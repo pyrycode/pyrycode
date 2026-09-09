@@ -231,10 +231,13 @@ const minThinkingTokensPerEvent = 64
 // One constant for two fields, as maxTaskFieldID serves three: both are short,
 // enum-ish values claude chooses out of a set it does not publish.
 //
-// The MULTIPLE is wide on purpose. The observed values run 7-9 bytes ("allowed",
-// "rejected", "five_hour" across the three captures), so 256 is roughly 28x the
-// observation — wider than maxTaskFieldID's 9x, and deliberately so: the value
-// set beyond the one benign status is UNMEASURED, so on the side that matters
+// The MULTIPLE is wide on purpose. The observed values run 7-15 bytes ("allowed",
+// "rejected", "five_hour", and the warning band's "allowed_warning" and
+// "seven_day"), so 256 is roughly 17x the widest observation — wider than
+// maxTaskFieldID's 9x, and deliberately so: the value
+// set beyond the one benign status is ALMOST ENTIRELY UNMEASURED — exactly one
+// non-benign value is on record and no capture of a limit actually in force
+// exists — so on the side that matters
 // there is no distribution to reason about and the binding constraint has to come
 // from the envelope instead.
 //
@@ -243,13 +246,15 @@ const minThinkingTokensPerEvent = 64
 // of the v2 application-envelope cap of 65519 bytes (docs/protocol-mobile.md §
 // Application-envelope size cap), an order of magnitude under the scalar
 // background-task pair's 7.4% and 6.6%. Escaping is mild for maxUnrecognizedRaw's
-// reason. ResetsAt contributes NO term and gets no cap: an int64 cannot grow, and
-// its absence here is a statement rather than an oversight.
+// reason. ResetsAt and Utilization contribute NO term and get no cap: neither an
+// int64 nor a float64 can grow — a float64's shortest round-trip encoding is
+// bounded by the type at 39 bytes including the key, measured on the largest
+// finite value — and their absence here is a statement rather than an oversight.
 //
 // The amplification from input to retained bytes is linear and near zero:
-// rateLimitEventLine holds three scalars and no array, so a 4 MiB line
+// rateLimitEventLine holds four scalars and no array, so a 4 MiB line
 // (defaultMaxParseBuf) yields at most 512 bytes of retained text plus one
-// integer.
+// integer and one float.
 //
 // There is also no RATE bound, and its absence is deliberate:
 // minThinkingTokensPerEvent exists because thinking_tokens fires ~10 times per
@@ -275,15 +280,21 @@ const maxRateLimitField = 256
 // usage-limit window, so without this gate a 1:1 mapping would put one "you are
 // rate limited" event on every healthy turn.
 //
-// MEASURED, not chosen: "allowed" in all three captures on record
-// (internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json and
-// permission_protocol_v2.1.158.json / _v2.1.199.json — three claude versions).
-// What is NOT measured is the rest of the value set: no capture of a limit
+// MEASURED, not chosen: every committed rate_limit_event record reads "allowed"
+// EXCEPT ONE, across four claude versions (2.1.158, 2.1.199, 2.1.220, 2.1.239).
+// The exception is the warning band, "allowed_warning", in
+// internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json, and
+// TestParser_RateLimitWarningCaptureCarriesUtilization replays it — so the
+// exception is pinned against claude's own bytes rather than described here. The
+// count of records is deliberately not given: compactionPinnedShapes' correction
+// is the precedent, and a tally in a comment goes stale on the next capture while
+// the shape above does not.
+// What is still NOT measured is the rest of the value set: no capture of a limit
 // actually in force exists, so emitRateLimit is designed for that openly and
 // anything else emits.
 //
 // Matched by byte-exact equality — no trim, no fold, no prefix — which is the
-// tolerance three observations earn, exactly as one observation earns it for
+// tolerance the observations earn, exactly as one observation earns it for
 // harnessNoOutputNudge. Unlike that constant, though, the failure direction here
 // is NOT the safe one, and the trade is accepted deliberately rather than
 // inherited: if claude recapitalises or renames the benign value, this event
@@ -2341,16 +2352,19 @@ type systemStatusLine struct {
 // The two keys the captured line also carries, uuid and session_id, are
 // deliberately absent — see turnevent.RateLimited's doc — and so are the
 // payload's four overage keys, two of which are measured version-variable across
-// the three captures. Absent from the DECODE TARGET is a stronger guarantee than
+// the captures. surpassedThreshold joins them as of #2249: the warning-band
+// capture carries it beside the utilization this target now reads, and it is left
+// out because nothing asks for it — an unused field is a claim nobody checks.
+// Absent from the DECODE TARGET is a stronger guarantee than
 // the test's reflection sweep, because a field that is never declared cannot
 // leak.
 type rateLimitEventLine struct {
 	Info rateLimitInfo `json:"rate_limit_info"`
 }
 
-// rateLimitInfo is claude's rate_limit_info object reduced to the three keys the
-// mapping reads. All three are present in all three captures on record, across
-// three claude versions.
+// rateLimitInfo is claude's rate_limit_info object reduced to the four keys the
+// mapping reads. Status, LimitType and ResetsAt are present in every committed
+// record, across four claude versions; Utilization is present in one.
 //
 // Both strings are plain strings, which is why truncateField's json.RawMessage
 // exception does not reach this shape: encoding/json has already U+FFFD-replaced
@@ -2362,6 +2376,22 @@ type rateLimitInfo struct {
 	Status    string `json:"status"`
 	LimitType string `json:"rateLimitType"`
 	ResetsAt  int64  `json:"resetsAt"`
+	// Utilization is a POINTER so a reading claude omitted is decidable, which is
+	// compactMetadata.PostTokens' rule and the INVERSE of the plain int64 beside it:
+	// ResetsAt can collapse absence into 0 because 0 there is DEFINED as "not
+	// reported", whereas a utilization of 0 is a meaningful reading — a fresh window
+	// — and cannot absorb absence without presenting one as exhausted. That
+	// distinction is the measured case rather than a hypothetical: the one committed
+	// record carrying this key is also the only one whose status is not the benign
+	// value, and every benign record omits it entirely.
+	//
+	// An absent key and an explicit null are ONE reading here (both nil) and nothing
+	// downstream answers them differently. A non-numeric value, or a number outside
+	// float64's range, fails the WHOLE-LINE decode exactly as a too-large resetsAt
+	// does — encoding/json refuses the conversion rather than saturating, so no
+	// non-finite reading is representable. JSON has no NaN or Inf literal either,
+	// which is why no guard for one is declared.
+	Utilization *float64 `json:"utilization"`
 }
 
 // systemInitLine is the decoded payload of one system/init line. Kept separate
@@ -4786,9 +4816,9 @@ type compactMetadata struct {
 //
 // THE GATE is the substance of this mapping; the field copying is routine. claude
 // emits this line ONCE PER RUN whatever the state of the usage-limit window —
-// status read "allowed" in all three captures on record, i.e. every run that
-// produced one hit no limit at all — so a 1:1 mapping would put one "you are rate
-// limited" event on every healthy turn. status is the discriminator, and it has
+// status reads "allowed" in every committed record but one, i.e. almost every run
+// that produced one hit no limit at all — so a 1:1 mapping would put one "you are
+// rate limited" event on every healthy turn. status is the discriminator, and it has
 // three reachable readings:
 //
 //  1. status == benignRateLimitStatus → SILENCE. The measured healthy case.
@@ -4813,8 +4843,13 @@ type compactMetadata struct {
 //     are rate limited" row on EVERY healthy run forever, indistinguishable from a
 //     real limit and actionable in the wrong direction — exactly the per-turn
 //     noise row ignoredLineTypes' doctrine ranks as the outcome to avoid — while
-//     rung-3-silent produces a false NEGATIVE on a condition that has never fired
-//     once in three captures. And it is this package's own precedent for an absent
+//     rung-3-silent produces a false NEGATIVE on a condition no capture shows a
+//     limit actually in force for. CORRECTED 2026-09-09 (#2249): this read "a
+//     condition that has never fired once in three captures", and the non-benign
+//     condition HAS now fired — the warning band is on record and rung 2 has a
+//     captured witness. What survives is the weaker claim the rung actually needs,
+//     that no capture shows a limit in force, so the rationale holds while its
+//     evidence sentence does not. And it is this package's own precedent for an absent
 //     field: emitBackgroundTaskStarted lands the field empty rather than inventing
 //     a validation rule, and landing empty on the GATE INPUT means the gate reads
 //     "no report was made", which is silence.
@@ -4889,6 +4924,18 @@ func (p *Parser) emitRateLimit(line []byte) {
 		// Passed through unbounded and unvalidated in both directions: an int64
 		// cannot grow, and see the field's doc for why no range check belongs here.
 		ResetsAt: rl.Info.ResetsAt,
+		// Unbounded and unvalidated for the same two reasons one line up, and NOT
+		// clamped to 0..1: the field's doc says why a range check would be a rule with
+		// no captured negative case behind it.
+		//
+		// THE POINTER CROSSES AS A POINTER, which is what carries claude's presence
+		// rather than collapsing it — a nil reading means claude stated none and must
+		// not become a zero. It is not deep-copied, the CompactionBoundary arm's rule
+		// in turnbridge for compactMetadata's pointers: encoding/json allocated a fresh
+		// float64 for this line, this parser retains nothing once emit returns, and
+		// nothing downstream mutates an event, so the aliasing is observable to nobody
+		// and a defensive copy would only obscure that.
+		Utilization: rl.Info.Utilization,
 		// nil when nothing was cut: append never ran.
 		TruncatedFields: cut,
 	})

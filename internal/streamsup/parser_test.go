@@ -2862,6 +2862,227 @@ func TestParser_RateLimitSilentRungsLogTheirReason(t *testing.T) {
 	})
 }
 
+// rateLimitUtilizationLineFixture builds a non-benign rate_limit_event line whose
+// utilization term is the RAW JSON text given, with the empty string meaning the key
+// is omitted entirely.
+//
+// A raw fragment rather than a fourth parameter on rateLimitLineFixture, and the
+// reason is not tidiness: two of the rows this serves cannot be expressed through
+// map[string]any at all. A JSON string where a number belongs needs the bytes
+// `"0.94"`, and a number outside float64's range needs `1e400`, which json.Marshal
+// refuses to write from any Go value because the nearest one is +Inf. Building the
+// line as text is what lets the undecodable rows be exactly the bytes a hostile or
+// changed claude would send. It invents no field structure: the four keys are the
+// captures' own.
+func rateLimitUtilizationLineFixture(status, limitType string, resetsAt int64, utilization string) string {
+	info := fmt.Sprintf(`"status":%q,"rateLimitType":%q,"resetsAt":%d`, status, limitType, resetsAt)
+	if utilization != "" {
+		info += `,"utilization":` + utilization
+	}
+	return `{"type":"rate_limit_event","rate_limit_info":{` + info + `}}`
+}
+
+// TestParser_RateLimitCarriesUtilizationUnvalidated is #2249's AC 4 at the producer:
+// claude's reading crosses verbatim, and nothing about it is clamped, rounded or
+// range-checked.
+//
+// THE FIRST THREE ROWS ARE THE POINT AND THEY SIT ADJACENT DELIBERATELY, which is
+// TestParser_CompactBoundaryPublishesTriggerAndCounts' arrangement and its reason: a
+// plain float64 in place of the pointer passes the absent row (nil reads as 0) while
+// failing the explicit-zero row, or the other way round depending on how the
+// assertion is written, so neither row alone decides the shape. Only the pair does.
+// An absent key and an explicit null are one reading because nothing downstream
+// answers them differently — claude stating nothing and claude stating null are the
+// same fact.
+//
+// The two out-of-range rows are not hypotheticals about claude so much as the stated
+// contract: the field is NOT a bounded fraction, and a consumer that scales a gauge
+// by it without a range check is the realistic bug. A clamp added here would make
+// that bug invisible rather than fixing it, and would destroy the evidence of what
+// claude actually sent. 0.94 is the one observed value and is the capture's; it is
+// pinned against the committed bytes in rate_limit_capture_test.go rather than here,
+// so this row asserts the hermetic path agrees with that one.
+func TestParser_RateLimitCarriesUtilizationUnvalidated(t *testing.T) {
+	t.Parallel()
+
+	// Addressable locals rather than a generic pointer helper, which is
+	// TestParser_CompactBoundaryPublishesTriggerAndCounts' idiom in this package for
+	// the same absent-versus-present table.
+	zero, observed, negative, aboveOne := 0.0, 0.94, -3.5, 17.25
+
+	tests := []struct {
+		name        string
+		utilization string
+		want        *float64
+		why         string
+	}{
+		{
+			name: "the key is absent", utilization: "", want: nil,
+			why: "every committed record carrying the benign status omits it, so absence is the " +
+				"measured majority case rather than an edge",
+		},
+		{
+			name: "an explicit zero is a reading, not an absence", utilization: "0", want: &zero,
+			why: "a fresh window is a real reading; folding it into nil would present an untouched " +
+				"quota as an exhausted one, which is exactly the failure the pointer prevents",
+		},
+		{
+			name: "an explicit null reads as absent", utilization: "null", want: nil,
+			why: "claude stating nothing and claude stating null are one fact and nothing answers " +
+				"them differently",
+		},
+		{
+			name: "the observed warning-band reading", utilization: "0.94", want: &observed,
+			why: "the value the committed allowed_warning capture carries, asserted here on the " +
+				"hermetic path too",
+		},
+		{
+			name: "a negative reading crosses verbatim", utilization: "-3.5", want: &negative,
+			why: "claude's number, unvalidated in BOTH directions — a clamp to 0 would invent a " +
+				"reading claude did not make",
+		},
+		{
+			name: "a reading above one crosses verbatim", utilization: "17.25", want: &aboveOne,
+			why: "not a bounded fraction: 17.25 is not rejected, not divided by 100, and not " +
+				"treated as a percentage",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			line := rateLimitUtilizationLineFixture("exceeded", "five_hour", 1785699000, tt.utilization)
+			ev := rateLimitEvent(t, line)
+
+			switch {
+			case tt.want == nil && ev.Utilization != nil:
+				t.Errorf("Utilization: got %v, want nil (%s)", *ev.Utilization, tt.why)
+			case tt.want != nil && ev.Utilization == nil:
+				t.Errorf("Utilization: got nil, want %v (%s)", *tt.want, tt.why)
+			case tt.want != nil && *ev.Utilization != *tt.want:
+				t.Errorf("Utilization: got %v, want %v (%s)", *ev.Utilization, *tt.want, tt.why)
+			}
+			// The reading must not cost the rest of the mapping: a decode target that
+			// mis-declared the new key could shift the others, and every row here would
+			// still pass on the field it was written for.
+			if ev.Status != "exceeded" || ev.LimitType != "five_hour" || ev.ResetsAt != 1785699000 {
+				t.Errorf("the other three fields are %q/%q/%d, want exceeded/five_hour/1785699000",
+					ev.Status, ev.LimitType, ev.ResetsAt)
+			}
+			// Still not a cut field and still not capped: a float64 cannot grow, which is
+			// ResetsAt's reason for the same omission.
+			if ev.TruncatedFields != nil {
+				t.Errorf("TruncatedFields: got %v, want nil — utilization is not a member and "+
+					"nothing here is near maxRateLimitField", ev.TruncatedFields)
+			}
+		})
+	}
+}
+
+// TestParser_RateLimitUndecodableUtilizationDropsTheWholeLine is AC 4's other half:
+// a reading this parser cannot read as a number takes emitRateLimit's EXISTING
+// undecodable drop. No new reason, no new rung, no range check, and no partial event
+// carrying the three fields that did decode.
+//
+// Dropping the whole line is the conservative direction and it is the same mechanism
+// rateLimitInfo's doc already states for a non-numeric resetsAt: encoding/json fails
+// the whole-line decode, so there is nothing to emit a half of. The out-of-range row
+// matters on its own because the failure mode it rules out is silent — a decoder that
+// saturated would hand the event +Inf, and +Inf is not JSON-encodable, so the frame
+// would fail at the wire instead of here.
+//
+// The exact-attrs comparison is also the content-free logging assertion: a number is
+// the value a drop site is most tempted to explain itself with, and an attrs map with
+// anything beyond `reason` in it reddens here.
+func TestParser_RateLimitUndecodableUtilizationDropsTheWholeLine(t *testing.T) {
+	t.Parallel()
+
+	// Discriminating on purpose. A needle of 0.94 could occur in an unrelated attr by
+	// coincidence, which would make the no-leak sweep below pass or fail for reasons
+	// having nothing to do with this field.
+	const needle = "8675309"
+
+	tests := []struct {
+		name        string
+		utilization string
+		why         string
+	}{
+		{
+			name: "a string where a number belongs", utilization: `"0.` + needle + `"`,
+			why: "the WHOLE-LINE decode fails, exactly as it does for a non-numeric resetsAt",
+		},
+		{
+			name: "a number outside float64's range", utilization: "1." + needle + "e400",
+			why: "encoding/json refuses the conversion rather than saturating, so no non-finite " +
+				"reading can reach the event",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rec := &logRecorder{}
+			var events []turnevent.Event
+			p := NewParser(func(ev turnevent.Event) { events = append(events, ev) }, slog.New(rec))
+			line := rateLimitUtilizationLineFixture("exceeded", "five_hour", 1785699000, tt.utilization)
+			if _, err := p.Write([]byte(line + "\n")); err != nil {
+				t.Fatalf("Write err = %v, want nil", err)
+			}
+
+			if len(events) != 0 {
+				t.Errorf("event count: got %d, want 0 (%s) — a partial event carrying the three "+
+					"fields that did decode would report a limit whose reading the parser could "+
+					"not read: %#v", len(events), tt.why, events)
+			}
+			drops := rec.withMessage(rateLimitDropMsgFixture)
+			if len(drops) != 1 {
+				t.Fatalf("records with message %q: got %d, want 1 (all records: %+v)",
+					rateLimitDropMsgFixture, len(drops), rec.all())
+			}
+			wantAttrs := map[string]string{"reason": rateLimitDropUndecodable}
+			if !reflect.DeepEqual(drops[0].attrs, wantAttrs) {
+				t.Errorf("drop attrs: got %v, want exactly %v — this field earns NO new drop "+
+					"reason (%s)", drops[0].attrs, wantAttrs, tt.why)
+			}
+			for _, r := range rec.all() {
+				for key, value := range r.attrs {
+					if strings.Contains(value, needle) {
+						t.Errorf("log record %q attr %q carries the undecodable reading (%q). "+
+							"NOTHING from this payload is logged on any path", r.msg, key, value)
+					}
+				}
+			}
+		})
+	}
+
+	// The control: without a line whose utilization DOES decode, the rows above pass
+	// against a parser that dropped every rate_limit_event for some other reason.
+	t.Run("control_a_decodable_reading_emits_and_logs_no_drop", func(t *testing.T) {
+		t.Parallel()
+		rec := &logRecorder{}
+		var events []turnevent.Event
+		p := NewParser(func(ev turnevent.Event) { events = append(events, ev) }, slog.New(rec))
+		line := rateLimitUtilizationLineFixture("exceeded", "five_hour", 1785699000, "0."+needle)
+		if _, err := p.Write([]byte(line + "\n")); err != nil {
+			t.Fatalf("Write err = %v, want nil", err)
+		}
+		if len(events) != 1 {
+			t.Fatalf("event count: got %d, want 1 — the drop rows above prove nothing", len(events))
+		}
+		if drops := rec.withMessage(rateLimitDropMsgFixture); len(drops) != 0 {
+			t.Errorf("the emit path logged %d drop record(s), want 0: %+v", len(drops), drops)
+		}
+		// The emit path must not log the reading either, which the drop rows cannot say:
+		// they never reach this branch.
+		for _, r := range rec.all() {
+			for key, value := range r.attrs {
+				if strings.Contains(value, needle) {
+					t.Errorf("log record %q attr %q carries claude's reading (%q) on the EMIT path",
+						r.msg, key, value)
+				}
+			}
+		}
+	})
+}
+
 // TestParser_RateLimitFieldCaps pins the construction-time bound. It is applied
 // before the event reaches the sink, so an oversized payload never enters the event
 // stream, a queue, or a log — the same ordering maxUnrecognizedRaw's cap has, and

@@ -636,8 +636,8 @@ type ThinkingProgress struct {
 // The NAME is the daemon's, not claude's, for the reason BackgroundTaskStarted's
 // doc gives — and, as with BackgroundTaskRoster, the translation earns more here
 // than insulation from a rename. claude emits rate_limit_event ONCE PER RUN
-// whatever the window's state (status read "allowed" in all three captures on
-// record, i.e. every run that produced one hit no limit at all), so a variant
+// whatever the window's state (status reads "allowed" in every committed record but
+// one, i.e. almost every run that produced one hit no limit at all), so a variant
 // called RateLimitEvent or RateLimitStatus would read as a periodic report and
 // invite a consumer to draw one row per healthy turn. This variant fires only
 // when the producer's gate says a limit is in force; the name states that
@@ -647,7 +647,8 @@ type ThinkingProgress struct {
 // It is a REPORT, never a control input. Nothing in the daemon may key a
 // behaviour on it: no backoff, no throttle, no retry, no turn suspension, no
 // reconnect delay. Every field is claude-authored text or a claude-authored
-// integer crossing the subprocess trust boundary, and the only thing downstream
+// NUMBER — an integer instant and, since #2249, an optional utilization reading —
+// crossing the subprocess trust boundary, and the only thing downstream
 // of it is display (#1405). That is what keeps a wrong — or hostile — status
 // value costing at most one misleading row, rather than a resource action the
 // daemon takes on itself. A slice that wants the daemon to ACT on a rate limit is
@@ -675,15 +676,20 @@ type RateLimited struct {
 	// Status is claude's own rate_limit_info.status, verbatim.
 	//
 	// It is on the event because it is the only field that says WHY the event
-	// fired, and its value set beyond the benign one is UNMEASURED: no capture of
-	// a limit actually in force exists. Carrying claude's raw string is how that
+	// fired, and its value set beyond the benign one is ALMOST ENTIRELY UNMEASURED:
+	// exactly one non-benign value is on record — "allowed_warning", the weekly
+	// warning band, against limit_type "seven_day" — and no capture of
+	// a limit actually in force exists. A frame is therefore NOT proof that anything
+	// was blocked: every turn in that capture ran normally.
+	// Carrying claude's raw string is how the rest of that
 	// set gets measured the first time a real limit fires, instead of the daemon
 	// inventing an enum it has no evidence for — so a plain string rather than a
 	// closed enum, for BackgroundTaskStarted.TaskType's reason taken one step
 	// further. Never empty: the producer's gate does not emit on an empty status.
 	Status string
-	// LimitType is WHICH limit is in force: claude's rateLimitType ("five_hour" in
-	// all three captures). The name is translated because RateLimitType inside a
+	// LimitType is WHICH limit is in force: claude's rateLimitType ("five_hour" and
+	// "seven_day" are the observed values, the second riding the one non-benign
+	// status). The name is translated because RateLimitType inside a
 	// type called RateLimited stutters; the daemon's snake_case name for
 	// TruncatedFields purposes is "limit_type". A plain string, not a closed enum,
 	// for Status's reason.
@@ -705,6 +711,38 @@ type RateLimited struct {
 	// discipline for a field that is only ever a number on a wire. int64 rather
 	// than int because a unix timestamp is a 64-bit quantity by nature.
 	ResetsAt int64
+	// Utilization is how much of the window claude says is spent, as claude's own
+	// number. nil when claude reported none — and the event still fires, because
+	// absence of the detail is claude's to choose and the status is the report
+	// (ResetsAt's rule, stated for absence rather than for 0).
+	//
+	// A POINTER, unlike ResetsAt, and the asymmetry is the point. ResetsAt folds
+	// absence into 0 because 0 there is DEFINED as "not reported"; 0 HERE is a
+	// meaningful reading — a fresh window — so folding the two would present an
+	// untouched quota as an exhausted one. That is the measured case rather than a
+	// hypothetical: every committed record carrying the benign status omits this key,
+	// and the single record that carries it is the single non-benign one.
+	//
+	// It is CLAUDE's number and it is unvalidated in BOTH directions, exactly as
+	// ResetsAt is. NOT a bounded fraction: a consumer must not assume it lies in
+	// 0..1, and must not assume it lies in a sane range at all. 0.94 is the one
+	// observed value; negative, above-one and astronomically large readings are all
+	// representable and none is rejected here, because rejecting one would be a
+	// validation rule with no captured negative case behind it. Scaling a progress
+	// bar by it without a range check is the realistic bug, and the one this field's
+	// shape can do nothing about.
+	//
+	// It does not appear in TruncatedFields and needs no cap: a float64 cannot grow,
+	// which is ResetsAt's reason for the same omission.
+	//
+	// IT IS A REPORT, NOT A THRESHOLD TO BRANCH ON. This type's doc states that
+	// nothing in the daemon may key a behaviour on this variant, and a number invites
+	// that far more strongly than a status string does — a percentage is the obvious
+	// thing to throttle or auto-pause on. The constraint is unchanged and restated
+	// here because this is the field that will tempt someone to break it: a slice
+	// that wants the daemon to ACT on a usage reading is re-opening the trust
+	// analysis, not extending it.
+	Utilization *float64
 	// TruncatedFields names the fields the producer cut to fit its cap, in
 	// declaration order, using the DAEMON's snake_case names: "status",
 	// "limit_type" (not claude's rateLimitType — the report names the field it

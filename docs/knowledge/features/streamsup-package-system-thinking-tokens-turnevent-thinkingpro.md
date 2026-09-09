@@ -15,38 +15,52 @@ See [codebase/1385.md](../codebase/1385.md).
 
 **`rate_limit_event` → `turnevent.RateLimited` is the fifth mapping, the first that is not a `system`
 subtype, and its substance is a gate rather than the field copy (#1404).** claude emits this line **once
-per run** whatever the state of the usage-limit window — `status` reads `"allowed"` in all three captures
-on record (three claude versions), i.e. every run that produced one hit no limit at all — so a 1:1
-mapping would put one "you are rate limited" event on every healthy turn. `status` is the discriminator,
-with three reachable readings, all decided and stated at `emitRateLimit`: (1) `status ==
+per run** whatever the state of the usage-limit window. `status` is the discriminator, with three
+reachable readings, all decided and stated at `emitRateLimit`: (1) `status ==
 benignRateLimitStatus` ("allowed") → silence; (2) `status` non-empty and not the benign value → one
 `RateLimited`, because the failure direction is the safe one — an unrecognised status surfaces and a human
 looks, rather than a real limit vanishing; (3) `rate_limit_info` absent, present-but-empty, or the line
 fails to decode → silence, **not** emit — the naive "emit unless status is allowed" reading is rejected,
 because an absent container answered with "emit" turns a container rename into a per-run noise row on
 every healthy run forever (the worse failure), whereas answering it with silence produces a false negative
-on a condition that has never fired once in three captures. The cost is named rather than hidden: a
+on a rung whose triggering condition is itself unmeasured. The cost is named rather than hidden: a
 container rename is undetected by any automatic test, and the only backstop is the live drop census (the
 same one that surfaced this payload in the first place, #1260) still recording the dropped line's shape.
-`RateLimited{Status, LimitType, ResetsAt int64, TruncatedFields}` — `Status`/`LimitType` bounded by
-`maxRateLimitField` (256, ~28× the observed 7–9 byte values — wide because the value set beyond the one
-benign status is unmeasured); `ResetsAt` is claude's unix-seconds number passed through **unbounded and
-unvalidated in both directions** (not `time.Time` — converting would invent a claim the bytes do not
-make). No rate bound: once-per-run is measured, not enforced, so an adversarial or buggy claude emitting
-many non-benign lines produces many events (an accepted, named exposure, not a mechanised one, per
-evidence-based fix selection). The variant is a **report, never a control input** — nothing in the daemon
-may key a behaviour on it. `session_id`/`uuid` are absent from the decode target itself, as with the
-background-task family; so are the payload's four `overage*` keys, two of which are measured
-version-variable across claude 2.1.158/2.1.199/2.1.220. The drop site logs one message
-(`rateLimitDropMsg`) with a `reason` drawn from a closed keyword set — `Status` never reaches a log, since
-it is the one claude-authored value on this line and the field a drop site is most tempted to explain
-itself with. `cmd/pyry/interactive_turn_v2.go`'s `eventKind` gained a fifth mapped arm
-(`turnevent.RateLimited → "rate_limited"`, name only); `acpbridge.MapUpdate` and `stream_turn_busy.go`'s
-opener whitelist correctly drop it through their existing `default:` arms — the ACP/desktop lane is
-deliberately untouched (#1262) and a usage-limit report opens no turn. `turnbridge.MapEvent` no longer
-drops it: the wire type landed in #1405 and the mapping arm in #1410, so the variant now reaches an
-interactive v2 mobile client instead of falling to `default:`. See [codebase/1404.md](../codebase/1404.md),
-[codebase/1405.md](../codebase/1405.md), [codebase/1410.md](../codebase/1410.md).
+`RateLimited{Status, LimitType, ResetsAt int64, Utilization *float64, TruncatedFields}` —
+`Status`/`LimitType` bounded by `maxRateLimitField` (256, ~28× the observed 7–9 byte values — wide because
+the value set beyond the one benign status is unmeasured); `ResetsAt` and `Utilization` are both claude's
+own numbers, passed through **unbounded and unvalidated in both directions** (`ResetsAt` is not
+`time.Time` — converting would invent a claim the bytes do not make; `Utilization` is not a bounded 0–1
+fraction — a client scaling a progress bar by it is trusting a check the daemon never performs). No rate
+bound: once-per-run is measured, not enforced, so an adversarial or buggy claude emitting many non-benign
+lines produces many events (an accepted, named exposure, not a mechanised one, per evidence-based fix
+selection). The variant is a **report, never a control input** — nothing in the daemon may key a
+behaviour on it, and a number strengthens that invitation more than a status string did, since a threshold
+is the obvious thing to branch on. `session_id`/`uuid` are absent from the decode target itself, as with
+the background-task family; so are the payload's `surpassedThreshold`/`isUsingOverage`/`overage*` keys,
+two of which are measured version-variable across claude 2.1.158/2.1.199/2.1.220. The drop site logs one
+message (`rateLimitDropMsg`) with a `reason` drawn from a closed keyword set — no claude-authored value
+from this line, including `Utilization`, ever reaches a log. `cmd/pyry/interactive_turn_v2.go`'s
+`eventKind` gained a fifth mapped arm (`turnevent.RateLimited → "rate_limited"`, name only);
+`acpbridge.MapUpdate` and `stream_turn_busy.go`'s opener whitelist correctly drop it through their
+existing `default:` arms — the ACP/desktop lane is deliberately untouched (#1262) and a usage-limit report
+opens no turn. `turnbridge.MapEvent` no longer drops it: the wire type landed in #1405 and the mapping arm
+in #1410, so the variant now reaches an interactive v2 mobile client instead of falling to `default:`. See
+[codebase/1404.md](../codebase/1404.md), [codebase/1405.md](../codebase/1405.md),
+[codebase/1410.md](../codebase/1410.md).
+
+**CORRECTED 2026-09-09 (#2249): the "three captures" tally above was a comment that outgrew its evidence
+by 8x, and the fix removed the tally rather than updating it.** A re-derived census across the full
+committed corpus (four claude versions, not three) found 25 `rate_limit_event` records: 24 read the
+benign `allowed`/`five_hour` with no `utilization` key, and exactly one reads `allowed_warning`/
+`seven_day` with `utilization: 0.94` — evidence enough to carry that reading (`Utilization *float64`,
+above) end to end. That one record also falsifies the old rung-3 rationale's literal wording, "a condition
+that has never fired once in three captures" — the non-benign condition **has** now fired. What rung 3
+actually needs survives unweakened: **no capture shows a limit actually in force** (`status` still reads
+`allowed_warning`, a warning band, never a hard block), which is why the rung is unchanged and only the
+sentence describing it moved. Following `compactionPinnedShapes`' own corrected-note precedent, the
+replacement carries no new count to go stale on the next capture — a statement of shape (benign in every
+record but one) rather than a number.
 
 **`system/init` → `turnevent.ModelAnnounced` is the sixth mapping, a fifth `system` subtype, and the
 first that reports what the daemon itself ASKED FOR versus what claude actually RAN (#1600).** The

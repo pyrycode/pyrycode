@@ -67,6 +67,18 @@ func TestMapEventOutbound(t *testing.T) {
 	overCapResult := strings.Repeat("r", maxResultSummaryRunes+100)
 	cutResult := strings.Repeat("r", maxResultSummaryRunes) + "…"
 
+	// FUNCTIONS rather than variables, for overCapAliases' reason two paragraphs up and
+	// with more force: a pointer shared between ev and wantPayload would make
+	// reflect.DeepEqual pass on the fact that both sides name one variable rather than
+	// on the value claude sent. Separately-allocated pointers with equal contents is
+	// this table's standing rule and the only form in which the pointee is checked.
+	//
+	// The sentinel is NEGATIVE on purpose, which is load-bearing rather than stylistic:
+	// utilization is not a bounded fraction, so a clamp to 0..1, an abs() or a
+	// percent-scaling rewrite goes red here rather than shipping.
+	utilizationSentinel := func() *float64 { v := -7.25; return &v }
+	zeroUtilization := func() *float64 { v := 0.0; return &v }
+
 	tests := []struct {
 		name        string
 		ev          turnevent.Event
@@ -743,6 +755,7 @@ func TestMapEventOutbound(t *testing.T) {
 				Status:          "qq-status-sentinel",
 				LimitType:       "zz-limittype-sentinel",
 				ResetsAt:        -1,
+				Utilization:     utilizationSentinel(),
 				TruncatedFields: []string{"tf-alpha-sentinel", "tf-beta-sentinel"},
 			},
 			tc:      tc,
@@ -752,6 +765,7 @@ func TestMapEventOutbound(t *testing.T) {
 				Status:          "qq-status-sentinel",
 				LimitType:       "zz-limittype-sentinel",
 				ResetsAt:        -1,
+				Utilization:     utilizationSentinel(),
 				TruncatedFields: []string{"tf-alpha-sentinel", "tf-beta-sentinel"},
 			},
 			wantOK: true,
@@ -761,7 +775,14 @@ func TestMapEventOutbound(t *testing.T) {
 			// stays NIL: reflect.DeepEqual distinguishes a nil []string from an empty
 			// one, so a mapper that allocated []string{} fails here as well as on the
 			// bytes (TestMapEventRateLimitedTruncatedFieldsOnTheWire below).
-			name: "RateLimited far-future instant and nil truncation stay as claude left them",
+			//
+			// THE NIL Utilization IS THE SAME KIND OF CLAIM and is this row's second
+			// job: nil means claude stated no reading, and a mapper that helpfully
+			// substituted a zero would tell a phone the window is FRESH. DeepEqual
+			// distinguishes a nil *float64 from a pointer to 0, so the pairing with the
+			// explicit-zero row below is what pins the distinction — neither row alone
+			// does, exactly as in streamsup's own absent-versus-zero table.
+			name: "RateLimited far-future instant, nil truncation and nil utilization stay as claude left them",
 			ev: turnevent.RateLimited{
 				Status:    "qq-status-sentinel",
 				LimitType: "zz-limittype-sentinel",
@@ -774,6 +795,27 @@ func TestMapEventOutbound(t *testing.T) {
 				Status:         "qq-status-sentinel",
 				LimitType:      "zz-limittype-sentinel",
 				ResetsAt:       4102444800,
+			},
+			wantOK: true,
+		},
+		{
+			// The other half of that pair. An explicit zero is a READING — a fresh
+			// window — and it must arrive as a pointer to 0 rather than collapsing into
+			// the nil above. A plain float64 field on either type passes this row and
+			// fails the one above it, which is why both are here.
+			name: "RateLimited explicit zero utilization crosses as zero, not as absent",
+			ev: turnevent.RateLimited{
+				Status:      "qq-status-sentinel",
+				LimitType:   "zz-limittype-sentinel",
+				Utilization: zeroUtilization(),
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeRateLimited,
+			wantPayload: protocol.RateLimitedPayload{
+				ConversationID: "c1",
+				Status:         "qq-status-sentinel",
+				LimitType:      "zz-limittype-sentinel",
+				Utilization:    zeroUtilization(),
 			},
 			wantOK: true,
 		},
@@ -1335,6 +1377,13 @@ func TestMapEventRateLimitedTruncatedFieldsOnTheWire(t *testing.T) {
 
 	tc := TurnContext{ConversationID: "cc-conv-sentinel", TurnID: "t1", Seq: 7}
 
+	// Fresh allocations per row, the sibling table's rule, and the two values are the
+	// absent-versus-zero pair's wire halves: 0 must encode as 0 and never as null,
+	// while the negative one proves the encoder is handed claude's number rather than
+	// something clamped on the way.
+	zeroWireUtilization := func() *float64 { v := 0.0; return &v }
+	negativeWireUtilization := func() *float64 { v := -7.25; return &v }
+
 	tests := []struct {
 		name    string
 		ev      turnevent.RateLimited
@@ -1354,8 +1403,43 @@ func TestMapEventRateLimitedTruncatedFieldsOnTheWire(t *testing.T) {
 				`"status":"qq-status-sentinel"`,
 				`"limit_type":"zz-limittype-sentinel"`,
 				`"resets_at":4102444800`,
+				// An unreported utilization reaches the wire as null TOO, and the
+				// forbidden form below is the whole point: "utilization":0 would tell a
+				// phone the window is fresh when claude said nothing about it. An
+				// omitempty added to the field later also reddens here, because the key
+				// would vanish rather than carry null.
+				`"utilization":null`,
 			},
-			notWant: []string{`"truncated_fields":[]`},
+			notWant: []string{`"truncated_fields":[]`, `"utilization":0`},
+		},
+		{
+			// The reading's own row, and both needles are full "key":value pairs per this
+			// test's standing rule. The value is negative so a clamp to 0..1 or an abs()
+			// goes red on the bytes as well as on the struct, and the explicit-zero needle
+			// is forbidden here for the same reason the null row forbids it: the two are
+			// different facts and exactly one of them is true of any given frame.
+			name: "an explicit zero reading reaches the wire as 0, and a negative one verbatim",
+			ev: turnevent.RateLimited{
+				Status:      "qq-status-sentinel",
+				LimitType:   "zz-limittype-sentinel",
+				Utilization: zeroWireUtilization(),
+			},
+			want: []string{
+				`"utilization":0`,
+				`"conversation_id":"cc-conv-sentinel"`,
+				`"status":"qq-status-sentinel"`,
+			},
+			notWant: []string{`"utilization":null`},
+		},
+		{
+			name: "a negative reading crosses to the wire unclamped",
+			ev: turnevent.RateLimited{
+				Status:      "qq-status-sentinel",
+				LimitType:   "zz-limittype-sentinel",
+				Utilization: negativeWireUtilization(),
+			},
+			want:    []string{`"utilization":-7.25`},
+			notWant: []string{`"utilization":null`, `"utilization":0`, `"utilization":7.25`},
 		},
 		{
 			// The control: null is not what the mapping emits for everything, so the
