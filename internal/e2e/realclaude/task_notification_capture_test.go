@@ -128,7 +128,13 @@ const (
 )
 
 const (
-	tncapTurnBudget  = 4 * time.Minute
+	// Deliberately larger than the three phase waits below can spend between them
+	// (90+100+90 = 280 s), so a turn that runs every wait to its deadline still has
+	// headroom left to end on `result`. Sized by TestTncapBudgetOutlastsItsPhases
+	// rather than by eye: at the earlier 4 minutes the phases could outlast the
+	// budget, and the final select would then have BOTH arms ready and pick
+	// TerminatedOn at random.
+	tncapTurnBudget  = 6 * time.Minute
 	tncapRunExitWait = 30 * time.Second
 	// How long to wait for claude's `cat` to open the FIFO. Generous: it covers
 	// model latency and the tool round-trip, and overrunning it is recorded as "the
@@ -141,7 +147,8 @@ const (
 	tncapBackgroundWait = 100 * time.Second
 	// How long to wait, after the FIFO is released and `cat` can finally exit, for
 	// the terminal-state line. This is the ONE wait whose overrun is evidence about
-	// pyry's surface rather than about the staging.
+	// pyry's surface rather than about the staging, and the ONE wait that must run
+	// to its deadline regardless of `result` — see tncapResultIsNotTheEnd.
 	tncapNotificationWait = 90 * time.Second
 	// dropcapRecorder exposes only a `result` signal, so the two per-subtype waits
 	// above poll its snapshot. Teaching the recorder a second channel would be a
@@ -255,10 +262,10 @@ type tncapFrame struct {
 	Payload                 string `json:"payload,omitempty"`
 	PayloadB64              string `json:"payload_b64,omitempty"`
 
-	EventsEmitted        int      `json:"events_emitted"`
-	Keys                 []string `json:"keys"`
-	AmbientPresent       bool     `json:"ambient_present"`
-	SkipTranscriptResent bool     `json:"skip_transcript_present"`
+	EventsEmitted         int      `json:"events_emitted"`
+	Keys                  []string `json:"keys"`
+	AmbientPresent        bool     `json:"ambient_present"`
+	SkipTranscriptPresent bool     `json:"skip_transcript_present"`
 }
 
 // tncapPresence is AC2's answer for ONE companion subtype. It is emitted for all
@@ -526,7 +533,7 @@ func tncapPresenceTable(frames []tncapFrame) []tncapPresence {
 			if f.AmbientPresent {
 				p.LinesWithAmbient++
 			}
-			if f.SkipTranscriptResent {
+			if f.SkipTranscriptPresent {
 				p.LinesWithSkipTranscript++
 			}
 		}
@@ -598,20 +605,45 @@ func tncapCollect(t *testing.T, lines []dropcapCaptured, red *dropcapRedactor) [
 			EventsEmitted:           len(parseOne(t, string(c.Raw))),
 			Keys:                    keys,
 			AmbientPresent:          ambient,
-			SkipTranscriptResent:    skipTranscript,
+			SkipTranscriptPresent:   skipTranscript,
 		})
 	}
 	return out
 }
 
+// Whether the turn's own `result` line ends a wait, spelled at the call sites
+// because a bare true/false there would hide the single most consequential
+// distinction in this rig.
+//
+// It DOES end a wait for a line the assistant emits inside its own turn:
+// task_started fires when claude backgrounds a foreground call, which cannot
+// happen after the turn it belongs to has finished, so a `result` with no
+// task_started means none is coming.
+//
+// It does NOT end the wait for this ticket's quarry, and assuming it did was the
+// defect this constant exists to name. task_notification fires when a BACKGROUND
+// task terminates, and a background task by construction outlives the turn that
+// started it. dropped_lines_v2.1.220.json is this probe's own staging and it
+// records terminated_on:"result" with a process still holding the FIFO's read end
+// AT TURN END — so on this exact staging claude emits `result` while the
+// backgrounded `cat` is still alive, and the quarry can only arrive afterwards.
+// Because resultSeen is closed via sync.Once, treating it as terminal collapsed
+// the whole tncapNotificationWait to one snapshot() and then reported the
+// unspent wait as a finding about pyry's surface.
+const (
+	tncapResultEndsWait    = true
+	tncapResultIsNotTheEnd = false
+)
+
 // tncapAwaitSubtype polls the recorder's snapshot until a system line of the given
-// subtype has been captured, the turn ends, or the budget runs out.
+// subtype has been captured, or the wait's deadline passes, or — only when
+// resultEndsWait — the turn's `result` line lands.
 //
 // A poll rather than a signal because dropcapRecorder exposes only `result`, and
 // teaching it a second channel would fork a helper every probe in this package
 // shares — for a wait whose granularity does not matter: the two callers are bounded
 // in tens of seconds and one tick is a quarter of a second.
-func tncapAwaitSubtype(recorder *dropcapRecorder, subtype string, within time.Duration) bool {
+func tncapAwaitSubtype(recorder *dropcapRecorder, subtype string, within time.Duration, resultEndsWait bool) bool {
 	deadline := time.Now().Add(within)
 	for {
 		lines, _ := recorder.snapshot()
@@ -620,18 +652,23 @@ func tncapAwaitSubtype(recorder *dropcapRecorder, subtype string, within time.Du
 				return true
 			}
 		}
-		select {
-		case <-recorder.resultSeen:
-			// The turn is over, so nothing more will arrive. One last look, because
-			// the line may have landed in the same batch as the result.
-			lines, _ = recorder.snapshot()
-			for _, c := range lines {
-				if c.Decoded && c.Type == "system" && c.Subtype == subtype {
-					return true
+		if resultEndsWait {
+			select {
+			case <-recorder.resultSeen:
+				// The turn is over and this subtype cannot outlive it, so nothing more
+				// will arrive. One last look, because the line may have landed in the
+				// same batch as the result.
+				lines, _ = recorder.snapshot()
+				for _, c := range lines {
+					if c.Decoded && c.Type == "system" && c.Subtype == subtype {
+						return true
+					}
 				}
+				return false
+			case <-time.After(tncapPoll):
 			}
-			return false
-		case <-time.After(tncapPoll):
+		} else {
+			time.Sleep(tncapPoll)
 		}
 		if !time.Now().Before(deadline) {
 			return false
@@ -798,7 +835,8 @@ func TestRealClaude_TaskNotificationCapture(t *testing.T) {
 	// that has to EXIST before it can terminate, and its absence is a staging failure
 	// rather than a finding.
 	if rec.ForegroundCallObserved {
-		rec.BackgroundTaskObserved = tncapAwaitSubtype(recorder, "task_started", tncapBackgroundWait)
+		rec.BackgroundTaskObserved = tncapAwaitSubtype(recorder, "task_started", tncapBackgroundWait,
+			tncapResultEndsWait)
 	}
 
 	// Phase 3 — RELEASE. This is the whole delta from #1260's staging: `cat` sees
@@ -811,13 +849,23 @@ func TestRealClaude_TaskNotificationCapture(t *testing.T) {
 		rec.HeldSeconds = time.Since(heldFrom).Seconds()
 	}
 
-	// Phase 4 — wait for the terminal-state line, then for the turn to end.
-	tncapAwaitSubtype(recorder, tncapQuarrySubtype, tncapNotificationWait)
+	// Phase 4 — wait for the terminal-state line, then for the turn to end. This wait
+	// runs to its own deadline and does NOT stop at `result`: the quarry fires when a
+	// background task terminates, and that outlives the turn. See tncapResultIsNotTheEnd.
+	tncapAwaitSubtype(recorder, tncapQuarrySubtype, tncapNotificationWait, tncapResultIsNotTheEnd)
+	// `result` may well have landed during the wait above, and by then the budget may
+	// have expired too. A single select over both would find both arms ready and pick
+	// at random, so the already-closed resultSeen is checked first, non-blocking.
 	select {
 	case <-recorder.resultSeen:
 		rec.TerminatedOn = tncapTerminatedResult
-	case <-turnBudget.C:
-		rec.TerminatedOn = tncapTerminatedBudget
+	default:
+		select {
+		case <-recorder.resultSeen:
+			rec.TerminatedOn = tncapTerminatedResult
+		case <-turnBudget.C:
+			rec.TerminatedOn = tncapTerminatedBudget
+		}
 	}
 	rec.TurnSeconds = time.Since(turnStart).Seconds()
 
@@ -885,6 +933,35 @@ func TestRealClaude_TaskNotificationCapture(t *testing.T) {
 
 // --- writing the record ------------------------------------------------------
 
+// tncapSeal marshals the record as it stands and deny-scans the exact bytes it just
+// produced, plus the decoded bytes of every base64 frame payload — those hide from a
+// scan of the marshalled record, where they sit as base64.
+//
+// Split out of tncapWriteRecord's seal closure so the property that matters can be
+// asserted offline, with no live turn and no write anywhere near the repo. It returns
+// the classes hit rather than deciding anything: the caller owns the fail-closed
+// response, and the caller is the only place that knows what was about to be written.
+func tncapSeal(scanner dropcapScanner, rec *tncapRecord) (blob []byte, hits []string, err error) {
+	blob, err = json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return nil, nil, err
+	}
+	hits, _ = scanner.scan(blob)
+	for _, f := range rec.Frames {
+		if f.PayloadB64 == "" {
+			continue
+		}
+		decoded, derr := base64.StdEncoding.DecodeString(f.PayloadB64)
+		if derr != nil {
+			return nil, nil, fmt.Errorf("frame %d: decode base64 payload for the scan: %w", f.Index, derr)
+		}
+		if h, _ := scanner.scan(decoded); len(h) > 0 {
+			hits = append(hits, h...)
+		}
+	}
+	return blob, hits, nil
+}
+
 // tncapWriteRecord marshals, deny-scans, writes, promotes and stages. #1260's
 // fail-closed rule verbatim: on a hit NOTHING is written and the message names the
 // CLASS only, never the matched value.
@@ -892,57 +969,56 @@ func tncapWriteRecord(t *testing.T, dir string, red *dropcapRedactor, scanner dr
 	t.Helper()
 	rec.Redaction = red.substitutions()
 
-	blob, err := json.MarshalIndent(rec, "", "  ")
-	if err != nil {
-		t.Errorf("#2247: marshal record: %v", err)
-		return
-	}
-	hits, notApplied := scanner.scan(blob)
-	// A base64 payload hides its bytes from a scan of the marshalled record, so the
-	// decoded bytes are scanned too.
-	for _, f := range rec.Frames {
-		if f.PayloadB64 == "" {
-			continue
-		}
-		decoded, derr := base64.StdEncoding.DecodeString(f.PayloadB64)
-		if derr != nil {
-			t.Errorf("#2247: frame %d: decode base64 payload for the scan: %v", f.Index, derr)
-			return
-		}
-		if h, _ := scanner.scan(decoded); len(h) > 0 {
-			hits = append(hits, h...)
-		}
-	}
-	if len(hits) > 0 {
-		t.Fatalf("#2247: deny-scan found %d denied class(es) still present in the record: %v\n"+
-			"NOTHING was written — not the record, not the fixture. Extend dropcapRedactor's table with "+
-			"the named class and re-run the capture. The offending value is deliberately not printed: "+
-			"putting it in CI output is exactly the exposure this scan exists to prevent", len(hits), hits)
-	}
+	// credential_scan_skipped is a list of CLASS NAMES whose needle was too short to
+	// search for, which is the one thing that makes a silently-off credential net
+	// visible after the fact. It is a property of the needle SET rather than of any
+	// blob, so it is read once here and ships inside every blob sealed below.
+	_, notApplied := scanner.scan(nil)
 	rec.CredentialScanSkipped = notApplied
 
-	// Promotion is decided BEFORE the final marshal so fixture_staged and
-	// fixture_stage_detail ship inside the bytes that land, in the record and in the
-	// fixture alike. A record that cannot say whether its own promotion happened is
-	// the #2229 shape: green from outside, with no way to tell afterwards.
+	// seal marshals the record AS IT STANDS and deny-scans the EXACT bytes about to
+	// be written, fail-closed.
+	//
+	// It is called before every write rather than once at the top, and that is the
+	// whole point of it. Fields enter the record BETWEEN the writes:
+	// fixture_stage_detail carries `git`'s combined output, and git prints repository
+	// paths on failure — a path in nobody's substitution table, since dropcapRedactor
+	// covers the temp $HOME, the artifact dir, the workdir, the FIFO and the session
+	// id, and not the repo. Sealing once and then re-marshalling scanned a blob that
+	// did not yet hold those bytes, so they reached a public committed artefact
+	// having passed no scan at all.
+	seal := func(what string) []byte {
+		t.Helper()
+		blob, hits, err := tncapSeal(scanner, rec)
+		if err != nil {
+			t.Fatalf("#2247: seal the %s: %v", what, err)
+		}
+		if len(hits) > 0 {
+			t.Fatalf("#2247: deny-scan found %d denied class(es) in the %s about to be written: %v\n"+
+				"THAT FILE WAS NOT WRITTEN, and neither is anything after it. Whatever this run had "+
+				"already put on disk was sealed by this same scan before it was written, so nothing "+
+				"unscanned is on disk. Extend dropcapRedactor's table with the named class and re-run "+
+				"the capture. The offending value is deliberately not printed: putting it in CI output "+
+				"is exactly the exposure this scan exists to prevent", len(hits), what, hits)
+		}
+		return blob
+	}
+
 	reason, worthy := rec.fixtureWorthy()
 	if worthy {
-		rec.FixtureStaged, rec.FixtureStageDetail = tncapStageFixture(red)
+		// What the FIXTURE can honestly say about its own staging, which is not
+		// whether `git add` succeeded: staging can only run once the file exists, so
+		// its outcome lands in the artifact-dir record rewritten at the end of this
+		// function. A record that cannot say whether its own promotion happened is the
+		// #2229 shape — green from outside, with no way to tell afterwards.
+		rec.FixtureStageDetail = "promoted; `git add` runs after this file is written, so its outcome " +
+			"is in fixture_staged/fixture_stage_detail of the artifact-dir record, not here"
 	} else {
 		rec.FixtureStageDetail = "not promoted: " + reason
 	}
 
-	// Re-marshal so credential_scan_skipped and the promotion fields ship in the
-	// written bytes. credential_scan_skipped is a list of CLASS NAMES the scan could
-	// not apply, which is the one thing that makes a silently-off credential net
-	// visible after the fact.
-	blob, err = json.MarshalIndent(rec, "", "  ")
-	if err != nil {
-		t.Errorf("#2247: re-marshal record: %v", err)
-		return
-	}
-
 	path := filepath.Join(dir, tncapRecordName)
+	blob := seal("record")
 	if err := os.WriteFile(path, append(blob, '\n'), 0o600); err != nil {
 		t.Errorf("#2247: write record %s: %v", red.str(path), err)
 		return
@@ -960,12 +1036,24 @@ func tncapWriteRecord(t *testing.T, dir string, red *dropcapRedactor, scanner dr
 			"or route the finding back", tncapFixturePath, reason)
 		return
 	}
-	// The same deny-scanned bytes, promoted in-repo so the run that produced them is
-	// the run that lands them. Writing the fixture here rather than leaving it in the
-	// tempdir is the point of this probe's self-arming gate: a capture that still
-	// needs a human to copy a file is a capture #1763 says will not land.
+	// The same sealed bytes, promoted in-repo so the run that produced them is the run
+	// that lands them. Writing the fixture here rather than leaving it in the tempdir
+	// is the point of this probe's self-arming gate: a capture that still needs a
+	// human to copy a file is a capture #1763 says will not land.
 	if err := os.WriteFile(tncapFixturePath, append(blob, '\n'), 0o600); err != nil {
 		t.Errorf("#2247: write fixture %s: %v", tncapFixturePath, red.str(err.Error()))
+		return
+	}
+
+	// AC3, and it runs only now that the file exists. `git add` on a path that is not
+	// yet on disk fails with "pathspec did not match any files" — and the fixture
+	// being absent is precisely the first-capture case this probe arms itself for, so
+	// staging before the write would have failed on every run that mattered.
+	rec.FixtureStaged, rec.FixtureStageDetail = tncapStageFixture(red)
+	// Re-seal so git's output is deny-scanned before it becomes part of any artefact,
+	// and rewrite the record — the artifact-dir copy is where AC3's evidence lives.
+	if err := os.WriteFile(path, append(seal("record's staging outcome"), '\n'), 0o600); err != nil {
+		t.Errorf("#2247: rewrite record %s with the staging outcome: %v", red.str(path), err)
 		return
 	}
 	t.Logf("#2247: FIXTURE WRITTEN to %s (%d %s frame(s)). git add: staged=%v — %s\n"+
@@ -1260,9 +1348,9 @@ func TestTncapPresenceTableRecordsADidNotFire(t *testing.T) {
 		frames := []tncapFrame{
 			{Subtype: "task_started", AmbientPresent: true},
 			{Subtype: "task_started"},
-			{Subtype: "task_updated", SkipTranscriptResent: true},
+			{Subtype: "task_updated", SkipTranscriptPresent: true},
 			// The quarry is not a companion and must not appear in this table.
-			{Subtype: tncapQuarrySubtype, AmbientPresent: true, SkipTranscriptResent: true},
+			{Subtype: tncapQuarrySubtype, AmbientPresent: true, SkipTranscriptPresent: true},
 		}
 		byName := map[string]tncapPresence{}
 		for _, p := range tncapPresenceTable(frames) {
@@ -1356,6 +1444,198 @@ func TestTncapUnredactedPathFieldsNamesTheFieldNotTheValue(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTncapAwaitSubtypeOutlivesTheTurnForTheQuarry runs offline against a recorder
+// fed by hand, and it is the deterministic net under the one assumption that decides
+// whether this probe catches anything at all.
+//
+// task_notification fires when a BACKGROUND task terminates, and a background task
+// outlives the turn that started it. dropped_lines_v2.1.220.json — this probe's own
+// staging — records terminated_on:"result" with a process still holding the FIFO's
+// read end at turn end, so `result` demonstrably arrives first on this staging.
+// resultSeen is closed via sync.Once, so a wait that took it as terminal stayed
+// permanently ready: the 90 s tncapNotificationWait collapsed to a single snapshot(),
+// and stagingVerdict then reported the unspent wait as a finding about pyry's
+// surface. The arms below pin both halves — the quarry wait spends its deadline
+// after `result`, and still finds a line that lands inside it.
+func TestTncapAwaitSubtypeOutlivesTheTurnForTheQuarry(t *testing.T) {
+	t.Parallel()
+
+	const resultLine = `{"type":"result","subtype":"success"}` + "\n"
+	quarryLine := fmt.Sprintf("{\"type\":\"system\",\"subtype\":%q,\"task_id\":\"t1\"}\n", tncapQuarrySubtype)
+	// Three poll ticks, so a wait that runs to its deadline is unmistakably longer
+	// than one that returns on the closed channel.
+	const within = 3 * tncapPoll
+
+	t.Run("the quarry wait spends its deadline although the turn has ended", func(t *testing.T) {
+		t.Parallel()
+		r := newDropcapRecorder()
+		if _, err := r.Write([]byte(resultLine)); err != nil {
+			t.Fatalf("feed the result line: %v", err)
+		}
+		<-r.resultSeen // the turn is over before the wait even starts
+
+		start := time.Now()
+		if tncapAwaitSubtype(r, tncapQuarrySubtype, within, tncapResultIsNotTheEnd) {
+			t.Fatal("reported the quarry present although no such line was ever fed")
+		}
+		if elapsed := time.Since(start); elapsed < within {
+			t.Errorf("the quarry wait returned after %s, short of its %s deadline: `result` was treated "+
+				"as terminal, so the wait that has to outlive the turn was never spent and a zero-frame "+
+				"capture would be reported as a surface finding", elapsed, within)
+		}
+	})
+
+	t.Run("the quarry wait finds a line that lands after the result", func(t *testing.T) {
+		t.Parallel()
+		r := newDropcapRecorder()
+		if _, err := r.Write([]byte(resultLine)); err != nil {
+			t.Fatalf("feed the result line: %v", err)
+		}
+		<-r.resultSeen
+		go func() {
+			time.Sleep(tncapPoll)
+			_, _ = r.Write([]byte(quarryLine))
+		}()
+
+		if !tncapAwaitSubtype(r, tncapQuarrySubtype, 20*tncapPoll, tncapResultIsNotTheEnd) {
+			t.Error("missed a quarry line that arrived after the turn's result, which is the ONLY " +
+				"order this ticket's staging can produce it in")
+		}
+	})
+
+	t.Run("a companion wait still ends at the result", func(t *testing.T) {
+		t.Parallel()
+		r := newDropcapRecorder()
+		if _, err := r.Write([]byte(resultLine)); err != nil {
+			t.Fatalf("feed the result line: %v", err)
+		}
+		<-r.resultSeen
+
+		// task_started fires when claude backgrounds a call inside its own turn, so a
+		// `result` with none means none is coming and waiting out the deadline would
+		// spend tncapBackgroundWait for nothing.
+		start := time.Now()
+		if tncapAwaitSubtype(r, "task_started", time.Minute, tncapResultEndsWait) {
+			t.Fatal("reported task_started present although no such line was ever fed")
+		}
+		if elapsed := time.Since(start); elapsed > 20*tncapPoll {
+			t.Errorf("the companion wait took %s to notice the turn had ended", elapsed)
+		}
+	})
+}
+
+// TestTncapSealCatchesWhatEntersTheRecordAfterTheFirstScan runs offline and is the
+// net under this file's one genuinely new exposure.
+//
+// The record is marshalled more than once, and fields enter it BETWEEN the marshals:
+// fixture_stage_detail carries `git`'s combined output, and git prints repository
+// paths on failure. That path is in nobody's substitution table — dropcapRedactor
+// covers the temp $HOME, the artifact dir, the workdir, the FIFO and the session id,
+// and not the repo — so the redactor passes it through unchanged and only the
+// deny-scan can catch it. Scanning once at the top and then re-marshalling scanned a
+// blob that did not yet hold those bytes, and the path landed in a committed public
+// fixture having passed no scan at all.
+//
+// The arms below pin the property as a property of the SEAL rather than of any one
+// call order: whatever is in the record when it is sealed is what gets scanned.
+func TestTncapSealCatchesWhatEntersTheRecordAfterTheFirstScan(t *testing.T) {
+	t.Parallel()
+
+	// The fixed half of the net, which needs no knowledge of the run that produced a
+	// record — the same half that lets a committed capture be re-scanned forever.
+	scanner := newDropcapScanner("", "", "")
+
+	clean := func() *tncapRecord {
+		return &tncapRecord{Ticket: tncapTicket, IsCapture: true, Outcome: tncapFired}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*tncapRecord)
+		want   string
+	}{
+		{
+			name:   "a clean record seals with no hit",
+			mutate: func(*tncapRecord) {},
+		},
+		{
+			// The exact shape the earlier code let through: `git add` losing a race on
+			// the index lock prints the repository path, and it enters the record after
+			// the first marshal.
+			name: "git's index-lock error reaches the seal",
+			mutate: func(rec *tncapRecord) {
+				rec.FixtureStageDetail = "git add failed (exit status 128): fatal: Unable to create " +
+					"'/Users/operator/src/pyrycode/.git/index.lock': File exists"
+			},
+			want: dropcapDenyUsers,
+		},
+		{
+			name: "a linux repository path reaches the seal",
+			mutate: func(rec *tncapRecord) {
+				rec.FixtureStageDetail = "git add failed: /home/operator/src/pyrycode/.git/index.lock"
+			},
+			want: dropcapDenyHome,
+		},
+		{
+			// The frame payloads are scanned as DECODED bytes, because base64 hides
+			// them from a scan of the marshalled record.
+			name: "a base64 frame payload is scanned decoded",
+			mutate: func(rec *tncapRecord) {
+				rec.Frames = []tncapFrame{{
+					Index:      0,
+					Subtype:    tncapQuarrySubtype,
+					PayloadB64: base64.StdEncoding.EncodeToString([]byte(`{"output_file":"/Users/x/o.txt"}`)),
+				}}
+			},
+			want: dropcapDenyUsers,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := clean()
+			tc.mutate(rec)
+			blob, hits, err := tncapSeal(scanner, rec)
+			if err != nil {
+				t.Fatalf("seal: %v", err)
+			}
+			if tc.want == "" {
+				if len(hits) > 0 {
+					t.Fatalf("a clean record was refused, naming %v", hits)
+				}
+				return
+			}
+			if !tncapContains(hits, tc.want) {
+				t.Fatalf("the seal returned %v and not %q: these bytes enter the record after the first "+
+					"marshal, so a scan that ran only at the top would carry them into a committed "+
+					"public fixture unscanned", hits, tc.want)
+			}
+			// The blob is returned for the caller to write, and the caller refuses to
+			// write it on a hit. What it must NOT do is be pre-sanitised here: the
+			// fail-closed response belongs to the caller, which knows what file was
+			// about to land.
+			if len(blob) == 0 {
+				t.Error("the seal returned no bytes alongside its hits")
+			}
+		})
+	}
+}
+
+// TestTncapBudgetOutlastsItsPhases pins the arithmetic the turn budget is chosen by,
+// offline. The three phase waits run in sequence before the budget is ever consulted,
+// so a budget smaller than their sum leaves the final select with BOTH arms ready and
+// TerminatedOn picked at random — a record that misreports how its own turn ended.
+// The margin is what is left for the turn to finish after the quarry wait is spent.
+func TestTncapBudgetOutlastsItsPhases(t *testing.T) {
+	t.Parallel()
+	phases := tncapRendezvousWait + tncapBackgroundWait + tncapNotificationWait
+	if tncapTurnBudget <= phases {
+		t.Errorf("tncapTurnBudget = %s but the phase waits can spend %s (%s + %s + %s) before the budget "+
+			"is read: raise the budget or shorten a phase, and do it deliberately",
+			tncapTurnBudget, phases, tncapRendezvousWait, tncapBackgroundWait, tncapNotificationWait)
+	}
+	t.Logf("turn budget %s, phases at most %s, margin %s", tncapTurnBudget, phases, tncapTurnBudget-phases)
 }
 
 // tncapContains is a local spelling of "is s in xs", used by the presence-flag

@@ -309,3 +309,84 @@ sequence, not a hole.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-09
+
+## Revisions
+
+### 2026-09-09 — rework leg 1, from the verifier's findings on PR #2294
+
+Three changes to the design above, two of them load-bearing. Each names the finding that drove it.
+
+**1. The quarry wait no longer treats `result` as terminal** (MUST FIX, `tncapAwaitSubtype`).
+
+The Design's turn sequence said "poll for a `system/task_notification` line, bounded" and the
+implementation reused the companion wait, which returns as soon as `recorder.resultSeen` closes. That
+is right for a line the assistant emits inside its own turn and wrong for this ticket's quarry:
+`task_notification` fires when a **background** task terminates, and a background task by construction
+outlives the turn that started it. `resultSeen` is closed via `sync.Once`, so once fired the arm is
+permanently ready and the whole `tncapNotificationWait` collapsed to a single `snapshot()`.
+
+The plan should have caught this, and the evidence to catch it with was already in the Files read
+list. `dropped_lines_v2.1.220.json` is this probe's own staging and it records `terminated_on:
+"result"` with a process still holding the FIFO's read end at turn end — so on this exact staging
+claude emits `result` while the backgrounded `cat` is still alive, and the quarry can only arrive
+afterwards. The consequence was not a missed line but a **false verdict**: `stagingVerdict`'s third arm
+would state that no line arrived "in the 90s that followed" when the 90 s were never spent, reporting
+a rig failure as a finding about pyry's surface — the exact confusion that arm exists to prevent.
+
+New contract: `tncapAwaitSubtype` takes a `resultEndsWait bool`, spelled at both call sites through
+the named constants `tncapResultEndsWait` and `tncapResultIsNotTheEnd`. Phase 2 keeps the terminal
+behaviour, because `task_started` cannot fire after the turn that would have backgrounded the call has
+finished. Phase 4 runs to its own deadline.
+
+**Budget, chosen rather than inherited.** The three phase waits now genuinely sum to 280 s, against a
+`tncapTurnBudget` that was 4 minutes. Under the old number the phases could outlast the budget, and the
+final `select` would then find both arms ready and pick `terminated_on` at random. The budget is
+6 minutes, and `TestTncapBudgetOutlastsItsPhases` pins the inequality offline so the next edit to a
+phase wait cannot quietly re-create the overlap. The final select also checks the already-closed
+`resultSeen` non-blocking first, so the arm is chosen rather than raced.
+
+**2. The deny-scan now covers the bytes that are actually written** (MUST FIX, `tncapWriteRecord`), and
+the Security review's `[Subprocess]` finding above is wrong where it says otherwise.
+
+That finding reasons that git's combined output "goes through `red.str` before entering the record" and
+that it "runs only after `fixtureWorthy` passes, i.e. only after the deny-scan has already cleared the
+same bytes." **The last clause is false, and it is the clause the design leaned on.** They are not the
+same bytes: the scan cleared a blob marshalled before `FixtureStageDetail` existed, and the record was
+then re-marshalled and that second blob was written to both the artifact record and the committed
+fixture. `red.str` is no backstop here — `dropcapRedactor`'s declared table covers the temp `$HOME`,
+the artifact dir, the workdir, the FIFO and the session id, and not the repository, so a `git add`
+losing the index lock prints `/Users/<operator>/…/.git/index.lock` and the redactor passes it through
+unchanged. Read the `[Subprocess]` finding as amended by this paragraph: the argv reasoning stands, the
+"already cleared the same bytes" reasoning does not.
+
+The design is now that **every blob written is deny-scanned as itself**. `tncapSeal` marshals the
+record as it stands, scans that blob plus the decoded bytes of every base64 frame payload, and returns
+the classes hit; `tncapWriteRecord`'s `seal` closure owns the fail-closed response, and every
+`os.WriteFile` takes a `seal(...)` result. It is split out as a function rather than left inline so the
+property can be asserted with no live turn and no write near the repo, which is what
+`TestTncapSealCatchesWhatEntersTheRecordAfterTheFirstScan` does — including the index-lock string
+verbatim. A mutant that scans a blob marshalled before the staging fields entered reddens it.
+
+**Ordering, found while making the above true.** `tncapStageFixture` ran **before** the fixture was
+written, so `git add` was staging a path that did not exist yet. That fails with "pathspec did not
+match any files", and the fixture being absent is precisely the first-capture case this probe arms
+itself for — so AC3 would have failed on every run that mattered. Staging now runs after the fixture
+write. The consequence is that the two files deliberately differ by two fields: the **fixture** carries
+a `fixture_stage_detail` saying where its staging outcome lives, because a file cannot truthfully
+record whether it was staged before it existed, and the **artifact-dir record** is rewritten after
+staging and is AC3's evidence. That rewrite is sealed again, which is what puts git's output through
+the scan.
+
+**3. `tncapFrame.SkipTranscriptResent` renamed to `SkipTranscriptPresent`** (SHOULD FIX). Every use
+meant *present*; the JSON tag was already `skip_transcript_present`, so the record shape is unchanged.
+
+**Unchanged by this leg:** the `## Security review` verdict stands as PASS with the `[Subprocess]`
+amendment above folded in — the finding's conclusion (no injection surface, fixed argv, nothing claude
+emits reaches it) survives; only its claim about scan coverage was wrong, and that gap is now closed in
+code rather than in reasoning. `streamLine` is still untouched, no production file changed, and the
+streamsup reader and its four-quadrant gate are exactly as designed, pin still honestly empty.
+
+**Open question 1 is unaffected but better instrumented.** Whether a released FIFO fires
+`task_notification` at 2.1.259 is still the live gate's to answer. The difference is that the answer is
+now trustworthy: before this leg a zero-frame result could not distinguish "the surface does not emit
+it" from "the rig never waited", and `stagingVerdict`'s third arm asserted the former either way.
