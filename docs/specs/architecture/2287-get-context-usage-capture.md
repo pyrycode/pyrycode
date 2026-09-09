@@ -449,3 +449,57 @@ recorded and pass, and neither can fail the run. Question 2 (where the payload s
 resolved by construction: `cucapSubtypeOf` searches all three known placements and
 `cucapLeaves` records every numeric leaf by dotted path, so the record is readable whatever
 the nesting turns out to be.
+
+### 2026-09-09, the live gate lap and the rework leg it routed back
+
+The dispatcher's `make e2e-realclaude` gate ran the probe on claude 2.1.259 and **the CLI
+answers `get_context_usage` on the stdin control channel**, which settles open question 1.
+Both arms replied with `subtype:"success"` and a correlated `request_id`. Question 3 is
+settled the same way: the pinned `--session-id` reached the transcript filename, so
+`transcript_found` is true and AC 2's comparison is a real one rather than a recorded
+absence.
+
+| | `detail:"summary"` | `detail:"full"` |
+|---|---|---|
+| round trip | 102 ms | 710 ms |
+| numeric leaves | 386 | 386 |
+| `totalTokens` | 21929 | 21929 |
+
+The two `detail` values returned the **same payload** and differed only in latency, which
+is the finding #2288 designs against: paying `full`'s seven-fold round trip bought nothing
+this session could observe. The daemon's own reading of the same session was 21978 tokens
+against a 200000 window, 10.99%, beside claude's 21929 and its top-level 11% — the two
+readings agree to within the 49 tokens the transcript gained between the control reply and
+the daemon's read.
+
+**The promotion path worked exactly as the plan argued it had to.** The in-repo fixture the
+probe wrote went out with the dispatcher's detached merge-only worktree, as #2229's did.
+The unconditional artifact copy survived in an `os.MkdirTemp` directory outside every
+worktree, and recovering that file is how the bytes reached this commit. The one thing the
+design got wrong is that the redaction pass rewrites the artifact directory to
+`$ARTIFACT_DIR` in the probe's own log line, so the log names the file to recover without
+naming where it is — a later capture in this family should log the artifact path
+unredacted, since a temp directory the run itself created is not an operator secret and the
+whole point of that copy is that a human can find it.
+
+**`cucapSelect` now breaks ties on the shallowest path**, which the capture is what taught.
+The response carries a whole-context `percentage` beside a `gridRows` matrix whose every
+cell repeats a `percentage` of its own category, and a lexical-only tie-break picks a cell,
+because `gridRows` sorts before `percentage`. The committed record therefore reports
+`claude_percent_value` 3 from `response.response.gridRows[0][0].percentage` — that is what
+the run computed and the record is left as the run wrote it, source path and all. The
+figure AC 2 asks for is 11, and it sits in the same committed bytes at
+`response.response.percentage`, both verbatim in `control_responses` and in
+`numeric_leaves`, which is the authoritative field set the record's own docblock points a
+reader to. A re-capture at the next claude version records the shallow path.
+
+**The gate's failure was a shared clock, not this branch's code.** It reported
+`TestRealClaude_ToolLoopIntegrity` as introduced-by-this-branch, but that test was simply
+the one running when the package's 20-minute `go test` budget expired; on base, alone, it
+passes in 5.88 s. The live package has been sitting on that ceiling all day — the last
+passing lap (#2272) took 1197.4 s of 1200, and both #2279 laps hit 1200.4 s and failed the
+same way. This probe's live arm cost 3.7 s of that, and costs **zero** from here: the
+arming gate is the fixture's absence and the fixture is now committed, so the probe skips
+before the credential check. The remaining 2.6-second margin on `origin/main` is not this
+ticket's to fix: #2305 already carries it, filed off #2279's identical rework leg an hour
+before this one, and it names the same misattribution mechanism.

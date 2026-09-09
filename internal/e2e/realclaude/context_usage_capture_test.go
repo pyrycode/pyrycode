@@ -510,10 +510,10 @@ func math_IsInf(f float64) bool {
 //
 // EACH ENTRY IS A PATH SUFFIX, matched case-insensitively against the dotted paths
 // cucapLeaves produced, and the lists are ORDERED — the first suffix with any match
-// wins, and among its matches the lexically smallest path wins. Determinism is the
-// requirement: Go randomises map iteration, so "the first match" over a map answers
-// differently between two runs on identical input, and a committed fixture must not
-// change from run to run.
+// wins, and among its matches the shallowest path wins, ties broken lexically.
+// Determinism is the requirement: Go randomises map iteration, so "the first match"
+// over a map answers differently between two runs on identical input, and a committed
+// fixture must not change from run to run.
 //
 // THE LISTS ARE A GUESS AND THE RECORD SAYS SO. claude_total_source names the path a
 // value actually came from and is EMPTY when nothing matched — which is itself a
@@ -531,17 +531,33 @@ var (
 )
 
 // cucapSelect returns the first matching path and its value, scanning suffixes in
-// order and breaking ties on the lexically smallest path. Both returns are empty when
-// nothing matches.
+// order and breaking ties on the SHALLOWEST path, then on the lexically smallest.
+// Both returns are empty when nothing matches.
+//
+// DEPTH BEFORE SPELLING, and the live capture is what taught it. claude 2.1.259
+// answered with a whole-context "percentage" beside a gridRows matrix whose every cell
+// repeats a "percentage" of its own category. A lexical-only tie-break picks a cell —
+// "gridRows" sorts before "percentage" — so the record reported 3% as claude's reading
+// of a context the daemon had just measured at 10.99%, two figures of different
+// quantities presented as the two sides of one comparison. A deeper match under the
+// same suffix is a COMPONENT of the headline figure rather than the figure, at every
+// nesting this payload has, so the shallowest wins.
+//
+// Depth is the dot count, which is exactly cucapLeaves' own segment separator: an
+// array index is appended as "[i]" to the segment it indexes rather than dotted onto
+// it, so two paths tie on depth only when they sit at the same object nesting.
+// Ordering by (depth, path) is a total order over distinct keys, so the selection
+// stays independent of Go's map iteration.
 func cucapSelect(leaves map[string]string, suffixes []string) (path, value string) {
 	for _, suffix := range suffixes {
-		best := ""
+		best, bestDepth := "", 0
 		for p := range leaves {
 			if !strings.HasSuffix(strings.ToLower(p), suffix) {
 				continue
 			}
-			if best == "" || p < best {
-				best = p
+			depth := strings.Count(p, ".")
+			if best == "" || depth < bestDepth || (depth == bestDepth && p < best) {
+				best, bestDepth = p, depth
 			}
 		}
 		if best != "" {
@@ -1919,6 +1935,30 @@ func TestCucapSelect_IsDeterministicAndReportsItsSource(t *testing.T) {
 				t.Fatalf("#%s: selected %q on iteration %d, want a.total_tokens every time; a "+
 					"selection that follows map iteration writes a different value into the "+
 					"committed fixture on every run", cucapTicket, path, i)
+			}
+		}
+	})
+
+	t.Run("the shallowest match wins over a deeper one carrying the same suffix", func(t *testing.T) {
+		t.Parallel()
+		// THE MEASURED SHAPE, not a hypothetical: claude 2.1.259 answered both arms with
+		// a payload carrying a whole-context "percentage" beside a gridRows matrix whose
+		// every cell carries its own category "percentage". A tie-break on the lexically
+		// smallest path alone picks a GRID CELL — "gridRows" sorts before "percentage" —
+		// and the record then reports one category's 3% as claude's reading of the whole
+		// context, beside a daemon percentage computed over all of it. Depth first is
+		// what makes the two sides of AC 2's comparison describe the same quantity.
+		leaves := map[string]string{
+			"response.response.percentage":                "11",
+			"response.response.gridRows[0][0].percentage": "3",
+			"response.response.gridRows[1][5].percentage": "86",
+		}
+		for i := 0; i < 32; i++ {
+			path, value := cucapSelect(leaves, cucapPercentPathSuffixes)
+			if path != "response.response.percentage" || value != "11" {
+				t.Fatalf("#%s: selected %q=%q on iteration %d, want response.response.percentage=11 "+
+					"every time; a deeper match is a component of the figure, not the figure",
+					cucapTicket, path, value, i)
 			}
 		}
 	})

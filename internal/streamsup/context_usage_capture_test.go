@@ -68,18 +68,27 @@ const contextUsageCaptureGlob = "../e2e/realclaude/testdata/context_usage_v*.jso
 // a subtype. A reader that treated an unanswered arm as an absence would delete the
 // measurement.
 //
-// IT IS EMPTY ON PURPOSE UNTIL THE LIVE GATE HAS RUN. The fixture cannot exist
-// before `make e2e-realclaude` produces it, which happens after verification, so a
-// reader asserting against bytes any earlier would redden `make check` for every
-// unrelated ticket. contextUsageReaderGate turns that into a state machine with
-// exactly one legal skip: filling this slice is the commit that lands the fixture,
-// and a fixture landing WITHOUT it fatals rather than passing quietly.
+// THE LIVE GATE HAS RUN AND THE ANSWER IS THAT THE CLI ANSWERS BOTH ARMS. On claude
+// 2.1.259 the stdin control channel replied to get_context_usage at each `detail`
+// value with subtype "success", so the unanswered spelling above is still the
+// vocabulary's other half and is no longer what was observed. Both replies carried
+// the same payload — the same totalTokens, the same category list — and differed only
+// in what they cost to produce, which the record's round_trip_ms columns hold.
 //
-// Fill it from the record's own per-arm response_subtype and answered fields — and
-// note that the reader below does NOT trust those labels when it checks the pin. It
-// re-derives each shape from the arm's own recorded response bytes, so committing
+// It was EMPTY until that run, which is the state contextUsageReaderGate calls its one
+// legal skip: the fixture cannot exist before `make e2e-realclaude` produces it, and a
+// reader asserting against bytes any earlier would redden `make check` for every
+// unrelated ticket. Filling this slice is the commit that lands the fixture, and a
+// fixture landing WITHOUT it fatals rather than passing quietly.
+//
+// It is filled from the record's own per-arm response_subtype and answered fields —
+// and note that the reader below does NOT trust those labels when it checks the pin.
+// It re-derives each shape from the arm's own recorded response bytes, so committing
 // the record cannot turn this measurement into an agreement with itself.
-var contextUsagePinnedShapes = []string{}
+var contextUsagePinnedShapes = []string{
+	"summary/success",
+	"full/success",
+}
 
 // The four states of (fixture, pin). Only the first is a skip, and only on the leg
 // before the live gate has ever run.
