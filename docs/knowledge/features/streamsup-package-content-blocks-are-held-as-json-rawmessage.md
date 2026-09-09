@@ -143,6 +143,40 @@ location, and #1839 (below) put the consumer inside this same file rather than i
 reason (in-package caller, no cross-package dispatch to satisfy) rather than for having no caller
 at all. This slice writes the line and stops; nothing reads the ack.
 
+**Inbound `can_use_tool` decode and its `control_response` answer complete the family (#2282).**
+`control_request` had been outbound-only through the three primitives above; the parser's
+`case "control_request"` arm now also reads one in. `controlRequestSubtypeLine` decodes just the nested
+subtype so an unrecognized one (or an undecodable subtype) falls to `emitUnrecognized` exactly as before;
+only a matched `can_use_tool` is re-decoded, off the same line bytes, into `canUseToolLine`'s
+`CanUseToolRequest`, then handed to a handler installed via `Parser.SetCanUseToolHandler` — dropped
+silently with no handler installed, which is safe only because no spawn yet passes
+`--permission-prompt-tool stdio`; #2284 spawns under the flag and installs the answerer. The write half,
+`WriteCanUseToolAllow`/`WriteCanUseToolDeny`, mirrors `WriteInterrupt` down to the nil-writer
+`ErrNoLiveChild` check, and marshals a `controlResponse` whose allow/deny `PermissionResult` payload
+nests one level deeper than the ack envelopes above, per the verbatim capture in
+[set-permission-mode-inband-probe.md](set-permission-mode-inband-probe.md).
+
+Two lessons from decoding a shape whose only authority is an SDK type definition, never a captured line:
+
+- **A field the ticket doesn't pin to a scalar is typed `json.RawMessage`, not guessed.** `encoding/json`
+  fails the *whole* decode on one wrong scalar guess, and this decode's cost of being wrong is a lost
+  permission ask claude is blocking on — the field-typing rule the Interrupt/PermissionMode primitives
+  don't need, since every one of their fields is pinned by a measured line. `CanUseToolRequest`'s
+  `DecisionReason` and `MatchedAskRule` are exactly the fields this caught: both read like plain strings
+  and are sent as objects in the plausible shape.
+- **`json.RawMessage` on the write path is not the raw-newline injection surface it looks like.**
+  `WriteCanUseToolAllow`'s `updatedInput`/`updatedPermissions` and the deny `message` string are the only
+  claude- or caller-supplied bytes this family writes back onto the child's stdin. `encoding/json`
+  validates and compacts a `Marshaler`'s output: malformed bytes fail the marshal before anything is
+  written, and well-formed bytes lose only insignificant whitespace, never gain a raw newline. The
+  appended `'\n'` stays the only one in the line by construction, not by scanning the value first.
+
+The subtype-then-payload split is `controlResponseLine`/`controlAckLine`'s idiom applied to a third
+shape, for the reason it was first applied: a field added to one target must not change the other's
+decode outcome, and reporting an undecodable `can_use_tool` payload as `UnrecognizedLineType` — the same
+frame an unrelated subtype gets — is deliberate, not an oversight: an ask this codec cannot read is still
+news the daemon should see.
+
 **Tool-result sidecar decode — fail-closed is a confinement control, not just AC hygiene (#2024, extended
 to all five shapes by #2025).** `consumeLine`'s `user` arm hands `emitUser` the raw line bytes (the
 `emitRateLimit(line)` shape), which decodes the line's `tool_use_result` sidecar a second time into
