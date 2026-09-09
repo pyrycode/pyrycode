@@ -47,6 +47,18 @@ ticket, as #2236 did) to actually land them. Check `internal/e2e/realclaude/test
 `parent_tool_use_v*.json` before assuming the replay in `internal/streamsup` runs rather than
 skips.
 
+### A whole-turn capture paid for a second ticket's measurement, without a second live turn (#2248)
+
+Because this probe keeps every line of the turn rather than filtering to `parent_tool_use_id`,
+the committed record also carried two verbatim `system/task_progress` frames nobody had asked
+this probe for. `internal/streamsup/task_progress_capture_test.go` reads them straight off this
+same file rather than spending a second live turn to re-measure a subtype already sitting in an
+existing capture. The general lesson: a capture probe in this family that keeps the whole turn is
+reusable evidence for subtypes its own ticket never cared about; one that filters to its own
+quarry (`tool_progress_capture_test.go` counted a `task_notification` line in its census but kept
+none of its bytes, so a whole separate probe had to be built for it later) is not. Keeping the
+whole turn costs a few KB and is worth defaulting to.
+
 ### Related
 
 - [`compaction_capture_test.go`](e2e-realclaude-compaction-capture-test-go.md) — the
@@ -59,3 +71,6 @@ skips.
 - [streamsup's decode-target family doc](streamsup-package-result-stop-shape-second-decode-target-and-dr.md)
   — where the captured bytes are read: the `assistantParentLine`/widened-`userLine` split and the
   `maxTaskFieldID` join-key bound.
+- [streamsup's system-subtype map](streamsup-package-system-maps-per-subtype-since-2026-08-07.md)
+  — a second reader over this same record, `internal/streamsup/task_progress_capture_test.go`
+  (#2248), pins the two `system/task_progress` frames this whole-turn capture also carried.
