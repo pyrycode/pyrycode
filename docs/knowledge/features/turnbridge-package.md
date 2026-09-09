@@ -80,7 +80,7 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
 | `Compacting` (#1074) | `TypeCompacting` | `CompactingPayload{tc.ConversationID, ev.Active}` (`tc.TurnID`/`tc.Seq` ignored) | true |
 | `Unrecognized` | `TypeUnrecognizedMessage` | `UnrecognizedMessagePayload{tc.ConversationID, ev.Site, ev.Kind, ev.Raw, ev.Truncated}` (`tc.TurnID`/`tc.Seq` ignored — an unrecognized message has no turn we can honestly attribute it to) | true |
 | `BackgroundTaskStarted` (#1394) | `TypeBackgroundTaskStarted` | `BackgroundTaskStartedPayload{tc.ConversationID, ev.TaskID, ev.ToolCallID, ev.Description, ev.TaskType, ev.TruncatedFields}` (`tc.TurnID`/`tc.Seq` ignored — a background task outlives the turn that spawned it) | true |
-| `BackgroundTaskUpdated` (#1394) | `TypeBackgroundTaskUpdated` | `BackgroundTaskUpdatedPayload{tc.ConversationID, ev.TaskID, ev.Patch, ev.TruncatedFields}` (`tc.TurnID`/`tc.Seq` ignored) | true |
+| `BackgroundTaskUpdated` (#1394; `Status`/`Summary` #2245) | `TypeBackgroundTaskUpdated` | `BackgroundTaskUpdatedPayload{tc.ConversationID, ev.TaskID, ev.Patch, ev.Status, ev.Summary, ev.TruncatedFields}` (`tc.TurnID`/`tc.Seq` ignored). Two of claude's subtypes fill this event and they fill DISJOINT fields (`task_updated` → `Patch`, `task_notification` → `Status`/`Summary`); the arm does not branch on which — it copies all four whatever their state, so an empty one crosses as empty and a non-empty `Status` is what tells a client a terminal state arrived | true |
 | `BackgroundTaskRoster` (#1394) | `TypeBackgroundTaskRoster` | `BackgroundTaskRosterPayload{tc.ConversationID, tasks, ev.DroppedTasks}` — `ev.Tasks` looped into `[]protocol.BackgroundTask`, nil left nil (the payload's own `MarshalJSON` owns nil→`[]`) | true |
 | `ThinkingProgress` (#1386) | `TypeThinkingProgress` | `ThinkingProgressPayload{tc.ConversationID, ev.EstimatedTokens, ev.EstimatedTokensDelta}` (`tc.TurnID`/`tc.Seq` ignored — a periodic reading of an inference request in flight, not a turn-scoped fact) | true |
 | `RateLimited` (#1410, `Utilization` #2249) | `TypeRateLimited` | `RateLimitedPayload{tc.ConversationID, ev.Status, ev.LimitType, ev.ResetsAt, ev.Utilization, ev.TruncatedFields}` (`tc.TurnID`/`tc.Seq` ignored — a usage-limit window is a condition of the account, orthogonal to whichever turn observed it). Nil `TruncatedFields` left nil, and here that nil is what reaches the wire as `null`: unlike `BackgroundTaskRosterPayload` two rows up, `RateLimitedPayload` deliberately has **no** `MarshalJSON`, because nothing-was-cut is an absence. `ResetsAt` crosses unclamped and unvalidated in both directions; neither string is re-capped (the producer bounded both at construction). `Utilization *float64` (#2249) crosses **as the same pointer, not deep-copied** — `CompactionBoundary`'s stated reason applies unchanged (`encoding/json` allocates a fresh `float64` per line, nothing downstream mutates a payload) — and, like `ResetsAt`, is unvalidated and unclamped: a client scaling a progress bar by it is assuming a 0–1 domain the daemon never checked. Nil (claude reported nothing) and a pointer to `0` (claude reported a fresh window) are different facts and must stay distinguishable across this arm, which is why the row is a straight pointer copy rather than a dereference-and-rebuild | true |
@@ -160,6 +160,16 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
   with a decoded-payload presence assertion on the recorded push; the payload half is
   what actually caught the arm dropping the event silently — the log-absence half
   alone stayed green throughout.
+- **A hand-enumerated leak sweep does not widen when the struct it guards does.**
+  `TestInteractiveTurnEmitterV2_BackgroundTasksNoLogLeak` lists one marker string
+  per claude-derived field, by hand, across all three background-task variants.
+  Adding `Status`/`Summary` to `BackgroundTaskUpdated` (#2245) would have left both
+  silently unswept — no red, no signal — without someone remembering to add their
+  markers, and `Summary` is the field on this family with the most to leak
+  (unbounded model prose). The fix also needed a **second** event of the variant,
+  because `task_updated` and `task_notification` fill disjoint fields and one
+  fixture leaves half the variant's fields permanently unset and so permanently
+  unswept. Check this test whenever a variant already in its list grows a field.
 - **Pinning "entry order is preserved" needs a non-monotonic fixture, not just two
   distinguishable entries.** `ModelList`'s outbound row (#1848) uses two entries
   whose `ResolvedModel`/`Value`/`DisplayName` all happen to sort ascending; the
