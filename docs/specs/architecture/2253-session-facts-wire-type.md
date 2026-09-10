@@ -376,3 +376,41 @@ inline before this section was written).
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-10
+
+## Revisions
+
+### 2026-09-10 — implementation
+
+The design landed as planned; nothing in the shape, the guard registrations or the
+documentation plan changed. Three things are worth recording.
+
+**The count is nineteen, confirmed by enumeration rather than by trusting the
+prose.** Open question 1 resolved as expected: the `####` frames under § Interactive
+events run `turn_state` through `session_facts` and number nineteen exactly, with
+`session_transition`, `model_list` and `slash_command_list` sitting outside the count
+they cite. All four sentences moved.
+
+**Three overlay mutants were run, and one falsified a comment I had written.**
+
+| Mutant | Result |
+|---|---|
+| Swap the `claude_code_version` / `permission_mode` struct tags | Both round trips red — confirms the fixture's two values differ *usefully*, not decoratively |
+| `TypeSessionFacts` value → `"session_fact"` | Round trip red — confirms the committed fixture is the thing pinning the wire literal, per the drift-detector overview's lesson that no registry can |
+| `omitempty` on `TruncatedFields` | Zero-value round trip red |
+
+The third one corrected me. The zero-value test's comment had borrowed the sibling's
+sentence claiming the round trip alone would "go on passing" without the
+`bytes.Contains` guards. Against the **committed** fixture that is false — the key
+vanishes from the re-marshalled bytes while the fixture still carries it, so the byte
+comparison reddens on its own. The guards' real value is surviving a fixture
+**regeneration**, which is the property the drift-detector overview records for
+key-set pins. The comment now says what the mutant showed rather than what the
+sibling's comment says.
+
+**Open question 2 is settled, with a caveat worth naming.** The single
+`truncated_fields` entry naming `permission_mode` stands. It is not detectable by a
+mutant at this layer — there is no producer to mis-name the entry, so the assertion
+can only pin the fixture against itself — which means it is carrying its weight as a
+**client-facing artifact** rather than as a guard: it is what a client author copies
+when learning that entries use the daemon's `permission_mode` and never claude's
+`permissionMode`. The machine-checked half of that rule arrives with #2254's producer.

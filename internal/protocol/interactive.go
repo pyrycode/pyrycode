@@ -1117,6 +1117,89 @@ type ModelAnnouncedPayload struct {
 	Truncated      bool   `json:"truncated"`
 }
 
+// SessionFactsPayload is the body of an Envelope whose Type == TypeSessionFacts
+// (docs/protocol-mobile.md § session_facts, #2253). Binary → phone direction; the
+// wire form of turnevent.SessionFacts, which reports what claude's own build IS and
+// what posture claude says the child is running under, from the same system/init
+// line ModelAnnouncedPayload's value comes from.
+//
+// Declared here (#2253) ahead of its producer so a client can be written against the
+// shape — the sequencing #1405 used ahead of #1410, #1616 ahead of #1638 and #1704
+// ahead of #1848. The producer is #2254: nothing maps or emits this frame yet, and
+// this sentence is the ONE place in the tree that claim is made, so #2254 has one
+// edit rather than #1616's twelve.
+//
+// Like ModelAnnouncedPayload it is conversation-scoped rather than turn-scoped, so
+// there is no turn_id, and receiving one neither opens nor closes a turn: a per-turn
+// report is not a turn boundary (turnevent.SessionFacts' own doc). PER LINE, NOT PER
+// SESSION — claude emits init once per TURN, so one session produces several of
+// these and the producer does not dedup. The bridge will supply ConversationID
+// because the internal event carries none.
+//
+// The two values' semantics are NOT restated here: turnevent.SessionFacts' field
+// comments are their single source of truth, in the manner ModelAnnouncedPayload
+// delegates to ModelAnnounced.Model. Named and delegated: both are claude's text
+// VERBATIM, neither is parsed, normalised or checked against any published list;
+// EITHER may be empty, because the producer emits when either fact is present; and
+// PermissionMode is an OPEN SET on purpose, since an allow-list would drop the first
+// report of a posture nobody has heard of, which is the case an operator most needs
+// to see. A consumer-facing statement of each is in docs/protocol-mobile.md
+// § session_facts.
+//
+// TruncatedFields is the siblings' []string rather than ModelAnnouncedPayload's
+// Truncated bool, and that payload's doc states the rule both follow: a bool is
+// right when the payload bounds a SINGLE string and a name list would be permanently
+// either nil or one known name; a named list is right the moment the report has to
+// say WHICH of several was cut. Two fields is where the rule flips. Entries are the
+// DAEMON's wire names — "claude_code_version" and "permission_mode", the second NOT
+// claude's own permissionMode, exactly as RateLimitedPayload's are "limit_type" and
+// not claude's rateLimitType. nil when nothing was cut, never an empty non-nil
+// slice, and nil serialises as null: UnrecognizedMessagePayload's form, and what
+// every truncated_fields row in docs/protocol-mobile.md already describes. It is
+// load-bearing either way — a payload that dropped it would present claude's cut
+// text to a phone as complete.
+//
+// FOUR KEYS OF THE CAPTURED INIT LINE ARE DELIBERATELY ABSENT, and the absence is
+// the guarantee rather than a gap: cwd, memory_paths and messaging_socket_path are
+// the operator's local filesystem, and session_id is claude's own session identity,
+// which is not the daemon's conversation identity (BackgroundTaskStartedPayload's
+// reason plus #1380's). None is declared on the producer's decode target
+// (internal/streamsup's systemInitLine), so this payload cannot carry them even by
+// accident — a field never decoded cannot leak whatever a later sweep forgets to
+// check. There is NO effort field because claude publishes none, measured in #2251
+// and machine-enforced by effortInitPins; see TypeSessionFacts' block. MCP server
+// status belongs to the frame #2275 declares and is deliberately not folded in here.
+//
+// SECURITY: both strings are claude-authored values that crossed the subprocess
+// trust boundary. They are safe to RENDER as inert text and must never be fed to an
+// HTML sink, an attribute, or a URL; the daemon bounds them but does not sanitize
+// them — no control-character or terminal-escape stripping happens on this path,
+// beyond the invalid-UTF-8 scrub a mid-rune cut forces — so they stay untrusted,
+// model-influenced text all the way to the client, and the render boundary owing the
+// sanitization is the CLIENT's. Their bounds are the producer's, decided at
+// construction (internal/streamsup's maxClaudeVersionField and
+// maxPermissionModeField), so this struct re-decides no maximum: a second cap here
+// would be a second place the limit is decided, and the two could disagree silently.
+//
+// PermissionMode CARRIES ONE HAZARD THE SIBLING DOES NOT, and it is the field a
+// client is likeliest to misuse. It is a CLAIM, NOT A GUARANTEE: a buggy or
+// compromised claude can report `default` while running under any posture at all,
+// and what the value proves is only what claude SAID. Nothing in the daemon gates on
+// it and the value is never fed back into a spawn or a control request — in
+// particular it must not become an input to internal/streamsup's
+// permissionModeAllowed, which bounds what the DAEMON may ASK FOR and is a
+// deliberately different rule. A client MUST NOT read it as an authorization
+// decision: suppressing a warning, unlocking an action, or rendering a safety
+// posture on the strength of this string is exactly the misuse it cannot support.
+// Both fields follow ModelAnnouncedPayload's standing constraint — this is a REPORT,
+// never a control input.
+type SessionFactsPayload struct {
+	ConversationID    string   `json:"conversation_id"`
+	ClaudeCodeVersion string   `json:"claude_code_version"`
+	PermissionMode    string   `json:"permission_mode"`
+	TruncatedFields   []string `json:"truncated_fields"`
+}
+
 // ModelListPayload is the body of an Envelope whose Type == TypeModelList
 // (docs/protocol-mobile.md § model_list — that section lands with the fixtures in
 // #1705). Binary → phone direction; the wire form of the model inventory claude

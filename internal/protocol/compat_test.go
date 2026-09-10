@@ -84,6 +84,11 @@ func TestIsKnownAppType(t *testing.T) {
 		// is also what keeps the type off the inbound path — a phone must never be
 		// able to send a slash_command_list frame into dispatch.Route.
 		{"slash_command_list-rejected", TypeSlashCommandList, false, ErrUnknownType},
+		// the v2-only session-facts report: an outbound binary → phone report an
+		// old phone never receives, so IsKnownAppType must reject it. Rejection is
+		// also what keeps the type off the inbound path — a phone must never be
+		// able to send a session_facts frame into dispatch.Route.
+		{"session_facts-rejected", TypeSessionFacts, false, ErrUnknownType},
 		// v2-only screen-snapshot types are likewise not v1-compatible.
 		{"request_snapshot-rejected", TypeRequestSnapshot, false, ErrUnknownType},
 		{"screen_snapshot-rejected", TypeScreenSnapshot, false, ErrUnknownType},
@@ -297,6 +302,8 @@ var v2OnlyTypes = map[string]bool{
 	TypeModelList: true,
 	// v2 slash-command-list report.
 	TypeSlashCommandList: true,
+	// v2 session-facts report.
+	TypeSessionFacts: true,
 	// v2 attachment vocabulary.
 	TypeAttachmentChunk: true,
 	// v2 attachment upload success reply.
@@ -406,6 +413,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeModelList,
 		// v2 slash-command-list report.
 		TypeSlashCommandList,
+		// v2 session-facts report.
+		TypeSessionFacts,
 		// v2 attachment vocabulary.
 		TypeAttachmentChunk,
 		// v2 attachment upload success reply.
