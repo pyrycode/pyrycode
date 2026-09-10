@@ -1,4 +1,4 @@
-# `tool_progress` is consumed by matching, not added to `ignoredLineTypes` (#2089)
+# `tool_progress` is consumed by matching; heartbeats emit progress (#2089, #2323)
 
 A long-running `Bash` call makes claude emit a `tool_progress` heartbeat every
 ~30s; before this ticket `consumeLine` had no arm for that top-level type, so
@@ -11,17 +11,20 @@ row in the operator's chat for the life of the call.
 wholesale and this type's fourth variety (bash/powershell progress) has no
 positive marker — a marker-set matcher lets exactly that variety fall through
 to the unrecognized lane on purpose, so a claude release that starts sending it
-here raises the alarm instead of going silent. The matched varieties —
-`heartbeat: true`, a present `subagent_type`, a present `repl_call` — are
-decoded from the raw line into `toolProgressMarkers`, the same second-decode
-shape `userToolResultLine` uses for the same reason (`streamLine` stays a pure
-segmentation struct).
+here raises the alarm instead of going silent. The markers — `heartbeat: true`,
+a present `subagent_type`, a present `repl_call` — are decoded from the raw line
+into `toolProgressMarkers`, the same second-decode shape `userToolResultLine`
+uses for the same reason (`streamLine` stays a pure segmentation struct).
+`subagent_type` and `repl_call` remain content-free drops. Since #2323, a
+heartbeat is still consumed by the same matcher but emits one
+`turnevent.ToolProgress`; a bad payload changes what the matched line produces,
+never which lane consumes it.
 
 ## Wire facts pinned by a live capture, not the vendor's declared schema alone
 
 Reverse-engineering the 2.1.259 binary got the marker set right, but two facts
 needed a real capture (`internal/e2e/realclaude/testdata/tool_progress_v2.1.259.json`,
-read by `TestParser_ToolProgressCapturedFramesAreSilent`) to confirm rather than
+read by `TestParser_ToolProgressCapturedFramesEmitHeartbeatEvents`) to confirm rather than
 guess:
 
 - **The heartbeat is a 30s `setInterval`.** `elapsed_time_seconds` steps
@@ -45,7 +48,7 @@ the output-chunked variant to key on. `consumeToolProgress`'s dated docblock
 records this as narrowed, not closed — a future capture would need either
 `CLAUDE_CODE_CONTAINER_ID` set or a staged command with incremental stdout.
 
-## `parent_tool_use_id` means something different here, and that scoped #2191's decode
+## `parent_tool_use_id` means something different here, so validation is shared but meaning is not
 
 The committed `tool_progress_v2.1.259.json` is the fixture that proves it: 12 of its
 frames carry a non-null `parent_tool_use_id`, and none of them name a subagent spawn.
@@ -59,14 +62,33 @@ its own Bash row.
 
 This is `userLine`'s `tool_use_result`/`toolUseResult` hazard arriving from the other
 direction: there, two *spellings* collide; here, one spelling carries two *meanings*
-depending which line type it rides. #2191 scopes its decode to exactly the `assistant`
-and `user` arms of `consumeLine` for this reason — `consumeToolProgress` sits in a
-structurally disjoint branch and is never touched — and proves the negative by driving
-every frame of this fixture through the parser and asserting no `ToolStart`/`ToolUpdate`
-carries a non-empty `ParentToolCallID` at all. See
+depending which line type it rides. `parentToolUseID` is deliberately reused only as
+the key's JSON-string and `maxTaskFieldID` validator. Its result populates
+`ParentToolCallID` on assistant/user lines, but `ToolCallID` on `ToolProgress`; an
+absent, empty, non-string, or oversized value drops the progress event rather than
+publishing an unjoinable handle. The branches remain structurally disjoint, and the
+\#2191 negative proof still asserts that no heartbeat feeds `ParentToolCallID` on a
+`ToolStart` or `ToolUpdate`. See
 [the decode-target family doc](streamsup-package-result-stop-shape-second-decode-target-and-dr.md)
 for where the two new targets live and why one widens `userLine` while the other gets
 its own struct.
+
+## Heartbeat mapping is stateless and lifecycle-neutral
+
+Each valid heartbeat maps independently to `ToolProgress{ToolCallID,
+ElapsedSeconds}`. The elapsed reading is a signed `int`: absent and explicit zero
+both publish zero, and a negative reading remains observable rather than being
+clamped or wrapped. The daemon does not infer the 30-second cadence, accumulate
+readings, or retain per-call state. `ToolStart` already opened the row and the later
+`tool_result` closes it, so `turnMarkFor` classifies the heartbeat `turnMarkNone`;
+under fan-in saturation it may be dropped rather than crowding out an actual turn
+boundary.
+
+The event is producer-first: `eventKind` names it without logging its join key or
+elapsed value, while `interactiveTurnEmitterV2.Handle` deliberately has no mapping
+until the wire contract lands. Keeping it distinct from `ToolUpdate` matters because
+the streamsup producer and busy-path consumer treat every `ToolUpdate` as terminal;
+reusing that type for a repeating heartbeat would silently break that invariant.
 
 ## Related
 

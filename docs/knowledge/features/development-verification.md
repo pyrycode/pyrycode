@@ -108,6 +108,11 @@ that stops running after its fixture exists can retain stale assertions indefini
 When changing the parser's result for its frames, inspect the disarmed probe and compile
 the tagged suite even if no new live capture is needed.
 
+Do not equate a non-zero parser event count with reaching an unrecognized lane. That
+shortcut becomes false when a previously silent matched frame gains a legitimate event.
+State the expected event cardinality for each captured marker or subtype, and keep the
+unrecognized census tied to the discriminator that actually selects that lane.
+
 Record enough redacted context to diagnose an empty capture. Count other line types,
 subtypes, tool outcomes and timing without retaining secret-bearing inputs. A witness
 controlled by the test rig is stronger than a model being asked to wait. Ensure its

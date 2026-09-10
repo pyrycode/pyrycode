@@ -191,37 +191,68 @@ func TestParser_ToolProgressMarkerDiscriminatorIsPerVariety(t *testing.T) {
 	}
 }
 
-// TestParser_ToolProgressCapturedFramesAreSilent is AC2's and AC3's proof, and
-// the reason it is driven from committed capture bytes rather than a hand-written
+// TestParser_ToolProgressCapturedFramesEmitHeartbeatEvents is AC1's capture proof,
+// and the reason it is driven from committed capture bytes rather than a hand-written
 // line: a production decoder keyed on a spelling claude does not use is dead code,
 // and no fixture written by the same hand that wrote the decoder can catch it.
 // That is the tool_use_result / toolUseResult failure userToolResultLine records.
 //
 // Two assertions, and the second is what makes the first non-vacuous:
 //
-//   - every captured frame emits zero events, so no tool_progress line claude
-//     actually sent on this surface reaches the unrecognized lane;
+//   - every captured heartbeat emits one ToolProgress carrying the real parent
+//     call id and its elapsed reading, never the synthetic heartbeat id;
 //   - at least one captured frame carries `heartbeat` equal to JSON true, decoded
 //     HERE out of the raw bytes and never by the production matcher. Zero such
 //     frames means the marker set is keyed on a spelling claude does not send,
 //     and this fatals rather than passing green on a decoder that never fires.
-func TestParser_ToolProgressCapturedFramesAreSilent(t *testing.T) {
+func TestParser_ToolProgressCapturedFramesEmitHeartbeatEvents(t *testing.T) {
 	t.Parallel()
 	frames := capturedToolProgressLines(t)
+	const capturedToolCallID = "toolu_01V6TGAWoiykrgeJNzTqX1dG"
 
 	heartbeats := 0
 	for i, raw := range frames {
-		if got := collectEvents(string(raw)); len(got) != 0 {
-			t.Errorf("captured frame %d emitted %d event(s), want 0: %+v", i, len(got), got)
-		}
 		var probe struct {
-			Heartbeat json.RawMessage `json:"heartbeat"`
+			Heartbeat    json.RawMessage `json:"heartbeat"`
+			ToolUseID    string          `json:"tool_use_id"`
+			ParentToolID string          `json:"parent_tool_use_id"`
+			Elapsed      int             `json:"elapsed_time_seconds"`
 		}
 		if err := json.Unmarshal(raw, &probe); err != nil {
 			t.Fatalf("captured frame %d: independent decode: %v", i, err)
 		}
-		if string(probe.Heartbeat) == "true" {
-			heartbeats++
+		if string(probe.Heartbeat) != "true" {
+			continue
+		}
+		heartbeats++
+		got := collectEvents(string(raw))
+		if len(got) != 1 {
+			t.Fatalf("captured heartbeat %d emitted %d event(s), want 1: %+v", i, len(got), got)
+		}
+		progress, ok := got[0].(turnevent.ToolProgress)
+		if !ok {
+			t.Fatalf("captured heartbeat %d event type = %T, want turnevent.ToolProgress", i, got[0])
+		}
+		if progress.ToolCallID != probe.ParentToolID {
+			t.Errorf("captured heartbeat %d ToolCallID = %q, want parent_tool_use_id %q",
+				i, progress.ToolCallID, probe.ParentToolID)
+		}
+		if progress.ToolCallID != capturedToolCallID {
+			t.Errorf("captured heartbeat %d ToolCallID = %q, want captured Bash call id %q",
+				i, progress.ToolCallID, capturedToolCallID)
+		}
+		if progress.ToolCallID == probe.ToolUseID || strings.Contains(progress.ToolCallID, "-heartbeat-") {
+			t.Errorf("captured heartbeat %d ToolCallID = %q, want real parent id, not synthetic tool_use_id %q",
+				i, progress.ToolCallID, probe.ToolUseID)
+		}
+		if progress.ElapsedSeconds != probe.Elapsed {
+			t.Errorf("captured heartbeat %d ElapsedSeconds = %d, want %d",
+				i, progress.ElapsedSeconds, probe.Elapsed)
+		}
+		wantElapsed := heartbeats * 30
+		if progress.ElapsedSeconds != wantElapsed {
+			t.Errorf("captured heartbeat %d ElapsedSeconds = %d, want cadence value %d",
+				i, progress.ElapsedSeconds, wantElapsed)
 		}
 	}
 	if heartbeats == 0 {
@@ -232,4 +263,87 @@ func TestParser_ToolProgressCapturedFramesAreSilent(t *testing.T) {
 			toolProgressCapturePath, len(frames))
 	}
 	t.Logf("%d captured tool_progress frame(s), %d carrying heartbeat:true", len(frames), heartbeats)
+}
+
+// TestParser_ToolProgressHeartbeatRequiresJoinableParentID pins the only field
+// gate on heartbeat emission. Every row is still consumed: zero events means the
+// invalid heartbeat did not leak into the unrecognized lane.
+func TestParser_ToolProgressHeartbeatRequiresJoinableParentID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		parent string
+	}{
+		{name: "absent", parent: ""},
+		{name: "empty", parent: `"parent_tool_use_id":"",`},
+		{name: "non-string", parent: `"parent_tool_use_id":42,`},
+		{name: "over cap", parent: `"parent_tool_use_id":"` + strings.Repeat("x", maxTaskFieldID+1) + `",`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			line := toolProgressLine(`"heartbeat":true`)
+			line = strings.Replace(line, `"parent_tool_use_id":null,`, tc.parent, 1)
+			if got := collectEvents(line); len(got) != 0 {
+				t.Fatalf("emitted %d event(s), want consumed without event: %+v", len(got), got)
+			}
+		})
+	}
+}
+
+func TestParser_ToolProgressHeartbeatCarriesSignedElapsedReading(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		elapsed string
+		want    int
+	}{
+		{name: "positive", elapsed: `,"elapsed_time_seconds":30`, want: 30},
+		{name: "zero", elapsed: `,"elapsed_time_seconds":0`, want: 0},
+		{name: "negative", elapsed: `,"elapsed_time_seconds":-7`, want: -7},
+		{name: "absent", elapsed: "", want: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			line := toolProgressLine(`"heartbeat":true`)
+			line = strings.Replace(line, `"parent_tool_use_id":null`, `"parent_tool_use_id":"toolu-real"`, 1)
+			line = strings.Replace(line, `,"elapsed_time_seconds":30`, tc.elapsed, 1)
+			got := collectEvents(line)
+			if len(got) != 1 {
+				t.Fatalf("emitted %d event(s), want 1: %+v", len(got), got)
+			}
+			progress, ok := got[0].(turnevent.ToolProgress)
+			if !ok {
+				t.Fatalf("event type = %T, want turnevent.ToolProgress", got[0])
+			}
+			if progress.ToolCallID != "toolu-real" || progress.ElapsedSeconds != tc.want {
+				t.Errorf("progress = %+v, want ToolCallID toolu-real and ElapsedSeconds %d", progress, tc.want)
+			}
+		})
+	}
+}
+
+func TestParser_ToolProgressHeartbeatAcceptsParentIDAtCap(t *testing.T) {
+	t.Parallel()
+	id := strings.Repeat("x", maxTaskFieldID)
+	line := toolProgressLine(`"heartbeat":true`)
+	line = strings.Replace(line, `"parent_tool_use_id":null`, `"parent_tool_use_id":"`+id+`"`, 1)
+	got := collectEvents(line)
+	if len(got) != 1 {
+		t.Fatalf("emitted %d event(s), want 1: %+v", len(got), got)
+	}
+	if progress, ok := got[0].(turnevent.ToolProgress); !ok || progress.ToolCallID != id {
+		t.Fatalf("event = %#v, want ToolProgress with exact-cap id", got[0])
+	}
+}
+
+func TestParser_ToolProgressHeartbeatMalformedElapsedStaysConsumed(t *testing.T) {
+	t.Parallel()
+	line := toolProgressLine(`"heartbeat":true`)
+	line = strings.Replace(line, `"parent_tool_use_id":null`, `"parent_tool_use_id":"toolu-real"`, 1)
+	line = strings.Replace(line, `"elapsed_time_seconds":30`, `"elapsed_time_seconds":"thirty"`, 1)
+	if got := collectEvents(line); len(got) != 0 {
+		t.Fatalf("emitted %d event(s), want consumed without event: %+v", len(got), got)
+	}
 }

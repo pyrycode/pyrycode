@@ -21,7 +21,7 @@ package turnevent
 import "encoding/json"
 
 // Event is the sealed sum type of outbound turn events: TextChunk,
-// ThoughtChunk, ToolStart, ToolUpdate, TurnEnd, BackgroundTaskStarted,
+// ThoughtChunk, ToolStart, ToolUpdate, ToolProgress, TurnEnd, BackgroundTaskStarted,
 // BackgroundTaskUpdated, BackgroundTaskRoster, BackgroundTaskProgress,
 // ThinkingProgress, the
 // internal-only status peers Stall, ApiRetry, and Compacting, the compaction
@@ -105,6 +105,32 @@ type ToolUpdate struct {
 	Status           ToolStatus
 	Content          ToolContent
 	ResultDetail     string
+}
+
+// ToolProgress reports the elapsed time of a tool call that ToolStart already
+// announced. It maps claude's top-level tool_progress heartbeat and is distinct
+// from ToolUpdate: a ToolUpdate from streamsup is terminal, while this event is a
+// non-terminal reading that may repeat until the tool_result closes the row.
+//
+// ToolCallID is read from the heartbeat's parent_tool_use_id, not tool_use_id.
+// Claude gives each heartbeat a synthetic tool_use_id ending in `-heartbeat-N`;
+// parent_tool_use_id is the byte-identical handle published by ToolStart. The
+// producer requires a non-empty JSON string no longer than
+// streamsup.maxTaskFieldID and drops the whole event otherwise. It never cuts the
+// id, because a cut join key matches no row while still looking usable.
+//
+// ElapsedSeconds is claude's signed integer reading carried verbatim. Zero means
+// claude omitted the key or explicitly reported zero; a negative value stays
+// observable rather than wrapping or being normalized. The daemon does not infer
+// cadence, accumulate readings, or keep per-call state.
+//
+// The captured session_id, uuid, and tool_name are deliberately absent. The first
+// two do not identify the daemon conversation or tool row, and ToolStart already
+// published the tool name. Like every event here, this carries no daemon
+// conversation identity; adapters inject it.
+type ToolProgress struct {
+	ToolCallID     string
+	ElapsedSeconds int
 }
 
 // TurnEnd marks the end of a claude turn, carrying the reason, — since #2101 —
@@ -2645,6 +2671,7 @@ func (TextChunk) isTurnEvent()              {}
 func (ThoughtChunk) isTurnEvent()           {}
 func (ToolStart) isTurnEvent()              {}
 func (ToolUpdate) isTurnEvent()             {}
+func (ToolProgress) isTurnEvent()           {}
 func (TurnEnd) isTurnEvent()                {}
 func (BackgroundTaskStarted) isTurnEvent()  {}
 func (BackgroundTaskUpdated) isTurnEvent()  {}
@@ -2671,6 +2698,7 @@ var (
 	_ Event = ThoughtChunk{}
 	_ Event = ToolStart{}
 	_ Event = ToolUpdate{}
+	_ Event = ToolProgress{}
 	_ Event = TurnEnd{}
 	_ Event = BackgroundTaskStarted{}
 	_ Event = BackgroundTaskUpdated{}

@@ -876,6 +876,12 @@ func eventKind(ev turnevent.Event) string {
 		return "tool_start"
 	case turnevent.ToolUpdate:
 		return "tool_update"
+	case turnevent.ToolProgress:
+		// The variant name only. ToolCallID is a claude-authored join key and must
+		// not enter a log; ElapsedSeconds is omitted with it so every eventKind arm
+		// remains content-free. This event intentionally has no Handle mapping until
+		// #2324 adds its wire contract, so the unknown-event drop is a live caller.
+		return "tool_progress"
 	case turnevent.TurnEnd:
 		return "turn_end"
 	case turnevent.Stall:
