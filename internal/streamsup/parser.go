@@ -2165,6 +2165,22 @@ const harnessNoOutputNudge = "[Your previous response had no visible output. Ple
 // FRAME IS the state change, carrying claude's own benign reading. There is nothing
 // to publish separately because nothing happens separately.
 //
+// AMENDED 2026-09-10 (#2263): there are SEVEN pieces of cross-line state.
+// apiRetryOpen records that at least one system/api_retry line has published an
+// active update. It resembles compacting because a client mirrors the boolean and
+// therefore needs an observable clear, but its boundary is wider: the next
+// successfully decoded assistant, user, OR result line closes it before that line's
+// events. Claude emits no explicit retry-end line, and the committed capture reaches
+// assistant before result, so waiting for the one result reset would leave the retry
+// state lit while assistant output had already resumed.
+//
+// Repeated active lines are never suppressed. Each carries a later attempt counter,
+// so the latch guards only the falling edge. A child that dies while it is set leaves
+// both parser and client in the same active state; the next assistant/user/result
+// after respawn publishes the clear before its own event. That residual is bounded by
+// the next content line rather than by a child-lifecycle reset, preserving one
+// observable answer for the client without coupling parser state to process teardown.
+//
 // Single-writer invariant: os/exec drives a non-*os.File Config.Stdout through
 // exactly one internal goroutine (io.Copy of the child's stdout pipe into this
 // writer), so Write — hence buf and the sink calls — is only ever invoked
@@ -2369,8 +2385,20 @@ type Parser struct {
 	// first field that DEPENDS on surviving a child respawn rather than merely
 	// tolerating one, so the happens-before edge is load-bearing — cmd.Wait returns
 	// only after the previous forwarder goroutine has finished. A future concurrent
-	// reader guards all SIX fields, not five.
+	// reader guards it with every other parser field.
 	rateLimitNonBenign bool
+
+	// apiRetryOpen is true after any system/api_retry line and until the next
+	// assistant, user, or result line. Every retry line still emits an active update;
+	// this latch suppresses only duplicate inactive edges. clearAPIRetry owns the
+	// transition so all three closing arms publish the edge before their existing
+	// events.
+	//
+	// It holds no Claude-authored value. The subtype-specific counters are emitted
+	// directly and never retained, so no input can grow this state and nothing stale
+	// can be republished after a child respawn. Parser's single-writer invariant covers
+	// the field without a mutex.
+	apiRetryOpen bool
 
 	// postureGate is the ack signal this parser releases for the runner it is
 	// installed on (#2064). Minted in NewParser, read by the runner through
@@ -2534,6 +2562,15 @@ type streamLine struct {
 	Type    string         `json:"type"`
 	Subtype string         `json:"subtype"`
 	Message *streamMessage `json:"message"`
+}
+
+// systemAPIRetryLine is the complete published subset of a system/api_retry
+// line. The separate target keeps attempt counters out of streamLine's
+// segmentation contract. If either field has a non-integer shape, decoding the
+// pair fails and emitAPIRetry publishes the event contract's zero values.
+type systemAPIRetryLine struct {
+	Attempt    int `json:"attempt"`
+	MaxRetries int `json:"max_retries"`
 }
 
 // systemTaskStartedLine is the decoded payload of one system/task_started line.
@@ -4239,6 +4276,7 @@ func (p *Parser) consumeLine(line []byte) {
 	}
 	switch sl.Type {
 	case "assistant":
+		p.clearAPIRetry()
 		// The wrapper-level API error category (#2224), read here rather than inside
 		// emitAssistant for two reasons that both bite. It is a sibling of `message`
 		// on the LINE, so emitAssistant — which takes only the decoded message —
@@ -4260,11 +4298,13 @@ func (p *Parser) consumeLine(line []byte) {
 		// bug.
 		p.emitAssistant(sl.Message, line)
 	case "user":
+		p.clearAPIRetry()
 		// The line bytes ride along so emitUser can decode the tool_use_result
 		// sidecar, a sibling of `message` rather than a field inside it (#2024) —
 		// and, since #2191, the spawning Agent call, a third field of that shape.
 		p.emitUser(sl.Message, line)
 	case "result":
+		p.clearAPIRetry()
 		// The turn boundary. The subtype selects the reason: an interrupted turn
 		// (subtype error_during_execution, spike T1 #1075) → cancelled; a clean
 		// turn and every other subtype → end_turn. Richer max_tokens/refusal
@@ -4687,9 +4727,40 @@ func (p *Parser) emitSystemSubtype(subtype string, line []byte) bool {
 		return p.emitModelRefusalFallback(line)
 	case "informational":
 		return p.emitInformationalBanner(line)
+	case "api_retry":
+		return p.emitAPIRetry(line)
 	default:
 		return false
 	}
+}
+
+// emitAPIRetry maps every system/api_retry line to an active update. Unlike
+// compacting, a repeated active line is not redundant: each observed line
+// advances the attempt counter. A malformed counter pair is consumed and
+// published as zeroes, which is ApiRetry's existing unparsed-counter contract.
+func (p *Parser) emitAPIRetry(line []byte) bool {
+	var retry systemAPIRetryLine
+	if err := json.Unmarshal(line, &retry); err != nil {
+		retry = systemAPIRetryLine{}
+	}
+	p.apiRetryOpen = true
+	p.emit(turnevent.ApiRetry{
+		Active:  true,
+		Current: retry.Attempt,
+		Total:   retry.MaxRetries,
+	})
+	return true
+}
+
+// clearAPIRetry publishes the one falling edge owed after retry state opens.
+// Callers invoke it before mapping assistant, user, or result content so a
+// client clears its retry display before rendering the line that ended it.
+func (p *Parser) clearAPIRetry() {
+	if !p.apiRetryOpen {
+		return
+	}
+	p.apiRetryOpen = false
+	p.emit(turnevent.ApiRetry{Active: false})
 }
 
 // emitInformationalBanner maps one system/informational line onto at most one
