@@ -165,7 +165,7 @@ Pending for the documentation stage:
   behavioral files remain as designed. Neither comment-only edit is a standalone
   deliverable or independently verifiable, so the one-consumer floor keeps both
   with the mechanism despite the production-file ceiling. Final written work is
-  597 added lines including this plan, below the 800-line
+  669 added lines including this plan, below the 800-line
   boundary. No interface, data flow, or behavior changed from the committed plan.
 - 2026-09-11: The committed #2279 success capture omits an inner response payload;
   the exact response is `response{subtype:"success", request_id}` rather than the
