@@ -34,9 +34,12 @@ import "encoding/json"
 type Event interface{ isTurnEvent() }
 
 // TextChunk is incremental assistant text, grouped by message.
+// ParentToolCallID names the Agent/Task call that spawned the subagent producing
+// the text, or is empty on the main conversation.
 type TextChunk struct {
-	MessageID string
-	Text      string
+	MessageID        string
+	ParentToolCallID string
+	Text             string
 }
 
 // ThoughtChunk is streaming reasoning ("thinking") text, grouped by message.

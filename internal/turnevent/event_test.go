@@ -11,7 +11,7 @@ import (
 func TestEvents_FieldRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	if got := (TextChunk{MessageID: "m1", Text: "hi"}); got.MessageID != "m1" || got.Text != "hi" {
+	if got := (TextChunk{MessageID: "m1", ParentToolCallID: "tc-parent", Text: "hi"}); got.MessageID != "m1" || got.ParentToolCallID != "tc-parent" || got.Text != "hi" {
 		t.Errorf("TextChunk: got %+v", got)
 	}
 	if got := (ThoughtChunk{MessageID: "m1", Text: "thinking"}); got.MessageID != "m1" || got.Text != "thinking" {

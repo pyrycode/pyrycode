@@ -8078,7 +8078,11 @@ func (p *Parser) emitAssistant(msg *streamMessage, line []byte) {
 		}
 		switch block.Type {
 		case "text":
-			p.emit(turnevent.TextChunk{MessageID: msg.ID, Text: block.Text})
+			p.emit(turnevent.TextChunk{
+				MessageID:        msg.ID,
+				ParentToolCallID: parent,
+				Text:             block.Text,
+			})
 		case "thinking":
 			p.emit(turnevent.ThoughtChunk{MessageID: msg.ID, Text: block.Thinking})
 		case "tool_use":

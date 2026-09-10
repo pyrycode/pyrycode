@@ -94,9 +94,10 @@ parser-state question rather than a decode-isolation one and belongs there
 instead.
 
 **#2191 adds two more targets and, for the first time in the family, bounds
-one of them by `maxTaskFieldID` instead of `maxTurnEndStopField`.** The key
-is `parent_tool_use_id`, read off `assistant` and `user` lines to publish
-`turnevent.ToolStart`/`ToolUpdate`'s `ParentToolCallID`. `maxTurnEndStopField`
+one of them by `maxTaskFieldID` instead of `maxTurnEndStopField`; #2328 reuses
+the assistant-side result for text.** The key is `parent_tool_use_id`, read
+off `assistant` and `user` lines to publish `turnevent.TextChunk`/`ToolStart`/
+`ToolUpdate`'s `ParentToolCallID`. `maxTurnEndStopField`
 covers "short open-set tokens matched against a known list" — this value is
 the opposite shape, a machine-minted identifier a client *joins* on, which is
 `maxTaskFieldID`'s class (the constant #2233 already applies to a
@@ -134,6 +135,15 @@ property while still landing one converted value. The general form: adding a
 field to a struct whose existing fields were typed to make the decode
 infallible has to preserve that property with the same care a first design
 would, not just match the JSON shape.
+
+**Assistant parent attribution remains line-local.** `emitAssistant` decodes
+the parent once and copies it into every `TextChunk` and `ToolStart` from that
+line; it does not latch the id in `Parser`. That distinction prevents a later
+main-thread or nested assistant line from inheriting an earlier Agent call.
+Absent, null, non-string, and over-cap values all become empty through the same
+converter, while a valid id is preserved byte-for-byte. `ThoughtChunk` remains
+unattributed, and the field stays dormant at the current single-lane delivery
+boundary because subagent-text forwarding is still disabled.
 
 **#2260 adds a fourth target, `resultTurnTotalsLine`, for four numbers claude
 had always sent on this line and the daemon had never decoded** —

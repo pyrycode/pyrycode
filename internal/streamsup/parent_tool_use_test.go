@@ -35,6 +35,8 @@ func parentUserLineWith(fragments ...string) string {
 const (
 	parentToolUseBlock = `"message":{"id":"m1","role":"assistant","content":` +
 		`[{"type":"tool_use","id":"toolu_child","name":"Read","input":{"file_path":"/tmp/x"}}]}`
+	parentTextBlock = `"message":{"id":"m-text","role":"assistant","content":` +
+		`[{"type":"text","text":"hello"}]}`
 	parentToolResultBlock = `"message":{"role":"user","content":` +
 		`[{"tool_use_id":"toolu_child","type":"tool_result","content":"ok"}]}`
 	// The id an Agent call would carry, in claude's own shape.
@@ -71,6 +73,67 @@ func toolUpdateFrom(t *testing.T, events []turnevent.Event) turnevent.ToolUpdate
 		t.Fatalf("got %d ToolUpdate events, want exactly 1 (all events: %#v)", len(found), events)
 	}
 	return found[0]
+}
+
+func textChunkFrom(t *testing.T, events []turnevent.Event) turnevent.TextChunk {
+	t.Helper()
+	var found []turnevent.TextChunk
+	for _, ev := range events {
+		if text, ok := ev.(turnevent.TextChunk); ok {
+			found = append(found, text)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("got %d TextChunk events, want exactly 1 (all events: %#v)", len(found), events)
+	}
+	return found[0]
+}
+
+func TestParser_ParentToolUseID_ReachesTextEvents(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		parent string
+		wantID string
+	}{
+		{name: "valid", parent: `"parent_tool_use_id":"toolu_01Case-Sensitive_ID"`, wantID: "toolu_01Case-Sensitive_ID"},
+		{name: "absent"},
+		{name: "null", parent: `"parent_tool_use_id":null`},
+		{name: "non-string", parent: `"parent_tool_use_id":{"id":"toolu_wrong"}`},
+		{name: "over cap", parent: `"parent_tool_use_id":"` + strings.Repeat("x", maxTaskFieldID+1) + `"`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fragments := []string{parentTextBlock}
+			if tc.parent != "" {
+				fragments = append(fragments, tc.parent)
+			}
+			got := textChunkFrom(t, parseOneLine(t, assistantLineWith(fragments...)))
+			if got.MessageID != "m-text" || got.Text != "hello" || got.ParentToolCallID != tc.wantID {
+				t.Errorf("TextChunk = %+v, want MessageID %q, Text %q, ParentToolCallID %q",
+					got, "m-text", "hello", tc.wantID)
+			}
+		})
+	}
+}
+
+func TestParser_ParentToolUseID_TextReadsInnerDepthVerbatim(t *testing.T) {
+	t.Parallel()
+	const outer, inner = "toolu_01OuterAgent", "toolu_01InnerAgent"
+	events := parseLines(t,
+		assistantLineWith(parentTextBlock, `"parent_tool_use_id":"`+outer+`"`),
+		assistantLineWith(parentTextBlock, `"parent_tool_use_id":"`+inner+`"`),
+	)
+	var got []string
+	for _, ev := range events {
+		if text, ok := ev.(turnevent.TextChunk); ok {
+			got = append(got, text.ParentToolCallID)
+		}
+	}
+	if len(got) != 2 || got[0] != outer || got[1] != inner {
+		t.Fatalf("TextChunk parent ids = %q, want [%q %q]", got, outer, inner)
+	}
 }
 
 // TestParser_ParentToolUseID_ReachesBothToolEvents is AC 2's hermetic half: the
