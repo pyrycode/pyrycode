@@ -496,6 +496,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`api_retry`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's live API-error retry state (#1074). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`compacting`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's auto-compaction banner (#1074). Since #2236 the falling edge also names the **outcome** — `compact_result` and `compact_error` — so a failed compaction is distinguishable from an ordinary one. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`compaction_boundary`** | binary → phone | no | **New in v2** (interactive, capability-gated). A compaction finished: what triggered it and how far the context shrank (#2237). A **separate frame** from `compacting`, not a wider one — `claude` states these values on a line that arrives *after* that frame's falling edge has shipped. See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`banner`** | binary → phone | no | **New in v2** (interactive, capability-gated). Operator-facing text `claude` printed **about** the session rather than as part of an answer — a hook's block reason, a local command's output, a loop notification (#2256). The one typed place such text arrives; before it, the daemon dropped it. Conversation-scoped, so there is no `turn_id`. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`unrecognized_message`** | binary → phone | no | **New in v2** (interactive, capability-gated). The stream parser met claude output it has no mapping for — a gap in our mapping, not a claude sub-state. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`background_task_started`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude started work that outlives the turn that spawned it (#1394). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`background_task_updated`** | binary → phone | no | **New in v2** (interactive, capability-gated). A background task claude already started changed (#1394), or **ended** (#2245). See [Interactive events](#interactive-events-v2-capability-gated). |
@@ -1093,6 +1094,84 @@ structural rather than a scrub: the daemon's decode target declares these three 
 so every other key is discarded — including ones `claude` has not shipped yet. That
 line also carries three UUIDs naming entries in the **operator's own transcript**, and
 those are the reason the allowlist is stated here rather than left implicit.
+
+#### `banner`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation whose stream carried the text. |
+| `level` | string | **Open set.** `claude`'s own word for how the text should read — `warning` observed; `info`, `notice` and `suggestion` are its other documented values. Empty means `claude` named none this client can be offered. Bounded by the daemon and **dropped, not cut**. **`claude`-authored, not daemon-asserted** — see below. |
+| `text` | string | The text `claude` printed, verbatim. Bounded by the daemon at **4 KiB** and **cut, not dropped**. **`claude`-authored, not sanitized** — see below. |
+| `truncated` | bool | Whether the daemon cut `text` to fit that bound. |
+| `stops_turn` | bool | Whether `claude` said it will not continue past this banner. **A report, never an instruction** — see below. |
+
+`banner` (#2256) exists because nothing else on the wire could carry this text, and the
+gap was total rather than awkward. [`unrecognized_message`](#unrecognized_message) is a
+parser-gap diagnostic, [`compacting`](#compacting) and [`rate_limited`](#rate_limited)
+each report one specific machine state, and the assistant stream carries only what the
+model *said*. Text `claude` prints *about* the session had nowhere to go and was
+dropped.
+
+**It is conversation-scoped and carries no `turn_id`, and the producer set is what
+forces that** rather than symmetry with its neighbours. A prompt a hook refuses is never
+answered, so no turn exists to attribute the refusal to; a notification belongs to
+`claude`'s own queue and rides no turn at all. There is no turn the daemon could
+honestly name, and the frame may arrive with no turn in progress whatever.
+
+**`level` and `text` take opposite bound rules, and this is the trap worth reading
+twice.** `level` is a **token a client matches**, so an over-long one is **dropped** — a
+cut token would match no known value while still looking like one, and an emptied
+`level` is directly observable. `text` is **prose**, so an over-long one is **cut** — a
+cut sentence still reads as what it is — and `truncated` reports that. This is the same
+split [`compaction_boundary`](#compaction_boundary)'s `trigger` and
+[`compacting`](#compacting)'s `compact_error` carry across two frames, landing here on
+one. Treat an unrecognised `level` as *unknown*, [`turn_end`](#turn_end)'s `outcome`
+rule; it is not an error.
+
+**Both bounds belong to the producer.** The daemon caps `text` where it crosses the
+subprocess boundary and nowhere else, so neither the wire shape nor the bridge
+re-decides a maximum — a second cap site is a second place the limit is decided, and the
+two could disagree silently. `truncated` is therefore the daemon's own answer about
+whether it cut, never something a client should re-derive by measuring the string.
+
+**Every field is `claude`'s, and so is the fact of the banner.** This goes a step beyond
+[`compaction_boundary`](#compaction_boundary)'s class change: that frame at least
+reports a compaction the daemon can corroborate from its own parser state, whereas this
+one reports that `claude` had something to say, and nothing else on the wire confirms or
+contradicts it.
+
+**It is the first frame here whose whole purpose is arbitrary `claude`-authored prose
+with no machine state anchoring it**, and that changes what a client owes it.
+[`compacting`](#compacting)'s `compact_error` is prose attached to a compaction the
+daemon observed; [`unrecognized_message`](#unrecognized_message)'s `raw` is prose
+explicitly labelled a parser gap. A client renders **this** one as a first-class notice,
+so **text impersonating daemon chrome at `level: "warning"` is the realistic abuse**, not
+a hypothetical one. [§ Security model](#security-model)'s threat 1 lands in the outward
+direction: the daemon **bounds** `text` and **does not sanitize** it, and the render
+boundary owing control-character and terminal-escape stripping is the **client's**.
+Newlines, terminal escapes, markup, a URL and text impersonating daemon chrome all fit
+inside 4 KiB, and the observed line contains a host filesystem path and echoes the
+operator's own prompt back. Render it as **inert text** — never an HTML sink, an
+attribute or a URL — and as **`claude`'s assertion, attributed to `claude`**, never as
+the daemon's own finding.
+
+**`stops_turn` is a report, and a client owes it the same restraint the daemon does.**
+Nothing in the daemon acts on it or on any other field here — no retry, no backoff, no
+teardown, no routing — which is what keeps a fabricated banner a misleading label rather
+than an actuator. The field name reads like a lever, and that is exactly why: anything
+that let it cancel work the operator did not cancel would hand `claude` a self-service
+turn abort.
+
+**It carries no data class an interactive grant does not already receive**, which is why
+there is no narrower gate. The observed text embeds a host path and echoes the
+operator's prompt, and [`tool_use`](#tool_use)'s verbatim input fields already carry both
+to the same grant.
+
+**The frame ships ahead of its producers, deliberately.** #2257 maps `claude`'s
+`informational` lines onto it and #2258 its `notification` lines, each proven against a
+committed capture; until those land, nothing emits a `banner` and a client will see none.
+Declaring a contract ahead of its producers is this spec's established sequencing, and it
+is what lets client work start against a published shape.
 
 #### `unrecognized_message`
 
@@ -3853,6 +3932,8 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 **Date:** 2026-05-16
 
 ## Changelog
+
+- `2026-09-10`: **`claude`'s operator-facing text now has somewhere to arrive** (#2256) — a new frame, [`banner`](#banner), carrying `level`, `text`, `truncated` and `stops_turn`, so a hook's block reason, a local command's output or a loop notification reaches a client instead of being dropped. **The gap was total, not awkward**: [`unrecognized_message`](#unrecognized_message) is a parser-gap diagnostic, [`compacting`](#compacting) and [`rate_limited`](#rate_limited) each report one machine state, and the assistant stream carries only what the model *said* — so text `claude` printed *about* the session had no typed place at all. **It carries no `turn_id`, and the producer set forces that** rather than taste: a prompt a hook refuses is never answered, and a notification belongs to `claude`'s own queue and rides no turn, so there is no turn the daemon could honestly name. **`level` and `text` take opposite bound rules and this is the reading most likely to be got wrong** — `level` is a token a client matches, so an over-long one is **dropped**; `text` is prose, so an over-long one is **cut** at 4 KiB with `truncated` saying so. That is the split [`compaction_boundary`](#compaction_boundary)'s `trigger` and `compact_error` carry across two frames, landing here on one. **Both bounds belong to the producer**, so nothing on the wire path re-decides a maximum and `truncated` is never re-derived by measuring the string. **`level` is `claude`'s own key, adopted verbatim**, where `text` renames its `content` and `stops_turn` its `prevent_continuation` — those two renames are the translation layer a vocabulary pin holds. **Every field is `claude`'s, and so is the fact of the banner**, a step beyond #2237's class change: that frame reports a compaction the daemon can corroborate, this one reports that `claude` had something to say. It is also **the first frame whose whole purpose is arbitrary `claude`-authored prose with no machine state anchoring it**, so a client renders it as a first-class notice and text impersonating daemon chrome at `level: "warning"` is the realistic abuse. Render it as inert text, attributed to `claude`; the observed line carries a host filesystem path and echoes the operator's own prompt back. **`stops_turn` is a report, never an instruction** — nothing in the daemon acts on it, and a client that lets it cancel work the operator did not cancel hands `claude` a self-service turn abort. **Nothing emits the frame yet**, deliberately: the `informational` mapping is #2257 and the `notification` mapping #2258, each proven against a committed capture.
 
 - `2026-09-10`: **Corrected § [`session_facts`](#session_facts)'s published claim that nothing emits the frame** (#2254) — #1860's correction for `model_list` and #2010's for `slash_command_list`, a third time, and for the reason those entries named when they left such statements standing: at the time each was written the frame genuinely had no producer, and that reason expires the moment one lands. **The frame is emitted**: #2252 added the emitting handler on `cmd/pyry`'s interactive turn lane and #2254 the mapping — `internal/turnbridge`'s `MapEvent` shapes `turnevent.SessionFacts` into this payload — so the application-message-types row and § `session_facts`'s own paragraph both take the *emitted since* form the [`rate_limited`](#rate_limited) and [`model_announced`](#model_announced) rows use. **The two halves landed in the opposite order from every prior split in this family**, and that is stated rather than smoothed over: `rate_limited`, `model_announced`, `model_list` and `slash_command_list` each got the mapping first, where the handler is what makes the frame appear; here the handler came first (#2252) and pushed nothing at all until the mapping arrived beneath it, which is why the entry above could be written truthfully while a `Handle` case for the variant already existed. A reader auditing the sequencing by looking for the handler would have found it and drawn the wrong conclusion. **Nothing about the shape changed** — no field was added, removed, renamed or re-typed, and no fixture moved. **`truncated_fields` keeps its `null` polarity through the mapping**, which is the one property most at risk in a change of this shape: the payload owns no `MarshalJSON`, so a mapper that helpfully allocated an empty slice would have put `[]` on the wire and told a client that `claude`'s cut text was complete. It carries the producer's nil through untouched, and both the struct-level and the byte-level assertion forbid `[]`. **Neither string is re-capped and neither is charset-checked**: both were bounded at construction by the producer, so a second bound in the mapping would be a second place the limit is decided, and an allow-list on `permission_mode` would drop the first report of a posture nobody has heard of — the case an operator most needs to see. **The security statements are unchanged and deliberately so**: `permission_mode` remains an open set and **a claim rather than a guarantee** a client must not read as an authorization decision, and both strings remain `claude`-authored text that crossed the subprocess trust boundary — bounded but **not sanitized**, so the render-as-inert-text rule still applies and still falls on the client. Making a frame reachable is exactly the moment those statements start mattering, so they were carried through the correction rather than trimmed with the stale sentence beside them. **No delivery window is published**, and that is a decision rather than an omission: unlike `model_list`, whose once-per-`initialize` cadence made its three loss points worth enumerating, this frame rides the per-turn `system/init` line on the same lane as `model_announced`, which publishes none either — a client that missed one gets the next turn's. **Left standing on purpose**: the sibling frames' own *nothing emits it yet* statements, [`attachment_stored`](#attachment_stored)'s among them, which belong to their own families and are true of them. The changelog entry below is historical and was **left untouched**, including its *nothing emits it yet* clause, which was accurate when written — #1860's entry records why rewriting one destroys the record it exists to keep. **No live count moved**: this frame added no `####` heading and is not a new `turnevent` variant, so the four sentences #2253 moved to **nineteen** are untouched, as is § [`unrecognized_message`](#unrecognized_message)'s **five**. No fixture and no wire byte changed.
 

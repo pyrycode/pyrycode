@@ -2402,6 +2402,110 @@ type ModelRefusalFallback struct {
 	DroppedFields []string
 }
 
+// Banner reports operator-facing text claude printed ABOUT the session rather
+// than as part of an answer — a hook's block reason, a local command's output, a
+// loop notification (#2256). It is the one typed place such text arrives; before
+// this variant there was none, and the daemon dropped it.
+//
+// IT SHIPS WITH NO PRODUCER, deliberately. The streamsup mappings are #2257
+// (claude's system/informational subtype) and #2258 (system/notification), and
+// each is proven against a committed capture. Declaring the contract ahead of its
+// producers is this package's established sequencing.
+//
+// IT CARRIES NO TURN IDENTITY, and the reason is the PRODUCER SET rather than
+// taste. A prompt a hook refuses is never answered, so no turn exists to attribute
+// the refusal to; a notification belongs to claude's own queue and rides no turn at
+// all. Stall and Unrecognized are the conversation-scoped precedents. Like every
+// variant here it carries no conversation identity of the DAEMON's either — the
+// bridge injects that.
+//
+// EVERY FIELD IS claude's, AND SO IS THE FACT OF THE BANNER — CompactionBoundary's
+// class change, reached by a shorter route and landing somewhere sharper. That
+// variant at least reports a compaction the daemon can corroborate from its own
+// parser state; this one reports that claude had something to say, which nothing
+// else on the wire can confirm or contradict. It is also the first variant here
+// whose WHOLE PURPOSE is arbitrary claude-authored prose with no machine state
+// anchoring it: Compacting.ErrorText is prose attached to a compaction the daemon
+// observed, and Unrecognized.Raw is prose explicitly labelled a parser gap. A
+// consumer renders this one as a first-class notice, so text impersonating daemon
+// chrome at Level "warning" is the realistic abuse. Render it as claude's
+// ASSERTION, attributed to claude, never as the daemon's own finding.
+//
+// NOTHING IN THE DAEMON ACTS ON ANY FIELD HERE — no retry, no backoff, no
+// teardown, no routing — which is what keeps a fabricated banner a misleading
+// label rather than an actuator. StopsTurn is where that constraint is most
+// load-bearing and it is restated at the field, because the field NAME is what
+// invites the mistake.
+//
+// It opens and closes no turn, exactly as CompactionBoundary does not.
+type Banner struct {
+	// Level is claude's own `level` key, adopted VERBATIM — the one field on this
+	// variant that keeps claude's spelling, where Text and StopsTurn are renames.
+	//
+	// An OPEN SET, on TurnEnd.Outcome's rule: a consumer treats an unrecognised token
+	// as unknown rather than as an error. `warning` is the observed value (claude
+	// 2.1.259, the single informational line in
+	// internal/e2e/realclaude/testdata/operator_system_lines_v2.1.259.json); `info`,
+	// `notice` and `suggestion` are claude's other documented values for the key and
+	// have NOT been observed on this repo. That distinction is the point of naming
+	// them separately rather than presenting four as a set this repo has seen.
+	//
+	// BOUNDED BY THE PRODUCER AND DROPPED RATHER THAN CUT, the opposite answer Text
+	// beside it gets, and the pairing is the trap worth naming on this variant:
+	// CompactionBoundary.Trigger argues it in full. This is a token a consumer
+	// MATCHES, where a cut token would match no known value while still looking like
+	// one; Text is prose, where a cut sentence still reads as what it is. Carrying
+	// the empty value says "no level I can offer you", which a consumer must already
+	// handle because the set is open, and the drop needs no report: an emptied scalar
+	// is directly observable.
+	Level string
+	// Text is claude's `content`, renamed. It is the field this variant exists to
+	// carry, and the rename is half of the translation layer the vocabulary pin in
+	// internal/protocol holds — `content` beside `level` would read as the frame's
+	// own body rather than as what claude printed.
+	//
+	// BOUNDED AT 4 KiB BY THE PRODUCER (#2257, whose constant lands beside
+	// streamsup's maxCompactTrigger and maxDenialProse) and CUT rather than dropped,
+	// per Level above. The bound is stated here as the CONTRACT THAT TICKET OWES
+	// rather than as a fact this file enforces: nothing on this path caps anything,
+	// on Compacting.ErrorText's one-cap-site rule, and this variant re-decides no
+	// maximum of its own. Whether a cut happened is Truncated's answer, not a length
+	// comparison a consumer should make.
+	//
+	// SECURITY: claude-authored, bounded by the daemon and NOT sanitized. The
+	// provenance reading is Compacting.ErrorText's, and unlike CompactionBoundary.Trigger
+	// the SHAPE reading carries across too — this is the riskier half of that pair,
+	// not the safer one. Newlines, terminal escapes, markup, a URL and text
+	// impersonating daemon chrome all fit inside 4 KiB, and the observed line
+	// contains a host filesystem path and echoes the operator's own prompt back.
+	// Treat it as inert text on UnrecognizedMessagePayload.Raw's rule — never an HTML
+	// sink, an attribute or a URL — and attribute it to claude.
+	Text string
+	// Truncated says whether the PRODUCER cut Text to fit the bound above. It is the
+	// producer's answer carried verbatim, never one a consumer recomputes from
+	// len(Text): a second authority on the same fact is a second place it can be
+	// decided differently.
+	//
+	// There is no companion DroppedFields slice, unlike ToolCallDenied's pair, and
+	// none is owed. Text is the only field the daemon cuts, so one bool names it
+	// unambiguously — ToolCallDenied needs a slice because it has six candidate
+	// fields — and an emptied Level is directly observable, exactly as
+	// CompactionBoundary.Trigger's unreported drop is.
+	Truncated bool
+	// StopsTurn is claude's `prevent_continuation`, renamed. It says claude will not
+	// continue past this banner — the observed value is true, on a hook that refused
+	// a prompt.
+	//
+	// A REPORT, NEVER AN ACTUATOR, and the constraint is restated here rather than
+	// left to the type's doc because THIS FIELD'S NAME IS WHAT INVITES THE MISTAKE.
+	// It reads like a lever, and a daemon that ever keyed a teardown, a retry
+	// suppression or a queue decision on it would hand claude a self-service turn
+	// abort — a fabricated line stopping work the operator asked for. Nothing acts
+	// on it today. Whoever first makes the daemon behave differently on it owes the
+	// review that turns a claude-authored bool into an actuator.
+	StopsTurn bool
+}
+
 // ConversationReset reports that claude reset the conversation and mounted a
 // fresh transcript under a new id. It maps claude's top-level
 // `conversation_reset` line (#2134) — the announcement claude writes on its own
@@ -2550,6 +2654,7 @@ func (Compacting) isTurnEvent()             {}
 func (CompactionBoundary) isTurnEvent()     {}
 func (ToolCallDenied) isTurnEvent()         {}
 func (ModelRefusalFallback) isTurnEvent()   {}
+func (Banner) isTurnEvent()                 {}
 func (ConversationReset) isTurnEvent()      {}
 func (Unrecognized) isTurnEvent()           {}
 

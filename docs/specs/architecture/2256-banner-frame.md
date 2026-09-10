@@ -338,3 +338,27 @@ The § A2 overlap sweep found `origin/feature/449` touching `internal/protocol/c
 Not a blocker and no `blockedBy` was set: issue #449 is CLOSED (2026-05-17), the branch
 has no PR, and it is not an ancestor of `main` — an abandoned branch that can never
 reach integration, not in-flight work.
+
+## Revisions
+
+**2026-09-10 — the measured size, correcting this plan's own estimate.** The sizing note
+above predicted roughly 600 lines of code, tests and docs; the implementation landed 821
+insertions across 13 files, so total written work with this plan is about 1160 rather
+than the ~830 stated. The overage against the 800-line ceiling is therefore ~45%, not
+~4%, and the note's number should be read as the correction rather than the prediction.
+
+The decision it justified is unchanged and the re-measurement strengthens it rather than
+weakening it: no seam here was cuttable without producing a child consumed by exactly one
+sibling, which the floor rule forbids more firmly the larger the ticket turns out to be.
+What the miss actually measures is this repo's comment density on a new wire type — five
+of the thirteen files are doc-comment blocks on types whose executable bodies are a
+struct literal and a switch arm. The five production files carry 335 insertions and
+fewer than 40 are statements.
+
+For a future ticket in this shape: size a new v2 frame from the analogue's TOTAL
+insertions for the same file set, not from a bottom-up guess at each file, and expect a
+vocabulary pin plus a mutation-killing bridge test to add roughly 250 rather than the 90
+the estimate line allowed.
+
+**No design change.** Every interface, field, bound rule and arm shipped as planned, and
+all three Open Questions resolved to the answers recorded there.

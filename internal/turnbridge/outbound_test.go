@@ -3355,3 +3355,126 @@ func TestMapEvent_ToolDeniedCarriesNothingElse(t *testing.T) {
 		}
 	}
 }
+
+// TestMapEvent_BannerCrossesVerbatim is #2256's AC 3, and it is the load-bearing test of
+// the arm rather than a shape check. The arm's whole contract is that it decides
+// NOTHING: the producer (#2257) owns the 4 KiB cap on the text and the drop rule on the
+// level, so a bound re-decided here would be a second place the limit lives, free to
+// disagree with the first.
+//
+// THE LONG-TEXT ROWS ARE THE DISCRIMINATING ONES. A bridge that recomputed Truncated
+// from len(Text) — the one mistake this arm could plausibly make — passes every short
+// row and dies only on the pair below: a long text the producer did NOT flag, and a
+// short text it DID. Those two rows are the mutation kill, and neither is redundant with
+// the other, since a length rule and an inverted length rule are different bugs.
+//
+// The unrecognised level row is the other half of the criterion. `catastrophe` is not
+// one of claude's four documented values, and the arm must carry it rather than
+// normalise, reject or empty it — TurnEndPayload.Outcome's open-set rule.
+func TestMapEvent_BannerCrossesVerbatim(t *testing.T) {
+	t.Parallel()
+
+	longText := strings.Repeat("p", (4<<10)+1)
+
+	tests := []struct {
+		name  string
+		event turnevent.Banner
+	}{
+		{"observed shape", turnevent.Banner{
+			Level: "warning", Text: "UserPromptSubmit operation blocked by hook", StopsTurn: true,
+		}},
+		{"unrecognised level crosses unchanged", turnevent.Banner{
+			Level: "catastrophe", Text: "something claude has not documented",
+		}},
+		{"empty level is carried, not defaulted", turnevent.Banner{
+			Level: "", Text: "the producer dropped an oversized level",
+		}},
+		// The two mutation kills. Truncated is the PRODUCER's answer in both directions:
+		// over the documented bound with no flag, and under it with one.
+		{"text past the documented bound is not cut and not flagged here", turnevent.Banner{
+			Level: "info", Text: longText, Truncated: false,
+		}},
+		{"a short text the producer flagged stays flagged", turnevent.Banner{
+			Level: "info", Text: "cut", Truncated: true,
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			typ, payload, ok := MapEvent(tc.event, TurnContext{ConversationID: "c1", TurnID: "t1", Seq: 7})
+			if !ok {
+				t.Fatal("MapEvent refused a Banner; the arm must map every one of them")
+			}
+			if typ != protocol.TypeBanner {
+				t.Errorf("type: got %q, want %q", typ, protocol.TypeBanner)
+			}
+			got, isBanner := payload.(protocol.BannerPayload)
+			if !isBanner {
+				t.Fatalf("payload type: got %T, want protocol.BannerPayload", payload)
+			}
+			if got.ConversationID != "c1" {
+				t.Errorf("ConversationID: got %q, want %q", got.ConversationID, "c1")
+			}
+			if got.Level != tc.event.Level {
+				t.Errorf("Level: got %q, want %q verbatim", got.Level, tc.event.Level)
+			}
+			if got.Text != tc.event.Text {
+				t.Errorf("Text: got %d bytes, want the event's %d verbatim", len(got.Text), len(tc.event.Text))
+			}
+			if got.Truncated != tc.event.Truncated {
+				t.Errorf("Truncated: got %v, want the producer's %v — the bridge must not "+
+					"recompute this from len(Text)", got.Truncated, tc.event.Truncated)
+			}
+			if got.StopsTurn != tc.event.StopsTurn {
+				t.Errorf("StopsTurn: got %v, want %v verbatim", got.StopsTurn, tc.event.StopsTurn)
+			}
+		})
+	}
+}
+
+// TestMapEvent_BannerCarriesNothingElse pins the frame's key set, and the turn_id half
+// is the one that matters: the payload has no field for a turn at all, so the non-empty
+// TurnID and non-zero Seq passed below cannot leak. A banner's producers ride no turn —
+// a notification belongs to claude's own queue, and a prompt a hook refuses is never
+// answered — so a turn_id here would attribute operator-facing text to work it did not
+// come from.
+func TestMapEvent_BannerCarriesNothingElse(t *testing.T) {
+	t.Parallel()
+
+	_, payload, ok := MapEvent(turnevent.Banner{
+		Level: "warning", Text: "blocked by hook", Truncated: true, StopsTurn: true,
+	}, TurnContext{ConversationID: "c1", TurnID: "t1", Seq: 7})
+	if !ok {
+		t.Fatal("MapEvent refused a Banner; the arm must map every one of them")
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshalling the payload: %v", err)
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		t.Fatalf("re-decoding the payload: %v", err)
+	}
+	want := map[string]bool{
+		"conversation_id": true, "level": true, "text": true, "truncated": true, "stops_turn": true,
+	}
+	for k := range keys {
+		if !want[k] {
+			t.Errorf("payload carries key %q, which is not on the allowlist", k)
+		}
+	}
+	for k := range want {
+		if _, present := keys[k]; !present {
+			t.Errorf("payload is missing key %q; every key is always present on this file's "+
+				"frames, which is what lets the testdata fixture pin the full shape", k)
+		}
+	}
+	for _, forbidden := range []string{"turn_id", "seq"} {
+		if _, present := keys[forbidden]; present {
+			t.Errorf("payload carries %q; a banner's producers ride no turn the daemon "+
+				"could honestly name", forbidden)
+		}
+	}
+}

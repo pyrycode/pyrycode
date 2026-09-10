@@ -434,6 +434,38 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			PreTokens:      e.PreTokens,
 			PostTokens:     e.PostTokens,
 		}, true
+	case turnevent.Banner:
+		// Conversation identity only, like the status peers above: tc.TurnID and tc.Seq
+		// are ignored and the payload has no field for either. The reason belongs to the
+		// PRODUCER SET rather than being borrowed from a neighbour. A prompt a hook
+		// refuses is never answered, so no turn exists to attribute the refusal to; a
+		// notification belongs to claude's own queue and rides no turn at all. There is
+		// no turn this adapter could honestly name.
+		//
+		// ALL FOUR claude-SIDE VALUES CROSS VERBATIM. Nothing here bounds, drops, cuts,
+		// defaults or recomputes: Text is bounded at CONSTRUCTION by the producer (#2257,
+		// at 4 KiB) and Level dropped there when over-long, so a second bound in this
+		// adapter would be a number to keep in step with one that already holds — the
+		// Compacting and CompactionBoundary arms' stated terms. An unrecognised Level is
+		// not an error and is not normalised: TurnEnd.Outcome's open-set rule.
+		//
+		// IN PARTICULAR Truncated IS NOT RECOMPUTED from len(Text), which is the one
+		// mistake this arm could plausibly make and the one the bridge test's long-text
+		// row exists to kill. The producer decided whether it cut; a length comparison
+		// here would be a SECOND authority on that fact, free to disagree with the first
+		// — and it would be wrong by construction the moment the producer's cap changes,
+		// since this package does not hold the constant.
+		//
+		// Every field is a value type, so unlike the CompactionBoundary arm's pointers
+		// and the ToolCallDenied arm's slices there is nothing to alias and no copy to
+		// justify.
+		return protocol.TypeBanner, protocol.BannerPayload{
+			ConversationID: tc.ConversationID,
+			Level:          e.Level,
+			Text:           e.Text,
+			Truncated:      e.Truncated,
+			StopsTurn:      e.StopsTurn,
+		}, true
 	case turnevent.Unrecognized:
 		// Conversation identity only, like Stall and Compacting above: tc.TurnID
 		// and tc.Seq are ignored. This one is not merely "not turn-scoped" — an

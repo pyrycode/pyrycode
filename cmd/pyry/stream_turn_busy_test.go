@@ -675,6 +675,15 @@ func TestTurnMarkFor_TotalOverEveryVariant(t *testing.T) {
 		// variant set beside the marker-derived one this test reads, which is the drift
 		// the guard exists to foreclose.
 		{turnevent.ToolCallDenied{ToolName: "Bash", ToolCallID: "toolu-1"}, turnMarkNone},
+		// #2256. Neither an opener nor a closer, and its argument is CompactionBoundary's
+		// rather than the row above's: both can reach the fan-in with NO TURN OPEN AT
+		// ALL, where a denial always rides a turn the preceding ToolStart opened. A
+		// notification belongs to claude's own queue and rides no turn, and a prompt a
+		// hook refuses is never answered — so opening a mark here would wedge the
+		// conversation permanently, the turn end that would clear it being one that never
+		// comes. The whitelist's default already answers it, so this row asserts an
+		// existing answer rather than a new arm; turnMarkFor is unchanged by that ticket.
+		{turnevent.Banner{Level: "warning", Text: "blocked by hook", StopsTurn: true}, turnMarkNone},
 		// #2267. Neither an opener nor a closer, and its argument is the ModelAnnounced
 		// row's rather than the ToolCallDenied row's above: an announcement about WHICH
 		// MODEL is running is not a boundary inside a turn. It also arrives strictly

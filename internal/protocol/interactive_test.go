@@ -3137,3 +3137,130 @@ func TestBackgroundTaskProgressPayload_DeclaresNoneOfClaudesOmittedKeys(t *testi
 		}
 	}
 }
+
+// TestBannerPayload_RoundTrip is #2256 at the wire: the frame carrying claude's
+// operator-facing text, its level, the truncation report and the stops-turn flag.
+//
+// The fixture's level and stops_turn are the OBSERVED capture's own values (claude
+// 2.1.259 — warning and true, on the single informational line
+// internal/e2e/realclaude/testdata/operator_system_lines_v2.1.259.json carries). Its
+// text is DELIBERATELY NOT the captured prose, which is the one place this fixture
+// departs from the capture and is a decision rather than convenience: that prose embeds
+// a host filesystem path and echoes the operator's own prompt back, and neither is
+// needed to pin a shape. A short synthetic string proves everything a long real one
+// would.
+//
+// truncated is false here because the fixture's text is short. The interesting half of
+// that field — a long text a bridge did NOT flag, and a short one it did — cannot live
+// on a fixture at all, since the bridge is what could get it wrong; it is
+// TestMapEvent_BannerCrossesVerbatim's row in internal/turnbridge.
+func TestBannerPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "banner.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeBanner {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeBanner)
+	}
+
+	var payload BannerPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "c1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "c1")
+	}
+	if payload.Level != "warning" {
+		t.Errorf("Level: got %q, want %q", payload.Level, "warning")
+	}
+	if want := "UserPromptSubmit operation blocked by hook"; payload.Text != want {
+		t.Errorf("Text: got %q, want %q", payload.Text, want)
+	}
+	if payload.Truncated {
+		t.Errorf("Truncated: got %v, want false", payload.Truncated)
+	}
+	if !payload.StopsTurn {
+		t.Errorf("StopsTurn: got %v, want true", payload.StopsTurn)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestBannerType_IsNotClaudesVocabulary pins the translation layer this frame exists to
+// preserve, as its rate_limited, model_announced, model_list, slash_command_list and
+// question_shown siblings do. The daemon is the ONE place a claude rename lands; naming
+// the wire type after claude's own vocabulary would undo that.
+//
+// claude has FIVE words on this path: the system subtypes informational (#2257) and
+// notification (#2258), and the payload keys content, level and prevent_continuation.
+// Four of them are checked below and the fifth may not be, which is the whole
+// difference between this pin and its siblings.
+//
+// level IS ADOPTED VERBATIM, SO IT MUST NOT BE A CHECK — in either half. In the name
+// half it would assert the frame is not derived from a word the frame DELIBERATELY
+// keeps, which is backwards even though it happens to be green against `banner` today.
+// In the payload half it would be RED against the correct struct, because level is this
+// payload's own wire key: exactly the trap
+// TestSlashCommandListType_IsNotClaudesVocabulary records for `commands` and
+// TestModelListType_IsNotClaudesVocabulary for `models`. Do not copy either sibling's
+// check list here.
+//
+// THE CONTAINMENT LATTICE IS FLAT, unlike every sibling's, and that is worth stating so
+// a future rename knows the siblings' subtlety does not apply. Those pins have to
+// reason about singular subject nouns that are substrings of the correct name — command
+// and slash for slash_command_list, question for question_shown, model for
+// model_announced. None of claude's five words here is a substring of `banner`, and
+// `banner` is a substring of none of them, so every check below is independently
+// discriminating and none is kept for redundancy. A rename that reintroduces a
+// containment relation must re-derive this paragraph rather than inherit it.
+//
+// The exact-equality pin is the half that fails a WRONG name rather than merely a
+// claude-derived one: the negative checks alone leave every other wrong name green.
+// Naming is half this ticket's deliverable and no producer supplies the string, so the
+// pin is load-bearing.
+func TestBannerType_IsNotClaudesVocabulary(t *testing.T) {
+	for _, word := range []string{"informational", "notification", "content", "prevent_continuation"} {
+		if TypeBanner == word {
+			t.Errorf("wire type is claude's own word %q; it must be the daemon's own name", TypeBanner)
+		}
+		if strings.Contains(TypeBanner, word) {
+			t.Errorf("wire type %q is derived from claude's vocabulary (contains %q)", TypeBanner, word)
+		}
+	}
+	// The exact pin, naming what the frame IS to a client rather than anything of
+	// claude's.
+	if TypeBanner != "banner" {
+		t.Errorf("wire type: got %q, want %q", TypeBanner, "banner")
+	}
+
+	// The payload's own bytes, not the envelope's — the envelope carries its own id/ts
+	// and would dilute the check.
+	//
+	// The list is exactly claude's two RENAMED keys, and both omissions from it are
+	// deliberate. level is omitted because the shape adopts it (above). informational
+	// and notification are omitted because they are LINE-level subtypes that were never
+	// payload keys, so checking them would be non-discriminating by construction — and
+	// worse than merely redundant here, because text carries claude's arbitrary prose
+	// and a banner legitimately saying the word "notification" would turn this pin red
+	// on correct data. That hazard is why this half checks keys claude used and this
+	// shape rejected, never words claude merely said.
+	//
+	// The row's values are chosen to carry neither spelling for the same reason.
+	body, err := json.Marshal(BannerPayload{
+		ConversationID: "c1",
+		Level:          "warning",
+		Text:           "UserPromptSubmit operation blocked by hook",
+		Truncated:      false,
+		StopsTurn:      true,
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	for _, key := range []string{"content", "prevent_continuation"} {
+		if bytes.Contains(body, []byte(key)) {
+			t.Errorf("payload carries claude's spelling %q: %s", key, body)
+		}
+	}
+}
