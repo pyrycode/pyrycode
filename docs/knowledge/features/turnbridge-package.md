@@ -90,6 +90,7 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
 | `SlashCommandList` (#2001) | `TypeSlashCommandList` | `SlashCommandListPayload{tc.ConversationID, commands, ev.DroppedCommands}` (`tc.TurnID`/`tc.Seq` ignored — the same `initialize`-exchange, not-even-per-turn addressing as `ModelList`; `turnMarkFor` answers `turnMarkNone`). `ev.Commands` looped into `[]protocol.SlashCommand`, nil left nil (`SlashCommandListPayload.MarshalJSON` owns nil→`[]`, the `ModelList`/`BackgroundTaskRoster` rule); each row's five fields cross verbatim, including `Aliases` (nil→`[]` via `SlashCommand.MarshalJSON`) and `TruncatedFields` (nil stays nil — deliberately exempt from normalisation, so an absence reaches the wire as `null`, the opposite polarity from `Aliases` one field over). `DroppedCommands` is the decode's count **plus** whatever the frame cut below drops, never recomputed from `len(commands)` alone and never a constant. No re-cap, re-order or charset check of any dimension the producer already bounds (`streamsup`'s `maxSlashCommandName`/`maxSlashCommandDescription`/`maxSlashCommandArgumentHint`/`maxSlashCommandAlias`/`maxSlashCommandAliasCount`/`maxSlashCommandListEntries`), and `Name` is not an identifier (`__remote-workflow` is in the committed capture) so no charset assumption belongs here either. No suppression branch — a zero-value `SlashCommandList` maps, `ModelList`'s posture unchanged. **Frame-size bound (#2002):** the producer's content caps alone allow a payload several times the 65519-byte v2 envelope, and no *count* cap can close that — the only entry count whose worst case fits (51) is the committed capture's own size, so it would fire on claude's ordinary output. The arm instead walks `e.Commands`, marshals each row as the wire `protocol.SlashCommand` (not the turnevent one — its `MarshalJSON` normalisations are part of what actually crosses), and takes the tail-cut prefix that fits under `maxSlashCommandListBytes` (64000 B), `break`ing rather than skipping on the first row that would not, so a client sees a shortened menu rather than one with holes | true |
 | `CompactionBoundary` (#2237) | `TypeCompactionBoundary` | `CompactionBoundaryPayload{tc.ConversationID, ev.Trigger, ev.PreTokens, ev.PostTokens}` (`tc.TurnID`/`tc.Seq` ignored — a compaction boundary is a fact about the conversation's context, not about the turn that happened to contain it). Nothing is re-capped here: the producer bounded `Trigger` at construction. The two count pointers cross **verbatim, not deep-copied** — the producer allocates a fresh `int` per line and retains neither, and nothing downstream mutates a payload, so the aliasing is observable to no one | true |
 | `ToolCallDenied` (#2233) | `TypeToolDenied` | `ToolDeniedPayload{tc.ConversationID, tc.TurnID, ToolUseID: ev.ToolCallID, ToolName: ev.ToolName, DecisionReasonType: ev.DecisionReasonType, DecisionReason: ev.DecisionReason, Message: ev.Message, TruncatedFields: deniedReportKeys(ev.TruncatedFields), DroppedFields: deniedReportKeys(ev.DroppedFields)}` — **turn-scoped**, taking `ToolStart`/`ToolUpdate`'s shape rather than the status peers' (`tc.Seq` still ignored): the denial names one call the client already has a `tool_use` for and must land in the same turn. Every string crosses verbatim and nothing is re-capped — the producer bounded all five at construction (`streamsup`'s `maxTaskFieldID`/`maxDenialProse`) | true |
+| `Banner` (#2256) | `TypeBanner` | `BannerPayload{tc.ConversationID, ev.Level, ev.Text, ev.Truncated, ev.StopsTurn}` (`tc.TurnID`/`tc.Seq` ignored — a banner rides no turn the daemon could honestly attribute it to). All four claude-side values cross verbatim; the arm bounds, drops, cuts, defaults or recomputes none of them — in particular it never recomputes `Truncated` from `len(ev.Text)`, on `ToolDeniedPayload`'s one-cap-site rule: the 4 KiB bound on `Text` belongs to the producer (#2257) alone | true |
 | `ThoughtChunk` | `""` | `nil` | **false** (drop) |
 | nil / unknown | `""` | `nil` | false (drop) |
 
@@ -272,6 +273,18 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
   for the payload-side shape, the three-valued reading the two slices make
   decidable, and a doc-comment ordering claim about these same slices that
   shipped false.
+- **A pure pass-through arm's own test needs a row that can fail in the
+  pass-through direction, not merely a row that exercises the field.**
+  `Banner`'s arm (#2256) copies `Truncated` verbatim rather than recomputing it
+  from `len(ev.Text)`, and every *short*-text row in
+  `TestMapEvent_BannerCrossesVerbatim` is equally green against either
+  implementation — a length-based mutant only dies on a `Text` past the
+  producer's 4 KiB bound carrying `Truncated: false` (the producer chose not to
+  flag it), paired with a short `Text` the producer did flag `true`. A single
+  row in either direction alone is satisfied by the inverted rule. The same
+  shape as the `ModelAnnounced` mixed-case-sentinel lesson above, generalized
+  from "does the value survive a transform" to "does the flag disagree with a
+  plausible recomputation the arm must NOT perform."
 
 ### `BuildTurnState` — the lifecycle payload builder
 
