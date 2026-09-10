@@ -126,13 +126,15 @@ type ToolDeniedPayload struct {
 // #2256 — the wire form of turnevent.Banner: operator-facing text claude prints
 // ABOUT the session (a hook's block reason, a loop notification) with nowhere
 // else on the wire to go. Conversation-scoped like CompactionBoundaryPayload —
-// no turn_id — because neither intended producer has one to attribute it to: a
+// no turn_id — because neither producer has one to attribute it to: a
 // hook-refused prompt is never answered, and a notification rides claude's own
-// queue. Declared with no producer; #2257/#2258 land after it.
+// queue. **CORRECTED 2026-09-10 (#2319): has a producer.** `system/informational`
+// maps onto it (a hook's block reason reaching the operator for the first time);
+// `system/notification` (#2258) is still outstanding.
 type BannerPayload struct {
     ConversationID string `json:"conversation_id"`
     Level          string `json:"level"`      // claude's own key, adopted verbatim; open-set, dropped not cut
-    Text           string `json:"text"`       // claude's content, renamed; prose, cut not dropped, 4 KiB bound owed by the producer (#2257)
+    Text           string `json:"text"`       // claude's content, renamed; prose, cut not dropped, 4 KiB bound owed by the producer (#2319's maxBannerText)
     Truncated      bool   `json:"truncated"`  // the PRODUCER's answer about Text; never recomputed downstream
     StopsTurn      bool   `json:"stops_turn"` // claude's prevent_continuation, renamed; a REPORT, never an actuator
 }
@@ -437,7 +439,7 @@ type BannerPayload struct {
   is). `Truncated` reports only the producer's answer about `Text` — no
   `DroppedFields` companion for an emptied `Level` exists because an empty scalar
   is already directly observable, `CompactionBoundaryPayload.Trigger`'s unreported
-  drop again. Both bounds are the producer's to enforce (#2257's `maxBannerText`);
+  drop again. Both bounds are the producer's to enforce (#2319's `maxBannerText`);
   neither this struct nor `turnbridge.MapEvent` re-decides a maximum —
   `ToolDeniedPayload`'s one-cap-site rule, and see
   [turnbridge-package.md](turnbridge-package.md) for the mutation-test shape that

@@ -704,6 +704,81 @@ const maxCompactTrigger = 256
 // fires at most once per refused turn. Both are turn-paced rather than model-paced.
 const maxDenialProse = 2 << 10
 
+// maxBannerText caps the ONE claude-authored prose field a system/informational line
+// publishes — content, which reaches the wire as turnevent.Banner.Text (#2319).
+// Applied at CONSTRUCTION, exactly as every cap above is, so an oversized value never
+// enters the event stream, the push queue, or any log.
+//
+// 4096 IS A PUBLISHED CONTRACT, not a number chosen here. turnevent.Banner.Text's doc
+// and docs/protocol-mobile.md § banner both state 4 KiB as the bound this arm owes,
+// and #2256 shipped the frame against that statement. It is the first cap in this file
+// whose value was decided by a doc a client reads rather than by a measurement, and
+// what backs it is #2256's own reasoning: the field carries arbitrary operator-facing
+// prose — a hook's block reason wrapping its own stderr and echoing the operator's
+// prompt back — so the observation this arm has (447 bytes of captured line, content
+// included) bounds nothing about the next one.
+//
+// maxDenialProse IS THE WRONG CONSTANT TO REUSE, and it is the cheap wrong move rather
+// than an unlikely one. It is 2 KiB, HALF the published contract, and since #2267 it
+// already caps a claude-authored prose field the daemon spells `banner` —
+// turnevent.ModelRefusalFallback.Banner. The field names match while the events do
+// not: that one is a swap notice reporting its cut through a TruncatedFields slice,
+// this one is a distinct variant reporting through a single bool. Reusing it would
+// silently halve a bound a client was told to expect, at the one site whose name makes
+// the mistake read as deliberate. The one-constant-over-several-fields form
+// (maxTaskFieldID's, maxDenialProse's own) does not reach across that.
+//
+// IT CUTS RATHER THAN DROPS, the opposite answer to maxBannerLevel below and
+// maxCompactField's reasoning: a cut sentence still reads as what it is, where a cut
+// token would match nothing while still looking like one. The cut IS reported
+// (turnevent.Banner.Truncated) because an emptied prose field cannot speak for itself
+// the way an emptied token does — and because the report is the whole reason that
+// field exists rather than a consumer measuring len(Text) against a bound it would
+// then own a second copy of.
+//
+// The envelope arithmetic: worst case one Banner carries 4096 + maxBannerLevel = 4352
+// bytes of claude-derived text, 6.6% of the 65519-byte v2 application-envelope cap
+// (docs/protocol-mobile.md § Application-envelope size cap), against ToolCallDenied's
+// 4864 and ModelRefusalFallback's 5120. NO FitV2EnvelopeCap MEASUREMENT IS TAKEN and
+// #2256 declined one on the same ground: every such test in this repo guards an
+// aggregate whose per-field caps compose badly, and one bounded string beside one
+// bounded token on a frame carrying otherwise a conversation id and a bool is not that
+// shape.
+//
+// No RATE bound, and none is owed. One application per informational line, an O(1)
+// length test against a line already bounded by defaultMaxParseBuf, and no parser state
+// is retained — which is why maxTurnDenials' second dimension has no analogue here.
+// A stream emitting the line in a loop produces frames cmd/pyry's turnMarkFor answers
+// turnMarkNone for (its opener set is a whitelist and this variant is not in it), so
+// every one is droppable at the fan-in, with retention bounded by
+// eventring.MaxEventsPerConversation. maxCompactTrigger's posture exactly.
+const maxBannerText = 4 << 10
+
+// maxBannerLevel caps the ONE claude-authored TOKEN a system/informational line
+// publishes — level, which reaches the wire as turnevent.Banner.Level (#2319). 256,
+// the family's value for a token.
+//
+// A SEPARATE CONSTANT FROM ITS NEIGHBOUR ABOVE, although both bound one field of one
+// line, and the reason is that the one-constant-over-several-fields form serves fields
+// of the same KIND taking the same answer — maxDenialProse's two prose fields,
+// maxTaskFieldID's three ids. These two take OPPOSITE answers for opposite reasons, so
+// a shared budget would be a number two unrelated decisions had to keep agreeing about.
+//
+// IT DROPS RATHER THAN CUTS, and the drop is UNREPORTED. maxCompactTrigger argues both
+// halves in full and turnevent.Banner.Level restates them at the field: a client
+// MATCHES this token against an open set, so a cut token is indistinguishable from one
+// the client has never heard of — a state it must already handle — while carrying the
+// empty value says exactly "no level I can offer you" and invents nothing. No report is
+// owed because an emptied scalar is directly observable, unlike an absence a consumer
+// would have to infer, and turnevent.Banner.Truncated is Text's answer alone.
+//
+// UNMEASURED AGAINST AN OVERFLOW, stated rather than left to be assumed from the
+// number. The captured line's level is `warning`, 7 bytes, and claude's other
+// documented values for the key are shorter still; 256 is the family's token value
+// applied to a field nothing has been observed to stretch. Its rate and envelope terms
+// are maxBannerText's, which counts this field in its worst case.
+const maxBannerLevel = 256
+
 // maxTurnDenials caps BOTH dimensions of one turn's denial bookkeeping (#2234): how
 // many tool_use_ids Parser.deniedThisTurn remembers, and how many permission_denials
 // entries emitRecoveredDenials reads off a `result` line. maxTaskRosterEntries'
@@ -4580,9 +4655,151 @@ func (p *Parser) emitSystemSubtype(subtype string, line []byte) bool {
 		return p.emitPermissionDenied(line)
 	case "model_refusal_fallback":
 		return p.emitModelRefusalFallback(line)
+	case "informational":
+		return p.emitInformationalBanner(line)
 	default:
 		return false
 	}
+}
+
+// emitInformationalBanner maps one system/informational line onto at most one
+// turnevent.Banner (#2319), always consuming the line. It is the FIRST producer of
+// that variant, which #2256 declared and shipped unwired; the field mapping and both
+// cap answers come from the committed capture
+// (internal/e2e/realclaude/testdata/operator_system_lines_v2.1.259.json, one line) and
+// from the contract that variant's doc publishes, never from a hand-built payload.
+//
+// NAMED FOR THE SUBTYPE RATHER THAN THE EVENT, unlike emitCompactionBoundary beside
+// it, and deliberately: #2258 maps system/notification onto this SAME variant, so an
+// emitBanner would be a name its sibling could not also take.
+//
+// system/informational is the line claude uses for non-error status text about the
+// session — hook feedback, a UserPromptSubmit hook's block reason, text a slash
+// command prints. Before this arm it fell to consumeLine's silent debug drop, so a
+// prompt a hook refused was never answered AND never explained: indistinguishable, from
+// the operator's side, from one that was accepted.
+//
+// NO DECODE-FAILURE GATE IS OWED, which is the one thing this arm's nearest precedent
+// might suggest it needs. consumePermissionDeniedLine exists because a real denial
+// spells `message` as a string where streamLine declares *streamMessage, failing the
+// whole-line decode before sl.Type is read. The captured informational line decodes
+// into streamLine CLEANLY with `message` absent — the record states both, as
+// decodes_into_stream_line and message_json_type — so this arm is reached by the
+// ordinary route and a second entry point would only widen a match whose safety is
+// entirely in how little it matches.
+//
+// The decode's input is `line` — the TOP-LEVEL bytes — never a nested field, and here
+// that is emitPermissionDenied's forgery argument held for a further arm. streamLine's
+// doc states the property: control shapes are read from the top level only and nested
+// content is never re-scanned, so a tool result whose text is literally an
+// informational line cannot mint a banner in the operator's notice lane.
+//
+// THREE CONSUMING PATHS, in the order they appear below:
+//
+//   - undecodable → Debug naming the subtype, no event. emitPermissionDenied's and
+//     emitCompactionBoundary's shared arm on its stated ground: the subtype is a
+//     message-name keyword rather than payload, and no claude-authored field was
+//     decoded on this path. The decode error is DISCARDED rather than logged, for
+//     emitRecoveredDenials' reason — encoding/json QUOTES the offending input into its
+//     error text, which on THIS line is the operator's own echoed prompt and a host
+//     filesystem path.
+//   - decodable, empty content → no event, nothing logged. The gate, argued below.
+//   - content present → exactly one event, whatever the other two fields hold.
+//
+// IT GATES ON CONTENT, WHICH IS emitCompactionBoundary'S ANSWER AND NOT
+// emitPermissionDenied'S, and the choice between those two is the decision this arm
+// owed. That one gates on nothing because the SUBTYPE is the payload: nothing else on
+// that surface separates a denied call from one that ran and failed, so a field-less
+// line is still news. Here the TEXT is the payload. turnevent.Banner reports
+// operator-facing text claude printed, Text is the field it exists to carry, and with
+// content empty there is nothing operator-facing left: Level is a rendering attribute
+// of nothing and StopsTurn is a report the daemon acts on nowhere. A client renders
+// this frame as a first-class notice, so an empty one is visible chrome saying nothing
+// — worse for the operator than the silence it replaces.
+//
+// The gate CANNOT re-drop a refusal, which is the hazard #2232 names for gating at all
+// and the reason this one was checked against it rather than reasoned about in the
+// abstract: claude composes the wrapper prose itself — the "blocked by hook" sentence,
+// the hook's path, then the original prompt — so a hook refusing with an empty reason
+// still yields non-empty content. What the gate can reach is a line with no text at
+// all, which carries no refusal to lose. Its absence is pinned inside `make check` by
+// TestParser_InformationalGatesOnEmptyContent, not left to the build-tagged
+// classification row.
+//
+// NOTHING IS LOGGED ON THE EMITTING PATH, and on this arm that is the most
+// load-bearing instance of the rule in this file. `content` is a hook's stderr: an
+// operator-authored script's arbitrary output, which names absolute host paths in the
+// captured line, echoes the operator's own prompt back verbatim, and could carry an
+// environment variable the script chose to print. It is the field a drop site would be
+// most tempted to explain itself with and the one that must never reach a log.
+// emitThinkingProgress' posture otherwise applies: everything decoded reaches the
+// event, so a second sink would be a record to keep in step for no diagnostic gain.
+//
+// IT READS AND WRITES NO PARSER STATE, emitCompactionBoundary's property and its
+// consequence: a banner arriving inside a turn, between two, or with no turn ever
+// opened maps identically, and no arm of consumeLine's turn-boundary reset has anything
+// of this function's to reset. turnevent.Banner opens and closes no turn either.
+func (p *Parser) emitInformationalBanner(line []byte) bool {
+	var il systemInformationalLine
+	if err := json.Unmarshal(line, &il); err != nil {
+		p.log.Debug("streamsup: dropping undecodable system line", "subtype", "informational")
+		return true
+	}
+	if il.Content == "" {
+		return true
+	}
+
+	// The two bounds, applied at construction and by OPPOSITE answers — see
+	// maxBannerText and maxBannerLevel for why one cuts and reports while the other
+	// empties in silence. truncateField is deliberately not called on the level: the
+	// value is emptied, not shortened, and no UTF-8 scrub is owed on that branch either
+	// because encoding/json already replaced invalid input bytes with U+FFFD on the way
+	// into a Go string and the only mid-rune hazard is a cut this branch does not make.
+	text, truncated := truncateField(il.Content, maxBannerText)
+	level := il.Level
+	if len(level) > maxBannerLevel {
+		level = ""
+	}
+
+	p.emit(turnevent.Banner{
+		Level: level,
+		Text:  text,
+		// The producer's answer, carried as computed. turnevent.Banner.Truncated's doc
+		// forbids a consumer re-deriving it from len(Text), which is the same
+		// one-authority rule that keeps the cut here rather than at the bridge.
+		Truncated: truncated,
+		// Claude's prevent_continuation, renamed. A REPORT and never an actuator: nothing
+		// in this package or downstream of it reads the field, which is what keeps a
+		// fabricated line a misleading label rather than a self-service turn abort.
+		StopsTurn: il.PreventContinuation,
+	})
+	return true
+}
+
+// systemInformationalLine is the decoded payload of one system/informational line.
+// Kept separate from streamLine for systemTaskStartedLine's reason: that is the
+// line-level SEGMENTATION struct and stays at Type/Subtype/Message, and
+// TestStreamLine_StaysSegmentationOnly fails the build on a widening.
+//
+// The field set is exactly what the committed capture shows and nothing invented. The
+// two keys the captured line also carries are deliberately absent — uuid, which nothing
+// in the daemon reads, and session_id, which is claude's session identity and NOT the
+// daemon's conversation identity. Absent from the DECODE TARGET is a stronger guarantee
+// than a scrub or a test sweep, because a field that is never declared cannot leak;
+// TestParser_InformationalDropsClaudesIdentityKeys is the witness rather than the
+// mechanism, and the capture replay proves it against the real values.
+//
+// Every field is a concrete Go type — two plain strings and a plain bool — so a value
+// of the wrong JSON type fails the whole decode and takes the undecodable path.
+// Fail-closed, per emitInformationalBanner, and the bool is the reachable case: claude
+// spelling prevent_continuation as the string "true" would cost the frame rather than
+// producing a half-true one.
+type systemInformationalLine struct {
+	// Content is claude's prose, named for the key here and renamed to Text at the emit
+	// site, per systemModelRefusalFallbackLine's note about where renames happen.
+	Content             string `json:"content"`
+	Level               string `json:"level"`
+	PreventContinuation bool   `json:"prevent_continuation"`
 }
 
 // consumePermissionDeniedLine maps a system/permission_denied line that FAILED
