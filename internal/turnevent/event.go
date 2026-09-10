@@ -2448,6 +2448,59 @@ type ModelRefusalFallback struct {
 	DroppedFields []string
 }
 
+// ModelRefusalNoFallback reports that claude ended a turn with stop reason
+// `refusal` and did not retry it on another model. It maps claude's
+// system/model_refusal_no_fallback line (#2268) and is deliberately distinct from
+// ModelRefusalFallback: one says the turn stopped, while the other says claude
+// retried it.
+//
+// THIS IS CLAUDE'S ASSERTION, NOT A DAEMON FINDING. ModelAnnounced remains the
+// authority on which model claude is running; this event only explains the cause of
+// the stopped turn. Nothing in the daemon acts on these fields — no routing, retry,
+// teardown, model selection, or session setting is keyed on them. A fabricated or
+// mistaken line can therefore mislabel a refusal but cannot actuate the daemon.
+//
+// THE FIELD SET IS DOCUMENTATION-DERIVED, NOT CAPTURE-DERIVED. It was read
+// 2026-09-07 from the Claude Code headless and Agent SDK documentation and
+// @anthropic-ai/claude-agent-sdk@0.3.263's sdk.d.ts, against a daemon on claude
+// 2.1.259. No capture exists or can safely be provoked, so every field is optional.
+// An empty field named in neither report below means claude omitted or emptied it;
+// a field named in a report means the daemon bounded it.
+//
+// request_id and refused_user_message_uuid are deliberately absent. The first is
+// API-internal; the second names a claude message identity no daemon surface can
+// join against. Retraction of the refused partial cannot be honoured on this wire.
+//
+// Every string is claude-derived and bounded by streamsup at construction. Bounded
+// and UTF-8-valid is all the contract promises: control characters, terminal escape
+// sequences, and markup are not sanitized. It opens and closes no turn.
+type ModelRefusalNoFallback struct {
+	// OriginalModel is the model that refused. It is carried verbatim, without alias
+	// expansion or validation against a model list. Overflow DROPS rather than cuts
+	// it, because a client matches the identifier and a cut token looks real while
+	// joining to nothing.
+	OriginalModel string
+	// RefusalCategory is claude's open classification string, such as "cyber" or
+	// "bio". It is claude's assertion about the request, never the daemon's finding,
+	// and a consumer must attribute it accordingly. As a matched token it DROPS on
+	// overflow rather than being cut.
+	RefusalCategory string
+	// RefusalExplanation is claude's display prose about the refusal; Banner is the
+	// announcement text from claude's `content` key. Both may quote or paraphrase the
+	// user's refused request, code, or command line. They are inert text: safe to
+	// render with the consumer's sanitization, never to execute or re-shell.
+	//
+	// Both prose fields CUT on overflow because a shortened sentence remains useful.
+	RefusalExplanation string
+	Banner             string
+	// TruncatedFields names CUT fields in declaration order using daemon names:
+	// "refusal_explanation", then "banner". It is nil when nothing was cut.
+	TruncatedFields []string
+	// DroppedFields names DROPPED fields in declaration order using daemon names:
+	// "original_model", then "refusal_category". It is nil when nothing was dropped.
+	DroppedFields []string
+}
+
 // Banner reports operator-facing text claude printed ABOUT the session rather
 // than as part of an answer — a hook's block reason, a local command's output, a
 // loop notification (#2256). It is the one typed place such text arrives; before
@@ -2709,6 +2762,7 @@ func (Compacting) isTurnEvent()             {}
 func (CompactionBoundary) isTurnEvent()     {}
 func (ToolCallDenied) isTurnEvent()         {}
 func (ModelRefusalFallback) isTurnEvent()   {}
+func (ModelRefusalNoFallback) isTurnEvent() {}
 func (Banner) isTurnEvent()                 {}
 func (ConversationReset) isTurnEvent()      {}
 func (Unrecognized) isTurnEvent()           {}
@@ -2732,6 +2786,7 @@ var (
 	_ Event = Stall{}
 	_ Event = ApiRetry{}
 	_ Event = Compacting{}
+	_ Event = ModelRefusalNoFallback{}
 	_ Event = ConversationReset{}
 	_ Event = Unrecognized{}
 )

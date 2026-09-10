@@ -70,6 +70,12 @@ const maxUnrecognizedRaw = 16 << 10
 // reason stated at each field, and the divergence is the same one that paragraph
 // already records.
 //
+// AMENDED 2026-09-10 (#2268): a FOURTH event now,
+// turnevent.ModelRefusalNoFallback's OriginalModel and RefusalCategory. They take
+// the same DROP answer for the same reason as the corresponding fallback fields.
+// The documented no-fallback line is also uncaptured, so this reuse adds no new
+// measurement — only two more tokens of the same shape.
+//
 // The multiple is the weakest it has been, and that is stated rather than hidden.
 // The two earlier events multiplied over an OBSERVED maximum; #2267's field set is
 // documentation-derived with no capture in existence, so 256 is a multiple of nothing
@@ -702,6 +708,12 @@ const maxCompactTrigger = 256
 // The rate paragraph above holds unchanged, and for one more reason of its own: a
 // session-scoped fallback stops re-announcing by definition, and a local-scoped one
 // fires at most once per refused turn. Both are turn-paced rather than model-paced.
+//
+// AMENDED 2026-09-10 (#2268): it caps TWO MORE prose fields on a third event,
+// turnevent.ModelRefusalNoFallback's RefusalExplanation and Banner. Both take the
+// existing CUT-and-report answer. Its worst case is 2*256 + 2*2048 = 4608 bytes,
+// below the range already established above; no envelope ceiling changes. An outright
+// refusal fires at most once per refused turn, so the existing rate reasoning holds.
 const maxDenialProse = 2 << 10
 
 // maxBannerText caps the ONE claude-authored prose field a system/informational line
@@ -4725,6 +4737,8 @@ func (p *Parser) emitSystemSubtype(subtype string, line []byte) bool {
 		return p.emitPermissionDenied(line)
 	case "model_refusal_fallback":
 		return p.emitModelRefusalFallback(line)
+	case "model_refusal_no_fallback":
+		return p.emitModelRefusalNoFallback(line)
 	case "informational":
 		return p.emitInformationalBanner(line)
 	case "api_retry":
@@ -5329,6 +5343,62 @@ func (p *Parser) emitModelRefusalFallback(line []byte) bool {
 	return true
 }
 
+// emitModelRefusalNoFallback maps one documentation-derived
+// system/model_refusal_no_fallback shape to one descriptive event. No capture of the
+// line exists or can safely be provoked, so the decode target treats every declared
+// key as optional and emission gates on none of them: the subtype itself is news.
+//
+// The documented shape has no `message` key and therefore reaches this arm through
+// streamLine's ordinary top-level dispatch. That is a prediction, not an observation;
+// a future scalar message would justify a recovery entry point, but none is added
+// speculatively.
+//
+// A wrong type on any declared string fails the whole decode target. The line remains
+// consumed, no event is emitted, and the Debug record carries only this package's
+// fixed subtype keyword. In particular, no decoded prose may reach a log: it can echo
+// the user's refused request.
+func (p *Parser) emitModelRefusalNoFallback(line []byte) bool {
+	var refusal systemModelRefusalNoFallbackLine
+	if err := json.Unmarshal(line, &refusal); err != nil {
+		p.log.Debug("streamsup: dropping undecodable system line", "subtype", "model_refusal_no_fallback")
+		return true
+	}
+
+	var cut, dropped []string
+	cutField := func(value, name string) string {
+		out, truncated := truncateField(value, maxDenialProse)
+		if truncated {
+			cut = append(cut, name)
+		}
+		return out
+	}
+	dropField := func(value, name string) string {
+		if len(value) > maxTaskFieldID {
+			dropped = append(dropped, name)
+			return ""
+		}
+		return value
+	}
+
+	// Sequential construction makes the report ordering visible rather than relying
+	// on evaluation order inside a composite literal. Reports name daemon fields, not
+	// claude's api_ prefixed keys.
+	originalModel := dropField(refusal.OriginalModel, "original_model")
+	refusalCategory := dropField(refusal.APIRefusalCategory, "refusal_category")
+	refusalExplanation := cutField(refusal.APIRefusalExplanation, "refusal_explanation")
+	banner := cutField(refusal.Content, "banner")
+
+	p.emit(turnevent.ModelRefusalNoFallback{
+		OriginalModel:      originalModel,
+		RefusalCategory:    refusalCategory,
+		RefusalExplanation: refusalExplanation,
+		Banner:             banner,
+		TruncatedFields:    cut,
+		DroppedFields:      dropped,
+	})
+	return true
+}
+
 // systemModelRefusalFallbackLine is the decoded payload of one
 // system/model_refusal_fallback line. Kept separate from streamLine for
 // systemTaskStartedLine's reason: that is the line-level SEGMENTATION struct and stays
@@ -5368,6 +5438,22 @@ type systemModelRefusalFallbackLine struct {
 	// Content is claude's banner text for the swap. Named for the key here and for its
 	// role on the event, per the note above about where renames happen.
 	Content string `json:"content"`
+}
+
+// systemModelRefusalNoFallbackLine declares exactly the four documented keys this
+// daemon event carries. request_id and refused_user_message_uuid are omitted rather
+// than decoded and scrubbed, so those identifiers cannot leak through this target.
+// Every field is a plain string: a wrong type rejects the target as a unit in
+// emitModelRefusalNoFallback, while an absent field remains empty.
+//
+// It stays separate from systemModelRefusalFallbackLine because scope and
+// fallback_model do not belong to this subtype. The narrower target makes that
+// exclusion structural and follows the task-line family's separation rule.
+type systemModelRefusalNoFallbackLine struct {
+	OriginalModel         string `json:"original_model"`
+	APIRefusalCategory    string `json:"api_refusal_category"`
+	APIRefusalExplanation string `json:"api_refusal_explanation"`
+	Content               string `json:"content"`
 }
 
 // systemPermissionDeniedLine is the decoded payload of one system/permission_denied

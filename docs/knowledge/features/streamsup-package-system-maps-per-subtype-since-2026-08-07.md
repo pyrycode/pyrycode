@@ -200,6 +200,25 @@ Write absence and wrong-type as two separate criteria with two separate expected
 future subtype's acceptance criteria are drafted from a documentation-derived (rather than
 capture-derived) field set.
 
+**Tenth arm, `model_refusal_no_fallback` (#2268) — the sibling line is a distinct outcome, not a
+smaller fallback payload.** `emitModelRefusalNoFallback` maps it to
+`turnevent.ModelRefusalNoFallback` with `OriginalModel`, `RefusalCategory`,
+`RefusalExplanation`, and `Banner`. The separate `systemModelRefusalNoFallbackLine` declares only
+those four documented string keys: it structurally excludes the API-internal `request_id` and the
+unjoinable `refused_user_message_uuid`, as well as the fallback-only `scope` and `fallback_model`.
+That separation prevents a client from confusing "claude retried" with "the turn stopped," and
+keeps fields that have no meaning on the no-fallback line out of its contract.
+
+The same documentation-derived constraints as the fallback arm apply. No capture exists or can
+safely be provoked, so all four keys are optional and a decodable line emits exactly one event even
+when every field is empty. A present field with the wrong JSON type rejects the whole decode target:
+the known subtype is consumed, no event is emitted, and the Debug record contains only the fixed
+subtype. The documented shape has no `message`, so it uses ordinary top-level dispatch; no recovery
+path is guessed before a real capture demonstrates a collision. `OriginalModel` and
+`RefusalCategory` drop past `maxTaskFieldID`, while `RefusalExplanation` and `Banner` cut at
+`maxDenialProse`; the reports use the daemon names `original_model`, `refusal_category`,
+`refusal_explanation`, and `banner` in declaration order.
+
 **`task_progress` was measured and pinned by #2248, then mapped by #2246 — the eleventh `case`
 arm.** `internal/streamsup/task_progress_capture_test.go` reads the two verbatim
 `system/task_progress` frames `parent_tool_use_v2.1.259.json` already carried — captured for a
