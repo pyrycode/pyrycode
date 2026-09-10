@@ -106,7 +106,7 @@ func answerSetPermissionMode(t *testing.T, line string, honorInterrupt, withhold
 	t.Helper()
 
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(line+"\n"), &buf, honorInterrupt, false, "", withholdModeAck, 0, false, "")
+	runStreamJSON(strings.NewReader(line+"\n"), &buf, honorInterrupt, false, "", withholdModeAck, 0, false, "", false)
 
 	out := strings.TrimSpace(buf.String())
 	if out == "" {

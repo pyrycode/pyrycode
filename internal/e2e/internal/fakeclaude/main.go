@@ -348,6 +348,18 @@
 //	                               Stream mode only.
 //	                               Unset or empty ⟹ off ⟹ byte-identical to prior
 //	                               behaviour (the field is omitempty).
+//	PYRY_FAKE_CLAUDE_STREAM_SESSION_FACTS
+//	                               optional. When non-empty, every stream-mode
+//	                               user turn is preceded by one system/init line
+//	                               (#2315) — the line claude opens each turn with,
+//	                               and the one this file wrote no form of before.
+//	                               See writeSystemInitLine for the fixture and its
+//	                               provenance. A boolean like the knob above and
+//	                               for its reason: the fixture is one canned line,
+//	                               with nothing to count and nothing to choose.
+//	                               Stream mode only.
+//	                               Unset or empty ⟹ off ⟹ byte-identical to prior
+//	                               behaviour.
 //
 // The binary lives under internal/e2e/internal/ to visibility-fence it from
 // non-e2e callers. Because TUI mode makes this file carry claude-TUI
@@ -404,6 +416,7 @@ const (
 	envStreamRoster       = "PYRY_FAKE_CLAUDE_STREAM_ROSTER"
 	envStreamModelWindows = "PYRY_FAKE_CLAUDE_STREAM_MODEL_WINDOWS"
 	envStreamResetTo      = "PYRY_FAKE_CLAUDE_STREAM_RESET_TO"
+	envStreamSessionFacts = "PYRY_FAKE_CLAUDE_STREAM_SESSION_FACTS"
 	envApproveSocketFile  = "PYRY_FAKE_CLAUDE_APPROVE_SOCKET_FILE"
 	envRejectAbsentResume = "PYRY_FAKE_CLAUDE_REJECT_ABSENT_RESUME"
 	assistantMaxBytes     = 64 * 1024
@@ -733,10 +746,19 @@ func main() {
 		// envStreamWithholdMode spelling, because there is nothing to count and
 		// nothing to choose — the fixture is one canned map. Unset ⟹ off ⟹
 		// byte-identical, the field being omitempty.
+		//
+		// Init rider (envStreamSessionFacts, default-off): prepend one
+		// system/init line — the line claude opens every turn with — ahead of the
+		// normal per-turn reply (#2315), so an e2e can drive the daemon's
+		// session_facts frame end-to-end. Tested for emptiness rather than
+		// parsed, the envStreamModelWindows spelling and for its reason: the
+		// fixture is one canned line, with nothing to count and nothing to
+		// choose. Unset ⟹ off ⟹ byte-identical.
 		rosterTasks, _ := strconv.Atoi(os.Getenv(envStreamRoster))
 		runStreamJSON(stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "", os.Getenv(envStreamBogus) != "",
 			os.Getenv(envStreamRateLimit), os.Getenv(envStreamWithholdMode) != "", rosterTasks,
-			os.Getenv(envStreamModelWindows) != "", os.Getenv(envStreamResetTo))
+			os.Getenv(envStreamModelWindows) != "", os.Getenv(envStreamResetTo),
+			os.Getenv(envStreamSessionFacts) != "")
 		return
 	}
 
@@ -1770,16 +1792,29 @@ func (w syncWriter) Write(p []byte) (int, error) {
 // gives — it keeps the tail's mis-slot a compile error, and the number is what lets a
 // caller drive the roster over the daemon's entry cap.
 //
+// emitInit selects the init rider (#2315, default-off): each user turn is preceded by
+// one system/init line — see writeSystemInitLine — ahead of everything else the turn
+// writes, on the rate-limit rider's terms. It is the FIRST rider whose line the daemon
+// turns into two events rather than one: streamsup's emitInitLine decodes the line once
+// and calls both emitModelAnnounced and emitSessionFacts, so a capture-faithful line
+// carrying `model` produces a model_announced frame beside the session_facts one. A
+// consumer must therefore filter by frame type rather than counting frames. False ⟹
+// off ⟹ byte-identical.
+//
 // The riders are parameters in the order they landed, and withholdModeAck is appended
 // rather than grouped with the leading bools deliberately: the resulting string, bool
 // tail makes a mis-slotted call-site edit a compile error, which a third adjacent bool
 // would not. rosterTasks extends the same discipline — bool, int, not a fourth bool.
 // modelWindows extends it once more: it lands AFTER the int, so the tail reads
 // int, bool and a transposed call site is still a compile error. resetToID extends
-// it a further time and lands last, so the tail reads bool, string — the same
-// alternation, the same compile error on a transposition.
+// it a further time, so the tail reads bool, string — the same alternation, the same
+// compile error on a transposition. emitInit lands last and keeps the alternation
+// going one more step: string, bool. It is a BOOL rather than a knob carrying the
+// version string for exactly that reason — a second adjacent string would end the
+// property every rider before it has preserved, and there is nothing to choose anyway,
+// the fixture being one canned line.
 func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rateLimitStatus string,
-	withholdModeAck bool, rosterTasks int, modelWindows bool, resetToID string) {
+	withholdModeAck bool, rosterTasks int, modelWindows bool, resetToID string, emitInit bool) {
 	// bufio.ReadString (not bufio.Scanner) so an arbitrarily long line — a
 	// stream-json envelope carries a whole prompt — is never truncated by a token
 	// cap, and the final non-newline-terminated bytes at EOF are still processed.
@@ -1792,6 +1827,16 @@ func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rat
 			if text, ok := userTurnText(b); ok {
 				turn++
 				msgID := fmt.Sprintf("m%d", turn)
+				// The init rider writes FIRST among the prepends, because that is
+				// where claude itself puts the line: every captured turn opens with
+				// it. No test drives two riders at once, so the ordering is
+				// unobservable today and the choice is capture-fidelity rather than
+				// a constraint anything depends on.
+				if emitInit {
+					if werr := writeSystemInitLine(w); werr != nil {
+						return
+					}
+				}
 				// The bogus rider emits its two unmappable shapes BEFORE the real
 				// reply, so a test that waits on the reply has necessarily already
 				// seen them — no ordering race to tune.
@@ -2121,6 +2166,103 @@ const (
 	rateLimitResetsAt  = int64(1785699000)
 	rateLimitLimitType = "five_hour"
 	rateLimitUUID      = "44444444-4444-4444-8444-444444444444"
+)
+
+// writeSystemInitLine writes one top-level system/init line — the line claude opens
+// every turn with, and the one this file wrote no form of before #2315. It is the fake
+// half of that ticket's proof: the daemon turns this single line into a session_facts
+// frame on a connected client, and nothing hermetic drove that path before.
+//
+// PROVENANCE: transcribed from the committed capture
+// (internal/e2e/realclaude/testdata/effort_init_v2.1.259_sonnet_effort.json, claude
+// 2.1.259, whose three init lines agree on every key here). ALL TWENTY-FOUR top-level
+// keys, and every scalar value is the capture's verbatim. Three open-ended arrays —
+// skills, slash_commands, tools — carry the capture's first entries rather than its
+// full lists: nothing between here and the wire decodes any of them, the key's
+// PRESENCE is the whole of what this fixture owes them, and ninety lines of tool names
+// would bury the four keys that actually matter.
+//
+// THE FULL KEY SET IS THE POINT, not padding, and interruptMarkerLine's doc states the
+// argument this inherits: a minimal three-key line would turn a presence among
+// twenty-four keys into a presence among three. Twenty-one of these keys are absent
+// from the daemon's decode target (streamsup's systemInitLine, which declares model,
+// claude_code_version and permissionMode and nothing else), so feeding them is what
+// shows the frame CANNOT carry one — four of them name the operator's filesystem (cwd,
+// memory_paths, messaging_socket_path) or claude's own session identity (session_id),
+// and those four are exactly what SessionFactsPayload's doc promises are absent.
+//
+// The identity values are SUBSTITUTED, shape-preserving, as writeRateLimitEvent
+// substitutes: the capture templates cwd, memory_paths, messaging_socket_path and
+// session_id as $WORKDIR / $TEMP_HOME / $MESSAGING_SOCKET / $SESSION_ID, which are
+// placeholders rather than values to copy, and its uuid names a real session. None is
+// in the parser's decode target, so none can reach a frame either way. The synthetic
+// replacements are obviously synthetic so no reader mistakes one for a measured path.
+//
+// mcp_servers is carried verbatim because #2275 publishes a conversation's MCP server
+// status from this same line and can populate its payload from this fixture rather
+// than rebuilding it.
+//
+// permissionMode is claude's own camelCase spelling, deliberately: it is the key as it
+// appears on the line, and the daemon's snake_case permission_mode appears only where
+// the daemon names the field itself. interruptMarkerLine also mentions this key and is
+// NOT the place to add it — there its ABSENCE is load-bearing (one extra key and the
+// marker reads as a human prompt), and that line rides the JSONL/TUI lane rather than
+// this one, so the two never meet.
+//
+// A map[string]any like writeRateLimitEvent: keys marshal sorted, so the line is
+// deterministic without declaring a struct for a shape nothing else reads. json.Marshal
+// over a map and never a shell or os.Expand, which is what keeps a `$` in any of these
+// values an inert byte — writeBackgroundTaskRoster states the same rule for its
+// captured `cat $FIFO` row. Returns the first marshal/write error.
+func writeSystemInitLine(w io.Writer) error {
+	return writeJSONLine(w, map[string]any{
+		"type":                      "system",
+		"subtype":                   "init",
+		"claude_code_version":       initLineClaudeCodeVersion,
+		"permissionMode":            initLinePermissionMode,
+		"model":                     initLineModel,
+		"agents":                    []string{"claude", "Explore", "general-purpose", "Plan", "statusline-setup"},
+		"analytics_disabled":        false,
+		"apiKeySource":              "none",
+		"capabilities":              []string{"interrupt_receipt_v1", "interrupt_cancel_queued_v1", "msg_lifecycle_v1"},
+		"fast_mode_disabled_reason": "sdk_opt_in_required",
+		"fast_mode_state":           "off",
+		"mcp_servers": []map[string]any{
+			{"name": "pyry_approve", "status": "connected"},
+		},
+		"output_style":              "default",
+		"plugins":                   []string{},
+		"product_feedback_disabled": false,
+		"skills":                    []string{"deep-research", "design-sync", "dataviz"},
+		"slash_commands":            []string{"deep-research", "design-sync", "dataviz"},
+		"terminal_slash_commands":   []string{"doctor", "color"},
+		"tools":                     []string{"Task", "AskUserQuestion", "Bash"},
+		// The four the daemon must never surface, substituted for the capture's
+		// templates. Their presence here is the assertion's whole subject.
+		"cwd":                   initLineCWD,
+		"memory_paths":          map[string]any{"auto": initLineMemoryPath},
+		"messaging_socket_path": initLineMessagingSocket,
+		"session_id":            streamSessionID,
+		"uuid":                  initLineUUID,
+	})
+}
+
+// The captured init-line values the init rider writes verbatim, plus the synthetic
+// identity values it stamps in place of the capture's templates. Constants rather than
+// inline literals for the rate-limit fixture's reason: the e2e asserts against the same
+// values the fake writes, across a main-package boundary it cannot import.
+//
+// The version and the posture are the two the daemon actually publishes, and both are
+// an order of magnitude under the producer's 256-byte per-field caps, so nothing on
+// this path truncates and the frame's truncated_fields must cross as null.
+const (
+	initLineClaudeCodeVersion = "2.1.259"
+	initLinePermissionMode    = "default"
+	initLineModel             = "claude-sonnet-5"
+	initLineUUID              = "77777777-7777-4777-8777-777777777777"
+	initLineCWD               = "/fake-claude/workdir"
+	initLineMemoryPath        = "/fake-claude/memory/"
+	initLineMessagingSocket   = "/fake-claude/messaging.sock"
 )
 
 // writeBackgroundTaskRoster writes one system/background_tasks_changed line canning

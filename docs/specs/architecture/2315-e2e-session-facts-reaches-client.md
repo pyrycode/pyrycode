@@ -217,6 +217,18 @@ per the stream-interactive harness overview.
   two riders are on at once. No test drives two, so the choice is unobservable today;
   resolved to "first", matching claude. Revisit only if a ticket needs both.
 
+## Revisions
+
+**2026-09-10 — the three open-ended arrays carry a prefix, not the full lists.**
+The Design section above says the fed line carries all 24 top-level keys, which it
+does, and every scalar value is the capture's verbatim. `skills`, `slash_commands` and
+`tools` carry the capture's first three entries each rather than its 17, 50 and 29:
+nothing between the fed line and the wire decodes any of them, the key's PRESENCE is
+the whole of what the fixture owes them, and ninety lines of tool names would bury the
+four keys the non-leak assertion is about. `mcp_servers` is verbatim, because #2275
+reads it. Recorded here rather than left implicit because "transcribed from the
+capture" is a provenance claim, and this is the one place it is a prefix.
+
 ## Security review
 
 **Verdict:** PASS (second pass; the first found one MUST FIX, resolved in the Testing
