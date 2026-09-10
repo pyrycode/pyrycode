@@ -94,6 +94,21 @@ func NewParser(sink func(turnevent.Event), logger *slog.Logger) *Parser
 func (p *Parser) Write(b []byte) (int, error) // io.Writer; set as Config.Stdout
 ```
 
+`emitSystemSubtype` maps every `system/api_retry` line to
+`turnevent.ApiRetry{Active:true}` with claude's `attempt` and `max_retries` values;
+repeated active lines must not be coalesced because each advances the counter. The
+parser's `apiRetryOpen` latch suppresses only duplicate falling edges:
+`clearAPIRetry` emits one `ApiRetry{Active:false}` before the next successfully
+decoded `assistant`, `user`, or `result` line's existing events. Missing or
+non-integer counters still consume the known subtype and publish the active event
+with `{Current:0, Total:0}`, rather than surfacing it as `Unrecognized`.
+
+The latch deliberately belongs to the long-lived `Parser`, not a child lifecycle.
+If a child dies without a result while retry is open, the state survives the
+respawn and the next assistant/user/result line publishes the observable clear
+before its own event. Resetting it on child exit would leave the client holding an
+active state with no matching falling edge.
+
 ## Per-conversation turn-busy tracking (#1201)
 
 `cmd/pyry/stream_turn_busy.go`'s `turnBusyTracker` (`newTurnBusyTracker(resolve, logger) *turnBusyTracker`,
