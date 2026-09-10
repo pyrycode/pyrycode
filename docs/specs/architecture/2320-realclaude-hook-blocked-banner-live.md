@@ -221,3 +221,17 @@ The claim's strength is unchanged: the same budget, the same conversation, the s
 **Open questions.** None added. All three are answered, 3 now by live observation as well as by reading production. AC 1's first half and AC 2 are live-proven as of this run; AC 1's second half is the only claim in the file that no live run has yet reached.
 
 **Security.** No new finding, and one strengthened. `O_EXCL` removes the check-then-use the review had concluded was absent — the mode discipline and the "refuse an existing file" rule are unchanged in substance. The sleep adds no data path, no file write and no log site, and no new format verb touches claude-authored text: the fields the two new failure texts render are `turn_state.state`, which the daemon mints from its own constants, and a conversation identifier, both quoted regardless.
+
+### 2026-09-10 — the timeout guard was placed in front of its own return, so no wait could say why it failed
+
+**What drove it.** The fourth review, and it did not need a live lap to find. In the previous revision's window primitive the receive-timeout branch set `readTimedOut` and then `continue`d, described as re-looping into the deadline check. It re-enters the guard instead, because the guard is the first statement in the loop. So EVERY wait that timed out died on the read-past-a-timeout message, on the same call that recorded the timeout, and `next` could never return `false` at all.
+
+**What it cost.** The three blocks of failure text this file exists to make decidable were unreachable: `awaitBanner`'s four-reading diagnostic keyed on the hook witness, and `awaitCompletedTurn`'s wedged-conversation and acked-but-silent arms. That is precisely the half of AC 1 no live run has reached, so the one wait most likely to redden next was the one whose diagnostic could not print. A rig failure and the finding this ticket commissions would have been indistinguishable.
+
+**The fix.** Set the flag and return `false`. The guard keeps its job, which is to fail a LATER call loudly rather than let a caller read on into a dead phone, and that is the behaviour the previous revision's closing paragraph already claimed. `resetWindow`, the sibling this primitive was copied from, carries no such guard and returns `false` correctly; the divergence from the precedent was exactly where the defect sat.
+
+**Also folded in.** The pull request description still framed the hook as arriving through a pass-through `--settings` flag with the collision unmeasured. The first revision measured it and moved the hook to the harness-minted home's user settings, and the shipped test passes no such flag. Rewritten to describe what shipped.
+
+**Open questions.** None added, none closed. AC 1's second half is still the only claim no live run has reached.
+
+**Security.** No new finding. The change removes one `continue` and adds one `return`; no file write, log site or format verb moves.

@@ -479,7 +479,11 @@ func (w *hookBannerWindow) next(t *testing.T, h *perConvHarness,
 		if err != nil {
 			if errors.Is(err, fakephone.ErrReceiveTimeout) {
 				w.readTimedOut = true
-				continue // re-loop into the deadline check above
+				// RETURN, never continue: the guard at the top of the loop is what a
+				// LATER call must hit, and re-entering it from here would swallow every
+				// caller's own failure text behind this file's read-past-a-timeout
+				// message. The three waits below each say something the guard cannot.
+				return protocol.Envelope{}, false
 			}
 			t.Fatalf("phone receive (hook-refusal window): %v", err)
 		}
