@@ -47,7 +47,7 @@ func TestRunStreamJSON_SingleTurn(t *testing.T) {
 
 	const prompt = "hello over stream-json"
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine(prompt)+"\n"), &buf, false, false, "", false, 0, false, "")
+	runStreamJSON(strings.NewReader(userTurnLine(prompt)+"\n"), &buf, false, false, "", false, 0, false, "", false)
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 2 {
@@ -85,7 +85,7 @@ func TestRunStreamJSON_MultipleTurns(t *testing.T) {
 		in.WriteString(userTurnLine(p) + "\n")
 	}
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(in.String()), &buf, false, false, "", false, 0, false, "")
+	runStreamJSON(strings.NewReader(in.String()), &buf, false, false, "", false, 0, false, "", false)
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 2*len(prompts) {
@@ -119,7 +119,7 @@ func TestRunStreamJSON_NonUserLinesIgnored(t *testing.T) {
 	const ctrl = `{"type":"control_request","request_id":"r1","request":{"subtype":"interrupt"}}`
 	input := ctrl + "\n" + "\n" + "not json at all\n"
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(input), &buf, false, false, "", false, 0, false, "")
+	runStreamJSON(strings.NewReader(input), &buf, false, false, "", false, 0, false, "", false)
 
 	if buf.Len() != 0 {
 		t.Fatalf("non-user lines produced %d bytes of output, want 0: %q", buf.Len(), buf.String())
@@ -144,7 +144,7 @@ func TestRunStreamJSON_InterruptMode_UserTurnStaysInFlight(t *testing.T) {
 
 	const prompt = "in-flight over stream-json"
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine(prompt)+"\n"), &buf, true, false, "", false, 0, false, "")
+	runStreamJSON(strings.NewReader(userTurnLine(prompt)+"\n"), &buf, true, false, "", false, 0, false, "", false)
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 1 {
@@ -167,7 +167,7 @@ func TestRunStreamJSON_InterruptMode_InterruptEndsTurnCancelled(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(interruptControlRequestLine("r1")+"\n"), &buf, true, false, "", false, 0, false, "")
+	runStreamJSON(strings.NewReader(interruptControlRequestLine("r1")+"\n"), &buf, true, false, "", false, 0, false, "", false)
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 1 {
@@ -193,7 +193,7 @@ func TestRunStreamJSON_InterruptMode_InFlightThenInterrupt(t *testing.T) {
 	in.WriteString(userTurnLine(prompt) + "\n")
 	in.WriteString(interruptControlRequestLine("r1") + "\n")
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(in.String()), &buf, true, false, "", false, 0, false, "")
+	runStreamJSON(strings.NewReader(in.String()), &buf, true, false, "", false, 0, false, "", false)
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 2 {
@@ -239,7 +239,7 @@ func TestRunStreamJSON_InterruptAckRider(t *testing.T) {
 	// have minted itself.
 	const reqID = "e2e-1500-interrupt-req"
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(interruptControlRequestLine(reqID)+"\n"), &buf, true, false, "", false, 0, false, "")
+	runStreamJSON(strings.NewReader(interruptControlRequestLine(reqID)+"\n"), &buf, true, false, "", false, 0, false, "", false)
 
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 	if len(lines) != 2 {
@@ -346,7 +346,7 @@ func TestWriteStreamResponse_Shape(t *testing.T) {
 // normal reply still arrives intact.
 func TestRunStreamJSON_BogusRider(t *testing.T) {
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine("hello")+"\n"), &buf, false, true, "", false, 0, false, "")
+	runStreamJSON(strings.NewReader(userTurnLine("hello")+"\n"), &buf, false, true, "", false, 0, false, "", false)
 
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 	if len(lines) != 4 {
@@ -383,8 +383,8 @@ func TestRunStreamJSON_BogusRider(t *testing.T) {
 // untouched path always wrote.
 func TestRunStreamJSON_BogusRiderOffIsByteIdentical(t *testing.T) {
 	var on, off bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &off, false, false, "", false, 0, false, "")
-	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &on, false, true, "", false, 0, false, "")
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &off, false, false, "", false, 0, false, "", false)
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &on, false, true, "", false, 0, false, "", false)
 
 	offLines := strings.Split(strings.TrimSpace(off.String()), "\n")
 	onLines := strings.Split(strings.TrimSpace(on.String()), "\n")
@@ -426,7 +426,7 @@ func TestRunStreamJSON_RateLimitRider(t *testing.T) {
 			t.Parallel()
 
 			var buf bytes.Buffer
-			runStreamJSON(strings.NewReader(userTurnLine("hello")+"\n"), &buf, false, false, tc.status, false, 0, false, "")
+			runStreamJSON(strings.NewReader(userTurnLine("hello")+"\n"), &buf, false, false, tc.status, false, 0, false, "", false)
 
 			lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 			if len(lines) != 3 {
@@ -507,8 +507,8 @@ func TestRunStreamJSON_RateLimitRiderOffIsByteIdentical(t *testing.T) {
 	t.Parallel()
 
 	var on, off bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &off, false, false, "", false, 0, false, "")
-	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &on, false, false, "allowed", false, 0, false, "")
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &off, false, false, "", false, 0, false, "", false)
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &on, false, false, "allowed", false, 0, false, "", false)
 
 	offLines := strings.Split(strings.TrimSpace(off.String()), "\n")
 	onLines := strings.Split(strings.TrimSpace(on.String()), "\n")
@@ -540,7 +540,7 @@ func TestRunStreamJSON_RosterRider(t *testing.T) {
 	// writes all nine — the CUT is the daemon's, and reproducing it here would hide
 	// the very thing the e2e measures.
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine("hello")+"\n"), &buf, false, false, "", false, 9, false, "")
+	runStreamJSON(strings.NewReader(userTurnLine("hello")+"\n"), &buf, false, false, "", false, 9, false, "", false)
 
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 	if len(lines) != 3 {
@@ -600,7 +600,7 @@ func TestRunStreamJSON_RosterRider(t *testing.T) {
 
 	// The rider only PREPENDS; the tail must match the untouched output.
 	var off bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine("hello")+"\n"), &off, false, false, "", false, 0, false, "")
+	runStreamJSON(strings.NewReader(userTurnLine("hello")+"\n"), &off, false, false, "", false, 0, false, "", false)
 	offLines := strings.Split(strings.TrimSpace(off.String()), "\n")
 	if len(offLines) != 2 {
 		t.Fatalf("rider-off line count: got %d, want 2", len(offLines))
@@ -619,7 +619,7 @@ func TestRunStreamJSON_RosterRiderOffIsByteIdentical(t *testing.T) {
 	t.Parallel()
 
 	var base bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &base, false, false, "", false, 0, false, "")
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &base, false, false, "", false, 0, false, "", false)
 	want := strings.TrimSpace(base.String())
 	if len(strings.Split(want, "\n")) != 2 {
 		t.Fatalf("rider-off line count: got %d, want 2", len(strings.Split(want, "\n")))
@@ -627,7 +627,7 @@ func TestRunStreamJSON_RosterRiderOffIsByteIdentical(t *testing.T) {
 
 	for _, count := range []int{0, -1} {
 		var buf bytes.Buffer
-		runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &buf, false, false, "", false, count, false, "")
+		runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &buf, false, false, "", false, count, false, "", false)
 		if got := strings.TrimSpace(buf.String()); got != want {
 			t.Errorf("rosterTasks=%d is not byte-identical to the untouched path:\n got %s\nwant %s",
 				count, got, want)
@@ -668,13 +668,13 @@ func TestRunStreamJSON_ModelWindowRider(t *testing.T) {
 	}
 
 	var off bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &off, false, false, "", false, 0, false, "")
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &off, false, false, "", false, 0, false, "", false)
 	if got := resultModelUsage(t, off.String()); got != nil {
 		t.Errorf("rider off: modelUsage = %v, want absent", got)
 	}
 
 	var on bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &on, false, false, "", false, 0, true, "")
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &on, false, false, "", false, 0, true, "", false)
 	got := resultModelUsage(t, on.String())
 	entry, ok := got[riderModelWindowSonnetKey]
 	if !ok {
@@ -706,7 +706,7 @@ func TestStreamJSON_ResetRiderAnnouncesOnceOnTheFirstTurn(t *testing.T) {
 
 	var buf bytes.Buffer
 	runStreamJSON(strings.NewReader(userTurnLine("one")+"\n"+userTurnLine("two")+"\n"), &buf,
-		false, false, "", false, 0, false, announced)
+		false, false, "", false, 0, false, announced, false)
 
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 	var resets []string
@@ -732,8 +732,129 @@ func TestStreamJSON_ResetRiderAnnouncesOnceOnTheFirstTurn(t *testing.T) {
 	// Off by default: an unset rider must leave the stream byte-identical, so every
 	// sibling spec that does not opt in is unaffected.
 	var off bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine("one")+"\n"), &off, false, false, "", false, 0, false, "")
+	runStreamJSON(strings.NewReader(userTurnLine("one")+"\n"), &off, false, false, "", false, 0, false, "", false)
 	if strings.Contains(off.String(), "conversation_reset") {
 		t.Errorf("an unset rider still announced a reset:\n%s", off.String())
+	}
+}
+
+// TestRunStreamJSON_SessionFactsRider pins the init rider at the cheapest tier: with
+// the rider on, one turn prepends exactly one system/init line carrying the captured
+// key set, and the normal reply still arrives intact.
+//
+// THE KEY COUNT IS THE ASSERTION THIS TEST EXISTS FOR. writeSystemInitLine's whole
+// argument — interruptMarkerLine's, inherited — is that a presence among twenty-four
+// keys is a different claim from a presence among three, because twenty-one of those
+// keys are absent from the daemon's decode target and feeding them is what shows the
+// frame cannot carry one. A later hand trimming the fixture down to the three keys the
+// daemon reads would leave the e2e green and quietly delete that claim; it reddens
+// here instead.
+func TestRunStreamJSON_SessionFactsRider(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	runStreamJSON(strings.NewReader(userTurnLine("hello")+"\n"), &buf, false, false, "", false, 0, false, "", true)
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("line count: got %d, want 3 (system/init, echo, result)\n%s", len(lines), buf.String())
+	}
+
+	// Decoded twice, and both readings are load-bearing. The map answers "which keys
+	// are on the line", which no struct can; the struct answers "what are the values",
+	// which a map/any comparison would answer only through type assertions.
+	var keyed map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(lines[0]), &keyed); err != nil {
+		t.Fatalf("unmarshal init line as an object: %v\n%s", err, lines[0])
+	}
+	if len(keyed) != 24 {
+		t.Errorf("init line top-level key count: got %d, want 24 (the capture's full set — see "+
+			"writeSystemInitLine for why the extra twenty-one are the point)\n%s", len(keyed), lines[0])
+	}
+
+	var got struct {
+		Type              string `json:"type"`
+		Subtype           string `json:"subtype"`
+		ClaudeCodeVersion string `json:"claude_code_version"`
+		PermissionMode    string `json:"permissionMode"`
+		Model             string `json:"model"`
+		CWD               string `json:"cwd"`
+		SessionID         string `json:"session_id"`
+		UUID              string `json:"uuid"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+		t.Fatalf("unmarshal init line: %v\n%s", err, lines[0])
+	}
+	if got.Type != "system" || got.Subtype != "init" {
+		t.Fatalf("line routing keys: got type=%q subtype=%q, want system/init — anything else and the "+
+			"daemon routes the line to a different arm entirely", got.Type, got.Subtype)
+	}
+	// The two the daemon publishes, verbatim: no normalising, no zero-padding, no
+	// parse into a semver triple.
+	if got.ClaudeCodeVersion != initLineClaudeCodeVersion {
+		t.Errorf("claude_code_version: got %q, want %q (the capture's, verbatim)",
+			got.ClaudeCodeVersion, initLineClaudeCodeVersion)
+	}
+	// claude's camelCase spelling. The daemon's snake_case permission_mode belongs on
+	// the WIRE, and a fake that wrote it here would feed the parser a key its decode
+	// target does not declare — the line would decode, the posture would be empty, and
+	// the e2e would fail four layers away from the cause.
+	if got.PermissionMode != initLinePermissionMode {
+		t.Errorf("permissionMode: got %q, want %q (claude's own spelling)",
+			got.PermissionMode, initLinePermissionMode)
+	}
+	// Carried because the capture carries it, and because it is what makes the line
+	// produce a model_announced frame beside the session_facts one — the two-events
+	// fan-out runStreamJSON's doc warns a consumer about.
+	if got.Model != initLineModel {
+		t.Errorf("model: got %q, want %q", got.Model, initLineModel)
+	}
+	// The identity values are the fake's own substitutes, not the capture's templated
+	// placeholders. A `$WORKDIR` surviving here would mean something expanded — or
+	// failed to — where writeSystemInitLine promises a plain json.Marshal.
+	if got.CWD != initLineCWD {
+		t.Errorf("cwd: got %q, want %q (the synthetic substitute)", got.CWD, initLineCWD)
+	}
+	if got.SessionID != streamSessionID {
+		t.Errorf("session_id: got %q, want %q", got.SessionID, streamSessionID)
+	}
+	if got.UUID != initLineUUID {
+		t.Errorf("uuid: got %q, want %q", got.UUID, initLineUUID)
+	}
+
+	// The real reply must survive the rider untouched.
+	if !strings.Contains(lines[1], `"text":"hello"`) {
+		t.Errorf("assistant echo: got %s, want the prompt echoed", lines[1])
+	}
+	if !strings.Contains(lines[2], `"subtype":"success"`) {
+		t.Errorf("result line: got %s, want subtype success", lines[2])
+	}
+}
+
+// TestRunStreamJSON_SessionFactsRiderOffIsByteIdentical pins that the init rider is
+// default-off and additive: with emitInit false, output is exactly the two lines the
+// untouched path always wrote, and the rider only PREPENDS.
+//
+// This is what lets the e2e's rider-off half be a controlled comparison rather than a
+// different experiment: every fake-daemon suite that does not opt in sees an unchanged
+// stream, so a session_facts frame arriving in one of them would be the rider's doing
+// and nothing else's.
+func TestRunStreamJSON_SessionFactsRiderOffIsByteIdentical(t *testing.T) {
+	t.Parallel()
+
+	var on, off bytes.Buffer
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &off, false, false, "", false, 0, false, "", false)
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &on, false, false, "", false, 0, false, "", true)
+
+	offLines := strings.Split(strings.TrimSpace(off.String()), "\n")
+	onLines := strings.Split(strings.TrimSpace(on.String()), "\n")
+	if len(offLines) != 2 {
+		t.Fatalf("rider-off line count: got %d, want 2\n%s", len(offLines), off.String())
+	}
+	if strings.Contains(off.String(), `"subtype":"init"`) {
+		t.Errorf("an unset rider still wrote an init line:\n%s", off.String())
+	}
+	if got, want := strings.Join(onLines[1:], "\n"), strings.Join(offLines, "\n"); got != want {
+		t.Errorf("rider changed the normal reply:\n got %s\nwant %s", got, want)
 	}
 }

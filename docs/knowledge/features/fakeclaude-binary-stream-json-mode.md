@@ -548,3 +548,36 @@ So fakeclaude calls `control.Approve` directly rather than spawning its own
 verdict) without depending on that still-open wiring gap. See
 [codebase/1139.md](../codebase/1139.md) for the live e2e this feeds and the
 production follow-up this gap is tracked under.
+
+### Session-facts init line rider (#2315)
+
+`PYRY_FAKE_CLAUDE_STREAM_SESSION_FACTS` (default-off) makes stream mode prepend one
+`system`/`init` line — the line claude opens every turn with, and the one this file
+wrote no form of before — ahead of each turn's reply, on the rate-limit rider's
+"before the reply" discipline: a `turn_end` reaching a client implies the parser has
+already seen the line, so the consuming e2e needs no sleep or poll. First among the
+prepends because that is where claude itself puts it. `emitInit` is the tenth
+parameter on `runStreamJSON`, landing last in the `string, bool` tail alternation the
+rider list has kept since #1631 (a transposed call site stays a compile error) — and
+the point this family's rider list has now reached: **ten parameters, 25 call sites**,
+all needing the new zero value in the same commit. The next rider is the one worth
+converting to an options struct, as its own ticket rather than inside a feature's
+budget.
+
+`writeSystemInitLine` transcribes all 24 top-level keys of
+`effort_init_v2.1.259_sonnet_effort.json` (`claude_code_version` `2.1.259`,
+`permissionMode` `default`), not just the three `streamsup`'s decode target reads —
+`interruptMarkerLine`'s doc already states why a minimal line is the wrong fixture: it
+turns a presence among 24 keys into a presence among three, and here the twenty-one
+extra keys — four of them naming the operator's filesystem or claude's session identity
+— are the point. Three open-ended arrays (`skills`, `slash_commands`, `tools`) carry
+only the capture's first three entries each; nothing downstream decodes them, so the
+key's presence is the whole of what the fixture owes them, and the full lists would
+bury the four keys the consuming e2e's non-leak assertion is actually about.
+
+**The fixture's key COUNT is itself a load-bearing assertion, not shape decoration.**
+`stream_detect_test.go`'s rider-on case asserts the emitted line's top-level key count
+is 24, so a later hand trimming the fixture down to what the daemon decodes reddens at
+the file that made the fixture, not silently downstream. See
+[e2e-harness-stream-interactive-harness-pattern-startstreamin.md § relay_v2_stream_session_facts_test.go](e2e-harness-stream-interactive-harness-pattern-startstreamin.md)
+for the e2e half and the non-leak assertion this fixture exists to support.

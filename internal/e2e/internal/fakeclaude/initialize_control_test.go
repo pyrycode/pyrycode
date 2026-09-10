@@ -78,7 +78,7 @@ func answerInitialize(t *testing.T, requestID string, honorInterrupt bool) initi
 
 	var buf bytes.Buffer
 	runStreamJSON(strings.NewReader(initializeControlRequestLine(requestID)+"\n"), &buf,
-		honorInterrupt, false, "", false, 0, false, "")
+		honorInterrupt, false, "", false, 0, false, "", false)
 
 	out := strings.TrimSpace(buf.String())
 	if out == "" {
@@ -366,7 +366,7 @@ func TestRunStreamJSON_InitializeControlAnswer(t *testing.T) {
 		const unknown = `{"type":"control_request","request_id":"r1",` +
 			`"request":{"subtype":"e2e-1692-not-initialize"}}`
 		var buf bytes.Buffer
-		runStreamJSON(strings.NewReader(unknown+"\n"), &buf, false, false, "", false, 0, false, "")
+		runStreamJSON(strings.NewReader(unknown+"\n"), &buf, false, false, "", false, 0, false, "", false)
 
 		if buf.Len() != 0 {
 			t.Fatalf("an unknown control_request subtype produced %d bytes of output, want 0: %q",
