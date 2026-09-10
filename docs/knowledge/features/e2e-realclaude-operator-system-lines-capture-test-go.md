@@ -136,3 +136,7 @@ above is trustworthy on the strength of the dispatcher's own JSON test log, not 
   from one whose fixture was never actually captured.
 - `emitSystemSubtype`, `ignoredLineTypes`, `consumePermissionDeniedLine` (`internal/streamsup/parser.go`)
   — the mapping surface these four subtypes are for; out of scope here, live in #2256–#2259.
+- [interactive_stream_hook_blocked_banner_test.go](e2e-realclaude-interactive-stream-hook-blocked-banner-test-go.md)
+  — reuses this file's four hook-trigger helpers to prove the `informational` line observed here
+  also reaches a connected client, through a daemon-spawned child rather than this file's direct
+  `streamsup` spawn.

@@ -128,6 +128,23 @@ The AC ("on deadline exceeded returns a typed error the caller can
 match against") is fully covered; only the spec's optional "conn
 remains usable after timeout" sub-assertion was dropped.
 
+**A documented trap still costs a live lap when a negative assertion needs
+it (#2320).** "Construct a fresh Client per attempt" doesn't fit a test
+that must keep reading the *same* connection across a whole turn — a
+window primitive proving a client-visible frame did **not** arrive can't
+just requeue. #2320's third live gate run read `ErrReceiveTimeout` as an
+ordinary recoverable deadline and treated it as the SUCCESS path of its
+absence check, which is exactly the case this doc already warns costs the
+`Client`: the conn was gone by the time the next send tried to use it,
+and every green run would have hit the same failure. The fix for that
+shape is to never read to a deadline expected to expire — sleep for the
+budget instead, with nothing consuming the connection, then read forward
+from before the next send. Anything the daemon emitted during the sleep
+queues on the socket in arrival order and is still there to inspect
+afterward. See
+[e2e-realclaude-interactive-stream-hook-blocked-banner-test-go.md](e2e-realclaude-interactive-stream-hook-blocked-banner-test-go.md)'s
+`letRefusedTurnSettle` for the pattern.
+
 ## What's NOT modeled (deliberate)
 
 - **Routing-envelope wrap/unwrap.** The phone speaks raw

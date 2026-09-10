@@ -104,6 +104,26 @@ test helper to strip the new `--settings <path>` pair before asserting the
 `spawnBase` composition should check `cmd/pyry` argv assertions too — the
 blast radius is not scoped to one package just because the change is.
 
+**A caller's own pass-through `--settings` cannot reach a daemon-spawned
+child — LIVE-CONFIRMED 2026-09-10 (#2320).** `Pool.New` and `buildSession`
+both compose the child argv as `[operator pass-through] … --settings
+<this file's path> …` — the daemon's own flag always lands after whatever
+the caller supplied, per this doc's own "Wired into `spawnBase`" paragraph
+above. claude 2.1.259 registers `--settings` as a plain single-valued
+option with no accumulating parser (unlike `--plugin-dir`, one entry along
+in the same table, which advertises itself as repeatable), and a repeated
+single-valued option is last-wins — so the daemon's file always wins the
+collision, silently. #2320 needed a `UserPromptSubmit` hook to reach a
+daemon-spawned child and first tried it as a pass-through `--settings
+<rig-file>`; the hook never registered, because it always loses this
+race. The route that works is planting the config as **user settings**
+under the child's own `HOME` (`<home>/.claude/settings.json`) instead of
+fighting this flag — a settings source of its own, not a competitor for
+the one `spawnBase` already owns, and unaffected by `--setting-sources`
+since pyry passes no such flag. Before betting a future ticket on a
+pass-through flag reaching a daemon-spawned child, check whether claude
+registers that flag as repeatable — most are not.
+
 `spawnBase` gained a second daemon-written file this way in #2093 —
 [`writeSystemPrompt` + `systemPromptText`](sessions-package-key-types-writesystemprompt-systemprompttext.md),
 joining `--settings <path>` with `--append-system-prompt-file <path>`
