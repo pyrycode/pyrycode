@@ -43,3 +43,9 @@
     ack-but-no-delta, never as a missing ack — "no ack" specifically means
     `Route` failed to resolve the conversation against the re-keyed pool
     entry.
+
+**Related:**
+[interactive_stream_hook_blocked_banner_test.go](e2e-realclaude-interactive-stream-hook-blocked-banner-test-go.md)
+copies this file's window-primitive shape for a turn that can't satisfy the shared drain either,
+but sends its second turn on a different signal — a hook-refused turn has no closing boundary to
+race a transition against, unlike `/clear`.
