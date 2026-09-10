@@ -74,6 +74,7 @@ func TestIsKnownAppType(t *testing.T) {
 		// also what keeps the type off the inbound path — a phone must never be
 		// able to send a model_announced frame into dispatch.Route.
 		{"model_announced-rejected", TypeModelAnnounced, false, ErrUnknownType},
+		{"model_refusal_fallback-rejected", TypeModelRefusalFallback, false, ErrUnknownType},
 		// the v2-only model-list report: an outbound binary → phone report an old
 		// phone never receives, so IsKnownAppType must reject it. Rejection is also
 		// what keeps the type off the inbound path — a phone must never be able to
@@ -299,7 +300,8 @@ var v2OnlyTypes = map[string]bool{
 	// v2 usage-limit report.
 	TypeRateLimited: true,
 	// v2 announced-model report.
-	TypeModelAnnounced: true,
+	TypeModelAnnounced:       true,
+	TypeModelRefusalFallback: true,
 	// v2 model-list report.
 	TypeModelList: true,
 	// v2 slash-command-list report.
@@ -411,6 +413,7 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeRateLimited,
 		// v2 announced-model report.
 		TypeModelAnnounced,
+		TypeModelRefusalFallback,
 		// v2 model-list report.
 		TypeModelList,
 		// v2 slash-command-list report.

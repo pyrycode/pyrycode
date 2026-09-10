@@ -720,6 +720,23 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			Model:          e.Model,
 			Truncated:      e.Truncated,
 		}, true
+	case turnevent.ModelRefusalFallback:
+		// Conversation identity only. The event carries no request or claude message
+		// identity that can join it to the assistant-delta stream, so tc.TurnID and
+		// tc.Seq have no honest destination. All published values cross verbatim and
+		// are not re-capped; emitModelRefusalFallback bounded them at construction.
+		// RefusalExplanation is deliberately excluded because Banner is the one
+		// display string the wire publishes.
+		return protocol.TypeModelRefusalFallback, protocol.ModelRefusalFallbackPayload{
+			ConversationID:  tc.ConversationID,
+			OriginalModel:   e.OriginalModel,
+			FallbackModel:   e.FallbackModel,
+			Scope:           e.Scope,
+			RefusalCategory: e.RefusalCategory,
+			Banner:          e.Banner,
+			TruncatedFields: modelRefusalFallbackReportKeys(e.TruncatedFields),
+			DroppedFields:   modelRefusalFallbackReportKeys(e.DroppedFields),
+		}, true
 	case turnevent.SessionFacts:
 		// The OTHER half of the same system/init line the arm above maps, and it sits
 		// here rather than anywhere else in this switch for that reason. Conversation
@@ -1050,6 +1067,22 @@ func deniedReportKeys(report []string) []string {
 			continue
 		}
 		out[i] = name
+	}
+	return out
+}
+
+// modelRefusalFallbackReportKeys copies a daemon report into the closed wire
+// vocabulary. RefusalExplanation is intentionally absent from the payload, so
+// its token is filtered with any unknown token rather than naming a key a client
+// cannot inspect. Starting with nil preserves nil for no reports and for an
+// excluded-only report, which is what marshals as null instead of [].
+func modelRefusalFallbackReportKeys(report []string) []string {
+	var out []string
+	for _, name := range report {
+		switch name {
+		case "scope", "original_model", "fallback_model", "refusal_category", "banner":
+			out = append(out, name)
+		}
 	}
 	return out
 }

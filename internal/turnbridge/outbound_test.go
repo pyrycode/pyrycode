@@ -1,6 +1,7 @@
 package turnbridge
 
 import (
+	"bytes"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -239,6 +240,45 @@ func TestMapEventOutbound(t *testing.T) {
 			wantPayload: protocol.ToolDeniedPayload{
 				ConversationID: "c1", TurnID: "t1", ToolUseID: "tool-2",
 				ToolName: "Bash", Message: "requested permissions to use Bash",
+			},
+			wantOK: true,
+		},
+		{
+			name: "ModelRefusalFallback -> model_refusal_fallback filters reports to published wire keys",
+			ev: turnevent.ModelRefusalFallback{
+				Scope:              "session",
+				OriginalModel:      "claude-opus-4-1",
+				FallbackModel:      "claude-sonnet-4-5",
+				RefusalCategory:    "cyber",
+				RefusalExplanation: "The request was refused.",
+				Banner:             "Retrying with a fallback model.",
+				TruncatedFields:    []string{"refusal_explanation", "banner"},
+				DroppedFields:      []string{"scope", "original_model", "fallback_model", "refusal_category"},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeModelRefusalFallback,
+			wantPayload: protocol.ModelRefusalFallbackPayload{
+				ConversationID:  "c1",
+				OriginalModel:   "claude-opus-4-1",
+				FallbackModel:   "claude-sonnet-4-5",
+				Scope:           "session",
+				RefusalCategory: "cyber",
+				Banner:          "Retrying with a fallback model.",
+				TruncatedFields: []string{"banner"},
+				DroppedFields:   []string{"scope", "original_model", "fallback_model", "refusal_category"},
+			},
+			wantOK: true,
+		},
+		{
+			name: "ModelRefusalFallback excluded-only report -> nil wire report",
+			ev: turnevent.ModelRefusalFallback{
+				RefusalExplanation: "The request was refused.",
+				TruncatedFields:    []string{"refusal_explanation"},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeModelRefusalFallback,
+			wantPayload: protocol.ModelRefusalFallbackPayload{
+				ConversationID: "c1",
 			},
 			wantOK: true,
 		},
@@ -3422,6 +3462,75 @@ func TestMapEvent_ToolDeniedCarriesNothingElse(t *testing.T) {
 			t.Errorf("%s: got %s, want null — an allocated [] and a nil report are "+
 				"different statements to a client", report, got)
 		}
+	}
+}
+
+func TestMapEvent_ModelRefusalFallbackCarriesNothingElseAndDoesNotMutate(t *testing.T) {
+	t.Parallel()
+	ev := turnevent.ModelRefusalFallback{
+		Scope:              "session",
+		OriginalModel:      "original-sentinel",
+		FallbackModel:      "fallback-sentinel",
+		RefusalCategory:    "category-sentinel",
+		RefusalExplanation: "excluded-explanation-sentinel",
+		Banner:             "banner-sentinel",
+		TruncatedFields:    []string{"refusal_explanation", "banner"},
+		DroppedFields:      []string{"scope", "original_model"},
+	}
+	before := turnevent.ModelRefusalFallback{
+		Scope:              ev.Scope,
+		OriginalModel:      ev.OriginalModel,
+		FallbackModel:      ev.FallbackModel,
+		RefusalCategory:    ev.RefusalCategory,
+		RefusalExplanation: ev.RefusalExplanation,
+		Banner:             ev.Banner,
+		TruncatedFields:    append([]string(nil), ev.TruncatedFields...),
+		DroppedFields:      append([]string(nil), ev.DroppedFields...),
+	}
+
+	_, payload, ok := MapEvent(ev, TurnContext{ConversationID: "conversation-sentinel", TurnID: "excluded-turn", Seq: 77})
+	if !ok {
+		t.Fatal("MapEvent refused a ModelRefusalFallback")
+	}
+	p, isRefusal := payload.(protocol.ModelRefusalFallbackPayload)
+	if !isRefusal {
+		t.Fatalf("payload is %T, want protocol.ModelRefusalFallbackPayload", payload)
+	}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		t.Fatalf("re-decode payload: %v", err)
+	}
+	wantKeys := map[string]bool{
+		"conversation_id": true, "original_model": true, "fallback_model": true,
+		"scope": true, "refusal_category": true, "banner": true,
+		"truncated_fields": true, "dropped_fields": true,
+	}
+	if len(keys) != len(wantKeys) {
+		t.Fatalf("payload keys: got %v, want exactly %v", keys, wantKeys)
+	}
+	for key := range keys {
+		if !wantKeys[key] {
+			t.Errorf("unexpected payload key %q", key)
+		}
+	}
+	if bytes.Contains(raw, []byte(ev.RefusalExplanation)) {
+		t.Errorf("excluded refusal explanation reached the wire: %s", raw)
+	}
+	if !reflect.DeepEqual(ev, before) {
+		t.Errorf("MapEvent mutated the event: got %+v, want %+v", ev, before)
+	}
+	if len(p.TruncatedFields) > 0 {
+		p.TruncatedFields[0] = "mutation-sentinel"
+	}
+	if len(p.DroppedFields) > 0 {
+		p.DroppedFields[0] = "mutation-sentinel"
+	}
+	if !reflect.DeepEqual(ev, before) {
+		t.Errorf("payload report slices alias the event: got %+v, want %+v", ev, before)
 	}
 }
 
