@@ -104,7 +104,8 @@ package realclaude
 // bytes produced under the operator's real credentials would need this package's
 // redaction apparatus, which is #2138's answer to the same question.
 //
-// The spine is the #997 per-conversation harness with #2320's pass-through seam.
+// The spine is the #997 per-conversation harness, whose seed callback is where
+// the rig and its user settings are written before anything spawns.
 // One daemon, one conversation created over the wire, one encrypted channel, ONE
 // reader for the whole window — the receive nonce is sequential, so a second
 // concurrent reader would desync the CipherState and surface as an unrelated
