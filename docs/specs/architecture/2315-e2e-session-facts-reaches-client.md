@@ -67,7 +67,7 @@ rather than hiding it:
 | Limit | Boundary | This ticket |
 |---|---|---|
 | Production source files created or modified | ≤ 5 | 1 |
-| Total written work | ≤ 800 | ~700 |
+| Total written work | ≤ 800 | ~700 estimated, **940 actual** (see Revisions) |
 | New exported types or interfaces | ≤ 5 | 0 |
 | Consumer call sites needing simultaneous update | ≤ 10 | **25** |
 | Acceptance criteria | ≤ 5 | 4 |
@@ -218,6 +218,15 @@ per the stream-interactive harness overview.
   resolved to "first", matching claude. Revisit only if a ticket needs both.
 
 ## Revisions
+
+**2026-09-10 — a second boundary came in over, on the line count.** The sizing table
+estimated ~700 lines of total written work against a ceiling of 800; the branch landed
+940 across all six files, with the spec at 283 and the e2e at 366. The gap is comment
+weight in the two test files and in `writeSystemInitLine`, not extra behaviour: no file
+outside the plan was touched and nothing was built that the plan did not prescribe.
+The overage did not cost the run — plan and implementation together used well under a
+quarter of the turn budget — but the estimate was wrong and the table now records both
+numbers rather than the one that flattered the plan.
 
 **2026-09-10 — the three open-ended arrays carry a prefix, not the full lists.**
 The Design section above says the fed line carries all 24 top-level keys, which it
