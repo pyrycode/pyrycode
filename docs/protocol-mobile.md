@@ -1168,9 +1168,11 @@ operator's prompt, and [`tool_use`](#tool_use)'s verbatim input fields already c
 to the same grant.
 
 **The frame has a producer since #2319**, which maps `claude`'s `informational` lines
-onto it — a hook's block reason among them — against a committed capture. **Still
-outstanding is #2258**, which owns `local_command_output` and `notification`; the capture
-records both as unobserved, so what is mappable there is that ticket's to decide. The
+onto it — a hook's block reason among them — against a committed capture. **It has no
+second producer, and #2258 is closed as answered** (`2026-09-10`): that ticket owned
+`local_command_output` and `notification`, and the capture recorded both unobserved with
+zero frames, so neither had a field set to map. That is not a claim `claude` never sends
+them, only that neither is reachable on the input paths tried at `2.1.259`. The
 frame shipped ahead of that first producer deliberately: declaring a contract ahead of
 its producers is this spec's established sequencing, and it is what let client work start
 against a published shape.

@@ -341,7 +341,9 @@ case, `emitInformationalBanner`, maps `system/informational` — hook feedback, 
 block reason, text a slash command prints — onto `turnevent.Banner` (`Level`, `Text`, `Truncated`,
 `StopsTurn`), declared unconstructed by #2256. Before this arm, a hook that refused a prompt reached the
 operator as nothing at all: the prompt was never answered and nothing said why. `system/notification`
-(#2258) is the sibling subtype still outstanding on the same variant. See
+(#2258) was the sibling subtype on the same variant and is **closed as answered (2026-09-10)** — the
+committed capture recorded it and `local_command_output` unobserved with zero frames, so neither had a
+field set to map. The variant's second slot stays open for whichever subtype produces bytes first. See
 [turnevent-package-outbound-event-variants.md](turnevent-package-outbound-event-variants.md) and
 [the interactive payload doc](protocol-package-interactive-event-payloads.md) for the wire shape, now
 corrected to name this arm rather than the "declared with no producer" claim both carried before it.
