@@ -1992,9 +1992,12 @@ const (
 // to a client. TestBannerType_IsNotClaudesVocabulary pins that, and pins which of
 // claude's words the check list may NOT contain.
 //
-// IT SHIPS WITH NO PRODUCER, deliberately: the streamsup mappings are #2257
-// (informational) and #2258 (notification), each proven against a committed capture.
-// Declaring a contract ahead of its producers is this file's established sequencing —
+// IT HAS ONE PRODUCER SINCE #2319, which maps claude's informational subtype onto this
+// frame against a committed capture. STILL OUTSTANDING is #2258, which owns
+// local_command_output and notification: the capture records both as unobserved, so
+// what is mappable there is that ticket's to decide. The frame shipped ahead of that
+// first producer deliberately, and declaring a contract ahead of its producers is this
+// file's established sequencing —
 // #2052→#2054, #1983→#1984 — and it lets the client slices start against a published
 // shape. Unlike TypeMintPairing above, nothing is pending on the INBOUND side: this is
 // an outbound push and cmd/pyry/relay_guard_test.go's excludedTypes carries it as one.

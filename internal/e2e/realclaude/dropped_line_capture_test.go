@@ -1638,6 +1638,18 @@ func TestDropcapClassification(t *testing.T) {
 				"changed",
 		},
 		{
+			name: "system/informational",
+			line: `{"type":"system","subtype":"informational","content":"blocked by hook","level":"warning"}`,
+			why: "#2319: MAPPED, onto turnevent.Banner — the FIRST producer of a variant #2256 " +
+				"declared and shipped unwired, so before this arm a hook's refusal reached the " +
+				"operator as nothing at all. The row carries `content` because the arm GATES ON IT, " +
+				"emitCompactionBoundary's answer rather than permission_denied's: the text IS the " +
+				"payload here, so a line with none would be a first-class notice saying nothing. " +
+				"A bare line of this subtype therefore still reads as a drop, and that gate is " +
+				"pinned inside `make check` by streamsup's " +
+				"TestParser_InformationalGatesOnEmptyContent rather than by a second row here",
+		},
+		{
 			name: "rate_limit_event", line: `{"type":"rate_limit_event"}`,
 			wantReason: dropcapReasonIgnoredType, wantDrop: true,
 			why: "CORRECTED (#1404): no longer the second ignoredLineTypes member — the type is " +

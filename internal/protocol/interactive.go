@@ -696,10 +696,10 @@ type BannerPayload struct {
 	// beside `level` would read as the frame's own body rather than as what claude
 	// printed.
 	//
-	// BOUNDED AT 4 KiB BY THE DAEMON, at the PRODUCER (#2257), and CUT rather than
-	// dropped. The bound is stated here as the contract THAT ticket owes rather than as
-	// a fact this package enforces: the enforcing constant lands in internal/streamsup
-	// beside maxCompactTrigger and maxDenialProse, on this repo's standing division
+	// BOUNDED AT 4 KiB BY THE DAEMON, at the PRODUCER (#2319), and CUT rather than
+	// dropped. The bound is stated here as the contract THAT ticket owed rather than as
+	// a fact this package enforces: the enforcing constant is streamsup's maxBannerText,
+	// landed beside maxCompactTrigger and maxDenialProse, on this repo's standing division
 	// that claude's text is bounded where it crosses the subprocess boundary. This
 	// shape and the bridge re-decide no maximum — a second cap site is a second place
 	// the limit is decided and the two could disagree silently, which is the rule

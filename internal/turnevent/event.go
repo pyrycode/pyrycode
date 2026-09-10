@@ -2407,10 +2407,14 @@ type ModelRefusalFallback struct {
 // loop notification (#2256). It is the one typed place such text arrives; before
 // this variant there was none, and the daemon dropped it.
 //
-// IT SHIPS WITH NO PRODUCER, deliberately. The streamsup mappings are #2257
-// (claude's system/informational subtype) and #2258 (system/notification), and
-// each is proven against a committed capture. Declaring the contract ahead of its
-// producers is this package's established sequencing.
+// IT HAS ONE PRODUCER SINCE #2319: streamsup's emitInformationalBanner, mapping
+// claude's system/informational subtype — a hook's block reason among them —
+// against the capture that ticket replays. The variant shipped ahead of that
+// producer deliberately, which is this package's established sequencing.
+//
+// STILL OUTSTANDING is #2258, which owns local_command_output and notification.
+// The capture records both as unobserved, so what is mappable there is that
+// ticket's to decide.
 //
 // IT CARRIES NO TURN IDENTITY, and the reason is the PRODUCER SET rather than
 // taste. A prompt a hook refuses is never answered, so no turn exists to attribute
@@ -2464,7 +2468,7 @@ type Banner struct {
 	// internal/protocol holds — `content` beside `level` would read as the frame's
 	// own body rather than as what claude printed.
 	//
-	// BOUNDED AT 4 KiB BY THE PRODUCER (#2257, whose constant lands beside
+	// BOUNDED AT 4 KiB BY THE PRODUCER (#2319, whose maxBannerText lands beside
 	// streamsup's maxCompactTrigger and maxDenialProse) and CUT rather than dropped,
 	// per Level above. The bound is stated here as the CONTRACT THAT TICKET OWES
 	// rather than as a fact this file enforces: nothing on this path caps anything,
