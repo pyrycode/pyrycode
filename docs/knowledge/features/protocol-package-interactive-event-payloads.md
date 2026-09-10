@@ -354,6 +354,16 @@ type BannerPayload struct {
   field needs translating at the same seam** — nothing in the type system catches a
   missed rename, since both sides are plain `[]string` and a round-trip fixture is
   byte-equal either way.
+- **`ModelRefusalFallbackPayload` (#2265) makes report provenance a per-field
+  property, not a payload-wide label.** Its models, `Scope`, `RefusalCategory`, and
+  `Banner` are claude-authored values, but `TruncatedFields` and `DroppedFields` are
+  daemon-authored metadata created while those values are bounded. Calling every
+  non-conversation field claude-authored would misattribute the daemon's own report
+  and invite clients to treat claude's accusatory category as daemon judgment. The
+  category remains an open, inert assertion; the arrays remain closed reports in the
+  payload's wire-key vocabulary. An excluded-only report is `nil` and therefore
+  marshals as `null`, not `[]`: filtering the unpublished refusal explanation must
+  not manufacture the claim that a complete, empty report was received.
 - **A doc comment's claim that a report slice lists its tokens "in declaration order" is
   not provable by anything that runs, and shipped false here.** `ToolDeniedPayload`'s
   `TruncatedFields`/`DroppedFields` doc comments enumerate their tokens in *this
