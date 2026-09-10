@@ -131,14 +131,17 @@ func TestInteractiveStreamLiveness(t *testing.T) {
 
 	initSend, initRecv := driveHandshakeInteractive(t, phone, pubKey, payload.Token)
 
-	// Drive ONE real turn (AC #2; the fake counterpart #1141 drives one). A short
-	// deterministic instruction with a per-run nonce defeats accidental caching
-	// without asserting on content. Generous budget: real claude on a cold stream
-	// session (spawn + model load + first-turn reply), not fakeclaude milliseconds.
+	// Drive ONE real turn (AC #2; the fake counterpart #1141 drives one). The
+	// deliberately long response crosses multiple 250 ms emitter coalescing
+	// windows, while the per-run nonce defeats accidental caching without making
+	// the assertion depend on content. Generous budget: real claude on a cold
+	// stream session (spawn + model load + first-turn reply), not fakeclaude
+	// milliseconds.
 	nonce := time.Now().UnixNano()
 	sealSendMessage(t, phone, initSend, 2, streamConvID, "m-1",
-		fmt.Sprintf("Reply with a single short word. run=%d", nonce))
-	drainForCompletedTurn(t, phone, initRecv, streamConvID, 120*time.Second)
+		fmt.Sprintf("Without using tools, write exactly ten numbered paragraphs about reliable process supervision. "+
+			"Each paragraph must contain at least two complete sentences. run=%d", nonce))
+	drainForCompletedTurnWithMinimumDeltas(t, phone, initRecv, streamConvID, 120*time.Second, 2)
 }
 
 // --- stream-json toggle + turn drain ----------------------------------------
@@ -224,16 +227,29 @@ const warnRateLimitStatus = "allowed_warning"
 // statement may discard results.
 func drainForCompletedTurn(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration) string {
 	t.Helper()
-	sawDelta := false
+	return drainForCompletedTurnWithMinimumDeltas(t, phone, cs, convID, timeout, 1)
+}
+
+// drainForCompletedTurnWithMinimumDeltas applies drainForCompletedTurn's full
+// frame inventory and terminal-idle contract, but does not accept idle until at
+// least minDeltas non-empty frames for the driving conversation have arrived.
+func drainForCompletedTurnWithMinimumDeltas(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration, minDeltas int) string {
+	t.Helper()
+	nonEmptyDeltas := 0
 	var reply strings.Builder
 	deadline := time.Now().Add(timeout)
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			if !sawDelta {
+			if nonEmptyDeltas == 0 {
 				t.Fatalf("M1: never observed a non-empty assistant_delta for %q within %s — the turn never drained "+
 					"end-to-end (delivery never reached the child, or the parser / drain gate / emitter dropped it — "+
 					"most likely a UUID mismatch between seedBootstrapRegistry and seedBoundConversation)", convID, timeout)
+			}
+			if nonEmptyDeltas < minDeltas {
+				t.Fatalf("M1: observed %d non-empty assistant_delta frame(s) for %q within %s, want at least %d — "+
+					"the reply did not stream across multiple emitter coalescing windows",
+					nonEmptyDeltas, convID, timeout, minDeltas)
 			}
 			t.Fatalf("M2: observed the assistant_delta for %q but never a terminal turn_state{idle} within %s — "+
 				"the turn opened but never closed", convID, timeout)
@@ -361,29 +377,32 @@ func drainForCompletedTurn(t *testing.T, phone *fakephone.Client, cs *noise.Ciph
 			if p.ConversationID != convID {
 				continue
 			}
-			// Every delta is accumulated, not just the first: a reply arrives in
-			// pieces and a caller's token can land in any of them. M1 below still
-			// fires exactly once, on the first non-empty one.
+			// Every delta is accumulated: a reply arrives in pieces and a caller's
+			// token can land in any of them. The requested minimum decides when M1
+			// is satisfied; the default drain keeps its one-delta contract.
 			reply.WriteString(p.Text)
-			// M1: liveness — a non-empty streamed delta for the driving conv. No
+			// M1: liveness — non-empty streamed deltas for the driving conv. No
 			// content/echo assertion (real claude's words are non-deterministic).
-			if !sawDelta && strings.TrimSpace(p.Text) != "" {
-				sawDelta = true
-				t.Logf("M1: non-empty assistant_delta (seq=%d, %d bytes) for %q", p.Seq, len(p.Text), convID)
+			if strings.TrimSpace(p.Text) != "" {
+				nonEmptyDeltas++
+				t.Logf("M1: non-empty assistant_delta %d/%d (seq=%d, %d bytes) for %q",
+					nonEmptyDeltas, minDeltas, p.Seq, len(p.Text), convID)
 			}
 		case protocol.TypeTurnState:
-			if !sawDelta {
-				continue // the leading responding state precedes the delta
-			}
 			var st protocol.TurnStatePayload
 			if err := json.Unmarshal(env.Payload, &st); err != nil {
 				t.Fatalf("decode turn_state payload: %v", err)
 			}
-			// M2: after the delta, the terminal idle state closes the turn.
-			if st.State == "idle" && st.ConversationID == convID {
-				t.Logf("M2: terminal turn_state{idle} for %q — the turn closed", convID)
-				return reply.String()
+			if st.State != "idle" || st.ConversationID != convID {
+				continue // the leading responding state precedes the delta
 			}
+			if nonEmptyDeltas < minDeltas {
+				t.Fatalf("M1: terminal turn_state{idle} arrived after %d non-empty assistant_delta frame(s) "+
+					"for %q, want at least %d", nonEmptyDeltas, convID, minDeltas)
+			}
+			// M2: after the required deltas, the terminal idle state closes the turn.
+			t.Logf("M2: terminal turn_state{idle} for %q — the turn closed", convID)
+			return reply.String()
 		}
 	}
 }
