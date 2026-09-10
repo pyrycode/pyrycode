@@ -367,10 +367,13 @@ var excludedTypes = map[string]string{
 	"TypeSlashCommandList": "push",
 
 	// outbound push — the v2 session-facts report (#2253). Outbound-only like the
-	// eight above, and mandatory here from the moment the constant exists rather
-	// than from the moment something emits it (the turnbridge mapping and the
-	// emission are both #2254) — Assertion #3 reports an unclassified constant, not
-	// an unemitted one. This entry is in fact the ONLY thing that reddens on the new
+	// eight above, and it was mandatory here from the moment the constant existed
+	// rather than from the moment something emitted it — Assertion #3 reports an
+	// unclassified constant, not an unemitted one. Both halves have since landed
+	// (#2252 the emitting Handle case, #2254 the turnbridge mapping), so the
+	// classification is now describing live traffic rather than reserving a slot for
+	// it, and it does not move: a push that started pushing is still a push. This
+	// entry was in fact the ONLY thing that reddened on the new
 	// constant: internal/protocol/compat_test.go's own two lists are hand-maintained
 	// literals, so a constant left off both moves its size assertion nowhere, while
 	// this guard walks codes.go's AST. It is a push and not a reply because that

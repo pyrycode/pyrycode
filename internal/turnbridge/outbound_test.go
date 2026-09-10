@@ -24,6 +24,18 @@ func TestMapEventOutbound(t *testing.T) {
 	const modelSentinel = "QQ-Model-Sentinel-ZZ"
 	overCapModel := "QQ-OverCap-Model-" + strings.Repeat("M", 300)
 
+	// The session-facts sentinels, the model-announced ones' discipline applied to the
+	// other half of the same init line. Mixed case for that row's reason, and the two
+	// are distinct from each other and from every conversation id in this file, so a
+	// mapper that swapped the pair — or filled either from tc — goes red on the value
+	// rather than needing a shape assertion. The over-cap pair is longer than the
+	// producer's own bounds (maxClaudeVersionField, maxPermissionModeField) AND than
+	// this file's maxSummaryLen, so a re-cap at any of the three reddens.
+	const versionSentinel = "QQ-Version-Sentinel-ZZ"
+	const modeSentinel = "QQ-Mode-Sentinel-ZZ"
+	overCapVersion := "QQ-OverCap-Version-" + strings.Repeat("C", 300)
+	overCapMode := "QQ-OverCap-Mode-" + strings.Repeat("P", 300)
+
 	// The model-list over-cap fixtures. Each is longer than EVERY bound a developer
 	// could reach for — the producer's own (streamsup's maxModelResolved /
 	// maxModelValue / maxModelDisplayName at 256, maxModelEffortLevel at 32) and
@@ -1059,6 +1071,92 @@ func TestMapEventOutbound(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			// The other half of the same system/init line. Mixed case on both strings
+			// for the ModelAnnounced verbatim row's reason — "no lowercasing" is a named
+			// property of each — and the two sentinels are distinct from each other and
+			// from tc.ConversationID, so a mapper that swapped any pair of the three
+			// goes red here without a second assertion. The truncation report carries
+			// BOTH members, in producer order, so a mapper that dropped one or reordered
+			// the pair is caught too.
+			//
+			// ev and wantPayload carry SEPARATE slice literals, the model-list rows'
+			// rule: a shared backing array would let a mapper that sorted or filtered
+			// in place mutate the expectation into agreement with itself.
+			name: "SessionFacts -> session_facts, every field verbatim",
+			ev: turnevent.SessionFacts{
+				ClaudeCodeVersion: versionSentinel,
+				PermissionMode:    modeSentinel,
+				TruncatedFields:   []string{"claude_code_version", "permission_mode"},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeSessionFacts,
+			wantPayload: protocol.SessionFactsPayload{
+				ConversationID:    "c1",
+				ClaudeCodeVersion: versionSentinel,
+				PermissionMode:    modeSentinel,
+				TruncatedFields:   []string{"claude_code_version", "permission_mode"},
+			},
+			wantOK: true,
+		},
+		{
+			// The re-cap mutant's row, and it needs BOTH strings over-cap rather than
+			// one: a re-cap applied to only the version would survive a row that tested
+			// only the posture, and vice versa. Each fixture is longer than every bound
+			// a developer could reach for — the producer's own (streamsup's
+			// maxClaudeVersionField and maxPermissionModeField, both 256, where the
+			// values were already bounded at construction) and this package's
+			// maxSummaryLen (200, the tool-précis cap and NOT applicable here) — so a
+			// re-cap at any of them goes red rather than shipping. The short sentinels
+			// above survive all three, which is why the verbatim row cannot double as
+			// this one.
+			name: "SessionFacts over-cap version and posture cross uncut",
+			ev: turnevent.SessionFacts{
+				ClaudeCodeVersion: overCapVersion,
+				PermissionMode:    overCapMode,
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeSessionFacts,
+			wantPayload: protocol.SessionFactsPayload{
+				ConversationID:    "c1",
+				ClaudeCodeVersion: overCapVersion,
+				PermissionMode:    overCapMode,
+			},
+			wantOK: true,
+		},
+		{
+			// The "not turn-scoped" claim under TEST: tc carries a conspicuous TurnID
+			// and a non-zero Seq, and the expected payload has no field either could
+			// land in. Mirrors the ModelAnnounced, RateLimited and ThinkingProgress
+			// rows above.
+			name:    "SessionFacts ignores turn addressing (not turn-scoped)",
+			ev:      turnevent.SessionFacts{ClaudeCodeVersion: versionSentinel, PermissionMode: modeSentinel},
+			tc:      TurnContext{ConversationID: "c1", TurnID: "t-must-not-appear", Seq: 42},
+			wantTyp: protocol.TypeSessionFacts,
+			wantPayload: protocol.SessionFactsPayload{
+				ConversationID:    "c1",
+				ClaudeCodeVersion: versionSentinel,
+				PermissionMode:    modeSentinel,
+			},
+			wantOK: true,
+		},
+		{
+			// Zero value maps rather than dropping — the absence of a suppression
+			// branch, under test, and the producer's gate is what makes the row a
+			// SHAPE rather than a state the daemon reaches: emitSessionFacts emits
+			// when EITHER fact is present, so a second, differently-shaped filter here
+			// would silently diverge from it. reflect.DeepEqual distinguishes a nil
+			// TruncatedFields from an empty non-nil one, so the pre-allocation mutant
+			// reddens on the struct here as well as on the bytes below.
+			name:    "SessionFacts zero value maps rather than dropping",
+			ev:      turnevent.SessionFacts{},
+			tc:      tc,
+			wantTyp: protocol.TypeSessionFacts,
+			wantPayload: protocol.SessionFactsPayload{
+				ConversationID: "c1",
+			},
+			wantOK: true,
+		},
+		{
 			// Every field of every row, 1:1. Mixed-case sentinels on all three
 			// strings for the ModelAnnounced verbatim row's reason — an
 			// all-lowercase sentinel survives a mapper that ran strings.ToLower.
@@ -1607,6 +1705,117 @@ func TestMapEventRateLimitedTruncatedFieldsOnTheWire(t *testing.T) {
 			}
 			if typ != protocol.TypeRateLimited {
 				t.Fatalf("typ: got %q, want %q", typ, protocol.TypeRateLimited)
+			}
+			b, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal mapped payload: %v", err)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(string(b), want) {
+					t.Fatalf("mapped bytes missing %s:\n%s", want, b)
+				}
+			}
+			for _, notWant := range tt.notWant {
+				if strings.Contains(string(b), notWant) {
+					t.Fatalf("mapped bytes carry %s:\n%s", notWant, b)
+				}
+			}
+		})
+	}
+}
+
+// session_facts asserts on BYTES because its nil polarity is not visible on the
+// struct alone. The payload owns no MarshalJSON — SessionFactsPayload deliberately
+// has none, RateLimitedPayload's reason — so what reaches the wire is whatever
+// encoding/json makes of the header the arm passed through, and the two outcomes a
+// reader must tell apart are "truncated_fields":null and "truncated_fields":[].
+// Those differ by one byte-level fact and by nothing on the Go value a
+// reflect.DeepEqual would compare beyond nil-ness, which the table above does pin;
+// this test is what proves the nil SURVIVES the encoder rather than being normalised
+// on the way out.
+//
+// The polarity here is the RateLimited arm's and NOT the roster arm's, and copying
+// the wrong one is the realistic mistake: nothing-was-cut is an ABSENCE, so a mapper
+// that allocated an empty slice would emit [] and tell a phone that claude's cut text
+// is complete. An omitempty added to the field later also reddens here, because
+// the key would vanish rather than carry null.
+//
+// The assertion runs on json.Marshal of the value MapEvent RETURNED, never on a
+// test-built payload: a hand-built one would prove encoding/json works and say
+// nothing about whether the mapping reached it with the nil intact.
+//
+// Needles are always the full "key":"value" pair, never a bare value — three of the
+// four fields are strings, so a bare-value needle would pass against a mapping that
+// swapped two of them.
+func TestMapEventSessionFactsTruncatedFieldsOnTheWire(t *testing.T) {
+	t.Parallel()
+
+	tc := TurnContext{ConversationID: "cc-conv-sentinel", TurnID: "t1", Seq: 7}
+
+	tests := []struct {
+		name    string
+		ev      turnevent.SessionFacts
+		want    []string
+		notWant []string
+	}{
+		{
+			name: "nil truncation reaches the wire as null",
+			ev: turnevent.SessionFacts{
+				ClaudeCodeVersion: "qq-version-sentinel",
+				PermissionMode:    "zz-mode-sentinel",
+			},
+			want: []string{
+				`"truncated_fields":null`,
+				`"conversation_id":"cc-conv-sentinel"`,
+				`"claude_code_version":"qq-version-sentinel"`,
+				`"permission_mode":"zz-mode-sentinel"`,
+			},
+			notWant: []string{`"truncated_fields":[]`},
+		},
+		{
+			// The control: null is not what the mapping emits for everything, so the
+			// nil row above passes for the right reason. Both members in ONE needle pins
+			// member ORDER — the producer's, version before posture — not merely
+			// membership. The names are the DAEMON's wire keys and specifically not
+			// claude's permissionMode, so a report rebuilt from claude's own spelling
+			// goes red on the bytes.
+			name: "populated truncation crosses verbatim and in producer order",
+			ev: turnevent.SessionFacts{
+				ClaudeCodeVersion: "qq-version-sentinel",
+				PermissionMode:    "zz-mode-sentinel",
+				TruncatedFields:   []string{"claude_code_version", "permission_mode"},
+			},
+			want: []string{
+				`"truncated_fields":["claude_code_version","permission_mode"]`,
+				`"conversation_id":"cc-conv-sentinel"`,
+			},
+			notWant: []string{`"truncated_fields":null`, `"truncated_fields":[]`},
+		},
+		{
+			// Either fact may be absent, since the producer emits when EITHER is
+			// present — so an empty version must reach the wire as "" and keep its key,
+			// never vanish. This row is also the one that would redden on an omitempty
+			// added to a value field rather than to the report.
+			name: "a posture-only line keeps the empty version's key",
+			ev:   turnevent.SessionFacts{PermissionMode: "zz-mode-sentinel"},
+			want: []string{
+				`"claude_code_version":""`,
+				`"permission_mode":"zz-mode-sentinel"`,
+				`"truncated_fields":null`,
+			},
+			notWant: []string{`"truncated_fields":[]`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			typ, payload, ok := MapEvent(tt.ev, tc)
+			if !ok {
+				t.Fatal("the mapping suppressed a session-facts event; it must be forwarded")
+			}
+			if typ != protocol.TypeSessionFacts {
+				t.Fatalf("typ: got %q, want %q", typ, protocol.TypeSessionFacts)
 			}
 			b, err := json.Marshal(payload)
 			if err != nil {

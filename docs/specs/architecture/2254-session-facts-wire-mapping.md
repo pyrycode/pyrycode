@@ -217,3 +217,31 @@ of struct literal that do it.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-10
+
+## Revisions
+
+**2026-09-10 — both open questions resolved; the correction sweep grew by two paragraphs.**
+
+- **Open question 1 (delivery window): no, and the changelog says so explicitly.** #1860 published one
+  for `model_list` because that frame's once-per-`initialize` cadence made its three loss points worth
+  enumerating. This frame rides the per-turn `system/init` line on the same lane as `model_announced`,
+  which publishes none either, and a client that misses one gets the next turn's. Recording the
+  decision rather than leaving the absence to be read as an oversight.
+- **Open question 2 (drift detectors): none redden.** `relay_guard_test.go`'s classification stays
+  `push` — a push that started pushing is still a push — and the whole `internal/protocol` package
+  passes under `-race` unchanged. The entry's comment was repaired for its stale parenthetical only.
+- **Two claims outside AC3's enumeration were repaired**, both inside blocks AC3 does name and both
+  false for the same reason: `TypeSessionFacts`' opening paragraph said *no client can see either fact
+  today*, and `SessionFactsPayload`'s said *the bridge WILL supply ConversationID*. AC3's governing
+  sentence is that no live prose or Go doc still says the frame is unemitted, so leaving either would
+  have satisfied the list while failing the rule.
+- **One live claim is knowingly left standing**, and it is not this ticket's to fix:
+  `docs/knowledge/features/protocol-package-constants-codes-go-envelope-types.md` says the frame was
+  *declared unwired in #2253* with the mapping still pending. That path belongs to the documentation
+  phase, which this ticket is forbidden to write to; the PR body carries it forward instead. The
+  #2253 changelog entry is likewise left standing, per AC4.
+- **The security review's two SHOULD FIX items both landed.** The trust-tier statements survived the
+  sweep intact — `permission_mode` is still published as a claim rather than a guarantee and both
+  strings as bounded-but-not-sanitized, in the payload doc and in § `session_facts` — and the new
+  changelog entry restates them rather than trimming them beside the stale sentence. The rewritten
+  `cmd/pyry` test reads its values from the decoded push, never from a log buffer.

@@ -1125,16 +1125,16 @@ type ModelAnnouncedPayload struct {
 //
 // Declared here (#2253) ahead of its producer so a client can be written against the
 // shape — the sequencing #1405 used ahead of #1410, #1616 ahead of #1638 and #1704
-// ahead of #1848. The producer is #2254: nothing maps or emits this frame yet, and
-// this sentence is the ONE place in the tree that claim is made, so #2254 has one
-// edit rather than #1616's twelve.
+// ahead of #1848. The producer has since landed: turnbridge.MapEvent's
+// turnevent.SessionFacts arm constructs it (#2254) and cmd/pyry's interactive turn
+// emitter pushes it (#2252), so live traffic carries the frame.
 //
 // Like ModelAnnouncedPayload it is conversation-scoped rather than turn-scoped, so
 // there is no turn_id, and receiving one neither opens nor closes a turn: a per-turn
 // report is not a turn boundary (turnevent.SessionFacts' own doc). PER LINE, NOT PER
 // SESSION — claude emits init once per TURN, so one session produces several of
-// these and the producer does not dedup. The bridge will supply ConversationID
-// because the internal event carries none.
+// these and the producer does not dedup. The bridge supplies ConversationID because
+// the internal event carries none.
 //
 // The two values' semantics are NOT restated here: turnevent.SessionFacts' field
 // comments are their single source of truth, in the manner ModelAnnouncedPayload
