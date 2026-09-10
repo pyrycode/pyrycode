@@ -167,3 +167,19 @@ Each is resolved in Phase B or recorded under `## Revisions`.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-10
+
+## Revisions
+
+### 2026-09-10 — the hook moves from `--settings` to the HOME's user settings
+
+**What drove it.** The first live gate run reddened on this ticket's own test: 1377 tests executed, 1376 passed, this one failed with an EMPTY hook witness — reading (a) of the four the design commissioned, which says nothing about the banner path. That is Open question 1 answered.
+
+**The measurement.** The failure printed the daemon's own spawn records, and both children received `--settings` twice, the rig's first and the daemon's second. `Pool.New` and `buildSession` append pyry's MCP settings pair after the operator's pass-through, exactly as § Design's risk paragraph predicted. What the plan could not measure then is now readable without a live probe: claude 2.1.259 registers `--settings` with a plain single-valued option and no accumulating parser, while `--plugin-dir` one entry along in the same option table registers one explicitly and advertises itself as repeatable. A repeated single-valued option is last-wins, so the daemon's file won and the rig's hook never registered.
+
+**The design change.** A test whose child the daemon spawns cannot reach that child through `--settings` at all — every value it passes is shadowed by construction, so this is not a tuning problem. The hook now goes into the harness-minted HOME's user settings at `<home>/.claude/settings.json`, installed by `hookBannerInstallUserSettings` from the rig builder's own JSON. That is a settings source of its own rather than a competitor for the same flag: claude's retention diagnostic calls the user source "disabled (`--setting-sources`)", so the flag is what turns it off, and pyry passes no such flag. The two files still conflict on no key, so the daemon keeps the keys `writeMCPSettings` sets. Planting configuration under the minted HOME for a daemon-spawned child to read is the route `TestInteractiveStreamSkillInvocationIsSilent` already takes for a skill.
+
+**What this costs AC 3.** Nothing structurally: both helpers still accept extra pass-through claude arguments, every existing caller keeps what it passed, and the seeded harness's own spawn is still the one call that forwards them. What changes is that this file now forwards `nil`, because the one flag it wanted to pass is the shadowed one. Passing it anyway would assert nothing, and would risk registering the same hook twice on a claude that ever did merge both occurrences — which is the failure mode the "exactly one banner" assertion would take.
+
+**Open questions.** 1 is answered above, and its stated follow-up — "a separate ticket about how a test rig reaches a daemon-spawned child's settings" — is resolved in place instead, since the user-settings source needs no argv at all. 2 and 3 stay open on the same terms: the run never got a hook to fire, so neither was reached.
+
+**Security addendum.** The new write is one more file under the same Go-minted HOME, at 0600 inside a 0700 directory, with an explicit `os.Chmod` after the write because `os.WriteFile`'s perm argument is umask-masked — § Security review's File-operations finding, unchanged in substance. It declares a hook, so it is code execution as the operator by the same design decision that section already states, and the executed script is still `oslcapWriteHookRig`'s, quoted by `oslcapShellQuote` and reading no environment variable. One thing is added: the installer refuses an existing file rather than overwriting it, because a second writer of claude's user settings appearing in this harness would leave the rig competing for the child's hooks instead of supplying the only ones in play.

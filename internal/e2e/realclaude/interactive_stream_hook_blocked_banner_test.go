@@ -26,10 +26,10 @@ package realclaude
 // A RED RUN HAS FOUR READINGS, and the hook witness is what separates them. The
 // first two are not claims about the banner path at all:
 //
-//	(a) The hook never ran — hookVerdicts is empty. Either claude did not honour
-//	    the rig's --settings, or it honoured a DIFFERENT one. See THE SHADOWING
-//	    RISK below; the failure prints the daemon's own spawn argv so the two are
-//	    distinguishable. Route back. It says nothing about the banner.
+//	(a) The hook never ran — hookVerdicts is empty. The child never registered
+//	    the rig's hook. See WHERE THE HOOK LIVES below; the failure prints the
+//	    daemon's own spawn argv, so what the child WAS handed is legible. Route
+//	    back. It says nothing about the banner.
 //	(b) The hook ran and PASSED the marked prompt — the rig failed to provoke the
 //	    thing it meant to measure. Also route back.
 //	(c) The hook ran and BLOCKED, and no banner arrived. That is the finding this
@@ -41,18 +41,38 @@ package realclaude
 //	    line" record before concluding the mapping regressed.
 //	(d) The daemon regressed on the delivery path.
 //
-// THE SHADOWING RISK, which is the one non-obvious hazard in this file and the
-// reason the hook witness is asserted at all. The rig's --settings reaches claude
-// through the daemon's pass-through argv (spawnBootstrapDaemon's #2320 tail), and
-// pyry composes its OWN --settings after it: both Pool.New and buildSession append
-// their MCP settings pair to the operator's pass-through, so what claude receives
-// carries the flag twice, the rig's first. claude declares --settings as a
-// single-valued option, so which one wins is claude's precedence to decide and is
-// UNMEASURED here. If the daemon's wins, the rig's hook never registers and the
-// run reds as reading (a) rather than as a false (c). The two files conflict on no
-// key — writeMCPSettings' payload is two booleans and declares no hooks — so
-// whichever wins, nothing else about the spawn moves, and both of those booleans
-// suppress PTY-path startup dialogs this stream-json path does not raise.
+// WHERE THE HOOK LIVES, AND WHY IT IS NOT A --settings PASS-THROUGH. This file's
+// first live run (2026-09-10) did pass the rig's settings file through the
+// daemon's pass-through argv, and reddened with an EMPTY witness — the hook never
+// ran. Two readings settle it, and neither is a guess. The spawn record the
+// failure printed shows the child receiving --settings TWICE, the rig's first and
+// the daemon's second: pyry composes its own MCP settings pair AFTER the
+// operator's pass-through, at both Pool.New and buildSession. And claude 2.1.259
+// registers --settings as a plain single-valued option with no accumulating
+// parser, where --plugin-dir one entry along in the same option table registers
+// one explicitly and advertises itself as repeatable. A repeated single-valued
+// option is last-wins, so the daemon's file won and the rig's hook was never
+// registered.
+//
+// A test whose child the DAEMON spawns therefore cannot reach that child through
+// --settings at all: whatever it passes is shadowed by construction. So the hook
+// goes into the harness-minted HOME's USER settings, at <home>/.claude/settings
+// .json, which is a settings source in its own right rather than a competitor for
+// the same flag. claude's own retention diagnostic calls that source "disabled
+// (--setting-sources)", so the flag is what turns it OFF, and pyry passes no such
+// flag. The two files conflict on no key — writeMCPSettings' payload is two
+// booleans and declares no hooks — so the daemon keeps the keys it sets and the
+// user file supplies the only hooks in play. Planting configuration under the
+// minted HOME for a daemon-spawned child to read is the route
+// TestInteractiveStreamSkillInvocationIsSilent already takes for a skill.
+//
+// Nothing is passed through #2320's pass-through seam as a result, and the seed
+// callback returns nil. The seam is still the harness capability the ticket asks
+// for, and the one a caller with a flag pyry does NOT compose would use; this
+// file simply has no such flag left to pass. Passing the shadowed one anyway, to
+// stay faithful to the design that failed, would assert nothing and would risk
+// registering the same hook twice if a later claude ever did merge both
+// occurrences. spawnBootstrapDaemon's header carries the same warning at source.
 //
 // WHY NEITHER SHARED DRAIN FITS. drainForCompletedTurn requires a non-empty
 // assistant_delta before a terminal idle, and a hook-blocked turn carries no
@@ -99,6 +119,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -125,9 +146,9 @@ const hookBannerTurnCloseBudget = 60 * time.Second
 func TestInteractiveStreamHookBlockedBannerReachesTheClient(t *testing.T) {
 	// The rig is written by the seed callback, which runs after the bootstrap
 	// registry is seeded and BEFORE the daemon starts — the only point at which
-	// the minted HOME exists and nothing has spawned yet. Its return value is the
-	// pass-through argv (#2320's seam), which is why the settings path does not
-	// have to be knowable at this call: it is not, and cannot be.
+	// the minted HOME exists and nothing has spawned yet. Both halves need that
+	// window: the hook's own files, and the user settings file that registers it,
+	// which has to be on disk before the first child reads its startup snapshot.
 	var rig oslcapRig
 	h := startPerConversationHarnessSeeded(t, func(home, workdir string) []string {
 		var err error
@@ -141,7 +162,16 @@ func TestInteractiveStreamHookBlockedBannerReachesTheClient(t *testing.T) {
 			// resulting silence as a finding about the banner.
 			t.Fatalf("write the #2320 hook rig: %v", err)
 		}
-		return []string{"--settings", rig.SettingsPath}
+		// The rig builder's own settings file stays where it wrote it and is not
+		// passed to anything — see the header. What the child reads is this copy
+		// of the same JSON, installed as the HOME's user settings.
+		if err := hookBannerInstallUserSettings(home, rig); err != nil {
+			t.Fatalf("install the #2320 hook rig as user settings: %v", err)
+		}
+		// No extra pass-through claude arguments. The one flag this file wanted
+		// to pass is shadowed by the daemon's own copy of it, so the seam has
+		// nothing to carry here.
+		return nil
 	})
 
 	// A per-run nonce so reruns differ, and so the marked prompt the hook matches
@@ -203,7 +233,7 @@ func TestInteractiveStreamHookBlockedBannerReachesTheClient(t *testing.T) {
 	if len(verdicts) == 0 || verdicts[0] != oslcapHookBlocked {
 		t.Fatalf("the hook witness reads %q, want it to open with %q. The rig did not refuse the marked "+
 			"prompt, so whatever reached the client above was not this file's subject. An EMPTY witness means "+
-			"the hook never ran at all — see the header's shadowing risk, and the spawn argv below.\n%s",
+			"the hook never ran at all — see the header's WHERE THE HOOK LIVES, and the spawn argv below.\n%s",
 			verdicts, oslcapHookBlocked, hookBannerSpawnArgv(h))
 	}
 
@@ -248,11 +278,58 @@ func TestInteractiveStreamHookBlockedBannerReachesTheClient(t *testing.T) {
 		"exactly one banner crossed the window", liveReqID)
 }
 
+// hookBannerInstallUserSettings writes the rig's settings JSON into the minted
+// HOME as claude's USER settings — the only settings source a test can reach on a
+// child the DAEMON spawns, for the reason the header gives: every --settings the
+// pass-through carries is shadowed by the copy pyry appends after it.
+//
+// The bytes are the rig builder's own rather than a second rendering of the same
+// shape. oslcapSettingsJSON is pinned by TestOslcapSettingsFileIsTheShapeClaudeReads
+// inside `make check`; a hand-copied shape here would be pinned by nothing and
+// would drift the first time claude's hooks schema moved.
+//
+// Modes are set with an explicit Chmod after the write rather than left to
+// os.WriteFile's perm argument, which the runner's umask masks — oslcapWriteHookRig's
+// discipline, for its reason: this file names a script claude runs AS THE OPERATOR,
+// so its integrity is the property that matters, and a mode that depends on the
+// umask is a mode no test can pin.
+//
+// An existing file is an error, never an overwrite. Nothing else in this harness
+// writes <home>/.claude/settings.json today — WithWorktreeAuthenticated seeds
+// .claude.json, which is a different file — so one already there would mean a
+// second writer had appeared and this rig would be competing with it for the
+// child's hooks rather than supplying the only ones in play.
+func hookBannerInstallUserSettings(home string, rig oslcapRig) error {
+	dir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create the user settings dir: %w", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("chmod the user settings dir: %w", err)
+	}
+	path := filepath.Join(dir, "settings.json")
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("%s already exists; this harness has grown a second writer of claude's user "+
+			"settings and the hook rig would be competing with it", path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat the user settings file: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(rig.Settings), 0o600); err != nil {
+		return fmt.Errorf("write the user settings file: %w", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("chmod the user settings file: %w", err)
+	}
+	return nil
+}
+
 // hookBannerSpawnArgv renders the daemon's own "spawning claude" records, which is
-// what makes the header's shadowing risk decidable from a failure rather than
-// guessable. Each record carries the argv pyry handed one child, so the number and
-// ORDER of --settings occurrences in it says whether the rig's file was the
-// earlier of two.
+// what makes a red run's cause readable rather than guessable. Each record is the
+// argv pyry handed one child, and what a reader checks in it is that the rig's
+// settings file is ABSENT and that the single --settings there is the daemon's
+// own — i.e. that this run took the user-settings route the header describes, so
+// an empty witness is a hook that did not register rather than a pass-through the
+// daemon shadowed. That shadowing is what the first live run measured.
 //
 // Only the extracted records are rendered, never h.daemon.stderr's whole buffer:
 // that is the daemon's entire captured stderr, the harness already tees it to
@@ -265,8 +342,8 @@ func hookBannerSpawnArgv(h *perConvHarness) string {
 		return "The daemon logged no \"spawning claude\" record at all, so no child was spawned through it."
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "The daemon spawned %d child/children; each record's argv decides the shadowing "+
-		"question (count the --settings occurrences and read their order):", len(records))
+	fmt.Fprintf(&b, "The daemon spawned %d child/children; each record is the argv it handed one of them, "+
+		"and the rig's settings file should appear in NONE of them:", len(records))
 	for _, rec := range records {
 		fmt.Fprintf(&b, "\n  %q", rec)
 	}
@@ -391,10 +468,12 @@ func (w *hookBannerWindow) awaitBanner(t *testing.T, h *perConvHarness, convID s
 			verdicts := oslcapHookVerdicts(rig.WitnessPath)
 			t.Fatalf("no banner reached the client within %s of the refused send. The hook witness reads %q, "+
 				"and it decides which of these this is:\n"+
-				"  EMPTY — the hook never ran. Either claude did not honour the rig's --settings or it "+
-				"honoured a different one; pyry composes its own --settings AFTER the pass-through, so the "+
-				"rig's is the earlier of two occurrences of a single-valued flag. Says NOTHING about the "+
-				"banner path. Route back.\n"+
+				"  EMPTY — the hook never ran, so the child did not register it from <HOME>/.claude/"+
+				"settings.json. Either claude stopped loading user settings on a spawn carrying its own "+
+				"--settings, or it stopped running UserPromptSubmit hooks from that source. Says NOTHING "+
+				"about the banner path, and it is NOT the --settings shadowing the first live run measured "+
+				"— this file passes no --settings, and the argv below shows it. Route back; the follow-up is "+
+				"a ticket about how a test rig reaches a daemon-spawned child's hooks at all.\n"+
 				"  [%s …] — the rig failed to provoke a refusal at all. Route back.\n"+
 				"  [%s …] — THE FINDING: claude refused the prompt and the refusal did not reach the client. "+
 				"Before concluding the mapping regressed, read the daemon's stderr for a \"dropping "+
