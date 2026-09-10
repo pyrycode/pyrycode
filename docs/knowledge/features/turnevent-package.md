@@ -136,8 +136,8 @@ type Inbound interface{ isInbound() }          // permission.go (#700) — inbou
   arms' own lists still name `acp_turn_stream.go`, deleted with the
   terminal-driving path in #1348.
 
-The outbound `Event` variants themselves — the full field table for all
-fourteen, `TurnEnd`'s per-ticket growth history, `Stall`/`ApiRetry`/`Compacting`,
+The outbound `Event` variants themselves — the full field table,
+`TurnEnd`'s per-ticket growth history, `Stall`/`ApiRetry`/`Compacting`,
 and `Location` — moved to their own document, § Sections below, once this
 file reached the 50000-byte package-overview cap; that section was the
 majority of the file's bytes and the one still gaining a paragraph almost
