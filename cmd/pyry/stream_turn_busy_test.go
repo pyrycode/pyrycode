@@ -699,6 +699,11 @@ func TestTurnMarkFor_TotalOverEveryVariant(t *testing.T) {
 		// new arm; turnMarkFor is unchanged by that ticket, and its default-arm comment
 		// does NOT gain this variant's name for the reason the row above states.
 		{turnevent.ModelRefusalFallback{Scope: "session", FallbackModel: "claude-sonnet-4-5"}, turnMarkNone},
+		// #2268. Neither an opener nor a closer. Unlike the fallback row, this line
+		// announces that claude will not retry, so no later event is guaranteed; opening
+		// a mark here would therefore wedge the conversation permanently. The whitelist's
+		// default already answers turnMarkNone, so turnMarkFor remains unchanged.
+		{turnevent.ModelRefusalNoFallback{OriginalModel: "claude-opus-4-1"}, turnMarkNone},
 	}
 
 	covered := make([]string, 0, len(tests))
