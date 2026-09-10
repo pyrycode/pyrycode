@@ -1993,9 +1993,9 @@ const (
 // claude's words the check list may NOT contain.
 //
 // IT HAS ONE PRODUCER SINCE #2319, which maps claude's informational subtype onto this
-// frame against a committed capture. STILL OUTSTANDING is #2258, which owns
-// local_command_output and notification: the capture records both as unobserved, so
-// what is mappable there is that ticket's to decide. The frame shipped ahead of that
+// frame against a committed capture, and NO SECOND ONE. #2258, which owned
+// local_command_output and notification, is CLOSED AS ANSWERED (2026-09-10): the
+// capture recorded both unobserved with zero frames, so neither had a field set to map. The frame shipped ahead of that
 // first producer deliberately, and declaring a contract ahead of its producers is this
 // file's established sequencing —
 // #2052→#2054, #1983→#1984 — and it lets the client slices start against a published

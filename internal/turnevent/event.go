@@ -2412,9 +2412,13 @@ type ModelRefusalFallback struct {
 // against the capture that ticket replays. The variant shipped ahead of that
 // producer deliberately, which is this package's established sequencing.
 //
-// STILL OUTSTANDING is #2258, which owns local_command_output and notification.
-// The capture records both as unobserved, so what is mappable there is that
-// ticket's to decide.
+// IT HAS NO SECOND PRODUCER. #2258, which owned local_command_output and
+// notification, is CLOSED AS ANSWERED (2026-09-10): the capture recorded both
+// subtypes unobserved with zero frames, so neither had a field set to map, and the
+// operator closed it rather than spend another live capture lap. That is not a claim
+// claude never sends them — only that neither is reachable on the input paths tried
+// at 2.1.259. The variant's second slot stays open for whichever subtype produces
+// bytes first.
 //
 // IT CARRIES NO TURN IDENTITY, and the reason is the PRODUCER SET rather than
 // taste. A prompt a hook refuses is never answered, so no turn exists to attribute

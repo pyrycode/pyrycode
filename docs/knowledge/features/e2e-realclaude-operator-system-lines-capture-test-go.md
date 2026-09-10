@@ -25,11 +25,20 @@ ordinary assistant prose, not a distinct `system` line. That is itself the findi
 least for `/usage`, a local slash command's output does not arrive as a `local_command_output`
 line at all, so a mapping built for one would have nothing to decode against.
 
-`commands_changed` landed **inconclusive** — the rig wrote `.claude/commands/oslcap-probe.md`
-mid-session, but no post-write `system/init` line arrived inside the observation window to measure
-whether the inventory changed. Whether claude re-reads `.claude/commands/` mid-session is still
-open at `2.1.259`; a future capture needs a longer post-write window or an additional turn before
-concluding either way.
+`commands_changed` landed **inconclusive** on this run — the rig wrote
+`.claude/commands/oslcap-probe.md` mid-session, but no post-write `system/init` line arrived inside
+the observation window to measure whether the inventory changed.
+
+**CORRECTED 2026-09-10: the committed fixture answers it, so read the fixture's row and not the
+paragraph above.** A later lap supplied exactly the longer post-write window this section asked for.
+`operator_system_lines_v2.1.259.json` records the subtype `observed: false`, `trigger_fired: false`,
+`trigger_could_not_fire: true`, `conclusive: true`: 154 bytes of a project slash command went into
+the live child's `.claude/commands`, claude re-broadcast its inventory across 2 post-write
+`system/init` lines, and in both the probe was absent and the inventory was identical to the
+baseline. Writing a file there provokes nothing at `2.1.259`. That does not extend to every trigger
+— the one #2197 named and nobody has tried is skills discovery in a subdirectory, a different
+mechanism from project slash commands. #2259, which would have mapped the subtype, is closed as
+answered on this evidence.
 
 `notification` stayed **unobserved, no trigger**, exactly as designed — it has none, and the
 record says so rather than naming one that doesn't exist.

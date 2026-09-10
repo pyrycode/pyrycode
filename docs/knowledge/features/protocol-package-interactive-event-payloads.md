@@ -130,7 +130,8 @@ type ToolDeniedPayload struct {
 // hook-refused prompt is never answered, and a notification rides claude's own
 // queue. **CORRECTED 2026-09-10 (#2319): has a producer.** `system/informational`
 // maps onto it (a hook's block reason reaching the operator for the first time);
-// `system/notification` (#2258) is still outstanding.
+// `system/notification` (#2258) is CLOSED AS ANSWERED 2026-09-10 — recorded
+// unobserved with zero frames, so it had no field set to map.
 type BannerPayload struct {
     ConversationID string `json:"conversation_id"`
     Level          string `json:"level"`      // claude's own key, adopted verbatim; open-set, dropped not cut

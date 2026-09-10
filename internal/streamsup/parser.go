@@ -4670,8 +4670,12 @@ func (p *Parser) emitSystemSubtype(subtype string, line []byte) bool {
 // from the contract that variant's doc publishes, never from a hand-built payload.
 //
 // NAMED FOR THE SUBTYPE RATHER THAN THE EVENT, unlike emitCompactionBoundary beside
-// it, and deliberately: #2258 maps system/notification onto this SAME variant, so an
-// emitBanner would be a name its sibling could not also take.
+// it, and deliberately: the variant is shared, so an emitBanner would be a name no
+// sibling subtype could also take. #2258 was to be that sibling and is CLOSED AS
+// ANSWERED (2026-09-10) — the committed capture recorded system/notification and
+// system/local_command_output unobserved with zero frames, so neither had a field set
+// to map. The name still earns itself: the variant's second slot stays open for
+// whichever subtype produces bytes first.
 //
 // system/informational is the line claude uses for non-error status text about the
 // session — hook feedback, a UserPromptSubmit hook's block reason, text a slash
