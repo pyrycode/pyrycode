@@ -125,3 +125,5 @@ search can reach it.
 - [Drift detectors](protocol-package-drift-detectors.md) — The v1 type list appears three times: in the `Type*` constants block (`codes.go`), in the `inboundAppTypeSet` map literal (`envelope.go`),…
 - [What's deliberately NOT in the package](protocol-package-what-s-deliberately-not-in-the-package.md) — see the document
 - [Related](protocol-package-related.md) — see the document
+
+See [development verification](development-verification.md) for cross-package testing and evidence checks.

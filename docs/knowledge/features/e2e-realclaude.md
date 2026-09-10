@@ -128,3 +128,5 @@ search can reach it.
 - [1448](e2e-realclaude-related-tickets-1448-1458.md) — see the document
 - [1459](e2e-realclaude-related-tickets-1459-1463.md) — see the document
 - [1353](e2e-realclaude-related-tickets-1353-1428.md) — see the document
+
+See [development verification](development-verification.md) for cross-package testing and evidence checks.

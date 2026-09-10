@@ -107,3 +107,12 @@ Why this is a build gate and not just guidance: comments are the one thing no te
 - **Commit messages:** imperative mood, concise subject line. E.g., "Extract backoff timer into testable type".
 - **No force-push to main.** Feature branches are fine to rebase.
 - **One concern per commit.** Refactors and features in separate commits.
+
+## Persistent data conventions
+
+Translate package error values to wire error codes at the consuming handler.
+Keep transport vocabulary out of storage and process primitives.
+Compare timestamps with `time.Time.Equal` across serialisation boundaries.
+Write persistent registries through a temporary file in the destination directory,
+then sync, close and rename it. Sort records by a stable key before serialising.
+Validate caller-supplied identifiers at the public boundary that receives them.

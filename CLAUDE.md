@@ -2,7 +2,7 @@
 
 ## Headless Mode
 
-If you are running headless (`claude -p`, dispatch, cron), do not prompt for input. Make decisions, document your reasoning, and move on. Read `docs/PROJECT-MEMORY.md` and `docs/knowledge/INDEX.md` before starting any work.
+When running unattended through a dispatcher or scheduled job, do not prompt for input. Make decisions, document your reasoning, and move on. Read `docs/knowledge/INDEX.md` before starting work.
 
 ## Project
 
@@ -65,83 +65,54 @@ Key points:
 ```
 docs/
   knowledge/                   Evergreen documentation
-    INDEX.md                   One-line summary per doc (documentation phase is the sole writer)
+    INDEX.md                   Short startup map
+    CATALOG.md                 Detailed document inventory
     architecture/              System design, module interactions
     codebase/                  Per-ticket implementation + patterns + lessons (<N>.md; the directory listing is its index)
     decisions/                 ADRs (numbered: 001-*.md)
     features/                  Feature documentation
   specs/                       Per-ticket build artifacts
-  PROJECT-MEMORY.md            Index of where things live — read-only for agents
+  PROJECT-MEMORY.md            Compatibility pointer to the shared index
   lessons.md                   Frozen 2026-05-11 — historical reference only
   plan.md                      Phase roadmap
 ```
 
 - **Knowledge docs** are evergreen — updated when things change, not appended to
 - **Specs** are build-time artifacts created during ticketed work
-- **PROJECT-MEMORY.md** is read-only for agents (since 2026-05-11); humans maintain it directly
-- **lessons.md** is frozen (2026-05-11); new lessons go in the ticket's `docs/knowledge/codebase/<N>.md`
+- **PROJECT-MEMORY.md** is a compatibility pointer. Do not append there.
+- **lessons.md** and **knowledge/codebase/** are frozen history. New lessons go into the owning topic document.
 
 ## Search Before You Build
 
-Use QMD to search project documentation before writing code or making decisions:
-
-```
-mcp__qmd__query(collection: "pyrycode-docs", query: "backoff restart strategy")
-mcp__qmd__query(collection: "pyrycode-root", query: "error handling convention")
-```
-
-**Collections:**
-- `pyrycode-docs` — indexes `docs/` (knowledge base, specs, lessons, project memory)
-- `pyrycode-root` — indexes root markdown (CLAUDE.md, CODING-STYLE.md, README.md) and `agents/**/CLAUDE.md`
-
-Use **Context7** for Go library documentation:
-```
-mcp__context7__resolve-library-id(libraryName: "creack/pty")
-mcp__context7__query-docs(context7CompatibleLibraryID: "<id>", topic: "start process in pty")
-```
+Use QMD's available tool schema to search `pyrycode-docs` for documentation
+and `pyrycode-root` for project instructions. Tool names and argument shapes can
+differ between assistants. Use Context7's current tools for library documentation.
+Do not copy an old invocation without checking the tool signature.
 
 **Always search QMD before:** writing new code, making architectural decisions, creating new files, fixing bugs. The answer may already be documented.
 
 **Always `qmd update && qmd embed` after:** adding or modifying docs. `embed` alone doesn't detect new files.
 
-## Session Memory
+## Shared project knowledge
 
-**On start:**
-1. Read `docs/PROJECT-MEMORY.md` — index of where things live
-2. Read `docs/knowledge/INDEX.md` — one-line map of the evergreen docs
-3. Read `docs/knowledge/features/` for the area you touch; architecture truth is `docs/knowledge/architecture/system-overview.md`
+Claude and Codex share these instructions. Claude auto memory is disabled for
+this project. Do not read or write its local memory directory during routine work.
 
-**During work:**
-- Update `docs/knowledge/` evergreen docs when the thing they describe changes
+Start with `docs/knowledge/INDEX.md`, then read the owning topic for the task.
+Search `docs/knowledge/CATALOG.md` or QMD when more detail is needed. Do not read
+the entire catalog at startup. See `docs/shared-knowledge.md` for the capture rules.
 
-**On finish:**
-- Verify all knowledge changes are committed
-- Run `qmd update && qmd embed` if docs changed
+Pipeline role restrictions take precedence over general documentation advice.
+Builders record lessons in PR bodies, verifiers in review comments, and refiners
+on tickets. The documentation stage is the sole pipeline writer under
+`docs/knowledge/`. It folds durable findings into the owning topic and updates
+the catalog when a document is added. No new per-ticket knowledge files.
+Interactive maintainers may update shared documentation in a reviewed change.
+Workflow lessons belong in the agent or dispatcher repository. Project direction,
+preferences and operating history belong in the vault, with links to engineering docs.
 
-## Knowledge Capture
-
-When making decisions, discovering gotchas, or completing features:
-
-| What happened | Where to write |
-|---|---|
-| Chose X over Y with reasoning | `docs/knowledge/decisions/NNN-*.md` (ADR) |
-| How a feature works | `docs/knowledge/features/*.md` |
-| System design, module interactions | `docs/knowledge/architecture/*.md` |
-| Per-ticket implementation, patterns, lessons | `docs/knowledge/codebase/<N>.md` — written by the pipeline's documentation phase |
-
-Update `docs/knowledge/INDEX.md` when adding new knowledge docs.
-
-Do **not** write to `docs/lessons.md` (frozen 2026-05-11) or `docs/PROJECT-MEMORY.md` (read-only for agents). Lessons and status land in the ticket's `docs/knowledge/codebase/<N>.md` via the documentation phase.
-
-## Memory index entries
-
-The Claude Code memory index is injected into every agent run and it is capped. Keep tickets out of it entirely.
-
-**Never name a ticket in a memory index entry.** No ticket number in the title, none in the note filename. A ticket's knowledge belongs in the repo, where it is committed, reviewed and unbounded. The documentation phase folds each ticket's lessons into the package overview at `docs/knowledge/features/<package>.md`. A refinement, split or prerequisite decision belongs on the ticket itself as a comment, which the dispatcher already feeds to every later agent on that ticket.
-
-**The index is only for a lesson that outlives its ticket.** Title it with what was learned and no number at all, as in `structured clone preserves an undefined property`. Cite the ticket in the summary if that helps, never in the title and never in the filename.
-
-The dispatcher enforces this deterministically. Between cycles it strips every entry whose title or note filename carries a ticket number, so an entry that names one disappears on its own. The note file stays on disk; only the pointer goes. Writing one is not dangerous, it is just wasted.
+Do not append to the compatibility memory index or frozen history. Re-index QMD
+after documentation changes and include those changes in the commit.
 
 ## Package overview size
 
