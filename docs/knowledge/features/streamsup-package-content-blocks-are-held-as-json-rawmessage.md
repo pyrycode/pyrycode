@@ -120,11 +120,31 @@ structural type assertion would fail *open* rather than a build failure. **CORRE
 closed `PostureGate` onto its own freshly-minted id after a successful write, so claude's
 per-model refusal of `auto` (#2041) — or any other NAK for a request this method sent — is
 recorded as a refusal and surfaces as a turn-gate Warn if it lands while the gate is closed; an
-**open** gate is never touched by this call, so a `/model`/`/effort` delivery that follows it on
-the same turn is unaffected. See [Posture gate](streamsup-package-posture-gate-spawn-permission-mode-ack.md).
+**open** gate is never touched by this call, so a later `/effort` delivery is
+unaffected. Model delivery uses its own control request and never participates in
+the posture gate. See [Posture gate](streamsup-package-posture-gate-spawn-permission-mode-ack.md).
 See [codebase/1603.md](../codebase/1603.md),
 [set-permission-mode-inband-probe.md](set-permission-mode-inband-probe.md), and
 [permission-mode-switch-inband-probe.md](permission-mode-switch-inband-probe.md).
+
+**Model-control send primitive (#2280).** `(*Runner).SetModel(model string) error`
+writes one newline-terminated control request to the held-open child stdin:
+`{"type":"control_request","request_id":"<id>","request":{"subtype":"set_model","model":"<model>"}}`.
+`WriteModel(w io.Writer, requestID, model string) error` is the marshal-and-write
+half: nil stdin returns `ErrNoLiveChild`, JSON encoding keeps the model a string,
+and the complete line is passed to one `Write`. `controlRequestInner.Model` is
+tagged `omitempty`, so interrupt, initialize and permission-mode requests retain
+their prior byte shapes. The id comes from the same `nextControlID` sequence as
+every other control subtype.
+
+This request creates no user turn. Its matching success response identifies the
+request but does not echo the requested alias; the resolved model is reported by
+the next application turn's `system/init`. `SetModel` deliberately does not close
+or retarget `PostureGate`: that gate protects spawn and permission-posture
+confirmation, while a missing or refused model acknowledgement must not turn an
+otherwise healthy session into a refusal window. Model servability and
+client-visible refusal reporting therefore remain outside this writer; the
+caller-owned validation boundary still constrains network-originated values.
 
 **Initialize send primitive (#1689).** `(*Runner).RequestInitialize() error` writes a single
 structured `control_request` line —

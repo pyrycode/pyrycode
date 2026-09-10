@@ -1,18 +1,21 @@
 # interactive_stream_inband_model_test.go
-- `interactive_stream_inband_model_test.go` (#1582) — **live proof of #1581, not
-  a new feature under test**: #1581 changed `Pool.UpdateSettings` to deliver a
-  model/effort-only change by writing `/model <value>` as an in-band user turn
-  instead of killing and respawning the child, and proved that hermetically —
-  observing that no respawn happened and that the write was issued, never that
-  claude itself changed model. This test supplies the second half. It drives an
+- `interactive_stream_inband_model_test.go` (#1582, updated #2280) — **live proof
+  of model delivery, not a new feature under test**: #2280 changed
+  `Pool.UpdateSettings` to deliver a non-empty model as a `set_model` control
+  request instead of an in-band `/model` user turn, and proved the exact
+  newline-terminated write hermetically. This test supplies the real-child half.
+  It drives an
   **in-process `sessions.Pool`** (not a daemon subprocess — the only test in this
   package that constructs one) through a turn, `Pool.UpdateSettings`, and a
-  further turn, and asserts from claude's own per-turn `system`/`init`
+  further turn, waits for the success response carrying the model request's own
+  correlation id, and asserts from claude's next per-turn `system`/`init`
   announcement — read via `inbandTapRecorder`, an `io.Writer` dropped into
   `streamsup.Config.Stdout` **upstream of the parser**, the same seam
   `dropcapRecorder` (#1260) taps — that the reported model changed to the
-  requested one and that one process (`ChildPID` unchanged, one `"spawning
-  claude"` log record) served every turn. The `init` line is asserted here from
+  resolved target rather than merely echoing the requested alias, and that one
+  process (`ChildPID` unchanged, one `"spawning claude"` log record) served every
+  turn. Because `set_model` creates no turn, there is no intermediate result or
+  old-model init to tolerate. The `init` line is asserted here from
   the tap upstream of the parser, independent of whatever the parser does with
   it downstream. CORRECTED 2026-08-19 (#1600): this used to say the line "must
   never reach a client or daemon event" because `emitSystemSubtype` had no arm
@@ -43,7 +46,7 @@
   always has a candidate that differs from whatever a given machine's default
   is. Two assertion pairs, each the sole red for a distinct mutant, both proven
   by measured evidence runs recorded in the file's header: A1/A2 (model changed)
-  red under a `-overlay` mutant dropping the in-band `/model` send, green
+  red under a `-overlay` mutant dropping the former in-band `/model` send, green
   (vacuously) on the pre-#1581 tree since a respawn also changes the model;
   A3/A4 (no teardown) red on the pre-#1581 tree (`b047b9e^`, 2 spawns), green
   under the mutant. Zero production files touched. Code review: one round, PASS,
