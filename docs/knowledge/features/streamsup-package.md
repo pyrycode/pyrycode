@@ -94,6 +94,31 @@ func NewParser(sink func(turnevent.Event), logger *slog.Logger) *Parser
 func (p *Parser) Write(b []byte) (int, error) // io.Writer; set as Config.Stdout
 ```
 
+`emitStreamEvent` maps Claude's nested partial-message wire without changing the
+downstream event contract. A valid `message_start` replaces the current message
+ID and open-block state; a valid `content_block_start` records one index and
+block type. Each `content_block_delta/text_delta` for that matching open text
+block emits a `turnevent.TextChunk` immediately with the current message ID.
+Measured lifecycle, thinking, signature, and partial tool-input events remain
+content-free: they emit nothing, and partial JSON never competes with the
+completed assistant `tool_use` block as the tool event's owner. Unknown,
+undecodable, or unattributed inner events instead emit one `Unrecognized`; delta
+text is never accumulated or logged.
+
+The later completed assistant text is suppressed only for the captured
+correlation: the line has exactly one text block, its message ID matches the
+current stream message, and the corresponding open text block has already
+emitted a delta. Multi-block assistant lines and text without delta evidence keep
+the completed-text behavior. A `result` clears the whole stream-event composite,
+so a later delta cannot inherit the prior message identity; `message_start`
+replaces that identity between messages within the same turn.
+
+Reset tests must isolate each field they claim to prove. To prove that `result`
+clears message attribution, reopen a matching text block after the result before
+sending the rejected delta. Without that setup, clearing only the block state is
+enough to reject the delta, so a mutant that wrongly retains the old message ID
+stays green.
+
 `emitSystemSubtype` maps every `system/api_retry` line to
 `turnevent.ApiRetry{Active:true}` with claude's `attempt` and `max_retries` values;
 repeated active lines must not be coalesced because each advances the counter. The

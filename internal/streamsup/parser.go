@@ -2193,6 +2193,12 @@ const harnessNoOutputNudge = "[Your previous response had no visible output. Ple
 // the next content line rather than by a child-lifecycle reset, preserving one
 // observable answer for the client without coupling parser state to process teardown.
 //
+// AMENDED 2026-09-11 (#2270): stream-event attribution is one composite eighth
+// piece of cross-line state. A message_start replaces its message id and open-block
+// fields, content-block events advance the open block, and the existing result arm
+// clears the composite. It retains only one id, one block discriminator and scalar
+// routing state; delta text is emitted directly and is never accumulated here.
+//
 // Single-writer invariant: os/exec drives a non-*os.File Config.Stdout through
 // exactly one internal goroutine (io.Copy of the child's stdout pipe into this
 // writer), so Write — hence buf and the sink calls — is only ever invoked
@@ -2412,6 +2418,17 @@ type Parser struct {
 	// the field without a mutex.
 	apiRetryOpen bool
 
+	// streamMessageID is the message identity supplied by the latest valid
+	// stream_event/message_start. The three block fields describe the one currently
+	// open content block. streamBlockTextDelta records only that the block has already
+	// published text; model output itself is never retained. message_start replaces
+	// this composite and consumeLine's result arm clears it.
+	streamMessageID      string
+	streamBlockIndex     int
+	streamBlockType      string
+	streamBlockOpen      bool
+	streamBlockTextDelta bool
+
 	// postureGate is the ack signal this parser releases for the runner it is
 	// installed on (#2064). Minted in NewParser, read by the runner through
 	// PostureGate(). It carries its OWN mutex, so it is the one piece of parser state
@@ -2574,6 +2591,35 @@ type streamLine struct {
 	Type    string         `json:"type"`
 	Subtype string         `json:"subtype"`
 	Message *streamMessage `json:"message"`
+}
+
+// streamEventLine keeps the vendor event payload raw until consumeLine has selected
+// the top-level stream_event arm. Nested control data can therefore never influence
+// top-level segmentation, and an unsafe inner shape remains available to the existing
+// capped Unrecognized path.
+type streamEventLine struct {
+	Event json.RawMessage `json:"event"`
+}
+
+type streamEventInner struct {
+	Type         string                   `json:"type"`
+	Index        *int                     `json:"index"`
+	Message      *streamEventMessage      `json:"message"`
+	ContentBlock *streamEventContentBlock `json:"content_block"`
+	Delta        json.RawMessage          `json:"delta"`
+}
+
+type streamEventMessage struct {
+	ID string `json:"id"`
+}
+
+type streamEventContentBlock struct {
+	Type string `json:"type"`
+}
+
+type streamEventDelta struct {
+	Type string  `json:"type"`
+	Text *string `json:"text"`
 }
 
 // systemAPIRetryLine is the complete published subset of a system/api_retry
@@ -4315,6 +4361,8 @@ func (p *Parser) consumeLine(line []byte) {
 		// sidecar, a sibling of `message` rather than a field inside it (#2024) —
 		// and, since #2191, the spawning Agent call, a third field of that shape.
 		p.emitUser(sl.Message, line)
+	case "stream_event":
+		p.emitStreamEvent(line)
 	case "result":
 		p.clearAPIRetry()
 		// The turn boundary. The subtype selects the reason: an interrupted turn
@@ -4400,6 +4448,7 @@ func (p *Parser) consumeLine(line []byte) {
 		// terminal frames drive, which this clear does not touch. The residual direction
 		// is argued at the field: an extra event, never silence.
 		p.taskProgressToolUses = nil
+		p.resetStreamEventState()
 		windows, droppedWindows := decodeModelWindows(line)
 		isError, terminalReason := decodeStopShape(line)
 		// A THIRD DECODE OF THE SAME LINE, joining the two above rather than widening
@@ -4696,6 +4745,93 @@ func (p *Parser) consumeLine(line []byte) {
 		// anyone claude started emitting something new.
 		p.emitUnrecognized(turnevent.UnrecognizedLineType, sl.Type, line)
 	}
+}
+
+// emitStreamEvent consumes one stream_event family member. Only text_delta has a
+// client-visible mapping; the other measured variants carry lifecycle, thinking,
+// signature, or partial tool-input data whose settled forms already have owners.
+// Unsafe inner shapes take one visible rejection path and never publish text.
+func (p *Parser) emitStreamEvent(line []byte) {
+	reject := func() {
+		p.emitUnrecognized(turnevent.UnrecognizedLineType, "stream_event", line)
+	}
+	var outer streamEventLine
+	if err := json.Unmarshal(line, &outer); err != nil {
+		reject()
+		return
+	}
+	var event streamEventInner
+	if err := json.Unmarshal(outer.Event, &event); err != nil || event.Type == "" {
+		reject()
+		return
+	}
+
+	switch event.Type {
+	case "message_start":
+		if event.Message == nil || event.Message.ID == "" {
+			reject()
+			return
+		}
+		p.streamMessageID = event.Message.ID
+		p.resetStreamEventBlock()
+	case "content_block_start":
+		if event.Index == nil || *event.Index < 0 || event.ContentBlock == nil || event.ContentBlock.Type == "" {
+			reject()
+			return
+		}
+		p.streamBlockIndex = *event.Index
+		p.streamBlockType = event.ContentBlock.Type
+		p.streamBlockOpen = true
+		p.streamBlockTextDelta = false
+	case "content_block_delta":
+		if event.Index == nil || *event.Index < 0 {
+			reject()
+			return
+		}
+		var delta streamEventDelta
+		if err := json.Unmarshal(event.Delta, &delta); err != nil || delta.Type == "" {
+			reject()
+			return
+		}
+		switch delta.Type {
+		case "text_delta":
+			if delta.Text == nil || p.streamMessageID == "" || !p.streamBlockOpen ||
+				p.streamBlockIndex != *event.Index || p.streamBlockType != "text" {
+				reject()
+				return
+			}
+			p.streamBlockTextDelta = true
+			p.emit(turnevent.TextChunk{MessageID: p.streamMessageID, Text: *delta.Text})
+		case "thinking_delta", "signature_delta", "input_json_delta":
+			return
+		default:
+			reject()
+		}
+	case "content_block_stop":
+		if event.Index == nil || *event.Index < 0 {
+			reject()
+			return
+		}
+		if p.streamBlockOpen && p.streamBlockIndex == *event.Index {
+			p.resetStreamEventBlock()
+		}
+	case "message_delta", "message_stop":
+		return
+	default:
+		reject()
+	}
+}
+
+func (p *Parser) resetStreamEventBlock() {
+	p.streamBlockIndex = 0
+	p.streamBlockType = ""
+	p.streamBlockOpen = false
+	p.streamBlockTextDelta = false
+}
+
+func (p *Parser) resetStreamEventState() {
+	p.streamMessageID = ""
+	p.resetStreamEventBlock()
 }
 
 // emitSystemSubtype maps one system line's subtype, reporting whether it
@@ -8164,6 +8300,14 @@ func (p *Parser) emitAssistant(msg *streamMessage, line []byte) {
 		}
 		switch block.Type {
 		case "text":
+			// Claude's partial-message surface settles one open text block as a
+			// single-block assistant line after all of its deltas. Suppress only that
+			// captured correlation; multi-block and unattributed assistant lines keep
+			// the established completed-text behavior.
+			if len(msg.Content) == 1 && msg.ID == p.streamMessageID &&
+				p.streamBlockOpen && p.streamBlockType == "text" && p.streamBlockTextDelta {
+				continue
+			}
 			p.emit(turnevent.TextChunk{
 				MessageID:        msg.ID,
 				ParentToolCallID: parent,
