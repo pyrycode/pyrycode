@@ -307,6 +307,13 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			ResultSummary:   resultSummary(e.Content),
 			ResultDetail:    e.ResultDetail,
 		}, true
+	case turnevent.ToolProgress:
+		return protocol.TypeToolProgress, protocol.ToolProgressPayload{
+			ConversationID: tc.ConversationID,
+			TurnID:         tc.TurnID,
+			ToolUseID:      e.ToolCallID,
+			ElapsedSeconds: e.ElapsedSeconds,
+		}, true
 	case turnevent.ToolCallDenied:
 		// TURN-SCOPED, unlike the status peers below: tc.TurnID is carried, and only
 		// tc.Seq is ignored. A denial is not a mark in the conversation's history — it

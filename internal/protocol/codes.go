@@ -1969,6 +1969,17 @@ const (
 	TypeToolDenied = "tool_denied" // binary → phone, outbound v2 tool-denial marker
 )
 
+// Mobile Protocol v2 tool-progress reading. This push-only frame updates the open
+// tool row named by tool_use_id with claude's signed elapsed-seconds reading. It is
+// a report, not a lifecycle edge or an inbound control surface.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go. The
+// drift detectors in internal/protocol/compat_test.go and cmd/pyry's relay guard
+// classify it as an outbound v2 push.
+const (
+	TypeToolProgress = "tool_progress" // binary → phone, outbound v2 tool-progress reading
+)
+
 // Mobile Protocol v2 operator-facing banner. claude printed text ABOUT the session
 // rather than as part of an answer — a hook's block reason, a local command's output,
 // a loop notification — and this frame is the one typed place it arrives

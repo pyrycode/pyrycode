@@ -1,15 +1,16 @@
-# Interactive event payloads (#607, #638, #1074, #2237, #2233)
+# Interactive event payloads (#607, #638, #1074, #2237, #2233, #2324)
 
 The **v2 additive application events** — the wire representation of
-`internal/turnevent`'s neutral turn-event model (#606). All eleven are **binary →
-phone only**, sent **only** to a phone whose `interactive` capability was echoed in
+`internal/turnevent`'s neutral turn-event model (#606). They are **binary → phone
+only**, sent **only** to a phone whose `interactive` capability was echoed in
 `hello_ack`; an old phone never sees them and keeps the coarse v1 `message`
 fan-out. Spec source: `docs/protocol-mobile.md` § Interactive events. They map 1:1
 to the `Type*` constants `TypeTurnState` / `TypeAssistantDelta` / `TypeToolUse` /
 `TypeToolResult` / `TypeTurnEnd` (all #607), `TypeStall` (#638), `TypeApiRetry`
 / `TypeCompacting` (#1074), `TypeCompactionBoundary` (#2237, its own const
 block), `TypeToolDenied` (#2233, also its own const block), and `TypeBanner`
-(#2256, also its own const block — see
+(#2256, also its own const block), plus `TypeToolProgress` (#2324, its own const
+block — see
 [Envelope types](protocol-package-constants-codes-go-envelope-types.md)).
 The first five are the wire form of ACP-shaped turn events; `stall`, `api_retry`,
 and `compacting` are the wire form of **internal-only** signals (no ACP
@@ -51,6 +52,14 @@ type ToolResultPayload struct {
     IsError         bool   `json:"is_error"`
     ResultSummary   string `json:"result_summary"` // human-readable précis, not raw output
     ResultDetail    string `json:"result_detail"` // daemon-composed display text, e.g. a read's line count (#2024)
+}
+
+// #2324 — a non-terminal reading for the ToolUsePayload row with the same id.
+type ToolProgressPayload struct {
+    ConversationID string `json:"conversation_id"`
+    TurnID         string `json:"turn_id"`
+    ToolUseID      string `json:"tool_use_id"`
+    ElapsedSeconds int    `json:"elapsed_seconds"`
 }
 
 type TurnEndPayload struct {
@@ -378,6 +387,15 @@ type BannerPayload struct {
   where an empty value degrades to top-level rendering, the pre-#2191 behaviour. See
   [turnevent-package.md](turnevent-package.md) § `ToolStart`/`ToolUpdate` for the field's origin
   and [turnbridge-package.md](turnbridge-package.md) for the straight-through mapping arm.
+- **`ToolProgressPayload` (#2324) updates an existing tool row; it is not another
+  lifecycle edge.** Reusing `tool_use_id` is load-bearing: a new id spelling would
+  make a client create or miss a row instead of joining the `ToolUsePayload` it
+  already holds. `ElapsedSeconds` is claude's signed report, so the daemon neither
+  clamps it nor replaces it with its own clock, and `ToolResultPayload` remains the
+  only close. Heartbeats follow claude's cadence and are independently droppable;
+  absence, gaps, zero, and negative readings therefore prove nothing about whether
+  the call ran, stopped, or restarted. The id and count are display data, never
+  authority or timing evidence.
 - **`ToolUsePayload.MarshalJSON` (#1678) is the file's second custom
   marshaller, following `BackgroundTaskRosterPayload`'s pattern exactly:** a
   nil `Input` normalises to `"input":{}`, never `"input":null`, because the
@@ -451,7 +469,7 @@ type BannerPayload struct {
   misleading label rather than a self-service turn abort a compromised claude
   could pull.
 
-Eight golden round-trip tests in `interactive_test.go` decode each fixture through
+Golden round-trip tests in `interactive_test.go` decode each fixture through
 `Envelope` → `Envelope.Payload` → per-type struct, assert each field (incl. the
 boundary `Seq == 0` / `IsError == false`, `StopReason == "end_turn"`, and the
 `api_retry` fixture's non-zero `current`/`total`), then re-marshal
@@ -477,3 +495,7 @@ query, matching the pre-existing `input_summary` value; `Input`'s empty-map
 polarity is pinned separately by `TestToolUsePayload_NilInputNormalises` (a
 direct marshal, no fixture — mirroring `TestBackgroundTaskRosterPayload_NilTasksNormalises`
 below) and by `TestToolUsePayload_FitV2EnvelopeCap` (above).
+`tool_progress.json` uses pairwise-distinct identifiers and a negative count so a
+field swap or clamp cannot hide behind equal-looking values; its zero-value sibling
+inspects all four raw keys before decoding, so regenerating a fixture cannot quietly
+turn an always-present zero into an omitted field.

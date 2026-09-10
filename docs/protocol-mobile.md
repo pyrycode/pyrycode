@@ -491,6 +491,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`assistant_delta`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
 | **`tool_use`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
 | **`tool_result`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
+| **`tool_progress`** | binary → phone | no | **New in v2** (interactive, capability-gated). Updates an open tool row with `claude`'s signed elapsed-seconds reading (#2324). Push-only; absence proves nothing. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`turn_end`** | binary → phone | no | **New in v2** (interactive, capability-gated). Since #2223 it also carries the **stop shape `claude` itself reported** — `outcome`, `is_error`, `terminal_reason` — beside the unchanged `stop_reason`, so a turn stopped by a turn cap, a budget cap or a context overflow no longer reads as a finished answer; and since #2224 the **API error category** an `assistant` message reported, `error_category`, so a rate-limited or rejected account is nameable rather than looking like a turn that ended. All four are **optional and open-set**, and they are its only `claude`-authored strings. Since #2260 it also carries four **numbers** off the same `result` line — `duration_ms`, `duration_api_ms`, `num_turns`, `cost_usd_total` — so a client can show the per-turn status line a terminal shows without re-deriving it from the transcript. **Two of those are per turn and two are session running totals**, and `duration_api_ms` is routinely the larger of the two durations. See [`turn_end`](#turn_end). |
 | **`stall`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
 | **`api_retry`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's live API-error retry state (#1074). See [Interactive events](#interactive-events-v2-capability-gated). |
@@ -757,7 +758,7 @@ The daemon MUST echo only what it itself supports — the agreed set is the **in
 
 ### Interactive events (v2, capability-gated)
 
-These nineteen envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model. All *payload* fields are always present (no omitempty) so boundary values like `seq: 0` and `is_error: false` are explicit on the wire.
+These twenty envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model. All *payload* fields are always present (no omitempty) so boundary values like `seq: 0`, `is_error: false`, and `elapsed_seconds: 0` are explicit on the wire.
 
 **Replay cursor (`event_id`, #649).** Every frame in this stream additionally carries an envelope-level `event_id` (the optional `Envelope` field above) — the durable id the daemon assigns to each structured event as it records it in a bounded per-conversation event ring (ADR 025 § Backpressure / replay). It is **not** the same as the envelope's `id`: `id` is a per-connection counter that resets each reconnect, whereas `event_id` is connection-independent, identical across all interactive connections for a given logical event, and strictly increasing in the daemon's emit order. **Retention is per conversation; the id space is not** (#2022). One ring-wide counter assigns every id, so an id is never shared by two conversations and a conversation's own ids ascend without being contiguous — ids belonging to other conversations sit between them, and the first id a conversation is assigned is normally far above 1. **A client may therefore keep one scalar cursor**: no event the daemon emits later, in any conversation, can carry an id at or below one already seen. A client that keys its cursor per conversation is equally correct and unaffected. A phone records the latest `event_id` it has seen and, on mid-turn reconnect, advertises it as `last_event_id` in its `hello`; the daemon then replays the missed tail from the ring (or emits a `resync` marker if it fell off the bounded window). The **producer** side (the daemon stamping `event_id` outbound) landed in #649; the reconnect **consumer** (`hello.last_event_id`, ring replay, and the `resync` marker) landed in #647 — see [Reconnect replay & resync](#reconnect-replay--resync-consumer-647) below.
 
@@ -894,6 +895,40 @@ never a control input - no retry, no routing, no teardown - which is what keeps 
 fabricated denial a misleading label rather than an actuator. There is no inbound
 direction either: a phone cannot send a `tool_denied`, and re-authorizing a blocked call
 is not something this frame offers.
+
+#### `tool_progress`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation this turn belongs to. |
+| `turn_id` | string | The turn containing the open tool call. |
+| `tool_use_id` | string | **The join key.** Byte-identical to the `tool_use`, `tool_result`, and `tool_denied` frames for the same call. |
+| `elapsed_seconds` | int | `claude`'s signed elapsed-seconds reading, forwarded verbatim. |
+
+`tool_progress` (#2324) updates the row opened by [`tool_use`](#tool_use); it does
+not open a second row. It is a progress report, not a terminal frame:
+[`tool_result`](#tool_result) remains the event that closes the row. The frame carries
+no `session_id`, `uuid`, tool name, sequence number, or parent id because the existing
+tool row already supplies the display identity and this report needs only enough
+addressing to join it.
+
+The daemon forwards each heartbeat independently at `claude`'s cadence. It does not
+compute elapsed time, retain the latest reading, rate-limit, deduplicate, clamp, or
+require monotonicity. The integer is signed deliberately, so zero or a negative value
+is an upstream reading rather than a daemon validation result. A client may display
+the latest value; it must not subtract readings or use them as trusted timing evidence.
+
+**Absence proves nothing.** A tool call that finishes before `claude`'s first heartbeat
+emits no progress frame, and a later frame can be lost independently of the
+never-droppable tool lifecycle frames. A missing or skipped number therefore does not
+mean that the call stopped, restarted, or failed.
+
+**The join id is an untrusted display handle, not a capability.** It is bounded and
+dropped rather than truncated before this frame is constructed, but the daemon does
+not verify that a client has seen the named row and performs no action from either
+field. A forged heartbeat can at worst mislabel a visible counter. A client joins a
+known row when the id matches and otherwise ignores the report; it must never treat the
+id or elapsed value as authorization, routing input, or proof of execution.
 
 #### `turn_end`
 
@@ -1982,7 +2017,7 @@ and take security decisions from something the client itself controls.
 
 #### `session_transition`
 
-Direction **binary → phone** (outbound v2 session-boundary marker; not in `v1TypeSet` — an old phone never receives it). This is a **session-boundary marker, distinct from the nineteen turn-stream events above** — it does not belong to the structured live-session stream and carries no `event_id`. It is the wire form of `pyrycode-mobile#336`'s `ThreadItem.SessionBoundary`: the daemon's session rotated, so the phone renders a boundary marker instead of inferring one from message fields that do not exist.
+Direction **binary → phone** (outbound v2 session-boundary marker; not in `v1TypeSet` — an old phone never receives it). This is a **session-boundary marker, distinct from the twenty turn-stream events above** — it does not belong to the structured live-session stream and carries no `event_id`. It is the wire form of `pyrycode-mobile#336`'s `ThreadItem.SessionBoundary`: the daemon's session rotated, so the phone renders a boundary marker instead of inferring one from message fields that do not exist.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -1999,7 +2034,7 @@ The **producer** is **#657**. Until a server-side workspace-change source exists
 
 #### `model_list`
 
-Direction **binary → phone** (outbound v2 model inventory; not in `v1TypeSet` — an old phone never receives it). This is a **conversation-scoped menu, distinct from the nineteen turn-stream events above** — it is not a `turnevent` variant and is not one of those events, though it rides the same live interactive lane they do and carries an `event_id` like them, which is what the delivery window below turns on. It carries what claude returns from a `control_request` with subtype `initialize` on the control channel the daemon already writes to, so it arrives on a `control_response` rather than on the turn stream; receiving one **neither opens nor closes a turn**. It is a **snapshot** of what claude will accept for the conversation, not a delta. That same `initialize` reply publishes a second per-conversation menu, [`slash_command_list`](#slash_command_list): this frame inventories the **identities** claude will run as, that one inventories the **verbs** the working directory will accept.
+Direction **binary → phone** (outbound v2 model inventory; not in `v1TypeSet` — an old phone never receives it). This is a **conversation-scoped menu, distinct from the twenty turn-stream events above** — it is not a `turnevent` variant and is not one of those events, though it rides the same live interactive lane they do and carries an `event_id` like them, which is what the delivery window below turns on. It carries what claude returns from a `control_request` with subtype `initialize` on the control channel the daemon already writes to, so it arrives on a `control_response` rather than on the turn stream; receiving one **neither opens nor closes a turn**. It is a **snapshot** of what claude will accept for the conversation, not a delta. That same `initialize` reply publishes a second per-conversation menu, [`slash_command_list`](#slash_command_list): this frame inventories the **identities** claude will run as, that one inventories the **verbs** the working directory will accept.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -2068,7 +2103,7 @@ Four things a client will otherwise get wrong:
 
 #### `slash_command_list`
 
-Direction **binary → phone** (outbound v2 slash-command inventory; not in `v1TypeSet` — an old phone never receives it). This is a **conversation-scoped menu, distinct from the nineteen turn-stream events above** — it is not a `turnevent` variant and is not one of those events, though the live-lane emission rides the same interactive lane they do and carries an `event_id` like them, which is what the delivery window below turns on; the connect-time copy deliberately carries none. It carries the `commands` array claude returns from a `control_request` with subtype `initialize`, the same reply [`model_list`](#model_list) is drawn from, so it arrives on a `control_response` rather than on the turn stream; receiving one **neither opens nor closes a turn**. It is a **snapshot** of the commands this session *in this working directory* will accept, not a delta. `model_list` inventories the **identities** claude will run as; this one inventories the **verbs**.
+Direction **binary → phone** (outbound v2 slash-command inventory; not in `v1TypeSet` — an old phone never receives it). This is a **conversation-scoped menu, distinct from the twenty turn-stream events above** — it is not a `turnevent` variant and is not one of those events, though the live-lane emission rides the same interactive lane they do and carries an `event_id` like them, which is what the delivery window below turns on; the connect-time copy deliberately carries none. It carries the `commands` array claude returns from a `control_request` with subtype `initialize`, the same reply [`model_list`](#model_list) is drawn from, so it arrives on a `control_response` rather than on the turn stream; receiving one **neither opens nor closes a turn**. It is a **snapshot** of the commands this session *in this working directory* will accept, not a delta. `model_list` inventories the **identities** claude will run as; this one inventories the **verbs**.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -3936,6 +3971,8 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 **Date:** 2026-05-16
 
 ## Changelog
+
+- `2026-09-10`: **An open tool row now receives `claude`'s elapsed counter** (#2324) — a new push-only [`tool_progress`](#tool_progress) frame carries the current conversation and turn ids, the byte-identical `tool_use_id` join key, and `claude`'s signed `elapsed_seconds` reading. The daemon forwards each heartbeat without computing, clamping, retaining, deduplicating, or rate-limiting it; [`tool_result`](#tool_result) remains the only terminal frame. **Absence proves nothing** because a short call can finish before the first heartbeat and later frames can be lost independently. The payload deliberately carries no session id, UUID, tool name, sequence, or parent id. The join id was bounded and dropped-not-cut by #2323 before this mapping, but remains an untrusted display handle: neither the daemon nor a client may treat it or the elapsed value as authority or proof of execution. Populated and zero-value fixtures pin all four keys with no `omitempty`. The four live-event statements now read **twenty**, matching the `####` headings from `turn_state` through `model_announced`.
 
 - `2026-09-10`: **[`banner`](#banner) has a producer** (#2319) — the daemon maps `claude`'s `system/informational` lines onto the frame, so a hook that refuses a prompt now reaches a client with its reason instead of being dropped. **That was the silent worst case**: a refused prompt is never answered, so before this the operator saw a message that looked accepted and got no reply and no explanation. **The 4 KiB bound on `text` is enforced for the first time here**, and the two fields keep the opposite answers this spec published — `text` is prose and is **cut**, with `truncated` saying so; `level` is a token a client matches and is **dropped**, with the emptied value speaking for itself and `truncated` staying `false` because it answers for `text` alone. **The producer emits nothing for a line with no text**, which is the one gate on this path: `level` and `stops_turn` are not something a client can render or act on alone, so an empty frame would be a first-class notice saying nothing. **It cannot swallow a refusal** — `claude` composes the wrapper prose itself, so a hook refusing with an empty reason still yields text. **Two keys the line carries reach nothing**: `claude`'s `session_id`, which is not the daemon's conversation identity, and the line's `uuid`, which nothing reads — neither is declared on the decode target, so neither can leak. **Nothing about the frame's shape changed**, and nothing in the daemon acts on `stops_turn` — it remains a report. The claim in [§ `banner`](#banner) that nothing emits the frame is repaired in the same change. **Still outstanding is #2258**, which owns `local_command_output` and `notification`.
 

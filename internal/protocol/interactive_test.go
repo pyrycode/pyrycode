@@ -3264,3 +3264,76 @@ func TestBannerType_IsNotClaudesVocabulary(t *testing.T) {
 		}
 	}
 }
+
+func TestToolProgressPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "tool_progress.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeToolProgress {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeToolProgress)
+	}
+
+	var payload ToolProgressPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "conversation-11" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "conversation-11")
+	}
+	if payload.TurnID != "turn-22" {
+		t.Errorf("TurnID: got %q, want %q", payload.TurnID, "turn-22")
+	}
+	if payload.ToolUseID != "tool-progress-33" {
+		t.Errorf("ToolUseID: got %q, want %q", payload.ToolUseID, "tool-progress-33")
+	}
+	if payload.ElapsedSeconds != -44 {
+		t.Errorf("ElapsedSeconds: got %d, want %d", payload.ElapsedSeconds, -44)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+func TestToolProgressPayload_ZeroValue_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "tool_progress_zero.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeToolProgress {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeToolProgress)
+	}
+
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(env.Payload, &keys); err != nil {
+		t.Fatalf("unmarshal payload keys: %v", err)
+	}
+	wantRaw := map[string]string{
+		"conversation_id": `""`,
+		"turn_id":         `""`,
+		"tool_use_id":     `""`,
+		"elapsed_seconds": "0",
+	}
+	if len(keys) != len(wantRaw) {
+		t.Errorf("payload key count: got %d, want %d; keys=%v", len(keys), len(wantRaw), keys)
+	}
+	for key, want := range wantRaw {
+		got, present := keys[key]
+		if !present {
+			t.Errorf("zero payload is missing key %q", key)
+			continue
+		}
+		if string(got) != want {
+			t.Errorf("zero payload %s: got %s, want %s", key, got, want)
+		}
+	}
+
+	var payload ToolProgressPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	roundTripEnvelope(t, env, payload, raw)
+}
