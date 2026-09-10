@@ -2723,6 +2723,92 @@ func TestInteractiveTurnEmitterV2_ModelRefusalFallbackEventKindIsContentFree(t *
 	}
 }
 
+func TestInteractiveTurnEmitterV2_ModelRefusalNoFallbackFansOutToInteractiveOnly(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{
+		{ConnID: "interactive", Interactive: true},
+		{ConnID: "legacy", Interactive: false},
+	}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	ctx := context.Background()
+	e.Handle(ctx, turnevent.TextChunk{MessageID: "message-1", Text: "partial"})
+	beforeTurnID, beforeState := e.turnID, e.currentState
+	e.Handle(ctx, turnevent.ModelRefusalNoFallback{
+		OriginalModel:      "original-sentinel",
+		RefusalCategory:    "category-sentinel",
+		RefusalExplanation: "excluded-explanation-sentinel",
+		Banner:             "banner-sentinel",
+		TruncatedFields:    []string{"refusal_explanation", "banner"},
+		DroppedFields:      []string{"original_model"},
+	})
+
+	if got := pushTypes(pushesFor(bcast.pushes, "interactive")); !slices.Equal(got, []string{
+		protocol.TypeTurnState,
+		protocol.TypeAssistantDelta,
+		protocol.TypeModelRefusalNoFallback,
+	}) {
+		t.Fatalf("interactive frame order: got %v", got)
+	}
+	if got := len(pushesFor(bcast.pushes, "legacy")); got != 0 {
+		t.Fatalf("non-interactive connection received %d frames, want 0", got)
+	}
+	refusals := pushesOfType(bcast.pushes, protocol.TypeModelRefusalNoFallback)
+	if len(refusals) != 1 {
+		t.Fatalf("model_refusal_no_fallback pushed %d envelopes, want exactly 1", len(refusals))
+	}
+	var payload protocol.ModelRefusalNoFallbackPayload
+	if err := json.Unmarshal(refusals[0].env.Payload, &payload); err != nil {
+		t.Fatalf("decode model_refusal_no_fallback payload: %v", err)
+	}
+	if payload.ConversationID != testConvID || payload.OriginalModel != "original-sentinel" ||
+		payload.RefusalCategory != "category-sentinel" || payload.Banner != "banner-sentinel" {
+		t.Fatalf("model_refusal_no_fallback payload: got %+v", payload)
+	}
+	if want := []string{"banner"}; !slices.Equal(payload.TruncatedFields, want) {
+		t.Errorf("truncated_fields: got %v, want %v", payload.TruncatedFields, want)
+	}
+	if want := []string{"original_model"}; !slices.Equal(payload.DroppedFields, want) {
+		t.Errorf("dropped_fields: got %v, want %v", payload.DroppedFields, want)
+	}
+	if !e.inTurn || e.turnID != beforeTurnID || e.currentState != beforeState {
+		t.Errorf("refusal no-fallback mutated lifecycle: inTurn=%v turnID=%q state=%q; want true, %q, %q",
+			e.inTurn, e.turnID, e.currentState, beforeTurnID, beforeState)
+	}
+}
+
+func TestInteractiveTurnEmitterV2_ModelRefusalNoFallbackEventKindIsContentFree(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	e := newInteractiveTurnEmitterV2(&stubCursor{}, &fakeInteractiveBcast{}, logger)
+	values := []string{
+		"ORIGINAL-MODEL-NO-FALLBACK-SENTINEL", "CATEGORY-NO-FALLBACK-SENTINEL",
+		"BANNER-NO-FALLBACK-SENTINEL", "REPORT-NO-FALLBACK-SENTINEL",
+	}
+	e.Handle(context.Background(), turnevent.ModelRefusalNoFallback{
+		OriginalModel:   values[0],
+		RefusalCategory: values[1],
+		Banner:          values[2],
+		DroppedFields:   []string{values[3]},
+	})
+
+	logs := buf.String()
+	if !strings.Contains(logs, "kind=model_refusal_no_fallback") {
+		t.Fatalf("log does not name model_refusal_no_fallback: %s", logs)
+	}
+	if strings.Contains(logs, "kind=unknown") {
+		t.Fatalf("eventKind returned unknown: %s", logs)
+	}
+	for _, value := range values {
+		if strings.Contains(logs, value) {
+			t.Fatalf("claude-authored value %q leaked into the kind log: %s", value, logs)
+		}
+	}
+}
+
 // The two claude-authored values #2252 carries, as conspicuous sentinels. Distinct
 // from each other and from modelAnnouncedFixture so a log sweep can say WHICH field
 // leaked, and spelled so they collide with nothing slog itself writes.

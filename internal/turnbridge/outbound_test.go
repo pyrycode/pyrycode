@@ -284,6 +284,41 @@ func TestMapEventOutbound(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			name: "ModelRefusalNoFallback -> model_refusal_no_fallback filters reports to published wire keys",
+			ev: turnevent.ModelRefusalNoFallback{
+				OriginalModel:      "claude-opus-4-1",
+				RefusalCategory:    "cyber",
+				RefusalExplanation: "The request was refused.",
+				Banner:             "Claude refused this request.",
+				TruncatedFields:    []string{"refusal_explanation", "banner"},
+				DroppedFields:      []string{"original_model", "refusal_category"},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeModelRefusalNoFallback,
+			wantPayload: protocol.ModelRefusalNoFallbackPayload{
+				ConversationID:  "c1",
+				OriginalModel:   "claude-opus-4-1",
+				RefusalCategory: "cyber",
+				Banner:          "Claude refused this request.",
+				TruncatedFields: []string{"banner"},
+				DroppedFields:   []string{"original_model", "refusal_category"},
+			},
+			wantOK: true,
+		},
+		{
+			name: "ModelRefusalNoFallback excluded-only report -> nil wire report",
+			ev: turnevent.ModelRefusalNoFallback{
+				RefusalExplanation: "The request was refused.",
+				TruncatedFields:    []string{"refusal_explanation"},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeModelRefusalNoFallback,
+			wantPayload: protocol.ModelRefusalNoFallbackPayload{
+				ConversationID: "c1",
+			},
+			wantOK: true,
+		},
+		{
 			name: "ToolUpdate failed -> tool_result is_error true",
 			ev: turnevent.ToolUpdate{
 				ToolCallID: "tool-1",
@@ -3509,6 +3544,70 @@ func TestMapEvent_ModelRefusalFallbackCarriesNothingElseAndDoesNotMutate(t *test
 		"conversation_id": true, "original_model": true, "fallback_model": true,
 		"scope": true, "refusal_category": true, "banner": true,
 		"truncated_fields": true, "dropped_fields": true,
+	}
+	if len(keys) != len(wantKeys) {
+		t.Fatalf("payload keys: got %v, want exactly %v", keys, wantKeys)
+	}
+	for key := range keys {
+		if !wantKeys[key] {
+			t.Errorf("unexpected payload key %q", key)
+		}
+	}
+	if bytes.Contains(raw, []byte(ev.RefusalExplanation)) {
+		t.Errorf("excluded refusal explanation reached the wire: %s", raw)
+	}
+	if !reflect.DeepEqual(ev, before) {
+		t.Errorf("MapEvent mutated the event: got %+v, want %+v", ev, before)
+	}
+	if len(p.TruncatedFields) > 0 {
+		p.TruncatedFields[0] = "mutation-sentinel"
+	}
+	if len(p.DroppedFields) > 0 {
+		p.DroppedFields[0] = "mutation-sentinel"
+	}
+	if !reflect.DeepEqual(ev, before) {
+		t.Errorf("payload report slices alias the event: got %+v, want %+v", ev, before)
+	}
+}
+
+func TestMapEvent_ModelRefusalNoFallbackCarriesNothingElseAndDoesNotMutate(t *testing.T) {
+	t.Parallel()
+	ev := turnevent.ModelRefusalNoFallback{
+		OriginalModel:      "original-sentinel",
+		RefusalCategory:    "category-sentinel",
+		RefusalExplanation: "excluded-explanation-sentinel",
+		Banner:             "banner-sentinel",
+		TruncatedFields:    []string{"refusal_explanation", "banner"},
+		DroppedFields:      []string{"original_model", "refusal_category"},
+	}
+	before := turnevent.ModelRefusalNoFallback{
+		OriginalModel:      ev.OriginalModel,
+		RefusalCategory:    ev.RefusalCategory,
+		RefusalExplanation: ev.RefusalExplanation,
+		Banner:             ev.Banner,
+		TruncatedFields:    append([]string(nil), ev.TruncatedFields...),
+		DroppedFields:      append([]string(nil), ev.DroppedFields...),
+	}
+
+	_, payload, ok := MapEvent(ev, TurnContext{ConversationID: "conversation-sentinel", TurnID: "excluded-turn", Seq: 77})
+	if !ok {
+		t.Fatal("MapEvent refused a ModelRefusalNoFallback")
+	}
+	p, isRefusal := payload.(protocol.ModelRefusalNoFallbackPayload)
+	if !isRefusal {
+		t.Fatalf("payload is %T, want protocol.ModelRefusalNoFallbackPayload", payload)
+	}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		t.Fatalf("re-decode payload: %v", err)
+	}
+	wantKeys := map[string]bool{
+		"conversation_id": true, "original_model": true, "refusal_category": true,
+		"banner": true, "truncated_fields": true, "dropped_fields": true,
 	}
 	if len(keys) != len(wantKeys) {
 		t.Fatalf("payload keys: got %v, want exactly %v", keys, wantKeys)

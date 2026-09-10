@@ -515,6 +515,13 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// ending a turn. The capability decision remains the single gate in emit.
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
+	case turnevent.ModelRefusalNoFallback:
+		// A refusal without fallback explains why output stopped but carries no
+		// identity that makes it a lifecycle edge. Flush pending text to preserve
+		// wire order, then publish through emit's single capability gate without
+		// opening, transitioning, or ending a turn.
+		e.flushDelta(ctx)
+		e.emitMapped(ctx, convID, ev)
 	case turnevent.SessionFacts:
 		// claude's own build and the posture it says the child is running under
 		// (#2252), taking the same shape as the status peers above: NO turn-lifecycle
@@ -1038,6 +1045,10 @@ func eventKind(ev turnevent.Event) string {
 		// Variant name only. Models, scope, category, banner, and report tokens are
 		// claude-authored content and must not enter logs.
 		return "model_refusal_fallback"
+	case turnevent.ModelRefusalNoFallback:
+		// Variant name only. Model, category, banner, and report tokens are
+		// claude-authored content and must not enter logs.
+		return "model_refusal_no_fallback"
 	case turnevent.SessionFacts:
 		// The variant NAME only, for the arms above's reason, and here the temptation is
 		// the PermissionMode: it is the field a log line explaining an unexpected posture
