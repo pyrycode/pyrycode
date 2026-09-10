@@ -290,7 +290,28 @@ type bootstrapDaemon struct {
 // with real claude as the supervised child on --model haiku, the control socket
 // under a short /tmp dir (the #860 sun_path fix), and the relay wired to relayURL.
 // Blocks until the control socket is dialable.
-func spawnBootstrapDaemon(t *testing.T, home, workdir, claudeBin, relayURL string) *bootstrapDaemon {
+//
+// extraClaudeArgs (#2320) are appended to the pass-through tail after the two
+// standing flags, so they reach claude rather than pyry. Variadic and APPEND-ONLY
+// by design: with none supplied the argv is byte-identical to what nine live
+// callers have been spawning, so none of them changes in text or in behaviour.
+// spawnBootstrapDaemonVerbose's header argues against widening this function at
+// all, on the ground that `make check` never compiles this package so a mistake
+// here surfaces only as every live test failing at once. That reasoning is why
+// this is a trailing append rather than a restructure of the argv assembly, and
+// why the tag-enabled compile is part of this ticket's own gate.
+//
+// The values are NOT validated or shell-quoted here, and none is owed: this is
+// exec.Command with an explicit argv, so there is no shell to interpret them, and
+// every caller passes a compile-time constant or a path Go minted.
+//
+// A caller passing a flag the daemon ALSO composes should know that pyry's own
+// copy lands after this tail — Pool.New and buildSession both append their
+// --settings and --append-system-prompt-file pairs to the operator's
+// pass-through, so the value supplied here is the EARLIER of two occurrences and
+// claude's own precedence decides which wins.
+func spawnBootstrapDaemon(t *testing.T, home, workdir, claudeBin, relayURL string,
+	extraClaudeArgs ...string) *bootstrapDaemon {
 	t.Helper()
 	bin := ensurePyryBuilt(t) // builds with real HOME (warm cache); runs with isolated HOME
 	socket := shortSocketPath(t)
@@ -307,6 +328,7 @@ func spawnBootstrapDaemon(t *testing.T, home, workdir, claudeBin, relayURL strin
 		"--model", "haiku",
 		"--dangerously-skip-permissions",
 	}
+	args = append(args, extraClaudeArgs...)
 	cmd := exec.Command(bin, args...)
 	// os.Environ() already carries the isolated HOME and the credential
 	// (WithWorktreeAuthenticated t.Setenv's both). Add the relay switches.

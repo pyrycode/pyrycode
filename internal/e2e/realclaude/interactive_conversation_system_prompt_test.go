@@ -90,8 +90,12 @@ func TestInteractiveConversationSystemPrompt_ReachesTheReply(t *testing.T) {
 	prompt := "You are in a test harness. Append the token " + marker +
 		" on its own line at the end of every reply you write, verbatim and unaltered."
 
-	h := startPerConversationHarnessSeeded(t, func(home, workdir string) {
+	h := startPerConversationHarnessSeeded(t, func(home, workdir string) []string {
 		seedPromptedConversations(t, home, workdir, prompt)
+		// No extra pass-through claude arguments (#2320's seam): this case's
+		// subject is what the daemon composes for itself, not what an operator
+		// added. The spawn argv it asserts on below is unchanged.
+		return nil
 	})
 
 	// Arm 1 — the conversation whose stored prompt asks for the marker.

@@ -172,7 +172,15 @@ func startPerConversationHarness(t *testing.T) *perConvHarness {
 // loads conversations.json. #2150 is the first such case: no verb writes a
 // conversation's system prompt yet (#2151 is that ticket), so the only way to
 // have one stored is to seed the file the daemon reads at startup.
-func startPerConversationHarnessSeeded(t *testing.T, seed func(home, workdir string)) *perConvHarness {
+//
+// The callback RETURNS extra pass-through claude arguments (#2320), forwarded to
+// this helper's own spawnBootstrapDaemon call and to no other. A return value
+// rather than a second parameter is forced rather than stylistic: an argument
+// naming a file the seed writes cannot be known at the CALL, because the file
+// lives under a HOME this helper mints for itself. Supplying it on the same
+// lifetime as the seed is the only shape that can name it. A seed with nothing to
+// add returns nil, which is what every caller before #2320 does.
+func startPerConversationHarnessSeeded(t *testing.T, seed func(home, workdir string) []string) *perConvHarness {
 	t.Helper()
 	// No t.Parallel: WithWorktreeAuthenticated calls t.Setenv.
 	if _, err := exec.LookPath("claude"); err != nil {
@@ -205,14 +213,15 @@ func startPerConversationHarnessSeeded(t *testing.T, seed func(home, workdir str
 	// Seed ONLY the bootstrap pool id (loaded once at startup). NO
 	// seedBoundConversation — each case creates its conversation over the wire.
 	seedBootstrapRegistry(t, home, livePerConvBootstrapUUID)
+	var extraClaudeArgs []string
 	if seed != nil {
-		seed(home, workdir)
+		extraClaudeArgs = seed(home, workdir)
 	}
 
 	fr := fakerelay.New(relayTestLogger())
 	t.Cleanup(func() { _ = fr.Close() })
 
-	d := spawnBootstrapDaemon(t, home, workdir, claudeBin, fr.URL()+"/v2/server")
+	d := spawnBootstrapDaemon(t, home, workdir, claudeBin, fr.URL()+"/v2/server", extraClaudeArgs...)
 	t.Cleanup(func() { d.stop(t) })
 
 	serverID := readPersistedServerID(t, home)
