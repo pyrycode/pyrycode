@@ -5349,23 +5349,38 @@ type toolProgressMarkers struct {
 	ReplCall     *jsonKey        `json:"repl_call"`
 }
 
+// toolProgressHeartbeat is the heartbeat variety's second decode target. It is
+// separate from toolProgressMarkers so marker tolerance cannot be widened by a
+// field needed only after a strict heartbeat match, and streamLine stays a
+// segmentation struct.
+//
+// ParentToolUseID is raw so one malformed join key drops only the event rather
+// than making encoding/json's saved type error compete with the already-set
+// marker. ElapsedSeconds is signed and absent reads as zero, following
+// systemTaskProgressUsage's decode contract: unusual upstream readings remain
+// observable rather than wrapping or becoming a validation rule.
+type toolProgressHeartbeat struct {
+	ParentToolUseID json.RawMessage `json:"parent_tool_use_id"`
+	ElapsedSeconds  int             `json:"elapsed_time_seconds"`
+}
+
 // consumeToolProgress reports whether this tool_progress line carried a known
-// marker, dropping it content-free when it did. emitSystemSubtype's shape and for
-// its reason: unlike emitRateLimit's void return, this arm has a real "did you
-// handle it?" to report back, because a marker-less frame must still reach the
+// marker. A heartbeat may emit one ToolProgress; the other known varieties remain
+// content-free drops. Unlike emitRateLimit's void return, this arm has a real "did
+// you handle it?" to report back, because a marker-less frame must still reach the
 // unrecognized lane.
 //
 // The case arms are the ONE enumeration of the matched set, as they are in
 // emitSystemSubtype — adding a variety IS adding an arm.
 //
-// THIS IS A SILENCING PRIMITIVE, so the narrowness above is the whole safety
-// argument and not fussiness. Suppression can only WITHHOLD a row that carries no
-// content, never inject one, and that bound holds exactly while the marker set
-// stays narrow and type-strict. Loosening a marker — any truthy heartbeat, a
-// tool_name prefix, the id suffix — trades the bound away and starts swallowing
-// frames nobody measured. harnessNoOutputNudge argues its own tolerance the same
-// way, and for the same reason: a suppression's match is the thing to be strict
-// about.
+// THIS IS A MATCHING PRIMITIVE, so the narrowness above is the whole safety
+// argument and not fussiness. A matched heartbeat now publishes an event, while
+// either other match withholds a row; both consequences stay bounded exactly while
+// the marker set stays narrow and type-strict. Loosening a marker — any truthy
+// heartbeat, a tool_name prefix, the id suffix — would either inject an event from
+// an unmeasured variety or swallow a frame nobody measured. harnessNoOutputNudge
+// argues its own tolerance the same way, and for the same reason: a suppression or
+// mapping match is the thing to be strict about.
 //
 // # MEASURED 2026-09-06 — claude 2.1.259, model haiku, one live turn
 //
@@ -5410,9 +5425,9 @@ type toolProgressMarkers struct {
 // is today rather than being swallowed. The marker-less shape is unhandled ON
 // PURPOSE.
 //
-// TestParser_ToolProgressCapturedFramesAreSilent walks that capture through this
-// arm inside `make check`, which is what stops a decoder keyed on a spelling
-// claude does not use from never firing in silence.
+// TestParser_ToolProgressCapturedFramesEmitHeartbeatEvents walks that capture
+// through this arm inside `make check`, which is what stops a decoder keyed on a
+// spelling claude does not use from never firing in silence.
 func (p *Parser) consumeToolProgress(line []byte) bool {
 	var m toolProgressMarkers
 	// The error is not a branch. consumeLine has already decoded this line into
@@ -5426,6 +5441,7 @@ func (p *Parser) consumeToolProgress(line []byte) bool {
 	switch {
 	case bytes.Equal(m.Heartbeat, toolProgressHeartbeatTrue):
 		marker = toolProgressMarkerHeartbeat
+		p.emitToolProgressHeartbeat(line)
 	case m.SubagentType != nil:
 		marker = toolProgressMarkerSubagentType
 	case m.ReplCall != nil:
@@ -5438,6 +5454,25 @@ func (p *Parser) consumeToolProgress(line []byte) bool {
 	// frame is recorded anywhere.
 	p.log.Debug("streamsup: dropping tool_progress", "type", "tool_progress", "marker", marker)
 	return true
+}
+
+// emitToolProgressHeartbeat emits at most one ToolProgress from a matched
+// heartbeat. Every failure is silent: consumeToolProgress still reports the line
+// handled, so an unusable join key or elapsed shape cannot move it into the
+// unrecognized lane.
+func (p *Parser) emitToolProgressHeartbeat(line []byte) {
+	var heartbeat toolProgressHeartbeat
+	if err := json.Unmarshal(line, &heartbeat); err != nil {
+		return
+	}
+	toolCallID := parentToolUseID(heartbeat.ParentToolUseID)
+	if toolCallID == "" {
+		return
+	}
+	p.emit(turnevent.ToolProgress{
+		ToolCallID:     toolCallID,
+		ElapsedSeconds: heartbeat.ElapsedSeconds,
+	})
 }
 
 // emitBackgroundTaskStarted decodes a system/task_started line and emits one
@@ -7731,13 +7766,17 @@ func decodeAssistantParent(line []byte) string {
 	return parentToolUseID(pl.ParentToolUseID)
 }
 
-// parentToolUseID is the WHOLE of #2191's semantics for the key, and the one site
-// that decides them for both line types. A JSON string yields its decoded value;
+// parentToolUseID is the one site that validates the parent_tool_use_id wire key
+// wherever streamsup publishes it. A JSON string yields its decoded value;
 // every other JSON value — a number, an object, an array, null — and an absent key
-// yield "", which means "main thread".
+// yield "". On assistant/user lines that means "main thread"; on tool_progress
+// it makes the heartbeat unjoinable, so emitToolProgressHeartbeat drops the event.
 //
 // It is also the one site that applies the bound, so the cap cannot be applied twice
-// or forgotten on one of the two arms.
+// or forgotten on any arm. The key's RELATIONSHIP meaning remains line-specific:
+// assistant/user lines name the Agent/Task call that spawned a subagent, while a
+// tool_progress heartbeat names the foreground tool call whose elapsed time it
+// reports.
 //
 // THE CAP IS maxTaskFieldID, NOT A NEW CONSTANT. That constant caps a
 // machine-generated identifier, which is exactly this value's class; observed values

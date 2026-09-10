@@ -595,6 +595,11 @@ func TestTurnMarkFor_TotalOverEveryVariant(t *testing.T) {
 		{turnevent.ThoughtChunk{MessageID: "m1", Text: "thinking"}, turnMarkOpen},
 		{turnevent.ToolStart{ToolCallID: "tu-1", Title: "Read"}, turnMarkOpen},
 		{turnevent.ToolUpdate{ToolCallID: "tu-1"}, turnMarkOpen},
+		// A heartbeat updates a row ToolStart already opened. It is neither a turn
+		// boundary nor worth reserving under saturation: losing one skips a counter
+		// reading, while classifying repeated readings as openers buys no lifecycle
+		// transition and can crowd out a real boundary.
+		{turnevent.ToolProgress{ToolCallID: "tu-1", ElapsedSeconds: 30}, turnMarkNone},
 		{turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}, turnMarkClose},
 		{turnevent.BackgroundTaskStarted{TaskID: "t-1"}, turnMarkNone},
 		{turnevent.BackgroundTaskUpdated{TaskID: "t-1"}, turnMarkNone},

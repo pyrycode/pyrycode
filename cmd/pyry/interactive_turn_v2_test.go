@@ -3731,6 +3731,36 @@ func TestInteractiveTurnEmitterV2_ToolDeniedEventKindNamesTheVariant(t *testing.
 	}
 }
 
+// A ToolProgress has no wire arm until #2324, but every turn lane must still
+// recognize its kind. The no-cursor path reaches eventKind and also proves that
+// neither Claude-authored field is copied into the log.
+func TestInteractiveTurnEmitterV2_ToolProgressEventKindNamesTheVariant(t *testing.T) {
+	t.Parallel()
+
+	const id = "SECRETTOOLPROGRESSIDZZZ"
+	const elapsed = 987654321
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	cur := &stubCursor{}
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, logger)
+	e.Handle(context.Background(), turnevent.ToolProgress{ToolCallID: id, ElapsedSeconds: elapsed})
+
+	logs := buf.String()
+	if !strings.Contains(logs, "kind=tool_progress") {
+		t.Fatalf("log does not name the variant (want kind=tool_progress):\n%s", logs)
+	}
+	if strings.Contains(logs, "kind=unknown") {
+		t.Fatalf("eventKind returned unknown for tool_progress:\n%s", logs)
+	}
+	for _, leak := range []string{id, strconv.Itoa(elapsed)} {
+		if strings.Contains(logs, leak) {
+			t.Fatalf("claude-authored value %q leaked into the kind log:\n%s", leak, logs)
+		}
+	}
+}
+
 // The claude-authored fixture values the tool-denied kind test uses. Conspicuous
 // sentinels rather than natural values, for the reason the compaction-boundary block
 // above gives: a substring of the frame name, the event name or the log message would

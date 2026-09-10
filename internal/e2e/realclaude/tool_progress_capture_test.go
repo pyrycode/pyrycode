@@ -216,8 +216,8 @@ const tpcapRedactionRationale = "Inherited whole from #1260 (see dropcapRedactio
 // re-derived; the rest is this ticket's.
 //
 // events_emitted is the SHIPPED parser's verdict (parseOne), never a mirror of
-// its tables — a frame with a non-zero count is one that reaches the unrecognized
-// lane and puts a row in the operator's chat.
+// its tables. After #2323 a heartbeat emits one ToolProgress; either other marked
+// variety emits none. A marker-less frame remains an Unrecognized event.
 type tpcapFrame struct {
 	Index                   int    `json:"index"`
 	Type                    string `json:"type"`
@@ -268,12 +268,12 @@ type tpcapRecord struct {
 	ToolResultErrors int            `json:"tool_result_errors"`
 	UndecodedLines   int            `json:"undecoded_lines"`
 
-	LinesCaptured  int            `json:"lines_captured"`
-	FrameCount     int            `json:"frame_count"`
-	Frames         []tpcapFrame   `json:"frames"`
-	MarkerCensus   map[string]int `json:"marker_census"`
-	UnmarkedFrames int            `json:"unmarked_frames"`
-	FramesReaching int            `json:"frames_reaching_unrecognized_lane"`
+	LinesCaptured            int            `json:"lines_captured"`
+	FrameCount               int            `json:"frame_count"`
+	Frames                   []tpcapFrame   `json:"frames"`
+	MarkerCensus             map[string]int `json:"marker_census"`
+	UnmarkedFrames           int            `json:"unmarked_frames"`
+	UnexpectedParserVerdicts int            `json:"unexpected_parser_verdicts"`
 
 	Redaction             []dropcapSubstitution `json:"redaction"`
 	RedactionRationale    string                `json:"redaction_rationale"`
@@ -320,8 +320,8 @@ func (rec *tpcapRecord) fixtureWorthy() (string, bool) {
 		return fmt.Sprintf("%d frame(s) carried none of the three markers — the marker set is "+
 			"insufficient and that is a finding to route back", rec.UnmarkedFrames), false
 	}
-	if rec.FramesReaching > 0 {
-		return fmt.Sprintf("%d frame(s) still reach the unrecognized lane", rec.FramesReaching), false
+	if rec.UnexpectedParserVerdicts > 0 {
+		return fmt.Sprintf("%d frame(s) violate the parser contract", rec.UnexpectedParserVerdicts), false
 	}
 	if got, _, _ := strings.Cut(rec.ClaudeVersion, " "); got != tpcapFixtureVersion {
 		return fmt.Sprintf("claude_version %q is not the %s pinned in the fixture name — repin "+
@@ -742,8 +742,12 @@ func TestRealClaude_ToolProgressCapture(t *testing.T) {
 		if f.Marker == tpcapMarkerNone {
 			rec.UnmarkedFrames++
 		}
-		if f.EventsEmitted != 0 {
-			rec.FramesReaching++
+		wantEvents := 0
+		if f.Marker == tpcapMarkerHeartbeat {
+			wantEvents = 1
+		}
+		if f.EventsEmitted != wantEvents {
+			rec.UnexpectedParserVerdicts++
 		}
 	}
 	if rec.FrameCount == 0 {
@@ -775,10 +779,11 @@ func TestRealClaude_ToolProgressCapture(t *testing.T) {
 			"the record, read their key set and re-refine",
 			rec.UnmarkedFrames, rec.FrameCount, rec.MarkerCensus)
 	}
-	if rec.FramesReaching > 0 {
-		t.Fatalf("#2089: %d of %d tool_progress frames still reach the unrecognized lane "+
-			"(census %v). Every captured frame must be consumed emitting zero events",
-			rec.FramesReaching, rec.FrameCount, rec.MarkerCensus)
+	if rec.UnexpectedParserVerdicts > 0 {
+		t.Fatalf("#2089: %d of %d tool_progress frames violate the parser contract "+
+			"(census %v). A heartbeat must emit one event; either other marked variety "+
+			"must be consumed emitting zero events",
+			rec.UnexpectedParserVerdicts, rec.FrameCount, rec.MarkerCensus)
 	}
 }
 
@@ -902,11 +907,11 @@ func tpcapWriteRecord(t *testing.T, dir string, red *dropcapRedactor, scanner dr
 		return
 	}
 	t.Logf("#2089 outcome=%s terminated_on=%s turn=%.1fs fg_call=%v held=%.1fs captured=%d "+
-		"frames=%d census=%v unmarked=%d reaching_lane=%d line_types=%v tools=%v tool_errors=%d "+
+		"frames=%d census=%v unmarked=%d unexpected_parser_verdicts=%d line_types=%v tools=%v tool_errors=%d "+
 		"scan_not_applied=%v\n  record: %s\n  %s",
 		rec.Outcome, rec.TerminatedOn, rec.TurnSeconds, rec.ForegroundCallObserved,
 		rec.ForegroundHeldSeconds, rec.LinesCaptured, rec.FrameCount, rec.MarkerCensus,
-		rec.UnmarkedFrames, rec.FramesReaching, rec.LineTypeCensus, rec.ToolCalls,
+		rec.UnmarkedFrames, rec.UnexpectedParserVerdicts, rec.LineTypeCensus, rec.ToolCalls,
 		rec.ToolResultErrors, notApplied, red.str(path), red.str(rec.OutcomeDetail))
 
 	// The same deny-scanned bytes, promoted in-repo so the run that produced them
@@ -963,7 +968,7 @@ func TestTpcapFixtureWorthyRefusesEveryBadCapture(t *testing.T) {
 		{"instrument broken", func(r *tpcapRecord) { r.Outcome = tpcapInstrumentBroken }, false},
 		{"vacuous: zero frames", func(r *tpcapRecord) { r.FrameCount = 0 }, false},
 		{"an unmarked frame is a finding, not a fixture", func(r *tpcapRecord) { r.UnmarkedFrames = 1 }, false},
-		{"a frame still reaching the lane", func(r *tpcapRecord) { r.FramesReaching = 1 }, false},
+		{"a frame violates the parser contract", func(r *tpcapRecord) { r.UnexpectedParserVerdicts = 1 }, false},
 		{"a different claude release", func(r *tpcapRecord) { r.ClaudeVersion = "2.1.260 (Claude Code)" }, false},
 		{"version unreadable", func(r *tpcapRecord) { r.ClaudeVersion = "<unavailable: exec failed>" }, false},
 		{"version absent", func(r *tpcapRecord) { r.ClaudeVersion = "" }, false},
