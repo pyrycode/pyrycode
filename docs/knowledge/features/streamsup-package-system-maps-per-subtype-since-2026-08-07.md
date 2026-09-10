@@ -334,3 +334,58 @@ excluded keys (`tool_use_id`, `uuid`, `session_id`) have non-empty captured valu
 ordinary reflection-based value sweep — only the empty-string case needed the structural version. Check
 whether a to-be-excluded field's one captured value is empty before writing a drop test as a value sweep; if
 it is, the sweep is decoration and the exclusion needs a structural assertion instead.
+
+**Twelfth arm, `informational` (#2319) — the first producer for `turnevent.Banner`, and the gate question
+turned on how `claude` composes the line rather than on the shape alone.** `emitSystemSubtype`'s twelfth
+case, `emitInformationalBanner`, maps `system/informational` — hook feedback, a `UserPromptSubmit` hook's
+block reason, text a slash command prints — onto `turnevent.Banner` (`Level`, `Text`, `Truncated`,
+`StopsTurn`), declared unconstructed by #2256. Before this arm, a hook that refused a prompt reached the
+operator as nothing at all: the prompt was never answered and nothing said why. `system/notification`
+(#2258) is the sibling subtype still outstanding on the same variant. See
+[turnevent-package-outbound-event-variants.md](turnevent-package-outbound-event-variants.md) and
+[the interactive payload doc](protocol-package-interactive-event-payloads.md) for the wire shape, now
+corrected to name this arm rather than the "declared with no producer" claim both carried before it.
+
+The arm gates on `Content` being non-empty — `emitCompactionBoundary`'s answer, not `emitPermissionDenied`'s
+unconditional one — because `Text` is the field the variant exists to carry, and a client renders this frame
+as a first-class notice: an empty banner is visible chrome saying nothing, worse than the silence it
+replaced. **That choice needed checking against the defect it could restore, not just against the shape it
+resembles.** A gate that can drop a refusal silently is exactly #2232's hazard, and this one is safe only
+because `claude` composes the wrapper prose itself (`"UserPromptSubmit operation blocked by hook:"`, the
+hook's path, then the original prompt) — a hook refusing with an empty reason still yields non-empty
+`content`. That is a fact about `claude`'s formatting, not about the design, and it is what makes the
+precedent's gate applicable here rather than merely similar-looking; a future arm on this switch that picks
+the compaction-boundary gate by analogy still owes this check against its own line's composition.
+
+Two new bounds land beside `maxCompactTrigger` and `maxDenialProse`: `maxBannerText` (4 KiB, cuts and
+reports through `Truncated`, the contract `turnevent.Banner.Text`'s doc publishes) and `maxBannerLevel`
+(256 bytes, drops in silence, since `Level` is a token a client matches). `maxDenialProse` was the tempting
+wrong reuse and is deliberately not taken: it is 2 KiB — half the published contract — and it already caps
+a `claude`-authored prose field the daemon spells `banner`, `turnevent.ModelRefusalFallback.Banner` (#2267).
+The two `banner`s are unrelated variants that happen to share a word; a grep for `Banner` in this package
+turns up that other field's hits almost exclusively, and sizing or reusing a constant off a name match
+rather than off the variant it actually bounds is the failure mode the new constant's own doc states to
+head off. **A name collision between a field and a variant is worth stating at the new constant, because
+the next reader greps the word and finds the wrong one first.**
+
+The capture reader, `informational_capture_test.go`, is a fourth reader on `compaction_capture_test.go`'s
+terms and deliberately not a generalization of its two nearest siblings (`compaction_capture_test.go`,
+`task_notification_capture_test.go`): both of those carry a four-quadrant skip gate built for a fixture that
+had not landed in the tree yet. Copying that gate onto an already-committed fixture would add a legal-skip
+state this file can never reach, and — because the fixture is committed — a *deleted* fixture would then
+read as a skip rather than a failure, silently passing a measurement that proves nothing. This reader fatals
+instead. **Check whether a copied sequencing gate answers a question the new reader's own fixture can still
+ask, before reusing a nearby reader's shape wholesale; a gate built for "not landed yet" is a trap once the
+bytes are committed.** It also pins the line's own key set (`informationalPinnedKeys`), on the family's
+`taskNotificationPinnedKeys` shape, so a `claude` release that adds or renames a key on this line reddens
+the pin instead of the decode target quietly reading three fields out of a line that changed shape.
+
+**Known gap, left open at review:** `maxBannerText`'s value (4096) is stated in four places —
+`turnevent.Banner.Text`'s doc, `protocol.BannerPayload.Text`'s doc, and the constant's own doc, twice over —
+and pinned by zero tests. An overlay mutation halving the constant to `2 << 10` still passes both
+`internal/streamsup` test files, because each derives its fixture's over-cap length from the symbol itself
+(`strings.Repeat("p", maxBannerText+1)`) rather than from the literal the docs publish. The sibling caps in
+this family are all symbolic too, but those are measurements the daemon chose; this one is a number a
+client was told to expect, and nothing in the diff asserts `maxBannerText == 4096`. A single literal
+assertion closes it — worth adding before a later edit to this constant goes unnoticed by every test that
+exercises it.
