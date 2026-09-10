@@ -366,6 +366,19 @@ var excludedTypes = map[string]string{
 	// together and this entry becomes "reply".
 	"TypeSlashCommandList": "push",
 
+	// outbound push — the v2 session-facts report (#2253). Outbound-only like the
+	// eight above, and mandatory here from the moment the constant exists rather
+	// than from the moment something emits it (the turnbridge mapping and the
+	// emission are both #2254) — Assertion #3 reports an unclassified constant, not
+	// an unemitted one. This entry is in fact the ONLY thing that reddens on the new
+	// constant: internal/protocol/compat_test.go's own two lists are hand-maintained
+	// literals, so a constant left off both moves its size assertion nowhere, while
+	// this guard walks codes.go's AST. It is a push and not a reply because that
+	// ticket declares no inbound request verb: an inbound type needs a handler in
+	// Handlers or dispatchAppFrame or Assertion #1 fails, and filing a handler-less
+	// verb here to dodge that would be a lie to the guard.
+	"TypeSessionFacts": "push",
+
 	// TypeAttachmentChunk is NO LONGER HERE. It sat here as "pending handler"
 	// while #1752 had declared the constant and nothing dispatched it; #1897 added
 	// the dispatchAppFrame case, so it moved up to inboundTypes as

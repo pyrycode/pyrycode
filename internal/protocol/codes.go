@@ -726,6 +726,86 @@ const (
 	TypeSlashCommandList = "slash_command_list" // binary → phone, outbound v2 slash-command-list report
 )
 
+// Mobile Protocol v2 session-facts report. What claude's own build IS and what
+// posture claude says the child is running under, taken from the SAME system/init
+// line TypeModelAnnounced's value comes from. internal/streamsup has translated
+// those two keys into turnevent.SessionFacts since #2252, but turnbridge.MapEvent's
+// default drops the variant, so no client can see either fact today. The defect it
+// closes is the one TypeModelAnnounced's block states, applied to two more facts of
+// the same shape: the daemon knows what it ASKED FOR and only claude knows what it
+// GOT, so an unexpected posture or an unexpected build is currently discarded with
+// the rest of the line. The waiting consumer is pyrycode-desktop#1241.
+//
+// Grouped alone rather than with any block above: it is not a turn sub-state with
+// two edges, not turn-independent work, not a periodic reading, not a condition
+// report about a window, and not a capability inventory. It is an IDENTITY report
+// like TypeModelAnnounced, and it is a separate block from that one because the two
+// report identities of DIFFERENT SUBJECTS — model_announced reports what claude will
+// run AS for one turn, this reports what the child RUN itself is and how it is
+// postured. A client renders the model on every turn; a version and a posture are
+// what an operator checks when something looks wrong.
+//
+// THE NAME CARRIES A TENSION WORTH MEETING HEAD-ON rather than leaving a reader to
+// notice. This frame declares no session identity at all: claude's session_id is
+// claude's session and NOT the daemon's conversation, and it is not even declared on
+// the producer's decode target. "Session" here names the CHILD RUN the two facts
+// describe, not an identifier the frame carries.
+//
+// The NAME is otherwise the daemon's, not claude's, for the reason the blocks above
+// give: the wire follows internal/turnevent's VARIANT (turnevent.SessionFacts), so a
+// claude rename lands in one place instead of breaking every client at once.
+//
+// THE DISCRIMINATING WORDS INVERT THE OBVIOUS CHOICE, and the trap the sibling
+// blocks record cuts closer here than on any of them. `session` is a substring of
+// this very name, so a strings.Contains check on it is RED against the correct name
+// — TypeModelAnnounced's block records the same trap for the singular `model` and
+// TypeSlashCommandList's records it three words wide for command, slash_command and
+// slash. `session` is also claude's own word, via the session_id key on the same
+// init line, so the collision is not merely a coincidence of spelling. The checkable
+// words are claude's SUBTYPE (init) and claude's two KEYS for the values
+// (claude_code_version and permissionMode); this name contains none of the three,
+// which is what makes the negative pins satisfiable at all. Separating it from the
+// three shipped session_-prefixed constants — TypeSessionTransition,
+// TypeSessionSettings and TypeSessionError — has to be an EQUALITY rather than a
+// containment for that same reason, the shape TypeQuestionDismissed's pin needed
+// against TypeModalDismissed (see TestSessionFactsType_IsNotClaudesVocabulary).
+//
+// NO effort FIELD ON THE PAYLOAD, and the absence is MEASURED rather than forgotten.
+// #2251 captured the init line under the production spawn shape with an effort
+// actually set, on the launch argv and acknowledged in band, and no init line
+// carries an effort key. That measurement is machine-enforced by effortInitPins in
+// internal/streamsup. Declaring the field anyway would put a permanently empty field
+// on a shipped wire type, which is far harder to withdraw than to add later; should
+// a later claude start publishing one, that pin reddens and that is the ticket to
+// write then.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: this is
+// an outbound binary → phone report an old phone never receives, and a leak into
+// that set would let a phone send a session_facts frame into dispatch.Route. Two
+// drift detectors classify it, both mandatory from the moment the constant exists
+// rather than from the moment something emits it: the partition in
+// internal/protocol/compat_test.go splits Type* constants between inboundAppTypeSet
+// and v2OnlyTypes (this lives in the latter), and cmd/pyry/relay_guard_test.go's
+// excludedTypes records it as a push. Only the second of the two actually reddens on
+// a BRAND-NEW constant — compat_test.go's lists are hand-maintained, so a constant
+// left off both of them moves its size assertion nowhere, while the relay guard
+// walks codes.go's AST.
+//
+// No inbound request verb is declared here, and that is not an omission.
+// TestEveryInboundV2TypeHasHandler's Assertion #1 requires an inbound type to be
+// wired into cmd/pyry/relay.go's Handlers map or internal/relay/v2session.go's
+// dispatchAppFrame switch, and this ticket ships no handler — so a verb declared
+// here would be red by construction, and filing it under excludedTypes to dodge that
+// would be a lie to the guard.
+//
+// The declaring ticket (#2253) is wire vocabulary and documentation only; #2254 adds
+// internal/turnbridge's MapEvent arm for turnevent.SessionFacts and cmd/pyry's
+// emitting Handle case. Same declare-then-emit sequencing as #1405→#1410,
+// #1616→#1638, #1704→#1848 and #1726→#2003.
+const (
+	TypeSessionFacts = "session_facts" // binary → phone, outbound v2 session-facts report
+)
+
 // Mobile Protocol v2 screen-snapshot types. The always-available,
 // parser-independent screen snapshot is the floor of ADR 025's
 // safe-degradation strategy (docs/protocol-mobile.md § Screen snapshot): the

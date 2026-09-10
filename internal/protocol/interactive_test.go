@@ -1300,6 +1300,205 @@ func TestModelAnnouncedType_IsNotClaudesSubtype(t *testing.T) {
 	}
 }
 
+func TestSessionFactsPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "session_facts.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeSessionFacts {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeSessionFacts)
+	}
+
+	var payload SessionFactsPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	// BOTH claude-derived values are MEASURED, per TestModelAnnouncedPayload_RoundTrip's
+	// register: a client author copies a fixture as if it were observed traffic, so it
+	// has to be. 2.1.259 is claude's own build on all three init lines of #2251's
+	// effort capture; default is the posture those same lines report.
+	// bypassPermissions is the other measured posture, from the capture
+	// internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json.
+	//
+	// The two differ from each other deliberately. With one string in both fields, a
+	// struct wiring claude_code_version and permission_mode to each other's wire key
+	// would decode and re-encode identically and this test would stay green.
+	for _, f := range []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"ConversationID", payload.ConversationID, "c1"},
+		{"ClaudeCodeVersion", payload.ClaudeCodeVersion, "2.1.259"},
+		{"PermissionMode", payload.PermissionMode, "default"},
+	} {
+		if f.got != f.want {
+			t.Errorf("%s: got %q, want %q", f.name, f.got, f.want)
+		}
+	}
+	// One entry, naming the SECOND field. That is what discriminates this []string
+	// from ModelAnnounced's Truncated bool: a list permanently indexed to the first
+	// field carries no more than the bool does. It also pins the DAEMON's name for
+	// the posture — claude's key is permissionMode, and an entry spelling it claude's
+	// way is the realistic bug (turnevent.SessionFacts.TruncatedFields' own rule).
+	//
+	// The PAIRING is not a capture, as model_announced.json's is not: 2.1.259 is 7
+	// bytes against a 256-byte cap, so no real frame reports this version as cut. The
+	// two values are measured; the truncation report is chosen to discriminate.
+	if got, want := strings.Join(payload.TruncatedFields, ","), "permission_mode"; got != want {
+		t.Errorf("TruncatedFields: got %q, want %q", got, want)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestSessionFactsPayload_ZeroValue_RoundTrip pins the encoding of every field's
+// zero value, which is what this stream's no-omitempty rule
+// (docs/protocol-mobile.md § Interactive events) actually asserts: adding omitempty
+// to any one of the four fields turns this round trip red, and no realistic fixture
+// can make that claim for all four.
+//
+// The frame itself is one the bridge will never emit — the producer gates on at
+// least one of the two facts being present (turnevent.SessionFacts' own gate note)
+// and the bridge always supplies a conversation id. It exists for the encoding, not
+// for the scenario, exactly as TestModelAnnouncedPayload_ZeroValue_RoundTrip's does.
+func TestSessionFactsPayload_ZeroValue_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "session_facts_zero.json")
+
+	// The four guards are load-bearing, and WHICH failure they catch is worth stating
+	// precisely rather than copying the sibling's sentence — measured by overlay
+	// mutant rather than assumed. Against the COMMITTED fixture the round trip below
+	// already reddens on an omitempty: the key vanishes from the re-marshalled bytes
+	// while the fixture still carries it, so the byte comparison fails. What these
+	// guards add is survival of a fixture REGENERATION — the moment someone
+	// regenerates session_facts_zero.json under an omitempty, the key is gone from
+	// both sides and the round trip goes green again while these stay red. That is
+	// the property the drift-detector overview records for key-set pins generally.
+	//
+	// The truncated_fields guard differs from the sibling's three: nil serialises as
+	// null and not as [], the form every truncated_fields row in
+	// docs/protocol-mobile.md already describes.
+	for _, want := range []string{
+		`"conversation_id":""`,
+		`"claude_code_version":""`,
+		`"permission_mode":""`,
+		`"truncated_fields":null`,
+	} {
+		if !bytes.Contains(canonical(t, raw), []byte(want)) {
+			t.Errorf("fixture must carry %s explicitly, got: %s", want, raw)
+		}
+	}
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeSessionFacts {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeSessionFacts)
+	}
+
+	var payload SessionFactsPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	for _, f := range []struct {
+		name string
+		got  string
+	}{
+		{"ConversationID", payload.ConversationID},
+		{"ClaudeCodeVersion", payload.ClaudeCodeVersion},
+		{"PermissionMode", payload.PermissionMode},
+	} {
+		if f.got != "" {
+			t.Errorf("%s: got %q, want empty", f.name, f.got)
+		}
+	}
+	if payload.TruncatedFields != nil {
+		t.Errorf("TruncatedFields: got %v, want nil", payload.TruncatedFields)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestSessionFactsType_IsNotClaudesVocabulary pins the translation layer this frame
+// exists to preserve, as its model_announced, model_list and slash_command_list
+// siblings above do. The daemon is the ONE place a claude rename lands.
+//
+// THE DISCRIMINATING WORDS INVERT THE OBVIOUS CHOICE, and the trap cuts closer here
+// than on any sibling: `session` is a substring of the correct name, so a
+// strings.Contains check on it would be RED against session_facts — the same trap
+// TypeModelAnnounced's block records for the singular `model` and
+// TypeSlashCommandList's records three words wide for command, slash_command and
+// slash. `session` is claude's word as well, via the session_id key on the very
+// system/init line these two facts come from, which is what makes the collision
+// worth stating rather than leaving for the next reader to rediscover.
+//
+// The checkable words are therefore claude's SUBTYPE (init) and claude's two KEYS
+// for the values (claude_code_version, permissionMode). session_facts contains none
+// of the three, which is what makes these pins satisfiable at all.
+//
+// Separating this constant from its shipped session_-prefixed neighbours has to be
+// an EQUALITY rather than a containment, for the same reason: three constants
+// already begin session_, so the shared word cannot tell them apart. That is the
+// shape TypeQuestionDismissed's pin needed against TypeModalDismissed.
+func TestSessionFactsType_IsNotClaudesVocabulary(t *testing.T) {
+	if TypeSessionFacts == "init" {
+		t.Errorf("wire type is claude's subtype %q; it must be the daemon's own name", TypeSessionFacts)
+	}
+	for _, word := range []string{"init", "claude_code_version", "permissionMode"} {
+		if strings.Contains(TypeSessionFacts, word) {
+			t.Errorf("wire type %q is derived from claude's vocabulary (contains %q)", TypeSessionFacts, word)
+		}
+	}
+	// The exact pin, matching internal/turnevent's variant name (SessionFacts) in
+	// snake_case rather than anything of claude's. cmd/pyry's eventKind already
+	// returns this spelling for the variant (#2252), so the wire name and the daemon's
+	// own log agree by construction rather than by coincidence.
+	if TypeSessionFacts != "session_facts" {
+		t.Errorf("wire type: got %q, want %q", TypeSessionFacts, "session_facts")
+	}
+	for _, sibling := range []struct {
+		name  string
+		value string
+	}{
+		{"TypeSessionTransition", TypeSessionTransition},
+		{"TypeSessionSettings", TypeSessionSettings},
+		{"TypeSessionError", TypeSessionError},
+	} {
+		if TypeSessionFacts == sibling.value {
+			t.Errorf("wire type collides with %s (%q)", sibling.name, sibling.value)
+		}
+	}
+
+	// The payload's own bytes, not the envelope's — the envelope carries its own
+	// id/ts and would dilute the check. This is where "what this frame does NOT
+	// carry" stops being prose and becomes machine-checked: the operator's local
+	// filesystem (cwd, memory_paths, messaging_socket_path), claude's own session
+	// identity (session_id), the MCP server status that belongs to #2275's frame, and
+	// the effort key #2251 measured claude does not publish at all. Non-discriminating
+	// today by construction; the job is to go red the day someone "helpfully" adds
+	// claude's init-line keys back.
+	body, err := json.Marshal(SessionFactsPayload{
+		ConversationID:    "c1",
+		ClaudeCodeVersion: "2.1.259",
+		PermissionMode:    "bypassPermissions",
+		TruncatedFields:   []string{"claude_code_version", "permission_mode"},
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	for _, key := range []string{
+		"cwd", "session_id", "memory_paths", "messaging_socket_path",
+		"mcp_servers", "effort", "tools", "slash_commands",
+	} {
+		if bytes.Contains(body, []byte(key)) {
+			t.Errorf("payload carries claude's excluded init-line key %q: %s", key, body)
+		}
+	}
+}
+
 // TestModelListPayload_NilModelsNormalises covers the case no fixture could —
 // and here that is the ONLY path there is. Unmarshalling "models":[] always
 // yields a non-nil empty slice, so the nil branch is reachable only by
