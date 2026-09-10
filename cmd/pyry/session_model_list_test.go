@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -13,9 +14,105 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
+
+func TestValidateModelVocabulary(t *testing.T) {
+	t.Parallel()
+
+	complete := turnevent.ModelList{Models: []turnevent.ModelOption{
+		{Value: "sonnet"},
+		{Value: "claude-fable-5-1[1m]"},
+	}}
+	tests := []struct {
+		name  string
+		list  turnevent.ModelList
+		have  bool
+		model string
+		want  error
+	}{
+		{name: "exact alias", list: complete, have: true, model: "sonnet"},
+		{name: "exact bracketed variant", list: complete, have: true, model: "claude-fable-5-1[1m]"},
+		{name: "empty reset bypasses membership", model: ""},
+		{name: "complete absence", list: complete, have: true, model: "opus", want: relay.ErrModelNotOffered},
+		{name: "no retained vocabulary", model: "opus", want: relay.ErrModelVocabularyUnavailable},
+		{name: "reported empty vocabulary", list: turnevent.ModelList{}, have: true, model: "opus", want: relay.ErrModelVocabularyUnavailable},
+		{name: "dropped row makes absence inconclusive", list: turnevent.ModelList{Models: []turnevent.ModelOption{{Value: "sonnet"}}, DroppedModels: 1}, have: true, model: "opus", want: relay.ErrModelVocabularyUnavailable},
+		{name: "truncated value makes absence inconclusive", list: turnevent.ModelList{Models: []turnevent.ModelOption{{Value: "opu", TruncatedFields: []string{"value"}}}}, have: true, model: "opus", want: relay.ErrModelVocabularyUnavailable},
+		{name: "matching truncated value is not offered", list: turnevent.ModelList{Models: []turnevent.ModelOption{{Value: "opus", TruncatedFields: []string{"value"}}}}, have: true, model: "opus", want: relay.ErrModelVocabularyUnavailable},
+		{name: "unrelated truncation leaves absence conclusive", list: turnevent.ModelList{Models: []turnevent.ModelOption{{Value: "sonnet", TruncatedFields: []string{"display_name"}}}}, have: true, model: "opus", want: relay.ErrModelNotOffered},
+		{name: "exact match wins despite incomplete siblings", list: turnevent.ModelList{Models: []turnevent.ModelOption{{Value: "sonnet"}, {Value: "opu", TruncatedFields: []string{"value"}}}, DroppedModels: 2}, have: true, model: "sonnet"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if err := validateModelVocabulary(tt.list, tt.have, tt.model); !errors.Is(err, tt.want) {
+				t.Errorf("validateModelVocabulary(..., %q) = %v, want %v", tt.model, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestSettingsUpdaterAdapter_RejectsBeforeWholeFrameMutation(t *testing.T) {
+	t.Parallel()
+
+	pool, plan := newModelListTestPool(t)
+	id := pool.Default().ID()
+	plan.arm(id, turnevent.ModelList{Models: []turnevent.ModelOption{{Value: "sonnet"}}})
+	adapter := settingsUpdaterAdapter{pool}
+
+	requested, effort, mode := "opus", "high", "plan"
+	err := adapter.UpdateSettings(string(id), relay.SettingsUpdate{
+		Model: &requested, Effort: &effort, PermissionMode: &mode,
+	})
+	if !errors.Is(err, relay.ErrModelNotOffered) {
+		t.Fatalf("UpdateSettings(absent model) = %v, want ErrModelNotOffered", err)
+	}
+	got, err := pool.SettingsFor(id)
+	if err != nil {
+		t.Fatalf("SettingsFor: %v", err)
+	}
+	if got.Model != "" || got.Effort != "" || got.PermissionMode != "default" {
+		t.Errorf("settings after rejected frame = %+v, want defaults", got)
+	}
+
+	offered, low := "sonnet", "low"
+	if err := adapter.UpdateSettings(string(id), relay.SettingsUpdate{Model: &offered, Effort: &low, PermissionMode: &mode}); err != nil {
+		t.Fatalf("UpdateSettings(offered model): %v", err)
+	}
+	got, err = pool.SettingsFor(id)
+	if err != nil {
+		t.Fatalf("SettingsFor after offered update: %v", err)
+	}
+	if got.Model != offered || got.Effort != low || got.PermissionMode != mode {
+		t.Errorf("settings after offered whole frame = %+v, want model=%q effort=%q mode=%q", got, offered, low, mode)
+	}
+
+	reset := ""
+	if err := adapter.UpdateSettings(string(id), relay.SettingsUpdate{Model: &reset}); err != nil {
+		t.Fatalf("UpdateSettings(explicit empty reset): %v", err)
+	}
+	got, err = pool.SettingsFor(id)
+	if err != nil {
+		t.Fatalf("SettingsFor after reset: %v", err)
+	}
+	if got.Model != "" || got.Effort != low || got.PermissionMode != mode {
+		t.Errorf("settings after explicit empty reset = %+v, want only model cleared", got)
+	}
+
+	unknown, err := sessions.NewID()
+	if err != nil {
+		t.Fatalf("sessions.NewID: %v", err)
+	}
+	if err := adapter.UpdateSettings(string(unknown), relay.SettingsUpdate{Model: &requested}); !errors.Is(err, relay.ErrSessionUnknown) {
+		t.Errorf("UpdateSettings(unknown session) = %v, want ErrSessionUnknown before menu outcome", err)
+	}
+	if err := adapter.UpdateSettings("", relay.SettingsUpdate{Model: &requested}); !errors.Is(err, relay.ErrSessionUnknown) {
+		t.Errorf("UpdateSettings(empty session) = %v, want ErrSessionUnknown before bootstrap-menu outcome", err)
+	}
+}
 
 // modelListPlan is the per-pool-session answer table modelListRunner reads at
 // CALL time rather than at construction. The indirection is load-bearing for the

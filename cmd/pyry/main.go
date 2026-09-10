@@ -39,6 +39,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -57,6 +58,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 	"github.com/pyrycode/pyrycode/internal/sessions"
+	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
 // Version is set at build time via -ldflags "-X main.Version=...".
@@ -1290,15 +1292,23 @@ func (m sessionMinter) Create(_ context.Context, label, spawnDir string) (string
 	return string(id), err
 }
 
-// settingsUpdaterAdapter adapts *sessions.Pool to relay.SettingsUpdater (#845).
+// settingsUpdaterAdapter adapts *sessions.Pool to relay.SettingsUpdater (#845,
+// model-vocabulary validation #2281).
 // It narrows the type (relay speaks relay.SettingsUpdate / relay.ErrSessionUnknown
 // so internal/relay imports neither internal/sessions nor cmd/pyry) and owns the
-// single sessions.ErrSessionNotFound → relay.ErrSessionUnknown mapping — the
+// sessions.ErrSessionNotFound → relay.ErrSessionUnknown mapping and the retained
+// model-vocabulary decision — the
 // project convention that sentinel-to-wire mapping lives at the consumer call
 // site, not in the primitive. The four presence pointers pass straight through:
 // relay.SettingsUpdate mirrors sessions.SettingsUpdate 1:1, so a nil field still
 // means "leave unchanged" and a nil YOLO can never enable bypass. The precedent
 // for this type-narrowing seam is sessionMinter / poolResolver above.
+//
+// A non-empty model is checked before Pool.UpdateSettings against the same
+// retainedModelVocabulary used for client publication. This adapter is the one
+// layer that can see both cmd-side retention and the sessions primitive without
+// inverting either package dependency. Empty retains its restart-to-default
+// meaning and skips membership.
 //
 // The mirror is maintained BY HAND, so a field added on one side and forgotten
 // here compiles and ships as a silent no-op. That is what
@@ -1308,7 +1318,31 @@ func (m sessionMinter) Create(_ context.Context, label, spawnDir string) (string
 type settingsUpdaterAdapter struct{ p *sessions.Pool }
 
 func (a settingsUpdaterAdapter) UpdateSettings(id string, u relay.SettingsUpdate) error {
-	err := a.p.UpdateSettings(sessions.SessionID(id), sessions.SettingsUpdate{
+	sessionID := sessions.SessionID(id)
+	if u.Model != nil && *u.Model != "" {
+		// Check membership only for a session the daemon actually hosts. Apart from
+		// preserving session.not_found precedence, this prevents an unknown id from
+		// probing whether the bootstrap vocabulary is complete.
+		// Pool.Lookup("") deliberately resolves the bootstrap session for legacy
+		// internal callers, while Pool.UpdateSettings requires an exact map key.
+		// Preserve the update seam's unknown-session behavior before consulting
+		// the vocabulary.
+		if sessionID == "" {
+			return relay.ErrSessionUnknown
+		}
+		if _, err := a.p.Lookup(sessionID); err != nil {
+			if errors.Is(err, sessions.ErrSessionNotFound) {
+				return relay.ErrSessionUnknown
+			}
+			return err
+		}
+		list, have := retainedModelVocabulary(a.p, id)
+		if err := validateModelVocabulary(list, have, *u.Model); err != nil {
+			return err
+		}
+	}
+
+	err := a.p.UpdateSettings(sessionID, sessions.SettingsUpdate{
 		Model:          u.Model,
 		Effort:         u.Effort,
 		YOLO:           u.YOLO,
@@ -1318,6 +1352,38 @@ func (a settingsUpdaterAdapter) UpdateSettings(id string, u relay.SettingsUpdate
 		return relay.ErrSessionUnknown
 	}
 	return err
+}
+
+// validateModelVocabulary classifies one non-empty client model against the same
+// retained menu used for publication. A complete untruncated row set can prove
+// absence; a missing list, a dropped row, or a cut Value cannot. Exact match is
+// checked first because a present full row proves availability even when a
+// different row was lost or truncated.
+//
+// Only ModelOption.Value participates. Neither the requested value nor any menu
+// value is included in the returned sentinels, so callers can log the outcome
+// without disclosing model vocabulary.
+func validateModelVocabulary(list turnevent.ModelList, have bool, model string) error {
+	if model == "" {
+		return nil
+	}
+	if !have || len(list.Models) == 0 {
+		return relay.ErrModelVocabularyUnavailable
+	}
+	for _, option := range list.Models {
+		if option.Value == model && !slices.Contains(option.TruncatedFields, "value") {
+			return nil
+		}
+	}
+	if list.DroppedModels > 0 {
+		return relay.ErrModelVocabularyUnavailable
+	}
+	for _, option := range list.Models {
+		if slices.Contains(option.TruncatedFields, "value") {
+			return relay.ErrModelVocabularyUnavailable
+		}
+	}
+	return relay.ErrModelNotOffered
 }
 
 // errNoBoundSession is the sentinel sessionRouter.Route returns when a
