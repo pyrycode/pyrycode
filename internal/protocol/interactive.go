@@ -192,6 +192,22 @@ type ToolResultPayload struct {
 	ResultDetail    string `json:"result_detail"`
 }
 
+// ToolProgressPayload is the body of an Envelope whose Type == TypeToolProgress.
+// It updates the open ToolUsePayload row with the matching ToolUseID. The elapsed
+// value is claude's signed reading, forwarded verbatim rather than computed,
+// clamped, or accumulated by the daemon.
+//
+// The join id was already bounded at construction by the turnevent producer. It
+// remains an untrusted display handle rather than a capability: neither this
+// package nor the outbound bridge acts on it. No field uses omitempty, so zero
+// values remain explicit on the wire like every other interactive-event payload.
+type ToolProgressPayload struct {
+	ConversationID string `json:"conversation_id"`
+	TurnID         string `json:"turn_id"`
+	ToolUseID      string `json:"tool_use_id"`
+	ElapsedSeconds int    `json:"elapsed_seconds"`
+}
+
 // ToolDeniedPayload is the body of an Envelope whose Type == TypeToolDenied
 // (docs/protocol-mobile.md § tool_denied, #2233). Binary → phone direction; the wire
 // form of turnevent.ToolCallDenied, which reports that claude REFUSED to run a tool

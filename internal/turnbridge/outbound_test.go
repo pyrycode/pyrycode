@@ -181,6 +181,22 @@ func TestMapEventOutbound(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			name: "ToolProgress -> tool_progress preserves the signed reading",
+			ev: turnevent.ToolProgress{
+				ToolCallID:     "tool-progress-33",
+				ElapsedSeconds: -44,
+			},
+			tc:      TurnContext{ConversationID: "conversation-11", TurnID: "turn-22", Seq: 55},
+			wantTyp: protocol.TypeToolProgress,
+			wantPayload: protocol.ToolProgressPayload{
+				ConversationID: "conversation-11",
+				TurnID:         "turn-22",
+				ToolUseID:      "tool-progress-33",
+				ElapsedSeconds: -44,
+			},
+			wantOK: true,
+		},
+		{
 			// The id report token is the DAEMON's tool_call_id on the event and this
 			// frame's tool_use_id on the wire; every other token already names a key
 			// this frame carries and crosses untouched. Separate slice literals for ev
@@ -1510,6 +1526,42 @@ func TestMapEventOutbound(t *testing.T) {
 				t.Fatalf("dropped event must yield nil payload, got %#v", payload)
 			}
 		})
+	}
+}
+
+func TestMapEvent_ToolProgressCarriesOnlyItsFourFields(t *testing.T) {
+	t.Parallel()
+
+	_, payload, ok := MapEvent(turnevent.ToolProgress{
+		ToolCallID:     "tool-progress-33",
+		ElapsedSeconds: -44,
+	}, TurnContext{ConversationID: "conversation-11", TurnID: "turn-22", Seq: 55})
+	if !ok {
+		t.Fatal("MapEvent refused a ToolProgress; every decoded heartbeat must map")
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		t.Fatalf("decode payload keys: %v", err)
+	}
+	want := map[string]bool{
+		"conversation_id": true,
+		"turn_id":         true,
+		"tool_use_id":     true,
+		"elapsed_seconds": true,
+	}
+	for key := range keys {
+		if !want[key] {
+			t.Errorf("payload carries unexpected key %q", key)
+		}
+	}
+	for key := range want {
+		if _, present := keys[key]; !present {
+			t.Errorf("payload is missing required key %q", key)
+		}
 	}
 }
 

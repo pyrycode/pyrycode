@@ -4035,3 +4035,54 @@ func TestInteractiveTurnEmitterV2_BannerEventKindNamesTheVariant(t *testing.T) {
 		}
 	}
 }
+
+func TestInteractiveTurnEmitterV2_ToolProgressFansOutToInteractiveOnly(t *testing.T) {
+	t.Parallel()
+
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{
+		{ConnID: "a", Interactive: true},
+		{ConnID: "b", Interactive: false},
+	}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	ctx := context.Background()
+	e.Handle(ctx, turnevent.ToolStart{ToolCallID: "tool-progress-33", Title: "Bash"})
+	e.Handle(ctx, turnevent.ToolProgress{ToolCallID: "tool-progress-33", ElapsedSeconds: -44})
+
+	progress := pushesOfType(bcast.pushes, protocol.TypeToolProgress)
+	if len(progress) != 1 {
+		t.Fatalf("tool_progress pushed %d envelopes; want exactly 1", len(progress))
+	}
+	if progress[0].connID != "a" {
+		t.Fatalf("tool_progress pushed to conn %q, want interactive conn a", progress[0].connID)
+	}
+	var got protocol.ToolProgressPayload
+	if err := json.Unmarshal(progress[0].env.Payload, &got); err != nil {
+		t.Fatalf("decode tool_progress payload: %v", err)
+	}
+	uses := pushesOfType(bcast.pushes, protocol.TypeToolUse)
+	if len(uses) != 1 {
+		t.Fatalf("tool_use count: got %d, want 1", len(uses))
+	}
+	var use protocol.ToolUsePayload
+	if err := json.Unmarshal(uses[0].env.Payload, &use); err != nil {
+		t.Fatalf("decode tool_use payload: %v", err)
+	}
+	if got.ConversationID != testConvID {
+		t.Errorf("ConversationID: got %q, want %q", got.ConversationID, testConvID)
+	}
+	if got.TurnID == "" || got.TurnID != use.TurnID {
+		t.Errorf("TurnID: got %q, want tool_use turn %q", got.TurnID, use.TurnID)
+	}
+	if got.ToolUseID != use.ToolUseID {
+		t.Errorf("ToolUseID: got %q, want tool_use id %q", got.ToolUseID, use.ToolUseID)
+	}
+	if got.ElapsedSeconds != -44 {
+		t.Errorf("ElapsedSeconds: got %d, want -44 verbatim", got.ElapsedSeconds)
+	}
+	if len(pushesFor(bcast.pushes, "b")) != 0 {
+		t.Fatal("non-interactive conn b received tool_progress")
+	}
+}

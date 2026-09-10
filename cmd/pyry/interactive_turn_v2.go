@@ -249,6 +249,16 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		e.flushDelta(ctx) // buffered text precedes the tool_result
 		e.transitionTo(ctx, convID, turnbridge.StateResponding)
 		e.emitMapped(ctx, convID, ev)
+	case turnevent.ToolProgress:
+		// A progress reading belongs to the tool row that ToolStart already opened.
+		// It is turn-scoped but lifecycle-neutral: preserve wire order by flushing
+		// prior text, then publish without emitting another turn_state or retaining
+		// counter state in the daemon.
+		if !e.startTurnIfNeeded(convID) {
+			return
+		}
+		e.flushDelta(ctx)
+		e.emitMapped(ctx, convID, ev)
 	case turnevent.ToolCallDenied:
 		// claude refused a tool call it had already announced (#2233). TURN-SCOPED,
 		// taking ToolStart/ToolUpdate's shape above rather than the status peers' below,
@@ -879,8 +889,7 @@ func eventKind(ev turnevent.Event) string {
 	case turnevent.ToolProgress:
 		// The variant name only. ToolCallID is a claude-authored join key and must
 		// not enter a log; ElapsedSeconds is omitted with it so every eventKind arm
-		// remains content-free. This event intentionally has no Handle mapping until
-		// #2324 adds its wire contract, so the unknown-event drop is a live caller.
+		// remains content-free.
 		return "tool_progress"
 	case turnevent.TurnEnd:
 		return "turn_end"
