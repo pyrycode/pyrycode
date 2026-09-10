@@ -82,7 +82,7 @@ package realclaude
 // silently consumes everything before it, which makes "exactly one banner" and "no
 // unrecognized_message" unassertable after the fact, and makes the NEGATIVE — the
 // banner did not arrive — inexpressible. So the window gets one local primitive
-// (hookBannerWindow.next) that every frame passes through, with three thin waits
+// (hookBannerWindow.next) that every frame passes through, with two thin waits
 // over it. That is #2138's shape and its header states the same reason.
 //
 // A REFUSED TURN HAS NO CLIENT-VISIBLE BOUNDARY, so turn 2 is sent on the BANNER.
@@ -98,8 +98,25 @@ package realclaude
 // open turn, logging "interactive_turn.turn_end_no_turn" and emitting nothing. A
 // refused turn therefore produces exactly one client-visible frame, the banner
 // itself, whose stops_turn field is how the client learns the prompt was refused.
-// There is no boundary to wait for, and awaitRefusedTurnQuiet asserts that absence
-// rather than merely stepping around it.
+// There is no boundary to wait for, and this file asserts that absence rather than
+// merely stepping around it.
+//
+// THE ABSENCE IS MEASURED WITH A SLEEP, NOT WITH A READ DEADLINE, and that is
+// forced rather than chosen. The THIRD live run (2026-09-10) reddened one step
+// further on: the banner arrived, the absence held for its whole budget, and then
+// the unblocked prompt could not be SENT — "use of closed network connection". The
+// reason is documented on the client itself. coder/websocket closes the underlying
+// connection when a Read context is canceled, so fakephone.Client.Receive's doc
+// says in as many words that a timed-out client cannot be reused. A vigil that ENDS
+// in a read timeout therefore destroys the phone it is about to need, and every
+// green run would have ended that way: the timeout is the success path of a
+// negative. So the budget is spent ASLEEP, before the unblocked prompt is sent.
+// Nothing reads during it, so whatever the daemon emits queues on the socket in
+// arrival order and is read afterwards — necessarily ahead of turn 2's own ack,
+// which the daemon cannot write until the send that follows the sleep reaches it.
+// That is what makes "arrived before the ack" mean "belongs to the refused turn"
+// over a full budget instead of over a millisecond race, and awaitCompletedTurn is
+// where the two readings are named.
 //
 // So #2138's ordering IS inherited after all, for a different reason than its own.
 // That file sent turn 2 on the session_transition because whether its `/clear` turn
@@ -161,10 +178,15 @@ import (
 // different HOMEs is a coincidence waiting to read as a shared fixture.
 const hookBannerRigDir = "hookbanner-rig-2320"
 
-// hookBannerRefusedQuietBudget bounds the QUIET WINDOW after the banner: how long
-// this file reads the wire while asserting that the refused turn produces no
-// turn-lifecycle frame at all, which the header explains is production's designed
-// behaviour rather than an accident to tolerate.
+// hookBannerRefusedSettleBudget bounds the window in which a turn-lifecycle frame
+// for the REFUSED turn would have to appear and does not, which the header explains
+// is production's designed behaviour rather than an accident to tolerate.
+//
+// It is spent ASLEEP rather than in a read, and the header gives the reason: a read
+// whose deadline expires closes this phone for good, so a vigil cannot be followed
+// by a send. Nothing reads during the sleep, so anything the daemon emits queues in
+// arrival order and is read afterwards, ahead of the unblocked prompt's ack — which
+// is the marker that attributes it to the refusal.
 //
 // It is spent in full on every green run, and that is the price of the negative
 // rather than waste. An absence is evidence only if something waited for it; a
@@ -175,7 +197,7 @@ const hookBannerRigDir = "hookbanner-rig-2320"
 // block phase, and the child is already up by the time it is waited on — the cold
 // spawn was paid for by the banner wait, which takes perTurnReplyBudget for exactly
 // that reason.
-const hookBannerRefusedQuietBudget = 10 * time.Second
+const hookBannerRefusedSettleBudget = 10 * time.Second
 
 func TestInteractiveStreamHookBlockedBannerReachesTheClient(t *testing.T) {
 	// The rig is written by the seed callback, which runs after the bootstrap
@@ -232,7 +254,7 @@ func TestInteractiveStreamHookBlockedBannerReachesTheClient(t *testing.T) {
 	sealSendMessage(t, h.phone, h.initSend, blockReqID, convID, "m-blocked", oslcapBlockPrompt(nonce))
 
 	// --- AC 1, first half: the refusal reaches the client ----------------------
-	banner := w.awaitBanner(t, h, convID, rig, perTurnReplyBudget)
+	banner := w.awaitBanner(t, h, rig, perTurnReplyBudget)
 	if banner.ConversationID != convID {
 		t.Errorf("banner conversation_id = %q, want the driving conversation %q",
 			banner.ConversationID, convID)
@@ -274,9 +296,12 @@ func TestInteractiveStreamHookBlockedBannerReachesTheClient(t *testing.T) {
 	// --- AC 1, second half: the session still answers the next prompt ----------
 	// No wait for the refused turn to close, because it produces no client-visible
 	// boundary — by production design, for the reason the header gives. The absence
-	// is ASSERTED here, and then turn 2 is sent on the banner: #2138's ordering
-	// after all, arrived at for a different reason than #2138's own.
-	w.awaitRefusedTurnQuiet(t, h, convID, hookBannerRefusedQuietBudget)
+	// is ASSERTED rather than stepped around: the refusal is given a full budget to
+	// emit something with nothing reading, and awaitCompletedTurn below attributes
+	// anything that arrives before turn 2's ack to it. Turn 2 is then sent on the
+	// banner: #2138's ordering after all, arrived at for a different reason than
+	// #2138's own.
+	letRefusedTurnSettle(t, hookBannerRefusedSettleBudget)
 
 	liveReqID := reqID
 	reqID++
@@ -319,9 +344,11 @@ func TestInteractiveStreamHookBlockedBannerReachesTheClient(t *testing.T) {
 // pass-through carries is shadowed by the copy pyry appends after it.
 //
 // The bytes are the rig builder's own rather than a second rendering of the same
-// shape. oslcapSettingsJSON is pinned by TestOslcapSettingsFileIsTheShapeClaudeReads
-// inside `make check`; a hand-copied shape here would be pinned by nothing and
-// would drift the first time claude's hooks schema moved.
+// shape. oslcapSettingsJSON is pinned by TestOslcapSettingsFileIsTheShapeClaudeReads,
+// which runs offline but NOT inside `make check`: this whole package sits behind the
+// e2e_realclaude tag, so the hermetic gate never compiles it and the pin holds only
+// under `make e2e-realclaude` or `make preship`. A hand-copied shape here would be
+// pinned by nothing at all and would drift the first time claude's hooks schema moved.
 //
 // Modes are set with an explicit Chmod after the write rather than left to
 // os.WriteFile's perm argument, which the runner's umask masks — oslcapWriteHookRig's
@@ -329,9 +356,10 @@ func TestInteractiveStreamHookBlockedBannerReachesTheClient(t *testing.T) {
 // so its integrity is the property that matters, and a mode that depends on the
 // umask is a mode no test can pin.
 //
-// An existing file is an error, never an overwrite. Nothing else in this harness
-// writes <home>/.claude/settings.json today — WithWorktreeAuthenticated seeds
-// .claude.json, which is a different file — so one already there would mean a
+// An existing file is an error, never an overwrite, and O_EXCL states that as one
+// operation rather than as a stat this code then acts on. Nothing else in this
+// harness writes <home>/.claude/settings.json today — WithWorktreeAuthenticated
+// seeds .claude.json, which is a different file — so one already there would mean a
 // second writer had appeared and this rig would be competing with it for the
 // child's hooks rather than supplying the only ones in play.
 func hookBannerInstallUserSettings(home string, rig oslcapRig) error {
@@ -343,14 +371,20 @@ func hookBannerInstallUserSettings(home string, rig oslcapRig) error {
 		return fmt.Errorf("chmod the user settings dir: %w", err)
 	}
 	path := filepath.Join(dir, "settings.json")
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("%s already exists; this harness has grown a second writer of claude's user "+
-			"settings and the hook rig would be competing with it", path)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("stat the user settings file: %w", err)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("%s already exists; this harness has grown a second writer of claude's user "+
+				"settings and the hook rig would be competing with it", path)
+		}
+		return fmt.Errorf("create the user settings file: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(rig.Settings), 0o600); err != nil {
+	if _, err := f.WriteString(rig.Settings); err != nil {
+		_ = f.Close()
 		return fmt.Errorf("write the user settings file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close the user settings file: %w", err)
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		return fmt.Errorf("chmod the user settings file: %w", err)
@@ -394,6 +428,10 @@ func hookBannerSpawnArgv(h *perConvHarness) string {
 // drain happened not to have consumed already.
 type hookBannerWindow struct {
 	banners []protocol.BannerPayload
+
+	// readTimedOut records that a receive deadline expired, which on this client is
+	// terminal rather than recoverable — see next's guard.
+	readTimedOut bool
 }
 
 // next reads one binary→phone envelope, applies the window-wide negatives, records
@@ -401,10 +439,17 @@ type hookBannerWindow struct {
 // reports false when deadline passes with nothing more read.
 //
 // Banners are the only frames tallied here. turn_state is deliberately NOT counted,
-// and both waits that care about one decode the frame themselves: a tally cannot say
-// whether THIS frame is the one, which awaitRefusedTurnQuiet needs in order to name
-// the state that arrived and awaitCompletedTurn needs in order not to let a leading
-// `responding` close its turn.
+// and the one wait that cares about one decodes the frame itself: a tally cannot say
+// whether THIS frame is the one, which awaitCompletedTurn needs both in order not to
+// let a leading `responding` close its turn and in order to name the state of a frame
+// that reached the refused turn.
+//
+// A RECEIVE TIMEOUT IS TERMINAL, which is why the timeout branch below records it and
+// the guard at the top refuses to read on. coder/websocket closes the connection under
+// a canceled Read context, so a client that has timed out once is gone for every
+// later read AND every later send. The next reader would see "use of closed network
+// connection" many lines from the cause. This file's third live run lost a whole lap
+// to exactly that, which is why the knowledge sits in code here rather than in prose.
 //
 // Receive-nonce discipline: every noise_msg is decrypted in arrival order and
 // non-noise_msg control frames (e.g. rekey) are skipped WITHOUT decrypting, since
@@ -415,10 +460,17 @@ type hookBannerWindow struct {
 // The negatives are Fatal rather than returned, deliberately: neither is a
 // condition any caller could do something better with, and folding them in here is
 // what lets the three waits below stay thin.
-func (w *hookBannerWindow) next(t *testing.T, h *perConvHarness, convID string,
+func (w *hookBannerWindow) next(t *testing.T, h *perConvHarness,
 	deadline time.Time) (protocol.Envelope, bool) {
 	t.Helper()
 	for {
+		if w.readTimedOut {
+			t.Fatalf("the hook-refusal window tried to read past a receive timeout, and this phone has been " +
+				"unusable since: coder/websocket closes the connection under a canceled Read context, so " +
+				"fakephone.Client's own doc says a timed-out client cannot be reused. Whatever this read " +
+				"was for is unmeasurable now. To measure an ABSENCE, sleep before the next send the way " +
+				"letRefusedTurnSettle does — never read to a deadline you expect to expire")
+		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			return protocol.Envelope{}, false
@@ -426,6 +478,7 @@ func (w *hookBannerWindow) next(t *testing.T, h *perConvHarness, convID string,
 		raw, err := h.phone.ReceiveBytes(remaining)
 		if err != nil {
 			if errors.Is(err, fakephone.ErrReceiveTimeout) {
+				w.readTimedOut = true
 				continue // re-loop into the deadline check above
 			}
 			t.Fatalf("phone receive (hook-refusal window): %v", err)
@@ -487,12 +540,12 @@ func (w *hookBannerWindow) next(t *testing.T, h *perConvHarness, convID string,
 //
 // The timeout's failure text is where readings (a) through (d) are made
 // decidable, because a missing banner is the shape three of the four take.
-func (w *hookBannerWindow) awaitBanner(t *testing.T, h *perConvHarness, convID string,
+func (w *hookBannerWindow) awaitBanner(t *testing.T, h *perConvHarness,
 	rig oslcapRig, timeout time.Duration) protocol.BannerPayload {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		env, ok := w.next(t, h, convID, deadline)
+		env, ok := w.next(t, h, deadline)
 		if !ok {
 			verdicts := oslcapHookVerdicts(rig.WitnessPath)
 			t.Fatalf("no banner reached the client within %s of the refused send. The hook witness reads %q, "+
@@ -517,65 +570,44 @@ func (w *hookBannerWindow) awaitBanner(t *testing.T, h *perConvHarness, convID s
 	}
 }
 
-// awaitRefusedTurnQuiet reads the window forward for the WHOLE of timeout and
-// asserts the negative the header states: a refused turn produces no turn-lifecycle
-// frame for convID, because the banner arm opens no turn and the turn end that
-// follows is dropped outside one. This is the assertion the local window primitive
-// exists to make possible — a drain that returned only the frames it was asked for
-// could step around this absence, but could never claim it.
+// letRefusedTurnSettle spends the settle budget with NOTHING reading the wire, which
+// is how this file makes the negative the header states measurable: a refused turn
+// produces no turn-lifecycle frame and no assistant text, because the banner arm
+// opens no turn and the turn end that follows is dropped outside one.
 //
-// It cannot return early on the success path, and the budget's doc says why. What it
-// can do is stop early on the failure path, since one such frame settles the
-// question and reading further adds nothing.
+// Sleeping is the mechanism, not an accident of convenience. Reading the wire to a
+// deadline that is MEANT to expire — the obvious shape, and this file's first two
+// drafts — closes the phone: coder/websocket closes the connection under a canceled
+// Read context, so fakephone.Client cannot be reused after a receive timeout, and
+// the unblocked prompt that follows could not be sent at all. Nothing is lost by
+// sleeping instead. The socket buffers, so every frame the daemon emits during the
+// budget is still read afterwards, in order, ahead of the ack for a send that had
+// not yet happened — which is precisely what lets awaitCompletedTurn attribute a
+// pre-ack frame to the refusal rather than to the turn that follows it.
 //
-// A turn_state that DOES arrive is an Errorf, not a Fatalf, and the run continues
-// into turn 2. Both readings below are worth having, and neither makes AC 1's second
-// half unprovable: the unblocked prompt can still be sent and answered whether or
-// not the refused turn grew a lifecycle frame.
-func (w *hookBannerWindow) awaitRefusedTurnQuiet(t *testing.T, h *perConvHarness, convID string,
-	timeout time.Duration) {
+// The assertions themselves therefore live in awaitCompletedTurn, one arm per
+// reading, both Errorf rather than Fatalf: neither makes AC 1's second half
+// unprovable, since the unblocked prompt can still be sent and answered whether or
+// not the refused turn grew a frame it should not have.
+func letRefusedTurnSettle(t *testing.T, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		env, ok := w.next(t, h, convID, deadline)
-		if !ok {
-			t.Logf("CAPTURE (#2320): the refused turn produced no turn_state frame for %q in the %s after "+
-				"the banner. The refusal's only client-visible frame is the banner itself, and its "+
-				"stops_turn field is how the client learns the prompt was refused", convID, timeout)
-			return
-		}
-		if env.Type != protocol.TypeTurnState {
-			continue
-		}
-		var st protocol.TurnStatePayload
-		if err := json.Unmarshal(env.Payload, &st); err != nil {
-			t.Fatalf("decode turn_state payload: %v", err)
-		}
-		if st.ConversationID != convID {
-			continue
-		}
-		t.Errorf("a turn_state of %q reached the client for the REFUSED turn on %q, which production says "+
-			"cannot happen: interactiveTurnEmitterV2.Handle's turnevent.Banner arm mutates no turn "+
-			"lifecycle, and its turnevent.TurnEnd peer drops a turn end that arrives outside an open turn. "+
-			"Two readings, needing different tickets:\n"+
-			"  a turn OPENED on this path — the banner arm grew a startTurnIfNeeded, or a second producer "+
-			"reached it. That is the wedge that arm's comment exists to prevent, since a producer whose "+
-			"turn is never answered is followed by no turn end to close it.\n"+
-			"  claude ANSWERED the refused prompt — an assistant line now follows a hook block, so this "+
-			"whole file's premise has moved and drainForCompletedTurn would fit the turn after all.",
-			st.State, convID)
-		return
-	}
+	time.Sleep(timeout)
 }
 
 // awaitCompletedTurn reads the window forward through the unblocked turn: the ack
 // correlated on reqID, then a non-empty assistant_delta for convID, then the
-// terminal turn_state{idle}. The three are ordered — a delta before the ack is
-// ignored, an idle before the delta is ignored — which keeps this turn's own leading
-// `responding` from closing it early. That mirrors drainForCompletedTurn's guard.
-// The refused turn contributes no turn_state to guard against, which is what
-// awaitRefusedTurnQuiet has just asserted rather than assumed; the ordering earns its
-// keep on the leading responding state, which does arrive.
+// terminal turn_state{idle}. The three are ordered — an idle before the delta is
+// ignored — which keeps this turn's own leading `responding` from closing it early.
+// That mirrors drainForCompletedTurn's guard.
+//
+// It also carries the REFUSED turn's negative, because this is where that turn's
+// frames would finally be read. Everything the daemon emitted during the settle
+// budget queued on the socket while nothing read, and the ack below cannot have been
+// written until after that budget elapsed and the next prompt reached the daemon. So
+// anything for convID that arrives BEFORE the ack belongs to the refusal, and each
+// of the two shapes it could take gets its own arm and its own reading. On the green
+// path there is nothing before the ack at all, and the ack arm is where that is
+// captured.
 //
 // No content assertion: real claude's words are non-deterministic, and asserting
 // them would risk the substrate guard. The property under test is that a turn
@@ -584,9 +616,10 @@ func (w *hookBannerWindow) awaitCompletedTurn(t *testing.T, h *perConvHarness, c
 	reqID uint64, timeout time.Duration) {
 	t.Helper()
 	sawAck, sawDelta := false, false
+	refusalFrames := 0
 	deadline := time.Now().Add(timeout)
 	for {
-		env, ok := w.next(t, h, convID, deadline)
+		env, ok := w.next(t, h, deadline)
 		if !ok {
 			switch {
 			case !sawAck:
@@ -610,18 +643,33 @@ func (w *hookBannerWindow) awaitCompletedTurn(t *testing.T, h *perConvHarness, c
 		case protocol.TypeAck:
 			if env.InReplyTo != nil && *env.InReplyTo == reqID {
 				sawAck = true
+				if refusalFrames == 0 {
+					t.Logf("CAPTURE (#2320): the refused turn produced no turn_state and no assistant text "+
+						"for %q in the %s it was given before the next prompt was even sent. The refusal's "+
+						"only client-visible frame is the banner itself, and its stops_turn field is how "+
+						"the client learns the prompt was refused",
+						convID, hookBannerRefusedSettleBudget)
+				}
 				t.Logf("the session accepted the unblocked prompt after the refusal (ack for send_message #%d)",
 					reqID)
 			}
 		case protocol.TypeAssistantDelta:
-			if !sawAck {
-				continue // anything before the ack belongs to the refused turn
-			}
 			var p protocol.AssistantDeltaPayload
 			if err := json.Unmarshal(env.Payload, &p); err != nil {
 				t.Fatalf("decode assistant_delta payload: %v", err)
 			}
 			if p.ConversationID != convID || strings.TrimSpace(p.Text) == "" {
+				continue
+			}
+			if !sawAck {
+				// The refused turn's first reading. Errorf, so the liveness half is
+				// still measured on the same run.
+				refusalFrames++
+				t.Errorf("a non-empty assistant_delta for %q reached the client BEFORE the unblocked prompt "+
+					"was acked, so claude ANSWERED the prompt its own hook refused. This whole file's "+
+					"premise has moved: a refused turn now carries assistant text, the banner is no longer "+
+					"its only client-visible frame, and drainForCompletedTurn would fit the turn after all. "+
+					"That is a new ticket about what a refusal means, not a fault in this one", convID)
 				continue
 			}
 			if !sawDelta {
@@ -630,9 +678,6 @@ func (w *hookBannerWindow) awaitCompletedTurn(t *testing.T, h *perConvHarness, c
 					p.TurnID, p.Seq, len(p.Text), convID)
 			}
 		case protocol.TypeTurnState:
-			if !sawDelta {
-				continue // the leading responding state this turn opens with
-			}
 			// Decoded here rather than tallied in next, which is the reason next
 			// tallies no turn_state at all: a count cannot say whether THIS frame is
 			// the idle, so gating on one an earlier frame had advanced would let the
@@ -642,7 +687,26 @@ func (w *hookBannerWindow) awaitCompletedTurn(t *testing.T, h *perConvHarness, c
 			if err := json.Unmarshal(env.Payload, &st); err != nil {
 				t.Fatalf("decode turn_state payload: %v", err)
 			}
-			if st.State == "idle" && st.ConversationID == convID {
+			if st.ConversationID != convID {
+				continue
+			}
+			if !sawAck {
+				// The refused turn's second reading, and the one production is most
+				// explicit about. Errorf for the same reason as the delta arm above.
+				refusalFrames++
+				t.Errorf("a turn_state of %q reached the client for %q BEFORE the unblocked prompt was "+
+					"acked, so it belongs to the REFUSED turn — which production says cannot happen: "+
+					"interactiveTurnEmitterV2.Handle's turnevent.Banner arm mutates no turn lifecycle, and "+
+					"its turnevent.TurnEnd peer drops a turn end that arrives outside an open turn. A turn "+
+					"OPENED on this path: the banner arm grew a startTurnIfNeeded, or a second producer "+
+					"reached it. That is the wedge that arm's comment exists to prevent, since a producer "+
+					"whose turn is never answered is followed by no turn end to close it", st.State, convID)
+				continue
+			}
+			if !sawDelta {
+				continue // the leading responding state this turn opens with
+			}
+			if st.State == "idle" {
 				t.Logf("terminal turn_state{idle} for %q — the post-refusal turn closed", convID)
 				return
 			}
