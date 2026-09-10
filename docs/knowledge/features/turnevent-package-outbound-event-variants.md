@@ -262,6 +262,15 @@ stream-json `system/status` line since #2227, the first of the three to regain o
   numeric field. `docs/protocol-mobile.md` § `turn_end` is where a client reads
   the full per-turn/running-total distinction and the "zero is claude's, not a
   decode failure" rule.
+- **`TurnEnd`'s four token counts (#2261) are a different group from those
+  running totals: every one describes the turn that just ended.** Three are
+  input-side (`InputTokens` is uncached input, plus `CacheReadTokens` and
+  `CacheCreationTokens`) and only `OutputTokens` is output-side, so
+  `InputTokens + OutputTokens` is not the turn total. The group fails as a
+  unit on a hostile nested count but stays isolated from every sibling result
+  shape; its signed values then remain unsummed, unclamped, and unconverted.
+  Because absent, null, unreadable, and explicit zero collapse to the same
+  plain `int` value, consumers cannot infer why a zero was observed.
 - **Widening a sealed sum-type variant with a slice breaks `==`, and a grep for
   the variant's type name will not find where it breaks.** `TurnEnd` stopped
   being comparable the moment `ModelWindows` landed, and the site that

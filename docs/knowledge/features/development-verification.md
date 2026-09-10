@@ -71,6 +71,11 @@ A verifier can use Go's `-overlay` option with replacement files outside the wor
 to test a mutation without editing the branch. Assert that each replacement applied.
 Run the named test being evaluated so a neighbouring assertion cannot mask its weakness.
 
+A content-free log assertion must not search for a short, common fragment of the
+secret. Timestamp and metadata text can contain the same digits and make an unrelated
+wall-clock value look like a disclosure. Use a distinctive sentinel or inspect the
+structured attribute being protected rather than substring-matching the whole log line.
+
 ## Protocol boundaries
 
 Round-trip tests must marshal the decoded payload back into the envelope. Comparing
@@ -121,6 +126,11 @@ release path cannot hang when no reader starts.
 Read the evidence and the expression behind a conclusive flag. A boolean can omit the
 very observation that changes its interpretation. Reusing a decoder does not validate
 an unobserved envelope key; a wrong key can silently produce an empty result.
+
+When a capture's evidence is an explicit zero, assert the raw key and numeric JSON type
+before asserting the decoded zero. Missing, null, wrong-typed, and explicit-zero input
+can deliberately collapse to the same downstream zero value, so parser output alone
+cannot prove which source shape the fixture retained.
 
 ## Test execution and artifact survival
 

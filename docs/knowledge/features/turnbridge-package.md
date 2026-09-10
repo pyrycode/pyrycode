@@ -75,7 +75,7 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
 | `ToolStart` | `TypeToolUse` | `ToolUsePayload{…, ToolUseID: ev.ToolCallID, ParentToolUseID: ev.ParentToolCallID, Name: ev.Title, InputSummary: inputSummary(ev.RawInput), Input: inputFields(ev.RawInput)}` (#1678; `ParentToolCallID` #2191, straight-through, no re-cap — bounded at construction) | true |
 | `ToolUpdate` | `TypeToolResult` | `ToolResultPayload{…, ToolUseID: ev.ToolCallID, ParentToolUseID: ev.ParentToolCallID, IsError: ev.Status == ToolStatusFailed, ResultSummary: resultSummary(ev.Content), ResultDetail: ev.ResultDetail}` (#2024, extended #2025, straight-through, no cap here — see below; `ParentToolCallID` #2191, same rule) | true |
 | `ToolProgress` (#2324) | `TypeToolProgress` | `ToolProgressPayload{tc.ConversationID, tc.TurnID, ToolUseID: ev.ToolCallID, ElapsedSeconds: ev.ElapsedSeconds}` — turn-scoped but lifecycle-neutral: it joins the row `ToolStart` already opened, while `ToolUpdate` remains the close. The signed reading crosses verbatim with no clock read, clamp, cadence check, lookup, retention, or deduplication; the producer already bounded the join id, and an independently dropped heartbeat carries no lifecycle meaning | true |
-| `TurnEnd` | `TypeTurnEnd` | `TurnEndPayload{…, StopReason: string(ev.Reason), Outcome: ev.Outcome, IsError: ev.IsError, TerminalReason: ev.TerminalReason, ErrorCategory: ev.ErrorCategory, DurationMS: ev.DurationMS, DurationAPIMS: ev.DurationAPIMS, NumTurns: ev.NumTurns, CostUSDTotal: ev.CostUSDTotal}` (#2223/#2224/#2260, straight-through, no cap here — see below) | true |
+| `TurnEnd` | `TypeTurnEnd` | `TurnEndPayload{…, StopReason: string(ev.Reason), Outcome: ev.Outcome, IsError: ev.IsError, TerminalReason: ev.TerminalReason, ErrorCategory: ev.ErrorCategory, DurationMS: ev.DurationMS, DurationAPIMS: ev.DurationAPIMS, NumTurns: ev.NumTurns, CostUSDTotal: ev.CostUSDTotal, InputTokens: ev.InputTokens, OutputTokens: ev.OutputTokens, CacheReadTokens: ev.CacheReadTokens, CacheCreationTokens: ev.CacheCreationTokens}` (#2223/#2224/#2260/#2261, straight-through, no cap here — see below) | true |
 | `Stall` (#639) | `TypeStall` | `StallPayload{tc.ConversationID}` (`tc.TurnID`/`tc.Seq` ignored — not turn-scoped, not a delta) | true |
 | `ApiRetry` (#1074) | `TypeApiRetry` | `ApiRetryPayload{tc.ConversationID, ev.Active, ev.Current, ev.Total}` (`tc.TurnID`/`tc.Seq` ignored) | true |
 | `Compacting` (#1074) | `TypeCompacting` | `CompactingPayload{tc.ConversationID, ev.Active}` (`tc.TurnID`/`tc.Seq` ignored) | true |
@@ -126,7 +126,12 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
   favour of a first one. `DurationAPIMS`/`CostUSDTotal` are session running
   totals the arm does not difference into a per-turn figure; nothing here
   reads a prior event or holds state across turns to do that with anyway,
-  which is a structural argument, not merely an unimplemented one. **The
+  which is a structural argument, not merely an unimplemented one. **#2261's
+  four token counts cross by the same direct-copy rule but are all per turn;
+  the arm neither sums them nor treats uncached `InputTokens` as total input.
+  The two cache fields are input-side despite their shortened wire names. The
+  mutually distinct mapping-test values are load-bearing because they catch a
+  crossed field or a derived total that a round-trip alone would preserve. The
   window pair on the same variant (`ModelWindows`,
   `DroppedModelWindows`) is still not forwarded** — this arm builds the payload
   field by field, so what reaches the wire is exactly what is named in the arm and

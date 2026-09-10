@@ -1,4 +1,4 @@
-# Interactive event payloads (#607, #638, #1074, #2237, #2233, #2324)
+# Interactive event payloads (#607, #638, #1074, #2237, #2233, #2261, #2324)
 
 The **v2 additive application events** — the wire representation of
 `internal/turnevent`'s neutral turn-event model (#606). They are **binary → phone
@@ -78,6 +78,11 @@ type TurnEndPayload struct {
     DurationAPIMS  int     `json:"duration_api_ms"`  // running total; routinely LARGER than DurationMS
     NumTurns       int     `json:"num_turns"`
     CostUSDTotal   float64 `json:"cost_usd_total"`   // claude spells this total_cost_usd; the one respelling
+    // #2261 — four per-turn token readings; the cache wire keys are shortened.
+    InputTokens         int `json:"input_tokens"`
+    OutputTokens        int `json:"output_tokens"`
+    CacheReadTokens     int `json:"cache_read_tokens"`
+    CacheCreationTokens int `json:"cache_creation_tokens"`
 }
 
 // #638 — the wire form of the internal-only turnevent.Stall onset marker.
@@ -231,6 +236,16 @@ type BannerPayload struct {
   operator's spend presents model-authored data as trusted chrome. See
   `docs/protocol-mobile.md` § `turn_end` for the full per-turn/running-total
   table.
+- **The four token readings added by #2261 are all per turn, but only one is
+  output-side.** `InputTokens` is uncached input; `CacheReadTokens` and
+  `CacheCreationTokens` are input-side too. Treating `InputTokens +
+  OutputTokens` as the turn total therefore drops both cache components. The
+  bridge copies the four independently, and the wire deliberately shortens
+  claude's `cache_read_input_tokens` / `cache_creation_input_tokens` to
+  `cache_read_tokens` / `cache_creation_tokens`. Plain `int` fields without
+  `omitempty` preserve the existing compatibility rule: new frames emit every
+  key, while an old, absent, null, unreadable, or explicit-zero reading reaches
+  a client as zero.
 - **`Seq` is `int`, not `uint64`.** A per-turn counter that resets each turn (the
   package count-field idiom: `DebugBundleDonePayload.Total`); `uint64` is reserved
   for the session-monotonic `Envelope.ID`.

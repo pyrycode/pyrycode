@@ -199,3 +199,23 @@ storing its lines under `frames`, with each line's JSON inside a string
 payload, rather than `stdout_events`; a helper that reads only the common
 shape will not see it, which matters here because it is also the only
 capture carrying an observed zero on either of these two numbers.
+
+**#2261 adds a fifth independent result-line target for the nested `usage`
+object, and nesting changes where failure isolation stops.** Keeping
+`resultTurnUsageLine` beside the model-window, stop, denial, and turn-total
+targets means a hostile usage container or count cannot suppress those
+siblings or the turn boundary. Inside `resultTurnUsage`, however, one
+wrong-typed count fails the four-count target as a unit; an absent or null
+member merely zeros that member and preserves its valid siblings. Splitting
+every count into its own decode would buy a finer fallback for display-only
+numbers at the cost of four passes over the same line, with no observed need.
+
+**A downstream all-zero assertion cannot prove that a committed capture
+contains an explicit all-zero object.** Missing `usage`, null `usage`, missing
+members, and four literal zeroes all become the same `TurnEnd` values. A
+capture pin whose evidence is the explicit zero shape must first inspect the
+raw nested object and assert that all four source keys exist with numeric zero
+values, then run it through `decodeTurnUsage`; otherwise deleting the very
+evidence the test claims to pin leaves the test green. This matters especially
+for `compaction_v2.1.259.json`, whose result line lives under
+`frames[].payload` rather than the corpus's common `stdout_events` shape.
