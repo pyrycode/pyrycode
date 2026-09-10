@@ -62,6 +62,17 @@ pinned from both ends — the reader fatals on a `claude_version` mismatch, and
 upgrade forces a loud re-capture rather than a fixture that quietly describes
 some other release.
 
+### A parser verdict is not an unrecognized-lane counter
+
+The original record named every frame with a non-zero `parseOne` event count as
+one reaching the unrecognized lane. That stayed green only while all matched
+varieties were intentionally silent; #2323 made a heartbeat legitimately emit one
+`ToolProgress`, so the same counter would reject a healthy forced re-capture.
+Capture verdicts must encode the expected event cardinality per marker — one for a
+heartbeat, zero for the other matched varieties — rather than infer the event's lane
+from whether anything was emitted. Marker-less frames retain their separate census
+and remain the evidence that actually reached `Unrecognized`.
+
 ### Staging a duration via a prompted `sleep` proves nothing; a rig-held FIFO does
 
 An earlier staging (a prompted foreground `sleep 75`) produced a turn that
