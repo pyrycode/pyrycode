@@ -609,6 +609,16 @@ func TestTurnMarkFor_TotalOverEveryVariant(t *testing.T) {
 		{turnevent.ThinkingProgress{EstimatedTokens: 184}, turnMarkNone},
 		{turnevent.RateLimited{Status: "allowed", LimitType: "five_hour"}, turnMarkNone},
 		{turnevent.ModelAnnounced{Model: "claude-haiku-4-5-20251001"}, turnMarkNone},
+		// #2252. Neither an opener nor a closer, and its argument is the row above's
+		// taken one step further OUT rather than repeated. An announced model is a
+		// property of the turn's configuration and does vary turn to turn; a build and a
+		// posture are properties of the CHILD, so they say even less about whether a turn
+		// is open. Both arrive on the same per-turn init line and in every conversation,
+		// which is what makes the wedge argument identical: opening a mark here would
+		// wedge all of them. The whitelist's default already answers it, so this row
+		// asserts an existing answer rather than a new arm — turnMarkFor is unchanged by
+		// that ticket.
+		{turnevent.SessionFacts{ClaudeCodeVersion: "2.1.259", PermissionMode: "default"}, turnMarkNone},
 		// #1811. Neither an opener nor a closer: the inventory is reported once per
 		// initialize exchange, which is not a turn boundary and not even per-turn. The
 		// whitelist's default already answers it, so this row asserts that answer

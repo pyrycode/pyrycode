@@ -3883,6 +3883,30 @@ func modelAnnouncedEvent(t *testing.T, line string) turnevent.ModelAnnounced {
 	return ev
 }
 
+// modelAnnouncedFromRichLine returns the ModelAnnounced produced by a line that
+// also carries the keys #2252 maps, so the parser legitimately emits a
+// turnevent.SessionFacts beside it.
+//
+// A SECOND READER rather than a loosening of modelAnnouncedEvent above, and the
+// distinction is what keeps that helper's exactly-one rule worth having: every
+// caller of it feeds modelInitLineFixture, which declares `model` alone, and there a
+// second event WOULD be a defect. The captured lines are the ones carrying all three
+// facts, and they are what this reader exists for.
+func modelAnnouncedFromRichLine(t *testing.T, line string) turnevent.ModelAnnounced {
+	t.Helper()
+	got := collectEvents(line)
+	var found []turnevent.ModelAnnounced
+	for _, ev := range got {
+		if ma, ok := ev.(turnevent.ModelAnnounced); ok {
+			found = append(found, ma)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("ModelAnnounced count: got %d, want 1 (all events: %#v)", len(found), got)
+	}
+	return found[0]
+}
+
 // TestParser_ModelAnnouncedMapsFromCapture is #1600's central assertion: the
 // CAPTURED system/init line becomes one turnevent.ModelAnnounced carrying the
 // model the capture shows, and NOTHING ELSE from the line.
@@ -3921,7 +3945,11 @@ func TestParser_ModelAnnouncedMapsFromCapture(t *testing.T) {
 		}
 	}
 
-	ev := modelAnnouncedEvent(t, string(line))
+	// The rich reader: since #2252 this captured line also carries
+	// claude_code_version and permissionMode, so it produces a SessionFacts beside the
+	// announcement. What THIS test asserts is unchanged — one ModelAnnounced carrying
+	// the model and nothing else from the line.
+	ev := modelAnnouncedFromRichLine(t, string(line))
 
 	if wantEv := (turnevent.ModelAnnounced{Model: want}); !reflect.DeepEqual(ev, wantEv) {
 		t.Errorf("event: got %#v, want %#v — the model verbatim and nothing else from the line", ev, wantEv)
@@ -4286,8 +4314,14 @@ func TestParser_ModelAnnouncedIsLoggedContentFree(t *testing.T) {
 		}
 	}
 
-	if len(events) != 2 {
-		t.Fatalf("event count: got %d, want 2 (the two model-carrying lines) — %#v", len(events), events)
+	// Three, not two, since #2252: the two model-carrying lines each produce a
+	// ModelAnnounced, and the CAPTURED one carries claude_code_version and
+	// permissionMode as well, so it produces a SessionFacts too. What this test asserts
+	// is unchanged — it is about the log, and the count is here so a producer that
+	// silently stopped emitting cannot pass the sweep by logging nothing.
+	if len(events) != 3 {
+		t.Fatalf("event count: got %d, want 3 (two model-carrying lines, one of them also "+
+			"carrying the #2252 facts) — %#v", len(events), events)
 	}
 	// ONE record and not two, three or four: the emit path logs nothing, the
 	// model-less line logs nothing, and only the undecodable line speaks. That count

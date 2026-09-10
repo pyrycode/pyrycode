@@ -12,8 +12,28 @@ every task claude is tracking at that moment rather than reporting what happened
 `system/thinking_tokens` → `turnevent.ThinkingProgress` (`EstimatedTokens`, `EstimatedTokensDelta`,
 **no** `TruncatedFields` — two `int`s cannot grow) — the one **rate-bounded** variant, described below;
 and `system/init` → `turnevent.ModelAnnounced` (`Model`, `Truncated`) — the one variant naming what
-claude is actually running rather than something about a turn or a task, described below (#1600). The
-first three mappings fix #1240's symptom: previously a backgrounded command's lifecycle was
+claude is actually running rather than something about a turn or a task, described below (#1600).
+
+**CORRECTED 2026-09-10 (#2252): `system/init` now produces TWO variants, not one — the family's
+first line to do that, where every prior "first" here (`task_notification`, above) went the other
+way, two subtypes into one event.** `emitSystemSubtype`'s `"init"` case now calls `emitInitLine`,
+which decodes the line ONCE into the now-three-field `systemInitLine` and calls two void helpers in
+order: `emitModelAnnounced` (unchanged gate, cap and verbatim rule, just no longer owning the
+decode) and the new `emitSessionFacts`, mapping `claude_code_version` and `permissionMode` to
+`turnevent.SessionFacts`. The undecodable arm moved up into `emitInitLine` and is shared, which is
+the whole reason the decode was hoisted rather than duplicated: two decodes of one malformed line
+would fire the drop Debug twice for a single bad line. `SessionFacts` gates differently from every
+prior single-field arm in this family — it emits when EITHER of its two facts is present and
+suppresses only when BOTH are empty, because unlike `ModelAnnounced` (where the field IS the whole
+payload) two facts share one event here, and only their joint absence asserts nothing. `effort` was
+considered and dropped on evidence, not omitted for lack of trying: #2251's capture set an effort on
+both the daemon's launch-argv and in-band paths and no `system/init` line ever carried the key,
+machine-pinned by `effortInitPins` in `effort_init_capture_test.go` so a later claude that starts
+sending one reddens the pin instead of shipping unnoticed. See
+[turnevent-package.md](turnevent-package.md) for `SessionFacts`'s own doc and why it is a new
+variant rather than a widened `ModelAnnounced`.
+
+The first three mappings fix #1240's symptom: previously a backgrounded command's lifecycle was
 indistinguishable from a genuine turn end (`turn_end`/`end_turn`, state `idle`) because the whole
 `system` family was dropped regardless of subtype. `thinking_tokens` fixes a different gap: it is
 claude's only mid-turn proof of life on this surface, so mapping it gives a client watching a long turn

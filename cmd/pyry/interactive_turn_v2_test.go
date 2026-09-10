@@ -2632,6 +2632,127 @@ func TestInteractiveTurnEmitterV2_ModelAnnouncedMidTurnDoesNotDisturbOpenTurn(t 
 	}
 }
 
+// The two claude-authored values #2252 carries, as conspicuous sentinels. Distinct
+// from each other and from modelAnnouncedFixture so a log sweep can say WHICH field
+// leaked, and spelled so they collide with nothing slog itself writes.
+const (
+	sessionFactsVersionFixture = "ZZVERSIONSENTINELZZ"
+	sessionFactsModeFixture    = "ZZMODESENTINELZZ"
+)
+
+// #2252 AC5: eventKind names the variant, and the name is ALL it returns.
+//
+// PermissionMode is precisely the field the #833 posture — restated across
+// internal/relay's v2session_settings.go and internal/sessions' pool.go as "model /
+// effort / YOLO values are NEVER logged at any level" — exists to keep out of logs,
+// and it is the one a log line explaining an unexpected posture would reach for. So
+// the negatives are the half that discriminates: an arm returning "session_facts:" +
+// PermissionMode leaves the kind check TRUE and only the per-value checks catch it.
+//
+// The empty cursor is load-bearing rather than incidental, exactly as it is for the
+// model_announced test above: the variant HAS a Handle arm (#2252), so with a live
+// cursor it reaches eventKind through emitMapped's unmapped drop instead, and this
+// test's assertion would then be about a different call site. Both are reachable
+// today and both would read kind=unknown without the arm — as would
+// acp_turn_stream.go, stream_turn_busy.go and stream_turn_drain.go.
+func TestInteractiveTurnEmitterV2_SessionFactsEventKindNamesTheVariant(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if len(groups) == 0 && a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	}))
+
+	cur := &stubCursor{} // empty cursor: the no_cursor drop logs eventKind
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, logger)
+
+	e.Handle(context.Background(), turnevent.SessionFacts{
+		ClaudeCodeVersion: sessionFactsVersionFixture,
+		PermissionMode:    sessionFactsModeFixture,
+		TruncatedFields:   []string{"claude_code_version", "permission_mode"},
+	})
+
+	logs := buf.String()
+	if logs == "" {
+		t.Fatal("expected a DEBUG no-cursor drop log; got none")
+	}
+	if !strings.Contains(logs, "kind=session_facts") {
+		t.Fatalf("log does not name the variant (want kind=session_facts):\n%s", logs)
+	}
+	if strings.Contains(logs, "kind=unknown") {
+		t.Fatalf("eventKind returned unknown for session_facts:\n%s", logs)
+	}
+	for _, leak := range []string{sessionFactsVersionFixture, sessionFactsModeFixture} {
+		if strings.Contains(logs, leak) {
+			t.Fatalf("claude-authored content (%q) leaked into the kind log:\n%s", leak, logs)
+		}
+	}
+}
+
+// #2252 AC5: the session-facts arm mutates no turn lifecycle. It is handled bare
+// before any turn, the tracker's inTurn/turnID/currentState are asserted directly,
+// and a following content event proves a fresh turn still opens.
+//
+// The lifecycle answer matters here for the model_announced test's reason and one
+// step more: this rides the SAME per-turn init line, so it arrives once per turn in
+// EVERY conversation, and a startTurnIfNeeded in the arm would wedge all of them.
+//
+// NO FRAME IS PUSHED, and asserting that is not a weaker version of the sibling's
+// frame-sequence check — it is the accurate one for the state the tree is in.
+// turnbridge.MapEvent has no arm for this variant until #2254, so emitMapped takes
+// its unmapped branch and emits nothing. The assertion is deliberately written as
+// "no frames at all", so this test is what reddens when the mapper lands and the
+// frame starts appearing, which is the reminder to assert its type here then.
+func TestInteractiveTurnEmitterV2_SessionFactsNoLifecycleMutation(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.SessionFacts{
+		ClaudeCodeVersion: sessionFactsVersionFixture,
+		PermissionMode:    sessionFactsModeFixture,
+	})
+
+	// A turn_state anywhere in the sequence is the observable signature of a
+	// transitionTo call, so an empty sequence carries the lifecycle claim as well as
+	// the not-yet-mapped one.
+	if got := pushTypes(bcast.pushes); len(got) != 0 {
+		t.Fatalf("bare session_facts envelopes: got %v, want none until turnbridge.MapEvent gains "+
+			"an arm (#2254) — a turn_state here would be a lifecycle mutation", got)
+	}
+	if e.inTurn {
+		t.Error("session_facts opened a turn; inTurn must stay false")
+	}
+	if e.turnID != "" {
+		t.Errorf("session_facts minted a turn id: got %q, want empty", e.turnID)
+	}
+	if e.currentState != "" {
+		t.Errorf("session_facts set currentState: got %q, want empty", e.currentState)
+	}
+
+	e.Handle(context.Background(), turnevent.TextChunk{Text: "hello"})
+	e.flushDelta(context.Background())
+	wantTypes := []string{
+		protocol.TypeTurnState,      // responding — a fresh turn opens afterwards
+		protocol.TypeAssistantDelta, // hello
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("post-session_facts envelopes:\n got %v\nwant %v", got, wantTypes)
+	}
+	if got := turnStateValues(t, bcast.pushes); !slices.Equal(got, []string{"responding"}) {
+		t.Fatalf("turn_state after session_facts: got %v, want [responding]", got)
+	}
+}
+
 // emitterModelListDropped is the entry count claude sent beyond streamsup's
 // maxModelListEntries. Conspicuously non-zero so the wire assertion below cannot
 // pass against a mapping that hard-codes 0 or recomputes len(Models), and a value

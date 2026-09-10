@@ -465,6 +465,48 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// gate stops being single.
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
+	case turnevent.SessionFacts:
+		// claude's own build and the posture it says the child is running under
+		// (#2252), taking the same shape as the status peers above: NO turn-lifecycle
+		// mutation (no startTurnIfNeeded / transitionTo / endTurn; inTurn, turnID,
+		// currentState untouched).
+		//
+		// Kept a separate case from ModelAnnounced above despite the identical body,
+		// following this switch's own rule that arms merge when they share a REASON.
+		// These two are the closest pair on the switch — they map two halves of ONE
+		// system/init line, and neither is a turn boundary — and the rule is still not
+		// met, because what the arms argue about is HOW FAR OUT the fact sits. An
+		// announced model is a property of the TURN'S CONFIGURATION and genuinely varies
+		// turn to turn, which is the hazard that arm spends its length on. A build and a
+		// posture are properties of the CHILD: the build cannot change under a running
+		// child at all, and the posture changes only when someone changes it. So the
+		// per-turn staleness ModelAnnounced warns a consumer about has no analogue here,
+		// and merging the arms would file that difference under a shared comment.
+		// TestTurnMarkFor_TotalOverEveryVariant pins the lifecycle answer as turnMarkNone.
+		//
+		// NOTHING IS MAPPED YET, and that is a state rather than a defect: #2253
+		// declares the wire type and #2254 wires turnbridge.MapEvent's arm, so until
+		// then emitMapped takes its unmapped branch and logs one content-free Debug per
+		// turn naming the kind only. The arm is written now anyway, per this ticket's
+		// AC5, so that the variant is not logged as an UNKNOWN event by the default arm
+		// below — a distinction that matters to whoever reads the log next. eventKind's
+		// arm is the other half of that: without it the Debug would read kind=unknown for
+		// a variant the daemon does recognize.
+		//
+		// Flush any pending delta first so buffered text keeps its wire position ahead of
+		// the report. Like turn_state this flows through emit() and is NOT a droppable
+		// delta (the droppable set is assistant_delta only, #610), so it holds a queue
+		// slot. Nothing bounds the rate on either side and that is deliberate, for the
+		// arm above's reason exactly: the producer applies no dedup (at most one event
+		// per init line), both values are already bounded at construction by streamsup's
+		// maxClaudeVersionField and maxPermissionModeField, and the cadence is claude's
+		// own rather than anything network-reachable.
+		//
+		// No capability gate in the arm. The interactive grant is filtered once, in
+		// emit(), for every frame type; writing a second one here is how that single
+		// gate stops being single.
+		e.flushDelta(ctx)
+		e.emitMapped(ctx, convID, ev)
 	case turnevent.ModelList:
 		// claude's inventory of selectable models (#1849), taking the same shape as
 		// the status peers above: NO turn-lifecycle mutation (no startTurnIfNeeded /
@@ -895,6 +937,16 @@ func eventKind(ev turnevent.Event) string {
 		// produces (it is PTY/modalbridge-only, as
 		// TestTurnMarkFor_TotalOverEveryVariant states independently).
 		//
+		// CORRECTED 2026-09-10 (#2252): the COUNT in the correction below has moved
+		// again, and is restated here rather than edited in place so both corrections
+		// stay legible. SessionFacts is a twentieth variant and it lands WITH a Handle
+		// case, so the reading is now 18 of 20 with the same TWO arms missing —
+		// PermissionRequest, which streamsup.Parser never produces, and
+		// ConversationReset, whose absence is #2134's deliberate one. What did not move:
+		// this arm's claim about ITSELF, and the fact that a count in a comment is
+		// exactly the kind of claim nothing reddens when it goes stale. The reusable
+		// check is a grep for the digits.
+		//
 		// CORRECTED 2026-09-06 (#2134): both sentences above are FALSE now, and the
 		// paragraph is left standing rather than rewritten so what changed stays
 		// legible. ConversationReset is a variant internal/streamsup DOES produce and
@@ -913,6 +965,27 @@ func eventKind(ev turnevent.Event) string {
 		// stream_turn_drain.go — would read kind=unknown for a variant the daemon does
 		// recognize.
 		return "model_announced"
+	case turnevent.SessionFacts:
+		// The variant NAME only, for the arms above's reason, and here the temptation is
+		// the PermissionMode: it is the field a log line explaining an unexpected posture
+		// would reach for, and it would look genuinely useful. It is not returned, and
+		// neither is the version. Both are claude-authored strings arriving on the path
+		// maxModelField already bounds, so the #833 posture the arm above names —
+		// restated across internal/relay's v2session_settings.go and internal/sessions'
+		// pool.go as "model / effort / YOLO values are NEVER logged at any level" —
+		// covers them unchanged. TruncatedFields is not returned either, though its
+		// contents are DAEMON-authored: a cut is a fact about claude's value, and the
+		// count of them would be one bit of it.
+		//
+		// THIS ARM IS LIVE FOR THIS FILE'S OWN DEBUG, unlike its neighbours, and that is
+		// the reason it is here rather than only for the other call sites. The variant
+		// has a Handle case (#2252), so the unknown-event drop is not its site; but
+		// turnbridge.MapEvent has no arm until #2254, so emitMapped's unmapped-drop
+		// Debug fires for it once per turn and reads this name. Without the arm every
+		// eventKind site — here, acp_turn_stream.go, stream_turn_busy.go,
+		// stream_turn_drain.go — would read kind=unknown for a variant the daemon does
+		// recognize, on the one lane where it is currently the most frequent record.
+		return "session_facts"
 	case turnevent.ModelList:
 		// The variant NAME only, for the arms above's reason — and here the
 		// temptation is multiplied rather than merely present: every entry carries a

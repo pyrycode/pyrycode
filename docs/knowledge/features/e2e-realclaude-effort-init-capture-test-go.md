@@ -30,21 +30,17 @@ proved nothing. This run set one on both of the daemon's paths — launch argv
 `effort` field from `systemInitLine` rather than declare one claude does not send**, per the
 ticket's own Technical Notes.
 
-### Fixture status as of this ticket
+### Fixture status
 
-The record above exists only in a dispatcher gate log
-(`real-claude-gate-2251`, 2026-09-09T08:01Z run) — it landed in that run's detached worktree at
-`testdata/effort_init_v2.1.259_sonnet_effort.json` and was discarded with the worktree, the same
-loss #2229's and #2247's captures suffered (see
-[`compaction_capture_test.go`](e2e-realclaude-compaction-capture-test-go.md) and
-[`task_notification_capture_test.go`](e2e-realclaude-task-notification-capture-test-go.md)). Its
-artifact copy went to an `os.MkdirTemp` directory on the dispatcher host, itself ephemeral. Nothing
-under `internal/e2e/realclaude/testdata/` or `internal/streamsup/effort_init_capture_test.go`'s
-`effortInitPins` is committed as of this writing — the reader still skips on the one legal quadrant
-(absent fixture, empty pin). A promotion commit — re-run the capture from a real checkout, `git
-add` the fixture, fill `effortInitPins` from the record's `effort_capture.init_lines` in the same
-commit — is still needed before #2252 or anything else can read committed bytes rather than this
-log. The finding above is trustworthy already; the bytes backing it are not yet in the repository.
+**CORRECTED 2026-09-10 (#2252): promoted.** The record first existed only in a dispatcher gate log
+and was discarded with its detached worktree, the same loss #2229's and #2247's captures suffered
+(see [`compaction_capture_test.go`](e2e-realclaude-compaction-capture-test-go.md) and
+[`task_notification_capture_test.go`](e2e-realclaude-task-notification-capture-test-go.md)). A
+promotion commit (`ddfd5cf4`, followed by a pin-filling commit `c17cbf23`) landed
+`testdata/effort_init_v2.1.259_sonnet_effort.json` under `internal/e2e/realclaude/testdata/` and
+filled `effortInitPins` from the record's three init lines — all three now read `ClaudeCodeVersion:
+"2.1.259"`, `PermissionMode: "default"`, `EffortPresent: false`. #2252 reads these same committed
+bytes for its own `SessionFacts` capture assertions rather than the log.
 
 ### A nonce of zero is not a degenerate no-op in `dropcapRedactor`
 
