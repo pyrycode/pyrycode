@@ -88,7 +88,11 @@ type Inbound interface{ isInbound() }          // permission.go (#700) — inbou
   `turnbridge.MapEvent`, none of which are exhaustiveness-checked by the build.
   **A prose claim that counts variants against a total is only good for as long
   as the total doesn't move, and nothing reddens when it does — #2134 is the
-  second time this has bitten.** `eventKind`'s `ModelAnnounced`/`SlashCommandList`
+  second time this has bitten, and #2252 the third:** adding `SessionFacts` (with
+  a `Handle` case) moved `eventKind`'s own literal count of Handle-covered
+  variants from "17 of 18" to "18 of 20," corrected in place rather than found by
+  the ticket's own Files-read list — the grep-for-the-digits check below is what
+  caught it. `eventKind`'s `ModelAnnounced`/`SlashCommandList`
   arms each carried a sentence generalizing from "no production producer emits a
   variant without a `Handle` case", backed by a literal count ("17 of 18
   implementations, the one without is `PermissionRequest`"). `ConversationReset`
