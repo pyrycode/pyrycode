@@ -136,3 +136,21 @@ Gate: `go test -race` on the three touched packages, `go vet ./...`, `go build .
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-10
+
+## Revisions
+
+### 2026-09-10 — implementation
+
+Both Open Questions resolved, and three departures from the plan as written.
+
+1. **Open question 1, resolved yes.** `ModelAnnounced`'s doc carried the same 22-key census as `systemInitLine`'s and both are corrected to 24 with `terminal_slash_commands`, `memory_paths` and `messaging_socket_path` named as the newcomers. The correction is appended rather than substituted in `ModelAnnounced`'s case, in the house style that leaves a falsified claim legible beside its correction.
+
+2. **Open question 2, resolved yes.** The `Handle` arm is written now. Its test asserts that NO frame is pushed, which is the accurate statement while `MapEvent` has no arm — and it is written so that it reddens when #2254 lands, which is the reminder to assert the frame's type there.
+
+3. **A third stale claim was found and corrected, which the plan did not anticipate.** The `eventKind` arm for `ModelAnnounced` carries a literal COUNT of how many variants have a `Handle` case, and adding a twentieth variant moved it. The turnevent package overview names exactly this failure mode and names the check that finds it — a grep for the digits — so the count is corrected in place with a dated note. Nothing reddens when such a count goes stale, which is why it is worth recording that the check ran.
+
+4. **The capture replay needs `json.Compact`.** The plan assumed each `stdout_events` entry could be fed to the parser as a line. The committed record is written indented, so one entry spans many physical lines and an uncompacted replay yields one `Unrecognized` per brace. Compacting removes only insignificant whitespace, so key order and every value survive byte-for-byte and the replay stays a replay. Stated in the reader's doc.
+
+5. **A second reader rather than a loosened one.** The plan said two existing tests would move off `modelAnnouncedEvent`. One did, onto a new `modelAnnouncedFromRichLine` that filters instead of requiring exactly one event; the other only needed its event count corrected from two to three. Loosening `modelAnnouncedEvent` itself was rejected: its other four callers feed a fixture declaring `model` alone, and there a second event genuinely would be a defect.
+
+6. **No `internal/turnevent` round-trip test was added, and the plan's line naming one is withdrawn.** That package's test files cover the original five variants only; `ModelAnnounced`, `RateLimited` and `SlashCommandList` have no round-trip test there either, because the package is pure data and the behaviour lives at the producer and the consumer, both of which this ticket tests. A test for this variant alone would have no siblings to sit beside and would assert that Go assigns struct fields.

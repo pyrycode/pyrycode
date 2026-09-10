@@ -532,6 +532,66 @@ const (
 // variants do. Revisit on an OBSERVED rate, as #1385 did.
 const maxModelField = 256
 
+// maxClaudeVersionField caps turnevent.SessionFacts's ClaudeCodeVersion — claude's
+// own build, taken from the SAME system/init line maxModelField's field comes from
+// (#2252). Applied at construction like every cap in this block, so an oversized
+// value never enters the event stream, a queue, or any log.
+//
+// A separate constant even though it equals maxModelField and the three below it:
+// maxRateLimitField's paragraph applies verbatim, and it applies hardest right here
+// because this constant and its neighbour bound two keys of ONE line. Folding them
+// into maxModelField would make a future change to the MODEL identifier's budget —
+// the field with by far the most measured variety — silently move the budget for a
+// version string and a posture keyword that have shown almost none.
+//
+// MEASURED, not chosen. Two observations across two committed captures: 2.1.220
+// (internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json) and 2.1.259
+// (#2251's effort capture, all three of its init lines), both 7 bytes. 256 is ~36x
+// the observed maximum, wider in ratio than maxModelField's ~10x and deliberately
+// so: a version string is the field most likely to grow a suffix nobody predicted —
+// a channel name, a build hash, a date — and unlike a model identifier it has no
+// naming scheme the daemon has ever seen vary. Still a hard cut on anything that has
+// stopped being a version.
+//
+// See maxPermissionModeField for the pair's envelope arithmetic and for why neither
+// carries a rate bound.
+const maxClaudeVersionField = 256
+
+// maxPermissionModeField caps turnevent.SessionFacts's PermissionMode — the posture
+// claude says the child is running under, from the same line (#2252). A separate
+// constant for the neighbour's stated reason.
+//
+// MEASURED: bypassPermissions (17 bytes, the 2.1.220 capture) and default (7 bytes,
+// all three 2.1.259 init lines). 256 is ~15x the observed maximum, near
+// maxModelField's ratio and for its reason — room for a keyword claude has not
+// shipped yet.
+//
+// A CAP AND NOT A MEMBERSHIP CHECK, and this is the one place in the file where the
+// distinction is between two things that already exist side by side.
+// permissionModeAllowed in envelope.go bounds a permission mode by MEMBERSHIP, and
+// is right to: it gates what the DAEMON may ask for on a control request, which the
+// daemon controls entirely. This value is claude's report of what it IS running,
+// which the daemon neither controls nor may reject. An allow-list here would drop
+// the first report of a posture we have not heard of — the case an operator most
+// needs to see — so the cap is the only judgement made, exactly as it is the only
+// one maxModelField makes.
+//
+// The envelope arithmetic for the pair, in maxUnrecognizedRaw's style: worst case
+// one SessionFacts carries 512 bytes of claude-derived text plus ~37 bytes of
+// DAEMON-authored names in TruncatedFields, ~0.8% of the v2 application-envelope cap
+// of 65519 bytes (docs/protocol-mobile.md § Application-envelope size cap) — the
+// same contribution maxCompactField's pair makes, and twice ModelAnnounced's.
+// Amplification from input to retained bytes is near zero: systemInitLine holds
+// three scalars and no array, so a 4 MiB line (defaultMaxParseBuf) yields at most
+// 768 retained bytes across both events.
+//
+// No RATE bound for either, and none is owed: init fires once per TURN and produces
+// at most one of these, so maxModelField's paragraph covers the pair unchanged — the
+// event is not a droppable delta (the droppable set is assistant_delta only, #610)
+// and holds a queue slot under the same existing backpressure. Revisit on an
+// OBSERVED rate, as #1385 did.
+const maxPermissionModeField = 256
+
 // maxCompactField caps the two claude-authored fields one system/status line
 // carries when compaction ENDS — compact_result and compact_error (#2227). 256, the
 // family's value, and a separate constant for maxRateLimitField's stated reason.
@@ -2902,28 +2962,54 @@ type rateLimitInfo struct {
 // from streamLine for systemTaskStartedLine's reason, and separate from every
 // other subtype target because it shares no key with any of them.
 //
-// ONE FIELD, and the OMISSIONS are the point. The captured line carries 22 keys —
-// type, subtype, cwd, session_id, tools, mcp_servers, model, permissionMode,
-// slash_commands, apiKeySource, claude_code_version, output_style, agents, skills,
-// plugins, capabilities, analytics_disabled, product_feedback_disabled, uuid,
-// memory_paths, fast_mode_state, fast_mode_disabled_reason — and twenty-one are
-// deliberately absent from this target. Two of them are why that matters: cwd is
-// the operator's local filesystem path, and session_id is claude's session identity
-// and NOT the daemon's conversation identity (#1380). See turnevent.ModelAnnounced's
-// doc. Absent from the DECODE TARGET is a stronger guarantee than the test's
-// reflection sweep, because a field that is never declared cannot leak.
+// THREE FIELDS, and the OMISSIONS are still the point. The captured line carries 24
+// keys — type, subtype, cwd, session_id, tools, mcp_servers, model, permissionMode,
+// slash_commands, terminal_slash_commands, apiKeySource, claude_code_version,
+// output_style, agents, skills, plugins, capabilities, analytics_disabled,
+// product_feedback_disabled, uuid, memory_paths, messaging_socket_path,
+// fast_mode_state, fast_mode_disabled_reason — and twenty-one are deliberately
+// absent from this target. Four of them are why that matters: cwd, memory_paths and
+// messaging_socket_path are the operator's local filesystem, and session_id is
+// claude's session identity and NOT the daemon's conversation identity (#1380). See
+// turnevent.ModelAnnounced's and turnevent.SessionFacts's docs. Absent from the
+// DECODE TARGET is a stronger guarantee than the test's reflection sweep, because a
+// field that is never declared cannot leak.
 //
-// A plain string, which is why truncateField's json.RawMessage exception does not
+// The census read 22 keys until #2252 corrected it against the capture #2251
+// committed, where all three init lines carry 24 and the newcomers are
+// terminal_slash_commands, memory_paths and messaging_socket_path. The field COUNT
+// moved in the same ticket for an unrelated reason, from one to three:
+// claude_code_version and permissionMode now feed turnevent.SessionFacts.
+//
+// Plain strings, which is why truncateField's json.RawMessage exception does not
 // reach this shape: encoding/json has already U+FFFD-replaced invalid input on
 // decode, so our own cut is the only mid-rune hazard.
 //
-// A non-string model fails the whole decode and takes emitModelAnnounced's
-// undecodable arm, exactly as systemTaskUpdatedLine.TaskID does for a numeric task
-// id — and that is the ONLY reachable undecodable case here, which is what tells a
-// test how to build the fixture: consumeLine has already decoded this line into
-// streamLine, so malformed JSON never reaches this function at all.
+// A NON-STRING VALUE IN ANY OF THE THREE fails the whole decode and takes
+// emitInitLine's undecodable arm, exactly as systemTaskUpdatedLine.TaskID does for a
+// numeric task id — and that is the ONLY reachable undecodable case here, which is
+// what tells a test how to build the fixture: consumeLine has already decoded this
+// line into streamLine, so malformed JSON never reaches that function at all.
+//
+// THAT IS A RUNG-DISTURBANCE #2252 ACCEPTED RATHER THAN AVOIDED, and controlAckLine's
+// doc names the shape of it: a new field on a shared decode target makes a
+// non-string value in THAT field fail the WHOLE-line decode, so a line that emits
+// ModelAnnounced today would newly emit nothing. One target was kept anyway, for
+// three reasons. It is what makes the declared-field-set pin a single assertion
+// rather than two that can drift apart. Both new keys are strings on all four
+// committed init lines across two releases. And a second target would decode the
+// same line twice and fire the undecodable Debug twice for one malformed line, which
+// is a worse answer to a malformed line than the one this accepts.
 type systemInitLine struct {
 	Model string `json:"model"`
+	// claude's own build. Its consumer is turnevent.SessionFacts, NOT
+	// ModelAnnounced, and the two events are separate for that variant's stated
+	// wire-compatibility reason.
+	ClaudeCodeVersion string `json:"claude_code_version"`
+	// claude's camelCase spelling, deliberately: this is the key as it appears on the
+	// line, and the DAEMON's snake_case spelling (permission_mode) appears only where
+	// the daemon names the field itself — in TruncatedFields and on the wire.
+	PermissionMode string `json:"permissionMode"`
 }
 
 // conversationResetLine is the decoded payload of one top-level
@@ -4485,7 +4571,7 @@ func (p *Parser) emitSystemSubtype(subtype string, line []byte) bool {
 	case "thinking_tokens":
 		return p.emitThinkingProgress(line)
 	case "init":
-		return p.emitModelAnnounced(line)
+		return p.emitInitLine(line)
 	case "status":
 		return p.emitCompactingStatus(line)
 	case "compact_boundary":
@@ -6131,18 +6217,69 @@ func (p *Parser) emitRateLimit(line []byte) {
 	})
 }
 
-// emitModelAnnounced decodes a system/init line and emits AT MOST ONE
-// turnevent.ModelAnnounced, reporting that it CONSUMED the line either way. Field
-// mapping comes from the committed capture
-// (internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json), never from a
-// hand-built payload.
+// emitInitLine decodes a system/init line ONCE and emits AT MOST TWO events from
+// it, reporting that it CONSUMED the line on every path. Field mapping comes from
+// the committed captures (internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json
+// and #2251's effort_init_v2.1.259_sonnet_effort.json), never from a hand-built
+// payload.
+//
+// TWO VARIANTS FROM ONE LINE, which is what #2252 changed and why this function
+// exists at all. It is named after the LINE rather than after a variant, breaking
+// the family's emit<Variant> convention deliberately: a function that emits two
+// cannot honestly be named for one. The helpers below it keep the convention, take
+// the DECODED struct rather than bytes, and each own one variant's gate.
+//
+// THE DECODE IS HOISTED HERE rather than duplicated per variant, and the undecodable
+// arm with it. That is the whole reason for the shape: two decodes of the same line
+// would fire the Debug below twice for one malformed line, which is a worse answer
+// to a malformed line than sharing the arm. The order of the two calls is the order
+// a client observes and is asserted by a test rather than left to a reader.
 //
 // The decode's input is `line` — the TOP-LEVEL bytes — never a nested field.
 // streamLine's doc states the property it preserves: control shapes are read from
 // the top level only and nested content is never re-scanned, which is what stops a
 // tool result whose text is literally `{"type":"result"}` from forging a turn
 // boundary. Decoding this payload from anywhere else would let claude's own tool
-// output announce a model the daemon never ran.
+// output announce a model the daemon never ran, or a posture the child is not
+// running under.
+//
+// Nothing is surfaced as an Unrecognized on any path, because keeping `system`
+// whole on ignoredLineTypes is what makes "no system line reaches the unrecognized
+// lane" structural, and that guarantee is worth more than surfacing a malformed
+// line of a subtype we already know.
+func (p *Parser) emitInitLine(line []byte) bool {
+	var il systemInitLine
+	if err := json.Unmarshal(line, &il); err != nil {
+		// The subtype is a message-name keyword, not payload — the same class as
+		// sl.Type in the drop log above, so this adds no new category of logged
+		// content, and the message is byte-identical to the task siblings' arms.
+		//
+		// The err is deliberately NOT logged, and this is the sharpest instance of
+		// that rule in the package: encoding/json QUOTES the offending input bytes
+		// into its error text, so `"err", err` on a line whose model, version or
+		// permission mode is long or revealing would put that value in the daemon log
+		// through a channel no per-path attribute check can see. It is precisely the
+		// value #833's posture — restated across internal/relay's v2session_settings.go
+		// and internal/sessions' pool.go as "model / effort / YOLO values are NEVER
+		// logged at any level" — exists to keep out. The house idiom points the other
+		// way (CLAUDE.md: wrap errors with context), which is why it is stated here
+		// rather than assumed; cmd/pyry's emit marshal-error path says it outright, and
+		// both task siblings' arms already follow it.
+		p.log.Debug("streamsup: dropping undecodable system line", "subtype", "init")
+		return true
+	}
+	p.emitModelAnnounced(il)
+	p.emitSessionFacts(il)
+	return true
+}
+
+// emitModelAnnounced emits AT MOST ONE turnevent.ModelAnnounced from an already
+// decoded system/init line.
+//
+// It took the raw line and owned the decode until #2252; the decode moved up to
+// emitInitLine when the line gained a second consumer, and nothing about WHAT this
+// arm emits moved with it — the gate, the cap and the verbatim rule below are
+// unchanged.
 //
 // AN EMPTY model SUPPRESSES the event, and that DIVERGES from the task handlers,
 // which treat a missing field as claude's choice and emit with the field empty.
@@ -6170,31 +6307,11 @@ func (p *Parser) emitRateLimit(line []byte) {
 // whole on ignoredLineTypes is what makes "no system line reaches the unrecognized
 // lane" structural, and that guarantee is worth more than surfacing a malformed
 // line of a subtype we already know.
-func (p *Parser) emitModelAnnounced(line []byte) bool {
-	var il systemInitLine
-	if err := json.Unmarshal(line, &il); err != nil {
-		// The subtype is a message-name keyword, not payload — the same class as
-		// sl.Type in the drop log above, so this adds no new category of logged
-		// content, and the message is byte-identical to the task siblings' arms.
-		//
-		// The err is deliberately NOT logged, and this is the sharpest instance of
-		// that rule in the package: encoding/json QUOTES the offending input bytes
-		// into its error text, so `"err", err` on a line whose model is long or
-		// revealing would put that value in the daemon log through a channel no
-		// per-path attribute check can see. It is precisely the value #833's posture
-		// — restated across internal/relay's v2session_settings.go and
-		// internal/sessions' pool.go as "model / effort / YOLO values are NEVER logged
-		// at any level" — exists to keep out. The house idiom points the other way
-		// (CLAUDE.md: wrap errors with context), which is why it is stated here rather
-		// than assumed; cmd/pyry's emit marshal-error path says it outright, and both
-		// task siblings' arms already follow it.
-		p.log.Debug("streamsup: dropping undecodable system line", "subtype", "init")
-		return true
-	}
+func (p *Parser) emitModelAnnounced(il systemInitLine) {
 	// Absent, present-but-empty, and a line carrying no such key all land here and
 	// are answered identically.
 	if il.Model == "" {
-		return true
+		return
 	}
 	// No `bound` closure and no sequential-statements rule: one field means there is
 	// no TruncatedFields ORDER for a composite literal to decide, which is the only
@@ -6208,7 +6325,79 @@ func (p *Parser) emitModelAnnounced(line []byte) bool {
 		Model:     model,
 		Truncated: truncated,
 	})
-	return true
+}
+
+// emitSessionFacts emits AT MOST ONE turnevent.SessionFacts from an already decoded
+// system/init line: claude's own build and the posture it says the child is running
+// under (#2252). Field mapping comes from the committed captures — 2.1.220 in
+// dropped_lines_v2.1.220.json and all three init lines of #2251's
+// effort_init_v2.1.259_sonnet_effort.json — never from a hand-built payload.
+//
+// It exists for the reason turnevent.ModelAnnounced exists, applied to two more
+// facts of the same shape: the daemon knows what it ASKED FOR and only claude knows
+// what it GOT. An unexpected posture is visible here instead of being discarded with
+// the rest of the line.
+//
+// NO effort FIELD, and its absence is MEASURED. #2251 captured this line under the
+// production spawn shape with an effort actually set and no init line carries the
+// key; effortInitPins holds that measurement and reddens if a later claude starts
+// sending one.
+//
+// BOTH EMPTY SUPPRESSES the event, and ONE empty does not. That DIVERGES from
+// emitModelAnnounced one arm up, and the divergence is the whole gate decision
+// rather than an inconsistency. There the model IS the payload, so an event naming
+// none asserts something the line did not say. Here two facts share one event: one
+// present fact is still news, and the other's absence is claude's own choice —
+// emitBackgroundTaskStarted's rule, which the task handlers follow for every field
+// they carry. Both-empty is the only case that asserts nothing, so it is the only
+// one dropped. Absence, a present-but-empty value, and a line carrying no such key
+// are answered identically PER FIELD, which is what makes plain string fields
+// sufficient.
+//
+// IT GATES ON THE DECODED VALUES, BEFORE THE CAP, because the question is about the
+// LINE. One consequence is worth naming rather than discovering: truncateField
+// DELETES invalid UTF-8 rather than replacing it, so a value made only of invalid
+// bytes passes this gate and lands empty on the event. That residue already sits
+// behind ModelAnnounced.Model's "never empty" claim, on the same helper, and is not
+// repaired here — a second gate after the cap would suppress an event for a line
+// that did carry a fact, which is the failure this arm's whole shape argues against.
+//
+// THAT DROP IS SILENT, for emitModelAnnounced's stated reason: init fires once per
+// TURN, so a Debug on a routine drop reinstates a per-turn noise row in the log.
+func (p *Parser) emitSessionFacts(il systemInitLine) {
+	if il.ClaudeCodeVersion == "" && il.PermissionMode == "" {
+		return
+	}
+
+	var cut []string
+	bound := func(value, name string, limit int) string {
+		out, truncated := truncateField(value, limit)
+		if truncated {
+			cut = append(cut, name)
+		}
+		return out
+	}
+	// Sequential statements rather than a composite literal, for
+	// emitBackgroundTaskStarted's reason: TruncatedFields is ordered by these calls,
+	// and inside a literal that order would rest on the left-to-right operand rule
+	// rather than on something a reader sees. The second name is the DAEMON's —
+	// permission_mode, not claude's permissionMode — exactly as the arm above spells
+	// limit_type rather than claude's rateLimitType, and it matches the key the wire
+	// payload publishes (#2253).
+	version := bound(il.ClaudeCodeVersion, "claude_code_version", maxClaudeVersionField)
+	mode := bound(il.PermissionMode, "permission_mode", maxPermissionModeField)
+
+	p.emit(turnevent.SessionFacts{
+		// claude's values VERBATIM: no lowercasing, no alias expansion, no version
+		// parsing, no normalising, and no lookup against any published list of releases
+		// or permission modes. The cap is the only judgement made about either — see the
+		// fields' docs, and maxPermissionModeField for why an allow-list here would drop
+		// the first report of a posture nobody has seen.
+		ClaudeCodeVersion: version,
+		PermissionMode:    mode,
+		// nil when nothing was cut: append never ran.
+		TruncatedFields: cut,
+	})
 }
 
 // emitConversationReset decodes one top-level conversation_reset line and emits AT
