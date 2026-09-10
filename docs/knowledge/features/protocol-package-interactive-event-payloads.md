@@ -1,14 +1,15 @@
 # Interactive event payloads (#607, #638, #1074, #2237, #2233)
 
 The **v2 additive application events** — the wire representation of
-`internal/turnevent`'s neutral turn-event model (#606). All ten are **binary →
+`internal/turnevent`'s neutral turn-event model (#606). All eleven are **binary →
 phone only**, sent **only** to a phone whose `interactive` capability was echoed in
 `hello_ack`; an old phone never sees them and keeps the coarse v1 `message`
 fan-out. Spec source: `docs/protocol-mobile.md` § Interactive events. They map 1:1
 to the `Type*` constants `TypeTurnState` / `TypeAssistantDelta` / `TypeToolUse` /
 `TypeToolResult` / `TypeTurnEnd` (all #607), `TypeStall` (#638), `TypeApiRetry`
 / `TypeCompacting` (#1074), `TypeCompactionBoundary` (#2237, its own const
-block), and `TypeToolDenied` (#2233, also its own const block — see
+block), `TypeToolDenied` (#2233, also its own const block), and `TypeBanner`
+(#2256, also its own const block — see
 [Envelope types](protocol-package-constants-codes-go-envelope-types.md)).
 The first five are the wire form of ACP-shaped turn events; `stall`, `api_retry`,
 and `compacting` are the wire form of **internal-only** signals (no ACP
@@ -120,6 +121,20 @@ type ToolDeniedPayload struct {
     Message            string   `json:"message"`                // claude's rejection prose
     TruncatedFields    []string `json:"truncated_fields"`       // nil -> null; NO MarshalJSON
     DroppedFields      []string `json:"dropped_fields"`         // nil -> null; NO MarshalJSON
+}
+
+// #2256 — the wire form of turnevent.Banner: operator-facing text claude prints
+// ABOUT the session (a hook's block reason, a loop notification) with nowhere
+// else on the wire to go. Conversation-scoped like CompactionBoundaryPayload —
+// no turn_id — because neither intended producer has one to attribute it to: a
+// hook-refused prompt is never answered, and a notification rides claude's own
+// queue. Declared with no producer; #2257/#2258 land after it.
+type BannerPayload struct {
+    ConversationID string `json:"conversation_id"`
+    Level          string `json:"level"`      // claude's own key, adopted verbatim; open-set, dropped not cut
+    Text           string `json:"text"`       // claude's content, renamed; prose, cut not dropped, 4 KiB bound owed by the producer (#2257)
+    Truncated      bool   `json:"truncated"`  // the PRODUCER's answer about Text; never recomputed downstream
+    StopsTurn      bool   `json:"stops_turn"` // claude's prevent_continuation, renamed; a REPORT, never an actuator
 }
 ```
 
@@ -393,6 +408,45 @@ type ToolDeniedPayload struct {
   sane. Measured **56618 B, 86.4%** of the 65519-byte cap. Same never-raise
   rule: if the test ever fails, the fix is to lower `internal/turnbridge`'s
   constants, not this test's literal.
+
+- **`BannerPayload` (#2256) is the first frame in this file whose vocabulary pin has
+  to exclude an adopted-verbatim word from BOTH halves, not just the payload half
+  every prior sibling pin already knew about.** `Level` is claude's own key kept
+  unchanged, so `TestBannerType_IsNotClaudesVocabulary` cannot check it in the
+  type-name half (asserting the type isn't derived from a word the frame
+  deliberately keeps is backwards, even though it happens to read green against
+  `banner` today) any more than in the payload half — there `level` is this
+  struct's own wire key, exactly `TestSlashCommandListType_IsNotClaudesVocabulary`'s
+  `commands` trap and `TestModelListType_IsNotClaudesVocabulary`'s `models` trap,
+  both of which only ever bit the payload half because neither sibling's adopted
+  word was also relevant to the name check. A future field adopted verbatim from
+  claude needs both halves reasoned about, not just the one those two taught.
+- **On a frame carrying free-form claude prose, a vocabulary pin's payload-bytes
+  check may test only wire KEYS, never words claude merely SAID.** `Text` carries
+  arbitrary prose, so adding `notification` or `informational` to the bytes check
+  would pass every fixture and go red the day a real banner happens to use that
+  word — a hazard no prior sibling pin faced, since none of them published
+  free-form text alongside a claimed vocabulary. `TestBannerType_IsNotClaudesVocabulary`
+  checks only `content`/`prevent_continuation` (structural keys this shape does not
+  adopt), never the two claude subtypes the frame's own text could legitimately quote.
+- **`Level`/`Text` take opposite bound rules on the same frame** —
+  `CompactionBoundaryPayload.Trigger`'s single-field argument applied to a pair:
+  `Level` is a token a client matches, so an over-long one is dropped, not cut (a
+  cut token matches no known value while still looking like one); `Text` is prose,
+  so an over-long one is cut, not dropped (a cut sentence still reads as what it
+  is). `Truncated` reports only the producer's answer about `Text` — no
+  `DroppedFields` companion for an emptied `Level` exists because an empty scalar
+  is already directly observable, `CompactionBoundaryPayload.Trigger`'s unreported
+  drop again. Both bounds are the producer's to enforce (#2257's `maxBannerText`);
+  neither this struct nor `turnbridge.MapEvent` re-decides a maximum —
+  `ToolDeniedPayload`'s one-cap-site rule, and see
+  [turnbridge-package.md](turnbridge-package.md) for the mutation-test shape that
+  actually proves the bridge doesn't.
+- **`StopsTurn` is a report, never an actuator, and the field's own NAME is the
+  trap.** It reads like a lever, and nothing in the daemon branches on it or on
+  any other field of this payload — that is what keeps a fabricated banner a
+  misleading label rather than a self-service turn abort a compromised claude
+  could pull.
 
 Eight golden round-trip tests in `interactive_test.go` decode each fixture through
 `Envelope` → `Envelope.Payload` → per-type struct, assert each field (incl. the

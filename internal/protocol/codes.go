@@ -1968,3 +1968,42 @@ const (
 const (
 	TypeToolDenied = "tool_denied" // binary → phone, outbound v2 tool-denial marker
 )
+
+// Mobile Protocol v2 operator-facing banner. claude printed text ABOUT the session
+// rather than as part of an answer — a hook's block reason, a local command's output,
+// a loop notification — and this frame is the one typed place it arrives
+// (docs/protocol-mobile.md § banner, #2256).
+//
+// THE FRAME EXISTS BECAUSE NOTHING ELSE ON THE WIRE COULD CARRY IT, and the gap was
+// total rather than awkward. TypeUnrecognizedMessage is a parser-gap diagnostic,
+// TypeCompacting and TypeRateLimited each report one specific machine state, and the
+// assistant stream carries only what the model said. Text claude prints about the
+// session had nowhere to go and was dropped.
+//
+// Grouped alone rather than with api_retry/compacting. Those are show/clear sub-states
+// of a live turn with two edges each; this is a single report with none, and its
+// producer set spans two unrelated claude subtypes rather than one line pair.
+//
+// The NAME is the daemon's, not claude's, for the reason the blocks above give: the
+// wire follows internal/turnevent's VARIANT, so a claude rename lands in one place
+// instead of breaking every client at once. claude's words on this path are the
+// subtypes informational and notification and the payload keys content, level and
+// prevent_continuation; `banner` derives from none of them and names what the thing IS
+// to a client. TestBannerType_IsNotClaudesVocabulary pins that, and pins which of
+// claude's words the check list may NOT contain.
+//
+// IT SHIPS WITH NO PRODUCER, deliberately: the streamsup mappings are #2257
+// (informational) and #2258 (notification), each proven against a committed capture.
+// Declaring a contract ahead of its producers is this file's established sequencing —
+// #2052→#2054, #1983→#1984 — and it lets the client slices start against a published
+// shape. Unlike TypeMintPairing above, nothing is pending on the INBOUND side: this is
+// an outbound push and cmd/pyry/relay_guard_test.go's excludedTypes carries it as one.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: this is an
+// outbound binary → phone event an old phone never receives. The drift detector in
+// internal/protocol/compat_test.go partitions Type* constants between inboundAppTypeSet
+// and v2OnlyTypes; this lives in the latter, which is also the structural guarantee
+// that nothing in this daemon accepts a banner FROM a phone.
+const (
+	TypeBanner = "banner" // binary → phone, outbound v2 operator-facing text
+)

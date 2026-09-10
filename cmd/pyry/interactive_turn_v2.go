@@ -344,6 +344,39 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// here is how a single gate stops being single.
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
+	case turnevent.Banner:
+		// claude's operator-facing text (#2256), taking the same shape as the arms above:
+		// NO turn-lifecycle mutation (no startTurnIfNeeded / transitionTo / endTurn;
+		// inTurn, turnID, currentState untouched).
+		//
+		// Kept a separate case from the CompactionBoundary and ApiRetry/Compacting arms
+		// despite the identical body, following this switch's own rule: it merges arms
+		// that share a REASON, and this one's reason is its own. Those report MACHINE
+		// STATES and history marks the daemon observed for itself; this carries TEXT
+		// CLAUDE WROTE FOR A PERSON, which nothing in the daemon corroborates.
+		//
+		// Opening a turn here would wedge the conversation exactly as opening one on an
+		// unrecognized message would, and the argument is stronger than
+		// CompactionBoundary's rather than borrowed from it: a notification belongs to
+		// claude's own queue and rides no turn, and a prompt a hook refuses is never
+		// answered — so no turn end follows either producer, ever. turnMarkFor's
+		// whitelist default already answers turnMarkNone, and
+		// TestTurnMarkFor_TotalOverEveryVariant pins it.
+		//
+		// Flush any pending delta first so buffered text keeps its wire position ahead of
+		// the banner. Like turn_state this flows through emit() and is NOT a droppable
+		// delta (the droppable set is assistant_delta only, #610), so it holds a queue
+		// slot; that is bounded by the producer rather than here — one frame per line,
+		// no accumulator and no dedup.
+		//
+		// No capability gate in the arm and no bound on the text. The interactive grant
+		// is filtered once, in emit(), for every frame type, and the text was bounded at
+		// construction by the producer (#2257). Writing either here is how a single gate
+		// stops being single. And nothing in this arm reads StopsTurn: the frame is a
+		// report, so a claude-authored bool must not become a lever on the daemon's own
+		// turn lifecycle.
+		e.flushDelta(ctx)
+		e.emitMapped(ctx, convID, ev)
 	case turnevent.Unrecognized:
 		// A parser-gap diagnostic, not a claude sub-state, but it takes the same
 		// shape as the status peers above: NO turn-lifecycle mutation (no
@@ -874,6 +907,19 @@ func eventKind(ev turnevent.Event) string {
 		// all of which would otherwise read kind=unknown for a variant the daemon does
 		// recognize.
 		return "compaction_boundary"
+	case turnevent.Banner:
+		// The variant NAME only, and the temptation here is the widest on this switch —
+		// wider than the tool_denied arm's, which already called itself that. Text is
+		// arbitrary claude-authored prose whose whole purpose is to explain something to
+		// an operator, so a log line explaining a banner would reach for it first, and
+		// Level reads like a log level by construction. NEITHER IS RETURNED, and neither
+		// is the truncation flag or the stops-turn flag. The variant is claimed by a
+		// Handle case on this lane, so this file's `interactive_turn.unknown` Debug is
+		// not a live call site for it; the reachable one is the no-cursor drop, which
+		// returns before the type switch, plus the OTHER eventKind sites
+		// (acp_turn_stream.go, stream_turn_busy.go, stream_turn_drain.go), all of which
+		// would otherwise read kind=unknown for a variant the daemon does recognize.
+		return "banner"
 	case turnevent.Unrecognized:
 		// The variant NAME only. The event's Kind field holds claude's offending
 		// type string, which is not returned here: this feeds log fields, and the

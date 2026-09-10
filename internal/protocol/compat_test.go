@@ -256,6 +256,7 @@ var v2OnlyTypes = map[string]bool{
 	TypeCompacting:          true,
 	TypeCompactionBoundary:  true,
 	TypeToolDenied:          true,
+	TypeBanner:              true,
 	TypeUnrecognizedMessage: true,
 	TypeRequestSnapshot:     true,
 	TypeScreenSnapshot:      true,
@@ -442,6 +443,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeCompactionBoundary,
 		// v2 tool-denial marker (outbound turn-stream event, #2233).
 		TypeToolDenied,
+		// v2 operator-facing banner (outbound status, #2256).
+		TypeBanner,
 	}
 	for _, ty := range all {
 		inV1 := inboundAppTypeSet[ty]

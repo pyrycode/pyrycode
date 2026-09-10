@@ -3864,3 +3864,144 @@ func TestInteractiveTurnEmitterV2_BackgroundTaskProgressNoLifecycleMutation(t *t
 		t.Fatalf("post-progress envelopes:\n got %v\nwant %v", got, wantTypes)
 	}
 }
+
+// The banner fixtures are conspicuous sentinels rather than natural values, for the
+// reason the compaction-boundary block above states: the eventKind capture carries the
+// literal kind=banner and event=interactive_turn.no_cursor, so a natural value that is a
+// substring of either would make the leak negatives red against a correct
+// implementation. Both are digit-free, which is what makes the clock a non-issue here —
+// the numeric-needle hazard measured on the thinking-progress test cannot arise.
+const (
+	bannerTextFixture  = "OPERATOR-TEXT-SENTINEL"
+	bannerLevelFixture = "LEVEL-SENTINEL"
+)
+
+// TestInteractiveTurnEmitterV2_BannerReachesClientWithNoLifecycleMutation is #2256's
+// AC 2 at the production path, and the ARRIVAL half is what makes it load-bearing.
+// Both switches this ticket touches default silently, so a missing Handle arm drops the
+// frame with nothing red anywhere — no compile error, no failing sibling. Asserting the
+// envelope reaches a connected client is the only assertion that dies when the arm is
+// gone; asserting the arm compiles would not.
+//
+// The values are read from the DECODED PUSH rather than from a log buffer, following
+// the session-facts test above: the eventKind test below forbids either string from
+// reaching a log at all, so an assertion that found them in log text would be passing
+// on a leak.
+func TestInteractiveTurnEmitterV2_BannerReachesClientWithNoLifecycleMutation(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.Banner{
+		Level:     bannerLevelFixture,
+		Text:      bannerTextFixture,
+		Truncated: true,
+		StopsTurn: true,
+	})
+
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, []string{protocol.TypeBanner}) {
+		t.Fatalf("banner envelopes:\n got %v\nwant %v — a turn_state here would be a "+
+			"lifecycle mutation, and an empty sequence means the Handle arm is gone",
+			got, []string{protocol.TypeBanner})
+	}
+	var pl protocol.BannerPayload
+	if err := json.Unmarshal(pushesFor(bcast.pushes, "a")[0].env.Payload, &pl); err != nil {
+		t.Fatalf("decode banner payload: %v", err)
+	}
+	if pl.ConversationID != testConvID {
+		t.Errorf("conversation_id: got %q, want %q", pl.ConversationID, testConvID)
+	}
+	if pl.Level != bannerLevelFixture {
+		t.Errorf("level: got %q, want %q", pl.Level, bannerLevelFixture)
+	}
+	if pl.Text != bannerTextFixture {
+		t.Errorf("text: got %q, want %q", pl.Text, bannerTextFixture)
+	}
+	if !pl.Truncated {
+		t.Error("truncated: got false, want the producer's true")
+	}
+	if !pl.StopsTurn {
+		t.Error("stops_turn: got false, want the producer's true")
+	}
+	// The lifecycle half. StopsTurn is true above precisely so this is a real check: a
+	// daemon that ever read that field as a lever would close the turn here, and a
+	// banner arriving with no turn open would then wedge the conversation.
+	if e.inTurn {
+		t.Error("banner opened a turn; inTurn must stay false")
+	}
+	if e.turnID != "" {
+		t.Errorf("banner minted a turn id %q; it must mint none", e.turnID)
+	}
+}
+
+// TestInteractiveTurnEmitterV2_BannerFlushesPendingDeltaFirst pins the ordering half of
+// the arm: buffered assistant text keeps its wire position AHEAD of the banner, so a
+// client renders what claude said before the notice about the session. Without the
+// flushDelta call the delta would surface later, behind a frame that came after it.
+func TestInteractiveTurnEmitterV2_BannerFlushesPendingDeltaFirst(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "hello"})
+	e.Handle(context.Background(), turnevent.Banner{Level: bannerLevelFixture, Text: bannerTextFixture})
+
+	got := pushTypes(bcast.pushes)
+	if len(got) < 2 {
+		t.Fatalf("envelopes: got %v, want a flushed delta followed by a banner", got)
+	}
+	if last := got[len(got)-1]; last != protocol.TypeBanner {
+		t.Fatalf("last envelope: got %q, want %q — the banner must arrive after the "+
+			"text it followed:\n%v", last, protocol.TypeBanner, got)
+	}
+	if before := got[len(got)-2]; before != protocol.TypeAssistantDelta {
+		t.Fatalf("envelope before the banner: got %q, want %q — the pending delta must be "+
+			"flushed immediately ahead of it:\n%v", before, protocol.TypeAssistantDelta, got)
+	}
+}
+
+// TestInteractiveTurnEmitterV2_BannerEventKindNamesTheVariant is the arm's other half,
+// and its content-free negative is the widest on this switch. Text is arbitrary
+// claude-authored prose whose whole purpose is to explain something to an operator, so
+// a log line explaining a banner would reach for it first; Level reads like a log level
+// by construction. Neither may reach a log field.
+func TestInteractiveTurnEmitterV2_BannerEventKindNamesTheVariant(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	cur := &stubCursor{} // empty cursor: the no_cursor drop logs eventKind
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, logger)
+
+	e.Handle(context.Background(), turnevent.Banner{
+		Level:     bannerLevelFixture,
+		Text:      bannerTextFixture,
+		Truncated: true,
+		StopsTurn: true,
+	})
+
+	logs := buf.String()
+	if logs == "" {
+		t.Fatal("expected a DEBUG no-cursor drop log; got none")
+	}
+	if !strings.Contains(logs, "kind=banner") {
+		t.Fatalf("log does not name the variant (want kind=banner):\n%s", logs)
+	}
+	if strings.Contains(logs, "kind=unknown") {
+		t.Fatalf("eventKind returned unknown for banner:\n%s", logs)
+	}
+	// No ReplaceAttr dropping slog's time= here, unlike the two tests above, and the
+	// reason is that both needles are digit-free sentinels: the clock cannot spell
+	// either, so the hazard those tests disarm does not exist on this one.
+	for _, secret := range []string{bannerTextFixture, bannerLevelFixture} {
+		if strings.Contains(logs, secret) {
+			t.Fatalf("claude-authored value %q leaked into the kind log:\n%s", secret, logs)
+		}
+	}
+}

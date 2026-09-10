@@ -300,6 +300,7 @@ var excludedTypes = map[string]string{
 	"TypeCompacting":          "push",
 	"TypeCompactionBoundary":  "push",
 	"TypeToolDenied":          "push",
+	"TypeBanner":              "push",
 	"TypeUnrecognizedMessage": "push",
 	"TypeScreenSnapshot":      "push",
 	"TypeResync":              "push",

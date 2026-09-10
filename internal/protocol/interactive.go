@@ -625,6 +625,119 @@ type CompactionBoundaryPayload struct {
 	PostTokens *int `json:"post_tokens"`
 }
 
+// BannerPayload is the body of an Envelope whose Type == TypeBanner
+// (docs/protocol-mobile.md § banner, #2256). Binary → phone direction; the wire form
+// of turnevent.Banner. Like compacting and unrecognized_message it is
+// conversation-scoped rather than turn-scoped, so there is no turn_id.
+//
+// THE ABSENT turn_id IS FORCED BY THE PRODUCER SET, not chosen for symmetry with those
+// two. A prompt a hook refuses is never answered, so no turn exists to attribute the
+// refusal to; a notification belongs to claude's own queue and rides no turn at all.
+// There is no turn the daemon could honestly name, and naming one anyway would attach
+// operator-facing text to work it did not come from.
+//
+// EVERY FIELD IS claude's, AND SO IS THE FACT OF THE BANNER — CompactionBoundaryPayload's
+// class change, landing somewhere sharper. That frame at least reports a compaction the
+// daemon can corroborate from its own parser state; this one reports that claude had
+// something to say, which nothing else on the wire confirms or contradicts.
+//
+// IT IS THE FIRST FRAME HERE WHOSE WHOLE PURPOSE IS ARBITRARY claude-AUTHORED PROSE
+// with no machine state anchoring it, and that is a class change rather than another
+// prose field. CompactingPayload.ErrorText is prose attached to a compaction the daemon
+// observed; UnrecognizedMessagePayload.Raw is prose explicitly labelled a parser gap. A
+// client renders THIS one as a first-class notice, so text impersonating daemon chrome
+// at level "warning" is the realistic abuse rather than a hypothetical one. Render the
+// whole frame as claude's ASSERTION, attributed to claude, never as the daemon's own
+// finding — the trap QuestionDismissedPayload's outcome field exists to avoid — and
+// render Text as inert text on UnrecognizedMessagePayload.Raw's rule.
+//
+// NOTHING IN THE DAEMON ACTS ON ANY FIELD HERE — no retry, no backoff, no teardown, no
+// routing — which is what keeps a fabricated banner a misleading label rather than an
+// actuator. StopsTurn is where that constraint is most load-bearing and it is restated
+// at the field, because the field NAME is what invites the mistake.
+//
+// IT CARRIES NO DATA CLASS AN INTERACTIVE GRANT DOES NOT ALREADY RECEIVE, which is why
+// no narrower capability gate exists. The observed text embeds a host filesystem path
+// and echoes the operator's own prompt back, and ToolUsePayload.Input's verbatim
+// top-level fields already carry both to the same grant.
+//
+// No omitempty on any field, per this file's rule as stated at ToolResultPayload:
+// absence and the zero value mean the same thing, always emitting the key keeps the
+// testdata fixture pinning the full shape, and a client built before this landed
+// ignores the unknown keys. Every field is a value type — two strings and two bools, no
+// pointer and no slice, unlike CompactionBoundaryPayload's counts and ToolDeniedPayload's
+// report slices — so this frame raises no aliasing question at either seam.
+type BannerPayload struct {
+	ConversationID string `json:"conversation_id"`
+	// Level is claude's own key, adopted VERBATIM — the one field here that keeps
+	// claude's spelling, where text and stops_turn are renames. It is consequently the
+	// one word a vocabulary pin on this frame may NOT check for, the trap
+	// TestSlashCommandListType_IsNotClaudesVocabulary records for `commands`.
+	//
+	// An OPEN SET, on TurnEndPayload.Outcome's rule: treat an unrecognised token as
+	// unknown rather than as an error, because claude may ship one at any time.
+	// `warning` is the OBSERVED value (claude 2.1.259, the single informational line in
+	// the committed operator_system_lines capture); `info`, `notice` and `suggestion`
+	// are claude's other DOCUMENTED values for the key and have not been observed on
+	// this repo. The two groups are named separately on purpose — presenting four as a
+	// set this repo has seen would overstate the evidence.
+	//
+	// BOUNDED BY THE PRODUCER AND DROPPED RATHER THAN CUT, which is the opposite answer
+	// text beside it gets, and the pairing is the trap worth naming on this frame:
+	// CompactionBoundaryPayload.Trigger argues it in full. This is a token a client
+	// MATCHES, where a cut token matches no known value while still looking like one;
+	// text is prose, where a cut sentence still reads as what it is. Empty means claude
+	// named no level this client can be offered — either it sent none, or the daemon
+	// dropped an oversized one. The drop is not reported and needs none: an emptied
+	// scalar is directly observable.
+	Level string `json:"level"`
+	// Text is claude's `content`, renamed — the field this frame exists to carry. The
+	// rename is half of the translation layer the vocabulary pin holds: `content`
+	// beside `level` would read as the frame's own body rather than as what claude
+	// printed.
+	//
+	// BOUNDED AT 4 KiB BY THE DAEMON, at the PRODUCER (#2257), and CUT rather than
+	// dropped. The bound is stated here as the contract THAT ticket owes rather than as
+	// a fact this package enforces: the enforcing constant lands in internal/streamsup
+	// beside maxCompactTrigger and maxDenialProse, on this repo's standing division
+	// that claude's text is bounded where it crosses the subprocess boundary. This
+	// shape and the bridge re-decide no maximum — a second cap site is a second place
+	// the limit is decided and the two could disagree silently, which is the rule
+	// ToolDeniedPayload's doc states.
+	//
+	// SECURITY: claude-authored text, bounded by the daemon and NOT sanitized, so
+	// CompactingPayload.ErrorText's SECURITY paragraph applies for provenance — the
+	// render boundary owing control-character and terminal-escape stripping is the
+	// CLIENT's. IT APPLIES FOR SHAPE TOO, and this is the RISKIER half of the pair
+	// CompactionBoundaryPayload.Trigger is the safer half of. Newlines, terminal
+	// escapes, markup, a URL and text impersonating daemon chrome all fit inside 4 KiB,
+	// and the observed line contains a host filesystem path and echoes the operator's
+	// own prompt back. Never an HTML sink, an attribute or a URL.
+	Text string `json:"text"`
+	// Truncated says whether the daemon cut text to fit the bound above. It is the
+	// PRODUCER's answer carried verbatim, never one the bridge recomputed from the
+	// string's length: a second authority on the same fact is a second place it can be
+	// decided differently.
+	//
+	// There is no companion dropped_fields slice, unlike ToolDeniedPayload's pair, and
+	// none is owed. text is the only field the daemon cuts, so one bool names it
+	// unambiguously — that frame needs a slice because it has six candidate fields —
+	// and an emptied level is directly observable, exactly as
+	// CompactionBoundaryPayload.Trigger's unreported drop is.
+	Truncated bool `json:"truncated"`
+	// StopsTurn is claude's `prevent_continuation`, renamed. It says claude will not
+	// continue past this banner; the observed value is true, on a hook that refused a
+	// prompt.
+	//
+	// A REPORT, NEVER AN ACTUATOR, and the constraint is restated here rather than left
+	// to the type's doc because THIS FIELD'S NAME IS WHAT INVITES THE MISTAKE. It reads
+	// like a lever, and a daemon that ever keyed a teardown, a retry suppression or a
+	// queue decision on it would hand claude a self-service turn abort — a fabricated
+	// line stopping work the operator asked for. A CLIENT owes the same restraint:
+	// render it, do not let it cancel anything the operator did not cancel.
+	StopsTurn bool `json:"stops_turn"`
+}
+
 // UnrecognizedMessagePayload is the body of an Envelope whose Type ==
 // TypeUnrecognizedMessage (docs/protocol-mobile.md § unrecognized_message).
 // Binary → phone direction; the wire form of the internal-only
