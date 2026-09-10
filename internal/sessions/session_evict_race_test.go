@@ -56,6 +56,8 @@ func (r *raceRunner) Restart(args []string) {}
 
 func (r *raceRunner) SetSpawnArgs(args []string) {}
 
+func (r *raceRunner) SetModel(model string) error { return nil }
+
 func (r *raceRunner) SetSpawnPermissionMode(string) {}
 
 func (r *raceRunner) SetPermissionMode(mode string) error { return nil }

@@ -159,4 +159,15 @@ Pending for the documentation stage:
 
 ## Revisions
 
-None.
+- 2026-09-11: The written file list contains seven production `.go` files, not
+  the six stated in the initial size count: both `PostureGate.retarget` and
+  `validModel` require corrections in separate production files, while the five
+  behavioral files remain as designed. Neither comment-only edit is a standalone
+  deliverable or independently verifiable, so the one-consumer floor keeps both
+  with the mechanism despite the production-file ceiling. Final written work is
+  597 added lines including this plan, below the 800-line
+  boundary. No interface, data flow, or behavior changed from the committed plan.
+- 2026-09-11: The committed #2279 success capture omits an inner response payload;
+  the exact response is `response{subtype:"success", request_id}` rather than the
+  draft design's `response{subtype:"success", request_id, response:{}}`. Fakeclaude
+  emits the captured key set, and its byte-exact test pins that corrected contract.

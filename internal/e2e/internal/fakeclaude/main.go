@@ -1550,24 +1550,24 @@ type inUserTurn struct {
 
 // inControlRequest is the minimal decode of one inbound control_request line — only
 // the fields the fake reads (the top-level type and request subtype, the correlation
-// id the ack echoes since #1500, and the requested mode since #2067). It mirrors
+// id the ack echoes since #1500, and the requested setting value). It mirrors
 // streamsup.controlRequest (envelope.go), which is unexported there.
 //
-// The two inbound values sit at DIFFERENT levels, and both are the wire's, not a
+// The inbound values sit at different levels, and all are the wire's, not a
 // convenience. RequestID is TOP-LEVEL, matching marshalInterruptEnvelope's request
 // side; the response side inverts that — see writeInterruptAck. Mode is a SIBLING of
 // Subtype inside Request, matching marshalPermissionModeEnvelope, not a second
 // top-level field beside RequestID.
 //
-// Mode is empty for every subtype that does not carry one, which is every subtype but
-// set_permission_mode. That is a decoded absence, not a sentinel: the fake echoes it
-// as it found it rather than substituting a default — see writeSetPermissionModeAck.
+// Mode and Model are empty for subtypes that do not carry them. These are decoded
+// absences, not sentinels; the subtype wrappers decide what a response echoes.
 type inControlRequest struct {
 	Type      string `json:"type"`
 	RequestID string `json:"request_id"`
 	Request   struct {
 		Subtype string `json:"subtype"`
 		Mode    string `json:"mode"`
+		Model   string `json:"model"`
 	} `json:"request"`
 }
 
@@ -1932,6 +1932,10 @@ func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rat
 						return
 					}
 				}
+			} else if reqID, _, ok := setModelRequest(b); ok {
+				if werr := writeSetModelAck(w, reqID); werr != nil {
+					return
+				}
 			} else if honorInterrupt {
 				if reqID, ok := interruptControlRequest(b); ok {
 					// The daemon routed a phone interrupt to this child as a control_request:
@@ -1978,14 +1982,15 @@ func userTurnText(line []byte) (string, bool) {
 }
 
 // The control_request subtypes fakeclaude answers, named so the dispatch in
-// runStreamJSON reads by name rather than by bare literal. All three are the daemon's
+// runStreamJSON reads by name rather than by bare literal. All four are the daemon's
 // strings: interrupt is streamsup.marshalInterruptEnvelope's (#1136/#1500), initialize
 // is the request the daemon sends to collect the session's model list (#1689), and
-// set_permission_mode is marshalPermissionModeEnvelope's (#2067).
+// setting subtypes are marshalPermissionModeEnvelope's and marshalModelEnvelope's.
 const (
 	subtypeInterrupt         = "interrupt"
 	subtypeInitialize        = "initialize"
 	subtypeSetPermissionMode = "set_permission_mode"
+	subtypeSetModel          = "set_model"
 )
 
 // decodeControlRequest reports whether line is a control_request carrying subtype,
@@ -2045,6 +2050,14 @@ func setPermissionModeRequest(line []byte) (requestID, mode string, ok bool) {
 		return "", "", false
 	}
 	return in.RequestID, in.Request.Mode, true
+}
+
+func setModelRequest(line []byte) (requestID, model string, ok bool) {
+	in, ok := decodeControlRequest(line, subtypeSetModel)
+	if !ok {
+		return "", "", false
+	}
+	return in.RequestID, in.Request.Model, true
 }
 
 // writeStreamResponse writes fakeclaude's canned reply to one user turn: one
@@ -2475,6 +2488,19 @@ func writeSetPermissionModeAck(w io.Writer, requestID, mode string) error {
 	})
 }
 
+// writeSetModelAck mirrors the success envelope captured from Claude 2.1.259.
+// The response correlates by request id and does not echo the alias; the resolved
+// model is reported on the next application turn's system/init.
+func writeSetModelAck(w io.Writer, requestID string) error {
+	return writeJSONLine(w, map[string]any{
+		"type": "control_response",
+		"response": map[string]any{
+			"subtype":    "success",
+			"request_id": requestID,
+		},
+	})
+}
+
 // initializeModels is the canned model list writeInitializeAck answers with — two
 // entries transcribed VERBATIM from the committed capture
 // (internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json), chosen because
@@ -2775,6 +2801,10 @@ func runStreamJSONApprove(r io.Reader, w io.Writer, socketFile string) {
 				// model list it never reads; answering it here would be untested surface
 				// added on symmetry alone.
 				if werr := writeSetPermissionModeAck(w, reqID, mode); werr != nil {
+					return
+				}
+			} else if reqID, _, ok := setModelRequest([]byte(line)); ok {
+				if werr := writeSetModelAck(w, reqID); werr != nil {
 					return
 				}
 			}

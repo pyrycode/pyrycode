@@ -99,16 +99,17 @@ type controlRequest struct {
 // Subtype MUST stay first: the set_permission_mode line is pinned byte for byte
 // against the one #1595 measured live, subtype before mode.
 //
-// The omitempty on Mode is load-bearing rather than cosmetic. Mode belongs to
-// set_permission_mode only; without the tag every interrupt and every initialize
-// line would grow a "mode":"" field it has no business carrying, and
+// The omitempty tags are load-bearing rather than cosmetic. Mode belongs to
+// set_permission_mode and Model belongs to set_model; without the tags every
+// other control line would grow empty fields it has no business carrying, and
 // marshalInterruptEnvelope's and marshalInitializeEnvelope's output would stop
 // matching the lines claude has been sent since #1120 and measured in #1763.
 // TestMarshalInterruptEnvelope's and TestMarshalInitializeEnvelope's byte-exact
 // wants are what hold this.
 type controlRequestInner struct {
-	Subtype string `json:"subtype"`        // "interrupt" | "set_permission_mode" | "initialize"
-	Mode    string `json:"mode,omitempty"` // set_permission_mode only
+	Subtype string `json:"subtype"`         // "interrupt" | "set_permission_mode" | "set_model" | "initialize"
+	Mode    string `json:"mode,omitempty"`  // set_permission_mode only
+	Model   string `json:"model,omitempty"` // set_model only
 }
 
 // marshalInterruptEnvelope returns the single newline-terminated interrupt
@@ -149,6 +150,49 @@ func WriteInterrupt(w io.Writer, requestID string) error {
 		return fmt.Errorf("streamsup: write interrupt: %w", err)
 	}
 	return nil
+}
+
+// marshalModelEnvelope returns one newline-terminated set_model control request.
+// Both variable fields are JSON strings, so the appended terminator is the only
+// raw newline even if a caller supplies metacharacters in model.
+func marshalModelEnvelope(requestID, model string) ([]byte, error) {
+	env := controlRequest{
+		Type:      "control_request",
+		RequestID: requestID,
+		Request: controlRequestInner{
+			Subtype: "set_model",
+			Model:   model,
+		},
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
+// WriteModel writes one set_model request to the held-open child stdin. Model
+// servability is not validated at this layer: the control response cannot report
+// it reliably, and the caller's trust boundary owns syntactic validation.
+func WriteModel(w io.Writer, requestID, model string) error {
+	if w == nil {
+		return ErrNoLiveChild
+	}
+	env, err := marshalModelEnvelope(requestID, model)
+	if err != nil {
+		return fmt.Errorf("streamsup: marshal model: %w", err)
+	}
+	if _, err := w.Write(env); err != nil {
+		return fmt.Errorf("streamsup: write model: %w", err)
+	}
+	return nil
+}
+
+// SetModel changes the live child's model without creating a user turn. It mints
+// from the runner-wide control sequence but deliberately does not touch the
+// permission posture gate: model acknowledgement is not a turn-admission gate.
+func (r *Runner) SetModel(model string) error {
+	return WriteModel(r.Stdin(), r.nextControlID(), model)
 }
 
 // permissionModeDefault is the posture a bypass revocation asks for, and the mode

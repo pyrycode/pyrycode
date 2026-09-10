@@ -1043,9 +1043,9 @@ func TestRunner_NakThenInBandModeChange_RecoversTheSession(t *testing.T) {
 
 // TestRunner_SetPermissionMode_LeavesAnOpenGateOpen is the other half of the retarget
 // rule, and it guards a regression the recovery would otherwise introduce.
-// Pool.deliverSettingsInBand writes the posture and then sends /model and /effort
-// through WriteUserTurn in the SAME call, so a retarget that closed a confirmed gate
-// would drop those sends while UpdateSettings still reported success.
+// Pool.deliverSettingsInBand can later send /effort through WriteUserTurn, so a
+// retarget that closed a confirmed gate would drop that setting turn while
+// UpdateSettings still reported success. set_model never retargets this gate.
 func TestRunner_SetPermissionMode_LeavesAnOpenGateOpen(t *testing.T) {
 	t.Parallel()
 	out, stderr := &safeBuffer{}, &safeBuffer{}
@@ -1075,8 +1075,7 @@ func TestRunner_SetPermissionMode_LeavesAnOpenGateOpen(t *testing.T) {
 	waitForContains(t, out, "READY", 3*time.Second)
 	gate.release(gate.armedIDForTest())
 
-	// deliverSettingsInBand's own order: the posture write, then the follow-on send with
-	// no wait for an ack in between.
+	// Exercise the same no-wait property across a posture write and a later turn.
 	if err := r.SetPermissionMode("plan"); err != nil {
 		t.Fatalf("SetPermissionMode: %v", err)
 	}
@@ -1124,6 +1123,40 @@ func TestRunner_SetPermissionMode_FailedWriteDoesNotRetarget(t *testing.T) {
 				t.Errorf("the gate is armed on %q, want the pending spawn id \"1\" — a write that failed cannot be acked", got)
 			}
 		})
+	}
+}
+
+func TestRunner_SetModel_DoesNotRetargetPostureGate(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "echo_lines", out, stderr)
+	cfg.SpawnPermissionMode = "default"
+	gate := &PostureGate{}
+	cfg.PostureGate = gate
+	spawned := make(chan struct{}, 1)
+	cfg.onSpawn = func(int) { spawned <- struct{}{} }
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+	defer func() { cancel(); join() }()
+
+	select {
+	case <-spawned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("child never spawned")
+	}
+	waitForContains(t, out, "READY", 3*time.Second)
+	spawnID := gate.armedIDForTest()
+	if spawnID == "" {
+		t.Fatal("spawn posture gate is open; the test cannot observe retargeting")
+	}
+	if err := r.SetModel("sonnet"); err != nil {
+		t.Fatalf("SetModel: %v", err)
+	}
+	if got := gate.armedIDForTest(); got != spawnID {
+		t.Errorf("set_model retargeted posture gate from %q to %q", spawnID, got)
 	}
 }
 

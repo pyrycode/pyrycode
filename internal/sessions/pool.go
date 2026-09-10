@@ -796,8 +796,8 @@ func (p *Pool) Rename(id SessionID, newLabel string) error {
 // carried — which fields, and for the posture its value too (inBandDeliverable):
 //
 //   - A change claude accepts on the stream the daemon already holds open is
-//     delivered IN-BAND (#1581, #1604, #2043, #2066): the /model and /effort
-//     commands as ordinary user turns, and ANY of the six storable postures as a
+//     delivered IN-BAND (#1581, #1604, #2043, #2066, #2280): model through
+//     set_model, effort through an ordinary /effort user turn, and ANY of the six storable postures as a
 //     set_permission_mode control request, so the child is neither terminated nor
 //     respawned and its transcript survives. That branch still installs the
 //     recomposed argv, via SetSpawnArgs — Restart's swap half — because skipping
@@ -912,8 +912,8 @@ func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error {
 	// above, so the escalation reaches Restart only in combination with something
 	// else. What keeps this call reachable is the OTHER half of inBandDeliverable's
 	// reject set: a Model or Effort explicitly cleared to "" means "run at claude's
-	// own default", which claudeSettingsArgs expresses by omitting the flag and which
-	// has no measured /model or /effort form, so it can only be applied by relaunching
+	// own default", which claudeSettingsArgs expresses by omitting the flag. Pyrycode
+	// deliberately retains restart semantics for an explicit clear, so it is applied by relaunching
 	// under the recomposed argv. #1574 may still NOT delete Restart, and a future
 	// slice that gives the empty value an in-band form is the one that inherits the
 	// question.
@@ -954,8 +954,8 @@ func validatePermissionUpdate(update SettingsUpdate) error {
 }
 
 // inBandDeliverable reports whether update's PRESENT fields are all changes
-// claude accepts on a stream it is already reading — a non-empty Model or Effort
-// as a /model or /effort command (#1581), and any of the SIX storable postures —
+// claude accepts on a stream it is already reading — a non-empty Model through a
+// set_model control request, a non-empty Effort as an /effort command, and any of the SIX storable postures —
 // the five non-escalating ones and, since #2066, the escalation — as a
 // set_permission_mode control request (#1604, #2043, #2066) — and so the changes
 // Pool.UpdateSettings can live-apply without tearing the child down.
@@ -995,7 +995,7 @@ func validatePermissionUpdate(update SettingsUpdate) error {
 //     tolerates for an unchanged model re-sent alongside a new effort.
 //   - A present-but-empty Model or Effort takes the restart. Empty means "run at
 //     claude's own default", which claudeSettingsArgs expresses by OMITTING the
-//     flag; no /model invocation means "revert to default". That reject wins over
+//     flag; this contract does not use control-layer reset spellings. That reject wins over
 //     ANY posture change in the same frame — an escalation as much as a revoke —
 //     and loses nothing, since the restart recomposes argv from the merged
 //     settings, so the respawn carries the posture. No frame can lose a posture
@@ -1034,8 +1034,8 @@ func inBandDeliverable(update SettingsUpdate) bool {
 }
 
 // deliverSettingsInBand writes the settings changes implied by update onto id's
-// live child stdin as the non-restarting live-apply (#1581): the /model and
-// /effort commands as ordinary user turns, and the resulting permission POSTURE
+// live child stdin as the non-restarting live-apply (#1581): model as a set_model
+// control request, effort as an ordinary /effort user turn, and the resulting permission POSTURE
 // as a set_permission_mode control request via SetPermissionMode (#1604 built the
 // revoke-only form; #2043 generalised it). Caller must have released p.mu and must
 // have installed the recomposed argv already, so a failed delivery still reaches
@@ -1087,10 +1087,9 @@ func inBandDeliverable(update SettingsUpdate) bool {
 //
 // Two ordering facts a reader will otherwise get wrong:
 //
-//   - The revocation is a control request, not a queued turn, so it does not pass
-//     the turncommit gate and may reach the child AHEAD of a /model turn queued in
-//     the same update. That affects arrival order, not the resulting posture: the
-//     two settings are independent.
+//   - Model and posture are control requests and do not pass the turncommit gate;
+//     effort remains a queued turn. The fixed call order is model, effort, posture,
+//     so a blocked effort send also delays the posture write from this call.
 //   - It changes the child's permission mode, not work already dispatched. A tool
 //     call in flight when the request arrives is not torn down — the old restart
 //     killed the child and so ended it. `interrupt` remains the verb for ending a
@@ -1132,7 +1131,9 @@ func (p *Pool) deliverSettingsInBand(id SessionID, sup Runner, update SettingsUp
 		}
 	}
 	if update.Model != nil {
-		send("model", "/model "+*update.Model)
+		if err := sup.SetModel(*update.Model); err != nil {
+			notDelivered("model", err)
+		}
 	}
 	if update.Effort != nil {
 		send("effort", "/effort "+*update.Effort)
