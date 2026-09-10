@@ -99,6 +99,8 @@ const (
 // daemon's dedup is the one-shot consume of the batch id.
 const questionAnswerToken = "e2e-1987-answer-token"
 
+const questionModelUpdateBudget = 30 * time.Second
+
 // questionSurfaceBudget is the budget for a real clarifying-question batch to
 // surface after the trigger send: cold claude (spawn + model load) reaching the
 // AskUserQuestion call, `pyry mcp-approve` parking it, questionbridge.Parse
@@ -149,6 +151,31 @@ func TestInteractiveStreamQuestionAnswer(t *testing.T) {
 	// AC 1: a real batch surfaced, and non-vacuous BEFORE anything is answered.
 	batch := raiseRealQuestionBatch(t, h, 2, convID, questionAnswerTrigger(nonce))
 
+	// Change the live child's model while AskUserQuestion is parked. The reply
+	// proves the daemon accepted the update; the original batch id remains the
+	// subject of the answer and dismissal below, which proves it was not replaced.
+	targetModel := "haiku"
+	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
+		ID:   3,
+		Type: protocol.TypeSetSessionSettings,
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, protocol.SetSessionSettingsPayload{
+			SessionID: streamModalBootstrapUUID,
+			Model:     &targetModel,
+		}),
+	})
+	updated := drainForControlEvent(t, h.phone, h.initRecv, protocol.TypeSessionSettingsUpdated, questionModelUpdateBudget)
+	if updated.InReplyTo == nil || *updated.InReplyTo != 3 {
+		t.Fatalf("session_settings_updated in_reply_to = %v, want 3", updated.InReplyTo)
+	}
+	var updatedPayload protocol.SessionSettingsUpdatedPayload
+	if err := json.Unmarshal(updated.Payload, &updatedPayload); err != nil {
+		t.Fatalf("decode session_settings_updated: %v", err)
+	}
+	if updatedPayload.SessionID != streamModalBootstrapUUID {
+		t.Fatalf("session_settings_updated session_id = %q, want %q", updatedPayload.SessionID, streamModalBootstrapUUID)
+	}
+
 	// AC 4's first half: the choice is made from the surfaced batch.
 	entries, choice := chooseQuestionAnswers(t, batch)
 
@@ -156,7 +183,7 @@ func TestInteractiveStreamQuestionAnswer(t *testing.T) {
 	// emits no reply and no broadcast of its own, so there is nothing to correlate
 	// on — the dismissal below is what reports the outcome.
 	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
-		ID:   3,
+		ID:   4,
 		Type: protocol.TypeQuestionAnswer,
 		TS:   time.Now().UTC(),
 		Payload: mustJSON(t, protocol.QuestionAnswerPayload{
@@ -171,6 +198,18 @@ func TestInteractiveStreamQuestionAnswer(t *testing.T) {
 
 	// AC 4's second half: the continuation shows claude read the answers.
 	requireContinuationNamesChoice(t, text, choice)
+
+	// A fresh application turn proves the parked-question update changed the
+	// child's model rather than merely persisting it and reporting success.
+	sealSendMessage(t, h.phone, h.initSend, 5, convID, "m-after-model-change",
+		fmt.Sprintf("Reply with one short word. run=%d after-model-change", nonce))
+	announced, seen := drainForAnnouncedModel(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
+	if !seen {
+		t.Fatalf("the post-question turn emitted no model_announced frame")
+	}
+	if want := announcedTargetFor(t, targetModel); announced.Model != want {
+		t.Errorf("post-question model = %q, want %q after set_model %q", announced.Model, want, targetModel)
+	}
 }
 
 // --- surfacing --------------------------------------------------------------

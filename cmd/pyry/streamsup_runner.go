@@ -66,6 +66,11 @@ func (a streamRunner) Restart(args []string) { a.r.Restart(args) }
 // avoid. Dispatched from the in-band branch of Pool.UpdateSettings since #1581.
 func (a streamRunner) SetSpawnArgs(args []string) { a.r.SetSpawnArgs(args) }
 
+// SetModel forwards the non-turning live model change to the stream supervisor.
+// Validation stays at the relay boundary; this adapter neither logs nor rewrites
+// the requested value.
+func (a streamRunner) SetModel(model string) error { return a.r.SetModel(model) }
+
 // SetSpawnPermissionMode forwards to (*streamsup.Runner).SetSpawnPermissionMode
 // (#2064), installing the posture the runner's next and every later spawn asserts to
 // its child in-band. It is ON the sessions.Runner interface for SetSpawnArgs' reason,

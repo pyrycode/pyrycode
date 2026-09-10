@@ -1,4 +1,4 @@
-# `Runner` interface + `RunnerFactory` (#1077, corrected #1580 for #1348 fallout, widened #2042, `RevokeBypass` retired #2043, widened again #2064)
+# `Runner` interface + `RunnerFactory` (#1077, corrected #1580 for #1348 fallout, widened #2042, `RevokeBypass` retired #2043, widened #2064/#2280)
 
 `Session.sup` is typed `Runner` (`internal/sessions/runner.go`):
 
@@ -10,6 +10,7 @@ type Runner interface {
     Run(ctx context.Context) error
     Restart(args []string)
     SetSpawnArgs(args []string) // #1580 — installs the NEXT spawn's argv, no kill
+    SetModel(model string) error // #2280 — switches the LIVE child's model by control request, no turn or kill
     SetPermissionMode(mode string) error // #2042 — switches the LIVE child to a caller-named mode, no kill
     SetSpawnPermissionMode(mode string) // #2064 — installs the NEXT spawn's posture write, no kill, no live effect
 }
@@ -22,11 +23,11 @@ type RunnerFactory func(cfg RunnerConfig) (Runner, error)
 covariant return on interface satisfaction and the concrete runner's `State` returns `streamsup.State`,
 not `sessions.State`. Its compile-time proof, `var _ sessions.Runner = streamRunner{}`, lives with it in
 `cmd/pyry/streamsup_runner.go` — **not** in this file, since the type it asserts about is not in this
-package. The other five implementations are all test doubles: `fakeRunner`/`lifecycleRunner`
+package. Five test doubles implement the interface directly: `fakeRunner`/`lifecycleRunner`
 (`internal/sessions/runner_test.go`), `raceRunner` (`internal/sessions/session_evict_race_test.go`),
 `stubRunner` (`cmd/pyry/session_router_test.go`), `baseRunner`
-(`cmd/pyry/inbound_deliver_rotation_test.go`), `modelListRunner`
-(`cmd/pyry/session_model_list_test.go` — `stubRunner` plus the one method
+(`cmd/pyry/inbound_deliver_rotation_test.go`). Two more doubles inherit the complete method set by
+embedding `stubRunner`: `modelListRunner` (`cmd/pyry/session_model_list_test.go` — plus the one method
 `resolveBoundModelList` asserts for, so `stubRunner` itself stays the
 ready-made not-implemented fixture for that resolver's refusal case, #1857),
 and `slashCommandListRunner` (`cmd/pyry/session_slash_command_list_test.go` —
@@ -59,13 +60,15 @@ would be `ok == false` always and fall through silently to an inert default — 
 `BeginRotation`/`ModelList` stay off `sessions.Runner` deliberately (adding any would be speculative
 surface, or in `ModelList`'s case would drag every test double in both packages into the diff for no
 compile-time guarantee since its consumer sits in `cmd/pyry`, not `internal/sessions`); `SetSpawnArgs`,
-`SetPermissionMode` and `SetSpawnPermissionMode` are on it instead, because — per their own docs — widening is
+`SetModel`, `SetPermissionMode` and `SetSpawnPermissionMode` are on it instead, because — per their own docs — widening is
 compile-checked across the whole one-production/five-double set, whereas a type assertion at a future
 call site would fail silently at runtime and either fall back to `Restart` or leave a posture stuck
 while the caller reports success — the exact outcomes these swap/posture-changing methods exist to
-avoid. All three share the same placement rule: their consumers are inside `internal/sessions`, so there
+avoid. `SetModel` follows the same rule: `Pool.deliverSettingsInBand` must either have the live control
+capability or fail compilation, because an optional assertion could persist the setting while silently
+leaving the running child unchanged. All four share the same placement rule: their consumers are inside `internal/sessions`, so there
 is no `cmd/pyry` dispatch site to type-assert at. `SetSpawnPermissionMode` closes a staleness
-gap the other two don't have to: `Pool.UpdateSettings` never reconstructs a runner, so without an
+gap the other three don't have to: `Pool.UpdateSettings` never reconstructs a runner, so without an
 interface method a construction-time-only spawn posture would silently outlive the operator's own
 change and get re-asserted on the next crash-respawn. See [streamsup-package's Posture
 gate](streamsup-package-posture-gate-spawn-permission-mode-ack.md).

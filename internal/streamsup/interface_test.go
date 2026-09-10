@@ -171,6 +171,18 @@ func TestRunner_NextControlID_Monotonic(t *testing.T) {
 	}
 }
 
+func TestRunner_SetModel_NoLiveChild(t *testing.T) {
+	t.Parallel()
+	cfg := helperRunCfg(t, "echo_lines", &safeBuffer{}, &safeBuffer{})
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := r.SetModel("sonnet"); !errors.Is(err, ErrNoLiveChild) {
+		t.Fatalf("SetModel with no live child = %v, want ErrNoLiveChild", err)
+	}
+}
+
 // TestRunner_Interrupt_LiveChildDelivers: on a live child Interrupt writes a
 // single control_request line onto the held-open stdin (AC1); the echo_lines
 // fake child echoes it back as ECHO:<line>, proving the exact interrupt envelope

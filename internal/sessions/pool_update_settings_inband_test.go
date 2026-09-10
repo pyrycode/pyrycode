@@ -36,8 +36,8 @@ func waitRunning(t *testing.T, runner *lifecycleRunner) {
 }
 
 // TestInBandDeliverable pins the partition itself (#1581, redrawn by #1604 and
-// again by #2066): which updates reach the live child in-band — /model + /effort
-// command text, and any STORABLE posture as a control request — and which keep
+// again by #2066 and #2280): which updates reach the live child in-band — model
+// and posture as control requests, effort as command text — and which keep
 // #842's restart. Total over the shapes the wire can produce, so the restart tests
 // stay green on purpose rather than by luck.
 //
@@ -249,8 +249,8 @@ func TestPool_UpdateSettings_InBand_Escalation_NoRespawn(t *testing.T) {
 }
 
 // TestPool_UpdateSettings_InBand_ModelAndEffort (AC #1): a change whose present
-// fields are a non-empty model and effort is delivered to the live child as
-// command text on the stream the daemon already holds open, and that child is
+// fields are a non-empty model and effort is delivered to the live child on the
+// stream the daemon already holds open, and that child is
 // neither terminated nor respawned. Both halves are read off the double's own
 // records — the delivered payloads and the Restart calls — never off the `done`
 // sentinel, which cannot observe a respawn here (see doneAppears).
@@ -274,8 +274,10 @@ func TestPool_UpdateSettings_InBand_ModelAndEffort(t *testing.T) {
 		t.Fatalf("UpdateSettings: %v", err)
 	}
 
-	// The command text is the measured form, and model precedes effort.
-	if got, want := runner.userTurns(), []string{"/model opus", "/effort high"}; !reflect.DeepEqual(got, want) {
+	if got, want := runner.modelRequests(), []string{"opus"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("delivered model requests = %q, want %q", got, want)
+	}
+	if got, want := runner.userTurns(), []string{"/effort high"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("delivered turns = %q, want %q", got, want)
 	}
 	if restarts := runner.restartArgs(); len(restarts) != 0 {
@@ -328,8 +330,11 @@ func TestPool_UpdateSettings_InBand_EvictedNoLiveChild(t *testing.T) {
 	if restarts := runner.restartArgs(); len(restarts) != 0 {
 		t.Errorf("model-only update on an evicted session called Restart%v", restarts)
 	}
-	if got, want := runner.userTurns(), []string{"/model opus"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("delivered turns = %q, want %q", got, want)
+	if got, want := runner.modelRequests(), []string{"opus"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("delivered model requests = %q, want %q", got, want)
+	}
+	if got := runner.userTurns(); len(got) != 0 {
+		t.Errorf("model-only update wrote user turns %q, want none", got)
 	}
 	installs := runner.spawnArgSets()
 	if len(installs) != 1 {
@@ -343,8 +348,8 @@ func TestPool_UpdateSettings_InBand_EvictedNoLiveChild(t *testing.T) {
 
 // TestPool_UpdateSettings_ClearModel_KeepsRestart (AC #2's uncovered corner):
 // clearing the model to "" means "run at claude's own default", which
-// claudeSettingsArgs expresses by omitting the --model flag and which has no
-// measured /model form — so it keeps the restart. (The posture suffix is
+// claudeSettingsArgs expresses by omitting the --model flag. Pyrycode keeps that
+// explicit clear on the restart contract rather than using a control reset. (The posture suffix is
 // unrelated and is on every argv since #2065; "no settings flags" below means no
 // model and no effort.) Every test AC #2 names either carries a
 // present YOLO or returns before the live-apply, so none of them exercises this.
@@ -373,5 +378,8 @@ func TestPool_UpdateSettings_ClearModel_KeepsRestart(t *testing.T) {
 	}
 	if got := runner.userTurns(); len(got) != 0 {
 		t.Errorf("clearing the model invented a command: %q", got)
+	}
+	if got := runner.modelRequests(); len(got) != 0 {
+		t.Errorf("clearing the model invented a control request: %q", got)
 	}
 }

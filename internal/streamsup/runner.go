@@ -508,16 +508,15 @@ func (g *PostureGate) refuse(requestID string) {
 // child stays healthy and refuses every turn until the daemon restarts.
 //
 // It never closes an OPEN gate, and that half is as load-bearing as the other. This
-// ticket gates SPAWNS, and closing the gate on an in-band change would make every
-// posture update start a fresh refusal window on a session that was working: every
-// user turn until the ack lands, and the /model and /effort sends any LATER update
-// makes, which Pool.deliverSettingsInBand issues as ordinary turns through
-// WriteUserTurn and which would then be dropped with that update still reporting
-// success.
+// ticket gates SPAWNS, and closing the gate on an in-band posture change would make
+// every update start a fresh refusal window on a session that was working: every
+// user turn until the ack lands, including a later /effort setting turn. Model
+// changes use set_model and deliberately never call retarget; they are not posture
+// confirmations and must not become turn-admission gates.
 //
 // CORRECTED 2026-09-03: this paragraph used to place those sends "immediately after the
 // posture write in the same call", which inverts deliverSettingsInBand — it sends
-// /model and /effort FIRST and calls SetPermissionMode last, so a gate closed there
+// set_model and /effort first and calls SetPermissionMode last, so a gate closed there
 // cannot reach the sends of the call that closed it. The carve-out is unchanged; only
 // the mechanism it cited was wrong, and a reader who checks a false mechanism is a
 // reader who deletes a carve-out that errs toward staying open.
@@ -1167,7 +1166,7 @@ func (r *Runner) RequestInitialize() error {
 }
 
 // nextControlID mints the next locally-unique control-request correlation id,
-// shared by Interrupt, SetPermissionMode and RequestInitialize (RevokeBypass draws
+// shared by Interrupt, SetModel, SetPermissionMode and RequestInitialize (RevokeBypass draws
 // on it through SetPermissionMode, minting exactly one id per call, not two). The atomic counter is
 // unique within the runner's lifetime — one sequence, not one per subtype, since
 // request_id must be unique across all in-flight control requests on the stream

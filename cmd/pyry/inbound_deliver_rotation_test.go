@@ -92,6 +92,7 @@ func (baseRunner) WaitForPTY(ctx context.Context) error { return nil }
 func (baseRunner) Run(ctx context.Context) error        { return nil }
 func (baseRunner) Restart(args []string)                {}
 func (baseRunner) SetSpawnArgs(args []string)           {}
+func (baseRunner) SetModel(model string) error          { return nil }
 func (baseRunner) SetSpawnPermissionMode(string)        {}
 func (baseRunner) SetPermissionMode(mode string) error  { return nil }
 

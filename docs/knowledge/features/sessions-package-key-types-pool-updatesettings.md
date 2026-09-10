@@ -121,11 +121,16 @@ place is what keeps them safe.):
   escalation as `yolo:true` and that clause was the one place it was still
   refused) — →
   `sup.SetSpawnArgs(newArgs)` then `deliverSettingsInBand`, which writes
-  `/model <v>` and `/effort <v>` as ordinary user turns via
+  model as one newline-terminated `set_model` control request via
+  `sup.SetModel`, `/effort <v>` as the remaining ordinary user turn via
   `sup.WriteUserTurn(context.Background(), "", …)`, and the **resulting**
   posture — including the escalation — as one `set_permission_mode` control
   request via `sup.SetPermissionMode(merged.PermissionMode)` — model, then
-  effort, then posture, **exactly one send** for an update naming either
+  effort, then posture, **exactly one send** for each present setting and no
+  user turn for a model-only change. A model acknowledgement is consumed as a
+  normal control response but does not retarget `PostureGate`; unlike spawn and
+  permission posture, model acknowledgement is not a turn-admission condition.
+  There is exactly one posture send for an update naming either
   posture field.
   That arithmetic is deliberate and load-bearing: the pre-#2043 shape (a mode
   clause kept beside the old `!*update.YOLO → RevokeBypass()` clause) would
@@ -164,8 +169,9 @@ place is what keeps them safe.):
 - **Everything else** → `sup.Restart(newArgs)`, unchanged. Since #2066 the
   escalation no longer reaches this branch, so what is left is clearing model
   or effort to `""` ("run at claude's own default", which `claudeSettingsArgs`
-  expresses by *omitting* the flag, and for which no `/model` invocation means
-  "revert") — including a `yolo:true` or `bypassPermissions` mode mixed into
+  expresses by *omitting* the flag; the control layer's reset spellings do not
+  change Pyrycode's explicit-clear contract) — including a `yolo:true` or
+  `bypassPermissions` mode mixed into
   the same frame as a cleared `Model`/`Effort`. The empty-value reject wins,
   but costs nothing: the restart recomposes argv from the **merged** settings,
   so the respawn still carries the escalation. No frame can lose a posture

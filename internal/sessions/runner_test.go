@@ -34,6 +34,8 @@ func (fakeRunner) Restart(args []string) {}
 
 func (fakeRunner) SetSpawnArgs(args []string) {}
 
+func (fakeRunner) SetModel(model string) error { return nil }
+
 func (fakeRunner) SetSpawnPermissionMode(string) {}
 
 func (fakeRunner) SetPermissionMode(mode string) error { return nil }
@@ -166,6 +168,9 @@ type lifecycleRunner struct {
 	// refuses when no child is bound, and the pool's contract is to attempt the
 	// send unconditionally.
 	modes []string
+	// models records every live set_model request separately from user turns, so
+	// tests can prove a model change does not enter the turn queue.
+	models []string
 
 	// spawnModes records the posture of every SetSpawnPermissionMode call, in order
 	// (#2064). Kept beside modes rather than folded into it because the two answer
@@ -265,6 +270,13 @@ func (r *lifecycleRunner) SetPermissionMode(mode string) error {
 	return nil
 }
 
+func (r *lifecycleRunner) SetModel(model string) error {
+	r.mu.Lock()
+	r.models = append(r.models, model)
+	r.mu.Unlock()
+	return nil
+}
+
 // SetSpawnPermissionMode records what Pool.UpdateSettings installs as the NEXT
 // spawn's posture (#2064), kept in its own slice beside modes so a test can tell the
 // live-child switch from the per-spawn install — the two are recorded together on the
@@ -316,6 +328,12 @@ func (r *lifecycleRunner) permissionModes() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string(nil), r.modes...)
+}
+
+func (r *lifecycleRunner) modelRequests() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.models...)
 }
 
 func cloneArgvRecords(recs [][]string) [][]string {

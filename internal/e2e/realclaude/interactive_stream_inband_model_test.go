@@ -5,11 +5,10 @@ package realclaude
 // #1582 — proof, from claude's own report, that an in-band settings change moves
 // a RUNNING child's model and never tears that child down.
 //
-// #1581 changed how a model/effort-only settings change is delivered: instead of
-// killing the child and respawning it with a rebuilt argv, Pool.UpdateSettings
-// writes `/model <value>` as an ordinary user turn on the stream the daemon
-// already holds open. That ticket is proven hermetically — its tests observe that
-// no respawn happened and that the write was issued. Neither observes claude, and
+// #2280 changes live model delivery again: Pool.UpdateSettings now writes a
+// `set_model` control request on the stream the daemon already holds open, while
+// effort remains an ordinary turn. Hermetic tests observe the exact request and
+// absence of a model user turn. They do not observe claude, and
 // a hermetic suite cannot tell "the daemon wrote the right bytes" from "the
 // running child actually changed model". This file supplies the second one, and
 // changes no production code.
@@ -83,12 +82,12 @@ package realclaude
 // model was claude-sonnet-5 (claude's own machine default — the base argv carries
 // no --model) and the target alias `haiku`.
 //
-// THE CURRENT TREE — all four green.
+// THE PRE-#2280 IN-BAND TREE — all four green at the time.
 //
 //	init models [claude-sonnet-5, claude-sonnet-5, claude-haiku-4-5-20251001],
 //	spawns 1, pid 44368 -> 44368, 3 results, 5.7 s.
 //
-// THREE init lines: the /model turn does emit its own, and that one still reports
+// THREE init lines: the old /model turn emitted its own, and that one still reported
 // the OLD model. Measured, not assumed — and it is why the assertions read
 // first-and-last rather than a fixed index.
 //
@@ -103,19 +102,18 @@ package realclaude
 // NOTHING on this tree. The file compiles there unchanged: every API it touches
 // is exported and predates #1581, SetSpawnArgs included (#1580).
 //
-// THE CURRENT TREE + A MUTANT that drops the `if update.Model != nil` send from
+// THE PRE-#2280 TREE + A MUTANT that drops the `if update.Model != nil` send from
 // deliverSettingsInBand — A1 and A2 RED, A3 and A4 green.
 //
 //	init models [claude-sonnet-5, claude-sonnet-5],
 //	spawns 1, pid 47027 -> 47027, 2 results.
 //
-// No /model ever reached the child, and nothing was torn down. Run with
+// No model change ever reached the child, and nothing was torn down. Run with
 // `go test -overlay=<abs>/overlay.json`, so no mutated source was ever written
 // into the worktree.
 //
-// Both red runs took ~65 s rather than the green run's 5.7 s: neither produces a
-// result for the /model turn, so the tolerated settle wait below burns its full
-// budget. That is the wait working, not a hang.
+// Those historical mutation runs predate `set_model`; the current test waits for
+// the matching success response instead of waiting for a model turn result.
 //
 // # Two phases since #1838, and the second one pins no model string
 //
@@ -128,7 +126,7 @@ package realclaude
 // same running child, asserted by B1-B3. #1838 widened internal/relay's validModel
 // to accept the trailing bracket group claude publishes for a variant row; that
 // widening is proven hermetically in internal/relay, which is where the validator
-// lives. What a hermetic test cannot answer is whether claude's own `/model`
+// lives. What a hermetic test cannot answer is whether claude's own `set_model`
 // accepts the form claude's own menu publishes as "the argument you pass to select
 // this model" — so the split is deliberate: the hermetic tests prove THE DAEMON
 // ACCEPTS THE VALUE, this phase proves CLAUDE APPLIES IT TO A RUNNING CHILD, and
@@ -232,7 +230,7 @@ const (
 var inbandBaseArgs = []string{"--dangerously-skip-permissions"}
 
 // inbandModelTarget is one candidate the test can switch TO. resolvedID is what
-// claude's init line reports after `/model <alias>`.
+// claude's init line reports after `set_model` carries the alias.
 //
 // These are claude-VERSION facts, measured against 2.1.220 on 2026-08-19, and a
 // family bump (Haiku 5, Sonnet 6) will red A2. That failure means THE ALIAS
@@ -266,13 +264,9 @@ const (
 	// one-word turn (~3-8 s measured), so the green path never duplicates.
 	inbandResendAfter = 45 * time.Second
 
-	// The wait for the /model turn to close, so turn 3 is not queued behind it —
-	// which would be unmeasured behaviour. The whole three-turn green run takes
-	// 5.7 s, so 60 s is an order of magnitude of headroom; it is also what each
-	// red evidence run pays in full, since neither produces a /model result. This
-	// is the ONE wait whose timeout is tolerated rather than fatal — see the call
-	// site.
-	inbandSettleBudget = 60 * time.Second
+	// A set_model response is one line from an already-idle child. Its absence is
+	// a failed mechanism, not a slow application turn, so the wait is fatal.
+	inbandControlBudget = 30 * time.Second
 
 	inbandRunExitWait = 30 * time.Second
 
@@ -318,6 +312,9 @@ type inbandTapRecorder struct {
 	partial []byte
 	models  []string
 	results int
+	// controlSuccessIDs records the correlation ids of success responses that do
+	// not carry a model menu. In this harness those are set_model acknowledgements.
+	controlSuccessIDs []string
 	// menu is the model list off the most recent initialize control_response
 	// (#1838), empty until one arrives. Under the same mutex as models and
 	// results, for the same reason.
@@ -383,7 +380,9 @@ func (r *inbandTapRecorder) consume(line []byte) {
 		// keys, the ~14 KB commands array included, are dropped here because
 		// they are not declared.
 		Response struct {
-			Response struct {
+			Subtype   string `json:"subtype"`
+			RequestID string `json:"request_id"`
+			Response  struct {
 				Models []inbandMenuRow `json:"models"`
 			} `json:"response"`
 		} `json:"response"`
@@ -399,6 +398,8 @@ func (r *inbandTapRecorder) consume(line []byte) {
 		// runner can receive decodes into the struct above, and only an
 		// initialize success fills the array.
 		r.menu = append([]inbandMenuRow(nil), env.Response.Response.Models...)
+	case env.Type == "control_response" && env.Response.Subtype == "success":
+		r.controlSuccessIDs = append(r.controlSuccessIDs, env.Response.RequestID)
 	case env.Type == "result":
 		r.results++
 	}
@@ -424,6 +425,12 @@ func (r *inbandTapRecorder) resultCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.results
+}
+
+func (r *inbandTapRecorder) successfulControlIDs() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.controlSuccessIDs...)
 }
 
 func (r *inbandTapRecorder) droppedCount() int {
@@ -527,7 +534,7 @@ func TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel(t *testing
 	spawnHandler, spawns := newInbandSpawnCounter()
 
 	// The factory captures the concrete runner so the test body can read Stdin()
-	// and ChildPID off the very object the pool will deliver the /model command
+	// and ChildPID off the very object the pool will deliver the set_model request
 	// to. It is the one place Stdout is set, and it is set to the recorder.
 	var tap inbandRunner
 	factory := func(cfg sessions.RunnerConfig) (sessions.Runner, error) {
@@ -571,7 +578,7 @@ func TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel(t *testing
 
 	// The instrument check that makes the whole measurement non-vacuous: the
 	// runner the test drives must be the runner UpdateSettings will write the
-	// /model command to. Without it, a future refactor that hands the pool a
+	// set_model request to. Without it, a future refactor that hands the pool a
 	// different runner would leave every assertion below reading a bystander.
 	sup := pool.Default().Runner()
 	if sup != sessions.Runner(tap) {
@@ -626,14 +633,12 @@ func TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel(t *testing
 		t.Fatalf("#1582: UpdateSettings(model=%q): %v", alias, err)
 	}
 
-	// Wait for the /model turn to close so turn 3 is not queued behind it. This is
-	// the ONE wait whose timeout is tolerated: on a tree that restarts instead of
-	// writing in-band there is no /model turn to close, no second result ever
-	// comes, and the test must still reach its assertions rather than dying here.
-	if !inbandWaitResults(rec, 2, inbandSettleBudget) {
-		t.Logf("#1582: no result for the /model turn within %s — expected on a tree that "+
-			"restarts instead of delivering in-band; continuing to the assertions",
-			inbandSettleBudget)
+	// This fresh runner has minted no earlier control request, so the model request
+	// is id 1. Observing that exact success response proves correlation rather than
+	// accepting an unrelated control response as the acknowledgement.
+	if !inbandWaitControlSuccess(rec, "1", inbandControlBudget) {
+		t.Fatalf("#2280: no matching set_model success response within %s (success ids=%q)",
+			inbandControlBudget, rec.successfulControlIDs())
 	}
 
 	inbandSendTurn(t, sup, rec, inbandPromptTwo)
@@ -648,18 +653,15 @@ func TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel(t *testing
 		t.Fatalf("#1582: only %d system/init line(s) captured (%q); a before and an after "+
 			"are both needed", len(models), models)
 	}
-	// FIRST and LAST, never a fixed index: the /model turn emits its own init line
-	// reporting the OLD model (measured — see the header's § Evidence), and a
-	// resent turn adds another. Neither changes the verdict, so do not assert
-	// len(models) == 3.
+	// set_model creates no turn and therefore no intermediate init. Read first and
+	// last so a retried application turn cannot change the verdict.
 	first, last := models[0], models[len(models)-1]
 
 	if last == first {
-		t.Errorf("A1: the child reported model %q both before and after the change; "+
-			"no /model reached the live child", first)
+		t.Errorf("A1: the child reported model %q both before and after set_model", first)
 	}
 	if last != target.resolvedID {
-		t.Errorf("A2: the child reported model %q after `/model %s`, want %q. "+
+		t.Errorf("A2: the child reported model %q after set_model %s, want %q. "+
 			"If A1 passed, the mechanism worked and this row of inbandModelTargets is stale "+
 			"(the alias resolves elsewhere on this claude version) — update it",
 			last, target.alias, target.resolvedID)
@@ -704,14 +706,13 @@ func TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel(t *testing
 	// present-but-empty Model routes onto the restart path via inBandDeliverable,
 	// which would make B3 measure the mechanism it exists to rule out.
 	bracketed := row.Value
-	settleFrom := rec.resultCount()
 	if err := pool.UpdateSettings(pool.Default().ID(), sessions.SettingsUpdate{Model: &bracketed}); err != nil {
 		t.Fatalf("#1838: UpdateSettings(model=%q): %v", bracketed, err)
 	}
-	// Tolerated exactly as phase 1's settle wait is, and for the same reason.
-	if !inbandWaitResults(rec, settleFrom+1, inbandSettleBudget) {
-		t.Logf("#1838: no result for the `/model %s` turn within %s; continuing to the assertions",
-			bracketed, inbandSettleBudget)
+	// RequestInitialize used id 2; this model request therefore correlates on id 3.
+	if !inbandWaitControlSuccess(rec, "3", inbandControlBudget) {
+		t.Fatalf("#2280: no matching bracketed set_model success within %s (success ids=%q)",
+			inbandControlBudget, rec.successfulControlIDs())
 	}
 
 	inbandSendTurn(t, sup, rec, inbandPromptThree)
@@ -730,7 +731,7 @@ func TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel(t *testing
 
 	if bLast == baseline {
 		modelAssertionFailed = true
-		t.Errorf("B1: the child reported model %q both before and after `/model %s`; "+
+		t.Errorf("B1: the child reported model %q both before and after set_model %s; "+
 			"claude publishes that value in its own menu as the argument you pass to select "+
 			"the model, and did not apply it to the running child. The daemon now ACCEPTS the "+
 			"bracketed form (internal/relay's validModel, #1838) and delivered it in band, so a "+
@@ -739,7 +740,7 @@ func TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel(t *testing
 	}
 	if bLast != row.ResolvedModel {
 		modelAssertionFailed = true
-		t.Errorf("B2: the child reported model %q after `/model %s`, want %q — the "+
+		t.Errorf("B2: the child reported model %q after set_model %s, want %q — the "+
 			"resolvedModel claude's OWN menu gave for that row in this same session. "+
 			"If B1 passed, the bracketed value applied and claude's announcement disagrees "+
 			"with its own menu: that is a claude-side inconsistency to record, not a defect "+
@@ -862,6 +863,19 @@ func inbandWaitResults(rec *inbandTapRecorder, want int, budget time.Duration) b
 		}
 		time.Sleep(inbandPoll)
 	}
+}
+
+func inbandWaitControlSuccess(rec *inbandTapRecorder, requestID string, budget time.Duration) bool {
+	deadline := time.Now().Add(budget)
+	for time.Now().Before(deadline) {
+		for _, got := range rec.successfulControlIDs() {
+			if got == requestID {
+				return true
+			}
+		}
+		time.Sleep(inbandPoll)
+	}
+	return false
 }
 
 // inbandResultCounter is the one thing inbandSendTurn reads off a recorder: the

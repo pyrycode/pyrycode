@@ -252,8 +252,11 @@ func TestPool_UpdateSettings_RevokeKeepsStoredMode(t *testing.T) {
 	if got, want := runner.permissionModes(), []string{"plan"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("in-band posture sends = %v, want exactly %v", got, want)
 	}
-	if got, want := runner.userTurns(), []string{"/model opus"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("delivered turns = %q, want %q", got, want)
+	if got, want := runner.modelRequests(), []string{"opus"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("delivered model requests = %q, want %q", got, want)
+	}
+	if got := runner.userTurns(); len(got) != 0 {
+		t.Errorf("model update wrote user turns %q, want none", got)
 	}
 	installs := runner.spawnArgSets()
 	if len(installs) != 1 {

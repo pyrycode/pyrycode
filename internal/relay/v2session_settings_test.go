@@ -591,11 +591,10 @@ func TestValidModel_ByteSetIsClosed(t *testing.T) {
 		}
 	}
 
-	// The property the two sinks depend on, derived from the three loops and
-	// asserted by name rather than by code: an accepted value is a single
-	// whitespace-free token, so internal/sessions' deliverSettingsInBand can
-	// interpolate "/model " + value onto the live child's stdin as ONE line
-	// carrying ONE word, and claudeSettingsArgs' argv element cannot be split.
+	// The boundary remains deliberately narrower than JSON requires: an accepted
+	// value is a bounded whitespace-free identifier, and the future-spawn argv
+	// element cannot pose as another token. Structured set_model marshalling is
+	// independently responsible for keeping live delivery to one physical line.
 	for _, tc := range []struct {
 		name string
 		b    byte
@@ -612,7 +611,7 @@ func TestValidModel_ByteSetIsClosed(t *testing.T) {
 			"a[" + string([]byte{tc.b}) + "]",
 		} {
 			if validModel(in) {
-				t.Errorf("validModel(%q) accepted a %s; `/model `+value would no longer be one line carrying one token", in, tc.name)
+				t.Errorf("validModel(%q) accepted a %s; the network boundary must remain a bounded identifier grammar", in, tc.name)
 			}
 		}
 	}

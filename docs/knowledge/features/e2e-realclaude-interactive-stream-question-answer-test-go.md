@@ -15,6 +15,15 @@ Attribution is pinned separately: the resolution must carry a
 `outcome=answered`, so the backstop's `unanswered` outcome can't pass in its
 place.
 
+Since #2280, the test changes the running child's model after
+`question_shown` but before answering the batch. It first correlates the
+`session_settings_updated` reply, then answers the original batch id and retains
+the existing dismissal and continuation assertions. That ordering distinguishes
+"the settings frame was accepted" from the stronger property under test: the
+model control request neither resolved nor replaced the parked question. A fresh
+application turn after completion must emit `model_announced` for the resolved
+target, proving the update reached the child rather than merely being persisted.
+
 The gate runs under `askQuestionCaptureModel` (`claude-sonnet-5`), reused from
 [ask_user_question_capture_test.go](e2e-realclaude-ask-user-question-capture-test-go.md)
 rather than the `--model haiku` the other modal-gate tests hardcode — haiku's

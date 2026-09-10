@@ -423,13 +423,10 @@ func (m *V2SessionManager) settingsReplyError(ctx context.Context, s *V2Session,
 //     shell parses either, so "[" and "]" are ordinary bytes to execve.
 //   - No shell metachar, whitespace, control byte, separator or byte >= 0x80 (a
 //     multi-byte UTF-8 rune's continuation bytes) appears anywhere in an accepted
-//     value. That is the TURN-TEXT sink, which is the branch a menu click
-//     actually travels since #1581 stopped restarting the child for a model
-//     change: deliverSettingsInBand interpolates "/model " + value onto the live
-//     child's stdin as ONE line, so an accepted value must be a single
-//     whitespace-free token that can neither end that line nor open a second word
-//     or a second slash command. Neither bracket is a line terminator, a
-//     separator or a command sigil, so admitting them does not weaken it.
+//     value. The live sink is now a set_model control request whose model is encoded
+//     as a JSON string, so structured marshalling — not this grammar — prevents line
+//     injection. Keeping the closed class still bounds network-originated values and
+//     rejects ambiguous identifiers before they reach either live delivery or argv.
 //
 // That closure is machine-checked rather than asserted:
 // TestValidModel_ByteSetIsClosed walks all 256 byte values in each of the three
@@ -550,9 +547,9 @@ func validEffort(e string) bool {
 //
 // The accepted value reaches ONE sink, and it is not the one validModel worries
 // about: a posture is delivered to the live child as a set_permission_mode
-// control request carrying a JSON string field, never interpolated into turn text
-// the way "/model "+value is. So the whitespace-and-line-terminator reasoning
-// validModel needs does not apply here — but the five literals contain no byte
+// control request carrying a JSON string field, just as model now uses set_model.
+// The free-form model still needs validModel's bounded grammar at the network
+// boundary, while this closed posture vocabulary admits only five literals with no byte
 // that would matter to it anyway, and no byte that could pose as a claude flag on
 // a spawn argv.
 func validPermissionMode(mode string) bool {

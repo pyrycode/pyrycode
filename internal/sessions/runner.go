@@ -39,12 +39,21 @@ type Runner interface {
 	// caller that needs to change what the session runs next without ending what it
 	// is running now. Declining to call Restart is not that path: it loses the swap
 	// outright, so the next spawn re-execs the stale argv. Pool.UpdateSettings is
-	// its one caller: the in-band branch (#1581) installs through it and delivers
-	// the change as a /model or /effort command instead of a respawn.
+	// its one caller: the in-band branch installs through it and delivers the live
+	// change as set_model, /effort, or set_permission_mode instead of a respawn.
 	// See (*streamsup.Runner).SetSpawnArgs for the full contract —
 	// notably that the argv is installed verbatim, with validation staying upstream
 	// in Session.spawnArgs.
 	SetSpawnArgs(args []string)
+	// SetModel switches the LIVE child's model without killing it and without
+	// creating a user turn. The implementation writes one set_model control
+	// request to the held-open stream. Model validation belongs to the caller's
+	// trust boundary; errors must not echo the model value.
+	//
+	// It is on this interface because its consumer is deliverSettingsInBand. A
+	// capability assertion there would fail open and report a persisted update as
+	// live-applied even when the runner could not send it.
+	SetModel(model string) error
 	// SetSpawnPermissionMode installs the posture the runner's NEXT and every later
 	// spawn asserts to its child in-band, without touching the running one (#2064).
 	// It is SetSpawnArgs' posture twin and stands in the same relation to

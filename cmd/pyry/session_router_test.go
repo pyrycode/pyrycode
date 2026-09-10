@@ -24,6 +24,7 @@ func (stubRunner) WaitForPTY(ctx context.Context) error { return nil }
 func (stubRunner) Run(ctx context.Context) error        { <-ctx.Done(); return ctx.Err() }
 func (stubRunner) Restart(args []string)                {}
 func (stubRunner) SetSpawnArgs(args []string)           {}
+func (stubRunner) SetModel(model string) error          { return nil }
 func (stubRunner) SetSpawnPermissionMode(string)        {}
 func (stubRunner) SetPermissionMode(mode string) error  { return nil }
 
