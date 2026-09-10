@@ -283,14 +283,19 @@ func TestTurnEndPayload_RoundTrip(t *testing.T) {
 	if payload.CostUSDTotal != 0.1608898 {
 		t.Errorf("CostUSDTotal: got %v, want %v", payload.CostUSDTotal, 0.1608898)
 	}
+	if payload.InputTokens != 8 || payload.OutputTokens != 1715 ||
+		payload.CacheReadTokens != 196771 || payload.CacheCreationTokens != 12211 {
+		t.Errorf("token counts: got {%d %d %d %d}, want {8 1715 196771 12211}",
+			payload.InputTokens, payload.OutputTokens, payload.CacheReadTokens, payload.CacheCreationTokens)
+	}
 
 	roundTripEnvelope(t, env, payload, raw)
 }
 
 // TestTurnEndPayload_TurnTotalsAreOptional is the "optional means no omitempty, not a
 // pointer" contract measured from the client's side: a frame minted before #2260
-// landed must decode without error, with the four numbers at zero and every field
-// beside them intact.
+// and #2261 landed must decode without error, with both four-number groups at zero
+// and every field beside them intact.
 //
 // The sibling-survival check is the half a decode-succeeded assertion would miss — a
 // decode that "worked" but dropped error_category would pass the first check alone.
@@ -309,9 +314,27 @@ func TestTurnEndPayload_TurnTotalsAreOptional(t *testing.T) {
 		t.Errorf("turn totals: got {%d %d %d %v}, want all zero",
 			payload.DurationMS, payload.DurationAPIMS, payload.NumTurns, payload.CostUSDTotal)
 	}
+	if payload.InputTokens != 0 || payload.OutputTokens != 0 ||
+		payload.CacheReadTokens != 0 || payload.CacheCreationTokens != 0 {
+		t.Errorf("token counts: got {%d %d %d %d}, want all zero",
+			payload.InputTokens, payload.OutputTokens, payload.CacheReadTokens, payload.CacheCreationTokens)
+	}
 	if payload.Outcome != "error_max_turns" || payload.TerminalReason != "max_turns" ||
 		payload.ErrorCategory != "rate_limit" || !payload.IsError {
 		t.Errorf("sibling fields: got %+v", payload)
+	}
+}
+
+func TestTurnEndPayload_ZeroTokenCountsAreEmitted(t *testing.T) {
+	t.Parallel()
+	raw, err := json.Marshal(TurnEndPayload{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{"input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"} {
+		if !bytes.Contains(raw, []byte(`"`+key+`":0`)) {
+			t.Errorf("missing zero-valued %q in %s", key, raw)
+		}
 	}
 }
 

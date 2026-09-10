@@ -374,10 +374,14 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			// the strings above, and for a stronger reason — those are bounded at
 			// construction by a constant this file would have to keep in step, whereas
 			// these are bounded by their Go types for every input claude can send.
-			DurationMS:    e.DurationMS,
-			DurationAPIMS: e.DurationAPIMS,
-			NumTurns:      e.NumTurns,
-			CostUSDTotal:  e.CostUSDTotal,
+			DurationMS:          e.DurationMS,
+			DurationAPIMS:       e.DurationAPIMS,
+			NumTurns:            e.NumTurns,
+			CostUSDTotal:        e.CostUSDTotal,
+			InputTokens:         e.InputTokens,
+			OutputTokens:        e.OutputTokens,
+			CacheReadTokens:     e.CacheReadTokens,
+			CacheCreationTokens: e.CacheCreationTokens,
 		}, true
 	case turnevent.Stall:
 		// A stall carries conversation identity only — it is not turn-scoped and

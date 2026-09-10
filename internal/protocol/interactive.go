@@ -453,6 +453,19 @@ type TurnEndPayload struct {
 	// IT IS CLAUDE'S ESTIMATE, NOT A BILLING STATEMENT, and on a subscription it is
 	// informational. See the four fields' shared rules below.
 	CostUSDTotal float64 `json:"cost_usd_total"`
+	// The four token counts are claude's per-turn usage readings, carried without
+	// summing or conversion. InputTokens is uncached input only; CacheReadTokens
+	// and CacheCreationTokens are input-side too, while OutputTokens is output-side.
+	// InputTokens + OutputTokens is therefore not the turn total.
+	//
+	// The cache keys are deliberately shorter than claude's
+	// cache_read_input_tokens and cache_creation_input_tokens. Plain values without
+	// omitempty keep every key present; old, absent, null and unreadable readings are
+	// all zero. The numbers are unverified claude output and drive no daemon action.
+	InputTokens         int `json:"input_tokens"`
+	OutputTokens        int `json:"output_tokens"`
+	CacheReadTokens     int `json:"cache_read_tokens"`
+	CacheCreationTokens int `json:"cache_creation_tokens"`
 }
 
 // StallPayload is the body of an Envelope whose Type == TypeStall

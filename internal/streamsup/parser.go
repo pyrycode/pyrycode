@@ -2842,6 +2842,26 @@ type resultTurnTotalsLine struct {
 	TotalCostUSD  float64 `json:"total_cost_usd"`
 }
 
+// resultTurnUsageLine is the fifth independent decode target for a `result` line.
+// Keeping usage out of streamLine preserves the segmentation-only boundary, and
+// keeping it out of the four sibling targets means a hostile nested shape can zero
+// only these counts. The turn boundary and every other result field still decode.
+//
+// An absent or null Usage decodes to the nested struct's zero value. Within a valid
+// object, an absent or null member does the same without disturbing its siblings.
+// Any non-numeric member fails this target as a unit; decodeTurnUsage then returns
+// four zeros. Other usage details claude sends are outside this allowlist.
+type resultTurnUsageLine struct {
+	Usage resultTurnUsage `json:"usage"`
+}
+
+type resultTurnUsage struct {
+	InputTokens         int `json:"input_tokens"`
+	OutputTokens        int `json:"output_tokens"`
+	CacheReadTokens     int `json:"cache_read_input_tokens"`
+	CacheCreationTokens int `json:"cache_creation_input_tokens"`
+}
+
 // assistantErrorLine is the decoded API-error category of one `assistant` line
 // (#2224). Kept separate from streamLine for resultStopLine's reason applied to a
 // different line type: the segmentation struct stays at Type/Subtype/Message, and
@@ -4336,6 +4356,10 @@ func (p *Parser) consumeLine(line []byte) {
 		// these four numbers, and no outcome of this one can disturb the windows, the
 		// stop shape, the denials recovered next, or the boundary itself.
 		durationMS, durationAPIMS, numTurns, costUSDTotal := decodeTurnTotals(line)
+		// A FIFTH DECODE OF THE SAME LINE, isolated for the nested usage counts.
+		// A hostile usage cannot suppress any sibling decode or the boundary, and a
+		// hostile sibling cannot suppress these counts.
+		inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens := decodeTurnUsage(line)
 		// ORDERED BEFORE THE TurnEnd BELOW, which is AC 1's real content rather than a
 		// detail of it: a client closes the turn on that event, so a marker emitted
 		// after it would arrive for a turn already finished — #2232's defect restored
@@ -4374,6 +4398,12 @@ func (p *Parser) consumeLine(line []byte) {
 			DurationAPIMS: durationAPIMS,
 			NumTurns:      numTurns,
 			CostUSDTotal:  costUSDTotal,
+			// claude's four per-turn counts, unsummed and unconverted. InputTokens is
+			// only uncached input; the two cache counts are input-side too.
+			InputTokens:         inputTokens,
+			OutputTokens:        outputTokens,
+			CacheReadTokens:     cacheReadTokens,
+			CacheCreationTokens: cacheCreationTokens,
 		})
 	case "rate_limit_event":
 		// Its own arm rather than an ignoredLineTypes member with a subtype
@@ -7723,6 +7753,23 @@ func decodeTurnTotals(line []byte) (durationMS, durationAPIMS, numTurns int, cos
 		return 0, 0, 0, 0
 	}
 	return tl.DurationMS, tl.DurationAPIMS, tl.NumTurns, tl.TotalCostUSD
+}
+
+// decodeTurnUsage reads the four per-turn token counts from a result line's usage
+// object. It is pure, holds no previous reading, and cannot turn the counts into
+// running totals or deltas.
+//
+// Decode failure is silent. encoding/json can quote hostile subprocess bytes in an
+// error, so logging it would create another unbounded output path. A failed target
+// returns the same all-zero reading as absent, null, or explicit zeros. Signed counts
+// pass through without clamping, summing, conversion, or ordering checks.
+func decodeTurnUsage(line []byte) (input, output, cacheRead, cacheCreation int) {
+	var ul resultTurnUsageLine
+	if err := json.Unmarshal(line, &ul); err != nil {
+		return 0, 0, 0, 0
+	}
+	return ul.Usage.InputTokens, ul.Usage.OutputTokens,
+		ul.Usage.CacheReadTokens, ul.Usage.CacheCreationTokens
 }
 
 // decodeAssistantError reads the wrapper-level API error category off one `assistant`

@@ -481,6 +481,23 @@ func TestMapEventOutbound(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			name: "TurnEnd carries claude's per-turn token counts",
+			ev: turnevent.TurnEnd{
+				Reason:              turnevent.TurnEndReasonEndTurn,
+				InputTokens:         8,
+				OutputTokens:        1715,
+				CacheReadTokens:     196771,
+				CacheCreationTokens: 12211,
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeTurnEnd,
+			wantPayload: protocol.TurnEndPayload{
+				ConversationID: "c1", TurnID: "t1", StopReason: "end_turn",
+				InputTokens: 8, OutputTokens: 1715, CacheReadTokens: 196771, CacheCreationTokens: 12211,
+			},
+			wantOK: true,
+		},
+		{
 			// The zeros claude itself sends, carried as claude sent them. The row is
 			// not a duplicate of the empty-event rows above: those reach zero because
 			// nothing was set, this one because a REAL turn reported duration_api_ms 0

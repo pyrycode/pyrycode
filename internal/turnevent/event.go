@@ -368,8 +368,25 @@ type TurnEnd struct {
 	// it, reconcile it against anything, or compute it — it read a number off
 	// claude's stdout and carried it. On a subscription it is informational.
 	CostUSDTotal float64
-	// THE FOUR NUMBERS ABOVE SHARE ONE SET OF RULES, stated once here rather than
-	// four times.
+	// InputTokens, OutputTokens, CacheReadTokens and CacheCreationTokens are the
+	// four counts claude reports in the result line's usage object for THIS TURN.
+	// They are copied without summing, conversion, clamping or ordering checks.
+	//
+	// THREE ARE INPUT-SIDE: InputTokens is only uncached input, while
+	// CacheReadTokens and CacheCreationTokens are the cached-input components.
+	// OutputTokens is output-side. InputTokens + OutputTokens is therefore NOT the
+	// turn's total token use.
+	//
+	// These are claude-authored observations, not daemon measurements. Nothing in
+	// the daemon acts on them: no budget, retry, routing, teardown or lifecycle
+	// decision reads them. A negative value remains observable as claude sent it.
+	// Absent, null, unreadable and explicit zero are one zero-value reading.
+	InputTokens         int
+	OutputTokens        int
+	CacheReadTokens     int
+	CacheCreationTokens int
+	// THE FOUR TURN-TOTAL NUMBERS ABOVE THE TOKEN COUNTS SHARE ONE SET OF RULES,
+	// stated once here rather than four times.
 	//
 	// A ZERO IS A NUMBER CLAUDE SENDS, not only a decode fallback, and a consumer
 	// reading one as "the daemon could not get this" mislabels a real turn.
