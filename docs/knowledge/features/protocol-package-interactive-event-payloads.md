@@ -1,4 +1,4 @@
-# Interactive event payloads (#607, #638, #1074, #2237, #2233, #2261, #2324)
+# Interactive event payloads (#607, #638, #1074, #2237, #2233, #2261, #2324, #2329)
 
 The **v2 additive application events** — the wire representation of
 `internal/turnevent`'s neutral turn-event model (#606). They are **binary → phone
@@ -28,10 +28,11 @@ type TurnStatePayload struct {
 }
 
 type AssistantDeltaPayload struct {
-    ConversationID string `json:"conversation_id"`
-    TurnID         string `json:"turn_id"`
-    Seq            int    `json:"seq"`  // per-turn, non-negative, resets each turn
-    Text           string `json:"text"` // coalesced chunk, not per-token
+    ConversationID  string `json:"conversation_id"`
+    TurnID          string `json:"turn_id"`
+    Seq             int    `json:"seq"`                // per-turn, non-negative, resets each turn
+    ParentToolUseID string `json:"parent_tool_use_id"` // Agent call's ToolUseID, "" on the main thread (#2329)
+    Text            string `json:"text"`               // coalesced chunk, not per-token
 }
 
 type ToolUsePayload struct {
@@ -158,8 +159,9 @@ type BannerPayload struct {
 - **No `omitempty` on any field — the deliberate inverse of the handshake/optional
   discipline.** Every field is always present on the wire so the fixtures pin the
   full shape and boundary zero-values can't silently vanish: `assistant_delta` with
-  `seq: 0` and `tool_result` with `is_error: false` are pinned exactly. Pick the tag
-  by whether a field's absence is meaningful — here it never is.
+  `seq: 0` and `parent_tool_use_id: ""`, and `tool_result` with `is_error: false`,
+  are pinned exactly. Pick the tag by whether a field's absence is meaningful —
+  here it never is.
 - **`State` and `StopReason` stay plain `string`, not named enums.** Same
   `MessagePayload.Role` precedent: the closed-set guarantee belongs at the consumer,
   not in the wire type. `State` is documented (`thinking` / `responding` / `idle`)
@@ -402,16 +404,18 @@ type BannerPayload struct {
   make). `InputSummary` is untouched by this change: same meaning, same
   value, same cap, and it remains the whole-input fallback when the total
   budget drops a field.
-- **`ParentToolUseID` (#2191) is a display and join hint, not a capability, and the security
-  review made the daemon say so at both structs.** A client that reads a `tool_use_id`-shaped
+- **`ParentToolUseID` (#2191, extended to `AssistantDeltaPayload` by #2329) is a display and
+  join hint, not a capability, and the security review made the daemon say so at every
+  carrying struct.** A client that reads a `tool_use_id`-shaped
   field could reasonably try to look it up or dereference it; nothing in the daemon does either
   — no code branches on the value, so a subagent that persuades claude to name an unrelated
-  call's id mislabels one row's parent and nothing more. Bounded and dropped (not cut) at
+  call's id mislabels one row or prose chunk's parent and nothing more. Bounded and dropped (not cut) at
   `maxTaskFieldID` by `internal/streamsup`'s `parentToolUseID`, the producer's own join-key
   reasoning: a cut id would still look like a real one and could join a row to the wrong parent,
   where an empty value degrades to top-level rendering, the pre-#2191 behaviour. See
   [turnevent-package.md](turnevent-package.md) § `ToolStart`/`ToolUpdate` for the field's origin
-  and [turnbridge-package.md](turnbridge-package.md) for the straight-through mapping arm.
+  on tool frames, its `TextChunk` section for assistant text, and
+  [turnbridge-package.md](turnbridge-package.md) for the straight-through mapping arms.
 - **`ToolProgressPayload` (#2324) updates an existing tool row; it is not another
   lifecycle edge.** Reusing `tool_use_id` is load-bearing: a new id spelling would
   make a client create or miss a row instead of joining the `ToolUsePayload` it
@@ -514,7 +518,10 @@ their zero value while the other seven survive, the "optional means no
 **decoded payload struct** (not the original `RawMessage`) back into the envelope —
 that is what pins struct → wire shape, since a missing or reordered json tag only
 surfaces when the bytes are actually re-encoded (the original-`RawMessage`-passthrough
-variant cannot catch it). `TestToolUsePayload_RoundTrip`'s fixture
+variant cannot catch it). `assistant_delta.json` carries a distinct, non-empty
+`parent_tool_use_id`; that round trip cannot prove the key survives its main-thread
+zero value, so `TestAssistantDeltaPayload_ZeroValueParentIDIsEmitted` separately
+inspects the raw JSON for `"parent_tool_use_id":""`. `TestToolUsePayload_RoundTrip`'s fixture
 (`testdata/tool_use.json`) carries a `WebSearch` input whose one field is the
 query, matching the pre-existing `input_summary` value; `Input`'s empty-map
 polarity is pinned separately by `TestToolUsePayload_NilInputNormalises` (a

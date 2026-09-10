@@ -1,1 +1,1 @@
-{"id":302,"type":"assistant_delta","ts":"2026-05-08T10:33:14.6Z","payload":{"conversation_id":"c1","turn_id":"t7","seq":0,"text":"Let me check the weather for you."}}
+{"id":302,"type":"assistant_delta","ts":"2026-05-08T10:33:14.6Z","payload":{"conversation_id":"c1","turn_id":"t7","seq":0,"parent_tool_use_id":"toolu_delta_parent","text":"Let me check the weather for you."}}

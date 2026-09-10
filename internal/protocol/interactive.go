@@ -31,11 +31,18 @@ type TurnStatePayload struct {
 // phone direction; an incremental, coalesced chunk of assistant text. Seq
 // is a per-turn, non-negative delta-ordering counter that resets each turn
 // (distinct from the session-monotonic Envelope.ID).
+//
+// ParentToolUseID names the Agent call that produced attributed text and is
+// empty for main-thread text. It has ToolUsePayload.ParentToolUseID's exact
+// grouping-hint-not-a-capability semantics: clients may join it to a parent
+// ToolUseID for display, but must not treat a match as authority. The key has
+// no omitempty so the main-thread value is always emitted as an empty string.
 type AssistantDeltaPayload struct {
-	ConversationID string `json:"conversation_id"`
-	TurnID         string `json:"turn_id"`
-	Seq            int    `json:"seq"`
-	Text           string `json:"text"`
+	ConversationID  string `json:"conversation_id"`
+	TurnID          string `json:"turn_id"`
+	Seq             int    `json:"seq"`
+	ParentToolUseID string `json:"parent_tool_use_id"`
+	Text            string `json:"text"`
 }
 
 // ToolUsePayload is the body of an Envelope whose Type == TypeToolUse

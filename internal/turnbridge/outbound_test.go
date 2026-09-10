@@ -101,17 +101,18 @@ func TestMapEventOutbound(t *testing.T) {
 		wantOK      bool
 	}{
 		{
-			name:    "TextChunk -> assistant_delta",
-			ev:      turnevent.TextChunk{MessageID: "m1", Text: "hi there"},
+			name:    "attributed TextChunk -> assistant_delta",
+			ev:      turnevent.TextChunk{MessageID: "m1", ParentToolCallID: "toolu_delta_parent", Text: "hi there"},
 			tc:      tc,
 			wantTyp: protocol.TypeAssistantDelta,
 			wantPayload: protocol.AssistantDeltaPayload{
-				ConversationID: "c1", TurnID: "t1", Seq: 7, Text: "hi there",
+				ConversationID: "c1", TurnID: "t1", Seq: 7,
+				ParentToolUseID: "toolu_delta_parent", Text: "hi there",
 			},
 			wantOK: true,
 		},
 		{
-			name:    "TextChunk seq 0 boundary reaches the wire",
+			name:    "main-thread TextChunk keeps empty parent id and seq 0",
 			ev:      turnevent.TextChunk{Text: "first"},
 			tc:      TurnContext{ConversationID: "c1", TurnID: "t1", Seq: 0},
 			wantTyp: protocol.TypeAssistantDelta,

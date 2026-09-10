@@ -71,7 +71,7 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
 
 | `ev` concrete type | `typ` | `payload` | `ok` |
 |---|---|---|---|
-| `TextChunk` | `TypeAssistantDelta` | `AssistantDeltaPayload{tc.ConversationID, tc.TurnID, tc.Seq, ev.Text}` | true |
+| `TextChunk` | `TypeAssistantDelta` | `AssistantDeltaPayload{tc.ConversationID, tc.TurnID, tc.Seq, ParentToolUseID: ev.ParentToolCallID, ev.Text}` (#2329; straight-through, no re-cap — bounded at construction; empty remains main-thread text) | true |
 | `ToolStart` | `TypeToolUse` | `ToolUsePayload{…, ToolUseID: ev.ToolCallID, ParentToolUseID: ev.ParentToolCallID, Name: ev.Title, InputSummary: inputSummary(ev.RawInput), Input: inputFields(ev.RawInput)}` (#1678; `ParentToolCallID` #2191, straight-through, no re-cap — bounded at construction) | true |
 | `ToolUpdate` | `TypeToolResult` | `ToolResultPayload{…, ToolUseID: ev.ToolCallID, ParentToolUseID: ev.ParentToolCallID, IsError: ev.Status == ToolStatusFailed, ResultSummary: resultSummary(ev.Content), ResultDetail: ev.ResultDetail}` (#2024, extended #2025, straight-through, no cap here — see below; `ParentToolCallID` #2191, same rule) | true |
 | `ToolProgress` (#2324) | `TypeToolProgress` | `ToolProgressPayload{tc.ConversationID, tc.TurnID, ToolUseID: ev.ToolCallID, ElapsedSeconds: ev.ElapsedSeconds}` — turn-scoped but lifecycle-neutral: it joins the row `ToolStart` already opened, while `ToolUpdate` remains the close. The signed reading crosses verbatim with no clock read, clamp, cadence check, lookup, retention, or deduplication; the producer already bounded the join id, and an independently dropped heartbeat carries no lifecycle meaning | true |

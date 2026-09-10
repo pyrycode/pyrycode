@@ -84,11 +84,33 @@ func TestAssistantDeltaPayload_RoundTrip(t *testing.T) {
 	if payload.Seq != 0 {
 		t.Errorf("Seq: got %d, want 0", payload.Seq)
 	}
+	if payload.ParentToolUseID != "toolu_delta_parent" {
+		t.Errorf("ParentToolUseID: got %q, want %q", payload.ParentToolUseID, "toolu_delta_parent")
+	}
 	if payload.Text != "Let me check the weather for you." {
 		t.Errorf("Text: got %q, want %q", payload.Text, "Let me check the weather for you.")
 	}
 
 	roundTripEnvelope(t, env, payload, raw)
+}
+
+func TestAssistantDeltaPayload_ZeroValueParentIDIsEmitted(t *testing.T) {
+	b, err := json.Marshal(AssistantDeltaPayload{})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		t.Fatalf("unmarshal payload fields: %v", err)
+	}
+	got, ok := fields["parent_tool_use_id"]
+	if !ok {
+		t.Fatalf("parent_tool_use_id missing from zero-value payload: %s", b)
+	}
+	if string(got) != `""` {
+		t.Errorf("parent_tool_use_id: got %s, want empty string", got)
+	}
 }
 
 func TestToolUsePayload_RoundTrip(t *testing.T) {

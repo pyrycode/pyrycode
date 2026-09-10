@@ -244,10 +244,11 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 	switch e := ev.(type) {
 	case turnevent.TextChunk:
 		return protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{
-			ConversationID: tc.ConversationID,
-			TurnID:         tc.TurnID,
-			Seq:            tc.Seq,
-			Text:           e.Text,
+			ConversationID:  tc.ConversationID,
+			TurnID:          tc.TurnID,
+			Seq:             tc.Seq,
+			ParentToolUseID: e.ParentToolCallID,
+			Text:            e.Text,
 		}, true
 	case turnevent.ToolStart:
 		// RawInput is read TWICE and the two readings are independent by design.

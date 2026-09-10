@@ -777,7 +777,15 @@ These twenty-two envelope types form the structured live-session stream. They ar
 | `conversation_id` | string | Conversation this turn belongs to. |
 | `turn_id` | string | Identifies the turn the delta belongs to. |
 | `seq` | int | Per-turn, non-negative delta-ordering counter; resets each turn. |
+| `parent_tool_use_id` | string | The parent `Agent` call's `tool_use_id`. **Empty means the main thread.** |
 | `text` | string | Incremental assistant text, coalesced (not per token). |
+
+`parent_tool_use_id` is an inert grouping hint for attributed subagent prose.
+Join it to the parent `Agent` frame's `tool_use_id` to render that prose under
+the call that produced it; the identifiers cross byte-for-byte. A value that
+matches no known frame stays at top level. It is **not a capability** and grants
+no authority to look up, invoke, or otherwise act on the referenced call. The
+daemon always emits the key, using an empty string for main-thread text.
 
 #### `tool_use`
 
