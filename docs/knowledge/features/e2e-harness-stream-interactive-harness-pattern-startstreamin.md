@@ -237,6 +237,30 @@ the rider's synthetic id prefix and that no id repeats — the one addition this
 own plan, and the one that actually backs the acceptance criterion's "with its tasks … intact"
 clause rather than a payload that merely has the right shape and length.
 
+### `relay_v2_stream_session_facts_test.go` — `TestRelayV2_StreamSessionFactsReachesConnectedPhone` (#2315)
+
+Proves `session_facts` reaches a connected phone from a fake claude's `system`/`init`
+line — the fake wrote no form of that line before this ticket, so the rider
+(`PYRY_FAKE_CLAUDE_STREAM_SESSION_FACTS`, see
+[fakeclaude-binary-stream-json-mode.md § Session-facts init line rider](fakeclaude-binary-stream-json-mode.md))
+ships in the same commit as the spec. One fed line necessarily produces two frames —
+`emitInitLine` decodes it once and calls both `emitModelAnnounced` and
+`emitSessionFacts` — so the drain filters by frame type rather than asserting a frame
+total, the same discipline the roster reconcile's row loop uses for a wire that isn't
+the only thing on it. Paired against a rider-off run receiving zero frames of either
+kind, the non-vacuity guard this family's rate-limit ancestor established.
+
+**A frame-arrival assertion that decodes into the payload type cannot prove non-leak —
+hold the raw bytes too.** `SessionFactsPayload` declares four keys; decoding a wire
+frame into that struct silently drops every key the struct doesn't declare, which is
+exactly the property under test here — the fed line carries 24 keys, four of them
+naming the operator's filesystem or claude's session identity, and none of the other
+twenty-one may reach the client. The spec's self-review caught this as the plan's one
+MUST FIX: a version asserting only the three expected values would go green on a frame
+that had grown a `cwd`. Generalizes past this ticket — any e2e proving "frame X carries
+fact Y and nothing else" needs the raw payload's key set asserted beside the decoded
+values, not the decoded struct alone.
+
 ### `relay_v2_attachment_destination_test.go` — three attachment-destination flows (#2144)
 
 Proves the property #2143 shipped — the bytes land where the client named the
