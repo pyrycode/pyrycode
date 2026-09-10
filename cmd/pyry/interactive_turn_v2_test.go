@@ -2704,12 +2704,19 @@ func TestInteractiveTurnEmitterV2_SessionFactsEventKindNamesTheVariant(t *testin
 // step more: this rides the SAME per-turn init line, so it arrives once per turn in
 // EVERY conversation, and a startTurnIfNeeded in the arm would wedge all of them.
 //
-// NO FRAME IS PUSHED, and asserting that is not a weaker version of the sibling's
-// frame-sequence check — it is the accurate one for the state the tree is in.
-// turnbridge.MapEvent has no arm for this variant until #2254, so emitMapped takes
-// its unmapped branch and emits nothing. The assertion is deliberately written as
-// "no frames at all", so this test is what reddens when the mapper lands and the
-// frame starts appearing, which is the reminder to assert its type here then.
+// EXACTLY ONE FRAME IS PUSHED, and it is the report itself. #2252 wrote this
+// assertion as "no frames at all" — accurate while turnbridge.MapEvent had no arm
+// for the variant, and deliberately shaped to redden the moment one landed. #2254
+// landed it, so the sequence now carries the frame and the assertion moved to its
+// type and its wire values. The lifecycle claim did NOT weaken: a turn_state
+// anywhere in the sequence is the observable signature of a transitionTo call, so
+// requiring this one frame and no other still catches a lifecycle mutation, and the
+// three tracker fields are asserted directly besides.
+//
+// The values are read from the DECODED PUSH rather than from a log buffer, which is
+// not a stylistic choice: the eventKind test above forbids either string from
+// reaching a log at all, so an assertion that found them in log text would be
+// passing on a leak.
 func TestInteractiveTurnEmitterV2_SessionFactsNoLifecycleMutation(t *testing.T) {
 	t.Parallel()
 	cur := &stubCursor{}
@@ -2717,17 +2724,36 @@ func TestInteractiveTurnEmitterV2_SessionFactsNoLifecycleMutation(t *testing.T) 
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
 	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
 
+	// A populated truncation report, so a mapping that dropped the field reddens here
+	// as well as on the bytes in internal/turnbridge. Both members in one comparison
+	// pins member ORDER, not merely membership.
+	cut := []string{"claude_code_version", "permission_mode"}
 	e.Handle(context.Background(), turnevent.SessionFacts{
 		ClaudeCodeVersion: sessionFactsVersionFixture,
 		PermissionMode:    sessionFactsModeFixture,
+		TruncatedFields:   cut,
 	})
 
-	// A turn_state anywhere in the sequence is the observable signature of a
-	// transitionTo call, so an empty sequence carries the lifecycle claim as well as
-	// the not-yet-mapped one.
-	if got := pushTypes(bcast.pushes); len(got) != 0 {
-		t.Fatalf("bare session_facts envelopes: got %v, want none until turnbridge.MapEvent gains "+
-			"an arm (#2254) — a turn_state here would be a lifecycle mutation", got)
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, []string{protocol.TypeSessionFacts}) {
+		t.Fatalf("session_facts envelopes:\n got %v\nwant %v — a turn_state here would be a "+
+			"lifecycle mutation, and an empty sequence means the mapping arm is gone",
+			got, []string{protocol.TypeSessionFacts})
+	}
+	var pl protocol.SessionFactsPayload
+	if err := json.Unmarshal(pushesFor(bcast.pushes, "a")[0].env.Payload, &pl); err != nil {
+		t.Fatalf("decode session_facts payload: %v", err)
+	}
+	if pl.ConversationID != testConvID {
+		t.Errorf("conversation_id: got %q, want %q", pl.ConversationID, testConvID)
+	}
+	if pl.ClaudeCodeVersion != sessionFactsVersionFixture {
+		t.Errorf("claude_code_version: got %q, want %q", pl.ClaudeCodeVersion, sessionFactsVersionFixture)
+	}
+	if pl.PermissionMode != sessionFactsModeFixture {
+		t.Errorf("permission_mode: got %q, want %q", pl.PermissionMode, sessionFactsModeFixture)
+	}
+	if !slices.Equal(pl.TruncatedFields, cut) {
+		t.Errorf("truncated_fields: got %v, want %v", pl.TruncatedFields, cut)
 	}
 	if e.inTurn {
 		t.Error("session_facts opened a turn; inTurn must stay false")
@@ -2742,6 +2768,7 @@ func TestInteractiveTurnEmitterV2_SessionFactsNoLifecycleMutation(t *testing.T) 
 	e.Handle(context.Background(), turnevent.TextChunk{Text: "hello"})
 	e.flushDelta(context.Background())
 	wantTypes := []string{
+		protocol.TypeSessionFacts,   // the report, still first and still alone in its turn
 		protocol.TypeTurnState,      // responding — a fresh turn opens afterwards
 		protocol.TypeAssistantDelta, // hello
 	}

@@ -729,12 +729,12 @@ const (
 // Mobile Protocol v2 session-facts report. What claude's own build IS and what
 // posture claude says the child is running under, taken from the SAME system/init
 // line TypeModelAnnounced's value comes from. internal/streamsup has translated
-// those two keys into turnevent.SessionFacts since #2252, but turnbridge.MapEvent's
-// default drops the variant, so no client can see either fact today. The defect it
-// closes is the one TypeModelAnnounced's block states, applied to two more facts of
-// the same shape: the daemon knows what it ASKED FOR and only claude knows what it
-// GOT, so an unexpected posture or an unexpected build is currently discarded with
-// the rest of the line. The waiting consumer is pyrycode-desktop#1241.
+// those two keys into turnevent.SessionFacts since #2252, and turnbridge.MapEvent has
+// mapped the variant onto this type since #2254, so a client sees both facts. The
+// defect it closes is the one TypeModelAnnounced's block states, applied to two more
+// facts of the same shape: the daemon knows what it ASKED FOR and only claude knows
+// what it GOT, so an unexpected posture or an unexpected build was being discarded
+// with the rest of the line. The waiting consumer is pyrycode-desktop#1241.
 //
 // Grouped alone rather than with any block above: it is not a turn sub-state with
 // two edges, not turn-independent work, not a periodic reading, not a condition
@@ -798,10 +798,12 @@ const (
 // here would be red by construction, and filing it under excludedTypes to dodge that
 // would be a lie to the guard.
 //
-// The declaring ticket (#2253) is wire vocabulary and documentation only; #2254 adds
-// internal/turnbridge's MapEvent arm for turnevent.SessionFacts and cmd/pyry's
-// emitting Handle case. Same declare-then-emit sequencing as #1405→#1410,
-// #1616→#1638, #1704→#1848 and #1726→#2003.
+// The declaring ticket (#2253) was wire vocabulary and documentation only; #2252 added
+// cmd/pyry's emitting Handle case and #2254 internal/turnbridge's MapEvent arm for
+// turnevent.SessionFacts, so this frame now reaches an interactive v2 mobile client.
+// Same declare-then-emit sequencing as #1405→#1410, #1616→#1638, #1704→#1848 and
+// #1726→#2003, with the two halves landing in the opposite order: the Handle case came
+// first here and pushed nothing until the mapping arrived beneath it.
 const (
 	TypeSessionFacts = "session_facts" // binary → phone, outbound v2 session-facts report
 )

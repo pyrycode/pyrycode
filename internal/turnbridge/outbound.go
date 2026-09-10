@@ -677,6 +677,61 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			Model:          e.Model,
 			Truncated:      e.Truncated,
 		}, true
+	case turnevent.SessionFacts:
+		// The OTHER half of the same system/init line the arm above maps, and it sits
+		// here rather than anywhere else in this switch for that reason. Conversation
+		// identity only, like the status peers: tc.TurnID and tc.Seq are ignored and the
+		// payload has no field either could land in. A build and a posture are properties
+		// of the CHILD RUN — the build cannot change under a running child at all, and
+		// the posture changes only when someone changes it — so they are one step further
+		// out than the neighbour's per-turn configuration, and further still from a turn
+		// boundary. cmd/pyry's TestTurnMarkFor_TotalOverEveryVariant pins the lifecycle
+		// answer as turnMarkNone.
+		//
+		// Both strings cross BYTE-FOR-BYTE. Why that is the right answer rather than a
+		// lazy one — no version parsing, no posture allow-list, and why a value matching
+		// no known release or mode is ORDINARY rather than an error — is
+		// turnevent.SessionFacts' field docs, their single source of truth, not restated
+		// here. Specifically, and each point is the arm above's, unchanged:
+		//
+		//   - NEITHER IS RE-CAPPED. The producer bounded both at construction (streamsup's
+		//     maxClaudeVersionField and maxPermissionModeField), so a second cap here
+		//     would be a second place the limit is decided and the two could disagree
+		//     silently. maxSummaryLen lives in THIS file and is not the applicable bound —
+		//     it is the tool-précis cap, and reaching for it here is the specific mistake
+		//     to avoid.
+		//   - There is no charset check on either. internal/relay's validModel bounds a
+		//     PHONE-supplied override and is deliberately a different rule; the posture is
+		//     the field where a membership check is most tempting and most wrong, since an
+		//     allow-list would drop the first report of a posture nobody has heard of —
+		//     the case an operator most needs to see.
+		//   - A nil TruncatedFields is passed straight through, and HERE that nil is what
+		//     puts "truncated_fields":null on the wire. This is the RateLimited arm's
+		//     polarity and NOT the roster arm's: SessionFactsPayload owns no MarshalJSON,
+		//     so nothing normalises the nil afterwards, and a mapper that helpfully
+		//     allocated an empty slice would emit [] and tell a phone that claude's cut
+		//     text is complete. The slice header is shared rather than deep-copied, for
+		//     the CompactionBoundary arm's three reasons: streamsup's emitSessionFacts
+		//     declares its accumulator fresh per call, retains no reference to it after
+		//     emit, and nothing downstream mutates a payload.
+		//
+		// No suppression branch, not even on two empty strings. The producer emits when
+		// EITHER fact is present, so a line naming only a posture arrives here with an
+		// empty version — that is a report, not a defect, and a second, differently-shaped
+		// filter here would silently diverge from the gate that already decided the event
+		// exists. That is the hazard the ThinkingProgress, RateLimited and ModelAnnounced
+		// arms above all name.
+		//
+		// Nothing here re-decides what the frame may carry, and it could not: the four
+		// init-line keys naming the operator's filesystem and claude's own session
+		// identity are absent from the producer's DECODE TARGET (streamsup's
+		// systemInitLine), which is why this arm cannot leak one even by accident.
+		return protocol.TypeSessionFacts, protocol.SessionFactsPayload{
+			ConversationID:    tc.ConversationID,
+			ClaudeCodeVersion: e.ClaudeCodeVersion,
+			PermissionMode:    e.PermissionMode,
+			TruncatedFields:   e.TruncatedFields,
+		}, true
 	case turnevent.ModelList:
 		// Conversation identity only, like the status peers above: tc.TurnID and
 		// tc.Seq are ignored and the payload has no field for either. It is not even

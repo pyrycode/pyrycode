@@ -484,14 +484,15 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// and merging the arms would file that difference under a shared comment.
 		// TestTurnMarkFor_TotalOverEveryVariant pins the lifecycle answer as turnMarkNone.
 		//
-		// NOTHING IS MAPPED YET, and that is a state rather than a defect: #2253
-		// declares the wire type and #2254 wires turnbridge.MapEvent's arm, so until
-		// then emitMapped takes its unmapped branch and logs one content-free Debug per
-		// turn naming the kind only. The arm is written now anyway, per this ticket's
-		// AC5, so that the variant is not logged as an UNKNOWN event by the default arm
-		// below — a distinction that matters to whoever reads the log next. eventKind's
-		// arm is the other half of that: without it the Debug would read kind=unknown for
-		// a variant the daemon does recognize.
+		// THE FRAME IS MAPPED AND PUSHED. turnbridge.MapEvent's turnevent.SessionFacts
+		// arm (#2254) constructs protocol.SessionFactsPayload, so emitMapped reaches emit
+		// with a payload and this lane carries the report to every interactive client.
+		// Between #2252 and #2254 it took the unmapped branch instead, logging one
+		// content-free Debug per turn naming the kind only — which is why this arm was
+		// written before anything consumed it, so the variant was never logged as an
+		// UNKNOWN event by the default arm below. eventKind's arm is the other half of
+		// that and still earns its place: without it every eventKind call site would read
+		// kind=unknown for a variant the daemon does recognize.
 		//
 		// Flush any pending delta first so buffered text keeps its wire position ahead of
 		// the report. Like turn_state this flows through emit() and is NOT a droppable
@@ -977,14 +978,17 @@ func eventKind(ev turnevent.Event) string {
 		// contents are DAEMON-authored: a cut is a fact about claude's value, and the
 		// count of them would be one bit of it.
 		//
-		// THIS ARM IS LIVE FOR THIS FILE'S OWN DEBUG, unlike its neighbours, and that is
-		// the reason it is here rather than only for the other call sites. The variant
-		// has a Handle case (#2252), so the unknown-event drop is not its site; but
-		// turnbridge.MapEvent has no arm until #2254, so emitMapped's unmapped-drop
-		// Debug fires for it once per turn and reads this name. Without the arm every
-		// eventKind site — here, acp_turn_stream.go, stream_turn_busy.go,
-		// stream_turn_drain.go — would read kind=unknown for a variant the daemon does
-		// recognize, on the one lane where it is currently the most frequent record.
+		// THIS ARM MATCHES ITS NEIGHBOURS AGAIN since #2254, and the correction is worth
+		// stating because the arm's justification MOVED rather than expired. In the
+		// window between #2252 and #2254 it was live for this file's own Debug: the
+		// variant had a Handle case, so the unknown-event drop was not its site, but
+		// turnbridge.MapEvent had no arm, so emitMapped's unmapped-drop Debug fired for
+		// it once per turn and read this name. That mapping arm landed, so the unmapped
+		// drop is no longer a site for this variant either. What remains is the reachable
+		// site the arms above name — the no-cursor drop, which returns before the type
+		// switch — plus acp_turn_stream.go, stream_turn_busy.go and stream_turn_drain.go,
+		// every one of which would read kind=unknown without this arm for a variant the
+		// daemon does recognize.
 		return "session_facts"
 	case turnevent.ModelList:
 		// The variant NAME only, for the arms above's reason — and here the
