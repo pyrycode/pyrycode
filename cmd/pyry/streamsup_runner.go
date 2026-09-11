@@ -415,7 +415,7 @@ func (h *stdioPermissionHandler) await(requestID string, req permbridge.Request,
 
 	switch verdict.Behavior {
 	case permbridge.BehaviorAllow:
-		_ = streamsup.WriteCanUseToolAllow(origin, requestID, verdict.UpdatedInput, nil)
+		_ = streamsup.WriteCanUseToolAllow(origin, requestID, verdict.UpdatedInput, verdict.UpdatedPermissions)
 	default:
 		_ = streamsup.WriteCanUseToolDeny(origin, requestID, verdict.Message, false)
 	}

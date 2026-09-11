@@ -96,7 +96,7 @@ type modalResolverV2 struct {
 // production implementer; the interface is declared at its consumer.
 type streamApprovalResolver interface {
 	RemoteAnswerable(modalID string) bool
-	ResolveStream(modalID string, allow bool, denyReason string) (handled bool)
+	ResolveStream(modalID string, allow, alwaysAllow bool, denyReason string) (handled bool)
 }
 
 type streamModalRegistry interface {
@@ -263,6 +263,13 @@ func (r *modalResolverV2) ResolveTimeout(modalID string) (relay.ModalDismissal, 
 // unbounded state, so it is deliberately not built. The token is decoded (it
 // arrives as a param) and otherwise unused, and never logged.
 func (r *modalResolverV2) ResolveAnswer(modalID, optionID, answerToken string, dev *devices.Device) (relay.ModalDismissal, bool) {
+	return r.ResolveAnswerWithAlwaysAllow(modalID, optionID, answerToken, false, dev)
+}
+
+// ResolveAnswerWithAlwaysAllow carries the optional session-grant choice from
+// the v2 payload. ResolveAnswer remains the false/absent compatibility entry
+// point for internal callers that do not supply the additive field.
+func (r *modalResolverV2) ResolveAnswerWithAlwaysAllow(modalID, optionID, answerToken string, alwaysAllow bool, dev *devices.Device) (relay.ModalDismissal, bool) {
 	_ = answerToken // see method doc: decoded, not used server-side, never logged.
 
 	// Step 1: Lookup (read, no consume). Stale / unknown / already-resolved (a
@@ -332,7 +339,7 @@ func (r *modalResolverV2) ResolveAnswer(modalID, optionID, answerToken string, d
 	//   - KEYSTROKE (tui): every other modalID — and every modal when no stream
 	//     bridge is wired (foreground/v1, streamApprovals==nil) — routes the
 	//     safe-answer keystroke into the on-screen modal (unchanged pre-#1080 path).
-	handled := r.streamApprovals != nil && r.streamApprovals.ResolveStream(modalID, allow, reasonRemoteDeny)
+	handled := r.streamApprovals != nil && r.streamApprovals.ResolveStream(modalID, allow, alwaysAllow, reasonRemoteDeny)
 	if !handled {
 		if err := r.routeAnswerKeystroke(verb, choice); err != nil {
 			r.logger.Warn("relay: modal answer keystroke failed",
@@ -1136,19 +1143,21 @@ func (b *streamApprovalBridge) RemoteAnswerable(modalID string) bool {
 	return !ok || !correlation.requiresUserInteraction
 }
 
-// ResolveStream is modalResolverV2.ResolveAnswer's stream (verdict) arm: resolve a
+// ResolveStream is modalResolverV2.ResolveAnswerWithAlwaysAllow's stream
+// (verdict) arm: resolve a
 // stream-json approval identified by modalID to allow/deny on claude's parked
 // completer (AC-2). handled=false ⇒ modalID is not a stream approval (absent from
 // byModal) → the caller routes the tui keystroke arm. An allow echoes the parked
-// tool Input byte-verbatim; a perm.Lookup miss on allow means permbridge already
-// resolved (a raced timeout) — nothing to do, still fail-closed (claude denied).
+// tool Input byte-verbatim and, when requested, derives session-only permission
+// updates from the parked offer. A perm.Lookup miss on allow means permbridge
+// already resolved (a raced timeout) — nothing to do, still fail-closed (claude denied).
 // denyReason is the fixed content-free reasonRemoteDeny, never host-derived.
 //
 // It does NOT delete the correlation (retire is the sole, unconditional deleter)
 // and does NOT consume the modalbridge entry (ResolveAnswer already consumed it
 // before calling here, which gates a second ResolveStream for the same modalID).
 // Runs on the relay manager's single Run goroutine.
-func (b *streamApprovalBridge) ResolveStream(modalID string, allow bool, denyReason string) (handled bool) {
+func (b *streamApprovalBridge) ResolveStream(modalID string, allow, alwaysAllow bool, denyReason string) (handled bool) {
 	b.mu.Lock()
 	correlation, ok := b.byModal[modalID]
 	b.mu.Unlock()
@@ -1158,7 +1167,11 @@ func (b *streamApprovalBridge) ResolveStream(modalID string, allow bool, denyRea
 
 	if allow {
 		if req, ok := b.perm.Lookup(correlation.toolUseID); ok {
-			b.perm.Resolve(correlation.toolUseID, permbridge.Allow(req.Input))
+			verdict := permbridge.Allow(req.Input)
+			if alwaysAllow {
+				verdict = permbridge.AllowAlways(req.Input, req.AlwaysAllow)
+			}
+			b.perm.Resolve(correlation.toolUseID, verdict)
 		}
 	} else {
 		b.perm.Resolve(correlation.toolUseID, permbridge.Deny(denyReason))

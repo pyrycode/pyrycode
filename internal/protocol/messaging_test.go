@@ -615,8 +615,66 @@ func TestModalAnswerPayload_RoundTrip(t *testing.T) {
 	if payload.AnswerToken != "atk-91c2" {
 		t.Errorf("AnswerToken: got %q, want %q", payload.AnswerToken, "atk-91c2")
 	}
+	if !payload.AlwaysAllow {
+		t.Error("AlwaysAllow: got false, want true")
+	}
 
 	roundTripEnvelope(t, env, payload, raw)
+}
+
+func TestModalAnswerPayload_FieldCensus(t *testing.T) {
+	t.Parallel()
+
+	typ := reflect.TypeOf(ModalAnswerPayload{})
+	want := []struct {
+		name string
+		typ  reflect.Type
+		tag  string
+	}{
+		{"ModalID", reflect.TypeOf(""), "modal_id"},
+		{"OptionID", reflect.TypeOf(""), "option_id"},
+		{"AnswerToken", reflect.TypeOf(""), "answer_token"},
+		{"AlwaysAllow", reflect.TypeOf(false), "always_allow,omitempty"},
+	}
+	if typ.NumField() != len(want) {
+		t.Fatalf("ModalAnswerPayload fields = %d, want %d", typ.NumField(), len(want))
+	}
+	for i, field := range want {
+		got := typ.Field(i)
+		if got.Name != field.name || got.Type != field.typ || got.Tag.Get("json") != field.tag {
+			t.Errorf("field %d = {%s %v %q}, want {%s %v %q}", i, got.Name, got.Type, got.Tag.Get("json"), field.name, field.typ, field.tag)
+		}
+	}
+}
+
+func TestModalAnswerPayload_AlwaysAllowFalseAndAbsentCompatibility(t *testing.T) {
+	t.Parallel()
+
+	const legacy = `{"modal_id":"mdl-7f3a","option_id":"allow","answer_token":"atk-91c2"}`
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{"absent", legacy},
+		{"false", `{"modal_id":"mdl-7f3a","option_id":"allow","answer_token":"atk-91c2","always_allow":false}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var payload ModalAnswerPayload
+			if err := json.Unmarshal([]byte(tc.raw), &payload); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if payload.AlwaysAllow {
+				t.Fatal("AlwaysAllow = true, want false")
+			}
+			got, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if string(got) != legacy {
+				t.Errorf("false/absent bytes changed:\n got: %s\nwant: %s", got, legacy)
+			}
+		})
+	}
 }
 
 func TestModalCancelPayload_RoundTrip(t *testing.T) {

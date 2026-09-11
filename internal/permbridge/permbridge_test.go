@@ -1,6 +1,7 @@
 package permbridge
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -456,6 +457,49 @@ func TestVerdict_MarshalShape(t *testing.T) {
 	}
 	if strings.Contains(ds, `"updatedInput"`) {
 		t.Fatalf("deny verdict %s must omit updatedInput", ds)
+	}
+}
+
+func TestAllowAlways_RewritesDestinationsAndPreservesOrder(t *testing.T) {
+	t.Parallel()
+
+	offer := ParseAlwaysAllow(json.RawMessage(`[
+		{"type":"addRules","rules":[{"toolName":"Bash"},{"toolName":"Read","ruleContent":"//src/**"}],"behavior":"allow","destination":"userSettings"},
+		{"type":"addRules","rules":[{"toolName":"Write","ruleContent":"//tmp/**"}],"behavior":"allow","destination":"projectSettings"}
+	]`), false)
+	if !offer.Offered() {
+		t.Fatal("test offer unavailable")
+	}
+
+	verdict := AllowAlways(json.RawMessage(`{"command":"true"}`), offer)
+	if verdict.Behavior != BehaviorAllow || string(verdict.UpdatedInput) != `{"command":"true"}` {
+		t.Fatalf("verdict = %+v, want allow with original input", verdict)
+	}
+	want := `[{"type":"addRules","rules":[{"toolName":"Bash"},{"toolName":"Read","ruleContent":"//src/**"}],"behavior":"allow","destination":"session"},{"type":"addRules","rules":[{"toolName":"Write","ruleContent":"//tmp/**"}],"behavior":"allow","destination":"session"}]`
+	if string(verdict.UpdatedPermissions) != want {
+		t.Errorf("UpdatedPermissions:\n got: %s\nwant: %s", verdict.UpdatedPermissions, want)
+	}
+	for i, update := range offer.Updates() {
+		if update.Destination != "" {
+			t.Errorf("source offer update %d destination = %q, want empty", i, update.Destination)
+		}
+	}
+}
+
+func TestAllowAlways_UnavailableOfferPreservesPlainAllow(t *testing.T) {
+	t.Parallel()
+
+	input := json.RawMessage(`{"command":"true"}`)
+	plain, err := json.Marshal(Allow(input))
+	if err != nil {
+		t.Fatalf("marshal plain allow: %v", err)
+	}
+	got, err := json.Marshal(AllowAlways(input, AlwaysAllow{}))
+	if err != nil {
+		t.Fatalf("marshal unavailable always allow: %v", err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Errorf("unavailable offer changed plain allow:\n got: %s\nwant: %s", got, plain)
 	}
 }
 

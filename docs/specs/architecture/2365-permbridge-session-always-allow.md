@@ -119,3 +119,7 @@ None. The preceding slice fixes offer validation and retention; this ticket fixe
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-11
+
+## Revisions
+
+- During implementation, the relay seam became `ModalResolver.ResolveAnswerWithAlwaysAllow` while the concrete resolver retained `ResolveAnswer` as the false/absent compatibility wrapper. This keeps existing direct resolver callers on the exact legacy path and makes the only new caller — `V2SessionManager.handleModalAnswer` — explicit about carrying the additive Boolean. Grant semantics, trust boundaries, and the data flow are unchanged.

@@ -95,7 +95,8 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 		approvalTimeout string
 		// answer, when non-empty, is the OptionID the phone answers with; empty means
 		// send NO answer (the timeout case).
-		answer string
+		answer      string
+		alwaysAllow bool
 		// answerDelay holds the answer back this long past modal_shown. Non-zero only
 		// in the extended case, where it must span MORE THAN ONE window so the answer
 		// lands on an approval the daemon's own timer would already have denied
@@ -110,6 +111,7 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 		suppressAlwaysAllow bool
 		question            bool
 		childExit           bool
+		wantSessionUpdates  bool
 		// wantNeedle is the assistant_delta text the daemon's verdict must reflect;
 		// forbidNeedles must never appear (fail-open / masked-error guards).
 		wantNeedle    string
@@ -151,9 +153,34 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			wantSource:       "remote",
 		},
 		{
+			name:               "stdio_always_allow",
+			approvalTimeout:    "30s",
+			answer:             allowOnce,
+			alwaysAllow:        true,
+			stdio:              true,
+			offerAlwaysAllow:   true,
+			wantSessionUpdates: true,
+			wantNeedle:         "approve-allow",
+			forbidNeedles:      []string{"approve-deny", "approve-error"},
+			wantOutcome:        allowOnce,
+			wantSource:         "remote",
+		},
+		{
+			name:            "stdio_unoffered_always_allow",
+			approvalTimeout: "30s",
+			answer:          allowOnce,
+			alwaysAllow:     true,
+			stdio:           true,
+			wantNeedle:      "approve-allow",
+			forbidNeedles:   []string{"approve-deny", "approve-error"},
+			wantOutcome:     allowOnce,
+			wantSource:      "remote",
+		},
+		{
 			name:                "stdio_deny",
 			approvalTimeout:     "30s",
 			answer:              rejectOnce,
+			alwaysAllow:         true,
 			stdio:               true,
 			suppressAlwaysAllow: true,
 			wantNeedle:          "approve-deny",
@@ -638,6 +665,7 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 							ModalID:     shown.ModalID,
 							OptionID:    tc.answer,
 							AnswerToken: "e2e-1139-answer-token",
+							AlwaysAllow: tc.alwaysAllow,
 						}),
 					})
 				}
@@ -784,6 +812,19 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 				}
 				if tc.question && !bytes.Contains(data, []byte(`"answers":{"Pick?":"B"}`)) {
 					t.Errorf("question control response did not carry the selected answer in updatedInput; stdin=%s", data)
+				}
+				wantUpdates := []byte(`"updatedPermissions":[{"type":"addRules","rules":[{"toolName":"Bash"}],"behavior":"allow","destination":"session"},{"type":"addRules","rules":[{"toolName":"Read","ruleContent":"//src/**"}],"behavior":"allow","destination":"session"}]`)
+				if tc.wantSessionUpdates {
+					if !bytes.Contains(data, wantUpdates) {
+						t.Errorf("always-allow response did not preserve offered rules with session destinations; stdin=%s", data)
+					}
+					for _, persistent := range [][]byte{[]byte(`"destination":"userSettings"`), []byte(`"destination":"projectSettings"`), []byte(`"destination":"localSettings"`), []byte(`"destination":"cliArg"`)} {
+						if bytes.Contains(data, persistent) {
+							t.Errorf("always-allow response carried persistent destination %s; stdin=%s", persistent, data)
+						}
+					}
+				} else if bytes.Contains(data, []byte(`"updatedPermissions"`)) {
+					t.Errorf("plain/deny/unoffered response unexpectedly carried updatedPermissions; stdin=%s", data)
 				}
 			}
 		})

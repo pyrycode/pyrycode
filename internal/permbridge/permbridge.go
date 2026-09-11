@@ -60,9 +60,10 @@ type PermissionRule struct {
 // admits only addRules/allow updates, but the discriminants remain explicit for
 // the grant path that will serialize the retained updates back to claude.
 type PermissionUpdate struct {
-	Type     string           `json:"type"`
-	Rules    []PermissionRule `json:"rules"`
-	Behavior string           `json:"behavior"`
+	Type        string           `json:"type"`
+	Rules       []PermissionRule `json:"rules"`
+	Behavior    string           `json:"behavior"`
+	Destination string           `json:"destination,omitempty"`
 }
 
 // AlwaysAllow is an immutable, validated always-allow offer. Its slices are
@@ -196,18 +197,44 @@ type Request struct {
 }
 
 // Verdict is the allow/deny decision claude accepts. The omitempty tags give the
-// two disjoint wire shapes: allow → {"behavior":"allow","updatedInput":{…}};
-// deny → {"behavior":"deny","message":"…"}. Construct via Allow / Deny.
+// two disjoint wire shapes: allow → {"behavior":"allow","updatedInput":{…}}
+// with optional session-scoped updatedPermissions; deny →
+// {"behavior":"deny","message":"…"}. Construct via Allow, AllowAlways, or Deny.
 type Verdict struct {
-	Behavior     string          `json:"behavior"`
-	UpdatedInput json.RawMessage `json:"updatedInput,omitempty"` // allow only
-	Message      string          `json:"message,omitempty"`      // deny only
+	Behavior           string          `json:"behavior"`
+	UpdatedInput       json.RawMessage `json:"updatedInput,omitempty"`       // allow only
+	UpdatedPermissions json.RawMessage `json:"updatedPermissions,omitempty"` // session allow only
+	Message            string          `json:"message,omitempty"`            // deny only
 }
 
 // Allow builds an allow verdict echoing updatedInput (the request's Input,
 // possibly modified by the resolver — a #1080 policy decision).
 func Allow(updatedInput json.RawMessage) Verdict {
 	return Verdict{Behavior: BehaviorAllow, UpdatedInput: updatedInput}
+}
+
+// AllowAlways builds an allow verdict from a daemon-retained validated offer.
+// Every destination is rewritten to session; an unavailable offer preserves the
+// plain allow shape. The typed updates contain only strings, so marshal failure
+// is unreachable with the current value, but falling back grants no rule if that
+// contract changes.
+func AllowAlways(updatedInput json.RawMessage, offer AlwaysAllow) Verdict {
+	updates := offer.Updates()
+	if len(updates) == 0 {
+		return Allow(updatedInput)
+	}
+	for i := range updates {
+		updates[i].Destination = "session"
+	}
+	raw, err := json.Marshal(updates)
+	if err != nil {
+		return Allow(updatedInput)
+	}
+	return Verdict{
+		Behavior:           BehaviorAllow,
+		UpdatedInput:       updatedInput,
+		UpdatedPermissions: raw,
+	}
 }
 
 // Deny builds a deny verdict carrying a human-readable reason.

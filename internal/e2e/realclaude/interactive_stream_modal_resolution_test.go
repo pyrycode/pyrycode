@@ -58,6 +58,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,6 +92,57 @@ func TestInteractiveStreamModalResolution(t *testing.T) {
 func TestInteractiveStreamStdioModalAllow(t *testing.T) {
 	h, convID := startStdioModalResolutionHarness(t, permissionDaemonModel)
 	driveInteractiveStreamModalResolution(t, h, convID)
+}
+
+func TestInteractiveStreamStdioAlwaysAllowIsSessionScoped(t *testing.T) {
+	const (
+		witness = "pyrycode-always-allow-witness.txt"
+		command = "printf 'session-grant\\n' >> " + witness
+		prompt  = "Use the Bash tool to run exactly `" + command + "`. Do not use another tool. After it completes, reply with one short word."
+	)
+
+	h, convID := startStdioModalResolutionHarness(t, permissionDaemonModel)
+	shown := raiseRealPermissionModalPayload(t, h, 2, convID, prompt)
+	if !shown.AlwaysAllow.Offered || len(shown.AlwaysAllow.Rules) == 0 {
+		t.Fatalf("first permission modal did not offer always-allow rules: %+v", shown.AlwaysAllow)
+	}
+	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
+		ID:   3,
+		Type: protocol.TypeModalAnswer,
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, protocol.ModalAnswerPayload{
+			ModalID:     shown.ModalID,
+			OptionID:    string(turnevent.PermissionOptionKindAllowOnce),
+			AnswerToken: "e2e-2365-session-grant",
+			AlwaysAllow: true,
+		}),
+	})
+	drainForCompletedTurn(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
+	requireSessionGrantExecutions(t, filepath.Join(h.workdir, witness), 1)
+
+	sealSendMessage(t, h.phone, h.initSend, 4, convID, "m-4", prompt)
+	drainForCompletedTurnWithoutModal(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
+	requireSessionGrantExecutions(t, filepath.Join(h.workdir, witness), 2)
+
+	fresh, freshConvID := startStdioModalResolutionHarness(t, permissionDaemonModel)
+	freshShown := raiseRealPermissionModalPayload(t, fresh, 2, freshConvID, prompt)
+	if freshShown.ModalID == "" {
+		t.Fatal("fresh session permission modal carried an empty modal_id")
+	}
+	if _, err := os.Stat(filepath.Join(fresh.workdir, witness)); !os.IsNotExist(err) {
+		t.Fatalf("fresh-session command executed before its new permission modal (stat error: %v)", err)
+	}
+}
+
+func requireSessionGrantExecutions(t *testing.T, path string, want int) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read session-grant witness: %v", err)
+	}
+	if got := strings.Count(string(raw), "session-grant\n"); got != want {
+		t.Fatalf("session-grant command executions = %d, want %d; witness=%q", got, want, raw)
+	}
 }
 
 func driveInteractiveStreamModalResolution(t *testing.T, h *perConvHarness, convID string) {

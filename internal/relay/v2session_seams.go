@@ -225,11 +225,10 @@ type ModalResolver interface {
 	// no keystroke, no audit, no dismissal.
 	ResolveCancel(modalID string, dev *devices.Device) (ModalDismissal, bool)
 
-	// ResolveAnswer resolves an inbound modal_answer. In this slice it is a
-	// deferred no-op — always (zero, false): no keystroke, no mutation, no
-	// audit. #717 fills the gated answer arm; the manager code is already
-	// general (broadcasts on ok=true) so #717 changes only the impl.
-	ResolveAnswer(modalID, optionID, answerToken string, dev *devices.Device) (ModalDismissal, bool)
+	// ResolveAnswerWithAlwaysAllow resolves an inbound modal_answer. The Boolean
+	// is only a request to use daemon-retained rules; implementations must still
+	// authorize the device, classify an allow option, and consume the modal once.
+	ResolveAnswerWithAlwaysAllow(modalID, optionID, answerToken string, alwaysAllow bool, dev *devices.Device) (ModalDismissal, bool)
 
 	// ResolveTimeout safe-denies an unanswered modal whose deny-on-timeout
 	// window elapsed (#725): it consumes modalID (registry Resolve), routes the
