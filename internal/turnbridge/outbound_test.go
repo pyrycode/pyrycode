@@ -290,8 +290,8 @@ func TestMapEventOutbound(t *testing.T) {
 				RefusalCategory:    "cyber",
 				RefusalExplanation: "The request was refused.",
 				Banner:             "Claude refused this request.",
-				TruncatedFields:    []string{"refusal_explanation", "banner"},
-				DroppedFields:      []string{"original_model", "refusal_category"},
+				TruncatedFields:    []string{"refusal_explanation", "future_field", "banner"},
+				DroppedFields:      []string{"original_model", "future_field", "refusal_category"},
 			},
 			tc:      tc,
 			wantTyp: protocol.TypeModelRefusalNoFallback,
@@ -3577,8 +3577,8 @@ func TestMapEvent_ModelRefusalNoFallbackCarriesNothingElseAndDoesNotMutate(t *te
 		RefusalCategory:    "category-sentinel",
 		RefusalExplanation: "excluded-explanation-sentinel",
 		Banner:             "banner-sentinel",
-		TruncatedFields:    []string{"refusal_explanation", "banner"},
-		DroppedFields:      []string{"original_model", "refusal_category"},
+		TruncatedFields:    []string{"refusal_explanation", "future_field", "banner"},
+		DroppedFields:      []string{"original_model", "future_field", "refusal_category"},
 	}
 	before := turnevent.ModelRefusalNoFallback{
 		OriginalModel:      ev.OriginalModel,

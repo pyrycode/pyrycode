@@ -2779,6 +2779,30 @@ func TestInteractiveTurnEmitterV2_ModelRefusalNoFallbackFansOutToInteractiveOnly
 	}
 }
 
+func TestInteractiveTurnEmitterV2_ModelRefusalNoFallbackDoesNotOpenTurn(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{
+		{ConnID: "interactive", Interactive: true},
+	}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.ModelRefusalNoFallback{
+		OriginalModel:   "original-sentinel",
+		RefusalCategory: "category-sentinel",
+		Banner:          "banner-sentinel",
+	})
+
+	if e.inTurn || e.turnID != "" || e.currentState != "" {
+		t.Errorf("refusal no-fallback opened a turn: inTurn=%v turnID=%q state=%q",
+			e.inTurn, e.turnID, e.currentState)
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, []string{protocol.TypeModelRefusalNoFallback}) {
+		t.Fatalf("frames without an open turn: got %v, want only model_refusal_no_fallback", got)
+	}
+}
+
 func TestInteractiveTurnEmitterV2_ModelRefusalNoFallbackEventKindIsContentFree(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
