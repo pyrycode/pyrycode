@@ -1669,23 +1669,45 @@ type ModelList struct {
 // It is informational only: consumers may display it, but it does not replace the
 // daemon-owned contextwindow.Read value used for control decisions.
 //
-// Every Claude-authored string and the category count are bounded by streamsup at
-// construction. Categories are ordered by descending token count so a producer-side
-// count cut preserves the heaviest entries. The scalar integers remain Claude's own
-// values; the daemon neither recomputes nor normalizes them.
+// Every Claude-authored string and list count are bounded by streamsup at
+// construction. Each list is independently ordered by descending token count so
+// a producer-side count cut preserves its heaviest entries. The scalar integers
+// remain Claude's own values; the daemon neither recomputes nor normalizes them.
 type ContextUsage struct {
-	Model             string
-	TotalTokens       int
-	MaxTokens         int
-	Percentage        int
-	Categories        []ContextUsageCategory
-	DroppedCategories int
+	Model              string
+	TotalTokens        int
+	MaxTokens          int
+	Percentage         int
+	Categories         []ContextUsageCategory
+	DroppedCategories  int
+	MCPTools           []ContextUsageMCPTool
+	DroppedMCPTools    int
+	MemoryFiles        []ContextUsageMemoryFile
+	DroppedMemoryFiles int
 }
 
 // ContextUsageCategory is one named contribution to a ContextUsage reading. Name
 // is bounded by the producer before this value enters the event stream.
 type ContextUsageCategory struct {
 	Name   string
+	Tokens int
+}
+
+// ContextUsageMCPTool is one MCP tool's contribution to a ContextUsage reading.
+// Name and ServerName are bounded by the producer before this value enters the
+// event stream.
+type ContextUsageMCPTool struct {
+	Name       string
+	ServerName string
+	Tokens     int
+}
+
+// ContextUsageMemoryFile is one memory file's contribution to a ContextUsage
+// reading. Path and Type are bounded by the producer before this value enters the
+// event stream; Path is descriptive and is not opened by this event path.
+type ContextUsageMemoryFile struct {
+	Path   string
+	Type   string
 	Tokens int
 }
 
