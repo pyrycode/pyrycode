@@ -455,7 +455,8 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, approva
 		// the chain's own doc states is what the retentions get from, and only from,
 		// sitting here.
 		follow := newSessionResetFollower(tag, cfg.AdoptAnnouncedReset, sink.sinkForTag(tag.ID), cfg.Logger)
-		parser, held := newSessionParser(follow.Sink, cfg.Logger)
+		contextUsage := newTurnEndContextUsageRequester(follow.Sink, cfg.Logger)
+		parser, held := newSessionParser(contextUsage.Sink, cfg.Logger)
 		scfg.Stdout = parser
 		onChildExit := sink.exitForTag(tag.ID)
 		var r *streamsup.Runner
@@ -494,6 +495,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, approva
 		// is reached directly: sessions.Runner carries a method only when its consumer
 		// sits inside internal/sessions, and this consumer sits here.
 		follow.adoptRunner = r.AdoptSessionID
+		contextUsage.request = r.RequestContextUsage
 		return streamRunner{r: r, sessionRetentions: held}, nil
 	}
 }
