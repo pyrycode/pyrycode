@@ -44,7 +44,7 @@ const mcpStatusCaptureVersion = "2.1.259"
 // union of the keys claude actually sent on the per-server objects of an
 // `mcp_status` reply.
 //
-// It exists because the only shapes on record for that reply are DECLARATIONS.
+// It distinguishes the observed reply from the earlier DECLARATIONS.
 // `sdk.d.ts` promises `{name, status, serverInfo?, error?, config?, scope?}`; the
 // claude 2.1.259 binary's own bundled request schema declares two more, `tools` and
 // `capabilities`. Neither is a wire measurement, and a decode arm in #2275 written
@@ -52,13 +52,10 @@ const mcpStatusCaptureVersion = "2.1.259"
 // construction — it names every key SOME server carried, not every key EVERY server
 // carried — and the record's per-server key sets are the per-entry truth behind it.
 //
-// IT IS EMPTY ON PURPOSE UNTIL THE LIVE GATE HAS RUN, and that is what sequences
-// this family. The fixture cannot exist before `make e2e-realclaude` produces it,
-// which happens after verification, so a reader asserting against bytes any earlier
-// would redden `make check` for every unrelated ticket. mcpStatusReaderGate turns
-// that into a state machine with exactly one legal skip: filling this slice is the
-// commit that lands the fixture, and a fixture landing WITHOUT it fatals rather than
-// passing quietly.
+// Captured from Claude 2.1.259 on 2026-09-11 after both healthy servers connected.
+// The earlier pending reply lacks serverInfo and tools. The reader selects the
+// final status request, matching the probe's server-shape extraction.
+// mcpStatusReaderGate permits a skip only before both fixture and pin exist.
 //
 // THE FILLING IS A SOURCE EDIT, NOT A `git add`. The dispatcher's real-claude gate
 // verifies from a detached worktree it then discards and never runs `git add`, so
@@ -66,7 +63,7 @@ const mcpStatusCaptureVersion = "2.1.259"
 // would be — that is what happened to #2229, whose bytes reached the tree only later
 // out of the run's surviving artifact directory. Whoever lands those bytes fills this
 // slice from the record's own `servers[].keys` in the same commit.
-var mcpStatusPinnedServerKeys = []string{}
+var mcpStatusPinnedServerKeys = []string{"config", "error", "name", "scope", "serverInfo", "status", "tools"}
 
 // The four states of (fixture, pin). Only the first is a skip, and only on the leg
 // before the live gate has ever run.
@@ -231,14 +228,14 @@ func TestRealClaudeMCPStatusCaptureServerKeysArePinned(t *testing.T) {
 			mcpStatusCaptureVersion)
 	}
 
-	// The request id the `mcp_status` verb went out under. The reply is found through
+	// The final request id the `mcp_status` verb went out under. The reply is found through
 	// it rather than by scanning for a line that happens to carry an `mcpServers` key:
 	// three verbs were sent on one child and any of them may answer with a server list.
+	// Earlier readiness polls can still report pending servers with fewer keys.
 	var statusID string
 	for _, r := range capture.Requests {
 		if r.Subtype == "mcp_status" {
 			statusID = r.RequestID
-			break
 		}
 	}
 	if statusID == "" {
