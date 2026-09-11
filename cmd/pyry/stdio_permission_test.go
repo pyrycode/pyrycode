@@ -2,14 +2,18 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"slices"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/modalbridge"
 	"github.com/pyrycode/pyrycode/internal/permbridge"
+	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
+	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
 type lockedBuffer struct {
@@ -126,15 +130,16 @@ func TestStdioPermissionHandler_CarriesAskContextFromCorrespondingFields(t *test
 	var out lockedBuffer
 	reason := json.RawMessage(`{"source":"ask-field"}`)
 	h.handle(streamsup.CanUseToolRequest{
-		RequestID:          "request-context",
-		ToolUseID:          "tool-context",
-		ToolName:           "Bash",
-		Input:              json.RawMessage(`{"reason":"input-lookalike","reason_type":"input-type","blocked_path":"input-path","description":"input-description","default_to_no":false}`),
-		DecisionReason:     reason,
-		DecisionReasonType: "future_reason_kind",
-		BlockedPath:        "/ask/path",
-		Description:        "ask description",
-		DefaultToNo:        true,
+		RequestID:               "request-context",
+		ToolUseID:               "tool-context",
+		ToolName:                "Bash",
+		Input:                   json.RawMessage(`{"reason":"input-lookalike","reason_type":"input-type","blocked_path":"input-path","description":"input-description","default_to_no":false,"requires_user_interaction":false}`),
+		DecisionReason:          reason,
+		DecisionReasonType:      "future_reason_kind",
+		BlockedPath:             "/ask/path",
+		Description:             "ask description",
+		DefaultToNo:             true,
+		RequiresUserInteraction: true,
 	}, &out)
 
 	var got permbridge.Request
@@ -144,7 +149,8 @@ func TestStdioPermissionHandler_CarriesAskContextFromCorrespondingFields(t *test
 		t.Fatal("permission request was not surfaced")
 	}
 	if !bytes.Equal(got.DecisionReason, reason) || got.DecisionReasonType != "future_reason_kind" ||
-		got.BlockedPath != "/ask/path" || got.Description != "ask description" || !got.DefaultToNo {
+		got.BlockedPath != "/ask/path" || got.Description != "ask description" || !got.DefaultToNo ||
+		!got.RequiresUserInteraction {
 		t.Errorf("surfaced context = %+v, want corresponding ask fields", got)
 	}
 	select {
@@ -271,9 +277,10 @@ func TestStdioPermissionHandler_AskUserQuestionUsesExistingSurface(t *testing.T)
 	h := newStdioPermissionHandler(f.perm, time.Minute, surface)
 	var out lockedBuffer
 	h.handle(streamsup.CanUseToolRequest{
-		RequestID: "request-question",
-		ToolUseID: "tool-use-question",
-		ToolName:  "AskUserQuestion",
+		RequestID:               "request-question",
+		ToolUseID:               "tool-use-question",
+		ToolName:                "AskUserQuestion",
+		RequiresUserInteraction: true,
 		Input: questionInput(t, multiQuestionText, "Write strategy", "rewrite",
 			"replace the file wholesale"),
 	}, &out)
@@ -331,5 +338,108 @@ func TestStdioPermissionHandler_UnansweredDenies(t *testing.T) {
 	requestID, behavior, _ := decodeStdioPermissionResponse(t, out.BytesCopy())
 	if requestID != "request-timeout" || behavior != permbridge.BehaviorDeny {
 		t.Errorf("response = request_id %q behavior %q, want request-timeout deny", requestID, behavior)
+	}
+}
+
+func TestStdioPermissionHandler_InteractionRequiredRefusesRemoteAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		optionID string
+	}{
+		{"allow", string(turnevent.PermissionOptionKindAllowOnce)},
+		{"deny", string(turnevent.PermissionOptionKindRejectOnce)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := permbridge.New()
+			modal := modalbridge.New()
+			bcast := oneInteractiveConn("c1")
+			bridge := newStreamApprovalBridge(reg, modal, bcast, func() string { return testConvID }, context.Background(), discardLogger())
+			reg.SetAnswerable(bridge.ApprovalAnswerable)
+
+			surfaced := make(chan struct{})
+			retired := make(chan struct{})
+			surface := &approvalSurfaceReport{}
+			surface.set(func(req permbridge.Request) func() {
+				retire := bridge.Surface(req)
+				close(surfaced)
+				return func() {
+					retire()
+					close(retired)
+				}
+			})
+			h := newStdioPermissionHandler(reg, 250*time.Millisecond, surface)
+			var out lockedBuffer
+			h.handle(streamsup.CanUseToolRequest{
+				RequestID:               "request-interaction",
+				ToolUseID:               "tool-interaction",
+				ToolName:                "Bash",
+				Input:                   json.RawMessage(`{"command":"true"}`),
+				RequiresUserInteraction: true,
+			}, &out)
+
+			select {
+			case <-surfaced:
+			case <-time.After(time.Second):
+				t.Fatal("interaction-required permission was not surfaced")
+			}
+			shown := lastModalShown(t, bcast.pushes)
+			resolver := newModalResolverV2(modal, &fakeKeystroker{}, discardLogger())
+			resolver.streamApprovals = bridge
+
+			if dismissal, ok := resolver.ResolveAnswer(shown.ModalID, tc.optionID, "answer-token", eligibleDevice(t)); ok {
+				t.Errorf("ResolveAnswer(%s) accepted interaction-required permission: %+v", tc.name, dismissal)
+			}
+			if got := out.BytesCopy(); len(got) != 0 {
+				t.Errorf("pre-deadline control response = %q, want none", got)
+			}
+			if _, ok := reg.Lookup("tool-interaction"); !ok {
+				t.Error("remote answer consumed the parked approval")
+			}
+			if _, ok := modal.Lookup(shown.ModalID); !ok {
+				t.Error("remote answer consumed the permission modal")
+			}
+			if n := bridgeLen(bridge); n != 1 {
+				t.Errorf("permission correlations = %d, want 1 before timeout", n)
+			}
+			parkedReq, _ := reg.Lookup("tool-interaction")
+			if bridge.ApprovalAnswerable("tool-interaction", parkedReq) {
+				t.Error("interaction-required permission reported answerable with an interactive client connected")
+			}
+
+			select {
+			case <-retired:
+			case <-time.After(2 * time.Second):
+				t.Fatal("interaction-required permission did not retire after its deadline")
+			}
+			raw := out.BytesCopy()
+			if got := bytes.Count(raw, []byte(`"type":"control_response"`)); got != 1 {
+				t.Fatalf("control_response count = %d, want 1 in %q", got, raw)
+			}
+			requestID, behavior, _ := decodeStdioPermissionResponse(t, raw)
+			if requestID != "request-interaction" || behavior != permbridge.BehaviorDeny {
+				t.Errorf("timeout response = request_id %q behavior %q, want request-interaction deny", requestID, behavior)
+			}
+			if bytes.Contains(raw, []byte(`"behavior":"allow"`)) {
+				t.Errorf("timeout response contains allow: %q", raw)
+			}
+			if _, ok := reg.Lookup("tool-interaction"); ok {
+				t.Error("approval remains parked after timeout")
+			}
+			if _, ok := modal.Lookup(shown.ModalID); ok {
+				t.Error("modal remains outstanding after timeout retirement")
+			}
+			if n := bridgeLen(bridge); n != 0 {
+				t.Errorf("permission correlations = %d after timeout, want 0", n)
+			}
+			var dismissed int
+			for _, typ := range pushTypes(bcast.pushes) {
+				if typ == protocol.TypeModalDismissed {
+					dismissed++
+				}
+			}
+			if dismissed != 1 {
+				t.Errorf("modal_dismissed count = %d, want 1; pushes = %v", dismissed, pushTypes(bcast.pushes))
+			}
+		})
 	}
 }

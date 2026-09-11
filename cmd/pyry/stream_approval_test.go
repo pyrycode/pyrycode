@@ -29,6 +29,12 @@ func bridgeLen(b *streamApprovalBridge) int {
 	return len(b.byModal)
 }
 
+func bridgeAnswerable(t *testing.T, b *streamApprovalBridge, perm *permbridge.Registry, id string) bool {
+	t.Helper()
+	req, _ := perm.Lookup(id)
+	return b.ApprovalAnswerable(id, req)
+}
+
 // lastModalShown decodes the most recent modal_shown envelope from a push log.
 func lastModalShown(t *testing.T, pushes []recordedPush) protocol.ModalShownPayload {
 	t.Helper()
@@ -44,6 +50,18 @@ func lastModalShown(t *testing.T, pushes []recordedPush) protocol.ModalShownPayl
 	}
 	t.Fatal("no modal_shown push found")
 	return protocol.ModalShownPayload{}
+}
+
+type blockingModalResolve struct {
+	*modalbridge.Registry
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingModalResolve) Resolve(id string) (modalbridge.Outstanding, bool) {
+	close(r.entered)
+	<-r.release
+	return r.Registry.Resolve(id)
 }
 
 // parkApproval registers a parked approval in perm and returns the request and
@@ -330,6 +348,43 @@ func TestStreamApprovalBridge_Retire_AfterConsumeNoSecondDismissal(t *testing.T)
 	}
 	if recs := auditRecords(t, logBuf); len(recs) != 0 {
 		t.Errorf("audit records = %d, want 0 on the answer path", len(recs))
+	}
+}
+
+func TestStreamApprovalBridge_InteractionRequiredRefusalSurvivesConcurrentRetire(t *testing.T) {
+	perm := permbridge.New()
+	modalReg := modalbridge.New()
+	bcast := oneInteractiveConn("c1")
+	bridge := newStreamApprovalBridge(perm, modalReg, bcast, func() string { return "" }, context.Background(), discardLogger())
+
+	req, _ := parkApproval(t, perm, "tu-interaction-race", "Bash", json.RawMessage(`{"cmd":"true"}`))
+	req.RequiresUserInteraction = true
+	retire := bridge.Surface(req)
+	modalID := lastModalShown(t, bcast.pushes).ModalID
+	blocked := &blockingModalResolve{Registry: modalReg, entered: make(chan struct{}), release: make(chan struct{})}
+	bridge.modal = blocked
+
+	retired := make(chan struct{})
+	go func() {
+		retire()
+		close(retired)
+	}()
+	<-blocked.entered
+
+	resolver := newModalResolverV2(modalReg, &fakeKeystroker{}, discardLogger())
+	resolver.streamApprovals = bridge
+	if dismissal, ok := resolver.ResolveAnswer(modalID, string(turnevent.PermissionOptionKindAllowOnce), "token", eligibleDevice(t)); ok {
+		t.Errorf("concurrent answer accepted during timeout retirement: %+v", dismissal)
+	}
+
+	close(blocked.release)
+	select {
+	case <-retired:
+	case <-time.After(time.Second):
+		t.Fatal("retire did not complete")
+	}
+	if got := pushTypes(bcast.pushes); len(got) != 2 || got[1] != protocol.TypeModalDismissed {
+		t.Errorf("pushes = %v, want modal_shown then timeout modal_dismissed", got)
 	}
 }
 
@@ -912,17 +967,58 @@ func TestStreamApprovalBridge_ApprovalAnswerable_NegativeOnlyWhenNobodyIsConnect
 	f := newApprovalReport(t, "", discardLogger())
 	f.park(t, "tu-a1")
 
-	if !f.bridge.ApprovalAnswerable("tu-a1") {
+	if !bridgeAnswerable(t, f.bridge, f.perm, "tu-a1") {
 		t.Error("ApprovalAnswerable = false with the approval parked and an interactive client connected")
 	}
 
 	f.conns() // everybody disconnected; nothing retired
 
-	if f.bridge.ApprovalAnswerable("tu-a1") {
+	if bridgeAnswerable(t, f.bridge, f.perm, "tu-a1") {
 		t.Error("ApprovalAnswerable = true for a still-parked approval with nobody connected")
 	}
 	if n := bridgeLen(f.bridge); n == 0 {
 		t.Error("byModal is empty; the negative above came from the correlation side, not the connectivity side")
+	}
+}
+
+func TestStreamApprovalBridge_ApprovalAnswerable_UsesCurrentReusedIDEligibility(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		firstRequired  bool
+		secondRequired bool
+		want           bool
+	}{
+		{"ordinary then interaction-required", false, true, false},
+		{"interaction-required then ordinary", true, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newApprovalReport(t, "", discardLogger())
+			first := permbridge.Request{ToolName: "Bash", ToolUseID: "reused", RequiresUserInteraction: tc.firstRequired}
+			firstPending, err := f.perm.Register(first.ToolUseID, first, time.Minute)
+			if err != nil {
+				t.Fatalf("register first: %v", err)
+			}
+			firstRetire := f.bridge.Surface(first)
+			if !f.perm.Resolve(first.ToolUseID, permbridge.Deny("first done")) {
+				t.Fatal("resolve first = false")
+			}
+			if got := firstPending.Await(); got.Behavior != permbridge.BehaviorDeny {
+				t.Fatalf("first verdict = %+v", got)
+			}
+
+			second := permbridge.Request{ToolName: "Bash", ToolUseID: "reused", RequiresUserInteraction: tc.secondRequired}
+			if _, err := f.perm.Register(second.ToolUseID, second, time.Minute); err != nil {
+				t.Fatalf("register second: %v", err)
+			}
+			secondRetire := f.bridge.Surface(second)
+
+			if got := f.bridge.ApprovalAnswerable(second.ToolUseID, second); got != tc.want {
+				t.Errorf("ApprovalAnswerable current generation = %v, want %v", got, tc.want)
+			}
+			f.perm.Resolve(second.ToolUseID, permbridge.Deny("cleanup"))
+			secondRetire()
+			firstRetire()
+		})
 	}
 }
 
@@ -953,7 +1049,7 @@ func TestStreamApprovalBridge_ApprovalAnswerable_NonInteractiveClientCannotAnswe
 	}
 	for _, tc := range tests {
 		f.conns(tc.snapshot...)
-		if got := f.bridge.ApprovalAnswerable("tu-a1"); got != tc.want {
+		if got := bridgeAnswerable(t, f.bridge, f.perm, "tu-a1"); got != tc.want {
 			t.Errorf("%s: ApprovalAnswerable = %v, want %v", tc.name, got, tc.want)
 		}
 	}
@@ -1010,7 +1106,7 @@ func TestStreamApprovalBridge_ApprovalAnswerable_NegativesCollapse(t *testing.T)
 		{"the empty approval id", "", false},
 	}
 	for _, tc := range tests {
-		if got := f.bridge.ApprovalAnswerable(tc.id); got != tc.want {
+		if got := bridgeAnswerable(t, f.bridge, f.perm, tc.id); got != tc.want {
 			t.Errorf("%s: ApprovalAnswerable(%q) = %v, want %v", tc.name, tc.id, got, tc.want)
 		}
 	}
@@ -1033,14 +1129,14 @@ func TestStreamApprovalBridge_ApprovalAnswerable_LogsNothing(t *testing.T) {
 	f.park(t, "tu-a1")
 
 	logBuf.Reset()
-	if !f.bridge.ApprovalAnswerable("tu-a1") {
+	if !bridgeAnswerable(t, f.bridge, f.perm, "tu-a1") {
 		t.Fatal("ApprovalAnswerable = false with the approval parked and a client connected; the assertion below would be vacuous")
 	}
-	if f.bridge.ApprovalAnswerable("tu-never-registered") {
+	if bridgeAnswerable(t, f.bridge, f.perm, "tu-never-registered") {
 		t.Fatal("ApprovalAnswerable = true for an id that was never parked")
 	}
 	f.conns()
-	if f.bridge.ApprovalAnswerable("tu-a1") {
+	if bridgeAnswerable(t, f.bridge, f.perm, "tu-a1") {
 		t.Fatal("ApprovalAnswerable = true with nobody connected")
 	}
 
@@ -1512,16 +1608,16 @@ func TestStreamApprovalBridge_ApprovalAnswerable_CoversAParkedQuestion(t *testin
 		questionInput(t, "how should it write?", "Write strategy", "rewrite", "replace the file wholesale"))
 	retire := f.bridge.Surface(req)
 
-	if !f.bridge.ApprovalAnswerable("tu-q1") {
+	if !bridgeAnswerable(t, f.bridge, f.perm, "tu-q1") {
 		t.Error("ApprovalAnswerable = false with a question parked and an interactive client connected")
 	}
-	if f.bridge.ApprovalAnswerable("tu-never-parked") {
+	if bridgeAnswerable(t, f.bridge, f.perm, "tu-never-parked") {
 		t.Error("ApprovalAnswerable = true for an id that was never parked")
 	}
 
 	retire()
 
-	if f.bridge.ApprovalAnswerable("tu-q1") {
+	if bridgeAnswerable(t, f.bridge, f.perm, "tu-q1") {
 		t.Error("ApprovalAnswerable = true after the batch retired; the correlation is gone")
 	}
 }
