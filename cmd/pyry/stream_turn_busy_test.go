@@ -629,6 +629,10 @@ func TestTurnMarkFor_TotalOverEveryVariant(t *testing.T) {
 		// whitelist's default already answers it, so this row asserts that answer
 		// rather than a new arm — turnMarkFor is unchanged by that ticket.
 		{turnevent.ModelList{Models: []turnevent.ModelOption{{ResolvedModel: "claude-sonnet-5", Value: "sonnet"}}}, turnMarkNone},
+		// #2357. A solicited context reading is informational and neither begins nor
+		// ends a turn. The whitelist's default already answers it, so this row asserts
+		// the existing lifecycle-neutral behavior rather than adding a production arm.
+		{turnevent.ContextUsage{Model: "claude-haiku-4-5", TotalTokens: 10}, turnMarkNone},
 		// #1854. Neither an opener nor a closer, for the row above's reason and one
 		// step more strongly: the inventory is reported once per initialize
 		// exchange, which is not a turn boundary and not even per-turn. The
