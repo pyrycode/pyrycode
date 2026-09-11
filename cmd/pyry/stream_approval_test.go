@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -71,6 +72,11 @@ func TestStreamApprovalBridge_Surface_BroadcastsPermissionModal(t *testing.T) {
 	bridge := newStreamApprovalBridge(perm, modal, bcast, func() string { return testConvID }, context.Background(), discardLogger())
 
 	req, _ := parkApproval(t, perm, "tu-1", "Bash", json.RawMessage(`{"cmd":"ls"}`))
+	req.DecisionReason = json.RawMessage(`{"rule":"outside_read_only"}`)
+	req.DecisionReasonType = "future_reason_kind"
+	req.BlockedPath = "/workspace/out"
+	req.Description = "Write output"
+	req.DefaultToNo = true
 	retire := bridge.Surface(req)
 	if retire == nil {
 		t.Fatal("Surface returned a nil retire closure")
@@ -104,12 +110,48 @@ func TestStreamApprovalBridge_Surface_BroadcastsPermissionModal(t *testing.T) {
 	if p.ConversationID != testConvID {
 		t.Errorf("conversation_id = %q, want %q", p.ConversationID, testConvID)
 	}
+	if string(p.Reason) != string(req.DecisionReason) || p.ReasonType != req.DecisionReasonType ||
+		p.BlockedPath != req.BlockedPath || p.Description != req.Description || p.DefaultToNo != req.DefaultToNo {
+		t.Errorf("initial modal context = %+v, want parked request context %+v", p, req)
+	}
+	snapshot := modal.Snapshot()
+	if len(snapshot) != 1 || !reflect.DeepEqual(snapshot[0], p) {
+		t.Errorf("reconnect snapshot = %+v, want initial payload %+v", snapshot, p)
+	}
 
 	if n := bridgeLen(bridge); n != 1 {
 		t.Errorf("byModal len = %d, want 1 (correlation stored)", n)
 	}
 	if _, ok := modal.Lookup(p.ModalID); !ok {
 		t.Errorf("Outstanding %q not recorded in modalbridge", p.ModalID)
+	}
+}
+
+func TestStreamApprovalBridge_Surface_EmptyContextIsNotDerivedFromInput(t *testing.T) {
+	t.Parallel()
+
+	perm := permbridge.New()
+	modal := modalbridge.New()
+	bcast := oneInteractiveConn("c1")
+	bridge := newStreamApprovalBridge(perm, modal, bcast, func() string { return testConvID }, context.Background(), discardLogger())
+	req, _ := parkApproval(t, perm, "tu-empty-context", "Bash", json.RawMessage(
+		`{"reason":{"from":"input"},"reason_type":"input-type","blocked_path":"input-path","description":"input-description","default_to_no":true}`,
+	))
+	retire := bridge.Surface(req)
+	defer func() {
+		perm.Resolve(req.ToolUseID, permbridge.Deny("test cleanup"))
+		retire()
+	}()
+
+	payload := lastModalShown(t, bcast.pushes)
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal modal_shown: %v", err)
+	}
+	for _, key := range []string{"reason", "reason_type", "blocked_path", "description", "default_to_no"} {
+		if bytes.Contains(raw, []byte(`"`+key+`"`)) {
+			t.Errorf("zero-context modal derived %q from tool input: %s", key, raw)
+		}
 	}
 }
 
@@ -481,6 +523,7 @@ func TestStreamApproval_NoBodyLeakInLogs(t *testing.T) {
 
 	const secretTool = "SECRET-TOOL-NAME-9999"
 	const secretInput = "SECRET-INPUT-BYTES-7777"
+	const secretContext = "SECRET-CONTEXT-BYTES-5555"
 
 	perm := permbridge.New()
 	modalReg := modalbridge.New()
@@ -491,6 +534,10 @@ func TestStreamApproval_NoBodyLeakInLogs(t *testing.T) {
 
 	input := json.RawMessage(`{"cmd":"` + secretInput + `"}`)
 	req, _ := parkApproval(t, perm, "tu-1", secretTool, input)
+	req.DecisionReason = json.RawMessage(`{"detail":"` + secretContext + `"}`)
+	req.DecisionReasonType = secretContext + "-type"
+	req.BlockedPath = "/" + secretContext
+	req.Description = secretContext + "-description"
 	retire := bridge.Surface(req)
 	modalID := lastModalShown(t, bcast.pushes).ModalID
 
@@ -508,6 +555,9 @@ func TestStreamApproval_NoBodyLeakInLogs(t *testing.T) {
 	}
 	if strings.Contains(s, secretInput) {
 		t.Error("tool input leaked into a log field")
+	}
+	if strings.Contains(s, secretContext) {
+		t.Error("permission context leaked into a log field")
 	}
 }
 

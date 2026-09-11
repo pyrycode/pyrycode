@@ -60,6 +60,17 @@ type Outstanding struct {
     ModalID, Class, Title, Prompt string
     Options                       []protocol.ModalOption
     DefaultOptionID               string
+    Reason                        json.RawMessage
+    ReasonType, BlockedPath       string
+    Description                   string
+    DefaultToNo                   bool
+}
+
+type PermissionContext struct {
+    Reason                        json.RawMessage
+    ReasonType, BlockedPath       string
+    Description                   string
+    DefaultToNo                   bool
 }
 
 type Registry struct { /* sync.Mutex + map[string]Outstanding */ }
@@ -76,6 +87,7 @@ func PermissionRequestForClass(class tuidriver.ModalClass, screenText string) (t
 // key (convID), records the Outstanding (with ConversationID) in the SAME critical
 // section, returns the stamped payload. The only error path is RNG failure.
 func (r *Registry) Record(req turnevent.PermissionRequest, wireClass, convID string) (protocol.ModalShownPayload, error)
+func (r *Registry) RecordWithContext(req turnevent.PermissionRequest, wireClass, convID string, context PermissionContext) (protocol.ModalShownPayload, error)
 
 func (r *Registry) Lookup(modalID string) (Outstanding, bool)  // #717's read seam
 func (r *Registry) Resolve(modalID string) (Outstanding, bool) // #727's consume-and-retire one-shot
@@ -86,6 +98,14 @@ func (r *Registry) Snapshot() []protocol.ModalShownPayload     // #876's current
 cancel win and every replay/unknown id a no-op), `Lookup` by #717's gated
 `modal_answer`. They belong with the type's contract even though #716 only calls
 `Record`.
+
+`RecordWithContext` (#2346) is the additive permission path. It stores the five
+Claude-authored display fields in the same operation that returns the stamped
+initial payload, so `Snapshot` can replay exactly the same context after a
+reconnect. `Record` delegates with zero context, preserving the older approval
+MCP payload shape. `Reason` is cloned on write and snapshot because
+`json.RawMessage` is a mutable byte slice; copying only the struct would let an
+initial-broadcast or reconnect caller mutate outstanding registry truth.
 
 ## Class → option mapping (the minimal fixed-option-set, design option (a))
 
@@ -339,8 +359,9 @@ func (r *Registry) Snapshot() []protocol.ModalShownPayload
   no-nested-locks discipline as `Lookup`/`Resolve`). Mints no id (`newModalID` untouched),
   retires nothing — a modal in a snapshot is still `Lookup`/`Resolve`-able afterward. A
   resolved modal never re-surfaces, since `Resolve` already removed it from `r.outstanding`.
-- **`Options` is cloned per payload** (`slices.Clone`, mirroring `Record`'s clone-on-write)
-  so a mutating consumer can't corrupt the stored `Outstanding` through an aliased slice —
+- **`Options` and the open-shape JSON `Reason` are cloned per payload**
+  (`slices.Clone`, mirroring `Record`'s clone-on-write) so a mutating consumer
+  can't corrupt the stored `Outstanding` through an aliased slice —
   the property that keeps "leaves registry state unchanged" true even under a careless
   caller.
 - **Map-walk order is unspecified.** #877's consumer reconciles by `modal_id`, never by
@@ -470,4 +491,3 @@ path is #791/#793 (EPIC #597 Phase 3).
   turn genuinely never delivered. Rides [#1013](../codebase/1013.md) and [#1014](../codebase/1014.md)
   wholesale; introduces no production behaviour beyond the test-only `fakeclaude` simulation. See
   [codebase/993.md](../codebase/993.md).
-

@@ -967,7 +967,13 @@ func (b *streamApprovalBridge) Surface(req permbridge.Request) (retire func()) {
 		return func() {}
 	}
 
-	payload, err := b.modal.Record(permReq, wireClass, b.activeConv())
+	payload, err := b.modal.RecordWithContext(permReq, wireClass, b.activeConv(), modalbridge.PermissionContext{
+		Reason:      req.DecisionReason,
+		ReasonType:  req.DecisionReasonType,
+		BlockedPath: req.BlockedPath,
+		Description: req.Description,
+		DefaultToNo: req.DefaultToNo,
+	})
 	if err != nil {
 		// crypto/rand failure — drop the modal (no modal_shown, no correlation);
 		// claude times out to deny. Never echo err detail; no payload/screen bytes.

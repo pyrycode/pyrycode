@@ -111,6 +111,49 @@ func TestStdioPermissionHandler_AllowAndDeny(t *testing.T) {
 	}
 }
 
+func TestStdioPermissionHandler_CarriesAskContextFromCorrespondingFields(t *testing.T) {
+	t.Parallel()
+	reg := permbridge.New()
+	surfaced := make(chan permbridge.Request, 1)
+	retired := make(chan struct{})
+	surface := &approvalSurfaceReport{}
+	surface.set(func(req permbridge.Request) func() {
+		surfaced <- req
+		reg.Resolve(req.ToolUseID, permbridge.Deny("done"))
+		return func() { close(retired) }
+	})
+	h := newStdioPermissionHandler(reg, time.Minute, surface)
+	var out lockedBuffer
+	reason := json.RawMessage(`{"source":"ask-field"}`)
+	h.handle(streamsup.CanUseToolRequest{
+		RequestID:          "request-context",
+		ToolUseID:          "tool-context",
+		ToolName:           "Bash",
+		Input:              json.RawMessage(`{"reason":"input-lookalike","reason_type":"input-type","blocked_path":"input-path","description":"input-description","default_to_no":false}`),
+		DecisionReason:     reason,
+		DecisionReasonType: "future_reason_kind",
+		BlockedPath:        "/ask/path",
+		Description:        "ask description",
+		DefaultToNo:        true,
+	}, &out)
+
+	var got permbridge.Request
+	select {
+	case got = <-surfaced:
+	case <-time.After(time.Second):
+		t.Fatal("permission request was not surfaced")
+	}
+	if !bytes.Equal(got.DecisionReason, reason) || got.DecisionReasonType != "future_reason_kind" ||
+		got.BlockedPath != "/ask/path" || got.Description != "ask description" || !got.DefaultToNo {
+		t.Errorf("surfaced context = %+v, want corresponding ask fields", got)
+	}
+	select {
+	case <-retired:
+	case <-time.After(time.Second):
+		t.Fatal("stdio permission waiter did not retire")
+	}
+}
+
 func TestStdioPermissionHandler_ChildExitRetiresWithoutReplacementWrite(t *testing.T) {
 	t.Parallel()
 

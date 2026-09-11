@@ -249,7 +249,9 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			stdinLog := filepath.Join(home, "stream-stdin.log")
 			var h *Harness
 			if tc.stdio {
-				rider := `{"tool_name":"Bash","input":{"command":"true"},"tool_use_id":"` + riderToolUseID + `"}`
+				rider := `{"tool_name":"Bash","input":{"command":"true","reason_type":"input-lookalike"},"tool_use_id":"` + riderToolUseID + `",` +
+					`"decision_reason":{"rule":"outside_read_only"},"decision_reason_type":"future_reason_kind",` +
+					`"blocked_path":"/workspace/out","description":"Write output","default_to_no":true}`
 				if tc.question {
 					rider = `{"tool_name":"AskUserQuestion","input":{"questions":[{"question":"Pick?","header":"Pick","options":[{"label":"A","description":"first"},{"label":"B","description":"second"}],"multiSelect":false}]},"tool_use_id":"` + riderToolUseID + `"}`
 				}
@@ -414,6 +416,12 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 				}
 				if shown.ConversationID != knownConvID {
 					t.Errorf("modal_shown ConversationID = %q, want %q", shown.ConversationID, knownConvID)
+				}
+				if tc.stdio {
+					if string(shown.Reason) != `{"rule":"outside_read_only"}` || shown.ReasonType != "future_reason_kind" ||
+						shown.BlockedPath != "/workspace/out" || shown.Description != "Write output" || !shown.DefaultToNo {
+						t.Errorf("stdio modal context = %+v, want rider fields", shown)
+					}
 				}
 				wantIDs := []string{
 					string(turnevent.PermissionOptionKindAllowOnce),

@@ -79,6 +79,11 @@ func writeFileTrigger(nonce int64) string {
 // surfaced (the drain deadlines) or a non-permission modal (this fails).
 func raiseRealPermissionModal(t *testing.T, h *perConvHarness, reqID uint64, convID string, triggerPrompt string) string {
 	t.Helper()
+	return raiseRealPermissionModalPayload(t, h, reqID, convID, triggerPrompt).ModalID
+}
+
+func raiseRealPermissionModalPayload(t *testing.T, h *perConvHarness, reqID uint64, convID string, triggerPrompt string) protocol.ModalShownPayload {
+	t.Helper()
 	sealSendMessage(t, h.phone, h.initSend, reqID, convID, fmt.Sprintf("m-%d", reqID), triggerPrompt)
 	env := drainForControlEvent(t, h.phone, h.initRecv, protocol.TypeModalShown, modalSurfaceBudget)
 	var shown protocol.ModalShownPayload
@@ -91,7 +96,7 @@ func raiseRealPermissionModal(t *testing.T, h *perConvHarness, reqID uint64, con
 	if shown.ModalID == "" {
 		t.Fatal("modal_shown carried an empty modal_id")
 	}
-	return shown.ModalID
+	return shown
 }
 
 // --- harness ----------------------------------------------------------------

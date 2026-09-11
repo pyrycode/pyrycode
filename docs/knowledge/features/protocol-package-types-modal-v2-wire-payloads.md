@@ -21,12 +21,18 @@ type ModalOption struct { // a single ordered choice
 }
 
 type ModalShownPayload struct { // binary → phone
-    ModalID         string        `json:"modal_id"`
-    Class           string        `json:"class"`
-    Title           string        `json:"title"`
-    Prompt          string        `json:"prompt"`
-    Options         []ModalOption `json:"options"`           // ordered: array order is display/selection order
-    DefaultOptionID string        `json:"default_option_id"` // MUST equal one of Options[].ID (documented invariant)
+    ConversationID  string          `json:"conversation_id"`
+    ModalID         string          `json:"modal_id"`
+    Class           string          `json:"class"`
+    Title           string          `json:"title"`
+    Prompt          string          `json:"prompt"`
+    Options         []ModalOption   `json:"options"`           // ordered: array order is display/selection order
+    DefaultOptionID string          `json:"default_option_id"` // MUST equal one of Options[].ID (documented invariant)
+    Reason          json.RawMessage `json:"reason,omitempty"`
+    ReasonType      string          `json:"reason_type,omitempty"`
+    BlockedPath     string          `json:"blocked_path,omitempty"`
+    Description     string          `json:"description,omitempty"`
+    DefaultToNo     bool            `json:"default_to_no,omitempty"`
 }
 
 type ModalAnswerPayload struct { // phone → binary, inbound control
@@ -46,19 +52,19 @@ type ModalDismissedPayload struct { // binary → phone
 }
 ```
 
-- **No `omitempty` on any field** — the same deliberate inverse as the #607
-  interactive and #617 snapshot payloads. Every field is always present so the
-  fixtures pin the full shape and boundary values (an empty `default_option_id`,
-  an empty `option_id`) cannot silently vanish. No `time.Time` field — the
-  envelope's `ts` covers timing — so **no new import**.
-- **`modal_id` is the sole correlation key — there is no `conversation_id`.** The
-  daemon resolves `modal_id` against its **own** outstanding-modal state and never
-  trusts a phone-asserted conversation; `option_id` maps against the daemon's own
-  recorded option list. A shape carrying both `conversation_id` and `modal_id`
-  would admit a disagreeing pair the daemon must adjudicate — the single-key shape
-  forecloses cross-conversation `modal_id` confusion structurally. (Producer
-  obligation: `modal_id` minted from `crypto/rand`, globally unique across
-  concurrently-outstanding modals.)
+- **The original modal fields carry no `omitempty`; the five Claude-authored
+  permission-context fields do** (#2346). This preserves the established payload
+  for zero-context producers while allowing stdio permission asks to pass through
+  `reason` (open-shape JSON), `reason_type` (open string vocabulary),
+  `blocked_path`, `description`, and the `default_to_no` client-selection hint.
+  None is derived from tool input or used as permission authority.
+- **`modal_id` is the sole inbound correlation key; `conversation_id` is outbound
+  scope only.** The daemon resolves `modal_id` against its **own** outstanding-modal
+  state and never trusts a phone-asserted conversation; `option_id` maps against
+  the daemon's own recorded option list. `modal_answer` and `modal_cancel` carry no
+  `conversation_id`, so an inbound frame cannot present a disagreeing pair for the
+  daemon to adjudicate. (Producer obligation: `modal_id` minted from `crypto/rand`,
+  globally unique across concurrently-outstanding modals.)
 - **`answer_token` is an idempotency key, not a credential.** Uniqueness and
   stability matter; secrecy does not. It lets the daemon collapse a replayed/
   reordered `modal_answer` to a no-op via `(modal_id, answer_token)`. It is **not**

@@ -346,6 +346,9 @@ func TestExtraEnvHasHelperProcessFlag(t *testing.T) {
 // m.Run() and recursed unboundedly. Each test that wants the fake-pyry
 // pattern now opts in explicitly via the RunOpts field.
 func TestMain(m *testing.M) {
+	if os.Getenv("PYRY_PERMISSION_OBSERVER") == "1" {
+		os.Exit(runPermissionObserver())
+	}
 	if os.Getenv("GO_TEST_HELPER_PROCESS") == "1" {
 		runFakePyry()
 		return
