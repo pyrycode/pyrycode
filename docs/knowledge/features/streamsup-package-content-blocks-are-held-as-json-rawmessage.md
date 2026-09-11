@@ -93,7 +93,13 @@ rather than a style choice:
   reasonably retry forever a request that can never succeed. `ErrUnsupportedPermissionMode` is
   permanent, `errors.Is`-distinguishable from `ErrNoLiveChild`, and returned as a **bare
   sentinel** — never wrapped with the rejected mode — because `Pool.deliverSettingsInBand` logs it
-  verbatim and #833 keeps settings values out of the daemon log.
+  verbatim and #833 keeps settings values out of the daemon log. That precedence must also hold at
+  any runner wrapper before it constructs the writer call: Go evaluates `r.Stdin()` and
+  `r.nextControlID()` before entering the delegated function. #2352 caught this in
+  `RequestContextUsage`; relying only on `WriteContextUsage`'s validation returned the right
+  sentinel but still inspected child state and consumed a shared request ID. Keep the closed
+  predicate at the exported writer boundary, and repeat its preflight in a wrapper whenever the
+  ordering itself is part of the contract.
 - **Vocabulary check, not an authorisation check.** The allow-list answers "will claude parse this
   mode?", never "may this caller change this session's posture?" — three of its five members
   (`acceptEdits`, `auto`, `dontAsk`) genuinely *loosen* a child launched in `default` behind the

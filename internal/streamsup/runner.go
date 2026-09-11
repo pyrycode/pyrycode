@@ -1165,9 +1165,22 @@ func (r *Runner) RequestInitialize() error {
 	return WriteInitialize(r.Stdin(), r.nextControlID())
 }
 
+// RequestContextUsage asks the live child for its summary or full context
+// breakdown. The detail vocabulary is checked before child lookup and ID minting;
+// WriteContextUsage repeats the same boundary for direct callers. The request ID
+// comes from the runner-wide control sequence, and this method does not decode the
+// response.
+func (r *Runner) RequestContextUsage(detail string) error {
+	if !contextUsageDetailAllowed(detail) {
+		return ErrUnsupportedContextUsageDetail
+	}
+	return WriteContextUsage(r.Stdin(), r.nextControlID(), detail)
+}
+
 // nextControlID mints the next locally-unique control-request correlation id,
-// shared by Interrupt, SetModel, SetPermissionMode and RequestInitialize (RevokeBypass draws
-// on it through SetPermissionMode, minting exactly one id per call, not two). The atomic counter is
+// shared by Interrupt, SetModel, SetPermissionMode, RequestInitialize and
+// RequestContextUsage (RevokeBypass draws on it through SetPermissionMode,
+// minting exactly one id per call, not two). The atomic counter is
 // unique within the runner's lifetime — one sequence, not one per subtype, since
 // request_id must be unique across all in-flight control requests on the stream
 // rather than merely within one subtype.
