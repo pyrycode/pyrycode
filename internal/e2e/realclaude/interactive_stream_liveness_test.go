@@ -164,6 +164,20 @@ func writeStreamInteractiveConfig(t *testing.T, home string) {
 	}
 }
 
+// writeStdioPermissionPromptConfig selects the stream runner and the opt-in
+// stdio permission transport in the one file the daemon reads at startup.
+func writeStdioPermissionPromptConfig(t *testing.T, home string) {
+	t.Helper()
+	pyryDir := filepath.Join(home, ".pyry")
+	if err := os.MkdirAll(pyryDir, 0o700); err != nil {
+		t.Fatalf("realclaude: mkdir .pyry: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pyryDir, "config.json"),
+		[]byte(`{"interactive_runner":"stream-json","stdio_permission_prompt":true}`), 0o600); err != nil {
+		t.Fatalf("realclaude: write config.json: %v", err)
+	}
+}
+
 // warnRateLimitStatus is the ONE non-benign rate_limit_info.status this drain
 // TOLERATES: claude reporting that the account sits inside its usage-limit
 // warning band while still ALLOWING the turn. The daemon is right to emit the

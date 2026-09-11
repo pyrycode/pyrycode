@@ -64,6 +64,18 @@ import (
 
 func TestInteractiveStreamPermissionDeny(t *testing.T) {
 	h, convID := startStreamModalResolutionHarness(t, permissionDaemonModel)
+	driveInteractiveStreamPermissionDeny(t, h, convID)
+}
+
+// TestInteractiveStreamStdioPermissionDeny keeps the existing MCP test above
+// intact and applies its attributed reject + filesystem witness to stdio.
+func TestInteractiveStreamStdioPermissionDeny(t *testing.T) {
+	h, convID := startStdioModalResolutionHarness(t, permissionDaemonModel)
+	driveInteractiveStreamPermissionDeny(t, h, convID)
+}
+
+func driveInteractiveStreamPermissionDeny(t *testing.T, h *perConvHarness, convID string) {
+	t.Helper()
 	// A per-run nonce keeps the trigger's target filename unique (defeats
 	// accidental caching AND makes the absence walk unambiguous — no other run's
 	// file can false-match).

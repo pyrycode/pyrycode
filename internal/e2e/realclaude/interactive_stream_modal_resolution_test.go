@@ -84,6 +84,19 @@ const (
 // to completion. Answer-only — the cancel phase (#1030 Phase B) is out of scope.
 func TestInteractiveStreamModalResolution(t *testing.T) {
 	h, convID := startStreamModalResolutionHarness(t, permissionDaemonModel)
+	driveInteractiveStreamModalResolution(t, h, convID)
+}
+
+// TestInteractiveStreamStdioModalResolution runs the same non-vacuous allow
+// proof through the opt-in stdio transport. The sibling above remains the MCP
+// rollback gate.
+func TestInteractiveStreamStdioModalResolution(t *testing.T) {
+	h, convID := startStdioModalResolutionHarness(t, permissionDaemonModel)
+	driveInteractiveStreamModalResolution(t, h, convID)
+}
+
+func driveInteractiveStreamModalResolution(t *testing.T, h *perConvHarness, convID string) {
+	t.Helper()
 	// A per-run nonce keeps the trigger command distinct (defeats accidental
 	// caching) without asserting on its echo.
 	nonce := time.Now().UnixNano()
@@ -138,6 +151,14 @@ func TestInteractiveStreamModalResolution(t *testing.T) {
 // AskUserQuestion call has actually been measured; the two modal gates pass
 // permissionDaemonModel and are unchanged by it.
 func startStreamModalResolutionHarness(t *testing.T, model string) (*perConvHarness, string) {
+	return startPermissionModalResolutionHarness(t, model, false)
+}
+
+func startStdioModalResolutionHarness(t *testing.T, model string) (*perConvHarness, string) {
+	return startPermissionModalResolutionHarness(t, model, true)
+}
+
+func startPermissionModalResolutionHarness(t *testing.T, model string, stdioPermissionPrompt bool) (*perConvHarness, string) {
 	t.Helper()
 	// No t.Parallel: WithWorktreeAuthenticated calls t.Setenv.
 	if _, err := exec.LookPath("claude"); err != nil {
@@ -161,7 +182,11 @@ func startStreamModalResolutionHarness(t *testing.T, model string) (*perConvHarn
 	// daemon spawns — resolveConfigPath reads <home>/.pyry/config.json once at
 	// startup. This one line is what distinguishes this gate from the PTY-path
 	// #1030 harness; it is the seam this test exists to prove end-to-end.
-	writeStreamInteractiveConfig(t, home)
+	if stdioPermissionPrompt {
+		writeStdioPermissionPromptConfig(t, home)
+	} else {
+		writeStreamInteractiveConfig(t, home)
+	}
 
 	// Pair WITH --allow-remote-permissions: ResolveAnswer gates on the device's
 	// MayAnswerRemotePermission() (== AllowRemotePermissions), which pairing

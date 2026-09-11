@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/agentrun"
+	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
@@ -231,7 +235,7 @@ func mapStreamState(s streamsup.State) sessions.State {
 	}
 }
 
-// newStreamRunnerFactory returns a sessions.RunnerFactory (func(supervisor.Config)
+// Interactive stream runner factory wiring returns a sessions.RunnerFactory (func(supervisor.Config)
 // (sessions.Runner, error)) that constructs a stream-json runner AND installs the
 // #1088 turnevent Parser as its Config.Stdout, with the Parser's sink bound to
 // sink for the runner's session (#1098). The factory captures the
@@ -302,14 +306,138 @@ func mapStreamState(s streamsup.State) sessions.State {
 // session cannot silently bypass the approval gate. On the "" / "pty" path the
 // factory is never built, so mcpServersPath is "" and unused there. The live
 // wire is exercised end-to-end by TestInteractiveStreamModalResolution (#1154).
-func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string) sessions.RunnerFactory {
+
+// streamApprovalConfig carries the optional stdio transport's daemon-singleton
+// dependencies into each per-session handler. A zero value preserves the MCP path.
+type streamApprovalConfig struct {
+	stdio    bool
+	registry *permbridge.Registry
+	timeout  time.Duration
+	surface  *approvalSurfaceReport
+}
+
+// approvalSurfaceReport bridges the composition-order gap between runner creation
+// and relay construction. set runs before pool.Run; every reader starts from a
+// goroutine created by pool.Run, so goroutine publication makes the single write
+// visible without a mutex.
+type approvalSurfaceReport struct {
+	show func(permbridge.Request) func()
+}
+
+func (r *approvalSurfaceReport) set(show func(permbridge.Request) func()) {
+	if r != nil {
+		r.show = show
+	}
+}
+
+func (r *approvalSurfaceReport) surface(req permbridge.Request) func() {
+	if r == nil || r.show == nil {
+		return func() {}
+	}
+	return r.show(req)
+}
+
+const (
+	reasonStdioInvalidRequest = "permission request was invalid"
+	reasonStdioDuplicate      = "permission request was already pending"
+	reasonStdioChildExit      = "permission request ended with its Claude process"
+)
+
+// stdioPermissionHandler adapts one runner's can_use_tool requests onto the
+// daemon-wide approval registry. live contains only requests originating from the
+// runner that owns this handler, allowing child exit to fail them closed without
+// disturbing another session's approvals.
+type stdioPermissionHandler struct {
+	registry *permbridge.Registry
+	timeout  time.Duration
+	surface  *approvalSurfaceReport
+
+	mu   sync.Mutex
+	live map[string]struct{}
+}
+
+func newStdioPermissionHandler(registry *permbridge.Registry, timeout time.Duration, surface *approvalSurfaceReport) *stdioPermissionHandler {
+	return &stdioPermissionHandler{
+		registry: registry,
+		timeout:  timeout,
+		surface:  surface,
+		live:     make(map[string]struct{}),
+	}
+}
+
+// handle is called synchronously by Parser on the child's stdout-forwarding
+// goroutine. Registration is bounded local work; surfacing, waiting, and response
+// I/O run asynchronously so later stdout can always drain.
+func (h *stdioPermissionHandler) handle(req streamsup.CanUseToolRequest, origin io.Writer) {
+	if req.RequestID == "" || req.ToolUseID == "" || h.registry == nil || origin == nil {
+		go func() {
+			_ = streamsup.WriteCanUseToolDeny(origin, req.RequestID, reasonStdioInvalidRequest, false)
+		}()
+		return
+	}
+
+	parked := permbridge.Request{
+		ToolName:  req.ToolName,
+		Input:     req.Input,
+		ToolUseID: req.ToolUseID,
+	}
+	pending, err := h.registry.Register(req.ToolUseID, parked, h.timeout)
+	if err != nil {
+		go func() {
+			_ = streamsup.WriteCanUseToolDeny(origin, req.RequestID, reasonStdioDuplicate, false)
+		}()
+		return
+	}
+
+	h.mu.Lock()
+	h.live[req.ToolUseID] = struct{}{}
+	h.mu.Unlock()
+
+	go h.await(req.RequestID, parked, pending, origin)
+}
+
+func (h *stdioPermissionHandler) await(requestID string, req permbridge.Request, pending *permbridge.Pending, origin io.Writer) {
+	retire := h.surface.surface(req)
+	verdict := pending.Await()
+
+	h.mu.Lock()
+	delete(h.live, req.ToolUseID)
+	h.mu.Unlock()
+
+	switch verdict.Behavior {
+	case permbridge.BehaviorAllow:
+		_ = streamsup.WriteCanUseToolAllow(origin, requestID, verdict.UpdatedInput, nil)
+	default:
+		_ = streamsup.WriteCanUseToolDeny(origin, requestID, verdict.Message, false)
+	}
+	retire()
+}
+
+// childExited resolves only this runner's outstanding asks. The registry one-shot
+// arbitrates an answer or timeout racing the exit; await remains the sole writer.
+func (h *stdioPermissionHandler) childExited() {
+	h.mu.Lock()
+	ids := make([]string, 0, len(h.live))
+	for id := range h.live {
+		ids = append(ids, id)
+	}
+	h.mu.Unlock()
+
+	for _, id := range ids {
+		h.registry.Resolve(id, permbridge.Deny(reasonStdioChildExit))
+	}
+}
+
+// newStreamRunnerFactory binds the shared event sink and optional stdio approval
+// transport to each streamsup runner it constructs.
+func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, approval streamApprovalConfig) sessions.RunnerFactory {
 	return func(cfg sessions.RunnerConfig) (sessions.Runner, error) {
 		scfg := mapStreamsupConfig(cfg)
 		// The posture and its provenance are BOTH read off cfg, never off scfg.Args:
 		// since #2065 every argv carries the escalation flag, so the assembled argv
 		// cannot say which children the daemon downgrades and which keep the bypass
 		// they launch with. See withApprovalArgs' doc for the derivation.
-		scfg.Args = withApprovalArgs(scfg.Args, mcpServersPath, cfg.PermissionMode, cfg.OperatorBypass)
+		scfg.Args = withApprovalArgs(scfg.Args, mcpServersPath, cfg.PermissionMode, cfg.OperatorBypass, approval.stdio)
 		tag := newStreamSessionTag(cfg.SessionID)
 		// #2135 chains the announced-reset follower between the retention holds and
 		// the fan-in send, rather than inside newSessionParser: it retains nothing,
@@ -321,7 +449,20 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string) session
 		follow := newSessionResetFollower(tag, cfg.AdoptAnnouncedReset, sink.sinkForTag(tag.ID), cfg.Logger)
 		parser, held := newSessionParser(follow.Sink, cfg.Logger)
 		scfg.Stdout = parser
-		scfg.OnChildExit = sink.exitForTag(tag.ID)
+		onChildExit := sink.exitForTag(tag.ID)
+		var r *streamsup.Runner
+		if approval.stdio {
+			handler := newStdioPermissionHandler(approval.registry, approval.timeout, approval.surface)
+			parser.SetCanUseToolHandler(func(req streamsup.CanUseToolRequest) {
+				handler.handle(req, r.Stdin())
+			})
+			scfg.OnChildExit = func() {
+				handler.childExited()
+				onChildExit()
+			}
+		} else {
+			scfg.OnChildExit = onChildExit
+		}
 		scfg.OnSessionRotate = tag.Rotate
 		// #2064's posture gate is bound HERE rather than in mapStreamsupConfig, on the
 		// same dividing line Stdout sits on: it is a runtime object, not a plain value
@@ -331,7 +472,8 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string) session
 		// is #1840's argument for minting the parser and its holds in one call, applied
 		// to a seam whose two ends sit in different packages.
 		scfg.PostureGate = parser.PostureGate()
-		r, err := streamsup.New(scfg)
+		var err error
+		r, err = streamsup.New(scfg)
 		if err != nil {
 			return nil, fmt.Errorf("cmd/pyry: stream runner: %w", err)
 		}
@@ -428,11 +570,14 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string) session
 //
 // The append runs on a clone so the caller's args (scfg.Args, freshly owned by
 // mapStreamsupConfig) is never aliased or mutated.
-func withApprovalArgs(args []string, mcpServersPath, storedMode string, operatorBypass bool) []string {
+func withApprovalArgs(args []string, mcpServersPath, storedMode string, operatorBypass, stdioPermissionPrompt bool) []string {
 	if storedMode == sessions.PermissionModeBypass || operatorBypass {
 		return args
 	}
 	extra := permissionArgs(false, mcpServersPath)
+	if stdioPermissionPrompt {
+		extra[1] = "stdio"
+	}
 	if namesPermissionMode(args) {
 		extra = dropPermissionMode(extra)
 	}

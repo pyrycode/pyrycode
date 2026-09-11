@@ -407,9 +407,20 @@ func StartRotationWithRelay(t *testing.T, home, sessionsDir, initialUUID, trigge
 // handler delegates Enabled to the stderr handler), shortening its history in
 // these specs; no test reads that either.
 func StartStreamInteractiveWithRelay(t *testing.T, home, initialUUID, relayURL string, extraEnv ...string) *Harness {
+	return startStreamInteractiveWithRelay(t, home, initialUUID, relayURL, false, extraEnv...)
+}
+
+// StartStreamInteractiveWithRelayStdio is the opt-in permission-transport twin
+// of StartStreamInteractiveWithRelay. It changes only the persisted startup
+// toggle; the fake child, relay, phone, and daemon lifecycle are identical.
+func StartStreamInteractiveWithRelayStdio(t *testing.T, home, initialUUID, relayURL string, extraEnv ...string) *Harness {
+	return startStreamInteractiveWithRelay(t, home, initialUUID, relayURL, true, extraEnv...)
+}
+
+func startStreamInteractiveWithRelay(t *testing.T, home, initialUUID, relayURL string, stdioPermissionPrompt bool, extraEnv ...string) *Harness {
 	t.Helper()
 
-	writeStreamInteractiveConfig(t, home)
+	writeStreamInteractiveConfig(t, home, stdioPermissionPrompt)
 
 	fakeBin := ensureFakeClaudeBuilt(t)
 	seedBootstrapRegistry(t, home, initialUUID)
@@ -464,14 +475,17 @@ func StartStreamInteractiveWithRelay(t *testing.T, home, initialUUID, relayURL s
 // interactive_runner and a missed copy leaves that harness's daemon on the
 // default runner while its test keeps passing, asserting nothing about the path
 // it names — the defect class #1512 fixed in startPerConvHarness.
-func writeStreamInteractiveConfig(t *testing.T, home string) {
+func writeStreamInteractiveConfig(t *testing.T, home string, stdioPermissionPrompt ...bool) {
 	t.Helper()
 	pyryDir := filepath.Join(home, ".pyry")
 	if err := os.MkdirAll(pyryDir, 0o700); err != nil {
 		t.Fatalf("e2e: mkdir .pyry: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(pyryDir, "config.json"),
-		[]byte(`{"interactive_runner":"stream-json"}`), 0o600); err != nil {
+	body := []byte(`{"interactive_runner":"stream-json"}`)
+	if len(stdioPermissionPrompt) > 0 && stdioPermissionPrompt[0] {
+		body = []byte(`{"interactive_runner":"stream-json","stdio_permission_prompt":true}`)
+	}
+	if err := os.WriteFile(filepath.Join(pyryDir, "config.json"), body, 0o600); err != nil {
 		t.Fatalf("e2e: write config.json: %v", err)
 	}
 }

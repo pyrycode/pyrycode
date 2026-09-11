@@ -28,9 +28,9 @@ import (
 // they run TOGETHER, live, against a spawned fakeclaude that ORIGINATES the approval.
 //
 // Per case one interactive phone (paired --allow-remote-permissions) handshakes to a
-// daemon under the stream toggle, sends one send_message, and the fakeclaude approve
-// rider dials control.Approve — the SAME client `pyry mcp-approve` calls — which parks
-// in permbridge, surfaces as modal_shown, blocks, and returns the daemon's verdict:
+// daemon under the stream toggle and sends one send_message. The original cases use
+// the fakeclaude MCP rider; the stdio cases use its can_use_tool rider. Both park in
+// the same permbridge registry, surface as modal_shown, and return the same verdict:
 //
 //	phone send_message(knownConvID) → ack
 //	  → fakeclaude receives the user turn → control.Approve (blocks)
@@ -103,6 +103,7 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 		// session ENDS, so nobody is left able to answer — the condition the window
 		// still denies on. A second, later conn witnesses the outcome (see the arm).
 		loseAnswerer bool
+		stdio        bool
 		// wantNeedle is the assistant_delta text the daemon's verdict must reflect;
 		// forbidNeedles must never appear (fail-open / masked-error guards).
 		wantNeedle    string
@@ -133,6 +134,26 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			wantSource:      "remote",
 		},
 		{
+			name:            "stdio_allow",
+			approvalTimeout: "30s",
+			answer:          allowOnce,
+			stdio:           true,
+			wantNeedle:      "approve-allow",
+			forbidNeedles:   []string{"approve-deny", "approve-error"},
+			wantOutcome:     allowOnce,
+			wantSource:      "remote",
+		},
+		{
+			name:            "stdio_deny",
+			approvalTimeout: "30s",
+			answer:          rejectOnce,
+			stdio:           true,
+			wantNeedle:      "approve-deny",
+			forbidNeedles:   []string{"approve-allow", "approve-error"},
+			wantOutcome:     rejectOnce,
+			wantSource:      "remote",
+		},
+		{
 			// The extension case (#1932): the phone stays connected and answers only
 			// after MORE THAN ONE window has elapsed. Because an interactive client is
 			// connected to a surfaced approval, every expiry re-arms instead of
@@ -155,6 +176,16 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			approvalTimeout: "2s",
 			answer:          "",
 			loseAnswerer:    true,
+			wantNeedle:      "approve-deny",
+			forbidNeedles:   []string{"approve-allow", "approve-error"},
+			wantOutcome:     "denied_timeout",
+			wantSource:      "timeout",
+		},
+		{
+			name:            "stdio_timeout",
+			approvalTimeout: "2s",
+			loseAnswerer:    true,
+			stdio:           true,
 			wantNeedle:      "approve-deny",
 			forbidNeedles:   []string{"approve-allow", "approve-error"},
 			wantOutcome:     "denied_timeout",
@@ -195,17 +226,30 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			// from this file, which the test writes after startup.
 			socketFile := filepath.Join(home, "approve-socket.txt")
 
-			h := StartStreamInteractiveWithRelay(t, home, initialUUID, fr.URL()+"/v2/server",
-				"PYRY_FAKE_CLAUDE_STREAM_APPROVE=1",
-				"PYRY_FAKE_CLAUDE_APPROVE_SOCKET_FILE="+socketFile,
-				"PYRY_APPROVAL_TIMEOUT="+tc.approvalTimeout,
-			)
+			stdinLog := filepath.Join(home, "stream-stdin.log")
+			var h *Harness
+			if tc.stdio {
+				rider := `{"tool_name":"Bash","input":{"command":"true"},"tool_use_id":"` + riderToolUseID + `"}`
+				h = StartStreamInteractiveWithRelayStdio(t, home, initialUUID, fr.URL()+"/v2/server",
+					"PYRY_FAKE_CLAUDE_STREAM_CAN_USE_TOOL="+rider,
+					"PYRY_FAKE_CLAUDE_STDIN_LOG="+stdinLog,
+					"PYRY_APPROVAL_TIMEOUT="+tc.approvalTimeout,
+				)
+			} else {
+				h = StartStreamInteractiveWithRelay(t, home, initialUUID, fr.URL()+"/v2/server",
+					"PYRY_FAKE_CLAUDE_STREAM_APPROVE=1",
+					"PYRY_FAKE_CLAUDE_APPROVE_SOCKET_FILE="+socketFile,
+					"PYRY_APPROVAL_TIMEOUT="+tc.approvalTimeout,
+				)
+			}
 			t.Cleanup(func() { h.Stop(t) })
 
 			// Hand the fake the daemon's real control socket (now known). It reads this at
 			// dial time, well after this write.
-			if err := os.WriteFile(socketFile, []byte(h.SocketPath), 0o600); err != nil {
-				t.Fatalf("write approve socket file: %v", err)
+			if !tc.stdio {
+				if err := os.WriteFile(socketFile, []byte(h.SocketPath), 0o600); err != nil {
+					t.Fatalf("write approve socket file: %v", err)
+				}
 			}
 
 			serverID := readPersistedServerID(t, home)
@@ -538,19 +582,36 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			// that order through one parser, one drain goroutine and one conn, and nextEnv
 			// is the single reader, so the frame is necessarily consumed before the needle
 			// that ended the loop.
-			if !sawToolUse {
+			if !sawToolUse && (!tc.stdio || tc.answer == allowOnce) {
 				t.Fatalf("never observed a tool_use frame; the rider's gated call did not reach the phone, so the "+
 					"feed a tool-call attribution report joins against (tool_use_id %q) is unreachable", riderToolUseID)
 			}
-			if toolUse.ToolUseID != riderToolUseID {
+			if sawToolUse && toolUse.ToolUseID != riderToolUseID {
 				t.Errorf("tool_use ToolUseID = %q, want %q — the frame must carry the id the approval was raised with",
 					toolUse.ToolUseID, riderToolUseID)
 			}
-			if toolUse.Name != riderToolName {
+			if sawToolUse && toolUse.Name != riderToolName {
 				t.Errorf("tool_use Name = %q, want %q", toolUse.Name, riderToolName)
 			}
-			if toolUse.ConversationID != knownConvID {
+			if sawToolUse && toolUse.ConversationID != knownConvID {
 				t.Errorf("tool_use ConversationID = %q, want %q", toolUse.ConversationID, knownConvID)
+			}
+
+			if tc.stdio {
+				data, err := os.ReadFile(childStdinLog(stdinLog, initialUUID))
+				if err != nil {
+					t.Fatalf("read fakeclaude stdin log: %v", err)
+				}
+				responses := 0
+				for _, line := range strings.Split(string(data), "\n") {
+					if strings.Contains(line, `"type":"control_response"`) &&
+						strings.Contains(line, `"request_id":"permission-1"`) {
+						responses++
+					}
+				}
+				if responses != 1 {
+					t.Errorf("correlated stdio control responses = %d, want exactly 1; stdin=%s", responses, data)
+				}
 			}
 		})
 	}
