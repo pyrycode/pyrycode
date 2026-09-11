@@ -127,4 +127,21 @@ Pending for the documentation stage:
 
 ## Revisions
 
-None.
+### 2026-09-11 — verifier rework: traverse the full captured menu
+
+The verifier found that `TestRelayV2_StreamRejectsModelAbsentFromPublishedMenu`
+only checked the default two-row fake menu for membership in #2279's six-row
+capture, so four captured rows never traversed initialize retention or client
+publication. The hermetic test now creates an exact `Value`/`ResolvedModel`
+projection of every captured row, after asserting the capture is complete, and
+passes its path through `PYRY_FAKE_CLAUDE_INITIALIZE_MODELS`. The test-only
+`loadInitializeModels` override feeds that projection through
+`writeInitializeAck`; the default canned menu remains unchanged for every other
+test. The phone-visible menu must match all captured rows in order before the
+absent-model rejection and later-turn assertions run.
+
+This adds one touched production-language file under the test harness,
+`internal/e2e/internal/fakeclaude/main.go`, bringing the ticket to five such
+files and remaining within the one-ticket boundary. The override reads only a
+test-supplied local fixture and introduces no production daemon file operation
+or trust-boundary change, so the committed security-review verdict remains PASS.

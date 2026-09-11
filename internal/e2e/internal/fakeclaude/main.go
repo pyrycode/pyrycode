@@ -234,6 +234,9 @@
 //	                               stream wins and the other is inert). Default off —
 //	                               when unset, fakeclaude is byte-identical to its
 //	                               prior behaviour.
+//	PYRY_FAKE_CLAUDE_INITIALIZE_MODELS optional path to a JSON array used as the
+//	                               initialize response's model menu in stream-json
+//	                               mode. Unset uses the canned initializeModels.
 //	PYRY_FAKE_CLAUDE_SESSION_ID_FROM_ARGV  optional; when set to any non-empty
 //	                               value, fakeclaude takes the stem for its INITIAL
 //	                               <uuid>.jsonl from its own argv — the value after
@@ -417,6 +420,7 @@ const (
 	envStreamModelWindows = "PYRY_FAKE_CLAUDE_STREAM_MODEL_WINDOWS"
 	envStreamResetTo      = "PYRY_FAKE_CLAUDE_STREAM_RESET_TO"
 	envStreamSessionFacts = "PYRY_FAKE_CLAUDE_STREAM_SESSION_FACTS"
+	envInitializeModels   = "PYRY_FAKE_CLAUDE_INITIALIZE_MODELS"
 	envApproveSocketFile  = "PYRY_FAKE_CLAUDE_APPROVE_SOCKET_FILE"
 	envRejectAbsentResume = "PYRY_FAKE_CLAUDE_REJECT_ABSENT_RESUME"
 	assistantMaxBytes     = 64 * 1024
@@ -2425,17 +2429,41 @@ func writeInterruptAck(w io.Writer, requestID string) error {
 // sorted, so the line is deterministic without declaring a struct for a shape nothing
 // else reads. Returns the first marshal/write error.
 func writeInitializeAck(w io.Writer, requestID string) error {
+	models, err := loadInitializeModels(os.Getenv(envInitializeModels))
+	if err != nil {
+		return fmt.Errorf("load initialize models: %w", err)
+	}
 	return writeJSONLine(w, map[string]any{
 		"type": "control_response",
 		"response": map[string]any{
 			"subtype":    "success",
 			"request_id": requestID,
 			"response": map[string]any{
-				"models":   initializeModels,
+				"models":   models,
 				"commands": initializeCommands,
 			},
 		},
 	})
+}
+
+// loadInitializeModels returns the default capture-backed model menu unless a
+// test supplies a JSON fixture path. The override lets an end-to-end test feed a
+// newer committed capture through the same stdout parser and retention path as
+// the canned response without changing the default bytes for the rest of the
+// hermetic suite.
+func loadInitializeModels(path string) ([]map[string]any, error) {
+	if path == "" {
+		return initializeModels, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", filepath.Base(path), err)
+	}
+	var models []map[string]any
+	if err := json.Unmarshal(raw, &models); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", filepath.Base(path), err)
+	}
+	return models, nil
 }
 
 // writeSetPermissionModeAck writes the control_response real claude answers a

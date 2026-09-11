@@ -43,9 +43,13 @@ func TestRelayV2_StreamRejectsModelAbsentFromPublishedMenu(t *testing.T) {
 	seedBoundConversation(t, home, modelRejectConvID, modelRejectSessionID)
 	fr := fakerelay.New(relayTestLogger())
 	t.Cleanup(func() { _ = fr.Close() })
+	captured := capturedModels2281(t)
+	modelFixture := filepath.Join(home, "model-reject-initialize-models.json")
+	writeCapturedModelFixture2281(t, modelFixture, captured)
 	stdinStem := filepath.Join(home, "model-reject-stdin")
 	h := StartStreamInteractiveWithRelay(t, home, modelRejectSessionID, fr.URL()+"/v2/server",
-		"PYRY_FAKE_CLAUDE_STDIN_LOG="+stdinStem)
+		"PYRY_FAKE_CLAUDE_STDIN_LOG="+stdinStem,
+		"PYRY_FAKE_CLAUDE_INITIALIZE_MODELS="+modelFixture)
 	t.Cleanup(func() { h.Stop(t) })
 
 	serverID := readPersistedServerID(t, home)
@@ -110,13 +114,19 @@ func TestRelayV2_StreamRejectsModelAbsentFromPublishedMenu(t *testing.T) {
 		t.Fatalf("decode advertised model list: %v", err)
 	}
 
-	captured := capturedModelValues2281(t)
-	for _, option := range menu.Models {
-		if !captured[option.Value] {
-			t.Errorf("advertised Value %q is not derived from #2279's committed 2.1.259 vocabulary", option.Value)
-		}
+	if len(menu.Models) != len(captured) {
+		t.Fatalf("advertised model count = %d, want all %d rows from #2279's committed capture", len(menu.Models), len(captured))
 	}
-	candidate := absentModelCandidate2281(captured)
+	offered := make(map[string]bool, len(captured))
+	for i, option := range menu.Models {
+		want := captured[i]
+		if option.Value != want.Value || option.ResolvedModel != want.ResolvedModel {
+			t.Errorf("advertised model %d = (%q, %q), want captured (%q, %q)",
+				i, option.Value, option.ResolvedModel, want.Value, want.ResolvedModel)
+		}
+		offered[option.Value] = true
+	}
+	candidate := absentModelCandidate2281(offered)
 	for _, option := range menu.Models {
 		if option.Value == candidate {
 			t.Fatalf("candidate %q unexpectedly appears in the advertised menu", candidate)
@@ -188,7 +198,12 @@ func TestRelayV2_StreamRejectsModelAbsentFromPublishedMenu(t *testing.T) {
 	}
 }
 
-func capturedModelValues2281(t *testing.T) map[string]bool {
+type capturedModel2281 struct {
+	Value         string `json:"value"`
+	ResolvedModel string `json:"resolved_model"`
+}
+
+func capturedModels2281(t *testing.T) []capturedModel2281 {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("realclaude", "testdata", "set_model_v2.1.259_accept.json"))
 	if err != nil {
@@ -196,22 +211,48 @@ func capturedModelValues2281(t *testing.T) map[string]bool {
 	}
 	var capture struct {
 		SetModel struct {
-			Published []struct {
-				Value string `json:"value"`
-			} `json:"published_models"`
+			Published []capturedModel2281 `json:"published_models"`
+			Truncated bool                `json:"published_models_truncated"`
 		} `json:"set_model_capture"`
 	}
 	if err := json.Unmarshal(raw, &capture); err != nil {
 		t.Fatalf("decode #2279 capture: %v", err)
 	}
+	if capture.SetModel.Truncated {
+		t.Fatal("#2279 capture reports a truncated published model vocabulary")
+	}
 	values := make(map[string]bool, len(capture.SetModel.Published))
 	for _, option := range capture.SetModel.Published {
+		if option.Value == "" || option.ResolvedModel == "" {
+			t.Fatalf("#2279 capture carries an incomplete published model row: %+v", option)
+		}
+		if values[option.Value] {
+			t.Fatalf("#2279 capture repeats published model Value %q", option.Value)
+		}
 		values[option.Value] = true
 	}
 	if len(values) == 0 {
 		t.Fatal("#2279 capture carries no published model values")
 	}
-	return values
+	return capture.SetModel.Published
+}
+
+func writeCapturedModelFixture2281(t *testing.T, path string, captured []capturedModel2281) {
+	t.Helper()
+	models := make([]map[string]string, 0, len(captured))
+	for _, option := range captured {
+		models = append(models, map[string]string{
+			"value":         option.Value,
+			"resolvedModel": option.ResolvedModel,
+		})
+	}
+	raw, err := json.Marshal(models)
+	if err != nil {
+		t.Fatalf("marshal #2279 initialize model projection: %v", err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write #2279 initialize model projection: %v", err)
+	}
 }
 
 func absentModelCandidate2281(offered map[string]bool) string {
