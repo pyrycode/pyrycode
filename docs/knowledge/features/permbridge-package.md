@@ -30,9 +30,14 @@ It is also **log-free** — a pure data structure with no logger field, so it ca
 ```go
 // Request is the tool-approval request claude sends (T1 spike contract).
 type Request struct {
-    ToolName  string          `json:"tool_name"`
-    Input     json.RawMessage `json:"input"`      // opaque, preserved verbatim
-    ToolUseID string          `json:"tool_use_id"`
+    ToolName           string          `json:"tool_name"`
+    Input              json.RawMessage `json:"input"` // opaque, preserved verbatim
+    ToolUseID          string          `json:"tool_use_id"`
+    DecisionReason     json.RawMessage `json:"decision_reason,omitempty"`
+    DecisionReasonType string          `json:"decision_reason_type,omitempty"`
+    BlockedPath        string          `json:"blocked_path,omitempty"`
+    Description        string          `json:"description,omitempty"`
+    DefaultToNo        bool            `json:"default_to_no,omitempty"`
 }
 
 // Verdict is the allow/deny decision claude accepts.
@@ -50,7 +55,7 @@ func Allow(updatedInput json.RawMessage) Verdict // {BehaviorAllow, updatedInput
 func Deny(message string) Verdict                // {BehaviorDeny, nil, message}
 ```
 
-`Input`/`UpdatedInput` are `json.RawMessage` so an arbitrary tool-input object round-trips byte-verbatim — the #1080 stream verdict arm (`streamApprovalBridge.ResolveStream`) always echoes the parked `Input` back as `UpdatedInput` unmodified on allow; the primitive only carries the bytes. `omitempty` gives the two disjoint wire shapes claude expects. `Allow`/`Deny` constructors make call sites correct-by-construction — no stringly-typed `"allow"`/`"deny"` at the resolver. `reasonTimeout` (unexported, a fixed string, never host-derived content) is the deny message the timer path uses.
+`Input`/`UpdatedInput` are `json.RawMessage` so an arbitrary tool-input object round-trips byte-verbatim — the #1080 stream verdict arm (`streamApprovalBridge.ResolveStream`) always echoes the parked `Input` back as `UpdatedInput` unmodified on allow; the primitive only carries the bytes. The five optional ask-context fields are independent Claude-authored display values (#2346): the stdio adapter copies each only from its corresponding `can_use_tool` field, never from `Input`, while the approval MCP producer leaves all five at zero values. They do not participate in the verdict or timeout. `omitempty` gives the two disjoint verdict wire shapes claude expects. `Allow`/`Deny` constructors make call sites correct-by-construction — no stringly-typed `"allow"`/`"deny"` at the resolver. `reasonTimeout` (unexported, a fixed string, never host-derived content) is the deny message the timer path uses.
 
 ## Registry surface
 

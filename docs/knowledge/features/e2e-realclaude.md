@@ -45,6 +45,16 @@ therefore keep stdin open, assert the request and response correlation, and use 
 side-effect witness; a successful process exit alone cannot distinguish a denial
 from a silent bypass. See [the permission protocol findings](permission-protocol-spike.md).
 
+Optional permission fields need a raw-presence observation before ordinary JSON
+decoding. A plain string target collapses an absent key, a present empty string,
+and JSON `null` to the same Go zero value, so a green assertion on `""` cannot
+prove that Claude omitted the key. The live permission-context proof records key
+presence and raw value upstream of daemon decoding, then compares that source
+with both the initial and reconnect-reconciled `modal_shown`. This matters in
+practice: Claude 2.1.259 omitted both reason fields for an ordinary Bash write,
+while an outside-working-directory Write supplied `workingDir` plus non-empty
+reason text.
+
 Live delegation turns have an extra, valid envelope before the forwarded child
 response: claude emits the delegated prompt as a `user` text block, which the
 stream parser intentionally surfaces as `unrecognized_message` with
