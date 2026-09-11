@@ -200,4 +200,26 @@ documentation is edited by this builder.
 
 ## Revisions
 
-None.
+### 2026-09-11 — reconnect a ready test-owned server
+
+The first dispatcher-owned live run reached all three controls and retained the
+broken server's status and error, but correctly refused promotion because reconnect
+targeted that broken server and Claude returned a correlated error. The recovery
+direction approved on the ticket changes the driver contract: after the first
+`mcp_status`, it polls `mcp_status` with distinct request ids until
+`mcapApproveServer` reports `connected`, within the existing bounded reply budget,
+then reconnects that healthy test-owned server. `mcp_toggle` continues to target the
+deliberately broken server, preserving separate diagnostic evidence without
+weakening the correlated-success promotion gate.
+
+The offline driver test now scripts a pending-to-connected status transition and
+proves reconnect is not sent before readiness. A second test keeps the readiness
+state pending through the bounded budget and proves the driver returns diagnostic
+failure without attempting reconnect. The additional status polls are retained in
+`Requests` with their exact sent lines, outcomes, and unique ids; the last correlated
+status response remains the source of the recorded server shapes.
+
+Security posture is unchanged: the readiness target is the fixed rig-owned
+`mcapApproveServer`, status replies still pass through the existing redaction and
+deny-scan path, the polling budget is bounded, and no user turn or new subprocess is
+introduced.

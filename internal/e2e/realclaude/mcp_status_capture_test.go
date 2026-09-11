@@ -509,40 +509,103 @@ func mcapControlLine(subtype, requestID string, extra map[string]any) ([]byte, e
 }
 
 // mcapDriveRequests sends the three MCP controls without waiting for system/init.
+// Before reconnect it polls status until the rig-owned healthy server is connected;
+// every poll remains in the record with its own id and bounded reply outcome.
 // Reply timing is injectable so startup silence is proved offline without sleeping.
-// A write failure stops later sends because the pipe is no longer trustworthy; a
-// reply timeout does not, because every verb is independent evidence.
+// A write failure stops later sends because the pipe is no longer trustworthy.
 func mcapDriveRequests(stdin io.Writer, recorder *dropcapRecorder, red *dropcapRedactor,
 	budget, poll time.Duration) ([]mcapRequest, error) {
-	verbs := []struct {
-		subtype string
-		extra   map[string]any
-	}{
-		{mcapSubtypeStatus, nil},
-		{mcapSubtypeReconnect, map[string]any{"serverName": mcapBrokenServer}},
-		{mcapSubtypeToggle, map[string]any{"serverName": mcapBrokenServer, "enabled": false}},
-	}
-	requests := make([]mcapRequest, 0, len(verbs))
-	for i, verb := range verbs {
-		requestID := fmt.Sprintf("req_%s_%d", verb.subtype, i+1)
-		line, err := mcapControlLine(verb.subtype, requestID, verb.extra)
+	requests := make([]mcapRequest, 0, 4)
+	send := func(subtype string, extra map[string]any, replyBudget time.Duration) (mcapRequest, error) {
+		requestID := fmt.Sprintf("req_%s_%d", subtype, len(requests)+1)
+		line, err := mcapControlLine(subtype, requestID, extra)
 		if err != nil {
-			return requests, fmt.Errorf("build %s control line: %w", verb.subtype, err)
+			return mcapRequest{}, fmt.Errorf("build %s control line: %w", subtype, err)
 		}
-		entry := mcapRequest{Subtype: verb.subtype, RequestID: requestID, Sent: red.str(string(line))}
+		entry := mcapRequest{Subtype: subtype, RequestID: requestID, Sent: red.str(string(line))}
 		start := time.Now()
 		if _, err := stdin.Write(line); err != nil {
 			entry.WriteError = red.str(err.Error())
 			entry.TerminatedOn = mcapTerminatedWrite
 			entry.WaitSeconds = time.Since(start).Seconds()
 			requests = append(requests, entry)
-			return requests, fmt.Errorf("write %s control request: %w", verb.subtype, err)
+			return entry, fmt.Errorf("write %s control request: %w", subtype, err)
 		}
-		entry.ReplyIndices, entry.TerminatedOn = mcapAwait(recorder, requestID, budget, poll)
+		entry.ReplyIndices, entry.TerminatedOn = mcapAwait(recorder, requestID, replyBudget, poll)
 		entry.WaitSeconds = time.Since(start).Seconds()
 		requests = append(requests, entry)
+		return entry, nil
+	}
+
+	status, err := send(mcapSubtypeStatus, nil, budget)
+	if err != nil {
+		return requests, err
+	}
+	if status.TerminatedOn != mcapTerminatedResponse {
+		return requests, fmt.Errorf("await %s readiness: initial mcp_status ended on %s",
+			mcapApproveServer, status.TerminatedOn)
+	}
+	readinessDeadline := time.Now().Add(budget)
+	for !mcapStatusReports(recorder, status.RequestID, mcapApproveServer, "connected") {
+		remaining := time.Until(readinessDeadline)
+		if remaining <= 0 {
+			return requests, fmt.Errorf("await %s readiness: server did not report connected within %s",
+				mcapApproveServer, budget)
+		}
+		if poll > 0 {
+			delay := min(poll, remaining)
+			time.Sleep(delay)
+		}
+		remaining = time.Until(readinessDeadline)
+		if remaining <= 0 {
+			return requests, fmt.Errorf("await %s readiness: server did not report connected within %s",
+				mcapApproveServer, budget)
+		}
+		status, err = send(mcapSubtypeStatus, nil, remaining)
+		if err != nil {
+			return requests, err
+		}
+		if status.TerminatedOn != mcapTerminatedResponse {
+			return requests, fmt.Errorf("await %s readiness: mcp_status ended on %s",
+				mcapApproveServer, status.TerminatedOn)
+		}
+	}
+
+	if _, err := send(mcapSubtypeReconnect,
+		map[string]any{"serverName": mcapApproveServer}, budget); err != nil {
+		return requests, err
+	}
+	if _, err := send(mcapSubtypeToggle,
+		map[string]any{"serverName": mcapBrokenServer, "enabled": false}, budget); err != nil {
+		return requests, err
 	}
 	return requests, nil
+}
+
+// mcapStatusReports reads the correlated status reply directly from the recorder.
+// It intentionally checks the wire response rather than elapsed time: reconnect is
+// sent only after the fixed test-owned server actually reports the requested state.
+func mcapStatusReports(recorder *dropcapRecorder, requestID, serverName, wantStatus string) bool {
+	lines, _ := recorder.snapshot()
+	for _, line := range lines {
+		if !line.Decoded || mcapResponseRequestID(line.Raw) != requestID {
+			continue
+		}
+		servers, _, ok := mcapServersFrom(line.Raw)
+		if !ok {
+			continue
+		}
+		for _, server := range servers {
+			var state struct {
+				Name   string `json:"name"`
+				Status string `json:"status"`
+			}
+			if json.Unmarshal(server, &state) == nil && state.Name == serverName && state.Status == wantStatus {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // mcapResponseRequestID returns the request_id one line carries, or empty.
@@ -1437,8 +1500,8 @@ func TestMcapControlLineCarriesEachVerbsOwnFields(t *testing.T) {
 		{
 			name:      "mcp_reconnect names the server, camelCase",
 			subtype:   mcapSubtypeReconnect,
-			extra:     map[string]any{"serverName": mcapBrokenServer},
-			wantInner: map[string]any{"subtype": mcapSubtypeReconnect, "serverName": mcapBrokenServer},
+			extra:     map[string]any{"serverName": mcapApproveServer},
+			wantInner: map[string]any{"subtype": mcapSubtypeReconnect, "serverName": mcapApproveServer},
 		},
 		{
 			name:    "mcp_toggle names the server and the desired state",
@@ -1488,28 +1551,67 @@ func TestMcapControlLineCarriesEachVerbsOwnFields(t *testing.T) {
 	}
 }
 
+type mcapTestWriter func([]byte) (int, error)
+
+func (write mcapTestWriter) Write(p []byte) (int, error) { return write(p) }
+
 // TestMcapDriveRequestsDoesNotWaitForInit is the offline guard on #2360's repaired
 // send point. An empty recorder is the exact startup-silence state that used to hold
 // the probe in its pre-request init wait until it returned without sending anything.
 func TestMcapDriveRequestsDoesNotWaitForInit(t *testing.T) {
 	t.Parallel()
 	recorder := newDropcapRecorder()
-	var sent strings.Builder
-	requests, err := mcapDriveRequests(&sent, recorder,
-		newDropcapRedactor("", "", "", "", "", mcapTestNonce), 0, 0)
+	statusReplies := 0
+	var sentLines []string
+	write := mcapTestWriter(func(line []byte) (int, error) {
+		sentLines = append(sentLines, string(line))
+		var request mcapControlRequest
+		if err := json.Unmarshal(line, &request); err != nil {
+			return 0, err
+		}
+		subtype, _ := request.Request["subtype"].(string)
+		response := map[string]any{
+			"type": "control_response",
+			"response": map[string]any{
+				"subtype":    "success",
+				"request_id": request.RequestID,
+			},
+		}
+		if subtype == mcapSubtypeStatus {
+			status := "pending"
+			if statusReplies > 0 {
+				status = "connected"
+			}
+			statusReplies++
+			response["response"].(map[string]any)["response"] = map[string]any{
+				"mcpServers": []map[string]any{
+					{"name": mcapApproveServer, "status": status},
+					{"name": mcapBrokenServer, "status": "failed", "error": "command not found"},
+				},
+			}
+		}
+		encoded, err := json.Marshal(response)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := recorder.Write(append(encoded, '\n')); err != nil {
+			return 0, err
+		}
+		return len(line), nil
+	})
+	requests, err := mcapDriveRequests(write, recorder,
+		newDropcapRedactor("", "", "", "", "", mcapTestNonce), time.Second, 0)
 	if err != nil {
 		t.Fatalf("mcapDriveRequests() error: %v", err)
 	}
-	if len(requests) != 3 {
-		t.Fatalf("mcapDriveRequests() returned %d requests, want 3", len(requests))
+	if len(requests) != 4 {
+		t.Fatalf("mcapDriveRequests() returned %d requests, want 4", len(requests))
 	}
 
-	wantSubtypes := []string{mcapSubtypeStatus, mcapSubtypeReconnect, mcapSubtypeToggle}
-	seenIDs := map[string]bool{}
-	lines := strings.Split(strings.TrimSuffix(sent.String(), "\n"), "\n")
-	if len(lines) != len(wantSubtypes) {
-		t.Fatalf("stdin received %d lines, want %d: %q", len(lines), len(wantSubtypes), sent.String())
+	wantSubtypes := []string{
+		mcapSubtypeStatus, mcapSubtypeStatus, mcapSubtypeReconnect, mcapSubtypeToggle,
 	}
+	seenIDs := map[string]bool{}
 	for i, wantSubtype := range wantSubtypes {
 		got := requests[i]
 		if got.Subtype != wantSubtype {
@@ -1519,12 +1621,68 @@ func TestMcapDriveRequestsDoesNotWaitForInit(t *testing.T) {
 			t.Errorf("request %d id = %q, want a distinct non-empty id", i, got.RequestID)
 		}
 		seenIDs[got.RequestID] = true
-		if got.Sent != lines[i]+"\n" {
-			t.Errorf("request %d sent = %q, want exact stdin line %q", i, got.Sent, lines[i]+"\n")
+		if got.Sent != sentLines[i] {
+			t.Errorf("request %d sent = %q, want exact stdin line %q", i, got.Sent, sentLines[i])
 		}
-		if got.TerminatedOn != mcapTerminatedBudget || len(got.ReplyIndices) != 0 {
-			t.Errorf("request %d outcome = %q/%v, want explicit budget with no reply",
+		if got.TerminatedOn != mcapTerminatedResponse || len(got.ReplyIndices) != 1 {
+			t.Errorf("request %d outcome = %q/%v, want one correlated response",
 				i, got.TerminatedOn, got.ReplyIndices)
+		}
+	}
+	if !strings.Contains(requests[2].Sent, `"serverName":"`+mcapApproveServer+`"`) {
+		t.Errorf("reconnect line = %q, want the ready test-owned server", requests[2].Sent)
+	}
+	if !strings.Contains(requests[3].Sent, `"serverName":"`+mcapBrokenServer+`"`) {
+		t.Errorf("toggle line = %q, want the deliberately broken diagnostic server", requests[3].Sent)
+	}
+}
+
+func TestMcapDriveRequestsRefusesReconnectUntilHealthy(t *testing.T) {
+	t.Parallel()
+	recorder := newDropcapRecorder()
+	write := mcapTestWriter(func(line []byte) (int, error) {
+		var request mcapControlRequest
+		if err := json.Unmarshal(line, &request); err != nil {
+			return 0, err
+		}
+		subtype, _ := request.Request["subtype"].(string)
+		if subtype != mcapSubtypeStatus {
+			t.Errorf("sent %s before %s reported connected", subtype, mcapApproveServer)
+		}
+		response := map[string]any{
+			"type": "control_response",
+			"response": map[string]any{
+				"subtype":    "success",
+				"request_id": request.RequestID,
+				"response": map[string]any{
+					"mcpServers": []map[string]any{
+						{"name": mcapApproveServer, "status": "pending"},
+						{"name": mcapBrokenServer, "status": "failed", "error": "command not found"},
+					},
+				},
+			},
+		}
+		encoded, err := json.Marshal(response)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := recorder.Write(append(encoded, '\n')); err != nil {
+			return 0, err
+		}
+		return len(line), nil
+	})
+
+	requests, err := mcapDriveRequests(write, recorder,
+		newDropcapRedactor("", "", "", "", "", mcapTestNonce), 5*time.Millisecond, time.Millisecond)
+	if err == nil {
+		t.Fatal("mcapDriveRequests() reconnected before the healthy server reported connected")
+	}
+	if len(requests) == 0 {
+		t.Fatal("mcapDriveRequests() retained no status request while waiting for readiness")
+	}
+	for _, request := range requests {
+		if request.Subtype != mcapSubtypeStatus {
+			t.Errorf("retained %s request before readiness, want only status diagnostics", request.Subtype)
 		}
 	}
 }
