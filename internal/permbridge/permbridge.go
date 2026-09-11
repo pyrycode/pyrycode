@@ -55,16 +55,19 @@ var ErrDuplicateID = errors.New("permbridge: duplicate or empty approval id")
 // is the opaque tool-input object, carried as json.RawMessage so it round-trips
 // byte-verbatim — an allow echoes it back as Verdict.UpdatedInput. The remaining
 // optional fields are copied only from the corresponding can_use_tool ask fields;
-// they are display context, never derived from Input and never verdict inputs.
+// they are never derived from Input. RequiresUserInteraction is daemon-internal
+// answer eligibility rather than display data and is therefore excluded from
+// JSON. None of these fields changes the registry's verdict arbitration.
 type Request struct {
-	ToolName           string          `json:"tool_name"`
-	Input              json.RawMessage `json:"input"`
-	ToolUseID          string          `json:"tool_use_id"`
-	DecisionReason     json.RawMessage `json:"decision_reason,omitempty"`
-	DecisionReasonType string          `json:"decision_reason_type,omitempty"`
-	BlockedPath        string          `json:"blocked_path,omitempty"`
-	Description        string          `json:"description,omitempty"`
-	DefaultToNo        bool            `json:"default_to_no,omitempty"`
+	ToolName                string          `json:"tool_name"`
+	Input                   json.RawMessage `json:"input"`
+	ToolUseID               string          `json:"tool_use_id"`
+	DecisionReason          json.RawMessage `json:"decision_reason,omitempty"`
+	DecisionReasonType      string          `json:"decision_reason_type,omitempty"`
+	BlockedPath             string          `json:"blocked_path,omitempty"`
+	Description             string          `json:"description,omitempty"`
+	DefaultToNo             bool            `json:"default_to_no,omitempty"`
+	RequiresUserInteraction bool            `json:"-"`
 }
 
 // Verdict is the allow/deny decision claude accepts. The omitempty tags give the
