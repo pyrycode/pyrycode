@@ -45,6 +45,15 @@ therefore keep stdin open, assert the request and response correlation, and use 
 side-effect witness; a successful process exit alone cannot distinguish a denial
 from a silent bypass. See [the permission protocol findings](permission-protocol-spike.md).
 
+Live delegation turns have an extra, valid envelope before the forwarded child
+response: claude emits the delegated prompt as a `user` text block, which the
+stream parser intentionally surfaces as `unrecognized_message` with
+`site=user_block`. A proof concerned with child prose lanes must still decrypt
+every Noise frame in order, classify and ignore that known unrelated envelope,
+then keep strict assertions for malformed payloads and unexpected parent lanes.
+Treating every non-target envelope as a lane failure rejects valid turns; skipping
+its decryption desynchronizes the receive nonce.
+
 ## Make target
 
 ```make

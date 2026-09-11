@@ -277,6 +277,64 @@ func TestStreamTurnDrainV2_FullSingleTurn(t *testing.T) {
 	}
 }
 
+func TestStreamTurnDrainV2_AttributedTextExcludesThinkingAndSignature(t *testing.T) {
+	t.Parallel()
+	const (
+		parentID        = "toolu-agent-2331"
+		visibleText     = "VISIBLE-SUBAGENT-TEXT-2331"
+		thinkingSecret  = "PRIVATE-SUBAGENT-THINKING-2331"
+		signatureSecret = "PRIVATE-SUBAGENT-SIGNATURE-2331"
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	active := &stubActiveSession{}
+	active.set("sess-a")
+	bcast := newChanBcast("conn-a")
+	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	sink := newStreamTurnSink(0, discardLogger())
+	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil, discardLogger())
+	defer func() { cancel(); cleanup() }()
+
+	attributed := `{"type":"assistant","parent_tool_use_id":"` + parentID +
+		`","message":{"id":"m-child","role":"assistant","content":[` +
+		`{"type":"thinking","thinking":"` + thinkingSecret + `","signature":"` + signatureSecret + `"},` +
+		`{"type":"text","text":"` + visibleText + `"}]}}`
+	feedLines(sink, "sess-a", attributed, resultLine)
+
+	got := collectEnvs(t, bcast.pushed, 5)
+	var delta protocol.AssistantDeltaPayload
+	foundDelta := false
+	for _, env := range got {
+		raw, err := json.Marshal(env)
+		if err != nil {
+			t.Fatalf("marshal captured %s envelope: %v", env.Type, err)
+		}
+		for _, secret := range []string{thinkingSecret, signatureSecret} {
+			if strings.Contains(string(raw), secret) {
+				t.Errorf("%s envelope published confidential marker %q: %s", env.Type, secret, raw)
+			}
+		}
+		if env.Type != protocol.TypeAssistantDelta {
+			continue
+		}
+		if err := json.Unmarshal(env.Payload, &delta); err != nil {
+			t.Fatalf("decode attributed assistant_delta: %v", err)
+		}
+		foundDelta = true
+	}
+	if !foundDelta {
+		t.Fatal("ordinary attributed text did not reach an assistant_delta")
+	}
+	if delta.Text != visibleText || delta.ParentToolUseID != parentID {
+		t.Errorf("assistant_delta = {text:%q parent:%q}, want {%q %q}",
+			delta.Text, delta.ParentToolUseID, visibleText, parentID)
+	}
+}
+
 // AC2: a background conversation's parser events (its session != the active
 // session) are dropped BEFORE the emitter, so its conn never receives them.
 func TestStreamTurnDrainV2_ScopingDropsBackground(t *testing.T) {
