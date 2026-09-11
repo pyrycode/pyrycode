@@ -78,11 +78,27 @@ Table-driven stdlib `testing`, `go test -race`. Fake-child harness dispatches fr
 
 Scenarios: `buildArgs` shape (pure, table — fixed prefix present, `-p` absent, `--session-id` vs `--resume`, id byte-identical across first-spawn/respawn, `base` order preserved and not mutated); held-open stdin (echo round-trip + `GOT_EOF` absent while alive); backoff ladder (lifted `supervisor.backoff_test.go` verbatim against the copied `backoffTimer`); restart-on-crash (≥2 spawns observed via `onSpawn`); resume-id-stable-across-restart (captured argv: spawn 1 has `--session-id <id>`, spawn 2 has `--resume <id>`, same id); teardown SIGTERM+grace (`Run` returns within `< killGrace`, "got SIGTERM" on stderr); teardown reaps descendant groups (`reapDescendantGroupsFn` swap, non-parallel); the `firstRun`-gate regression test (non-existent binary, every retry keeps `--session-id`).
 
+For request/reply correlation that spans an `io.Writer` call, proving
+"registered before write" and "a failed write cannot emit" in separate tests
+does not prove their ordering under concurrency. A matching response can arrive
+after the operating-system write but before the writer returns its error. The
+discriminating test needs a writer that exposes that response while its return
+is still blocked, then returns the error and proves the waiting parser emits
+nothing. Otherwise a regression that reads the response before the write result
+is published can leave both simpler tests green.
+
 **#1630 added three tests, all pure insertions — the four argv-through-a-real-spawn pins and the three `buildArgs`-shape tests above stay byte-unmodified.** `TestUseCreateForm_ProbeDecidesIDFlag` (pure, table, composes `useCreateForm`+`buildArgs` over `t.TempDir()` fixtures with hand-written `<uuid>.jsonl` files, mtime-differentiated via `os.Chtimes` so a "newer unrelated transcript" row is deterministic rather than write-order-dependent); `TestRunner_BeginSpawn_FirstSpawnResumesExistingTranscript` (the wiring pin — proves `beginSpawn` actually feeds the probe's answer to `buildArgs` rather than passing `firstRun` straight through); `TestRunner_RestartFresh_ProbeDecidesPerSpawn` (the per-spawn pin — an *asymmetric* fixture, transcript present only for the pre-rotation id, is the one arrangement that discriminates a per-spawn decision from one memoised at construction; a fixture with both ids absent would pass either way). One general lesson from building the table: a row composing two functions (`useCreateForm` then `buildArgs`) only proves the override if its `latchCreate` column is set *against* the expected flag — a row where the latch already agrees with the probe's answer stays green under a mutant that deletes the probe entirely, so it reads as coverage while proving nothing about the override.
 
 ## Turn I/O — envelope write + stdout parser (#1088)
 
-The turn I/O boundary fills `Stdin()`/`Config.Stdout` with two additive seams — no `runner.go` diff.
+`buildArgs` requests both `--include-partial-messages` and
+`--forward-subagent-text` in the fixed prefix for create (`--session-id`) and
+resume (`--resume`) spawns. Production therefore receives the nested
+`stream_event` lines and attributed subagent prose mapped below; caller-supplied
+arguments do not need to opt into either. This prefix belongs only to the
+long-lived interactive child; the separate `pyry agent-run` argv is unchanged.
+The turn I/O boundary fills
+`Stdin()`/`Config.Stdout` with two additive seams:
 
 ```go
 var ErrNoLiveChild = errors.New("streamsup: no live child")
@@ -93,6 +109,26 @@ type Parser struct { /* sink, byte buffer, maxBuf, logger */ }
 func NewParser(sink func(turnevent.Event), logger *slog.Logger) *Parser
 func (p *Parser) Write(b []byte) (int, error) // io.Writer; set as Config.Stdout
 ```
+
+`Runner.RequestContextUsage` and the parser form one solicited-response boundary.
+When the runner's `Config.Stdout` is that concrete parser, the runner registers
+its locally minted request ID before writing `get_context_usage`, removes the
+registration if the write fails, and publishes the write result to any response
+that arrived before the call returned. The parser accepts only an exact pending
+ID and retires it before decoding subtype or payload, so an unknown ID, duplicate,
+error reply, or malformed first reply cannot emit a later `ContextUsage` under
+the same ID. A runner configured with another stdout writer can still send the
+request but cannot establish the provenance needed to emit the event.
+
+A successful reply emits Claude's `model`, `totalTokens`, `maxTokens`, and
+`percentage` unchanged. `boundContextUsageEntries` ranks categories by descending
+token count, retains at most 32 names of at most 256 bytes, and reports every
+string rejection and count-cap omission in `DroppedCategories`; an overlong model
+drops the whole event. This reading is informational and does not replace
+`contextwindow.Read`. Response-side decode failures are deliberately silent:
+`emitModelList` remains the sole owner of the existing content-free
+`logControlResponse` record, so Claude-authored bytes and decoder errors never
+enter daemon logs.
 
 `emitStreamEvent` maps Claude's nested partial-message wire without changing the
 downstream event contract. A valid `message_start` replaces the current message

@@ -1,0 +1,1 @@
+{"id":918,"type":"model_refusal_no_fallback","ts":"2026-09-11T08:21:01Z","payload":{"conversation_id":"c1","original_model":"claude-opus-4-1","refusal_category":"","banner":"Claude refused this request.","truncated_fields":null,"dropped_fields":null}}

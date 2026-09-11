@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/pyrycode/pyrycode/internal/transcript"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
@@ -2436,6 +2437,11 @@ type Parser struct {
 	// invariant above does not extend to it.
 	postureGate *PostureGate
 
+	// contextUsageRequests correlates the locally requested context readings whose
+	// replies may emit. Its own mutex covers calls from Runner while Write consumes
+	// stdout on another goroutine.
+	contextUsageRequests contextUsageRequests
+
 	// canUseTool is the seam an answerer installs to receive claude's inbound
 	// permission asks (#2282). Nil until SetCanUseToolHandler is called, and nil is
 	// the production state today: nothing spawns with --permission-prompt-tool stdio,
@@ -2483,6 +2489,14 @@ func NewParser(sink func(turnevent.Event), logger *slog.Logger) *Parser {
 // the runner arming the gate and the parser releasing it are the same object by
 // construction. Never nil for a parser built by NewParser.
 func (p *Parser) PostureGate() *PostureGate { return p.postureGate }
+
+func (p *Parser) registerContextUsageRequest(id string) *pendingContextUsageRequest {
+	return p.contextUsageRequests.register(id)
+}
+
+func (p *Parser) removeContextUsageRequest(id string, pending *pendingContextUsageRequest) {
+	p.contextUsageRequests.remove(id, pending)
+}
 
 // SetCanUseToolHandler installs h as the destination for claude's inbound
 // can_use_tool permission asks (#2282). With none installed the parser consumes such
@@ -3243,7 +3257,8 @@ type conversationResetLine struct {
 // (controlAckLine) answering a DIFFERENT question. That reader gates a locally-minted
 // request the daemon is actively WAITING FOR; this type decides what a payload's
 // CONTENT may be read as. The paragraph above was never about the former and does not
-// pre-decide it.
+// pre-decide it. Context-usage replies now correlate content on their own
+// `contextUsageResponseIDLine`, likewise without widening this model-list target.
 //
 // The separate type is also what keeps this one's decode behaviour fixed, and the
 // reason is worth stating where the temptation is: adding `RequestID string` here
@@ -3296,6 +3311,83 @@ type controlAckLine struct {
 		Subtype   string `json:"subtype"`
 		RequestID string `json:"request_id"`
 	} `json:"response"`
+}
+
+// contextUsageResponseIDLine is the narrow first decode of a context-usage reply.
+// It excludes subtype and payload so an exact pending id can be retired before
+// either is interpreted.
+type contextUsageResponseIDLine struct {
+	Response struct {
+		RequestID string `json:"request_id"`
+	} `json:"response"`
+}
+
+type contextUsageCategoryLine struct {
+	Name   string `json:"name"`
+	Tokens int    `json:"tokens"`
+}
+
+type contextUsageResponseLine struct {
+	Response struct {
+		Subtype  string `json:"subtype"`
+		Response *struct {
+			Model       string                     `json:"model"`
+			TotalTokens int                        `json:"totalTokens"`
+			MaxTokens   int                        `json:"maxTokens"`
+			Percentage  int                        `json:"percentage"`
+			Categories  []contextUsageCategoryLine `json:"categories"`
+		} `json:"response"`
+	} `json:"response"`
+}
+
+type pendingContextUsageRequest struct {
+	done    chan struct{}
+	success bool
+	once    sync.Once
+}
+
+func (r *pendingContextUsageRequest) resolve(success bool) {
+	r.once.Do(func() {
+		r.success = success
+		close(r.done)
+	})
+}
+
+func (r *pendingContextUsageRequest) written() bool {
+	<-r.done
+	return r.success
+}
+
+type contextUsageRequests struct {
+	mu      sync.Mutex
+	pending map[string]*pendingContextUsageRequest
+}
+
+func (r *contextUsageRequests) register(id string) *pendingContextUsageRequest {
+	pending := &pendingContextUsageRequest{done: make(chan struct{})}
+	r.mu.Lock()
+	if r.pending == nil {
+		r.pending = make(map[string]*pendingContextUsageRequest)
+	}
+	r.pending[id] = pending
+	r.mu.Unlock()
+	return pending
+}
+
+func (r *contextUsageRequests) take(id string) *pendingContextUsageRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	pending := r.pending[id]
+	delete(r.pending, id)
+	return pending
+}
+
+func (r *contextUsageRequests) remove(id string, pending *pendingContextUsageRequest) {
+	r.mu.Lock()
+	if r.pending[id] == pending {
+		delete(r.pending, id)
+	}
+	r.mu.Unlock()
 }
 
 // canUseToolSubtype is the one inbound control-request subtype this parser claims.
@@ -4558,6 +4650,7 @@ func (p *Parser) consumeLine(line []byte) {
 		// noteControlAck runs ABOVE emitModelList so the gate opens without waiting
 		// behind an emit into a downstream sink, and it reads its own decode target, so
 		// which rung a models or commands payload lands on is untouched by construction.
+		p.emitContextUsage(line)
 		p.noteControlAck(line)
 		p.emitModelList(line)
 	case "control_request":
@@ -7053,6 +7146,48 @@ func (p *Parser) emitConversationReset(line []byte) bool {
 		NewConversationID: cr.NewConversationID,
 	})
 	return true
+}
+
+// emitContextUsage publishes a context reading only for an exact pending id minted
+// by RequestContextUsage. The id is decoded and retired before subtype or payload,
+// making every matched reply terminal even when its payload is unusable. This path
+// logs nothing; emitModelList remains the sole control-response record owner.
+func (p *Parser) emitContextUsage(line []byte) {
+	var idLine contextUsageResponseIDLine
+	if err := json.Unmarshal(line, &idLine); err != nil || idLine.Response.RequestID == "" {
+		return
+	}
+	pending := p.contextUsageRequests.take(idLine.Response.RequestID)
+	if pending == nil || !pending.written() {
+		return
+	}
+
+	var response contextUsageResponseLine
+	if err := json.Unmarshal(line, &response); err != nil ||
+		response.Response.Subtype != controlResponseSuccess || response.Response.Response == nil {
+		return
+	}
+	payload := response.Response.Response
+	if len(payload.Model) > maxContextUsageStringBytes {
+		return
+	}
+	categories, dropped := boundContextUsageEntries(
+		payload.Categories,
+		func(category contextUsageCategoryLine) int { return category.Tokens },
+		func(category *contextUsageCategoryLine) []*string { return []*string{&category.Name} },
+	)
+	eventCategories := make([]turnevent.ContextUsageCategory, len(categories))
+	for i, category := range categories {
+		eventCategories[i] = turnevent.ContextUsageCategory{Name: category.Name, Tokens: category.Tokens}
+	}
+	p.emit(turnevent.ContextUsage{
+		Model:             strings.Clone(payload.Model),
+		TotalTokens:       payload.TotalTokens,
+		MaxTokens:         payload.MaxTokens,
+		Percentage:        payload.Percentage,
+		Categories:        eventCategories,
+		DroppedCategories: dropped,
+	})
 }
 
 // emitModelList decodes one top-level control_response line and emits AT MOST ONE

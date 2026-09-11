@@ -738,6 +738,19 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			TruncatedFields: modelRefusalFallbackReportKeys(e.TruncatedFields),
 			DroppedFields:   modelRefusalFallbackReportKeys(e.DroppedFields),
 		}, true
+	case turnevent.ModelRefusalNoFallback:
+		// Conversation identity only. The event carries no request or claude message
+		// identity that can join it to the assistant-delta stream, so tc.TurnID and
+		// tc.Seq have no honest destination. The producer already bounded every value.
+		// RefusalExplanation is excluded because Banner is the wire's sole display prose.
+		return protocol.TypeModelRefusalNoFallback, protocol.ModelRefusalNoFallbackPayload{
+			ConversationID:  tc.ConversationID,
+			OriginalModel:   e.OriginalModel,
+			RefusalCategory: e.RefusalCategory,
+			Banner:          e.Banner,
+			TruncatedFields: modelRefusalNoFallbackReportKeys(e.TruncatedFields),
+			DroppedFields:   modelRefusalNoFallbackReportKeys(e.DroppedFields),
+		}, true
 	case turnevent.SessionFacts:
 		// The OTHER half of the same system/init line the arm above maps, and it sits
 		// here rather than anywhere else in this switch for that reason. Conversation
@@ -1082,6 +1095,17 @@ func modelRefusalFallbackReportKeys(report []string) []string {
 	for _, name := range report {
 		switch name {
 		case "scope", "original_model", "fallback_model", "refusal_category", "banner":
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func modelRefusalNoFallbackReportKeys(report []string) []string {
+	var out []string
+	for _, name := range report {
+		switch name {
+		case "original_model", "refusal_category", "banner":
 			out = append(out, name)
 		}
 	}

@@ -1576,8 +1576,8 @@ type inUserTurn struct {
 // Subtype inside Request, matching marshalPermissionModeEnvelope, not a second
 // top-level field beside RequestID.
 //
-// Mode and Model are empty for subtypes that do not carry them. These are decoded
-// absences, not sentinels; the subtype wrappers decide what a response echoes.
+// Mode, Model, and Detail are empty for subtypes that do not carry them. These are
+// decoded absences, not sentinels; the subtype wrappers decide what a response echoes.
 type inControlRequest struct {
 	Type      string `json:"type"`
 	RequestID string `json:"request_id"`
@@ -1585,6 +1585,7 @@ type inControlRequest struct {
 		Subtype string `json:"subtype"`
 		Mode    string `json:"mode"`
 		Model   string `json:"model"`
+		Detail  string `json:"detail"`
 	} `json:"request"`
 }
 
@@ -2083,6 +2084,14 @@ func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rat
 				if werr := writeInitializeAck(w, reqID); werr != nil {
 					return
 				}
+			} else if reqID, ok := contextUsageRequestID(b); ok {
+				// Context usage is requested during ordinary fake-daemon runs, so its
+				// canned answer is unconditional on stream riders just like initialize.
+				// Summary and full deliberately share this response: the committed
+				// capture found the same payload hierarchy for both detail values.
+				if werr := writeContextUsageAck(w, reqID); werr != nil {
+					return
+				}
 			} else if reqID, mode, ok := setPermissionModeRequest(b); ok {
 				// The daemon told this child which permission posture to adopt (#2067) —
 				// the request it will, from #2064 on, write at spawn time and hold every
@@ -2159,6 +2168,7 @@ func userTurnText(line []byte) (string, bool) {
 const (
 	subtypeInterrupt         = "interrupt"
 	subtypeInitialize        = "initialize"
+	subtypeGetContextUsage   = "get_context_usage"
 	subtypeSetPermissionMode = "set_permission_mode"
 	subtypeSetModel          = "set_model"
 )
@@ -2203,6 +2213,22 @@ func controlRequestID(line []byte, subtype string) (string, bool) {
 // correlation id for the ack to echo (#1500).
 func interruptControlRequest(line []byte) (string, bool) {
 	return controlRequestID(line, subtypeInterrupt)
+}
+
+// contextUsageRequestID accepts the two detail values observed in the capture and
+// returns the correlation id for the shared canned answer. A missing or unknown
+// detail is not a recognized request and falls through without output.
+func contextUsageRequestID(line []byte) (string, bool) {
+	in, ok := decodeControlRequest(line, subtypeGetContextUsage)
+	if !ok {
+		return "", false
+	}
+	switch in.Request.Detail {
+	case "summary", "full":
+		return in.RequestID, true
+	default:
+		return "", false
+	}
 }
 
 // setPermissionModeRequest reports whether line is the set_permission_mode
@@ -2630,6 +2656,97 @@ func loadInitializeModels(path string) ([]map[string]any, error) {
 		return nil, fmt.Errorf("decode %s: %w", filepath.Base(path), err)
 	}
 	return models, nil
+}
+
+type cannedContextUsageCategory struct {
+	Name       string `json:"name"`
+	Tokens     int    `json:"tokens"`
+	Color      string `json:"color"`
+	IsDeferred bool   `json:"isDeferred,omitempty"`
+}
+
+type cannedContextUsageMCPTool struct {
+	Name       string `json:"name"`
+	ServerName string `json:"serverName"`
+	Tokens     int    `json:"tokens"`
+	IsLoaded   bool   `json:"isLoaded"`
+}
+
+type cannedContextUsageMemoryFile struct {
+	Path   string `json:"path"`
+	Tokens int    `json:"tokens"`
+}
+
+type cannedContextUsagePayload struct {
+	Categories           []cannedContextUsageCategory   `json:"categories"`
+	TotalTokens          int                            `json:"totalTokens"`
+	MaxTokens            int                            `json:"maxTokens"`
+	RawMaxTokens         int                            `json:"rawMaxTokens"`
+	AutocompactSource    string                         `json:"autocompactSource"`
+	Percentage           int                            `json:"percentage"`
+	AutoCompactThreshold int                            `json:"autoCompactThreshold"`
+	IsAutoCompactEnabled bool                           `json:"isAutoCompactEnabled"`
+	Model                string                         `json:"model"`
+	MCPTools             []cannedContextUsageMCPTool    `json:"mcpTools"`
+	MemoryFiles          []cannedContextUsageMemoryFile `json:"memoryFiles"`
+}
+
+// writeContextUsageAck writes the captured get_context_usage success hierarchy with
+// deterministic fictional values. The deliberately oversized and unsorted lists make
+// downstream limit handling observable in the hermetic suite: mcpTools exceeds the
+// 32-entry bound, one name exceeds 256 bytes, and every list requires sorting.
+func writeContextUsageAck(w io.Writer, requestID string) error {
+	return writeJSONLine(w, map[string]any{
+		"type": "control_response",
+		"response": map[string]any{
+			"subtype":    "success",
+			"request_id": requestID,
+			"response":   cannedContextUsage(),
+		},
+	})
+}
+
+func cannedContextUsage() cannedContextUsagePayload {
+	return cannedContextUsagePayload{
+		Categories: []cannedContextUsageCategory{
+			{Name: "Fixture system prompt", Tokens: 1800, Color: "promptBorder"},
+			{Name: "Fixture tools", Tokens: 4200, Color: "inactive"},
+			{Name: "Fixture deferred tools", Tokens: 900, Color: "inactive", IsDeferred: true},
+			{Name: "Fixture messages", Tokens: 2600, Color: "purple_FOR_SUBAGENTS_ONLY"},
+		},
+		TotalTokens:          9500,
+		MaxTokens:            200000,
+		RawMaxTokens:         200000,
+		AutocompactSource:    "auto",
+		Percentage:           5,
+		AutoCompactThreshold: 167000,
+		IsAutoCompactEnabled: true,
+		Model:                "claude-fixture-context",
+		MCPTools:             cannedContextUsageMCPTools(),
+		MemoryFiles: []cannedContextUsageMemoryFile{
+			{Path: "/__pyry_fake__/memory/project.md", Tokens: 19},
+			{Path: "/__pyry_fake__/memory/" + strings.Repeat("long-fixture-segment-", 14) + "memory.md", Tokens: 83},
+			{Path: "/__pyry_fake__/memory/preferences.md", Tokens: 31},
+		},
+	}
+}
+
+func cannedContextUsageMCPTools() []cannedContextUsageMCPTool {
+	const count = 33
+	tools := make([]cannedContextUsageMCPTool, 0, count)
+	for i := range count {
+		name := fmt.Sprintf("mcp__fixture_server__tool_%02d", i)
+		if i == count/2 {
+			name += "_" + strings.Repeat("long_fixture_name_", 16)
+		}
+		tools = append(tools, cannedContextUsageMCPTool{
+			Name:       name,
+			ServerName: "fixture-server",
+			Tokens:     40 + (i%7)*37,
+			IsLoaded:   i%5 == 0,
+		})
+	}
+	return tools
 }
 
 // writeSetPermissionModeAck writes the control_response real claude answers a
