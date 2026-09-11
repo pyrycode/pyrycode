@@ -114,5 +114,5 @@ Pending for the documentation stage: update `docs/knowledge/features/permbridge-
 - [Concurrency] No findings — the immutable bit is stored and read under the existing leaf bridge mutex, which is released before broadcaster or registry calls. Existing registry and modal delete-under-lock one-shots arbitrate terminal races; no goroutine or shutdown path is added.
 - [Threat model alignment] No findings — a paired remote device loses, rather than gains, authority for a class of Claude-declared asks. Replay, forged option, unauthenticated-device, and timeout behavior continue through the existing gates. Local tool-specific interaction itself is outside this daemon permission-modal transport; the ticket requires fail-closed timeout rather than adding a new remote interaction protocol.
 
-**Reviewer:** builder (self-review per the security-review checklist)  
+**Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-11
