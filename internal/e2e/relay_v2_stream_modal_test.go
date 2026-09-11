@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -103,10 +104,12 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 		// loseAnswerer drives the fail-closed arm: instead of answering, phone A's
 		// session ENDS, so nobody is left able to answer — the condition the window
 		// still denies on. A second, later conn witnesses the outcome (see the arm).
-		loseAnswerer bool
-		stdio        bool
-		question     bool
-		childExit    bool
+		loseAnswerer        bool
+		stdio               bool
+		offerAlwaysAllow    bool
+		suppressAlwaysAllow bool
+		question            bool
+		childExit           bool
 		// wantNeedle is the assistant_delta text the daemon's verdict must reflect;
 		// forbidNeedles must never appear (fail-open / masked-error guards).
 		wantNeedle    string
@@ -137,24 +140,26 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			wantSource:      "remote",
 		},
 		{
-			name:            "stdio_allow",
-			approvalTimeout: "30s",
-			answer:          allowOnce,
-			stdio:           true,
-			wantNeedle:      "approve-allow",
-			forbidNeedles:   []string{"approve-deny", "approve-error"},
-			wantOutcome:     allowOnce,
-			wantSource:      "remote",
+			name:             "stdio_allow",
+			approvalTimeout:  "30s",
+			answer:           allowOnce,
+			stdio:            true,
+			offerAlwaysAllow: true,
+			wantNeedle:       "approve-allow",
+			forbidNeedles:    []string{"approve-deny", "approve-error"},
+			wantOutcome:      allowOnce,
+			wantSource:       "remote",
 		},
 		{
-			name:            "stdio_deny",
-			approvalTimeout: "30s",
-			answer:          rejectOnce,
-			stdio:           true,
-			wantNeedle:      "approve-deny",
-			forbidNeedles:   []string{"approve-allow", "approve-error"},
-			wantOutcome:     rejectOnce,
-			wantSource:      "remote",
+			name:                "stdio_deny",
+			approvalTimeout:     "30s",
+			answer:              rejectOnce,
+			stdio:               true,
+			suppressAlwaysAllow: true,
+			wantNeedle:          "approve-deny",
+			forbidNeedles:       []string{"approve-allow", "approve-error"},
+			wantOutcome:         rejectOnce,
+			wantSource:          "remote",
 		},
 		{
 			name:            "stdio_question_answer",
@@ -251,7 +256,14 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			if tc.stdio {
 				rider := `{"tool_name":"Bash","input":{"command":"true","reason_type":"input-lookalike"},"tool_use_id":"` + riderToolUseID + `",` +
 					`"decision_reason":{"rule":"outside_read_only"},"decision_reason_type":"future_reason_kind",` +
-					`"blocked_path":"/workspace/out","description":"Write output","default_to_no":true}`
+					`"blocked_path":"/workspace/out","description":"Write output","default_to_no":true`
+				if tc.offerAlwaysAllow || tc.suppressAlwaysAllow {
+					rider += `,"permission_suggestions":[` +
+						`{"type":"addRules","behavior":"allow","rules":[{"toolName":"Bash"}]},` +
+						`{"type":"addRules","behavior":"allow","rules":[{"toolName":"Read","ruleContent":"//src/**"}]}` +
+						`],"suppress_always_allow_rule":` + strconv.FormatBool(tc.suppressAlwaysAllow)
+				}
+				rider += `}`
 				if tc.question {
 					rider = `{"tool_name":"AskUserQuestion","input":{"questions":[{"question":"Pick?","header":"Pick","options":[{"label":"A","description":"first"},{"label":"B","description":"second"}],"multiSelect":false}]},"tool_use_id":"` + riderToolUseID + `"}`
 				}
@@ -422,6 +434,16 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 						shown.BlockedPath != "/workspace/out" || shown.Description != "Write output" || !shown.DefaultToNo {
 						t.Errorf("stdio modal context = %+v, want rider fields", shown)
 					}
+				}
+				if shown.AlwaysAllow.Offered != tc.offerAlwaysAllow {
+					t.Errorf("modal_shown always_allow offered = %v, want %v", shown.AlwaysAllow.Offered, tc.offerAlwaysAllow)
+				}
+				wantRules := []string{}
+				if tc.offerAlwaysAllow {
+					wantRules = []string{"Bash", "Read(//src/**)"}
+				}
+				if shown.AlwaysAllow.Rules == nil || !slices.Equal(shown.AlwaysAllow.Rules, wantRules) {
+					t.Errorf("modal_shown always_allow rules = %v, want %v", shown.AlwaysAllow.Rules, wantRules)
 				}
 				wantIDs := []string{
 					string(turnevent.PermissionOptionKindAllowOnce),

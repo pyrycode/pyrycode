@@ -30,11 +30,15 @@ func sampleModalPayload(modalID string) protocol.ModalShownPayload {
 			{ID: "reject_once", Label: "Reject once"},
 		},
 		DefaultOptionID: "reject_once",
-		Reason:          json.RawMessage(`{"rule":"outside_read_only"}`),
-		ReasonType:      "future_reason_kind",
-		BlockedPath:     "/workspace/out",
-		Description:     "Write output",
-		DefaultToNo:     true,
+		AlwaysAllow: protocol.AlwaysAllowPayload{
+			Offered: true,
+			Rules:   []string{"Bash", "Read(//src/**)"},
+		},
+		Reason:      json.RawMessage(`{"rule":"outside_read_only"}`),
+		ReasonType:  "future_reason_kind",
+		BlockedPath: "/workspace/out",
+		Description: "Write output",
+		DefaultToNo: true,
 	}
 }
 

@@ -1,0 +1,1 @@
+{"id":502,"type":"modal_shown","ts":"2026-06-22T10:00:00Z","payload":{"conversation_id":"conv-7f3a","modal_id":"mdl-unavailable","class":"permission","title":"Allow Bash?","prompt":"claude wants to run: pwd","options":[{"id":"allow","label":"Allow"},{"id":"deny","label":"Deny"}],"default_option_id":"deny","always_allow":{"offered":false,"rules":[]}}}

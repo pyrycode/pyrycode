@@ -95,6 +95,10 @@ func TestStreamApprovalBridge_Surface_BroadcastsPermissionModal(t *testing.T) {
 	req.BlockedPath = "/workspace/out"
 	req.Description = "Write output"
 	req.DefaultToNo = true
+	req.AlwaysAllow = permbridge.ParseAlwaysAllow(json.RawMessage(`[`+
+		`{"type":"addRules","behavior":"allow","rules":[{"toolName":"Bash"}]},`+
+		`{"type":"addRules","behavior":"allow","rules":[{"toolName":"Read","ruleContent":"//src/**"}]}`+
+		`]`), false)
 	retire := bridge.Surface(req)
 	if retire == nil {
 		t.Fatal("Surface returned a nil retire closure")
@@ -131,6 +135,9 @@ func TestStreamApprovalBridge_Surface_BroadcastsPermissionModal(t *testing.T) {
 	if string(p.Reason) != string(req.DecisionReason) || p.ReasonType != req.DecisionReasonType ||
 		p.BlockedPath != req.BlockedPath || p.Description != req.Description || p.DefaultToNo != req.DefaultToNo {
 		t.Errorf("initial modal context = %+v, want parked request context %+v", p, req)
+	}
+	if !p.AlwaysAllow.Offered || !reflect.DeepEqual(p.AlwaysAllow.Rules, []string{"Bash", "Read(//src/**)"}) {
+		t.Errorf("initial always_allow = %+v, want ordered offered rules", p.AlwaysAllow)
 	}
 	snapshot := modal.Snapshot()
 	if len(snapshot) != 1 || !reflect.DeepEqual(snapshot[0], p) {
@@ -170,6 +177,9 @@ func TestStreamApprovalBridge_Surface_EmptyContextIsNotDerivedFromInput(t *testi
 		if bytes.Contains(raw, []byte(`"`+key+`"`)) {
 			t.Errorf("zero-context modal derived %q from tool input: %s", key, raw)
 		}
+	}
+	if payload.AlwaysAllow.Offered || payload.AlwaysAllow.Rules == nil || len(payload.AlwaysAllow.Rules) != 0 {
+		t.Errorf("zero-context always_allow = %+v, want unavailable", payload.AlwaysAllow)
 	}
 }
 
@@ -579,6 +589,7 @@ func TestStreamApproval_NoBodyLeakInLogs(t *testing.T) {
 	const secretTool = "SECRET-TOOL-NAME-9999"
 	const secretInput = "SECRET-INPUT-BYTES-7777"
 	const secretContext = "SECRET-CONTEXT-BYTES-5555"
+	const secretSuggestion = "SECRET-SUGGESTION-BYTES-3333"
 
 	perm := permbridge.New()
 	modalReg := modalbridge.New()
@@ -593,6 +604,7 @@ func TestStreamApproval_NoBodyLeakInLogs(t *testing.T) {
 	req.DecisionReasonType = secretContext + "-type"
 	req.BlockedPath = "/" + secretContext
 	req.Description = secretContext + "-description"
+	req.AlwaysAllow = permbridge.ParseAlwaysAllow(json.RawMessage(`[{"type":"addRules","behavior":"allow","rules":[{"toolName":"`+secretSuggestion+`"}]}]`), false)
 	retire := bridge.Surface(req)
 	modalID := lastModalShown(t, bcast.pushes).ModalID
 
@@ -613,6 +625,9 @@ func TestStreamApproval_NoBodyLeakInLogs(t *testing.T) {
 	}
 	if strings.Contains(s, secretContext) {
 		t.Error("permission context leaked into a log field")
+	}
+	if strings.Contains(s, secretSuggestion) {
+		t.Error("permission suggestion leaked into a log field")
 	}
 }
 

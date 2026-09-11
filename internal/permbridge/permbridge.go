@@ -29,6 +29,7 @@
 package permbridge
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"sync"
@@ -40,6 +41,129 @@ const (
 	BehaviorAllow = "allow"
 	BehaviorDeny  = "deny"
 )
+
+const (
+	maxAlwaysAllowBytes  = 16 << 10
+	maxAlwaysAllowRules  = 16
+	maxRenderedRuleBytes = 1024
+)
+
+// PermissionRule is one validated rule from claude's permission suggestions.
+// RuleContent distinguishes an absent value from a present empty string because
+// the latter renders as toolName().
+type PermissionRule struct {
+	ToolName    string  `json:"toolName"`
+	RuleContent *string `json:"ruleContent,omitempty"`
+}
+
+// PermissionUpdate is one supported permission suggestion. ParseAlwaysAllow
+// admits only addRules/allow updates, but the discriminants remain explicit for
+// the grant path that will serialize the retained updates back to claude.
+type PermissionUpdate struct {
+	Type     string           `json:"type"`
+	Rules    []PermissionRule `json:"rules"`
+	Behavior string           `json:"behavior"`
+}
+
+// AlwaysAllow is an immutable, validated always-allow offer. Its slices are
+// package-owned; accessors return clones so outstanding modal state cannot be
+// changed by a later caller.
+type AlwaysAllow struct {
+	updates []PermissionUpdate
+	rules   []string
+}
+
+// Offered reports whether the value contains a complete validated offer.
+func (a AlwaysAllow) Offered() bool {
+	return len(a.updates) != 0
+}
+
+// Rules returns rendered display rules in source order.
+func (a AlwaysAllow) Rules() []string {
+	return append([]string(nil), a.rules...)
+}
+
+// Updates returns a deep copy of the validated updates in source order.
+func (a AlwaysAllow) Updates() []PermissionUpdate {
+	if a.updates == nil {
+		return nil
+	}
+	out := make([]PermissionUpdate, len(a.updates))
+	for i, update := range a.updates {
+		out[i] = update
+		out[i].Rules = make([]PermissionRule, len(update.Rules))
+		for j, rule := range update.Rules {
+			out[i].Rules[j] = rule
+			if rule.RuleContent != nil {
+				content := *rule.RuleContent
+				out[i].Rules[j].RuleContent = &content
+			}
+		}
+	}
+	return out
+}
+
+type permissionUpdateInput struct {
+	Type     string                `json:"type"`
+	Rules    []permissionRuleInput `json:"rules"`
+	Behavior string                `json:"behavior"`
+}
+
+type permissionRuleInput struct {
+	ToolName    string          `json:"toolName"`
+	RuleContent json.RawMessage `json:"ruleContent"`
+}
+
+// ParseAlwaysAllow validates claude-authored permission suggestions as one
+// bounded batch. Every unavailable or invalid shape returns the zero value;
+// partial and truncated offers are never returned.
+func ParseAlwaysAllow(raw json.RawMessage, suppressed bool) AlwaysAllow {
+	if suppressed || len(raw) == 0 || len(raw) > maxAlwaysAllowBytes {
+		return AlwaysAllow{}
+	}
+	var input []permissionUpdateInput
+	if err := json.Unmarshal(raw, &input); err != nil || len(input) == 0 {
+		return AlwaysAllow{}
+	}
+
+	updates := make([]PermissionUpdate, len(input))
+	rendered := make([]string, 0)
+	totalRules := 0
+	for i, update := range input {
+		if update.Type != "addRules" || update.Behavior != BehaviorAllow || len(update.Rules) == 0 {
+			return AlwaysAllow{}
+		}
+		totalRules += len(update.Rules)
+		if totalRules > maxAlwaysAllowRules {
+			return AlwaysAllow{}
+		}
+		updates[i] = PermissionUpdate{Type: update.Type, Behavior: update.Behavior, Rules: make([]PermissionRule, len(update.Rules))}
+		for j, rule := range update.Rules {
+			if rule.ToolName == "" {
+				return AlwaysAllow{}
+			}
+			stored := PermissionRule{ToolName: rule.ToolName}
+			text := rule.ToolName
+			if rule.RuleContent != nil {
+				if bytes.Equal(bytes.TrimSpace(rule.RuleContent), []byte("null")) {
+					return AlwaysAllow{}
+				}
+				var content string
+				if err := json.Unmarshal(rule.RuleContent, &content); err != nil {
+					return AlwaysAllow{}
+				}
+				stored.RuleContent = &content
+				text += "(" + content + ")"
+			}
+			if len(text) > maxRenderedRuleBytes {
+				return AlwaysAllow{}
+			}
+			updates[i].Rules[j] = stored
+			rendered = append(rendered, text)
+		}
+	}
+	return AlwaysAllow{updates: updates, rules: rendered}
+}
 
 // reasonTimeout is the deny message the fail-closed timer path uses. A fixed
 // constant — never host-derived content — so the timeout deny leaks nothing.
@@ -68,6 +192,7 @@ type Request struct {
 	Description             string          `json:"description,omitempty"`
 	DefaultToNo             bool            `json:"default_to_no,omitempty"`
 	RequiresUserInteraction bool            `json:"-"`
+	AlwaysAllow             AlwaysAllow     `json:"-"`
 }
 
 // Verdict is the allow/deny decision claude accepts. The omitempty tags give the

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -530,6 +531,9 @@ func TestModalShownPayload_RoundTrip(t *testing.T) {
 	if payload.DefaultOptionID != "deny" {
 		t.Errorf("DefaultOptionID: got %q, want %q", payload.DefaultOptionID, "deny")
 	}
+	if !payload.AlwaysAllow.Offered || !reflect.DeepEqual(payload.AlwaysAllow.Rules, []string{"Bash", "Read(//src/**)"}) {
+		t.Errorf("AlwaysAllow: got %+v, want offered bare and content rules", payload.AlwaysAllow)
+	}
 	if want := `{"rule":"outside_read_only","details":["write"]}`; string(payload.Reason) != want {
 		t.Errorf("Reason: got %s, want %s", payload.Reason, want)
 	}
@@ -549,6 +553,22 @@ func TestModalShownPayload_RoundTrip(t *testing.T) {
 	roundTripEnvelope(t, env, payload, raw)
 }
 
+func TestModalShownPayload_AlwaysAllowUnavailable_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "modal_shown_always_allow_unavailable.json")
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	var payload ModalShownPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.AlwaysAllow.Offered || payload.AlwaysAllow.Rules == nil || len(payload.AlwaysAllow.Rules) != 0 {
+		t.Errorf("AlwaysAllow: got %+v, want offered false and non-nil empty rules", payload.AlwaysAllow)
+	}
+	roundTripEnvelope(t, env, payload, raw)
+}
+
 func TestModalShownPayload_EmptyContextOmitted(t *testing.T) {
 	payload := ModalShownPayload{
 		ConversationID:  "conv-7f3a",
@@ -558,12 +578,13 @@ func TestModalShownPayload_EmptyContextOmitted(t *testing.T) {
 		Prompt:          "claude wants to run: rm -rf build/",
 		Options:         []ModalOption{{ID: "allow", Label: "Allow"}, {ID: "deny", Label: "Deny"}},
 		DefaultOptionID: "deny",
+		AlwaysAllow:     AlwaysAllowPayload{Rules: []string{}},
 	}
 	got, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	want := `{"conversation_id":"conv-7f3a","modal_id":"mdl-7f3a","class":"permission","title":"Allow Bash?","prompt":"claude wants to run: rm -rf build/","options":[{"id":"allow","label":"Allow"},{"id":"deny","label":"Deny"}],"default_option_id":"deny"}`
+	want := `{"conversation_id":"conv-7f3a","modal_id":"mdl-7f3a","class":"permission","title":"Allow Bash?","prompt":"claude wants to run: rm -rf build/","options":[{"id":"allow","label":"Allow"},{"id":"deny","label":"Deny"}],"default_option_id":"deny","always_allow":{"offered":false,"rules":[]}}`
 	if string(got) != want {
 		t.Errorf("zero-context payload changed:\n got: %s\nwant: %s", got, want)
 	}
