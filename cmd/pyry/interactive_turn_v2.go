@@ -67,6 +67,11 @@ type cursorReader interface {
 	CurrentConversation() string
 }
 
+type assistantDeltaLane struct {
+	turnID string
+	seq    int
+}
+
 // interactiveTurnEmitterV2 is the stateful structured turn-event emitter at the
 // heart of Phase 2 (ADR 025 § Phase 2). It consumes one neutral
 // turnevent.Event at a time via Handle, derives the turn_state lifecycle
@@ -112,6 +117,7 @@ type interactiveTurnEmitterV2 struct {
 	turnConvID   string               // conversation that owns the open turn; set at turn open, compared each Handle (#1062)
 	seq          int                  // per-turn assistant-delta counter; 0 at each turn boundary
 	currentState turnbridge.TurnState // last-emitted turn_state, for transition de-dup
+	childLanes   map[string]*assistantDeltaLane
 
 	// nextID is the session-monotonic envelope-ID counter. It is NEVER reset
 	// across turns (mirrors #589's policy; the basis for #611 mid-turn-reconnect
@@ -151,6 +157,7 @@ type interactiveTurnEmitterV2 struct {
 	// the timer relies on: flushTimer is armed iff deltaBuf is non-empty.
 	deltaBuf    strings.Builder // accumulated assistant text for the open (un-flushed) delta
 	deltaMsgID  string          // MessageID of the buffered text; meaningful only while deltaBuf.Len() > 0
+	deltaParent string          // ParentToolCallID of the buffered text; empty identifies the main lane
 	deltaConvID string          // conversation cursor captured when buffering began; the flush emits against it
 	flushTimer  *time.Timer     // ~250ms latency timer; owned here, its channel selected by the producer (flushC)
 }
@@ -215,10 +222,14 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		if !e.startTurnIfNeeded(convID) {
 			return
 		}
-		// Message-boundary flush: a new JSONL message id ends the prior delta
-		// before this chunk opens a fresh one (per-JSONL-message batching).
-		if e.deltaBuf.Len() > 0 && v.MessageID != e.deltaMsgID {
+		// Lane/message-boundary flush: changing either key ends the prior delta
+		// before this chunk opens a fresh one. One active buffer preserves global
+		// arrival order when main and child streams interleave.
+		if e.deltaBuf.Len() > 0 && (v.ParentToolCallID != e.deltaParent || v.MessageID != e.deltaMsgID) {
 			e.flushDelta(ctx)
+		}
+		if !e.ensureDeltaLane(convID, v.ParentToolCallID) {
+			return
 		}
 		// Safe before buffering: during a text run the state is already
 		// responding, so this is a no-op and never emits a turn_state ahead of
@@ -228,6 +239,7 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		wasEmpty := e.deltaBuf.Len() == 0
 		e.deltaConvID = convID
 		e.deltaMsgID = v.MessageID
+		e.deltaParent = v.ParentToolCallID
 		e.deltaBuf.WriteString(v.Text)
 		if wasEmpty {
 			// Arm the latency window from the OLDEST unflushed chunk; never re-arm
@@ -699,6 +711,46 @@ func (e *interactiveTurnEmitterV2) startTurnIfNeeded(convID string) bool {
 	return true
 }
 
+// ensureDeltaLane lazily mints the identity for a child assistant lane. The
+// empty parent id is the main lane already opened by startTurnIfNeeded. A mint
+// failure leaves no partial lane state and logs no application-controlled id.
+func (e *interactiveTurnEmitterV2) ensureDeltaLane(convID, parentID string) bool {
+	if parentID == "" {
+		return true
+	}
+	if _, ok := e.childLanes[parentID]; ok {
+		return true
+	}
+	id, err := conversations.NewID()
+	if err != nil {
+		e.logger.Warn("relay: interactive-turn drop; child turn-id mint failed",
+			"event", "interactive_turn.child_rand_err",
+			"conversation_id", convID)
+		return false
+	}
+	if e.childLanes == nil {
+		e.childLanes = make(map[string]*assistantDeltaLane)
+	}
+	e.childLanes[parentID] = &assistantDeltaLane{turnID: string(id)}
+	return true
+}
+
+func (e *interactiveTurnEmitterV2) deltaAddress(parentID string) (string, int) {
+	if parentID == "" {
+		return e.turnID, e.seq
+	}
+	lane := e.childLanes[parentID]
+	return lane.turnID, lane.seq
+}
+
+func (e *interactiveTurnEmitterV2) advanceDeltaSeq(parentID string) {
+	if parentID == "" {
+		e.seq++
+		return
+	}
+	e.childLanes[parentID].seq++
+}
+
 // transitionTo emits a turn_state envelope for state, de-duped against the
 // last-emitted state. State-change-based emission is a superset of "first
 // content -> responding" and naturally handles interleaving (thinking -> text
@@ -712,12 +764,16 @@ func (e *interactiveTurnEmitterV2) transitionTo(ctx context.Context, convID stri
 	e.emit(ctx, convID, typ, payload)
 }
 
-// endTurn closes the current turn. The next content/thought event re-mints a
-// fresh turn id and resets seq/currentState via startTurnIfNeeded. It need not
-// touch the delta buffer — the TurnEnd arm already flushed it, and the buffer
-// is only ever non-empty inside an open turn.
+// endTurn closes the current turn and discards every main/child lane identity
+// and counter. It need not touch the delta buffer — callers flush before every
+// turn end or conversation switch.
 func (e *interactiveTurnEmitterV2) endTurn() {
 	e.inTurn = false
+	e.turnID = ""
+	e.turnConvID = ""
+	e.seq = 0
+	e.currentState = ""
+	e.childLanes = nil
 }
 
 // splitDeltaText splits s into consecutive chunks of at most max bytes each,
@@ -779,22 +835,24 @@ func (e *interactiveTurnEmitterV2) flushDelta(ctx context.Context) {
 	}
 	// Capture before emitting: the reset below clears these fields, so the loop
 	// must read the values the flush started with, not live state.
-	text, convID, msgID := e.deltaBuf.String(), e.deltaConvID, e.deltaMsgID
-	// Reconstruct a synthetic TextChunk per chunk and reuse emitMapped — no new
-	// payload path. MapEvent reads only Text for the assistant_delta; MessageID
-	// is the coalescing key, not a wire field.
+	text, convID, msgID, parentID := e.deltaBuf.String(), e.deltaConvID, e.deltaMsgID, e.deltaParent
+	turnID, seq := e.deltaAddress(parentID)
+	// Reconstruct a synthetic TextChunk per chunk and reuse the emitMapped path —
+	// no new payload path. MapEvent carries ParentToolCallID to the wire;
+	// MessageID remains only a coalescing key.
 	for _, chunk := range splitDeltaText(text, maxDeltaTextBytes) {
-		e.emitMapped(ctx, convID, turnevent.TextChunk{
-			MessageID: msgID,
-			Text:      chunk,
-		})
-		// Inside the loop, after the emit: emitMapped reads e.seq off the
-		// struct, so hoisting this either way gives every chunk the same seq or
-		// shifts the whole sequence by one.
-		e.seq++
+		e.emitMappedAt(ctx, convID, turnevent.TextChunk{
+			MessageID:        msgID,
+			ParentToolCallID: parentID,
+			Text:             chunk,
+		}, turnID, seq)
+		// Advance after mapping so the first frame in every lane starts at zero.
+		seq++
+		e.advanceDeltaSeq(parentID)
 	}
 	e.deltaBuf.Reset()
 	e.deltaMsgID = ""
+	e.deltaParent = ""
 	e.deltaConvID = ""
 	e.flushTimer.Stop()
 }
@@ -804,10 +862,14 @@ func (e *interactiveTurnEmitterV2) flushDelta(ctx context.Context) {
 // Handle routes here, since only ThoughtChunk and a nil event drop in MapEvent
 // and neither reaches this function.
 func (e *interactiveTurnEmitterV2) emitMapped(ctx context.Context, convID string, ev turnevent.Event) {
+	e.emitMappedAt(ctx, convID, ev, e.turnID, e.seq)
+}
+
+func (e *interactiveTurnEmitterV2) emitMappedAt(ctx context.Context, convID string, ev turnevent.Event, turnID string, seq int) {
 	typ, payload, ok := turnbridge.MapEvent(ev, turnbridge.TurnContext{
 		ConversationID: convID,
-		TurnID:         e.turnID,
-		Seq:            e.seq,
+		TurnID:         turnID,
+		Seq:            seq,
 	})
 	if !ok {
 		e.logger.Debug("relay: interactive-turn drop; no wire mapping",

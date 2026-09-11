@@ -28,6 +28,23 @@ Single tag, no alternation. The `e2e_install` precedent established the `e2e_<pu
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
 
+Harness constants are not interchangeable merely because they have the same
+UUID shape. `startStreamModalResolutionHarness` seeds
+`streamModalBootstrapUUID`; addressing `liveModalBootstrapUUID` instead made
+\#2281's first live model-rejection test stop at `session.not_found`, before the
+vocabulary gate it claimed to exercise. A test for a downstream refusal must use
+the identifier returned or documented by the fixture that seeded the pool, and
+assert the expected error code rather than accepting any error envelope.
+
+Permission protocol behavior is Claude-version dependent. The captured 2.1.143
+spike saw `--permission-prompt-tool stdio` silently bypass the gate, while
+`TestRealClaude_StdioPermissionPromptDeny` proves that 2.1.259 emits
+`control_request/can_use_tool`, accepts a correlated deny response, completes the
+turn, and does not execute the denied command. A useful compatibility test must
+therefore keep stdin open, assert the request and response correlation, and use a
+side-effect witness; a successful process exit alone cannot distinguish a denial
+from a silent bypass. See [the permission protocol findings](permission-protocol-spike.md).
+
 ## Make target
 
 ```make

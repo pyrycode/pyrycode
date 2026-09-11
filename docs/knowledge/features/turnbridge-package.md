@@ -44,7 +44,7 @@ internal/turnbridge/
 type TurnContext struct {
     ConversationID string
     TurnID         string
-    Seq            int // per-turn assistant-delta order; consumed ONLY by TextChunk
+    Seq            int // per-lane assistant-delta order; consumed ONLY by TextChunk
 }
 
 // TurnState is the coarse lifecycle state BuildTurnState shapes into a turn_state
@@ -71,7 +71,7 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
 
 | `ev` concrete type | `typ` | `payload` | `ok` |
 |---|---|---|---|
-| `TextChunk` | `TypeAssistantDelta` | `AssistantDeltaPayload{tc.ConversationID, tc.TurnID, tc.Seq, ParentToolUseID: ev.ParentToolCallID, ev.Text}` (#2329; straight-through, no re-cap — bounded at construction; empty remains main-thread text) | true |
+| `TextChunk` | `TypeAssistantDelta` | `AssistantDeltaPayload{tc.ConversationID, tc.TurnID, tc.Seq, ParentToolUseID: ev.ParentToolCallID, ev.Text}` (#2329; straight-through, no re-cap — bounded at construction; empty remains main-thread text). `interactiveTurnEmitterV2` supplies main- or child-lane addressing before this call (#2330); the mapper neither derives nor checks that relationship | true |
 | `ToolStart` | `TypeToolUse` | `ToolUsePayload{…, ToolUseID: ev.ToolCallID, ParentToolUseID: ev.ParentToolCallID, Name: ev.Title, InputSummary: inputSummary(ev.RawInput), Input: inputFields(ev.RawInput)}` (#1678; `ParentToolCallID` #2191, straight-through, no re-cap — bounded at construction) | true |
 | `ToolUpdate` | `TypeToolResult` | `ToolResultPayload{…, ToolUseID: ev.ToolCallID, ParentToolUseID: ev.ParentToolCallID, IsError: ev.Status == ToolStatusFailed, ResultSummary: resultSummary(ev.Content), ResultDetail: ev.ResultDetail}` (#2024, extended #2025, straight-through, no cap here — see below; `ParentToolCallID` #2191, same rule) | true |
 | `ToolProgress` (#2324) | `TypeToolProgress` | `ToolProgressPayload{tc.ConversationID, tc.TurnID, ToolUseID: ev.ToolCallID, ElapsedSeconds: ev.ElapsedSeconds}` — turn-scoped but lifecycle-neutral: it joins the row `ToolStart` already opened, while `ToolUpdate` remains the close. The signed reading crosses verbatim with no clock read, clamp, cadence check, lookup, retention, or deduplication; the producer already bounded the join id, and an independently dropped heartbeat carries no lifecycle meaning | true |
@@ -472,6 +472,20 @@ was removed in [#699](../codebase/699.md), and the v1 coarse bridge
 `cmd/pyry/assistant_turn.go` this paragraph originally also pointed at was removed in
 [#913](../codebase/913.md). This is why the adapter is pure: every clock read,
 counter, and I/O lives in the consumer.
+
+`interactiveTurnEmitterV2` therefore owns the parent-keyed assistant-lane state
+(#2330). The empty parent uses the existing outer-turn id and sequence; each
+non-empty parent lazily receives a distinct stable id and independent counter for
+that outer turn. Its coalescer intentionally remains **one active buffer keyed by
+both parent id and message id**. A buffer per lane looks natural but can delay an
+earlier child until after later main or sibling-child prose, destroying global
+arrival order; the single buffer flushes on either key change and still lets
+same-lane, same-message text coalesce. Turn end and conversation switch flush before
+discarding all lane state. Every flushed chunk then returns through `MapEvent` and
+the ordinary emitter path, so attributed prose does not acquire a second mapping,
+splitting, replay-ring, history, droppable-classification, or fan-out path.
+This isolation does not enable the subprocess's subagent-text forwarding flag;
+that production switch and its live-Claude proof belong to #2331.
 
 ## Concurrency model
 

@@ -63,7 +63,7 @@ exit 0
 func runFactoryRunner(t *testing.T, sink *streamTurnSink, bin, sessionID string) sessions.Runner {
 	t.Helper()
 
-	runner, err := newStreamRunnerFactory(sink, "")(sessions.RunnerConfig{
+	runner, err := newStreamRunnerFactory(sink, "", streamApprovalConfig{})(sessions.RunnerConfig{
 		ClaudeBin: bin,
 		WorkDir:   t.TempDir(),
 		SessionID: sessionID,
