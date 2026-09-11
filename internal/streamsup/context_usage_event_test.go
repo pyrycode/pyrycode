@@ -31,6 +31,16 @@ type capturedContextUsagePayload struct {
 		Name   string `json:"name"`
 		Tokens int    `json:"tokens"`
 	} `json:"categories"`
+	MCPTools []struct {
+		Name       string `json:"name"`
+		ServerName string `json:"serverName"`
+		Tokens     int    `json:"tokens"`
+	} `json:"mcpTools"`
+	MemoryFiles []struct {
+		Path   string `json:"path"`
+		Type   string `json:"type"`
+		Tokens int    `json:"tokens"`
+	} `json:"memoryFiles"`
 }
 
 func contextUsageTestRunner(t *testing.T, p *Parser, w io.WriteCloser) *Runner {
@@ -133,6 +143,27 @@ func TestParser_ContextUsageCaptureReplay(t *testing.T) {
 			if got.DroppedCategories != 0 {
 				t.Errorf("DroppedCategories = %d, want 0", got.DroppedCategories)
 			}
+			if len(expected.MCPTools) != 34 {
+				t.Fatalf("captured MCP tool count = %d, want 34", len(expected.MCPTools))
+			}
+			sort.SliceStable(expected.MCPTools, func(i, j int) bool {
+				return expected.MCPTools[i].Tokens > expected.MCPTools[j].Tokens
+			})
+			wantMCPTools := make([]turnevent.ContextUsageMCPTool, 0, min(len(expected.MCPTools), maxContextUsageEntries))
+			for _, tool := range expected.MCPTools[:min(len(expected.MCPTools), maxContextUsageEntries)] {
+				wantMCPTools = append(wantMCPTools, turnevent.ContextUsageMCPTool{
+					Name: tool.Name, ServerName: tool.ServerName, Tokens: tool.Tokens,
+				})
+			}
+			if !reflect.DeepEqual(got.MCPTools, wantMCPTools) {
+				t.Errorf("MCPTools = %+v, want %+v", got.MCPTools, wantMCPTools)
+			}
+			if wantDropped := max(0, len(expected.MCPTools)-maxContextUsageEntries); got.DroppedMCPTools != wantDropped {
+				t.Errorf("DroppedMCPTools = %d, want %d", got.DroppedMCPTools, wantDropped)
+			}
+			if len(got.MemoryFiles) != 0 || got.DroppedMemoryFiles != 0 {
+				t.Errorf("MemoryFiles/dropped = %+v/%d, want empty/0", got.MemoryFiles, got.DroppedMemoryFiles)
+			}
 		})
 	}
 }
@@ -154,6 +185,136 @@ func contextUsageResponseFixture(t *testing.T, requestID, subtype, model string,
 		t.Fatalf("marshalling context usage fixture: %v", err)
 	}
 	return b
+}
+
+func contextUsageInventoryResponseFixture(t *testing.T, requestID string, mcpTools, memoryFiles any) []byte {
+	t.Helper()
+	response := map[string]any{
+		"model": "inventory-model", "totalTokens": 101, "maxTokens": 202,
+		"percentage": 50, "categories": []any{},
+	}
+	if mcpTools != nil {
+		response["mcpTools"] = mcpTools
+	}
+	if memoryFiles != nil {
+		response["memoryFiles"] = memoryFiles
+	}
+	line := map[string]any{
+		"type": "control_response",
+		"response": map[string]any{
+			"subtype": "success", "request_id": requestID, "response": response,
+		},
+	}
+	b, err := json.Marshal(line)
+	if err != nil {
+		t.Fatalf("marshalling context usage inventory fixture: %v", err)
+	}
+	return b
+}
+
+func TestParser_ContextUsageSyntheticMemoryFilesMapWithoutSystemPromptSections(t *testing.T) {
+	t.Parallel()
+	// This is intentionally synthetic: the committed live capture records an empty
+	// memoryFiles array, so it cannot prove the nonempty field mapping.
+	memoryFiles := []map[string]any{
+		{"path": "/synthetic/project/CLAUDE.md", "type": "project", "tokens": 45},
+		{"path": "/synthetic/user/CLAUDE.md", "type": "user", "tokens": 90},
+	}
+
+	var events []turnevent.Event
+	p := NewParser(func(ev turnevent.Event) { events = append(events, ev) }, discardLogger())
+	var request bytes.Buffer
+	r := contextUsageTestRunner(t, p, contextUsageTestWriteCloser{write: request.Write})
+	id := requestContextUsageID(t, r, "full", &request)
+	line := contextUsageInventoryResponseFixture(t, id, nil, memoryFiles)
+	_, _ = p.Write(append(line, '\n'))
+
+	if len(events) != 1 {
+		t.Fatalf("event count = %d, want 1: %#v", len(events), events)
+	}
+	got := events[0].(turnevent.ContextUsage)
+	want := []turnevent.ContextUsageMemoryFile{
+		{Path: "/synthetic/user/CLAUDE.md", Type: "user", Tokens: 90},
+		{Path: "/synthetic/project/CLAUDE.md", Type: "project", Tokens: 45},
+	}
+	if !reflect.DeepEqual(got.MemoryFiles, want) || got.DroppedMemoryFiles != 0 {
+		t.Errorf("MemoryFiles/dropped = %+v/%d, want %+v/0", got.MemoryFiles, got.DroppedMemoryFiles, want)
+	}
+	if len(got.MCPTools) != 0 || got.DroppedMCPTools != 0 {
+		t.Errorf("MCPTools/dropped = %+v/%d, want empty/0", got.MCPTools, got.DroppedMCPTools)
+	}
+}
+
+func TestParser_ContextUsageInventoriesAreIndependentlyBounded(t *testing.T) {
+	t.Parallel()
+	const (
+		toolSentinel   = "overlong-tool-sentinel-2291"
+		serverSentinel = "overlong-server-sentinel-2291"
+		pathSentinel   = "overlong-path-sentinel-2291"
+		typeSentinel   = "overlong-type-sentinel-2291"
+	)
+	mcpTools := []map[string]any{
+		{"name": toolSentinel + strings.Repeat("x", 257), "serverName": "server", "tokens": 10_000},
+		{"name": "tool", "serverName": serverSentinel + strings.Repeat("x", 257), "tokens": 9_000},
+	}
+	memoryFiles := []map[string]any{
+		{"path": pathSentinel + strings.Repeat("x", 257), "type": "project", "tokens": 20_000},
+		{"path": "/valid", "type": typeSentinel + strings.Repeat("x", 257), "tokens": 19_000},
+	}
+	for i := range 34 {
+		mcpTools = append(mcpTools, map[string]any{
+			"name": fmt.Sprintf("tool-%02d", i), "serverName": fmt.Sprintf("server-%02d", i), "tokens": i,
+		})
+		memoryFiles = append(memoryFiles, map[string]any{
+			"path": fmt.Sprintf("/memory-%02d", i), "type": fmt.Sprintf("type-%02d", i), "tokens": 100 + i,
+		})
+	}
+
+	var events []turnevent.Event
+	p := NewParser(func(ev turnevent.Event) { events = append(events, ev) }, discardLogger())
+	var request bytes.Buffer
+	r := contextUsageTestRunner(t, p, contextUsageTestWriteCloser{write: request.Write})
+	id := requestContextUsageID(t, r, "full", &request)
+	line := contextUsageInventoryResponseFixture(t, id, mcpTools, memoryFiles)
+	_, _ = p.Write(append(line, '\n'))
+
+	if len(events) != 1 {
+		t.Fatalf("event count = %d, want 1: %#v", len(events), events)
+	}
+	got := events[0].(turnevent.ContextUsage)
+	if len(got.MCPTools) != 32 || got.DroppedMCPTools != 4 {
+		t.Fatalf("MCPTools/dropped = %d/%d, want 32/4", len(got.MCPTools), got.DroppedMCPTools)
+	}
+	if len(got.MemoryFiles) != 32 || got.DroppedMemoryFiles != 4 {
+		t.Fatalf("MemoryFiles/dropped = %d/%d, want 32/4", len(got.MemoryFiles), got.DroppedMemoryFiles)
+	}
+	for i := range 32 {
+		wantIndex := 33 - i
+		if got.MCPTools[i] != (turnevent.ContextUsageMCPTool{
+			Name: fmt.Sprintf("tool-%02d", wantIndex), ServerName: fmt.Sprintf("server-%02d", wantIndex), Tokens: wantIndex,
+		}) {
+			t.Errorf("MCPTools[%d] = %+v, want valid index %d", i, got.MCPTools[i], wantIndex)
+		}
+		if got.MemoryFiles[i] != (turnevent.ContextUsageMemoryFile{
+			Path: fmt.Sprintf("/memory-%02d", wantIndex), Type: fmt.Sprintf("type-%02d", wantIndex), Tokens: 100 + wantIndex,
+		}) {
+			t.Errorf("MemoryFiles[%d] = %+v, want valid index %d", i, got.MemoryFiles[i], wantIndex)
+		}
+	}
+	for _, secret := range []string{toolSentinel, serverSentinel} {
+		for _, tool := range got.MCPTools {
+			if strings.Contains(tool.Name, secret) || strings.Contains(tool.ServerName, secret) {
+				t.Errorf("MCPTools retained rejected sentinel %q: %+v", secret, tool)
+			}
+		}
+	}
+	for _, secret := range []string{pathSentinel, typeSentinel} {
+		for _, file := range got.MemoryFiles {
+			if strings.Contains(file.Path, secret) || strings.Contains(file.Type, secret) {
+				t.Errorf("MemoryFiles retained rejected sentinel %q: %+v", secret, file)
+			}
+		}
+	}
 }
 
 func TestParser_ContextUsageCategoriesAreBounded(t *testing.T) {
@@ -318,6 +479,10 @@ func TestParser_ContextUsageLogsOnlyExistingContentFreeRecord(t *testing.T) {
 		categorySentinel = "context-category-sentinel-2357"
 		decoderSentinel  = "context-decoder-sentinel-2357"
 		errorSentinel    = "context-error-sentinel-2357"
+		toolSentinel     = "context-tool-sentinel-2291"
+		serverSentinel   = "context-server-sentinel-2291"
+		pathSentinel     = "context-path-sentinel-2291"
+		typeSentinel     = "context-memory-type-sentinel-2291"
 	)
 	rec := &logRecorder{}
 	p := NewParser(func(turnevent.Event) {}, slog.New(rec))
@@ -325,11 +490,14 @@ func TestParser_ContextUsageLogsOnlyExistingContentFreeRecord(t *testing.T) {
 	p.registerContextUsageRequest("context-error-id-2357").resolve(true)
 	p.registerContextUsageRequest("context-invalid-id-2357").resolve(true)
 	lines := [][]byte{
-		contextUsageResponseFixture(t, requestSentinel, "success", modelSentinel,
+		contextUsageInventoryResponseFixture(t, requestSentinel,
+			[]any{map[string]any{"name": toolSentinel, "serverName": serverSentinel, "tokens": 2}},
+			[]any{map[string]any{"path": pathSentinel, "type": typeSentinel, "tokens": 1}}),
+		contextUsageResponseFixture(t, "context-unowned-id-2291", "success", modelSentinel,
 			[]any{map[string]any{"name": categorySentinel, "tokens": 1}}),
 		contextUsageResponseFixture(t, requestSentinel, "success", "duplicate-model", []any{}),
 		[]byte(`{"type":"control_response","response":{"subtype":"error","request_id":"context-error-id-2357","error":"` + errorSentinel + `"}}`),
-		[]byte(`{"type":"control_response","response":{"subtype":"success","request_id":"context-invalid-id-2357","response":{"categories":"` + decoderSentinel + `"}}}`),
+		[]byte(`{"type":"control_response","response":{"subtype":"success","request_id":"context-invalid-id-2357","response":{"mcpTools":"` + decoderSentinel + `"}}}`),
 		contextUsageResponseFixture(t, "failed-write-id-2357", "success", "failed-write-model", []any{}),
 	}
 	for _, line := range lines {
@@ -345,7 +513,8 @@ func TestParser_ContextUsageLogsOnlyExistingContentFreeRecord(t *testing.T) {
 			t.Errorf("record[%d] message = %q, want %q", i, record.msg, controlResponseConsumeMsgFixture)
 		}
 		for _, secret := range []string{requestSentinel, modelSentinel, categorySentinel, decoderSentinel,
-			errorSentinel, "context-error-id-2357", "context-invalid-id-2357", "failed-write-id-2357", `"response"`} {
+			errorSentinel, toolSentinel, serverSentinel, pathSentinel, typeSentinel,
+			"context-error-id-2357", "context-invalid-id-2357", "failed-write-id-2357", `"response"`} {
 			if strings.Contains(record.msg, secret) {
 				t.Errorf("record[%d] message leaks %q: %q", i, secret, record.msg)
 			}

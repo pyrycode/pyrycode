@@ -3327,15 +3327,29 @@ type contextUsageCategoryLine struct {
 	Tokens int    `json:"tokens"`
 }
 
+type contextUsageMCPToolLine struct {
+	Name       string `json:"name"`
+	ServerName string `json:"serverName"`
+	Tokens     int    `json:"tokens"`
+}
+
+type contextUsageMemoryFileLine struct {
+	Path   string `json:"path"`
+	Type   string `json:"type"`
+	Tokens int    `json:"tokens"`
+}
+
 type contextUsageResponseLine struct {
 	Response struct {
 		Subtype  string `json:"subtype"`
 		Response *struct {
-			Model       string                     `json:"model"`
-			TotalTokens int                        `json:"totalTokens"`
-			MaxTokens   int                        `json:"maxTokens"`
-			Percentage  int                        `json:"percentage"`
-			Categories  []contextUsageCategoryLine `json:"categories"`
+			Model       string                       `json:"model"`
+			TotalTokens int                          `json:"totalTokens"`
+			MaxTokens   int                          `json:"maxTokens"`
+			Percentage  int                          `json:"percentage"`
+			Categories  []contextUsageCategoryLine   `json:"categories"`
+			MCPTools    []contextUsageMCPToolLine    `json:"mcpTools"`
+			MemoryFiles []contextUsageMemoryFileLine `json:"memoryFiles"`
 		} `json:"response"`
 	} `json:"response"`
 }
@@ -7180,13 +7194,39 @@ func (p *Parser) emitContextUsage(line []byte) {
 	for i, category := range categories {
 		eventCategories[i] = turnevent.ContextUsageCategory{Name: category.Name, Tokens: category.Tokens}
 	}
+	mcpTools, droppedMCPTools := boundContextUsageEntries(
+		payload.MCPTools,
+		func(tool contextUsageMCPToolLine) int { return tool.Tokens },
+		func(tool *contextUsageMCPToolLine) []*string { return []*string{&tool.Name, &tool.ServerName} },
+	)
+	eventMCPTools := make([]turnevent.ContextUsageMCPTool, len(mcpTools))
+	for i, tool := range mcpTools {
+		eventMCPTools[i] = turnevent.ContextUsageMCPTool{
+			Name: tool.Name, ServerName: tool.ServerName, Tokens: tool.Tokens,
+		}
+	}
+	memoryFiles, droppedMemoryFiles := boundContextUsageEntries(
+		payload.MemoryFiles,
+		func(file contextUsageMemoryFileLine) int { return file.Tokens },
+		func(file *contextUsageMemoryFileLine) []*string { return []*string{&file.Path, &file.Type} },
+	)
+	eventMemoryFiles := make([]turnevent.ContextUsageMemoryFile, len(memoryFiles))
+	for i, file := range memoryFiles {
+		eventMemoryFiles[i] = turnevent.ContextUsageMemoryFile{
+			Path: file.Path, Type: file.Type, Tokens: file.Tokens,
+		}
+	}
 	p.emit(turnevent.ContextUsage{
-		Model:             strings.Clone(payload.Model),
-		TotalTokens:       payload.TotalTokens,
-		MaxTokens:         payload.MaxTokens,
-		Percentage:        payload.Percentage,
-		Categories:        eventCategories,
-		DroppedCategories: dropped,
+		Model:              strings.Clone(payload.Model),
+		TotalTokens:        payload.TotalTokens,
+		MaxTokens:          payload.MaxTokens,
+		Percentage:         payload.Percentage,
+		Categories:         eventCategories,
+		DroppedCategories:  dropped,
+		MCPTools:           eventMCPTools,
+		DroppedMCPTools:    droppedMCPTools,
+		MemoryFiles:        eventMemoryFiles,
+		DroppedMemoryFiles: droppedMemoryFiles,
 	})
 }
 
