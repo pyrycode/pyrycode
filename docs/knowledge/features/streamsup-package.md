@@ -120,6 +120,16 @@ error reply, or malformed first reply cannot emit a later `ContextUsage` under
 the same ID. A runner configured with another stdout writer can still send the
 request but cannot establish the provenance needed to emit the event.
 
+The daemon's `turnEndContextUsageRequester` wraps each session parser sink and
+automatically calls that same runner's `RequestContextUsage("summary")` once after
+forwarding every `turnevent.TurnEnd`; opener and non-terminal variants only pass
+through. This policy must stay upstream of `streamTurnSink`: the shared drain
+drops events from inactive sessions and may refuse events under pressure, so a
+drain-side trigger would silently lose those sessions' readings. The turn-busy
+tracker remains downstream lifecycle evidence, not the request owner. A teardown
+write failure is absorbed as one content-free Debug record and cannot enter the
+runner's restart or backoff path.
+
 A successful reply emits Claude's `model`, `totalTokens`, `maxTokens`, and
 `percentage` unchanged. `boundContextUsageEntries` ranks categories by descending
 token count, retains at most 32 names of at most 256 bytes, and reports every
