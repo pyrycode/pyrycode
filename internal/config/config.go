@@ -32,6 +32,12 @@ type Config struct {
 	// config package cannot import). Rollback: set back to "pty" (or remove the
 	// field) and restart the daemon.
 	InteractiveRunner string `json:"interactive_runner"`
+
+	// StdioPermissionPrompt routes non-bypass interactive permission asks over
+	// claude's stdio control protocol. The zero value keeps the proven MCP prompt
+	// tool path, so an absent field is the rollback posture. Read once at daemon
+	// startup; changing the file takes effect after a restart.
+	StdioPermissionPrompt bool `json:"stdio_permission_prompt"`
 }
 
 // DefaultConfig returns the built-in defaults. Used directly when no config

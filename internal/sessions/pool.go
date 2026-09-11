@@ -1123,6 +1123,7 @@ func inBandDeliverable(update SettingsUpdate) bool {
 func (p *Pool) deliverSettingsInBand(id SessionID, sup Runner, update SettingsUpdate, merged SessionSettings) {
 	notDelivered := func(setting string, err error) {
 		p.log.Info("sessions: in-band settings command not delivered",
+			"event", "sessions.settings.delivery_err",
 			"session", id, "setting", setting, "err", err)
 	}
 	send := func(setting, command string) {

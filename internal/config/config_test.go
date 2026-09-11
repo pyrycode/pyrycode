@@ -10,7 +10,7 @@ import (
 func TestDefaultConfig(t *testing.T) {
 	t.Parallel()
 	got := DefaultConfig()
-	want := Config{RelayURL: "wss://relay.pyrycode.dev", DebugCapture: false}
+	want := Config{RelayURL: "wss://relay.pyrycode.dev", DebugCapture: false, StdioPermissionPrompt: false}
 	if got != want {
 		t.Errorf("DefaultConfig() = %+v, want %+v", got, want)
 	}
@@ -42,6 +42,21 @@ func TestLoad(t *testing.T) {
 			name:     "partial file with missing fields keeps defaults",
 			fileBody: ptr(`{}`),
 			want:     Config{RelayURL: "wss://relay.pyrycode.dev"},
+		},
+		{
+			name:     "absent stdio permission prompt is off",
+			fileBody: ptr(`{"relay_url":"wss://my-relay.example/"}`),
+			want:     Config{RelayURL: "wss://my-relay.example/", StdioPermissionPrompt: false},
+		},
+		{
+			name:     "false stdio permission prompt stays off",
+			fileBody: ptr(`{"stdio_permission_prompt":false}`),
+			want:     Config{RelayURL: "wss://relay.pyrycode.dev", StdioPermissionPrompt: false},
+		},
+		{
+			name:     "true stdio permission prompt is on",
+			fileBody: ptr(`{"stdio_permission_prompt":true}`),
+			want:     Config{RelayURL: "wss://relay.pyrycode.dev", StdioPermissionPrompt: true},
 		},
 		{
 			// AC1: an absent debug_capture field decodes to OFF (Go zero value),
