@@ -52,3 +52,7 @@ No pending shared documentation change; the issue specifies no documentation-onl
 ## Revisions
 
 - 2026-09-11, verifier finding on `drainForCompletedTurnWithMinimumDeltas`: preserve `drainForCompletedTurn`'s pre-M1 behavior by ignoring a matching terminal idle while no non-empty delta has arrived. A queued idle can belong to the cancelled turn consumed by `drainForCancelledTurnEnd`, so it cannot identify the new turn. Once at least one non-empty delta identifies the active turn, terminal idle remains authoritative: the helper accepts it at the requested minimum and fails when the positive count is below that minimum.
+
+### Documentation handoff
+
+Pending for the documentation stage: update the introduction under `docs/knowledge/features/e2e-realclaude-stream-event-capture-test-go.md`'s “stream_event_capture_test.go (#2269)” section, which currently says production never sets `--include-partial-messages`, and update `docs/knowledge/features/streamsup-package.md`'s “Turn I/O — envelope write + stdout parser” section if needed to record that `buildArgs` now requests partial messages. This supersedes the original no-change handoff above.
