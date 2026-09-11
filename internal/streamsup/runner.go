@@ -707,6 +707,10 @@ type Runner struct {
 	// call site branches on it.
 	postureGate *PostureGate
 
+	// contextUsageParser is non-nil when Config.Stdout is the Parser that consumes
+	// this runner's child output. It binds request registration to that exact parser.
+	contextUsageParser *Parser
+
 	// rotatePending is set by RestartFresh and consumed once by beginSpawn: it
 	// re-arms first-run form so the next spawn uses --session-id <newID> (a fresh
 	// transcript), not --resume <newID>. firstRun stays Run-goroutine-private;
@@ -794,16 +798,18 @@ func New(cfg Config) (*Runner, error) {
 		cfg.BackoffReset = defaultBackoffReset
 	}
 	cfg.Args = slices.Clone(cfg.Args)
+	contextUsageParser, _ := cfg.Stdout.(*Parser)
 	return &Runner{
-		cfg:         cfg,
-		log:         cfg.Logger,
-		workDir:     workDir,
-		state:       State{Phase: PhaseStarting},
-		args:        slices.Clone(cfg.Args),
-		sessionID:   cfg.SessionID,
-		spawnMode:   cfg.SpawnPermissionMode,
-		postureGate: cfg.PostureGate,
-		restartCh:   make(chan struct{}, 1),
+		cfg:                cfg,
+		log:                cfg.Logger,
+		workDir:            workDir,
+		state:              State{Phase: PhaseStarting},
+		args:               slices.Clone(cfg.Args),
+		sessionID:          cfg.SessionID,
+		spawnMode:          cfg.SpawnPermissionMode,
+		postureGate:        cfg.PostureGate,
+		contextUsageParser: contextUsageParser,
+		restartCh:          make(chan struct{}, 1),
 	}, nil
 }
 
@@ -1169,12 +1175,26 @@ func (r *Runner) RequestInitialize() error {
 // breakdown. The detail vocabulary is checked before child lookup and ID minting;
 // WriteContextUsage repeats the same boundary for direct callers. The request ID
 // comes from the runner-wide control sequence, and this method does not decode the
-// response.
+// response. When Stdout is the runner's Parser, the id is registered before the
+// write and removed again on a write failure; only that parser can consume the
+// successful registration.
 func (r *Runner) RequestContextUsage(detail string) error {
 	if !contextUsageDetailAllowed(detail) {
 		return ErrUnsupportedContextUsageDetail
 	}
-	return WriteContextUsage(r.Stdin(), r.nextControlID(), detail)
+	id := r.nextControlID()
+	var pending *pendingContextUsageRequest
+	if r.contextUsageParser != nil {
+		pending = r.contextUsageParser.registerContextUsageRequest(id)
+	}
+	err := WriteContextUsage(r.Stdin(), id, detail)
+	if pending != nil {
+		if err != nil {
+			r.contextUsageParser.removeContextUsageRequest(id, pending)
+		}
+		pending.resolve(err == nil)
+	}
+	return err
 }
 
 // nextControlID mints the next locally-unique control-request correlation id,

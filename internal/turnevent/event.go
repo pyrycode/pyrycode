@@ -23,7 +23,7 @@ import "encoding/json"
 // Event is the sealed sum type of outbound turn events: TextChunk,
 // ThoughtChunk, ToolStart, ToolUpdate, ToolProgress, TurnEnd, BackgroundTaskStarted,
 // BackgroundTaskUpdated, BackgroundTaskRoster, BackgroundTaskProgress,
-// ThinkingProgress, the
+// ThinkingProgress, ContextUsage, the
 // internal-only status peers Stall, ApiRetry, and Compacting, the compaction
 // boundary CompactionBoundary, and the diagnostic marker Unrecognized.
 // The unexported marker
@@ -1665,6 +1665,30 @@ type ModelList struct {
 	DroppedModels int
 }
 
+// ContextUsage is one solicited reading of claude's context-window arithmetic.
+// It is informational only: consumers may display it, but it does not replace the
+// daemon-owned contextwindow.Read value used for control decisions.
+//
+// Every Claude-authored string and the category count are bounded by streamsup at
+// construction. Categories are ordered by descending token count so a producer-side
+// count cut preserves the heaviest entries. The scalar integers remain Claude's own
+// values; the daemon neither recomputes nor normalizes them.
+type ContextUsage struct {
+	Model             string
+	TotalTokens       int
+	MaxTokens         int
+	Percentage        int
+	Categories        []ContextUsageCategory
+	DroppedCategories int
+}
+
+// ContextUsageCategory is one named contribution to a ContextUsage reading. Name
+// is bounded by the producer before this value enters the event stream.
+type ContextUsageCategory struct {
+	Name   string
+	Tokens int
+}
+
 // SlashCommand is one entry of a SlashCommandList: the list's element type, NOT
 // an Event, so it carries no marker — BackgroundTask's and ModelOption's shape,
 // for their reason.
@@ -2755,6 +2779,7 @@ func (RateLimited) isTurnEvent()            {}
 func (ModelAnnounced) isTurnEvent()         {}
 func (SessionFacts) isTurnEvent()           {}
 func (ModelList) isTurnEvent()              {}
+func (ContextUsage) isTurnEvent()           {}
 func (SlashCommandList) isTurnEvent()       {}
 func (Stall) isTurnEvent()                  {}
 func (ApiRetry) isTurnEvent()               {}
