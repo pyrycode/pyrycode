@@ -241,10 +241,13 @@ func TestV2Session_SetSessionSettings_ErrorReplies(t *testing.T) {
 		wantCode  string
 		wantMsg   string
 		wantRetry bool
+		wantEvent string
 	}{
 		{name: "nil seam replies unavailable", nilSeam: true, wantCode: protocol.CodeServerBinaryOffline, wantMsg: msgSettingsUnavailable, wantRetry: true},
 		{name: "unknown session id", seamErr: ErrSessionUnknown, wantCode: protocol.CodeSessionNotFound, wantMsg: msgSettingsNotFound, wantRetry: false},
-		{name: "persist failure replies unavailable", seamErr: errors.New(persistErrSentinel), wantCode: protocol.CodeServerBinaryOffline, wantMsg: msgSettingsUnavailable, wantRetry: true},
+		{name: "model not offered", seamErr: ErrModelNotOffered, wantCode: protocol.CodeProtocolMalformed, wantMsg: msgSettingsModelNotOffered, wantRetry: false, wantEvent: "v2.settings.model_not_offered"},
+		{name: "model vocabulary unavailable", seamErr: ErrModelVocabularyUnavailable, wantCode: protocol.CodeModelListUnavailable, wantMsg: msgModelListUnavailable, wantRetry: true, wantEvent: "v2.settings.model_vocabulary_unavailable"},
+		{name: "persist failure replies unavailable", seamErr: errors.New(persistErrSentinel), wantCode: protocol.CodeServerBinaryOffline, wantMsg: msgSettingsUnavailable, wantRetry: true, wantEvent: "v2.settings.persist_err"},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -294,6 +297,14 @@ func TestV2Session_SetSessionSettings_ErrorReplies(t *testing.T) {
 			}
 			if p.Retryable != tc.wantRetry {
 				t.Errorf("error Retryable = %v, want %v", p.Retryable, tc.wantRetry)
+			}
+			if tc.wantEvent != "" && !strings.Contains(logBuf.String(), tc.wantEvent) {
+				t.Errorf("log does not carry event %q:\n%s", tc.wantEvent, logBuf.String())
+			}
+			if tc.seamErr == ErrModelNotOffered || tc.seamErr == ErrModelVocabularyUnavailable {
+				if s := logBuf.String(); strings.Contains(s, "sonnet") {
+					t.Errorf("validation log leaked requested model: %s", s)
+				}
 			}
 
 			if tc.seamErr != nil && strings.Contains(tc.seamErr.Error(), "boom") {

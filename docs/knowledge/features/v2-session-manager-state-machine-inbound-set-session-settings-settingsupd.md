@@ -50,15 +50,19 @@ success or failure, never a silent drop. Control flow, in load-bearing order:
 4. **Nil-seam guard.** `m.cfg.SettingsUpdater == nil` → deterministic
    `server.binary_offline` "unavailable" reply (foreground / unwired), never
    a silent drop.
-5. **Persist + reply.** `SettingsUpdater.UpdateSettings(sessionID, update)`:
-   `nil` error → `session_settings_updated` success reply (echoes only the
-   client's own confirmed-real `session_id`, safe because it matched a real
-   session key on the nil-error path); `errors.Is(err, ErrSessionUnknown)` →
-   `session.not_found`; any other error → `server.binary_offline` (the
-   persist-failure event is logged — `event`, `conn_id`, `session_id` only,
-   **never** `err.Error()`, which can quote a path).
+5. **Availability gate, persist + reply.** `SettingsUpdater.UpdateSettings`
+   checks a non-empty model against the retained vocabulary before it calls
+   `Pool.UpdateSettings`. An exact, untruncated `ModelOption.Value` match
+   proceeds; complete-menu absence returns `ErrModelNotOffered`, while a
+   missing/empty menu, dropped row, or any value-truncated row returns
+   `ErrModelVocabularyUnavailable`. The handler maps those to non-retryable
+   `protocol.malformed` and retryable `model_list.unavailable`, respectively.
+   `nil` error → `session_settings_updated`; `ErrSessionUnknown` →
+   `session.not_found`; any remaining error → `server.binary_offline`. All
+   rejection messages and event names are fixed and carry no requested or
+   published model value.
 
-- **`SettingsUpdater` / `SettingsUpdate` / `ErrSessionUnknown` consumer seam**
+- **`SettingsUpdater` / `SettingsUpdate` / outcome-sentinel consumer seam**
   (beside `Interrupter` / `SessionStarter` / `QueueRemover`). `SettingsUpdate{
   Model, Effort *string; YOLO *bool; PermissionMode *string}` (#1687) mirrors
   `sessions.SettingsUpdate` 1:1 so
@@ -66,15 +70,19 @@ success or failure, never a silent drop. Control flow, in load-bearing order:
   optional `V2SessionConfig.SettingsUpdater` field is nil-safe (nil ⇒
   "unavailable" reply, never drop). `cmd/pyry`'s `settingsUpdaterAdapter{p
   *sessions.Pool}` is the **sole** place `sessions.ErrSessionNotFound` maps
-  onto `relay.ErrSessionUnknown` — the project's sentinel-to-wire-mapping
-  convention (mapping lives at the consumer call site, not the primitive).
+  onto `relay.ErrSessionUnknown` and classifies the retained model vocabulary
+  as `ErrModelNotOffered` or `ErrModelVocabularyUnavailable` — the project's
+  sentinel-to-wire-mapping convention (mapping lives at the consumer call site,
+  not the primitive). The adapter checks session existence first, so an unknown
+  id cannot probe whether the bootstrap vocabulary is complete.
   Wired by threading a `settings relay.SettingsUpdater` param through
   `startRelay` → `startRelayV2` from the single `main.go` call site
   (`settingsUpdaterAdapter{pool}`, `pool` already in scope alongside
   `sessionMinter{pool}`).
-- **`validModel(m string) bool`** — a **shape check, not an allowlist** (model
-  names churn per release; a fixed allowlist would force a code edit per
-  launch). `""` accepted (clears to template default — `claudeSettingsArgs`
+- **`validModel(m string) bool`** — a **shape check, not the availability
+  decision** (model names churn per release; a fixed in-code allowlist would
+  force a code edit per launch). Availability is checked afterward against the
+  dynamically retained published menu. `""` accepted (clears to template default — `claudeSettingsArgs`
   emits no `--model` for it); otherwise a value within the unchanged 64-byte
   bound whose first byte is alphanumeric, whose remaining bytes are in
   `[A-Za-z0-9._-]`, and which may carry **one trailing bracket group** —
@@ -98,7 +106,9 @@ success or failure, never a silent drop. Control flow, in load-bearing order:
   interior excludes both brackets, nothing inside can open or close another
   group. `TestValidModel_ByteSetIsClosed` checks the whitespace-free
   guarantee across all 256 byte values in each of the three grammar positions
-  rather than by example. `validEffort` below carries the identical direction
+  rather than by example. A well-shaped non-empty model can still be rejected
+  when no exact untruncated `ModelOption.Value` row is offered. `validEffort`
+  below carries the identical direction
   hazard and is deliberately **not** widened — there is no bracketed effort
   level to admit yet, and widening against a hypothetical is not
   evidence-based.
@@ -128,9 +138,9 @@ success or failure, never a silent drop. Control flow, in load-bearing order:
   `debugBundleReplyError` shape (marshal `protocol.ErrorPayload` →
   `Envelope{Type: TypeError, InReplyTo}` → `forwardEnvelope`); the established
   per-handler-owns-its-helper posture, not extracted into a shared helper.
-  `message` is always one of three fixed constants
-  (`msgSettingsMalformed` / `msgSettingsNotFound` / `msgSettingsUnavailable`)
-  — never attacker-influenced bytes.
+  `message` is always a fixed constant, including
+  `msgSettingsModelNotOffered` and the shared `msgModelListUnavailable` — never
+  attacker-influenced bytes.
 
 **YOLO fail-safe (the primary asset).** Three deterministic layers, no
 stochastic component: (1) the `*bool` presence contract — an absent `yolo`
