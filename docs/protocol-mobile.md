@@ -788,6 +788,19 @@ matches no known frame stays at top level. It is **not a capability** and grants
 no authority to look up, invoke, or otherwise act on the referenced call. The
 daemon always emits the key, using an empty string for main-thread text.
 
+The daemon's long-lived interactive `streamsup` child opts into claude's
+`--forward-subagent-text` output on both create and resume spawns. Ordinary child
+prose therefore reaches the non-empty, parent-keyed lanes described above;
+main-thread deltas remain on the empty-parent lane. The separate `pyry agent-run`
+path does not enable this option.
+
+Only ordinary assistant text is publishable. Attributed thinking and signature
+content is consumed without producing any mobile envelope, including when it
+arrives beside publishable child prose. This preserves [ADR 025's remote-head
+boundary](knowledge/decisions/025-mobile-remote-head-interactive-session.md): the
+phone receives typed display events, never claude's private reasoning or signature
+material.
+
 Lane identities and counters live only for the current outer turn. Its single
 `turn_end` carries the main turn id, closes the child lanes too, and follows any
 pending prose; an active-conversation switch likewise flushes before discarding

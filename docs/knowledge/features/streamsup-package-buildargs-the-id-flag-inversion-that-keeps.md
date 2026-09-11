@@ -6,7 +6,7 @@ func buildArgs(base []string, create bool, sessionID string) []string
 
 Pure function, assembled fresh each spawn (never mutates `base`), and — since #1630 — no longer the decider of its own `create` argument:
 
-1. Fixed stream-json prefix: `--input-format stream-json --output-format stream-json --verbose`. **Never `-p`/`--print`** — the non-`-p` choice is billing-classification-tied and was spike-verified live (#1075): multi-turn, interrupt, resume, and the approval round-trip all work without it.
+1. Fixed stream-json prefix: `--input-format stream-json --output-format stream-json --verbose --include-partial-messages --forward-subagent-text`. The last option enables attributed child prose on both create and resume spawns; this composition is specific to the long-lived interactive child and does not change `pyry agent-run`. **Never `-p`/`--print`** — the non-`-p` choice is billing-classification-tied and was spike-verified live (#1075): multi-turn, interrupt, resume, and the approval round-trip all work without it.
 2. Then the caller's `base` (`Config.Args`, e.g. `--model <m>`).
 3. Then the id flag: `create == true` → `--session-id <sessionID>` (establishes the on-disk transcript under a known id); `create == false` → `--resume <sessionID>` (reattach, append, **no fork** — `--fork-session` is the explicit, unused opt-in).
 

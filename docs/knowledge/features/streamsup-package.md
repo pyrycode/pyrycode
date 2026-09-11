@@ -82,10 +82,13 @@ Scenarios: `buildArgs` shape (pure, table — fixed prefix present, `-p` absent,
 
 ## Turn I/O — envelope write + stdout parser (#1088)
 
-`buildArgs` requests `--include-partial-messages` in the fixed prefix for both
-create (`--session-id`) and resume (`--resume`) spawns. Production therefore
-receives the nested `stream_event` lines mapped below; caller-supplied arguments
-do not need to opt into them. The turn I/O boundary fills
+`buildArgs` requests both `--include-partial-messages` and
+`--forward-subagent-text` in the fixed prefix for create (`--session-id`) and
+resume (`--resume`) spawns. Production therefore receives the nested
+`stream_event` lines and attributed subagent prose mapped below; caller-supplied
+arguments do not need to opt into either. This prefix belongs only to the
+long-lived interactive child; the separate `pyry agent-run` argv is unchanged.
+The turn I/O boundary fills
 `Stdin()`/`Config.Stdout` with two additive seams:
 
 ```go
