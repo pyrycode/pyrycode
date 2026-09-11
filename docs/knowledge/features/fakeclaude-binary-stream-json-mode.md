@@ -549,6 +549,54 @@ verdict) without depending on that still-open wiring gap. See
 [codebase/1139.md](../codebase/1139.md) for the live e2e this feeds and the
 production follow-up this gap is tracked under.
 
+### Stdio permission rider (`PYRY_FAKE_CLAUDE_STREAM_CAN_USE_TOOL`, #2283)
+
+`PYRY_FAKE_CLAUDE_STREAM_CAN_USE_TOOL` is the default-off rider for claude's other
+permission path: the `--permission-prompt-tool stdio` control exchange. Its value
+is a JSON object containing the inner `can_use_tool` request fields. On each user
+turn, fakeclaude wraps those fields in one newline-terminated `control_request`,
+fixes the subtype to `can_use_tool`, assigns the deterministic non-empty id
+`permission-<turn>`, and waits on stdin before emitting any terminal turn output.
+This is deliberately separate from the approve rider above: the request and answer
+both travel over the child's stream-json pipes rather than the control socket.
+
+The accepted keys are exactly the fields decoded by `streamsup.CanUseToolRequest`:
+`tool_name`, `input`, `tool_use_id`, `agent_id`, `permission_suggestions`,
+`blocked_path`, `decision_reason`, `decision_reason_type`, `matched_ask_rule`,
+`classifier_approvable`, `suppress_always_allow_rule`, `default_to_no`, `title`,
+`display_name`, `description`, and `requires_user_interaction`. String and boolean
+fields must have their corresponding JSON scalar type; the production codec's
+opaque fields retain any valid JSON shape. Malformed JSON, a non-object or `null`,
+an unknown key, a wrong scalar type, or a caller-supplied `subtype` disables the
+rider silently and leaves the ordinary assistant/result transcript byte-identical.
+
+**Presence belongs to the fixture, not to a Go zero value.** The configuration is
+kept as raw JSON until the request is marshalled. An omitted key therefore remains
+absent, an explicit `false` remains present, and object/array-valued fields do not
+get flattened or retyped. A typed config struct with `omitempty` would make the
+explicit-false test pass through the same representation as omission and would
+remove the distinction later permission slices need to exercise.
+
+Only a nested successful `control_response` whose `request_id` matches the one
+outstanding ask can resolve the turn. Other ids, non-success envelopes, malformed
+lines, and unknown behaviours are consumed without terminal output; a later
+matching answer can still resolve it. `runStreamJSON` keeps this state in its
+single reader/writer loop, so at most one permission ask is outstanding.
+
+The terminal transcripts intentionally make the two decisions distinguishable:
+
+| Matching answer | Output after the request |
+|---|---|
+| `allow` without `updatedInput` | assistant `tool_use` carrying the requested `input`, then `approve-allow`, then `result{success}` |
+| `allow` with `updatedInput` | assistant `tool_use` carrying that exact JSON value, then `approve-allow`, then `result{success}` |
+| `deny` | `approve-deny`, then `result{success}`; no `tool_use`, so denial cannot be mistaken for a permitted call |
+
+The correlation test must include an unrelated response before the matching one:
+testing only a matching id would stay green if the fake accepted the first response
+it saw. The request-shape test likewise asserts raw keys, not only decoded values,
+because a normal Go decode cannot distinguish omitted optional fields from their
+zero values.
+
 ### Session-facts init line rider (#2315)
 
 `PYRY_FAKE_CLAUDE_STREAM_SESSION_FACTS` (default-off) makes stream mode prepend one
