@@ -48,3 +48,7 @@ No pending shared documentation change; the issue specifies no documentation-onl
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-11
+
+## Revisions
+
+- 2026-09-11, verifier finding on `drainForCompletedTurnWithMinimumDeltas`: preserve `drainForCompletedTurn`'s pre-M1 behavior by ignoring a matching terminal idle while no non-empty delta has arrived. A queued idle can belong to the cancelled turn consumed by `drainForCancelledTurnEnd`, so it cannot identify the new turn. Once at least one non-empty delta identifies the active turn, terminal idle remains authoritative: the helper accepts it at the requested minimum and fails when the positive count is below that minimum.

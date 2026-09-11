@@ -245,8 +245,9 @@ func drainForCompletedTurn(t *testing.T, phone *fakephone.Client, cs *noise.Ciph
 }
 
 // drainForCompletedTurnWithMinimumDeltas applies drainForCompletedTurn's full
-// frame inventory and terminal-idle contract, but does not accept idle until at
-// least minDeltas non-empty frames for the driving conversation have arrived.
+// frame inventory and terminal-idle contract. It ignores matching idle frames
+// until the first non-empty delta identifies this turn, then requires at least
+// minDeltas such frames before accepting idle.
 func drainForCompletedTurnWithMinimumDeltas(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration, minDeltas int) string {
 	t.Helper()
 	nonEmptyDeltas := 0
@@ -409,6 +410,12 @@ func drainForCompletedTurnWithMinimumDeltas(t *testing.T, phone *fakephone.Clien
 			}
 			if st.State != "idle" || st.ConversationID != convID {
 				continue // the leading responding state precedes the delta
+			}
+			if nonEmptyDeltas == 0 {
+				// A prior cancelled turn can leave its terminal idle queued after
+				// drainForCancelledTurnEnd returns at turn_end. Without a delta,
+				// this idle cannot be attributed to the turn being drained.
+				continue
 			}
 			if nonEmptyDeltas < minDeltas {
 				t.Fatalf("M1: terminal turn_state{idle} arrived after %d non-empty assistant_delta frame(s) "+
