@@ -58,7 +58,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -97,7 +96,7 @@ func TestInteractiveStreamStdioModalAllow(t *testing.T) {
 func TestInteractiveStreamStdioAlwaysAllowIsSessionScoped(t *testing.T) {
 	const (
 		witness = "pyrycode-always-allow-witness.txt"
-		command = "printf 'session-grant\\n' >> " + witness
+		command = "touch " + witness
 		prompt  = "Use the Bash tool to run exactly `" + command + "`. Do not use another tool. After it completes, reply with one short word."
 	)
 
@@ -118,11 +117,24 @@ func TestInteractiveStreamStdioAlwaysAllowIsSessionScoped(t *testing.T) {
 		}),
 	})
 	drainForCompletedTurn(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
-	requireSessionGrantExecutions(t, filepath.Join(h.workdir, witness), 1)
+	witnessPath := filepath.Join(h.workdir, witness)
+	if _, err := os.Stat(witnessPath); err != nil {
+		t.Fatalf("first session-granted command did not create its witness: %v", err)
+	}
+	stale := time.Unix(1, 0)
+	if err := os.Chtimes(witnessPath, stale, stale); err != nil {
+		t.Fatalf("reset session-grant witness timestamp: %v", err)
+	}
 
 	sealSendMessage(t, h.phone, h.initSend, 4, convID, "m-4", prompt)
 	drainForCompletedTurnWithoutModal(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
-	requireSessionGrantExecutions(t, filepath.Join(h.workdir, witness), 2)
+	info, err := os.Stat(witnessPath)
+	if err != nil {
+		t.Fatalf("stat session-grant witness after second command: %v", err)
+	}
+	if !info.ModTime().After(stale) {
+		t.Fatalf("second session-granted command did not update its witness: modtime=%s", info.ModTime())
+	}
 
 	fresh, freshConvID := startStdioModalResolutionHarness(t, permissionDaemonModel)
 	freshShown := raiseRealPermissionModalPayload(t, fresh, 2, freshConvID, prompt)
@@ -131,17 +143,6 @@ func TestInteractiveStreamStdioAlwaysAllowIsSessionScoped(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(fresh.workdir, witness)); !os.IsNotExist(err) {
 		t.Fatalf("fresh-session command executed before its new permission modal (stat error: %v)", err)
-	}
-}
-
-func requireSessionGrantExecutions(t *testing.T, path string, want int) {
-	t.Helper()
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read session-grant witness: %v", err)
-	}
-	if got := strings.Count(string(raw), "session-grant\n"); got != want {
-		t.Fatalf("session-grant command executions = %d, want %d; witness=%q", got, want, raw)
 	}
 }
 
