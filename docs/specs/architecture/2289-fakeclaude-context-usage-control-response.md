@@ -62,4 +62,5 @@ Pending for the documentation stage: update `docs/knowledge/features/fakeclaude-
 
 ## Revisions
 
-None.
+- During RED/GREEN implementation, “malformed” was resolved to include a `get_context_usage` envelope whose `detail` is absent or outside the captured `summary`/`full` vocabulary. `contextUsageRequestID` now admits exactly those two values before selecting the shared writer; this replaces the original subtype-only recognition described in Design and keeps incomplete requests silent.
+- The capture review during GREEN found two additional scalar payload fields, `autoCompactThreshold` and `isAutoCompactEnabled`, beyond the initially enumerated six. The canned payload and vocabulary test include both so “captured scalar fields” is literal rather than selective.
