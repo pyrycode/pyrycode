@@ -38,3 +38,12 @@ sizes off a table-driven unit test — the ordinary test tier for this family
 cannot see it. The next per-entry cap built on this pattern (`boundEach`,
 `emitModelList`, `emitBackgroundTaskRoster`) that pre-allocates against a
 decoded collection's length before filtering carries the same hazard.
+
+Slice ownership and string ownership need separate proofs. Replacing fields in
+the source entry after a bound returns proves that the result owns its structs,
+but a shallow struct copy still passes while its strings share the source's
+backing bytes. Tests for `boundContextUsageEntries` therefore build designated
+strings over mutable byte buffers, mutate those buffers after the call, and
+assert that the retained values stay unchanged. Without that mutation, removing
+the per-field `strings.Clone` would leave an ownership test green while allowing
+a short retained string to pin a much larger untrusted parse buffer.
