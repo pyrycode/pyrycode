@@ -8,8 +8,10 @@ PTY-derived status-peer events (`Stall` #638, `ApiRetry` / `Compacting` #1074)
 behind a sealed `Event` sum type. It also seals the
 **inbound** members behind a sealed `Inbound` sum type — `PermissionResponse`
 (#700, first) and `Cancel` (#707, the neutral remote-Esc / ACP `session/cancel`
-command). Four string-backed ACP enums and a sealed `ToolContent` sum type round
-it out. No transport, no I/O, no goroutines, no `context`, no `slog` — **standard
+command). Solicited informational readings include `ContextUsage`, whose scalar
+arithmetic remains Claude-authored while its model and category collection are
+bounded by the producing `streamsup` parser. Four string-backed ACP enums and a
+sealed `ToolContent` sum type round it out. No transport, no I/O, no goroutines, no `context`, no `slog` — **standard
 library only** (`encoding/json` for `json.RawMessage` is the sole import;
 `permission.go` needs none).
 
@@ -38,7 +40,7 @@ the first inbound member `PermissionResponse`, see [codebase/700.md](../codebase
 
 ```
 internal/turnevent/
-├── event.go         Event sealed sum type; the 5 ACP-shaped event structs + the internal-only status peers Stall (#638), ApiRetry / Compacting (#1074) + the internal-only diagnostic Unrecognized; Location; value-receiver markers; var _ Event = … assertions
+├── event.go         Event sealed sum type, including the solicited ContextUsage reading and its category value; internal-only status and diagnostic peers; Location; value-receiver markers; var _ Event = … assertions
 ├── permission.go    (#700) PermissionRequest (outbound Event variant) + PermissionOption + NewPermissionRequest; Inbound sealed sum type + PermissionResponse (first member) + Cancel (#707, fieldless inbound command); markers + assertions. Zero imports.
 ├── taxonomy.go      ToolKind / ToolStatus / TurnEndReason / PermissionOptionKind (#700) enums + const blocks + unexported canonical slices + Valid() methods
 ├── content.go       ToolContent sealed sum type; TextContent / DiffContent / TerminalContent; markers; var _ ToolContent = … assertions
@@ -70,8 +72,8 @@ type Inbound interface{ isInbound() }          // permission.go (#700) — inbou
   external ACP-spec churn cannot inject a variant. The bridge (#608) ranges a
   stream of `Event`; the wire adapter (#607) type-switches to map each kind.
 - This is **not** a preemptive interface (which `CODING-STYLE.md` warns against):
-  there are already seven / three / one concrete implementations and a known
-  consumer (#608) that needs a single typed stream element. The sealed-marker
+  each seam already has concrete implementations and known consumers that need
+  one typed stream element. The sealed-marker
   exception is justified by the closed-set, known-consumer shape. `Inbound` is
   defined ahead of its consumer for the same reason the whole package is — it is
   the neutral contract the downstream inbound parser maps onto (see § The
@@ -331,7 +333,7 @@ imposes nothing.
 
 ## Sections
 
-- [The outbound `Event` variants (`event.go`, `permission.go`)](turnevent-package-outbound-event-variants.md) — the full field table for all fourteen variants, `TurnEnd`'s per-ticket growth history (`ModelWindows`, the `result`-line stop shape, `ErrorCategory`, the #2260 duration/turn/cost numbers), `Stall`/`ApiRetry`/`Compacting`, and `Location`.
+- [The outbound `Event` variants (`event.go`, `permission.go`)](turnevent-package-outbound-event-variants.md) — the full field table, including solicited `ContextUsage`, `TurnEnd`'s growth history (`ModelWindows`, the `result`-line stop shape, `ErrorCategory`, the #2260 duration/turn/cost numbers), `Stall`/`ApiRetry`/`Compacting`, and `Location`.
 
 ## Related
 
