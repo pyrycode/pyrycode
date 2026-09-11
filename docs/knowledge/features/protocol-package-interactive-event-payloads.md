@@ -1,4 +1,4 @@
-# Interactive event payloads (#607, #638, #1074, #2237, #2233, #2261, #2324, #2329, #2330)
+# Interactive event payloads (#607, #638, #1074, #2237, #2233, #2261, #2265, #2266, #2324, #2329, #2330)
 
 The **v2 additive application events** — the wire representation of
 `internal/turnevent`'s neutral turn-event model (#606). They are **binary → phone
@@ -9,8 +9,9 @@ to the `Type*` constants `TypeTurnState` / `TypeAssistantDelta` / `TypeToolUse` 
 `TypeToolResult` / `TypeTurnEnd` (all #607), `TypeStall` (#638), `TypeApiRetry`
 / `TypeCompacting` (#1074), `TypeCompactionBoundary` (#2237, its own const
 block), `TypeToolDenied` (#2233, also its own const block), and `TypeBanner`
-(#2256, also its own const block), plus `TypeToolProgress` (#2324, its own const
-block — see
+(#2256, also its own const block), `TypeModelRefusalFallback` (#2265), and
+`TypeModelRefusalNoFallback` (#2266), plus `TypeToolProgress` (#2324, its own
+const block — see
 [Envelope types](protocol-package-constants-codes-go-envelope-types.md)).
 The first five are the wire form of ACP-shaped turn events; `stall`, `api_retry`,
 and `compacting` are the wire form of **internal-only** signals (no ACP
@@ -362,16 +363,19 @@ type BannerPayload struct {
   field needs translating at the same seam** — nothing in the type system catches a
   missed rename, since both sides are plain `[]string` and a round-trip fixture is
   byte-equal either way.
-- **`ModelRefusalFallbackPayload` (#2265) makes report provenance a per-field
-  property, not a payload-wide label.** Its models, `Scope`, `RefusalCategory`, and
-  `Banner` are claude-authored values, but `TruncatedFields` and `DroppedFields` are
-  daemon-authored metadata created while those values are bounded. Calling every
-  non-conversation field claude-authored would misattribute the daemon's own report
-  and invite clients to treat claude's accusatory category as daemon judgment. The
-  category remains an open, inert assertion; the arrays remain closed reports in the
-  payload's wire-key vocabulary. An excluded-only report is `nil` and therefore
-  marshals as `null`, not `[]`: filtering the unpublished refusal explanation must
-  not manufacture the claim that a complete, empty report was received.
+- **The refusal payloads (#2265/#2266) make report provenance a per-field property,
+  not a payload-wide label.** Their models, open classification values, and banners
+  are claude-authored, but `TruncatedFields` and `DroppedFields` are daemon-authored
+  metadata created while those values are bounded. Calling every non-conversation
+  field claude-authored would misattribute the daemon's own report and invite clients
+  to treat claude's accusatory category as daemon judgment. The category remains an
+  open, inert assertion; the arrays remain closed reports in each payload's wire-key
+  vocabulary. `ModelRefusalNoFallbackPayload` deliberately omits the fallback model,
+  scope, request/message identities, and second refusal explanation: its banner is the
+  sole rendered prose and the envelope type itself says no retry occurred. An
+  excluded-only report is `nil` and therefore marshals as `null`, not `[]`: filtering
+  an unpublished field must not manufacture the claim that a complete, empty report
+  was received.
 - **A doc comment's claim that a report slice lists its tokens "in declaration order" is
   not provable by anything that runs, and shipped false here.** `ToolDeniedPayload`'s
   `TruncatedFields`/`DroppedFields` doc comments enumerate their tokens in *this
