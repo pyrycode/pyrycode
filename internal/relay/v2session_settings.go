@@ -23,9 +23,10 @@ import (
 // into its decode-error string, so no decode error, payload byte, or model/effort
 // value ever reaches these messages, the wire, or a log.
 const (
-	msgSettingsMalformed   = "malformed set_session_settings request"
-	msgSettingsNotFound    = "unknown session_id"
-	msgSettingsUnavailable = "session settings unavailable"
+	msgSettingsMalformed       = "malformed set_session_settings request"
+	msgSettingsModelNotOffered = "requested model is not offered"
+	msgSettingsNotFound        = "unknown session_id"
+	msgSettingsUnavailable     = "session settings unavailable"
 )
 
 // handleSetSessionSettings applies an inbound interactive set_session_settings
@@ -68,11 +69,13 @@ const (
 //     not be added for debuggability.
 //  4. Nil-seam guard: a nil SettingsUpdater replies "unavailable" deterministically
 //     (foreground / unwired), never a silent drop.
-//  5. Persist + reply: UpdateSettings merges all present fields under one atomic
-//     save (rollback on failure), so a partial write is impossible (AC #1).
-//     ErrSessionUnknown ⇒ session.not_found; any other error ⇒ a server-unavailable
-//     reply whose message is the fixed constant (never the wrapped err, which can
-//     quote a path); nil error ⇒ the success reply.
+//  5. Validate availability + persist: the injected adapter checks a non-empty
+//     model against the retained published vocabulary before Pool.UpdateSettings.
+//     A complete-menu absence becomes a fixed non-retryable malformed reply; an
+//     incomplete vocabulary becomes retryable model_list.unavailable. Otherwise
+//     UpdateSettings merges all fields under one atomic save (rollback on failure),
+//     so a partial write is impossible. ErrSessionUnknown becomes session.not_found;
+//     any remaining error becomes server-unavailable; nil becomes success.
 func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Session, env protocol.Envelope) {
 	if !s.interactive {
 		return // non-interactive conn: inert, no reply (AC #6 negative path)
@@ -133,6 +136,22 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 	})
 	if errors.Is(err, ErrSessionUnknown) {
 		m.settingsReplyError(ctx, s, env.ID, protocol.CodeSessionNotFound, msgSettingsNotFound, false)
+		return
+	}
+	if errors.Is(err, ErrModelNotOffered) {
+		m.cfg.Logger.Info("relay: v2 set_session_settings model not offered",
+			"event", "v2.settings.model_not_offered",
+			"conn_id", s.connID,
+			"session_id", p.SessionID)
+		m.settingsReplyError(ctx, s, env.ID, protocol.CodeProtocolMalformed, msgSettingsModelNotOffered, false)
+		return
+	}
+	if errors.Is(err, ErrModelVocabularyUnavailable) {
+		m.cfg.Logger.Info("relay: v2 set_session_settings model vocabulary unavailable",
+			"event", "v2.settings.model_vocabulary_unavailable",
+			"conn_id", s.connID,
+			"session_id", p.SessionID)
+		m.settingsReplyError(ctx, s, env.ID, protocol.CodeModelListUnavailable, msgModelListUnavailable, true)
 		return
 	}
 	if err != nil {

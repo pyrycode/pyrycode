@@ -366,7 +366,7 @@ func TestWithApprovalArgs(t *testing.T) {
 
 	t.Run("a downgraded child still gets the approval set", func(t *testing.T) {
 		t.Parallel()
-		got := withApprovalArgs(alwaysOn, path, "default", false)
+		got := withApprovalArgs(alwaysOn, path, "default", false, false)
 
 		// permissionArgs' own --permission-mode default pair drops, because the argv
 		// already names a mode — #2043's arm, now the common case.
@@ -392,7 +392,7 @@ func TestWithApprovalArgs(t *testing.T) {
 		t.Parallel()
 		// Byte-identical args and stored mode to the subtest above. Only the
 		// provenance differs, and it is the whole decision.
-		got := withApprovalArgs(alwaysOn, path, "default", true)
+		got := withApprovalArgs(alwaysOn, path, "default", true, false)
 
 		if !slices.Equal(got, alwaysOn) {
 			t.Fatalf("withApprovalArgs operator-bypass = %q, want unchanged %q", got, alwaysOn)
@@ -413,7 +413,7 @@ func TestWithApprovalArgs(t *testing.T) {
 		// subtracts the escalation back out of the writer's allow-list — so nothing
 		// walks this child back either.
 		in := []string{"--model", "haiku", bypass, "--settings", "p"}
-		got := withApprovalArgs(in, path, sessions.PermissionModeBypass, false)
+		got := withApprovalArgs(in, path, sessions.PermissionModeBypass, false, false)
 
 		if !slices.Equal(got, in) {
 			t.Fatalf("withApprovalArgs stored-escalation = %q, want unchanged %q", got, in)
@@ -452,7 +452,7 @@ func TestWithApprovalArgs(t *testing.T) {
 			{"--model", "haiku", bypass, "--permission-mode", "plan", "--settings", "p"},
 			{"--permission-mode=plan", bypass, "--settings", "p"},
 		} {
-			got := withApprovalArgs(in, path, "plan", false)
+			got := withApprovalArgs(in, path, "plan", false, false)
 
 			if n := countMode(got); n != 1 {
 				t.Errorf("withApprovalArgs(%q) produced %d --permission-mode flags, want exactly 1: %q", in, n, got)
@@ -487,7 +487,7 @@ func TestWithApprovalArgs(t *testing.T) {
 	t.Run("an unrecognised stored mode still gets the approval set", func(t *testing.T) {
 		t.Parallel()
 		for _, mode := range []string{"", "notAMode"} {
-			got := withApprovalArgs([]string{bypass}, path, mode, false)
+			got := withApprovalArgs([]string{bypass}, path, mode, false, false)
 			for _, f := range []string{"--permission-prompt-tool", "--mcp-config", "--strict-mcp-config"} {
 				if !slices.Contains(got, f) {
 					t.Errorf("stored mode %q produced %q, which is missing %q; an unexpected mode must "+
@@ -501,7 +501,7 @@ func TestWithApprovalArgs(t *testing.T) {
 		t.Parallel()
 		in := []string{"--model", "haiku", bypass}
 		saved := slices.Clone(in)
-		got := withApprovalArgs(in, path, "default", false)
+		got := withApprovalArgs(in, path, "default", false, false)
 
 		if !slices.Equal(in, saved) {
 			t.Errorf("withApprovalArgs mutated its input: got %q, want %q", in, saved)
@@ -510,6 +510,19 @@ func TestWithApprovalArgs(t *testing.T) {
 		// input's backing array.
 		if len(got) > 0 && len(in) > 0 && &got[0] == &in[0] {
 			t.Errorf("withApprovalArgs returned a slice aliasing the input backing array")
+		}
+	})
+
+	t.Run("stdio toggle changes only the prompt tool value", func(t *testing.T) {
+		t.Parallel()
+		got := withApprovalArgs(alwaysOn, path, "default", false, true)
+		want := append(slices.Clone(alwaysOn),
+			"--permission-prompt-tool", "stdio",
+			"--mcp-config", path,
+			"--strict-mcp-config",
+		)
+		if !slices.Equal(got, want) {
+			t.Fatalf("withApprovalArgs stdio = %q, want %q", got, want)
 		}
 	})
 }
@@ -564,7 +577,7 @@ func TestWithApprovalArgs_BypassChildGetsNoFilesServer(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := withApprovalArgs(tc.args, path, tc.storedMode, tc.operatorBypass)
+			got := withApprovalArgs(tc.args, path, tc.storedMode, tc.operatorBypass, true)
 
 			if slices.Contains(got, "--mcp-config") {
 				t.Errorf("args %q carry --mcp-config; a child keeping its bypass must be handed no "+
@@ -595,7 +608,7 @@ func TestWithApprovalArgs_BypassChildGetsNoFilesServer(t *testing.T) {
 func TestStreamRunnerFactory_Construct(t *testing.T) {
 	t.Parallel()
 
-	factory := newStreamRunnerFactory(newStreamTurnSink(0, slog.Default()), "/tmp/pyry-mcp-approve-test.json")
+	factory := newStreamRunnerFactory(newStreamTurnSink(0, slog.Default()), "/tmp/pyry-mcp-approve-test.json", streamApprovalConfig{})
 	shapes := []struct {
 		name string
 		args []string
@@ -967,7 +980,7 @@ func TestStreamRunnerFactory_ErrorPropagation(t *testing.T) {
 		SessionID:  "sess-uuid",
 		ClaudeArgs: []string{"--settings", "p"},
 	}
-	runner, err := newStreamRunnerFactory(newStreamTurnSink(0, slog.Default()), "")(cfg)
+	runner, err := newStreamRunnerFactory(newStreamTurnSink(0, slog.Default()), "", streamApprovalConfig{})(cfg)
 	if err == nil {
 		t.Fatalf("newStreamRunnerFactory error = nil, want non-nil for a missing binary")
 	}

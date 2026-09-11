@@ -9,6 +9,11 @@ This package shipped the registry **primitive only**, unwired and unit-tested in
 - **#1106 (landed)** — spawn-arg injection + mcp-config generation (`cmd/pyry/mcp_config.go`) that points a non-YOLO claude spawn at the #1105 subcommand in the first place (`--permission-prompt-tool mcp__pyry_approve__approve --mcp-config <path>`). Doesn't call the registry directly; completes the enforce-vs-skip switch that makes #1104/#1105 reachable at all. See [codebase/1106.md](../codebase/1106.md).
 - **#1080 (landed)** — the `modal_shown ↔ modal_answer` wiring: `cmd/pyry`'s `streamApprovalBridge` calls `Lookup`/`Resolve` from a client's decision, threading the *same* `*Registry` instance #1104 created at the `cmd/pyry` composition root (`runSupervisor`), not a second one. See [v2-session-manager.md § Stream-json approval bridge](v2-session-manager.md#stream-json-approval-bridge--the-verdict-arm-1080) and [codebase/1080.md](../codebase/1080.md).
 - **#1932 (landed)** — wires `SetAnswerable`: `cmd/pyry/relay.go`'s `startRelayV2` installs `bridge.ApprovalAnswerable` as the registry's `AnswerableFunc`, so #1931's conditional bound (below) is live in production rather than shipped-dormant. See § Conditional bound and [control-plane.md § Approve](control-plane.md#approve-mcpapprove-verb--forward-to-permbridge-block-default-deny-1104).
+- **#2343 (landed)** — adds an opt-in stdio consumer for interactive daemon
+  children. `stdioPermissionHandler` registers each `can_use_tool` ask in this
+  same registry and returns the correlated verdict to the child that originated
+  it; the MCP consumer remains the default rollback transport. See
+  [config-package.md](config-package.md#stdio_permission_prompt--interactive-permission-transport-2343).
 
 Spec: [`specs/architecture/1103-permbridge-registry.md`](../../specs/architecture/1103-permbridge-registry.md). Ticket record: [codebase/1103.md](../codebase/1103.md).
 
@@ -113,6 +118,15 @@ This mirrors `cmd/pyry/acp_permission.go`'s existing default-deny idiom (every n
 ## Concurrency model
 
 Four goroutine roles touch the registry: (1) the caller/verb goroutine — `Register` then `Await`, one per parked request; (2) the resolver goroutine (`streamApprovalBridge.ResolveStream`/`retire`, #1080, calling `Resolve` from the relay `Run` goroutine and the control-server handler goroutine respectively); (3) the per-entry timer goroutine (`time.AfterFunc`, `Stop()`ped when `Resolve` wins so it never fires in the resolved-in-time case); (4) a concurrent `Lookup` reader. All shared state is `Registry.pending`, guarded by the **leaf** `Registry.mu` — held only around O(1) map ops, never nested with another lock, never held across the channel send. Each `pending.ch` is buffered(1), written exactly once by the one-shot winner, read at most once by `Await`.
+
+Consumer-side lifecycle tracking needs the same per-registration identity. The
+stdio adapter's `stdioPermissionHandler` may accept a new request after the
+registry has resolved and removed an older request with the same external
+`tool_use_id`, while the older waiter is still unwinding. If that waiter deletes
+a side-map entry by id alone, it can erase the newer request and make child-exit
+cleanup miss it. `stdioPermissionHandler.await` therefore deletes the tracked
+entry only when its stored `*permbridge.Pending` is the same registration it
+awaited; the external correlation id alone is not an ownership token.
 
 No daemon-lifecycle goroutine exists in this primitive — shutdown (a bulk "deny all pending on daemon stop" drain) is deferred; every entry is self-bounded by its own `timeout` window, so with no `AnswerableFunc` installed no entry outlives its deadline regardless of process shutdown timing, and with one installed no entry outlives a window in which the report reads unanswerable.
 

@@ -120,6 +120,14 @@ Once `Dial` succeeds, the control server is in `Serve` (per
 daemon is responsive even if the supervised child hasn't spawned yet —
 sufficient for the "daemon is alive" contract.
 
+It is deliberately **not** a child-initialize readiness signal (#2281). A test
+that immediately requests retained child state can observe the hosted session
+before its `initialize` response has populated the hold. Such a test may retry
+only the protocol's explicit transient outcome — for a model-list request,
+retryable `model_list.unavailable` — and must fail on every other reply. Treating
+socket readiness as vocabulary readiness makes an otherwise-correct integration
+test timing-dependent.
+
 A second `select` watches `doneCh` (closed by the wait goroutine on
 `cmd.Wait` return). An early pyry exit short-circuits the deadline and surfaces
 captured stderr in the `t.Fatalf` message.
@@ -362,6 +370,14 @@ output against a planted input file, in general) only exercises the join if
 the two sides are seeded from two independently-chosen values, not two copies
 of one constant — pin the values the real channels are observed to disagree on,
 the way #2118's rider key and transcript id now do.
+
+**Checking that a small advertised subset belongs to a larger capture does not
+prove the capture traversed the system (#2281).** The first model-rejection e2e
+loaded #2279's six-row capture only as a comparison set while fake claude still
+published its default two-row fixture; it stayed green although four source rows
+never crossed initialize retention or client publication. When a capture is the
+claimed provenance, feed an exact projection of every complete row into the
+producer and compare the full ordered output before testing downstream behavior.
 
 **Editing the source in place still needs `-count=1` against a daemon-spawning
 suite (#2099).** `-overlay` isn't the only way a mutant fails to reach the

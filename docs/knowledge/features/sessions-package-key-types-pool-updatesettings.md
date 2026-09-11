@@ -58,9 +58,12 @@ Never takes `Session.lcMu` — `settings` is a `Pool.mu`-guarded field, same as
 re-acquire (`docs/lessons.md` § "Lock order with callback into the host").
 
 Validating untrusted model/effort values is explicitly **not** this method's
-job — it operates on operator-trusted input; the wire handler (#845, a
-charset/length shape check for `Model`, a closed enum for `Effort`) owns the
-untrusted → trusted crossing. See [codebase/840.md](../codebase/840.md).
+job — it operates on operator-trusted input. The relay handler owns the
+charset/length shape check for `Model` and closed enum for `Effort`; for a
+non-empty model, `cmd/pyry`'s `settingsUpdaterAdapter.UpdateSettings` then owns
+the exact membership check against the retained published vocabulary before
+this method can mutate or deliver anything. See [Inbound
+`set_session_settings`](v2-session-manager-state-machine-inbound-set-session-settings-settingsupd.md).
 
 **Live-apply on a real change (#842, #1581).** After a successful persist of a
 real change (not a no-op, not a failed save), `UpdateSettings` recomposes the
@@ -157,7 +160,8 @@ place is what keeps them safe.):
   survive those too, with no new mechanism. Swap **before** write — the
   install is the durable half. Delivery is fire-and-forget: every write error
   is logged at `Info`
-  (`"sessions: in-band settings command not delivered"`, fields `session` / a
+  (`"sessions: in-band settings command not delivered"`, fixed event
+  `sessions.settings.delivery_err`, fields `session` / a
   fixed `setting` literal (`"permission_mode"` for the posture) / `err` —
   **never** the value, the payload bytes, or the conversation id) and
   swallowed, so the client sees success. They cannot be classified anyway:

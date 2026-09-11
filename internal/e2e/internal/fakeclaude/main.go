@@ -234,6 +234,19 @@
 //	                               stream wins and the other is inert). Default off —
 //	                               when unset, fakeclaude is byte-identical to its
 //	                               prior behaviour.
+//	PYRY_FAKE_CLAUDE_INITIALIZE_MODELS optional path to a JSON array used as the
+//	                               initialize response's model menu in stream-json
+//	                               mode. Unset uses the canned initializeModels.
+//	PYRY_FAKE_CLAUDE_STREAM_CAN_USE_TOOL optional JSON object whose keys are the
+//	                               inner can_use_tool request fields. In stream-json
+//	                               mode, each user turn emits the configured request
+//	                               and waits for its correlated control_response before
+//	                               ending the turn. Invalid JSON or an unknown key
+//	                               disables the rider. Default off.
+//	PYRY_FAKE_CLAUDE_STREAM_EXIT_AFTER_CAN_USE_TOOL optional; "1" makes the
+//	                               stream child exit immediately after emitting the
+//	                               configured can_use_tool request. It drives
+//	                               origin-child teardown while the ask is parked.
 //	PYRY_FAKE_CLAUDE_SESSION_ID_FROM_ARGV  optional; when set to any non-empty
 //	                               value, fakeclaude takes the stem for its INITIAL
 //	                               <uuid>.jsonl from its own argv — the value after
@@ -417,11 +430,15 @@ const (
 	envStreamModelWindows = "PYRY_FAKE_CLAUDE_STREAM_MODEL_WINDOWS"
 	envStreamResetTo      = "PYRY_FAKE_CLAUDE_STREAM_RESET_TO"
 	envStreamSessionFacts = "PYRY_FAKE_CLAUDE_STREAM_SESSION_FACTS"
+	envStreamCanUseTool   = "PYRY_FAKE_CLAUDE_STREAM_CAN_USE_TOOL"
+	envInitializeModels   = "PYRY_FAKE_CLAUDE_INITIALIZE_MODELS"
 	envApproveSocketFile  = "PYRY_FAKE_CLAUDE_APPROVE_SOCKET_FILE"
 	envRejectAbsentResume = "PYRY_FAKE_CLAUDE_REJECT_ABSENT_RESUME"
 	assistantMaxBytes     = 64 * 1024
 	pollInterval          = 50 * time.Millisecond
 )
+
+const envStreamExitAfterCanUseTool = "PYRY_FAKE_CLAUDE_STREAM_EXIT_AFTER_CAN_USE_TOOL"
 
 // modalScreen is the compact plaintext permission-modal screen fakeclaude writes
 // on the modal trigger's first appearance (envModalTrigger). Its bottom region
@@ -1571,6 +1588,38 @@ type inControlRequest struct {
 	} `json:"request"`
 }
 
+// stdioPermissionRider is the presence-preserving inner request configured by
+// envStreamCanUseTool. Values stay raw until json.Marshal writes the request, so
+// objects and arrays retain their JSON shape and false remains distinguishable from
+// an absent boolean.
+type stdioPermissionRider map[string]json.RawMessage
+
+// pendingStdioPermission is the one ask runStreamJSON has written but not yet
+// resolved. The stream loop is sequential, so no second ask can become outstanding
+// while this value is set.
+type pendingStdioPermission struct {
+	requestID string
+	messageID string
+	toolName  string
+	toolUseID string
+	input     json.RawMessage
+}
+
+// inPermissionResponse is the minimal response half of streamsup's can_use_tool
+// codec. updatedInput remains raw because the allowed tool_use must expose the
+// answering host's JSON value without guessing its schema.
+type inPermissionResponse struct {
+	Type     string `json:"type"`
+	Response struct {
+		Subtype   string `json:"subtype"`
+		RequestID string `json:"request_id"`
+		Response  struct {
+			Behavior     string          `json:"behavior"`
+			UpdatedInput json.RawMessage `json:"updatedInput"`
+		} `json:"response"`
+	} `json:"response"`
+}
+
 // outAssistant / outResult are the two outbound stdout lines fakeclaude writes per
 // user turn. Field order/tags produce shapes byte-compatible with
 // stream_turn_drain_test.go's assistantTextLine / resultLine, so streamsup.Parser
@@ -1742,6 +1791,81 @@ func (w syncWriter) Write(p []byte) (int, error) {
 	return n, w.f.Sync()
 }
 
+// loadStdioPermissionRider reads the default-off can_use_tool rider. It admits only
+// fields carried by streamsup.CanUseToolRequest and validates the fields whose scalar
+// type that codec pins. Opaque fields accept every JSON shape. subtype is deliberately
+// not configurable: writeStdioPermissionRequest supplies can_use_tool itself.
+func loadStdioPermissionRider(raw string) stdioPermissionRider {
+	if raw == "" {
+		return nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &fields); err != nil || fields == nil {
+		return nil
+	}
+	for key, value := range fields {
+		switch key {
+		case "tool_name", "tool_use_id", "agent_id", "blocked_path", "decision_reason_type",
+			"title", "display_name", "description":
+			var decoded string
+			if err := json.Unmarshal(value, &decoded); err != nil {
+				return nil
+			}
+		case "classifier_approvable", "suppress_always_allow_rule", "default_to_no",
+			"requires_user_interaction":
+			var decoded bool
+			if err := json.Unmarshal(value, &decoded); err != nil {
+				return nil
+			}
+		case "input", "permission_suggestions", "decision_reason", "matched_ask_rule":
+			// Opaque in streamsup.CanUseToolRequest; encoding/json already proved the
+			// value is valid JSON when it decoded the containing object.
+		default:
+			return nil
+		}
+	}
+	return stdioPermissionRider(fields)
+}
+
+// configuredString decodes one optional scalar from the rider. The loader has
+// already validated its shape, so the error is unreachable; a missing or JSON-null
+// field has the same empty Go value streamsup.CanUseToolRequest would decode.
+func (r stdioPermissionRider) configuredString(key string) string {
+	var value string
+	_ = json.Unmarshal(r[key], &value)
+	return value
+}
+
+// writeStdioPermissionRequest emits exactly one newline-terminated request. Copying
+// the map before adding subtype leaves the loaded configuration reusable on every
+// turn and prevents a configured field from replacing the fixed discriminator.
+func writeStdioPermissionRequest(w io.Writer, requestID string, rider stdioPermissionRider) error {
+	request := make(map[string]json.RawMessage, len(rider)+1)
+	for key, value := range rider {
+		request[key] = value
+	}
+	request["subtype"] = json.RawMessage(`"can_use_tool"`)
+	return writeJSONLine(w, map[string]any{
+		"type":       "control_request",
+		"request_id": requestID,
+		"request":    request,
+	})
+}
+
+// permissionResponse decodes a successful can_use_tool answer. Its boolean reports
+// only the envelope shape; request-id correlation and behavior selection remain in
+// runStreamJSON so an unrelated answer cannot resolve the outstanding ask.
+func permissionResponse(line []byte) (inPermissionResponse, bool) {
+	var response inPermissionResponse
+	if err := json.Unmarshal(line, &response); err != nil {
+		return inPermissionResponse{}, false
+	}
+	if response.Type != "control_response" || response.Response.Subtype != "success" {
+		return inPermissionResponse{}, false
+	}
+	return response, true
+}
+
 // runStreamJSON reads line-delimited stream-json user-turn envelopes from r and,
 // for each {"type":"user",…} line, writes one assistant text line (echoing the
 // prompt) followed by one result line to w — one response per received user turn.
@@ -1820,13 +1944,59 @@ func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rat
 	// cap, and the final non-newline-terminated bytes at EOF are still processed.
 	br := bufio.NewReader(r)
 	turn := 0
+	permissionRider := loadStdioPermissionRider(os.Getenv(envStreamCanUseTool))
+	var pendingPermission *pendingStdioPermission
 	for {
 		line, err := br.ReadString('\n')
 		if len(line) > 0 {
 			b := []byte(line)
-			if text, ok := userTurnText(b); ok {
+			if pendingPermission != nil {
+				response, ok := permissionResponse(b)
+				if ok && response.Response.RequestID == pendingPermission.requestID {
+					switch response.Response.Response.Behavior {
+					case "allow":
+						input := response.Response.Response.UpdatedInput
+						if input == nil {
+							input = pendingPermission.input
+						}
+						if werr := writeAssistantToolUseFor(w, pendingPermission.messageID,
+							pendingPermission.toolUseID, pendingPermission.toolName, input); werr != nil {
+							return
+						}
+						if werr := writeVerdictResponse(w, pendingPermission.messageID, verdictAllow); werr != nil {
+							return
+						}
+						pendingPermission = nil
+					case "deny":
+						if werr := writeVerdictResponse(w, pendingPermission.messageID, verdictDeny); werr != nil {
+							return
+						}
+						pendingPermission = nil
+					}
+				}
+			} else if text, ok := userTurnText(b); ok {
 				turn++
 				msgID := fmt.Sprintf("m%d", turn)
+				if permissionRider != nil {
+					requestID := fmt.Sprintf("permission-%d", turn)
+					if werr := writeStdioPermissionRequest(w, requestID, permissionRider); werr != nil {
+						return
+					}
+					pendingPermission = &pendingStdioPermission{
+						requestID: requestID,
+						messageID: msgID,
+						toolName:  permissionRider.configuredString("tool_name"),
+						toolUseID: permissionRider.configuredString("tool_use_id"),
+						input:     permissionRider["input"],
+					}
+					if os.Getenv(envStreamExitAfterCanUseTool) == "1" {
+						return
+					}
+					if err != nil {
+						return
+					}
+					continue
+				}
 				// The init rider writes FIRST among the prepends, because that is
 				// where claude itself puts the line: every captured turn opens with
 				// it. No test drives two riders at once, so the ordering is
@@ -2425,17 +2595,41 @@ func writeInterruptAck(w io.Writer, requestID string) error {
 // sorted, so the line is deterministic without declaring a struct for a shape nothing
 // else reads. Returns the first marshal/write error.
 func writeInitializeAck(w io.Writer, requestID string) error {
+	models, err := loadInitializeModels(os.Getenv(envInitializeModels))
+	if err != nil {
+		return fmt.Errorf("load initialize models: %w", err)
+	}
 	return writeJSONLine(w, map[string]any{
 		"type": "control_response",
 		"response": map[string]any{
 			"subtype":    "success",
 			"request_id": requestID,
 			"response": map[string]any{
-				"models":   initializeModels,
+				"models":   models,
 				"commands": initializeCommands,
 			},
 		},
 	})
+}
+
+// loadInitializeModels returns the default capture-backed model menu unless a
+// test supplies a JSON fixture path. The override lets an end-to-end test feed a
+// newer committed capture through the same stdout parser and retention path as
+// the canned response without changing the default bytes for the rest of the
+// hermetic suite.
+func loadInitializeModels(path string) ([]map[string]any, error) {
+	if path == "" {
+		return initializeModels, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", filepath.Base(path), err)
+	}
+	var models []map[string]any
+	if err := json.Unmarshal(raw, &models); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", filepath.Base(path), err)
+	}
+	return models, nil
 }
 
 // writeSetPermissionModeAck writes the control_response real claude answers a
@@ -2833,6 +3027,13 @@ func runStreamJSONApprove(r io.Reader, w io.Writer, socketFile string) {
 // so reusing it is a shape claude produces and is inert to the parser either way.
 // Returns the first marshal/write error.
 func writeAssistantToolUse(w io.Writer, msgID, toolUseID string) error {
+	return writeAssistantToolUseFor(w, msgID, toolUseID, approveToolName, json.RawMessage(approveToolInput))
+}
+
+// writeAssistantToolUseFor is the configurable sibling used after a stdio permission
+// allow. json.Marshal validates and compacts input, so even hostile-but-valid JSON
+// remains inside one physical assistant line; a nil input becomes JSON null.
+func writeAssistantToolUseFor(w io.Writer, msgID, toolUseID, toolName string, input json.RawMessage) error {
 	return writeJSONLine(w, outAssistantToolUse{
 		Type: "assistant",
 		Message: outAsstToolMessage{
@@ -2841,8 +3042,8 @@ func writeAssistantToolUse(w io.Writer, msgID, toolUseID string) error {
 			Content: []outToolUseBlock{{
 				Type:  "tool_use",
 				ID:    toolUseID,
-				Name:  approveToolName,
-				Input: json.RawMessage(approveToolInput),
+				Name:  toolName,
+				Input: input,
 			}},
 		},
 	})

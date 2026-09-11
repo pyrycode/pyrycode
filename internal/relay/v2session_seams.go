@@ -145,8 +145,9 @@ type SettingsUpdate struct {
 // internal/sessions nor cmd/pyry (CODING-STYLE: define interfaces where they are
 // consumed). UpdateSettings returns ErrSessionUnknown for an id the daemon does
 // not host (the adapter maps sessions.ErrSessionNotFound onto it) — which the
-// handler turns into a session.not_found reply; any other error is a persist
-// failure the handler reports as server-unavailable.
+// handler turns into a session.not_found reply. ErrModelNotOffered and
+// ErrModelVocabularyUnavailable are pre-mutation validation outcomes; remaining
+// errors are persistence failures reported as server-unavailable.
 type SettingsUpdater interface {
 	UpdateSettings(sessionID string, update SettingsUpdate) error
 }
@@ -197,6 +198,18 @@ type RunConfig struct {
 // stays free of an internal/sessions import; handleSetSessionSettings maps it to a
 // deterministic session.not_found reply.
 var ErrSessionUnknown = errors.New("relay: session unknown")
+
+// ErrModelNotOffered means a complete retained model vocabulary proves that a
+// requested non-empty model is absent. The settings handler maps it to a fixed,
+// non-retryable protocol.malformed response. It deliberately carries no model
+// value because callers may log the outcome.
+var ErrModelNotOffered = errors.New("relay: model not offered")
+
+// ErrModelVocabularyUnavailable means retained state cannot prove whether a
+// requested non-empty model is offered. Missing state, dropped rows, and a row
+// whose Value was truncated all map here. The settings handler returns the same
+// retryable model_list.unavailable used by the model-list request path.
+var ErrModelVocabularyUnavailable = errors.New("relay: model vocabulary unavailable")
 
 // ModalResolver resolves an inbound modal control frame against the daemon's
 // outstanding-modal state. Declared here (consumer side), beside

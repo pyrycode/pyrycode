@@ -382,6 +382,9 @@ func TestPool_PermissionModeNeverLogged(t *testing.T) {
 	if !strings.Contains(logged, "permission_mode") {
 		t.Fatalf("no delivery record was written at all: %q", logged)
 	}
+	if !strings.Contains(logged, "sessions.settings.delivery_err") {
+		t.Errorf("delivery record lacks a stable event key: %q", logged)
+	}
 	if strings.Contains(logged, mode) {
 		t.Errorf("the delivery record leaked the mode value: %q", logged)
 	}
