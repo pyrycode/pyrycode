@@ -141,3 +141,21 @@ Pending for the documentation stage: update `docs/knowledge/features/config-pack
 
 **Reviewer:** builder (self-review per the security-review checklist)  
 **Date:** 2026-09-11
+
+## Revisions
+
+### 2026-09-11 — preserve tracking across reused tool-use IDs
+
+Verifier review found that an older waiter could delete the `live` entry of a
+newer request that reused the same Claude-authored `tool_use_id` after registry
+resolution. Each accepted registration now receives a private identity stored as
+the map value. A waiter deletes its entry only when that identity still matches;
+child exit snapshots the current IDs and continues to resolve through the
+registry one-shot. The focused test will force the old-resolution, ID-reuse, old-
+waiter cleanup, and child-exit ordering and prove the newer waiter terminates.
+
+The fake-daemon proof also grows the two scenarios requested by verifier review:
+an `AskUserQuestion` rider must surface `question_shown` and return the existing
+`updatedInput`, and a rider whose origin child exits must reject a late answer
+without writing to the replacement child's stdin. These extend the existing
+stdio fake-daemon cases without changing production contracts.

@@ -150,6 +150,66 @@ func TestStdioPermissionHandler_ChildExitRetiresWithoutReplacementWrite(t *testi
 	}
 }
 
+func TestStdioPermissionHandler_ReusedIDRemainsTrackedForChildExit(t *testing.T) {
+	t.Parallel()
+
+	reg := permbridge.New()
+	firstSurfaced := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	retired := []chan struct{}{make(chan struct{}), make(chan struct{})}
+	var surfaceMu sync.Mutex
+	surfaceCount := 0
+	surface := &approvalSurfaceReport{}
+	surface.set(func(permbridge.Request) func() {
+		surfaceMu.Lock()
+		index := surfaceCount
+		surfaceCount++
+		surfaceMu.Unlock()
+		if index == 0 {
+			close(firstSurfaced)
+			<-releaseFirst
+		}
+		return func() { close(retired[index]) }
+	})
+	h := newStdioPermissionHandler(reg, time.Minute, surface)
+	var firstOut, secondOut lockedBuffer
+	request := streamsup.CanUseToolRequest{
+		RequestID: "request-first",
+		ToolUseID: "reused-tool-use",
+		ToolName:  "Bash",
+		Input:     json.RawMessage(`{"command":"true"}`),
+	}
+	h.handle(request, &firstOut)
+	<-firstSurfaced
+	if !reg.Resolve(request.ToolUseID, permbridge.Allow(request.Input)) {
+		t.Fatal("first request was not live")
+	}
+
+	request.RequestID = "request-second"
+	h.handle(request, &secondOut)
+	close(releaseFirst)
+	select {
+	case <-retired[0]:
+	case <-time.After(time.Second):
+		t.Fatal("first waiter did not retire after resolution")
+	}
+
+	h.childExited()
+	lateAnswerWon := reg.Resolve(request.ToolUseID, permbridge.Allow(request.Input))
+	select {
+	case <-retired[1]:
+	case <-time.After(time.Second):
+		t.Fatal("reused-ID waiter did not retire after child exit")
+	}
+	if lateAnswerWon {
+		t.Fatal("late answer resolved the reused ID; older waiter cleanup removed its child-exit tracking")
+	}
+	requestID, behavior, _ := decodeStdioPermissionResponse(t, secondOut.BytesCopy())
+	if requestID != "request-second" || behavior != permbridge.BehaviorDeny {
+		t.Errorf("second response = request_id %q behavior %q, want request-second deny", requestID, behavior)
+	}
+}
+
 func TestStdioPermissionHandler_AskUserQuestionUsesExistingSurface(t *testing.T) {
 	t.Parallel()
 

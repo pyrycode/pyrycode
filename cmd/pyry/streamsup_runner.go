@@ -353,7 +353,7 @@ type stdioPermissionHandler struct {
 	surface  *approvalSurfaceReport
 
 	mu   sync.Mutex
-	live map[string]struct{}
+	live map[string]*permbridge.Pending
 }
 
 func newStdioPermissionHandler(registry *permbridge.Registry, timeout time.Duration, surface *approvalSurfaceReport) *stdioPermissionHandler {
@@ -361,7 +361,7 @@ func newStdioPermissionHandler(registry *permbridge.Registry, timeout time.Durat
 		registry: registry,
 		timeout:  timeout,
 		surface:  surface,
-		live:     make(map[string]struct{}),
+		live:     make(map[string]*permbridge.Pending),
 	}
 }
 
@@ -390,7 +390,7 @@ func (h *stdioPermissionHandler) handle(req streamsup.CanUseToolRequest, origin 
 	}
 
 	h.mu.Lock()
-	h.live[req.ToolUseID] = struct{}{}
+	h.live[req.ToolUseID] = pending
 	h.mu.Unlock()
 
 	go h.await(req.RequestID, parked, pending, origin)
@@ -401,7 +401,9 @@ func (h *stdioPermissionHandler) await(requestID string, req permbridge.Request,
 	verdict := pending.Await()
 
 	h.mu.Lock()
-	delete(h.live, req.ToolUseID)
+	if h.live[req.ToolUseID] == pending {
+		delete(h.live, req.ToolUseID)
+	}
 	h.mu.Unlock()
 
 	switch verdict.Behavior {

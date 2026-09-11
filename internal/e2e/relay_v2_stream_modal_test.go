@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -104,6 +105,8 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 		// still denies on. A second, later conn witnesses the outcome (see the arm).
 		loseAnswerer bool
 		stdio        bool
+		question     bool
+		childExit    bool
 		// wantNeedle is the assistant_delta text the daemon's verdict must reflect;
 		// forbidNeedles must never appear (fail-open / masked-error guards).
 		wantNeedle    string
@@ -152,6 +155,23 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			forbidNeedles:   []string{"approve-allow", "approve-error"},
 			wantOutcome:     rejectOnce,
 			wantSource:      "remote",
+		},
+		{
+			name:            "stdio_question_answer",
+			approvalTimeout: "30s",
+			answer:          allowOnce,
+			stdio:           true,
+			question:        true,
+			wantNeedle:      "approve-allow",
+			forbidNeedles:   []string{"approve-deny", "approve-error"},
+			wantOutcome:     "answered",
+			wantSource:      "remote",
+		},
+		{
+			name:            "stdio_child_exit_late_answer",
+			approvalTimeout: "30s",
+			stdio:           true,
+			childExit:       true,
 		},
 		{
 			// The extension case (#1932): the phone stays connected and answers only
@@ -230,11 +250,18 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			var h *Harness
 			if tc.stdio {
 				rider := `{"tool_name":"Bash","input":{"command":"true"},"tool_use_id":"` + riderToolUseID + `"}`
-				h = StartStreamInteractiveWithRelayStdio(t, home, initialUUID, fr.URL()+"/v2/server",
-					"PYRY_FAKE_CLAUDE_STREAM_CAN_USE_TOOL="+rider,
-					"PYRY_FAKE_CLAUDE_STDIN_LOG="+stdinLog,
-					"PYRY_APPROVAL_TIMEOUT="+tc.approvalTimeout,
-				)
+				if tc.question {
+					rider = `{"tool_name":"AskUserQuestion","input":{"questions":[{"question":"Pick?","header":"Pick","options":[{"label":"A","description":"first"},{"label":"B","description":"second"}],"multiSelect":false}]},"tool_use_id":"` + riderToolUseID + `"}`
+				}
+				env := []string{
+					"PYRY_FAKE_CLAUDE_STREAM_CAN_USE_TOOL=" + rider,
+					"PYRY_FAKE_CLAUDE_STDIN_LOG=" + stdinLog,
+					"PYRY_APPROVAL_TIMEOUT=" + tc.approvalTimeout,
+				}
+				if tc.childExit {
+					env = append(env, "PYRY_FAKE_CLAUDE_STREAM_EXIT_AFTER_CAN_USE_TOOL=1")
+				}
+				h = StartStreamInteractiveWithRelayStdio(t, home, initialUUID, fr.URL()+"/v2/server", env...)
 			} else {
 				h = StartStreamInteractiveWithRelay(t, home, initialUUID, fr.URL()+"/v2/server",
 					"PYRY_FAKE_CLAUDE_STREAM_APPROVE=1",
@@ -357,50 +384,144 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			// only dials once the child is live). This precedes the answer, so a later
 			// assertion cannot pass vacuously over a modal that never surfaced.
 			var shown protocol.ModalShownPayload
+			var questionShown protocol.QuestionShownPayload
 			modalDeadline := time.Now().Add(20 * time.Second)
-			for shown.ModalID == "" {
+			for shown.ModalID == "" && questionShown.QuestionBatchID == "" {
 				env, ok := nextEnv(modalDeadline)
 				if !ok {
-					t.Fatal("did not observe modal_shown before deadline; the fake's control.Approve never parked / surfaced " +
-						"(the approval registry or the stream surfacer may not be wired under the stream toggle)")
+					t.Fatal("did not observe the permission surface before deadline; the fake request never parked or surfaced")
 				}
 				if env.Type == protocol.TypeError {
-					t.Fatalf("unexpected error envelope while awaiting modal_shown: %s", string(env.Payload))
+					t.Fatalf("unexpected error envelope while awaiting permission surface: %s", string(env.Payload))
 				}
-				if env.Type != protocol.TypeModalShown {
-					continue
+				if tc.question && env.Type == protocol.TypeQuestionShown {
+					if err := json.Unmarshal(env.Payload, &questionShown); err != nil {
+						t.Fatalf("decode question_shown payload: %v", err)
+					}
+				} else if !tc.question && env.Type == protocol.TypeModalShown {
+					if err := json.Unmarshal(env.Payload, &shown); err != nil {
+						t.Fatalf("decode modal_shown payload: %v", err)
+					}
 				}
-				if err := json.Unmarshal(env.Payload, &shown); err != nil {
-					t.Fatalf("decode modal_shown payload: %v", err)
+			}
+			if tc.question {
+				if questionShown.ConversationID != knownConvID || len(questionShown.Questions) != 1 {
+					t.Fatalf("question_shown = %+v, want one question scoped to %q", questionShown, knownConvID)
 				}
-				if shown.ModalID == "" {
-					t.Fatal("modal_shown carried an empty modal_id")
+			} else {
+				if shown.Class != "permission" {
+					t.Fatalf("modal_shown Class = %q, want %q", shown.Class, "permission")
+				}
+				if shown.ConversationID != knownConvID {
+					t.Errorf("modal_shown ConversationID = %q, want %q", shown.ConversationID, knownConvID)
+				}
+				wantIDs := []string{
+					string(turnevent.PermissionOptionKindAllowOnce),
+					string(turnevent.PermissionOptionKindAllowAlways),
+					string(turnevent.PermissionOptionKindRejectOnce),
+					string(turnevent.PermissionOptionKindRejectAlways),
+				}
+				gotIDs := make([]string, len(shown.Options))
+				for i, o := range shown.Options {
+					gotIDs[i] = o.ID
+				}
+				if !slices.Equal(gotIDs, wantIDs) {
+					t.Fatalf("modal_shown option IDs = %v, want %v (the fixed screen-independent permission set)", gotIDs, wantIDs)
 				}
 			}
-			if shown.Class != "permission" {
-				t.Fatalf("modal_shown Class = %q, want %q", shown.Class, "permission")
-			}
-			if shown.ConversationID != knownConvID {
-				t.Errorf("modal_shown ConversationID = %q, want %q", shown.ConversationID, knownConvID)
-			}
-			wantIDs := []string{
-				string(turnevent.PermissionOptionKindAllowOnce),
-				string(turnevent.PermissionOptionKindAllowAlways),
-				string(turnevent.PermissionOptionKindRejectOnce),
-				string(turnevent.PermissionOptionKindRejectAlways),
-			}
-			gotIDs := make([]string, len(shown.Options))
-			for i, o := range shown.Options {
-				gotIDs[i] = o.ID
-			}
-			if !slices.Equal(gotIDs, wantIDs) {
-				t.Fatalf("modal_shown option IDs = %v, want %v (the fixed screen-independent permission set)", gotIDs, wantIDs)
+
+			if tc.childExit {
+				dismissDeadline := time.Now().Add(10 * time.Second)
+				for {
+					env, ok := nextEnv(dismissDeadline)
+					if !ok {
+						t.Fatal("origin child exit did not retire its permission modal")
+					}
+					if env.Type != protocol.TypeModalDismissed {
+						continue
+					}
+					var dismissed protocol.ModalDismissedPayload
+					if err := json.Unmarshal(env.Payload, &dismissed); err != nil {
+						t.Fatalf("decode child-exit modal_dismissed: %v", err)
+					}
+					if dismissed.ModalID == shown.ModalID {
+						break
+					}
+				}
+
+				replacementLog := childStdinLog(stdinLog, initialUUID)
+				childReadyDeadline := time.Now().Add(10 * time.Second)
+				for time.Now().Before(childReadyDeadline) {
+					if _, err := os.ReadFile(replacementLog); err == nil {
+						break
+					}
+					time.Sleep(25 * time.Millisecond)
+				}
+				if _, err := os.ReadFile(replacementLog); err != nil {
+					t.Fatalf("replacement child did not become stdin-ready: %v", err)
+				}
+
+				sealSend(protocol.Envelope{
+					ID:   answerReqID,
+					Type: protocol.TypeModalAnswer,
+					TS:   time.Now().UTC(),
+					Payload: mustJSON(t, protocol.ModalAnswerPayload{
+						ModalID:     shown.ModalID,
+						OptionID:    allowOnce,
+						AnswerToken: "e2e-2343-late-answer-token",
+					}),
+				})
+
+				const syncNeedle = "e2e-2343-late-answer-sync"
+				sealSend(protocol.Envelope{
+					ID:   234302,
+					Type: protocol.TypeSendMessage,
+					TS:   time.Now().UTC(),
+					Payload: mustJSON(t, protocol.SendMessagePayload{
+						ConversationID: knownConvID,
+						MessageID:      "u-sync",
+						Text:           syncNeedle,
+					}),
+				})
+				syncDeadline := time.Now().Add(10 * time.Second)
+				for time.Now().Before(syncDeadline) {
+					data, err := os.ReadFile(replacementLog)
+					if err == nil && bytes.Contains(data, []byte(syncNeedle)) {
+						break
+					}
+					time.Sleep(25 * time.Millisecond)
+				}
+				data, err := os.ReadFile(replacementLog)
+				if err != nil {
+					t.Fatalf("read replacement stdin log: %v", err)
+				}
+				if !bytes.Contains(data, []byte(syncNeedle)) {
+					t.Fatalf("replacement child never received the synchronization turn; stdin=%s", data)
+				}
+				if bytes.Contains(data, []byte(`"request_id":"permission-1"`)) {
+					t.Fatalf("late answer wrote the origin request's response to the replacement child: %s", data)
+				}
+				return
 			}
 
 			// --- Post-modal_shown arms. The approval is now parked AND answerable —
 			// the state the extension protects, and the "was answerable at the window"
 			// half of the fail-closed proof.
-			if tc.loseAnswerer {
+			if tc.question {
+				sealSend(protocol.Envelope{
+					ID:   answerReqID,
+					Type: protocol.TypeQuestionAnswer,
+					TS:   time.Now().UTC(),
+					Payload: mustJSON(t, protocol.QuestionAnswerPayload{
+						QuestionBatchID: questionShown.QuestionBatchID,
+						AnswerToken:     "e2e-2343-question-answer-token",
+						Answers: []protocol.QuestionAnswerEntry{{
+							QuestionIndex: 0,
+							Values:        []string{"B"},
+						}},
+					}),
+				})
+			} else if tc.loseAnswerer {
 				// Step 1: END phone A's session. A plain WS close is NOT usable: the
 				// relay↔binary leg is one multiplexed socket with no per-connection
 				// disconnect frame (docs/protocol-mobile.md, close code 4408), so a
@@ -551,7 +672,22 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 						}
 						sawNeedle = true
 					}
+				case protocol.TypeQuestionDismissed:
+					if !tc.question {
+						continue
+					}
+					var dis protocol.QuestionDismissedPayload
+					if err := json.Unmarshal(env.Payload, &dis); err != nil {
+						t.Fatalf("decode question_dismissed payload: %v", err)
+					}
+					if dis.QuestionBatchID != questionShown.QuestionBatchID || dis.Outcome != tc.wantOutcome || dis.Source != tc.wantSource {
+						t.Fatalf("question_dismissed = %+v, want batch %q outcome %q source %q", dis, questionShown.QuestionBatchID, tc.wantOutcome, tc.wantSource)
+					}
+					sawDismissal = true
 				case protocol.TypeModalDismissed:
+					if tc.question {
+						continue
+					}
 					var dis protocol.ModalDismissedPayload
 					if err := json.Unmarshal(env.Payload, &dis); err != nil {
 						t.Fatalf("decode modal_dismissed payload: %v", err)
@@ -590,8 +726,12 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 				t.Errorf("tool_use ToolUseID = %q, want %q — the frame must carry the id the approval was raised with",
 					toolUse.ToolUseID, riderToolUseID)
 			}
-			if sawToolUse && toolUse.Name != riderToolName {
-				t.Errorf("tool_use Name = %q, want %q", toolUse.Name, riderToolName)
+			wantToolName := riderToolName
+			if tc.question {
+				wantToolName = "AskUserQuestion"
+			}
+			if sawToolUse && toolUse.Name != wantToolName {
+				t.Errorf("tool_use Name = %q, want %q", toolUse.Name, wantToolName)
 			}
 			if sawToolUse && toolUse.ConversationID != knownConvID {
 				t.Errorf("tool_use ConversationID = %q, want %q", toolUse.ConversationID, knownConvID)
@@ -611,6 +751,9 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 				}
 				if responses != 1 {
 					t.Errorf("correlated stdio control responses = %d, want exactly 1; stdin=%s", responses, data)
+				}
+				if tc.question && !bytes.Contains(data, []byte(`"answers":{"Pick?":"B"}`)) {
+					t.Errorf("question control response did not carry the selected answer in updatedInput; stdin=%s", data)
 				}
 			}
 		})

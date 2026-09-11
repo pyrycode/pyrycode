@@ -243,6 +243,10 @@
 //	                               and waits for its correlated control_response before
 //	                               ending the turn. Invalid JSON or an unknown key
 //	                               disables the rider. Default off.
+//	PYRY_FAKE_CLAUDE_STREAM_EXIT_AFTER_CAN_USE_TOOL optional; "1" makes the
+//	                               stream child exit immediately after emitting the
+//	                               configured can_use_tool request. It drives
+//	                               origin-child teardown while the ask is parked.
 //	PYRY_FAKE_CLAUDE_SESSION_ID_FROM_ARGV  optional; when set to any non-empty
 //	                               value, fakeclaude takes the stem for its INITIAL
 //	                               <uuid>.jsonl from its own argv — the value after
@@ -433,6 +437,8 @@ const (
 	assistantMaxBytes     = 64 * 1024
 	pollInterval          = 50 * time.Millisecond
 )
+
+const envStreamExitAfterCanUseTool = "PYRY_FAKE_CLAUDE_STREAM_EXIT_AFTER_CAN_USE_TOOL"
 
 // modalScreen is the compact plaintext permission-modal screen fakeclaude writes
 // on the modal trigger's first appearance (envModalTrigger). Its bottom region
@@ -1982,6 +1988,9 @@ func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rat
 						toolName:  permissionRider.configuredString("tool_name"),
 						toolUseID: permissionRider.configuredString("tool_use_id"),
 						input:     permissionRider["input"],
+					}
+					if os.Getenv(envStreamExitAfterCanUseTool) == "1" {
+						return
 					}
 					if err != nil {
 						return
