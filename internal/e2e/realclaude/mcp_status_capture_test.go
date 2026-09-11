@@ -582,6 +582,45 @@ func mcapDriveRequests(stdin io.Writer, recorder *dropcapRecorder, red *dropcapR
 	return requests, nil
 }
 
+// mcapDriveAndClassify owns the live caller's transition into the pre-turn request
+// path. Once that path starts, init is observational rather than awaited. A status
+// timeout or a healthy-server readiness timeout is measured data; failure to send a
+// status request remains an instrument fault.
+func mcapDriveAndClassify(stdin io.Writer, recorder *dropcapRecorder, red *dropcapRedactor,
+	rec *mcapRecord, budget, poll time.Duration) error {
+	rec.InitWait = mcapInitNotAwaited
+	requests, err := mcapDriveRequests(stdin, recorder, red, budget, poll)
+	rec.Requests = requests
+	if err == nil {
+		return nil
+	}
+
+	outcome := mcapInstrumentBroken
+	detail := red.str(err.Error())
+	var status *mcapRequest
+	writeFailed := false
+	for i := range rec.Requests {
+		request := &rec.Requests[i]
+		if request.WriteError != "" {
+			writeFailed = true
+		}
+		if request.Subtype == mcapSubtypeStatus {
+			status = request
+		}
+	}
+	if !writeFailed && status != nil {
+		switch status.TerminatedOn {
+		case mcapTerminatedBudget:
+			outcome = mcapDidNotFire
+			detail += "; " + mcapStatusVerdict(rec)
+		case mcapTerminatedResponse:
+			outcome = mcapDidNotFire
+		}
+	}
+	rec.set(outcome, "%s", detail)
+	return err
+}
+
 // mcapStatusReports reads the correlated status reply directly from the recorder.
 // It intentionally checks the wire response rather than elapsed time: reconnect is
 // sent only after the fixed test-owned server actually reports the requested state.
@@ -1226,12 +1265,10 @@ func TestRealClaude_MCPStatusCapture(t *testing.T) {
 	// The control surface is live as soon as stdin is available. Do not wait for
 	// system/init: this stream-json path emits it with a user turn, and this probe sends
 	// no user turn by design.
-	rec.Requests, err = mcapDriveRequests(stdin, recorder, red, mcapReplyBudget, mcapPoll)
+	err = mcapDriveAndClassify(stdin, recorder, red, rec, mcapReplyBudget, mcapPoll)
 	if err != nil {
-		rec.set(mcapInstrumentBroken, "%v", red.str(err.Error()))
 		return
 	}
-	rec.InitWait = mcapInitNotAwaited
 	if raw, ok := mcapInitServers(recorder); ok {
 		rec.InitSeen = true
 		rec.InitWait = mcapInitSeen
@@ -2505,6 +2542,78 @@ func TestMcapStderrIsRedactedBeforeItIsCapped(t *testing.T) {
 			if strings.Contains(got, "/var/folders/") {
 				t.Error("stderr_capture still carries a fixed deny-scan literal, so the capture was " +
 					"cut before it was redacted and the whole record would be refused")
+			}
+		})
+	}
+}
+
+func TestMcapDriveAndClassifyPersistsFailure(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name        string
+		writeErr    error
+		replyStatus string
+		budget      time.Duration
+		wantOutcome string
+		wantDetail  string
+	}{
+		{"unanswered status", nil, "", 0, mcapDidNotFire, "answered NOTHING"},
+		{"failed write", errors.New("closed test stdin"), "", 0, mcapInstrumentBroken, "closed test stdin"},
+		{"server stays pending", nil, "pending", 5 * time.Millisecond, mcapDidNotFire, "did not report connected"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			recorder := newDropcapRecorder()
+			red := newDropcapRedactor("", "", "", "", "", mcapTestNonce)
+			rec := &mcapRecord{Ticket: mcapTicket, IsCapture: true, Model: mcapModel}
+			write := mcapTestWriter(func(line []byte) (int, error) {
+				if tc.writeErr != nil {
+					return 0, tc.writeErr
+				}
+				var request mcapControlRequest
+				if err := json.Unmarshal(line, &request); err != nil {
+					return 0, err
+				}
+				if request.Request["subtype"] != mcapSubtypeStatus {
+					t.Error("sent another verb before readiness")
+				}
+				if tc.replyStatus != "" {
+					response := fmt.Sprintf(`{"type":"control_response","response":{"subtype":"success","request_id":%q,"response":{"mcpServers":[{"name":%q,"status":%q}]}}}`,
+						request.RequestID, mcapApproveServer, tc.replyStatus)
+					if _, err := recorder.Write([]byte(response + "\n")); err != nil {
+						return 0, err
+					}
+				}
+				return len(line), nil
+			})
+			if err := mcapDriveAndClassify(write, recorder, red, rec, tc.budget, time.Millisecond); err == nil {
+				t.Fatal("request path unexpectedly succeeded")
+			}
+
+			dir := t.TempDir()
+			fixturePath := filepath.Join(dir, "fixture.json")
+			var stderr probeSyncBuffer
+			mcapPersist(t, dir, fixturePath, recorder, &stderr, red,
+				dropcapScanner{needles: dropcapFixedNeedles()}, rec)
+			blob, err := os.ReadFile(filepath.Join(dir, mcapRecordName))
+			if err != nil {
+				t.Fatalf("reading persisted diagnostic record: %v", err)
+			}
+			var got mcapRecord
+			if err := json.Unmarshal(blob, &got); err != nil {
+				t.Fatalf("decoding persisted diagnostic record: %v", err)
+			}
+			if got.Outcome != tc.wantOutcome || got.InitWait != mcapInitNotAwaited {
+				t.Errorf("outcome/init_wait = %q/%q, want %q/%q", got.Outcome, got.InitWait, tc.wantOutcome, mcapInitNotAwaited)
+			}
+			if !strings.Contains(got.OutcomeDetail, tc.wantDetail) {
+				t.Errorf("outcome_detail = %q, want %q", got.OutcomeDetail, tc.wantDetail)
+			}
+			if len(got.Requests) == 0 || got.Requests[0].Subtype != mcapSubtypeStatus {
+				t.Fatal("diagnostic record lost the attempted status request")
+			}
+			if _, err := os.Stat(fixturePath); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("diagnostic run promoted a fixture: %v", err)
 			}
 		})
 	}

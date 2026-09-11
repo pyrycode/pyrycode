@@ -242,3 +242,14 @@ Validate the committed recording through the promotion predicate and fixed
 credential scan. Use its bytes in the persistence regression so a diagnostic run
 must preserve an actual valid fixture. Update the capture documentation and run
 the offline gate plus the final live suite before completing the ticket.
+
+## Revision 3: preserve diagnostics on request failure
+
+The final review identified an early-return gap. A status timeout returned before
+the caller recorded that init was not awaited. It also classified unanswered
+requests as instrument failures before the status verdict could run.
+
+The live caller now uses mcapDriveAndClassify to record the pre-turn state before
+sending. Unanswered status and exhausted readiness remain measured findings.
+Failed writes remain instrument failures. The persistence regression drives these
+three failure paths and reads their saved records. None may promote a fixture.
