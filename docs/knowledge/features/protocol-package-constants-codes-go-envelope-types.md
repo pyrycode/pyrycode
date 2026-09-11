@@ -33,6 +33,20 @@ These six live in their **own** const block (not merged into the `TypeRekeyReque
 
 `TypeApiRetry = "api_retry"` and `TypeCompacting = "compacting"` share their own adjacent const block (not merged into the interactive block above) so the doc comment can name them explicitly as PTY-derived status peers of `TypeStall`, not turn-lifecycle events. Both are outbound binary → phone only, carry the named payload structs `ApiRetryPayload` / `CompactingPayload` (`interactive.go` — see [Interactive event payloads](#interactive-event-payloads-607-638-1074-2237-2233)), and stay out of `inboundAppTypeSet` (two `{"api_retry-rejected"/"compacting-rejected", …, ErrUnknownType}` rows in `compat_test.go` pin the v1 rejection). Unlike `stall`, both carry an explicit `active: false` falling edge — see the payload doc below. The consumer (`cmd/pyry/interactive_turn_v2.go`'s `Handle`) is `security-sensitive`: it forwards a screen-derived attempt counter across the tui-driver substrate seal. See [codebase/1074.md](../codebase/1074.md).
 
+**v2 model-refusal report types** (#2265/#2266; spec `docs/protocol-mobile.md` § model refusal):
+
+| Group | Constants |
+|-------|-----------|
+| Refusal reports | `TypeModelRefusalFallback`, `TypeModelRefusalNoFallback` |
+
+Both are outbound interactive pushes and must stay outside `inboundAppTypeSet`.
+Their separate discriminants carry separate meanings: the fallback frame says claude
+retried on another model, while the no-fallback frame says no retry occurred and
+therefore has no `fallback_model` or `scope`. Neither changes the current-model
+authority held by `TypeModelAnnounced`. `TestTypeConstants_V1V2Partition` and the
+relay guard's push classification keep either new variant from silently becoming an
+inbound application type.
+
 **v2 tool-denial vocabulary** (#2233; spec `docs/protocol-mobile.md` § `tool_denied`):
 
 | Group | Constant |

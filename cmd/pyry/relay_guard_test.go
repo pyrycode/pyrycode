@@ -342,8 +342,9 @@ var excludedTypes = map[string]string{
 	// rather than from the moment something emits it (the turnbridge mapping is
 	// #1638) — Assertion #3 reports an unclassified constant, not an unemitted
 	// one.
-	"TypeModelAnnounced":       "push",
-	"TypeModelRefusalFallback": "push",
+	"TypeModelAnnounced":         "push",
+	"TypeModelRefusalFallback":   "push",
+	"TypeModelRefusalNoFallback": "push",
 
 	// outbound push — the v2 model-list report (#1704). Outbound-only like the six
 	// above, and mandatory here from the moment the constant exists rather than

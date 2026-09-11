@@ -3157,6 +3157,78 @@ func TestModelRefusalFallbackPayload_EmptyReports_RoundTrip(t *testing.T) {
 	roundTripEnvelope(t, env, payload, raw)
 }
 
+func TestModelRefusalNoFallbackPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "model_refusal_no_fallback.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeModelRefusalNoFallback {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeModelRefusalNoFallback)
+	}
+
+	var payload ModelRefusalNoFallbackPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "c1" || payload.OriginalModel != "claude-opus-4-1" {
+		t.Errorf("identity fields: got conversation_id=%q original_model=%q", payload.ConversationID, payload.OriginalModel)
+	}
+	if payload.RefusalCategory != "cyber" || payload.Banner != "Claude refused this request…" {
+		t.Errorf("refusal fields: got category=%q banner=%q", payload.RefusalCategory, payload.Banner)
+	}
+	if want := []string{"banner"}; !reflect.DeepEqual(payload.TruncatedFields, want) {
+		t.Errorf("TruncatedFields: got %v, want %v", payload.TruncatedFields, want)
+	}
+	if want := []string{"original_model", "refusal_category"}; !reflect.DeepEqual(payload.DroppedFields, want) {
+		t.Errorf("DroppedFields: got %v, want %v", payload.DroppedFields, want)
+	}
+
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(env.Payload, &keys); err != nil {
+		t.Fatalf("re-decode payload keys: %v", err)
+	}
+	wantKeys := map[string]bool{
+		"conversation_id": true, "original_model": true, "refusal_category": true,
+		"banner": true, "truncated_fields": true, "dropped_fields": true,
+	}
+	if len(keys) != len(wantKeys) {
+		t.Fatalf("payload key count: got %d (%v), want %d (%v)", len(keys), keys, len(wantKeys), wantKeys)
+	}
+	for key := range keys {
+		if !wantKeys[key] {
+			t.Errorf("unexpected payload key %q", key)
+		}
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+func TestModelRefusalNoFallbackPayload_EmptyReports_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "model_refusal_no_fallback_empty_reports.json")
+	canonicalRaw := canonical(t, raw)
+	for _, want := range []string{`"refusal_category":""`, `"truncated_fields":null`, `"dropped_fields":null`} {
+		if !bytes.Contains(canonicalRaw, []byte(want)) {
+			t.Errorf("fixture must carry %s explicitly, got: %s", want, raw)
+		}
+	}
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	var payload ModelRefusalNoFallbackPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.TruncatedFields != nil || payload.DroppedFields != nil {
+		t.Fatalf("empty reports: got truncated=%v dropped=%v, want both nil", payload.TruncatedFields, payload.DroppedFields)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
 // TestBackgroundTaskProgressPayload_RoundTrip pins #2246's wire shape.
 //
 // The fixture's values are the committed capture's own second frame plus a
