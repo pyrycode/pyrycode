@@ -35,7 +35,7 @@ type permissionObservation struct {
 			FilePath string `json:"file_path"`
 			Command  string `json:"command"`
 		} `json:"input"`
-		Reason      json.RawMessage `json:"decision_reason"`
+		Reason      json.RawMessage `json:"decision_reason,omitempty"`
 		ReasonType  string          `json:"decision_reason_type"`
 		BlockedPath string          `json:"blocked_path"`
 		Description string          `json:"description"`
@@ -170,7 +170,8 @@ func TestInteractiveStreamStdioModalResolution(t *testing.T) {
 				t.Fatal("source precondition failed: expected the correlated test-owned request")
 			}
 			if outside {
-				if source.Request.ReasonType != "workingDir" || len(source.Request.Reason) == 0 {
+				var reasonText string
+				if source.Request.ReasonType != "workingDir" || json.Unmarshal(source.Request.Reason, &reasonText) != nil || reasonText == "" {
 					t.Fatal("source precondition failed: outside-directory ask did not supply workingDir and reason; not a forwarding pass")
 				}
 			} else if source.Request.ReasonType != "" || len(source.Request.Reason) != 0 {
@@ -259,6 +260,27 @@ func requirePermissionContext(t *testing.T, source permissionObservation, raw js
 		var gotJSON, wantJSON any
 		if json.Unmarshal(gotValue, &gotJSON) != nil || json.Unmarshal(wantValue, &wantJSON) != nil || !reflect.DeepEqual(gotJSON, wantJSON) {
 			t.Fatalf("phone context value differs from source for %s", key)
+		}
+	}
+}
+
+// The observer re-encodes selected fields over its private socket. Omitting an
+// absent RawMessage must not turn it into a present JSON null at that boundary.
+func TestPermissionObservation_PreservesReasonPresence(t *testing.T) {
+	for _, suffix := range []string{"", `,"decision_reason":null`, `,"decision_reason":"outside directory"`} {
+		var before, after permissionObservation
+		if err := json.Unmarshal([]byte(`{"request":{"subtype":"can_use_tool"`+suffix+`}}`), &before); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal(before)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(raw, &after); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(before.Request.Reason, after.Request.Reason) {
+			t.Fatal("observer changed source reason presence or value")
 		}
 	}
 }
