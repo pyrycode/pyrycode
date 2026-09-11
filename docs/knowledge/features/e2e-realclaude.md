@@ -36,6 +36,15 @@ vocabulary gate it claimed to exercise. A test for a downstream refusal must use
 the identifier returned or documented by the fixture that seeded the pool, and
 assert the expected error code rather than accepting any error envelope.
 
+Permission protocol behavior is Claude-version dependent. The captured 2.1.143
+spike saw `--permission-prompt-tool stdio` silently bypass the gate, while
+`TestRealClaude_StdioPermissionPromptDeny` proves that 2.1.259 emits
+`control_request/can_use_tool`, accepts a correlated deny response, completes the
+turn, and does not execute the denied command. A useful compatibility test must
+therefore keep stdin open, assert the request and response correlation, and use a
+side-effect witness; a successful process exit alone cannot distinguish a denial
+from a silent bypass. See [the permission protocol findings](permission-protocol-spike.md).
+
 ## Make target
 
 ```make
