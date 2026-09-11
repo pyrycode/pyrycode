@@ -36,7 +36,7 @@ func TestSelectInteractiveRunner(t *testing.T) {
 	// receiving the session-tagged envelope on the sink's own channel.
 	assertStreamSelected := func(t *testing.T, value string) {
 		t.Helper()
-		factory, sink, err := selectInteractiveRunner(config.Config{InteractiveRunner: value}, logger, "")
+		factory, sink, err := selectInteractiveRunner(config.Config{InteractiveRunner: value}, logger, "", streamApprovalConfig{})
 		if err != nil {
 			t.Fatalf("selectInteractiveRunner(%q) err = %v, want nil", value, err)
 		}
@@ -69,7 +69,7 @@ func TestSelectInteractiveRunner(t *testing.T) {
 
 	t.Run("pty is rejected, and the error says it was removed", func(t *testing.T) {
 		t.Parallel()
-		factory, sink, err := selectInteractiveRunner(config.Config{InteractiveRunner: "pty"}, logger, "")
+		factory, sink, err := selectInteractiveRunner(config.Config{InteractiveRunner: "pty"}, logger, "", streamApprovalConfig{})
 		if err == nil {
 			t.Fatal(`selectInteractiveRunner("pty") err = nil, want an error — the terminal interactive runner was removed and must not be selectable`)
 		}
@@ -89,7 +89,7 @@ func TestSelectInteractiveRunner(t *testing.T) {
 
 	t.Run("unrecognised value aborts with an AC4 error, no fallback", func(t *testing.T) {
 		t.Parallel()
-		factory, sink, err := selectInteractiveRunner(config.Config{InteractiveRunner: "garbage"}, logger, "")
+		factory, sink, err := selectInteractiveRunner(config.Config{InteractiveRunner: "garbage"}, logger, "", streamApprovalConfig{})
 		if err == nil {
 			t.Fatal(`selectInteractiveRunner("garbage") err = nil, want an error (no silent fallback)`)
 		}

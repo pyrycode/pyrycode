@@ -8,9 +8,10 @@ This package is leaf-level: stdlib only, no consumers wired in this slice. Daemo
 
 ```go
 type Config struct {
-    RelayURL          string `json:"relay_url"`
-    DebugCapture      bool   `json:"debug_capture"`
-    InteractiveRunner string `json:"interactive_runner"`
+    RelayURL              string `json:"relay_url"`
+    DebugCapture          bool   `json:"debug_capture"`
+    InteractiveRunner     string `json:"interactive_runner"`
+    StdioPermissionPrompt bool  `json:"stdio_permission_prompt"`
 }
 
 func DefaultConfig() Config        // built-in defaults
@@ -36,6 +37,28 @@ See [streamsup-package.md](streamsup-package.md) for the runner itself and [`cod
 The `case "pty"` (rejected-value) arm here is the pattern later reused for the CLI verbs #1348 deleted outright (`attach`/`acp`) — see [cli-verb-dispatch.md](cli-verb-dispatch.md).
 
 The default is built into the function body (not a package-level `const`) so callers don't reach for "the current value" through a separate symbol; when more fields land, the constructor grows naturally to a multi-line struct literal.
+
+## `stdio_permission_prompt` — interactive permission transport (#2343)
+
+This boolean selects the Claude-facing permission transport for the daemon's
+non-bypass interactive stream children. It does not change the approval registry,
+the client-facing modal/question flow, or the permission policy.
+
+| Value | Effect |
+|-------|--------|
+| absent / `false` | Default and rollback posture. Interactive permission asks use `mcp__pyry_approve__approve`, preserving the established MCP approval path. |
+| `true` | Interactive permission asks use Claude's stdio `can_use_tool` / `control_response` protocol. The spawn still carries `--mcp-config` and `--strict-mcp-config` because the same config also registers `pyry_files`, and it retains the selected permission-mode flag. |
+
+`runSupervisor` reads the config once, so changing this value takes effect only
+after a daemon restart. Set it to `false` and restart to roll back to MCP.
+
+The selector applies only to non-bypass interactive daemon spawns. YOLO continues
+to use `--dangerously-skip-permissions` in either position, and `pyry agent-run`
+keeps its independent argv construction unchanged.
+
+The opt-in is backed by the [Claude Code 2.1.259 compatibility result](permission-protocol-spike.md#current-finding-claude-code-21259-2342):
+the live gate observed a correlated stdio permission request, returned a matching
+deny response, and proved that the requested command did not execute.
 
 ## Defaults
 
