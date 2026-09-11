@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -87,6 +88,7 @@ type decodedControlRequest struct {
 	RequestID string `json:"request_id"`
 	Request   struct {
 		Subtype string `json:"subtype"`
+		Detail  string `json:"detail"`
 		Mode    string `json:"mode"`
 		Model   string `json:"model"`
 	} `json:"request"`
@@ -803,6 +805,133 @@ func TestWriteInitialize_WriteError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "write initialize") {
 		t.Fatalf("WriteInitialize error = %v, want it to mention %q", err, "write initialize")
+	}
+}
+
+func TestMarshalContextUsageEnvelope_MatchesCapture(t *testing.T) {
+	t.Parallel()
+
+	raw, err := os.ReadFile("../e2e/realclaude/testdata/context_usage_v2.1.259.json")
+	if err != nil {
+		t.Fatalf("read #2287 context usage capture: %v", err)
+	}
+	var capture struct {
+		Arms []struct {
+			Detail             string          `json:"detail"`
+			ControlRequestID   string          `json:"control_request_id"`
+			ControlRequestSent json.RawMessage `json:"control_request_sent"`
+		} `json:"arms"`
+	}
+	if err := json.Unmarshal(raw, &capture); err != nil {
+		t.Fatalf("decode #2287 context usage capture: %v", err)
+	}
+	if len(capture.Arms) != 2 {
+		t.Fatalf("#2287 context usage capture has %d arms, want summary and full", len(capture.Arms))
+	}
+
+	const requestID = "fixed-context-usage-id"
+	seen := make(map[string]bool, len(capture.Arms))
+	for _, arm := range capture.Arms {
+		arm := arm
+		t.Run(arm.Detail, func(t *testing.T) {
+			seen[arm.Detail] = true
+
+			var compact bytes.Buffer
+			if err := json.Compact(&compact, arm.ControlRequestSent); err != nil {
+				t.Fatalf("compact captured %s request: %v", arm.Detail, err)
+			}
+			oldID, err := json.Marshal(arm.ControlRequestID)
+			if err != nil {
+				t.Fatalf("marshal captured request id: %v", err)
+			}
+			newID, err := json.Marshal(requestID)
+			if err != nil {
+				t.Fatalf("marshal replacement request id: %v", err)
+			}
+			if got := bytes.Count(compact.Bytes(), oldID); got != 1 {
+				t.Fatalf("captured %s request contains its request id %d times, want 1", arm.Detail, got)
+			}
+			want := bytes.Replace(compact.Bytes(), oldID, newID, 1)
+			want = append(want, '\n')
+
+			got, err := marshalContextUsageEnvelope(requestID, arm.Detail)
+			if err != nil {
+				t.Fatalf("marshalContextUsageEnvelope(%q): %v", arm.Detail, err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("marshalContextUsageEnvelope(%q) =\n %q\nwant captured request\n %q", arm.Detail, got, want)
+			}
+			if bytes.Count(got, []byte{'\n'}) != 1 || got[len(got)-1] != '\n' {
+				t.Fatalf("context usage request is not exactly one newline-terminated physical line: %q", got)
+			}
+		})
+	}
+	if !seen["summary"] || !seen["full"] {
+		t.Fatalf("#2287 capture details = %v, want summary and full", seen)
+	}
+}
+
+func TestWriteContextUsage_Refusals(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	err := WriteContextUsage(&buf, "request-id", "SUMMARY")
+	if !errors.Is(err, ErrUnsupportedContextUsageDetail) {
+		t.Fatalf("WriteContextUsage(unsupported detail) = %v, want ErrUnsupportedContextUsageDetail", err)
+	}
+	if errors.Is(err, ErrNoLiveChild) {
+		t.Fatalf("unsupported detail reported as ErrNoLiveChild: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("unsupported detail wrote %q, want zero bytes", buf.Bytes())
+	}
+
+	err = WriteContextUsage(nil, "request-id", "SUMMARY")
+	if !errors.Is(err, ErrUnsupportedContextUsageDetail) {
+		t.Fatalf("unsupported detail with no child = %v, want permanent detail refusal", err)
+	}
+	if errors.Is(err, ErrNoLiveChild) {
+		t.Fatalf("unsupported detail with no child reported as retryable ErrNoLiveChild: %v", err)
+	}
+
+	for _, detail := range []string{"summary", "full"} {
+		if err := WriteContextUsage(nil, "request-id", detail); !errors.Is(err, ErrNoLiveChild) {
+			t.Errorf("WriteContextUsage(nil, %q) = %v, want ErrNoLiveChild", detail, err)
+		} else if errors.Is(err, ErrUnsupportedContextUsageDetail) {
+			t.Errorf("WriteContextUsage(nil, %q) also reported unsupported detail: %v", detail, err)
+		}
+	}
+}
+
+type contextUsageFailWriter struct {
+	err   error
+	calls int
+}
+
+func (w *contextUsageFailWriter) Write([]byte) (int, error) {
+	w.calls++
+	return 0, w.err
+}
+
+func TestWriteContextUsage_WriteError(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("distinct-context-usage-write-cause")
+	w := &contextUsageFailWriter{err: cause}
+	const requestID = "secret-request-id-marker"
+	const detail = "summary"
+	err := WriteContextUsage(w, requestID, detail)
+	if !errors.Is(err, cause) {
+		t.Fatalf("WriteContextUsage write error = %v, want original cause", err)
+	}
+	if errors.Is(err, ErrNoLiveChild) || errors.Is(err, ErrUnsupportedContextUsageDetail) {
+		t.Fatalf("WriteContextUsage write error misreported as a refusal: %v", err)
+	}
+	if w.calls != 1 {
+		t.Fatalf("WriteContextUsage attempted %d writes, want exactly 1", w.calls)
+	}
+	if strings.Contains(err.Error(), requestID) || strings.Contains(err.Error(), detail) {
+		t.Fatalf("WriteContextUsage write error leaks request id or detail: %v", err)
 	}
 }
 

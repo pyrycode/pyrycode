@@ -32,6 +32,12 @@ var ErrNoLiveChild = errors.New("streamsup: no live child")
 // sent, not from pyry's log.
 var ErrUnsupportedPermissionMode = errors.New("streamsup: unsupported permission mode")
 
+// ErrUnsupportedContextUsageDetail is returned when a context-usage request
+// names a detail outside the closed vocabulary claude accepts. It is permanent,
+// errors.Is-distinguishable from ErrNoLiveChild, and intentionally omits the
+// rejected value so it cannot reach logs through the error return.
+var ErrUnsupportedContextUsageDetail = errors.New("streamsup: unsupported context usage detail")
+
 // userTurn is the stream-json envelope written to claude's stdin. The shape
 // mirrors streamrunner's verbatim (the 2026-05-14 probe):
 //
@@ -99,17 +105,18 @@ type controlRequest struct {
 // Subtype MUST stay first: the set_permission_mode line is pinned byte for byte
 // against the one #1595 measured live, subtype before mode.
 //
-// The omitempty tags are load-bearing rather than cosmetic. Mode belongs to
-// set_permission_mode and Model belongs to set_model; without the tags every
-// other control line would grow empty fields it has no business carrying, and
+// The omitempty tags are load-bearing rather than cosmetic. Detail, Mode and
+// Model each belong to one control subtype; without the tags every other control
+// line would grow empty fields it has no business carrying, and
 // marshalInterruptEnvelope's and marshalInitializeEnvelope's output would stop
 // matching the lines claude has been sent since #1120 and measured in #1763.
 // TestMarshalInterruptEnvelope's and TestMarshalInitializeEnvelope's byte-exact
 // wants are what hold this.
 type controlRequestInner struct {
-	Subtype string `json:"subtype"`         // "interrupt" | "set_permission_mode" | "set_model" | "initialize"
-	Mode    string `json:"mode,omitempty"`  // set_permission_mode only
-	Model   string `json:"model,omitempty"` // set_model only
+	Subtype string `json:"subtype"`
+	Detail  string `json:"detail,omitempty"` // get_context_usage only
+	Mode    string `json:"mode,omitempty"`   // set_permission_mode only
+	Model   string `json:"model,omitempty"`  // set_model only
 }
 
 // marshalInterruptEnvelope returns the single newline-terminated interrupt
@@ -467,6 +474,54 @@ func WriteInitialize(w io.Writer, requestID string) error {
 	}
 	if _, err := w.Write(env); err != nil {
 		return fmt.Errorf("streamsup: write initialize: %w", err)
+	}
+	return nil
+}
+
+func contextUsageDetailAllowed(detail string) bool {
+	switch detail {
+	case "summary", "full":
+		return true
+	}
+	return false
+}
+
+// marshalContextUsageEnvelope returns one newline-terminated get_context_usage
+// request. Detail follows Subtype in controlRequestInner so encoding/json emits
+// the byte order captured by #2287.
+func marshalContextUsageEnvelope(requestID, detail string) ([]byte, error) {
+	env := controlRequest{
+		Type:      "control_request",
+		RequestID: requestID,
+		Request: controlRequestInner{
+			Subtype: "get_context_usage",
+			Detail:  detail,
+		},
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
+// WriteContextUsage writes one validated get_context_usage request to the live
+// child's held-open stdin. Vocabulary refusal precedes the no-child refusal so
+// an unsupported value is permanent regardless of child state. Fixed error
+// contexts keep both the detail and locally minted request ID out of logs.
+func WriteContextUsage(w io.Writer, requestID, detail string) error {
+	if !contextUsageDetailAllowed(detail) {
+		return ErrUnsupportedContextUsageDetail
+	}
+	if w == nil {
+		return ErrNoLiveChild
+	}
+	env, err := marshalContextUsageEnvelope(requestID, detail)
+	if err != nil {
+		return fmt.Errorf("streamsup: marshal context usage: %w", err)
+	}
+	if _, err := w.Write(env); err != nil {
+		return fmt.Errorf("streamsup: write context usage: %w", err)
 	}
 	return nil
 }

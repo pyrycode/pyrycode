@@ -62,7 +62,7 @@ None. The capture fixes the detail vocabulary and wire shape; the existing initi
 
 ## Documentation handoff
 
-No documentation-only acceptance criterion or explicit Documentation handoff was included in #2352. The later documentation stage may update `docs/knowledge/features/streamsup-package.md` to list `RequestContextUsage` alongside the other control-request operations.
+None. #2352 includes neither a Documentation handoff section nor a documentation-only acceptance criterion.
 
 ## Security review
 
@@ -85,4 +85,10 @@ No documentation-only acceptance criterion or explicit Documentation handoff was
 
 ## Revisions
 
-None.
+- 2026-09-11, implementation: `RequestContextUsage` preflights the same closed
+  predicate used by `WriteContextUsage` before calling `Stdin` or `nextControlID`.
+  The original design left validation solely in the writer, which preserved the
+  returned error but did not satisfy the acceptance criterion's stricter ordering
+  at the runner operation itself. The writer retains its check because it is an
+  exported direct-call boundary; the runner preflight also avoids consuming an ID
+  for a permanently refused request.

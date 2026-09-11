@@ -494,6 +494,100 @@ func TestRunner_RequestInitialize_LiveChildDelivers(t *testing.T) {
 	}
 }
 
+func TestRunner_RequestContextUsage_RefusalOutranksNoChild(t *testing.T) {
+	t.Parallel()
+	cfg := helperRunCfg(t, "echo_lines", &safeBuffer{}, &safeBuffer{})
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	err = r.RequestContextUsage("detailed")
+	if !errors.Is(err, ErrUnsupportedContextUsageDetail) {
+		t.Fatalf("RequestContextUsage(unsupported) = %v, want ErrUnsupportedContextUsageDetail", err)
+	}
+	if errors.Is(err, ErrNoLiveChild) {
+		t.Fatalf("RequestContextUsage(unsupported) reported ErrNoLiveChild: %v", err)
+	}
+	if id := r.nextControlID(); id != "1" {
+		t.Fatalf("unsupported detail consumed control request id; next id = %q, want 1", id)
+	}
+	if err := r.RequestContextUsage("summary"); !errors.Is(err, ErrNoLiveChild) {
+		t.Fatalf("RequestContextUsage(summary) with no child = %v, want ErrNoLiveChild", err)
+	}
+}
+
+func TestRunner_RequestContextUsage_LiveChildDelivers(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "echo_lines", out, stderr)
+	spawned := make(chan struct{}, 1)
+	cfg.onSpawn = func(int) {
+		select {
+		case spawned <- struct{}{}:
+		default:
+		}
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+	defer func() { cancel(); join() }()
+
+	select {
+	case <-spawned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("child never spawned")
+	}
+	waitForContains(t, out, "READY", 3*time.Second)
+
+	for _, detail := range []string{"summary", "full"} {
+		if err := r.RequestContextUsage(detail); err != nil {
+			t.Fatalf("RequestContextUsage(%q): %v", detail, err)
+		}
+	}
+	if err := r.Interrupt(); err != nil {
+		t.Fatalf("Interrupt FIFO barrier: %v", err)
+	}
+	waitForContains(t, out, `"subtype":"interrupt"`, 3*time.Second)
+
+	byDetail := make(map[string][]decodedControlRequest)
+	var interrupt decodedControlRequest
+	for _, line := range findEchoedLines(out.String()) {
+		var cr decodedControlRequest
+		if err := json.Unmarshal([]byte(line), &cr); err != nil {
+			t.Fatalf("echoed control line did not decode: %v (%q)", err, line)
+		}
+		switch cr.Request.Subtype {
+		case "get_context_usage":
+			byDetail[cr.Request.Detail] = append(byDetail[cr.Request.Detail], cr)
+		case "interrupt":
+			interrupt = cr
+		}
+	}
+
+	if interrupt.RequestID == "" {
+		t.Fatal("interrupt barrier has empty request id")
+	}
+	ids := map[string]bool{interrupt.RequestID: true}
+	for _, detail := range []string{"summary", "full"} {
+		requests := byDetail[detail]
+		if len(requests) != 1 {
+			t.Fatalf("get_context_usage detail %q reached child %d times, want exactly 1; output:\n%s", detail, len(requests), out.String())
+		}
+		request := requests[0]
+		if request.Type != "control_request" {
+			t.Errorf("get_context_usage detail %q type = %q, want control_request", detail, request.Type)
+		}
+		if request.RequestID == "" {
+			t.Errorf("get_context_usage detail %q has empty request id", detail)
+		} else if ids[request.RequestID] {
+			t.Errorf("get_context_usage detail %q reused request id %q from the shared sequence", detail, request.RequestID)
+		}
+		ids[request.RequestID] = true
+	}
+}
+
 // --- RequestInitializeOnSpawn: the per-spawn ask -----------------------------
 
 // initializeAsks returns the request id of every initialize control_request the
