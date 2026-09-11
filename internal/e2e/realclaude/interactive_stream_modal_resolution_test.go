@@ -84,18 +84,16 @@ const (
 // to completion. Answer-only — the cancel phase (#1030 Phase B) is out of scope.
 func TestInteractiveStreamModalResolution(t *testing.T) {
 	h, convID := startStreamModalResolutionHarness(t, permissionDaemonModel)
-	driveInteractiveStreamModalResolution(t, h, convID, false)
+	driveInteractiveStreamModalResolution(t, h, convID)
 }
 
-// TestInteractiveStreamStdioModalResolution runs the same non-vacuous allow
-// proof through the opt-in stdio transport. The sibling above remains the MCP
-// rollback gate.
-func TestInteractiveStreamStdioModalResolution(t *testing.T) {
+// Preserve the existing stdio allow/resume proof independently of ask context.
+func TestInteractiveStreamStdioModalAllow(t *testing.T) {
 	h, convID := startStdioModalResolutionHarness(t, permissionDaemonModel)
-	driveInteractiveStreamModalResolution(t, h, convID, true)
+	driveInteractiveStreamModalResolution(t, h, convID)
 }
 
-func driveInteractiveStreamModalResolution(t *testing.T, h *perConvHarness, convID string, requireReasonType bool) {
+func driveInteractiveStreamModalResolution(t *testing.T, h *perConvHarness, convID string) {
 	t.Helper()
 	// A per-run nonce keeps the trigger command distinct (defeats accidental
 	// caching) without asserting on its echo.
@@ -108,9 +106,6 @@ func driveInteractiveStreamModalResolution(t *testing.T, h *perConvHarness, conv
 	// requires the phone be paired --allow-remote-permissions (the device gate);
 	// startStreamModalResolutionHarness pairs with it.
 	shown := raiseRealPermissionModalPayload(t, h, 2, convID, writeFileTrigger(nonce))
-	if requireReasonType && shown.ReasonType == "" {
-		t.Fatal("stdio modal_shown carried an empty reason_type")
-	}
 	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
 		ID:   3,
 		Type: protocol.TypeModalAnswer,
@@ -162,6 +157,11 @@ func startStdioModalResolutionHarness(t *testing.T, model string) (*perConvHarne
 }
 
 func startPermissionModalResolutionHarness(t *testing.T, model string, stdioPermissionPrompt bool) (*perConvHarness, string) {
+	h, convID, _ := startObservedPermissionHarness(t, model, stdioPermissionPrompt, nil)
+	return h, convID
+}
+
+func startObservedPermissionHarness(t *testing.T, model string, stdioPermissionPrompt bool, configure func(string) string) (*perConvHarness, string, func()) {
 	t.Helper()
 	// No t.Parallel: WithWorktreeAuthenticated calls t.Setenv.
 	if _, err := exec.LookPath("claude"); err != nil {
@@ -214,20 +214,30 @@ func startPermissionModalResolutionHarness(t *testing.T, model string, stdioPerm
 	fr := fakerelay.New(relayTestLogger())
 	t.Cleanup(func() { _ = fr.Close() })
 
+	if configure != nil {
+		claudeBin = configure(claudeBin)
+	}
 	d := spawnPermissionDaemon(t, home, workdir, claudeBin, fr.URL()+"/v2/server", model)
 	t.Cleanup(func() { d.stop(t) })
 
 	serverID := readPersistedServerID(t, home)
 	waitBinaryHello(t, fr, serverID)
 
-	dialCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	phone, err := fakephone.Dial(dialCtx, fr.URL(), serverID, payload.Token, "phone-a")
-	if err != nil {
-		t.Fatalf("phone dial: %v", err)
+	h := &perConvHarness{home: home, workdir: workdir}
+	connect := func() {
+		dialCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		phone, err := fakephone.Dial(dialCtx, fr.URL(), serverID, payload.Token, "phone-a")
+		if err != nil {
+			t.Fatalf("phone dial: %v", err)
+		}
+		t.Cleanup(func() { _ = phone.Close() })
+		h.phone = phone
+		h.initSend, h.initRecv = driveHandshakeInteractive(t, phone, pubKey, payload.Token)
 	}
-	t.Cleanup(func() { _ = phone.Close() })
-
-	initSend, initRecv := driveHandshakeInteractive(t, phone, pubKey, payload.Token)
-	return &perConvHarness{phone: phone, initSend: initSend, initRecv: initRecv, home: home, workdir: workdir}, streamModalConvID
+	connect()
+	return h, streamModalConvID, func() {
+		_ = h.phone.Close()
+		connect()
+	}
 }
