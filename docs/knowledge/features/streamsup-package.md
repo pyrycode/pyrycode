@@ -133,12 +133,18 @@ runner's restart or backoff path.
 A successful reply emits Claude's `model`, `totalTokens`, `maxTokens`, and
 `percentage` unchanged. `boundContextUsageEntries` ranks categories by descending
 token count, retains at most 32 names of at most 256 bytes, and reports every
-string rejection and count-cap omission in `DroppedCategories`; an overlong model
-drops the whole event. This reading is informational and does not replace
-`contextwindow.Read`. Response-side decode failures are deliberately silent:
-`emitModelList` remains the sole owner of the existing content-free
-`logControlResponse` record, so Claude-authored bytes and decoder errors never
-enter daemon logs.
+string rejection and count-cap omission in `DroppedCategories`. The same helper
+independently ranks and caps the MCP-tool and memory-file inventories: each retains
+at most 32 entries, rejects an entry if any of its strings exceeds 256 bytes, and
+reports rejection plus count-cap omission in `DroppedMCPTools` or
+`DroppedMemoryFiles`. MCP entries carry `Name`, `ServerName`, and `Tokens`; memory
+entries carry `Path`, `Type`, and `Tokens`. An absent or empty inventory emits an
+empty slice with zero dropped entries, and individual system-prompt sections are
+not decoded or required. An overlong model drops the whole event. This reading is
+informational and does not replace `contextwindow.Read`. Response-side decode
+failures are deliberately silent: `emitModelList` remains the sole owner of the
+existing content-free `logControlResponse` record, so raw response bytes, decoder
+errors, tool and server names, and memory paths and types never enter daemon logs.
 
 `emitStreamEvent` maps Claude's nested partial-message wire without changing the
 downstream event contract. A valid `message_start` replaces the current message
