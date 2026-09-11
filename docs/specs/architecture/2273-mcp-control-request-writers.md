@@ -89,4 +89,4 @@ No documentation change is required by the ticket. The later documentation stage
 
 ## Revisions
 
-None.
+- During implementation, `controlRequestInner.ServerName` changed from an `omitempty` string to an `omitempty` string pointer. The original design would silently omit `serverName` when a caller supplied the empty string, contradicting the writer contract that reconnect and toggle always carry that field while this layer performs no server-name validation. Both MCP marshalers now take the address of their local string, preserving empty as explicit data while unrelated requests leave the pointer nil and preserve their bytes.
