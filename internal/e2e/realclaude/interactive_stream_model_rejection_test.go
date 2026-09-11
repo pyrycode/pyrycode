@@ -74,7 +74,7 @@ func TestInteractiveStreamRejectsModelAbsentFromCurrentMenu(t *testing.T) {
 		Type: protocol.TypeSetSessionSettings,
 		TS:   time.Now().UTC(),
 		Payload: mustJSON(t, protocol.SetSessionSettingsPayload{
-			SessionID:      liveModalBootstrapUUID,
+			SessionID:      streamModalBootstrapUUID,
 			Model:          &candidate,
 			Effort:         &effort,
 			PermissionMode: &mode,
