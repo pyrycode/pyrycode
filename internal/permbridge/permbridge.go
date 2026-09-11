@@ -53,11 +53,18 @@ var ErrDuplicateID = errors.New("permbridge: duplicate or empty approval id")
 
 // Request is the tool-approval request claude sends (T1 spike contract). Input
 // is the opaque tool-input object, carried as json.RawMessage so it round-trips
-// byte-verbatim — an allow echoes it back as Verdict.UpdatedInput.
+// byte-verbatim — an allow echoes it back as Verdict.UpdatedInput. The remaining
+// optional fields are copied only from the corresponding can_use_tool ask fields;
+// they are display context, never derived from Input and never verdict inputs.
 type Request struct {
-	ToolName  string          `json:"tool_name"`
-	Input     json.RawMessage `json:"input"`
-	ToolUseID string          `json:"tool_use_id"`
+	ToolName           string          `json:"tool_name"`
+	Input              json.RawMessage `json:"input"`
+	ToolUseID          string          `json:"tool_use_id"`
+	DecisionReason     json.RawMessage `json:"decision_reason,omitempty"`
+	DecisionReasonType string          `json:"decision_reason_type,omitempty"`
+	BlockedPath        string          `json:"blocked_path,omitempty"`
+	Description        string          `json:"description,omitempty"`
+	DefaultToNo        bool            `json:"default_to_no,omitempty"`
 }
 
 // Verdict is the allow/deny decision claude accepts. The omitempty tags give the

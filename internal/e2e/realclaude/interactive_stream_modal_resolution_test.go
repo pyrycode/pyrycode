@@ -84,7 +84,7 @@ const (
 // to completion. Answer-only — the cancel phase (#1030 Phase B) is out of scope.
 func TestInteractiveStreamModalResolution(t *testing.T) {
 	h, convID := startStreamModalResolutionHarness(t, permissionDaemonModel)
-	driveInteractiveStreamModalResolution(t, h, convID)
+	driveInteractiveStreamModalResolution(t, h, convID, false)
 }
 
 // TestInteractiveStreamStdioModalResolution runs the same non-vacuous allow
@@ -92,10 +92,10 @@ func TestInteractiveStreamModalResolution(t *testing.T) {
 // rollback gate.
 func TestInteractiveStreamStdioModalResolution(t *testing.T) {
 	h, convID := startStdioModalResolutionHarness(t, permissionDaemonModel)
-	driveInteractiveStreamModalResolution(t, h, convID)
+	driveInteractiveStreamModalResolution(t, h, convID, true)
 }
 
-func driveInteractiveStreamModalResolution(t *testing.T, h *perConvHarness, convID string) {
+func driveInteractiveStreamModalResolution(t *testing.T, h *perConvHarness, convID string, requireReasonType bool) {
 	t.Helper()
 	// A per-run nonce keeps the trigger command distinct (defeats accidental
 	// caching) without asserting on its echo.
@@ -107,13 +107,16 @@ func driveInteractiveStreamModalResolution(t *testing.T, h *perConvHarness, conv
 	// deadlines the drain and fails rather than passing silently. Answering
 	// requires the phone be paired --allow-remote-permissions (the device gate);
 	// startStreamModalResolutionHarness pairs with it.
-	modalID := raiseRealPermissionModal(t, h, 2, convID, writeFileTrigger(nonce))
+	shown := raiseRealPermissionModalPayload(t, h, 2, convID, writeFileTrigger(nonce))
+	if requireReasonType && shown.ReasonType == "" {
+		t.Fatal("stdio modal_shown carried an empty reason_type")
+	}
 	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
 		ID:   3,
 		Type: protocol.TypeModalAnswer,
 		TS:   time.Now().UTC(),
 		Payload: mustJSON(t, protocol.ModalAnswerPayload{
-			ModalID:  modalID,
+			ModalID:  shown.ModalID,
 			OptionID: string(turnevent.PermissionOptionKindAllowOnce),
 			// A client-minted idempotency key, NOT authorization — an arbitrary
 			// constant is fine (authorization is ModalID validity + the device gate).

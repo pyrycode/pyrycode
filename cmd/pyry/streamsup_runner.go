@@ -377,9 +377,14 @@ func (h *stdioPermissionHandler) handle(req streamsup.CanUseToolRequest, origin 
 	}
 
 	parked := permbridge.Request{
-		ToolName:  req.ToolName,
-		Input:     req.Input,
-		ToolUseID: req.ToolUseID,
+		ToolName:           req.ToolName,
+		Input:              req.Input,
+		ToolUseID:          req.ToolUseID,
+		DecisionReason:     req.DecisionReason,
+		DecisionReasonType: req.DecisionReasonType,
+		BlockedPath:        req.BlockedPath,
+		Description:        req.Description,
+		DefaultToNo:        req.DefaultToNo,
 	}
 	pending, err := h.registry.Register(req.ToolUseID, parked, h.timeout)
 	if err != nil {

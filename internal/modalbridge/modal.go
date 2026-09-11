@@ -15,6 +15,7 @@ package modalbridge
 
 import (
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -84,6 +85,22 @@ type Outstanding struct {
 	Prompt          string
 	Options         []protocol.ModalOption
 	DefaultOptionID string
+	Reason          json.RawMessage
+	ReasonType      string
+	BlockedPath     string
+	Description     string
+	DefaultToNo     bool
+}
+
+// PermissionContext is optional Claude-authored display context attached to a
+// permission modal. Each field is passed through independently; none is derived
+// from the tool input or used to decide the permission verdict.
+type PermissionContext struct {
+	Reason      json.RawMessage
+	ReasonType  string
+	BlockedPath string
+	Description string
+	DefaultToNo bool
 }
 
 // Registry is the in-memory outstanding-modal store, keyed by modal_id. It is
@@ -151,6 +168,16 @@ func PermissionRequestForClass(class tuidriver.ModalClass, screenText string) (t
 // critical section, so there is no window where a stored modal is Snapshot-able
 // without its scope key.
 func (r *Registry) Record(req turnevent.PermissionRequest, wireClass, convID string) (protocol.ModalShownPayload, error) {
+	return r.record(req, wireClass, convID, PermissionContext{})
+}
+
+// RecordWithContext records a modal with optional Claude-authored permission
+// context. Record remains the zero-context path for existing modal producers.
+func (r *Registry) RecordWithContext(req turnevent.PermissionRequest, wireClass, convID string, context PermissionContext) (protocol.ModalShownPayload, error) {
+	return r.record(req, wireClass, convID, context)
+}
+
+func (r *Registry) record(req turnevent.PermissionRequest, wireClass, convID string, context PermissionContext) (protocol.ModalShownPayload, error) {
 	id, err := newModalID()
 	if err != nil {
 		return protocol.ModalShownPayload{}, err
@@ -158,6 +185,11 @@ func (r *Registry) Record(req turnevent.PermissionRequest, wireClass, convID str
 	p := buildPayload(req, wireClass)
 	p.ModalID = id
 	p.ConversationID = convID
+	p.Reason = slices.Clone(context.Reason)
+	p.ReasonType = context.ReasonType
+	p.BlockedPath = context.BlockedPath
+	p.Description = context.Description
+	p.DefaultToNo = context.DefaultToNo
 
 	r.mu.Lock()
 	r.outstanding[id] = Outstanding{
@@ -168,6 +200,11 @@ func (r *Registry) Record(req turnevent.PermissionRequest, wireClass, convID str
 		Prompt:          p.Prompt,
 		Options:         slices.Clone(p.Options),
 		DefaultOptionID: p.DefaultOptionID,
+		Reason:          slices.Clone(p.Reason),
+		ReasonType:      p.ReasonType,
+		BlockedPath:     p.BlockedPath,
+		Description:     p.Description,
+		DefaultToNo:     p.DefaultToNo,
 	}
 	r.mu.Unlock()
 	return p, nil
@@ -219,6 +256,11 @@ func (r *Registry) Snapshot() []protocol.ModalShownPayload {
 			Prompt:          o.Prompt,
 			Options:         slices.Clone(o.Options),
 			DefaultOptionID: o.DefaultOptionID,
+			Reason:          slices.Clone(o.Reason),
+			ReasonType:      o.ReasonType,
+			BlockedPath:     o.BlockedPath,
+			Description:     o.Description,
+			DefaultToNo:     o.DefaultToNo,
 		})
 	}
 	return out

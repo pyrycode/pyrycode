@@ -263,6 +263,15 @@ type ModalShownPayload struct {
 	Prompt          string        `json:"prompt"`
 	Options         []ModalOption `json:"options"`
 	DefaultOptionID string        `json:"default_option_id"`
+	// The remaining fields are optional Claude-authored display context. They
+	// are never daemon-derived from tool input or used as permission authority.
+	// Reason preserves an open JSON shape; ReasonType preserves an open string
+	// vocabulary. DefaultToNo is a client-selection hint, not a timeout verdict.
+	Reason      json.RawMessage `json:"reason,omitempty"`
+	ReasonType  string          `json:"reason_type,omitempty"`
+	BlockedPath string          `json:"blocked_path,omitempty"`
+	Description string          `json:"description,omitempty"`
+	DefaultToNo bool            `json:"default_to_no,omitempty"`
 }
 
 // ModalAnswerPayload is the body of an Envelope whose Type == TypeModalAnswer

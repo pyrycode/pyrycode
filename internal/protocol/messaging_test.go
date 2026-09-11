@@ -530,8 +530,43 @@ func TestModalShownPayload_RoundTrip(t *testing.T) {
 	if payload.DefaultOptionID != "deny" {
 		t.Errorf("DefaultOptionID: got %q, want %q", payload.DefaultOptionID, "deny")
 	}
+	if want := `{"rule":"outside_read_only","details":["write"]}`; string(payload.Reason) != want {
+		t.Errorf("Reason: got %s, want %s", payload.Reason, want)
+	}
+	if payload.ReasonType != "future_reason_kind" {
+		t.Errorf("ReasonType: got %q, want %q", payload.ReasonType, "future_reason_kind")
+	}
+	if payload.BlockedPath != "/workspace/output.txt" {
+		t.Errorf("BlockedPath: got %q, want %q", payload.BlockedPath, "/workspace/output.txt")
+	}
+	if payload.Description != "Write the generated output" {
+		t.Errorf("Description: got %q, want %q", payload.Description, "Write the generated output")
+	}
+	if !payload.DefaultToNo {
+		t.Error("DefaultToNo: got false, want true")
+	}
 
 	roundTripEnvelope(t, env, payload, raw)
+}
+
+func TestModalShownPayload_EmptyContextOmitted(t *testing.T) {
+	payload := ModalShownPayload{
+		ConversationID:  "conv-7f3a",
+		ModalID:         "mdl-7f3a",
+		Class:           "permission",
+		Title:           "Allow Bash?",
+		Prompt:          "claude wants to run: rm -rf build/",
+		Options:         []ModalOption{{ID: "allow", Label: "Allow"}, {ID: "deny", Label: "Deny"}},
+		DefaultOptionID: "deny",
+	}
+	got, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `{"conversation_id":"conv-7f3a","modal_id":"mdl-7f3a","class":"permission","title":"Allow Bash?","prompt":"claude wants to run: rm -rf build/","options":[{"id":"allow","label":"Allow"},{"id":"deny","label":"Deny"}],"default_option_id":"deny"}`
+	if string(got) != want {
+		t.Errorf("zero-context payload changed:\n got: %s\nwant: %s", got, want)
+	}
 }
 
 func TestModalAnswerPayload_RoundTrip(t *testing.T) {

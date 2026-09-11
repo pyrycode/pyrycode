@@ -1,6 +1,8 @@
 package modalbridge
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -9,6 +11,39 @@ import (
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 )
+
+func TestRecordWithContext_ReturnAndSnapshotMatch(t *testing.T) {
+	t.Parallel()
+	reg := New()
+	req, class, _ := PermissionRequestForClass(tuidriver.ModalClassPermission, "Bash")
+	reason := json.RawMessage(`{"kind":"rule","nested":[1,true]}`)
+	payload, err := reg.RecordWithContext(req, class, "conv-context", PermissionContext{
+		Reason:      reason,
+		ReasonType:  "future_reason_kind",
+		BlockedPath: "/workspace/out",
+		Description: "Write output",
+		DefaultToNo: true,
+	})
+	if err != nil {
+		t.Fatalf("RecordWithContext: %v", err)
+	}
+
+	reason[2] = 'X'
+	snapshot := reg.Snapshot()
+	if len(snapshot) != 1 {
+		t.Fatalf("Snapshot len: got %d, want 1", len(snapshot))
+	}
+	got := snapshot[0]
+	if !bytes.Equal(got.Reason, payload.Reason) || got.ReasonType != payload.ReasonType ||
+		got.BlockedPath != payload.BlockedPath || got.Description != payload.Description ||
+		got.DefaultToNo != payload.DefaultToNo {
+		t.Errorf("snapshot context = %+v, want returned context %+v", got, payload)
+	}
+	got.Reason[2] = 'Y'
+	if again := reg.Snapshot()[0].Reason; !bytes.Equal(again, payload.Reason) {
+		t.Errorf("mutating snapshot Reason changed registry: got %s, want %s", again, payload.Reason)
+	}
+}
 
 func optionIDs(opts []protocol.ModalOption) []string {
 	out := make([]string, len(opts))
