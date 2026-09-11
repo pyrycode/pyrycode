@@ -152,6 +152,32 @@ otherwise healthy session into a refusal window. Model servability and
 client-visible refusal reporting therefore remain outside this writer; the
 caller-owned validation boundary still constrains network-originated values.
 
+**MCP-control send primitives (#2273).** `WriteMCPStatus`, `WriteMCPReconnect`,
+and `WriteMCPToggle` are write-only free functions for the `mcp_status`,
+`mcp_reconnect`, and `mcp_toggle` control requests. They take a caller-supplied
+request id, make one newline-terminated structured-JSON write to the held-open
+child stdin, and neither read the reply nor close the writer. Reconnect always
+carries `serverName`; toggle always carries both `serverName` and `enabled`.
+This layer deliberately accepts any server-name string: JSON encoding keeps
+quotes, backslashes, newlines, and control bytes as string data on one physical
+line, while server membership and caller authorisation remain the routing
+layer's responsibility.
+
+The shared `controlRequestInner` must distinguish a field that is inapplicable
+to one subtype from a legitimate zero value on another. Plain `string` or
+`bool` fields with `omitempty` collapse those states: `enabled:false` would
+vanish, and the original non-pointer `ServerName` design would also silently
+drop an explicitly supplied empty name even though the writer does no name
+validation. `ServerName *string` and `Enabled *bool` preserve those explicit
+values while nil keeps every unrelated request byte-identical. Tests need a
+false toggle and an empty server name to detect both regressions; non-zero
+examples alone stay green under the broken scalar design.
+
+The spellings are schema-backed from Claude 2.1.259, not live-compatibility
+evidence. The existing [MCP status capture probe](e2e-realclaude-mcp-status-capture-test-go.md)
+had not produced a committed fixture when these writers landed; reply decoding
+and the complete routed control path still require live evidence.
+
 **Initialize send primitive (#1689).** `(*Runner).RequestInitialize() error` writes a single
 structured `control_request` line —
 `{"type":"control_request","request_id":"<id>","request":{"subtype":"initialize"}}` — onto the live
