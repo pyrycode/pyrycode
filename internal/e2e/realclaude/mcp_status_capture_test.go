@@ -1473,8 +1473,31 @@ func mcapPersist(t *testing.T, dir, fixturePath string, recorder *dropcapRecorde
 //
 //	go test -tags e2e_realclaude -race -count=1 -run TestMcap ./internal/e2e/realclaude/
 //
-// None constructs a fixture-worthy record. Writer tests inject fixture paths under
-// t.TempDir so offline coverage cannot alter the repository fixture.
+// None fabricates a fixture-worthy record. The committed live record is validated
+// below. Writer tests inject fixture paths under t.TempDir so offline coverage
+// cannot alter the repository fixture.
+
+func TestMcapCommittedFixtureIsUsable(t *testing.T) {
+	t.Parallel()
+	blob, err := os.ReadFile(mcapFixturePath)
+	if err != nil {
+		t.Fatalf("reading committed MCP fixture: %v", err)
+	}
+	var rec mcapRecord
+	if err := json.Unmarshal(blob, &rec); err != nil {
+		t.Fatalf("decoding committed MCP fixture: %v", err)
+	}
+	if !rec.IsCapture {
+		t.Fatal("committed MCP fixture is not a live capture")
+	}
+	if reason, worthy := rec.fixtureWorthy(); !worthy {
+		t.Fatalf("committed MCP fixture is unusable: %s", reason)
+	}
+	scanner := dropcapScanner{needles: dropcapFixedNeedles()}
+	if hits, _ := scanner.scan(blob); len(hits) != 0 {
+		t.Fatalf("committed MCP fixture failed the credential scan: %v", hits)
+	}
+}
 
 // TestMcapControlLineCarriesEachVerbsOwnFields pins the three request shapes read
 // out of the claude 2.1.259 binary's own bundled schema.
@@ -2501,15 +2524,18 @@ func TestMcapStderrIsRedactedBeforeItIsCapped(t *testing.T) {
 // can promote a fixture as a side effect.
 func TestMcapPersistFillsARecordThatNeverReachedTheHappyPath(t *testing.T) {
 	t.Parallel()
+	existingFixture, err := os.ReadFile(mcapFixturePath)
+	if err != nil {
+		t.Fatalf("reading valid committed fixture: %v", err)
+	}
 	for _, fixtureExists := range []bool{false, true} {
 		fixtureExists := fixtureExists
 		t.Run(fmt.Sprintf("fixture_exists=%v", fixtureExists), func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
 			fixturePath := filepath.Join(dir, "fixture.json")
-			const sentinel = "{\"valid_existing_fixture\":true}\n"
 			if fixtureExists {
-				if err := os.WriteFile(fixturePath, []byte(sentinel), 0o600); err != nil {
+				if err := os.WriteFile(fixturePath, existingFixture, 0o600); err != nil {
 					t.Fatalf("seeding fixture: %v", err)
 				}
 			}
@@ -2589,8 +2615,8 @@ func TestMcapPersistFillsARecordThatNeverReachedTheHappyPath(t *testing.T) {
 				if err != nil {
 					t.Fatalf("existing fixture was removed: %v", err)
 				}
-				if string(fixtureBlob) != sentinel {
-					t.Errorf("existing fixture was overwritten: got %q, want %q", fixtureBlob, sentinel)
+				if string(fixtureBlob) != string(existingFixture) {
+					t.Error("existing valid fixture was overwritten")
 				}
 			} else if !errors.Is(err, fs.ErrNotExist) {
 				t.Errorf("non-worthy record created a fixture or returned the wrong error: bytes=%q err=%v",

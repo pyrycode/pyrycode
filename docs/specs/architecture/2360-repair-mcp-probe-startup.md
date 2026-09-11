@@ -223,3 +223,22 @@ Security posture is unchanged: the readiness target is the fixed rig-owned
 `mcapApproveServer`, status replies still pass through the existing redaction and
 deny-scan path, the polling budget is bounded, and no user turn or new subprocess is
 introduced.
+
+## Revision 2: commit the accepted live evidence
+
+The second live gate produced the usable recording on 2026-09-11 at 18:57 UTC.
+It contains two status requests, a successful reconnect to the connected approval
+server, and a successful toggle of the deliberately broken server. No user turn
+was sent and no init event was observed. The final status reply reports both
+healthy servers connected and retains the broken server's failed status and error.
+
+Recover the exact deny-scanned artifact without reserialising it. Commit it with
+the measured key union: config, error, name, scope, serverInfo, status, tools.
+The reader must correlate the final status request. Reading the first reply was
+reproduced as a failure because pending servers lacked serverInfo and tools.
+The committed fixture itself covers that transition.
+
+Validate the committed recording through the promotion predicate and fixed
+credential scan. Use its bytes in the persistence regression so a diagnostic run
+must preserve an actual valid fixture. Update the capture documentation and run
+the offline gate plus the final live suite before completing the ticket.
