@@ -3,7 +3,7 @@
 The wire vocabulary for a **modal** the supervised `claude` surfaces over the
 encrypted mobile wire (`docs/protocol-mobile.md` § Modal; epic #597 Phase 3,
 [ADR 025]). Lifecycle `modal_shown` → `modal_answer` / `modal_cancel` →
-`modal_dismissed`. Five new exported types in `messaging.go` (a modal is a
+`modal_dismissed`. Six exported types in `messaging.go` (a modal is a
 control/boundary concern, not a turn-stream event, so `messaging.go` not
 `interactive.go`), mapping to the four `Type*` constants. `modal_shown` /
 `modal_dismissed` are outbound binary → phone events; `modal_answer` /
@@ -28,11 +28,17 @@ type ModalShownPayload struct { // binary → phone
     Prompt          string          `json:"prompt"`
     Options         []ModalOption   `json:"options"`           // ordered: array order is display/selection order
     DefaultOptionID string          `json:"default_option_id"` // MUST equal one of Options[].ID (documented invariant)
+    AlwaysAllow     AlwaysAllowPayload `json:"always_allow"`   // always present, including unavailable
     Reason          json.RawMessage `json:"reason,omitempty"`
     ReasonType      string          `json:"reason_type,omitempty"`
     BlockedPath     string          `json:"blocked_path,omitempty"`
     Description     string          `json:"description,omitempty"`
     DefaultToNo     bool            `json:"default_to_no,omitempty"`
+}
+
+type AlwaysAllowPayload struct {
+    Offered bool     `json:"offered"`
+    Rules   []string `json:"rules"`
 }
 
 type ModalAnswerPayload struct { // phone → binary, inbound control
@@ -52,12 +58,21 @@ type ModalDismissedPayload struct { // binary → phone
 }
 ```
 
-- **The original modal fields carry no `omitempty`; the five Claude-authored
+- **The original modal fields and `AlwaysAllow` carry no `omitempty`; the five Claude-authored
   permission-context fields do** (#2346). This preserves the established payload
   for zero-context producers while allowing stdio permission asks to pass through
   `reason` (open-shape JSON), `reason_type` (open string vocabulary),
   `blocked_path`, `description`, and the `default_to_no` client-selection hint.
   None is derived from tool input or used as permission authority.
+- **Always-allow publication is all-or-nothing** (#2364). An offerable stdio
+  suggestion batch becomes ordered display strings in `Rules`; every invalid,
+  unsupported, suppressed, or over-bound batch becomes the explicit unavailable
+  value `{offered:false,rules:[]}`. Approval-MCP and other zero-context producers
+  use that same shape. `Rules` is never null and never contains a valid prefix of
+  a rejected batch. The outstanding modal retains the validated value, so an
+  initial broadcast and reconnect snapshot serialize the same truth instead of
+  parsing or reconstructing it twice. The strings are Claude-authored untrusted
+  display content, not authorization input and not safe log attributes.
 - **`modal_id` is the sole inbound correlation key; `conversation_id` is outbound
   scope only.** The daemon resolves `modal_id` against its **own** outstanding-modal
   state and never trusts a phone-asserted conversation; `option_id` maps against
@@ -84,10 +99,11 @@ type ModalDismissedPayload struct { // binary → phone
   action. Architect security pass verdict **PASS**; it forecloses the
   cross-conversation-confusion class and keeps validity-gate vs dedup-key separate.
 
-Four flat **one-func-per-type** round-trips in `messaging_test.go`
-(`TestModalShownPayload_RoundTrip` asserts `len(Options)==2` + positional ids +
-`DefaultOptionID`; `TestModalAnswerPayload_RoundTrip` asserts `AnswerToken`
-round-trips per the AC; `TestModalDismissedPayload_RoundTrip` asserts
-`Source=="remote"`), each on the shared `roundTripEnvelope` helper, over four
-single-line fixtures authored in **struct-field order**. See
+The flat payload round-trips in `messaging_test.go` include populated and
+unavailable `AlwaysAllow` shapes. `TestModalShownPayload_RoundTrip` pins option
+order, the default, and bare/content-bearing rendered rules; the unavailable
+fixture pins a non-null empty rule array. The answer and dismissal round-trips
+also pin `AnswerToken` and `Source=="remote"`. All use the shared
+`roundTripEnvelope` helper and single-line fixtures authored in **struct-field
+order**. See
 [codebase/701.md](../codebase/701.md).
