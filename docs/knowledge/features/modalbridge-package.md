@@ -64,6 +64,7 @@ type Outstanding struct {
     ReasonType, BlockedPath       string
     Description                   string
     DefaultToNo                   bool
+    AlwaysAllow                   permbridge.AlwaysAllow
 }
 
 type PermissionContext struct {
@@ -71,6 +72,7 @@ type PermissionContext struct {
     ReasonType, BlockedPath       string
     Description                   string
     DefaultToNo                   bool
+    AlwaysAllow                   permbridge.AlwaysAllow
 }
 
 type Registry struct { /* sync.Mutex + map[string]Outstanding */ }
@@ -99,13 +101,16 @@ cancel win and every replay/unknown id a no-op), `Lookup` by #717's gated
 `modal_answer`. They belong with the type's contract even though #716 only calls
 `Record`.
 
-`RecordWithContext` (#2346) is the additive permission path. It stores the five
-Claude-authored display fields in the same operation that returns the stamped
-initial payload, so `Snapshot` can replay exactly the same context after a
-reconnect. `Record` delegates with zero context, preserving the older approval
-MCP payload shape. `Reason` is cloned on write and snapshot because
+`RecordWithContext` is the additive permission path. It stores the five optional
+Claude-authored display fields (#2346) and the validated always-allow value
+(#2364) in the same operation that returns the stamped initial payload, so
+`Snapshot` can replay exactly the same context after a reconnect. `Record`
+delegates with zero context; every zero-context producer emits the explicit
+unavailable shape `{offered:false,rules:[]}`. `Reason` is cloned on write and snapshot because
 `json.RawMessage` is a mutable byte slice; copying only the struct would let an
 initial-broadcast or reconnect caller mutate outstanding registry truth.
+`AlwaysAllow` instead protects its own nested slices behind cloning accessors,
+which keeps retained grant data and every derived wire payload immutable.
 
 ## Class → option mapping (the minimal fixed-option-set, design option (a))
 
@@ -359,7 +364,7 @@ func (r *Registry) Snapshot() []protocol.ModalShownPayload
   no-nested-locks discipline as `Lookup`/`Resolve`). Mints no id (`newModalID` untouched),
   retires nothing — a modal in a snapshot is still `Lookup`/`Resolve`-able afterward. A
   resolved modal never re-surfaces, since `Resolve` already removed it from `r.outstanding`.
-- **`Options` and the open-shape JSON `Reason` are cloned per payload**
+- **`Options`, the open-shape JSON `Reason`, and always-allow rules are cloned per payload**
   (`slices.Clone`, mirroring `Record`'s clone-on-write) so a mutating consumer
   can't corrupt the stored `Outstanding` through an aliased slice —
   the property that keeps "leaves registry state unchanged" true even under a careless

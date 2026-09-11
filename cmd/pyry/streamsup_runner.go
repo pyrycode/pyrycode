@@ -386,6 +386,7 @@ func (h *stdioPermissionHandler) handle(req streamsup.CanUseToolRequest, origin 
 		Description:             req.Description,
 		DefaultToNo:             req.DefaultToNo,
 		RequiresUserInteraction: req.RequiresUserInteraction,
+		AlwaysAllow:             permbridge.ParseAlwaysAllow(req.PermissionSuggestions, req.SuppressAlwaysAllowRule),
 	}
 	pending, err := h.registry.Register(req.ToolUseID, parked, h.timeout)
 	if err != nil {

@@ -129,6 +129,7 @@ func TestStdioPermissionHandler_CarriesAskContextFromCorrespondingFields(t *test
 	h := newStdioPermissionHandler(reg, time.Minute, surface)
 	var out lockedBuffer
 	reason := json.RawMessage(`{"source":"ask-field"}`)
+	suggestions := json.RawMessage(`[{"type":"addRules","behavior":"allow","rules":[{"toolName":"Bash","ruleContent":"echo:*"}]}]`)
 	h.handle(streamsup.CanUseToolRequest{
 		RequestID:               "request-context",
 		ToolUseID:               "tool-context",
@@ -140,6 +141,7 @@ func TestStdioPermissionHandler_CarriesAskContextFromCorrespondingFields(t *test
 		Description:             "ask description",
 		DefaultToNo:             true,
 		RequiresUserInteraction: true,
+		PermissionSuggestions:   suggestions,
 	}, &out)
 
 	var got permbridge.Request
@@ -150,7 +152,8 @@ func TestStdioPermissionHandler_CarriesAskContextFromCorrespondingFields(t *test
 	}
 	if !bytes.Equal(got.DecisionReason, reason) || got.DecisionReasonType != "future_reason_kind" ||
 		got.BlockedPath != "/ask/path" || got.Description != "ask description" || !got.DefaultToNo ||
-		!got.RequiresUserInteraction {
+		!got.RequiresUserInteraction || !got.AlwaysAllow.Offered() ||
+		!slices.Equal(got.AlwaysAllow.Rules(), []string{"Bash(echo:*)"}) {
 		t.Errorf("surfaced context = %+v, want corresponding ask fields", got)
 	}
 	select {

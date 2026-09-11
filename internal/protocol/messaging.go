@@ -256,13 +256,14 @@ type ModalOption struct {
 // enum (leaf-data convention, matching MessagePayload.Role); the exhaustive
 // class vocabulary is #703's to finalize.
 type ModalShownPayload struct {
-	ConversationID  string        `json:"conversation_id"` // outbound routing/scoping key; daemon-asserted, client filters on it (#1065). Inbound answers carry no conversation_id — see doc.
-	ModalID         string        `json:"modal_id"`
-	Class           string        `json:"class"`
-	Title           string        `json:"title"`
-	Prompt          string        `json:"prompt"`
-	Options         []ModalOption `json:"options"`
-	DefaultOptionID string        `json:"default_option_id"`
+	ConversationID  string             `json:"conversation_id"` // outbound routing/scoping key; daemon-asserted, client filters on it (#1065). Inbound answers carry no conversation_id — see doc.
+	ModalID         string             `json:"modal_id"`
+	Class           string             `json:"class"`
+	Title           string             `json:"title"`
+	Prompt          string             `json:"prompt"`
+	Options         []ModalOption      `json:"options"`
+	DefaultOptionID string             `json:"default_option_id"`
+	AlwaysAllow     AlwaysAllowPayload `json:"always_allow"`
 	// The remaining fields are optional Claude-authored display context. They
 	// are never daemon-derived from tool input or used as permission authority.
 	// Reason preserves an open JSON shape; ReasonType preserves an open string
@@ -272,6 +273,13 @@ type ModalShownPayload struct {
 	BlockedPath string          `json:"blocked_path,omitempty"`
 	Description string          `json:"description,omitempty"`
 	DefaultToNo bool            `json:"default_to_no,omitempty"`
+}
+
+// AlwaysAllowPayload describes the bounded rules a permission modal can display
+// for a possible "don't ask again" choice. Both fields are always present.
+type AlwaysAllowPayload struct {
+	Offered bool     `json:"offered"`
+	Rules   []string `json:"rules"`
 }
 
 // ModalAnswerPayload is the body of an Envelope whose Type == TypeModalAnswer

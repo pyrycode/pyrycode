@@ -22,6 +22,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
@@ -90,6 +91,7 @@ type Outstanding struct {
 	BlockedPath     string
 	Description     string
 	DefaultToNo     bool
+	AlwaysAllow     permbridge.AlwaysAllow
 }
 
 // PermissionContext is optional Claude-authored display context attached to a
@@ -101,6 +103,7 @@ type PermissionContext struct {
 	BlockedPath string
 	Description string
 	DefaultToNo bool
+	AlwaysAllow permbridge.AlwaysAllow
 }
 
 // Registry is the in-memory outstanding-modal store, keyed by modal_id. It is
@@ -190,6 +193,7 @@ func (r *Registry) record(req turnevent.PermissionRequest, wireClass, convID str
 	p.BlockedPath = context.BlockedPath
 	p.Description = context.Description
 	p.DefaultToNo = context.DefaultToNo
+	p.AlwaysAllow = alwaysAllowPayload(context.AlwaysAllow)
 
 	r.mu.Lock()
 	r.outstanding[id] = Outstanding{
@@ -205,6 +209,7 @@ func (r *Registry) record(req turnevent.PermissionRequest, wireClass, convID str
 		BlockedPath:     p.BlockedPath,
 		Description:     p.Description,
 		DefaultToNo:     p.DefaultToNo,
+		AlwaysAllow:     context.AlwaysAllow,
 	}
 	r.mu.Unlock()
 	return p, nil
@@ -261,6 +266,7 @@ func (r *Registry) Snapshot() []protocol.ModalShownPayload {
 			BlockedPath:     o.BlockedPath,
 			Description:     o.Description,
 			DefaultToNo:     o.DefaultToNo,
+			AlwaysAllow:     alwaysAllowPayload(o.AlwaysAllow),
 		})
 	}
 	return out
@@ -282,7 +288,16 @@ func buildPayload(req turnevent.PermissionRequest, wireClass string) protocol.Mo
 		Prompt:          boundPrompt(req.Title),
 		Options:         opts,
 		DefaultOptionID: denyByClass[wireClass],
+		AlwaysAllow:     alwaysAllowPayload(permbridge.AlwaysAllow{}),
 	}
+}
+
+func alwaysAllowPayload(offer permbridge.AlwaysAllow) protocol.AlwaysAllowPayload {
+	rules := offer.Rules()
+	if rules == nil {
+		rules = []string{}
+	}
+	return protocol.AlwaysAllowPayload{Offered: offer.Offered(), Rules: rules}
 }
 
 // boundPrompt trims surrounding whitespace and caps the body at maxPromptBytes,

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -54,6 +55,99 @@ func sampleRequest(id string) Request {
 		ToolName:  "Bash",
 		Input:     json.RawMessage(`{"command":"ls -la"}`),
 		ToolUseID: id,
+	}
+}
+
+func permissionSuggestionBatch(rules int, toolName string) json.RawMessage {
+	entries := make([]string, rules)
+	for i := range entries {
+		entries[i] = `{"toolName":"` + toolName + `"}`
+	}
+	return json.RawMessage(`[{"type":"addRules","behavior":"allow","rules":[` + strings.Join(entries, ",") + `]}]`)
+}
+
+func TestParseAlwaysAllow(t *testing.T) {
+	t.Parallel()
+	empty := ""
+	readRule := "//src/**"
+	valid := json.RawMessage(`[` +
+		`{"type":"addRules","behavior":"allow","rules":[{"toolName":"Bash"},{"toolName":"Read","ruleContent":"//src/**"}]},` +
+		`{"type":"addRules","behavior":"allow","rules":[{"toolName":"Write","ruleContent":""}]}` +
+		`]`)
+
+	offer := ParseAlwaysAllow(valid, false)
+	if !offer.Offered() {
+		t.Fatal("valid suggestions were not offered")
+	}
+	if got, want := offer.Rules(), []string{"Bash", "Read(//src/**)", "Write()"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("rendered rules = %v, want %v", got, want)
+	}
+	wantUpdates := []PermissionUpdate{
+		{Type: "addRules", Behavior: "allow", Rules: []PermissionRule{{ToolName: "Bash"}, {ToolName: "Read", RuleContent: &readRule}}},
+		{Type: "addRules", Behavior: "allow", Rules: []PermissionRule{{ToolName: "Write", RuleContent: &empty}}},
+	}
+	if got := offer.Updates(); !reflect.DeepEqual(got, wantUpdates) {
+		t.Fatalf("updates = %#v, want %#v", got, wantUpdates)
+	}
+
+	// Both accessors return deep copies: a future grant path cannot mutate the
+	// validated offer retained by the outstanding modal.
+	rules := offer.Rules()
+	rules[0] = "changed"
+	updates := offer.Updates()
+	updates[0].Rules[1].ToolName = "changed"
+	*updates[0].Rules[1].RuleContent = "changed"
+	if got := offer.Rules(); !reflect.DeepEqual(got, []string{"Bash", "Read(//src/**)", "Write()"}) {
+		t.Fatalf("mutating accessor results changed offer: %v", got)
+	}
+
+	overRaw := json.RawMessage(`[{"type":"addRules","behavior":"allow","padding":"` + strings.Repeat("x", 16<<10) + `","rules":[{"toolName":"Bash"}]}]`)
+	cases := []struct {
+		name       string
+		raw        json.RawMessage
+		suppressed bool
+	}{
+		{name: "absent"},
+		{name: "null", raw: json.RawMessage(`null`)},
+		{name: "empty", raw: json.RawMessage(`[]`)},
+		{name: "suppressed", raw: valid, suppressed: true},
+		{name: "malformed", raw: json.RawMessage(`[{`)},
+		{name: "over raw byte bound", raw: overRaw},
+		{name: "unsupported type", raw: json.RawMessage(`[{"type":"removeRules","behavior":"allow","rules":[{"toolName":"Bash"}]}]`)},
+		{name: "unsupported behavior", raw: json.RawMessage(`[{"type":"addRules","behavior":"deny","rules":[{"toolName":"Bash"}]}]`)},
+		{name: "missing rules", raw: json.RawMessage(`[{"type":"addRules","behavior":"allow"}]`)},
+		{name: "empty rules", raw: json.RawMessage(`[{"type":"addRules","behavior":"allow","rules":[]}]`)},
+		{name: "too many rules", raw: permissionSuggestionBatch(17, "Bash")},
+		{name: "empty tool name", raw: permissionSuggestionBatch(1, "")},
+		{name: "wrong tool name type", raw: json.RawMessage(`[{"type":"addRules","behavior":"allow","rules":[{"toolName":7}]}]`)},
+		{name: "null rule content", raw: json.RawMessage(`[{"type":"addRules","behavior":"allow","rules":[{"toolName":"Bash","ruleContent":null}]}]`)},
+		{name: "wrong rule content type", raw: json.RawMessage(`[{"type":"addRules","behavior":"allow","rules":[{"toolName":"Bash","ruleContent":{}}]}]`)},
+		{name: "rendered rule over byte bound", raw: permissionSuggestionBatch(1, strings.Repeat("x", 1025))},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ParseAlwaysAllow(tc.raw, tc.suppressed)
+			if got.Offered() || got.Rules() != nil || got.Updates() != nil {
+				t.Errorf("rejected suggestions returned partial offer: offered=%v rules=%v updates=%v", got.Offered(), got.Rules(), got.Updates())
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{name: "sixteen rules", raw: permissionSuggestionBatch(16, "Bash")},
+		{name: "rendered rule exactly 1024 bytes", raw: permissionSuggestionBatch(1, strings.Repeat("x", 1024))},
+		{name: "unknown keys tolerated", raw: json.RawMessage(`[{"type":"addRules","behavior":"allow","future":true,"rules":[{"toolName":"Bash","future":"value"}]}]`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ParseAlwaysAllow(tc.raw, false); !got.Offered() {
+				t.Errorf("boundary-valid suggestions unavailable: %s", tc.raw)
+			}
+		})
 	}
 }
 

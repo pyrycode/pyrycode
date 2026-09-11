@@ -46,7 +46,22 @@ type Request struct {
     Description        string          `json:"description,omitempty"`
     DefaultToNo        bool            `json:"default_to_no,omitempty"`
     RequiresUserInteraction bool            `json:"-"`
+    AlwaysAllow        AlwaysAllow     `json:"-"`
 }
+
+type PermissionRule struct {
+    ToolName    string
+    RuleContent *string
+}
+type PermissionUpdate struct {
+    Type, Behavior string
+    Rules          []PermissionRule
+}
+type AlwaysAllow struct { /* immutable validated updates + rendered rules */ }
+func ParseAlwaysAllow(raw json.RawMessage, suppressed bool) AlwaysAllow
+func (a AlwaysAllow) Offered() bool
+func (a AlwaysAllow) Rules() []string
+func (a AlwaysAllow) Updates() []PermissionUpdate
 
 // Verdict is the allow/deny decision claude accepts.
 type Verdict struct {
@@ -63,7 +78,9 @@ func Allow(updatedInput json.RawMessage) Verdict // {BehaviorAllow, updatedInput
 func Deny(message string) Verdict                // {BehaviorDeny, nil, message}
 ```
 
-`Input`/`UpdatedInput` are `json.RawMessage` so an arbitrary tool-input object round-trips byte-verbatim — the #1080 stream verdict arm (`streamApprovalBridge.ResolveStream`) always echoes the parked `Input` back as `UpdatedInput` unmodified on allow; the primitive only carries the bytes. The five optional ask-context fields are independent Claude-authored display values (#2346): the stdio adapter copies each only from its corresponding `can_use_tool` field, never from `Input`, while the approval MCP producer leaves all five at zero values. They do not participate in the verdict or timeout. `RequiresUserInteraction` is different: it is immutable daemon-internal eligibility copied from the typed stdio ask, excluded from JSON, never displayed or logged, and false for approval-MCP requests. `omitempty` gives the two disjoint verdict wire shapes claude expects. `Allow`/`Deny` constructors make call sites correct-by-construction — no stringly-typed `"allow"`/`"deny"` at the resolver. `reasonTimeout` (unexported, a fixed string, never host-derived content) is the deny message the timer path uses.
+`Input`/`UpdatedInput` are `json.RawMessage` so an arbitrary tool-input object round-trips byte-verbatim — the #1080 stream verdict arm (`streamApprovalBridge.ResolveStream`) always echoes the parked `Input` back as `UpdatedInput` unmodified on allow; the primitive only carries the bytes. The five optional ask-context fields are independent Claude-authored display values (#2346): the stdio adapter copies each only from its corresponding `can_use_tool` field, never from `Input`, while the approval MCP producer leaves all five at zero values. They do not participate in the verdict or timeout. `RequiresUserInteraction` is different: it is immutable daemon-internal eligibility copied from the typed stdio ask, excluded from JSON, never displayed or logged, and false for approval-MCP requests. `AlwaysAllow` is also daemon-internal: it retains only a completely validated stdio permission-suggestion batch and stays zero for approval MCP. `omitempty` gives the two disjoint verdict wire shapes claude expects. `Allow`/`Deny` constructors make call sites correct-by-construction — no stringly-typed `"allow"`/`"deny"` at the resolver. `reasonTimeout` (unexported, a fixed string, never host-derived content) is the deny message the timer path uses.
+
+The important boundary in `ParseAlwaysAllow` is **validate the whole batch before publishing any of it**. Suppression and the 16 KiB raw limit are checked before decode; only non-empty `addRules`/`allow` updates with non-empty rule arrays, non-empty string tool names, optional string rule content, at most 16 total rules, and rendered rules of at most 1024 bytes survive. Any failure returns the zero value rather than a valid prefix. Rendering preserves update/rule order and produces `toolName` or `toolName(ruleContent)`. The opaque value owns its slices and every accessor clones them, so a modal or future grant consumer cannot mutate parked validation truth. This is also why parsing belongs in the log-free package: Claude-authored suggestions and rendered text never enter an error or logger.
 
 ## Registry surface
 
@@ -91,7 +108,7 @@ type AnswerableFunc func(id string, req Request) bool
 - **`SetAnswerable`** (#1931) installs the liveness report, or clears it with `nil` — a setter rather than a `New` option, because the daemon composition root builds the registry long before the thing that can answer the question exists. It does not validate its argument: `nil` is a meaningful value ("nobody can answer"), not an error. Written under `Registry.mu`; the expiry path reads it under the same lock, so last write wins and calling it concurrently with live entries is safe. The report receives the immutable `Request` from the exact pending generation whose timer fired; consumers must use that request rather than recover eligibility from an ID-keyed side map that may still contain an older generation.
 - **`Pending.Await`** blocks until resolved and returns the verdict. With no `AnswerableFunc` installed (the default, and the state this ships in) it is guaranteed to return within the `Register` timeout, exactly as before. With one installed, it returns within one window of the first reading that says nobody can answer — an approval whose answerer stays reachable and simply never decides stays parked indefinitely, by design (see § Conditional bound).
 
-Exported surface: 4 types (`Request`, `Verdict`, `Registry`, `Pending`), one func type (`AnswerableFunc`), funcs `New`/`Allow`/`Deny`, sentinel `ErrDuplicateID`.
+Exported surface: 7 data types (`Request`, `Verdict`, `PermissionRule`, `PermissionUpdate`, `AlwaysAllow`, `Registry`, `Pending`), one func type (`AnswerableFunc`), funcs `New`/`Allow`/`Deny`/`ParseAlwaysAllow`, sentinel `ErrDuplicateID`.
 
 ## Conditional bound: `expire` and `AnswerableFunc` (#1931)
 

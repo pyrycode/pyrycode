@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
@@ -17,12 +18,14 @@ func TestRecordWithContext_ReturnAndSnapshotMatch(t *testing.T) {
 	reg := New()
 	req, class, _ := PermissionRequestForClass(tuidriver.ModalClassPermission, "Bash")
 	reason := json.RawMessage(`{"kind":"rule","nested":[1,true]}`)
+	offer := permbridge.ParseAlwaysAllow(json.RawMessage(`[{"type":"addRules","behavior":"allow","rules":[{"toolName":"Bash"},{"toolName":"Read","ruleContent":"//src/**"}]}]`), false)
 	payload, err := reg.RecordWithContext(req, class, "conv-context", PermissionContext{
 		Reason:      reason,
 		ReasonType:  "future_reason_kind",
 		BlockedPath: "/workspace/out",
 		Description: "Write output",
 		DefaultToNo: true,
+		AlwaysAllow: offer,
 	})
 	if err != nil {
 		t.Fatalf("RecordWithContext: %v", err)
@@ -36,8 +39,13 @@ func TestRecordWithContext_ReturnAndSnapshotMatch(t *testing.T) {
 	got := snapshot[0]
 	if !bytes.Equal(got.Reason, payload.Reason) || got.ReasonType != payload.ReasonType ||
 		got.BlockedPath != payload.BlockedPath || got.Description != payload.Description ||
-		got.DefaultToNo != payload.DefaultToNo {
+		got.DefaultToNo != payload.DefaultToNo || !got.AlwaysAllow.Offered ||
+		!slicesEqual(got.AlwaysAllow.Rules, []string{"Bash", "Read(//src/**)"}) {
 		t.Errorf("snapshot context = %+v, want returned context %+v", got, payload)
+	}
+	out, ok := reg.Lookup(payload.ModalID)
+	if !ok || !out.AlwaysAllow.Offered() || len(out.AlwaysAllow.Updates()) != 1 || len(out.AlwaysAllow.Updates()[0].Rules) != 2 {
+		t.Errorf("outstanding always-allow = %+v, want every update and rule", out.AlwaysAllow)
 	}
 	got.Reason[2] = 'Y'
 	if again := reg.Snapshot()[0].Reason; !bytes.Equal(again, payload.Reason) {

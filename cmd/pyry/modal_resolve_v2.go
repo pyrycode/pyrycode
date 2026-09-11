@@ -996,6 +996,7 @@ func (b *streamApprovalBridge) Surface(req permbridge.Request) (retire func()) {
 		BlockedPath: req.BlockedPath,
 		Description: req.Description,
 		DefaultToNo: req.DefaultToNo,
+		AlwaysAllow: req.AlwaysAllow,
 	})
 	if err != nil {
 		// crypto/rand failure — drop the modal (no modal_shown, no correlation);
