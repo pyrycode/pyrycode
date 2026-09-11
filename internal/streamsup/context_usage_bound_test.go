@@ -1,10 +1,12 @@
 package streamsup
 
 import (
+	"bytes"
 	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"unsafe"
 )
 
 type contextUsageBoundFixture struct {
@@ -147,20 +149,32 @@ func TestBoundContextUsageEntries_CombinesRejectionAndCountDrops(t *testing.T) {
 func TestBoundContextUsageEntries_ResultOwnsRetainedValues(t *testing.T) {
 	t.Parallel()
 
+	nameBytes := bytes.Repeat([]byte("n"), 256)
+	serverBytes := []byte("server")
 	entries := []contextUsageBoundFixture{
-		{id: "kept", name: strings.Repeat("n", 256), server: "server", tokens: 2},
+		{
+			id:     "kept",
+			name:   unsafe.String(unsafe.SliceData(nameBytes), len(nameBytes)),
+			server: unsafe.String(unsafe.SliceData(serverBytes), len(serverBytes)),
+			tokens: 2,
+		},
 		{id: "also-kept", name: "other", server: "server", tokens: 1},
 	}
 	got, dropped := boundContextUsageEntries(entries, contextUsageFixtureWeight, contextUsageFixtureStrings)
 	if dropped != 0 || len(got) != 2 {
 		t.Fatalf("result = %+v, dropped = %d; want two retained and zero dropped", got, dropped)
 	}
-	want := append([]contextUsageBoundFixture(nil), got...)
+	want := []contextUsageBoundFixture{
+		{id: "kept", name: strings.Repeat("n", 256), server: "server", tokens: 2},
+		{id: "also-kept", name: "other", server: "server", tokens: 1},
+	}
 
-	entries[0].name = "mutated-name"
-	entries[0].server = "mutated-server"
+	for i := range nameBytes {
+		nameBytes[i] = 'x'
+	}
+	copy(serverBytes, "change")
+	entries[0] = contextUsageBoundFixture{id: "replacement", tokens: 99}
 	entries[1] = contextUsageBoundFixture{id: "replacement", tokens: 99}
-	entries = append(entries, contextUsageBoundFixture{id: "new-entry"})
 
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("result changed after input mutation:\n got  %+v\n want %+v", got, want)
