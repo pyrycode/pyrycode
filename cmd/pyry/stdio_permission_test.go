@@ -401,7 +401,8 @@ func TestStdioPermissionHandler_InteractionRequiredRefusesRemoteAnswers(t *testi
 			if n := bridgeLen(bridge); n != 1 {
 				t.Errorf("permission correlations = %d, want 1 before timeout", n)
 			}
-			if bridge.ApprovalAnswerable("tool-interaction") {
+			parkedReq, _ := reg.Lookup("tool-interaction")
+			if bridge.ApprovalAnswerable("tool-interaction", parkedReq) {
 				t.Error("interaction-required permission reported answerable with an interactive client connected")
 			}
 

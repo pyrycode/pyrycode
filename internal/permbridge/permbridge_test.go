@@ -68,13 +68,13 @@ type scriptedAnswerable struct {
 	answers []bool
 	// hook, when non-nil, runs after the ask is counted and before the answer is
 	// returned — the seam for a re-entrant or a deliberately slow report.
-	hook func(id string)
+	hook func(id string, req Request)
 }
 
-func (s *scriptedAnswerable) ask(id string) bool {
+func (s *scriptedAnswerable) ask(id string, req Request) bool {
 	n := int(s.calls.Add(1))
 	if s.hook != nil {
-		s.hook(id)
+		s.hook(id, req)
 	}
 	if len(s.answers) == 0 {
 		return true
@@ -642,7 +642,7 @@ func TestRegistry_ReportCalledWithMuReleased(t *testing.T) {
 	t.Parallel()
 	r := New()
 	seen := make(chan bool, 4)
-	s := &scriptedAnswerable{hook: func(id string) {
+	s := &scriptedAnswerable{hook: func(id string, _ Request) {
 		_, ok := r.Lookup(id)
 		select {
 		case seen <- ok:
@@ -683,7 +683,7 @@ func TestRegistry_SlowReportProducesOneExpiry(t *testing.T) {
 	const window = 20 * time.Millisecond
 	r := New()
 	release := make(chan struct{})
-	s := &scriptedAnswerable{answers: []bool{false}, hook: func(string) { <-release }}
+	s := &scriptedAnswerable{answers: []bool{false}, hook: func(string, Request) { <-release }}
 	r.SetAnswerable(s.ask)
 	req := sampleRequest("slow-1")
 
@@ -716,5 +716,50 @@ func TestRegistry_SlowReportProducesOneExpiry(t *testing.T) {
 	}
 	if n := registryLen(r); n != 0 {
 		t.Fatalf("registry length = %d after the slow report's deny, want 0", n)
+	}
+}
+
+func TestRegistry_StaleExpiryCannotResolveReusedIDGeneration(t *testing.T) {
+	r := New()
+	entered := make(chan Request, 1)
+	release := make(chan struct{})
+	s := &scriptedAnswerable{answers: []bool{false}, hook: func(_ string, req Request) {
+		entered <- req
+		<-release
+	}}
+	r.SetAnswerable(s.ask)
+
+	firstReq := sampleRequest("reused")
+	firstReq.Description = "first generation"
+	first, err := r.Register("reused", firstReq, time.Millisecond)
+	if err != nil {
+		t.Fatalf("register first: %v", err)
+	}
+	if got := <-entered; got.Description != firstReq.Description {
+		t.Fatalf("answerable request = %+v, want first generation", got)
+	}
+	if !r.Resolve("reused", Allow(firstReq.Input)) {
+		t.Fatal("resolve first = false")
+	}
+
+	secondReq := sampleRequest("reused")
+	secondReq.Description = "second generation"
+	second, err := r.Register("reused", secondReq, time.Minute)
+	if err != nil {
+		t.Fatalf("register second: %v", err)
+	}
+	close(release)
+	if got := awaitWithin(t, first, time.Second); got.Behavior != BehaviorAllow {
+		t.Fatalf("first verdict = %+v, want allow", got)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if _, ok := r.Lookup("reused"); !ok {
+		t.Fatal("stale first-generation expiry resolved the second generation")
+	}
+	if !r.Resolve("reused", Deny("cleanup")) {
+		t.Fatal("second generation was not live for cleanup")
+	}
+	if got := awaitWithin(t, second, time.Second); got.Behavior != BehaviorDeny {
+		t.Fatalf("second verdict = %+v, want deny cleanup", got)
 	}
 }

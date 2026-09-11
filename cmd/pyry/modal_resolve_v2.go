@@ -99,6 +99,11 @@ type streamApprovalResolver interface {
 	ResolveStream(modalID string, allow bool, denyReason string) (handled bool)
 }
 
+type streamModalRegistry interface {
+	RecordWithContext(turnevent.PermissionRequest, string, string, modalbridge.PermissionContext) (protocol.ModalShownPayload, error)
+	Resolve(string) (modalbridge.Outstanding, bool)
+}
+
 // reasonRemoteDeny is the fixed, content-free deny message a remote reject answer
 // returns to claude on the stream-json path (#1080). A compile-time constant —
 // never host-derived — so it leaks nothing back to claude, mirroring
@@ -489,7 +494,7 @@ func truncateForLog(s string, n int) string {
 // modal emitter and control server hold.
 type streamApprovalBridge struct {
 	perm       *permbridge.Registry   // claude-facing completer store (#1103)
-	modal      *modalbridge.Registry  // client-facing modal store (#716)
+	modal      streamModalRegistry    // client-facing modal store (#716)
 	bcast      interactiveBroadcaster // *relay.V2SessionManager (ActiveConns/Push)
 	activeConv func() string          // follow-active convID scoping (#1065)
 	ctx        context.Context        // daemon ctx captured at construction, for broadcasts
@@ -1233,9 +1238,9 @@ func (b *streamApprovalBridge) ApprovalParked(conversationID string) bool {
 // ApprovalAnswerable reports whether approvalID is still parked on a person,
 // eligible for a remote answer, AND has at least one interactive-capable client
 // connected to answer it.
-// approvalID is claude's tool_use_id, which is ALSO permbridge's registry id (the
-// control server registers each approval under Request.ToolUseID) and ALSO the
-// toolUseID inside byModal's correlation — one key both sides already agree on.
+// approvalID is claude's tool_use_id, which is ALSO permbridge's registry id. req
+// is the immutable request from the exact registry generation whose timer is
+// asking, so a stale same-ID surface cannot substitute its eligibility.
 //
 // All three parts of the conjunction are load-bearing. An approval can sit parked having
 // never been surfaced to anybody: Surface's modal.Record failure path stores no
@@ -1265,9 +1270,10 @@ func (b *streamApprovalBridge) ApprovalParked(conversationID string) bool {
 // establishes in this file by taking mu INSIDE its ActiveConns loop, never around
 // it. mu is a leaf lock; holding it across the hand-off would block every concurrent
 // Surface, retire and ResolveStream for the manager's scheduling latency and would
-// retire the leaf-lock property outright. The scan reads both byModal and
-// byQuestion under mu, so a parked clarifying question remains answerable while an
-// interaction-required permission does not. It releases mu before ActiveConns.
+// retire the leaf-lock property outright. The current request selects exactly one
+// surface family, whose correlation is scanned under mu; a parked clarifying
+// question remains answerable while an interaction-required permission does not.
+// It releases mu before ActiveConns.
 //
 // NEVER CALL THIS FROM THE RELAY Run GOROUTINE. ActiveConns funnels its request onto
 // Run and is documented safe only from other goroutines, so a call from Run
@@ -1300,18 +1306,19 @@ func (b *streamApprovalBridge) ApprovalParked(conversationID string) bool {
 // here would carry a tool_use id or a conn id.
 //
 // Callable from any goroutine except the relay Run goroutine.
-func (b *streamApprovalBridge) ApprovalAnswerable(approvalID string) bool {
+func (b *streamApprovalBridge) ApprovalAnswerable(approvalID string, req permbridge.Request) bool {
 	b.mu.Lock()
 	parkedAndEligible := false
-	for _, correlation := range b.byModal {
-		if correlation.toolUseID == approvalID {
-			parkedAndEligible = !correlation.requiresUserInteraction
-			break
-		}
-	}
-	if !parkedAndEligible {
+	if _, question := questionbridge.Parse(req.ToolName, req.Input); question {
 		for _, toolUseID := range b.byQuestion {
 			if toolUseID == approvalID {
+				parkedAndEligible = true
+				break
+			}
+		}
+	} else if !req.RequiresUserInteraction {
+		for _, correlation := range b.byModal {
+			if correlation.toolUseID == approvalID {
 				parkedAndEligible = true
 				break
 			}
@@ -1334,26 +1341,25 @@ func (b *streamApprovalBridge) ApprovalAnswerable(approvalID string) bool {
 // for a surfaced stream approval. It runs on EVERY Await return (answer, timeout,
 // disconnect, shutdown) in two steps with separate arbiters:
 //
-//  1. Unconditionally delete the modalID→toolUseID correlation under mu. This is
-//     the SOLE correlation deleter and it runs on every terminal path — including
-//     the answer path, where step 2 no-ops — so byModal never leaks (the MUST-FIX
-//     the no-correlation-leak test guards). Delete of an absent key is a safe
-//     no-op, so racing a concurrent delete is irrelevant.
-//  2. modal.Resolve(modalID): a miss ⇒ a modal_answer already consumed + dismissed
+//  1. modal.Resolve(modalID): a miss ⇒ a modal_answer already consumed + dismissed
 //     the modal → no second dismissal. A hit ⇒ the timeout/disconnect/shutdown
 //     path (permbridge already denied claude via its own timer or watchApproveConn)
 //     → write one content-free fail-closed audit record and broadcast one
 //     modal_dismissed so no stale modal lingers (AC-3). The modalbridge one-shot is
 //     the SINGLE arbiter of the dismissal broadcast: exactly one of {ResolveAnswer,
 //     retire} broadcasts.
+//  2. Unconditionally delete the modalID correlation under mu. Resolve comes first
+//     so an interaction-required modal cannot lose its negative eligibility while
+//     it is still available to a concurrent remote answer.
 //
 // Runs on the control-server handler goroutine after Await.
 func (b *streamApprovalBridge) retire(modalID string) {
+	out, ok := b.modal.Resolve(modalID)
+
 	b.mu.Lock()
 	delete(b.byModal, modalID)
 	b.mu.Unlock()
 
-	out, ok := b.modal.Resolve(modalID)
 	if !ok {
 		return // a modal_answer already consumed + broadcast this modal's dismissal
 	}

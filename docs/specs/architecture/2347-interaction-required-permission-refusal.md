@@ -94,6 +94,17 @@ Touched-scope verification:
 
 None. The source field, permission-only scope, consume ordering, and existing timeout authority are fixed by the ticket and current bridge contracts.
 
+## Revisions
+
+### 2026-09-11 — verifier concurrency corrections
+
+The first implementation exposed two lifecycle gaps identified in PR #2362's verifier review.
+
+- `streamApprovalBridge.retire` now consumes the modal one-shot before deleting its correlation. The negative `RemoteAnswerable` eligibility therefore remains authoritative for the entire interval in which a concurrent `ResolveAnswer` can still consume the modal. A blocking registry test controls this interleaving and proves that only the timeout dismissal wins.
+- `permbridge.AnswerableFunc` now receives the immutable `Request` for the exact pending generation being expired. `Registry.expire` snapshots that pending entry and compares its identity before either resolving or re-arming, so a completed request cannot act on a newer registration that reused the same external ID. `ApprovalAnswerable` uses the current request's eligibility and question classification rather than selecting an arbitrary same-ID correlation. Mixed-eligibility tests cover both reuse orders, and a registry test proves a blocked stale expiry cannot resolve the replacement generation.
+
+These corrections preserve the original external behavior and introduce no new goroutine or lock nesting. The cmd-local modal registry interface exists only to make the retirement ordering deterministic in the concurrency test.
+
 ## Documentation handoff
 
 Pending for the documentation stage: update `docs/knowledge/features/permbridge-package.md`, sections “Domain types”, “Conditional bound”, and “Fail-closed / default-deny”, to record `RequiresUserInteraction` as daemon-internal eligibility, the pre-consume remote-answer refusal, the negative liveness result, and the unchanged `AskUserQuestion` exception. No mobile protocol field is added.
@@ -111,7 +122,7 @@ Pending for the documentation stage: update `docs/knowledge/features/permbridge-
 - [Cryptographic primitives] Not applicable — the change adds no randomness, key material, comparison, or cryptographic operation and leaves modal ID minting unchanged.
 - [Network & I/O] No findings — no reader, connection, frame, or size limit changes. The existing authenticated relay path supplies the attempted answer, while the new gate rejects before any modal or approval one-shot is consumed. The stdio response remains encoded by the existing structured writer.
 - [Error messages, logs, telemetry] No findings — the refusal adds no log or audit call and returns no Claude-authored value. Focused tests retain distinct sentinels for source data and ensure the flag is never introduced as an attribute.
-- [Concurrency] No findings — the immutable bit is stored and read under the existing leaf bridge mutex, which is released before broadcaster or registry calls. Existing registry and modal delete-under-lock one-shots arbitrate terminal races; no goroutine or shutdown path is added.
+- [Concurrency] Corrected during rework — the initial design deleted the stream correlation before consuming the modal one-shot and keyed expiry liveness only by the reusable external ID. That allowed a remote answer to observe missing eligibility during retirement and allowed a stale expiry to act on a replacement generation. The corrected ordering retains eligibility until modal consumption, while `Registry.expire` carries and identity-checks the exact pending entry and passes its immutable request to `ApprovalAnswerable`. Controlled tests cover answer-versus-retire and both mixed-eligibility reuse orders. No goroutine, lock nesting, or shutdown path is added.
 - [Threat model alignment] No findings — a paired remote device loses, rather than gains, authority for a class of Claude-declared asks. Replay, forged option, unauthenticated-device, and timeout behavior continue through the existing gates. Local tool-specific interaction itself is outside this daemon permission-modal transport; the ticket requires fail-closed timeout rather than adding a new remote interaction protocol.
 
 **Reviewer:** builder (self-review per the security-review checklist)

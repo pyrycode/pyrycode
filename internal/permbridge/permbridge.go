@@ -119,8 +119,9 @@ func (p *Pending) Await() Verdict {
 	return <-p.ch
 }
 
-// AnswerableFunc reports whether the approval parked under id still has somebody
-// able to answer it. It is consulted only when a window elapses on a live entry,
+// AnswerableFunc reports whether the exact approval generation parked under id
+// still has somebody able to answer it. req is the immutable request captured by
+// that registration. It is consulted only when a window elapses on a live entry,
 // and a true reading buys exactly one more window before the question is asked
 // again — so it is read as a level, never latched as an edge.
 //
@@ -132,7 +133,7 @@ func (p *Pending) Await() Verdict {
 // recovery, and mapping a panic to "not answerable" would make a wiring bug read
 // as every approval silently denying. Guarding a not-yet-wired report is the
 // injection site's job.
-type AnswerableFunc func(id string) bool
+type AnswerableFunc func(id string, req Request) bool
 
 // Registry is the in-memory pending-approval store, keyed by an opaque id (a
 // tool-use id — a correlation key, not a credential). mu is a leaf lock: held
@@ -197,7 +198,7 @@ func (r *Registry) Register(id string, req Request, timeout time.Duration) (*Pen
 // safe no-op — AC-4). Delegates to the shared one-shot; the winning caller is the
 // sole writer of the verdict.
 func (r *Registry) Resolve(id string, v Verdict) bool {
-	return r.resolve(id, v)
+	return r.resolve(id, nil, v)
 }
 
 // Lookup returns the parked Request for id without resolving it — the read seam
@@ -234,7 +235,7 @@ func (r *Registry) Lookup(id string) (Request, bool) {
 // the effective window instead of overlapping with itself.
 func (r *Registry) expire(id string, window time.Duration) {
 	r.mu.Lock()
-	_, live := r.pending[id]
+	p, live := r.pending[id]
 	ask := r.answerable
 	r.mu.Unlock()
 
@@ -247,31 +248,33 @@ func (r *Registry) expire(id string, window time.Duration) {
 	// ≈immediately, and re-arming one would spin on the report as fast as the
 	// scheduler allows.
 	if ask == nil || window <= 0 {
-		r.resolve(id, Deny(reasonTimeout))
+		r.resolve(id, p, Deny(reasonTimeout))
 		return
 	}
-	if !ask(id) {
-		r.resolve(id, Deny(reasonTimeout))
+	if !ask(id, p.req) {
+		r.resolve(id, p, Deny(reasonTimeout))
 		return
 	}
 
 	r.mu.Lock()
-	if p, still := r.pending[id]; still {
-		p.timer.Reset(window)
+	if current, still := r.pending[id]; still && current == p {
+		current.timer.Reset(window)
 	}
 	r.mu.Unlock()
 }
 
 // resolve is the security core: the single internal one-shot both Resolve and
-// the timer callback funnel through. delete(pending, id) under mu is the sole
-// arbiter — exactly one caller finds the entry present, deletes it, and becomes
-// the single writer of p.ch; every other caller finds it gone and is a no-op.
+// the timer callback funnel through. A timer supplies its expected entry identity
+// so a stale callback cannot resolve a newer registration that reused id; an
+// explicit Resolve supplies nil to target whichever generation is currently live.
+// delete(pending, id) under mu is the sole arbiter — exactly one eligible caller
+// finds the entry present, deletes it, and becomes the single writer of p.ch.
 // Because ch is buffered(1) with a provably single writer, the send never blocks,
 // so it is safe outside the lock (leaf mutex; never held across a channel send).
-func (r *Registry) resolve(id string, v Verdict) bool {
+func (r *Registry) resolve(id string, expected *pending, v Verdict) bool {
 	r.mu.Lock()
 	p, ok := r.pending[id]
-	if !ok {
+	if !ok || expected != nil && p != expected {
 		r.mu.Unlock()
 		return false
 	}
