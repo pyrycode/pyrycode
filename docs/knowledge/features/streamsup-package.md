@@ -82,7 +82,11 @@ Scenarios: `buildArgs` shape (pure, table — fixed prefix present, `-p` absent,
 
 ## Turn I/O — envelope write + stdout parser (#1088)
 
-The turn I/O boundary fills `Stdin()`/`Config.Stdout` with two additive seams — no `runner.go` diff.
+`buildArgs` requests `--include-partial-messages` in the fixed prefix for both
+create (`--session-id`) and resume (`--resume`) spawns. Production therefore
+receives the nested `stream_event` lines mapped below; caller-supplied arguments
+do not need to opt into them. The turn I/O boundary fills
+`Stdin()`/`Config.Stdout` with two additive seams:
 
 ```go
 var ErrNoLiveChild = errors.New("streamsup: no live child")

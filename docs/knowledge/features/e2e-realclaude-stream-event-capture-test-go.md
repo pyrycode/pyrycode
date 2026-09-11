@@ -1,11 +1,12 @@
 ## stream_event_capture_test.go (#2269)
 
-Live capture that spawns claude with `--include-partial-messages` — a flag production never sets —
-and drives one turn producing several blocks of assistant text plus one tool call, keeping **every**
-stdout line of the turn rather than filtering to a quarry. #2270 writes the `stream_event` parser
-arm from the committed bytes rather than from the Agent SDK's type definitions. The flag rides in
-the probe's own `streamsup.Config.Args`, which `buildArgs` (`internal/streamsup/runner.go`) appends
-after its fixed prefix; nothing in `internal/streamsup` changes.
+Live capture that spawns claude with `--include-partial-messages` and drives one turn producing
+several blocks of assistant text plus one tool call, keeping **every** stdout line of the turn rather
+than filtering to a quarry. #2270 writes the `stream_event` parser arm from the committed bytes
+rather than from the Agent SDK's type definitions. Production now requests the same flag in
+`buildArgs`' fixed prefix for both create and resume spawns. The capture retains its explicit copy in
+`streamsup.Config.Args` so its observed-argv assertion remains local to the probe; a current capture
+spawn therefore carries the repeatable boolean flag twice.
 
 ### Content-block indices are per-message, and a stale map mislabels the second message silently
 
