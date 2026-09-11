@@ -117,3 +117,27 @@ None. The ticket fixes the source mapping, omission rules, open vocabulary, and 
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-11
+
+## Revisions
+
+### 2026-09-11 — Measured live source contract
+
+The first dispatcher live run showed that a Write request inside the working
+directory carried no `decision_reason_type`. A focused Bash experiment then
+showed that an ordinary Bash write also omitted both reason fields. The live
+proof therefore changed from one non-empty-category assertion to two measured
+source-shape cases observed before daemon decoding:
+
+- an ordinary Bash write must omit both `decision_reason` and
+  `decision_reason_type`;
+- a Write request to a test-owned path outside the working directory must carry
+  `decision_reason_type: "workingDir"` and non-empty reason text.
+
+A test-only observer subprocess now forwards Claude's stdout unchanged while
+copying selected request fields over a private socket. It preserves raw key
+presence for both reason fields, so absent, empty, and JSON `null` cannot be
+mistaken for the ordinary case's required absence. Each case compares the
+observed source with both the initial and reconnect-reconciled `modal_shown`,
+then proves a phone-attributed denial for the same tool-use ID and verifies the
+test-owned file remains absent. The existing stdio and MCP allow/resume proofs
+remain independent. No production design or security-review conclusion changed.

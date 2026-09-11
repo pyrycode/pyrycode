@@ -36,7 +36,7 @@ type permissionObservation struct {
 			Command  string `json:"command"`
 		} `json:"input"`
 		Reason      json.RawMessage `json:"decision_reason,omitempty"`
-		ReasonType  string          `json:"decision_reason_type"`
+		ReasonType  json.RawMessage `json:"decision_reason_type,omitempty"`
 		BlockedPath string          `json:"blocked_path"`
 		Description string          `json:"description"`
 		DefaultToNo bool            `json:"default_to_no"`
@@ -171,10 +171,11 @@ func TestInteractiveStreamStdioModalResolution(t *testing.T) {
 			}
 			if outside {
 				var reasonText string
-				if source.Request.ReasonType != "workingDir" || json.Unmarshal(source.Request.Reason, &reasonText) != nil || reasonText == "" {
+				var reasonType string
+				if json.Unmarshal(source.Request.ReasonType, &reasonType) != nil || reasonType != "workingDir" || json.Unmarshal(source.Request.Reason, &reasonText) != nil || reasonText == "" {
 					t.Fatal("source precondition failed: outside-directory ask did not supply workingDir and reason; not a forwarding pass")
 				}
-			} else if source.Request.ReasonType != "" || len(source.Request.Reason) != 0 {
+			} else if len(source.Request.ReasonType) != 0 || len(source.Request.Reason) != 0 {
 				t.Fatal("source precondition failed: ordinary ask no longer omits both reason fields")
 			}
 			requirePermissionContext(t, source, initial.Payload)
@@ -238,7 +239,11 @@ func requirePermissionWitnessAbsent(t *testing.T, path string) {
 
 func requirePermissionContext(t *testing.T, source permissionObservation, raw json.RawMessage) {
 	t.Helper()
-	expected := protocol.ModalShownPayload{Reason: source.Request.Reason, ReasonType: source.Request.ReasonType,
+	var reasonType string
+	if len(source.Request.ReasonType) != 0 && json.Unmarshal(source.Request.ReasonType, &reasonType) != nil {
+		t.Fatal("source reason type could not be decoded")
+	}
+	expected := protocol.ModalShownPayload{Reason: source.Request.Reason, ReasonType: reasonType,
 		BlockedPath: source.Request.BlockedPath, Description: source.Request.Description, DefaultToNo: source.Request.DefaultToNo}
 	encoded, err := json.Marshal(expected)
 	if err != nil {
@@ -267,7 +272,14 @@ func requirePermissionContext(t *testing.T, source permissionObservation, raw js
 // The observer re-encodes selected fields over its private socket. Omitting an
 // absent RawMessage must not turn it into a present JSON null at that boundary.
 func TestPermissionObservation_PreservesReasonPresence(t *testing.T) {
-	for _, suffix := range []string{"", `,"decision_reason":null`, `,"decision_reason":"outside directory"`} {
+	for _, suffix := range []string{
+		"",
+		`,"decision_reason":null`,
+		`,"decision_reason":"outside directory"`,
+		`,"decision_reason_type":null`,
+		`,"decision_reason_type":""`,
+		`,"decision_reason_type":"workingDir"`,
+	} {
 		var before, after permissionObservation
 		if err := json.Unmarshal([]byte(`{"request":{"subtype":"can_use_tool"`+suffix+`}}`), &before); err != nil {
 			t.Fatal(err)
@@ -281,6 +293,9 @@ func TestPermissionObservation_PreservesReasonPresence(t *testing.T) {
 		}
 		if !reflect.DeepEqual(before.Request.Reason, after.Request.Reason) {
 			t.Fatal("observer changed source reason presence or value")
+		}
+		if !reflect.DeepEqual(before.Request.ReasonType, after.Request.ReasonType) {
+			t.Fatal("observer changed source reason type presence or value")
 		}
 	}
 }
