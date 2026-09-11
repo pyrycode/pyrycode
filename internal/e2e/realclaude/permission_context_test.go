@@ -35,11 +35,13 @@ type permissionObservation struct {
 			FilePath string `json:"file_path"`
 			Command  string `json:"command"`
 		} `json:"input"`
-		Reason      json.RawMessage `json:"decision_reason,omitempty"`
-		ReasonType  json.RawMessage `json:"decision_reason_type,omitempty"`
-		BlockedPath string          `json:"blocked_path"`
-		Description string          `json:"description"`
-		DefaultToNo bool            `json:"default_to_no"`
+		Reason                  json.RawMessage `json:"decision_reason,omitempty"`
+		ReasonType              json.RawMessage `json:"decision_reason_type,omitempty"`
+		BlockedPath             string          `json:"blocked_path"`
+		Description             string          `json:"description"`
+		DefaultToNo             bool            `json:"default_to_no"`
+		PermissionSuggestions   json.RawMessage `json:"permission_suggestions,omitempty"`
+		SuppressAlwaysAllowRule bool            `json:"suppress_always_allow_rule"`
 	} `json:"request"`
 	PermissionDenials []struct {
 		ToolUseID string `json:"tool_use_id"`
@@ -100,6 +102,48 @@ func runPermissionObserver() int {
 	return 0
 }
 
+func startPermissionObserver(t *testing.T) (<-chan permissionObservation, func(string) string, func() string) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal("permission observer listen failed")
+	}
+	observations := make(chan permissionObservation, 16)
+	observerDone := make(chan struct{})
+	go func() {
+		defer close(observerDone)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			var observed permissionObservation
+			err = json.NewDecoder(io.LimitReader(conn, 2<<20)).Decode(&observed)
+			_ = conn.Close()
+			if err == nil {
+				select {
+				case observations <- observed:
+				default:
+					return
+				}
+			}
+		}
+	}()
+	t.Cleanup(func() { _ = listener.Close(); <-observerDone })
+
+	var version string
+	configure := func(realBin string) string {
+		version = stdioPermissionSafeLabel(stdioPermissionClaudeVersion(realBin))
+		t.Logf("claude_version=%s", version)
+		t.Setenv("PYRY_PERMISSION_OBSERVER", "1")
+		t.Setenv("PYRY_PERMISSION_OBSERVER_REAL", realBin)
+		t.Setenv("PYRY_PERMISSION_OBSERVER_ADDR", listener.Addr().String())
+		return os.Args[0]
+	}
+	return observations, configure, func() string { return version }
+}
+
 // Claude 2.1.259 supplied no reason for the ordinary Bash write and supplied
 // workingDir plus text for the outside-directory Write. Both are mandatory source
 // preconditions: upstream drift must not masquerade as a successful forwarding test.
@@ -110,41 +154,8 @@ func TestInteractiveStreamStdioModalResolution(t *testing.T) {
 			name = "working_directory_reason"
 		}
 		t.Run(name, func(t *testing.T) {
-			listener, err := net.Listen("tcp", "127.0.0.1:0")
-			if err != nil {
-				t.Fatal("permission observer listen failed")
-			}
-			t.Cleanup(func() { _ = listener.Close() })
-			observations := make(chan permissionObservation, 16)
-			observerDone := make(chan struct{})
-			go func() {
-				defer close(observerDone)
-				for {
-					conn, err := listener.Accept()
-					if err != nil {
-						return
-					}
-					_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-					var observed permissionObservation
-					err = json.NewDecoder(io.LimitReader(conn, 2<<20)).Decode(&observed)
-					_ = conn.Close()
-					if err == nil {
-						select {
-						case observations <- observed:
-						default:
-							return
-						}
-					}
-				}
-			}()
-			t.Cleanup(func() { _ = listener.Close(); <-observerDone })
-			h, convID, reconnect := startObservedPermissionHarness(t, permissionDaemonModel, true, func(realBin string) string {
-				t.Logf("claude_version=%s", stdioPermissionSafeLabel(stdioPermissionClaudeVersion(realBin)))
-				t.Setenv("PYRY_PERMISSION_OBSERVER", "1")
-				t.Setenv("PYRY_PERMISSION_OBSERVER_REAL", realBin)
-				t.Setenv("PYRY_PERMISSION_OBSERVER_ADDR", listener.Addr().String())
-				return os.Args[0]
-			})
+			observations, configure, _ := startPermissionObserver(t)
+			h, convID, reconnect := startObservedPermissionHarness(t, permissionDaemonModel, true, configure)
 			targetDir := h.workdir
 			if outside {
 				targetDir = t.TempDir()

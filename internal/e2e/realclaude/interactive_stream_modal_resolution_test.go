@@ -100,10 +100,16 @@ func TestInteractiveStreamStdioAlwaysAllowIsSessionScoped(t *testing.T) {
 		prompt  = "Use the Bash tool to run exactly `" + command + "`. Do not use another tool. After it completes, reply with one short word."
 	)
 
-	h, convID := startStdioModalResolutionHarness(t, permissionDaemonModel)
+	observations, configure, claudeVersion := startPermissionObserver(t)
+	h, convID, _ := startObservedPermissionHarness(t, permissionDaemonModel, true, configure)
 	shown := raiseRealPermissionModalPayload(t, h, 2, convID, prompt)
 	if !shown.AlwaysAllow.Offered || len(shown.AlwaysAllow.Rules) == 0 {
-		t.Fatalf("first permission modal did not offer always-allow rules: %+v", shown.AlwaysAllow)
+		source := nextPermissionObservation(t, observations, "control_request")
+		if source.RequestID == "" || source.Request.ToolUseID == "" || source.Request.ToolName != "Bash" || source.Request.Input.Command != command {
+			t.Fatal("permission-offer diagnostic source did not match the correlated test-owned request")
+		}
+		validation, outcome := writePermissionOfferDiagnostic(t, permissionOfferDiagnosticPath, h.home, h.workdir, claudeVersion(), source, shown.AlwaysAllow)
+		t.Fatalf("first permission modal did not offer always-allow rules: validation=%s outcome=%s diagnostic=%s", validation, outcome, permissionOfferDiagnosticPath)
 	}
 	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
 		ID:   3,

@@ -32,6 +32,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -119,51 +120,78 @@ type permissionRuleInput struct {
 // bounded batch. Every unavailable or invalid shape returns the zero value;
 // partial and truncated offers are never returned.
 func ParseAlwaysAllow(raw json.RawMessage, suppressed bool) AlwaysAllow {
-	if suppressed || len(raw) == 0 || len(raw) > maxAlwaysAllowBytes {
-		return AlwaysAllow{}
+	offer, _ := parseAlwaysAllow(raw, suppressed)
+	return offer
+}
+
+// parseAlwaysAllow returns a content-free status naming the first validation
+// condition that rejected the batch. ParseAlwaysAllow deliberately discards it;
+// the e2e_realclaude diagnostic shim exposes it only to the authenticated live
+// test so untrusted suggestion bytes never enter ordinary logs.
+func parseAlwaysAllow(raw json.RawMessage, suppressed bool) (AlwaysAllow, string) {
+	if suppressed {
+		return AlwaysAllow{}, "suppressed"
+	}
+	if len(raw) == 0 {
+		return AlwaysAllow{}, "absent"
+	}
+	if len(raw) > maxAlwaysAllowBytes {
+		return AlwaysAllow{}, "raw_over_16_kib"
 	}
 	var input []permissionUpdateInput
-	if err := json.Unmarshal(raw, &input); err != nil || len(input) == 0 {
-		return AlwaysAllow{}
+	if err := json.Unmarshal(raw, &input); err != nil {
+		return AlwaysAllow{}, "decode_failed"
+	}
+	if len(input) == 0 {
+		return AlwaysAllow{}, "empty_batch"
 	}
 
 	updates := make([]PermissionUpdate, len(input))
 	rendered := make([]string, 0)
 	totalRules := 0
 	for i, update := range input {
-		if update.Type != "addRules" || update.Behavior != BehaviorAllow || len(update.Rules) == 0 {
-			return AlwaysAllow{}
+		if update.Type != "addRules" {
+			return AlwaysAllow{}, fmt.Sprintf("update_%d_type_unsupported", i)
+		}
+		if update.Behavior == "" {
+			return AlwaysAllow{}, fmt.Sprintf("update_%d_behavior_empty", i)
+		}
+		if update.Behavior != BehaviorAllow {
+			return AlwaysAllow{}, fmt.Sprintf("update_%d_behavior_unsupported", i)
+		}
+		if len(update.Rules) == 0 {
+			return AlwaysAllow{}, fmt.Sprintf("update_%d_rules_empty", i)
 		}
 		totalRules += len(update.Rules)
 		if totalRules > maxAlwaysAllowRules {
-			return AlwaysAllow{}
+			return AlwaysAllow{}, "rule_count_over_16"
 		}
 		updates[i] = PermissionUpdate{Type: update.Type, Behavior: update.Behavior, Rules: make([]PermissionRule, len(update.Rules))}
 		for j, rule := range update.Rules {
 			if rule.ToolName == "" {
-				return AlwaysAllow{}
+				return AlwaysAllow{}, fmt.Sprintf("update_%d_rule_%d_tool_name_empty", i, j)
 			}
 			stored := PermissionRule{ToolName: rule.ToolName}
 			text := rule.ToolName
 			if rule.RuleContent != nil {
 				if bytes.Equal(bytes.TrimSpace(rule.RuleContent), []byte("null")) {
-					return AlwaysAllow{}
+					return AlwaysAllow{}, fmt.Sprintf("update_%d_rule_%d_content_null", i, j)
 				}
 				var content string
 				if err := json.Unmarshal(rule.RuleContent, &content); err != nil {
-					return AlwaysAllow{}
+					return AlwaysAllow{}, fmt.Sprintf("update_%d_rule_%d_content_not_string", i, j)
 				}
 				stored.RuleContent = &content
 				text += "(" + content + ")"
 			}
 			if len(text) > maxRenderedRuleBytes {
-				return AlwaysAllow{}
+				return AlwaysAllow{}, fmt.Sprintf("update_%d_rule_%d_rendered_over_1024_bytes", i, j)
 			}
 			updates[i].Rules[j] = stored
 			rendered = append(rendered, text)
 		}
 	}
-	return AlwaysAllow{updates: updates, rules: rendered}
+	return AlwaysAllow{updates: updates, rules: rendered}, "offered"
 }
 
 // reasonTimeout is the deny message the fail-closed timer path uses. A fixed
