@@ -77,12 +77,12 @@ TurnEndReasonEndTurn}` — see [streamsup-package.md § Turn I/O](streamsup-pack
   `atomic.Bool` signals are reached. Stream-json travels over a **pipe**, not a PTY,
   so canonical line discipline / CR mapping don't apply — `enterRawMode()` is never
   called in this mode.
-- **Default mode still ignores every non-`"user"` line, with two exceptions.** An
-  `initialize` `control_request` (#1692) and a `set_permission_mode` `control_request`
-  (#2067, see the two sections below) each get a canned answer regardless of mode or
-  rider; every other `control_request` — including `interrupt` in default mode — is
-  still dropped unlooked-at. new_session / queue / modal remain out of scope for the
-  fake. Interrupt is handled by the `honorInterrupt` rider, below (#1136).
+- **Default mode still ignores non-`"user"` lines unless a control-request arm
+  recognizes them.** `initialize` (#1692), `get_context_usage` (#2289),
+  `set_permission_mode` (#2067), and `set_model` each get a canned answer regardless
+  of `honorInterrupt`; an `interrupt` request is still dropped in default mode and is
+  handled only by the rider below (#1136). Malformed and unknown controls, plus
+  new_session / queue / modal lines, remain out of scope for the fake.
 - **No new glyph, no allowlist change.** Stream mode emits pure JSON — no TUI
   substrate glyphs — so `cmd/substrate-guard`'s allowlist for this file is
   unaffected.
@@ -256,6 +256,45 @@ shape), and an unknown-subtype `control_request` is confirmed unchanged. The cap
 a live developer recording (`argv` carries a home path, the inner payload carries an
 `account` object) — the test's failure messages print key **names** only, never a
 decoded entry or file dump, to avoid republishing that into CI output on a red run.
+
+### Context-usage control request answer (#2289)
+
+`runStreamJSON` answers `get_context_usage` unconditionally in both its default and
+interrupt modes. `contextUsageRequestID` recognizes only the two detail values observed
+in `context_usage_v2.1.259.json`, `summary` and `full`; both select the same
+`writeContextUsageAck` payload because the capture returned identical payloads for the
+two arms. A subtype-only match was too broad here: it would turn an absent or invented
+`detail` into a successful request and make malformed-request coverage falsely green.
+Decode failures, another envelope type or subtype, and missing or unknown detail values
+therefore still produce no output.
+
+The response keeps claude's inverted, double-nested success hierarchy:
+
+```text
+control_response
+└── response: {subtype: "success", request_id: <echoed>, response: {...}}
+    └── response: {model, totals, percentage, categories, mcpTools, memoryFiles, ...}
+```
+
+`writeContextUsageAck` goes through `writeJSONLine`, so the caller-supplied
+`request_id` remains one escaped JSON string on one physical line. The inner
+`cannedContextUsagePayload` preserves the capture's scalar spellings (`model`,
+`totalTokens`, `maxTokens`, `rawMaxTokens`, `autocompactSource`, `percentage`,
+`autoCompactThreshold`, and `isAutoCompactEnabled`) and the per-entry vocabulary of
+`categories`, `mcpTools`, and `memoryFiles`.
+
+The values are deliberately a consumer stress fixture rather than a miniature realistic
+session: `cannedContextUsageMCPTools` returns 33 entries, an MCP tool name and a memory
+path exceed 256 bytes, and every list's token counts arrive out of descending order.
+That combination distinguishes the required sort-then-cut behavior from either cutting
+the input first or accidentally relying on fixture order; a short or already-sorted
+fixture would let both bugs stay green. Memory paths live only below the fictional
+`/__pyry_fake__/memory/` root, and `TestContextUsageCannedPathsAreFictional` separately
+rejects any path rooted under the executing user's home so a live capture cannot leak an
+operator path into the canned response.
+
+`TestRunStreamJSON_ContextUsageAnswer` pins one response, correlation, and identical
+payloads across the two details and two `honorInterrupt` states.
 
 ### Set-permission-mode control request answer (#2067)
 
