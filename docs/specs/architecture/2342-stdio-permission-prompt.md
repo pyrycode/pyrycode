@@ -83,3 +83,7 @@ Pending for the documentation stage: update `docs/knowledge/features/permission-
 
 **Reviewer:** builder (self-review per the security-review checklist)  
 **Date:** 2026-09-11
+
+## Revisions
+
+- 2026-09-11: The implemented test file is about 420 lines rather than the sketched 250–320 because the content-free diagnostics, joined reader lifecycle, and offline reader proof are explicit file-local code. The design, single-test deliverable, production file count, and acceptance contract are unchanged; total written work remains below the 800-line boundary.
