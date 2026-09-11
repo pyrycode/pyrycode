@@ -105,18 +105,20 @@ type controlRequest struct {
 // Subtype MUST stay first: the set_permission_mode line is pinned byte for byte
 // against the one #1595 measured live, subtype before mode.
 //
-// The omitempty tags are load-bearing rather than cosmetic. Detail, Mode and
-// Model each belong to one control subtype; without the tags every other control
-// line would grow empty fields it has no business carrying, and
+// The omitempty tags are load-bearing rather than cosmetic. Detail, Mode, Model,
+// ServerName and Enabled each belong to specific control subtypes; without the
+// tags every other control line would grow fields it has no business carrying, and
 // marshalInterruptEnvelope's and marshalInitializeEnvelope's output would stop
 // matching the lines claude has been sent since #1120 and measured in #1763.
 // TestMarshalInterruptEnvelope's and TestMarshalInitializeEnvelope's byte-exact
 // wants are what hold this.
 type controlRequestInner struct {
-	Subtype string `json:"subtype"`
-	Detail  string `json:"detail,omitempty"` // get_context_usage only
-	Mode    string `json:"mode,omitempty"`   // set_permission_mode only
-	Model   string `json:"model,omitempty"`  // set_model only
+	Subtype    string  `json:"subtype"`
+	Detail     string  `json:"detail,omitempty"`     // get_context_usage only
+	Mode       string  `json:"mode,omitempty"`       // set_permission_mode only
+	Model      string  `json:"model,omitempty"`      // set_model only
+	ServerName *string `json:"serverName,omitempty"` // mcp_reconnect and mcp_toggle only
+	Enabled    *bool   `json:"enabled,omitempty"`    // mcp_toggle only; pointer preserves false
 }
 
 // marshalInterruptEnvelope returns the single newline-terminated interrupt
@@ -522,6 +524,108 @@ func WriteContextUsage(w io.Writer, requestID, detail string) error {
 	}
 	if _, err := w.Write(env); err != nil {
 		return fmt.Errorf("streamsup: write context usage: %w", err)
+	}
+	return nil
+}
+
+// marshalMCPStatusEnvelope returns one newline-terminated mcp_status request.
+// Its request object carries no subtype-specific fields.
+func marshalMCPStatusEnvelope(requestID string) ([]byte, error) {
+	env := controlRequest{
+		Type:      "control_request",
+		RequestID: requestID,
+		Request:   controlRequestInner{Subtype: "mcp_status"},
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
+// WriteMCPStatus writes one mcp_status request to the live child's held-open
+// stdin and returns without waiting for its reply.
+func WriteMCPStatus(w io.Writer, requestID string) error {
+	if w == nil {
+		return ErrNoLiveChild
+	}
+	env, err := marshalMCPStatusEnvelope(requestID)
+	if err != nil {
+		return fmt.Errorf("streamsup: marshal MCP status: %w", err)
+	}
+	if _, err := w.Write(env); err != nil {
+		return fmt.Errorf("streamsup: write MCP status: %w", err)
+	}
+	return nil
+}
+
+// marshalMCPReconnectEnvelope returns one newline-terminated mcp_reconnect
+// request. Structured encoding keeps serverName string data on one physical line.
+func marshalMCPReconnectEnvelope(requestID, serverName string) ([]byte, error) {
+	env := controlRequest{
+		Type:      "control_request",
+		RequestID: requestID,
+		Request: controlRequestInner{
+			Subtype:    "mcp_reconnect",
+			ServerName: &serverName,
+		},
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
+// WriteMCPReconnect writes one mcp_reconnect request to the live child's
+// held-open stdin and returns without waiting for its reply. Server membership
+// and authorization belong to the caller boundary.
+func WriteMCPReconnect(w io.Writer, requestID, serverName string) error {
+	if w == nil {
+		return ErrNoLiveChild
+	}
+	env, err := marshalMCPReconnectEnvelope(requestID, serverName)
+	if err != nil {
+		return fmt.Errorf("streamsup: marshal MCP reconnect: %w", err)
+	}
+	if _, err := w.Write(env); err != nil {
+		return fmt.Errorf("streamsup: write MCP reconnect: %w", err)
+	}
+	return nil
+}
+
+// marshalMCPToggleEnvelope returns one newline-terminated mcp_toggle request.
+// Enabled is a pointer in controlRequestInner so false remains explicit on wire.
+func marshalMCPToggleEnvelope(requestID, serverName string, enabled bool) ([]byte, error) {
+	env := controlRequest{
+		Type:      "control_request",
+		RequestID: requestID,
+		Request: controlRequestInner{
+			Subtype:    "mcp_toggle",
+			ServerName: &serverName,
+			Enabled:    &enabled,
+		},
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
+// WriteMCPToggle writes one mcp_toggle request to the live child's held-open
+// stdin and returns without waiting for its reply. Server membership and
+// authorization belong to the caller boundary.
+func WriteMCPToggle(w io.Writer, requestID, serverName string, enabled bool) error {
+	if w == nil {
+		return ErrNoLiveChild
+	}
+	env, err := marshalMCPToggleEnvelope(requestID, serverName, enabled)
+	if err != nil {
+		return fmt.Errorf("streamsup: marshal MCP toggle: %w", err)
+	}
+	if _, err := w.Write(env); err != nil {
+		return fmt.Errorf("streamsup: write MCP toggle: %w", err)
 	}
 	return nil
 }

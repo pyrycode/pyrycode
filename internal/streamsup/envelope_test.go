@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -166,6 +167,162 @@ func TestWriteModel(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "private-model") {
 		t.Fatalf("WriteModel error leaked the model value: %v", err)
+	}
+}
+
+func TestMarshalMCPControlEnvelopes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		marshal func() ([]byte, error)
+		want    string
+		keys    []string
+	}{
+		{
+			name:    "status",
+			marshal: func() ([]byte, error) { return marshalMCPStatusEnvelope("fixed-id") },
+			want:    `{"type":"control_request","request_id":"fixed-id","request":{"subtype":"mcp_status"}}` + "\n",
+			keys:    []string{"subtype"},
+		},
+		{
+			name:    "reconnect",
+			marshal: func() ([]byte, error) { return marshalMCPReconnectEnvelope("fixed-id", "broken-server") },
+			want:    `{"type":"control_request","request_id":"fixed-id","request":{"subtype":"mcp_reconnect","serverName":"broken-server"}}` + "\n",
+			keys:    []string{"subtype", "serverName"},
+		},
+		{
+			name:    "reconnect keeps empty server name",
+			marshal: func() ([]byte, error) { return marshalMCPReconnectEnvelope("fixed-id", "") },
+			want:    `{"type":"control_request","request_id":"fixed-id","request":{"subtype":"mcp_reconnect","serverName":""}}` + "\n",
+			keys:    []string{"subtype", "serverName"},
+		},
+		{
+			name:    "toggle true",
+			marshal: func() ([]byte, error) { return marshalMCPToggleEnvelope("fixed-id", "server", true) },
+			want:    `{"type":"control_request","request_id":"fixed-id","request":{"subtype":"mcp_toggle","serverName":"server","enabled":true}}` + "\n",
+			keys:    []string{"subtype", "serverName", "enabled"},
+		},
+		{
+			name:    "toggle false",
+			marshal: func() ([]byte, error) { return marshalMCPToggleEnvelope("fixed-id", "server", false) },
+			want:    `{"type":"control_request","request_id":"fixed-id","request":{"subtype":"mcp_toggle","serverName":"server","enabled":false}}` + "\n",
+			keys:    []string{"subtype", "serverName", "enabled"},
+		},
+		{
+			name:    "toggle keeps empty server name",
+			marshal: func() ([]byte, error) { return marshalMCPToggleEnvelope("fixed-id", "", false) },
+			want:    `{"type":"control_request","request_id":"fixed-id","request":{"subtype":"mcp_toggle","serverName":"","enabled":false}}` + "\n",
+			keys:    []string{"subtype", "serverName", "enabled"},
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := tc.marshal()
+			if err != nil {
+				t.Fatalf("marshal MCP request: %v", err)
+			}
+			if string(got) != tc.want {
+				t.Fatalf("MCP request =\n %q\nwant\n %q", got, tc.want)
+			}
+			if bytes.Count(got, []byte{'\n'}) != 1 || got[len(got)-1] != '\n' {
+				t.Fatalf("MCP request is not exactly one newline-terminated physical line: %q", got)
+			}
+			var env struct {
+				Request map[string]json.RawMessage `json:"request"`
+			}
+			if err := json.Unmarshal(got, &env); err != nil {
+				t.Fatalf("decode MCP request: %v", err)
+			}
+			if len(env.Request) != len(tc.keys) {
+				t.Fatalf("request keys = %v, want exactly %v", env.Request, tc.keys)
+			}
+			for _, key := range tc.keys {
+				if _, ok := env.Request[key]; !ok {
+					t.Errorf("request omitted %q: %v", key, env.Request)
+				}
+			}
+		})
+	}
+}
+
+func TestMarshalMCPControlEnvelope_ServerNameIsStructuredData(t *testing.T) {
+	t.Parallel()
+
+	const serverName = "quoted \"server\" \\ path\nnext\r\t\x00\x1f"
+	for _, marshal := range []func() ([]byte, error){
+		func() ([]byte, error) { return marshalMCPReconnectEnvelope("id", serverName) },
+		func() ([]byte, error) { return marshalMCPToggleEnvelope("id", serverName, false) },
+	} {
+		line, err := marshal()
+		if err != nil {
+			t.Fatalf("marshal MCP request: %v", err)
+		}
+		if got := bytes.Count(line, []byte{'\n'}); got != 1 || line[len(line)-1] != '\n' {
+			t.Fatalf("server name produced %d physical newlines, want one terminator: %q", got, line)
+		}
+		var env struct {
+			Request struct {
+				ServerName string `json:"serverName"`
+			} `json:"request"`
+		}
+		if err := json.Unmarshal(line, &env); err != nil {
+			t.Fatalf("decode MCP request: %v", err)
+		}
+		if env.Request.ServerName != serverName {
+			t.Fatalf("serverName round-trip = %q, want %q", env.Request.ServerName, serverName)
+		}
+	}
+}
+
+func TestWriteMCPControlRequests(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		write   func(io.Writer) error
+		marshal func() ([]byte, error)
+		context string
+	}{
+		{"status", func(w io.Writer) error { return WriteMCPStatus(w, "secret-id") }, func() ([]byte, error) { return marshalMCPStatusEnvelope("secret-id") }, "write MCP status"},
+		{"reconnect", func(w io.Writer) error { return WriteMCPReconnect(w, "secret-id", "secret-server") }, func() ([]byte, error) { return marshalMCPReconnectEnvelope("secret-id", "secret-server") }, "write MCP reconnect"},
+		{"toggle", func(w io.Writer) error { return WriteMCPToggle(w, "secret-id", "secret-server", false) }, func() ([]byte, error) { return marshalMCPToggleEnvelope("secret-id", "secret-server", false) }, "write MCP toggle"},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if err := tc.write(nil); !errors.Is(err, ErrNoLiveChild) {
+				t.Fatalf("write with no child = %v, want ErrNoLiveChild", err)
+			}
+
+			var sink writeCountingBuffer
+			if err := tc.write(&sink); err != nil {
+				t.Fatalf("write MCP request: %v", err)
+			}
+			want, err := tc.marshal()
+			if err != nil {
+				t.Fatalf("marshal MCP request: %v", err)
+			}
+			if sink.writes != 1 || !bytes.Equal(sink.Bytes(), want) {
+				t.Fatalf("writer made %d writes containing %q, want one write containing %q", sink.writes, sink.Bytes(), want)
+			}
+
+			cause := errors.New("distinct-write-cause")
+			failing := &contextUsageFailWriter{err: cause}
+			err = tc.write(failing)
+			if !errors.Is(err, cause) || errors.Is(err, ErrNoLiveChild) {
+				t.Fatalf("write error = %v, want wrapped cause only", err)
+			}
+			if failing.calls != 1 || !strings.Contains(err.Error(), tc.context) {
+				t.Fatalf("failing writer calls/error = %d/%v, want one call and %q context", failing.calls, err, tc.context)
+			}
+			if strings.Contains(err.Error(), "secret-id") || strings.Contains(err.Error(), "secret-server") {
+				t.Fatalf("write error leaked caller data: %v", err)
+			}
+		})
 	}
 }
 
