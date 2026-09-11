@@ -14,10 +14,17 @@ This package shipped the registry **primitive only**, unwired and unit-tested in
   same registry and returns the correlated verdict to the child that originated
   it; the MCP consumer remains the default rollback transport. See
   [config-package.md](config-package.md#stdio_permission_prompt--interactive-permission-transport-2343).
+- **#2347 (landed)** — preserves stdio `can_use_tool`'s
+  `requires_user_interaction` bit as daemon-internal answer eligibility. The
+  stream bridge refuses remote allow and deny answers before consuming either
+  one-shot and reports the permission unanswerable, leaving the existing timeout
+  to deny Claude and retire the modal. Parsed `AskUserQuestion` batches remain
+  answerable through their separate question correlation and `question_answer`
+  path; approval-MCP requests leave the bit false and retain their behavior.
 
 Spec: [`specs/architecture/1103-permbridge-registry.md`](../../specs/architecture/1103-permbridge-registry.md). Ticket record: [codebase/1103.md](../codebase/1103.md).
 
-**The timer's bound was narrowed from unconditional to conditional.** `Register`'s original deadline denied unconditionally: waiting past the window was itself treated as the unsafe state. It wasn't — a non-YOLO headless `claude` blocks on the verdict for the whole park, so the tool cannot run while parked, and interactive `claude` has no deadline at all (the Agent SDK's permission callback "can stay pending indefinitely"). `Register`'s timer callback now routes through an unexported `expire`, which consults an injected `AnswerableFunc` and re-arms the same window when someone can still answer, spending the deadline only on an approval nobody can answer. #1931 shipped this unwired, exactly like the original primitive shipped in #1103; **#1932 wired it** — `cmd/pyry/relay.go`'s `startRelayV2` installs `cmd/pyry`'s `streamApprovalBridge.ApprovalAnswerable(approvalID string) bool` as the report (same signature, same id space — claude's `tool_use_id` — so the method value assigns with no adapter), in the outer `w.approvals != nil` branch rather than the inner `w.busy != nil` guard that gates the two turn-busy-tracker assignments: `ApprovalAnswerable` reads the bridge's own modal correlation and the broadcaster, never the turn-busy tracker, so gating it on `w.busy` would have silently disabled the extension in PTY mode for no reason. No nil guard or wrapper closure is installed either — `bridge` and its `bcast` are non-nil by construction at that single wiring site, discharging `AnswerableFunc`'s no-panic obligation structurally; a defensive `if bridge == nil` wrapper would be unreachable code that turns a future genuine nil into "nobody can answer", which is the exact silent-universal-deny failure mode the seam's contract forbids. A nil `w.approvals` (relay disabled, or v1/foreground) means `SetAnswerable` is never called, so the window stays the hard unconditional deadline it always was. Spec: [`specs/architecture/1931-answerable-approval-window-extension.md`](../../specs/architecture/1931-answerable-approval-window-extension.md) — see especially § "Why a non-positive window is never extended" and § "Why at most one `expire` is ever in flight per entry" — and [`specs/architecture/1932-wire-approval-liveness-report.md`](../../specs/architecture/1932-wire-approval-liveness-report.md) for the wiring site.
+**The timer's bound was narrowed from unconditional to conditional.** `Register`'s original deadline denied unconditionally: waiting past the window was itself treated as the unsafe state. It wasn't — a non-YOLO headless `claude` blocks on the verdict for the whole park, so the tool cannot run while parked, and interactive `claude` has no deadline at all (the Agent SDK's permission callback "can stay pending indefinitely"). `Register`'s timer callback now routes through an unexported `expire`, which consults an injected `AnswerableFunc` and re-arms the same window when someone can still answer, spending the deadline only on an approval nobody can answer. #1931 shipped this unwired, exactly like the original primitive shipped in #1103; **#1932 wired it** — `cmd/pyry/relay.go`'s `startRelayV2` installs `cmd/pyry`'s `streamApprovalBridge.ApprovalAnswerable(approvalID string, req permbridge.Request) bool` as the report. The request argument, added in #2347, binds liveness to the exact pending generation even when an external id is reused. The method value still assigns with no adapter, in the outer `w.approvals != nil` branch rather than the inner `w.busy != nil` guard that gates the two turn-busy-tracker assignments: `ApprovalAnswerable` reads the bridge's own modal correlation and the broadcaster, never the turn-busy tracker, so gating it on `w.busy` would have silently disabled the extension in PTY mode for no reason. No nil guard or wrapper closure is installed either — `bridge` and its `bcast` are non-nil by construction at that single wiring site, discharging `AnswerableFunc`'s no-panic obligation structurally; a defensive `if bridge == nil` wrapper would be unreachable code that turns a future genuine nil into "nobody can answer", which is the exact silent-universal-deny failure mode the seam's contract forbids. A nil `w.approvals` (relay disabled, or v1/foreground) means `SetAnswerable` is never called, so the window stays the hard unconditional deadline it always was. Spec: [`specs/architecture/1931-answerable-approval-window-extension.md`](../../specs/architecture/1931-answerable-approval-window-extension.md) — see especially § "Why a non-positive window is never extended" and § "Why at most one `expire` is ever in flight per entry" — and [`specs/architecture/1932-wire-approval-liveness-report.md`](../../specs/architecture/1932-wire-approval-liveness-report.md) for the wiring site.
 
 ## Why `internal/permbridge` is self-contained
 
@@ -38,6 +45,7 @@ type Request struct {
     BlockedPath        string          `json:"blocked_path,omitempty"`
     Description        string          `json:"description,omitempty"`
     DefaultToNo        bool            `json:"default_to_no,omitempty"`
+    RequiresUserInteraction bool            `json:"-"`
 }
 
 // Verdict is the allow/deny decision claude accepts.
@@ -55,7 +63,7 @@ func Allow(updatedInput json.RawMessage) Verdict // {BehaviorAllow, updatedInput
 func Deny(message string) Verdict                // {BehaviorDeny, nil, message}
 ```
 
-`Input`/`UpdatedInput` are `json.RawMessage` so an arbitrary tool-input object round-trips byte-verbatim — the #1080 stream verdict arm (`streamApprovalBridge.ResolveStream`) always echoes the parked `Input` back as `UpdatedInput` unmodified on allow; the primitive only carries the bytes. The five optional ask-context fields are independent Claude-authored display values (#2346): the stdio adapter copies each only from its corresponding `can_use_tool` field, never from `Input`, while the approval MCP producer leaves all five at zero values. They do not participate in the verdict or timeout. `omitempty` gives the two disjoint verdict wire shapes claude expects. `Allow`/`Deny` constructors make call sites correct-by-construction — no stringly-typed `"allow"`/`"deny"` at the resolver. `reasonTimeout` (unexported, a fixed string, never host-derived content) is the deny message the timer path uses.
+`Input`/`UpdatedInput` are `json.RawMessage` so an arbitrary tool-input object round-trips byte-verbatim — the #1080 stream verdict arm (`streamApprovalBridge.ResolveStream`) always echoes the parked `Input` back as `UpdatedInput` unmodified on allow; the primitive only carries the bytes. The five optional ask-context fields are independent Claude-authored display values (#2346): the stdio adapter copies each only from its corresponding `can_use_tool` field, never from `Input`, while the approval MCP producer leaves all five at zero values. They do not participate in the verdict or timeout. `RequiresUserInteraction` is different: it is immutable daemon-internal eligibility copied from the typed stdio ask, excluded from JSON, never displayed or logged, and false for approval-MCP requests. `omitempty` gives the two disjoint verdict wire shapes claude expects. `Allow`/`Deny` constructors make call sites correct-by-construction — no stringly-typed `"allow"`/`"deny"` at the resolver. `reasonTimeout` (unexported, a fixed string, never host-derived content) is the deny message the timer path uses.
 
 ## Registry surface
 
@@ -74,13 +82,13 @@ func (p *Pending) Await() Verdict
 // AnswerableFunc reports whether the approval parked under id still has somebody
 // able to answer it. Consulted only when a window elapses; a true reading buys
 // exactly one more window and is then re-asked.
-type AnswerableFunc func(id string) bool
+type AnswerableFunc func(id string, req Request) bool
 ```
 
 - **`Register`** parks `req` under `id`, arms the fail-closed deadline (`time.AfterFunc(timeout, …)`), and returns the caller's handle. Rejects an empty `id` or a duplicate live `id` with `ErrDuplicateID` (`errors.Is`-matchable; caller default-denies). The timer callback routes through an unexported `expire`, not straight to a deny — see § Conditional bound below.
 - **`Resolve`** satisfies the pending request `id` with `v`; returns `true` if it resolved a live entry, `false` if the id is unknown or already resolved — a safe no-op.
 - **`Lookup`** returns the parked `Request` for `id` without resolving it — the read seam `streamApprovalBridge.ResolveStream` (#1080) uses to build `Allow(req.Input)`. Unknown id → `(Request{}, false)`, also a safe no-op.
-- **`SetAnswerable`** (#1931) installs the liveness report, or clears it with `nil` — a setter rather than a `New` option, because the daemon composition root builds the registry long before the thing that can answer the question exists. It does not validate its argument: `nil` is a meaningful value ("nobody can answer"), not an error. Written under `Registry.mu`; the expiry path reads it under the same lock, so last write wins and calling it concurrently with live entries is safe.
+- **`SetAnswerable`** (#1931) installs the liveness report, or clears it with `nil` — a setter rather than a `New` option, because the daemon composition root builds the registry long before the thing that can answer the question exists. It does not validate its argument: `nil` is a meaningful value ("nobody can answer"), not an error. Written under `Registry.mu`; the expiry path reads it under the same lock, so last write wins and calling it concurrently with live entries is safe. The report receives the immutable `Request` from the exact pending generation whose timer fired; consumers must use that request rather than recover eligibility from an ID-keyed side map that may still contain an older generation.
 - **`Pending.Await`** blocks until resolved and returns the verdict. With no `AnswerableFunc` installed (the default, and the state this ships in) it is guaranteed to return within the `Register` timeout, exactly as before. With one installed, it returns within one window of the first reading that says nobody can answer — an approval whose answerer stays reachable and simply never decides stays parked indefinitely, by design (see § Conditional bound).
 
 Exported surface: 4 types (`Request`, `Verdict`, `Registry`, `Pending`), one func type (`AnswerableFunc`), funcs `New`/`Allow`/`Deny`, sentinel `ErrDuplicateID`.
@@ -89,14 +97,14 @@ Exported surface: 4 types (`Request`, `Verdict`, `Registry`, `Pending`), one fun
 
 The registry no longer treats the timer as an unconditional deadline. `Register`'s `time.AfterFunc` now fires `expire(id, timeout)` instead of resolving straight to deny:
 
-1. Under `mu`: is `id` still live, and what is `r.answerable`? Release `mu`.
+1. Under `mu`: snapshot the live `*pending` for `id` and `r.answerable`. Release `mu`.
 2. Entry absent → return (already resolved by a winning `Resolve`; the report is never consulted for a dead entry — the common negative must not pay a cross-goroutine round-trip to reach an answer it cannot change).
-3. No report installed, or a non-positive window → `resolve(id, Deny(reasonTimeout))`.
-4. Call `ask(id)` with **no lock held** — in production this is a blocking round-trip onto the relay manager's `Run` goroutine, so `mu` (a leaf lock) is never held across it.
-5. `false` → `resolve(id, Deny(reasonTimeout))`.
-6. `true` → under `mu`, re-check `id` is *still* present, then `p.timer.Reset(window)` (the same `timer`, not a fresh `AfterFunc` — `resolve` reads `p.timer` outside `mu` to call `Stop()`, so the field is written once in `Register` and never reassigned).
+3. No report installed, or a non-positive window → resolve only if that same pending identity is still current.
+4. Call `ask(id, p.req)` with **no lock held** — in production this is a blocking round-trip onto the relay manager's `Run` goroutine, so `mu` (a leaf lock) is never held across it.
+5. `false` → deny only if that same pending identity is still current.
+6. `true` → under `mu`, re-check both `id` and pending identity, then `p.timer.Reset(window)` (the same `timer`, not a fresh `AfterFunc` — `resolve` reads `p.timer` outside `mu` to call `Stop()`, so the field is written once in `Register` and never reassigned).
 
-Each positive reading buys exactly one more window and is re-asked at the next expiry — a single stale "yes" can never buy an unbounded wait, because the report is a level the consumer is expected to re-read, not an edge latched once. The re-arm happens strictly *after* `ask` returns, so at most one `expire` is ever in flight per entry regardless of how slow the report is — a slow report stretches the window rather than racing itself via `Timer.Reset`'s documented "may run concurrently with the prior callback" hazard. `resolve`'s `delete`-under-`mu` is untouched by any of this: the extension path writes no verdict at all, so it remains the sole arbiter of who satisfies `p.ch`.
+Each positive reading buys exactly one more window and is re-asked at the next expiry — a single stale "yes" can never buy an unbounded wait, because the report is a level the consumer is expected to re-read, not an edge latched once. The re-arm happens strictly *after* `ask` returns, so at most one `expire` is ever in flight per entry regardless of how slow the report is — a slow report stretches the window rather than racing itself via `Timer.Reset`'s documented "may run concurrently with the prior callback" hazard. The pending-identity checks are load-bearing when an external id is reused: a stale callback may finish after a replacement registration, but it can neither resolve nor re-arm that newer generation. `resolve`'s `delete`-under-`mu` remains the sole arbiter of who satisfies `p.ch`.
 
 **A dishonest report defeats the bound.** A report that always answers `true` converts the fail-closed deadline into an unbounded park, including for a lost caller that never `Await`s. `AnswerableFunc`'s contract is therefore explicit: **answer false once nobody is waiting on this approval.** `expire` deliberately does not `recover()` a panic from `ask` — a nil-bridge method value panicking must kill the daemon, not read as "nobody can answer," which is the failure mode a swallowed panic would produce.
 
@@ -133,6 +141,14 @@ cleanup miss it. `stdioPermissionHandler.await` therefore deletes the tracked
 entry only when its stored `*permbridge.Pending` is the same registration it
 awaited; the external correlation id alone is not an ownership token.
 
+The stream surface has a second ordering requirement. Its modal correlation
+holds both the tool-use id and immutable remote-answer eligibility. Retirement
+must consume the modal one-shot before deleting that correlation; deleting first
+creates an interval in which a concurrent answer can mistake a still-live stream
+modal for a non-stream modal and bypass the eligibility refusal. Liveness reads
+the exact `Request` supplied by `AnswerableFunc`, so overlapping old and new
+surfaces that reuse an external id cannot lend one another eligibility.
+
 No daemon-lifecycle goroutine exists in this primitive — shutdown (a bulk "deny all pending on daemon stop" drain) is deferred; every entry is self-bounded by its own `timeout` window, so with no `AnswerableFunc` installed no entry outlives its deadline regardless of process shutdown timing, and with one installed no entry outlives a window in which the report reads unanswerable.
 
 ## Fail-closed / default-deny — the security-critical invariant
@@ -144,6 +160,8 @@ Allow is reachable by **exactly one path**: an explicit `Resolve(id, Allow(...))
 | Window elapses, no `AnswerableFunc` installed (default) | Timer wins the one-shot → `Await` returns `Deny(reasonTimeout)`; entry retired. Byte-identical to pre-#1931 behavior. |
 | Window elapses, report installed and answers false (including nil report) | Same as above — deny with the same fixed message, no new wire shape. |
 | Window elapses, report installed and answers true | Entry survives; timer re-armed for one more window; report re-asked at the next expiry. Not a terminal path — listed here because it is the one case that is *not* deny. |
+| Remote allow or deny targets a surfaced stdio permission with `RequiresUserInteraction` | Refused before modal classification or either one-shot is consumed; no verdict, dismissal, audit, or log is emitted. The existing timer later denies and retirement dismisses the modal. |
+| `AskUserQuestion` carries the same source flag | The separate question correlation remains answerable through `question_answer`; the permission-modal restriction does not apply. |
 | Resolve arrives **after** the deadline (or after a false reading) | Timer already deleted the entry → `Resolve` finds it gone → `false`, no-op. The already-delivered deny is never flipped to allow. |
 | Lost caller (never `Await`s) | Timer still fires, retires the entry, sends deny into the unread buffer (GC'd). No leaked pending entry. |
 | Unknown / already-resolved id on `Resolve`/`Lookup` | `false` / `(Request{}, false)`. No panic, no goroutine leak. |
@@ -154,7 +172,11 @@ Allow is reachable by **exactly one path**: an explicit `Resolve(id, Allow(...))
 
 The deterministic proof is a 300-iteration allow-vs-timeout race test asserting internal consistency under `-race` on every round (belt-and-suspenders: the guarantee is structural — a map delete under a mutex — and the test is deterministic code, not another stochastic check).
 
-**Known NIT (not fixed, contract documented instead):** the `AfterFunc` closure captures `id`, not the specific `*pending`, and re-looks-it-up in `resolve`. A stale timer that fires just as its entry is being re-`Register`ed under a **reused** id could, in a tight window, resolve the *new* entry instead of a no-op. This is fail-closed-only (can only ever deliver `Deny(reasonTimeout)`, never allow) and unreachable with claude's unique `tool_use_id`s, so code review (PR #1111) left it as-is. **Contract for future consumers:** an id must not be re-`Register`ed until its predecessor's timer has drained. If #1104 ever recycles ids, capture the `*pending` in the closure and identity-check it under `mu` before deleting.
+The timer callback still captures the external id, but it snapshots the matching
+`*pending` and supplies that identity to every resolve or re-arm. Re-registering
+an id after its predecessor resolves is therefore safe even if the predecessor's
+timer or liveness report is still unwinding: stale work becomes a no-op against
+the replacement generation.
 
 ## Trust boundary — who may call `Resolve`, and who may report liveness
 
@@ -167,6 +189,12 @@ Since #1931, the registry trusts a second thing: the *honesty* of whatever `Answ
 `internal/permbridge/permbridge_test.go`, same-package, stdlib `testing`, `go test -race`. Local helpers: `awaitWithin` (bounds `Await`), `registryLen`/`waitRetired` (poll internal state without a fixed sleep). Scenarios: allow path, deny path, timeout→deny, late-resolve-after-timeout (no flip), the 300-iteration allow-vs-timeout race, unknown-id no-op, duplicate/empty id, lost-caller self-clean (no leaked entry), `Lookup` returns the parked request, and marshal-shape golden checks (allow has no `message` key, deny has no `updatedInput` key). No fake clock anywhere — short real durations plus polling, throughout.
 
 **#1931's extension scenarios, and the shape a race test needs to actually race.** `TestRegistry_ExtendedAllowVsTimeoutRace` extends the 300-iteration race with a scripted, call-counted `AnswerableFunc`; it initially shipped with the racing `Resolve` firing before the 1 ms timer on every iteration (`extensions=0`, the report never asked), which is a duplicate of the unextended race test wearing new fixtures rather than a test of the extension path. A race test that measures zero occurrences of the branch it exists to cover has not raced anything — the fix was a per-iteration jitter so `Resolve` lands inside the extension windows on some iterations, which also made the ask-count assertion (not the empty-buffer check alone) load-bearing evidence that the extension actually ran. The other new scenarios: a report that flips from true to false is re-asked and denied without further extension once it turns false (pins "re-asked, not settled once"); a report is never consulted off the expiry path (unknown/duplicate/already-resolved ids); the report runs with `mu` released (a re-entrant `Lookup` from inside the report would self-deadlock a regression); a report slower than its window produces exactly one expiry, not two; and a non-positive window is never extended even with an always-true report (`TestRegistry_NonPositiveWindowIsNeverExtended` — the guard this pins is reachable in production, since `approvalTimeout` passes an unclamped `PYRY_APPROVAL_TIMEOUT` straight through).
+
+\#2347 adds controlled interleaving tests rather than relying on scheduler luck:
+a blocked stale expiry cannot deny a replacement registration, both
+mixed-eligibility id-reuse orders consult the current request, and timeout
+retirement cannot expose a still-live modal after its eligibility correlation is
+removed. These tests pin the identity and consume-before-delete rules above.
 
 ## Related
 
