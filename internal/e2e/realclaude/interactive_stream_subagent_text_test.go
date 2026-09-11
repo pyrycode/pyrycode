@@ -71,9 +71,6 @@ func TestInteractiveStreamForwardsSubagentText(t *testing.T) {
 			}
 			lane.observe(t, p)
 
-		case protocol.TypeUnrecognizedMessage:
-			t.Fatalf("turn emitted unrecognized_message: %s", env.Payload)
-
 		case protocol.TypeTurnState:
 			var p protocol.TurnStatePayload
 			if err := json.Unmarshal(env.Payload, &p); err != nil {

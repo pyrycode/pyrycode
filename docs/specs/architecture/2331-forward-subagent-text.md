@@ -93,3 +93,4 @@ Pending for the documentation stage:
 ## Revisions
 
 - During implementation, the live assertion was resolved to require at least two main-lane deltas and at least one child-lane delta. Every observed lane still must start at zero, remain on one turn id, and advance consecutively. Requiring two child frames would turn model chunking of one valid forwarded response into an unstated product contract; the advancing main lane plus the child's independent zero proves the counters do not share state.
+- The first dispatcher live run showed that Claude emits the delegated child prompt as a known `unrecognized_message` with `site=user_block` before the forwarded child response. The live proof now decrypts and ignores that unrelated envelope class, matching the design's receive-loop contract, while retaining strict failures for malformed payloads and unexpected attributed lanes.
