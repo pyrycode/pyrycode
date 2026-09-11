@@ -1,4 +1,4 @@
-# Interactive event payloads (#607, #638, #1074, #2237, #2233, #2261, #2324, #2329)
+# Interactive event payloads (#607, #638, #1074, #2237, #2233, #2261, #2324, #2329, #2330)
 
 The **v2 additive application events** — the wire representation of
 `internal/turnevent`'s neutral turn-event model (#606). They are **binary → phone
@@ -30,7 +30,7 @@ type TurnStatePayload struct {
 type AssistantDeltaPayload struct {
     ConversationID  string `json:"conversation_id"`
     TurnID          string `json:"turn_id"`
-    Seq             int    `json:"seq"`                // per-turn, non-negative, resets each turn
+    Seq             int    `json:"seq"`                // per-lane, non-negative; each lane starts at zero
     ParentToolUseID string `json:"parent_tool_use_id"` // Agent call's ToolUseID, "" on the main thread (#2329)
     Text            string `json:"text"`               // coalesced chunk, not per-token
 }
@@ -248,9 +248,15 @@ type BannerPayload struct {
   `omitempty` preserve the existing compatibility rule: new frames emit every
   key, while an old, absent, null, unreadable, or explicit-zero reading reaches
   a client as zero.
-- **`Seq` is `int`, not `uint64`.** A per-turn counter that resets each turn (the
-  package count-field idiom: `DebugBundleDonePayload.Total`); `uint64` is reserved
-  for the session-monotonic `Envelope.ID`.
+- **`TurnID` and `Seq` address an assistant lane, not necessarily the outer turn's
+  main stream (#2330).** Empty `ParentToolUseID` selects the established main lane
+  and its outer-turn id. Each distinct non-empty parent selects a different stable
+  child `TurnID`, with its own `Seq` beginning at zero. All identities and counters
+  are discarded at `TurnEnd` or an active-conversation switch, after buffered text
+  is flushed; the next outer turn cannot inherit an id, counter, parent, or prose.
+  `Seq` stays `int`, not `uint64`, following the package count-field idiom
+  (`DebugBundleDonePayload.Total`); `uint64` is reserved for the session-monotonic
+  `Envelope.ID`.
 - **`StallPayload` (#638) carries `conversation_id` only — no `turn_id`.** Like
   `turn_state`, a stall is a coarse conversation-level signal, not turn-scoped. It
   is the wire form of the internal-only `turnevent.Stall` (an onset-only marker:

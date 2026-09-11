@@ -775,8 +775,8 @@ These twenty-two envelope types form the structured live-session stream. They ar
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation this turn belongs to. |
-| `turn_id` | string | Identifies the turn the delta belongs to. |
-| `seq` | int | Per-turn, non-negative delta-ordering counter; resets each turn. |
+| `turn_id` | string | Identifies this assistant lane within the outer turn. The empty-parent main lane uses the outer turn id; each distinct non-empty parent gets its own stable, different id. |
+| `seq` | int | Per-lane, non-negative delta-ordering counter; starts at 0 independently for every lane. |
 | `parent_tool_use_id` | string | The parent `Agent` call's `tool_use_id`. **Empty means the main thread.** |
 | `text` | string | Incremental assistant text, coalesced (not per token). |
 
@@ -786,6 +786,17 @@ the call that produced it; the identifiers cross byte-for-byte. A value that
 matches no known frame stays at top level. It is **not a capability** and grants
 no authority to look up, invoke, or otherwise act on the referenced call. The
 daemon always emits the key, using an empty string for main-thread text.
+
+Lane identities and counters live only for the current outer turn. Its single
+`turn_end` carries the main turn id, closes the child lanes too, and follows any
+pending prose; an active-conversation switch likewise flushes before discarding
+every lane. The next outer turn lazily creates fresh ids and starts each lane at
+`seq: 0`. Order deltas by `seq` **within one `turn_id`**, not across the conversation.
+Coalescing also stays lane-local: adjacent text is combined only while both
+`parent_tool_use_id` and claude's internal message id match. The daemon keeps one
+active buffer, so a main/child or child/child switch flushes the earlier text and
+preserves global arrival order instead of letting per-lane buffers reorder
+interleaved prose.
 
 #### `tool_use`
 
