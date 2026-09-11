@@ -601,6 +601,16 @@ const (
 	TypeModelRefusalFallback = "model_refusal_fallback"
 )
 
+// Mobile Protocol v2 refusal-without-fallback report. claude emits this fact
+// when it refuses a turn and does not retry it on another model. The frame is
+// explanatory only; TypeModelAnnounced remains the current-model authority.
+//
+// MUST NOT enter inboundAppTypeSet. This is an outbound interactive push, and
+// the protocol and relay totality guards classify it as v2-only and push-only.
+const (
+	TypeModelRefusalNoFallback = "model_refusal_no_fallback"
+)
+
 // Mobile Protocol v2 model-list report. The daemon can ask claude which models it
 // will accept — a control_request with subtype initialize, written on the child's
 // held-open stdin, returns a models array — and that inventory used to stop at the

@@ -67,6 +67,11 @@ frame is emitted. A whole message family can be ignored before subtype handling,
 absence of an error frame cannot prove which subtype branch ran. Child stdout,
 client-visible frames and internal turn state are separate observations.
 
+For an event specified as lifecycle-neutral, test both an open turn and idle state.
+An open-turn assertion can prove the event did not transition or close that turn but
+still stays green if the handler opens a new turn from idle. The idle case must assert
+the lifecycle fields and that no synthetic lifecycle frame was emitted.
+
 A verifier can use Go's `-overlay` option with replacement files outside the worktree
 to test a mutation without editing the branch. Assert that each replacement applied.
 Run the named test being evaluated so a neighbouring assertion cannot mask its weakness.

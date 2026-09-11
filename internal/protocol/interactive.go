@@ -1294,6 +1294,29 @@ type ModelRefusalFallbackPayload struct {
 	DroppedFields   []string `json:"dropped_fields"`
 }
 
+// ModelRefusalNoFallbackPayload reports that claude refused a turn without
+// retrying it on another model. It is conversation-scoped because the daemon
+// has no request or claude message identity that can join it to an
+// assistant_delta. ModelAnnouncedPayload remains the current-model authority.
+//
+// Every value except ConversationID is bounded but unsanitized claude-authored
+// data. OriginalModel is opaque and RefusalCategory is claude's open assertion,
+// never a daemon finding or actuator. Banner may echo refused user text and must
+// be rendered as inert, claude-attributed text, never passed to an HTML sink,
+// URL, command, or shell.
+//
+// TruncatedFields and DroppedFields use this frame's wire-key vocabulary. Nil
+// means no published field was reported and intentionally marshals as null, not
+// []; neither field uses omitempty and this type must not gain a MarshalJSON.
+type ModelRefusalNoFallbackPayload struct {
+	ConversationID  string   `json:"conversation_id"`
+	OriginalModel   string   `json:"original_model"`
+	RefusalCategory string   `json:"refusal_category"`
+	Banner          string   `json:"banner"`
+	TruncatedFields []string `json:"truncated_fields"`
+	DroppedFields   []string `json:"dropped_fields"`
+}
+
 // SessionFactsPayload is the body of an Envelope whose Type == TypeSessionFacts
 // (docs/protocol-mobile.md § session_facts, #2253). Binary → phone direction; the
 // wire form of turnevent.SessionFacts, which reports what claude's own build IS and
