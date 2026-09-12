@@ -19,6 +19,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -98,11 +99,20 @@ func TestRelayV2_AttachmentUploadMultiChunk(t *testing.T) {
 
 	home := shortHome(t)
 
-	r := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
-	if r.ExitCode != 0 {
-		t.Fatalf("pyry pair exit=%d\nstdout:\n%s\nstderr:\n%s", r.ExitCode, r.Stdout, r.Stderr)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
+
+	payload, err := paireddevice.Setup(paireddevice.Config{
+		Home:                   home,
+		InstanceName:           "test",
+		Relay:                  relayURL,
+		DeviceName:             "phone-a",
+		AllowRemotePermissions: false,
+	})
+	if err != nil {
+		t.Fatalf("paireddevice.Setup: %v", err)
 	}
-	payload := decodePairPayload(t, r.Stdout)
 	pubKey, err := base64.StdEncoding.DecodeString(payload.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
@@ -110,20 +120,17 @@ func TestRelayV2_AttachmentUploadMultiChunk(t *testing.T) {
 
 	// Bind the conversation to the bootstrap session so send_message routes rather
 	// than answering server.binary_offline. The daemon loads conversations.json
-	// once at startup, so the row must exist before it starts; the pair above is
+	// once at startup, so the row must exist before it starts; the setup above is
 	// what created the instance directory this writes into. boundSessionID must
 	// equal the bootstrap pool id, which StartStreamInteractiveWithRelay pins to
 	// initialUUID via seedBootstrapRegistry.
 	seedBoundConversation(t, home, knownConvID, initialUUID)
 
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
 	// This starter rather than StartInWithEnv for two properties it already
 	// carries: it seeds the bootstrap registry at initialUUID, and it passes
 	// -pyry-verbose, which puts the Debug-level chunk.accepted record on the
 	// captured stderr the barrier below reads.
-	h := StartStreamInteractiveWithRelay(t, home, initialUUID, fr.URL()+"/v2/server")
+	h := StartStreamInteractiveWithRelay(t, home, initialUUID, relayURL)
 	t.Cleanup(func() { h.Stop(t) })
 
 	serverID := readPersistedServerID(t, home)
