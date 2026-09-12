@@ -85,6 +85,7 @@ package selfcheck
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -228,8 +229,8 @@ type Result struct {
 	// file contents or captured claude output.
 	SentinelPath string
 
-	// EndOfTurnObserved is true iff a deterministic end-of-turn assistant
-	// event was observed (stop_reason "end_turn" with non-empty text).
+	// EndOfTurnObserved is true after an end-of-turn assistant event or a
+	// successful end_turn stream result following an observed assistant.
 	EndOfTurnObserved bool
 
 	// AssistantCount counts assistant Events observed (informational).
@@ -244,7 +245,7 @@ type Result struct {
 // the probe tool (canonicalProbeTool).
 //
 // Returns (Result, nil) on PASS: the sentinel was absent and an
-// end-of-turn assistant event fired. Returns (Result, ErrSentinelWritten-
+// completed assistant turn was observed. Returns (Result, ErrSentinelWritten-
 // wrapped) on FAIL: the sentinel file was on disk after the run. Returns
 // (Result, ErrTimeout) on inconclusive. Returns (Result, other) on
 // infrastructure failure (trust, settings, sessionID, spawn, I/O, stat,
@@ -340,16 +341,17 @@ func SelfCheckDenyDefault(ctx context.Context, cfg Config) (Result, error) {
 				cancel()
 				return fmt.Errorf("agentrun: self-check: jsonl read: %w", err)
 			}
-			if ev.Kind != "assistant" {
-				continue
+			if ev.Kind == "assistant" {
+				result.AssistantCount++
 			}
-			result.AssistantCount++
 			// The watcher no longer decides PASS/FAIL: a tool_use block is
 			// normal LLM output regardless of whether the runtime executes
 			// it, so the verdict moves to the post-run os.Stat below. The
 			// watcher keeps only the liveness signal — end-of-turn — and
 			// tears the run down once a turn completes.
-			if ev.EndOfTurn {
+			// Stream-json assistant messages may leave stop_reason null;
+			// the successful terminal result then supplies completion.
+			if ev.EndOfTurn || (result.AssistantCount > 0 && successfulStreamResult(ev.Raw)) {
 				result.EndOfTurnObserved = true
 				cancel()
 			}
@@ -384,4 +386,18 @@ func SelfCheckDenyDefault(ctx context.Context, cfg Config) (Result, error) {
 		return result, fmt.Errorf("agentrun: self-check: %w", runErr)
 	}
 	return result, errors.New("agentrun: self-check: terminated without end-of-turn or sentinel signal")
+}
+
+// successfulStreamResult reads only completion metadata. Missing, malformed,
+// failed, or interrupted results cannot turn an inconclusive run into PASS.
+func successfulStreamResult(raw json.RawMessage) bool {
+	var result struct {
+		Type       string `json:"type"`
+		Subtype    string `json:"subtype"`
+		IsError    *bool  `json:"is_error"`
+		StopReason string `json:"stop_reason"`
+	}
+	return json.Unmarshal(raw, &result) == nil && result.Type == "result" &&
+		result.Subtype == "success" && result.IsError != nil && !*result.IsError &&
+		result.StopReason == "end_turn"
 }

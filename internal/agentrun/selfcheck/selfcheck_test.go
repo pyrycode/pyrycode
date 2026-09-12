@@ -102,6 +102,61 @@ func TestSelfCheck_Pass(t *testing.T) {
 	}
 }
 
+// Current stream-json assistant messages leave stop_reason null. The final
+// result carries completion. A successful result must not hide a leaked write
+// or accept a failed, incomplete, or empty run as proof of enforcement.
+func TestSelfCheck_StreamResult(t *testing.T) {
+	const assistant = `{"type":"assistant","message":{"stop_reason":null,"content":[{"type":"text","text":"Cannot write that file."}]}}`
+	const success = `{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn"}`
+	tests := []struct {
+		name          string
+		terminal      string
+		noAssistant   bool
+		writeSentinel bool
+		wantPass      bool
+	}{
+		{name: "completed stream", terminal: success, wantPass: true},
+		{name: "leaked write still fails", terminal: success, writeSentinel: true},
+		{name: "no assistant is inconclusive", terminal: success, noAssistant: true},
+		{name: "failed result", terminal: `{"type":"result","subtype":"error_max_turns","is_error":true,"stop_reason":"end_turn"}`},
+		{name: "error flag", terminal: `{"type":"result","subtype":"success","is_error":true,"stop_reason":"end_turn"}`},
+		{name: "missing error flag", terminal: `{"type":"result","subtype":"success","stop_reason":"end_turn"}`},
+		{name: "null error flag", terminal: `{"type":"result","subtype":"success","is_error":null,"stop_reason":"end_turn"}`},
+		{name: "wrong error flag type", terminal: `{"type":"result","subtype":"success","is_error":"false","stop_reason":"end_turn"}`},
+		{name: "incomplete turn", terminal: `{"type":"result","subtype":"success","is_error":false,"stop_reason":"tool_use"}`},
+		{name: "no result", terminal: `{"type":"system","subtype":"success","is_error":false,"stop_reason":"end_turn"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			installSeams(t)
+			streamRun = func(ctx context.Context, cfg streamrunner.Config) error {
+				if tc.writeSentinel {
+					if err := os.WriteFile(filepath.Join(cfg.WorkDir, probeSentinelName), []byte("hello"), 0o600); err != nil {
+						return err
+					}
+				}
+				if !tc.noAssistant {
+					if _, err := io.WriteString(cfg.Stdout, assistant+"\n"); err != nil {
+						return err
+					}
+				}
+				_, err := io.WriteString(cfg.Stdout, tc.terminal+"\n")
+				return err
+			}
+			result, err := SelfCheckDenyDefault(context.Background(), baseConfig(t))
+			if (err == nil) != tc.wantPass {
+				t.Fatalf("pass = %v, want %v; err = %v", err == nil, tc.wantPass, err)
+			}
+			if tc.writeSentinel && !errors.Is(err, ErrSentinelWritten) {
+				t.Fatalf("err = %v, want ErrSentinelWritten", err)
+			}
+			if tc.wantPass && (!result.EndOfTurnObserved || result.AssistantCount != 1) {
+				t.Fatalf("completed run not observed: end_of_turn=%v assistant_count=%d", result.EndOfTurnObserved, result.AssistantCount)
+			}
+		})
+	}
+}
+
 // TestSelfCheck_SentinelWritten pins the FAIL mechanism after the layer
 // swap: the verdict is the sentinel file on disk, not a tool_use block in
 // the stream. The mock simulates a leaked boundary by writing the sentinel
