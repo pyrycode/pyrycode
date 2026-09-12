@@ -13,6 +13,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -26,27 +27,27 @@ import (
 func TestRelay_RegisterPushToken_AckAndPersists(t *testing.T) {
 	home := shortHome(t)
 
-	// Pair a device. The daemon below runs with -pyry-name=test (set in
-	// the e2e harness's standard flag set), so pair must write to the
-	// same instance dir: <home>/.pyry/test/devices.json.
-	r := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
-	if r.ExitCode != 0 {
-		t.Fatalf("pyry pair exit=%d\nstdout:\n%s\nstderr:\n%s",
-			r.ExitCode, r.Stdout, r.Stderr)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
+	pairPayload, err := paireddevice.Setup(paireddevice.Config{
+		Home:         home,
+		InstanceName: "test",
+		Relay:        relayURL,
+		DeviceName:   "phone-a",
+	})
+	if err != nil {
+		t.Fatalf("setup paired device: %v", err)
 	}
-	pairPayload := decodePairPayload(t, r.Stdout)
 	pubKey, err := base64.StdEncoding.DecodeString(pairPayload.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
 	}
 
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
 	h := StartInWithEnv(t,
 		home,
 		[]string{"PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=1"},
-		"-pyry-relay="+fr.URL()+"/v2/server",
+		"-pyry-relay="+relayURL,
 	)
 	t.Cleanup(func() { h.Stop(t) })
 

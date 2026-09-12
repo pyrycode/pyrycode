@@ -12,6 +12,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/pair"
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -57,33 +58,40 @@ func TestRelayV2_MintPairing(t *testing.T) {
 	)
 
 	home := shortHome(t)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	daemonRelayURL := fr.URL() + "/v2/server"
 
 	// The minting device: privileged, which is the only way a device ever becomes
 	// one — a shell on the host.
-	r := RunBareIn(t, home, "pair", "-pyry-name=test", "--name="+grantorName, "--allow-remote-permissions")
-	if r.ExitCode != 0 {
-		t.Fatalf("pyry pair (grantor) exit=%d\nstdout:\n%s\nstderr:\n%s", r.ExitCode, r.Stdout, r.Stderr)
+	grantor, err := paireddevice.Setup(paireddevice.Config{
+		Home:                   home,
+		InstanceName:           "test",
+		Relay:                  daemonRelayURL,
+		DeviceName:             grantorName,
+		AllowRemotePermissions: true,
+	})
+	if err != nil {
+		t.Fatalf("setup grantor: %v", err)
 	}
-	grantor := decodePairPayload(t, r.Stdout)
 
 	// A second paired device WITHOUT the flag, for the refusal arm. Pairing it now
-	// rather than later keeps every CLI write ahead of the daemon except the one
-	// the lock claim needs to be concurrent.
-	r = RunBareIn(t, home, "pair", "-pyry-name=test", "--name="+watcherName)
-	if r.ExitCode != 0 {
-		t.Fatalf("pyry pair (watcher) exit=%d\nstdout:\n%s\nstderr:\n%s", r.ExitCode, r.Stdout, r.Stderr)
+	// rather than later keeps its setup write ahead of the daemon.
+	watcher, err := paireddevice.Setup(paireddevice.Config{
+		Home:         home,
+		InstanceName: "test",
+		Relay:        daemonRelayURL,
+		DeviceName:   watcherName,
+	})
+	if err != nil {
+		t.Fatalf("setup watcher: %v", err)
 	}
-	watcher := decodePairPayload(t, r.Stdout)
 
 	grantorPub, err := base64.StdEncoding.DecodeString(grantor.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
 	}
 
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
-	daemonRelayURL := fr.URL() + "/v2/server"
 	h := StartStreamInteractiveWithRelay(t, home, initialUUID, daemonRelayURL)
 	t.Cleanup(func() { h.Stop(t) })
 
@@ -95,7 +103,7 @@ func TestRelayV2_MintPairing(t *testing.T) {
 	// registry. Before #1531 this and the wire mint below would each have mutated
 	// a snapshot the other did not see; the assertion that both records survive is
 	// at the end of the run, after the wire mint has had its chance to erase this.
-	r = RunBareIn(t, home, "pair", "-pyry-name=test", "--name="+cliName)
+	r := RunBareIn(t, home, "pair", "-pyry-name=test", "--name="+cliName)
 	if r.ExitCode != 0 {
 		t.Fatalf("pyry pair (during daemon) exit=%d\nstdout:\n%s\nstderr:\n%s", r.ExitCode, r.Stdout, r.Stderr)
 	}
@@ -121,7 +129,7 @@ func TestRelayV2_MintPairing(t *testing.T) {
 		t.Errorf("minted server = %q, want this host's %q", got.Server, serverID)
 	}
 	if got.ServerStaticPubkey != grantor.ServerStaticPubkey {
-		t.Error("minted server_static_pubkey differs from the one `pyry pair` printed on this host")
+		t.Error("minted server_static_pubkey differs from the shared setup fixture's key")
 	}
 	if got.Relay != daemonRelayURL {
 		t.Errorf("minted relay = %q, want the daemon's own leg %q", got.Relay, daemonRelayURL)
