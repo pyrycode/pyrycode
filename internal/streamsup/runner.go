@@ -43,6 +43,7 @@ import (
 	"os/exec"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -287,6 +288,13 @@ type Config struct {
 	// a child whose rotation was ABORTED (BeginRotation's disarm path) permanently
 	// unasked — the state the per-replacement ask exists to prevent.
 	RequestInitializeOnSpawn bool
+
+	// MCPStatusConfigPath is the daemon-owned MCP config whose exact presence on
+	// one child spawn, together with --strict-mcp-config, permits automatic MCP
+	// status collection. Empty makes every child ineligible. The path is compared
+	// only with that spawn's completed argv; changing Args for a later spawn does
+	// not change the policy already installed for the running child.
+	MCPStatusConfigPath string
 
 	// SpawnPermissionMode is the session's stored permission posture, written to
 	// every spawned child as a set_permission_mode control request before any user
@@ -707,9 +715,10 @@ type Runner struct {
 	// call site branches on it.
 	postureGate *PostureGate
 
-	// contextUsageParser is non-nil when Config.Stdout is the Parser that consumes
-	// this runner's child output. It binds request registration to that exact parser.
-	contextUsageParser *Parser
+	// parser is non-nil when Config.Stdout is the Parser that consumes this runner's
+	// child output. It binds request registration and per-spawn MCP status policy to
+	// that exact parser.
+	parser *Parser
 
 	// rotatePending is set by RestartFresh and consumed once by beginSpawn: it
 	// re-arms first-run form so the next spawn uses --session-id <newID> (a fresh
@@ -798,18 +807,18 @@ func New(cfg Config) (*Runner, error) {
 		cfg.BackoffReset = defaultBackoffReset
 	}
 	cfg.Args = slices.Clone(cfg.Args)
-	contextUsageParser, _ := cfg.Stdout.(*Parser)
+	parser, _ := cfg.Stdout.(*Parser)
 	return &Runner{
-		cfg:                cfg,
-		log:                cfg.Logger,
-		workDir:            workDir,
-		state:              State{Phase: PhaseStarting},
-		args:               slices.Clone(cfg.Args),
-		sessionID:          cfg.SessionID,
-		spawnMode:          cfg.SpawnPermissionMode,
-		postureGate:        cfg.PostureGate,
-		contextUsageParser: contextUsageParser,
-		restartCh:          make(chan struct{}, 1),
+		cfg:         cfg,
+		log:         cfg.Logger,
+		workDir:     workDir,
+		state:       State{Phase: PhaseStarting},
+		args:        slices.Clone(cfg.Args),
+		sessionID:   cfg.SessionID,
+		spawnMode:   cfg.SpawnPermissionMode,
+		postureGate: cfg.PostureGate,
+		parser:      parser,
+		restartCh:   make(chan struct{}, 1),
 	}, nil
 }
 
@@ -1171,6 +1180,14 @@ func (r *Runner) RequestInitialize() error {
 	return WriteInitialize(r.Stdin(), r.nextControlID())
 }
 
+// RequestMCPStatus asks the live child for its current MCP server states. The
+// parser's per-child policy is the sole automatic caller; direct writers remain
+// available through WriteMCPStatus. The request id shares the runner-wide control
+// sequence with every other subtype.
+func (r *Runner) RequestMCPStatus() error {
+	return WriteMCPStatus(r.Stdin(), r.nextControlID())
+}
+
 // RequestContextUsage asks the live child for its summary or full context
 // breakdown. The detail vocabulary is checked before child lookup and ID minting;
 // WriteContextUsage repeats the same boundary for direct callers. The request ID
@@ -1184,13 +1201,13 @@ func (r *Runner) RequestContextUsage(detail string) error {
 	}
 	id := r.nextControlID()
 	var pending *pendingContextUsageRequest
-	if r.contextUsageParser != nil {
-		pending = r.contextUsageParser.registerContextUsageRequest(id)
+	if r.parser != nil {
+		pending = r.parser.registerContextUsageRequest(id)
 	}
 	err := WriteContextUsage(r.Stdin(), id, detail)
 	if pending != nil {
 		if err != nil {
-			r.contextUsageParser.removeContextUsageRequest(id, pending)
+			r.parser.removeContextUsageRequest(id, pending)
 		}
 		pending.resolve(err == nil)
 	}
@@ -1198,8 +1215,8 @@ func (r *Runner) RequestContextUsage(detail string) error {
 }
 
 // nextControlID mints the next locally-unique control-request correlation id,
-// shared by Interrupt, SetModel, SetPermissionMode, RequestInitialize and
-// RequestContextUsage (RevokeBypass draws on it through SetPermissionMode,
+// shared by Interrupt, SetModel, SetPermissionMode, RequestInitialize,
+// RequestMCPStatus and RequestContextUsage (RevokeBypass draws on it through SetPermissionMode,
 // minting exactly one id per call, not two). The atomic counter is
 // unique within the runner's lifetime — one sequence, not one per subtype, since
 // request_id must be unique across all in-flight control requests on the stream
@@ -1711,6 +1728,15 @@ func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, freshSeq 
 	if len(env) > 0 {
 		cmd.Env = append(os.Environ(), env...)
 	}
+	// Install the privacy decision before Start can create the stdout forwarder.
+	// args is beginSpawn's immutable snapshot for this exact child, so a settings
+	// change for the next spawn cannot retroactively alter this one.
+	if r.parser != nil {
+		r.parser.beginMCPStatusChild(
+			mcpStatusEligible(args, r.cfg.MCPStatusConfigPath),
+			r.RequestMCPStatus,
+		)
+	}
 
 	// Reap-then-SIGTERM fires only on ctx cancel (operator teardown): claude
 	// isolates every Bash command into its own detached process group two levels
@@ -2013,6 +2039,38 @@ func buildArgs(base []string, create bool, sessionID string) []string {
 		return append(args, "--session-id", sessionID)
 	}
 	return append(args, "--resume", sessionID)
+}
+
+// mcpStatusEligible reports whether args confines this child to the daemon's one
+// MCP config. Requiring exactly one matching config fails closed when duplicate
+// flags could add an operator-controlled inventory.
+func mcpStatusEligible(args []string, daemonConfigPath string) bool {
+	if daemonConfigPath == "" {
+		return false
+	}
+	strict := false
+	configs := 0
+	matchingConfigs := 0
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--strict-mcp-config":
+			strict = true
+		case args[i] == "--mcp-config":
+			configs++
+			if i+1 < len(args) {
+				i++
+				if args[i] == daemonConfigPath {
+					matchingConfigs++
+				}
+			}
+		case strings.HasPrefix(args[i], "--mcp-config="):
+			configs++
+			if strings.TrimPrefix(args[i], "--mcp-config=") == daemonConfigPath {
+				matchingConfigs++
+			}
+		}
+	}
+	return strict && configs == 1 && matchingConfigs == 1
 }
 
 // spawnEnv composes one spawn's additions to os.Environ(): the caller's fixed

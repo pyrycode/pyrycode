@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -15,6 +16,66 @@ import (
 	"github.com/pyrycode/pyrycode/internal/streamsup"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
+
+func TestNewStreamRunnerFactory_WiresMCPStatusConfigPath(t *testing.T) {
+	workDir := t.TempDir()
+	claudePath := filepath.Join(workDir, "claude-mcp-policy")
+	const helper = `#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"subtype":"initialize"'*)
+      printf '%s\n' '{"type":"control_response","response":{"subtype":"success","response":{"models":[{"resolvedModel":"helper-model","value":"helper","displayName":"Helper"}]}}}'
+      ;;
+    *'"subtype":"mcp_status"'*)
+      printf '%s\n' '{"type":"control_response","response":{"subtype":"success","response":{"mcpServers":[]}}}'
+      ;;
+  esac
+done
+`
+	if err := os.WriteFile(claudePath, []byte(helper), 0o700); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+
+	sink := newStreamTurnSink(8, discardLogger())
+	const daemonConfig = "/run/pyry/mcp.json"
+	factory := newStreamRunnerFactory(sink, daemonConfig, streamApprovalConfig{})
+	runner, err := factory(sessions.RunnerConfig{
+		ClaudeBin: claudePath,
+		WorkDir:   workDir,
+		SessionID: "factory-mcp-policy",
+		Logger:    discardLogger(),
+	})
+	if err != nil {
+		t.Fatalf("factory: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(ctx) }()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("runner did not stop")
+		}
+	}()
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case envelope := <-sink.ch:
+			if status, ok := envelope.ev.(turnevent.MCPStatus); ok {
+				if status.Servers == nil {
+					t.Fatal("factory-wired status has nil Servers, want the helper's reported empty list")
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("factory-wired strict child emitted no automatic MCPStatus")
+		}
+	}
+}
 
 // TestMapStreamState asserts the covariant-return adapter maps every streamsup
 // lifecycle field to its sessions.State twin, and that each Phase value maps to

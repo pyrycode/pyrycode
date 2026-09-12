@@ -447,6 +447,11 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, approva
 		// cannot say which children the daemon downgrades and which keep the bypass
 		// they launch with. See withApprovalArgs' doc for the derivation.
 		scfg.Args = withApprovalArgs(scfg.Args, mcpServersPath, cfg.PermissionMode, cfg.OperatorBypass, approval.stdio)
+		// The same path that withApprovalArgs may put on the child argv is the
+		// provenance anchor for automatic MCP status. The runner compares it with
+		// each completed spawn argv, so bypass children whose args stayed unchanged
+		// remain ineligible.
+		scfg.MCPStatusConfigPath = mcpServersPath
 		tag := newStreamSessionTag(cfg.SessionID)
 		// #2135 chains the announced-reset follower between the retention holds and
 		// the fan-in send, rather than inside newSessionParser: it retains nothing,

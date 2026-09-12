@@ -424,14 +424,12 @@ func TestRunner_RequestInitialize_NoLiveChild(t *testing.T) {
 // proving the exact envelope reached the child — type control_request,
 // request.subtype initialize, and a non-empty locally-minted request_id.
 //
-// An Interrupt follows in the same test to pin AC2's "same local source" clause:
+// MCP status and Interrupt follow in the same test to pin the shared local source:
 // all three control subtypes mint from one counter, so their request_ids must
-// differ. The distinct-id assertion is the SOLE detector for minting the
-// initialize id from a fresh per-subtype counter — every other assertion stays
-// green under that mutant, since the id is still non-empty, the byte-exact
-// marshal test uses a fixed literal id, and the nil-refusal path never mints. The
-// interrupt echo doubles as the FIFO barrier — stdin is a pipe, so once the
-// second line comes back the first already has.
+// differ. The distinct-id assertion is the detector for minting the initialize or
+// MCP status id from a fresh per-subtype counter. The interrupt echo doubles as
+// the FIFO barrier — stdin is a pipe, so once the third line comes back the first
+// two already have.
 func TestRunner_RequestInitialize_LiveChildDelivers(t *testing.T) {
 	t.Parallel()
 	out, stderr := &safeBuffer{}, &safeBuffer{}
@@ -460,6 +458,9 @@ func TestRunner_RequestInitialize_LiveChildDelivers(t *testing.T) {
 	if err := r.RequestInitialize(); err != nil {
 		t.Fatalf("RequestInitialize on a live child: %v", err)
 	}
+	if err := r.RequestMCPStatus(); err != nil {
+		t.Fatalf("RequestMCPStatus on a live child: %v", err)
+	}
 	if err := r.Interrupt(); err != nil {
 		t.Fatalf("Interrupt on a live child: %v", err)
 	}
@@ -484,13 +485,31 @@ func TestRunner_RequestInitialize_LiveChildDelivers(t *testing.T) {
 	if initialize.RequestID == "" {
 		t.Error("echoed initialize request_id is empty, want a locally-minted id")
 	}
+	mcpStatus, ok := bySubtype["mcp_status"]
+	if !ok {
+		t.Fatalf("no mcp_status line reached the child:\n%s", out.String())
+	}
+	if mcpStatus.Type != "control_request" {
+		t.Errorf("echoed mcp_status type = %q, want control_request", mcpStatus.Type)
+	}
+	if mcpStatus.RequestID == "" {
+		t.Error("echoed mcp_status request_id is empty, want a locally-minted id")
+	}
 
 	interrupt, ok := bySubtype["interrupt"]
 	if !ok {
 		t.Fatalf("no interrupt line reached the child:\n%s", out.String())
 	}
-	if initialize.RequestID == interrupt.RequestID {
-		t.Errorf("initialize and interrupt share request_id %q; both subtypes must mint from one control sequence", initialize.RequestID)
+	ids := map[string]bool{}
+	for subtype, request := range map[string]decodedControlRequest{
+		"initialize": initialize,
+		"mcp_status": mcpStatus,
+		"interrupt":  interrupt,
+	} {
+		if ids[request.RequestID] {
+			t.Errorf("%s reused request_id %q; all subtypes must mint from one control sequence", subtype, request.RequestID)
+		}
+		ids[request.RequestID] = true
 	}
 }
 
