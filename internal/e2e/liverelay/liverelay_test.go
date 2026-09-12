@@ -47,8 +47,8 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/noise"
-	"github.com/pyrycode/pyrycode/internal/pair"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -68,7 +68,15 @@ func TestLiveRelay_ListConversationsRoundTrip(t *testing.T) {
 
 	// Stage 2 — device identity (ephemeral, under a temp HOME auto-removed by t).
 	home := t.TempDir()
-	payload := runPyryPair(t, home)
+	payload, err := paireddevice.Setup(paireddevice.Config{
+		Home:         home,
+		InstanceName: "test",
+		Relay:        relay.baseWS,
+		DeviceName:   "phone-a",
+	})
+	if err != nil {
+		t.Fatalf("paireddevice.Setup: %v", err)
+	}
 	pubKey, err := base64.StdEncoding.DecodeString(payload.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
@@ -88,7 +96,7 @@ func TestLiveRelay_ListConversationsRoundTrip(t *testing.T) {
 	// daemon's resolveDialURL appends /v1/server — the endpoint the real relay
 	// serves. Do NOT copy the fakerelay test's /v2/server suffix: the real relay
 	// has no such route (it maps only /v1/server and /v1/client).
-	spawnDaemon(t, home, relay.baseWS)
+	spawnDaemon(t, home, payload.Relay)
 
 	// Stage 5 — wait until the daemon's binary connection is registered with the
 	// relay, then dial the phone. See waitBinaryRegistered for why /healthz
@@ -98,7 +106,7 @@ func TestLiveRelay_ListConversationsRoundTrip(t *testing.T) {
 	serverID := readPersistedServerID(t, home)
 	dialCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	phone, err := fakephone.Dial(dialCtx, relay.baseWS, serverID, payload.Token, "phone-a")
+	phone, err := fakephone.Dial(dialCtx, payload.Relay, serverID, payload.Token, "phone-a")
 	if err != nil {
 		t.Fatalf("phone dial: %v", err)
 	}
@@ -568,45 +576,6 @@ func ensurePyryBuilt(t *testing.T) string {
 		t.Fatalf("liverelay: %v", pyryBinErr)
 	}
 	return pyryBinPath
-}
-
-// runPyryPair runs the offline `pyry pair` verb under HOME=home and returns the
-// decoded pair payload (bearer token + responder static pubkey the phone pins).
-func runPyryPair(t *testing.T, home string) pair.Payload {
-	t.Helper()
-	bin := ensurePyryBuilt(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, "pair", "-pyry-name=test", "--name=phone-a")
-	cmd.Env = childEnv(home)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if ctx.Err() == context.DeadlineExceeded {
-		t.Fatalf("liverelay: pyry pair timed out\nstderr:\n%s", stderr.String())
-	}
-	if err != nil {
-		t.Fatalf("liverelay: pyry pair failed: %v\nstdout:\n%s\nstderr:\n%s",
-			err, stdout.String(), stderr.String())
-	}
-	return decodePairPayload(t, stdout.Bytes())
-}
-
-// decodePairPayload scans pair's stdout for the encoded payload line.
-func decodePairPayload(t *testing.T, stdout []byte) pair.Payload {
-	t.Helper()
-	for _, line := range strings.Split(string(stdout), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if p, err := pair.Decode(line); err == nil {
-			return p
-		}
-	}
-	t.Fatalf("no decodable pair payload found in stdout:\n%s", stdout)
-	return pair.Payload{}
 }
 
 // readPersistedServerID reads the daemon's server-id, polling for the file.
