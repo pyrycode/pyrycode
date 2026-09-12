@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"time"
 
@@ -102,6 +104,14 @@ func negotiateCapabilities(advertised []string) []string {
 		}
 	}
 	return out
+}
+
+func workspaceRoot() string {
+	home, err := os.UserHomeDir()
+	if err != nil || !filepath.IsAbs(home) {
+		return ""
+	}
+	return filepath.Join(home, "pyry-workspace")
 }
 
 // handleNoiseInit processes an inbound noise_init frame. The initial
@@ -213,6 +223,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 		ServerID:        m.cfg.ServerID,
 		ConnID:          s.connID,
 		Capabilities:    negotiated, // omitempty: nil/empty → key absent
+		WorkspaceRoot:   workspaceRoot(),
 	})
 	if err != nil {
 		m.cfg.Logger.Warn("relay: v2 handshake reject",
