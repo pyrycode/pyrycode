@@ -514,6 +514,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`resync`** | binary → phone | no | **New in v2.** Mid-turn-reconnect resync marker — the advertised `last_event_id` aged out of the ring; phone must full-reload (#647). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`session_transition`** | binary → phone | no | **New in v2** (interactive, capability-gated). Session-boundary marker for `pyrycode-mobile#336` (#656). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`model_list`** | binary → phone | no | **New in v2** (interactive, capability-gated). The menu of models claude will accept for a conversation, from its `initialize` control reply — identifiers, labels, per-model effort levels and auto-mode support (#1704). **Not** the per-turn announcement [`model_announced`](#model_announced) carries. Shape declared by #1704, fixtures and section by #1705, the mapping onto this wire shape by #1848 and the **producer** by #1849, proven end to end by #1845 — it is emitted on the live interactive turn lane, once per child spawn to whatever clients are connected at that instant, and **best-effort rather than guaranteed**: several loss points mean a client may see none at all, so never block a model menu on it. It also has a **connect-time snapshot** (#1863/#1867, widened by #2124 to cover every conversation the registry carries), so a client that missed the live frame is brought current on its next connect. See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`mcp_status`** | binary → phone | no | **New in v2.** The one conversation-scoped MCP server-status frame reserved for both a future live push and a correlated on-demand reply. #2373 declares the shape and fixture **before either producer lands**: nothing maps or emits it yet, and this slice declares no inbound request verb. #2374 owns the strict-config source gate, #2375 the interactive mapping and publication, and #2276 the separate request verb and correlated reply. See [`mcp_status`](#mcp_status). |
 | **`slash_command_list`** | binary → phone | no | **New in v2** (interactive, capability-gated). The slash commands this session's working directory will accept, from the `commands` array of the same `initialize` control reply — names, argument hints, descriptions and aliases (#1727). The sibling [`model_list`](#model_list) inventories *identities* from that reply; this one inventories *verbs*. Consumers are pyrycode-desktop#681 (Actions-menu grey-out) and pyrycode-desktop#694 (slash-command type-ahead). Type declared by #1726, shape by #1727, fixtures and section by #1718, the mapping onto this wire shape by #2001 with its frame-level byte bound by #2002, and the **producer** by #2003, proven end to end by #2008 — it is emitted on the live interactive turn lane, once per child spawn to whatever clients are connected at that instant, and **best-effort rather than guaranteed**. It also has a **connect-time snapshot** (#2006/#2007, proven by #2009), so a client that missed the live frame is brought current on its next connect. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`question_shown`** | binary → phone | no | **New in v2** (interactive, capability-gated). One whole batch of the clarifying questions claude's `AskUserQuestion` tool asks — questions, their options and a per-question multi-select flag, in claude's own order (#1962). The consumer is pyrycode-desktop#849. Type declared by #1962, shape by #1963, fixtures and section by #1964; the parse is #1965 and the producer #1973, which emits it the moment claude asks. **Not** a [`modal_shown`](#modal_shown): that frame is one prompt with flat options, this one is a batch with **two nesting levels** and a **two-verb** inbound half ([`question_answer`](#question_answer) / [`question_refused`](#question_refused), #1983) rather than the modal pair's single answer. See [Question](#question-v2). |
 | **`question_dismissed`** | binary → phone | no | **New in v2** (interactive, capability-gated). The frame that retires a [`question_shown`](#question_shown) batch, so a client clears the panel instead of rendering an ask that is already dead (#1974). Carries no claude-authored string. Its own type and **not** a [`modal_dismissed`](#modal_dismissed), which identifies what it clears by `modal_id` and routes to the modal panel. #1973 emits it on every no-answer terminal path, #1990 on a refusal and #1991 on an answer — all three terminal outcomes. See [Question](#question-v2). |
@@ -2035,8 +2036,8 @@ client author looking for them should stop looking: `cwd`, `memory_paths` and
 `messaging_socket_path` are the **operator's local filesystem**, and `session_id` is
 **`claude`'s own session identity**, which is not the daemon's conversation identity.
 None of the four is even decoded by the daemon, so the frame cannot carry them by
-accident. **MCP server status is a different frame's** — #2275 declares it — and is
-deliberately not folded in here.
+accident. **MCP server status is a different frame's** — #2373 declares
+[`mcp_status`](#mcp_status) — and is deliberately not folded in here.
 
 **SECURITY.** Both values are `claude`-authored strings that crossed the subprocess
 trust boundary. They are safe to **render as inert text** and never to feed to an
@@ -2217,6 +2218,59 @@ Four things a client will otherwise get wrong:
 **4. `truncated_fields` is load-bearing, not decoration.** A client that ignores it presents claude's cut text — or a cut list — as complete, and would offer back a `value` it was never told was truncated.
 
 **SECURITY.** `resolved_model`, `value`, `display_name` and **every string in `effort_levels`** are claude-authored strings that crossed the subprocess trust boundary. They are safe to **render as inert text** and must never be fed to an HTML sink, an attribute, or a URL. The daemon **bounds them but does not sanitize them** — nothing on this path strips control characters or terminal escape sequences — so they stay untrusted, model-influenced text all the way to the client, and **the render boundary that owes the sanitization is the client's, not the daemon's**. The frame is a **report, never a control input**, with one amendment the sibling frames do not need: `value` is the first field in this family a client is meant to send **back**, and publishing it does not make it trusted. It is still claude's text arriving on an inbound path, and the daemon re-validates it (property 3 above) rather than trusting that it came from a list the daemon itself published.
+
+#### `mcp_status`
+
+Direction **binary → phone** (outbound v2 only; the v1 inbound type predicate
+rejects it). This is the single conversation-scoped MCP server snapshot shared by
+the later live publication and on-demand reply paths. The reply will use this same
+payload, correlated at the envelope, rather than minting a second status shape.
+This slice declares no inbound request verb.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation whose child supplied the report. Always present. |
+| `servers` | array of object | The retained MCP servers in claude's order. **Always present, never `null`**; an admitted report with no servers serialises as `[]`. |
+| `dropped_servers` | int | Daemon-derived number of tail entries omitted when the source report was bounded. Always present as a number, including `0`; copied from the neutral event rather than inferred from the retained list length. |
+
+Each element of `servers` always carries all five keys below. Missing or
+zero-valued source strings encode as `""`; none of the fields is optional.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `name` | string | The server object's name. This is **not** `serverInfo.name`, which is excluded. |
+| `status` | string | claude's open-set status text. It is a report, not a state a client may treat as authority. |
+| `error` | string | claude's optional error prose; `""` when none was reported. The producer has already capped it to 256 UTF-8 bytes, but neither the wire layer nor the client may treat that size bound as sanitization. |
+| `scope` | string | claude's open-set scope text. It describes the report and grants no access or authority. |
+| `version` | string | `serverInfo.version`, carried as an opaque string; `""` when absent. Do not parse it as a required semantic version. |
+
+`dropped_servers` preserves the source event's accounting. The daemon retains a
+prefix of the decoded server array and records every omitted tail entry, so
+`len(servers) + dropped_servers` is the original decoded array length. The wire
+layer does not recompute the count, and the retained length is not a substitute
+for reading it. The producer's entry cap is not a wire constant and clients must
+not hardcode one.
+
+**The frame is declared before either producer.** #2373 fixes the discriminator,
+payload and encoding fixture, but nothing maps, publishes or answers with
+`mcp_status` yet. #2374 owns the source eligibility boundary, #2375 the live
+interactive mapper and emitter, and #2276 the separate inbound request and
+correlated reply. Until those land, a client must not wait for this frame or infer
+anything from its absence.
+
+**What this frame cannot carry.** There is no MCP `config`, tool list,
+`serverInfo.name`, request id or raw claude response in the payload. Those values
+are absent from the wire types rather than merely omitted by convention, so MCP
+command lines, argv and environments have no field through which to cross this
+boundary. [`session_facts`](#session_facts) remains separate and carries no MCP
+fields.
+
+**SECURITY.** Every string in a server row is untrusted claude-authored text. The
+wire layer does not sanitize it. A client must render each field as **inert text**,
+escaped for its render context, and must never feed it to an HTML sink, attribute,
+URL, command, endpoint selector or authorization decision. In particular,
+`status` and `scope` are claude's claims, not instructions or capabilities, and
+`error`'s byte cap is only a size bound. No server string is an actuator.
 
 #### `slash_command_list`
 
