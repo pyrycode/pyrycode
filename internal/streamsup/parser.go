@@ -1778,6 +1778,20 @@ const maxModelWindowEntries = 16
 // bound unnecessary rather than merely unmeasured.
 const maxTurnEndStopField = 256
 
+// maxMCPStatusServers caps the retained prefix of one turnevent.MCPStatus.
+// Claude controls the decoded array length, so the per-entry Error bound alone
+// cannot bound the event. Sixteen leaves ample room above the three-server live
+// capture while keeping result allocation independent of an inflated tail.
+// Overflow is reported in MCPStatus.DroppedServers rather than hidden.
+const maxMCPStatusServers = 16
+
+// maxMCPStatusError caps one MCPServerStatus.Error at construction. Error is
+// arbitrary Claude-authored prose rather than a token, so a byte cut remains a
+// truthful partial rendering. truncateField also removes a partial trailing rune,
+// keeping the event's string valid UTF-8. This separate constant makes the status
+// report's budget independent of unrelated 256-byte fields.
+const maxMCPStatusError = 256
+
 // controlResponseSuccess is the ONE response.subtype whose payload this parser
 // will read. Byte-exact equality against a DAEMON-authored constant, never a fold
 // or a prefix: it is the SHARED PRECONDITION of both of emitModelList's emits, and
@@ -3283,6 +3297,33 @@ type controlResponseLine struct {
 	} `json:"response"`
 }
 
+// mcpStatusResponseLine is the isolated decode target for a status report carried
+// by a top-level control_response. MCPServers stays raw long enough to distinguish
+// a present empty array from a missing or null key. Request id and every sibling
+// payload key are omitted, so neither correlation nor logging can accidentally
+// start depending on them.
+type mcpStatusResponseLine struct {
+	Response struct {
+		Subtype  string `json:"subtype"`
+		Response struct {
+			MCPServers json.RawMessage `json:"mcpServers"`
+		} `json:"response"`
+	} `json:"response"`
+}
+
+// mcpStatusServerLine declares only the fields the neutral event carries. Config,
+// tools and serverInfo.name never cross the decode target, which is stronger than
+// decoding them and relying on a later projection to remember to discard them.
+type mcpStatusServerLine struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Error      string `json:"error"`
+	Scope      string `json:"scope"`
+	ServerInfo struct {
+		Version string `json:"version"`
+	} `json:"serverInfo"`
+}
+
 // controlAckLine is the decode target of the ACK CORRELATION (#2064), and it is
 // deliberately a second, separate target rather than two fields added to
 // controlResponseLine above — that type's doc states the rung-disturbance this
@@ -4667,6 +4708,9 @@ func (p *Parser) consumeLine(line []byte) {
 		p.emitContextUsage(line)
 		p.noteControlAck(line)
 		p.emitModelList(line)
+		if status, ok := decodeMCPStatus(line); ok {
+			p.emit(status)
+		}
 	case "control_request":
 		// The first control line claude INITIATES rather than answers (#2282), and the
 		// direction is the whole novelty: every other control_request in this package is
@@ -7228,6 +7272,48 @@ func (p *Parser) emitContextUsage(line []byte) {
 		MemoryFiles:        eventMemoryFiles,
 		DroppedMemoryFiles: droppedMemoryFiles,
 	})
+}
+
+// decodeMCPStatus recognises a status report by shape rather than request
+// correlation. Its input is the complete top-level control_response line selected
+// by consumeLine; nested strings are never re-scanned into this function.
+//
+// It has no logger and returns false for every rejection or decode failure. That
+// makes Parser.logControlResponse, called independently by emitModelList, the one
+// content-free record owner for the line. The dedicated decode types also make
+// request id, config, tools, raw response bytes and serverInfo.name unreachable.
+func decodeMCPStatus(line []byte) (turnevent.MCPStatus, bool) {
+	var response mcpStatusResponseLine
+	if err := json.Unmarshal(line, &response); err != nil ||
+		response.Response.Subtype != controlResponseSuccess {
+		return turnevent.MCPStatus{}, false
+	}
+
+	var entries []mcpStatusServerLine
+	if len(response.Response.Response.MCPServers) == 0 ||
+		json.Unmarshal(response.Response.Response.MCPServers, &entries) != nil || entries == nil {
+		// A present [] decodes to a non-nil empty slice and is emitted. Missing and
+		// null both leave entries nil; any non-array shape fails the second decode.
+		return turnevent.MCPStatus{}, false
+	}
+
+	dropped := 0
+	if len(entries) > maxMCPStatusServers {
+		dropped = len(entries) - maxMCPStatusServers
+		entries = entries[:maxMCPStatusServers]
+	}
+	servers := make([]turnevent.MCPServerStatus, len(entries))
+	for i, entry := range entries {
+		errorText, _ := truncateField(entry.Error, maxMCPStatusError)
+		servers[i] = turnevent.MCPServerStatus{
+			Name:    entry.Name,
+			Status:  entry.Status,
+			Error:   errorText,
+			Scope:   entry.Scope,
+			Version: entry.ServerInfo.Version,
+		}
+	}
+	return turnevent.MCPStatus{Servers: servers, DroppedServers: dropped}, true
 }
 
 // emitModelList decodes one top-level control_response line and emits AT MOST ONE

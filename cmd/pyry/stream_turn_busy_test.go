@@ -633,6 +633,11 @@ func TestTurnMarkFor_TotalOverEveryVariant(t *testing.T) {
 		// ends a turn. The whitelist's default already answers it, so this row asserts
 		// the existing lifecycle-neutral behavior rather than adding a production arm.
 		{turnevent.ContextUsage{Model: "claude-haiku-4-5", TotalTokens: 10}, turnMarkNone},
+		// #2274. An MCP status report is informational inventory and neither begins nor
+		// ends a turn. Like ContextUsage, the whitelist's default already answers
+		// turnMarkNone; this row makes that lifecycle decision explicit in the exhaustive
+		// variant table without adding a production arm.
+		{turnevent.MCPStatus{Servers: []turnevent.MCPServerStatus{{Name: "example"}}}, turnMarkNone},
 		// #1854. Neither an opener nor a closer, for the row above's reason and one
 		// step more strongly: the inventory is reported once per initialize
 		// exchange, which is not a turn boundary and not even per-turn. The

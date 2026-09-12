@@ -23,7 +23,7 @@ import "encoding/json"
 // Event is the sealed sum type of outbound turn events: TextChunk,
 // ThoughtChunk, ToolStart, ToolUpdate, ToolProgress, TurnEnd, BackgroundTaskStarted,
 // BackgroundTaskUpdated, BackgroundTaskRoster, BackgroundTaskProgress,
-// ThinkingProgress, ContextUsage, the
+// ThinkingProgress, ContextUsage, MCPStatus, the
 // internal-only status peers Stall, ApiRetry, and Compacting, the compaction
 // boundary CompactionBoundary, and the diagnostic marker Unrecognized.
 // The unexported marker
@@ -1711,6 +1711,40 @@ type ContextUsageMemoryFile struct {
 	Tokens int
 }
 
+// MCPStatus is one shape-recognised reading of the MCP servers Claude reports.
+// It is internal-only in this slice: no wire adapter publishes it and no daemon
+// behaviour is keyed on it. A present empty Servers slice is meaningful — Claude
+// supplied mcpServers:[] — so the producer emits that value rather than collapsing
+// it with a missing or unusable payload.
+//
+// Servers preserves Claude's order and retains at most the producer's
+// maxMCPStatusServers entries. DroppedServers reports every entry omitted from the
+// tail, so len(Servers) + DroppedServers is the decoded array's original length.
+// The count is daemon-derived; every string below remains Claude-authored.
+type MCPStatus struct {
+	Servers        []MCPServerStatus
+	DroppedServers int
+}
+
+// MCPServerStatus is one entry of MCPStatus, not an Event itself. It deliberately
+// carries only the server object's top-level name, status, error and scope plus
+// serverInfo.version. Config, tools and serverInfo.name are structurally absent, so
+// consumers cannot accidentally recover credentials, argv, tool metadata or a
+// second spelling of the server name from this value.
+//
+// All fields are copied without canonicalisation and remain untrusted,
+// unsanitized text. Error is the one free-form prose field and is capped by the
+// producer at maxMCPStatusError bytes with valid UTF-8 output. A future renderer
+// must treat every string as inert Claude-authored content; publishing this report
+// does not make any field suitable as an actuator or command argument.
+type MCPServerStatus struct {
+	Name    string
+	Status  string
+	Error   string
+	Scope   string
+	Version string
+}
+
 // SlashCommand is one entry of a SlashCommandList: the list's element type, NOT
 // an Event, so it carries no marker — BackgroundTask's and ModelOption's shape,
 // for their reason.
@@ -2802,6 +2836,7 @@ func (ModelAnnounced) isTurnEvent()         {}
 func (SessionFacts) isTurnEvent()           {}
 func (ModelList) isTurnEvent()              {}
 func (ContextUsage) isTurnEvent()           {}
+func (MCPStatus) isTurnEvent()              {}
 func (SlashCommandList) isTurnEvent()       {}
 func (Stall) isTurnEvent()                  {}
 func (ApiRetry) isTurnEvent()               {}
