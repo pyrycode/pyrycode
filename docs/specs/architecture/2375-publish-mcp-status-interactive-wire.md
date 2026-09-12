@@ -115,3 +115,16 @@ The refiner estimated two production files. The current e2e stand-in does not an
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-12
+
+## Revisions
+
+### 2026-09-12 — Synchronize the bootstrap no-cursor drop before phone dial
+
+The first implemented e2e run showed that daemon socket readiness does not imply the
+bootstrap child has completed its initialize/status exchange: a fast phone could connect
+and route the conversation before that status reached `interactiveTurnEmitterV2.Handle`,
+making the bootstrap frame visible and obscuring replacement-child cardinality. The test
+now waits for the fixed, content-free `kind=mcp_status` no-cursor diagnostic before dialing
+the phone. It then completes the planned turn, kills the child, and observes the replacement
+status on the already-open connection. Production behavior and the security boundary are
+unchanged; this only makes the hermetic proof deterministic.

@@ -2981,6 +2981,157 @@ func TestInteractiveTurnEmitterV2_SessionFactsNoLifecycleMutation(t *testing.T) 
 	}
 }
 
+var emitterMCPStatusFixture = turnevent.MCPStatus{
+	Servers: []turnevent.MCPServerStatus{
+		{
+			Name:    "QQ-Zulu-Name-ZZ",
+			Status:  "QQ-Zulu-Status-ZZ",
+			Error:   "QQ-Zulu-Error-ZZ",
+			Scope:   "QQ-Zulu-Scope-ZZ",
+			Version: "QQ-Zulu-Version-ZZ",
+		},
+		{
+			Name:    "QQ-Alpha-Name-ZZ",
+			Status:  "QQ-Alpha-Status-ZZ",
+			Error:   "QQ-Alpha-Error-ZZ",
+			Scope:   "QQ-Alpha-Scope-ZZ",
+			Version: "QQ-Alpha-Version-ZZ",
+		},
+	},
+	DroppedServers: 7,
+}
+
+func TestInteractiveTurnEmitterV2_MCPStatusFansOutAndRecordsOnce(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{
+		{ConnID: "a", Interactive: true},
+		{ConnID: "b", Interactive: true},
+		{ConnID: "c", Interactive: false},
+	}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), emitterMCPStatusFixture)
+
+	for _, connID := range []string{"a", "b"} {
+		got := pushesFor(bcast.pushes, connID)
+		if len(got) != 1 || got[0].env.Type != protocol.TypeMCPStatus {
+			t.Fatalf("conn %s pushes = %#v, want one %s", connID, got, protocol.TypeMCPStatus)
+		}
+	}
+	if got := pushesFor(bcast.pushes, "c"); len(got) != 0 {
+		t.Fatalf("non-interactive conn received %d envelopes, want 0", len(got))
+	}
+
+	var payload protocol.MCPStatusPayload
+	pushA := pushesFor(bcast.pushes, "a")[0].env
+	if err := json.Unmarshal(pushA.Payload, &payload); err != nil {
+		t.Fatalf("decode mcp_status: %v", err)
+	}
+	if payload.ConversationID != testConvID || payload.DroppedServers != emitterMCPStatusFixture.DroppedServers {
+		t.Errorf("payload identity/count = (%q,%d), want (%q,%d)", payload.ConversationID,
+			payload.DroppedServers, testConvID, emitterMCPStatusFixture.DroppedServers)
+	}
+	if len(payload.Servers) != 2 || payload.Servers[0].Name != "QQ-Zulu-Name-ZZ" ||
+		payload.Servers[1].Name != "QQ-Alpha-Name-ZZ" {
+		t.Fatalf("server order changed: %+v", payload.Servers)
+	}
+
+	ring, gap := e.ring.After(testConvID, 0)
+	if gap || len(ring) != 1 {
+		t.Fatalf("ring = %#v (gap=%v), want one logical event", ring, gap)
+	}
+	if ring[0].Type != protocol.TypeMCPStatus || !bytes.Equal(ring[0].Payload, pushA.Payload) {
+		t.Fatalf("ring event differs from wire: ring=%s/%s wire=%s/%s",
+			ring[0].Type, ring[0].Payload, pushA.Type, pushA.Payload)
+	}
+	if pushA.EventID == nil || *pushA.EventID != ring[0].ID {
+		t.Fatalf("wire event id = %v, want ring id %d", pushA.EventID, ring[0].ID)
+	}
+}
+
+func TestInteractiveTurnEmitterV2_EmptyMCPStatusIsLifecycleNeutral(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.MCPStatus{})
+
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, []string{protocol.TypeMCPStatus}) {
+		t.Fatalf("idle empty mcp_status envelopes = %v, want [%s]", got, protocol.TypeMCPStatus)
+	}
+	if e.inTurn || e.turnID != "" || e.currentState != "" {
+		t.Fatalf("empty mcp_status changed lifecycle: inTurn=%v turnID=%q state=%q",
+			e.inTurn, e.turnID, e.currentState)
+	}
+	var payload protocol.MCPStatusPayload
+	if err := json.Unmarshal(bcast.pushes[0].env.Payload, &payload); err != nil {
+		t.Fatalf("decode empty mcp_status: %v", err)
+	}
+	if payload.Servers == nil || len(payload.Servers) != 0 {
+		t.Fatalf("empty servers = %#v, want non-nil empty slice from wire []", payload.Servers)
+	}
+}
+
+func TestInteractiveTurnEmitterV2_MCPStatusPreservesMidTurnSequence(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "before"})
+	turnID, state := e.turnID, e.currentState
+	e.Handle(context.Background(), emitterMCPStatusFixture)
+	if !e.inTurn || e.turnID != turnID || e.currentState != state {
+		t.Fatalf("mcp_status disturbed turn: inTurn=%v turnID=%q/%q state=%q/%q",
+			e.inTurn, e.turnID, turnID, e.currentState, state)
+	}
+	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m2", Text: "after"})
+	e.Handle(context.Background(), turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+
+	wantTypes := []string{
+		protocol.TypeTurnState,
+		protocol.TypeAssistantDelta,
+		protocol.TypeMCPStatus,
+		protocol.TypeAssistantDelta,
+		protocol.TypeTurnEnd,
+		protocol.TypeTurnState,
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("mid-turn mcp_status order = %v, want %v", got, wantTypes)
+	}
+	deltas := assistantDeltas(t, bcast.pushes)
+	if len(deltas) != 2 || deltas[0].TurnID != turnID || deltas[1].TurnID != turnID ||
+		deltas[0].Seq != 0 || deltas[1].Seq != 1 {
+		t.Fatalf("deltas around mcp_status = %+v, want same turn %q at seq 0,1", deltas, turnID)
+	}
+}
+
+func TestInteractiveTurnEmitterV2_MCPStatusEventKindIsContentFree(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	e := newInteractiveTurnEmitterV2(&stubCursor{}, &fakeInteractiveBcast{}, logger)
+
+	e.Handle(context.Background(), emitterMCPStatusFixture)
+
+	got := logs.String()
+	if !strings.Contains(got, "kind=mcp_status") || strings.Contains(got, "kind=unknown") {
+		t.Fatalf("no-cursor log does not name mcp_status safely: %s", got)
+	}
+	for _, server := range emitterMCPStatusFixture.Servers {
+		for _, value := range []string{server.Name, server.Status, server.Error, server.Scope, server.Version} {
+			if strings.Contains(got, value) {
+				t.Fatalf("server value %q leaked into log: %s", value, got)
+			}
+		}
+	}
+}
+
 // emitterModelListDropped is the entry count claude sent beyond streamsup's
 // maxModelListEntries. Conspicuously non-zero so the wire assertion below cannot
 // pass against a mapping that hard-codes 0 or recomputes len(Models), and a value
