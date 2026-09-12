@@ -1,0 +1,25 @@
+[
+  {
+    "type": "addRules",
+    "rules": [
+      {
+        "toolName": "Bash",
+        "ruleContent": "touch pyrycode-always-allow-witness.txt"
+      }
+    ],
+    "behavior": "allow",
+    "destination": "localSettings"
+  },
+  {
+    "type": "addDirectories",
+    "directories": [
+      "$WORKDIR"
+    ],
+    "destination": "session"
+  },
+  {
+    "type": "setMode",
+    "mode": "acceptEdits",
+    "destination": "session"
+  }
+]

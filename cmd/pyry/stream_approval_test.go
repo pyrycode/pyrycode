@@ -652,7 +652,9 @@ func TestStreamApproval_RoundTrip(t *testing.T) {
 			optionID:    string(turnevent.PermissionOptionKindAllowAlways),
 			alwaysAllow: true,
 			offer: json.RawMessage(`[
+				{"type":"setMode","mode":"acceptEdits","destination":"session"},
 				{"type":"addRules","rules":[{"toolName":"Bash"},{"toolName":"Read","ruleContent":"//src/**"}],"behavior":"allow","destination":"userSettings"},
+				{"type":"addDirectories","directories":["/test"],"destination":"session"},
 				{"type":"addRules","rules":[{"toolName":"Write","ruleContent":"//tmp/**"}],"behavior":"allow","destination":"localSettings"}
 			]`),
 			wantBehavior: permbridge.BehaviorAllow,

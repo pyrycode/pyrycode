@@ -2345,7 +2345,7 @@ Direction **binary → phone** (outbound v2 modal-surfaced event; not in `v1Type
 | `options` | array | Ordered list of `{id, label}` choices. **Array order is the canonical display/selection order** (claude's display order, allow-first). For `permission` the ids are the four `turnevent.PermissionOptionKind`s (`allow_once`/`allow_always`/`reject_once`/`reject_always`); for `trust`, `proceed`/`exit`. |
 | `default_option_id` | string | The `id` of the default/highlighted option. **Invariant:** MUST equal one of `options[].id`. **Fail-safe convention (#716):** the producer sets this to the **deny** option (`reject_once` / `exit`), *not* `options[0]`, so a careless confirm on this remote surface denies rather than allows. Display order (allow-first) and the highlighted default are deliberately decoupled. This is UI pre-selection only — answering is gated separately (#702) and deny-on-timeout is the resolution half's (#717). |
 | `always_allow` | object | Always-present description of whether this modal can offer a “don't ask again” choice. Contains the two always-present fields below. It is display information only and does not authorize an answer. |
-| `always_allow.offered` | bool | `true` only when the complete Claude permission-suggestion batch is supported and within every bound. `false` means no offer is available. |
+| `always_allow.offered` | bool | `true` only when Claude supplied at least one command-rule grant and all retained rule grants pass validation and every bound. `false` means no offer is available. |
 | `always_allow.rules` | array of strings | When offered, one display string per rule in source update/rule order: `toolName` when `ruleContent` is absent, otherwise `toolName(ruleContent)` (a present empty content renders as `toolName()`). When unavailable, this is the non-null empty array `[]`; the daemon never publishes a prefix or truncated list. |
 | `reason` | any JSON value, optional | Claude-authored display context copied from the corresponding `can_use_tool.decision_reason`. Its JSON shape is open: clients must not assume a string or object. |
 | `reason_type` | string, optional | Claude-authored category copied verbatim from `can_use_tool.decision_reason_type`. The vocabulary is open; clients must tolerate unknown future values. |
@@ -2355,7 +2355,9 @@ Direction **binary → phone** (outbound v2 modal-surfaced event; not in `v1Type
 
 The five optional fields are populated only by the correspondingly named Claude permission-ask fields; the daemon never derives them from raw tool `input`. An ordinary ask may omit both `reason` and `reason_type`, and a present category does not imply that `reason` is present. Empty strings, a false `default_to_no`, and an absent or empty reason are omitted. Treat every supplied value as untrusted display content rather than daemon-authored chrome or decision authority.
 
-`always_allow` is offered only for a non-suppressed stdio permission ask whose raw `permission_suggestions` is a non-empty JSON array of no more than **16 KiB**. Every update must have `type:"addRules"`, `behavior:"allow"`, and a non-empty `rules` array; every rule must have a non-empty string `toolName` and may have a string `ruleContent` (an explicit `null` is not accepted). The complete batch may contain at most **16 rules**, and each rendered rule may contain at most **1024 bytes**. Unknown object keys are tolerated, but every supported-subset and size check is all-or-nothing: absent, `null`, empty, suppressed, malformed, unsupported, or over-bound suggestions yield `{ "offered": false, "rules": [] }`, never a partial offer. The approval-MCP and non-permission modal paths carry that same unavailable shape.
+`always_allow` is offered only for a non-suppressed stdio permission ask whose raw `permission_suggestions` is a non-empty JSON array of no more than **16 KiB**. The daemon omits the `addDirectories` and `setMode` alternatives that Claude can supply beside command-rule grants. Those alternatives are never displayed as rules, retained, or granted. Every remaining update must have `type:"addRules"`, `behavior:"allow"`, and a non-empty `rules` array. Every rule must have a non-empty string `toolName` and may have a string `ruleContent`; explicit `null` is rejected. At least one rule grant must remain. The retained batch may contain at most **16 rules**, and each rendered rule may contain at most **1024 bytes**.
+
+Unknown object keys are tolerated. Unknown update types, malformed or non-allow rule grants, suppression, and any exceeded bound reject the entire offer. The result is `{ "offered": false, "rules": [] }`, never a valid prefix of a rejected rule batch. Absent, `null`, empty, and alternative-only lists are also unavailable. The approval-MCP and non-permission modal paths carry that same unavailable shape.
 
 All strings inside `permission_suggestions`, and every rendered rule derived from them, originate with Claude. Clients must treat them as untrusted display text, render them inertly, and must not interpret them as daemon-authored authority. The daemon does not put their content in log attributes.
 
@@ -2367,7 +2369,12 @@ Direction **phone → binary** (inbound v2 control). Intercepted by the v2 sessi
 |---|---|---|
 | `modal_id` | string | The modal being answered. Validated against the daemon's current outstanding `modal_id`; a stale one is rejected (#706, first-answer-wins). |
 | `option_id` | string | The selected `options[].id`. |
-| `answer_token` | string | Client-minted idempotency key — see the security note below. |
+| `answer_token` | string | Client-minted idempotency key. See the security note below. |
+| `always_allow` | bool, optional | Apply the retained offered rules for this session when the answer is an authorized allow. Defaults to false. |
+
+The optional `always_allow` Boolean defaults to false. False and absent preserve the existing allow response bytes. When true accompanies an authorized allow answer, the daemon may grant only the validated rules retained with that outstanding permission modal. Every granted update has its destination replaced with `session`, even if Claude suggested a persistent destination. Rule and update order are preserved. The client cannot supply rule bytes or a destination.
+
+True cannot turn a deny into an allow. An unoffered or suppressed permission ask still receives only the ordinary one-time allow. Unknown, stale, consumed, non-permission, and interaction-required modals retain their existing behavior. Consuming the modal remains the one-shot boundary, so replay cannot grant its rules twice.
 
 #### `modal_cancel`
 

@@ -116,9 +116,9 @@ type permissionRuleInput struct {
 	RuleContent json.RawMessage `json:"ruleContent"`
 }
 
-// ParseAlwaysAllow validates claude-authored permission suggestions as one
-// bounded batch. Every unavailable or invalid shape returns the zero value;
-// partial and truncated offers are never returned.
+// ParseAlwaysAllow validates the rule grants in a bounded Claude-authored
+// suggestion batch. Directory and mode alternatives are omitted, never granted.
+// Any invalid rule grant rejects the whole offer; rules are never truncated.
 func ParseAlwaysAllow(raw json.RawMessage, suppressed bool) AlwaysAllow {
 	offer, _ := parseAlwaysAllow(raw, suppressed)
 	return offer
@@ -146,10 +146,15 @@ func parseAlwaysAllow(raw json.RawMessage, suppressed bool) (AlwaysAllow, string
 		return AlwaysAllow{}, "empty_batch"
 	}
 
-	updates := make([]PermissionUpdate, len(input))
+	updates := make([]PermissionUpdate, 0, len(input))
 	rendered := make([]string, 0)
 	totalRules := 0
 	for i, update := range input {
+		// Claude offers these alongside command rules. They are separate,
+		// broader choices that this command-rule approval does not grant.
+		if update.Type == "addDirectories" || update.Type == "setMode" {
+			continue
+		}
 		if update.Type != "addRules" {
 			return AlwaysAllow{}, fmt.Sprintf("update_%d_type_unsupported", i)
 		}
@@ -166,7 +171,7 @@ func parseAlwaysAllow(raw json.RawMessage, suppressed bool) (AlwaysAllow, string
 		if totalRules > maxAlwaysAllowRules {
 			return AlwaysAllow{}, "rule_count_over_16"
 		}
-		updates[i] = PermissionUpdate{Type: update.Type, Behavior: update.Behavior, Rules: make([]PermissionRule, len(update.Rules))}
+		validated := PermissionUpdate{Type: update.Type, Behavior: update.Behavior, Rules: make([]PermissionRule, len(update.Rules))}
 		for j, rule := range update.Rules {
 			if rule.ToolName == "" {
 				return AlwaysAllow{}, fmt.Sprintf("update_%d_rule_%d_tool_name_empty", i, j)
@@ -187,9 +192,13 @@ func parseAlwaysAllow(raw json.RawMessage, suppressed bool) (AlwaysAllow, string
 			if len(text) > maxRenderedRuleBytes {
 				return AlwaysAllow{}, fmt.Sprintf("update_%d_rule_%d_rendered_over_1024_bytes", i, j)
 			}
-			updates[i].Rules[j] = stored
+			validated.Rules[j] = stored
 			rendered = append(rendered, text)
 		}
+		updates = append(updates, validated)
+	}
+	if len(updates) == 0 {
+		return AlwaysAllow{}, "no_rule_grants"
 	}
 	return AlwaysAllow{updates: updates, rules: rendered}, "offered"
 }
