@@ -260,9 +260,13 @@ continues.
 
 **Findings:**
 
-- [Trust boundaries] No findings — `claimMCPStatusQuery` is the single subprocess
-  response-claim boundary; `decodeMCPStatus` remains the single field/bounds mapping,
-  and `resolveBoundMCPStatus` treats every result as report-only untrusted text.
+- [Trust boundaries] RESOLVED MUST FIX — the first implementation passed the
+  requester-supplied lookup key to `turnbridge.MapEvent`, which could make a
+  network-authored identifier the reply's `ConversationID`. `resolveBoundRunner`
+  now returns the matched registry record's `Conversation.ID` alongside its runner,
+  and `resolveBoundMCPStatus` uses only that registry-owned value when mapping the
+  reply. `claimMCPStatusQuery` remains the single subprocess response-claim boundary,
+  and `decodeMCPStatus` remains the single field/bounds mapping.
 - [Tokens, secrets, credentials] No findings — no credential lifecycle changes. The
   query id is a daemon-minted correlation label, not authority, is never logged, and
   is echoed only across the existing child pipe.
@@ -297,6 +301,18 @@ continues.
 **Date:** 2026-09-12
 
 ## Revisions
+
+### 2026-09-12 — registry-owned conversation id stamps solicited replies
+
+Verifier review found that the requester-supplied conversation lookup key was also
+being passed to `turnbridge.MapEvent`, contrary to `MCPStatusFor`'s trust-boundary
+contract. `resolveBoundRunner` now returns the matched registry record's canonical
+`Conversation.ID` with the selected runner, and `resolveBoundMCPStatus` stamps the
+mapped payload with that value while keeping the requester key lookup-only. The
+resolver proof now binds the target conversation to a separately minted
+non-bootstrap session, arms bootstrap and bound runners with distinguishable results,
+and asserts that only the bound runner is queried. The security review was re-run
+against this design and remains PASS with the trust-boundary finding resolved.
 
 ### 2026-09-12 — generation revalidation preserves the runner lock hierarchy
 

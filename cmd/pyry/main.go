@@ -1020,7 +1020,8 @@ func runSupervisor(args []string) error {
 		activeInterrupter: activeInterrupter{
 			currentConv: active.CurrentConversation,
 			resolveRunner: func(convID string) (sessions.Runner, bool) {
-				return resolveBoundRunner(convReg, pool, convID)
+				runner, _, ok := resolveBoundRunner(convReg, pool, convID)
+				return runner, ok
 			},
 			log: logger,
 		},
@@ -1550,18 +1551,24 @@ func interruptRunner(r sessions.Runner) (interruptArm, error) {
 // enforcement point — without it Pool.Lookup("") returns the BOOTSTRAP session
 // (see errNoBoundSession / sessionRouter.resolve), so an unbound conversation's
 // interrupt would actuate the shared bootstrap claude (the #678 isolation break).
-// Every non-resolvable state returns (nil, false) so the caller stays inert; this
-// NEVER falls through to bootstrap.
-func resolveBoundRunner(convReg *conversations.Registry, pool *sessions.Pool, convID string) (sessions.Runner, bool) {
+// Every non-resolvable state returns (nil, "", false) so the caller stays inert;
+// this NEVER falls through to bootstrap. The returned conversation id comes from
+// the matched registry record so callers that stamp output never need to reflect
+// the untrusted lookup key.
+func resolveBoundRunner(
+	convReg *conversations.Registry,
+	pool *sessions.Pool,
+	convID string,
+) (sessions.Runner, conversations.ConversationID, bool) {
 	conv, ok := convReg.Get(conversations.ConversationID(convID))
 	if !ok || conv.CurrentSessionID == "" {
-		return nil, false
+		return nil, "", false
 	}
 	sess, err := pool.Lookup(sessions.SessionID(conv.CurrentSessionID))
 	if err != nil {
-		return nil, false
+		return nil, "", false
 	}
-	return sess.Runner(), true
+	return sess.Runner(), conv.ID, true
 }
 
 type mcpStatusQuerier interface {
@@ -1570,14 +1577,16 @@ type mcpStatusQuerier interface {
 
 // resolveBoundMCPStatus queries only the runner currently bound to convID and
 // shapes its bounded event through the same mapper as the automatic live path.
-// Every refusal returns the zero payload; there is no retained-status fallback.
+// The request id remains lookup-only; the mapped payload is stamped with the
+// registry-owned conversation id returned alongside the runner. Every refusal
+// returns the zero payload; there is no retained-status fallback.
 func resolveBoundMCPStatus(
 	ctx context.Context,
 	convReg *conversations.Registry,
 	pool *sessions.Pool,
 	convID string,
 ) (protocol.MCPStatusPayload, bool) {
-	runner, ok := resolveBoundRunner(convReg, pool, convID)
+	runner, canonicalID, ok := resolveBoundRunner(convReg, pool, convID)
 	if !ok {
 		return protocol.MCPStatusPayload{}, false
 	}
@@ -1589,7 +1598,7 @@ func resolveBoundMCPStatus(
 	if !ok {
 		return protocol.MCPStatusPayload{}, false
 	}
-	typ, mapped, ok := turnbridge.MapEvent(status, turnbridge.TurnContext{ConversationID: convID})
+	typ, mapped, ok := turnbridge.MapEvent(status, turnbridge.TurnContext{ConversationID: string(canonicalID)})
 	if !ok || typ != protocol.TypeMCPStatus {
 		return protocol.MCPStatusPayload{}, false
 	}

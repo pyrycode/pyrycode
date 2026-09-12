@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -112,16 +113,33 @@ func sentinelMCPStatus(tag string) turnevent.MCPStatus {
 func TestResolveBoundMCPStatus_QueriesBoundRunnerAndReusesMapping(t *testing.T) {
 	t.Parallel()
 	pool, plan := newMCPStatusQueryTestPool(t)
+	boundID, err := pool.Mint("mcp-status-bound", "")
+	if err != nil && !errors.Is(err, sessions.ErrPoolNotRunning) {
+		t.Fatalf("pool.Mint: %v", err)
+	}
+	if boundID == "" {
+		t.Fatal("pool.Mint returned an empty session id")
+	}
+	plan.arm(pool.BootstrapID(), sentinelMCPStatus("bootstrap-must-not-leak"))
 	wantEvent := sentinelMCPStatus("bound")
-	plan.arm(pool.BootstrapID(), wantEvent)
+	plan.arm(boundID, wantEvent)
 	reg := &conversations.Registry{}
-	reg.Create(conversations.Conversation{
+	conversation := conversations.Conversation{
 		ID:               "conv-mcp-bound",
-		CurrentSessionID: string(pool.BootstrapID()),
+		CurrentSessionID: string(boundID),
 		LastUsedAt:       time.Now().UTC(),
-	})
+	}
+	reg.Create(conversation)
 
-	got, ok := resolveBoundMCPStatus(context.Background(), reg, pool, "conv-mcp-bound")
+	_, canonicalID, ok := resolveBoundRunner(reg, pool, string(conversation.ID))
+	if !ok {
+		t.Fatal("resolveBoundRunner refused a resolvable non-bootstrap binding")
+	}
+	if canonicalID != conversation.ID {
+		t.Fatalf("resolved conversation id = %q, want registry id %q", canonicalID, conversation.ID)
+	}
+
+	got, ok := resolveBoundMCPStatus(context.Background(), reg, pool, string(conversation.ID))
 	if !ok {
 		t.Fatal("resolveBoundMCPStatus refused a queryable bound runner")
 	}
@@ -142,8 +160,11 @@ func TestResolveBoundMCPStatus_QueriesBoundRunnerAndReusesMapping(t *testing.T) 
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("resolveBoundMCPStatus = %+v, want %+v", got, want)
 	}
-	if calls := plan.callCount(pool.BootstrapID()); calls != 1 {
+	if calls := plan.callCount(boundID); calls != 1 {
 		t.Errorf("bound runner query calls = %d, want 1", calls)
+	}
+	if calls := plan.callCount(pool.BootstrapID()); calls != 0 {
+		t.Errorf("bootstrap runner query calls = %d, want 0", calls)
 	}
 }
 
