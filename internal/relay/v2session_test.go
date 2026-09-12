@@ -4594,12 +4594,11 @@ func TestV2Session_ActiveConns_MixedInteractive(t *testing.T) {
 // TestV2Session_CapabilitySpoof_TokenFail_NeverEnumerated is the security
 // proof: a phone that advertises [interactive] but fails the device-token check
 // is closed at 4401 and deleted, so its negotiated capability is never
-// observable in ActiveConns. The ack on the noise_resp DID echo [interactive]
-// (it is sealed before the token check, security-review Threat 3) — but that
-// echo grants nothing because the session never reaches V2StateOpen
-// (Threat 2/3, AC#1/#3).
+// observable in ActiveConns. The pre-validation ack may echo the negotiated
+// capability, which grants nothing, but it must not disclose host paths.
 func TestV2Session_CapabilitySpoof_TokenFail_NeverEnumerated(t *testing.T) {
-	t.Parallel()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 
 	respPriv, respPub := genV2Keypair(t)
 	initPriv, _ := genV2Keypair(t)
@@ -4635,14 +4634,23 @@ func TestV2Session_CapabilitySpoof_TokenFail_NeverEnumerated(t *testing.T) {
 		t.Fatalf("close_code = %d, want %d", envs[1].CloseCode, StatusUnauthorized)
 	}
 
-	// The ack was echoed (sealed before the token check) — leaks nothing.
+	// The ack is sealed before the token rejection so the initiator can decrypt
+	// it. Capability negotiation grants no access, while host-only metadata must
+	// remain absent until the token has been accepted.
 	respRaw := decodeRespFrame(t, envs[0])
 	earlyAck, _, _, err := initiator.ReadResp(respRaw)
 	if err != nil {
 		t.Fatalf("ReadResp: %v", err)
 	}
-	if ack := decodeHelloAck(t, earlyAck); !slices.Equal(ack.Capabilities, []string{protocol.CapabilityInteractive}) {
+	ack := decodeHelloAck(t, earlyAck)
+	if !slices.Equal(ack.Capabilities, []string{protocol.CapabilityInteractive}) {
 		t.Errorf("hello_ack Capabilities = %v, want [interactive]", ack.Capabilities)
+	}
+	if ack.WorkspaceRoot != "" {
+		t.Errorf("rejected-token hello_ack WorkspaceRoot = %q, want empty", ack.WorkspaceRoot)
+	}
+	if bytes.Contains(earlyAck, []byte(`"workspace_root"`)) {
+		t.Errorf("rejected-token hello_ack disclosed workspace_root: %s", earlyAck)
 	}
 
 	// The grant: the token-failed conn never reaches V2StateOpen, so the

@@ -44,8 +44,9 @@ absent key, preserving every existing greeting that cannot supply the value and 
 with `pyry-workspace` through `filepath.Join`. A small package-private `workspaceRoot` helper owns that resolution
 and collapses an error, empty result, or non-absolute result to `""`. The helper performs no filesystem operation;
 in particular it does not call `Stat`, `MkdirAll`, `EvalSymlinks`, or open the reported path. `handleNoiseInit` puts
-the result directly in the `HelloAckPayload` literal. `omitempty` turns the failure result into omission while the
-rest of the handshake follows its existing success path.
+the result in the `HelloAckPayload` literal only after `Devices.Validate` accepts the device token. `omitempty`
+turns resolution failure and token rejection into omission while the handshake retains its existing encrypted
+accept/reject flow.
 
 The field remains inside the `hello_ack` envelope supplied to Noise responder `WriteResp`. No routing envelope,
 header, close reason, error message, or log attribute gains the value.
@@ -64,9 +65,9 @@ handshake before the ack is sealed.
 ## Error handling
 
 `os.UserHomeDir` failure, an empty home, or a non-absolute home is a degradation of optional metadata, not a
-handshake failure. `workspaceRoot` returns the empty string, JSON omits `workspace_root`, and `handleNoiseInit`
-continues to marshal and seal the otherwise unchanged greeting. JSON/Noise failures retain their existing close
-behavior.
+handshake failure. A rejected device token also suppresses host metadata. `workspaceRoot` returns the empty string,
+JSON omits `workspace_root`, and `handleNoiseInit` continues to marshal and seal the otherwise unchanged greeting.
+JSON/Noise failures retain their existing close behavior.
 
 The resolution error itself is discarded rather than logged: logging it is unnecessary for an optional preview and
 could disclose the host path through platform-specific error text. No path value is used in an error.
@@ -109,11 +110,12 @@ be resolved, and transport only inside Noise-encrypted early data.
 
 **Findings:**
 
-- **[Trust boundaries]** No findings. `workspaceRoot` accepts only daemon-local `os.UserHomeDir` output, requires an
-  absolute value, and the only consumer is the daemon-authored `HelloAckPayload` literal in `handleNoiseInit`.
-- **[Tokens, secrets, credentials]** No findings. The change does not inspect or alter token handling; the new host
-  path is metadata rather than a credential and remains inside the same authenticated encrypted ack as the existing
-  server and connection identifiers.
+- **[Trust boundaries]** No findings after revision. Noise authenticates the initiator's static key before device-token
+  authorization, so encryption alone is insufficient. `handleNoiseInit` populates the daemon-authored
+  `HelloAckPayload.WorkspaceRoot` only when `Devices.Validate` returns `ValidateAccepted`; rejected-token acks omit it.
+- **[Tokens, secrets, credentials]** No findings after revision. The new host path is metadata rather than a
+  credential, remains inside the Noise-encrypted ack, and is populated only after the existing device-token
+  validation returns `ValidateAccepted`.
 - **[File operations]** No findings. `workspaceRoot` performs a lexical join only and never checks, opens, resolves
   symlinks within, or creates the path, eliminating traversal, TOCTOU, permission, and partial-write surfaces.
 - **[Subprocess execution]** Not applicable. No command is launched and the path is never supplied as an argument or
@@ -126,10 +128,21 @@ be resolved, and transport only inside Noise-encrypted early data.
   wrapped or logged, and the path appears in no log attribute; tests inspect both the captured log and outer wire.
 - **[Concurrency]** No findings. There is no shared seam or mutable package variable; resolution stays on the
   existing `handleNoiseInit` execution path and adds no goroutine or lock.
-- **[Threat model alignment]** No findings. Paired-client authentication and Noise confidentiality remain unchanged;
-  an authenticated phone learns only the selected daemon host's workspace convention. Relay blindness is asserted
-  directly. Host-path enumeration beyond this fixed base and using the reported path for filesystem access are out
-  of scope and are not capabilities implied by this field.
+- **[Threat model alignment]** No findings after revision. Paired-device authorization and Noise confidentiality are
+  both required before the selected daemon host's workspace convention is disclosed. Relay blindness and omission
+  from a decryptable rejected-token ack are asserted directly. Host-path enumeration beyond this fixed base and
+  using the reported path for filesystem access are out of scope and are not capabilities implied by this field.
 
 **Reviewer:** builder (self-review per the security-review checklist)  
 **Date:** 2026-09-12
+
+## Revisions
+
+### 2026-09-12 — gate host metadata on device-token acceptance
+
+Verifier review found that the original plan equated a Noise-authenticated initiator with an authorized paired
+device. Because `WriteResp` early data is decryptable before the token result is applied, an invalid, expired, or
+revoked token could receive the absolute workspace path. `handleNoiseInit` now reloads and validates the registry
+before constructing the ack, populates `WorkspaceRoot` only for `ValidateAccepted`, and then preserves the existing
+Noise response followed by the shared encrypted 4401 rejection flow. The rejected-token test decrypts that ack and
+asserts both the decoded zero value and raw-key omission.

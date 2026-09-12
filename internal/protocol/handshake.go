@@ -118,8 +118,9 @@ type HelloClientPayload struct {
 //
 // WorkspaceRoot is the daemon host's absolute ~/pyry-workspace/ base for
 // resolving relative workspace paths. It is omitted when the daemon cannot
-// determine an absolute home directory. The producer reports the convention
-// only; it does not create or inspect the path.
+// determine an absolute home directory or the peer is not authorized to
+// receive host metadata. The producer reports the convention only; it does not
+// create or inspect the path.
 type HelloAckPayload struct {
 	ProtocolVersion string   `json:"protocol_version"`
 	ServerID        string   `json:"server_id"`
