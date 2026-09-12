@@ -1368,7 +1368,7 @@ type ModelRefusalNoFallbackPayload struct {
 // accident — a field never decoded cannot leak whatever a later sweep forgets to
 // check. There is NO effort field because claude publishes none, measured in #2251
 // and machine-enforced by effortInitPins; see TypeSessionFacts' block. MCP server
-// status belongs to the frame #2275 declares and is deliberately not folded in here.
+// status belongs to the frame #2373 declares and is deliberately not folded in here.
 //
 // SECURITY: both strings are claude-authored values that crossed the subprocess
 // trust boundary. They are safe to RENDER as inert text and must never be fed to an
@@ -1398,6 +1398,51 @@ type SessionFactsPayload struct {
 	ClaudeCodeVersion string   `json:"claude_code_version"`
 	PermissionMode    string   `json:"permission_mode"`
 	TruncatedFields   []string `json:"truncated_fields"`
+}
+
+// MCPStatusPayload is the body of an Envelope whose Type == TypeMCPStatus.
+// Binary → phone direction; the conversation-scoped snapshot of MCP servers
+// Claude reported. This is the sole outbound wire shape for both later live
+// publication and on-demand replies. #2373 declares the shape before the
+// request, mapping and publication work in #2374, #2375 and #2276.
+//
+// Servers preserves Claude's order. Its key is always present and never null —
+// see MarshalJSON. DroppedServers is copied verbatim from
+// turnevent.MCPStatus.DroppedServers by a later mapper; this layer must not infer
+// loss from len(Servers).
+//
+// Config, tools, serverInfo.name, request ids and the raw Claude response are
+// deliberately absent. Every string in Servers is untrusted Claude-authored
+// text. This layer neither validates nor sanitizes it, and a client must render
+// every field as inert text rather than use it as an actuator.
+type MCPStatusPayload struct {
+	ConversationID string            `json:"conversation_id"`
+	Servers        []MCPServerStatus `json:"servers"`
+	DroppedServers int               `json:"dropped_servers"`
+}
+
+// MarshalJSON normalises a nil Servers slice to an empty array. An empty server
+// list is a positive snapshot, so clients receive "servers":[] rather than null.
+// The value receiver keeps normalisation local and does not mutate the caller.
+func (p MCPStatusPayload) MarshalJSON() ([]byte, error) {
+	if p.Servers == nil {
+		p.Servers = []MCPServerStatus{}
+	}
+	type alias MCPStatusPayload
+	return json.Marshal(alias(p))
+}
+
+// MCPServerStatus is one retained server row in MCPStatusPayload. All five keys
+// remain present even when their strings are empty. Error is free-form prose
+// already capped to 256 bytes by the producer; the wire layer does not cap it
+// again. Scope, Status and Version remain open strings rather than validation or
+// authority.
+type MCPServerStatus struct {
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	Error   string `json:"error"`
+	Scope   string `json:"scope"`
+	Version string `json:"version"`
 }
 
 // ModelListPayload is the body of an Envelope whose Type == TypeModelList

@@ -81,6 +81,9 @@ func TestIsKnownAppType(t *testing.T) {
 		// what keeps the type off the inbound path — a phone must never be able to
 		// send a model_list frame into dispatch.Route.
 		{"model_list-rejected", TypeModelList, false, ErrUnknownType},
+		// the v2-only MCP server-status report: an outbound binary → phone report
+		// an old phone never receives. This ticket declares no inbound request verb.
+		{"mcp_status-rejected", TypeMCPStatus, false, ErrUnknownType},
 		// the v2-only slash-command-list report: an outbound binary → phone report
 		// an old phone never receives, so IsKnownAppType must reject it. Rejection
 		// is also what keeps the type off the inbound path — a phone must never be
@@ -306,6 +309,8 @@ var v2OnlyTypes = map[string]bool{
 	TypeModelRefusalNoFallback: true,
 	// v2 model-list report.
 	TypeModelList: true,
+	// v2 MCP server-status report.
+	TypeMCPStatus: true,
 	// v2 slash-command-list report.
 	TypeSlashCommandList: true,
 	// v2 session-facts report.
@@ -419,6 +424,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeModelRefusalNoFallback,
 		// v2 model-list report.
 		TypeModelList,
+		// v2 MCP server-status report.
+		TypeMCPStatus,
 		// v2 slash-command-list report.
 		TypeSlashCommandList,
 		// v2 session-facts report.

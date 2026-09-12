@@ -101,4 +101,10 @@ Pending for the documentation stage: update `docs/protocol-mobile.md` with an `m
 
 ## Revisions
 
-None.
+### 2026-09-12 — Preserve both outbound uses in the direction label
+
+Reviewing #2276's landed request design clarified that `mcp_status` is intended
+to be both an unsolicited live push and a correlated reply. The relay guard will
+therefore classify `TypeMCPStatus` as `push+reply` rather than the plan's narrower
+`push` label. This does not add an inbound type: #2276 will declare and dispatch a
+separate request verb.

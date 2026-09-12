@@ -359,6 +359,11 @@ var excludedTypes = map[string]string{
 	// would still have to declare the verb together with its handler.
 	"TypeModelList": "push",
 
+	// outbound live push and correlated reply — the v2 MCP server-status report
+	// (#2373). Both later producers reuse this one output shape; the separate
+	// request verb belongs in inboundTypes with its real dispatch surface.
+	"TypeMCPStatus": "push+reply",
+
 	// outbound push — the v2 slash-command-list report (#1726). Outbound-only like
 	// the seven above, and mandatory here from the moment the constant exists
 	// rather than from the moment something emits it (the producer is #1720) —

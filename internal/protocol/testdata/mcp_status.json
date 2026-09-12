@@ -1,0 +1,1 @@
+{"id":816,"type":"mcp_status","ts":"2026-09-12T09:14:04Z","payload":{"conversation_id":"conversation-mcp","servers":[{"name":"filesystem","status":"connected","error":"","scope":"local","version":"1.4.2"},{"name":"remote\u003c\u0026\u003e","status":"failed","error":"dial refused\nretry?","scope":"project","version":"2.0-beta"}],"dropped_servers":3}}
