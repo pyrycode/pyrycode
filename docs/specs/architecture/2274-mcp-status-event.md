@@ -146,7 +146,10 @@ Pending for the documentation stage:
 
 ## Revisions
 
-None.
+- 2026-09-12 — The verifier's `TestTurnMarkFor_TotalOverEveryVariant` gate requires
+  every sealed `turnevent.Event` variant to declare its lifecycle classification in the
+  exhaustive test table. Add an `MCPStatus` row expecting `turnMarkNone`; the production
+  whitelist in `turnMarkFor` remains unchanged and continues to supply that answer.
 
 ## Security review
 
