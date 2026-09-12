@@ -126,7 +126,12 @@ before its `initialize` response has populated the hold. Such a test may retry
 only the protocol's explicit transient outcome — for a model-list request,
 retryable `model_list.unavailable` — and must fail on every other reply. Treating
 socket readiness as vocabulary readiness makes an otherwise-correct integration
-test timing-dependent.
+test timing-dependent. The same race affects spawn-time live-frame cardinality:
+if connecting or routing a client could expose the bootstrap child's report, wait
+for a child-level observation before dialing. #2375 uses the fixed, content-free
+no-cursor drop diagnostic for the bootstrap report; without that barrier, a fast
+client can receive the bootstrap frame and make a replacement-child proof count
+the wrong spawn.
 
 A second `select` watches `doneCh` (closed by the wait goroutine on
 `cmd.Wait` return). An early pyry exit short-circuits the deadline and surfaces
