@@ -65,6 +65,12 @@ from the new public key ships. Rotation/revocation beyond
 key-id or multi-key trust store by design (single algorithm, single trust
 root, no downgrade vector).
 
+A binary containing the previous public key cannot verify a release signed by
+the replacement key. Install the matching new binary through an independently
+verified download before relying on its updater. For a private repository,
+downloads also need GitHub authentication. The current updater and shell
+installer do not add authentication to their requests.
+
 ## First-signed-release smoke test
 
 Unit tests sign fixtures with a throwaway key, so they cannot exercise the
