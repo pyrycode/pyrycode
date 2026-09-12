@@ -32,11 +32,11 @@ import (
 //	openssl genpkey -algorithm ed25519 -out signing_key.pem
 //	openssl pkey -in signing_key.pem -pubout -outform DER | tail -c 32 | xxd -p -c 32
 //
-// The private half lives only as the PYRY_RELEASE_SIGNING_KEY Actions secret
-// on pyrycode/pyrycode — never committed. Regenerating the keypair means
+// The release workflow reads the private half from the PYRY_RELEASE_SIGNING_KEY
+// Actions secret on pyrycode/pyrycode — never committed. Regenerating the keypair means
 // updating this constant in the same change (a mismatch makes every update
 // fail closed). See docs/release-tooling.md.
-const releaseSigningPublicKeyHex = "cf38d7cd95ec06b5e42fc254c2958f3160a8fc80ef335ff35acc502aeb66a495"
+const releaseSigningPublicKeyHex = "c1839980c8be806616a2761058692426a33f15999b7021d04627d3b99616d282"
 
 // runUpdate implements `pyry update`: fetch the latest release, verify the
 // tarball's SHA-256, extract the pyry binary, atomically replace the running
