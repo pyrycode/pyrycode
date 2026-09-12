@@ -829,6 +829,21 @@ const (
 	TypeSessionFacts = "session_facts" // binary → phone, outbound v2 session-facts report
 )
 
+// Mobile Protocol v2 MCP server-status report. TypeMCPStatus is the single
+// binary → phone envelope carrying the conversation-scoped MCP inventory for
+// both later live publication and on-demand replies. The payload declaration
+// lands in #2373; request, mapping and publication remain in #2374, #2375 and
+// #2276.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go. This
+// slice declares no inbound request verb, and an old v1 client must reject the
+// type. The v2OnlyTypes partition and excludedTypes relay guard classify it as
+// output used by both live pushes and correlated replies before either producer
+// exists.
+const (
+	TypeMCPStatus = "mcp_status" // binary → phone, outbound v2 MCP server-status report
+)
+
 // Mobile Protocol v2 screen-snapshot types. The always-available,
 // parser-independent screen snapshot is the floor of ADR 025's
 // safe-degradation strategy (docs/protocol-mobile.md § Screen snapshot): the

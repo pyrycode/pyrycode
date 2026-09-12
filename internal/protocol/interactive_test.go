@@ -1521,7 +1521,7 @@ func TestSessionFactsType_IsNotClaudesVocabulary(t *testing.T) {
 	// id/ts and would dilute the check. This is where "what this frame does NOT
 	// carry" stops being prose and becomes machine-checked: the operator's local
 	// filesystem (cwd, memory_paths, messaging_socket_path), claude's own session
-	// identity (session_id), the MCP server status that belongs to #2275's frame, and
+	// identity (session_id), the MCP server status that belongs to #2373's frame, and
 	// the effort key #2251 measured claude does not publish at all. Non-discriminating
 	// today by construction; the job is to go red the day someone "helpfully" adds
 	// claude's init-line keys back.
@@ -1540,6 +1540,129 @@ func TestSessionFactsType_IsNotClaudesVocabulary(t *testing.T) {
 	} {
 		if bytes.Contains(body, []byte(key)) {
 			t.Errorf("payload carries claude's excluded init-line key %q: %s", key, body)
+		}
+	}
+}
+
+func TestMCPStatusPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "mcp_status.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeMCPStatus {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeMCPStatus)
+	}
+	assertWireKeys(t, env.Payload, "conversation_id", "servers", "dropped_servers")
+
+	var wire struct {
+		Servers []json.RawMessage `json:"servers"`
+	}
+	if err := json.Unmarshal(env.Payload, &wire); err != nil {
+		t.Fatalf("unmarshal payload key view: %v", err)
+	}
+	if len(wire.Servers) != 2 {
+		t.Fatalf("wire Servers: got %d entries, want 2", len(wire.Servers))
+	}
+	for i, entry := range wire.Servers {
+		t.Run(fmt.Sprintf("wire-keys-%d", i), func(t *testing.T) {
+			assertWireKeys(t, entry, "name", "status", "error", "scope", "version")
+		})
+	}
+
+	var payload MCPStatusPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "conversation-mcp" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "conversation-mcp")
+	}
+	if len(payload.Servers) != 2 {
+		t.Fatalf("Servers: got %d entries, want 2", len(payload.Servers))
+	}
+	wantServers := []MCPServerStatus{
+		{Name: "filesystem", Status: "connected", Error: "", Scope: "local", Version: "1.4.2"},
+		{Name: "remote<&>", Status: "failed", Error: "dial refused\nretry?", Scope: "project", Version: "2.0-beta"},
+	}
+	for i, want := range wantServers {
+		got := payload.Servers[i]
+		t.Run(want.Name, func(t *testing.T) {
+			for _, field := range []struct {
+				name string
+				got  string
+				want string
+			}{
+				{"Name", got.Name, want.Name},
+				{"Status", got.Status, want.Status},
+				{"Error", got.Error, want.Error},
+				{"Scope", got.Scope, want.Scope},
+				{"Version", got.Version, want.Version},
+			} {
+				if field.got != field.want {
+					t.Errorf("%s: got %q, want %q", field.name, field.got, field.want)
+				}
+			}
+		})
+	}
+	if payload.DroppedServers != 3 {
+		t.Errorf("DroppedServers: got %d, want 3", payload.DroppedServers)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+func TestMCPStatusPayload_ZeroValueEncoding(t *testing.T) {
+	payload := MCPStatusPayload{}
+	if payload.Servers != nil {
+		t.Fatalf("precondition: Servers must be nil, got %v", payload.Servers)
+	}
+
+	for _, tc := range []struct {
+		name string
+		in   any
+	}{
+		{"value", payload},
+		{"pointer", &payload},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := json.Marshal(tc.in)
+			if err != nil {
+				t.Fatalf("marshal payload: %v", err)
+			}
+			assertWireKeys(t, out, "conversation_id", "servers", "dropped_servers")
+
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(out, &fields); err != nil {
+				t.Fatalf("unmarshal payload key values: %v", err)
+			}
+			for key, want := range map[string]string{
+				"conversation_id": `""`,
+				"servers":         `[]`,
+				"dropped_servers": `0`,
+			} {
+				if got := string(fields[key]); got != want {
+					t.Errorf("%s: got JSON %s, want %s", key, got, want)
+				}
+			}
+		})
+	}
+	if payload.Servers != nil {
+		t.Errorf("MarshalJSON mutated the receiver: Servers is now %v", payload.Servers)
+	}
+
+	entry, err := json.Marshal(MCPServerStatus{})
+	if err != nil {
+		t.Fatalf("marshal zero server: %v", err)
+	}
+	assertWireKeys(t, entry, "name", "status", "error", "scope", "version")
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(entry, &fields); err != nil {
+		t.Fatalf("unmarshal server key values: %v", err)
+	}
+	for _, key := range []string{"name", "status", "error", "scope", "version"} {
+		if got, want := string(fields[key]), `""`; got != want {
+			t.Errorf("%s: got JSON %s, want %s", key, got, want)
 		}
 	}
 }
