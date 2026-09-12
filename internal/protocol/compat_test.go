@@ -82,8 +82,11 @@ func TestIsKnownAppType(t *testing.T) {
 		// send a model_list frame into dispatch.Route.
 		{"model_list-rejected", TypeModelList, false, ErrUnknownType},
 		// the v2-only MCP server-status report: an outbound binary → phone report
-		// an old phone never receives. This ticket declares no inbound request verb.
+		// an old phone never receives.
 		{"mcp_status-rejected", TypeMCPStatus, false, ErrUnknownType},
+		// the v2-only MCP status request: intercepted by the v2 session manager and
+		// never admitted to the v1 application handler chain.
+		{"mcp_status_request-rejected", TypeMCPStatusRequest, false, ErrUnknownType},
 		// the v2-only slash-command-list report: an outbound binary → phone report
 		// an old phone never receives, so IsKnownAppType must reject it. Rejection
 		// is also what keeps the type off the inbound path — a phone must never be
@@ -311,6 +314,8 @@ var v2OnlyTypes = map[string]bool{
 	TypeModelList: true,
 	// v2 MCP server-status report.
 	TypeMCPStatus: true,
+	// v2 MCP server-status request.
+	TypeMCPStatusRequest: true,
 	// v2 slash-command-list report.
 	TypeSlashCommandList: true,
 	// v2 session-facts report.
@@ -426,6 +431,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeModelList,
 		// v2 MCP server-status report.
 		TypeMCPStatus,
+		// v2 MCP server-status request.
+		TypeMCPStatusRequest,
 		// v2 slash-command-list report.
 		TypeSlashCommandList,
 		// v2 session-facts report.
@@ -503,6 +510,7 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeAttachmentNotFound":          CodeAttachmentNotFound,
 		"CodeAttachmentStreamAborted":     CodeAttachmentStreamAborted,
 		"CodeModelListUnavailable":        CodeModelListUnavailable,
+		"CodeMCPStatusUnavailable":        CodeMCPStatusUnavailable,
 		"CodeWorkspaceNotFound":           CodeWorkspaceNotFound,
 	}
 	want := map[string]string{
@@ -528,6 +536,7 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeAttachmentNotFound":          "attachment.not_found",
 		"CodeAttachmentStreamAborted":     "attachment.stream_aborted",
 		"CodeModelListUnavailable":        "model_list.unavailable",
+		"CodeMCPStatusUnavailable":        "mcp_status.unavailable",
 		"CodeWorkspaceNotFound":           "workspace.not_found",
 	}
 	if len(cases) != len(want) {

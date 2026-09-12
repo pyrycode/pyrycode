@@ -1667,6 +1667,65 @@ func TestMCPStatusPayload_ZeroValueEncoding(t *testing.T) {
 	}
 }
 
+func TestMCPStatusRequestPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "mcp_status_request.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeMCPStatusRequest {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeMCPStatusRequest)
+	}
+	if env.InReplyTo != nil {
+		t.Errorf("InReplyTo: got %v, want nil for a request", env.InReplyTo)
+	}
+
+	var payload MCPStatusRequestPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "conversation-mcp-request" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "conversation-mcp-request")
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+func TestMCPStatusRequestPayload_WireShape(t *testing.T) {
+	b, err := json.Marshal(MCPStatusRequestPayload{ConversationID: "conversation-mcp-request"})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		t.Fatalf("unmarshal payload key set: %v", err)
+	}
+	if len(fields) != 1 {
+		t.Fatalf("wire keys: got %v, want exactly [conversation_id]", fields)
+	}
+	raw, ok := fields["conversation_id"]
+	if !ok {
+		t.Fatalf("wire keys: got %v, want conversation_id", fields)
+	}
+	var conversationID string
+	if err := json.Unmarshal(raw, &conversationID); err != nil {
+		t.Fatalf("conversation_id JSON value is not a string: %v", err)
+	}
+	if conversationID != "conversation-mcp-request" {
+		t.Errorf("conversation_id: got %q, want %q", conversationID, "conversation-mcp-request")
+	}
+
+	zero, err := json.Marshal(MCPStatusRequestPayload{})
+	if err != nil {
+		t.Fatalf("marshal zero payload: %v", err)
+	}
+	if got, want := string(zero), `{"conversation_id":""}`; got != want {
+		t.Errorf("zero payload: got %s, want %s", got, want)
+	}
+}
+
 // TestModelListPayload_NilModelsNormalises covers the case no fixture could —
 // and here that is the ONLY path there is. Unmarshalling "models":[] always
 // yields a non-nil empty slice, so the nil branch is reachable only by

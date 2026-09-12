@@ -138,6 +138,12 @@ const (
 	// unsolicited paths.
 	CodeModelListUnavailable = "model_list.unavailable" // the daemon hosts the conversation but has no vocabulary to answer with; retryable
 
+	// MCP status error (#2381; docs/protocol-mobile.md § Error codes). A hosted
+	// conversation can be temporarily unable to report a current status: its
+	// resolver has no live result yet. The request handler emits this code only
+	// after membership succeeds, and never substitutes an empty or retained status.
+	CodeMCPStatusUnavailable = "mcp_status.unavailable" // hosted conversation has no current MCP status; retryable
+
 	// Workspace error (#2207; docs/protocol-mobile.md § Error codes). MINTED WITH
 	// THE HANDLER THAT SENDS IT, the sequencing #2052, the history group and #2125
 	// each followed: no reject vocabulary exists ahead of the code that can emit it.
@@ -829,19 +835,19 @@ const (
 	TypeSessionFacts = "session_facts" // binary → phone, outbound v2 session-facts report
 )
 
-// Mobile Protocol v2 MCP server-status report. TypeMCPStatus is the single
-// binary → phone envelope carrying the conversation-scoped MCP inventory for
-// both later live publication and on-demand replies. The payload declaration
-// lands in #2373; request, mapping and publication remain in #2374, #2375 and
-// #2276.
+// Mobile Protocol v2 MCP server-status request and report. TypeMCPStatus is the
+// single binary → phone envelope carrying the conversation-scoped MCP inventory
+// for both live publication and correlated replies. TypeMCPStatusRequest is the
+// phone → binary request intercepted by the v2 session manager before
+// dispatch.Route.
 //
 // MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go. This
-// slice declares no inbound request verb, and an old v1 client must reject the
-// type. The v2OnlyTypes partition and excludedTypes relay guard classify it as
-// output used by both live pushes and correlated replies before either producer
-// exists.
+// pair is v2-only, and an old v1 client must reject both types. The v2OnlyTypes
+// partition classifies both; the relay guard records TypeMCPStatusRequest as
+// switch-intercepted and TypeMCPStatus as output used by pushes and replies.
 const (
-	TypeMCPStatus = "mcp_status" // binary → phone, outbound v2 MCP server-status report
+	TypeMCPStatus        = "mcp_status"         // binary → phone, outbound v2 MCP server-status report
+	TypeMCPStatusRequest = "mcp_status_request" // phone → binary, inbound v2 control (switch-intercepted — #2381)
 )
 
 // Mobile Protocol v2 screen-snapshot types. The always-available,

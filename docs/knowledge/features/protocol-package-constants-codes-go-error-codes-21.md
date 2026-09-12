@@ -1,4 +1,4 @@
-# Error codes (29)
+# Error codes (30)
 
 Wire values for the `code` field of error payloads (spec § Error codes). Naming convention: `Code<Category><Reason>` mirrors the dotted-string `category.reason` shape.
 
@@ -30,6 +30,7 @@ Wire values for the `code` field of error payloads (spec § Error codes). Naming
 | `CodeHistoryInvalidCursor` | `history.invalid_cursor` |
 | `CodeHistoryUnavailable` | `history.unavailable` |
 | `CodeModelListUnavailable` | `model_list.unavailable` |
+| `CodeMCPStatusUnavailable` | `mcp_status.unavailable` |
 | `CodeWorkspaceNotFound` | `workspace.not_found` |
 | `CodePairingNotPermitted` | `pairing.not_permitted` |
 | `CodePairingUnavailable` | `pairing.unavailable` |
@@ -55,5 +56,13 @@ Wire values for the `code` field of error payloads (spec § Error codes). Naming
 Docs-and-Go review lesson from #1751 (a documentation-only ticket, no consumer code): **when a spec's prose gives per-constant comment guidance, check it against the same spec's own design table before writing the comment** — this ticket's spec text asked for a trailing comment marking `attachment.too_many_uploads` as "the group's only retryable member," but the spec's own table two paragraphs up marked three of the seven codes retryable. Following the prose instruction literally would have shipped a false claim into `codes.go` that no test catches (the pins in `TestErrorCode_Constants_MatchSpec` check wire *values*, not comment prose). Where a spec's prose and its own table disagree on a count, the table is the artifact that was reasoned about row by row — trust it.
 
 **`CodeModelListUnavailable` (#2125) merges two causes on the same disclosure reasoning `attachment.not_found` already states above: the client's repair is identical either way, so a distinguishable code would leak something about the host rather than the request.** Past `request_model_list`'s `conversation.not_found` (a plain membership check), the daemon can fail to answer for two different reasons — nothing is retained anywhere for that conversation, or no model-list source is wired into the daemon at all — and both collapse into this one retryable code rather than splitting on the receiver-resource precedent above. The reason the two precedents diverge is retryability: `too_many_uploads` vs. `too_large` split because one clears with time and the other doesn't, but here *both* causes clear on their own (a bootstrap child answering its `initialize` ask, or a daemon later gaining a wired source) and neither reveals a traversal-probe-shaped id the way a merged `attachment.not_found` protects against — the reason for this merge is narrower: it hides whether the *host* is configured with a model-list source, a fact about the machine rather than the request. See [Inbound `request_model_list`](v2-session-manager-state-machine-inbound-request-model-list-modellistfor-seam.md) for the seam that produces both causes.
+
+**`CodeMCPStatusUnavailable` (#2381) separates membership from temporary source
+availability without fabricating a snapshot.** `conversation.not_found` remains
+the non-retryable answer when the daemon does not host the requested conversation;
+only after that check may `MCPStatusFor` return false and produce the retryable
+`mcp_status.unavailable`. The false-result payload is ignored, so neither a zero
+value nor a retained value can escape as a misleading `mcp_status`. See
+[the mobile protocol request contract](../../protocol-mobile.md#asking-for-mcp-status-on-demand).
 
 **Minting a code needs `TestErrorCode_Constants_MatchSpec` updated in the same change, or a spelling drift goes uncaught.** The four `history.*` codes (#2116) shipped without new rows in that pin; every assertion elsewhere in the PR compared `protocol.CodeHistory*` to itself, so a rename anywhere would move both sides together and stay green (confirmed by mutation: `go test -overlay` renaming two of the four still passed the full wired suite). #1751 populated this same map in the commit that minted its seven `attachment.*` codes — treat updating it as part of minting a code, not an optional follow-up a later ticket can catch.
