@@ -119,7 +119,8 @@ Add a conversation-keyed resolver at the composition root. It uses
 `resolveBoundRunner`, rejects an absent, unbound, dangling, or non-query-capable
 session, invokes the bound runner with the relay-supplied context, and returns false
 for every unavailable outcome. A successful `turnevent.MCPStatus` goes through
-`turnbridge.MapEvent` with the requested conversation id. The resolver accepts only
+`turnbridge.MapEvent` with the matched registry record's canonical conversation id.
+The request key remains lookup-only. The resolver accepts only
 the resulting `protocol.TypeMCPStatus` and `protocol.MCPStatusPayload`, thereby
 reusing the single existing order/field/dropped-count mapping rather than duplicating
 it.
@@ -153,10 +154,10 @@ forwarder claims responses and delivers one value through a buffered per-query c
 
 `Runner.mu` orders writer, eligibility, and child teardown. The query-registry mutex
 orders registrations and claims; neither lock is held during the child write, parser
-decode, channel receive, or relay send. The runner may acquire its own mutex and then
-the registry mutex only during fast registration; teardown clears the runner fields,
-releases `Runner.mu`, and only then fails registry entries, so no reverse lock order
-exists.
+decode, channel receive, or relay send. The runner snapshots the child generation
+under its mutex, releases it before registration, and then rechecks the generation.
+It never nests the parser registry mutex under `Runner.mu`. Teardown clears the
+runner fields and releases that mutex before failing pending queries.
 
 Runner-context cancellation, relay-manager cancellation, and child exit all remove
 or fail the pending wait. The buffered result channel lets the parser finish if
@@ -227,14 +228,12 @@ private response class, mapper, error collapse, and requester-only relay path.
 
 ## Documentation handoff
 
-Pending for the documentation stage: update `docs/protocol-mobile.md`, specifically
-the `mcp_status` table row and `Asking for MCP status on demand` section, from the
-declaration-only state to the live query contract. State that eligible children are
-queried afresh only when their exact spawn used the daemon MCP config with
-`--strict-mcp-config`; successful replies are requester-only and do not enter the
-interactive fan-out or event ring; and no bound/live/eligible child, a write failure,
-cancelation, or an unusable reply produces #2381's `mcp_status.unavailable` error.
-Preserve the existing bypass-child privacy and inert-rendering guidance.
+Completed during direct maintenance on 2026-09-12. The protocol message table and
+`Asking for MCP status on demand` section describe fresh queries to the exact
+eligible child, requester-only replies, no event-ring publication, and unavailable
+outcomes. The bypass privacy and inert-rendering guidance remain in place.
+The stream-supervision and protocol knowledge documents describe the live resolver
+and its private correlation path.
 
 ## Scope re-check
 

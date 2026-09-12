@@ -188,6 +188,21 @@ before the shared sink while forwarding all other event variants unchanged;
 this also suppresses manually solicited status replies. A standalone parser has
 no installed child policy and retains the shape decoder's existing behaviour.
 
+`Runner.QueryMCPStatus` supplies the requester-only path for on-demand reads.
+It snapshots the live child's writer, eligibility and generation under the runner
+mutex. It registers an exact request id outside that lock, then rechecks the
+generation before writing. This preserves the runner's leaf-lock rule while
+rejecting a child replaced during registration.
+
+`Parser.claimMCPStatusQuery` runs before the shared control-response consumers.
+The first matching response retires the query, including an error or malformed
+payload. A successful write must finish before an early reply can succeed.
+The query reuses `decodeMCPStatus` and returns its event directly to the waiting
+requester. It never calls the shared sink. The private id prefix also consumes
+duplicates and late replies after cancellation or teardown without retaining a
+growing list of completed ids. Automatic numeric ids keep their existing path.
+No server text or request content is logged by the private path.
+
 `emitStreamEvent` maps Claude's nested partial-message wire without changing the
 downstream event contract. A valid `message_start` replaces the current message
 ID and open-block state; a valid `content_block_start` records one index and

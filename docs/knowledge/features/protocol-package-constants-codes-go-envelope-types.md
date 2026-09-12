@@ -231,8 +231,10 @@ binary control verb. It carries `MCPStatusRequestPayload`, whose unconditional
 by `dispatchAppFrame` before `dispatch.Route` and is classified
 `"switch-intercepted"` from declaration because its only relay consumer landed in
 the same slice. Both constants stay outside `inboundAppTypeSet`, and the v1
-predicate explicitly rejects both. #2381 intentionally leaves the production
-resolver nil until #2382 wires live-child correlation. See
+predicate explicitly rejects both. The daemon wires the live resolver through
+`relayWiring.mcpStatusFor` to `V2SessionConfig.MCPStatusFor`. It queries the exact
+eligible child bound to the conversation and stamps the answer with the registry
+record's canonical id. The request key remains lookup-only. See
 [`mcp_status`](../../protocol-mobile.md#mcp_status) and
 [the on-demand request](../../protocol-mobile.md#asking-for-mcp-status-on-demand).
 
