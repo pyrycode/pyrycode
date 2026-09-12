@@ -155,6 +155,12 @@ const (
 	// resolved path. The dotted namespace matches sessions.* ; the dot is a
 	// documentation convention, not a parser rule.
 	VerbChannelNew Verb = "channel.new"
+
+	// VerbPairingMint asks the selected daemon to mint a pairing through its
+	// installed provider. Request.Pairing carries only the new device's label
+	// and explicit remote-permission choice; Response.Pairing carries the
+	// provider's opaque pairing string.
+	VerbPairingMint Verb = "pairing.mint"
 )
 
 // JSONLPolicy is the wire-level enum selecting how the daemon disposes of a
@@ -208,6 +214,24 @@ type Request struct {
 
 	AttachFile *AttachFilePayload `json:"attachFile,omitempty"` // populated for VerbAttachFile
 	Channel    *ChannelPayload    `json:"channel,omitempty"`    // populated for VerbChannelNew
+	Pairing    *PairingPayload    `json:"pairing,omitempty"`    // populated for VerbPairingMint
+}
+
+// PairingPayload carries the only caller-selected inputs to a local pairing
+// mint. Identity, key, relay and registry values belong to the installed
+// provider and cannot be supplied over this control request.
+//
+// Neither field is omitted: an empty label requests the provider's existing
+// generated fallback, while false is an explicit permission choice.
+type PairingPayload struct {
+	DeviceLabel            string `json:"deviceLabel"`
+	AllowRemotePermissions bool   `json:"allowRemotePermissions"`
+}
+
+// PairingResult carries the provider's opaque pairing string. It is a plaintext
+// bearer credential and must not be logged or copied into an error field.
+type PairingResult struct {
+	Pairing string `json:"pairing"`
 }
 
 // ChannelPayload names the host directory a new channel is rooted at and,
@@ -366,6 +390,7 @@ type AttachFileResult struct {
 //   - Approve: verdict for VerbMCPApprove (allow or deny)
 //   - AttachFile: minted attachment id for VerbAttachFile
 //   - ChannelNew: minted conversation id for VerbChannelNew
+//   - Pairing: opaque bearer string for VerbPairingMint
 //   - OK: success acknowledgment for verbs without a typed payload (e.g. VerbStop)
 //
 // Error is set when the server rejects the request.
@@ -378,6 +403,7 @@ type Response struct {
 	Approve       *ApproveResult       `json:"approve,omitempty"`       // populated for VerbMCPApprove
 	AttachFile    *AttachFileResult    `json:"attachFile,omitempty"`    // populated for VerbAttachFile
 	ChannelNew    *ChannelNewResult    `json:"channelNew,omitempty"`    // populated for VerbChannelNew
+	Pairing       *PairingResult       `json:"pairing,omitempty"`       // populated for VerbPairingMint
 	OK            bool                 `json:"ok,omitempty"`
 	Error         string               `json:"error,omitempty"`
 	ErrorCode     ErrorCode            `json:"errorCode,omitempty"` // typed sentinel token (1.1d-B1)

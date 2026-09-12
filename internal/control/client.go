@@ -124,6 +124,41 @@ func ChannelNew(ctx context.Context, socketPath, cwd, name string) (string, erro
 	return resp.ChannelNew.ConversationID, nil
 }
 
+// MintPairing asks the selected daemon to mint a pairing for deviceLabel with
+// the explicit remote-permission choice. The returned string is an opaque
+// bearer credential and is never included in an error.
+//
+// Unlike request's general deadline policy, this operation always uses the
+// earlier of the caller's deadline and DialTimeout. Establishing that deadline
+// before request calls dial gives the complete dial, write and read exchange a
+// single budget.
+func MintPairing(ctx context.Context, socketPath, deviceLabel string, allowRemotePermissions bool) (string, error) {
+	deadline := time.Now().Add(DialTimeout)
+	if callerDeadline, ok := ctx.Deadline(); ok && callerDeadline.Before(deadline) {
+		deadline = callerDeadline
+	}
+	boundedCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+
+	resp, err := request(boundedCtx, socketPath, Request{
+		Verb: VerbPairingMint,
+		Pairing: &PairingPayload{
+			DeviceLabel:            deviceLabel,
+			AllowRemotePermissions: allowRemotePermissions,
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if resp.Error != "" {
+		return "", errors.New(resp.Error)
+	}
+	if resp.Pairing == nil || resp.Pairing.Pairing == "" {
+		return "", errors.New("control: empty pairing.mint response")
+	}
+	return resp.Pairing.Pairing, nil
+}
+
 // SessionsRm asks the daemon to remove the named session and apply the
 // JSONL disposition policy. Empty policy is treated by the server as
 // JSONLPolicyLeave (matches sessions.JSONLLeave's zero-value default).
