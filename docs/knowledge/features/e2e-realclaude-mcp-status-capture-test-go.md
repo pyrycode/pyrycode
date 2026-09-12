@@ -11,14 +11,29 @@ bypass session should report is left to #2275. Its hermetic sibling in `internal
 fixture-exists/pin-filled state machine as
 [`compaction_capture_test.go`](e2e-realclaude-compaction-capture-test-go.md).
 
-**Fixture not committed as of this ticket's landing.** `mcpStatusPinnedServerKeys` is still `[]string{}`
-and no `testdata/mcp_status_*.json` exists in the tree — read
-[`compaction_capture_test.go`](e2e-realclaude-compaction-capture-test-go.md) before assuming this
-family's fixtures land automatically once a probe merges. `mcapPersist` writes to both an
-`os.MkdirTemp` artifact directory and the in-repo fixture path from the outset (the double-write
-[`api_retry_capture_test.go`](e2e-realclaude-api-retry-capture-test-go.md) established), so a
-gate-only run that fires clean and loses the in-repo copy still has the artifact-directory record to
-recover from.
+**Fixture committed by #2360.** The Claude 2.1.259 recording from 2026-09-11 lives
+at `internal/e2e/realclaude/testdata/mcp_status_v2.1.259.json`. The reader pins the
+measured union `config, error, name, scope, serverInfo, status, tools`. Each server
+also retains its own key set and JSON value types. The union describes all observed
+keys across servers, rather than fields guaranteed on every server.
+
+The probe sends status before any user turn or init event. It polls status with
+unique request ids until the test-owned approval server reports connected, then
+reconnects that server. Toggle still targets the deliberately broken server.
+The accepted recording contains two status replies followed by successful
+reconnect and toggle replies. Both healthy servers were connected in the final
+status reply. The broken server reported failed status and a missing-command error.
+No init event appeared during this exchange.
+
+The reader correlates the final status request. The first reply still reported
+pending servers and lacked `serverInfo` and `tools`. Selecting it fails against
+the committed key union. The fixture itself preserves this regression case.
+`TestMcapCommittedFixtureIsUsable` checks the accepted recording through the
+promotion predicate and the fixed credential scan without a live login.
+
+`mcapPersist` writes the same scanned bytes to a durable artifact directory and
+the repository fixture path. Recover the exact external record if the gate's
+checkout has been discarded. Commit it with the matching reader pin.
 
 ### A shipped binary's own bundled schema outranks `sdk.d.ts`, and is still not the wire
 
@@ -97,33 +112,23 @@ substitution rule (built for the whole path) while it still trips `dropcapFixedN
 rather than anything actually captured. `TestMcapStderrIsRedactedBeforeItIsCapped` pins the
 ordering with a path positioned to trip exactly that failure if the two calls are swapped.
 
-### A silent child gets a shorter wait than one that is merely slow
+### Readiness belongs to the control replies
 
-`mcapAwaitInit` used to be a bool, so a claude that said nothing before `system/init` and a claude
-that was legitimately slow to start both held the full `mcapInitBudget` (2m) before the probe gave
-up — two minutes of every gate run, for evidence that never landed. It now returns one of
-`mcapInitSeen`, `mcapInitSilent` or `mcapInitAbsent`, and a run that produces no output at all is
-cut at `mcapInitSilenceBudget` (30s) while a run that's producing *anything* — including a lone
-blank line or an unterminated partial — keeps the full budget. That distinction is
-`mcapSawOutput`, which reads `dropcapCaps`' `BlankLines`, `LinesOverCap`, `PartialsDropped` and
-`UnterminatedPartial` counters rather than only counting kept lines, specifically so a child
-writing something illegible is never mistaken for one saying nothing. The 30s figure is a starting
-point, not a measurement — the seven 2026-09-09 runs all held the full budget and never produced
-the line, so the record's new `init_wait` field is what lets the next gate run retune it from
-evidence instead of another guess.
+The old startup wait required an init event before sending any request. That event
+is emitted per user turn, and this probe sends no user turn. The wait was circular.
+The repaired driver sends status immediately and retains every request, reply,
+write error and timeout. A bounded wait for the approval server to report connected
+makes reconnect exercise a healthy server. Reconnecting the deliberately broken
+server produced an error that correctly failed the successful-reply requirement.
 
-### Known landmine: this file's fixture-promotion test asserts the wrong side of the promotion
+### A diagnostic run must preserve an existing valid fixture
 
-`TestMcapPersistFillsARecordThatNeverReachedTheHappyPath` closes by asserting that
-`mcapFixturePath` does not exist on disk, when the property it means to prove is that *this test*
-declined to promote one — `rec.fixtureWorthy()` reporting not-worthy. Those come apart the moment
-a future ticket lands the committed fixture: `mcpStatusCapturePath` in `internal/streamsup`'s
-`mcpStatusReaderGate` resolves to the same file `mcapFixturePath` names here, so a legitimate
-fixture landing anywhere in the tree will fail this test on a promotion it never attempted, and
-the failure message will blame the writer. Code review caught this and it was left unfixed as
-non-blocking; whoever files the remedy this ticket enables (a `fired` record or a recorded-absence
-fixture, per the ticket's own out-of-scope note) should swap the assertion to `fixtureWorthy()`'s
-return before landing anything at that path.
+`TestMcapPersistFillsARecordThatNeverReachedTheHappyPath` gives the writer temporary
+fixture paths. It tests both an absent file and a copy of the valid committed
+recording. A non-worthy record must leave the former absent and the latter
+byte-identical. Both cases still require the separate diagnostic record to be
+written. The older assertion that the repository fixture must be absent was
+removed by #2360.
 
 ### Related
 

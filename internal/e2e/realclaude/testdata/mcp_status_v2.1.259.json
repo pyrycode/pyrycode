@@ -1,0 +1,274 @@
+{
+  "ticket": "2272",
+  "claude_version": "2.1.259 (Claude Code)",
+  "captured_at": "2026-09-11T21:57:32+03:00",
+  "is_capture": true,
+  "model": "haiku",
+  "spawn_shape": [
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--forward-subagent-text",
+    "--model",
+    "haiku",
+    "--permission-prompt-tool",
+    "mcp__pyry_approve__approve",
+    "--mcp-config",
+    "$RUN_LOCAL_TEMP",
+    "--strict-mcp-config",
+    "--permission-mode",
+    "default",
+    "--session-id",
+    "$SESSION_ID"
+  ],
+  "spawn_shape_delta": "Production's DOWNGRADED arm, not the YOLO shape the dropcap/ccap captures use: --permission-prompt-tool, --mcp-config, --strict-mcp-config and --permission-mode default, with NO --dangerously-skip-permissions. That is deliberate and is the whole reason this record can carry a broken server: --mcp-config is the only route by which a server this rig chose reaches a spawn, and --strict-mcp-config is what stops the operator's own user- and project-scoped servers loading beside it. The bypass arm carries neither flag, so it can carry no broken server and would report one machine's inventory; it is #2275's question, not this record's.",
+  "workdir": "$WORKDIR",
+  "mcp_config_document": "{\"mcpServers\":{\"pyry_approve\":{\"command\":\"$RUN_LOCAL_TEMP\",\"args\":[\"mcp-approve\",\"-pyry-socket\",\"$RUN_LOCAL_TEMP\"]},\"pyry_files\":{\"command\":\"$RUN_LOCAL_TEMP\",\"args\":[\"mcp-files\",\"-pyry-socket\",\"$RUN_LOCAL_TEMP\"]},\"pyry_probe_absent\":{\"command\":\"$RUN_LOCAL_TEMP\",\"args\":[]}}}",
+  "mcp_config_servers": [
+    "pyry_approve",
+    "pyry_files",
+    "pyry_probe_absent"
+  ],
+  "broken_server": "pyry_probe_absent",
+  "outcome": "fired",
+  "outcome_detail": "3 server(s) reported at response.response.mcpServers, key union [config error name scope serverInfo status tools]",
+  "init_seen": false,
+  "init_wait": "not-awaited",
+  "requests": [
+    {
+      "subtype": "mcp_status",
+      "request_id": "req_mcp_status_1",
+      "sent": "{\"type\":\"control_request\",\"request_id\":\"req_mcp_status_1\",\"request\":{\"subtype\":\"mcp_status\"}}\n",
+      "reply_indices": [
+        0
+      ],
+      "terminated_on": "response",
+      "wait_seconds": 0.501907708
+    },
+    {
+      "subtype": "mcp_status",
+      "request_id": "req_mcp_status_2",
+      "sent": "{\"type\":\"control_request\",\"request_id\":\"req_mcp_status_2\",\"request\":{\"subtype\":\"mcp_status\"}}\n",
+      "reply_indices": [
+        1
+      ],
+      "terminated_on": "response",
+      "wait_seconds": 0.250414292
+    },
+    {
+      "subtype": "mcp_reconnect",
+      "request_id": "req_mcp_reconnect_3",
+      "sent": "{\"type\":\"control_request\",\"request_id\":\"req_mcp_reconnect_3\",\"request\":{\"serverName\":\"pyry_approve\",\"subtype\":\"mcp_reconnect\"}}\n",
+      "reply_indices": [
+        2
+      ],
+      "terminated_on": "response",
+      "wait_seconds": 0.251185083
+    },
+    {
+      "subtype": "mcp_toggle",
+      "request_id": "req_mcp_toggle_4",
+      "sent": "{\"type\":\"control_request\",\"request_id\":\"req_mcp_toggle_4\",\"request\":{\"enabled\":false,\"serverName\":\"pyry_probe_absent\",\"subtype\":\"mcp_toggle\"}}\n",
+      "reply_indices": [
+        3
+      ],
+      "terminated_on": "response",
+      "wait_seconds": 0.251152584
+    }
+  ],
+  "status_reply_location": "response.response.mcpServers",
+  "server_count": 3,
+  "servers": [
+    {
+      "name": "pyry_approve",
+      "status": "connected",
+      "keys": [
+        "config",
+        "name",
+        "scope",
+        "serverInfo",
+        "status",
+        "tools"
+      ],
+      "key_types": {
+        "config": "object",
+        "name": "string",
+        "scope": "string",
+        "serverInfo": "object",
+        "status": "string",
+        "tools": "array"
+      },
+      "config": {
+        "type": "stdio",
+        "command": "$RUN_LOCAL_TEMP",
+        "args": [
+          "mcp-approve",
+          "-pyry-socket",
+          "$RUN_LOCAL_TEMP"
+        ]
+      }
+    },
+    {
+      "name": "pyry_files",
+      "status": "connected",
+      "keys": [
+        "config",
+        "name",
+        "scope",
+        "serverInfo",
+        "status",
+        "tools"
+      ],
+      "key_types": {
+        "config": "object",
+        "name": "string",
+        "scope": "string",
+        "serverInfo": "object",
+        "status": "string",
+        "tools": "array"
+      },
+      "config": {
+        "type": "stdio",
+        "command": "$RUN_LOCAL_TEMP",
+        "args": [
+          "mcp-files",
+          "-pyry-socket",
+          "$RUN_LOCAL_TEMP"
+        ]
+      }
+    },
+    {
+      "name": "pyry_probe_absent",
+      "status": "failed",
+      "error": "ENOENT: no such file or directory, posix_spawn '$RUN_LOCAL_TEMP'",
+      "keys": [
+        "config",
+        "error",
+        "name",
+        "scope",
+        "status"
+      ],
+      "key_types": {
+        "config": "object",
+        "error": "string",
+        "name": "string",
+        "scope": "string",
+        "status": "string"
+      },
+      "config": {
+        "type": "stdio",
+        "command": "$RUN_LOCAL_TEMP",
+        "args": []
+      }
+    }
+  ],
+  "server_key_union": [
+    "config",
+    "error",
+    "name",
+    "scope",
+    "serverInfo",
+    "status",
+    "tools"
+  ],
+  "lines_captured": 4,
+  "line_type_census": {
+    "control_response": 4
+  },
+  "undecoded_lines": 0,
+  "frames": [
+    {
+      "index": 0,
+      "type": "control_response",
+      "subtype": "success",
+      "request_id": "req_mcp_status_1",
+      "payload_len_bytes_captured": 1066,
+      "payload_len_bytes": 662,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"req_mcp_status_1\",\"response\":{\"mcpServers\":[{\"name\":\"pyry_approve\",\"status\":\"pending\",\"config\":{\"type\":\"stdio\",\"command\":\"$RUN_LOCAL_TEMP\",\"args\":[\"mcp-approve\",\"-pyry-socket\",\"$RUN_LOCAL_TEMP\"]},\"scope\":\"dynamic\"},{\"name\":\"pyry_files\",\"status\":\"pending\",\"config\":{\"type\":\"stdio\",\"command\":\"$RUN_LOCAL_TEMP\",\"args\":[\"mcp-files\",\"-pyry-socket\",\"$RUN_LOCAL_TEMP\"]},\"scope\":\"dynamic\"},{\"name\":\"pyry_probe_absent\",\"status\":\"failed\",\"error\":\"ENOENT: no such file or directory, posix_spawn '$RUN_LOCAL_TEMP'\",\"config\":{\"type\":\"stdio\",\"command\":\"$RUN_LOCAL_TEMP\",\"args\":[]},\"scope\":\"dynamic\"}]}}}",
+      "events_emitted": 0
+    },
+    {
+      "index": 1,
+      "type": "control_response",
+      "subtype": "success",
+      "request_id": "req_mcp_status_2",
+      "payload_len_bytes_captured": 1268,
+      "payload_len_bytes": 864,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"req_mcp_status_2\",\"response\":{\"mcpServers\":[{\"name\":\"pyry_approve\",\"status\":\"connected\",\"serverInfo\":{\"name\":\"pyry_approve\",\"version\":\"dev\"},\"config\":{\"type\":\"stdio\",\"command\":\"$RUN_LOCAL_TEMP\",\"args\":[\"mcp-approve\",\"-pyry-socket\",\"$RUN_LOCAL_TEMP\"]},\"scope\":\"dynamic\",\"tools\":[{\"name\":\"approve\",\"annotations\":{}}]},{\"name\":\"pyry_files\",\"status\":\"connected\",\"serverInfo\":{\"name\":\"pyry_files\",\"version\":\"dev\"},\"config\":{\"type\":\"stdio\",\"command\":\"$RUN_LOCAL_TEMP\",\"args\":[\"mcp-files\",\"-pyry-socket\",\"$RUN_LOCAL_TEMP\"]},\"scope\":\"dynamic\",\"tools\":[{\"name\":\"send_file\",\"annotations\":{}}]},{\"name\":\"pyry_probe_absent\",\"status\":\"failed\",\"error\":\"ENOENT: no such file or directory, posix_spawn '$RUN_LOCAL_TEMP'\",\"config\":{\"type\":\"stdio\",\"command\":\"$RUN_LOCAL_TEMP\",\"args\":[]},\"scope\":\"dynamic\"}]}}}",
+      "events_emitted": 0
+    },
+    {
+      "index": 2,
+      "type": "control_response",
+      "subtype": "success",
+      "request_id": "req_mcp_reconnect_3",
+      "payload_len_bytes_captured": 95,
+      "payload_len_bytes": 95,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"req_mcp_reconnect_3\"}}",
+      "events_emitted": 0
+    },
+    {
+      "index": 3,
+      "type": "control_response",
+      "subtype": "success",
+      "request_id": "req_mcp_toggle_4",
+      "payload_len_bytes_captured": 92,
+      "payload_len_bytes": 92,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"req_mcp_toggle_4\"}}",
+      "events_emitted": 0
+    }
+  ],
+  "stderr_capture": "",
+  "redaction": [
+    {
+      "class": "artifact_dir",
+      "replacement": "$ARTIFACT_DIR",
+      "count": 1
+    },
+    {
+      "class": "run_local_temp",
+      "replacement": "$RUN_LOCAL_TEMP",
+      "count": 30
+    },
+    {
+      "class": "session_id",
+      "replacement": "$SESSION_ID",
+      "count": 1
+    },
+    {
+      "class": "workdir",
+      "replacement": "$WORKDIR",
+      "count": 1
+    }
+  ],
+  "redaction_rationale": "Inherited whole from #1260 (see dropcapRedactionRationale): a fresh empty non-git workdir under a per-test temp $HOME, no prompt at all, no os.Environ() read into the record, the declared dropcapRedactor substitution table over every string, and dropcapScanner as a fail-closed deny-scan over the marshalled record. WHAT THIS CAPTURE SPECIFICALLY CAN CARRY, stated rather than left to be inferred by whoever decides to paste this record into a public issue. FIRST, an mcp_status reply reports a `config` PER SERVER, and a stdio server's config is its command, its argv and its environment — which is where an API key lives. It is KEPT, because whether claude echoes the document back is precisely what #2275 has to decode, and the defences for keeping it are that the three servers are rig-authored with no environment of their own, that every run-local path they name is substituted under run_local_temp, and that the deny-scan runs AHEAD of every filesystem call so a hit leaves nothing half-written. SECOND, the server NAMES are kept unredacted: --strict-mcp-config means they are this rig's three literals rather than an operator's inventory, which is exactly why the bypass arm was cut. THIRD, the recorded --mcp-config document is the rig's own bytes, and the argv is production's flag set; both name run-local paths and both go through the table. FOURTH, stderr_capture is the child's own stderr, verbatim and free-form — claude's diagnostics, including whatever it prints when it refuses the --mcp-config document, and the place an authentication failure prints. It is KEPT because a claude that refused the document complains NOWHERE ELSE, and a capture that cannot say why it failed is the defect #2307 was filed for. Its defences are the same three: every string goes through the substitution table BEFORE it is capped, so a truncation cannot strand half a path the table would otherwise have replaced; the deny-scan runs over it ahead of every filesystem call, with both credential environment variables live as needles; and it is bounded by capFixtureCapture at stderrFixtureCap. The bound is named by symbol rather than spelled as a number here, so this prose cannot drift from the value actually applied. THE CAP IS NOT A REDACTION — it bounds how much a reviewer must read, and nothing else.",
+  "credential_scan_applied": {
+    "ANTHROPIC_API_KEY": false,
+    "CLAUDE_CODE_OAUTH_TOKEN": true,
+    "anthropic-key-prefix": true,
+    "artifact_dir": true,
+    "home-path-prefix": true,
+    "operator_home": true,
+    "private-var-folders-prefix": true,
+    "temp_home": true,
+    "users-path-prefix": true,
+    "var-folders-prefix": true,
+    "workdir": true
+  },
+  "credential_scan_skipped": [
+    "ANTHROPIC_API_KEY"
+  ],
+  "limitations": "One spawn, one spawn shape, one claude version, one model (haiku), three servers, and NO user turn at all — the servers are read by pre-turn controls, never after a tool call. Cross-version, cross-model and cross-arm stability are UNMEASURED. The broken server is broken in ONE way, an absent stdio command; a server that starts and then fails its handshake, one that needs auth, and every remote (HTTP/SSE) transport are UNMEASURED and may report different keys. A key absent from servers[].keys did not appear on THIS reply, which is not the same as claude never sending it — and the union across these three servers over-reports, because a key one server carried is not one every server carries.",
+  "lines_dropped_over_cap": 0,
+  "bytes_dropped_over_cap": 0,
+  "partials_dropped": 0,
+  "blank_lines": 0,
+  "unterminated_partial_len": 0
+}

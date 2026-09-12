@@ -50,10 +50,11 @@ package realclaude
 //
 // # No user turn
 //
-// claude connects its MCP servers at startup — the system/init line already reports
-// mcp_servers — so the surface is live before any prompt. Sending no turn is what
-// keeps the permission-prompt tool unexercised and the blast radius at zero: a spawn
-// that never prompts cannot reach a tool call.
+// The working pre-turn arm in runInitControlChild proves the control surface accepts
+// a request before any prompt. system/init is emitted per turn rather than at spawn,
+// so this probe must not wait for it. Sending no turn keeps the permission-prompt
+// tool unexercised and the blast radius at zero: a spawn that never prompts cannot
+// reach a tool call.
 //
 // # What is reused, and what is deliberately not
 //
@@ -84,6 +85,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
@@ -152,22 +155,6 @@ const (
 const mcapApproveToolRef = "mcp__" + mcapApproveServer + "__approve"
 
 const (
-	// How long to wait for the system/init line that proves the child launched and
-	// considered its MCP servers. Generous: three stdio servers are spawned before it.
-	// Held only while the child is SAYING something — see mcapInitSilenceBudget.
-	mcapInitBudget = 120 * time.Second
-	// How long a child that has printed NOTHING AT ALL is waited on. Seven gate runs on
-	// 2026-09-09 held the whole mcapInitBudget and never produced the line, so a claude
-	// that was going to speak had four times this window; the sibling oslcapAwaitInit
-	// gives the same line 60s in total. Two minutes of silence per gate run is a tenth
-	// of the budget spent on evidence that never lands.
-	//
-	// A STARTING POINT, NOT A MEASUREMENT. claude's first stdout line in stream-json mode
-	// is normally system/init itself, so a startup slow enough to produce nothing for
-	// this long reads as silence and is cut. That is why the record now names WHICH arm
-	// fired: the next gate run retunes this number from its own evidence rather than
-	// from a second guess.
-	mcapInitSilenceBudget = 30 * time.Second
 	// Per control request. Each verb is awaited on its own budget so a verb claude
 	// declines to answer costs one wait, not the whole run.
 	mcapReplyBudget = 60 * time.Second
@@ -187,17 +174,15 @@ const (
 const (
 	mcapTerminatedResponse = "response"
 	mcapTerminatedBudget   = "budget"
+	mcapTerminatedWrite    = "write-error"
 )
 
-// How the init wait ended. The two failure arms are the whole point of #2307: a run
-// that recorded only "no system/init line" left "claude printed nothing" and "claude
-// printed lines, none of them system/init" fitting the evidence equally, and those
-// two have opposite fixes. Naming which one fired is what lets the remedy be filed
-// from the record rather than from another guess.
+// Init is observed after the controls rather than awaited before them. The working
+// initialize probe established that this stream-json path emits system/init per user
+// turn, and this probe deliberately sends no turn.
 const (
-	mcapInitSeen   = "seen"
-	mcapInitSilent = "silent"
-	mcapInitAbsent = "absent"
+	mcapInitSeen       = "seen"
+	mcapInitNotAwaited = "not-awaited"
 )
 
 const (
@@ -222,7 +207,7 @@ const mcapSpawnShapeDelta = "Production's DOWNGRADED arm, not the YOLO shape the
 	"report one machine's inventory; it is #2275's question, not this record's."
 
 const mcapLimitations = "One spawn, one spawn shape, one claude version, one model (" + mcapModel + "), " +
-	"three servers, and NO user turn at all — the servers are read as they stand at startup, never after " +
+	"three servers, and NO user turn at all — the servers are read by pre-turn controls, never after " +
 	"a tool call. Cross-version, cross-model and cross-arm stability are UNMEASURED. The broken server is " +
 	"broken in ONE way, an absent stdio command; a server that starts and then fails its handshake, one " +
 	"that needs auth, and every remote (HTTP/SSE) transport are UNMEASURED and may report different keys. " +
@@ -342,11 +327,8 @@ type mcapRecord struct {
 	// surfaces say about the same three servers. Raw, because whether 2.1.259 spells it
 	// as an array of objects or something else is part of what is being recorded.
 	InitSeen bool `json:"init_seen"`
-	// WHICH of mcapAwaitInit's three arms ended the wait — the discriminator #2307
-	// exists to add. init_seen answers "did the line arrive"; this answers "and if not,
-	// was the child silent or merely saying other things", which is the question a
-	// remedy has to be chosen on. Assigned in the same statement pair as InitSeen so the
-	// two cannot disagree.
+	// Init is observational context only. "not-awaited" means no init arrived while
+	// the three request waits ran; it is never a prerequisite for sending them.
 	InitWait       string          `json:"init_wait"`
 	InitMCPServers json.RawMessage `json:"init_mcp_servers,omitempty"`
 
@@ -418,6 +400,41 @@ func (rec *mcapRecord) fixtureWorthy() (string, bool) {
 	if rec.ServerCount == 0 {
 		return "the mcp_status reply reported zero servers — a vacuous fixture proves nothing", false
 	}
+	required := map[string]bool{
+		mcapSubtypeStatus: false, mcapSubtypeReconnect: false, mcapSubtypeToggle: false,
+	}
+	requestIDs := map[string]bool{}
+	for _, request := range rec.Requests {
+		if _, ok := required[request.Subtype]; !ok {
+			continue
+		}
+		if request.RequestID == "" || requestIDs[request.RequestID] {
+			return fmt.Sprintf("%s has a missing or duplicate request id %q", request.Subtype,
+				request.RequestID), false
+		}
+		requestIDs[request.RequestID] = true
+		if request.WriteError != "" || request.TerminatedOn != mcapTerminatedResponse ||
+			len(request.ReplyIndices) == 0 {
+			return fmt.Sprintf("%s did not retain a successful write and correlated reply", request.Subtype), false
+		}
+		matched := false
+		for _, index := range request.ReplyIndices {
+			for _, frame := range rec.Frames {
+				if frame.Index == index && frame.RequestID == request.RequestID && frame.Subtype == "success" {
+					matched = true
+				}
+			}
+		}
+		if !matched {
+			return fmt.Sprintf("%s reply indices do not name a correlated success frame", request.Subtype), false
+		}
+		required[request.Subtype] = true
+	}
+	for subtype, seen := range required {
+		if !seen {
+			return fmt.Sprintf("no complete correlated %s request and reply", subtype), false
+		}
+	}
 	sawBroken := false
 	for _, s := range rec.Servers {
 		if len(s.Keys) == 0 {
@@ -426,6 +443,9 @@ func (rec *mcapRecord) fixtureWorthy() (string, bool) {
 		}
 		if s.Name == mcapBrokenServer {
 			sawBroken = true
+			if s.Status == "" || s.Error == "" {
+				return "the deliberately broken server lacks observed status or error", false
+			}
 		}
 	}
 	if !sawBroken {
@@ -488,6 +508,145 @@ func mcapControlLine(subtype, requestID string, extra map[string]any) ([]byte, e
 	return append(b, '\n'), nil
 }
 
+// mcapDriveRequests sends the three MCP controls without waiting for system/init.
+// Before reconnect it polls status until the rig-owned healthy server is connected;
+// every poll remains in the record with its own id and bounded reply outcome.
+// Reply timing is injectable so startup silence is proved offline without sleeping.
+// A write failure stops later sends because the pipe is no longer trustworthy.
+func mcapDriveRequests(stdin io.Writer, recorder *dropcapRecorder, red *dropcapRedactor,
+	budget, poll time.Duration) ([]mcapRequest, error) {
+	requests := make([]mcapRequest, 0, 4)
+	send := func(subtype string, extra map[string]any, replyBudget time.Duration) (mcapRequest, error) {
+		requestID := fmt.Sprintf("req_%s_%d", subtype, len(requests)+1)
+		line, err := mcapControlLine(subtype, requestID, extra)
+		if err != nil {
+			return mcapRequest{}, fmt.Errorf("build %s control line: %w", subtype, err)
+		}
+		entry := mcapRequest{Subtype: subtype, RequestID: requestID, Sent: red.str(string(line))}
+		start := time.Now()
+		if _, err := stdin.Write(line); err != nil {
+			entry.WriteError = red.str(err.Error())
+			entry.TerminatedOn = mcapTerminatedWrite
+			entry.WaitSeconds = time.Since(start).Seconds()
+			requests = append(requests, entry)
+			return entry, fmt.Errorf("write %s control request: %w", subtype, err)
+		}
+		entry.ReplyIndices, entry.TerminatedOn = mcapAwait(recorder, requestID, replyBudget, poll)
+		entry.WaitSeconds = time.Since(start).Seconds()
+		requests = append(requests, entry)
+		return entry, nil
+	}
+
+	status, err := send(mcapSubtypeStatus, nil, budget)
+	if err != nil {
+		return requests, err
+	}
+	if status.TerminatedOn != mcapTerminatedResponse {
+		return requests, fmt.Errorf("await %s readiness: initial mcp_status ended on %s",
+			mcapApproveServer, status.TerminatedOn)
+	}
+	readinessDeadline := time.Now().Add(budget)
+	for !mcapStatusReports(recorder, status.RequestID, mcapApproveServer, "connected") {
+		remaining := time.Until(readinessDeadline)
+		if remaining <= 0 {
+			return requests, fmt.Errorf("await %s readiness: server did not report connected within %s",
+				mcapApproveServer, budget)
+		}
+		if poll > 0 {
+			delay := min(poll, remaining)
+			time.Sleep(delay)
+		}
+		remaining = time.Until(readinessDeadline)
+		if remaining <= 0 {
+			return requests, fmt.Errorf("await %s readiness: server did not report connected within %s",
+				mcapApproveServer, budget)
+		}
+		status, err = send(mcapSubtypeStatus, nil, remaining)
+		if err != nil {
+			return requests, err
+		}
+		if status.TerminatedOn != mcapTerminatedResponse {
+			return requests, fmt.Errorf("await %s readiness: mcp_status ended on %s",
+				mcapApproveServer, status.TerminatedOn)
+		}
+	}
+
+	if _, err := send(mcapSubtypeReconnect,
+		map[string]any{"serverName": mcapApproveServer}, budget); err != nil {
+		return requests, err
+	}
+	if _, err := send(mcapSubtypeToggle,
+		map[string]any{"serverName": mcapBrokenServer, "enabled": false}, budget); err != nil {
+		return requests, err
+	}
+	return requests, nil
+}
+
+// mcapDriveAndClassify owns the live caller's transition into the pre-turn request
+// path. Once that path starts, init is observational rather than awaited. A status
+// timeout or a healthy-server readiness timeout is measured data; failure to send a
+// status request remains an instrument fault.
+func mcapDriveAndClassify(stdin io.Writer, recorder *dropcapRecorder, red *dropcapRedactor,
+	rec *mcapRecord, budget, poll time.Duration) error {
+	rec.InitWait = mcapInitNotAwaited
+	requests, err := mcapDriveRequests(stdin, recorder, red, budget, poll)
+	rec.Requests = requests
+	if err == nil {
+		return nil
+	}
+
+	outcome := mcapInstrumentBroken
+	detail := red.str(err.Error())
+	var status *mcapRequest
+	writeFailed := false
+	for i := range rec.Requests {
+		request := &rec.Requests[i]
+		if request.WriteError != "" {
+			writeFailed = true
+		}
+		if request.Subtype == mcapSubtypeStatus {
+			status = request
+		}
+	}
+	if !writeFailed && status != nil {
+		switch status.TerminatedOn {
+		case mcapTerminatedBudget:
+			outcome = mcapDidNotFire
+			detail += "; " + mcapStatusVerdict(rec)
+		case mcapTerminatedResponse:
+			outcome = mcapDidNotFire
+		}
+	}
+	rec.set(outcome, "%s", detail)
+	return err
+}
+
+// mcapStatusReports reads the correlated status reply directly from the recorder.
+// It intentionally checks the wire response rather than elapsed time: reconnect is
+// sent only after the fixed test-owned server actually reports the requested state.
+func mcapStatusReports(recorder *dropcapRecorder, requestID, serverName, wantStatus string) bool {
+	lines, _ := recorder.snapshot()
+	for _, line := range lines {
+		if !line.Decoded || mcapResponseRequestID(line.Raw) != requestID {
+			continue
+		}
+		servers, _, ok := mcapServersFrom(line.Raw)
+		if !ok {
+			continue
+		}
+		for _, server := range servers {
+			var state struct {
+				Name   string `json:"name"`
+				Status string `json:"status"`
+			}
+			if json.Unmarshal(server, &state) == nil && state.Name == serverName && state.Status == wantStatus {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // mcapResponseRequestID returns the request_id one line carries, or empty.
 //
 // THREE PLACEMENTS ARE READ — top level, under `response`, and under
@@ -512,6 +671,30 @@ func mcapResponseRequestID(raw []byte) string {
 	for _, id := range []string{env.RequestID, env.Response.RequestID, env.Response.Response.RequestID} {
 		if id != "" {
 			return id
+		}
+	}
+	return ""
+}
+
+// mcapResponseSubtype reads the response outcome at the same three placements as
+// mcapResponseRequestID. The top-level recorder cannot see a nested success/error
+// subtype, but fixture promotion must reject an unsupported-command error reply.
+func mcapResponseSubtype(raw []byte) string {
+	var env struct {
+		Subtype  string `json:"subtype"`
+		Response struct {
+			Subtype  string `json:"subtype"`
+			Response struct {
+				Subtype string `json:"subtype"`
+			} `json:"response"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return ""
+	}
+	for _, subtype := range []string{env.Subtype, env.Response.Subtype, env.Response.Response.Subtype} {
+		if subtype != "" {
+			return subtype
 		}
 	}
 	return ""
@@ -543,65 +726,6 @@ func mcapAwait(recorder *dropcapRecorder, requestID string, budget, poll time.Du
 		}
 		if time.Now().After(deadline) {
 			return nil, mcapTerminatedBudget
-		}
-		time.Sleep(poll)
-	}
-}
-
-// mcapSawOutput answers whether the child has said ANYTHING, which is the
-// discriminator behind the short silence window below.
-//
-// Kept lines are the obvious shape of output and they are not the only one.
-// dropcapRecorder reports a blank line, a whole line dropped at the byte cap, a
-// discarded over-long partial and an unterminated tail in its COUNTERS rather than in
-// its line slice — and every one of them is a child that is talking. Reading only
-// len(lines) would call such a child silent and cut it off mid-sentence, then record
-// the cut as "claude printed nothing".
-//
-// BytesOverCap is not consulted: it cannot be non-zero while LinesOverCap is zero, so
-// reading it would add a second name for one fact.
-func mcapSawOutput(lines []dropcapCaptured, caps dropcapCaps) bool {
-	return len(lines) > 0 || caps.BlankLines > 0 || caps.LinesOverCap > 0 ||
-		caps.PartialsDropped > 0 || caps.UnterminatedPartial > 0
-}
-
-// mcapAwaitInit waits for the system/init line, which is the evidence that the child
-// launched AND got as far as considering its MCP servers. Sending a control request
-// before it would race the servers' own startup and record a `pending` reading of
-// the rig's timing rather than of claude's answer.
-//
-// TWO DEADLINES, AND THAT IS THE WHOLE OF #2307's THIRD CRITERION. A child that is
-// saying something gets the full budget, so a genuinely slow MCP startup is still
-// captured. A child that has said NOTHING AT ALL gets only `silence` — because seven
-// gate runs held the full two minutes on exactly that shape and landed nothing, and
-// because the two failures have opposite remedies and the caller cannot choose one
-// from a bare false.
-//
-// The silence arm is checked BEFORE the budget arm. With the live constants
-// (silence < budget) the two orders behave identically; under a degenerate
-// configuration where they do not, a completely silent run still reports as silent
-// rather than being relabelled an absence.
-//
-// budget, silence and poll are parameters rather than the constants directly so all
-// three exits are provable offline in milliseconds; the live call site passes
-// mcapInitBudget, mcapInitSilenceBudget and mcapPoll.
-func mcapAwaitInit(recorder *dropcapRecorder, budget, silence, poll time.Duration) string {
-	start := time.Now()
-	budgetDeadline := start.Add(budget)
-	silenceDeadline := start.Add(silence)
-	for {
-		lines, caps := recorder.snapshot()
-		for _, c := range lines {
-			if c.Decoded && c.Type == "system" && c.Subtype == "init" {
-				return mcapInitSeen
-			}
-		}
-		now := time.Now()
-		if !now.Before(silenceDeadline) && !mcapSawOutput(lines, caps) {
-			return mcapInitSilent
-		}
-		if !now.Before(budgetDeadline) {
-			return mcapInitAbsent
 		}
 		time.Sleep(poll)
 	}
@@ -760,7 +884,7 @@ func mcapCollect(t *testing.T, lines []dropcapCaptured, red *dropcapRedactor) []
 		out = append(out, mcapFrame{
 			Index:                   entry.Index,
 			Type:                    entry.Type,
-			Subtype:                 entry.Subtype,
+			Subtype:                 mcapResponseSubtype(c.Raw),
 			RequestID:               mcapResponseRequestID(c.Raw),
 			PayloadLenBytesCaptured: entry.PayloadLenBytesCaptured,
 			PayloadLenBytes:         entry.PayloadLenBytes,
@@ -778,8 +902,7 @@ func mcapCollect(t *testing.T, lines []dropcapCaptured, red *dropcapRedactor) []
 //
 // IT IS THE ONLY WRITER OF THOSE FIELDS, and mcapPersist calls it, so every
 // terminating path reports what was actually held. Before #2307 the fill sat inline
-// below the init wait, and the five returns above it — streamsup.New failing, no live
-// child, the init wait, and the two mid-loop returns — each wrote a record whose
+// below the init wait, and the returns above it each wrote a record whose
 // lines_captured, census and frames were still the zero values it was constructed
 // with. Seven gate runs read as "claude printed nothing" when the record could not
 // tell that from "claude printed lines, none of them system/init".
@@ -858,7 +981,7 @@ func mcapCensus(lines []dropcapCaptured) (map[string]int, int) {
 // prevent.
 //
 // fixtureReason names why the record was not promoted, and is empty when it was.
-func mcapWriteRecord(dir string, red *dropcapRedactor, scanner dropcapScanner, rec *mcapRecord) (
+func mcapWriteRecord(dir, fixturePath string, red *dropcapRedactor, scanner dropcapScanner, rec *mcapRecord) (
 	recordPath, fixtureReason string, err error) {
 	rec.Redaction = red.substitutions()
 
@@ -914,8 +1037,8 @@ func mcapWriteRecord(dir string, red *dropcapRedactor, scanner dropcapScanner, r
 	if reason, ok := rec.fixtureWorthy(); !ok {
 		return recordPath, reason, nil
 	}
-	if err := os.WriteFile(mcapFixturePath, append(blob, '\n'), 0o600); err != nil {
-		return recordPath, "", fmt.Errorf("write fixture %s: %w", mcapFixturePath, err)
+	if err := os.WriteFile(fixturePath, append(blob, '\n'), 0o600); err != nil {
+		return recordPath, "", fmt.Errorf("write fixture %s: %w", fixturePath, err)
 	}
 	return recordPath, "", nil
 }
@@ -1093,7 +1216,9 @@ func TestRealClaude_MCPStatusCapture(t *testing.T) {
 
 	// Registered before anything below can fail, so a structural t.Fatalf still leaves
 	// the evidence on disk — #1260's ordering.
-	t.Cleanup(func() { mcapPersist(t, artifactDir, recorder, &stderrBuf, red, scanner, rec) })
+	t.Cleanup(func() {
+		mcapPersist(t, artifactDir, mcapFixturePath, recorder, &stderrBuf, red, scanner, rec)
+	})
 
 	argvHandler, argv := newDropcapArgvHandler()
 	runner, err := streamsup.New(streamsup.Config{
@@ -1137,68 +1262,17 @@ func TestRealClaude_MCPStatusCapture(t *testing.T) {
 	}
 	rec.SpawnShape = red.strs(argv())
 
-	// One statement pair for both fields, so init_seen and init_wait cannot disagree.
-	rec.InitWait = mcapAwaitInit(recorder, mcapInitBudget, mcapInitSilenceBudget, mcapPoll)
-	rec.InitSeen = rec.InitWait == mcapInitSeen
-	if !rec.InitSeen {
-		// Counts and durations only — never the child's output, which reaches the record
-		// through the deny-scan and must not reach a log line around it.
-		switch rec.InitWait {
-		case mcapInitSilent:
-			rec.set(mcapInstrumentBroken, "no system/init line, and the child's stdout was COMPLETELY "+
-				"SILENT for %s — not one line, blank line or partial. It launched and then said "+
-				"nothing at all, so read stderr_capture: a claude that refused the --mcp-config "+
-				"document complains there and nowhere else. The remaining %s of the %s init budget "+
-				"was not spent, because a silent child had already answered the question",
-				mcapInitSilenceBudget, mcapInitBudget-mcapInitSilenceBudget, mcapInitBudget)
-		default:
-			rec.set(mcapInstrumentBroken, "no system/init line within %s, but the child WAS talking: "+
-				"see line_type_census and frames for what it sent instead. The MCP servers may simply "+
-				"be slower than this budget, which is a different fault from silence and has a "+
-				"different fix", mcapInitBudget)
-		}
+	// The control surface is live as soon as stdin is available. Do not wait for
+	// system/init: this stream-json path emits it with a user turn, and this probe sends
+	// no user turn by design.
+	err = mcapDriveAndClassify(stdin, recorder, red, rec, mcapReplyBudget, mcapPoll)
+	if err != nil {
 		return
 	}
 	if raw, ok := mcapInitServers(recorder); ok {
+		rec.InitSeen = true
+		rec.InitWait = mcapInitSeen
 		rec.InitMCPServers = json.RawMessage(red.redact(raw))
-	}
-
-	// The three verbs, in the acceptance criterion's order and each under its own id.
-	// mcp_status FIRST so it reads the servers pristine; the two mutating verbs then
-	// target the BROKEN server, because reconnecting it is the one call guaranteed to
-	// exercise a failure path and toggling it off is a real state change that leaves
-	// the two production servers untouched.
-	verbs := []struct {
-		subtype string
-		extra   map[string]any
-	}{
-		{mcapSubtypeStatus, nil},
-		{mcapSubtypeReconnect, map[string]any{"serverName": mcapBrokenServer}},
-		{mcapSubtypeToggle, map[string]any{"serverName": mcapBrokenServer, "enabled": false}},
-	}
-	for i, v := range verbs {
-		requestID := fmt.Sprintf("req_%s_%d", v.subtype, i+1)
-		line, lerr := mcapControlLine(v.subtype, requestID, v.extra)
-		if lerr != nil {
-			rec.set(mcapInstrumentBroken, "building the %s control line failed: %v", v.subtype,
-				red.str(lerr.Error()))
-			return
-		}
-		entry := mcapRequest{Subtype: v.subtype, RequestID: requestID, Sent: red.str(string(line))}
-		start := time.Now()
-		if _, werr := stdin.Write(line); werr != nil {
-			// Recorded rather than fatal: a failed write on the second verb still leaves the
-			// first verb's reply in the record, and that reply is the fixture.
-			entry.WriteError = red.str(werr.Error())
-			entry.TerminatedOn = mcapTerminatedBudget
-			rec.Requests = append(rec.Requests, entry)
-			rec.set(mcapInstrumentBroken, "writing the %s control request failed: %v", v.subtype,
-				entry.WriteError)
-			break
-		}
-		entry.ReplyIndices, entry.TerminatedOn = mcapAwait(recorder, requestID, mcapReplyBudget, mcapPoll)
-		entry.WaitSeconds = time.Since(start).Seconds()
-		rec.Requests = append(rec.Requests, entry)
 	}
 
 	// The server extraction below reads rec.Frames, which is why the fill is called here
@@ -1275,9 +1349,6 @@ func mcapStatusVerdict(rec *mcapRecord) string {
 		}
 	}
 	switch {
-	case !rec.InitSeen:
-		return "no system/init line was ever seen, so the child did not launch far enough to consider " +
-			"its MCP servers. This is an INSTRUMENT fault: read outcome_detail, not the reply search"
 	case status == nil:
 		return "the mcp_status request never went out, so the surface was never exercised. This is an " +
 			"INSTRUMENT fault: read outcome_detail, not the reply search"
@@ -1404,11 +1475,11 @@ func mcapInitServers(recorder *dropcapRecorder) (json.RawMessage, bool) {
 // The fill precedes the marshal, so stderr_capture goes through the FIRST marshal and
 // the deny-scan sees it. A field that only reached the record after the scan would
 // ship unscanned.
-func mcapPersist(t *testing.T, dir string, recorder *dropcapRecorder, stderr *probeSyncBuffer,
+func mcapPersist(t *testing.T, dir, fixturePath string, recorder *dropcapRecorder, stderr *probeSyncBuffer,
 	red *dropcapRedactor, scanner dropcapScanner, rec *mcapRecord) {
 	t.Helper()
 	mcapFillCapture(t, rec, recorder, stderr, red)
-	recordPath, fixtureReason, err := mcapWriteRecord(dir, red, scanner, rec)
+	recordPath, fixtureReason, err := mcapWriteRecord(dir, fixturePath, red, scanner, rec)
 	if err != nil {
 		t.Errorf("#2272: %v", red.str(err.Error()))
 		return
@@ -1420,7 +1491,7 @@ func mcapPersist(t *testing.T, dir string, recorder *dropcapRecorder, stderr *pr
 		red.str(rec.OutcomeDetail))
 	if fixtureReason != "" {
 		t.Logf("#2272: NOT promoted to %s — %s. The record above is the evidence; read it, then "+
-			"re-run or route the finding back", mcapFixturePath, fixtureReason)
+			"re-run or route the finding back", fixturePath, fixtureReason)
 		return
 	}
 	t.Logf("#2272: FIXTURE WRITTEN to %s (%d server(s), key union %v).\n"+
@@ -1430,7 +1501,7 @@ func mcapPersist(t *testing.T, dir string, recorder *dropcapRecorder, stderr *pr
 		"  A pipeline worktree is DISCARDED when the run ends, so a fixture a test merely writes "+
 		"does not survive (#1763, #2229). The record at the path above is written outside the "+
 		"worktree and is what the bytes can be recovered from if this run was the gate's.",
-		mcapFixturePath, rec.ServerCount, rec.ServerKeyUnion, mcapFixturePath)
+		fixturePath, rec.ServerCount, rec.ServerKeyUnion, fixturePath)
 }
 
 // --- offline self-checks -----------------------------------------------------------
@@ -1439,9 +1510,31 @@ func mcapPersist(t *testing.T, dir string, recorder *dropcapRecorder, stderr *pr
 //
 //	go test -tags e2e_realclaude -race -count=1 -run TestMcap ./internal/e2e/realclaude/
 //
-// None of them constructs a fixture-worthy record, so none can write to
-// mcapFixturePath: a test that promoted a fixture as a side effect would land bytes
-// no claude ever sent, behind the very provenance checks the reader trusts.
+// None fabricates a fixture-worthy record. The committed live record is validated
+// below. Writer tests inject fixture paths under t.TempDir so offline coverage
+// cannot alter the repository fixture.
+
+func TestMcapCommittedFixtureIsUsable(t *testing.T) {
+	t.Parallel()
+	blob, err := os.ReadFile(mcapFixturePath)
+	if err != nil {
+		t.Fatalf("reading committed MCP fixture: %v", err)
+	}
+	var rec mcapRecord
+	if err := json.Unmarshal(blob, &rec); err != nil {
+		t.Fatalf("decoding committed MCP fixture: %v", err)
+	}
+	if !rec.IsCapture {
+		t.Fatal("committed MCP fixture is not a live capture")
+	}
+	if reason, worthy := rec.fixtureWorthy(); !worthy {
+		t.Fatalf("committed MCP fixture is unusable: %s", reason)
+	}
+	scanner := dropcapScanner{needles: dropcapFixedNeedles()}
+	if hits, _ := scanner.scan(blob); len(hits) != 0 {
+		t.Fatalf("committed MCP fixture failed the credential scan: %v", hits)
+	}
+}
 
 // TestMcapControlLineCarriesEachVerbsOwnFields pins the three request shapes read
 // out of the claude 2.1.259 binary's own bundled schema.
@@ -1467,8 +1560,8 @@ func TestMcapControlLineCarriesEachVerbsOwnFields(t *testing.T) {
 		{
 			name:      "mcp_reconnect names the server, camelCase",
 			subtype:   mcapSubtypeReconnect,
-			extra:     map[string]any{"serverName": mcapBrokenServer},
-			wantInner: map[string]any{"subtype": mcapSubtypeReconnect, "serverName": mcapBrokenServer},
+			extra:     map[string]any{"serverName": mcapApproveServer},
+			wantInner: map[string]any{"subtype": mcapSubtypeReconnect, "serverName": mcapApproveServer},
 		},
 		{
 			name:    "mcp_toggle names the server and the desired state",
@@ -1518,6 +1611,142 @@ func TestMcapControlLineCarriesEachVerbsOwnFields(t *testing.T) {
 	}
 }
 
+type mcapTestWriter func([]byte) (int, error)
+
+func (write mcapTestWriter) Write(p []byte) (int, error) { return write(p) }
+
+// TestMcapDriveRequestsDoesNotWaitForInit is the offline guard on #2360's repaired
+// send point. An empty recorder is the exact startup-silence state that used to hold
+// the probe in its pre-request init wait until it returned without sending anything.
+func TestMcapDriveRequestsDoesNotWaitForInit(t *testing.T) {
+	t.Parallel()
+	recorder := newDropcapRecorder()
+	statusReplies := 0
+	var sentLines []string
+	write := mcapTestWriter(func(line []byte) (int, error) {
+		sentLines = append(sentLines, string(line))
+		var request mcapControlRequest
+		if err := json.Unmarshal(line, &request); err != nil {
+			return 0, err
+		}
+		subtype, _ := request.Request["subtype"].(string)
+		response := map[string]any{
+			"type": "control_response",
+			"response": map[string]any{
+				"subtype":    "success",
+				"request_id": request.RequestID,
+			},
+		}
+		if subtype == mcapSubtypeStatus {
+			status := "pending"
+			if statusReplies > 0 {
+				status = "connected"
+			}
+			statusReplies++
+			response["response"].(map[string]any)["response"] = map[string]any{
+				"mcpServers": []map[string]any{
+					{"name": mcapApproveServer, "status": status},
+					{"name": mcapBrokenServer, "status": "failed", "error": "command not found"},
+				},
+			}
+		}
+		encoded, err := json.Marshal(response)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := recorder.Write(append(encoded, '\n')); err != nil {
+			return 0, err
+		}
+		return len(line), nil
+	})
+	requests, err := mcapDriveRequests(write, recorder,
+		newDropcapRedactor("", "", "", "", "", mcapTestNonce), time.Second, 0)
+	if err != nil {
+		t.Fatalf("mcapDriveRequests() error: %v", err)
+	}
+	if len(requests) != 4 {
+		t.Fatalf("mcapDriveRequests() returned %d requests, want 4", len(requests))
+	}
+
+	wantSubtypes := []string{
+		mcapSubtypeStatus, mcapSubtypeStatus, mcapSubtypeReconnect, mcapSubtypeToggle,
+	}
+	seenIDs := map[string]bool{}
+	for i, wantSubtype := range wantSubtypes {
+		got := requests[i]
+		if got.Subtype != wantSubtype {
+			t.Errorf("request %d subtype = %q, want %q", i, got.Subtype, wantSubtype)
+		}
+		if got.RequestID == "" || seenIDs[got.RequestID] {
+			t.Errorf("request %d id = %q, want a distinct non-empty id", i, got.RequestID)
+		}
+		seenIDs[got.RequestID] = true
+		if got.Sent != sentLines[i] {
+			t.Errorf("request %d sent = %q, want exact stdin line %q", i, got.Sent, sentLines[i])
+		}
+		if got.TerminatedOn != mcapTerminatedResponse || len(got.ReplyIndices) != 1 {
+			t.Errorf("request %d outcome = %q/%v, want one correlated response",
+				i, got.TerminatedOn, got.ReplyIndices)
+		}
+	}
+	if !strings.Contains(requests[2].Sent, `"serverName":"`+mcapApproveServer+`"`) {
+		t.Errorf("reconnect line = %q, want the ready test-owned server", requests[2].Sent)
+	}
+	if !strings.Contains(requests[3].Sent, `"serverName":"`+mcapBrokenServer+`"`) {
+		t.Errorf("toggle line = %q, want the deliberately broken diagnostic server", requests[3].Sent)
+	}
+}
+
+func TestMcapDriveRequestsRefusesReconnectUntilHealthy(t *testing.T) {
+	t.Parallel()
+	recorder := newDropcapRecorder()
+	write := mcapTestWriter(func(line []byte) (int, error) {
+		var request mcapControlRequest
+		if err := json.Unmarshal(line, &request); err != nil {
+			return 0, err
+		}
+		subtype, _ := request.Request["subtype"].(string)
+		if subtype != mcapSubtypeStatus {
+			t.Errorf("sent %s before %s reported connected", subtype, mcapApproveServer)
+		}
+		response := map[string]any{
+			"type": "control_response",
+			"response": map[string]any{
+				"subtype":    "success",
+				"request_id": request.RequestID,
+				"response": map[string]any{
+					"mcpServers": []map[string]any{
+						{"name": mcapApproveServer, "status": "pending"},
+						{"name": mcapBrokenServer, "status": "failed", "error": "command not found"},
+					},
+				},
+			},
+		}
+		encoded, err := json.Marshal(response)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := recorder.Write(append(encoded, '\n')); err != nil {
+			return 0, err
+		}
+		return len(line), nil
+	})
+
+	requests, err := mcapDriveRequests(write, recorder,
+		newDropcapRedactor("", "", "", "", "", mcapTestNonce), 5*time.Millisecond, time.Millisecond)
+	if err == nil {
+		t.Fatal("mcapDriveRequests() reconnected before the healthy server reported connected")
+	}
+	if len(requests) == 0 {
+		t.Fatal("mcapDriveRequests() retained no status request while waiting for readiness")
+	}
+	for _, request := range requests {
+		if request.Subtype != mcapSubtypeStatus {
+			t.Errorf("retained %s request before readiness, want only status diagnostics", request.Subtype)
+		}
+	}
+}
+
 // TestMcapControlLineRefusesToOverrideItsOwnSubtype guards the one way a caller
 // could send a verb the record then mislabels: an `extra` map carrying `subtype`
 // would win the merge silently, and the recorded request would name one verb while
@@ -1561,6 +1790,29 @@ func TestMcapResponseRequestIDReadsAllThreePlacements(t *testing.T) {
 			t.Parallel()
 			if got := mcapResponseRequestID([]byte(tc.line)); got != tc.want {
 				t.Errorf("mcapResponseRequestID() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMcapResponseSubtypeReadsAllThreePlacements(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		line string
+		want string
+	}{
+		{"top level", `{"subtype":"success"}`, "success"},
+		{"under response", `{"response":{"subtype":"error"}}`, "error"},
+		{"under response.response", `{"response":{"response":{"subtype":"success"}}}`, "success"},
+		{"absent", `{"type":"control_response"}`, ""},
+		{"undecodable", `{"response":`, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := mcapResponseSubtype([]byte(tc.line)); got != tc.want {
+				t.Errorf("mcapResponseSubtype() = %q, want %q", got, tc.want)
 			}
 		})
 	}
@@ -1795,7 +2047,8 @@ func TestMcapWriteRecordRefusesACredentialShapedConfigAndLeavesNoFile(t *testing
 			t.Parallel()
 			dir := t.TempDir()
 			red := newDropcapRedactor("", "", "", "", "", 1)
-			path, reason, err := mcapWriteRecord(dir, red, scanner, record(tc.config))
+			path, reason, err := mcapWriteRecord(dir, filepath.Join(dir, "fixture.json"), red, scanner,
+				record(tc.config))
 
 			entries, rerr := os.ReadDir(dir)
 			if rerr != nil {
@@ -1849,11 +2102,24 @@ func TestMcapFixtureWorthyRefusesEveryBadCapture(t *testing.T) {
 			ServerCount:   2,
 			Servers: []mcapServer{
 				{Name: mcapApproveServer, Status: "connected", Keys: []string{"name", "status"}},
-				{Name: mcapBrokenServer, Status: "failed", Keys: []string{"error", "name", "status"}},
+				{Name: mcapBrokenServer, Status: "failed", Error: "command not found",
+					Keys: []string{"error", "name", "status"}},
+			},
+			Requests: []mcapRequest{
+				{Subtype: mcapSubtypeStatus, RequestID: "req_mcp_status_1",
+					ReplyIndices: []int{1}, TerminatedOn: mcapTerminatedResponse},
+				{Subtype: mcapSubtypeReconnect, RequestID: "req_mcp_reconnect_2",
+					ReplyIndices: []int{2}, TerminatedOn: mcapTerminatedResponse},
+				{Subtype: mcapSubtypeToggle, RequestID: "req_mcp_toggle_3",
+					ReplyIndices: []int{3}, TerminatedOn: mcapTerminatedResponse},
 			},
 			Frames: []mcapFrame{
 				{Index: 0, Type: "system", Subtype: "init", PayloadEncoding: dropcapEncodingJSONString},
-				{Index: 1, Type: "control_response", RequestID: "req_mcp_status_1",
+				{Index: 1, Type: "control_response", Subtype: "success", RequestID: "req_mcp_status_1",
+					PayloadEncoding: dropcapEncodingJSONString},
+				{Index: 2, Type: "control_response", Subtype: "success", RequestID: "req_mcp_reconnect_2",
+					PayloadEncoding: dropcapEncodingJSONString},
+				{Index: 3, Type: "control_response", Subtype: "success", RequestID: "req_mcp_toggle_3",
 					PayloadEncoding: dropcapEncodingJSONString},
 			},
 		}
@@ -1886,6 +2152,51 @@ func TestMcapFixtureWorthyRefusesEveryBadCapture(t *testing.T) {
 		{
 			"the deliberately broken server never appeared in the reply",
 			func(r *mcapRecord) { r.Servers = r.Servers[:1] },
+			false,
+		},
+		{
+			"the broken server has no observed status",
+			func(r *mcapRecord) { r.Servers[1].Status = "" },
+			false,
+		},
+		{
+			"the broken server has no observed error",
+			func(r *mcapRecord) { r.Servers[1].Error = "" },
+			false,
+		},
+		{
+			"one of the three verbs was never sent",
+			func(r *mcapRecord) { r.Requests = r.Requests[:2] },
+			false,
+		},
+		{
+			"two verbs reused one request id",
+			func(r *mcapRecord) { r.Requests[2].RequestID = r.Requests[1].RequestID },
+			false,
+		},
+		{
+			"a request write failed",
+			func(r *mcapRecord) { r.Requests[1].WriteError = "broken pipe" },
+			false,
+		},
+		{
+			"a request exhausted its reply budget",
+			func(r *mcapRecord) { r.Requests[1].TerminatedOn = mcapTerminatedBudget },
+			false,
+		},
+		{
+			"a request recorded no correlated reply",
+			func(r *mcapRecord) { r.Requests[1].ReplyIndices = nil },
+			false,
+		},
+		{
+			"a reply index names a frame carrying another request id",
+			func(r *mcapRecord) { r.Requests[1].ReplyIndices = []int{3} },
+			false,
+		},
+		{
+			"an unsupported-command error reply is diagnostic only",
+			func(r *mcapRecord) { r.Frames[2].Subtype = "error" },
 			false,
 		},
 		{
@@ -1994,21 +2305,25 @@ func TestMcapStatusVerdictSeparatesRigFailureFromFinding(t *testing.T) {
 		name        string
 		rec         mcapRecord
 		wantFinding bool
+		wantText    string
 	}{
-		{name: "the child never announced itself", rec: mcapRecord{InitSeen: false}},
-		{name: "the request never went out", rec: mcapRecord{InitSeen: true}},
+		{name: "the request never went out during startup silence", rec: mcapRecord{InitSeen: false},
+			wantText: "request never went out"},
 		{
-			name: "the request failed to reach stdin",
-			rec:  mcapRecord{InitSeen: true, Requests: status(mcapTerminatedBudget, "broken pipe")},
+			name:     "the request failed to reach stdin",
+			rec:      mcapRecord{InitSeen: false, Requests: status(mcapTerminatedBudget, "broken pipe")},
+			wantText: "failed to reach",
 		},
 		{
-			name: "claude answered nothing under that id",
-			rec:  mcapRecord{InitSeen: true, Requests: status(mcapTerminatedBudget, "")},
+			name:     "claude answered nothing under that id despite startup silence",
+			rec:      mcapRecord{InitSeen: false, Requests: status(mcapTerminatedBudget, "")},
+			wantText: "does not serve",
 		},
 		{
-			name:        "claude answered and the reply carried no server list",
-			rec:         mcapRecord{InitSeen: true, Requests: status(mcapTerminatedResponse, "")},
+			name:        "claude answered without init and the reply carried no server list",
+			rec:         mcapRecord{InitSeen: false, Requests: status(mcapTerminatedResponse, "")},
 			wantFinding: true,
+			wantText:    "finding about claude",
 		},
 	}
 	for _, tc := range tests {
@@ -2022,6 +2337,9 @@ func TestMcapStatusVerdictSeparatesRigFailureFromFinding(t *testing.T) {
 			if isFinding != tc.wantFinding {
 				t.Errorf("verdict reads as a finding about claude = %v, want %v\n  got: %s",
 					isFinding, tc.wantFinding, got)
+			}
+			if !strings.Contains(got, tc.wantText) {
+				t.Errorf("verdict = %q, want it to contain %q", got, tc.wantText)
 			}
 			if !tc.wantFinding && !strings.Contains(got, "INSTRUMENT") &&
 				!strings.Contains(got, "does not serve") {
@@ -2038,131 +2356,6 @@ func TestMcapStatusVerdictSeparatesRigFailureFromFinding(t *testing.T) {
 // anywhere in the record — harmless where nothing is asserted on digits, and a
 // silent corrupter of the byte-exact cap assertions below.
 const mcapTestNonce = 987654321
-
-// TestMcapSawOutputCountsEveryShapeOfOutput pins the discriminator behind the
-// silence window.
-//
-// Kept lines are the obvious shape of output and they are not the only one. A blank
-// line, a whole line dropped at the byte cap, a discarded over-long partial and an
-// unterminated tail are each a child that is TALKING, and dropcapRecorder reports
-// every one of them in its counters rather than in its line slice. A predicate
-// reading only len(lines) would call such a child silent and cut it off mid-sentence
-// — recording the cut as "claude printed nothing", which is the exact misreading
-// this ticket exists to end.
-func TestMcapSawOutputCountsEveryShapeOfOutput(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name  string
-		lines []dropcapCaptured
-		caps  dropcapCaps
-		want  bool
-	}{
-		{name: "nothing at all: no line, no counter"},
-		{name: "one kept line", lines: []dropcapCaptured{{Index: 0}}, want: true},
-		{name: "a blank line is output", caps: dropcapCaps{BlankLines: 1}, want: true},
-		{
-			name: "a whole line dropped at the byte cap is output",
-			caps: dropcapCaps{LinesOverCap: 1, BytesOverCap: 4096},
-			want: true,
-		},
-		{name: "a discarded over-long partial is output", caps: dropcapCaps{PartialsDropped: 1}, want: true},
-		{name: "an unterminated tail is output", caps: dropcapCaps{UnterminatedPartial: 7}, want: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := mcapSawOutput(tc.lines, tc.caps); got != tc.want {
-				t.Errorf("mcapSawOutput(%d line(s), %+v) = %v, want %v", len(tc.lines), tc.caps,
-					got, tc.want)
-			}
-		})
-	}
-}
-
-// TestMcapAwaitInitStopsEarlyOnSilenceAndHoldsTheBudgetOnOutput is the offline proof
-// that the two waits are different waits.
-//
-// THE ASSERTIONS ARE ON ELAPSED TIME, not only on the returned outcome, because the
-// acceptance criterion is about time: a silent run must stop within the short window
-// and a talking one must keep the full budget. An implementation returning the right
-// name at the wrong moment satisfies every outcome assertion and none of the point —
-// it would still cost the gate two minutes, which is the whole complaint.
-//
-// The blank-line row is the one that pins mcapSawOutput into this path: a child that
-// printed nothing but a newline is talking, so that run must hold the budget.
-func TestMcapAwaitInitStopsEarlyOnSilenceAndHoldsTheBudgetOnOutput(t *testing.T) {
-	t.Parallel()
-	const (
-		poll    = 10 * time.Millisecond
-		silence = 50 * time.Millisecond
-	)
-	tests := []struct {
-		name       string
-		feed       string
-		budget     time.Duration
-		want       string
-		wantAtMost time.Duration
-		wantHeld   bool
-	}{
-		{
-			name:       "the init line ends the wait",
-			feed:       "{\"type\":\"system\",\"subtype\":\"init\",\"mcp_servers\":[]}\n",
-			budget:     5 * time.Second,
-			want:       mcapInitSeen,
-			wantAtMost: 2 * time.Second,
-		},
-		{
-			name:       "a completely silent child gives up on the SHORT window",
-			feed:       "",
-			budget:     5 * time.Second,
-			want:       mcapInitSilent,
-			wantAtMost: 2 * time.Second,
-		},
-		{
-			name: "lines arriving without an init line keep the FULL budget",
-			feed: "{\"type\":\"control_response\",\"response\":{\"request_id\":\"req_9\"}}\n" +
-				"{\"type\":\"system\",\"subtype\":\"compact_boundary\"}\n",
-			budget:   300 * time.Millisecond,
-			want:     mcapInitAbsent,
-			wantHeld: true,
-		},
-		{
-			name:     "a blank line is output, so the budget is held rather than cut short",
-			feed:     "\n\n",
-			budget:   300 * time.Millisecond,
-			want:     mcapInitAbsent,
-			wantHeld: true,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			recorder := newDropcapRecorder()
-			if tc.feed != "" {
-				if _, err := recorder.Write([]byte(tc.feed)); err != nil {
-					t.Fatalf("feeding the recorder: %v", err)
-				}
-			}
-			start := time.Now()
-			got := mcapAwaitInit(recorder, tc.budget, silence, poll)
-			elapsed := time.Since(start)
-
-			if got != tc.want {
-				t.Errorf("mcapAwaitInit() = %q, want %q", got, tc.want)
-			}
-			if tc.wantHeld && elapsed < tc.budget {
-				t.Errorf("mcapAwaitInit() returned after %s, before its %s budget; a child that is "+
-					"talking must be given the whole window, or a genuinely slow MCP startup is cut "+
-					"off and recorded as an absence", elapsed, tc.budget)
-			}
-			if tc.wantAtMost > 0 && elapsed > tc.wantAtMost {
-				t.Errorf("mcapAwaitInit() took %s, want at most %s; holding the full %s budget on a "+
-					"silent child is the two minutes per gate run this ticket exists to stop",
-					elapsed, tc.wantAtMost, tc.budget)
-			}
-		})
-	}
-}
 
 // TestMcapFillCaptureDescribesWhatTheRecorderHeld is AC 1's offline proof.
 //
@@ -2354,13 +2547,84 @@ func TestMcapStderrIsRedactedBeforeItIsCapped(t *testing.T) {
 	}
 }
 
+func TestMcapDriveAndClassifyPersistsFailure(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name        string
+		writeErr    error
+		replyStatus string
+		budget      time.Duration
+		wantOutcome string
+		wantDetail  string
+	}{
+		{"unanswered status", nil, "", 0, mcapDidNotFire, "answered NOTHING"},
+		{"failed write", errors.New("closed test stdin"), "", 0, mcapInstrumentBroken, "closed test stdin"},
+		{"server stays pending", nil, "pending", 5 * time.Millisecond, mcapDidNotFire, "did not report connected"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			recorder := newDropcapRecorder()
+			red := newDropcapRedactor("", "", "", "", "", mcapTestNonce)
+			rec := &mcapRecord{Ticket: mcapTicket, IsCapture: true, Model: mcapModel}
+			write := mcapTestWriter(func(line []byte) (int, error) {
+				if tc.writeErr != nil {
+					return 0, tc.writeErr
+				}
+				var request mcapControlRequest
+				if err := json.Unmarshal(line, &request); err != nil {
+					return 0, err
+				}
+				if request.Request["subtype"] != mcapSubtypeStatus {
+					t.Error("sent another verb before readiness")
+				}
+				if tc.replyStatus != "" {
+					response := fmt.Sprintf(`{"type":"control_response","response":{"subtype":"success","request_id":%q,"response":{"mcpServers":[{"name":%q,"status":%q}]}}}`,
+						request.RequestID, mcapApproveServer, tc.replyStatus)
+					if _, err := recorder.Write([]byte(response + "\n")); err != nil {
+						return 0, err
+					}
+				}
+				return len(line), nil
+			})
+			if err := mcapDriveAndClassify(write, recorder, red, rec, tc.budget, time.Millisecond); err == nil {
+				t.Fatal("request path unexpectedly succeeded")
+			}
+
+			dir := t.TempDir()
+			fixturePath := filepath.Join(dir, "fixture.json")
+			var stderr probeSyncBuffer
+			mcapPersist(t, dir, fixturePath, recorder, &stderr, red,
+				dropcapScanner{needles: dropcapFixedNeedles()}, rec)
+			blob, err := os.ReadFile(filepath.Join(dir, mcapRecordName))
+			if err != nil {
+				t.Fatalf("reading persisted diagnostic record: %v", err)
+			}
+			var got mcapRecord
+			if err := json.Unmarshal(blob, &got); err != nil {
+				t.Fatalf("decoding persisted diagnostic record: %v", err)
+			}
+			if got.Outcome != tc.wantOutcome || got.InitWait != mcapInitNotAwaited {
+				t.Errorf("outcome/init_wait = %q/%q, want %q/%q", got.Outcome, got.InitWait, tc.wantOutcome, mcapInitNotAwaited)
+			}
+			if !strings.Contains(got.OutcomeDetail, tc.wantDetail) {
+				t.Errorf("outcome_detail = %q, want %q", got.OutcomeDetail, tc.wantDetail)
+			}
+			if len(got.Requests) == 0 || got.Requests[0].Subtype != mcapSubtypeStatus {
+				t.Fatal("diagnostic record lost the attempted status request")
+			}
+			if _, err := os.Stat(fixturePath); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("diagnostic run promoted a fixture: %v", err)
+			}
+		})
+	}
+}
+
 // TestMcapPersistFillsARecordThatNeverReachedTheHappyPath is AC 1's end-to-end
 // offline proof, and the one that fails if the fill is moved back off the path
 // everything goes through.
 //
-// The record below is shaped exactly like the seven that the gate wrote on
-// 2026-09-09: outcome instrument-broken, detail naming the init wait, and every
-// capture field untouched because the probe returned above the snapshot. The
+// The record below is shaped like a non-fixture-worthy live diagnostic: outcome
+// instrument-broken with every capture field untouched before persistence. The
 // assertions are on the bytes READ BACK FROM DISK rather than on the in-memory
 // record, because the file is the artifact an operator diagnoses from and a record
 // filled in memory after the marshal would be no use at all.
@@ -2369,79 +2633,104 @@ func TestMcapStderrIsRedactedBeforeItIsCapped(t *testing.T) {
 // can promote a fixture as a side effect.
 func TestMcapPersistFillsARecordThatNeverReachedTheHappyPath(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	recorder := newDropcapRecorder()
-	if _, err := recorder.Write([]byte(
-		"{\"type\":\"system\",\"subtype\":\"init\"}\n" +
-			"{\"type\":\"stream_event\"}\n" +
-			"still not json\n")); err != nil {
-		t.Fatalf("feeding the recorder: %v", err)
-	}
-	var stderr probeSyncBuffer
-	const complaint = "claude: MCP server pyry_probe_absent exited with code 127"
-	if _, err := stderr.Write([]byte(complaint)); err != nil {
-		t.Fatalf("feeding the stderr buffer: %v", err)
-	}
-
-	rec := &mcapRecord{Ticket: mcapTicket, IsCapture: true, Model: mcapModel}
-	rec.set(mcapInstrumentBroken, "no system/init line within %s", mcapInitBudget)
-	rec.InitWait = mcapInitSilent
-
-	// NEVER newDropcapScanner: it reads os.Getenv twice and realHome, so a record built
-	// through it is green or red depending on whose machine runs it.
-	mcapPersist(t, dir, recorder, &stderr, newDropcapRedactor("", "", "", "", "", mcapTestNonce),
-		dropcapScanner{needles: dropcapFixedNeedles()}, rec)
-
-	blob, err := os.ReadFile(filepath.Join(dir, mcapRecordName))
+	existingFixture, err := os.ReadFile(mcapFixturePath)
 	if err != nil {
-		t.Fatalf("the record was not written at all: %v", err)
+		t.Fatalf("reading valid committed fixture: %v", err)
 	}
-	var got struct {
-		Outcome        string         `json:"outcome"`
-		InitWait       string         `json:"init_wait"`
-		LinesCaptured  int            `json:"lines_captured"`
-		UndecodedLines int            `json:"undecoded_lines"`
-		LineTypeCensus map[string]int `json:"line_type_census"`
-		Frames         []struct {
-			Index int    `json:"index"`
-			Type  string `json:"type"`
-		} `json:"frames"`
-		StderrCapture string `json:"stderr_capture"`
-	}
-	if err := json.Unmarshal(blob, &got); err != nil {
-		t.Fatalf("the written record does not decode: %v", err)
-	}
+	for _, fixtureExists := range []bool{false, true} {
+		fixtureExists := fixtureExists
+		t.Run(fmt.Sprintf("fixture_exists=%v", fixtureExists), func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			fixturePath := filepath.Join(dir, "fixture.json")
+			if fixtureExists {
+				if err := os.WriteFile(fixturePath, existingFixture, 0o600); err != nil {
+					t.Fatalf("seeding fixture: %v", err)
+				}
+			}
 
-	if got.Outcome != mcapInstrumentBroken || got.InitWait != mcapInitSilent {
-		t.Errorf("outcome/init_wait = %q/%q, want %q/%q; the fill must not overwrite the verdict "+
-			"the terminating path already reached", got.Outcome, got.InitWait, mcapInstrumentBroken,
-			mcapInitSilent)
-	}
-	if got.LinesCaptured != 3 {
-		t.Errorf("lines_captured = %d, want 3 — the record was written straight off the init-wait "+
-			"path and still has to say what the recorder held", got.LinesCaptured)
-	}
-	if got.UndecodedLines != 1 {
-		t.Errorf("undecoded_lines = %d, want 1", got.UndecodedLines)
-	}
-	if got.LineTypeCensus == nil {
-		t.Error("line_type_census is null, which is the zero value the failing records carried; a " +
-			"census that RAN and observed nothing reads `{}`")
-	}
-	if got.LineTypeCensus["system/init"] != 1 || got.LineTypeCensus["stream_event"] != 1 {
-		t.Errorf("line_type_census = %v, want one system/init and one stream_event",
-			got.LineTypeCensus)
-	}
-	if len(got.Frames) != 3 {
-		t.Fatalf("frames holds %d entry/entries, want 3", len(got.Frames))
-	}
-	if got.StderrCapture != complaint {
-		t.Errorf("stderr_capture = %q, want the child's complaint; a claude that refused the "+
-			"--mcp-config document says so ONLY here", got.StderrCapture)
-	}
-	// The record is the only place the child's output belongs. A capture promoted to
-	// the fixture path from an instrument-broken record would be a lie.
-	if _, err := os.Stat(mcapFixturePath); err == nil {
-		t.Errorf("%s exists after an instrument-broken record was persisted", mcapFixturePath)
+			recorder := newDropcapRecorder()
+			if _, err := recorder.Write([]byte(
+				"{\"type\":\"system\",\"subtype\":\"init\"}\n" +
+					"{\"type\":\"stream_event\"}\n" +
+					"still not json\n")); err != nil {
+				t.Fatalf("feeding the recorder: %v", err)
+			}
+			var stderr probeSyncBuffer
+			const complaint = "claude: MCP server pyry_probe_absent exited with code 127"
+			if _, err := stderr.Write([]byte(complaint)); err != nil {
+				t.Fatalf("feeding the stderr buffer: %v", err)
+			}
+
+			rec := &mcapRecord{Ticket: mcapTicket, IsCapture: true, Model: mcapModel}
+			rec.set(mcapInstrumentBroken, "requests did not produce a fixture-worthy response")
+			rec.InitWait = mcapInitNotAwaited
+
+			// NEVER newDropcapScanner: it reads os.Getenv twice and realHome, so a record built
+			// through it is green or red depending on whose machine runs it.
+			mcapPersist(t, dir, fixturePath, recorder, &stderr,
+				newDropcapRedactor("", "", "", "", "", mcapTestNonce),
+				dropcapScanner{needles: dropcapFixedNeedles()}, rec)
+
+			blob, err := os.ReadFile(filepath.Join(dir, mcapRecordName))
+			if err != nil {
+				t.Fatalf("the record was not written at all: %v", err)
+			}
+			var got struct {
+				Outcome        string         `json:"outcome"`
+				InitWait       string         `json:"init_wait"`
+				LinesCaptured  int            `json:"lines_captured"`
+				UndecodedLines int            `json:"undecoded_lines"`
+				LineTypeCensus map[string]int `json:"line_type_census"`
+				Frames         []struct {
+					Index int    `json:"index"`
+					Type  string `json:"type"`
+				} `json:"frames"`
+				StderrCapture string `json:"stderr_capture"`
+			}
+			if err := json.Unmarshal(blob, &got); err != nil {
+				t.Fatalf("the written record does not decode: %v", err)
+			}
+
+			if got.Outcome != mcapInstrumentBroken || got.InitWait != mcapInitNotAwaited {
+				t.Errorf("outcome/init_wait = %q/%q, want %q/%q; the fill must not overwrite the verdict "+
+					"the terminating path already reached", got.Outcome, got.InitWait, mcapInstrumentBroken,
+					mcapInitNotAwaited)
+			}
+			if got.LinesCaptured != 3 {
+				t.Errorf("lines_captured = %d, want 3 — a non-worthy path still has to say what the "+
+					"recorder held", got.LinesCaptured)
+			}
+			if got.UndecodedLines != 1 {
+				t.Errorf("undecoded_lines = %d, want 1", got.UndecodedLines)
+			}
+			if got.LineTypeCensus == nil {
+				t.Error("line_type_census is null, which is the zero value the failing records carried; a " +
+					"census that RAN and observed nothing reads `{}`")
+			}
+			if got.LineTypeCensus["system/init"] != 1 || got.LineTypeCensus["stream_event"] != 1 {
+				t.Errorf("line_type_census = %v, want one system/init and one stream_event",
+					got.LineTypeCensus)
+			}
+			if len(got.Frames) != 3 {
+				t.Fatalf("frames holds %d entry/entries, want 3", len(got.Frames))
+			}
+			if got.StderrCapture != complaint {
+				t.Errorf("stderr_capture = %q, want the child's complaint; a claude that refused the "+
+					"--mcp-config document says so ONLY here", got.StderrCapture)
+			}
+			fixtureBlob, err := os.ReadFile(fixturePath)
+			if fixtureExists {
+				if err != nil {
+					t.Fatalf("existing fixture was removed: %v", err)
+				}
+				if string(fixtureBlob) != string(existingFixture) {
+					t.Error("existing valid fixture was overwritten")
+				}
+			} else if !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("non-worthy record created a fixture or returned the wrong error: bytes=%q err=%v",
+					fixtureBlob, err)
+			}
+		})
 	}
 }
