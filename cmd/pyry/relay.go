@@ -1115,10 +1115,12 @@ func startRelayV2(
 		// no-op keystroker whose ESC is moot — a stream-json approval has no PTY
 		// modal to dismiss and denies fail-closed via the permbridge timeout (#1103).
 		// Constructed above so its #1014 folder-not-trusted emit seams are set first.
-		// The wire's second pairing minter, alongside the `pyry pair` CLI (#2127).
-		// Both reach the same mintDevice, so a record created here is
-		// indistinguishable from one the CLI created — `pyry pair list` shows it
-		// and `pyry pair revoke` removes it, with no new verb.
+		// The remote wire pairing minter, alongside the `pyry pair` CLI and local
+		// control provider. All three reach the same mintDevice, so a record
+		// created here is indistinguishable from one either host-operator path
+		// created — `pyry pair list` shows it and `pyry pair revoke` removes it,
+		// with no new registry vocabulary. Only this remote path supplies a grantor
+		// hash and always creates an unprivileged device (#2127).
 		PairingMint: pairingMinter,
 
 		ModalResolver: modalResolver,

@@ -49,26 +49,26 @@ type mintRequest struct {
 	devicesPath string
 
 	// lockWait bounds the acquisition. A PARAMETER RATHER THAN pairLockWait
-	// directly, because this function now has two callers with different rights
+	// directly, because this function has three callers with two different rights
 	// to block: the CLI is an operator-invoked one-shot and passes the devices
-	// package default, while the wire mint runs on a conn's app-frame worker with
-	// a client waiting and passes its own short bound.
+	// package default, while both request-path minters have a client waiting and
+	// pass their own short bound.
 	lockWait time.Duration
 
 	// deviceName is the label to file the record under. The EMPTY STRING is not an
 	// error: it selects the device-<hash8> fallback, which is what makes a mint
-	// with no name asked for indistinguishable between the two entry points.
+	// with no name asked for indistinguishable between the three entry points.
 	//
-	// UNVALIDATED HERE, AND DELIBERATELY SO. From the CLI it is operator-authored
-	// `--name` input, and this ticket does not change what that verb accepts; from
-	// the wire it has already passed the relay handler's display-safety gate. A
-	// check here would refuse a name `pyry pair` takes today.
+	// UNVALIDATED HERE, AND DELIBERATELY SO. From the CLI and local control socket
+	// it is operator-authored input; from the remote wire it has already passed
+	// the relay handler's display-safety gate. A check here would refuse a name
+	// `pyry pair` and local control take today.
 	deviceName string
 
-	// allowRemotePermissions sets devices.Device.AllowRemotePermissions. Only
-	// `pyry pair --allow-remote-permissions` ever passes true — the wire mint
-	// passes a literal false, and protocol.MintPairingPayload has no field that
-	// could carry anything else.
+	// allowRemotePermissions sets devices.Device.AllowRemotePermissions. The CLI
+	// flag and mode-0600 local control request may pass true. The remote phone mint
+	// always passes a literal false, and protocol.MintPairingPayload has no field
+	// that could carry anything else.
 	allowRemotePermissions bool
 
 	// grantorHash, when non-empty, is a token hash that must STILL name a device
@@ -78,8 +78,8 @@ type mintRequest struct {
 	// the revoked device's next connection: v2 reloads devices.json per handshake,
 	// so a conn's authenticated record is otherwise as of connect time.
 	//
-	// The CLI passes "" — an operator with a shell on the host is the authority
-	// this check exists to defer to, not a subject of it.
+	// The CLI and mode-0600 local control provider pass "" — the host operator is
+	// the authority this check exists to defer to, not a subject of it.
 	grantorHash string
 }
 
@@ -105,13 +105,14 @@ type mintedDevice struct {
 // error from this function earns.
 var errGrantorRevoked = errors.New("pair: minting device is no longer privileged")
 
-// mintDevice performs the mint every `pyry pair` and every wire mint_pairing share
-// (#2127): draw a token, hash it, name the device, and append the record inside
-// ONE held devices lock.
+// mintDevice performs the mint shared by `pyry pair`, the local control
+// pairing.mint operation, and the remote wire mint_pairing operation (#2127):
+// draw a token, hash it, name the device, and append the record inside ONE held
+// devices lock.
 //
-// ONE FUNCTION, TWO CALLERS, so the two stampings cannot drift and `pyry pair`'s
-// observable behaviour is unchanged by the wire path existing. It is the block
-// runPairDefault held before this ticket, lifted rather than reimplemented.
+// ONE FUNCTION, THREE CALLERS, so their stampings cannot drift and `pyry pair`'s
+// observable behaviour is unchanged by either request path existing. It is the
+// block runPairDefault held before this ticket, lifted rather than reimplemented.
 //
 // THE LOAD RUNS INSIDE THE LOCK, and that is #1531's whole lesson rather than a
 // stylistic preference: wrapping only the Save would still mutate a snapshot taken

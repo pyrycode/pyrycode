@@ -633,6 +633,7 @@ func assertLocalPairingControlFailure(
 	minter *pairingMinterV2,
 	devicesPath string,
 	logs *bytes.Buffer,
+	secrets ...string,
 ) {
 	t.Helper()
 	const label = "local-failure-device-sentinel"
@@ -654,7 +655,13 @@ func assertLocalPairingControlFailure(
 		t.Error("local failure produced no credential-free daemon diagnostic")
 	}
 	hash := devices.HashToken(pmTestPlainTok)
-	assertDiagnosticBundleClean(t, logs.String(), pmTestPlainTok, hash, label)
+	secrets = append(secrets, pmTestPlainTok, hash, label)
+	for _, secret := range secrets {
+		if secret != "" && strings.Contains(logs.String(), secret) {
+			t.Error("local failure log contains protected credential material")
+		}
+	}
+	assertDiagnosticBundleClean(t, logs.String(), secrets...)
 }
 
 func TestLocalPairingProvider_FailuresReturnNoCredential(t *testing.T) {
@@ -670,20 +677,19 @@ func TestLocalPairingProvider_FailuresReturnNoCredential(t *testing.T) {
 
 	t.Run("registry load", func(t *testing.T) {
 		m, _, devicesPath, logs := newMintFixture(t, true)
-		if err := os.Remove(devicesPath); err != nil {
-			t.Fatalf("remove seeded registry: %v", err)
-		}
-		if err := os.Mkdir(devicesPath, 0o700); err != nil {
-			t.Fatalf("replace registry with directory: %v", err)
+		const malformedCredential = "registry-load-token-hash-sentinel"
+		malformed := []byte(`{"devices":[{"token_hash":"` + malformedCredential + `"}`)
+		if err := os.WriteFile(devicesPath, malformed, 0o600); err != nil {
+			t.Fatalf("write malformed registry: %v", err)
 		}
 
-		assertLocalPairingControlFailure(t, m, devicesPath, logs)
-		entries, err := os.ReadDir(devicesPath)
+		assertLocalPairingControlFailure(t, m, devicesPath, logs, malformedCredential)
+		got, err := os.ReadFile(devicesPath)
 		if err != nil {
-			t.Fatalf("read registry directory after failed mint: %v", err)
+			t.Fatalf("read malformed registry after failed mint: %v", err)
 		}
-		if len(entries) != 0 {
-			t.Errorf("failed registry load left %d files behind", len(entries))
+		if !bytes.Equal(got, malformed) {
+			t.Error("failed registry load changed the malformed registry")
 		}
 	})
 

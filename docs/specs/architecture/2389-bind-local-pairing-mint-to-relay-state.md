@@ -212,3 +212,8 @@ No pairing-format or protocol-reference change is required.
 
 ## Revisions
 
+### 2026-09-12 — verifier rework
+
+- Added a structural production-wiring guard in `TestLocalPairingProviderWiredFromRelayConstructionToControl` that reads the actual `startRelayV2`, `startRelay`, and `runSupervisor` AST. Together with the control-socket behavior test, it proves the successfully constructed minter's local method is carried through both relay return layers and installed on the control server; deleting or substituting any link fails the guard.
+- Strengthened the malformed-registry load case with a distinctive credential-like sentinel. The test now proves the malformed bytes remain unchanged and that neither the daemon log nor diagnostic-bundle log member contains the sentinel.
+- Corrected the shared-mint contract comments in `mintRequest`, `mintDevice`, and the `PairingMint` relay wiring to name all three callers. The remote phone path remains the only caller supplying a grantor hash and still passes literal false for remote permissions.

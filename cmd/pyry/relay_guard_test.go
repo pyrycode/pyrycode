@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"go/ast"
+	"go/format"
 	"go/parser"
 	"go/token"
 	"sort"
@@ -56,6 +58,59 @@ const (
 	handlersField  = "Handlers"
 	dispatchFnName = "dispatchAppFrame"
 )
+
+// TestLocalPairingProviderWiredFromRelayConstructionToControl pins the
+// production-only links that behavior tests cannot reach cheaply: startRelayV2
+// must expose the local method of the exact minter installed on the remote
+// manager, startRelay must carry that provider outward, and runSupervisor must
+// install it on the control server. The control-socket round trip in
+// TestLocalPairingProvider_BindsEachControlSocketToItsDaemonState proves the
+// method's behavior; this guard makes deleting or substituting any composition
+// link fail independently.
+func TestLocalPairingProviderWiredFromRelayConstructionToControl(t *testing.T) {
+	t.Parallel()
+
+	wants := map[string][]string{
+		formattedGoFunc(t, relayPath, "startRelayV2"): {
+			"pairingMinter := newPairingMinterV2(",
+			"PairingMint: pairingMinter,",
+			"}, surface, announce, announceConversation, pairingMinter.MintLocalPairing, nil",
+		},
+		formattedGoFunc(t, relayPath, "startRelay"): {
+			"drain, surface, announce, announceConversation, pairingProvider, err := startRelayV2(",
+			"return cleanup, surface, announce, announceConversation, pairingProvider, nil",
+		},
+		formattedGoFunc(t, "main.go", "runSupervisor"): {
+			"relayCleanup, approvalSurface, announceAttachment, announceConversation, pairingProvider, err := startRelay(",
+			"ctrl.SetPairingProvider(pairingProvider)",
+		},
+	}
+	for source, fragments := range wants {
+		for _, fragment := range fragments {
+			if !strings.Contains(source, fragment) {
+				t.Errorf("production wiring lacks %q", fragment)
+			}
+		}
+	}
+}
+
+// formattedGoFunc returns a comment-free, gofmt-normalized declaration so the
+// wiring guard cannot pass on matching prose and is insensitive to whitespace.
+func formattedGoFunc(t *testing.T, path, name string) string {
+	t.Helper()
+	file := parseGoFile(t, path)
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == name {
+			var out bytes.Buffer
+			if err := format.Node(&out, token.NewFileSet(), fn); err != nil {
+				t.Fatalf("formatting %s in %s: %v", name, path, err)
+			}
+			return out.String()
+		}
+	}
+	t.Fatalf("function %q not found in %s — did it move or rename? Update the guard.", name, path)
+	return ""
+}
 
 // inboundTypes classifies every client→daemon v2 request verb by the surface it
 // is dispatched on. The value is the surface, for legibility in review — a verb
