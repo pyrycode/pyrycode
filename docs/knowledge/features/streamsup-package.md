@@ -146,6 +146,22 @@ failures are deliberately silent: `emitModelList` remains the sole owner of the
 existing content-free `logControlResponse` record, so raw response bytes, decoder
 errors, tool and server names, and memory paths and types never enter daemon logs.
 
+`decodeMCPStatus` recognises another informational control-response shape directly
+from the complete top-level line, without request correlation. It requires
+`response.subtype:"success"` and a present array at
+`response.response.mcpServers`; a present empty array emits one `MCPStatus` with a
+non-nil empty `Servers` slice, while a missing, null, non-array, or undecodable value
+emits nothing. Because `consumeLine` dispatches only on the outer line type, a
+control-shaped string nested in assistant content cannot enter this decoder. The
+event preserves the first 16 servers in source order and reports the exact omitted
+tail in `DroppedServers`. Each `MCPServerStatus` carries only the server object's
+`name`, `status`, `error`, and `scope` plus `serverInfo.version`; request ids,
+`config`, `tools`, `serverInfo.name`, and raw bytes are absent from the decode
+targets. Optional values become empty strings, and only the free-form `Error` is cut
+to 256 bytes with valid UTF-8 output. The new decoder has no logger:
+`emitModelList` and `logControlResponse` remain the line's sole, content-free log
+owner on success, rejection, and decode failure.
+
 `emitStreamEvent` maps Claude's nested partial-message wire without changing the
 downstream event contract. A valid `message_start` replaces the current message
 ID and open-block state; a valid `content_block_start` records one index and
