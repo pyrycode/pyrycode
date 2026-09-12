@@ -22,18 +22,17 @@ below), so it did not need the auth-gated-skip machinery `realclaude` built.
 //go:build e2e_liverelay
 ```
 
-Single tag, no alternation, one file
-(`internal/e2e/liverelay/liverelay_test.go`, ~753 LOC). All helpers are
-file-local — nothing is exported, nothing widens `internal/e2e/harness.go`'s
-build tags. This is a **transcription**, not a shared-import: the
-daemon-spawn, Noise-driving, sleep-child-stand-in, and pair-decoding helpers
-are copy-adapted from `internal/e2e/realclaude/interactive_bootstrap_liveness_test.go`
-(the same transcription pattern established by #854/#997). The one piece
-that *is* imported directly is [`internal/e2e/internal/fakephone`](fakephone-harness.md)
-— it speaks the real phone-side wire protocol (not a protocol fake), so it
-drives the real relay's `/v1/client` route unchanged, and is importable from
-`internal/e2e/liverelay` under Go's `internal/` visibility rule (both rooted
-at `internal/e2e/`).
+Single tag, no alternation. Package-local helpers keep the suite self-contained
+without widening `internal/e2e/harness.go`'s build tags. The daemon-spawn,
+Noise-driving, and sleep-child-stand-in helpers are copy-adapted from
+`internal/e2e/realclaude/interactive_bootstrap_liveness_test.go` (the same
+transcription pattern established by #854/#997). Two shared test components
+are imported directly: [`internal/e2e/internal/fakephone`](fakephone-harness.md)
+speaks the real phone-side wire protocol, while
+`internal/e2e/internal/paireddevice.Setup` seeds the pre-daemon credential
+without invoking an operator-facing command. Both are importable under Go's
+`internal/` visibility rule because the packages share the `internal/e2e/`
+root.
 
 ## Design decision — a locally-built relay binary, not the production URL
 
@@ -98,10 +97,14 @@ error or a reply that doesn't match the seeded conversation fails the test
    conflict), polling `/healthz` for HTTP 200 before proceeding. Loopback
    binding is load-bearing for the security review — the ephemeral plaintext
    relay must never be reachable off-box.
-3. **Mint an ephemeral device identity** under a fresh temp `HOME` via
-   `pyry pair`, decoded into `pair.Payload` (bearer token + the relay's
-   static pubkey). Destroyed by `t.Cleanup(os.RemoveAll)` — nothing persists
-   past the test.
+3. **Seed an ephemeral device credential** under a fresh temp `HOME` with
+   `paireddevice.Setup`, passing instance `test`, device `phone-a`, and the
+   real relay's resolved base WebSocket destination. The fixture persists the
+   server identity, static key, and hashed device token, then returns a
+   `pair.Payload`. Its relay is the single value supplied to both daemon and
+   phone; its plaintext token and static public key drive the phone's existing
+   Noise handshake. The temp home is removed automatically, so nothing
+   persists past the test.
 4. **Seed one conversation** in `conversations.json`, mirroring
    `testV2DaemonListConversationsRoundTrip` verbatim.
 5. **Spawn the daemon** with the sleep-claude stand-in and the bare base
@@ -132,10 +135,11 @@ architecture spec's design — see [`codebase/968.md`](../codebase/968.md).
 ## What it requires — no credentials
 
 Unlike `e2e-realclaude`, this suite needs **no** secrets and spends **no**
-real resources: hermetic local relay, ephemeral in-test device identity,
-loopback-only network. The only prerequisite is the sibling
-`pyrycode-relay` checkout (or a prebuilt binary/repo path via the two env
-vars above).
+real resources: hermetic local relay, loopback-only network, and an ephemeral
+credential seeded directly by the shared test-only `paireddevice.Setup`
+fixture. It does not depend on the operator-facing `pyry pair` command. The
+only prerequisite is the sibling `pyrycode-relay` checkout (or a prebuilt
+binary/repo path via the two env vars above).
 
 ## Make target
 
