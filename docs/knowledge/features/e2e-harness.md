@@ -112,6 +112,33 @@ is never observed. `IdleTimeout=0` defeats the eviction timer by default;
 tests that need eviction pass `-pyry-idle-timeout=<dur>` via the variadic on
 `StartIn`.
 
+### Pre-daemon paired-device setup
+
+Tests that need an authenticated phone before daemon startup use
+`paireddevice.Setup` from `internal/e2e/internal/paireddevice`. Invoking the
+operator-facing `pyry pair` command is the wrong fixture boundary: that command
+is a live-daemon client, while setup must finish before the daemon under test
+exists. Keeping the helper under `internal/e2e/internal` makes the offline path
+available to the hermetic, live-Claude and live-relay suites without exposing it
+to production packages or external callers.
+
+`Setup` takes an absolute isolated home, instance name, relay destination,
+optional label and remote-permission choice. It reuses the instance identity and
+static key, appends a fresh device, and returns the matching `pair.Payload` only
+after `devices.Registry.Save` succeeds. The plaintext token is therefore an
+egress value, never persisted state; failures return a zero payload. Sequential
+repeats are supported, but concurrent setup against one instance is outside the
+contract because the underlying identity and key stores are not concurrent
+initializers. See [Pair command](pyry-pair-command.md) for the shared credential
+shape and [Device registry](devices-registry.md) for persistence semantics.
+
+A save-failure test must inject a known token and fail at the save seam. That is
+what lets it prove both halves of the security contract: the prior registry is
+byte-for-byte unchanged, and neither the known plaintext nor its encoded pairing
+appears in the error or any persisted file. Filesystem permission failures are a
+poor substitute because they are platform-dependent and often fail before a
+secret exists.
+
 ## Readiness Signal
 
 Poll `os.Stat` + `net.Dial` on the socket with a 5s deadline and 50ms gap.
