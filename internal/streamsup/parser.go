@@ -2456,6 +2456,12 @@ type Parser struct {
 	// stdout on another goroutine.
 	contextUsageRequests contextUsageRequests
 
+	// mcpStatusQueries correlates requester-private status reads. Unlike the
+	// automatic status path below, a claimed response completes one waiter and
+	// never reaches the shared event sink. Its own mutex covers registration from
+	// relay workers and claims from the stdout forwarder.
+	mcpStatusQueries mcpStatusQueries
+
 	// mcpStatusPolicy belongs to the current child. The runner replaces it before
 	// cmd.Start, and cmd.Wait joins the prior stdout forwarder before another child
 	// can replace it, so Parser's single-writer lifecycle covers the fields without
@@ -2521,6 +2527,10 @@ type mcpStatusChildPolicy struct {
 // cmd.Start, so no output from that child can be classified under its predecessor's
 // eligibility or once-only latch.
 func (p *Parser) beginMCPStatusChild(eligible bool, request func() error) {
+	// A child replacement terminates every query aimed at its predecessor. The
+	// request-id prefix keeps any already-buffered late reply private even after
+	// its pending entry is gone.
+	p.mcpStatusQueries.failAll()
 	p.mcpStatusPolicy = mcpStatusChildPolicy{
 		installed: true,
 		eligible:  eligible,
@@ -2534,6 +2544,18 @@ func (p *Parser) registerContextUsageRequest(id string) *pendingContextUsageRequ
 
 func (p *Parser) removeContextUsageRequest(id string, pending *pendingContextUsageRequest) {
 	p.contextUsageRequests.remove(id, pending)
+}
+
+func (p *Parser) registerMCPStatusQuery(id string) *pendingMCPStatusQuery {
+	return p.mcpStatusQueries.register(id)
+}
+
+func (p *Parser) removeMCPStatusQuery(id string, pending *pendingMCPStatusQuery) {
+	p.mcpStatusQueries.remove(id, pending)
+}
+
+func (p *Parser) failMCPStatusQueries() {
+	p.mcpStatusQueries.failAll()
 }
 
 // SetCanUseToolHandler installs h as the destination for claude's inbound
@@ -3467,6 +3489,95 @@ func (r *contextUsageRequests) remove(id string, pending *pendingContextUsageReq
 		delete(r.pending, id)
 	}
 	r.mu.Unlock()
+}
+
+type mcpStatusQueryResult struct {
+	status turnevent.MCPStatus
+	ok     bool
+}
+
+type pendingMCPStatusQuery struct {
+	writeDone  chan struct{}
+	writeOK    bool
+	writeOnce  sync.Once
+	result     chan mcpStatusQueryResult
+	resultOnce sync.Once
+}
+
+func newPendingMCPStatusQuery() *pendingMCPStatusQuery {
+	return &pendingMCPStatusQuery{
+		writeDone: make(chan struct{}),
+		result:    make(chan mcpStatusQueryResult, 1),
+	}
+}
+
+func (p *pendingMCPStatusQuery) resolveWrite(ok bool) {
+	p.writeOnce.Do(func() {
+		p.writeOK = ok
+		close(p.writeDone)
+	})
+}
+
+func (p *pendingMCPStatusQuery) written() bool {
+	<-p.writeDone
+	return p.writeOK
+}
+
+func (p *pendingMCPStatusQuery) complete(status turnevent.MCPStatus, ok bool) {
+	p.resultOnce.Do(func() {
+		p.result <- mcpStatusQueryResult{status: status, ok: ok}
+	})
+}
+
+type mcpStatusQueries struct {
+	mu      sync.Mutex
+	pending map[string]*pendingMCPStatusQuery
+}
+
+func (q *mcpStatusQueries) register(id string) *pendingMCPStatusQuery {
+	pending := newPendingMCPStatusQuery()
+	q.mu.Lock()
+	if q.pending == nil {
+		q.pending = make(map[string]*pendingMCPStatusQuery)
+	}
+	q.pending[id] = pending
+	q.mu.Unlock()
+	return pending
+}
+
+// claim removes an exact pending query before its payload is interpreted. An
+// unregistered id in the daemon's private query namespace is still claimed: it
+// is a duplicate or a response whose waiter was canceled, failed, or replaced.
+func (q *mcpStatusQueries) claim(id string) (*pendingMCPStatusQuery, bool) {
+	q.mu.Lock()
+	pending := q.pending[id]
+	delete(q.pending, id)
+	q.mu.Unlock()
+	if pending != nil {
+		return pending, true
+	}
+	return nil, strings.HasPrefix(id, mcpStatusQueryIDPrefix)
+}
+
+func (q *mcpStatusQueries) remove(id string, pending *pendingMCPStatusQuery) {
+	q.mu.Lock()
+	if q.pending[id] == pending {
+		delete(q.pending, id)
+	}
+	q.mu.Unlock()
+}
+
+func (q *mcpStatusQueries) failAll() {
+	q.mu.Lock()
+	pending := make([]*pendingMCPStatusQuery, 0, len(q.pending))
+	for id, query := range q.pending {
+		pending = append(pending, query)
+		delete(q.pending, id)
+	}
+	q.mu.Unlock()
+	for _, query := range pending {
+		query.complete(turnevent.MCPStatus{}, false)
+	}
 }
 
 // canUseToolSubtype is the one inbound control-request subtype this parser claims.
@@ -4729,6 +4840,9 @@ func (p *Parser) consumeLine(line []byte) {
 		// noteControlAck runs ABOVE emitModelList so the gate opens without waiting
 		// behind an emit into a downstream sink, and it reads its own decode target, so
 		// which rung a models or commands payload lands on is untouched by construction.
+		if p.claimMCPStatusQuery(line) {
+			return
+		}
 		p.emitContextUsage(line)
 		p.noteControlAck(line)
 		p.emitModelList(line)
@@ -7338,6 +7452,30 @@ func decodeMCPStatus(line []byte) (turnevent.MCPStatus, bool) {
 		}
 	}
 	return turnevent.MCPStatus{Servers: servers, DroppedServers: dropped}, true
+}
+
+// claimMCPStatusQuery consumes a requester-private MCP response before any
+// shared control-response consumer sees it. Matching the id retires the query
+// before subtype and payload decoding, so the first response is terminal.
+func (p *Parser) claimMCPStatusQuery(line []byte) bool {
+	var idLine contextUsageResponseIDLine
+	if err := json.Unmarshal(line, &idLine); err != nil || idLine.Response.RequestID == "" {
+		return false
+	}
+	pending, claimed := p.mcpStatusQueries.claim(idLine.Response.RequestID)
+	if !claimed {
+		return false
+	}
+	if pending == nil {
+		return true
+	}
+	if !pending.written() {
+		pending.complete(turnevent.MCPStatus{}, false)
+		return true
+	}
+	status, ok := decodeMCPStatus(line)
+	pending.complete(status, ok)
+	return true
 }
 
 // emitModelList decodes one top-level control_response line and emits AT MOST ONE

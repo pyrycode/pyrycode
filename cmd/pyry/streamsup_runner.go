@@ -221,6 +221,13 @@ func (a streamRunner) BackgroundTaskRoster() (turnevent.BackgroundTaskRoster, bo
 // export is a rename at one declaration rather than a redesign.
 func (a streamRunner) ModelWindows() (modelWindowReport, bool) { return a.windows.ModelWindows() }
 
+// QueryMCPStatus asks this runner's exact live child for a requester-private
+// status reading. It stays off sessions.Runner because its only consumer is the
+// conversation resolver in this package.
+func (a streamRunner) QueryMCPStatus(ctx context.Context) (turnevent.MCPStatus, bool) {
+	return a.r.QueryMCPStatus(ctx)
+}
+
 // mapStreamState maps streamsup's native lifecycle snapshot to supervisor.State.
 // The two types mirror each other field-for-field; Phase maps by a plain string
 // conversion because the phase values are identical across the two packages.

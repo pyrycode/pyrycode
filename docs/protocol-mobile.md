@@ -514,8 +514,8 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`resync`** | binary → phone | no | **New in v2.** Mid-turn-reconnect resync marker — the advertised `last_event_id` aged out of the ring; phone must full-reload (#647). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`session_transition`** | binary → phone | no | **New in v2** (interactive, capability-gated). Session-boundary marker for `pyrycode-mobile#336` (#656). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`model_list`** | binary → phone | no | **New in v2** (interactive, capability-gated). The menu of models claude will accept for a conversation, from its `initialize` control reply — identifiers, labels, per-model effort levels and auto-mode support (#1704). **Not** the per-turn announcement [`model_announced`](#model_announced) carries. Shape declared by #1704, fixtures and section by #1705, the mapping onto this wire shape by #1848 and the **producer** by #1849, proven end to end by #1845 — it is emitted on the live interactive turn lane, once per child spawn to whatever clients are connected at that instant, and **best-effort rather than guaranteed**: several loss points mean a client may see none at all, so never block a model menu on it. It also has a **connect-time snapshot** (#1863/#1867, widened by #2124 to cover every conversation the registry carries), so a client that missed the live frame is brought current on its next connect. See [Interactive events](#interactive-events-v2-capability-gated). |
-| **`mcp_status`** | binary → phone | no | **New in v2** (interactive, capability-gated). The conversation-scoped MCP server-status snapshot shared by the live push and the correlated [`mcp_status_request`](#asking-for-mcp-status-on-demand) reply. The live producer is once per eligible daemon-configured strict child: one admitted report becomes one event-ring entry and one frame per connected interactive client, including when `servers` is empty. The on-demand reply instead goes only to the requester, carries no `event_id`, and never enters the event ring. Status from a bypass child never reaches the live lane, so that frame never reports user- or project-scoped MCP servers loaded outside the daemon's strict config. #2373 declared the shape, #2374 the source gate, #2375 the live mapping and publication, and #2381 the relay request/reply contract. See [`mcp_status`](#mcp_status). |
-| **`mcp_status_request`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for the current MCP status of one conversation, naming it in the sole `conversation_id` string field (#2381). Correlation rides `in_reply_to`, so the payload has no request-id key. The answer is one existing [`mcp_status`](#mcp_status), unchanged from the resolver, or `protocol.malformed`, `conversation.not_found`, or retryable `mcp_status.unavailable`. Interactive-capability-gated; an unconfigured resolver or a conn without the capability consumes the request without decoding or replying. The relay contract exists before #2382 wires the live-child resolver. See [Asking for MCP status on demand](#asking-for-mcp-status-on-demand). |
+| **`mcp_status`** | binary → phone | no | **New in v2.** The conversation-scoped MCP status payload serves both automatic publication and a fresh [`mcp_status_request`](#asking-for-mcp-status-on-demand) reply. Automatic publication occurs once per eligible daemon-configured strict child, including an empty server list. It creates one event-ring entry and one frame per connected interactive client. A query reply goes only to its requester, carries no `event_id`, and never enters the event ring. Both paths exclude bypass children and their privately loaded MCP servers. See [`mcp_status`](#mcp_status). |
+| **`mcp_status_request`** | phone → binary | no | **New in v2.** A paired interactive client requests fresh MCP status for the conversation named by `conversation_id`. The daemon queries that conversation's current live child only when its actual spawn used the daemon MCP config with `--strict-mcp-config`. One exact child response returns to the requester as [`mcp_status`](#mcp_status), correlated by `in_reply_to`. Failures return `protocol.malformed`, `conversation.not_found`, or retryable `mcp_status.unavailable`. An unconfigured resolver or a connection without the capability consumes the request without decoding or replying. See [Asking for MCP status on demand](#asking-for-mcp-status-on-demand). |
 | **`slash_command_list`** | binary → phone | no | **New in v2** (interactive, capability-gated). The slash commands this session's working directory will accept, from the `commands` array of the same `initialize` control reply — names, argument hints, descriptions and aliases (#1727). The sibling [`model_list`](#model_list) inventories *identities* from that reply; this one inventories *verbs*. Consumers are pyrycode-desktop#681 (Actions-menu grey-out) and pyrycode-desktop#694 (slash-command type-ahead). Type declared by #1726, shape by #1727, fixtures and section by #1718, the mapping onto this wire shape by #2001 with its frame-level byte bound by #2002, and the **producer** by #2003, proven end to end by #2008 — it is emitted on the live interactive turn lane, once per child spawn to whatever clients are connected at that instant, and **best-effort rather than guaranteed**. It also has a **connect-time snapshot** (#2006/#2007, proven by #2009), so a client that missed the live frame is brought current on its next connect. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`question_shown`** | binary → phone | no | **New in v2** (interactive, capability-gated). One whole batch of the clarifying questions claude's `AskUserQuestion` tool asks — questions, their options and a per-question multi-select flag, in claude's own order (#1962). The consumer is pyrycode-desktop#849. Type declared by #1962, shape by #1963, fixtures and section by #1964; the parse is #1965 and the producer #1973, which emits it the moment claude asks. **Not** a [`modal_shown`](#modal_shown): that frame is one prompt with flat options, this one is a batch with **two nesting levels** and a **two-verb** inbound half ([`question_answer`](#question_answer) / [`question_refused`](#question_refused), #1983) rather than the modal pair's single answer. See [Question](#question-v2). |
 | **`question_dismissed`** | binary → phone | no | **New in v2** (interactive, capability-gated). The frame that retires a [`question_shown`](#question_shown) batch, so a client clears the panel instead of rendering an ask that is already dead (#1974). Carries no claude-authored string. Its own type and **not** a [`modal_dismissed`](#modal_dismissed), which identifies what it clears by `modal_id` and routes to the modal panel. #1973 emits it on every no-answer terminal path, #1990 on a refusal and #1991 on an answer — all three terminal outcomes. See [Question](#question-v2). |
@@ -2346,6 +2346,19 @@ envelope id. A resolver result is forwarded unchanged as the existing
 [`mcp_status`](#mcp_status) payload, including its daemon-authored
 `conversation_id`, server order and `dropped_servers` value.
 
+The daemon resolves the conversation's current session from its registry and
+queries that session's live child afresh. It uses the registry record's canonical
+conversation id in the answer. Eligibility comes from the exact child's spawn:
+it must use the daemon's sole MCP config with `--strict-mcp-config`. A bypass
+child receives no status query. Changing settings for the next spawn does not
+change the current child's eligibility.
+
+Each query gets a distinct child request id. Only the first response matching
+that exact id can complete it. An error or unusable payload reports unavailable.
+Overlapping queries complete independently. Automatic responses and unknown ids
+cannot complete a pending query. Duplicate and late private responses are
+consumed without publication.
+
 The on-demand answer is **requester-only**. It carries no `event_id`, is not
 broadcast, never enters the event ring, is never replayed, and advances no client
 cursor. This differs deliberately from a live `mcp_status` publication, which is
@@ -2358,15 +2371,18 @@ Three rejects are possible, each sent as one `error` envelope correlated by
 |---|---|---|
 | Payload cannot decode to the one-field shape | `protocol.malformed` | no |
 | `conversation_id` names no hosted conversation | `conversation.not_found` | no |
-| The hosted conversation has no current resolver result | `mcp_status.unavailable` | yes, after a backoff |
+| The hosted conversation has no bound session, no live eligible child, a failed child write, or an error or unusable child reply | `mcp_status.unavailable` | yes, after a backoff |
 
 No reject sends an empty or stale `mcp_status`. A conn that did not negotiate
 `interactive` receives nothing, and the daemon consults neither membership nor
 the resolver. A relay with no `MCPStatusFor` resolver configured is equally inert
 and consumes the type before decoding its payload, so it does not fall through to
-an unknown-type response. **That is the production posture at #2381:** this slice
-declares the stable relay contract before #2382 wires live-child request/response
-correlation.
+an unknown-type response. Ticket #2382 wires the daemon's hosted-conversation
+resolver.
+
+Write failure, resolver cancellation and child teardown clear pending queries.
+They never return a retained startup list. Cancellation or connection teardown
+can prevent delivery of the unavailable error because the reply path has closed.
 
 Resolution may wait on a child, so it runs on the requesting connection's
 application worker rather than the session manager's `Run` goroutine. Another
