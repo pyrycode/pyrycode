@@ -2456,6 +2456,12 @@ type Parser struct {
 	// stdout on another goroutine.
 	contextUsageRequests contextUsageRequests
 
+	// mcpStatusPolicy belongs to the current child. The runner replaces it before
+	// cmd.Start, and cmd.Wait joins the prior stdout forwarder before another child
+	// can replace it, so Parser's single-writer lifecycle covers the fields without
+	// another lock.
+	mcpStatusPolicy mcpStatusChildPolicy
+
 	// canUseTool is the seam an answerer installs to receive claude's inbound
 	// permission asks (#2282). Nil until SetCanUseToolHandler is called, and nil is
 	// the production state today: nothing spawns with --permission-prompt-tool stdio,
@@ -2503,6 +2509,24 @@ func NewParser(sink func(turnevent.Event), logger *slog.Logger) *Parser {
 // the runner arming the gate and the parser releasing it are the same object by
 // construction. Never nil for a parser built by NewParser.
 func (p *Parser) PostureGate() *PostureGate { return p.postureGate }
+
+type mcpStatusChildPolicy struct {
+	installed bool
+	eligible  bool
+	attempted bool
+	request   func() error
+}
+
+// beginMCPStatusChild installs the policy for one exact spawn. It is called before
+// cmd.Start, so no output from that child can be classified under its predecessor's
+// eligibility or once-only latch.
+func (p *Parser) beginMCPStatusChild(eligible bool, request func() error) {
+	p.mcpStatusPolicy = mcpStatusChildPolicy{
+		installed: true,
+		eligible:  eligible,
+		request:   request,
+	}
+}
 
 func (p *Parser) registerContextUsageRequest(id string) *pendingContextUsageRequest {
 	return p.contextUsageRequests.register(id)
@@ -8750,6 +8774,24 @@ func (p *Parser) dropHarnessProseLine(line []byte) bool {
 // runs on the os/exec forwarder goroutine, where a nil-sink panic would be
 // disproportionate to a misconfiguration.
 func (p *Parser) emit(ev turnevent.Event) {
+	if _, status := ev.(turnevent.MCPStatus); status &&
+		p.mcpStatusPolicy.installed && !p.mcpStatusPolicy.eligible {
+		return
+	}
+
+	if p.mcpStatusPolicy.eligible && !p.mcpStatusPolicy.attempted {
+		switch ev.(type) {
+		case turnevent.ModelList, turnevent.SlashCommandList:
+			p.mcpStatusPolicy.attempted = true
+			if p.mcpStatusPolicy.request == nil || p.mcpStatusPolicy.request() != nil {
+				// Fixed fields only: a writer error may contain bytes supplied by a
+				// test double or future transport and is deliberately not admitted.
+				p.log.Debug("streamsup: MCP status ask not delivered",
+					"event", "mcp_status.request.write_err")
+			}
+		}
+	}
+
 	if p.sink != nil {
 		p.sink(ev)
 	}

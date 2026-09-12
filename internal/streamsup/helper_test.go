@@ -31,28 +31,32 @@ func TestMain(m *testing.M) {
 // helperChild is the fake-claude entry point, keyed by GO_STREAMSUP_HELPER_MODE:
 //
 //   - "echo_lines":    write "READY", echo every stdin line back as
-//                      "ECHO:<line>", and on stdin EOF write "GOT_EOF". Used to
-//                      prove stdin is held open (the echo round-trips) and NOT
-//                      closed after spawn (GOT_EOF stays absent while the runner
-//                      keeps the child alive).
+//     "ECHO:<line>", and on stdin EOF write "GOT_EOF". Used to
+//     prove stdin is held open (the echo round-trips) and NOT
+//     closed after spawn (GOT_EOF stays absent while the runner
+//     keeps the child alive).
 //   - "block_sigterm": install a SIGTERM handler that prints "got SIGTERM" to
-//                      stderr and exits 0; otherwise drain stdin and block. Used
-//                      by the teardown SIGTERM + descendant-reap tests.
+//     stderr and exits 0; otherwise drain stdin and block. Used
+//     by the teardown SIGTERM + descendant-reap tests.
 //   - "crash":         append this spawn's argv to GO_STREAMSUP_HELPER_ARGV_FILE
-//                      (if set), then exit 1 after a short delay. Used by the
-//                      restart-on-crash and resume-id-stable tests to force the
-//                      supervise loop to respawn.
+//     (if set), then exit 1 after a short delay. Used by the
+//     restart-on-crash and resume-id-stable tests to force the
+//     supervise loop to respawn.
 //   - "record_block":  append this spawn's argv to GO_STREAMSUP_HELPER_ARGV_FILE
-//                      (like "crash"), then block until SIGTERM and exit 0 —
-//                      staying alive so a live Restart must KILL it (it never
-//                      self-exits). Used by the live-restart test to prove the
-//                      first child was terminated by Restart, not by its own exit.
+//     (like "crash"), then block until SIGTERM and exit 0 —
+//     staying alive so a live Restart must KILL it (it never
+//     self-exits). Used by the live-restart test to prove the
+//     first child was terminated by Restart, not by its own exit.
 //   - "stream_json":   read newline-delimited user-turn envelopes from the
-//                      held-open stdin; for each one, decode its prompt text and
-//                      emit a canned stream-json turn (system/init → assistant
-//                      text echoing the prompt → result/success). The session_id
-//                      stays constant across turns while init repeats per turn
-//                      (spike § 1). Used by the turn-I/O round-trip test.
+//     held-open stdin; for each one, decode its prompt text and
+//     emit a canned stream-json turn (system/init → assistant
+//     text echoing the prompt → result/success). The session_id
+//     stays constant across turns while init repeats per turn
+//     (spike § 1). Used by the turn-I/O round-trip test.
+//   - "mcp_status_policy": answer initialize with both inventory variants,
+//     answer mcp_status with an empty status report and record
+//     that request on stderr, and answer other input with a
+//     result barrier. Used to prove per-spawn status policy.
 func helperChild() {
 	switch os.Getenv("GO_STREAMSUP_HELPER_MODE") {
 	case "echo_lines":
@@ -130,6 +134,23 @@ func helperChild() {
 				},
 			})
 			os.Stdout.Write(append(asst, '\n'))
+			fmt.Fprintln(os.Stdout, `{"type":"result","subtype":"success","session_id":"S"}`)
+		}
+		os.Exit(0)
+	case "mcp_status_policy":
+		sc := bufio.NewScanner(os.Stdin)
+		for sc.Scan() {
+			var request decodedControlRequest
+			if json.Unmarshal(sc.Bytes(), &request) == nil && request.Type == "control_request" {
+				switch request.Request.Subtype {
+				case "initialize":
+					fmt.Fprintln(os.Stdout, `{"type":"control_response","response":{"subtype":"success","response":{"models":[{"resolvedModel":"helper-model","value":"helper","displayName":"Helper"}],"commands":[{"name":"helper-command"}]}}}`)
+				case "mcp_status":
+					fmt.Fprintln(os.Stderr, "MCP_STATUS_REQUEST")
+					fmt.Fprintln(os.Stdout, `{"type":"control_response","response":{"subtype":"success","response":{"mcpServers":[]}}}`)
+				}
+				continue
+			}
 			fmt.Fprintln(os.Stdout, `{"type":"result","subtype":"success","session_id":"S"}`)
 		}
 		os.Exit(0)
