@@ -1429,6 +1429,67 @@ func TestMapEventOutbound(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			// Every source string is distinct and mixed-case, the two rows are in a
+			// conspicuous non-alphabetical order, and DroppedServers differs from both
+			// zero and len(Servers). This makes field swaps, sorting, canonicalisation,
+			// and recomputed loss accounting independently visible.
+			name: "MCPStatus -> mcp_status, every field verbatim",
+			ev: turnevent.MCPStatus{
+				Servers: []turnevent.MCPServerStatus{
+					{
+						Name:    "QQ-Zulu-Name-ZZ",
+						Status:  "QQ-Zulu-Status-ZZ",
+						Error:   "QQ-Zulu-Error-ZZ",
+						Scope:   "QQ-Zulu-Scope-ZZ",
+						Version: "QQ-Zulu-Version-ZZ",
+					},
+					{
+						Name:    "QQ-Alpha-Name-ZZ",
+						Status:  "QQ-Alpha-Status-ZZ",
+						Error:   "QQ-Alpha-Error-ZZ",
+						Scope:   "QQ-Alpha-Scope-ZZ",
+						Version: "QQ-Alpha-Version-ZZ",
+					},
+				},
+				DroppedServers: 7,
+			},
+			tc:      TurnContext{ConversationID: "c1", TurnID: "t-must-not-appear", Seq: 42},
+			wantTyp: protocol.TypeMCPStatus,
+			wantPayload: protocol.MCPStatusPayload{
+				ConversationID: "c1",
+				Servers: []protocol.MCPServerStatus{
+					{
+						Name:    "QQ-Zulu-Name-ZZ",
+						Status:  "QQ-Zulu-Status-ZZ",
+						Error:   "QQ-Zulu-Error-ZZ",
+						Scope:   "QQ-Zulu-Scope-ZZ",
+						Version: "QQ-Zulu-Version-ZZ",
+					},
+					{
+						Name:    "QQ-Alpha-Name-ZZ",
+						Status:  "QQ-Alpha-Status-ZZ",
+						Error:   "QQ-Alpha-Error-ZZ",
+						Scope:   "QQ-Alpha-Scope-ZZ",
+						Version: "QQ-Alpha-Version-ZZ",
+					},
+				},
+				DroppedServers: 7,
+			},
+			wantOK: true,
+		},
+		{
+			// An admitted empty snapshot remains an event. The nil slice stays nil at
+			// this struct boundary; MCPStatusPayload.MarshalJSON owns its wire [] form.
+			name:    "MCPStatus zero value maps rather than dropping",
+			ev:      turnevent.MCPStatus{},
+			tc:      tc,
+			wantTyp: protocol.TypeMCPStatus,
+			wantPayload: protocol.MCPStatusPayload{
+				ConversationID: "c1",
+			},
+			wantOK: true,
+		},
+		{
 			// Every field of every row, 1:1 — the ModelList row above's discipline
 			// applied to the OTHER inventory the same initialize reply carries.
 			// Mixed-case sentinels on all three strings and on both aliases, so a
@@ -1619,6 +1680,29 @@ func TestMapEventOutbound(t *testing.T) {
 				t.Fatalf("dropped event must yield nil payload, got %#v", payload)
 			}
 		})
+	}
+}
+
+func TestMapEventMCPStatusEmptyServersOnTheWire(t *testing.T) {
+	t.Parallel()
+
+	typ, payload, ok := MapEvent(turnevent.MCPStatus{}, TurnContext{ConversationID: "c-empty"})
+	if !ok || typ != protocol.TypeMCPStatus {
+		t.Fatalf("MapEvent empty MCPStatus = (%q, %#v, %v), want mapped %q", typ, payload, ok, protocol.TypeMCPStatus)
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("decode payload fields: %v", err)
+	}
+	if got := string(fields["servers"]); got != "[]" {
+		t.Errorf("servers JSON = %s, want []", got)
+	}
+	if got := string(fields["dropped_servers"]); got != "0" {
+		t.Errorf("dropped_servers JSON = %s, want numeric 0", got)
 	}
 }
 

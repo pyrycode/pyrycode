@@ -514,7 +514,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`resync`** | binary → phone | no | **New in v2.** Mid-turn-reconnect resync marker — the advertised `last_event_id` aged out of the ring; phone must full-reload (#647). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`session_transition`** | binary → phone | no | **New in v2** (interactive, capability-gated). Session-boundary marker for `pyrycode-mobile#336` (#656). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`model_list`** | binary → phone | no | **New in v2** (interactive, capability-gated). The menu of models claude will accept for a conversation, from its `initialize` control reply — identifiers, labels, per-model effort levels and auto-mode support (#1704). **Not** the per-turn announcement [`model_announced`](#model_announced) carries. Shape declared by #1704, fixtures and section by #1705, the mapping onto this wire shape by #1848 and the **producer** by #1849, proven end to end by #1845 — it is emitted on the live interactive turn lane, once per child spawn to whatever clients are connected at that instant, and **best-effort rather than guaranteed**: several loss points mean a client may see none at all, so never block a model menu on it. It also has a **connect-time snapshot** (#1863/#1867, widened by #2124 to cover every conversation the registry carries), so a client that missed the live frame is brought current on its next connect. See [Interactive events](#interactive-events-v2-capability-gated). |
-| **`mcp_status`** | binary → phone | no | **New in v2.** The one conversation-scoped MCP server-status frame reserved for both a future live push and a correlated on-demand reply. #2373 declares the shape and fixture **before either producer lands**: nothing maps or emits it yet, and this slice declares no inbound request verb. #2374 owns the strict-config source gate, #2375 the interactive mapping and publication, and #2276 the separate request verb and correlated reply. See [`mcp_status`](#mcp_status). |
+| **`mcp_status`** | binary → phone | no | **New in v2** (interactive, capability-gated). The conversation-scoped MCP server-status snapshot used by the live push and reserved for a correlated on-demand reply. The live producer is once per eligible daemon-configured strict child: one admitted report becomes one event-ring entry and one frame per connected interactive client, including when `servers` is empty. Status from a bypass child never reaches this lane, so the frame never reports user- or project-scoped MCP servers loaded outside the daemon's strict config. #2373 declared the shape, #2374 the source gate, #2375 the live mapping and publication, and #2276 owns the separate request verb and reply. See [`mcp_status`](#mcp_status). |
 | **`slash_command_list`** | binary → phone | no | **New in v2** (interactive, capability-gated). The slash commands this session's working directory will accept, from the `commands` array of the same `initialize` control reply — names, argument hints, descriptions and aliases (#1727). The sibling [`model_list`](#model_list) inventories *identities* from that reply; this one inventories *verbs*. Consumers are pyrycode-desktop#681 (Actions-menu grey-out) and pyrycode-desktop#694 (slash-command type-ahead). Type declared by #1726, shape by #1727, fixtures and section by #1718, the mapping onto this wire shape by #2001 with its frame-level byte bound by #2002, and the **producer** by #2003, proven end to end by #2008 — it is emitted on the live interactive turn lane, once per child spawn to whatever clients are connected at that instant, and **best-effort rather than guaranteed**. It also has a **connect-time snapshot** (#2006/#2007, proven by #2009), so a client that missed the live frame is brought current on its next connect. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`question_shown`** | binary → phone | no | **New in v2** (interactive, capability-gated). One whole batch of the clarifying questions claude's `AskUserQuestion` tool asks — questions, their options and a per-question multi-select flag, in claude's own order (#1962). The consumer is pyrycode-desktop#849. Type declared by #1962, shape by #1963, fixtures and section by #1964; the parse is #1965 and the producer #1973, which emits it the moment claude asks. **Not** a [`modal_shown`](#modal_shown): that frame is one prompt with flat options, this one is a batch with **two nesting levels** and a **two-verb** inbound half ([`question_answer`](#question_answer) / [`question_refused`](#question_refused), #1983) rather than the modal pair's single answer. See [Question](#question-v2). |
 | **`question_dismissed`** | binary → phone | no | **New in v2** (interactive, capability-gated). The frame that retires a [`question_shown`](#question_shown) batch, so a client clears the panel instead of rendering an ask that is already dead (#1974). Carries no claude-authored string. Its own type and **not** a [`modal_dismissed`](#modal_dismissed), which identifies what it clears by `modal_id` and routes to the modal panel. #1973 emits it on every no-answer terminal path, #1990 on a refusal and #1991 on an answer — all three terminal outcomes. See [Question](#question-v2). |
@@ -2251,12 +2251,34 @@ layer does not recompute the count, and the retained length is not a substitute
 for reading it. The producer's entry cap is not a wire constant and clients must
 not hardcode one.
 
-**The frame is declared before either producer.** #2373 fixes the discriminator,
-payload and encoding fixture, but nothing maps, publishes or answers with
-`mcp_status` yet. #2374 owns the source eligibility boundary, #2375 the live
-interactive mapper and emitter, and #2276 the separate inbound request and
-correlated reply. Until those land, a client must not wait for this frame or infer
-anything from its absence.
+**The live frame is emitted.** #2375 maps an admitted `MCPStatus` onto this
+payload and publishes it through the interactive live lane. The live producer has
+once-per-child cardinality: after the first non-empty initialize inventory makes
+an eligible daemon-configured strict child ready, the daemon makes one best-effort
+status request attempt; one admitted response becomes one `mcp_status` frame. An
+ordinary turn does not synthesize another. A report whose `servers` list is empty
+is still published.
+
+Each admitted frame is appended once to the conversation's event ring before it
+is fanned out once to every connection that negotiated `interactive`. The ring and
+all recipients therefore observe the same logical event and `event_id`; the ring
+retains it even when no interactive connection is open. Receiving the frame is
+lifecycle-neutral: it opens, transitions and closes no turn. Pending assistant
+text is flushed first, and later content continues on the same turn and sequence.
+
+Publication does not move the privacy decision onto the wire. #2374 admits status
+only from a child whose completed argv proves that it uses the daemon's sole MCP
+config with `--strict-mcp-config`. It drops every status from a stored or
+operator-supplied bypass child before the shared sink, so user- or project-scoped
+MCP servers from such a child cannot enter the mapper, event ring or client frame.
+The mapper neither repeats nor relaxes that decision.
+
+This is a live, best-effort report rather than a health guarantee. A status that
+arrives before the daemon has a routed conversation cursor is dropped before the
+ring, and a failed request attempt is not retried for that child. A client must not
+interpret absence as either success or an empty server list. #2276 owns the later
+inbound request and correlated reply, reusing this payload rather than introducing
+a second status shape.
 
 **What this frame cannot carry.** There is no MCP `config`, tool list,
 `serverInfo.name`, request id or raw claude response in the payload. Those values

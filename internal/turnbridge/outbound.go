@@ -806,6 +806,32 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			PermissionMode:    e.PermissionMode,
 			TruncatedFields:   e.TruncatedFields,
 		}, true
+	case turnevent.MCPStatus:
+		// Conversation identity only: this is a child-level inventory reported once
+		// per eligible initialize exchange, not a turn boundary. Eligibility and
+		// once-per-child request policy are already enforced before the shared sink;
+		// this adapter translates the admitted event without re-deciding either.
+		//
+		// Every server field and DroppedServers cross verbatim. No value is re-capped,
+		// sorted, sanitized, filtered, or recovered here. A nil Servers stays nil at
+		// the struct boundary so MCPStatusPayload.MarshalJSON remains the sole owner
+		// of the wire's required empty array. The fresh outer slice preserves source
+		// order without mutating the event through its slice header.
+		var servers []protocol.MCPServerStatus
+		for _, server := range e.Servers {
+			servers = append(servers, protocol.MCPServerStatus{
+				Name:    server.Name,
+				Status:  server.Status,
+				Error:   server.Error,
+				Scope:   server.Scope,
+				Version: server.Version,
+			})
+		}
+		return protocol.TypeMCPStatus, protocol.MCPStatusPayload{
+			ConversationID: tc.ConversationID,
+			Servers:        servers,
+			DroppedServers: e.DroppedServers,
+		}, true
 	case turnevent.ModelList:
 		// Conversation identity only, like the status peers above: tc.TurnID and
 		// tc.Seq are ignored and the payload has no field for either. It is not even

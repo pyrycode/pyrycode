@@ -577,6 +577,14 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// gate stops being single.
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
+	case turnevent.MCPStatus:
+		// One admitted snapshot describes the child rather than a turn, so it opens,
+		// transitions, and closes nothing. The producer already owns strict-config
+		// eligibility and once-per-child cardinality; this lane only preserves order
+		// by flushing earlier text before publishing through emit's single capability
+		// gate and one-logical-event ring append.
+		e.flushDelta(ctx)
+		e.emitMapped(ctx, convID, ev)
 	case turnevent.ModelList:
 		// claude's inventory of selectable models (#1849), taking the same shape as
 		// the status peers above: NO turn-lifecycle mutation (no startTurnIfNeeded /
@@ -1135,6 +1143,10 @@ func eventKind(ev turnevent.Event) string {
 		// every one of which would read kind=unknown without this arm for a variant the
 		// daemon does recognize.
 		return "session_facts"
+	case turnevent.MCPStatus:
+		// Variant name only. Every server string is untrusted display content and none
+		// is returned to this or any other diagnostic call site.
+		return "mcp_status"
 	case turnevent.ModelList:
 		// The variant NAME only, for the arms above's reason — and here the
 		// temptation is multiplied rather than merely present: every entry carries a

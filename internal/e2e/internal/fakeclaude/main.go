@@ -373,6 +373,13 @@
 //	                               Stream mode only.
 //	                               Unset or empty ⟹ off ⟹ byte-identical to prior
 //	                               behaviour.
+//	PYRY_FAKE_CLAUDE_MCP_STATUS     optional. When non-empty, answer an inbound
+//	                               mcp_status control request with one canned,
+//	                               fully populated server row. The daemon sends
+//	                               this request only after an eligible child's
+//	                               initialize reply. Unset or empty leaves the
+//	                               request unanswered, preserving prior hermetic
+//	                               test traffic. Stream mode only.
 //
 // The binary lives under internal/e2e/internal/ to visibility-fence it from
 // non-e2e callers. Because TUI mode makes this file carry claude-TUI
@@ -430,6 +437,7 @@ const (
 	envStreamModelWindows = "PYRY_FAKE_CLAUDE_STREAM_MODEL_WINDOWS"
 	envStreamResetTo      = "PYRY_FAKE_CLAUDE_STREAM_RESET_TO"
 	envStreamSessionFacts = "PYRY_FAKE_CLAUDE_STREAM_SESSION_FACTS"
+	envStreamMCPStatus    = "PYRY_FAKE_CLAUDE_MCP_STATUS"
 	envStreamCanUseTool   = "PYRY_FAKE_CLAUDE_STREAM_CAN_USE_TOOL"
 	envInitializeModels   = "PYRY_FAKE_CLAUDE_INITIALIZE_MODELS"
 	envApproveSocketFile  = "PYRY_FAKE_CLAUDE_APPROVE_SOCKET_FILE"
@@ -1891,9 +1899,9 @@ func permissionResponse(line []byte) (inPermissionResponse, bool) {
 // rider — see writeInitializeAck. A `set_permission_mode` one (#2067) is answered on
 // the same terms — see writeSetPermissionModeAck. They are the control lines the fake
 // handles unconditionally, because once the daemon starts sending them every
-// fake-daemon run sees them regardless of rider; nothing sends either today, so no
-// existing suite's bytes change. Every other control_request keeps its behaviour
-// exactly.
+// fake-daemon run sees them regardless of rider. An `mcp_status` request is recognized
+// separately and answered only under envStreamMCPStatus; with that rider off it keeps
+// the prior no-answer behavior. Every other control_request remains unchanged.
 //
 // rateLimitStatus selects the rate-limit rider (#1411, default-off): non-empty
 // prepends one top-level rate_limit_event line carrying that string as its
@@ -2084,6 +2092,14 @@ func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rat
 				if werr := writeInitializeAck(w, reqID); werr != nil {
 					return
 				}
+			} else if reqID, ok := controlRequestID(b, subtypeMCPStatus); ok {
+				// The rider is opt-in because every eligible fake child now receives this
+				// request, while only the MCP-status e2e wants the reply to enter its wire.
+				if os.Getenv(envStreamMCPStatus) != "" {
+					if werr := writeMCPStatusAck(w, reqID); werr != nil {
+						return
+					}
+				}
 			} else if reqID, ok := contextUsageRequestID(b); ok {
 				// Context usage is requested during ordinary fake-daemon runs, so its
 				// canned answer is unconditional on stream riders just like initialize.
@@ -2161,13 +2177,14 @@ func userTurnText(line []byte) (string, bool) {
 }
 
 // The control_request subtypes fakeclaude answers, named so the dispatch in
-// runStreamJSON reads by name rather than by bare literal. All four are the daemon's
+// runStreamJSON reads by name rather than by bare literal. They are the daemon's
 // strings: interrupt is streamsup.marshalInterruptEnvelope's (#1136/#1500), initialize
 // is the request the daemon sends to collect the session's model list (#1689), and
 // setting subtypes are marshalPermissionModeEnvelope's and marshalModelEnvelope's.
 const (
 	subtypeInterrupt         = "interrupt"
 	subtypeInitialize        = "initialize"
+	subtypeMCPStatus         = "mcp_status"
 	subtypeGetContextUsage   = "get_context_usage"
 	subtypeSetPermissionMode = "set_permission_mode"
 	subtypeSetModel          = "set_model"
@@ -2633,6 +2650,32 @@ func writeInitializeAck(w io.Writer, requestID string) error {
 			"response": map[string]any{
 				"models":   models,
 				"commands": initializeCommands,
+			},
+		},
+	})
+}
+
+// writeMCPStatusAck writes the narrow status fixture used by the replacement-child
+// e2e. All text is inert and non-secret; writeJSONLine safely echoes the daemon's
+// request id without allowing it to create a second physical line.
+func writeMCPStatusAck(w io.Writer, requestID string) error {
+	return writeJSONLine(w, map[string]any{
+		"type": "control_response",
+		"response": map[string]any{
+			"subtype":    "success",
+			"request_id": requestID,
+			"response": map[string]any{
+				"mcpServers": []map[string]any{
+					{
+						"name":   "pyry_mcp_test",
+						"status": "failed",
+						"error":  "canned connection failure",
+						"scope":  "local",
+						"serverInfo": map[string]any{
+							"version": "9.8.7-test",
+						},
+					},
+				},
 			},
 		},
 	})

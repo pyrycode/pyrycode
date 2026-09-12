@@ -126,6 +126,36 @@ func TestRunStreamJSON_NonUserLinesIgnored(t *testing.T) {
 	}
 }
 
+func TestRunStreamJSON_MCPStatusRider(t *testing.T) {
+	t.Setenv("PYRY_FAKE_CLAUDE_MCP_STATUS", "1")
+	const request = `{"type":"control_request","request_id":"mcp-1","request":{"subtype":"mcp_status"}}`
+	var buf bytes.Buffer
+
+	runStreamJSON(strings.NewReader(request+"\n"), &buf, false, false, "", false, 0, false, "", false)
+
+	events := parseEmitted(t, buf.Bytes())
+	if len(events) != 1 {
+		t.Fatalf("mcp_status rider emitted %d events, want 1: %+v", len(events), events)
+	}
+	status, ok := events[0].(turnevent.MCPStatus)
+	if !ok {
+		t.Fatalf("event[0] = %T, want turnevent.MCPStatus", events[0])
+	}
+	if len(status.Servers) != 1 {
+		t.Fatalf("servers = %+v, want one canned row", status.Servers)
+	}
+	want := turnevent.MCPServerStatus{
+		Name:    "pyry_mcp_test",
+		Status:  "failed",
+		Error:   "canned connection failure",
+		Scope:   "local",
+		Version: "9.8.7-test",
+	}
+	if status.Servers[0] != want {
+		t.Errorf("server = %+v, want %+v", status.Servers[0], want)
+	}
+}
+
 // interruptControlRequestLine hand-mirrors the inbound interrupt control_request the
 // daemon (internal/streamsup/envelope.go marshalInterruptEnvelope) writes to
 // claude's stdin on a phone interrupt. Hand-written (not imported —
