@@ -210,19 +210,31 @@ Its wire field keeps the name `model` even though three other v2 payloads alread
 
 **A "declared exactly once" attribution claim is itself prone to multiplying, even inside a single PR.** The payload's doc comment asserted its own "nothing emits it yet" sentence was the *one* place that claim was made in the tree — the precaution #1616's twelve scattered copies (#1639 had to fix) exists to avoid — but code review found the same claim independently restated in `codes.go`'s block, the `docs/protocol-mobile.md` section's attribution sentence, and the application-message-type table row. None of the four was wrong, but the "one place" self-description was, and a later editor trusting it would under-edit the way #1639 had to correct. Grep for the claim's substance across all four sites (Go doc comment, `codes.go` block, doc section, table row) rather than trusting one sentence's count of itself.
 
-**v2 MCP-status vocabulary** (#2373; live producer #2375, on-demand path #2276):
+**v2 MCP-status vocabulary** (#2373; live producer #2375, request/reply contract
+\#2381, live-child resolver #2382):
 
-`TypeMCPStatus = "mcp_status"` is one outbound v2 shape deliberately reserved for
-two uses: an unsolicited live publication and a correlated reply. The initial
-direction label followed the neighbouring push-only declarations too narrowly;
-reviewing the already-specified request path showed that calling it only `"push"`
-would erase one intended use before either producer existed. Its relay-guard label
-is therefore `"push+reply"`. That label does **not** make the type inbound: a
-separate request verb and its handler belong to #2276, while `TypeMCPStatus` stays
-outside `inboundAppTypeSet` and is explicitly rejected by `IsKnownAppType`. #2373
-declares only the discriminator and payload; #2374 owns source eligibility and
-\#2375 the live mapping and publication. See
-[`mcp_status`](../../protocol-mobile.md#mcp_status).
+| Group | Constant |
+|-------|----------|
+| MCP status | `TypeMCPStatus` |
+| MCP status request | `TypeMCPStatusRequest` |
+
+`TypeMCPStatus = "mcp_status"` is one outbound v2 shape deliberately shared by
+an unsolicited live publication and a correlated reply. The initial direction
+label followed the neighbouring push-only declarations too narrowly; reviewing
+the request path showed that calling it only `"push"` would erase one intended
+use. Its relay-guard label is therefore `"push+reply"`.
+
+`TypeMCPStatusRequest = "mcp_status_request"` is the separate inbound phone →
+binary control verb. It carries `MCPStatusRequestPayload`, whose unconditional
+`conversation_id` string is the complete payload; correlation stays on
+`Envelope.InReplyTo`, so no request-id field is added. The request is intercepted
+by `dispatchAppFrame` before `dispatch.Route` and is classified
+`"switch-intercepted"` from declaration because its only relay consumer landed in
+the same slice. Both constants stay outside `inboundAppTypeSet`, and the v1
+predicate explicitly rejects both. #2381 intentionally leaves the production
+resolver nil until #2382 wires live-child correlation. See
+[`mcp_status`](../../protocol-mobile.md#mcp_status) and
+[the on-demand request](../../protocol-mobile.md#asking-for-mcp-status-on-demand).
 
 **v2 model-list vocabulary** (#1704; producer #1848/#1849, fixtures #1705):
 

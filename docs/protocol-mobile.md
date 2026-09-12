@@ -514,7 +514,8 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`resync`** | binary → phone | no | **New in v2.** Mid-turn-reconnect resync marker — the advertised `last_event_id` aged out of the ring; phone must full-reload (#647). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`session_transition`** | binary → phone | no | **New in v2** (interactive, capability-gated). Session-boundary marker for `pyrycode-mobile#336` (#656). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`model_list`** | binary → phone | no | **New in v2** (interactive, capability-gated). The menu of models claude will accept for a conversation, from its `initialize` control reply — identifiers, labels, per-model effort levels and auto-mode support (#1704). **Not** the per-turn announcement [`model_announced`](#model_announced) carries. Shape declared by #1704, fixtures and section by #1705, the mapping onto this wire shape by #1848 and the **producer** by #1849, proven end to end by #1845 — it is emitted on the live interactive turn lane, once per child spawn to whatever clients are connected at that instant, and **best-effort rather than guaranteed**: several loss points mean a client may see none at all, so never block a model menu on it. It also has a **connect-time snapshot** (#1863/#1867, widened by #2124 to cover every conversation the registry carries), so a client that missed the live frame is brought current on its next connect. See [Interactive events](#interactive-events-v2-capability-gated). |
-| **`mcp_status`** | binary → phone | no | **New in v2** (interactive, capability-gated). The conversation-scoped MCP server-status snapshot used by the live push and reserved for a correlated on-demand reply. The live producer is once per eligible daemon-configured strict child: one admitted report becomes one event-ring entry and one frame per connected interactive client, including when `servers` is empty. Status from a bypass child never reaches this lane, so the frame never reports user- or project-scoped MCP servers loaded outside the daemon's strict config. #2373 declared the shape, #2374 the source gate, #2375 the live mapping and publication, and #2276 owns the separate request verb and reply. See [`mcp_status`](#mcp_status). |
+| **`mcp_status`** | binary → phone | no | **New in v2** (interactive, capability-gated). The conversation-scoped MCP server-status snapshot shared by the live push and the correlated [`mcp_status_request`](#asking-for-mcp-status-on-demand) reply. The live producer is once per eligible daemon-configured strict child: one admitted report becomes one event-ring entry and one frame per connected interactive client, including when `servers` is empty. The on-demand reply instead goes only to the requester, carries no `event_id`, and never enters the event ring. Status from a bypass child never reaches the live lane, so that frame never reports user- or project-scoped MCP servers loaded outside the daemon's strict config. #2373 declared the shape, #2374 the source gate, #2375 the live mapping and publication, and #2381 the relay request/reply contract. See [`mcp_status`](#mcp_status). |
+| **`mcp_status_request`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for the current MCP status of one conversation, naming it in the sole `conversation_id` string field (#2381). Correlation rides `in_reply_to`, so the payload has no request-id key. The answer is one existing [`mcp_status`](#mcp_status), unchanged from the resolver, or `protocol.malformed`, `conversation.not_found`, or retryable `mcp_status.unavailable`. Interactive-capability-gated; an unconfigured resolver or a conn without the capability consumes the request without decoding or replying. The relay contract exists before #2382 wires the live-child resolver. See [Asking for MCP status on demand](#asking-for-mcp-status-on-demand). |
 | **`slash_command_list`** | binary → phone | no | **New in v2** (interactive, capability-gated). The slash commands this session's working directory will accept, from the `commands` array of the same `initialize` control reply — names, argument hints, descriptions and aliases (#1727). The sibling [`model_list`](#model_list) inventories *identities* from that reply; this one inventories *verbs*. Consumers are pyrycode-desktop#681 (Actions-menu grey-out) and pyrycode-desktop#694 (slash-command type-ahead). Type declared by #1726, shape by #1727, fixtures and section by #1718, the mapping onto this wire shape by #2001 with its frame-level byte bound by #2002, and the **producer** by #2003, proven end to end by #2008 — it is emitted on the live interactive turn lane, once per child spawn to whatever clients are connected at that instant, and **best-effort rather than guaranteed**. It also has a **connect-time snapshot** (#2006/#2007, proven by #2009), so a client that missed the live frame is brought current on its next connect. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`question_shown`** | binary → phone | no | **New in v2** (interactive, capability-gated). One whole batch of the clarifying questions claude's `AskUserQuestion` tool asks — questions, their options and a per-question multi-select flag, in claude's own order (#1962). The consumer is pyrycode-desktop#849. Type declared by #1962, shape by #1963, fixtures and section by #1964; the parse is #1965 and the producer #1973, which emits it the moment claude asks. **Not** a [`modal_shown`](#modal_shown): that frame is one prompt with flat options, this one is a batch with **two nesting levels** and a **two-verb** inbound half ([`question_answer`](#question_answer) / [`question_refused`](#question_refused), #1983) rather than the modal pair's single answer. See [Question](#question-v2). |
 | **`question_dismissed`** | binary → phone | no | **New in v2** (interactive, capability-gated). The frame that retires a [`question_shown`](#question_shown) batch, so a client clears the panel instead of rendering an ask that is already dead (#1974). Carries no claude-authored string. Its own type and **not** a [`modal_dismissed`](#modal_dismissed), which identifies what it clears by `modal_id` and routes to the modal panel. #1973 emits it on every no-answer terminal path, #1990 on a refusal and #1991 on an answer — all three terminal outcomes. See [Question](#question-v2). |
@@ -2260,9 +2261,8 @@ Four things a client will otherwise get wrong:
 
 Direction **binary → phone** (outbound v2 only; the v1 inbound type predicate
 rejects it). This is the single conversation-scoped MCP server snapshot shared by
-the later live publication and on-demand reply paths. The reply will use this same
-payload, correlated at the envelope, rather than minting a second status shape.
-This slice declares no inbound request verb.
+the live publication and on-demand reply paths. The reply uses this same payload,
+correlated at the envelope, rather than minting a second status shape.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -2313,9 +2313,9 @@ The mapper neither repeats nor relaxes that decision.
 This is a live, best-effort report rather than a health guarantee. A status that
 arrives before the daemon has a routed conversation cursor is dropped before the
 ring, and a failed request attempt is not retried for that child. A client must not
-interpret absence as either success or an empty server list. #2276 owns the later
-inbound request and correlated reply, reusing this payload rather than introducing
-a second status shape.
+interpret absence as either success or an empty server list. An on-demand request
+uses the separate contract below and never turns absence into an empty or retained
+`mcp_status` frame.
 
 **What this frame cannot carry.** There is no MCP `config`, tool list,
 `serverInfo.name`, request id or raw claude response in the payload. Those values
@@ -2330,6 +2330,48 @@ escaped for its render context, and must never feed it to an HTML sink, attribut
 URL, command, endpoint selector or authorization decision. In particular,
 `status` and `scope` are claude's claims, not instructions or capabilities, and
 `error`'s byte cap is only a size bound. No server string is an actuator.
+
+#### Asking for MCP status on demand
+
+**`mcp_status_request`** (phone → binary, **#2381**) asks for the current MCP
+status of one conversation. It is v2-only and gated on the negotiated
+`interactive` capability. The payload has exactly one field:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | The conversation whose current status is wanted. Always present; it is a remote-authored lookup key checked against the daemon's conversation registry, never an authority or a value to echo into the answer. |
+
+There is no request-id field. The reply's `in_reply_to` names the request
+envelope id. A resolver result is forwarded unchanged as the existing
+[`mcp_status`](#mcp_status) payload, including its daemon-authored
+`conversation_id`, server order and `dropped_servers` value.
+
+The on-demand answer is **requester-only**. It carries no `event_id`, is not
+broadcast, never enters the event ring, is never replayed, and advances no client
+cursor. This differs deliberately from a live `mcp_status` publication, which is
+one ring event fanned out to every interactive client.
+
+Three rejects are possible, each sent as one `error` envelope correlated by
+`in_reply_to`:
+
+| Condition | Code | Retryable |
+|---|---|---|
+| Payload cannot decode to the one-field shape | `protocol.malformed` | no |
+| `conversation_id` names no hosted conversation | `conversation.not_found` | no |
+| The hosted conversation has no current resolver result | `mcp_status.unavailable` | yes, after a backoff |
+
+No reject sends an empty or stale `mcp_status`. A conn that did not negotiate
+`interactive` receives nothing, and the daemon consults neither membership nor
+the resolver. A relay with no `MCPStatusFor` resolver configured is equally inert
+and consumes the type before decoding its payload, so it does not fall through to
+an unknown-type response. **That is the production posture at #2381:** this slice
+declares the stable relay contract before #2382 wires live-child request/response
+correlation.
+
+Resolution may wait on a child, so it runs on the requesting connection's
+application worker rather than the session manager's `Run` goroutine. Another
+connection continues to be serviced while it waits; the eventual unsealed reply
+re-enters `Run` before Noise encryption so the cipher remains single-owner.
 
 #### `slash_command_list`
 
@@ -3933,7 +3975,8 @@ Application-level error codes (carried in `error` envelopes inside `noise_msg` p
 |---|---|---|
 | `noise.handshake_failed` | no | Reported only to local logs — wire-level handshake failure closes the WS with `4426` and no AEAD-sealed envelope can be sent. Included here for completeness. |
 | `noise.rekey_failed` | yes | The peer's `rekey_request` was rejected (e.g. rate-limited) or the subsequent handshake didn't complete; sender may retry after a backoff. |
-| `protocol.malformed` | no | Among the existing malformed-request cases, a [`set_session_settings`](#set_session_settings) carrying a well-shaped non-empty model that is absent from a **complete** retained published vocabulary is rejected with the static message `requested model is not offered` (#2281). The entire frame is refused before persistence or live delivery; an explicit empty model remains the reset-to-default operation. |
+| `protocol.malformed` | no | Among the existing malformed-request cases, an [`mcp_status_request`](#asking-for-mcp-status-on-demand) whose payload cannot decode to its one-field shape is rejected before conversation membership or the resolver is consulted (#2381). Its message is static and neither the decoder error nor remote-authored values are returned or logged. A [`set_session_settings`](#set_session_settings) carrying a well-shaped non-empty model that is absent from a **complete** retained published vocabulary is likewise rejected with the static message `requested model is not offered` (#2281). |
+| `conversation.not_found` | no | Among its existing uses, an [`mcp_status_request`](#asking-for-mcp-status-on-demand) whose decoded `conversation_id` names no hosted conversation (#2381). The resolver is not consulted, and the static reply does not echo the id. Permanent for the request as sent; re-list conversations or correct the id rather than retrying unchanged. |
 | `session.not_found` | no | The `set_session_settings` target `session_id` names no live session. Returned by the handler (#845). |
 | `session.blocked` | no | Terminal — the daemon gave up delivering a conversation's queued backlog after repeated failures (msgqueue give-up, #1000). Carried in a `session_error` frame, not an `error` envelope; the emitting producer is #1008. A client attaches it to the `conversation_id` and MUST NOT retry (contrast the transient `server.binary_busy`). |
 | `attachment.invalid_chunk` | no | An `attachment_chunk`'s framing claims are inconsistent or out of range: a duplicate `index`, an `index` outside `[0, total_chunks)`, or a `total_chunks` disagreeing with the stream's earlier chunks (#1741). **Since #2143 it also answers an unusable destination** — an absent `conversation_id`, or one naming a conversation the daemon does not host — refused on the **first** chunk carrying it, before any byte is admitted. The three destination causes are **deliberately merged** into this one code so the upload leg is not a conversation-existence oracle; the daemon separates them in its own logs only. Not `attachment.storage_failed`, whose row is for a *verified* attachment the host could not write. The receiver discards the whole in-flight stream; resending the same frames reproduces it, so the repair is to re-chunk, or to name a conversation the daemon hosts. See [Attachments](#attachments). |
@@ -3947,6 +3990,7 @@ Application-level error codes (carried in `error` envelopes inside `noise_msg` p
 | **`history.invalid_page_size`** | no | A [`request_history`](#request_history) whose `limit` is **negative** (#2116). **`0` is not a reject** — it asks the daemon to choose. An ask *above* the ceiling is not a reject either; it is clamped. See [Page size](#page-size). |
 | **`history.invalid_cursor`** | no | A [`request_history`](#request_history) whose `cursor` does not decode, was minted for another conversation, or names a position not in this log (#2116). **Deliberately indistinguishable** across all three — a disclosure decision, not an imprecision: the distinctions are exactly what a probe would want, and the daemon's log raises one sentinel for all three, so the handler *cannot* branch on what it must not distinguish. The refusal **never echoes the cursor back**. Repair: restart the walk with an empty cursor. |
 | **`model_list.unavailable`** | yes, after a backoff | A [`request_model_list`](#asking-for-a-model-list-on-demand) naming a conversation the daemon **does** host, for which it has **no model vocabulary to answer with** (#2125), or a [`set_session_settings`](#set_session_settings) whose non-empty model cannot be checked conclusively because the retained vocabulary is missing, empty, reports dropped rows, or contains any row whose `value` was truncated (#2281). **It is not an empty menu**, and that distinction is the reason the code exists: `models` is documented never-`null` and never a stand-in for "unknown", so "no list" has to be said in an `error` frame rather than in a degraded `model_list`. On the settings path it refuses the whole frame before persistence or live delivery. These incomplete-vocabulary causes deliberately share one code because the client's repair is identical and the dominant cause clears on its own: back off until a complete menu may have arrived, then retry. Contrast a model absent from a complete menu (`protocol.malformed`, permanent for that value) and `conversation.not_found` (permanent for that request). The message is the static `model list is unavailable` and names no model, conversation or path. |
+| **`mcp_status.unavailable`** | yes, after a backoff | An [`mcp_status_request`](#asking-for-mcp-status-on-demand) naming a conversation the daemon **does** host, for which the configured resolver has no current status (#2381). **It is not an empty or retained snapshot**: the handler emits an error rather than fabricate or reuse an `mcp_status`, so the same request may be retried after the live source becomes available. The message is static and names no conversation, server, or resolver detail. |
 | **`workspace.not_found`** | no | A [`rename_workspace`](#renaming-a-workspace) whose `path` matches no stored conversation's `cwd` (#2207). Comparison is **byte-exact** and includes archived conversations, so a near-miss — a trailing separator, a trailing space, a case difference — is a miss. **Not `conversation.not_found`**, and the distinction is the point rather than a naming preference: this request names no conversation at all, so the conversation code would send a client looking for a row it never asked about and could not act on. It applies to a **clear as much as to a set** — a `null` label at an unmatched path is refused, not silently accepted. Permanent for the request as sent: the same path fails identically until a conversation exists there, which is not something a retry accomplishes. The message is static and **never echoes the requested path**, which matters more here than on the conversation verbs because a path is a filesystem location on the daemon's host. |
 | **`pairing.not_permitted`** | no | A [`mint_pairing`](#mint_pairing) from a device that does not hold the daemon-side `allow_remote_permissions` flag (#2127). **Nothing is created** — the gate fires before the token is drawn, and the refusal is written to the daemon's audit sink as `denied_unauthorized`. **Not `auth.invalid_token`**, and the distinction is the group's defining decision: a frame reaching this handler has already presented a token the handshake validated, so an auth code would tell a legitimate client its credential was rejected and invite it to re-pair — the one repair that cannot help. The device is authenticated; what it lacks is privilege. **It is not an oracle**: it reports only that the asking device may not mint, a fact that device can already establish by answering any permission [modal](#modal-v2) and being denied, and it is not conditioned on the requested `device_name`, so it cannot probe which labels exist. Permanent for the device as paired — only `pyry pair --allow-remote-permissions` at a shell on the host changes it. |
 | **`pairing.unavailable`** | **yes** | A [`mint_pairing`](#mint_pairing) the host could not complete (#2127): a busy `devices.json` lock, a registry that could not be read or written, or a refusing CSPRNG. **The three causes are merged deliberately** — each can clear without the client changing anything, the repair is identical, and distinguishing them would publish facts about the machine rather than about the request. The underlying error formats an absolute host path and **never reaches the wire**; the message is static. |
