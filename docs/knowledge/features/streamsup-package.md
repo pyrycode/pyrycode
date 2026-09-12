@@ -162,6 +162,32 @@ to 256 bytes with valid UTF-8 output. The new decoder has no logger:
 `emitModelList` and `logControlResponse` remain the line's sole, content-free log
 owner on success, rejection, and decode failure.
 
+Shape validation does not establish that an MCP status reply is safe to publish:
+a bypass child can author the same successful `mcpServers` shape while loading
+private user- or project-scoped servers. The runner therefore installs one
+`mcpStatusChildPolicy` on the concrete `Parser` before each `cmd.Start`, derived
+from that child's completed argv snapshot. A child is eligible only when
+`MCPStatusConfigPath` is non-empty, its argv contains exact
+`--strict-mcp-config`, and its sole `--mcp-config` occurrence names that daemon
+path (separate and joined forms are accepted). Missing, wrong, dangling, or
+duplicate config flags fail closed. Because this decision uses the spawn
+snapshot, changing the next spawn's args cannot reclassify the child already
+running; [the factory](streamsup-package-constructing-a-streamrunner-newstreamrunnerfacto.md)
+provides the daemon path beside the argv composition that may inject it.
+
+For an eligible child, the first non-empty `ModelList` or `SlashCommandList`
+emitted from a successful initialize-shaped reply triggers one
+`Runner.RequestMCPStatus` attempt. The attempted latch is set before delivery,
+so one reply containing both inventories still asks once, a failed write is not
+retried on later inventories, and a replacement child receives a fresh latch.
+Empty or unrecognised inventories trigger nothing. Delivery is best-effort: its
+fixed Debug diagnostic carries no returned error or request/response content and
+cannot enter child restart or backoff state. At the return boundary,
+`Parser.emit` drops every `MCPStatus` from an installed ineligible-child policy
+before the shared sink while forwarding all other event variants unchanged;
+this also suppresses manually solicited status replies. A standalone parser has
+no installed child policy and retains the shape decoder's existing behaviour.
+
 `emitStreamEvent` maps Claude's nested partial-message wire without changing the
 downstream event contract. A valid `message_start` replaces the current message
 ID and open-block state; a valid `content_block_start` records one index and
