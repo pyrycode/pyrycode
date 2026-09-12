@@ -242,6 +242,36 @@ func TestHelloAckPayload_CapabilitiesRoundTrip(t *testing.T) {
 	}
 }
 
+func TestHelloAckPayload_WorkspaceRootRoundTrip(t *testing.T) {
+	empty := HelloAckPayload{ProtocolVersion: "v2", ServerID: "8f7e", ConnID: "c-1"}
+	out, err := json.Marshal(empty)
+	if err != nil {
+		t.Fatalf("marshal empty payload: %v", err)
+	}
+	if bytes.Contains(out, []byte(`"workspace_root"`)) {
+		t.Errorf("empty WorkspaceRoot should be omitted; got %s", out)
+	}
+
+	want := "/Users/tester/pyry-workspace"
+	ack := HelloAckPayload{
+		ProtocolVersion: "v2",
+		ServerID:        "8f7e",
+		ConnID:          "c-1",
+		WorkspaceRoot:   want,
+	}
+	out, err = json.Marshal(ack)
+	if err != nil {
+		t.Fatalf("marshal populated payload: %v", err)
+	}
+	var back HelloAckPayload
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatalf("unmarshal populated payload: %v", err)
+	}
+	if back.WorkspaceRoot != want {
+		t.Errorf("WorkspaceRoot round-trip: got %q, want %q", back.WorkspaceRoot, want)
+	}
+}
+
 // TestCapability_Constants_MatchSpec pins each capability constant to its exact
 // wire string, the same shape TestErrorCode_Constants_MatchSpec uses for the
 // Code* block and for the same reason: every other test in this repo passes

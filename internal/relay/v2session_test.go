@@ -10,6 +10,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -303,6 +305,78 @@ func TestV2Session_HappyPath(t *testing.T) {
 	}
 	if s.send == nil || s.recv == nil {
 		t.Errorf("CipherStates nil after Open: send=%v recv=%v", s.send, s.recv)
+	}
+}
+
+func TestV2Session_HelloAckWorkspaceRoot(t *testing.T) {
+	handshake := func(t *testing.T, logger *slog.Logger) (protocol.HelloAckPayload, []byte, []protocol.RoutingEnvelope) {
+		t.Helper()
+		respPriv, respPub := genV2Keypair(t)
+		initPriv, _ := genV2Keypair(t)
+		frames := make(chan protocol.RoutingEnvelope, 1)
+		rec := &v2Recorder{}
+		session, earlyAck := driveToOpenCaps(t, V2SessionConfig{
+			Frames:     frames,
+			Outbound:   rec.outbound,
+			StaticPriv: respPriv,
+			Devices:    v2PairedRegistry(t, v2TestToken),
+			ServerID:   v2TestServerID,
+			Logger:     logger,
+		}, frames, rec, respPub, initPriv, v2TestToken, nil)
+		t.Cleanup(session.stop)
+		waitConnOpen(t, session.mgr, v2TestConnID)
+		return decodeHelloAck(t, earlyAck), earlyAck, rec.snapshot()
+	}
+
+	t.Run("reports absolute base without creating it", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		want := filepath.Join(home, "pyry-workspace")
+		if _, err := os.Stat(want); !os.IsNotExist(err) {
+			t.Fatalf("workspace root before handshake: got err %v, want not-exist", err)
+		}
+
+		var logs bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&logs, nil))
+		ack, _, wire := handshake(t, logger)
+		if ack.WorkspaceRoot != want {
+			t.Errorf("WorkspaceRoot = %q, want %q", ack.WorkspaceRoot, want)
+		}
+		if ack.ProtocolVersion != "v2" || ack.ServerID != v2TestServerID || ack.ConnID != v2TestConnID {
+			t.Errorf("existing greeting fields changed: got %+v", ack)
+		}
+		wireJSON, err := json.Marshal(wire)
+		if err != nil {
+			t.Fatalf("marshal recorded wire: %v", err)
+		}
+		if bytes.Contains(wireJSON, []byte(want)) {
+			t.Errorf("workspace root exposed outside encrypted early data: %s", wireJSON)
+		}
+		if bytes.Contains(logs.Bytes(), []byte(want)) {
+			t.Errorf("workspace root exposed in logs: %s", logs.Bytes())
+		}
+		if _, err := os.Stat(want); !os.IsNotExist(err) {
+			t.Fatalf("workspace root after handshake: got err %v, want not-exist", err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		home string
+	}{
+		{name: "home unavailable", home: ""},
+		{name: "home not absolute", home: "relative-home"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", tc.home)
+			ack, earlyAck, _ := handshake(t, silentLogger())
+			if ack.WorkspaceRoot != "" {
+				t.Errorf("WorkspaceRoot = %q, want empty", ack.WorkspaceRoot)
+			}
+			if bytes.Contains(earlyAck, []byte(`"workspace_root"`)) {
+				t.Errorf("workspace_root should be omitted; got %s", earlyAck)
+			}
+		})
 	}
 }
 
@@ -4520,12 +4594,11 @@ func TestV2Session_ActiveConns_MixedInteractive(t *testing.T) {
 // TestV2Session_CapabilitySpoof_TokenFail_NeverEnumerated is the security
 // proof: a phone that advertises [interactive] but fails the device-token check
 // is closed at 4401 and deleted, so its negotiated capability is never
-// observable in ActiveConns. The ack on the noise_resp DID echo [interactive]
-// (it is sealed before the token check, security-review Threat 3) — but that
-// echo grants nothing because the session never reaches V2StateOpen
-// (Threat 2/3, AC#1/#3).
+// observable in ActiveConns. The pre-validation ack may echo the negotiated
+// capability, which grants nothing, but it must not disclose host paths.
 func TestV2Session_CapabilitySpoof_TokenFail_NeverEnumerated(t *testing.T) {
-	t.Parallel()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 
 	respPriv, respPub := genV2Keypair(t)
 	initPriv, _ := genV2Keypair(t)
@@ -4561,14 +4634,23 @@ func TestV2Session_CapabilitySpoof_TokenFail_NeverEnumerated(t *testing.T) {
 		t.Fatalf("close_code = %d, want %d", envs[1].CloseCode, StatusUnauthorized)
 	}
 
-	// The ack was echoed (sealed before the token check) — leaks nothing.
+	// The ack is sealed before the token rejection so the initiator can decrypt
+	// it. Capability negotiation grants no access, while host-only metadata must
+	// remain absent until the token has been accepted.
 	respRaw := decodeRespFrame(t, envs[0])
 	earlyAck, _, _, err := initiator.ReadResp(respRaw)
 	if err != nil {
 		t.Fatalf("ReadResp: %v", err)
 	}
-	if ack := decodeHelloAck(t, earlyAck); !slices.Equal(ack.Capabilities, []string{protocol.CapabilityInteractive}) {
+	ack := decodeHelloAck(t, earlyAck)
+	if !slices.Equal(ack.Capabilities, []string{protocol.CapabilityInteractive}) {
 		t.Errorf("hello_ack Capabilities = %v, want [interactive]", ack.Capabilities)
+	}
+	if ack.WorkspaceRoot != "" {
+		t.Errorf("rejected-token hello_ack WorkspaceRoot = %q, want empty", ack.WorkspaceRoot)
+	}
+	if bytes.Contains(earlyAck, []byte(`"workspace_root"`)) {
+		t.Errorf("rejected-token hello_ack disclosed workspace_root: %s", earlyAck)
 	}
 
 	// The grant: the token-failed conn never reaches V2StateOpen, so the

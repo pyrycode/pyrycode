@@ -461,7 +461,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | Type | Direction | Carries handshake early-data? | Notes |
 |---|---|---|---|
 | `hello` | phone → binary | yes (in `noise_init`) | Includes the device-token; optional `last_event_id` for mid-turn reconnect replay (#647). Also accepts `last_seen_ts`, which **no daemon code reads** — it is decoded and dropped, drives no backfill, and a `hello` carrying it behaves identically to one omitting it (#2090). |
-| `hello_ack` | binary → phone | yes (in `noise_resp`) | Includes `conn_id`. |
+| `hello_ack` | binary → phone | yes (in `noise_resp`) | Includes `conn_id`; for an authorised peer, may include the daemon host's absolute `workspace_root` for resolving relative workspace paths. |
 | `send_message` | phone → binary | no | Carries an **optional** `attachment_ids` — the uploaded attachments this message references, so the daemon names them instead of inferring the set from upload order or arrival timing (#2036). Each element is a lowercase UUIDv4 per [The `attachment_id` shape](#the-attachment_id-shape); **at most 32 per message**, counting elements rather than distinct ids. A message naming none **omits the key entirely** — `null` and `[]` are also accepted and a receiver cannot tell the three apart. **Consumed since #2038**: the daemon names each attachment's on-host path in `claude`'s prompt, refuses an over-bound list with `protocol.malformed`, and deduplicates a repeated id. See [Naming a message's attachments](#naming-a-messages-attachments). |
 | `message` | binary → phone | no | v1 / dispatch-leg coarse assistant-turn type. Not minted on the v2 interactive path — the v2 coarse `message` fan-out was removed in #699; v2 assistant output flows only through the structured interactive stream below. |
 | `list_conversations` | phone → binary | no | |
@@ -734,7 +734,44 @@ emit a `resync` marker (#647). It is **untrusted input** — the daemon
 range/shape-validates it (`*uint64` decode) and bounds replay by the ring; the
 phone can never address a conversation other than the daemon's current one.
 
-Binary validates the token after decrypting the handshake message. If invalid, the binary sends an AEAD-sealed `error` envelope (code `auth.invalid_token`) inside a `noise_msg` and asks the relay to close with `4401`. The `noise_resp` may or may not have already been sent at this point — implementations should send it first (so the AEAD channel exists), then immediately send the auth error.
+Binary validates the token after decrypting the handshake message and before
+constructing the acknowledgement. If invalid, the binary still sends the
+`noise_resp` so the AEAD channel exists, then sends an AEAD-sealed `error`
+envelope (code `auth.invalid_token`) inside a `noise_msg` and asks the relay to
+close with `4401`.
+
+### `hello_ack` (v2-specific note)
+
+Sent only as the Noise-encrypted early-data payload of `noise_resp`; it never
+appears in a routing envelope, request header or other unencrypted wire
+surface.
+
+```json
+{
+  "id": 1, "type": "hello_ack", "ts": "...", "in_reply_to": 1,
+  "payload": {
+    "protocol_version": "v2",
+    "server_id": "8f7e...",
+    "conn_id": "c-7f3a...",
+    "capabilities": ["interactive"],
+    "workspace_root": "/Users/alice/pyry-workspace"
+  }
+}
+```
+
+`workspace_root` is optional (`omitempty`: absent, not `null`). For an
+authorised peer, it reports the absolute base on the **daemon host** that
+corresponds to the `~/pyry-workspace/` convention, so a client can preview the
+destination of a relative workspace path. It is a lexical report only: the
+directory need not exist, and computing the value neither inspects nor creates
+it. If the daemon cannot resolve an absolute home directory, the field is
+omitted and the handshake otherwise succeeds.
+
+The Noise responder also sends a decryptable `hello_ack` before delivering the
+encrypted rejection to a peer whose device token is invalid, expired or
+revoked. Such an acknowledgement omits `workspace_root`: Noise authentication
+and encryption do not replace device-token authorisation for daemon-host
+metadata. The value is never written to daemon logs.
 
 ### Capability negotiation (v2)
 

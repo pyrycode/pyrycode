@@ -109,7 +109,7 @@ Connect()              → goroutine spawns
 
 WS close-code `4409` (server-id conflict) is classified terminal independently of any frame exchange — it rides the transport's `FatalCloseCodes: [4409]` and surfaces as `ErrServerIDConflict` from `Wait()` (see Reconnect semantics).
 
-> The *phone↔binary* `hello`/`hello_ack` is a different leg and survives — it is carried E2E-encrypted as Noise_IK early-data, relay-blind, and validated by the Noise_IK v2 handshake in [`v2-session-manager.md`](v2-session-manager.md) (see § Auth below). Only the binary↔relay leg ceremony was retired.
+> The *phone↔binary* `hello`/`hello_ack` is a different leg and survives — it is carried E2E-encrypted as Noise_IK early-data, relay-blind, and validated by the Noise_IK v2 handshake in [`v2-session-manager.md`](v2-session-manager.md) (see § Auth below). Only the binary↔relay leg ceremony was retired. Encryption is not the device-authorisation boundary: a rejected-token initiator still receives and can decrypt the ack needed to establish the encrypted rejection channel, so [`handleNoiseInit`](v2-session-manager-state-machine-noise-init-happy-and-failure-path.md) validates the device token before adding daemon-host metadata such as `workspace_root`; rejected acks omit it.
 
 ## Reconnect semantics
 

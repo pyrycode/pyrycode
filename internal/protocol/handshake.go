@@ -115,11 +115,18 @@ type HelloClientPayload struct {
 // what it itself supports (the intersection with the phone's advertised
 // set, never a blind mirror of the phone's claims) — that trust decision
 // is #608's, not this wire-type layer's.
+//
+// WorkspaceRoot is the daemon host's absolute ~/pyry-workspace/ base for
+// resolving relative workspace paths. It is omitted when the daemon cannot
+// determine an absolute home directory or the peer is not authorized to
+// receive host metadata. The producer reports the convention only; it does not
+// create or inspect the path.
 type HelloAckPayload struct {
 	ProtocolVersion string   `json:"protocol_version"`
 	ServerID        string   `json:"server_id"`
 	ConnID          string   `json:"conn_id"`
 	Capabilities    []string `json:"capabilities,omitempty"`
+	WorkspaceRoot   string   `json:"workspace_root,omitempty"`
 }
 
 // ErrorPayload is the body of an "error" envelope (docs/protocol-mobile.md

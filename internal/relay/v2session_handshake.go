@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"time"
 
@@ -102,6 +104,14 @@ func negotiateCapabilities(advertised []string) []string {
 		}
 	}
 	return out
+}
+
+func workspaceRoot() string {
+	home, err := os.UserHomeDir()
+	if err != nil || !filepath.IsAbs(home) {
+		return ""
+	}
+	return filepath.Join(home, "pyry-workspace")
 }
 
 // handleNoiseInit processes an inbound noise_init frame. The initial
@@ -204,6 +214,28 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// flag — ack and flag can never disagree.
 	negotiated := negotiateCapabilities(helloPayload.Capabilities)
 
+	// Reload the on-disk registry so a device paired after daemon startup
+	// authenticates without a restart (#782). Fail closed on a read error:
+	// proceed to Validate against the retained in-memory set so the accept set
+	// is not widened and no loaded device is lost. SECURITY: never log the
+	// wrapped error; corrupt devices JSON can carry a token hash in a decode
+	// error. Validate before constructing the ack so host-only metadata can be
+	// limited to paired devices. The result is applied only after WriteResp
+	// establishes the existing encrypted accept/reject channel.
+	if m.cfg.DevicesPath != "" {
+		if err := m.cfg.Devices.Reload(m.cfg.DevicesPath); err != nil {
+			m.cfg.Logger.Warn("relay: v2 devices reload failed",
+				"event", "v2.devices.reload_failed",
+				"conn_id", s.connID,
+				"path", m.cfg.DevicesPath)
+		}
+	}
+	device, tokenResult := m.cfg.Devices.Validate(helloPayload.Token)
+	root := ""
+	if tokenResult == devices.ValidateAccepted {
+		root = workspaceRoot()
+	}
+
 	// Build and AEAD-seal hello_ack via WriteResp's early-data slot. The
 	// hello_ack carries InReplyTo=hello.ID to mirror v1's request/response
 	// pairing convention.
@@ -213,6 +245,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 		ServerID:        m.cfg.ServerID,
 		ConnID:          s.connID,
 		Capabilities:    negotiated, // omitempty: nil/empty → key absent
+		WorkspaceRoot:   root,
 	})
 	if err != nil {
 		m.cfg.Logger.Warn("relay: v2 handshake reject",
@@ -254,8 +287,8 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	}
 	s.send = sendCS
 	s.recv = recvCS
-	// State transitions to handshakeComplete BEFORE token validation —
-	// observably distinct from open. The gating test pins this.
+	// State transitions to handshakeComplete before the token result is applied
+	// — observably distinct from open. The gating test pins this.
 	s.state = V2StateHandshakeComplete
 
 	respFrame, err := marshalInnerFrameV2(protocol.TypeNoiseResp, respMsg)
@@ -269,22 +302,6 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 		return
 	}
 
-	// Reload the on-disk registry so a device paired after daemon startup
-	// authenticates without a restart (#782). Fail closed on a read error:
-	// log path + a static reason and proceed to Validate against the retained
-	// in-memory set — the accept set is not widened and no loaded device is
-	// lost. SECURITY: never log the wrapped err; a corrupt devices.json can
-	// carry file bytes (a token_hash) in a json.Unmarshal error.
-	if m.cfg.DevicesPath != "" {
-		if err := m.cfg.Devices.Reload(m.cfg.DevicesPath); err != nil {
-			m.cfg.Logger.Warn("relay: v2 devices reload failed",
-				"event", "v2.devices.reload_failed",
-				"conn_id", s.connID,
-				"path", m.cfg.DevicesPath)
-		}
-	}
-
-	device, tokenResult := m.cfg.Devices.Validate(helloPayload.Token)
 	if tokenResult != devices.ValidateAccepted {
 		// Token-failure path: emit AEAD-sealed error envelope and the
 		// 4401 close in a SINGLE routing envelope so the phone observes
