@@ -222,7 +222,7 @@ func TestStreamApprovalBridge_ResolveStream_AllowEchoesInput(t *testing.T) {
 	bridge.Surface(req)
 	modalID := lastModalShown(t, bcast.pushes).ModalID
 
-	if handled := bridge.ResolveStream(modalID, true, reasonRemoteDeny); !handled {
+	if handled := bridge.ResolveStream(modalID, true, false, reasonRemoteDeny); !handled {
 		t.Fatal("ResolveStream(allow) handled = false, want true")
 	}
 	v := pending.Await()
@@ -249,7 +249,7 @@ func TestStreamApprovalBridge_ResolveStream_Deny(t *testing.T) {
 	bridge.Surface(req)
 	modalID := lastModalShown(t, bcast.pushes).ModalID
 
-	if handled := bridge.ResolveStream(modalID, false, reasonRemoteDeny); !handled {
+	if handled := bridge.ResolveStream(modalID, false, false, reasonRemoteDeny); !handled {
 		t.Fatal("ResolveStream(deny) handled = false, want true")
 	}
 	v := pending.Await()
@@ -278,7 +278,7 @@ func TestStreamApprovalBridge_ResolveStream_UnknownModalID(t *testing.T) {
 	// Park an approval but never Surface it → no byModal entry.
 	parkApproval(t, perm, "tu-1", "Bash", json.RawMessage(`{}`))
 
-	if handled := bridge.ResolveStream("no-such-modal", true, reasonRemoteDeny); handled {
+	if handled := bridge.ResolveStream("no-such-modal", true, false, reasonRemoteDeny); handled {
 		t.Error("ResolveStream(unknown) handled = true, want false")
 	}
 	if _, ok := perm.Lookup("tu-1"); !ok {
@@ -640,11 +640,29 @@ func TestStreamApproval_RoundTrip(t *testing.T) {
 	cases := []struct {
 		name         string
 		optionID     string
+		alwaysAllow  bool
+		offer        json.RawMessage
 		wantBehavior string
 		wantAllow    bool
+		wantUpdates  string
 	}{
-		{"allow", string(turnevent.PermissionOptionKindAllowOnce), permbridge.BehaviorAllow, true},
-		{"deny", string(turnevent.PermissionOptionKindRejectOnce), permbridge.BehaviorDeny, false},
+		{name: "plain allow", optionID: string(turnevent.PermissionOptionKindAllowOnce), wantBehavior: permbridge.BehaviorAllow, wantAllow: true},
+		{
+			name:        "always allow offered rules",
+			optionID:    string(turnevent.PermissionOptionKindAllowAlways),
+			alwaysAllow: true,
+			offer: json.RawMessage(`[
+				{"type":"setMode","mode":"acceptEdits","destination":"session"},
+				{"type":"addRules","rules":[{"toolName":"Bash"},{"toolName":"Read","ruleContent":"//src/**"}],"behavior":"allow","destination":"userSettings"},
+				{"type":"addDirectories","directories":["/test"],"destination":"session"},
+				{"type":"addRules","rules":[{"toolName":"Write","ruleContent":"//tmp/**"}],"behavior":"allow","destination":"localSettings"}
+			]`),
+			wantBehavior: permbridge.BehaviorAllow,
+			wantAllow:    true,
+			wantUpdates:  `[{"type":"addRules","rules":[{"toolName":"Bash"},{"toolName":"Read","ruleContent":"//src/**"}],"behavior":"allow","destination":"session"},{"type":"addRules","rules":[{"toolName":"Write","ruleContent":"//tmp/**"}],"behavior":"allow","destination":"session"}]`,
+		},
+		{name: "always allow unavailable is plain allow", optionID: string(turnevent.PermissionOptionKindAllowAlways), alwaysAllow: true, wantBehavior: permbridge.BehaviorAllow, wantAllow: true},
+		{name: "deny ignores always allow", optionID: string(turnevent.PermissionOptionKindRejectOnce), alwaysAllow: true, offer: json.RawMessage(`[{"type":"addRules","rules":[{"toolName":"Bash"}],"behavior":"allow"}]`), wantBehavior: permbridge.BehaviorDeny},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -657,7 +675,16 @@ func TestStreamApproval_RoundTrip(t *testing.T) {
 			bridge := newStreamApprovalBridge(perm, modalReg, bcast, func() string { return "" }, context.Background(), discardLogger())
 
 			input := json.RawMessage(`{"cmd":"ls -la"}`)
-			req, pending := parkApproval(t, perm, "tu-1", "Bash", input)
+			req := permbridge.Request{
+				ToolName:    "Bash",
+				Input:       input,
+				ToolUseID:   "tu-1",
+				AlwaysAllow: permbridge.ParseAlwaysAllow(tc.offer, false),
+			}
+			pending, err := perm.Register(req.ToolUseID, req, time.Minute)
+			if err != nil {
+				t.Fatalf("Register: %v", err)
+			}
 
 			// PARK → modal_shown
 			retire := bridge.Surface(req)
@@ -670,7 +697,7 @@ func TestStreamApproval_RoundTrip(t *testing.T) {
 			kb := &fakeKeystroker{}
 			r := newModalResolverV2(modalReg, kb, discardLogger())
 			r.streamApprovals = bridge
-			d, ok := r.ResolveAnswer(shown.ModalID, tc.optionID, "tok", eligibleDevice(t))
+			d, ok := r.ResolveAnswerWithAlwaysAllow(shown.ModalID, tc.optionID, "tok", tc.alwaysAllow, eligibleDevice(t))
 			if !ok {
 				t.Fatal("ResolveAnswer ok = false, want true")
 			}
@@ -689,6 +716,9 @@ func TestStreamApproval_RoundTrip(t *testing.T) {
 				if !bytes.Equal(v.UpdatedInput, input) {
 					t.Errorf("allow UpdatedInput = %s, want %s (byte-verbatim)", v.UpdatedInput, input)
 				}
+				if string(v.UpdatedPermissions) != tc.wantUpdates {
+					t.Errorf("allow UpdatedPermissions = %s, want %s", v.UpdatedPermissions, tc.wantUpdates)
+				}
 			} else if v.Message != reasonRemoteDeny {
 				t.Errorf("deny message = %q, want %q", v.Message, reasonRemoteDeny)
 			}
@@ -702,6 +732,9 @@ func TestStreamApproval_RoundTrip(t *testing.T) {
 			}
 			if _, still := modalReg.Lookup(shown.ModalID); still {
 				t.Error("modal still outstanding after the round-trip")
+			}
+			if _, ok := r.ResolveAnswerWithAlwaysAllow(shown.ModalID, tc.optionID, "tok-replay", true, eligibleDevice(t)); ok {
+				t.Error("replayed answer resolved a consumed modal")
 			}
 		})
 	}
@@ -1404,7 +1437,7 @@ func TestStreamApprovalBridge_Surface_QuestionIsNotAPermissionModal(t *testing.T
 	if _, ok := f.modal.Lookup(batchID); ok {
 		t.Error("the batch id is recorded in modalbridge; a question is not a modal")
 	}
-	if handled := f.bridge.ResolveStream(batchID, true, reasonRemoteDeny); handled {
+	if handled := f.bridge.ResolveStream(batchID, true, false, reasonRemoteDeny); handled {
 		t.Error("ResolveStream(batchID) handled = true; a modal_answer must not resolve a question's completer")
 	}
 }

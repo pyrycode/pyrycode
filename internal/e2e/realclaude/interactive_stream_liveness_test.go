@@ -250,6 +250,16 @@ func drainForCompletedTurn(t *testing.T, phone *fakephone.Client, cs *noise.Ciph
 // minDeltas such frames before accepting idle.
 func drainForCompletedTurnWithMinimumDeltas(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration, minDeltas int) string {
 	t.Helper()
+	return drainForCompletedTurnOptions(t, phone, cs, convID, timeout, minDeltas, false)
+}
+
+func drainForCompletedTurnWithoutModal(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration) string {
+	t.Helper()
+	return drainForCompletedTurnOptions(t, phone, cs, convID, timeout, 1, true)
+}
+
+func drainForCompletedTurnOptions(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration, minDeltas int, rejectModal bool) string {
+	t.Helper()
 	nonEmptyDeltas := 0
 	var reply strings.Builder
 	deadline := time.Now().Add(timeout)
@@ -298,6 +308,10 @@ func drainForCompletedTurnWithMinimumDeltas(t *testing.T, phone *fakephone.Clien
 			t.Fatalf("decode envelope (drain): %v", err)
 		}
 		switch env.Type {
+		case protocol.TypeModalShown:
+			if rejectModal {
+				t.Fatalf("unexpected second modal_shown while draining the session-granted turn: %s", env.Payload)
+			}
 		case protocol.TypeUnrecognizedMessage:
 			// THE REGRESSION ALARM on the parser's known-ignored list.
 			//

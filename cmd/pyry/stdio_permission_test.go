@@ -54,6 +54,21 @@ func decodeStdioPermissionResponse(t *testing.T, raw []byte) (string, string, js
 	return env.Response.RequestID, env.Response.Response.Behavior, env.Response.Response.UpdatedInput
 }
 
+func decodeStdioUpdatedPermissions(t *testing.T, raw []byte) json.RawMessage {
+	t.Helper()
+	var env struct {
+		Response struct {
+			Response struct {
+				UpdatedPermissions json.RawMessage `json:"updatedPermissions"`
+			} `json:"response"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("decode updatedPermissions %q: %v", raw, err)
+	}
+	return env.Response.Response.UpdatedPermissions
+}
+
 func TestStdioPermissionHandler_AllowAndDeny(t *testing.T) {
 	t.Parallel()
 
@@ -62,6 +77,7 @@ func TestStdioPermissionHandler_AllowAndDeny(t *testing.T) {
 		verdict   func(json.RawMessage) permbridge.Verdict
 		behavior  string
 		wantInput json.RawMessage
+		wantRules json.RawMessage
 	}{
 		{
 			name: "allow carries updated input",
@@ -70,6 +86,16 @@ func TestStdioPermissionHandler_AllowAndDeny(t *testing.T) {
 			},
 			behavior:  permbridge.BehaviorAllow,
 			wantInput: json.RawMessage(`{"questions":[],"answers":{"Pick":"A"}}`),
+		},
+		{
+			name: "always allow carries session rules",
+			verdict: func(input json.RawMessage) permbridge.Verdict {
+				offer := permbridge.ParseAlwaysAllow(json.RawMessage(`[{"type":"addRules","rules":[{"toolName":"Bash"}],"behavior":"allow","destination":"projectSettings"}]`), false)
+				return permbridge.AllowAlways(input, offer)
+			},
+			behavior:  permbridge.BehaviorAllow,
+			wantInput: json.RawMessage(`{"questions":[]}`),
+			wantRules: json.RawMessage(`[{"type":"addRules","rules":[{"toolName":"Bash"}],"behavior":"allow","destination":"session"}]`),
 		},
 		{
 			name: "deny",
@@ -110,6 +136,9 @@ func TestStdioPermissionHandler_AllowAndDeny(t *testing.T) {
 			}
 			if !bytes.Equal(updatedInput, tc.wantInput) {
 				t.Errorf("updatedInput = %s, want %s", updatedInput, tc.wantInput)
+			}
+			if got := decodeStdioUpdatedPermissions(t, out.BytesCopy()); !bytes.Equal(got, tc.wantRules) {
+				t.Errorf("updatedPermissions = %s, want %s", got, tc.wantRules)
 			}
 		})
 	}

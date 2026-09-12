@@ -32,6 +32,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -60,9 +61,10 @@ type PermissionRule struct {
 // admits only addRules/allow updates, but the discriminants remain explicit for
 // the grant path that will serialize the retained updates back to claude.
 type PermissionUpdate struct {
-	Type     string           `json:"type"`
-	Rules    []PermissionRule `json:"rules"`
-	Behavior string           `json:"behavior"`
+	Type        string           `json:"type"`
+	Rules       []PermissionRule `json:"rules"`
+	Behavior    string           `json:"behavior"`
+	Destination string           `json:"destination,omitempty"`
 }
 
 // AlwaysAllow is an immutable, validated always-allow offer. Its slices are
@@ -114,55 +116,91 @@ type permissionRuleInput struct {
 	RuleContent json.RawMessage `json:"ruleContent"`
 }
 
-// ParseAlwaysAllow validates claude-authored permission suggestions as one
-// bounded batch. Every unavailable or invalid shape returns the zero value;
-// partial and truncated offers are never returned.
+// ParseAlwaysAllow validates the rule grants in a bounded Claude-authored
+// suggestion batch. Directory and mode alternatives are omitted, never granted.
+// Any invalid rule grant rejects the whole offer; rules are never truncated.
 func ParseAlwaysAllow(raw json.RawMessage, suppressed bool) AlwaysAllow {
-	if suppressed || len(raw) == 0 || len(raw) > maxAlwaysAllowBytes {
-		return AlwaysAllow{}
+	offer, _ := parseAlwaysAllow(raw, suppressed)
+	return offer
+}
+
+// parseAlwaysAllow returns a content-free status naming the first validation
+// condition that rejected the batch. ParseAlwaysAllow deliberately discards it;
+// the e2e_realclaude diagnostic shim exposes it only to the authenticated live
+// test so untrusted suggestion bytes never enter ordinary logs.
+func parseAlwaysAllow(raw json.RawMessage, suppressed bool) (AlwaysAllow, string) {
+	if suppressed {
+		return AlwaysAllow{}, "suppressed"
+	}
+	if len(raw) == 0 {
+		return AlwaysAllow{}, "absent"
+	}
+	if len(raw) > maxAlwaysAllowBytes {
+		return AlwaysAllow{}, "raw_over_16_kib"
 	}
 	var input []permissionUpdateInput
-	if err := json.Unmarshal(raw, &input); err != nil || len(input) == 0 {
-		return AlwaysAllow{}
+	if err := json.Unmarshal(raw, &input); err != nil {
+		return AlwaysAllow{}, "decode_failed"
+	}
+	if len(input) == 0 {
+		return AlwaysAllow{}, "empty_batch"
 	}
 
-	updates := make([]PermissionUpdate, len(input))
+	updates := make([]PermissionUpdate, 0, len(input))
 	rendered := make([]string, 0)
 	totalRules := 0
 	for i, update := range input {
-		if update.Type != "addRules" || update.Behavior != BehaviorAllow || len(update.Rules) == 0 {
-			return AlwaysAllow{}
+		// Claude offers these alongside command rules. They are separate,
+		// broader choices that this command-rule approval does not grant.
+		if update.Type == "addDirectories" || update.Type == "setMode" {
+			continue
+		}
+		if update.Type != "addRules" {
+			return AlwaysAllow{}, fmt.Sprintf("update_%d_type_unsupported", i)
+		}
+		if update.Behavior == "" {
+			return AlwaysAllow{}, fmt.Sprintf("update_%d_behavior_empty", i)
+		}
+		if update.Behavior != BehaviorAllow {
+			return AlwaysAllow{}, fmt.Sprintf("update_%d_behavior_unsupported", i)
+		}
+		if len(update.Rules) == 0 {
+			return AlwaysAllow{}, fmt.Sprintf("update_%d_rules_empty", i)
 		}
 		totalRules += len(update.Rules)
 		if totalRules > maxAlwaysAllowRules {
-			return AlwaysAllow{}
+			return AlwaysAllow{}, "rule_count_over_16"
 		}
-		updates[i] = PermissionUpdate{Type: update.Type, Behavior: update.Behavior, Rules: make([]PermissionRule, len(update.Rules))}
+		validated := PermissionUpdate{Type: update.Type, Behavior: update.Behavior, Rules: make([]PermissionRule, len(update.Rules))}
 		for j, rule := range update.Rules {
 			if rule.ToolName == "" {
-				return AlwaysAllow{}
+				return AlwaysAllow{}, fmt.Sprintf("update_%d_rule_%d_tool_name_empty", i, j)
 			}
 			stored := PermissionRule{ToolName: rule.ToolName}
 			text := rule.ToolName
 			if rule.RuleContent != nil {
 				if bytes.Equal(bytes.TrimSpace(rule.RuleContent), []byte("null")) {
-					return AlwaysAllow{}
+					return AlwaysAllow{}, fmt.Sprintf("update_%d_rule_%d_content_null", i, j)
 				}
 				var content string
 				if err := json.Unmarshal(rule.RuleContent, &content); err != nil {
-					return AlwaysAllow{}
+					return AlwaysAllow{}, fmt.Sprintf("update_%d_rule_%d_content_not_string", i, j)
 				}
 				stored.RuleContent = &content
 				text += "(" + content + ")"
 			}
 			if len(text) > maxRenderedRuleBytes {
-				return AlwaysAllow{}
+				return AlwaysAllow{}, fmt.Sprintf("update_%d_rule_%d_rendered_over_1024_bytes", i, j)
 			}
-			updates[i].Rules[j] = stored
+			validated.Rules[j] = stored
 			rendered = append(rendered, text)
 		}
+		updates = append(updates, validated)
 	}
-	return AlwaysAllow{updates: updates, rules: rendered}
+	if len(updates) == 0 {
+		return AlwaysAllow{}, "no_rule_grants"
+	}
+	return AlwaysAllow{updates: updates, rules: rendered}, "offered"
 }
 
 // reasonTimeout is the deny message the fail-closed timer path uses. A fixed
@@ -196,18 +234,44 @@ type Request struct {
 }
 
 // Verdict is the allow/deny decision claude accepts. The omitempty tags give the
-// two disjoint wire shapes: allow → {"behavior":"allow","updatedInput":{…}};
-// deny → {"behavior":"deny","message":"…"}. Construct via Allow / Deny.
+// two disjoint wire shapes: allow → {"behavior":"allow","updatedInput":{…}}
+// with optional session-scoped updatedPermissions; deny →
+// {"behavior":"deny","message":"…"}. Construct via Allow, AllowAlways, or Deny.
 type Verdict struct {
-	Behavior     string          `json:"behavior"`
-	UpdatedInput json.RawMessage `json:"updatedInput,omitempty"` // allow only
-	Message      string          `json:"message,omitempty"`      // deny only
+	Behavior           string          `json:"behavior"`
+	UpdatedInput       json.RawMessage `json:"updatedInput,omitempty"`       // allow only
+	UpdatedPermissions json.RawMessage `json:"updatedPermissions,omitempty"` // session allow only
+	Message            string          `json:"message,omitempty"`            // deny only
 }
 
 // Allow builds an allow verdict echoing updatedInput (the request's Input,
 // possibly modified by the resolver — a #1080 policy decision).
 func Allow(updatedInput json.RawMessage) Verdict {
 	return Verdict{Behavior: BehaviorAllow, UpdatedInput: updatedInput}
+}
+
+// AllowAlways builds an allow verdict from a daemon-retained validated offer.
+// Every destination is rewritten to session; an unavailable offer preserves the
+// plain allow shape. The typed updates contain only strings, so marshal failure
+// is unreachable with the current value, but falling back grants no rule if that
+// contract changes.
+func AllowAlways(updatedInput json.RawMessage, offer AlwaysAllow) Verdict {
+	updates := offer.Updates()
+	if len(updates) == 0 {
+		return Allow(updatedInput)
+	}
+	for i := range updates {
+		updates[i].Destination = "session"
+	}
+	raw, err := json.Marshal(updates)
+	if err != nil {
+		return Allow(updatedInput)
+	}
+	return Verdict{
+		Behavior:           BehaviorAllow,
+		UpdatedInput:       updatedInput,
+		UpdatedPermissions: raw,
+	}
 }
 
 // Deny builds a deny verdict carrying a human-readable reason.

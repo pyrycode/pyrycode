@@ -45,6 +45,14 @@ therefore keep stdin open, assert the request and response correlation, and use 
 side-effect witness; a successful process exit alone cannot distinguish a denial
 from a silent bypass. See [the permission protocol findings](permission-protocol-spike.md).
 
+`TestInteractiveStreamStdioAlwaysAllowIsSessionScoped` proves that two identical
+Bash commands execute after one approval in a session, then requires a fresh
+session to ask before execution. A live failure came from a mixed offer:
+Claude 2.1.259 supplied a command rule alongside directory and mode alternatives.
+The daemon now omits those alternatives while validating every retained command
+rule. The checked source is kept in the permbridge testdata, with exact session-only
+response coverage. The live test remains mandatory within this tagged suite.
+
 Optional permission fields need a raw-presence observation before ordinary JSON
 decoding. A plain string target collapses an absent key, a present empty string,
 and JSON `null` to the same Go zero value, so a green assertion on `""` cannot

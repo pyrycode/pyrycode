@@ -299,6 +299,7 @@ type ModalAnswerPayload struct {
 	ModalID     string `json:"modal_id"`
 	OptionID    string `json:"option_id"`
 	AnswerToken string `json:"answer_token"`
+	AlwaysAllow bool   `json:"always_allow,omitempty"`
 }
 
 // ModalCancelPayload is the body of an Envelope whose Type == TypeModalCancel

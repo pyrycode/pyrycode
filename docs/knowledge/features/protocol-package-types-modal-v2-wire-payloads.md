@@ -45,6 +45,7 @@ type ModalAnswerPayload struct { // phone → binary, inbound control
     ModalID     string `json:"modal_id"`
     OptionID    string `json:"option_id"`
     AnswerToken string `json:"answer_token"` // client-minted idempotency key
+    AlwaysAllow bool   `json:"always_allow,omitempty"`
 }
 
 type ModalCancelPayload struct { // phone → binary, inbound control
@@ -64,15 +65,20 @@ type ModalDismissedPayload struct { // binary → phone
   `reason` (open-shape JSON), `reason_type` (open string vocabulary),
   `blocked_path`, `description`, and the `default_to_no` client-selection hint.
   None is derived from tool input or used as permission authority.
-- **Always-allow publication is all-or-nothing** (#2364). An offerable stdio
-  suggestion batch becomes ordered display strings in `Rules`; every invalid,
-  unsupported, suppressed, or over-bound batch becomes the explicit unavailable
-  value `{offered:false,rules:[]}`. Approval-MCP and other zero-context producers
-  use that same shape. `Rules` is never null and never contains a valid prefix of
-  a rejected batch. The outstanding modal retains the validated value, so an
-  initial broadcast and reconnect snapshot serialize the same truth instead of
-  parsing or reconstructing it twice. The strings are Claude-authored untrusted
-  display content, not authorization input and not safe log attributes.
+- **Always-allow publication validates every retained rule grant**. Claude's
+  `addDirectories` and `setMode` alternatives are omitted and never granted.
+  Unknown update types, invalid rule grants, suppression, and exceeded bounds
+  reject the whole offer. At least one valid `addRules`/`allow` update must remain.
+  Unavailable offers use `{offered:false,rules:[]}`. The rules are ordered,
+  never null, and never a valid prefix of a rejected rule batch. The outstanding
+  modal retains the immutable validated value for initial and reconnect delivery.
+  The strings are untrusted display content and must not enter logs.
+- **The optional inbound `always_allow` Boolean only selects retained rules**.
+  False and absent preserve the old answer bytes. True is honored only for an
+  authorized allow answer with an offered daemon-retained value. Every granted
+  destination is rewritten to `session`. The client supplies neither rules nor
+  destinations. Deny, unavailable, ineligible, and stale-answer paths retain their
+  behavior. Consuming the modal prevents replay from granting rules twice.
 - **`modal_id` is the sole inbound correlation key; `conversation_id` is outbound
   scope only.** The daemon resolves `modal_id` against its **own** outstanding-modal
   state and never trusts a phone-asserted conversation; `option_id` maps against

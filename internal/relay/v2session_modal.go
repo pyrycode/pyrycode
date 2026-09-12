@@ -286,13 +286,11 @@ func (m *V2SessionManager) handleModalCancel(ctx context.Context, s *V2Session, 
 }
 
 // handleModalAnswer resolves an inbound modal_answer control frame through the
-// same ModalResolver seam as handleModalCancel. In this slice ResolveAnswer is a
-// deferred no-op (always ok=false), so the broadcast line is unreachable until
-// #717 fills the gated answer arm — but it is present, so #717 needs no manager
-// change. The escalating ALLOW path stays inert until the per-device gate exists
-// (the fail-safe property of this slice). Runs on the manager's single Run
-// dispatch goroutine; see handleModalCancel for the nil-resolver / decode /
-// never-echo discipline it shares.
+// same ModalResolver seam as handleModalCancel. The decoded always_allow value
+// is only a Boolean request; the resolver owns device authorization, option
+// classification, and the daemon-retained rule bytes. Runs on the manager's
+// single Run dispatch goroutine; see handleModalCancel for the nil-resolver /
+// decode / never-echo discipline it shares.
 func (m *V2SessionManager) handleModalAnswer(ctx context.Context, s *V2Session, env protocol.Envelope) {
 	if m.cfg.ModalResolver == nil {
 		m.cfg.Logger.Debug("relay: v2 modal_answer inert; no resolver wired",
@@ -303,7 +301,9 @@ func (m *V2SessionManager) handleModalAnswer(ctx context.Context, s *V2Session, 
 	var payload protocol.ModalAnswerPayload
 	_ = json.Unmarshal(env.Payload, &payload)
 
-	d, ok := m.cfg.ModalResolver.ResolveAnswer(payload.ModalID, payload.OptionID, payload.AnswerToken, s.device)
+	d, ok := m.cfg.ModalResolver.ResolveAnswerWithAlwaysAllow(
+		payload.ModalID, payload.OptionID, payload.AnswerToken, payload.AlwaysAllow, s.device,
+	)
 	if !ok {
 		return // deferred no-op in this slice (AC #3); #717 fills the gated arm
 	}

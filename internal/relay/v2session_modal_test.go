@@ -21,6 +21,7 @@ type modalCallRecord struct {
 	modalID     string
 	optionID    string
 	answerToken string
+	alwaysAllow bool
 	dev         *devices.Device
 }
 
@@ -54,9 +55,13 @@ func (f *fakeModalResolver) ResolveCancel(modalID string, dev *devices.Device) (
 }
 
 func (f *fakeModalResolver) ResolveAnswer(modalID, optionID, answerToken string, dev *devices.Device) (ModalDismissal, bool) {
+	return f.ResolveAnswerWithAlwaysAllow(modalID, optionID, answerToken, false, dev)
+}
+
+func (f *fakeModalResolver) ResolveAnswerWithAlwaysAllow(modalID, optionID, answerToken string, alwaysAllow bool, dev *devices.Device) (ModalDismissal, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.answerCalls = append(f.answerCalls, modalCallRecord{modalID: modalID, optionID: optionID, answerToken: answerToken, dev: dev})
+	f.answerCalls = append(f.answerCalls, modalCallRecord{modalID: modalID, optionID: optionID, answerToken: answerToken, alwaysAllow: alwaysAllow, dev: dev})
 	if f.answerOKFor == "" || modalID != f.answerOKFor {
 		return ModalDismissal{}, false
 	}
@@ -353,7 +358,7 @@ func TestV2Session_ModalAnswer_FanOut(t *testing.T) {
 		ID:      42,
 		Type:    protocol.TypeModalAnswer,
 		TS:      time.Now().UTC(),
-		Payload: json.RawMessage(`{"modal_id":"` + modalID + `","option_id":"` + optionID + `","answer_token":"tok-1"}`),
+		Payload: json.RawMessage(`{"modal_id":"` + modalID + `","option_id":"` + optionID + `","answer_token":"tok-1","always_allow":true}`),
 	})
 
 	// Three handshake noise_resp + two dismissals (A and B, not C) = five total.
@@ -366,6 +371,9 @@ func TestV2Session_ModalAnswer_FanOut(t *testing.T) {
 	}
 	if calls[0].modalID != modalID || calls[0].optionID != optionID {
 		t.Errorf("ResolveAnswer args = %+v, want {%s %s}", calls[0], modalID, optionID)
+	}
+	if !calls[0].alwaysAllow {
+		t.Error("ResolveAnswer alwaysAllow = false, want true")
 	}
 	if calls[0].dev == nil {
 		t.Fatal("ResolveAnswer device is nil, want the per-conn paired device")

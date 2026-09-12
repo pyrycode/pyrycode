@@ -93,6 +93,65 @@ func TestInteractiveStreamStdioModalAllow(t *testing.T) {
 	driveInteractiveStreamModalResolution(t, h, convID)
 }
 
+func TestInteractiveStreamStdioAlwaysAllowIsSessionScoped(t *testing.T) {
+	const (
+		witness = "pyrycode-always-allow-witness.txt"
+		command = "touch " + witness
+		prompt  = "Use the Bash tool to run exactly `" + command + "`. Do not use another tool. After it completes, reply with one short word."
+	)
+
+	observations, configure, claudeVersion := startPermissionObserver(t)
+	h, convID, _ := startObservedPermissionHarness(t, permissionDaemonModel, true, configure)
+	shown := raiseRealPermissionModalPayload(t, h, 2, convID, prompt)
+	if !shown.AlwaysAllow.Offered || len(shown.AlwaysAllow.Rules) == 0 {
+		source := nextPermissionObservation(t, observations, "control_request")
+		if source.RequestID == "" || source.Request.ToolUseID == "" || source.Request.ToolName != "Bash" || source.Request.Input.Command != command {
+			t.Fatal("permission-offer diagnostic source did not match the correlated test-owned request")
+		}
+		validation, outcome := writePermissionOfferDiagnostic(t, permissionOfferDiagnosticPath, h.home, h.workdir, claudeVersion(), source, shown.AlwaysAllow)
+		t.Fatalf("first permission modal did not offer always-allow rules: validation=%s outcome=%s diagnostic=%s", validation, outcome, permissionOfferDiagnosticPath)
+	}
+	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
+		ID:   3,
+		Type: protocol.TypeModalAnswer,
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, protocol.ModalAnswerPayload{
+			ModalID:     shown.ModalID,
+			OptionID:    string(turnevent.PermissionOptionKindAllowOnce),
+			AnswerToken: "e2e-2365-session-grant",
+			AlwaysAllow: true,
+		}),
+	})
+	drainForCompletedTurn(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
+	witnessPath := filepath.Join(h.workdir, witness)
+	if _, err := os.Stat(witnessPath); err != nil {
+		t.Fatalf("first session-granted command did not create its witness: %v", err)
+	}
+	stale := time.Unix(1, 0)
+	if err := os.Chtimes(witnessPath, stale, stale); err != nil {
+		t.Fatalf("reset session-grant witness timestamp: %v", err)
+	}
+
+	sealSendMessage(t, h.phone, h.initSend, 4, convID, "m-4", prompt)
+	drainForCompletedTurnWithoutModal(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
+	info, err := os.Stat(witnessPath)
+	if err != nil {
+		t.Fatalf("stat session-grant witness after second command: %v", err)
+	}
+	if !info.ModTime().After(stale) {
+		t.Fatalf("second session-granted command did not update its witness: modtime=%s", info.ModTime())
+	}
+
+	fresh, freshConvID := startStdioModalResolutionHarness(t, permissionDaemonModel)
+	freshShown := raiseRealPermissionModalPayload(t, fresh, 2, freshConvID, prompt)
+	if freshShown.ModalID == "" {
+		t.Fatal("fresh session permission modal carried an empty modal_id")
+	}
+	if _, err := os.Stat(filepath.Join(fresh.workdir, witness)); !os.IsNotExist(err) {
+		t.Fatalf("fresh-session command executed before its new permission modal (stat error: %v)", err)
+	}
+}
+
 func driveInteractiveStreamModalResolution(t *testing.T, h *perConvHarness, convID string) {
 	t.Helper()
 	// A per-run nonce keeps the trigger command distinct (defeats accidental

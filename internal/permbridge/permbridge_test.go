@@ -1,6 +1,7 @@
 package permbridge
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -75,7 +76,10 @@ func TestParseAlwaysAllow(t *testing.T) {
 		`{"type":"addRules","behavior":"allow","rules":[{"toolName":"Write","ruleContent":""}]}` +
 		`]`)
 
-	offer := ParseAlwaysAllow(valid, false)
+	offer, status := parseAlwaysAllow(valid, false)
+	if got, want := string(status), "offered"; got != want {
+		t.Fatalf("valid suggestion status = %q, want %q", got, want)
+	}
 	if !offer.Offered() {
 		t.Fatal("valid suggestions were not offered")
 	}
@@ -106,30 +110,35 @@ func TestParseAlwaysAllow(t *testing.T) {
 		name       string
 		raw        json.RawMessage
 		suppressed bool
+		wantStatus string
 	}{
-		{name: "absent"},
-		{name: "null", raw: json.RawMessage(`null`)},
-		{name: "empty", raw: json.RawMessage(`[]`)},
-		{name: "suppressed", raw: valid, suppressed: true},
-		{name: "malformed", raw: json.RawMessage(`[{`)},
-		{name: "over raw byte bound", raw: overRaw},
-		{name: "unsupported type", raw: json.RawMessage(`[{"type":"removeRules","behavior":"allow","rules":[{"toolName":"Bash"}]}]`)},
-		{name: "unsupported behavior", raw: json.RawMessage(`[{"type":"addRules","behavior":"deny","rules":[{"toolName":"Bash"}]}]`)},
-		{name: "missing rules", raw: json.RawMessage(`[{"type":"addRules","behavior":"allow"}]`)},
-		{name: "empty rules", raw: json.RawMessage(`[{"type":"addRules","behavior":"allow","rules":[]}]`)},
-		{name: "too many rules", raw: permissionSuggestionBatch(17, "Bash")},
-		{name: "empty tool name", raw: permissionSuggestionBatch(1, "")},
-		{name: "wrong tool name type", raw: json.RawMessage(`[{"type":"addRules","behavior":"allow","rules":[{"toolName":7}]}]`)},
-		{name: "null rule content", raw: json.RawMessage(`[{"type":"addRules","behavior":"allow","rules":[{"toolName":"Bash","ruleContent":null}]}]`)},
-		{name: "wrong rule content type", raw: json.RawMessage(`[{"type":"addRules","behavior":"allow","rules":[{"toolName":"Bash","ruleContent":{}}]}]`)},
-		{name: "rendered rule over byte bound", raw: permissionSuggestionBatch(1, strings.Repeat("x", 1025))},
+		{name: "absent", wantStatus: "absent"},
+		{name: "null", raw: json.RawMessage(`null`), wantStatus: "empty_batch"},
+		{name: "empty", raw: json.RawMessage(`[]`), wantStatus: "empty_batch"},
+		{name: "suppressed", raw: valid, suppressed: true, wantStatus: "suppressed"},
+		{name: "malformed", raw: json.RawMessage(`[{`), wantStatus: "decode_failed"},
+		{name: "over raw byte bound", raw: overRaw, wantStatus: "raw_over_16_kib"},
+		{name: "unsupported type", raw: json.RawMessage(`[{"type":"removeRules","behavior":"allow","rules":[{"toolName":"Bash"}]}]`), wantStatus: "update_0_type_unsupported"},
+		{name: "unsupported behavior", raw: json.RawMessage(`[{"type":"addRules","behavior":"deny","rules":[{"toolName":"Bash"}]}]`), wantStatus: "update_0_behavior_unsupported"},
+		{name: "missing behavior", raw: json.RawMessage(`[{"type":"addRules","rules":[{"toolName":"Bash"}]}]`), wantStatus: "update_0_behavior_empty"},
+		{name: "missing rules", raw: json.RawMessage(`[{"type":"addRules","behavior":"allow"}]`), wantStatus: "update_0_rules_empty"},
+		{name: "empty rules", raw: json.RawMessage(`[{"type":"addRules","behavior":"allow","rules":[]}]`), wantStatus: "update_0_rules_empty"},
+		{name: "too many rules", raw: permissionSuggestionBatch(17, "Bash"), wantStatus: "rule_count_over_16"},
+		{name: "empty tool name", raw: permissionSuggestionBatch(1, ""), wantStatus: "update_0_rule_0_tool_name_empty"},
+		{name: "wrong tool name type", raw: json.RawMessage(`[{"type":"addRules","behavior":"allow","rules":[{"toolName":7}]}]`), wantStatus: "decode_failed"},
+		{name: "null rule content", raw: json.RawMessage(`[{"type":"addRules","behavior":"allow","rules":[{"toolName":"Bash","ruleContent":null}]}]`), wantStatus: "update_0_rule_0_content_null"},
+		{name: "wrong rule content type", raw: json.RawMessage(`[{"type":"addRules","behavior":"allow","rules":[{"toolName":"Bash","ruleContent":{}}]}]`), wantStatus: "update_0_rule_0_content_not_string"},
+		{name: "rendered rule over byte bound", raw: permissionSuggestionBatch(1, strings.Repeat("x", 1025)), wantStatus: "update_0_rule_0_rendered_over_1024_bytes"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := ParseAlwaysAllow(tc.raw, tc.suppressed)
+			got, status := parseAlwaysAllow(tc.raw, tc.suppressed)
 			if got.Offered() || got.Rules() != nil || got.Updates() != nil {
 				t.Errorf("rejected suggestions returned partial offer: offered=%v rules=%v updates=%v", got.Offered(), got.Rules(), got.Updates())
+			}
+			if string(status) != tc.wantStatus {
+				t.Errorf("status = %q, want %q", status, tc.wantStatus)
 			}
 		})
 	}
@@ -456,6 +465,49 @@ func TestVerdict_MarshalShape(t *testing.T) {
 	}
 	if strings.Contains(ds, `"updatedInput"`) {
 		t.Fatalf("deny verdict %s must omit updatedInput", ds)
+	}
+}
+
+func TestAllowAlways_RewritesDestinationsAndPreservesOrder(t *testing.T) {
+	t.Parallel()
+
+	offer := ParseAlwaysAllow(json.RawMessage(`[
+		{"type":"addRules","rules":[{"toolName":"Bash"},{"toolName":"Read","ruleContent":"//src/**"}],"behavior":"allow","destination":"userSettings"},
+		{"type":"addRules","rules":[{"toolName":"Write","ruleContent":"//tmp/**"}],"behavior":"allow","destination":"projectSettings"}
+	]`), false)
+	if !offer.Offered() {
+		t.Fatal("test offer unavailable")
+	}
+
+	verdict := AllowAlways(json.RawMessage(`{"command":"true"}`), offer)
+	if verdict.Behavior != BehaviorAllow || string(verdict.UpdatedInput) != `{"command":"true"}` {
+		t.Fatalf("verdict = %+v, want allow with original input", verdict)
+	}
+	want := `[{"type":"addRules","rules":[{"toolName":"Bash"},{"toolName":"Read","ruleContent":"//src/**"}],"behavior":"allow","destination":"session"},{"type":"addRules","rules":[{"toolName":"Write","ruleContent":"//tmp/**"}],"behavior":"allow","destination":"session"}]`
+	if string(verdict.UpdatedPermissions) != want {
+		t.Errorf("UpdatedPermissions:\n got: %s\nwant: %s", verdict.UpdatedPermissions, want)
+	}
+	for i, update := range offer.Updates() {
+		if update.Destination != "" {
+			t.Errorf("source offer update %d destination = %q, want empty", i, update.Destination)
+		}
+	}
+}
+
+func TestAllowAlways_UnavailableOfferPreservesPlainAllow(t *testing.T) {
+	t.Parallel()
+
+	input := json.RawMessage(`{"command":"true"}`)
+	plain, err := json.Marshal(Allow(input))
+	if err != nil {
+		t.Fatalf("marshal plain allow: %v", err)
+	}
+	got, err := json.Marshal(AllowAlways(input, AlwaysAllow{}))
+	if err != nil {
+		t.Fatalf("marshal unavailable always allow: %v", err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Errorf("unavailable offer changed plain allow:\n got: %s\nwant: %s", got, plain)
 	}
 }
 
