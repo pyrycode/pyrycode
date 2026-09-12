@@ -143,6 +143,11 @@ var inboundTypes = map[string]string{
 	// Its reply half is TypeModelList, which is outbound-only and stays excluded,
 	// exactly as TypeHistoryPage does for TypeRequestHistory.
 	"TypeRequestModelList": "switch-intercepted",
+	// The on-demand MCP-status request verb (#2381). Its declaration and only
+	// relay consumer land together, and the switch tags it for the per-connection
+	// worker because the resolver may wait on a child round trip. Its answer reuses
+	// TypeMCPStatus, which remains classified as an outbound push+reply.
+	"TypeMCPStatusRequest": "switch-intercepted",
 	// The conversation system-prompt read verb (#2152). Like TypeRequestModelList
 	// above and unlike the three before it, it NEVER sat in excludedTypes as
 	// "pending handler": its declaration, its handler and its reply half land in one

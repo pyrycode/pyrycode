@@ -791,17 +791,12 @@ func (m *V2SessionManager) handleFrame(ctx context.Context, env protocol.Routing
 	}
 }
 
-// dispatchAppFrame runs on the Run goroutine. It splits an open-state
-// plaintext two ways: a v2 control envelope (rekey/modal/question/interrupt/
-// new_session/dequeue/snapshot/debug_bundle/settings) is handled inline on
-// Run — those handlers touch s.send / session state / timers and are fast,
-// with one exception: handleDebugBundleRequest is fast only because #1491 moved
-// its uncapped read+gzip off Run, leaving the accept, the gate and the seals
-// here; an application frame is handed OFF Run to this conn's worker goroutine
-// (appFrameWorker) via a non-blocking enqueue onto s.appFrames, then
-// dispatchAppFrame returns so the Run loop keeps servicing every other arm
-// (other conns' frames, m.wake, m.modalTimeout, m.manualRekey) while the
-// possibly-slow handler runs (#965). The worker routes the frame
+// dispatchAppFrame runs on the Run goroutine. Fast v2 control handlers stay on
+// Run; controls that can hash, read, write, or wait are tagged here and handed to
+// this conn's appFrameWorker through the bounded s.appFrames queue. Unrecognised
+// application frames use the same worker to reach dispatch.Route. In every case
+// dispatchAppFrame returns promptly so Run keeps servicing other connections and
+// wake channels while possibly-slow work runs off-Run. The worker routes the frame
 // (routeAppFrame → dispatch.Route → handler → c.Send: a marshal + channel
 // push, no AEAD) and posts each reply back to Run via m.appReply, where
 // forwardAppReply seals it under s.send — so every s.send.Encrypt stays on
@@ -871,6 +866,15 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 			// so an appFrameJob kind and a worker route would buy nothing. See
 			// handleRequestModelList's file header for what that placement obliges.
 			m.handleRequestModelList(ctx, s, probeEnv)
+			return
+		case protocol.TypeMCPStatusRequest:
+			// A live resolver may wait on a child round trip, so accepted requests
+			// run on this conn's worker. Both inert gates stay here on Run: neither
+			// posture decodes the payload or consults membership.
+			if m.cfg.MCPStatusFor == nil || !s.interactive {
+				return
+			}
+			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameMCPStatusRequest})
 			return
 		case protocol.TypeRequestSystemPrompt:
 			// Inline on Run (#2152), beside the two shape twins above rather than
@@ -1003,6 +1007,8 @@ const (
 	// appFrameMintPairing is the inbound pairing-mint request (#2127) — the first
 	// member of this set whose handler WRITES host state rather than reading it.
 	appFrameMintPairing
+	// appFrameMCPStatusRequest is the potentially blocking live-status read (#2381).
+	appFrameMCPStatusRequest
 )
 
 // appFrameWorker is the per-conn sub-actor that runs application handlers
@@ -1068,6 +1074,11 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				// bounds a conn to one mint in flight, which is why no per-verb
 				// concurrency limit exists for a verb that writes.
 				m.handleMintPairing(ctx, s, job.plaintext)
+			case appFrameMCPStatusRequest:
+				// The resolver may wait on a child round trip. Its reply and every
+				// reject return through forwardToRun, so the worker never seals under
+				// s.send or touches any other Run-owned session state.
+				m.handleMCPStatusRequest(ctx, s, job.plaintext)
 			case appFrameRoute:
 				// The v1 application dispatch chain, unchanged: build the outbound
 				// channel, call dispatch.Route, forward its replies to Run.

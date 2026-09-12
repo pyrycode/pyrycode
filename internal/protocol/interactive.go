@@ -1445,6 +1445,20 @@ type MCPServerStatus struct {
 	Version string `json:"version"`
 }
 
+// MCPStatusRequestPayload is the body of an Envelope whose Type ==
+// TypeMCPStatusRequest. It asks for the current MCP status of one conversation.
+// Correlation rides Envelope.InReplyTo on the TypeMCPStatus answer, so this
+// payload has no request-id field.
+//
+// ConversationID is an unverified remote-authored lookup key. The relay decodes
+// it before consulting membership and never logs or returns it as trusted input;
+// the successful answer's id comes from the resolver's daemon-side record.
+// The key is unconditional because absent and empty have the same meaning and a
+// committed fixture pins the complete request shape.
+type MCPStatusRequestPayload struct {
+	ConversationID string `json:"conversation_id"`
+}
+
 // ModelListPayload is the body of an Envelope whose Type == TypeModelList
 // (docs/protocol-mobile.md § model_list — that section lands with the fixtures in
 // #1705). Binary → phone direction; the wire form of the model inventory claude

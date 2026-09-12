@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"time"
@@ -378,9 +379,8 @@ type AttachmentIntake interface {
 
 // V2SessionConfig parameterises V2SessionManager. The handshake/transport
 // fields are required; NewV2SessionManager validates and panics or errors on
-// missing required values per the documentation below. Handlers, Snapshotter,
-// and KnownConversation are optional — their per-field docs describe the
-// nil behaviour.
+// missing required values per the documentation below. Optional seams document
+// their nil behaviour on each field.
 //
 // SECURITY: StaticPriv is the binary's 32-byte X25519 static private
 // key. It MUST NOT be logged, wrapped into an error message, or emitted
@@ -518,8 +518,9 @@ type V2SessionConfig struct {
 	Snapshotter ScreenSnapshotter
 
 	// KnownConversation reports whether conversationID names a conversation
-	// this daemon hosts. handleRequestSnapshot is its sole reader: it rejects an
-	// unknown/foreign id with conversation.not_found before any render (AC #4).
+	// this daemon hosts. handleRequestSnapshot and handleMCPStatusRequest use it
+	// to reject an unknown/foreign id with conversation.not_found before any
+	// render or resolver call.
 	// request_session_settings consulted it between #1586 and #1610 and no longer
 	// does — a pure membership check reads a known but UNBOUND conversation as
 	// addressable, so that verb resolves through RunConfigFor instead, which
@@ -687,6 +688,31 @@ type V2SessionConfig struct {
 	// registry belongs off Run, and moving it there means switching the handler's
 	// emit from forwardEnvelope to forwardToRun in the same change.
 	ModelListFor func(conversationID string) (protocol.ModelListPayload, bool)
+
+	// MCPStatusFor reports the current MCP server status for one hosted
+	// conversation, already shaped as the existing mcp_status payload. The
+	// mcp_status_request handler is its sole reader (#2381).
+	//
+	// The handler calls this seam only after the request payload decodes, the
+	// connection has negotiated the interactive capability, and KnownConversation
+	// accepts the id. The id remains an untrusted lookup key and MUST NOT be logged,
+	// joined into a path, or returned as the answer's ConversationID. Every string
+	// in the returned payload is Claude-authored and MUST NOT be logged either.
+	//
+	// Comma-ok distinguishes a current empty-server snapshot (true) from no current
+	// status (false). A caller MUST NOT inspect the payload when false; the relay
+	// translates that outcome to retryable mcp_status.unavailable and never falls
+	// back to a retained or empty frame.
+	//
+	// Optional: nil makes the inbound type consumed but inert before payload decode,
+	// membership, or reply. The production daemon leaves it nil until #2382 wires
+	// live-child request correlation.
+	//
+	// This call runs on the addressed connection's appFrameWorker, not Run, because
+	// a live implementation may wait for a child round trip. It MUST honor ctx so
+	// manager shutdown terminates the wait. Replies return through forwardToRun;
+	// implementations must never touch V2Session or Noise state.
+	MCPStatusFor func(ctx context.Context, conversationID string) (protocol.MCPStatusPayload, bool)
 
 	// SystemPromptFor reports the NAMED conversation's stored system prompt and how
 	// the running session's spawned-with value compares to it, already shaped as a
