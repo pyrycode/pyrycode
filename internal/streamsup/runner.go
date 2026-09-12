@@ -51,6 +51,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/agentrun"
 	"github.com/pyrycode/pyrycode/internal/transcript"
+	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
 // killGrace is the SIGTERM → SIGKILL grace window applied via exec.Cmd.WaitDelay
@@ -596,6 +597,13 @@ type Runner struct {
 	// a leaf — never held across a channel op, a log call or any other call-out.
 	mu    sync.Mutex
 	stdin io.WriteCloser
+
+	// mcpStatusEligible is the provenance verdict for stdin's exact child, derived
+	// from the immutable argv snapshot that spawned it. childGeneration changes
+	// whenever that binding changes, letting QueryMCPStatus register outside this
+	// leaf lock and then reject a target that was replaced in the gap.
+	mcpStatusEligible bool
+	childGeneration   uint64
 
 	// rotating reports that a new_session rotation is armed and no successor child
 	// has bound yet. BeginRotation sets it strictly BEFORE the pool-side rotate()
@@ -1188,6 +1196,71 @@ func (r *Runner) RequestMCPStatus() error {
 	return WriteMCPStatus(r.Stdin(), r.nextControlID())
 }
 
+const mcpStatusQueryIDPrefix = "mcp-status-query-"
+
+// QueryMCPStatus asks the exact eligible live child for its current MCP server
+// states and waits for the response carrying that request's id. The parser claims
+// that response before the shared sink; false collapses every unavailable outcome.
+func (r *Runner) QueryMCPStatus(ctx context.Context) (turnevent.MCPStatus, bool) {
+	if ctx.Err() != nil || r.parser == nil {
+		return turnevent.MCPStatus{}, false
+	}
+
+	r.mu.Lock()
+	if r.stdin == nil || r.rotating || !r.mcpStatusEligible {
+		r.mu.Unlock()
+		return turnevent.MCPStatus{}, false
+	}
+	w := r.stdin
+	generation := r.childGeneration
+	r.mu.Unlock()
+
+	id := mcpStatusQueryIDPrefix + r.nextControlID()
+	pending := r.parser.registerMCPStatusQuery(id)
+
+	// Registration stays outside the runner's leaf mutex. Rechecking the binding
+	// generation closes the snapshot-to-registration gap without nesting locks.
+	r.mu.Lock()
+	current := r.stdin != nil && !r.rotating && r.mcpStatusEligible && r.childGeneration == generation
+	r.mu.Unlock()
+	if !current {
+		r.parser.removeMCPStatusQuery(id, pending)
+		pending.resolveWrite(false)
+		pending.complete(turnevent.MCPStatus{}, false)
+		return turnevent.MCPStatus{}, false
+	}
+	if ctx.Err() != nil {
+		r.parser.removeMCPStatusQuery(id, pending)
+		pending.resolveWrite(false)
+		pending.complete(turnevent.MCPStatus{}, false)
+		return turnevent.MCPStatus{}, false
+	}
+
+	err := WriteMCPStatus(w, id)
+	pending.resolveWrite(err == nil)
+	if err != nil {
+		r.parser.removeMCPStatusQuery(id, pending)
+		pending.complete(turnevent.MCPStatus{}, false)
+		return turnevent.MCPStatus{}, false
+	}
+	if ctx.Err() != nil {
+		r.parser.removeMCPStatusQuery(id, pending)
+		pending.complete(turnevent.MCPStatus{}, false)
+		return turnevent.MCPStatus{}, false
+	}
+
+	select {
+	case result := <-pending.result:
+		if ctx.Err() != nil {
+			return turnevent.MCPStatus{}, false
+		}
+		return result.status, result.ok
+	case <-ctx.Done():
+		r.parser.removeMCPStatusQuery(id, pending)
+		return turnevent.MCPStatus{}, false
+	}
+}
+
 // RequestContextUsage asks the live child for its summary or full context
 // breakdown. The detail vocabulary is checked before child lookup and ID minting;
 // WriteContextUsage repeats the same boundary for direct callers. The request ID
@@ -1216,7 +1289,7 @@ func (r *Runner) RequestContextUsage(detail string) error {
 
 // nextControlID mints the next locally-unique control-request correlation id,
 // shared by Interrupt, SetModel, SetPermissionMode, RequestInitialize,
-// RequestMCPStatus and RequestContextUsage (RevokeBypass draws on it through SetPermissionMode,
+// RequestMCPStatus, QueryMCPStatus and RequestContextUsage (RevokeBypass draws on it through SetPermissionMode,
 // minting exactly one id per call, not two). The atomic counter is
 // unique within the runner's lifetime — one sequence, not one per subtype, since
 // request_id must be unique across all in-flight control requests on the stream
@@ -1731,11 +1804,9 @@ func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, freshSeq 
 	// Install the privacy decision before Start can create the stdout forwarder.
 	// args is beginSpawn's immutable snapshot for this exact child, so a settings
 	// change for the next spawn cannot retroactively alter this one.
+	mcpEligible := mcpStatusEligible(args, r.cfg.MCPStatusConfigPath)
 	if r.parser != nil {
-		r.parser.beginMCPStatusChild(
-			mcpStatusEligible(args, r.cfg.MCPStatusConfigPath),
-			r.RequestMCPStatus,
-		)
+		r.parser.beginMCPStatusChild(mcpEligible, r.RequestMCPStatus)
 	}
 
 	// Reap-then-SIGTERM fires only on ctx cancel (operator teardown): claude
@@ -1855,7 +1926,7 @@ func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, freshSeq 
 	}
 	r.postureGate.arm(postureID)
 
-	r.setStdin(stdin, freshSeq)
+	r.setStdin(stdin, freshSeq, mcpEligible)
 	r.updateState(func(st *State) {
 		st.Phase = PhaseRunning
 		st.ChildPID = cmd.Process.Pid
@@ -1940,9 +2011,11 @@ func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, freshSeq 
 // its own acquisition — and a Debug record anywhere in the daemon's stderr defeats
 // #1330's e2e instrument guard. Such a diagnostic belongs above the acquisition, in
 // spawnAndWait, at Info.
-func (r *Runner) setStdin(w io.WriteCloser, spawnFreshSeq uint64) {
+func (r *Runner) setStdin(w io.WriteCloser, spawnFreshSeq uint64, mcpEligible bool) {
 	r.mu.Lock()
 	r.stdin = w
+	r.mcpStatusEligible = mcpEligible
+	r.childGeneration++
 	if spawnFreshSeq > r.armFreshSeq {
 		r.rotating = false
 	}
@@ -1957,7 +2030,12 @@ func (r *Runner) takeStdin() io.WriteCloser {
 	r.mu.Lock()
 	w := r.stdin
 	r.stdin = nil
+	r.mcpStatusEligible = false
+	r.childGeneration++
 	r.mu.Unlock()
+	if r.parser != nil {
+		r.parser.failMCPStatusQueries()
+	}
 	return w
 }
 

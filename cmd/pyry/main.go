@@ -55,9 +55,11 @@ import (
 	"github.com/pyrycode/pyrycode/internal/install"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
 	"github.com/pyrycode/pyrycode/internal/permbridge"
+	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 	"github.com/pyrycode/pyrycode/internal/sessions"
+	"github.com/pyrycode/pyrycode/internal/turnbridge"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
@@ -1074,6 +1076,7 @@ func runSupervisor(args []string) error {
 		// The conversation-keyed half of the model-list pair (#2125), built beside its
 		// enumerating twin below over the same registry and pool.
 		modelListFor:                  modelListFor(convReg, pool),
+		mcpStatusFor:                  mcpStatusFor(convReg, pool),
 		retainedModelLists:            retainedModelLists(convReg, pool),
 		retainedSlashCommandLists:     retainedSlashCommandLists(convReg, pool),
 		retainedBackgroundTaskRosters: retainedBackgroundTaskRosters(convReg, pool),
@@ -1559,6 +1562,54 @@ func resolveBoundRunner(convReg *conversations.Registry, pool *sessions.Pool, co
 		return nil, false
 	}
 	return sess.Runner(), true
+}
+
+type mcpStatusQuerier interface {
+	QueryMCPStatus(context.Context) (turnevent.MCPStatus, bool)
+}
+
+// resolveBoundMCPStatus queries only the runner currently bound to convID and
+// shapes its bounded event through the same mapper as the automatic live path.
+// Every refusal returns the zero payload; there is no retained-status fallback.
+func resolveBoundMCPStatus(
+	ctx context.Context,
+	convReg *conversations.Registry,
+	pool *sessions.Pool,
+	convID string,
+) (protocol.MCPStatusPayload, bool) {
+	runner, ok := resolveBoundRunner(convReg, pool, convID)
+	if !ok {
+		return protocol.MCPStatusPayload{}, false
+	}
+	querier, ok := runner.(mcpStatusQuerier)
+	if !ok {
+		return protocol.MCPStatusPayload{}, false
+	}
+	status, ok := querier.QueryMCPStatus(ctx)
+	if !ok {
+		return protocol.MCPStatusPayload{}, false
+	}
+	typ, mapped, ok := turnbridge.MapEvent(status, turnbridge.TurnContext{ConversationID: convID})
+	if !ok || typ != protocol.TypeMCPStatus {
+		return protocol.MCPStatusPayload{}, false
+	}
+	payload, ok := mapped.(protocol.MCPStatusPayload)
+	if !ok {
+		return protocol.MCPStatusPayload{}, false
+	}
+	return payload, true
+}
+
+func mcpStatusFor(
+	convReg *conversations.Registry,
+	pool *sessions.Pool,
+) func(context.Context, string) (protocol.MCPStatusPayload, bool) {
+	if convReg == nil || pool == nil {
+		return nil
+	}
+	return func(ctx context.Context, convID string) (protocol.MCPStatusPayload, bool) {
+		return resolveBoundMCPStatus(ctx, convReg, pool, convID)
+	}
 }
 
 // activeInterrupter satisfies relay.Interrupter by routing an inbound interrupt to

@@ -15,7 +15,7 @@
 - `internal/streamsup/runner.go` → `Runner`, `RequestMCPStatus`, `spawnAndWait`, `setStdin`, `takeStdin`, `nextControlID` — live writer ownership, per-spawn argv snapshot, and shared control-id sequence.
 - `internal/streamsup/parser.go` → `Parser`, `contextUsageRequests`, `consumeLine`, `decodeMCPStatus`, `emit` — response parsing, correlation precedent, existing mapping, and shared-sink boundary.
 - `internal/streamsup/context_usage_event_test.go` → `TestRunner_ContextUsageWriteFailureCannotEmit`, `TestRunner_ContextUsageRegistersBeforeWrite` — the nearest interleaved write/result proof.
-- `internal/streamsup/mcp_status_policy_test.go` → `TestRunner_MCPStatusPolicy_SpawnSnapshotAndReplacement` — automatic per-child policy and next-spawn mutation proof that must stay green.
+- `internal/streamsup/mcp_status_policy_test.go` → `TestRunner_MCPStatusPolicyUsesEachSpawnArgs` — automatic per-child policy and next-spawn mutation proof that must stay green.
 - `cmd/pyry/main.go` → `runSupervisor`, `resolveBoundRunner` — the sole composition root and conversation-to-session binding lookup.
 - `cmd/pyry/streamsup_runner.go` → `streamRunner` — the production adapter exposing concrete stream-only operations outside `sessions.Runner`.
 - `cmd/pyry/relay.go` → `relayWiring`, `startRelayV2` — the named wiring bundle and the sole `V2SessionConfig` construction site.
@@ -298,4 +298,14 @@ continues.
 
 ## Revisions
 
-None.
+### 2026-09-12 — generation revalidation preserves the runner lock hierarchy
+
+The implementation snapshots the live writer, eligibility, and a child-generation
+counter under `Runner.mu`, registers the private parser waiter after releasing that
+leaf lock, then revalidates the generation before writing. This replaces the plan's
+same-acquisition registration sketch: acquiring the parser registry mutex while
+holding `Runner.mu` would violate the runner's established leaf-lock contract. The
+generation check closes the intervening child-replacement window without nesting
+locks; the observable exact-child and no-write-on-ineligible contracts are unchanged.
+The Files read entry also corrects the exact existing spawn-policy test symbol used
+for the implementation proof.

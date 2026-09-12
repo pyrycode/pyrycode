@@ -1953,6 +1953,7 @@ func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rat
 	// cap, and the final non-newline-terminated bytes at EOF are still processed.
 	br := bufio.NewReader(r)
 	turn := 0
+	mcpStatusRequests := 0
 	permissionRider := loadStdioPermissionRider(os.Getenv(envStreamCanUseTool))
 	var pendingPermission *pendingStdioPermission
 	for {
@@ -2096,7 +2097,8 @@ func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rat
 				// The rider is opt-in because every eligible fake child now receives this
 				// request, while only the MCP-status e2e wants the reply to enter its wire.
 				if os.Getenv(envStreamMCPStatus) != "" {
-					if werr := writeMCPStatusAck(w, reqID); werr != nil {
+					mcpStatusRequests++
+					if werr := writeMCPStatusAck(w, reqID, mcpStatusRequests > 1); werr != nil {
 						return
 					}
 				}
@@ -2655,27 +2657,38 @@ func writeInitializeAck(w io.Writer, requestID string) error {
 	})
 }
 
-// writeMCPStatusAck writes the narrow status fixture used by the replacement-child
-// e2e. All text is inert and non-secret; writeJSONLine safely echoes the daemon's
-// request id without allowing it to create a second physical line.
-func writeMCPStatusAck(w io.Writer, requestID string) error {
+// writeMCPStatusAck writes the narrow status fixture used by the MCP-status e2e
+// flows. fresh selects the changed state returned after this child's automatic
+// startup report. All text is inert and non-secret; writeJSONLine safely echoes
+// the daemon's request id without allowing it to create a second physical line.
+func writeMCPStatusAck(w io.Writer, requestID string, fresh bool) error {
+	server := map[string]any{
+		"name":   "pyry_mcp_test",
+		"status": "failed",
+		"error":  "canned connection failure",
+		"scope":  "local",
+		"serverInfo": map[string]any{
+			"version": "9.8.7-test",
+		},
+	}
+	if fresh {
+		server = map[string]any{
+			"name":   "pyry_mcp_fresh",
+			"status": "connected",
+			"error":  "",
+			"scope":  "project",
+			"serverInfo": map[string]any{
+				"version": "10.0.0-fresh",
+			},
+		}
+	}
 	return writeJSONLine(w, map[string]any{
 		"type": "control_response",
 		"response": map[string]any{
 			"subtype":    "success",
 			"request_id": requestID,
 			"response": map[string]any{
-				"mcpServers": []map[string]any{
-					{
-						"name":   "pyry_mcp_test",
-						"status": "failed",
-						"error":  "canned connection failure",
-						"scope":  "local",
-						"serverInfo": map[string]any{
-							"version": "9.8.7-test",
-						},
-					},
-				},
+				"mcpServers": []map[string]any{server},
 			},
 		},
 	})

@@ -280,6 +280,11 @@ type relayWiring struct {
 	// sides), so it crosses into V2SessionConfig unwrapped. nil in foreground/v1 ⇒
 	// the verb refuses every request as model_list.unavailable.
 	modelListFor func(convID string) (protocol.ModelListPayload, bool)
+	// mcpStatusFor queries the exact live child bound to a named conversation and
+	// returns the existing wire payload. It may block on that child, so
+	// V2SessionConfig dispatches it on the requesting connection's worker.
+	// nil preserves the relay seam's inert-unwired contract.
+	mcpStatusFor func(context.Context, string) (protocol.MCPStatusPayload, bool)
 	// modelWindows answers the context windows a named SESSION's child has
 	// reported, keyed by claude's own model id, for the context-window half of
 	// both usage seams below (#2107). Built at main.go over *sessions.Pool for the
@@ -1003,6 +1008,10 @@ func startRelayV2(
 		// silently defeat the seam's nil ⇒ refuse contract. A pure read: it mints no
 		// id and mutates no daemon state.
 		ModelListFor: w.modelListFor,
+		// Current-child MCP status source (#2382): unlike ModelListFor above this
+		// never reads retained inventory. The resolver waits for an exact child
+		// request id and returns through the worker's requester-only reply lane.
+		MCPStatusFor: w.mcpStatusFor,
 		// The conversation system-prompt read seam (#2152): what the registry stores
 		// for the NAMED conversation, plus a verdict on whether the session it is
 		// bound to was spawned with that same value — the gap #2151's store-and-

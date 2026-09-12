@@ -278,6 +278,12 @@ func TestRunner_MCPStatusPolicyUsesEachSpawnArgs(t *testing.T) {
 	if got := strings.Count(stderr.String(), "MCP_STATUS_REQUEST"); got != 2 {
 		t.Fatalf("ineligible child changed request count to %d, want 2", got)
 	}
+	if status, ok := r.QueryMCPStatus(context.Background()); ok {
+		t.Fatalf("QueryMCPStatus on ineligible child = (%+v,true), want unavailable", status)
+	}
+	if got := strings.Count(stderr.String(), "MCP_STATUS_REQUEST"); got != 2 {
+		t.Fatalf("ineligible on-demand query changed request count to %d, want 2", got)
+	}
 
 	// Even a manually delivered reply is suppressed for the ineligible child.
 	if err := r.RequestMCPStatus(); err != nil {

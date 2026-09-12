@@ -128,31 +128,48 @@ func TestRunStreamJSON_NonUserLinesIgnored(t *testing.T) {
 
 func TestRunStreamJSON_MCPStatusRider(t *testing.T) {
 	t.Setenv("PYRY_FAKE_CLAUDE_MCP_STATUS", "1")
-	const request = `{"type":"control_request","request_id":"mcp-1","request":{"subtype":"mcp_status"}}`
+	const (
+		firstRequest  = `{"type":"control_request","request_id":"mcp-1","request":{"subtype":"mcp_status"}}`
+		secondRequest = `{"type":"control_request","request_id":"mcp-2","request":{"subtype":"mcp_status"}}`
+	)
 	var buf bytes.Buffer
 
-	runStreamJSON(strings.NewReader(request+"\n"), &buf, false, false, "", false, 0, false, "", false)
+	runStreamJSON(strings.NewReader(firstRequest+"\n"+secondRequest+"\n"), &buf, false, false, "", false, 0, false, "", false)
 
 	events := parseEmitted(t, buf.Bytes())
-	if len(events) != 1 {
-		t.Fatalf("mcp_status rider emitted %d events, want 1: %+v", len(events), events)
+	if len(events) != 2 {
+		t.Fatalf("mcp_status rider emitted %d events, want 2: %+v", len(events), events)
 	}
-	status, ok := events[0].(turnevent.MCPStatus)
+	initial, ok := events[0].(turnevent.MCPStatus)
 	if !ok {
 		t.Fatalf("event[0] = %T, want turnevent.MCPStatus", events[0])
 	}
-	if len(status.Servers) != 1 {
-		t.Fatalf("servers = %+v, want one canned row", status.Servers)
+	fresh, ok := events[1].(turnevent.MCPStatus)
+	if !ok {
+		t.Fatalf("event[1] = %T, want turnevent.MCPStatus", events[1])
 	}
-	want := turnevent.MCPServerStatus{
+	if len(initial.Servers) != 1 || len(fresh.Servers) != 1 {
+		t.Fatalf("server rows = (%+v,%+v), want one each", initial.Servers, fresh.Servers)
+	}
+	wantInitial := turnevent.MCPServerStatus{
 		Name:    "pyry_mcp_test",
 		Status:  "failed",
 		Error:   "canned connection failure",
 		Scope:   "local",
 		Version: "9.8.7-test",
 	}
-	if status.Servers[0] != want {
-		t.Errorf("server = %+v, want %+v", status.Servers[0], want)
+	wantFresh := turnevent.MCPServerStatus{
+		Name:    "pyry_mcp_fresh",
+		Status:  "connected",
+		Error:   "",
+		Scope:   "project",
+		Version: "10.0.0-fresh",
+	}
+	if initial.Servers[0] != wantInitial {
+		t.Errorf("initial server = %+v, want %+v", initial.Servers[0], wantInitial)
+	}
+	if fresh.Servers[0] != wantFresh {
+		t.Errorf("fresh server = %+v, want %+v", fresh.Servers[0], wantFresh)
 	}
 }
 
