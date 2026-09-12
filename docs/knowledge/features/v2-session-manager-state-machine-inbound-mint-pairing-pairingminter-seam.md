@@ -25,10 +25,28 @@ unset ⇒ the frame is consumed but inert, matching every other optional seam
 in this family.
 
 The mint itself — CSPRNG draw, hash, `device-<hash8>` fallback, one clock
-read, locked load-mutate-save — is `cmd/pyry/pair.go:mintDevice`, the same
-function `runPairDefault` calls. See [`pyry pair`'s operation
+read, locked load-mutate-save — is `cmd/pyry`'s `mintDevice`, shared by
+`runPairDefault`, the local control provider, and this remote path. See [`pyry pair`'s operation
 order](pyry-pair-command.md#pyry-pair-bare--operation-order) for the shared
 step; this document covers only what the wire caller adds on top of it.
+
+`pairingMinterV2` also implements the local `pairing.mint` provider installed
+on the mode-0600 control socket. `startRelayV2` constructs one minter only after
+the relay identity, resolved URL, registry, and static key are fixed, installs
+it as the session manager's remote `PairingMinter`, and returns its
+`MintLocalPairing` method through `startRelay` to `runSupervisor`. Both daemon
+entry points consequently encode from the same immutable provenance rather
+than reloading saved service state. The local caller is the host operator: it
+may choose `AllowRemotePermissions` and supplies no grantor hash. The remote
+phone path remains narrower: it rechecks the grantor inside the registry lock
+and always passes literal `false`, so every remotely minted device is
+unprivileged.
+
+The two daemon entry points share `encodePairing`, and encoding happens only
+after `mintDevice` has persisted the hash. A local failure returns no pairing
+and is projected by the control server to a fixed error; remote failures retain
+their existing outcome mapping and audit record. Local success and failure logs
+are content-free, while remote audit and revocation behavior remain unchanged.
 
 ## A connection-scoped privilege check goes stale the moment it's used to authorize a write
 
@@ -50,10 +68,10 @@ one deterministic re-read inside the lock already being taken:
 registry snapshot the append is about to mutate — that a device with that
 token hash is still present and still carries `AllowRemotePermissions`,
 returning `errGrantorRevoked` and writing nothing otherwise
-(`cmd/pyry/pair.go:mintDevice`, `registryGrants`). It costs one more linear
+(`mintDevice`, `registryGrants`). It costs one more linear
 scan already paid for by the load that was going to happen anyway. `pyry
-pair`'s own call passes `grantorHash: ""` and skips the check — a shell on
-the host doesn't have a session that can go stale.
+pair` and local control pass `grantorHash: ""` and skip the check — the host
+operator doesn't have a remote session that can go stale.
 
 **The generalizable point:** a privilege check read from a value bound once,
 earlier in the connection's life, is a check against *stale* state the moment
@@ -135,7 +153,10 @@ by convention but has a second, less obvious remote writer already wired in.
 ## Related
 
 - [`pyry pair` — CLI device-pairing verb family](pyry-pair-command.md) — the
-  shared `mintDevice` step, and why the CLI passes `grantorHash: ""`.
+  shared `mintDevice` step, the local control sibling, and why both host
+  operator paths pass `grantorHash: ""`.
+- [Control plane](control-plane.md) — the local `pairing.mint` request and its
+  fixed error/redaction boundary.
 - [`devices.json` Registry](devices-registry.md) — `UpdatePushRegistration`,
   gated one step upstream by #2219, not inside the registry itself.
 - [Pairing request/reply payloads (#2126)](protocol-package-types-pairing-payloads.md) —

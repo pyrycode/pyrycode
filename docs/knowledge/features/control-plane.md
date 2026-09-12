@@ -23,7 +23,20 @@ func NewServer(
 
 Dependencies whose implementations need daemon composition state are installed after construction rather than widening `NewServer`. `SetPairingProvider` installs the narrow `func(deviceLabel string, allowRemotePermissions bool) (string, error)` used by `VerbPairingMint`; the provider owns every identity, key, relay, registry, and persistence input that the request cannot supply. `handlePairingMint` copies the closure under `Server.mu` and releases the lock before invoking it, so a slow provider does not serialize unrelated control verbs behind the server lock.
 
+For a relay-enabled daemon, `runSupervisor` installs that provider before
+`Server.Listen` from the same `pairingMinterV2` that `startRelayV2` constructed
+for the active relay leg. The closure therefore carries the running daemon's
+already-resolved server id, relay URL, static public key, and registry path; it
+does not reload saved configuration that may describe another service. Relay
+setup failures never return a provider, and a relay-disabled daemon deliberately
+leaves the seam nil.
+
 The pairing seam is also a credential-redaction boundary. An absent provider returns exactly `pairing.mint: provider not configured`; a missing payload or any provider error returns exactly `pairing.mint: operation failed`. On the error branch, `handlePairingMint` discards both the provider's returned string and its error detail, emits no control-layer log, and leaves `Response.Pairing` absent. `MintPairing` likewise returns an empty string for every error, including the fixed `control: empty pairing.mint response` guard for a missing or empty success payload. Only a nil-error, non-empty pairing reaches the caller.
+
+Operational failure detail from the concrete provider, including a registry
+path, remains daemon-only. Its fixed success and failure events omit the
+caller-supplied label, token, token hash, and encoded pairing, so copying the log
+snapshot into a diagnostic bundle does not create another credential egress.
 
 ## Handshake Deadline: per-conn timeout and the session-verb extend (#865)
 
@@ -381,6 +394,17 @@ Tests that need a real bridge (`TestServer_StopWhileAttached`, `TestServer_Bridg
 
 `pairing_test.go` treats the bearer result as a boundary, not ordinary response data. `TestMintPairing_WireRoundTrip` compares exact raw JSON for both boolean values and the typed pairing reply, while `TestProtocol_SessionsRoundTripBackCompat` proves the new optional outer fields did not change older verb bytes. Provider tests assert exactly one call with both arguments and use distinct success-pairing and provider-error sentinels to prove that only the successful return value can contain the credential; neither sentinel may enter control logs, response errors, transport diagnostics, or any error-path result.
 
+The daemon-side pairing tests add the construction proof that an isolated
+control-server fake cannot provide: `TestLocalPairingProviderWiredFromRelayConstructionToControl`
+pins the provider from `startRelayV2` through `startRelay` to
+`runSupervisor`'s `SetPairingProvider` call. The companion two-socket test uses
+distinct identities, keys, relay URLs, and registry paths. Its cross-registry
+negative assertion searches by token hash rather than by device label; a
+label-based lookup alone would stay green if the credential were written into
+the wrong registry under another name. Lock, malformed-load, and save failures
+also prove the fixed client error and inspect both daemon logs and diagnostic
+bundle logs for credential-like sentinels.
+
 The timeout tests cover both sides of the liveness contract: a silent peer must terminate at `DialTimeout` even when the caller allows longer, and an already-entered provider held past an earlier caller deadline must not keep the client blocked. The held provider is explicitly released so the synchronous server handler can drain; a green client-deadline assertion alone would not prove server shutdown remains finite.
 
 ## References
@@ -389,6 +413,7 @@ The timeout tests cover both sides of the liveness contract: a silent peer must 
 - [ADR 003](../decisions/003-session-addressable-runtime.md) — why the resolver seam exists.
 - Spec: [`docs/specs/architecture/29-wire-sessions-pool-consumers.md`](../../specs/architecture/29-wire-sessions-pool-consumers.md).
 - Pairing mint spec: [`docs/specs/architecture/2388-local-pairing-code-mint.md`](../../specs/architecture/2388-local-pairing-code-mint.md).
+- Relay-backed pairing provider spec: [`docs/specs/architecture/2389-bind-local-pairing-mint-to-relay-state.md`](../../specs/architecture/2389-bind-local-pairing-mint-to-relay-state.md).
 
 
 ## Sections

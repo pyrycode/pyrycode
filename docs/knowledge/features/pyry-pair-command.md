@@ -37,9 +37,9 @@ pyry pair preflight [-pyry-name=<instance>]
 | `-pyry-name` | Instance scope (state dir: `~/.pyry/<name>/`) | `defaultName()` — `PYRY_NAME` env or literal `"pyry"` |
 | `--name` | Device label persisted in the registry | `device-<short>` (first 8 hex chars of the token hash) |
 | `--relay` | Override the relay URL printed in the payload (does NOT mutate config.json) | resolved from config, then built-in default |
-| `--allow-remote-permissions` | Authorize THIS device to answer a remote permission/trust/destructive modal (#702) — records `Device.AllowRemotePermissions` on the pairing record | `false` (OFF — the safe default; the only writer of the bit) |
+| `--allow-remote-permissions` | Authorize THIS device to answer a remote permission/trust/destructive modal (#702) — records `Device.AllowRemotePermissions` on the pairing record | `false` (OFF — the safe default) |
 
-The `--allow-remote-permissions` bit (added #702) is the per-device authorization for the highest-trust mobile action: answering a permission modal. `pyry pair` is its **only** writer — it is never settable over the wire. Everything else a paired phone does stays ungated. Bare `--allow-remote-permissions` → `true`; absent → `false`; `--allow-remote-permissions=false` → `false` (Go `flag` bool semantics). See [`features/devices-package.md`](devices-package.md) § "Remote-permission gate" and [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) § "Security model".
+The `--allow-remote-permissions` bit (added #702) is the per-device authorization for the highest-trust mobile action: answering a permission modal. The host operator can set it through either `pyry pair` or the daemon's mode-0600 local `pairing.mint` control operation. The authenticated remote-phone `mint_pairing` path cannot set it and always creates an unprivileged device. Everything else a paired phone does stays ungated. Bare `--allow-remote-permissions` → `true`; absent → `false`; `--allow-remote-permissions=false` → `false` (Go `flag` bool semantics). See [`features/devices-package.md`](devices-package.md) § "Remote-permission gate", [Control plane](control-plane.md), and [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) § "Security model".
 
 `-pyry-name` is added because `devices.json` and `server-id` are per-instance — same scoping as `pyry sessions *` and the supervisor itself. A single-instance user gets one consistent state directory across every verb.
 
@@ -73,7 +73,12 @@ A refused acquisition (lock held elsewhere past `pairLockWait`) fails closed: st
 
 **Step 9 gates step 10.** If the locked region fails — a busy lock, or `registry.Save` failing inside it — `Render` is skipped and the plaintext token never escapes the process. The user retries; a new (independent) token is minted on the next run; the orphaned in-memory device is dropped with the process. The reverse ordering (render first, save second) would be wrong: a post-render save failure would print a working pairing payload that the daemon would later reject because the token isn't in the registry. See [ADR 021](../decisions/021-pair-cli-order-of-operations.md). The static keypair, by contrast, is intentionally persisted *before* the random draw — every paired phone binds to the same keypair, so it must outlive any single `pyry pair` invocation.
 
-**Steps 6–9 are `mintDevice`, shared with the wire path (#2127).** `cmd/pyry/pair.go:mintDevice(mintRequest) (mintedDevice, error)` lifts the CSPRNG draw, the hash, the `device-<hash8>` fallback, the single clock read and the locked load-mutate-save verbatim out of this verb, so a device minted over `mint_pairing` (a paired client asking the daemon to pair a second device — see [Inbound `mint_pairing`](v2-session-manager-state-machine-inbound-mint-pairing-pairingminter-seam.md)) is indistinguishable from one this CLI minted. `mintRequest.lockWait` is a parameter rather than the package-level `pairLockWait` constant precisely so the two callers can hold the lock for different durations: this verb is an operator-invoked one-shot and keeps `pairLockWait` (`devices.DefaultLockWait`, 5s), while the wire path is a request a client is blocking on and passes a much shorter bound. `mintRequest.grantorHash` is the one field this verb never sets (it passes `""`, skipping the check entirely) — it exists so a *wire* mint can re-confirm, inside the same held lock, that the device asking for it still holds the privilege it claimed at handshake, which this verb has no equivalent need for since a shell on the host already implies that authority.
+**Steps 6–9 are `mintDevice`, shared by three callers.** `mintDevice(mintRequest) (mintedDevice, error)` lifts the CSPRNG draw, hash, `device-<hash8>` fallback, single clock read, redemption window, and locked load-mutate-save out of this verb. `runPairDefault`, the mode-0600 local control provider, and the authenticated remote-phone `mint_pairing` path therefore create the same registry record shape. The CLI keeps `pairLockWait` (`devices.DefaultLockWait`, 5s); both request paths pass a shorter bound because a client is waiting. The CLI and local control pass `grantorHash: ""` because the host operator is the authority. Only the remote-phone caller supplies a grantor hash, rechecks it inside the held lock, and passes literal `false` for `allowRemotePermissions`. See [Inbound `mint_pairing`](v2-session-manager-state-machine-inbound-mint-pairing-pairingminter-seam.md).
+
+The local provider does not resolve identity, key, relay, or registry state as
+part of this sequence. It closes over the `pairingMinterV2` constructed from the
+active relay leg, preventing saved configuration for another service from
+changing what the running daemon mints.
 
 ### Daemon-name validator mismatch
 
@@ -122,12 +127,21 @@ Non-empty `--name` is used verbatim — no validation, no uniqueness check. `dev
 
 ## Token visibility (SECURITY)
 
-The plaintext token has exactly one egress: `pair.Render(payload, os.Stdout)`. `cmd/pyry/pair.go` never constructs a `*slog.Logger`, never calls `slog.*`, and never embeds `plain` / `payload` / `Encode(payload)` into any error wrapping. All operator-visible strings are either:
+For the standalone CLI, the plaintext token has exactly one egress: `pair.Render(payload, os.Stdout)`. `cmd/pyry/pair.go` never constructs a `*slog.Logger`, never calls `slog.*`, and never embeds `plain` / `payload` / `Encode(payload)` into any error wrapping. All operator-visible strings are either:
 
 - **stderr human strings** (the empty-relay hint, parse-error usage line)
 - **bare `fmt.Errorf("pair: %w", err)` wraps** of underlying errors from `config.Load`, `devices.Load`, `identity.LoadOrCreate`, `crypto/rand.Read`, `registry.Save`, `pair.Render` — none of which carry token bytes by construction (each layer's contract is reviewed separately; see [features/pair-package.md](pair-package.md) § "Token visibility").
 
-The discipline mirrors `internal/pair/render.go:23-30` and the package doc-comment of `internal/devices/device.go`. Code review enforces this on any future caller.
+The discipline mirrors `pair.Render` and the package documentation for
+`devices.Device`. Code review enforces this on any future caller.
+
+Across all three `mintDevice` callers, successful persistence selects exactly
+one bearer egress: CLI stdout, the local control response, or the remote
+`pairing_minted` reply inside the authenticated AEAD relay channel. Both daemon
+paths encode through `pairingMinterV2.encodePairing` only after `Registry.Save`
+succeeds. A lock, load, or save failure encodes and returns no pairing; the local
+client sees only `pairing.mint: operation failed`. Daemon events and diagnostic
+bundle logs omit the device label, token, token hash, and encoded pairing.
 
 ## Concurrency model
 
