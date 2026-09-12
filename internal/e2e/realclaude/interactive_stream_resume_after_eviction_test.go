@@ -82,6 +82,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -143,15 +144,20 @@ func TestInteractiveStreamResumeAfterEviction(t *testing.T) {
 	// startup. This is the seam this family exercises end-to-end.
 	writeStreamInteractiveConfig(t, home)
 
-	// Pair a device BEFORE the daemon starts. WITHOUT --allow-remote-permissions:
-	// there is no answer path here (the plant/recall turns raise no modal). Pairing
-	// mints the bearer token + the responder static pubkey the phone pins and writes
-	// the server-id + devices registry the daemon loads at startup.
-	exit, stdout, stderr := runPyry(t, "pair", "-pyry-name=test", "--name=phone-a")
-	if exit != 0 {
-		t.Fatalf("pyry pair exit=%d\nstdout:\n%s\nstderr:\n%s", exit, stdout, stderr)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
+
+	payload, err := paireddevice.Setup(paireddevice.Config{
+		Home:                   home,
+		InstanceName:           "test",
+		Relay:                  relayURL,
+		DeviceName:             "phone-a",
+		AllowRemotePermissions: false,
+	})
+	if err != nil {
+		t.Fatalf("paireddevice.Setup: %v", err)
 	}
-	payload := decodePairPayload(t, stdout)
 	pubKey, err := base64.StdEncoding.DecodeString(payload.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
@@ -162,12 +168,9 @@ func TestInteractiveStreamResumeAfterEviction(t *testing.T) {
 	seedBootstrapRegistry(t, home, evictResumeBootstrapUUID)
 	seedBoundConversation(t, home, evictResumeConvID, evictResumeBootstrapUUID, workdir)
 
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
 	// Spawn with the idle timer ENABLED (D). Keep the *bootstrapDaemon handle so the
 	// test can read the daemon's stderr for the session.idle_eviction WARN.
-	d := spawnBootstrapDaemonWithIdle(t, home, workdir, claudeBin, fr.URL()+"/v2/server", resumeAfterEvictionIdle)
+	d := spawnBootstrapDaemonWithIdle(t, home, workdir, claudeBin, relayURL, resumeAfterEvictionIdle)
 	t.Cleanup(func() { d.stop(t) })
 
 	serverID := readPersistedServerID(t, home)

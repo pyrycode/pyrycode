@@ -63,6 +63,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
@@ -250,15 +251,24 @@ func startObservedPermissionHarness(t *testing.T, model string, stdioPermissionP
 		writeStreamInteractiveConfig(t, home)
 	}
 
-	// Pair WITH --allow-remote-permissions: ResolveAnswer gates on the device's
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
+
+	// Seed WITH remote permissions: ResolveAnswer gates on the device's
 	// MayAnswerRemotePermission() (== AllowRemotePermissions), which pairing
-	// defaults OFF. Without this flag the answer denies at the gate, no
+	// defaults OFF. Without this privilege the answer denies at the gate, no
 	// continuation streams, and drainForCompletedTurn deadlines at M1.
-	exit, stdout, stderr := runPyry(t, "pair", "-pyry-name=test", "--name=phone-a", "--allow-remote-permissions")
-	if exit != 0 {
-		t.Fatalf("pyry pair exit=%d\nstdout:\n%s\nstderr:\n%s", exit, stdout, stderr)
+	payload, err := paireddevice.Setup(paireddevice.Config{
+		Home:                   home,
+		InstanceName:           "test",
+		Relay:                  relayURL,
+		DeviceName:             "phone-a",
+		AllowRemotePermissions: true,
+	})
+	if err != nil {
+		t.Fatalf("paireddevice.Setup: %v", err)
 	}
-	payload := decodePairPayload(t, stdout)
 	pubKey, err := base64.StdEncoding.DecodeString(payload.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
@@ -270,13 +280,10 @@ func startObservedPermissionHarness(t *testing.T, model string, stdioPermissionP
 	seedBootstrapRegistry(t, home, streamModalBootstrapUUID)
 	seedBoundConversation(t, home, streamModalConvID, streamModalBootstrapUUID, workdir)
 
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
 	if configure != nil {
 		claudeBin = configure(claudeBin)
 	}
-	d := spawnPermissionDaemon(t, home, workdir, claudeBin, fr.URL()+"/v2/server", model)
+	d := spawnPermissionDaemon(t, home, workdir, claudeBin, relayURL, model)
 	t.Cleanup(func() { d.stop(t) })
 
 	serverID := readPersistedServerID(t, home)
