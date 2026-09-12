@@ -386,9 +386,10 @@ type relayWiring struct {
 }
 
 // startRelay opens the binary↔relay leg in a supervisor-owned goroutine.
-// Returns a no-op cleanup and nil err when relayURL is empty (relay
-// disabled — see operator note below). Otherwise loads the server-id,
-// calls relay.Connect, and spawns one goroutine that:
+// Returns a no-op cleanup, nil local pairing provider, and nil error when
+// relayURL is empty (relay disabled — see operator note below). Otherwise loads
+// the server-id, calls relay.Connect, and returns the local pairing provider
+// built from the same active relay state while spawning one goroutine that:
 //
 //   - drains conn.Frames() (the v2 Noise manager consumes them)
 //   - blocks on conn.Wait()
@@ -414,21 +415,23 @@ func startRelay(
 	ctx context.Context,
 	logger *slog.Logger,
 	w relayWiring,
-) (cleanup func(), surface func(permbridge.Request) func(), announce func(conversationID, attachmentID, filename string), announceConversation func(protocol.ConversationUpdatedPayload), err error) {
+) (cleanup func(), surface func(permbridge.Request) func(), announce func(conversationID, attachmentID, filename string), announceConversation func(protocol.ConversationUpdatedPayload), pairingProvider localPairingProvider, err error) {
 	if w.relayURL == "" {
 		logger.Info("relay: disabled (no URL configured)")
-		// No relay leg ⇒ no stream-approval bridge and neither fan-out emitter;
-		// all three stay nil. SetApprovalSurfacer(nil) leaves mcp.approve
+		// No relay leg ⇒ no stream-approval bridge, neither fan-out emitter, and
+		// no local pairing provider; all four stay nil.
+		// SetApprovalSurfacer(nil) leaves mcp.approve
 		// modal-less, a nil announce hook leaves attachment.file storing and
 		// minting with nobody to tell (#2166), and a nil conversation hook leaves
-		// channel.new creating with nobody to tell (#2156) — this early return is
-		// exactly the daemon both hooks' nil-tolerance is written for.
-		return func() {}, nil, nil, nil, nil
+		// channel.new creating with nobody to tell (#2156). The nil pairing
+		// provider leaves pairing.mint unconfigured rather than deriving state from
+		// files for a relay leg that does not exist.
+		return func() {}, nil, nil, nil, nil, nil
 	}
 
 	serverID, err := identity.LoadOrCreate(resolveServerIDPath(w.instanceName))
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("load server-id: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("load server-id: %w", err)
 	}
 
 	// Load the device registry once at daemon startup. A missing file
@@ -436,7 +439,7 @@ func startRelay(
 	// `pyry pair` runs. Malformed JSON fails fast.
 	registry, err := devices.Load(resolveDevicesPath(w.instanceName))
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("load device registry: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("load device registry: %w", err)
 	}
 
 	if w.allowInsecure {
@@ -453,17 +456,17 @@ func startRelay(
 		ServerIDConflictThreshold: relay4409Threshold(logger),
 	})
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("relay connect: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("relay connect: %w", err)
 	}
 
 	// legCleanup tears down the v2 Noise manager — the sole consumer of
 	// conn.Frames() (ADR 024: v2 is a hard cutover, no mixed-mode path). The
 	// shared waitDone classifier below is appended to it in the returned cleanup.
 	logger.Info("relay: Mobile Protocol v2 (Noise_IK)")
-	drain, surface, announce, announceConversation, err := startRelayV2(ctx, logger, w, conn, registry, serverID)
+	drain, surface, announce, announceConversation, pairingProvider, err := startRelayV2(ctx, logger, w, conn, registry, serverID)
 	if err != nil {
 		_ = conn.Close()
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	legCleanup := func() {
 		// Close the connection first so Connection.run closes Frames,
@@ -503,7 +506,7 @@ func startRelay(
 		legCleanup()
 		<-waitDone
 	}
-	return cleanup, surface, announce, announceConversation, nil
+	return cleanup, surface, announce, announceConversation, pairingProvider, nil
 }
 
 // relay4409Threshold reads the PYRY_RELAY_4409_THRESHOLD test-only seam: a
@@ -683,7 +686,8 @@ func systemPromptStatus(st conversationPromptState) string {
 // loads the binary's persistent static keypair, builds a V2SessionManager
 // against conn.Frames() registering the conversation / messaging / workspace /
 // push-token handler set that dispatch.Route consults, and runs the manager in
-// one goroutine. The returned drain func blocks
+// one goroutine. It also returns the local pairing provider backed by the same
+// minter installed on that manager. The returned drain func blocks
 // until that goroutine has exited; the caller Close()s conn before calling
 // drain so the manager's Run unblocks on the closed Frames channel.
 //
@@ -710,10 +714,10 @@ func startRelayV2(
 	conn *relay.Connection,
 	registry *devices.Registry,
 	serverID identity.ServerID,
-) (drain func(), surface func(permbridge.Request) func(), announce func(conversationID, attachmentID, filename string), announceConversation func(protocol.ConversationUpdatedPayload), err error) {
+) (drain func(), surface func(permbridge.Request) func(), announce func(conversationID, attachmentID, filename string), announceConversation func(protocol.ConversationUpdatedPayload), pairingProvider localPairingProvider, err error) {
 	staticKey, err := keys.LoadOrCreate(resolveStaticKeyBaseDir(), sanitizeName(w.instanceName))
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("load static key: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("load static key: %w", err)
 	}
 	priv := staticKey.PrivateKey()
 
@@ -1111,10 +1115,12 @@ func startRelayV2(
 		// no-op keystroker whose ESC is moot — a stream-json approval has no PTY
 		// modal to dismiss and denies fail-closed via the permbridge timeout (#1103).
 		// Constructed above so its #1014 folder-not-trusted emit seams are set first.
-		// The wire's second pairing minter, alongside the `pyry pair` CLI (#2127).
-		// Both reach the same mintDevice, so a record created here is
-		// indistinguishable from one the CLI created — `pyry pair list` shows it
-		// and `pyry pair revoke` removes it, with no new verb.
+		// The remote wire pairing minter, alongside the `pyry pair` CLI and local
+		// control provider. All three reach the same mintDevice, so a record
+		// created here is indistinguishable from one either host-operator path
+		// created — `pyry pair list` shows it and `pyry pair revoke` removes it,
+		// with no new registry vocabulary. Only this remote path supplies a grantor
+		// hash and always creates an unprivileged device (#2127).
 		PairingMint: pairingMinter,
 
 		ModalResolver: modalResolver,
@@ -1210,7 +1216,7 @@ func startRelayV2(
 		SettingsUpdater: w.settings,
 	})
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("build v2 session manager: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("build v2 session manager: %w", err)
 	}
 
 	// Attachment-offer announcer (#2166): the producer half of a frame #2082
@@ -1484,7 +1490,7 @@ func startRelayV2(
 		streamQueueStateCleanup()
 		streamSessionErrCleanup()
 		<-mgrDone
-	}, surface, announce, announceConversation, nil
+	}, surface, announce, announceConversation, pairingMinter.MintLocalPairing, nil
 }
 
 // conversationForSession resolves a claude session id to the id of the

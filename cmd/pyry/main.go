@@ -1006,7 +1006,7 @@ func runSupervisor(args []string) error {
 		return s.Model, s.Effort, s.YOLO
 	}
 
-	relayCleanup, approvalSurface, announceAttachment, announceConversation, err := startRelay(ctx, logger, relayWiring{
+	relayCleanup, approvalSurface, announceAttachment, announceConversation, pairingProvider, err := startRelay(ctx, logger, relayWiring{
 		instanceName:  *name,
 		relayURL:      relayURL,
 		version:       Version,
@@ -1124,6 +1124,11 @@ func runSupervisor(args []string) error {
 	// disabled (no URL) — SetApprovalSurfacer(nil) leaves mcp.approve modal-less,
 	// the pre-#1080 behaviour.
 	ctrl.SetApprovalSurfacer(approvalSurface)
+	// The relay leg constructs this provider only after it has loaded the exact
+	// identity, static key, URL, and registry used by the running daemon. A nil
+	// provider when relay is disabled preserves pairing.mint's fixed
+	// not-configured response.
+	ctrl.SetPairingProvider(pairingProvider)
 	// Install the attachment.file destination (#2164) in the same
 	// between-NewServer-and-Serve window, over the SAME registry and pool every
 	// other conversation-keyed seam above resolves against. Wired here rather

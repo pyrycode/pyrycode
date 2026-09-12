@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -32,9 +33,16 @@ const classPairingMint = "pairing_mint"
 // is answered with a retryable code rather than a longer wait.
 const wireMintLockWait = 250 * time.Millisecond
 
-// pairingMinterV2 is the cmd/pyry implementation of relay.PairingMinter: the
-// per-device authorization gate for an inbound mint_pairing, the audit record of
-// every decision it makes, and the encode of what it minted.
+// localPairingProvider is the narrow capability startRelay hands back to the
+// composition root after the relay leg has fixed its identity, key, URL, and
+// registry. Its arguments are the only two values a local control caller may
+// choose.
+type localPairingProvider func(deviceLabel string, allowRemotePermissions bool) (string, error)
+
+// pairingMinterV2 is the cmd/pyry implementation of relay.PairingMinter and the
+// local control provider. It owns the per-device authorization gate for an
+// inbound mint_pairing, the audit record of every remote decision, and the
+// encode of every pairing the running daemon mints.
 //
 // IT IS THE ONLY SCOPE THAT HOLDS ALL FOUR HALVES. The gate needs internal/audit,
 // the mint needs mintDevice and the devices lock, the encode needs internal/pair,
@@ -42,10 +50,11 @@ const wireMintLockWait = 250 * time.Millisecond
 // key. internal/relay imports none of those and must not learn to; the seam is
 // what keeps that true, and this type is what stands behind it.
 //
-// EVERY FIELD IS DAEMON-AUTHORED and fixed for the process's life. Nothing a
-// client sends is input to what is minted — the request names a label and nothing
-// else — which is the property protocol.MintPairingPayload's block states and this
-// struct's shape makes structural: there is no field here a frame could reach.
+// EVERY FIELD IS DAEMON-AUTHORED and fixed for the process's life. Neither a
+// remote frame nor a local control request can supply the identity, key, relay,
+// or registry used for a mint. The remote request names only a label; the local
+// request adds the host operator's permission choice. Neither can reach a field
+// on this struct.
 type pairingMinterV2 struct {
 	devicesPath string
 	relayURL    string
@@ -80,6 +89,36 @@ func newPairingMinterV2(devicesPath, relayURL string, serverID identity.ServerID
 		staticPub:   base64.StdEncoding.EncodeToString(pub[:]),
 		logger:      logger,
 	}
+}
+
+// MintLocalPairing mints on behalf of the operator connected through the local
+// mode-0600 control socket. Unlike MintPairing, it needs no remote grantor: the
+// host user is the authority and may explicitly choose whether the new device
+// can answer remote permission prompts.
+//
+// Provider errors retain their operational detail only in the daemon log. The
+// control layer projects every one to its fixed response, while this method
+// returns no pairing unless persistence completed successfully.
+func (m *pairingMinterV2) MintLocalPairing(deviceName string, allowRemotePermissions bool) (string, error) {
+	minted, err := mintDevice(mintRequest{
+		devicesPath:            m.devicesPath,
+		lockWait:               wireMintLockWait,
+		deviceName:             deviceName,
+		allowRemotePermissions: allowRemotePermissions,
+	})
+	if err != nil {
+		m.logger.Warn("pair: local mint failed",
+			"event", "pairing.local_mint.failed",
+			"error", err)
+		return "", fmt.Errorf("mint local pairing: %w", err)
+	}
+
+	// Keep this event content-free. In particular, a local label has not crossed
+	// the remote display-safety gate and the minted bearer must never reach the
+	// log snapshot that diagnostic bundles retain.
+	m.logger.Info("pair: minted a pairing locally",
+		"event", "pairing.local_mint.ok")
+	return m.encodePairing(minted), nil
 }
 
 // MintPairing mints a pairing for another device on behalf of the requesting one,
@@ -180,13 +219,20 @@ func (m *pairingMinterV2) MintPairing(requester *devices.Device, deviceName stri
 
 	return relay.PairingMintResult{
 		Outcome: relay.PairingMintOK,
-		Pairing: pair.Encode(pair.Payload{
-			Server:             m.serverID,
-			Relay:              m.relayURL,
-			Token:              minted.token,
-			ServerStaticPubkey: m.staticPub,
-		}),
+		Pairing: m.encodePairing(minted),
 	}
+}
+
+// encodePairing is the single bearer egress shared by the daemon's remote and
+// local mint entry points. All payload provenance is immutable minter state;
+// only the freshly persisted token comes from the mint result.
+func (m *pairingMinterV2) encodePairing(minted mintedDevice) string {
+	return pair.Encode(pair.Payload{
+		Server:             m.serverID,
+		Relay:              m.relayURL,
+		Token:              minted.token,
+		ServerStaticPubkey: m.staticPub,
+	})
 }
 
 // auditMint writes exactly one terminal-decision record for a refused mint,

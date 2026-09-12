@@ -1,8 +1,13 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
+	"context"
 	"encoding/base64"
+	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -10,10 +15,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/control"
+	"github.com/pyrycode/pyrycode/internal/debugbundle"
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/identity"
 	"github.com/pyrycode/pyrycode/internal/pair"
 	"github.com/pyrycode/pyrycode/internal/relay"
+	"github.com/pyrycode/pyrycode/internal/sessions"
 )
 
 // --- #2127 wire-mint fixtures ---
@@ -80,6 +88,16 @@ func loadRegistry(t *testing.T, path string) *devices.Registry {
 func deviceNamed(reg *devices.Registry, name string) *devices.Device {
 	for _, d := range reg.List() {
 		if d.Name == name {
+			got := d
+			return &got
+		}
+	}
+	return nil
+}
+
+func deviceWithTokenHash(reg *devices.Registry, hash string) *devices.Device {
+	for _, d := range reg.List() {
+		if d.TokenHash == hash {
 			got := d
 			return &got
 		}
@@ -393,4 +411,304 @@ func TestMintDevice_CLICallerIsNotGrantorChecked(t *testing.T) {
 	if !stored.AllowRemotePermissions {
 		t.Error("the CLI's --allow-remote-permissions did not reach the record")
 	}
+}
+
+type localPairingTestResolver struct{}
+
+func (localPairingTestResolver) Lookup(_ sessions.SessionID) (control.Session, error) {
+	return nil, errors.New("not used")
+}
+
+func (localPairingTestResolver) ResolveID(_ string) (sessions.SessionID, error) {
+	return "", errors.New("not used")
+}
+
+func startLocalPairingControlServer(
+	t *testing.T,
+	provider func(deviceLabel string, allowRemotePermissions bool) (string, error),
+) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "pyry-local-pairing-")
+	if err != nil {
+		t.Fatalf("create short control tempdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	socketPath := filepath.Join(dir, "p.sock")
+	srv := control.NewServer(socketPath, localPairingTestResolver{}, nil, nil, nil, nil)
+	if provider != nil {
+		srv.SetPairingProvider(provider)
+	}
+	if err := srv.Listen(); err != nil {
+		t.Fatalf("listen on control socket: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("control Serve returned: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("control Serve did not return after cancel")
+		}
+	})
+	return socketPath
+}
+
+func assertDiagnosticBundleClean(t *testing.T, logs string, secrets ...string) {
+	t.Helper()
+	archive, _, err := debugbundle.Assemble(t.TempDir(), []string{logs})
+	if err != nil {
+		t.Fatalf("assemble diagnostic bundle: %v", err)
+	}
+	gz, err := gzip.NewReader(bytes.NewReader(archive))
+	if err != nil {
+		t.Fatalf("open diagnostic bundle gzip: %v", err)
+	}
+	defer gz.Close()
+
+	tr := tar.NewReader(gz)
+	for {
+		_, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read diagnostic bundle member: %v", err)
+		}
+		body, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatalf("read diagnostic bundle member body: %v", err)
+		}
+		for _, secret := range secrets {
+			if secret != "" && bytes.Contains(body, []byte(secret)) {
+				t.Error("diagnostic bundle contains protected credential material")
+			}
+		}
+	}
+}
+
+func TestLocalPairingProvider_BindsEachControlSocketToItsDaemonState(t *testing.T) {
+	t.Parallel()
+
+	type daemonFixture struct {
+		serverID              identity.ServerID
+		relayURL              string
+		pub                   [32]byte
+		devicesPath           string
+		label                 string
+		allowRemotePermission bool
+		logs                  bytes.Buffer
+		pairing               string
+	}
+
+	dir := t.TempDir()
+	fixtures := []*daemonFixture{
+		{
+			serverID:              identity.NewServerID(),
+			relayURL:              "wss://relay-one.invalid/live",
+			pub:                   [32]byte{1, 2, 3, 4},
+			devicesPath:           filepath.Join(dir, "one", "devices.json"),
+			label:                 "desk-one",
+			allowRemotePermission: false,
+		},
+		{
+			serverID:              identity.NewServerID(),
+			relayURL:              "wss://relay-two.invalid/live",
+			pub:                   [32]byte{9, 8, 7, 6},
+			devicesPath:           filepath.Join(dir, "two", "devices.json"),
+			label:                 "",
+			allowRemotePermission: true,
+		},
+	}
+
+	for _, fixture := range fixtures {
+		logger := slog.New(slog.NewTextHandler(&fixture.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		minter := newPairingMinterV2(
+			fixture.devicesPath,
+			fixture.relayURL,
+			fixture.serverID,
+			fixture.pub,
+			logger,
+		)
+		socketPath := startLocalPairingControlServer(t, minter.MintLocalPairing)
+		pairing, err := control.MintPairing(
+			context.Background(),
+			socketPath,
+			fixture.label,
+			fixture.allowRemotePermission,
+		)
+		if err != nil {
+			t.Fatalf("mint pairing through %s: %v", fixture.relayURL, err)
+		}
+		fixture.pairing = pairing
+	}
+
+	for i, fixture := range fixtures {
+		payload, err := pair.Decode(fixture.pairing)
+		if err != nil {
+			t.Fatalf("decode daemon %d pairing: %v", i, err)
+		}
+		if payload.Server != fixture.serverID {
+			t.Errorf("daemon %d server = %q, want %q", i, payload.Server, fixture.serverID)
+		}
+		if payload.Relay != fixture.relayURL {
+			t.Errorf("daemon %d relay = %q, want %q", i, payload.Relay, fixture.relayURL)
+		}
+		wantPub := base64.StdEncoding.EncodeToString(fixture.pub[:])
+		if payload.ServerStaticPubkey != wantPub {
+			t.Errorf("daemon %d static key = %q, want %q", i, payload.ServerStaticPubkey, wantPub)
+		}
+
+		wantHash := devices.HashToken(payload.Token)
+		wantLabel := fixture.label
+		if wantLabel == "" {
+			wantLabel = "device-" + wantHash[:8]
+		}
+		for registryIndex, registryFixture := range fixtures {
+			registry := loadRegistry(t, registryFixture.devicesPath)
+			if registryIndex == i {
+				stored := deviceNamed(registry, wantLabel)
+				if stored == nil {
+					t.Errorf("daemon %d registry has no device named %q", i, wantLabel)
+					continue
+				}
+				if stored.TokenHash != wantHash {
+					t.Errorf("daemon %d stored token hash does not match its returned token", i)
+				}
+				if stored.AllowRemotePermissions != fixture.allowRemotePermission {
+					t.Errorf("daemon %d permission = %v, want %v", i, stored.AllowRemotePermissions, fixture.allowRemotePermission)
+				}
+				if d := stored.RedeemBy.Sub(stored.PairedAt); d != devices.RedemptionWindow {
+					t.Errorf("daemon %d redemption window = %v, want %v", i, d, devices.RedemptionWindow)
+				}
+				continue
+			}
+			if deviceWithTokenHash(registry, wantHash) != nil {
+				t.Errorf("daemon %d token hash was written to daemon %d registry", i, registryIndex)
+			}
+		}
+
+		assertMintLogIsClean(t, &fixture.logs, payload.Token, wantHash, fixture.pairing)
+		if strings.Contains(fixture.logs.String(), wantLabel) {
+			t.Errorf("daemon %d local mint log contains the device label", i)
+		}
+		if n := strings.Count(fixture.logs.String(), "pairing.local_mint.ok"); n != 1 {
+			t.Errorf("daemon %d local success event count = %d, want 1", i, n)
+		}
+		assertDiagnosticBundleClean(t, fixture.logs.String(), payload.Token, wantHash, fixture.pairing, wantLabel)
+	}
+}
+
+func TestStartRelay_DisabledLeavesLocalPairingProviderUnconfigured(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cleanup, _, _, _, provider, err := startRelay(context.Background(), logger, relayWiring{})
+	if err != nil {
+		t.Fatalf("startRelay with no URL: %v", err)
+	}
+	defer cleanup()
+	if provider != nil {
+		t.Fatal("relay-disabled daemon returned a local pairing provider")
+	}
+
+	socketPath := startLocalPairingControlServer(t, provider)
+	got, err := control.MintPairing(context.Background(), socketPath, "offline-device", true)
+	if err == nil || err.Error() != "pairing.mint: provider not configured" {
+		t.Fatalf("MintPairing error = %v, want fixed not-configured error", err)
+	}
+	if got != "" {
+		t.Errorf("pairing = %q, want empty with relay disabled", got)
+	}
+}
+
+func assertLocalPairingControlFailure(
+	t *testing.T,
+	minter *pairingMinterV2,
+	devicesPath string,
+	logs *bytes.Buffer,
+	secrets ...string,
+) {
+	t.Helper()
+	const label = "local-failure-device-sentinel"
+	socketPath := startLocalPairingControlServer(t, minter.MintLocalPairing)
+	got, err := control.MintPairing(context.Background(), socketPath, label, true)
+	if err == nil || err.Error() != "pairing.mint: operation failed" {
+		t.Fatalf("MintPairing error = %v, want fixed operation error", err)
+	}
+	if got != "" {
+		t.Errorf("pairing = %q, want empty on provider failure", got)
+	}
+	if strings.Contains(err.Error(), devicesPath) {
+		t.Errorf("client error exposes registry path %q", devicesPath)
+	}
+	if strings.Contains(logs.String(), label) {
+		t.Error("local failure log contains the supplied device label")
+	}
+	if !strings.Contains(logs.String(), "pairing.local_mint.failed") {
+		t.Error("local failure produced no credential-free daemon diagnostic")
+	}
+	hash := devices.HashToken(pmTestPlainTok)
+	secrets = append(secrets, pmTestPlainTok, hash, label)
+	for _, secret := range secrets {
+		if secret != "" && strings.Contains(logs.String(), secret) {
+			t.Error("local failure log contains protected credential material")
+		}
+	}
+	assertDiagnosticBundleClean(t, logs.String(), secrets...)
+}
+
+func TestLocalPairingProvider_FailuresReturnNoCredential(t *testing.T) {
+	t.Run("lock timeout", func(t *testing.T) {
+		m, _, devicesPath, logs := newMintFixture(t, true)
+		assertUnchanged := freezeRegistry(t, devicesPath)
+		release := holdPairLock(t, devicesPath)
+
+		assertLocalPairingControlFailure(t, m, devicesPath, logs)
+		release()
+		assertUnchanged()
+	})
+
+	t.Run("registry load", func(t *testing.T) {
+		m, _, devicesPath, logs := newMintFixture(t, true)
+		const malformedCredential = "registry-load-token-hash-sentinel"
+		malformed := []byte(`{"devices":[{"token_hash":"` + malformedCredential + `"}`)
+		if err := os.WriteFile(devicesPath, malformed, 0o600); err != nil {
+			t.Fatalf("write malformed registry: %v", err)
+		}
+
+		assertLocalPairingControlFailure(t, m, devicesPath, logs, malformedCredential)
+		got, err := os.ReadFile(devicesPath)
+		if err != nil {
+			t.Fatalf("read malformed registry after failed mint: %v", err)
+		}
+		if !bytes.Equal(got, malformed) {
+			t.Error("failed registry load changed the malformed registry")
+		}
+	})
+
+	t.Run("registry save", func(t *testing.T) {
+		m, _, devicesPath, logs := newMintFixture(t, true)
+		assertUnchanged := freezeRegistry(t, devicesPath)
+		if err := os.WriteFile(devicesPath+".lock", nil, 0o600); err != nil {
+			t.Fatalf("seed lock sidecar: %v", err)
+		}
+		dir := filepath.Dir(devicesPath)
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatalf("make registry directory read-only: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+		assertLocalPairingControlFailure(t, m, devicesPath, logs)
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Fatalf("restore registry directory mode: %v", err)
+		}
+		assertUnchanged()
+	})
 }
