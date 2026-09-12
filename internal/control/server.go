@@ -295,6 +295,11 @@ type Server struct {
 	// panicking.
 	channelCreator func(cwd, name string) (string, error)
 
+	// pairingProvider services VerbPairingMint using daemon-authored runtime
+	// values. Its pairing and error are both sensitive and never logged or
+	// passed through as error detail by the control layer.
+	pairingProvider func(deviceLabel string, allowRemotePermissions bool) (string, error)
+
 	// streamingWG tracks streaming-handler goroutines (currently: the
 	// per-attach detach watcher). Serve waits on it before returning so a
 	// caller blocked on Serve can be sure no per-conn goroutines are left.
@@ -477,6 +482,17 @@ func (s *Server) SetFileAttacher(attach func(sessionID, path string) (string, er
 func (s *Server) SetChannelCreator(create func(cwd, name string) (string, error)) {
 	s.mu.Lock()
 	s.channelCreator = create
+	s.mu.Unlock()
+}
+
+// SetPairingProvider installs the dependency that services VerbPairingMint.
+// The provider owns every daemon-authored mint input and returns the existing
+// opaque pairing string. Safe to call from any goroutine; canonically called
+// once between NewServer and Serve. Passing nil clears an installed provider.
+// Provider errors are projected to fixed content-free text by the handler.
+func (s *Server) SetPairingProvider(provider func(deviceLabel string, allowRemotePermissions bool) (string, error)) {
+	s.mu.Lock()
+	s.pairingProvider = provider
 	s.mu.Unlock()
 }
 
@@ -711,6 +727,8 @@ func (s *Server) handle(conn net.Conn) {
 		s.handleAttachFile(conn, enc, req.AttachFile)
 	case VerbChannelNew:
 		s.handleChannelNew(conn, enc, req.Channel)
+	case VerbPairingMint:
+		s.handlePairingMint(conn, enc, req.Pairing)
 	default:
 		_ = enc.Encode(Response{Error: fmt.Sprintf("unknown verb: %q", req.Verb)})
 	}
@@ -1121,6 +1139,37 @@ func (s *Server) handleChannelNew(conn net.Conn, enc *json.Encoder, payload *Cha
 		return
 	}
 	_ = enc.Encode(Response{ChannelNew: &ChannelNewResult{ConversationID: id}})
+}
+
+// handlePairingMint invokes the optional provider exactly once for a valid
+// request. It releases Server.mu before the call so provider-owned registry
+// locking cannot block other control operations behind the server lock.
+//
+// Only a nil-error pairing reaches the response. Every failure is projected to
+// fixed content-free text, and this handler emits no logs. The request-read
+// deadline set in handle stays finite, and a fresh deadline bounds the write.
+func (s *Server) handlePairingMint(conn net.Conn, enc *json.Encoder, payload *PairingPayload) {
+	s.mu.Lock()
+	provider := s.pairingProvider
+	s.mu.Unlock()
+
+	_ = conn.SetWriteDeadline(time.Now().Add(DialTimeout))
+
+	if provider == nil {
+		_ = enc.Encode(Response{Error: "pairing.mint: provider not configured"})
+		return
+	}
+	if payload == nil {
+		_ = enc.Encode(Response{Error: "pairing.mint: operation failed"})
+		return
+	}
+
+	pairing, err := provider(payload.DeviceLabel, payload.AllowRemotePermissions)
+	if err != nil {
+		_ = enc.Encode(Response{Error: "pairing.mint: operation failed"})
+		return
+	}
+	_ = enc.Encode(Response{Pairing: &PairingResult{Pairing: pairing}})
 }
 
 // handleApprove serves a VerbMCPApprove request: register the forwarded
