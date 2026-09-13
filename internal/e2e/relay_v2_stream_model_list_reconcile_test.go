@@ -14,6 +14,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -167,22 +168,35 @@ func driveLateConnectModelList(t *testing.T) lateModelListObservation {
 	t.Helper()
 
 	home := shortHome(t)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
 
 	// TWO devices, both paired BEFORE the daemon starts — the daemon loads its
 	// registries once at startup, seedBoundConversation's stated reason for its own
-	// ordering. TestPairRevoke_E2E's "removes one of two" subtest is the precedent that
-	// two pair runs into one home yield two usable devices.
-	rA := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
-	if rA.ExitCode != 0 {
-		t.Fatalf("pyry pair phone-a exit=%d\nstdout:\n%s\nstderr:\n%s", rA.ExitCode, rA.Stdout, rA.Stderr)
+	// ordering. paireddevice.Setup's repeat contract establishes that two setup calls
+	// into one home yield two usable devices.
+	payloadA, err := paireddevice.Setup(paireddevice.Config{
+		Home:                   home,
+		InstanceName:           "test",
+		Relay:                  relayURL,
+		DeviceName:             "phone-a",
+		AllowRemotePermissions: false,
+	})
+	if err != nil {
+		t.Fatalf("setup paired device phone-a: %v", err)
 	}
-	rB := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-b")
-	if rB.ExitCode != 0 {
-		t.Fatalf("pyry pair phone-b exit=%d\nstdout:\n%s\nstderr:\n%s", rB.ExitCode, rB.Stdout, rB.Stderr)
+	payloadB, err := paireddevice.Setup(paireddevice.Config{
+		Home:                   home,
+		InstanceName:           "test",
+		Relay:                  relayURL,
+		DeviceName:             "phone-b",
+		AllowRemotePermissions: false,
+	})
+	if err != nil {
+		t.Fatalf("setup paired device phone-b: %v", err)
 	}
-	payloadA := decodePairPayload(t, rA.Stdout)
-	payloadB := decodePairPayload(t, rB.Stdout)
-	// One server static keypair serves both devices — pyry mints a token per pair run,
+	// One server static keypair serves both devices — the fixture mints a token per setup,
 	// but the static key is the daemon's and is the same in both payloads.
 	pubKey, err := base64.StdEncoding.DecodeString(payloadA.ServerStaticPubkey)
 	if err != nil {
@@ -194,10 +208,7 @@ func driveLateConnectModelList(t *testing.T) lateModelListObservation {
 	// TestRelayV2_StreamInterruptStopsRunningTurn's reasoning, inherited. No extra env
 	// either: fakeclaude's runStreamJSON answers the initialize control request in both
 	// of its modes and under no rider, so this spec adds no harness scaffolding at all.
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
-	h := StartStreamInteractiveWithRelay(t, home, lateModelListBootstrapUUID, fr.URL()+"/v2/server")
+	h := StartStreamInteractiveWithRelay(t, home, lateModelListBootstrapUUID, relayURL)
 	t.Cleanup(func() { h.Stop(t) })
 
 	serverID := readPersistedServerID(t, home)

@@ -15,6 +15,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -114,12 +115,20 @@ func driveModelListRespawn(t *testing.T) modelListObservation {
 	t.Helper()
 
 	home := shortHome(t)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
 
-	rA := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
-	if rA.ExitCode != 0 {
-		t.Fatalf("pyry pair phone-a exit=%d\nstdout:\n%s\nstderr:\n%s", rA.ExitCode, rA.Stdout, rA.Stderr)
+	payloadA, err := paireddevice.Setup(paireddevice.Config{
+		Home:                   home,
+		InstanceName:           "test",
+		Relay:                  relayURL,
+		DeviceName:             "phone-a",
+		AllowRemotePermissions: false,
+	})
+	if err != nil {
+		t.Fatalf("setup paired device: %v", err)
 	}
-	payloadA := decodePairPayload(t, rA.Stdout)
 	pubKey, err := base64.StdEncoding.DecodeString(payloadA.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
@@ -129,17 +138,14 @@ func driveModelListRespawn(t *testing.T) modelListObservation {
 	// UUID MUST equal the one handed to StartStreamInteractiveWithRelay below: a
 	// mismatch between the two seeds drops every event at the gate and hangs the
 	// drain for the full deadline, which presents as an unexplained timeout rather
-	// than a clean seed-time failure. The call also has to sit BETWEEN the pair run
+	// than a clean seed-time failure. The call also has to sit BETWEEN paired-device setup
 	// and the daemon start — seedBoundConversation writes into <home>/.pyry/test/
 	// without creating it, and the daemon loads conversations.json once at startup.
 	seedBoundConversation(t, home, modelListConvID, modelListInitialUUID)
 
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
 	// No extra env: fakeclaude answers the initialize control_request in both of its
 	// modes and under no rider, so this test adds no harness scaffolding at all.
-	h := StartStreamInteractiveWithRelay(t, home, modelListInitialUUID, fr.URL()+"/v2/server")
+	h := StartStreamInteractiveWithRelay(t, home, modelListInitialUUID, relayURL)
 	t.Cleanup(func() { h.Stop(t) })
 
 	serverID := readPersistedServerID(t, home)
