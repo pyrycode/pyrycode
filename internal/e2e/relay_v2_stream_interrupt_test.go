@@ -14,6 +14,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -76,13 +77,21 @@ func TestRelayV2_StreamInterruptStopsRunningTurn(t *testing.T) {
 	)
 
 	home := shortHome(t)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
 
 	// Pair one interactive device.
-	rA := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
-	if rA.ExitCode != 0 {
-		t.Fatalf("pyry pair phone-a exit=%d\nstdout:\n%s\nstderr:\n%s", rA.ExitCode, rA.Stdout, rA.Stderr)
+	payloadA, err := paireddevice.Setup(paireddevice.Config{
+		Home:                   home,
+		InstanceName:           "test",
+		Relay:                  relayURL,
+		DeviceName:             "phone-a",
+		AllowRemotePermissions: false,
+	})
+	if err != nil {
+		t.Fatalf("setup paired device: %v", err)
 	}
-	payloadA := decodePairPayload(t, rA.Stdout)
 	pubKey, err := base64.StdEncoding.DecodeString(payloadA.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
@@ -93,10 +102,7 @@ func TestRelayV2_StreamInterruptStopsRunningTurn(t *testing.T) {
 	// env (PYRY_FAKE_CLAUDE_STREAM_INTERRUPT) distinguishes this from #1141's send test —
 	// the daemon runs under interactive_runner:"stream-json", and both the bootstrap and
 	// the minted child inherit the interrupt mode via the daemon's process env.
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
-	h := StartStreamInteractiveWithRelay(t, home, initialUUID, fr.URL()+"/v2/server",
+	h := StartStreamInteractiveWithRelay(t, home, initialUUID, relayURL,
 		"PYRY_FAKE_CLAUDE_STREAM_INTERRUPT=1")
 	t.Cleanup(func() { h.Stop(t) })
 
@@ -395,12 +401,20 @@ func TestRelayV2_StreamInterruptNamedConversationStopsThatOne(t *testing.T) {
 	elapsed := func() string { return time.Since(testStart).Round(time.Millisecond).String() }
 
 	home := shortHome(t)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
 
-	rA := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
-	if rA.ExitCode != 0 {
-		t.Fatalf("pyry pair phone-a exit=%d\nstdout:\n%s\nstderr:\n%s", rA.ExitCode, rA.Stdout, rA.Stderr)
+	payloadA, err := paireddevice.Setup(paireddevice.Config{
+		Home:                   home,
+		InstanceName:           "test",
+		Relay:                  relayURL,
+		DeviceName:             "phone-a",
+		AllowRemotePermissions: false,
+	})
+	if err != nil {
+		t.Fatalf("setup paired device: %v", err)
 	}
-	payloadA := decodePairPayload(t, rA.Stdout)
 	pubKey, err := base64.StdEncoding.DecodeString(payloadA.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
@@ -412,16 +426,13 @@ func TestRelayV2_StreamInterruptNamedConversationStopsThatOne(t *testing.T) {
 	// cursor must end up on.
 	seedBoundConversation(t, home, convA, initialUUID)
 
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
 	regPath := filepath.Join(home, ".pyry", "test", "sessions.json")
 
 	// PYRY_FAKE_CLAUDE_STREAM_INTERRUPT puts BOTH children in interrupt mode (it
 	// reaches them through the daemon's process env), which is what lets two turns
 	// be in flight at once: the fake answers a user turn with an assistant chunk and
 	// no result, so a turn ends only when an interrupt arrives.
-	h := StartStreamInteractiveWithRelay(t, home, initialUUID, fr.URL()+"/v2/server",
+	h := StartStreamInteractiveWithRelay(t, home, initialUUID, relayURL,
 		"PYRY_FAKE_CLAUDE_STREAM_INTERRUPT=1")
 	t.Cleanup(func() { h.Stop(t) })
 

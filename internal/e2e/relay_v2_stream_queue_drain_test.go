@@ -19,6 +19,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -98,13 +99,21 @@ func TestRelayV2_StreamMidTurnHoldDropAndDrainInOrder(t *testing.T) {
 	)
 
 	home := shortHome(t)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
 
 	// Pair one interactive device.
-	r := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
-	if r.ExitCode != 0 {
-		t.Fatalf("pyry pair exit=%d\nstdout:\n%s\nstderr:\n%s", r.ExitCode, r.Stdout, r.Stderr)
+	payload, err := paireddevice.Setup(paireddevice.Config{
+		Home:                   home,
+		InstanceName:           "test",
+		Relay:                  relayURL,
+		DeviceName:             "phone-a",
+		AllowRemotePermissions: false,
+	})
+	if err != nil {
+		t.Fatalf("setup paired device: %v", err)
 	}
-	payload := decodePairPayload(t, r.Stdout)
 	pubKey, err := base64.StdEncoding.DecodeString(payload.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
@@ -116,16 +125,13 @@ func TestRelayV2_StreamMidTurnHoldDropAndDrainInOrder(t *testing.T) {
 	// must exist BEFORE the daemon starts.
 	seedBoundConversation(t, home, knownConvID, initialUUID)
 
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
 	// The child holds at startup until holdPath appears (not created yet), so the
 	// first send's turn is a long one and the rest are held in the daemon's backlog;
 	// dropping the trigger lets the child start consuming. No SESSIONS_DIR /
 	// STDIN_LOG env — stream mode opens no transcript and this test's oracles are the
 	// queue_state and assistant_delta streams, not a stdin log.
 	holdPath := filepath.Join(home, "stream-hold.trig")
-	h := StartStreamInteractiveWithRelay(t, home, initialUUID, fr.URL()+"/v2/server",
+	h := StartStreamInteractiveWithRelay(t, home, initialUUID, relayURL,
 		"PYRY_FAKE_CLAUDE_STREAM_HOLD="+holdPath)
 	t.Cleanup(func() { h.Stop(t) })
 

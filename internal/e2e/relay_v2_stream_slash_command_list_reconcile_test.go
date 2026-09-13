@@ -13,6 +13,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -150,23 +151,30 @@ func driveLateConnectSlashCommandList(t *testing.T) lateSlashCommandListObservat
 	t.Helper()
 
 	home := shortHome(t)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
 
 	// THREE devices, all paired BEFORE the daemon starts — the daemon loads its
 	// registries once at startup, seedBoundConversation's stated reason for its own
-	// ordering. TestPairRevoke_E2E's "removes one of two" subtest is the precedent that
-	// repeated pair runs into one home yield independently usable devices; the pairing
-	// path caps nothing.
+	// ordering. paireddevice.Setup's repeat contract establishes that repeated setup
+	// calls into one home yield independently usable devices.
 	names := []string{"phone-empty", "phone-a", "phone-b"}
 	tokens := make([]string, 0, len(names))
 	var staticPub string
 	for _, name := range names {
-		r := RunBareIn(t, home, "pair", "-pyry-name=test", "--name="+name)
-		if r.ExitCode != 0 {
-			t.Fatalf("pyry pair %s exit=%d\nstdout:\n%s\nstderr:\n%s", name, r.ExitCode, r.Stdout, r.Stderr)
+		p, err := paireddevice.Setup(paireddevice.Config{
+			Home:                   home,
+			InstanceName:           "test",
+			Relay:                  relayURL,
+			DeviceName:             name,
+			AllowRemotePermissions: false,
+		})
+		if err != nil {
+			t.Fatalf("setup paired device %s: %v", name, err)
 		}
-		p := decodePairPayload(t, r.Stdout)
 		tokens = append(tokens, p.Token)
-		// pyry mints a token per pair run, but the static key is the DAEMON's and is
+		// The fixture mints a token per setup, but the static key is the DAEMON's and is
 		// identical in all three payloads — so the last write wins harmlessly.
 		staticPub = p.ServerStaticPubkey
 	}
@@ -184,10 +192,7 @@ func driveLateConnectSlashCommandList(t *testing.T) lateSlashCommandListObservat
 	// retainedSlashCommandLists' double lookup exists to prevent. No extra env either:
 	// fakeclaude's runStreamJSON answers the initialize control request in both of its
 	// modes and under no rider, so this spec adds no harness scaffolding at all.
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
-	h := StartStreamInteractiveWithRelay(t, home, lateSlashCommandListBootstrapUUID, fr.URL()+"/v2/server")
+	h := StartStreamInteractiveWithRelay(t, home, lateSlashCommandListBootstrapUUID, relayURL)
 	t.Cleanup(func() { h.Stop(t) })
 
 	serverID := readPersistedServerID(t, home)

@@ -18,6 +18,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
@@ -249,16 +250,24 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			home := shortHome(t)
+			fr := fakerelay.New(relayTestLogger())
+			t.Cleanup(func() { _ = fr.Close() })
+			relayURL := fr.URL() + "/v2/server"
 
-			// Pair the phone WITH --allow-remote-permissions: ResolveAnswer gates on
-			// dev.MayAnswerRemotePermission() (pairing defaults it OFF). Without the flag
+			// Pair the phone WITH remote permissions: ResolveAnswer gates on
+			// dev.MayAnswerRemotePermission() (pairing defaults it OFF). Without the setting
 			// the allow/deny answer denies at the device gate and the case would observe
-			// approve-deny — so the flag is load-bearing for the answered cases.
-			r := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a", "--allow-remote-permissions")
-			if r.ExitCode != 0 {
-				t.Fatalf("pyry pair exit=%d\nstdout:\n%s\nstderr:\n%s", r.ExitCode, r.Stdout, r.Stderr)
+			// approve-deny — so the setting is load-bearing for the answered cases.
+			payload, err := paireddevice.Setup(paireddevice.Config{
+				Home:                   home,
+				InstanceName:           "test",
+				Relay:                  relayURL,
+				DeviceName:             "phone-a",
+				AllowRemotePermissions: true,
+			})
+			if err != nil {
+				t.Fatalf("setup paired device: %v", err)
 			}
-			payload := decodePairPayload(t, r.Stdout)
 			pubKey, err := base64.StdEncoding.DecodeString(payload.ServerStaticPubkey)
 			if err != nil {
 				t.Fatalf("decode server static pubkey: %v", err)
@@ -269,9 +278,6 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			// knownConvID), and the drain gate's activeSession() equals the sink tag. Must
 			// exist before the daemon loads conversations.json at startup.
 			seedBoundConversation(t, home, knownConvID, initialUUID)
-
-			fr := fakerelay.New(relayTestLogger())
-			t.Cleanup(func() { _ = fr.Close() })
 
 			// The socket path rides in as a FILE path (known pre-spawn); the daemon's
 			// random control socket is unknown until spawn, so the fake reads it lazily
@@ -302,9 +308,9 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 				if tc.childExit {
 					env = append(env, "PYRY_FAKE_CLAUDE_STREAM_EXIT_AFTER_CAN_USE_TOOL=1")
 				}
-				h = StartStreamInteractiveWithRelayStdio(t, home, initialUUID, fr.URL()+"/v2/server", env...)
+				h = StartStreamInteractiveWithRelayStdio(t, home, initialUUID, relayURL, env...)
 			} else {
-				h = StartStreamInteractiveWithRelay(t, home, initialUUID, fr.URL()+"/v2/server",
+				h = StartStreamInteractiveWithRelay(t, home, initialUUID, relayURL,
 					"PYRY_FAKE_CLAUDE_STREAM_APPROVE=1",
 					"PYRY_FAKE_CLAUDE_APPROVE_SOCKET_FILE="+socketFile,
 					"PYRY_APPROVAL_TIMEOUT="+tc.approvalTimeout,
