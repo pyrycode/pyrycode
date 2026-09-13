@@ -13,6 +13,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -182,22 +183,29 @@ func driveLateConnectBackgroundTaskRoster(t *testing.T) lateRosterObservation {
 	t.Helper()
 
 	home := shortHome(t)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
 
 	// THREE devices, all paired BEFORE the daemon starts — the daemon loads its
-	// registries once at startup. Repeated pair runs into one home yield independently
-	// usable devices (TestPairRevoke_E2E's "removes one of two" subtest is the
-	// precedent); the pairing path caps nothing.
+	// registries once at startup. paireddevice.Setup's repeat contract establishes
+	// that repeated setup calls into one home yield independently usable devices.
 	names := []string{"phone-empty", "phone-a", "phone-b"}
 	tokens := make([]string, 0, len(names))
 	var staticPub string
 	for _, name := range names {
-		r := RunBareIn(t, home, "pair", "-pyry-name=test", "--name="+name)
-		if r.ExitCode != 0 {
-			t.Fatalf("pyry pair %s exit=%d\nstdout:\n%s\nstderr:\n%s", name, r.ExitCode, r.Stdout, r.Stderr)
+		p, err := paireddevice.Setup(paireddevice.Config{
+			Home:                   home,
+			InstanceName:           "test",
+			Relay:                  relayURL,
+			DeviceName:             name,
+			AllowRemotePermissions: false,
+		})
+		if err != nil {
+			t.Fatalf("setup paired device %s: %v", name, err)
 		}
-		p := decodePairPayload(t, r.Stdout)
 		tokens = append(tokens, p.Token)
-		// pyry mints a token per pair run, but the static key is the DAEMON's and is
+		// The fixture mints a token per setup, but the static key is the DAEMON's and is
 		// identical in all three payloads — so the last write wins harmlessly. The key
 		// is public; the tokens are not, and nothing below ever prints one.
 		staticPub = p.ServerStaticPubkey
@@ -212,15 +220,12 @@ func driveLateConnectBackgroundTaskRoster(t *testing.T) lateRosterObservation {
 	// seeded row would bind a conversation to the BOOTSTRAP session, which would both
 	// make the empty-registry window vacuous and point the enumeration at a child that
 	// never runs a turn and so never reports a roster.
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
 	// The ONE piece of harness scaffolding this spec adds, and the part that does not
 	// transfer from the slash-command twin: that frame rides the initialize control
 	// reply, which fakeclaude answers under every rider, while a roster has a different
 	// source entirely — claude's mid-turn system/background_tasks_changed line, which
 	// nothing in the fake produced before #2080.
-	h := StartStreamInteractiveWithRelay(t, home, lateRosterBootstrapUUID, fr.URL()+"/v2/server",
+	h := StartStreamInteractiveWithRelay(t, home, lateRosterBootstrapUUID, relayURL,
 		fmt.Sprintf("%s=%d", rosterRiderEnv, rosterRiderTasks))
 	t.Cleanup(func() { h.Stop(t) })
 
