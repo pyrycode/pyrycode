@@ -106,6 +106,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 )
 
 // Fixed identifiers for the seeded state, distinct from every sibling in this
@@ -135,11 +136,20 @@ func TestInteractiveStreamNoUnrecognizedOnToolTurn(t *testing.T) {
 	// has no such parser and no such diagnostic.
 	writeStreamInteractiveConfig(t, home)
 
-	exit, stdout, stderr := runPyry(t, "pair", "-pyry-name=test", "--name=phone-a")
-	if exit != 0 {
-		t.Fatalf("pyry pair exit=%d\nstdout:\n%s\nstderr:\n%s", exit, stdout, stderr)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
+
+	payload, err := paireddevice.Setup(paireddevice.Config{
+		Home:                   home,
+		InstanceName:           "test",
+		Relay:                  relayURL,
+		DeviceName:             "phone-a",
+		AllowRemotePermissions: false,
+	})
+	if err != nil {
+		t.Fatalf("paireddevice.Setup: %v", err)
 	}
-	payload := decodePairPayload(t, stdout)
 	pubKey, err := base64.StdEncoding.DecodeString(payload.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
@@ -148,10 +158,7 @@ func TestInteractiveStreamNoUnrecognizedOnToolTurn(t *testing.T) {
 	seedBootstrapRegistry(t, home, unrecognizedBootstrapUUID)
 	seedBoundConversation(t, home, unrecognizedConvID, unrecognizedBootstrapUUID, workdir)
 
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
-	d := spawnBootstrapDaemon(t, home, workdir, claudeBin, fr.URL()+"/v2/server")
+	d := spawnBootstrapDaemon(t, home, workdir, claudeBin, relayURL)
 	t.Cleanup(func() { d.stop(t) })
 
 	serverID := readPersistedServerID(t, home)

@@ -117,6 +117,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -167,14 +168,20 @@ func TestInteractiveStreamModelAnnouncedFrame(t *testing.T) {
 	// multi-minute drain timeout on a live run.
 	writeStreamInteractiveConfig(t, home)
 
-	// Pair a device BEFORE the daemon starts (mints the bearer token + the
-	// responder static pubkey the phone pins; writes server-id + devices registry
-	// the daemon loads at startup).
-	exit, stdout, stderr := runPyry(t, "pair", "-pyry-name=test", "--name=phone-a")
-	if exit != 0 {
-		t.Fatalf("#1634: pyry pair exit=%d\nstdout:\n%s\nstderr:\n%s", exit, stdout, stderr)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
+
+	payload, err := paireddevice.Setup(paireddevice.Config{
+		Home:                   home,
+		InstanceName:           "test",
+		Relay:                  relayURL,
+		DeviceName:             "phone-a",
+		AllowRemotePermissions: false,
+	})
+	if err != nil {
+		t.Fatalf("#1634: paireddevice.Setup: %v", err)
 	}
-	payload := decodePairPayload(t, stdout)
 	pubKey, err := base64.StdEncoding.DecodeString(payload.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("#1634: decode server static pubkey: %v", err)
@@ -185,10 +192,7 @@ func TestInteractiveStreamModelAnnouncedFrame(t *testing.T) {
 	seedBootstrapRegistry(t, home, announcedBootstrapUUID)
 	seedBoundConversation(t, home, announcedConvID, announcedBootstrapUUID, workdir)
 
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
-	d := spawnBootstrapDaemonVerbose(t, home, workdir, claudeBin, fr.URL()+"/v2/server")
+	d := spawnBootstrapDaemonVerbose(t, home, workdir, claudeBin, relayURL)
 	t.Cleanup(func() { d.stop(t) })
 
 	serverID := readPersistedServerID(t, home)

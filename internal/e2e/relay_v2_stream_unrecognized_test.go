@@ -13,6 +13,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -62,11 +63,18 @@ func TestRelayV2_StreamUnrecognizedMessageReachesPhone(t *testing.T) {
 
 	home := shortHome(t)
 
-	rA := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
-	if rA.ExitCode != 0 {
-		t.Fatalf("pyry pair phone-a exit=%d\nstdout:\n%s\nstderr:\n%s", rA.ExitCode, rA.Stdout, rA.Stderr)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
+	payloadA, err := paireddevice.Setup(paireddevice.Config{
+		Home:         home,
+		InstanceName: "test",
+		Relay:        relayURL,
+		DeviceName:   "phone-a",
+	})
+	if err != nil {
+		t.Fatalf("setup phone-a: %v", err)
 	}
-	payloadA := decodePairPayload(t, rA.Stdout)
 	pubKey, err := base64.StdEncoding.DecodeString(payloadA.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
@@ -76,12 +84,9 @@ func TestRelayV2_StreamUnrecognizedMessageReachesPhone(t *testing.T) {
 	// mismatched UUID drops every event at the gate and hangs the test.
 	seedBoundConversation(t, home, knownConvID, initialUUID)
 
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
 	// The bogus rider is the ONLY env that distinguishes this from the plain send
 	// spec. Unset, fakeclaude is byte-identical to its prior behaviour.
-	h := StartStreamInteractiveWithRelay(t, home, initialUUID, fr.URL()+"/v2/server",
+	h := StartStreamInteractiveWithRelay(t, home, initialUUID, relayURL,
 		"PYRY_FAKE_CLAUDE_STREAM_BOGUS=1")
 	t.Cleanup(func() { h.Stop(t) })
 

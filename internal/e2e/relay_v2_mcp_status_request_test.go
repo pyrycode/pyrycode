@@ -12,6 +12,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -96,25 +97,34 @@ func drainMCPQueryTurn(t *testing.T, phone mcpQueryPhone, text string) (statuses
 
 func TestRelayV2_MCPStatusRequestQueriesLiveChildRequesterOnly(t *testing.T) {
 	home := shortHome(t)
-	pairA := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
-	if pairA.ExitCode != 0 {
-		t.Fatalf("pair phone-a exit=%d\nstdout:\n%s\nstderr:\n%s", pairA.ExitCode, pairA.Stdout, pairA.Stderr)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
+	payloadA, err := paireddevice.Setup(paireddevice.Config{
+		Home:         home,
+		InstanceName: "test",
+		Relay:        relayURL,
+		DeviceName:   "phone-a",
+	})
+	if err != nil {
+		t.Fatalf("setup phone-a: %v", err)
 	}
-	pairB := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-b")
-	if pairB.ExitCode != 0 {
-		t.Fatalf("pair phone-b exit=%d\nstdout:\n%s\nstderr:\n%s", pairB.ExitCode, pairB.Stdout, pairB.Stderr)
+	payloadB, err := paireddevice.Setup(paireddevice.Config{
+		Home:         home,
+		InstanceName: "test",
+		Relay:        relayURL,
+		DeviceName:   "phone-b",
+	})
+	if err != nil {
+		t.Fatalf("setup phone-b: %v", err)
 	}
-	payloadA := decodePairPayload(t, pairA.Stdout)
-	payloadB := decodePairPayload(t, pairB.Stdout)
 	pubKey, err := base64.StdEncoding.DecodeString(payloadA.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
 	}
 
 	seedBoundConversation(t, home, mcpQueryConvID, mcpQueryInitialUUID)
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-	h := StartStreamInteractiveWithRelay(t, home, mcpQueryInitialUUID, fr.URL()+"/v2/server",
+	h := StartStreamInteractiveWithRelay(t, home, mcpQueryInitialUUID, relayURL,
 		"PYRY_FAKE_CLAUDE_MCP_STATUS=1")
 	t.Cleanup(func() { h.Stop(t) })
 	serverID := readPersistedServerID(t, home)

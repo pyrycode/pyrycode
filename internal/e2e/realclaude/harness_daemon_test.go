@@ -48,7 +48,6 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/noise"
-	"github.com/pyrycode/pyrycode/internal/pair"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -485,22 +484,6 @@ func seedBoundConversation(t *testing.T, home, convID, boundSessionID, cwd strin
 	if err := os.WriteFile(convPath, convJSON, 0o600); err != nil {
 		t.Fatalf("seed conversations.json: %v", err)
 	}
-}
-
-// decodePairPayload scans pair's stdout for the encoded payload line.
-func decodePairPayload(t *testing.T, stdout []byte) pair.Payload {
-	t.Helper()
-	for _, line := range strings.Split(string(stdout), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if p, err := pair.Decode(line); err == nil {
-			return p
-		}
-	}
-	t.Fatalf("no decodable pair payload found in stdout:\n%s", stdout)
-	return pair.Payload{}
 }
 
 // waitBinaryHello blocks until the binary registers with the relay for serverID.
