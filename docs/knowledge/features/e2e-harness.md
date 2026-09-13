@@ -80,7 +80,8 @@ explicitly. The registry still lands at `<HomeDir>/.pyry/test/` via HOME
 redirection — no new `-pyry-registry` flag was needed.
 
 `PYRY_NAME` is stripped from the child's env so the operator's shell alias can't
-leak into a test daemon.
+leak into a test daemon. Helpers that accept `extraEnv` append it after this
+scrub, allowing a test whose subject is `PYRY_NAME` to opt in deliberately.
 
 Spawn args:
 
@@ -213,20 +214,26 @@ The helper is the *only* harness API added in #52. (`Harness.Stop()` mid-test
 was deferred at the time and shipped later in #106 — see the Restart Pattern
 section above. Typed `Status()` / `Logs()` wrappers remain declined.)
 
-## HOME-Isolated Bare Driver (`RunBareIn`)
+## HOME-Isolated Bare Drivers (`RunBareIn`, `RunBareInWithEnv`)
 
-`RunBareIn(t, home, args...)` (added in #213) is `RunBare` with one
-line spliced in: `cmd.Env = childEnv(home)`. The pinned `HOME` lets a
-daemon-free verb read its `~`-relative state from a `t.TempDir()`
-without disturbing the test process's environment. `pyry pair` is the
-first consumer — its target paths (`~/.pyry/config.json`,
-`~/.pyry/<name>/devices.json`, `~/.pyry/<name>/server-id`) all resolve
-through `os.UserHomeDir()`, and the e2e test asserts the post-run
-contents of `<home>/.pyry/pyry/devices.json`. Default instance name
-`"pyry"` is used because no `-pyry-name` flag is passed and `childEnv`
-does not set `PYRY_NAME`. See
-[features/pyry-pair-command.md](pyry-pair-command.md) for the
-verb-side contract.
+`RunBareIn(t, home, args...)` pins `HOME` through `childEnv(home)` so a
+one-shot binary invocation can read or discover `~`-relative state inside a
+`t.TempDir()` without disturbing the test process. It does not inject a socket
+flag or spawn a daemon. Since #2393 it delegates to
+`RunBareInWithEnv(t, home, nil, args...)`, keeping one execution and capture
+implementation.
+
+`RunBareInWithEnv(t, home, extraEnv, args...)` appends explicit environment
+entries after `childEnv` has replaced `HOME` and stripped `PYRY_NAME`. Reserve it
+for behavior whose contract is specifically about an environment variable. The
+pairing incident regression passes `PYRY_NAME=pyry-agent` here to prove that bare
+issuance still selects the sole running `pyry` service.
+
+The ordering is load-bearing: `RunBareIn`'s scrub makes ordinary tests immune to
+the operator's shell, but it also means a selector test that relies on
+`t.Setenv("PYRY_NAME", ...)` alone can pass while exercising no environment
+selector at all. Such tests must use the explicit override helper. See
+[Pair command](pyry-pair-command.md).
 
 ## CLI Verb Coverage Tests (`cli_verbs_test.go`)
 
@@ -533,7 +540,8 @@ push/PR yet — see the out-of-scope note above. Details: [codebase/919.md](../c
 This overview is split across the documents below. Each is kept small so
 search can reach it.
 
-- [Public API](e2e-harness-public-api.md) — Twelve exported names — `Harness`, `Start`, `StartIn`, `StartInWithEnv`, `StartRotation`, `StartRotationWithRelay`,…
+- [Public API](e2e-harness-public-api.md) — Fourteen exported names, including
+  `RunBareInWithEnv` for explicit environment-under-test invocations.
 - [CLI Driver (`Harness.Run`)](e2e-harness-cli-driver-harness-run.md) — `Run(t, verb, args...)` invokes the cached pyry binary with `<verb> -pyry-socket=<h.SocketPath> <args...>`, waits for it to exit (10s…
 - [Restart Pattern (`StartIn` + `Stop`)](e2e-harness-restart-pattern-startin-stop.md) — `StartIn` + `Stop` together let a test prove on-disk invariants survive daemon restart: pre-populate `HOME` → `Start` → `Stop` → second…
 - [Failed-Start Pattern (`StartExpectingFailureIn`)](e2e-harness-failed-start-pattern-startexpectingfailurein.md) — `StartExpectingFailureIn(t, home) RunResult` is the failure-side sibling of `StartIn`. 
