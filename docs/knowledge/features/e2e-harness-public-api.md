@@ -1,9 +1,9 @@
 # Public API
 
-Twelve exported names — `Harness`, `Start`, `StartIn`, `StartInWithEnv`,
+Fourteen exported names — `Harness`, `Start`, `StartIn`, `StartInWithEnv`,
 `StartRotation`, `StartRotationWithRelay`, `StartStreamInteractiveWithRelay`,
 `StartExpectingFailureIn`, `(*Harness).Stop`, `RunResult`, `(*Harness).Run`,
-`RunBare`, `RunBareIn`, plus the struct fields:
+`RunBare`, `RunBareIn`, `RunBareInWithEnv`, plus the struct fields:
 
 ```go
 type Harness struct {
@@ -103,12 +103,16 @@ func (h *Harness) Run(t *testing.T, verb string, args ...string) RunResult
 // machinery as Harness.Run.
 func RunBare(t *testing.T, args ...string) RunResult
 
-// RunBareIn behaves like RunBare but pins HOME to the supplied directory
-// via cmd.Env = childEnv(home), so verbs that read ~-relative state (e.g.
-// `pair`) can be driven against a t.TempDir() in isolation. Like RunBare
-// it does NOT auto-inject -pyry-socket — there is no daemon spawned.
-// Added in #213 for TestPair_E2E.
+// RunBareIn behaves like RunBare but pins HOME to the supplied directory.
+// It does not auto-inject -pyry-socket or itself spawn a daemon. It delegates
+// to RunBareInWithEnv with no explicit environment overrides.
 func RunBareIn(t *testing.T, home string, args ...string) RunResult
+
+// RunBareInWithEnv behaves like RunBareIn and appends extraEnv after
+// childEnv(home) has replaced HOME and stripped PYRY_NAME. Use it when the
+// environment variable is itself under test; ordinary callers should use
+// RunBareIn so shell aliases cannot leak into the child.
+func RunBareInWithEnv(t *testing.T, home string, extraEnv []string, args ...string) RunResult
 ```
 
 `Start(t) *Harness` is now a one-line `return StartIn(t, t.TempDir())` —

@@ -886,12 +886,20 @@ func RunBare(t *testing.T, args ...string) RunResult {
 // -pyry-socket — there is no daemon spawned.
 func RunBareIn(t *testing.T, home string, args ...string) RunResult {
 	t.Helper()
+	return RunBareInWithEnv(t, home, nil, args...)
+}
+
+// RunBareInWithEnv behaves like RunBareIn and appends the supplied environment
+// entries after childEnv's HOME isolation and PYRY_NAME scrub. It is reserved
+// for tests whose contract is specifically about an environment variable.
+func RunBareInWithEnv(t *testing.T, home string, extraEnv []string, args ...string) RunResult {
+	t.Helper()
 	bin := ensurePyryBuilt(t)
 	ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, bin, args...)
-	cmd.Env = childEnv(home)
+	cmd.Env = append(childEnv(home), extraEnv...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

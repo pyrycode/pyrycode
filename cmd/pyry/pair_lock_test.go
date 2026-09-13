@@ -14,12 +14,8 @@ import (
 	"github.com/pyrycode/pyrycode/internal/devices"
 )
 
-// mintBlockGrace is how long an interleaving test waits before concluding that
-// the verb under test is genuinely parked on the devices lock. It only has to
-// exceed the verb's uncontended non-lock work — a config read, a server-id
-// load, a curve25519 keypair load, a CSPRNG read — all of which are
-// sub-millisecond once warm. The green path never depends on it: a correctly
-// locked verb stays blocked until the holder releases, however long that is.
+// mintBlockGrace is how long the revoke interleaving test waits before
+// concluding that the verb is genuinely parked on the devices lock.
 const mintBlockGrace = 300 * time.Millisecond
 
 // holdPairLock acquires the devices lock for devicesPath on a background
@@ -111,9 +107,8 @@ func deviceNames(t *testing.T, path string) map[string]bool {
 	return names
 }
 
-// silenceStdout points os.Stdout at a throwaway file for the duration of the
-// test, so a verb rendering a pairing payload from a background goroutine does
-// not spray the test log. Restored at cleanup.
+// silenceStdout points os.Stdout at a throwaway file for tests of successful
+// revoke/list operations. Restored at cleanup.
 func silenceStdout(t *testing.T) {
 	t.Helper()
 	orig := os.Stdout
@@ -200,26 +195,6 @@ func assertLockBusy(t *testing.T, err error, devicesPath string) {
 	}
 }
 
-// TestRunPairDefault_BusyLockRefusesWithoutWriting is the mint leg of the
-// bounded-wait criterion: with the lock held elsewhere, the CLI waits rather
-// than writing, and once the bound elapses it fails with a message naming the
-// lock path while devices.json is left byte-unchanged.
-func TestRunPairDefault_BusyLockRefusesWithoutWriting(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("pyry is linux+macOS only")
-	}
-	path := isolatedInstance(t)
-	silenceStdout(t)
-	seedDevices(t, path, lockTestDevice("alpha", "aaaaaaaa"))
-	assertUnchanged := freezeRegistry(t, path)
-	shrinkPairLockWait(t)
-
-	holdPairLock(t, path)
-
-	assertLockBusy(t, runPairDefault(nil), path)
-	assertUnchanged()
-}
-
 // TestRunPairRevoke_BusyLockRefusesWithoutWriting is the revoke leg of the
 // same criterion. It also pins that a busy lock is reported as such rather
 // than as a missing device: the sentinel branch is matched by value, and
@@ -242,54 +217,6 @@ func TestRunPairRevoke_BusyLockRefusesWithoutWriting(t *testing.T) {
 		t.Errorf("error %q missing the %q prefix", err, "pair revoke:")
 	}
 	assertUnchanged()
-}
-
-// TestRunPairDefault_ReadsSnapshotInsideLock is the mint leg of the criterion
-// that separates this design from merely wrapping the existing Save: the
-// snapshot the CLI mutates must be read INSIDE the locked region, not before
-// it. A holder parks on the lock, the mint is started and must block, a second
-// device is committed from under it, and only then is the lock released.
-//
-// It reddens two distinct ways. With no locking at all the mint completes
-// during the grace window, which the select below reports. With the lock
-// around Save alone, the mint's pre-lock read misses zulu and its Save erases
-// the record — the surviving-names assertion catches that one.
-func TestRunPairDefault_ReadsSnapshotInsideLock(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("pyry is linux+macOS only")
-	}
-	path := isolatedInstance(t)
-	silenceStdout(t)
-	seedDevices(t, path, lockTestDevice("alpha", "aaaaaaaa"))
-
-	release := holdPairLock(t, path)
-
-	errc := make(chan error, 1)
-	go func() { errc <- runPairDefault(nil) }()
-
-	select {
-	case err := <-errc:
-		t.Fatalf("runPairDefault completed while another holder had the devices lock (err=%v); its write is not inside a locked region", err)
-	case <-time.After(mintBlockGrace):
-	}
-
-	seedDevices(t, path, lockTestDevice("zulu", "bbbbbbbb"))
-	release()
-
-	if err := <-errc; err != nil {
-		t.Fatalf("runPairDefault: %v", err)
-	}
-
-	names := deviceNames(t, path)
-	if !names["zulu"] {
-		t.Errorf("device committed while the mint was parked on the lock was erased; the mint read its snapshot before the region, not inside it (names=%v)", names)
-	}
-	if !names["alpha"] {
-		t.Errorf("pre-existing device alpha was erased by the mint (names=%v)", names)
-	}
-	if len(names) != 3 {
-		t.Errorf("registry holds %d devices (%v), want 3: alpha, zulu, and the minted one", len(names), names)
-	}
 }
 
 // TestRunPairRevoke_ReadsSnapshotInsideLock is the revoke leg of the same

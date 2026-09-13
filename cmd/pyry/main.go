@@ -3230,12 +3230,15 @@ Usage:
   pyry channel new [--name <label>]              create a channel whose workspace
                                                   is the current directory, and
                                                   print its conversation id
-  pyry pair [flags] [--name <label>] [--relay <url>]
-                                                 mint a device token, persist it
-                                                  in ~/.pyry/<name>/devices.json,
-                                                  print QR + paste-fallback payload
-  pyry pair list [flags]                         list paired devices
-  pyry pair revoke <name> [flags]                revoke a paired device by Name
+  pyry pair [flags] [--name <label>]             ask a running service to mint a
+                                                  pairing; selects the sole service,
+                                                  or requires -pyry-name when several
+                                                  run (PYRY_NAME is not a selector;
+                                                  --relay is rejected because the
+                                                  service owns its relay destination)
+  pyry pair list [flags]                         list saved paired devices offline
+  pyry pair revoke <name> [flags]                revoke a saved device offline by Name
+  pyry pair preflight [flags]                    check saved device state offline
   pyry rekey <conn_id> [flags]                   trigger an immediate Noise re-key
                                                   on the named v2 conn (operator
                                                   rotation; control-socket only)
@@ -3283,6 +3286,8 @@ Examples:
   pyry -pyry-name elli                  # second instance, socket ~/.pyry/elli.sock
   PYRY_NAME=elli pyry status            # status of the elli instance via env
   pyry status                           # check on the running daemon
+  pyry pair                             # pair through the sole running service
+  pyry pair -pyry-name elli             # select elli when several services run
   pyry stop                             # graceful shutdown via control socket
   pyry logs                             # last 200 lines of supervisor logs
   pyry install-service                  # write a systemd/launchd unit (template)

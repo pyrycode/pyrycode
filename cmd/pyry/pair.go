@@ -1,8 +1,8 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -15,10 +15,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/config"
+	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/devices"
-	"github.com/pyrycode/pyrycode/internal/identity"
-	"github.com/pyrycode/pyrycode/internal/keys"
 	"github.com/pyrycode/pyrycode/internal/pair"
 )
 
@@ -26,10 +24,9 @@ import (
 // Update in lockstep with the switch in runPair when new sub-verbs land.
 const pairVerbList = "list, revoke, preflight"
 
-// pairLockWait bounds how long `pyry pair` and `pyry pair revoke` block waiting
-// for the cross-process devices lock. WithLock's doc reserves a tightened bound
-// for callers on a request path and points everyone else at DefaultLockWait; an
-// operator-invoked one-shot is not a request path, so it inherits the default.
+// pairLockWait bounds how long `pyry pair revoke` blocks waiting for the
+// cross-process devices lock. WithLock's doc points operator-invoked one-shots
+// at DefaultLockWait.
 //
 // A var rather than a const purely so the timeout-path test can shrink it — a
 // contention test that waits the real bound out costs the suite the full
@@ -49,26 +46,23 @@ type mintRequest struct {
 	devicesPath string
 
 	// lockWait bounds the acquisition. A PARAMETER RATHER THAN pairLockWait
-	// directly, because this function has three callers with two different rights
-	// to block: the CLI is an operator-invoked one-shot and passes the devices
-	// package default, while both request-path minters have a client waiting and
-	// pass their own short bound.
+	// directly, because both request-path minters have a client waiting and pass
+	// their own short bound.
 	lockWait time.Duration
 
 	// deviceName is the label to file the record under. The EMPTY STRING is not an
 	// error: it selects the device-<hash8> fallback, which is what makes a mint
-	// with no name asked for indistinguishable between the three entry points.
+	// with no name asked for indistinguishable between both entry points.
 	//
-	// UNVALIDATED HERE, AND DELIBERATELY SO. From the CLI and local control socket
-	// it is operator-authored input; from the remote wire it has already passed
-	// the relay handler's display-safety gate. A check here would refuse a name
-	// `pyry pair` and local control take today.
+	// UNVALIDATED HERE, AND DELIBERATELY SO. From the local control socket it is
+	// operator-authored input; from the remote wire it has already passed the
+	// relay handler's display-safety gate.
 	deviceName string
 
-	// allowRemotePermissions sets devices.Device.AllowRemotePermissions. The CLI
-	// flag and mode-0600 local control request may pass true. The remote phone mint
-	// always passes a literal false, and protocol.MintPairingPayload has no field
-	// that could carry anything else.
+	// allowRemotePermissions sets devices.Device.AllowRemotePermissions. The
+	// mode-0600 local control request may pass true. The remote phone mint always
+	// passes a literal false, and protocol.MintPairingPayload has no field that
+	// could carry anything else.
 	allowRemotePermissions bool
 
 	// grantorHash, when non-empty, is a token hash that must STILL name a device
@@ -78,8 +72,8 @@ type mintRequest struct {
 	// the revoked device's next connection: v2 reloads devices.json per handshake,
 	// so a conn's authenticated record is otherwise as of connect time.
 	//
-	// The CLI and mode-0600 local control provider pass "" — the host operator is
-	// the authority this check exists to defer to, not a subject of it.
+	// The mode-0600 local control provider passes "" — the host operator is the
+	// authority this check exists to defer to, not a subject of it.
 	grantorHash string
 }
 
@@ -105,20 +99,17 @@ type mintedDevice struct {
 // error from this function earns.
 var errGrantorRevoked = errors.New("pair: minting device is no longer privileged")
 
-// mintDevice performs the mint shared by `pyry pair`, the local control
-// pairing.mint operation, and the remote wire mint_pairing operation (#2127):
-// draw a token, hash it, name the device, and append the record inside ONE held
-// devices lock.
+// mintDevice performs the mint shared by the local control pairing.mint
+// operation and the remote wire mint_pairing operation: draw a token, hash it,
+// name the device, and append the record inside ONE held devices lock.
 //
-// ONE FUNCTION, THREE CALLERS, so their stampings cannot drift and `pyry pair`'s
-// observable behaviour is unchanged by either request path existing. It is the
-// block runPairDefault held before this ticket, lifted rather than reimplemented.
+// ONE FUNCTION, TWO REQUEST PATHS, so their stampings cannot drift.
 //
 // THE LOAD RUNS INSIDE THE LOCK, and that is #1531's whole lesson rather than a
 // stylistic preference: wrapping only the Save would still mutate a snapshot taken
 // outside the region and leave the erase-a-concurrent-write bug fully intact.
-// Everything the callers do around this — config, identity and key loads, and the
-// wire path's payload encoding — stays outside, because none of it touches
+// Everything the callers do around this — daemon identity and key loads, and
+// payload encoding — stays outside, because none of it touches
 // devices.json and redemptionLockWait's doc comment promises its peers hold
 // sub-millisecond regions.
 //
@@ -249,8 +240,10 @@ func resolveStaticKeyBaseDir() string {
 // pairArgs is the parsed shape of `pyry pair`'s flag set.
 type pairArgs struct {
 	instanceName           string // -pyry-name
+	instanceExplicit       bool   // -pyry-name appeared on the command line
 	deviceName             string // --name
 	relay                  string // --relay
+	relayExplicit          bool   // --relay appeared, including --relay=
 	allowRemotePermissions bool   // --allow-remote-permissions
 }
 
@@ -270,31 +263,23 @@ func parsePairArgs(args []string) (pairArgs, error) {
 	if fs.NArg() > 0 {
 		return pairArgs{}, fmt.Errorf("unexpected positional %q", fs.Arg(0))
 	}
+	var instanceExplicit, relayExplicit bool
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "pyry-name":
+			instanceExplicit = true
+		case "relay":
+			relayExplicit = true
+		}
+	})
 	return pairArgs{
 		instanceName:           *instance,
+		instanceExplicit:       instanceExplicit,
 		deviceName:             *deviceName,
 		relay:                  *relay,
+		relayExplicit:          relayExplicit,
 		allowRemotePermissions: *allowRemotePermissions,
 	}, nil
-}
-
-// resolveRelay returns the first non-empty value among:
-//  1. flagValue (from --relay)
-//  2. cfg.RelayURL (from ~/.pyry/config.json, with defaults overlaid)
-//  3. config.DefaultConfig().RelayURL
-//
-// Returns "" only if all three are empty (only reachable if the built-in
-// default is empty *and* the on-disk file is absent/unset *and* the flag
-// is unset). The third leg is normally redundant — config.Load already
-// overlays DefaultConfig — but the AC names it explicitly.
-func resolveRelay(flagValue string, cfg config.Config) string {
-	if flagValue != "" {
-		return flagValue
-	}
-	if cfg.RelayURL != "" {
-		return cfg.RelayURL
-	}
-	return config.DefaultConfig().RelayURL
 }
 
 // runPair dispatches `pyry pair [<verb>] [flags]`. With no leading
@@ -324,72 +309,87 @@ func runPair(args []string) error {
 	return runPairDefault(args)
 }
 
-// runPairDefault implements the bare `pyry pair`: load config +
-// server-id, mint a 256-bit token, persist a Device entry (hashed)
-// under the cross-process devices lock, and render the pairing payload
-// (QR + paste fallback) to stdout.
-//
-// A refused acquisition fails closed: the minted token is discarded
-// without being persisted or rendered, and a token whose hash never
-// reached disk is unusable rather than unrecorded.
-//
-// Returns nil on success. Returns a wrapped error for exit-1 conditions
-// (I/O errors, render write errors). Calls os.Exit(2) directly for
-// exit-2 conditions (flag parse error, empty resolved relay) so the
-// `pyry: ` prefix that main's top-level error printer adds doesn't
-// appear on usage-style failures.
+type pairingService struct {
+	name       string
+	socketPath string
+}
+
+// runPairDefault implements bare `pyry pair` through one running daemon. An
+// explicit -pyry-name targets only that service. Without one, the sole
+// status-responsive socket under ~/.pyry is selected; zero or several services
+// fail before a pairing is requested.
 func runPairDefault(args []string) error {
 	parsed, err := parsePairArgs(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "pyry pair:", err)
-		fmt.Fprintln(os.Stderr, "usage: pyry pair [-pyry-name=<instance>] [--name <label>] [--relay <url>] [--allow-remote-permissions]")
+		fmt.Fprintln(os.Stderr, "usage: pyry pair [-pyry-name=<instance>] [--name <label>] [--allow-remote-permissions]")
+		os.Exit(2)
+	}
+	if parsed.relayExplicit {
+		fmt.Fprintln(os.Stderr, "pyry pair: --relay is not supported; the running service owns the relay destination")
+		fmt.Fprintln(os.Stderr, "usage: pyry pair [-pyry-name=<instance>] [--name <label>] [--allow-remote-permissions]")
 		os.Exit(2)
 	}
 
-	cfg, err := config.Load(resolveConfigPath())
+	ctx := context.Background()
+	service, err := selectPairingService(ctx, parsed)
 	if err != nil {
-		return fmt.Errorf("pair: %w", err)
+		return err
 	}
-
-	relay := resolveRelay(parsed.relay, cfg)
-	if relay == "" {
-		fmt.Fprintln(os.Stderr, "pyry pair: relay URL is empty (set --relay or relay_url in ~/.pyry/config.json)")
-		os.Exit(2)
-	}
-
-	devicesPath := resolveDevicesPath(parsed.instanceName)
-
-	serverID, err := identity.LoadOrCreate(resolveServerIDPath(parsed.instanceName))
+	encoded, err := control.MintPairing(ctx, service.socketPath, parsed.deviceName, parsed.allowRemotePermissions)
 	if err != nil {
-		return fmt.Errorf("pair: %w", err)
+		return fmt.Errorf("pair: service %q at %s: %w", service.name, service.socketPath, err)
 	}
-
-	staticKey, err := keys.LoadOrCreate(resolveStaticKeyBaseDir(), sanitizeName(parsed.instanceName))
+	payload, err := pair.Decode(encoded)
 	if err != nil {
-		return fmt.Errorf("pair: %w", err)
+		return fmt.Errorf("pair: service %q returned an invalid pairing", service.name)
 	}
-
-	minted, err := mintDevice(mintRequest{
-		devicesPath:            devicesPath,
-		lockWait:               pairLockWait,
-		deviceName:             parsed.deviceName,
-		allowRemotePermissions: parsed.allowRemotePermissions,
-	})
-	if err != nil {
-		return fmt.Errorf("pair: %w", err)
-	}
-
-	pub := staticKey.PublicKey()
-	payload := pair.Payload{
-		Server:             serverID,
-		Relay:              relay,
-		Token:              minted.token,
-		ServerStaticPubkey: base64.StdEncoding.EncodeToString(pub[:]),
+	if _, err := fmt.Fprintf(os.Stdout, "Service: %s\n\n", service.name); err != nil {
+		return fmt.Errorf("pair: render service name: %w", err)
 	}
 	if err := pair.Render(payload, os.Stdout); err != nil {
 		return fmt.Errorf("pair: render: %w", err)
 	}
 	return nil
+}
+
+func selectPairingService(ctx context.Context, parsed pairArgs) (pairingService, error) {
+	if parsed.instanceExplicit {
+		return pairingService{
+			name:       sanitizeName(parsed.instanceName),
+			socketPath: resolveSocketPath("", parsed.instanceName),
+		}, nil
+	}
+
+	pattern := filepath.Join(filepath.Dir(resolveSocketPath("", DefaultName)), "*.sock")
+	paths, err := filepath.Glob(pattern)
+	if err != nil {
+		return pairingService{}, fmt.Errorf("pair: discover running services: %w", err)
+	}
+	services := make([]pairingService, 0, len(paths))
+	for _, socketPath := range paths {
+		name := strings.TrimSuffix(filepath.Base(socketPath), ".sock")
+		if name == "" || sanitizeName(name) != name {
+			continue
+		}
+		if _, err := control.Status(ctx, socketPath); err != nil {
+			continue
+		}
+		services = append(services, pairingService{name: name, socketPath: socketPath})
+	}
+
+	switch len(services) {
+	case 0:
+		return pairingService{}, errors.New("pair: no running services found; start pyry and retry")
+	case 1:
+		return services[0], nil
+	default:
+		names := make([]string, len(services))
+		for i, service := range services {
+			names[i] = service.name
+		}
+		return pairingService{}, fmt.Errorf("pair: multiple running services found: %s; specify -pyry-name", strings.Join(names, ", "))
+	}
 }
 
 // pairListArgs is the parsed shape of `pyry pair list`'s flag set.
