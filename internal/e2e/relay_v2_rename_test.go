@@ -13,6 +13,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -53,14 +54,22 @@ func testV2DaemonRenameRoundTrip(t *testing.T) {
 		t.Fatalf("parse seeded last_used_at: %v", err)
 	}
 	home := shortHome(t)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
 
 	// Pair a device: yields the bearer token and the responder static pubkey the
 	// phone pins. The daemon loads the same static key on startup.
-	r := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
-	if r.ExitCode != 0 {
-		t.Fatalf("pyry pair exit=%d\nstdout:\n%s\nstderr:\n%s", r.ExitCode, r.Stdout, r.Stderr)
+	payload, err := paireddevice.Setup(paireddevice.Config{
+		Home:                   home,
+		InstanceName:           "test",
+		Relay:                  relayURL,
+		DeviceName:             "phone-a",
+		AllowRemotePermissions: false,
+	})
+	if err != nil {
+		t.Fatalf("setup paired device: %v", err)
 	}
-	payload := decodePairPayload(t, r.Stdout)
 	pubKey, err := base64.StdEncoding.DecodeString(payload.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
@@ -77,12 +86,9 @@ func testV2DaemonRenameRoundTrip(t *testing.T) {
 		t.Fatalf("seed conversations.json: %v", err)
 	}
 
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
 	h := StartInWithEnv(t, home,
 		[]string{"PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=1"},
-		"-pyry-relay="+fr.URL()+"/v2/server",
+		"-pyry-relay="+relayURL,
 	)
 	t.Cleanup(func() { h.Stop(t) })
 
@@ -201,12 +207,20 @@ func testV2DaemonRenameNotFound(t *testing.T) {
 		seededTS     = "2026-01-01T00:00:00Z"
 	)
 	home := shortHome(t)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
 
-	r := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
-	if r.ExitCode != 0 {
-		t.Fatalf("pyry pair exit=%d\nstdout:\n%s\nstderr:\n%s", r.ExitCode, r.Stdout, r.Stderr)
+	payload, err := paireddevice.Setup(paireddevice.Config{
+		Home:                   home,
+		InstanceName:           "test",
+		Relay:                  relayURL,
+		DeviceName:             "phone-a",
+		AllowRemotePermissions: false,
+	})
+	if err != nil {
+		t.Fatalf("setup paired device: %v", err)
 	}
-	payload := decodePairPayload(t, r.Stdout)
 	pubKey, err := base64.StdEncoding.DecodeString(payload.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
@@ -223,12 +237,9 @@ func testV2DaemonRenameNotFound(t *testing.T) {
 		t.Fatalf("seed conversations.json: %v", err)
 	}
 
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
 	h := StartInWithEnv(t, home,
 		[]string{"PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=1"},
-		"-pyry-relay="+fr.URL()+"/v2/server",
+		"-pyry-relay="+relayURL,
 	)
 	t.Cleanup(func() { h.Stop(t) })
 

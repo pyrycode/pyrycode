@@ -15,6 +15,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -67,12 +68,20 @@ func TestRelayV2_ConversationHistory(t *testing.T) {
 	)
 
 	home := shortHome(t)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
 
-	r := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
-	if r.ExitCode != 0 {
-		t.Fatalf("pyry pair exit=%d\nstdout:\n%s\nstderr:\n%s", r.ExitCode, r.Stdout, r.Stderr)
+	payload, err := paireddevice.Setup(paireddevice.Config{
+		Home:                   home,
+		InstanceName:           "test",
+		Relay:                  relayURL,
+		DeviceName:             "phone-a",
+		AllowRemotePermissions: false,
+	})
+	if err != nil {
+		t.Fatalf("setup paired device: %v", err)
 	}
-	payload := decodePairPayload(t, r.Stdout)
 	pubKey, err := base64.StdEncoding.DecodeString(payload.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
@@ -95,10 +104,7 @@ func TestRelayV2_ConversationHistory(t *testing.T) {
 		}
 	}
 
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
-	h := StartStreamInteractiveWithRelay(t, home, initialUUID, fr.URL()+"/v2/server")
+	h := StartStreamInteractiveWithRelay(t, home, initialUUID, relayURL)
 	t.Cleanup(func() { h.Stop(t) })
 
 	serverID := readPersistedServerID(t, home)

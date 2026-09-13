@@ -15,6 +15,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -78,20 +79,24 @@ func TestE2E_PerConversation_IdleEvictsAndReactivates(t *testing.T) {
 	)
 
 	home := shortHome(t)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
 
-	r := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
-	if r.ExitCode != 0 {
-		t.Fatalf("pyry pair exit=%d\nstdout:\n%s\nstderr:\n%s",
-			r.ExitCode, r.Stdout, r.Stderr)
+	pairPayload, err := paireddevice.Setup(paireddevice.Config{
+		Home:                   home,
+		InstanceName:           "test",
+		Relay:                  relayURL,
+		DeviceName:             "phone-a",
+		AllowRemotePermissions: false,
+	})
+	if err != nil {
+		t.Fatalf("setup paired device: %v", err)
 	}
-	pairPayload := decodePairPayload(t, r.Stdout)
 	pubKey, err := base64.StdEncoding.DecodeString(pairPayload.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
 	}
-
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
 
 	// idle=8s, uncapped: the only transitions are idle-driven, so a previously
 	// active per-conversation session evicts ~8s after its last activation.
@@ -110,7 +115,7 @@ func TestE2E_PerConversation_IdleEvictsAndReactivates(t *testing.T) {
 	// CONSTRAINT for future edits: this window must stay ≥ 3 ×
 	// msgqueue.defaultRetryInterval plus spawn. If either number moves, so does
 	// this one.
-	h := startPerConvHarness(t, home, initialUUID, fr.URL()+"/v2/server", "-pyry-idle-timeout=8s")
+	h := startPerConvHarness(t, home, initialUUID, relayURL, "-pyry-idle-timeout=8s")
 
 	regPath := filepath.Join(home, ".pyry", "test", "sessions.json")
 	convPath := filepath.Join(home, ".pyry", "test", "conversations.json")
@@ -284,22 +289,26 @@ func TestE2E_PerConversation_CapEvictsCrossDiscussion(t *testing.T) {
 	const initialUUID = "77777777-7777-4777-8777-777777777777"
 
 	home := shortHome(t)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
 
-	r := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
-	if r.ExitCode != 0 {
-		t.Fatalf("pyry pair exit=%d\nstdout:\n%s\nstderr:\n%s",
-			r.ExitCode, r.Stdout, r.Stderr)
+	pairPayload, err := paireddevice.Setup(paireddevice.Config{
+		Home:                   home,
+		InstanceName:           "test",
+		Relay:                  relayURL,
+		DeviceName:             "phone-a",
+		AllowRemotePermissions: false,
+	})
+	if err != nil {
+		t.Fatalf("setup paired device: %v", err)
 	}
-	pairPayload := decodePairPayload(t, r.Stdout)
 	pubKey, err := base64.StdEncoding.DecodeString(pairPayload.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
 	}
 
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
-	startPerConvHarness(t, home, initialUUID, fr.URL()+"/v2/server", "-pyry-active-cap=2")
+	startPerConvHarness(t, home, initialUUID, relayURL, "-pyry-active-cap=2")
 
 	regPath := filepath.Join(home, ".pyry", "test", "sessions.json")
 	convPath := filepath.Join(home, ".pyry", "test", "conversations.json")
