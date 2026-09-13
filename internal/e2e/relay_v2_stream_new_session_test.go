@@ -18,6 +18,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -115,7 +116,7 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	// so a failing run's output shows WHERE the time went instead of leaving a
 	// single total to be reconstructed by hand (#1273: the 20.21 s failure was
 	// read as a slow machine when it was really a full 20.00 s deadline burn on a
-	// 0.21 s prefix). Captured before shortHome/pairing/daemon startup so the
+	// 0.21 s prefix). Captured before shortHome/paired-device setup/daemon startup so the
 	// stamp covers that prefix too — it is exactly the quantity that arithmetic
 	// turns on. go test prints buffered t.Logf output when a test FAILS, not only
 	// under -v, so M1–M3's stamps ride along with any later failure for free.
@@ -123,13 +124,21 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	elapsed := func() string { return time.Since(testStart).Round(time.Millisecond).String() }
 
 	home := shortHome(t)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
 
-	// Pair one interactive device.
-	rA := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
-	if rA.ExitCode != 0 {
-		t.Fatalf("pyry pair phone-a exit=%d\nstdout:\n%s\nstderr:\n%s", rA.ExitCode, rA.Stdout, rA.Stderr)
+	// Set up one interactive device.
+	payloadA, err := paireddevice.Setup(paireddevice.Config{
+		Home:                   home,
+		InstanceName:           "test",
+		Relay:                  relayURL,
+		DeviceName:             "phone-a",
+		AllowRemotePermissions: false,
+	})
+	if err != nil {
+		t.Fatalf("setup paired device: %v", err)
 	}
-	payloadA := decodePairPayload(t, rA.Stdout)
 	pubKey, err := base64.StdEncoding.DecodeString(payloadA.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
@@ -153,12 +162,9 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	// hold, and the bare stem's absence stays meaningful (only the PTY tee writes it).
 	stdinLogStem := filepath.Join(t.TempDir(), "fakeclaude-stdin")
 
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
 	regPath := filepath.Join(home, ".pyry", "test", "sessions.json")
 
-	h := StartStreamInteractiveWithRelay(t, home, initialUUID, fr.URL()+"/v2/server",
+	h := StartStreamInteractiveWithRelay(t, home, initialUUID, relayURL,
 		"PYRY_FAKE_CLAUDE_STDIN_LOG="+stdinLogStem)
 	t.Cleanup(func() { h.Stop(t) })
 

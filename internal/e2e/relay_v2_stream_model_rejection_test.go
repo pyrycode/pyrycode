@@ -15,6 +15,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -30,24 +31,30 @@ const (
 // rejected frame then reaches neither settings storage nor fake Claude's stdin.
 func TestRelayV2_StreamRejectsModelAbsentFromPublishedMenu(t *testing.T) {
 	home := shortHome(t)
-	r := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
-	if r.ExitCode != 0 {
-		t.Fatalf("pyry pair exit=%d\nstdout:\n%s\nstderr:\n%s", r.ExitCode, r.Stdout, r.Stderr)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
+	pairPayload, err := paireddevice.Setup(paireddevice.Config{
+		Home:                   home,
+		InstanceName:           "test",
+		Relay:                  relayURL,
+		DeviceName:             "phone-a",
+		AllowRemotePermissions: false,
+	})
+	if err != nil {
+		t.Fatalf("setup paired device: %v", err)
 	}
-	pair := decodePairPayload(t, r.Stdout)
-	pubKey, err := base64.StdEncoding.DecodeString(pair.ServerStaticPubkey)
+	pubKey, err := base64.StdEncoding.DecodeString(pairPayload.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
 	}
 
 	seedBoundConversation(t, home, modelRejectConvID, modelRejectSessionID)
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
 	captured := capturedModels2281(t)
 	modelFixture := filepath.Join(home, "model-reject-initialize-models.json")
 	writeCapturedModelFixture2281(t, modelFixture, captured)
 	stdinStem := filepath.Join(home, "model-reject-stdin")
-	h := StartStreamInteractiveWithRelay(t, home, modelRejectSessionID, fr.URL()+"/v2/server",
+	h := StartStreamInteractiveWithRelay(t, home, modelRejectSessionID, relayURL,
 		"PYRY_FAKE_CLAUDE_STDIN_LOG="+stdinStem,
 		"PYRY_FAKE_CLAUDE_INITIALIZE_MODELS="+modelFixture)
 	t.Cleanup(func() { h.Stop(t) })
@@ -56,12 +63,12 @@ func TestRelayV2_StreamRejectsModelAbsentFromPublishedMenu(t *testing.T) {
 	waitBinaryHello(t, fr, serverID)
 	dialCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	phone, err := fakephone.Dial(dialCtx, fr.URL(), serverID, pair.Token, "phone-a")
+	phone, err := fakephone.Dial(dialCtx, fr.URL(), serverID, pairPayload.Token, "phone-a")
 	if err != nil {
 		t.Fatalf("phone dial: %v", err)
 	}
 	t.Cleanup(func() { _ = phone.Close() })
-	send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pubKey, pair.Token)
+	send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pubKey, pairPayload.Token)
 
 	seal := func(env protocol.Envelope) {
 		t.Helper()

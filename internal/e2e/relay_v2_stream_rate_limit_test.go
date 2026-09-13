@@ -13,6 +13,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -123,12 +124,20 @@ func driveRateLimitTurn(t *testing.T, riderStatus string) rateLimitObservation {
 	t.Helper()
 
 	home := shortHome(t)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
 
-	rA := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
-	if rA.ExitCode != 0 {
-		t.Fatalf("pyry pair phone-a exit=%d\nstdout:\n%s\nstderr:\n%s", rA.ExitCode, rA.Stdout, rA.Stderr)
+	payloadA, err := paireddevice.Setup(paireddevice.Config{
+		Home:                   home,
+		InstanceName:           "test",
+		Relay:                  relayURL,
+		DeviceName:             "phone-a",
+		AllowRemotePermissions: false,
+	})
+	if err != nil {
+		t.Fatalf("setup paired device: %v", err)
 	}
-	payloadA := decodePairPayload(t, rA.Stdout)
 	pubKey, err := base64.StdEncoding.DecodeString(payloadA.ServerStaticPubkey)
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
@@ -140,13 +149,10 @@ func driveRateLimitTurn(t *testing.T, riderStatus string) rateLimitObservation {
 	// drain for the full deadline, which presents as an unexplained timeout.
 	seedBoundConversation(t, home, rateLimitConvID, rateLimitInitialUUID)
 
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
 	// The rate-limit rider is the ONLY env that distinguishes this from the plain
 	// send spec, and its VALUE is the only thing distinguishing the two tests from
 	// each other. Unset, fakeclaude is byte-identical to its prior behaviour.
-	h := StartStreamInteractiveWithRelay(t, home, rateLimitInitialUUID, fr.URL()+"/v2/server",
+	h := StartStreamInteractiveWithRelay(t, home, rateLimitInitialUUID, relayURL,
 		rateLimitRiderEnv+"="+riderStatus)
 	t.Cleanup(func() { h.Stop(t) })
 
