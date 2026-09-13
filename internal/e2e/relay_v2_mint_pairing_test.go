@@ -94,6 +94,7 @@ func TestRelayV2_MintPairing(t *testing.T) {
 
 	h := StartStreamInteractiveWithRelay(t, home, initialUUID, daemonRelayURL)
 	t.Cleanup(func() { h.Stop(t) })
+	exposePairSocket(t, home, "test", h.SocketPath)
 
 	serverID := readPersistedServerID(t, home)
 	waitBinaryHello(t, fr, serverID)

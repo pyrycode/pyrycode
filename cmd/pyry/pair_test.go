@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/base64"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,9 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/config"
 	"github.com/pyrycode/pyrycode/internal/devices"
-	"github.com/pyrycode/pyrycode/internal/pair"
 )
 
 // TestParsePairArgs covers the flag-set surface of `pyry pair`: the
@@ -23,17 +19,21 @@ func TestParsePairArgs(t *testing.T) {
 	t.Setenv("PYRY_NAME", "")
 
 	tests := []struct {
-		name       string
-		args       []string
-		wantDevice string
-		wantRelay  string
-		wantAllow  bool
-		wantErr    string
+		name         string
+		args         []string
+		wantDevice   string
+		wantRelay    string
+		wantAllow    bool
+		wantNameSet  bool
+		wantRelaySet bool
+		wantErr      string
 	}{
 		{name: "empty", args: nil, wantDevice: "", wantRelay: ""},
 		{name: "name only", args: []string{"--name=phone"}, wantDevice: "phone", wantRelay: ""},
-		{name: "relay only", args: []string{"--relay=wss://x"}, wantDevice: "", wantRelay: "wss://x"},
-		{name: "both", args: []string{"--name=phone", "--relay=wss://x"}, wantDevice: "phone", wantRelay: "wss://x"},
+		{name: "command-line instance", args: []string{"-pyry-name=elli"}, wantNameSet: true},
+		{name: "relay only", args: []string{"--relay=wss://x"}, wantDevice: "", wantRelay: "wss://x", wantRelaySet: true},
+		{name: "empty relay is still supplied", args: []string{"--relay="}, wantRelaySet: true},
+		{name: "both", args: []string{"--name=phone", "--relay=wss://x"}, wantDevice: "phone", wantRelay: "wss://x", wantRelaySet: true},
 		{name: "name space form", args: []string{"--name", "phone"}, wantDevice: "phone"},
 		{name: "allow-remote-permissions", args: []string{"--allow-remote-permissions"}, wantAllow: true},
 		{name: "allow-remote-permissions explicit false", args: []string{"--allow-remote-permissions=false"}, wantAllow: false},
@@ -65,31 +65,38 @@ func TestParsePairArgs(t *testing.T) {
 			if got.allowRemotePermissions != tc.wantAllow {
 				t.Errorf("allowRemotePermissions=%v want %v", got.allowRemotePermissions, tc.wantAllow)
 			}
+			if got.instanceExplicit != tc.wantNameSet {
+				t.Errorf("instanceExplicit=%v want %v", got.instanceExplicit, tc.wantNameSet)
+			}
+			if got.relayExplicit != tc.wantRelaySet {
+				t.Errorf("relayExplicit=%v want %v", got.relayExplicit, tc.wantRelaySet)
+			}
 		})
+	}
+
+	t.Setenv("PYRY_NAME", "from-env")
+	got, err := parsePairArgs(nil)
+	if err != nil {
+		t.Fatalf("parse environment default: %v", err)
+	}
+	if got.instanceName != "from-env" || got.instanceExplicit {
+		t.Errorf("environment default parsed as name=%q explicit=%v", got.instanceName, got.instanceExplicit)
 	}
 }
 
-// TestResolveRelay pins the three-leg precedence: --relay > config >
-// built-in default. The fourth case (all empty) is the only path AC#5
-// names that reaches exit 2 through resolveRelay.
-func TestResolveRelay(t *testing.T) {
-	tests := []struct {
-		name string
-		flag string
-		cfg  config.Config
-		want string
-	}{
-		{name: "flag wins", flag: "wss://flag", cfg: config.Config{RelayURL: "wss://cfg"}, want: "wss://flag"},
-		{name: "config wins when flag empty", flag: "", cfg: config.Config{RelayURL: "wss://cfg"}, want: "wss://cfg"},
-		{name: "default wins when flag and cfg empty", flag: "", cfg: config.Config{}, want: config.DefaultConfig().RelayURL},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := resolveRelay(tc.flag, tc.cfg); got != tc.want {
-				t.Errorf("resolveRelay=%q want %q", got, tc.want)
-			}
-		})
+func TestHelpTextPairingUsesRunningService(t *testing.T) {
+	for _, fragment := range []string{
+		"ask a running service to mint a",
+		"requires -pyry-name when several",
+		"PYRY_NAME is not a selector",
+		"--relay is rejected",
+		"list saved paired devices offline",
+		"revoke a saved device offline",
+		"check saved device state offline",
+	} {
+		if !strings.Contains(helpText, fragment) {
+			t.Errorf("helpText missing %q", fragment)
+		}
 	}
 }
 
@@ -673,172 +680,4 @@ func TestRunPairPreflight_CorruptRegistry(t *testing.T) {
 	if !strings.Contains(err.Error(), "pair preflight:") {
 		t.Errorf("error %q missing prefix %q", err.Error(), "pair preflight:")
 	}
-}
-
-// captureStdout replaces os.Stdout with a pipe for the duration of fn
-// and returns whatever fn wrote. Lives inline rather than in a shared
-// helper since runPairDefault is currently the only test in this file
-// that needs it.
-func captureStdout(t *testing.T, fn func() error) ([]byte, error) {
-	t.Helper()
-	orig := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
-	os.Stdout = w
-	done := make(chan []byte, 1)
-	go func() {
-		b, _ := io.ReadAll(r)
-		done <- b
-	}()
-	runErr := fn()
-	_ = w.Close()
-	os.Stdout = orig
-	return <-done, runErr
-}
-
-// TestRunPairDefault_PopulatesStaticPubkey runs `pyry pair` end-to-end
-// against an isolated HOME, decodes the rendered payload, and asserts
-// the new ServerStaticPubkey field is present, base64-decodes to 32
-// bytes, and is stable across two calls (verifying keys.LoadOrCreate
-// returns the persisted key on the second call, not a fresh one).
-// Skipped on Windows — pyry doesn't target Windows.
-func TestRunPairDefault_PopulatesStaticPubkey(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("pyry is linux+macOS only")
-	}
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("PYRY_NAME", "")
-
-	stdout1, err := captureStdout(t, func() error { return runPairDefault(nil) })
-	if err != nil {
-		t.Fatalf("first runPairDefault: %v\nstdout:\n%s", err, stdout1)
-	}
-	p1 := decodeRenderedPayload(t, stdout1)
-	if p1.ServerStaticPubkey == "" {
-		t.Fatal("first payload ServerStaticPubkey is empty")
-	}
-	raw, err := base64.StdEncoding.DecodeString(p1.ServerStaticPubkey)
-	if err != nil {
-		t.Fatalf("base64 decode ServerStaticPubkey: %v", err)
-	}
-	if len(raw) != 32 {
-		t.Errorf("decoded pubkey length=%d, want 32", len(raw))
-	}
-
-	stdout2, err := captureStdout(t, func() error { return runPairDefault(nil) })
-	if err != nil {
-		t.Fatalf("second runPairDefault: %v\nstdout:\n%s", err, stdout2)
-	}
-	p2 := decodeRenderedPayload(t, stdout2)
-	if p2.ServerStaticPubkey != p1.ServerStaticPubkey {
-		t.Errorf("ServerStaticPubkey changed across invocations: first=%q second=%q",
-			p1.ServerStaticPubkey, p2.ServerStaticPubkey)
-	}
-}
-
-// TestRunPairDefault_AllowRemotePermissionsPersists runs `pyry pair`
-// end-to-end against an isolated HOME and asserts the bit reaches disk
-// through the real Save/Load path: `--allow-remote-permissions` records a
-// device with the bit set, while a bare pair records one with it OFF.
-// Covers AC1 (flag records the bit) + AC4 (survives the real Save/Load).
-func TestRunPairDefault_AllowRemotePermissionsPersists(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("pyry is linux+macOS only")
-	}
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("PYRY_NAME", "")
-
-	if _, err := captureStdout(t, func() error {
-		return runPairDefault([]string{"--allow-remote-permissions"})
-	}); err != nil {
-		t.Fatalf("runPairDefault(--allow-remote-permissions): %v", err)
-	}
-
-	reg, err := devices.Load(resolveDevicesPath(defaultName()))
-	if err != nil {
-		t.Fatalf("Load after first pair: %v", err)
-	}
-	list := reg.List()
-	if len(list) != 1 {
-		t.Fatalf("len(List) = %d, want 1", len(list))
-	}
-	if !list[0].AllowRemotePermissions {
-		t.Errorf("paired device AllowRemotePermissions = false, want true")
-	}
-
-	if _, err := captureStdout(t, func() error { return runPairDefault(nil) }); err != nil {
-		t.Fatalf("runPairDefault(nil): %v", err)
-	}
-
-	reg2, err := devices.Load(resolveDevicesPath(defaultName()))
-	if err != nil {
-		t.Fatalf("Load after second pair: %v", err)
-	}
-	var allowed, denied int
-	for _, d := range reg2.List() {
-		if d.AllowRemotePermissions {
-			allowed++
-		} else {
-			denied++
-		}
-	}
-	if allowed != 1 || denied != 1 {
-		t.Errorf("after bare pair: allowed=%d denied=%d, want 1 and 1", allowed, denied)
-	}
-}
-
-// TestRunPairDefault_StampsRedeemBy runs `pyry pair` end-to-end against an
-// isolated HOME and asserts the minted record reaches disk carrying a
-// redemption deadline of PairedAt + devices.RedemptionWindow. The equality is
-// exact — no tolerance window — because runPairDefault derives both stamps
-// from a single clock read.
-func TestRunPairDefault_StampsRedeemBy(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("pyry is linux+macOS only")
-	}
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("PYRY_NAME", "")
-
-	if _, err := captureStdout(t, func() error { return runPairDefault(nil) }); err != nil {
-		t.Fatalf("runPairDefault(nil): %v", err)
-	}
-
-	reg, err := devices.Load(resolveDevicesPath(defaultName()))
-	if err != nil {
-		t.Fatalf("devices.Load: %v", err)
-	}
-	list := reg.List()
-	if len(list) != 1 {
-		t.Fatalf("len(List) = %d, want 1", len(list))
-	}
-	got := list[0]
-	if got.RedeemBy.IsZero() {
-		t.Fatalf("minted device RedeemBy is the zero value, want a stamped deadline")
-	}
-	if d := got.RedeemBy.Sub(got.PairedAt); d != devices.RedemptionWindow {
-		t.Errorf("RedeemBy - PairedAt = %v, want %v", d, devices.RedemptionWindow)
-	}
-}
-
-// decodeRenderedPayload scans Render output for the encoded line and
-// decodes it via pair.Decode. Mirrors the e2e helper in
-// internal/e2e/pair_test.go.
-func decodeRenderedPayload(t *testing.T, stdout []byte) pair.Payload {
-	t.Helper()
-	for _, line := range strings.Split(string(stdout), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if p, err := pair.Decode(line); err == nil {
-			return p
-		}
-	}
-	t.Fatalf("no decodable pair payload found in stdout:\n%s", stdout)
-	return pair.Payload{}
 }
