@@ -102,6 +102,12 @@ func TestIsKnownAppType(t *testing.T) {
 		// also what keeps the type off the inbound path — a phone must never be
 		// able to send a session_facts frame into dispatch.Route.
 		{"session_facts-rejected", TypeSessionFacts, false, ErrUnknownType},
+		// the v2-only context-window reading: an outbound binary → phone report an
+		// old phone never receives, so IsKnownAppType must reject it. Rejection is
+		// also what keeps the type off the inbound path — a phone must never be
+		// able to send a context_usage frame into dispatch.Route, which would let a
+		// client assert the daemon's own context arithmetic back at it.
+		{"context_usage-rejected", TypeContextUsage, false, ErrUnknownType},
 		// v2-only screen-snapshot types are likewise not v1-compatible.
 		{"request_snapshot-rejected", TypeRequestSnapshot, false, ErrUnknownType},
 		{"screen_snapshot-rejected", TypeScreenSnapshot, false, ErrUnknownType},
@@ -364,6 +370,10 @@ var v2OnlyTypes = map[string]bool{
 	// client pushing a credential-minting verb into the v1 handler chain.
 	TypeMintPairing:   true,
 	TypePairingMinted: true,
+	// v2 context-window reading (#2370): an outbound binary → phone report with no
+	// inbound half at all. Its on-demand request verb is #2293's to declare together
+	// with the handler that answers it; the answer reuses this same outbound type.
+	TypeContextUsage: true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -479,6 +489,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeToolProgress,
 		// v2 operator-facing banner (outbound status, #2256).
 		TypeBanner,
+		// v2 context-window reading (outbound report, #2370).
+		TypeContextUsage,
 	}
 	for _, ty := range all {
 		inV1 := inboundAppTypeSet[ty]

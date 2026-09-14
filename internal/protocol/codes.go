@@ -2094,3 +2094,37 @@ const (
 const (
 	TypeBanner = "banner" // binary → phone, outbound v2 operator-facing text
 )
+
+// Mobile Protocol v2 context-window reading. TypeContextUsage is the single
+// binary → phone envelope carrying one conversation's context breakdown: the
+// model, the totals and percentage, and three independently bounded inventories
+// (categories, MCP tools, memory files) each with its own dropped count.
+//
+// ONE OUTBOUND SHAPE SERVES BOTH LATER PRODUCERS, which is why no request verb is
+// declared alongside it. #2371 maps turnevent.ContextUsage and publishes this frame
+// after a turn; #2293 answers an on-demand request with the SAME frame, correlated
+// by the request envelope's id on Envelope.InReplyTo. That is TypeMCPStatus's
+// arrangement, minus the separate read verb: #2293 owns the verb it needs together
+// with the handler that answers it, because an inbound type with no entry in
+// cmd/pyry/relay.go's Handlers map or internal/relay/v2session.go's dispatchAppFrame
+// switch is red by construction under TestEveryInboundV2TypeHasHandler's Assertion #1.
+//
+// Declared ahead of both producers, which is this file's established sequencing —
+// #2052→#2054, #1983→#1984, #2373→#2374/#2375 — and it lets the waiting client
+// slices (pyrycode-desktop#1254 and #2293) start against a published shape.
+//
+// The READING IS INFORMATIONAL. It is claude's own arithmetic, not the daemon-owned
+// contextwindow.Read value that control decisions key on, and nothing in this daemon
+// gates on what a client does with it.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: this is an
+// outbound binary → phone event an old v1 phone must never receive, and its absence
+// from that set is what makes IsKnownAppType reject it with ErrUnknownType. The drift
+// detector in internal/protocol/compat_test.go partitions Type* constants between
+// inboundAppTypeSet and v2OnlyTypes; this lives in the latter, which is also the
+// structural guarantee that nothing in this daemon accepts a context reading FROM a
+// phone. cmd/pyry/relay_guard_test.go's excludedTypes carries it as an outbound
+// push+reply.
+const (
+	TypeContextUsage = "context_usage" // binary → phone, outbound v2 context-window reading
+)

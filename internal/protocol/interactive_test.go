@@ -3884,3 +3884,239 @@ func TestToolProgressPayload_ZeroValue_RoundTrip(t *testing.T) {
 	}
 	roundTripEnvelope(t, env, payload, raw)
 }
+
+// contextUsageWireKeys is the published top-level key set of a context_usage
+// payload. It is spelled once and shared by the populated, empty-fixture and
+// zero-value tests so all three assert the same contract: assertWireKeys rejects
+// an unexpected key as well as a missing one, so this list is what fails a
+// silently added or renamed field.
+var contextUsageWireKeys = []string{
+	"conversation_id", "model", "total_tokens", "max_tokens", "percentage",
+	"categories", "dropped_categories",
+	"mcp_tools", "dropped_mcp_tools",
+	"memory_files", "dropped_memory_files",
+}
+
+func TestContextUsagePayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "context_usage.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeContextUsage {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeContextUsage)
+	}
+	assertWireKeys(t, env.Payload, contextUsageWireKeys...)
+
+	// Row-level key sets, asserted against the raw wire rather than the decoded
+	// struct: a row type that grew a field would still decode fine here.
+	var wire struct {
+		Categories  []json.RawMessage `json:"categories"`
+		MCPTools    []json.RawMessage `json:"mcp_tools"`
+		MemoryFiles []json.RawMessage `json:"memory_files"`
+	}
+	if err := json.Unmarshal(env.Payload, &wire); err != nil {
+		t.Fatalf("unmarshal payload key view: %v", err)
+	}
+	for _, list := range []struct {
+		name string
+		rows []json.RawMessage
+		keys []string
+	}{
+		{"categories", wire.Categories, []string{"name", "tokens"}},
+		{"mcp_tools", wire.MCPTools, []string{"name", "server_name", "tokens"}},
+		{"memory_files", wire.MemoryFiles, []string{"path", "type", "tokens"}},
+	} {
+		if len(list.rows) != 2 {
+			t.Fatalf("wire %s: got %d entries, want 2", list.name, len(list.rows))
+		}
+		for i, row := range list.rows {
+			t.Run(fmt.Sprintf("wire-keys-%s-%d", list.name, i), func(t *testing.T) {
+				assertWireKeys(t, row, list.keys...)
+			})
+		}
+	}
+
+	var payload ContextUsagePayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+
+	want := ContextUsagePayload{
+		ConversationID: "conversation-context",
+		Model:          "claude-opus-5",
+		TotalTokens:    128400,
+		MaxTokens:      200000,
+		Percentage:     64,
+		Categories: []ContextUsageCategory{
+			{Name: "System prompt", Tokens: 41200},
+			// Markup metacharacters survive verbatim: this layer neither
+			// validates nor sanitizes claude-authored descriptive text.
+			{Name: "Messages <&>", Tokens: 9800},
+		},
+		DroppedCategories: 3,
+		MCPTools: []ContextUsageMCPTool{
+			{Name: "read_file", ServerName: "filesystem", Tokens: 1450},
+			{Name: "query\ndocs", ServerName: "remote<mcp>", Tokens: 620},
+		},
+		DroppedMCPTools: 5,
+		MemoryFiles: []ContextUsageMemoryFile{
+			{Path: "/Users/dev/project/CLAUDE.md", Type: "project", Tokens: 3100},
+			// A traversal-shaped path crosses unchanged. Nothing on this path
+			// joins, cleans, resolves or opens it — see the doc comment on
+			// ContextUsageMemoryFile.
+			{Path: "../../../etc/passwd", Type: "user", Tokens: 240},
+		},
+		DroppedMemoryFiles: 7,
+	}
+	if !reflect.DeepEqual(payload, want) {
+		t.Errorf("payload:\n got %+v\nwant %+v", payload, want)
+	}
+
+	// The three dropped counts are asserted separately and given mutually
+	// distinct fixture values, so a mapper that cross-wires two of them fails
+	// here rather than passing on a coincidence.
+	for _, tc := range []struct {
+		name string
+		got  int
+		want int
+	}{
+		{"DroppedCategories", payload.DroppedCategories, 3},
+		{"DroppedMCPTools", payload.DroppedMCPTools, 5},
+		{"DroppedMemoryFiles", payload.DroppedMemoryFiles, 7},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s: got %d, want %d", tc.name, tc.got, tc.want)
+		}
+	}
+	// Each dropped count is independent of its list's length: the retained rows
+	// say nothing about how many were cut.
+	if len(payload.Categories) == payload.DroppedCategories {
+		t.Errorf("fixture is too weak: len(Categories) must differ from DroppedCategories")
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+func TestContextUsagePayload_EmptyFixtureRoundTrip(t *testing.T) {
+	raw := readFixture(t, "context_usage_empty.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeContextUsage {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeContextUsage)
+	}
+	assertWireKeys(t, env.Payload, contextUsageWireKeys...)
+
+	var payload ContextUsagePayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		got  int
+	}{
+		{"Categories", len(payload.Categories)},
+		{"MCPTools", len(payload.MCPTools)},
+		{"MemoryFiles", len(payload.MemoryFiles)},
+	} {
+		if tc.got != 0 {
+			t.Errorf("%s: got %d entries, want 0", tc.name, tc.got)
+		}
+	}
+	if payload.Categories == nil || payload.MCPTools == nil || payload.MemoryFiles == nil {
+		t.Errorf("an empty wire array must decode to a non-nil empty slice: %+v", payload)
+	}
+	if want := (ContextUsagePayload{
+		Categories:  []ContextUsageCategory{},
+		MCPTools:    []ContextUsageMCPTool{},
+		MemoryFiles: []ContextUsageMemoryFile{},
+	}); !reflect.DeepEqual(payload, want) {
+		t.Errorf("payload:\n got %+v\nwant %+v", payload, want)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+func TestContextUsagePayload_ZeroValueEncoding(t *testing.T) {
+	payload := ContextUsagePayload{}
+	if payload.Categories != nil || payload.MCPTools != nil || payload.MemoryFiles != nil {
+		t.Fatalf("precondition: all three slices must be nil, got %+v", payload)
+	}
+
+	for _, tc := range []struct {
+		name string
+		in   any
+	}{
+		{"value", payload},
+		{"pointer", &payload},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := json.Marshal(tc.in)
+			if err != nil {
+				t.Fatalf("marshal payload: %v", err)
+			}
+			assertWireKeys(t, out, contextUsageWireKeys...)
+
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(out, &fields); err != nil {
+				t.Fatalf("unmarshal payload key values: %v", err)
+			}
+			for key, want := range map[string]string{
+				"conversation_id":      `""`,
+				"model":                `""`,
+				"total_tokens":         `0`,
+				"max_tokens":           `0`,
+				"percentage":           `0`,
+				"categories":           `[]`,
+				"dropped_categories":   `0`,
+				"mcp_tools":            `[]`,
+				"dropped_mcp_tools":    `0`,
+				"memory_files":         `[]`,
+				"dropped_memory_files": `0`,
+			} {
+				if got := string(fields[key]); got != want {
+					t.Errorf("%s: got JSON %s, want %s", key, got, want)
+				}
+			}
+		})
+	}
+	if payload.Categories != nil || payload.MCPTools != nil || payload.MemoryFiles != nil {
+		t.Errorf("MarshalJSON mutated the receiver: %+v", payload)
+	}
+
+	for _, tc := range []struct {
+		name string
+		in   any
+		keys []string
+	}{
+		{"category", ContextUsageCategory{}, []string{"name", "tokens"}},
+		{"mcp-tool", ContextUsageMCPTool{}, []string{"name", "server_name", "tokens"}},
+		{"memory-file", ContextUsageMemoryFile{}, []string{"path", "type", "tokens"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row, err := json.Marshal(tc.in)
+			if err != nil {
+				t.Fatalf("marshal zero row: %v", err)
+			}
+			assertWireKeys(t, row, tc.keys...)
+
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(row, &fields); err != nil {
+				t.Fatalf("unmarshal row key values: %v", err)
+			}
+			for _, key := range tc.keys {
+				want := `""`
+				if key == "tokens" {
+					want = `0`
+				}
+				if got := string(fields[key]); got != want {
+					t.Errorf("%s: got JSON %s, want %s", key, got, want)
+				}
+			}
+		})
+	}
+}
