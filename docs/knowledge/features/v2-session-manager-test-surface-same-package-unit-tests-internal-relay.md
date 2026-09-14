@@ -102,6 +102,28 @@ false resolver result. A complete log proof asserts the decoder-error attribute 
 text is absent and drives the unavailable arm with a non-zero poisoned payload.
 These are known test-strength gaps, not observed implementation leaks.
 
+The `mcp_reconnect` / `mcp_toggle` tests (#2419, `v2session_mcpactuate_test.go`)
+run every scenario against **both** verbs rather than writing one and asserting
+the other looks the same by inspection — the two share all four handler helpers,
+so a scenario proven on one but not mirrored on the other is exactly the kind of
+drift a shared implementation invites. They also carry the #2381 pair of proof
+traps forward with a third specific to a comma-ok refusal seam: the accepted
+fixture's `ConversationID` deliberately differs from the requested id, the log
+proof asserts decoder-error text is absent rather than just scanning for payload
+sentinels, and the refusal-arm test drives a **poisoned** `MCPStatusPayload`
+back from the seam alongside `ok=false` — a refusal arm returning a zero payload
+cannot prove the handler ignores the payload on `false`, only a refusal that
+hands back something worth leaking can. The handler-behaviour tests passed on
+first run; that was not itself evidence, since the RED before them was
+structural (`TestEveryInboundV2TypeHasHandler` reddening for an unclassified
+constant, then for a type registered on no dispatch surface) rather than
+behavioural. Two mutations confirmed the assertions are not vacuous: ignoring
+the seam's `accepted` bool reddens the merged-refusal-code test on both verbs,
+and logging the decoder error on the malformed arm reddens the log-absence test
+— the second is precisely the gap a sentinel-only log search leaves open, so a
+green first run on tests like these is worth mutation-checking rather than
+trusting.
+
 Off-`Run` debug-bundle assembly ([#1491](../../specs/architecture/1491-assemble-debug-bundle-off-run.md)) — extends `v2session_debugbundle_test.go`, reusing `bundleManagerFor` / `requestBundle` / `assertBusyReject` / `queueLen` / `waitCallCount` plus a new `blockingBundler` double (mirrors `blockingHandler`: signals on `entered`, blocks on `release`, then returns an injectable `(archive, err)`). `TestV2Session_DebugBundle_AssemblyDoesNotStallRun` is the load-bearing proof for AC #1, built on the `TestV2Session_SlowHandler_*` (#965) template: with one conn's assembly parked mid-flight, asserts a second conn's application frame still gets a sealed reply (the `Frames` arm), a queued `Push` to a third conn still drains (the `drainCh` arm), and a fourth conn's armed modal-timeout still fires on schedule (the `modalTimeout` arm) — none of them waiting on the release; on the pre-#1491 tree, with the seam inline, all three time out instead. `TestV2Session_DebugBundle_RejectsSecondWhileAssembling` pins the accept-side gate half specifically: a second request arriving while the bundler is blocked and the queue is still empty (asserted via `queueLen == 0` and `!mgr.bundleInFlight(connID)`) is rejected with the bundler call count staying at 1 — non-vacuous proof that `s.bundleAssembling`, not the queue-derived scan, did the rejecting. `TestV2Session_DebugBundle_ServedAfterFailedAssembly` pins the deferred clear: an assembly error yields exactly one deterministic reply with the error text absent from both wire and log, then a fresh request on the same conn is served with a new assembly — failing if the marker clear is missed on the error branch. `TestV2Session_DebugBundle_ErrorReplies` was **amended**, not left stay-green: its assembly-error subtest now polls for the reply instead of taking a bare snapshot, because the reply lands one `Run` pass later than the old inline-synchronous assumption. `TestV2Session_DebugBundle_RejectsSecondWhileQueued`, `…_ServedAfterDrain`, `…_PerConnIsolation`, and `…_NeverLogsContentEncryptedOnly` pass unchanged — all already synchronise by polling, so the extra `Run` hop is invisible to them.
 
 Two fixture traps surfaced building the above, worth knowing before touching this file again. `blockingBundler.release` must be closed from a `t.Cleanup` **registered after** the manager's `stop` cleanup — `t.Cleanup` runs LIFO, and release-before-stop unparks the seam before `stop` waits for `Run` to exit; registered the other way round, a pre-fix tree *hangs* in cleanup instead of failing, turning the RED proof AC #1 demands into a timeout with no diagnostic. And a pre-fix failure and a mutation-kill can redden the same test for unrelated reasons: `…_RejectsSecondWhileAssembling` also fails pre-fix, but only because `Run` is parked and never reaches the second request at all — that says nothing about the marker specifically. Only a mutant that drops `s.bundleAssembling` from the gate while leaving assembly off `Run` isolates the accept-side half, and it reddens as a missing-reply count rather than an obviously-wrong value — the absent reply *is* the two-concurrent-assemblies bug, read backwards.
