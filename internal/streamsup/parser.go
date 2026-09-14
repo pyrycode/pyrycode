@@ -2456,6 +2456,14 @@ type Parser struct {
 	// stdout on another goroutine.
 	contextUsageRequests contextUsageRequests
 
+	// contextUsageQueries correlates requester-private context readings (#2430). Its
+	// relation to contextUsageRequests above is the one mcpActuations has to
+	// mcpStatusQueries: a separate map under a disjoint id prefix, because a claimed
+	// reading completes one waiter and must NOT also reach the shared event sink,
+	// where the automatic post-turn ask still publishes. Its own mutex covers
+	// registration from callers while Write consumes stdout on another goroutine.
+	contextUsageQueries contextUsageQueries
+
 	// mcpStatusQueries correlates requester-private status reads. Unlike the
 	// automatic status path below, a claimed response completes one waiter and
 	// never reaches the shared event sink. Its own mutex covers registration from
@@ -2541,10 +2549,12 @@ type mcpStatusChildPolicy struct {
 func (p *Parser) beginMCPStatusChild(eligible bool, request func() error) {
 	// A child replacement terminates every query aimed at its predecessor. The
 	// request-id prefix keeps any already-buffered late reply private even after
-	// its pending entry is gone. Actuations retire on the same boundary and for the
-	// same reason: a waiter must not outlive the exact child it targeted.
+	// its pending entry is gone. Actuations and context-usage queries retire on the
+	// same boundary and for the same reason: a waiter must not outlive the exact
+	// child it targeted.
 	p.mcpStatusQueries.failAll()
 	p.mcpActuations.failAll()
+	p.contextUsageQueries.failAll()
 	p.mcpStatusPolicy = mcpStatusChildPolicy{
 		installed: true,
 		eligible:  eligible,
@@ -2558,6 +2568,18 @@ func (p *Parser) registerContextUsageRequest(id string) *pendingContextUsageRequ
 
 func (p *Parser) removeContextUsageRequest(id string, pending *pendingContextUsageRequest) {
 	p.contextUsageRequests.remove(id, pending)
+}
+
+func (p *Parser) registerContextUsageQuery(id string) *pendingContextUsageQuery {
+	return p.contextUsageQueries.register(id)
+}
+
+func (p *Parser) removeContextUsageQuery(id string, pending *pendingContextUsageQuery) {
+	p.contextUsageQueries.remove(id, pending)
+}
+
+func (p *Parser) failContextUsageQueries() {
+	p.contextUsageQueries.failAll()
 }
 
 func (p *Parser) registerMCPStatusQuery(id string) *pendingMCPStatusQuery {
@@ -3515,6 +3537,114 @@ func (r *contextUsageRequests) remove(id string, pending *pendingContextUsageReq
 		delete(r.pending, id)
 	}
 	r.mu.Unlock()
+}
+
+type contextUsageQueryResult struct {
+	usage turnevent.ContextUsage
+	ok    bool
+}
+
+// pendingContextUsageQuery is one caller waiting on the reading it asked for. It is
+// pendingMCPStatusQuery's shape with a different payload, and the two are deliberately
+// NOT unified behind a generic: the status path is shipped and proven, and
+// parameterising its result type would put it inside this diff for no behavioural gain.
+//
+// THE RESULT CHANNEL'S ONE SLOT IS LOAD-BEARING. claim, failAll and a canceled caller's
+// remove can race; the buffer plus resultOnce is what lets the stdout forwarder complete
+// a waiter that has already walked away without blocking on nobody's receive.
+type pendingContextUsageQuery struct {
+	writeDone  chan struct{}
+	writeOK    bool
+	writeOnce  sync.Once
+	result     chan contextUsageQueryResult
+	resultOnce sync.Once
+}
+
+func newPendingContextUsageQuery() *pendingContextUsageQuery {
+	return &pendingContextUsageQuery{
+		writeDone: make(chan struct{}),
+		result:    make(chan contextUsageQueryResult, 1),
+	}
+}
+
+func (p *pendingContextUsageQuery) resolveWrite(ok bool) {
+	p.writeOnce.Do(func() {
+		p.writeOK = ok
+		close(p.writeDone)
+	})
+}
+
+// written blocks until the write outcome is known. It is what lets a FAILED WRITE beat
+// a reply the parser has already claimed: the child answering some request does not
+// establish that THIS one reached it intact, so a claim arriving while the writer is
+// still failing must not report a reading.
+func (p *pendingContextUsageQuery) written() bool {
+	<-p.writeDone
+	return p.writeOK
+}
+
+func (p *pendingContextUsageQuery) complete(usage turnevent.ContextUsage, ok bool) {
+	p.resultOnce.Do(func() {
+		p.result <- contextUsageQueryResult{usage: usage, ok: ok}
+	})
+}
+
+// contextUsageQueries is a SECOND MAP rather than a widening of contextUsageRequests
+// above, for the reason mcpActuations records against mcpStatusQueries: the two carry
+// different payloads — a write verdict against a reading — and, decisively, different id
+// namespaces. claim consumes every unregistered id carrying ITS prefix, so merging the
+// automatic lane's bare sequence ids into this map would swallow readings the shared
+// sink must still publish.
+type contextUsageQueries struct {
+	mu      sync.Mutex
+	pending map[string]*pendingContextUsageQuery
+}
+
+func (q *contextUsageQueries) register(id string) *pendingContextUsageQuery {
+	pending := newPendingContextUsageQuery()
+	q.mu.Lock()
+	if q.pending == nil {
+		q.pending = make(map[string]*pendingContextUsageQuery)
+	}
+	q.pending[id] = pending
+	q.mu.Unlock()
+	return pending
+}
+
+// claim removes an exact pending query before its payload is interpreted. An
+// unregistered id in the daemon's private query namespace is still claimed: it is a
+// duplicate, or a reply whose waiter was canceled, failed, or retired at a child
+// boundary. Claiming it is what keeps such a late reply off the shared sink.
+func (q *contextUsageQueries) claim(id string) (*pendingContextUsageQuery, bool) {
+	q.mu.Lock()
+	pending := q.pending[id]
+	delete(q.pending, id)
+	q.mu.Unlock()
+	if pending != nil {
+		return pending, true
+	}
+	return nil, strings.HasPrefix(id, contextUsageQueryIDPrefix)
+}
+
+func (q *contextUsageQueries) remove(id string, pending *pendingContextUsageQuery) {
+	q.mu.Lock()
+	if q.pending[id] == pending {
+		delete(q.pending, id)
+	}
+	q.mu.Unlock()
+}
+
+func (q *contextUsageQueries) failAll() {
+	q.mu.Lock()
+	pending := make([]*pendingContextUsageQuery, 0, len(q.pending))
+	for id, query := range q.pending {
+		pending = append(pending, query)
+		delete(q.pending, id)
+	}
+	q.mu.Unlock()
+	for _, query := range pending {
+		query.complete(turnevent.ContextUsage{}, false)
+	}
 }
 
 type mcpStatusQueryResult struct {
@@ -4974,6 +5104,15 @@ func (p *Parser) consumeLine(line []byte) {
 		// no record. Their id namespaces are disjoint, so the order between these two
 		// is free; the order relative to what follows is not.
 		if p.claimMCPActuation(line) {
+			return
+		}
+		// Third in the same family and for the same reason, but with one ordering
+		// constraint the other two do not carry: it must run ABOVE emitContextUsage
+		// (#2430). Both context-usage paths land in this arm, so a claim below the emit
+		// would publish a caller's private reading onto the shared sink as an
+		// unsolicited frame before handing it over. Order among the three claims is
+		// free — their id namespaces are disjoint.
+		if p.claimContextUsageQuery(line) {
 			return
 		}
 		p.emitContextUsage(line)
@@ -7490,15 +7629,34 @@ func (p *Parser) emitContextUsage(line []byte) {
 	if pending == nil || !pending.written() {
 		return
 	}
+	usage, ok := decodeContextUsage(line)
+	if !ok {
+		return
+	}
+	p.emit(usage)
+}
 
+// decodeContextUsage turns one top-level control_response into a bounded reading,
+// reading no request id at all: correlation belongs to the caller, exactly as
+// decodeMCPStatus splits it for the two MCP status consumers.
+//
+// ONE DECODER FOR BOTH LANES is the point rather than tidying. The shared sink reaches
+// it through emitContextUsage and a waiting caller through claimContextUsageQuery, and
+// a second decoder written for the second lane would bypass maxContextUsageStringBytes
+// and boundContextUsageEntries while every existing bound test stayed green — handing
+// that caller unbounded child-authored strings. Every rejection below is therefore a
+// bound BOTH lanes inherit, not a courtesy to one of them.
+//
+// It has no logger and emits nothing; it returns false for every rejection.
+func decodeContextUsage(line []byte) (turnevent.ContextUsage, bool) {
 	var response contextUsageResponseLine
 	if err := json.Unmarshal(line, &response); err != nil ||
 		response.Response.Subtype != controlResponseSuccess || response.Response.Response == nil {
-		return
+		return turnevent.ContextUsage{}, false
 	}
 	payload := response.Response.Response
 	if len(payload.Model) > maxContextUsageStringBytes {
-		return
+		return turnevent.ContextUsage{}, false
 	}
 	categories, dropped := boundContextUsageEntries(
 		payload.Categories,
@@ -7531,7 +7689,7 @@ func (p *Parser) emitContextUsage(line []byte) {
 			Path: file.Path, Type: file.Type, Tokens: file.Tokens,
 		}
 	}
-	p.emit(turnevent.ContextUsage{
+	return turnevent.ContextUsage{
 		Model:              strings.Clone(payload.Model),
 		TotalTokens:        payload.TotalTokens,
 		MaxTokens:          payload.MaxTokens,
@@ -7542,7 +7700,36 @@ func (p *Parser) emitContextUsage(line []byte) {
 		DroppedMCPTools:    droppedMCPTools,
 		MemoryFiles:        eventMemoryFiles,
 		DroppedMemoryFiles: droppedMemoryFiles,
-	})
+	}, true
+}
+
+// claimContextUsageQuery consumes a requester-private context reading before any
+// shared control-response consumer sees it — including emitContextUsage, which is
+// what keeps a claimed reading off the shared event sink and therefore out of the
+// unsolicited context_usage lane the automatic post-turn ask publishes on.
+//
+// Matching the id retires the query before subtype and payload decoding, so the
+// first response is terminal whatever it carries, exactly as claimMCPStatusQuery's
+// own doc block states. Nothing here logs: a claim returns above emitModelList,
+// which remains the sole control-response record owner.
+func (p *Parser) claimContextUsageQuery(line []byte) bool {
+	var idLine contextUsageResponseIDLine
+	if err := json.Unmarshal(line, &idLine); err != nil || idLine.Response.RequestID == "" {
+		return false
+	}
+	pending, claimed := p.contextUsageQueries.claim(idLine.Response.RequestID)
+	if !claimed {
+		return false
+	}
+	if pending == nil {
+		return true
+	}
+	if !pending.written() {
+		pending.complete(turnevent.ContextUsage{}, false)
+		return true
+	}
+	pending.complete(decodeContextUsage(line))
+	return true
 }
 
 // decodeMCPStatus recognises a status report by shape rather than request
