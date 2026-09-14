@@ -220,6 +220,35 @@ duplicates and late replies after cancellation or teardown without retaining a
 growing list of completed ids. Automatic numeric ids keep their existing path.
 No server text or request content is logged by the private path.
 
+`Runner.QueryContextUsage` (#2430) is a third instance of the same
+snapshot/register/recheck/write shape, this time correlating
+`RequestContextUsage`'s reading rather than MCP status. Its gate differs from
+`QueryMCPStatus`'s on purpose: `mcpStatusEligible` reports whether argv confines
+the child to the daemon's one MCP config, which has no bearing on whether a
+context reading can be asked for, so this gate checks only that the child is
+live and not rotating. `Parser.claimContextUsageQuery` sits beside
+`claimMCPStatusQuery` and `claimMCPActuation` ahead of `emitContextUsage`,
+under its own `context-usage-query-` prefix — disjoint from
+`mcpStatusQueryIDPrefix`, `mcpActuationIDPrefix`, and the bare sequence ids
+`RequestContextUsage` mints, since every one of these correlators claims any
+unregistered id in its own namespace and `mcpActuationIDPrefix`'s warning about
+a collision costing a hang rather than a miss applies unchanged to a fourth
+prefix on the same rule. `emitContextUsage`'s payload decode is split out as
+`decodeContextUsage` so the query and the shared sink read one decoder; a
+second decoder for the query path would have silently bypassed
+`maxContextUsageStringBytes` and `boundContextUsageEntries`'s per-entry caps
+while every existing bound test for the shared path stayed green, so sharing
+the decoder is what makes the bound structural rather than duplicated.
+
+Asserting that a claimed reading leaves no trace on the shared control-response
+record is easy to get vacuously: a query-minted id is never registered in
+`contextUsageRequests`, so `emitContextUsage` could not have published it
+regardless of where the claim sits in the arm, and a test that only checks "the
+sink saw nothing" proves nothing about ordering. The assertion that actually
+pins the claim above `emitModelList` needs a capturing logger checked for the
+absence of a control-response record — confirmed non-vacuous by moving the
+claim below `emitModelList` and watching that assertion fail first.
+
 `emitStreamEvent` maps Claude's nested partial-message wire without changing the
 downstream event contract. A valid `message_start` replaces the current message
 ID and open-block state; a valid `content_block_start` records one index and
