@@ -1954,6 +1954,11 @@ func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rat
 	br := bufio.NewReader(r)
 	turn := 0
 	mcpStatusRequests := 0
+	// mcpActuated is STICKY: once this child has accepted any MCP actuation, every
+	// later mcp_status answer reports the pending row. A one-shot flag would make the
+	// second verb's membership read disagree with the first verb's answer for no reason
+	// a test could name, and the stream loop is sequential so no lock is needed.
+	mcpActuated := false
 	permissionRider := loadStdioPermissionRider(os.Getenv(envStreamCanUseTool))
 	var pendingPermission *pendingStdioPermission
 	for {
@@ -2098,9 +2103,25 @@ func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rat
 				// request, while only the MCP-status e2e wants the reply to enter its wire.
 				if os.Getenv(envStreamMCPStatus) != "" {
 					mcpStatusRequests++
-					if werr := writeMCPStatusAck(w, reqID, mcpStatusRequests > 1); werr != nil {
+					if werr := writeMCPStatusAck(w, reqID, mcpStatusRequests > 1, mcpActuated); werr != nil {
 						return
 					}
+				}
+			} else if reqID, ok := mcpActuationRequestID(b); ok {
+				// The two actuation verbs (#2420). Answered UNCONDITIONALLY, beside the
+				// initialize and context-usage arms and for the reason those record: only a
+				// gated actuation sends one, so no existing suite's bytes change, and a
+				// rider-gated answer would leave a suite that does send one hanging until
+				// its caller's deadline rather than failing on the assertion it came for.
+				//
+				// ACCEPTING ONE FLIPS THE STICKY FLAG the status arm above reads, which is
+				// what makes a post-acknowledgement read observably different from the
+				// membership read that preceded it. It also models claude: the committed
+				// mcp_status capture shows a just-reconnected server commonly reporting
+				// pending rather than connected.
+				mcpActuated = true
+				if werr := writeMCPActuationAck(w, reqID); werr != nil {
+					return
 				}
 			} else if reqID, ok := contextUsageRequestID(b); ok {
 				// Context usage is requested during ordinary fake-daemon runs, so its
@@ -2187,6 +2208,8 @@ const (
 	subtypeInterrupt         = "interrupt"
 	subtypeInitialize        = "initialize"
 	subtypeMCPStatus         = "mcp_status"
+	subtypeMCPReconnect      = "mcp_reconnect"
+	subtypeMCPToggle         = "mcp_toggle"
 	subtypeGetContextUsage   = "get_context_usage"
 	subtypeSetPermissionMode = "set_permission_mode"
 	subtypeSetModel          = "set_model"
@@ -2661,7 +2684,43 @@ func writeInitializeAck(w io.Writer, requestID string) error {
 // flows. fresh selects the changed state returned after this child's automatic
 // startup report. All text is inert and non-secret; writeJSONLine safely echoes
 // the daemon's request id without allowing it to create a second physical line.
-func writeMCPStatusAck(w io.Writer, requestID string, fresh bool) error {
+// mcpActuationRequestID reports whether line is one of the two MCP actuation
+// control_requests the daemon writes on a gated mcp_reconnect / mcp_toggle
+// (streamsup.marshalMCPReconnectEnvelope and marshalMCPToggleEnvelope), returning the
+// correlation id its ack echoes.
+//
+// NEITHER THE SERVER NAME NOR THE ENABLED FLAG IS READ, and that is the fake being
+// honest about where the decision lives: membership and authorization are the daemon's
+// caller boundary, already settled before a byte reached this child, so a fake that
+// re-checked them would prove the gate against a second copy of itself. What it does
+// model is the one property claimMCPActuation reads — an ack that echoes the id and
+// carries the success subtype.
+func mcpActuationRequestID(line []byte) (string, bool) {
+	if id, ok := controlRequestID(line, subtypeMCPReconnect); ok {
+		return id, true
+	}
+	return controlRequestID(line, subtypeMCPToggle)
+}
+
+// writeMCPActuationAck answers one accepted MCP actuation. The shape is the minimum
+// claimMCPActuation consumes: the echoed request id plus the success subtype, with no
+// inner response — a matching id alone must not read as accepted, which is why that
+// claim tests the subtype and why this ack carries it explicitly.
+func writeMCPActuationAck(w io.Writer, requestID string) error {
+	return writeJSONLine(w, map[string]any{
+		"type": "control_response",
+		"response": map[string]any{
+			"subtype":    "success",
+			"request_id": requestID,
+		},
+	})
+}
+
+// writeMCPStatusAck answers one mcp_status query. fresh selects the changed-state row a
+// second and later query returns; actuated overrides both with the pending reading a
+// server commonly gives immediately after being reconnected, which is what lets a test
+// tell a post-acknowledgement read from the membership read that preceded it.
+func writeMCPStatusAck(w io.Writer, requestID string, fresh, actuated bool) error {
 	server := map[string]any{
 		"name":   "pyry_mcp_test",
 		"status": "failed",
@@ -2675,6 +2734,17 @@ func writeMCPStatusAck(w io.Writer, requestID string, fresh bool) error {
 		server = map[string]any{
 			"name":   "pyry_mcp_fresh",
 			"status": "connected",
+			"error":  "",
+			"scope":  "project",
+			"serverInfo": map[string]any{
+				"version": "10.0.0-fresh",
+			},
+		}
+	}
+	if actuated {
+		server = map[string]any{
+			"name":   "pyry_mcp_fresh",
+			"status": "pending",
 			"error":  "",
 			"scope":  "project",
 			"serverInfo": map[string]any{

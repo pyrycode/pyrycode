@@ -56,7 +56,24 @@ high-churn wiring file. #2005 added a fifth: `interface{ SlashCommandList() (tur
 reason. None of these assert to the concrete `*streamsup.Runner` type; `Session.Runner()`
 holds the value-typed `streamRunner` adapter in production, so a literal `.(*streamsup.Runner)` assertion
 would be `ok == false` always and fall through silently to an inert default — the same class of hazard AC
-5's #1580 review round caught in this file's own first-draft correction. `Interrupt`/`RestartFresh`/
+5's #1580 review round caught in this file's own first-draft correction.
+
+**#2420 is where this stopped being a documented hazard and became a real bug, caught only
+by a daemon-level test.** `boundMCPChildActuator` (`cmd/pyry/mcp_actuate_v2.go`) asserts a
+sixth capability interface, `mcpChildActuator` (`ReconnectMCPServer`/`SetMCPServerEnabled`),
+against `resolveBoundRunner`'s return — same family, same call-site shape. Its author read
+`resolveBoundMCPStatus`'s working `mcpStatusQuerier` assertion as proof that the concrete
+`*streamsup.Runner` satisfies a narrow interface directly, rather than as evidence that
+**someone had already widened `streamRunner` with a forward for it**. `streamRunner` carried
+no forward for the two new methods, so the assertion was `ok == false` on every call —
+exactly the silent-fallthrough failure this section already named — and every unit test
+stayed green, because each one injects `mcpChildActuator` directly rather than resolving it
+through the adapter the way production does. Only the daemon-level e2e spec caught it, on
+its first run. **The check for the next capability assertion in this family:** grep the
+method name against `cmd/pyry/streamsup_runner.go` before assuming a concrete runner method
+reaches the interface — a working sibling assertion is evidence the adapter was widened for
+*that* method, not that the adapter is transparent to every method the concrete type has.
+`Interrupt`/`RestartFresh`/
 `BeginRotation`/`ModelList` stay off `sessions.Runner` deliberately (adding any would be speculative
 surface, or in `ModelList`'s case would drag every test double in both packages into the diff for no
 compile-time guarantee since its consumer sits in `cmd/pyry`, not `internal/sessions`); `SetSpawnArgs`,

@@ -10,11 +10,13 @@ modal. Landed in #712 (EPIC #597 Phase 3 — mobile remote head, ADR 025 §6
 
 This slice is the **writer primitive only** — it ships with **no caller**. The
 package does **not** own any calling loop, timer, nonce, or decision logic; it
-only records an already-decided `Entry`. Three callers construct one today:
+only records an already-decided `Entry`. Four callers construct one today:
 the modal control loop (#703), `cmd/pyry`'s `questionResolverV2` since #1986
 — the per-device gate for an inbound `question_answer` / `question_refused` —
-and, since #2127, `cmd/pyry`'s `pairingMinterV2.MintPairing`. The first two
-reuse the same `ModalID`/`ModalClass` pair rather than the package growing a
+`cmd/pyry`'s `pairingMinterV2.MintPairing` since #2127, and `cmd/pyry`'s
+`mcpActuatorV2` since #2420 — the per-device gate for an inbound
+`mcp_reconnect` / `mcp_toggle`. The first two reuse the same
+`ModalID`/`ModalClass` pair rather than the package growing a
 question-specific field: the batch id rides `ModalID` and the compile-time
 constant `classQuestion = "question"` rides `ModalClass`, so a forensic reader
 tells a question record from a modal one by that field alone. Adding a
@@ -34,6 +36,22 @@ field earns a new consumer by what it already means, and a caller with no
 value for a required-looking field should say so by leaving it empty, not by
 manufacturing one that reads as data but isn't.
 
+**#2420 is where the id/class-reuse precedent stops applying, not where it
+breaks.** `mcpActuatorV2` is the first decision family that has to name
+**three** things — which conversation, which server, what kind of actuation —
+where `ModalID`/`ModalClass` offer two slots. Stuffing the conversation id
+into `ModalID` would repeat the exact mistake `pairingMinterV2`'s reasoning
+already forbids: putting a different *kind* of value into a field an operator
+reads as one thing, and a conversation id is not a one-time nonce. So `Entry`
+gained two fields instead, `ConversationID` and `Target` (below) — grown only
+because the reuse precedent's own justification, "the existing id/class pair
+already says which batch and what kind," is exactly what stops being true for
+a caller with a third thing to name. `ModalID` stays empty at this caller too,
+for `pairingMinterV2`'s reason: an actuation has no one-time nonce either.
+Read this as the boundary of the reuse rule, not a precedent for growing the
+type again — the next caller with only two things to say still reuses
+`ModalID`/`ModalClass` rather than reaching for a new field.
+
 - Decision anchor: [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md)
   § "Security model — remote permission granting", item 6 "Audit" — *"Each
   remote answer is logged locally (device id, class, decision, time); never on
@@ -50,18 +68,32 @@ This package honors that contract **structurally, not by discipline**:
 
 - **The `Entry` type has no field that can hold a plain token** (or any other
   secret). It carries only non-secret identity: the device's SHA-256
-  `DeviceHash` and `DeviceLabel`, the opaque modal nonce + class, the outcome,
-  and the source. `device.PushToken` (an opaque secret) likewise has no field.
+  `DeviceHash` and `DeviceLabel`, the opaque modal nonce + class, the
+  daemon-owned `ConversationID`, the bounded remote-authored `Target`, the
+  outcome, and the source. `device.PushToken` (an opaque secret) likewise has
+  no field.
 - **The package imports only `log/slog`** — it never imports `internal/devices`,
   so it cannot even reach a plain token.
 - **The writer emits a fixed attribute set** (`device_hash`, `device_label`,
-  `modal_id`, `modal_class`, `outcome`, `source`). The no-leak test pins that
-  exact key set, so any future edit that adds a secret-bearing field fails the
-  test (see [codebase/712.md](../codebase/712.md) § Lessons learned for why
-  *exact-key-set* beats a substring scan).
+  `modal_id`, `modal_class`, `conversation_id`, `target`, `outcome`, `source`).
+  The no-leak test pins that exact key set, so any future edit that adds a
+  secret-bearing field fails the test (see [codebase/712.md](../codebase/712.md)
+  § Lessons learned for why *exact-key-set* beats a substring scan).
 - **Modal body text is deliberately not captured.** A permission prompt can
   embed a shell command or file path; the entry records the opaque `modal_id`
   and the category `modal_class` only — never `Title`/`Prompt`/`Options`.
+- **`Target` is the one field a caller must bound before it arrives.** Unlike
+  every other field, it is remote-authored — `mcpActuatorV2` fills it with the
+  server name exactly as the asking device spelled it, capped only by the
+  transport's frame size upstream. `cmd/pyry`'s `truncateForLog` bounds it
+  (`mcpAuditTargetMax = 128` bytes) before it reaches `Entry`, because the
+  record is written *before* a refusal is decided and this package's sink is
+  tee'd into `internal/control`'s bounded ring: an unbounded field would let a
+  device the gate is about to refuse evict the operator's own recent forensic
+  history by padding it and retrying. This package cannot enforce that bound
+  itself — it has no opinion on what a caller's identifiers should look like —
+  so it is a caller obligation, the same way keeping a secret out of `Target`
+  is.
 
 ## Exported surface (3 types, 1 func)
 
@@ -71,10 +103,18 @@ This package honors that contract **structurally, not by discipline**:
 type Entry struct {
     DeviceHash  string  // device.TokenHash (SHA-256 hex); "" for a no-device timeout
     DeviceLabel string  // device.Name
-    ModalID     string  // protocol.ModalShownPayload.ModalID — the one-time nonce (#701)
-    ModalClass  string  // protocol.ModalShownPayload.Class — e.g. "permission" (ADR 025 §6 "class")
-    Outcome     Outcome // the self-contained decision classification
-    Source      Source  // where the decision originated (mirrors the wire set)
+    ModalID     string  // protocol.ModalShownPayload.ModalID — the one-time nonce (#701); "" where the caller has none (#2127, #2420)
+
+    // ConversationID and Target, added by #2420: the daemon-owned conversation a
+    // decision was scoped to, and the object it was about AS THE ASKING DEVICE
+    // NAMED IT (remote-authored; a caller MUST bound it — see "core security
+    // property" above). Both empty at every caller with nothing to put there.
+    ConversationID string
+    Target         string
+
+    ModalClass string  // protocol.ModalShownPayload.Class — e.g. "permission" (ADR 025 §6 "class"); also carries a non-modal caller's own class constant, e.g. classQuestion, classPairingMint, classMCPReconnect/classMCPToggle
+    Outcome    Outcome // the self-contained decision classification
+    Source     Source  // where the decision originated (mirrors the wire set)
 }
 
 type Outcome string // self-contained vocabulary; #703 maps onto it (table below)
@@ -194,16 +234,28 @@ the daemon's configured slog handler (local log sink — file/stderr per daemon 
   forgotten logger writes to the default, never panics, so the primitive is
   total and an audit write can never become a crash that drops the decision.
 
+## Matching one record in a daemon-level e2e assertion
+
+`Log`'s attribute order is fixed, but a single key is not a unique match
+against a daemon's stderr: `#2420`'s e2e spec first asserted on
+`conversation_id=<id>` alone and matched six lines, most of them ordinary
+relay diagnostics that happen to carry the same key. Pairing a key with its
+fixed neighbour — `conversation_id=… target=…` — pins the record family,
+because that adjacency is unique to one `Log` call site's attribute set. An
+e2e test asserting against this package's output should match on an adjacent
+key pair, not a single key, the same way a unit test inside this package
+matches the exact key set rather than a substring.
+
 ## Files
 
 ```
 internal/audit/
-├── audit.go       Entry, Outcome (5 consts), Source (3 consts), Log
+├── audit.go       Entry (8 fields, #2420 added ConversationID/Target), Outcome (5 consts), Source (3 consts), Log
 └── audit_test.go  one-per-outcome (5-row table), field-completeness, exact-key-set,
                    no-secret-leak (sentinel-absence + hash-present), nil-logger safety
 ```
 
-~81 LOC production + ~186 LOC tests, one new package; imports only `log/slog`.
+~115 LOC production + ~193 LOC tests; imports only `log/slog`.
 
 ## Related
 
@@ -229,5 +281,14 @@ internal/audit/
   **empty device identity** (a local TTY resolution has no answering device — the no-device
   case), on the first-answer-wins winner path only. See [codebase/706.md](../codebase/706.md)
   and [features/modalbridge-package.md](modalbridge-package.md).
+- **`ConversationID`/`Target` consumer — #2420** (landed): `cmd/pyry/mcp_actuate_v2.go`'s
+  `mcpActuatorV2` is the per-device gate for an inbound `mcp_reconnect` /
+  `mcp_toggle`. It is the first caller these two fields exist for — see "the
+  id/class-reuse precedent" above — and the first caller that must bound a
+  field before logging it, since `Target` carries the server name exactly as
+  the (possibly gate-refused) device asked for it. `ModalClass` carries
+  `classMCPReconnect` / `classMCPToggle`, valued as the wire type constants so
+  a forensic reader joins a record to a frame type without a mapping table.
+  See [protocol-mobile.md § Actuating MCP servers on demand](../../protocol-mobile.md#actuating-mcp-servers-on-demand).
 
 [ADR 025]: ../decisions/025-mobile-remote-head-interactive-session.md

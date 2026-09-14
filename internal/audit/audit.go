@@ -25,12 +25,43 @@ import "log/slog"
 // originated. It is constructed in-process by #703 and never decoded from the
 // network.
 type Entry struct {
-	DeviceHash  string  // device.TokenHash (SHA-256 hex); "" for a no-device timeout
-	DeviceLabel string  // device.Name
-	ModalID     string  // protocol.ModalShownPayload.ModalID — the one-time nonce (#701)
-	ModalClass  string  // protocol.ModalShownPayload.Class — e.g. "permission" (ADR 025 §6 "class")
-	Outcome     Outcome // the self-contained decision classification (below)
-	Source      Source  // where the decision originated (mirrors the wire set)
+	DeviceHash  string // device.TokenHash (SHA-256 hex); "" for a no-device timeout
+	DeviceLabel string // device.Name
+	ModalID     string // protocol.ModalShownPayload.ModalID — the one-time nonce (#701)
+	ModalClass  string // protocol.ModalShownPayload.Class — e.g. "permission" (ADR 025 §6 "class")
+
+	// ConversationID and Target scope a decision that is ABOUT SOMETHING rather
+	// than about a one-time prompt, and they arrived together in #2420 with the
+	// per-device MCP actuation gate — the first decision family that has to name
+	// three things (which conversation, which server, what kind) where ModalID and
+	// ModalClass offer two slots.
+	//
+	// Adding them departs from the precedent #1986 and #2127 set, and deliberately:
+	// that precedent's own reasoning is that the id/class pair "already says which
+	// batch and what kind", which is exactly what stops being true here. The
+	// alternative it forbids is the one not taken — pairingMinterV2.auditMint
+	// records that filling ModalID with a different KIND of value puts a value in a
+	// field an operator reads as one thing, and a conversation id is not a one-time
+	// nonce. Both fields are empty at every caller that has nothing for them, which
+	// is that same precedent honored rather than broken.
+	//
+	// ConversationID is DAEMON-OWNED: it comes from the registry record the decision
+	// resolved, never from the asking frame.
+	ConversationID string
+	// Target is the object the decision was about, AS THE ASKING DEVICE NAMED IT —
+	// so unlike every other field here it is REMOTE-AUTHORED, validated only by
+	// whatever decision recorded it, and a caller MUST bound it before it arrives
+	// (cmd/pyry's truncateForLog is the in-tree helper; its own block carries the
+	// padding threat). It is not identity, it is never a secret, and it must never
+	// have been used as a path component to get here.
+	//
+	// It is recorded as asked rather than as resolved on purpose: a record saying a
+	// device was refused "something" is not forensically useful, and on a refusal
+	// there IS no resolved value to substitute.
+	Target string
+
+	Outcome Outcome // the self-contained decision classification (below)
+	Source  Source  // where the decision originated (mirrors the wire set)
 }
 
 // Outcome is the security classification of a resolved remote-permission
@@ -76,6 +107,8 @@ func Log(logger *slog.Logger, e Entry) {
 		slog.String("device_label", e.DeviceLabel),
 		slog.String("modal_id", e.ModalID),
 		slog.String("modal_class", e.ModalClass),
+		slog.String("conversation_id", e.ConversationID),
+		slog.String("target", e.Target),
 		slog.String("outcome", string(e.Outcome)),
 		slog.String("source", string(e.Source)),
 	)

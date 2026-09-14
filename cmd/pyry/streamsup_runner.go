@@ -228,6 +228,25 @@ func (a streamRunner) QueryMCPStatus(ctx context.Context) (turnevent.MCPStatus, 
 	return a.r.QueryMCPStatus(ctx)
 }
 
+// ReconnectMCPServer and SetMCPServerEnabled forward the two MCP actuations #2418
+// landed on the concrete runner. They are the WRITE half of the pair whose read half is
+// QueryMCPStatus above and stay off sessions.Runner for its reason: their only consumer
+// is mcpActuatorV2 in this package, and widening that interface would pull every test
+// double into the slice.
+//
+// NEITHER FORWARD ADDS A CHECK, and the absence is the design rather than an omission.
+// Membership of the named server and the asking device's authorization are settled
+// ABOVE this adapter, in the one place that can audit them; the concrete methods say
+// the same thing from below. A check here would be a third opinion on a decision that
+// already has exactly one owner.
+func (a streamRunner) ReconnectMCPServer(ctx context.Context, serverName string) bool {
+	return a.r.ReconnectMCPServer(ctx, serverName)
+}
+
+func (a streamRunner) SetMCPServerEnabled(ctx context.Context, serverName string, enabled bool) bool {
+	return a.r.SetMCPServerEnabled(ctx, serverName, enabled)
+}
+
 // mapStreamState maps streamsup's native lifecycle snapshot to supervisor.State.
 // The two types mirror each other field-for-field; Phase maps by a plain string
 // conversion because the phase values are identical across the two packages.
