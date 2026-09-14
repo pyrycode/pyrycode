@@ -876,6 +876,17 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 			}
 			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameMCPStatusRequest})
 			return
+		case protocol.TypeRequestContextUsage:
+			// The read-and-wait arm's twin (#2431), on the worker for the same reason
+			// and then some: a live resolver defers a mid-turn request until the turn
+			// ends AND waits on a child round trip. Both inert gates stay here on Run:
+			// neither posture decodes the payload or consults membership, and holding
+			// them here is what keeps a frame that fails either off the queue entirely.
+			if m.cfg.ContextUsageFor == nil || !s.interactive {
+				return
+			}
+			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameContextUsageRequest})
+			return
 		case protocol.TypeMCPReconnect:
 			// The WRITE half of the MCP pair (#2419), on the worker for the same
 			// reason as the read above — the actuator waits on a child round trip —
@@ -1036,6 +1047,10 @@ const (
 	// which is why their dispatch arms gate on a seam that stays nil until #2420.
 	appFrameMCPReconnect
 	appFrameMCPToggle
+	// appFrameContextUsageRequest is the on-demand context-window read (#2431) —
+	// the longest-waiting member of this set, since it defers a mid-turn request
+	// until the turn ends before it asks the child anything.
+	appFrameContextUsageRequest
 )
 
 // appFrameWorker is the per-conn sub-actor that runs application handlers
@@ -1114,6 +1129,12 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 			case appFrameMCPToggle:
 				// The arm above's twin; same placement for the same reason.
 				m.handleMCPToggle(ctx, s, job.plaintext)
+			case appFrameContextUsageRequest:
+				// The resolver may wait for an open turn to end and then for a child
+				// round trip, so this stalls only the addressed conn's later frames.
+				// Its reply and every reject return through forwardToRun, so the
+				// worker seals nothing under s.send.
+				m.handleRequestContextUsage(ctx, s, job.plaintext)
 			case appFrameRoute:
 				// The v1 application dispatch chain, unchanged: build the outbound
 				// channel, call dispatch.Route, forward its replies to Run.

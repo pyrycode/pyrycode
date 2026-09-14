@@ -4452,6 +4452,13 @@ func TestNegotiateCapabilities(t *testing.T) {
 		{"model list granted", []string{protocol.CapabilityModelList}, []string{protocol.CapabilityModelList}},
 		{"all three granted", []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList}, []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList}},
 		{"all three granted, advertised in reverse", []string{protocol.CapabilityModelList, protocol.CapabilityQuestion, protocol.CapabilityInteractive}, []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList}},
+		// #2431's fourth supported member, APPENDED after CapabilityModelList. The
+		// last row advertises all four in reverse and expects supported order, so it
+		// fails both if context_usage is missing from the supported set and if it is
+		// inserted anywhere but the end.
+		{"context usage granted", []string{protocol.CapabilityContextUsage}, []string{protocol.CapabilityContextUsage}},
+		{"all four granted", []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage}, []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage}},
+		{"all four granted, advertised in reverse", []string{protocol.CapabilityContextUsage, protocol.CapabilityModelList, protocol.CapabilityQuestion, protocol.CapabilityInteractive}, []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage}},
 	}
 
 	for _, tc := range tests {
@@ -4507,6 +4514,19 @@ func TestV2Session_Handshake_CapabilityNegotiation(t *testing.T) {
 		// len(negotiated) > 0 test, which would hand this client the whole
 		// interactive stream on the strength of a detection-only string.
 		{"model list alone grants no interactive", []string{protocol.CapabilityModelList}, []string{protocol.CapabilityModelList}, false},
+		// #2431 AC-5, the echo half: a client advertising the new string has it
+		// echoed back when the daemon supports the verb.
+		{"advertise all four", []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage}, []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage}, true},
+		// #2431 AC-5, the third row of the detection-only family, for the reason the
+		// two above it give: context_usage is grantable to a client that stays
+		// non-interactive, so this reddens on a len(negotiated) > 0 reduction too.
+		{"context usage alone grants no interactive", []string{protocol.CapabilityContextUsage}, []string{protocol.CapabilityContextUsage}, false},
+		// #2431 AC-5, the OTHER half and the one that would go unwritten: a client
+		// advertising interactive WITHOUT the new string is negotiated exactly as it
+		// was before the string existed. That is what keeps pyrycode-mobile, which
+		// advertises interactive and nothing else, able to use the verb — the
+		// handler gates on this flag alone and never on the capability.
+		{"interactive without context usage still interactive", []string{protocol.CapabilityInteractive}, []string{protocol.CapabilityInteractive}, true},
 	}
 
 	for _, tc := range tests {

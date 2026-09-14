@@ -77,7 +77,11 @@ type InnerFrameV2Decoded struct {
 // while remaining non-interactive; reducing it to a len() > 0 test would hand a
 // question-only client the whole interactive stream.
 // protocol.CapabilityModelList (#2172) is the second such member and is pinned
-// by its own row for that reason rather than riding the question one.
+// by its own row for that reason rather than riding the question one, and
+// protocol.CapabilityContextUsage (#2431) is the third — APPENDED per the rule
+// below. Like the two before it, it gates nothing: request_context_usage gates on
+// s.interactive alone, so a client advertising only this string is negotiated
+// non-interactive and reaches none of the verb.
 //
 // New members are APPENDED, never inserted. negotiateCapabilities emits in this
 // slice's order and both of its test tables compare with slices.Equal, so the
@@ -87,7 +91,7 @@ type InnerFrameV2Decoded struct {
 // Read-only after package init and read on the manager's Run goroutine; it is a
 // var only because a slice cannot be const. Nothing may assign to it or to its
 // backing array at runtime.
-var supportedV2Capabilities = []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList}
+var supportedV2Capabilities = []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage}
 
 // negotiateCapabilities returns the phone's advertised set ∩
 // supportedV2Capabilities, in supported-set order. It iterates the supported

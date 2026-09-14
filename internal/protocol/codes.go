@@ -163,6 +163,38 @@ const (
 	// compile-time constant in internal/relay.
 	CodeMCPActuationRefused = "mcp_actuation.refused" // reconnect or toggle refused, reason deliberately merged; never retryable
 
+	// Context-usage read error (#2431; docs/protocol-mobile.md § Error codes).
+	// MINTED WITH THE HANDLER THAT SENDS IT, the sequencing #2052, the history
+	// group and #2125 each followed: no reject vocabulary exists ahead of the code
+	// that can emit it.
+	//
+	// ONE NEW CODE, NOT TWO, for the reason CodeModelListUnavailable's block above
+	// gives in full: the other condition request_context_usage can refuse — the
+	// daemon does not host the named conversation — is answered by the EXISTING
+	// CodeConversationNotFound, and KnownConversation is what separates the two
+	// arms. There is no second id here to build a path-existence oracle over.
+	//
+	// IT MERGES EVERY "HOSTED BUT NO READING" CAUSE, and the merge is inherited
+	// rather than chosen: streamsup's QueryContextUsage collapses no bound session,
+	// no live child, a rotation in flight, a child replaced before answering, a
+	// failed write, an expired deadline and an unusable payload into ONE bool, so a
+	// richer wire vocabulary here would have nothing to source itself from. An
+	// unwired daemon-side seam merges in too, deliberately: distinguishing it would
+	// publish whether the host's context-usage source is configured, which is a fact
+	// about the machine rather than about the request.
+	//
+	// RETRYABLE, following the dominant cause rather than the merged one: a busy or
+	// rotating child will answer later and the caller changes nothing to make that
+	// happen. Note that the daemon-side resolver caches a refusal for its collapsing
+	// window, so a retry inside that window is answered from the same refusal — the
+	// window is short precisely so this stays a pacing detail rather than a lie.
+	//
+	// IT IS NOT A ZERO-VALUED READING. A ContextUsagePayload of all zeros is a
+	// SHAPE a client cannot distinguish from a genuine empty context, so it must
+	// NEVER stand in for "unknown" — this code is the only way to say "no reading",
+	// alongside the absence of a frame on the unsolicited post-turn lane.
+	CodeContextUsageUnavailable = "context_usage.unavailable" // the daemon hosts the conversation but has no reading to give; retryable
+
 	// Workspace error (#2207; docs/protocol-mobile.md § Error codes). MINTED WITH
 	// THE HANDLER THAT SENDS IT, the sequencing #2052, the history group and #2125
 	// each followed: no reject vocabulary exists ahead of the code that can emit it.
@@ -2127,4 +2159,55 @@ const (
 // push+reply.
 const (
 	TypeContextUsage = "context_usage" // binary → phone, outbound v2 context-window reading
+)
+
+// Mobile Protocol v2 ON-DEMAND CONTEXT-USAGE REQUEST (#2431, split from #2293;
+// docs/protocol-mobile.md § context_usage publishes it). The frame a client sends
+// to ask for one conversation's context breakdown NOW, rather than waiting for the
+// next turn to end. Its payload is RequestContextUsagePayload (interactive.go).
+//
+// THE DEFECT IT CLOSES is that the automatic reading is both late and cheap. #2371
+// publishes one after every TurnEnd at detail:"summary" — claude answers that from
+// the last response's usage plus local estimates, with no token-count API calls. An
+// operator watching a long turn has no way to ask what it is consuming, and no way
+// to get the expensive detail:"full" reading, which counts each category through
+// that API and is worth asking for only when someone is looking at the screen.
+//
+// IT MINTS NO SECOND OUTBOUND SHAPE. The answer is TypeContextUsage and
+// ContextUsagePayload UNCHANGED, correlated by the envelope's InReplyTo and carrying
+// NO EventID — so the reply never enters the #647 replay ring and advances no client
+// cursor. That is what TypeContextUsage's own block above anticipated when it
+// declared one shape for both producers, and it is why that type stays in
+// cmd/pyry/relay_guard_test.go's excludedTypes as "push+reply" rather than moving.
+//
+// THE DETAIL IS THE DAEMON'S CHOICE AND IS NOT ON THE WIRE. The payload carries a
+// conversation id and nothing else: the daemon always asks at "full". A detail key
+// would let one client downgrade what another is shown for the same conversation,
+// because closely-spaced asks COLLAPSE to one round trip below the relay seam and
+// are all answered from its result — so the cheap reading would win a race it should
+// not be in. It would also be the second place that vocabulary is decided, after
+// streamsup's own allow-list.
+//
+// ITS REJECT VOCABULARY IS TWO CODES, ONLY ONE OF THEM NEW: the existing
+// CodeConversationNotFound for a conversation this daemon does not host, and
+// CodeContextUsageUnavailable (above) for one it hosts with no reading to give. A
+// MALFORMED PAYLOAD MINTS NO THIRD CODE — it is TOLERATED, TypeRequestModelList's
+// decision and for that block's stated reason: the id reaches a registry membership
+// check and nothing else, never a path component, so a failed decode leaves an empty
+// id that membership refuses. Do not copy that tolerance to a verb that joins the id
+// into a path.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: this is a
+// v2 CONTROL envelope intercepted before internal/dispatch.Route, exactly as
+// TypeRequestModelList and TypeMCPStatusRequest are. IsKnownAppType rejecting it with
+// ErrUnknownType is also the structural bar against a v1 client pushing one into the
+// v1 handler chain. The partition in internal/protocol/compat_test.go files it in
+// v2OnlyTypes, and inboundAppTypeSet's asserted count does not move.
+//
+// IT NEVER SITS IN excludedTypes AS "pending handler". Like TypeRequestModelList and
+// TypeRequestSystemPrompt, the declaration and the handler land in ONE ticket — the
+// declaration's only daemon-side consumer is that handler — so it is filed in
+// inboundTypes as "switch-intercepted" from the moment it exists.
+const (
+	TypeRequestContextUsage = "request_context_usage" // phone → binary, inbound v2 control (switch-intercepted — #2431)
 )

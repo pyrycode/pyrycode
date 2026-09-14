@@ -240,6 +240,15 @@ second decoder for the query path would have silently bypassed
 while every existing bound test for the shared path stayed green, so sharing
 the decoder is what makes the bound structural rather than duplicated.
 
+**`QueryContextUsage`'s first production caller is #2431's `cmd/pyry` collapsing
+resolver behind the `request_context_usage` verb.** It calls at `detail:"full"`
+only — the expensive, per-category count through claude's token-count API —
+never `"summary"`, which the automatic post-turn `turnEndContextUsageRequester`
+already covers on every completed turn. The resolver defers the call behind
+`turnBusyTracker.WaitIdle` so a mid-turn ask writes nothing to the child until
+that turn ends, and collapses closely-spaced asks for the same conversation into
+one call so two overlapping requests never both reach this method at once.
+
 Asserting that a claimed reading leaves no trace on the shared control-response
 record is easy to get vacuously: a query-minted id is never registered in
 `contextUsageRequests`, so `emitContextUsage` could not have published it

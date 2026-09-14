@@ -203,6 +203,12 @@ var inboundTypes = map[string]string{
 	// worker because the resolver may wait on a child round trip. Its answer reuses
 	// TypeMCPStatus, which remains classified as an outbound push+reply.
 	"TypeMCPStatusRequest": "switch-intercepted",
+	// The on-demand context-usage request verb (#2431). Like TypeRequestModelList
+	// above it NEVER sat in excludedTypes as "pending handler": its declaration and
+	// its handler land in one ticket, because the declaration's only daemon-side
+	// consumer IS that handler. Its REPLY needs no entry here — it reuses
+	// TypeContextUsage, which excludedTypes already carries as "push+reply".
+	"TypeRequestContextUsage": "switch-intercepted",
 	// The two MCP actuation verbs (#2419), filed together because they share one
 	// handler file, one reject vocabulary and one seam. Like the read verb above they
 	// are tagged for the per-connection worker, because the actuator waits on a child

@@ -1080,8 +1080,13 @@ func runSupervisor(args []string) error {
 		sessionTranscriptDir: sessionTranscriptDir(pool, claudeSessionsDir),
 		// The conversation-keyed half of the model-list pair (#2125), built beside its
 		// enumerating twin below over the same registry and pool.
-		modelListFor:                  modelListFor(convReg, pool),
-		mcpStatusFor:                  mcpStatusFor(convReg, pool),
+		modelListFor: modelListFor(convReg, pool),
+		mcpStatusFor: mcpStatusFor(convReg, pool),
+		// The resolution half of the on-demand context-usage read (#2431), built
+		// beside its MCP twin over the same registry and pool. The collapsing and
+		// mid-turn-deferral half is composed in startRelayV2, which holds the turn
+		// tracker and the daemon context.
+		contextUsageResolve:           contextUsageResolve(convReg, pool),
 		mcpActuatorFor:                boundMCPChildActuator(convReg, pool),
 		retainedModelLists:            retainedModelLists(convReg, pool),
 		retainedSlashCommandLists:     retainedSlashCommandLists(convReg, pool),
