@@ -349,6 +349,12 @@ func TestMain(m *testing.M) {
 	if os.Getenv("PYRY_PERMISSION_OBSERVER") == "1" {
 		os.Exit(runPermissionObserver())
 	}
+	// #2278's sibling branch: stand in front of claude to rewrite the daemon's
+	// --mcp-config document, then exec the real binary. Beside the observer above
+	// because it is the same substitution, not a second mechanism.
+	if os.Getenv(mcpShimEnabled) == "1" {
+		os.Exit(runMCPConfigShim())
+	}
 	if os.Getenv("GO_TEST_HELPER_PROCESS") == "1" {
 		runFakePyry()
 		return
