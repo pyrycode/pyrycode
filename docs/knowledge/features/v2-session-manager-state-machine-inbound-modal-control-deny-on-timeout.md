@@ -19,20 +19,25 @@ the caller, so no decode error or attacker-controlled byte is ever echoed back.
   through it, so `internal/relay` imports neither `internal/supervisor`,
   `internal/modalbridge`, `internal/audit`, nor `cmd/pyry`. The `cmd/pyry`
   `modalResolverV2` (`cmd/pyry/modal_resolve_v2.go`) implements it: `ResolveCancel`
-  does registry `Resolve` → keystroker `SendEsc` → `audit.Log({cancelled, remote})`;
-  `ResolveAnswer` is the gated answer arm (#717 — `Lookup` → fail-closed gate →
-  `option_id` classification → `Resolve` consume → safe-answer keystroke → audit).
+  does registry `Resolve` → the same two-arm actuation the stream-json bridge gives
+  `ResolveAnswer` below (#2416 — stream-deny via `ResolveStream`, else keystroker
+  `SendEsc`) → `audit.Log({cancelled, remote})`; `ResolveAnswer` is the gated answer
+  arm (#717 — `Lookup` → fail-closed gate → `option_id` classification → `Resolve`
+  consume → safe-answer keystroke → audit).
   Wired in `cmd/pyry/relay.go`'s `startRelayV2`
   over the **daemon-singleton** `modalbridge.New()` registry (the same instance
   [#798](../codebase/798.md) live-wires the producer into). The keystroker argument
   is nil-safe-wrapped via `modalKeystrokerOrNoop` (#1131, the fourth and final
   typed-nil `w.sup` guard): PTY mode passes `w.sup` straight through (it satisfies
   `modalKeystroker`), while the stream-json bootstrap path (typed-nil `w.sup`,
-  #1077) gets a non-nil `noopKeystroker` — `ResolveCancel`/`ResolveTimeout` call
-  `SendEsc()` **unconditionally**, so (unlike `screenSnapshotterOrNil`'s genuine-nil
-  return) the guard must return something callable, not nil. A stream-json approval
-  has no PTY modal to dismiss; it denies fail-closed via the permbridge completer's
-  own deny-on-timeout (#1103), never through this keystroker. See
+  #1077) gets a non-nil `noopKeystroker` — `ResolveTimeout` still calls `SendEsc()`
+  **unconditionally** (#2416 gave `ResolveCancel` its own stream-deny arm, so it no
+  longer always reaches this keystroker), so (unlike `screenSnapshotterOrNil`'s
+  genuine-nil return) the guard must return something callable, not nil. A
+  stream-json approval has no PTY modal to dismiss; on timeout it denies fail-closed
+  via the permbridge completer's own deny-on-timeout (#1103) rather than through
+  this keystroker, and on cancel (#2416) it denies immediately through the same
+  stream-deny arm `ResolveAnswer` uses — also never through this keystroker. See
   [codebase/1131.md](../codebase/1131.md).
 - **`handleModalCancel`** — nil-resolver ⇒ debug-log + return (inert). Else decode
   `ModalCancelPayload` (a decode failure is tolerated → empty `modal_id` → the
@@ -181,6 +186,24 @@ up through the gate → classify → modalbridge-consume steps in `ResolveAnswer
   Esc keystroke, which has no target on the stream-json path. `retire`
   (invoked promptly on `Await`'s return) is the client-dismissal backstop
   instead.
+- **`ResolveCancel` shares the same verdict arm (#2416).** A `modal_cancel` for a
+  stream-json permission is no longer routed through the ESC fallback either:
+  `ResolveCancel` computes `handled := r.streamApprovals != nil &&
+  r.streamApprovals.ResolveStream(modalID, false, false, reasonRemoteDeny)` in the
+  exact spot the unconditional `SendEsc` used to sit, so a cancelled stream approval
+  denies immediately instead of parking until `permbridge`'s own `mcpApprovalTimeout`
+  fires (ten minutes by default). Before #2416 this was the one gap in "no on-screen
+  modal exists on the stream-json path": cancelling one still consumed and dismissed
+  it on the phone side, but told claude nothing, so the completer sat parked until
+  the timeout — a silent ten-minute stall a client had no way to see coming. Nothing
+  about the correlation bookkeeping changes: `retire` (above) is still the sole
+  deleter, and a modal absent from `byModal` — the PTY-path case — still takes the
+  unchanged `!handled` fallback to `SendEsc`. `RemoteAnswerable` and the per-device
+  answer gate are deliberately **not** applied to this arm: a cancel is only ever a
+  deny (the fail-closed direction an interaction-required permission's allow-only
+  gate exists to prevent), and the terminal path's cancel was already an
+  unconditional deny via ESC, so this brings the stream path level with it rather
+  than granting anything new.
 - **Wiring.** `startRelayV2` constructs the bridge over the **same**
   `*permbridge.Registry` `runSupervisor` created and the **same**
   `*modalbridge.Registry` the emitter/resolver already share, sets
