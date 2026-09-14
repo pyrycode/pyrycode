@@ -1074,6 +1074,10 @@ func runSupervisor(args []string) error {
 			return resolveConversationPrompt(convReg, pool, convID)
 		},
 		modelWindows: sessionModelWindows(pool),
+		// The folder half of the same reading (#2423), built beside the windows half
+		// over the same pool and gated on the daemon's own sessions directory: with
+		// none, the conversation-keyed usage seam stays unwired exactly as before.
+		sessionTranscriptDir: sessionTranscriptDir(pool, claudeSessionsDir),
 		// The conversation-keyed half of the model-list pair (#2125), built beside its
 		// enumerating twin below over the same registry and pool.
 		modelListFor:                  modelListFor(convReg, pool),

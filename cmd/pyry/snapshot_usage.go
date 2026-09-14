@@ -9,17 +9,33 @@ import (
 // relay's SnapshotUsage seam: given a session id per CALL, it resolves that
 // session's transcript BY ID and reports its occupancy (used tokens, window
 // size). The id is an argument rather than a construction-time closure so one
-// reader over one sessions directory can answer for any resolved session, not
-// only the bootstrap's (#1608).
+// reader can answer for any resolved session, not only the bootstrap's (#1608).
 //
-// Returns nil when there is no sessions directory to resolve against
-// (foreground / unwired). The guard belongs here rather than at the wiring
-// point because it protects the reader itself: with an empty dir, StatByID
-// would join a RELATIVE <id>.jsonl against the daemon's working directory, and
-// a stray file of that name there would be read and reported as a session's
-// occupancy. bootstrapSnapshotUsage collapses a nil reader into the nil seam
-// that makes the handlers report zeros — the pre-existing unwired contract,
-// unchanged.
+// #2423 makes the FOLDER per session too. dirFor answers the directory claude
+// writes THIS session's <id>.jsonl into, asked for the same id the transcript is
+// then resolved by. Before it, the reader held one folder for the whole daemon —
+// resolveClaudeSessionsDir of the daemon's own working directory — while
+// Pool.buildSession spawns a conversation carrying a cwd in that directory
+// instead, so every session_settings reply for such a conversation reported zero
+// used tokens against the default window. The reader was never wrong; it was
+// handed the wrong folder. sessionTranscriptDir is the production answerer and
+// its doc carries the derivation; fixedTranscriptDir below is the one-folder
+// adapter for callers that genuinely have one.
+//
+// Returns nil when there is NO RESOLVER (foreground / unwired), which is the
+// build-time decision bootstrapSnapshotUsage collapses into the nil seam that
+// makes the handlers report zeros — the pre-existing unwired contract, unchanged.
+// Deciding it on the resolver's PRESENCE and not on what it answers is what keeps
+// that reading: a per-call guard alone would turn an unwired daemon into a working
+// reader reporting the default window against a zero used count, a different wire
+// shape.
+//
+// The empty-folder guard survives as a PER-CALL one, and it protects the reader
+// itself rather than the wiring: with an empty dir, StatByID would join a RELATIVE
+// <id>.jsonl against the daemon's working directory, and a stray file of that name
+// there would be read and reported as a session's occupancy. Every "" a resolver
+// answers — an unknown id, a runner that cannot name a folder — therefore collapses
+// to the same fresh-session report a missing transcript produces.
 //
 // #1214: this replaces a resolver that asked the terminal child for its process
 // id and followed whichever transcript that process held open. Two things were
@@ -63,21 +79,31 @@ import (
 // performs the join and every one of its rules; nothing is decided here.
 //
 // A NIL windows FUNC MUST NOT COLLAPSE THE SEAM, and this is the spot where the
-// neighbouring shape is close enough to be pattern-matched wrong. dir == ""
-// collapses to a nil seam because it protects the reader itself — see above. A
-// nil windows func is the runConfigFor case instead, whose doc argues it for its
-// own usage half: it yields a WORKING reader whose answers carry the default
-// window, which is the pre-#2107 reading exactly. A daemon that cannot resolve
-// windows still has transcripts to read, and degrading one integer must not make
-// a resolvable session unresolvable. Foreground / v1 is that daemon.
-func snapshotUsageFor(dir string, windows func(sessionID string) map[string]int) func(id string) (usedTokens, windowTokens int) {
-	if dir == "" {
+// neighbouring shape is close enough to be pattern-matched wrong. dirFor == nil
+// collapses to a nil seam because without a folder there is no transcript to read
+// at all — see above. A nil windows func is the runConfigFor case instead, whose
+// doc argues it for its own usage half: it yields a WORKING reader whose answers
+// carry the default window, which is the pre-#2107 reading exactly. A daemon that
+// cannot resolve windows still has transcripts to read, and degrading one integer
+// must not make a resolvable session unresolvable. Foreground / v1 is that daemon.
+//
+// SECURITY: since #2423 the folder derives from a directory a paired client can
+// choose (resolveSpawnDir's confined, symlink-resolved output), so the never-log-
+// a-path, never-surface-one contract below is load-bearing on this path rather
+// than incidental to it. Two independent validators keep the join non-traversable
+// and neither is here: sessions' encodeWorkdir replaces both '/' and '.' with '-',
+// so an encoded workdir is one path component whatever the requested cwd spelled,
+// and StatByID rejects an id failing ValidStem BEFORE the join below.
+func snapshotUsageFor(dirFor func(sessionID string) string, windows func(sessionID string) map[string]int) func(id string) (usedTokens, windowTokens int) {
+	if dirFor == nil {
 		return nil
 	}
 	return func(id string) (int, int) {
 		var path string
-		if res, err := transcript.StatByID(dir, id); err == nil {
-			path = res.Path
+		if dir := dirFor(id); dir != "" {
+			if res, err := transcript.StatByID(dir, id); err == nil {
+				path = res.Path
+			}
 		}
 		var observed map[string]int
 		if windows != nil {
@@ -96,6 +122,28 @@ func snapshotUsageFor(dir string, windows func(sessionID string) map[string]int)
 		}
 		return u.UsedTokens, u.WindowTokens
 	}
+}
+
+// fixedTranscriptDir adapts ONE folder to snapshotUsageFor's per-session resolver
+// (#2423), answering it for every id. It is for callers that genuinely have one
+// folder and no session to ask — the bootstrap seam below, whose runner's working
+// directory IS the daemon's trusted workdir, and the reader's own unit tables.
+//
+// Returns nil for "", which is what carries the pre-#2423 build-time contract
+// across the signature change unchanged: a caller with no directory builds no
+// reader, so bootstrapSnapshotUsage still collapses to the nil seam that makes the
+// handlers report zeros. A constant "" answerer would be the WRONG translation —
+// non-nil, so the seam would exist and report a default window against a zero used
+// count.
+//
+// It is deliberately NOT the production answer for a conversation: a fixed folder
+// is exactly the defect #2423 fixes, so the only production caller is the one whose
+// session is the daemon's own. Anything conversation-keyed takes sessionTranscriptDir.
+func fixedTranscriptDir(dir string) func(sessionID string) string {
+	if dir == "" {
+		return nil
+	}
+	return func(string) string { return dir }
 }
 
 // bootstrapSnapshotUsage builds the seam startRelayV2 hands to the relay: the
@@ -120,8 +168,19 @@ func snapshotUsageFor(dir string, windows func(sessionID string) map[string]int)
 // agreeing on one reading — the two are constructed side by side in startRelayV2,
 // and wiring one alone would make the two surfaces disagree for the same session
 // (#2107 AC 1).
+//
+// dir STAYS A FIXED FOLDER here while the conversation-keyed seam went per-session
+// (#2423 AC 3): this reader answers only for the BOOTSTRAP session, whose runner's
+// working directory is the daemon's own trusted workdir, so there is no workspace
+// for it to miss and its reading is left byte-identical. That leaves this the one
+// seam where the reader's folder and the runner's spawn probe can still differ —
+// the daemon derives this one with filepath.Abs and the probe with
+// agentrun.ResolveWorkdir, which also canonicalises case and resolves symlinks —
+// and #2423 chose an unchanged shipped reading over closing a divergence #1655
+// measured as absent in practice. Do not "finish the job" by routing this through
+// sessionTranscriptDir without a ticket that owns the reading it would change.
 func bootstrapSnapshotUsage(dir string, bootstrapID func() string, windows func(sessionID string) map[string]int) func() (usedTokens, windowTokens int) {
-	read := snapshotUsageFor(dir, windows)
+	read := snapshotUsageFor(fixedTranscriptDir(dir), windows)
 	if read == nil || bootstrapID == nil {
 		return nil
 	}

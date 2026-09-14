@@ -201,6 +201,72 @@ here, `session_model_window_lookup.go`. Worth checking on any future
 `cmd/pyry` file whose natural name would end in `_windows`, `_linux`,
 `_darwin`, `_test`, or one of Go's other implicit build-constraint suffixes.
 
+**#2423 — the transcript *folder* is resolved per session, the same way the
+window is per model.** Before #2423, the by-id reader behind
+`session_settings` (`snapshotUsageFor`) read every session's transcript out of
+one fixed folder — the daemon's own working directory
+(`resolveClaudeSessionsDir`), decided once at start-up. A conversation created
+with a `cwd` spawns claude somewhere else (`Pool.buildSession` prefers the
+spawn directory over the template workdir), so claude writes that session's
+transcript under the projects folder named for the directory it actually
+resolved. The stat missed, `Read` collapsed to its fresh-session report, and
+every `session_settings` reply for such a conversation showed `0` used tokens
+against the default window — the desktop's "Context: 0%" for a chat already
+43% into its window.
+
+`snapshotUsageFor` now takes a folder resolver keyed by session id (`dirFor`)
+in place of the fixed `dir`. `sessionTranscriptDir`
+(`cmd/pyry/session_transcript_dir.go`) answers it exactly like
+`sessionModelWindows` above — `Pool.Lookup` on the id, then a type assertion
+off `Session.Runner()` — but for a `ClaudeSessionsDir() string` method instead
+of `ModelWindows`. That method (on `streamRunner`) hands back the *stored*
+string `mapStreamsupConfig` already computed for that same runner's own spawn
+probe, never a fresh derivation, so the reader and the probe read one field of
+one struct and cannot name different folders for one session — including
+under case canonicalisation or a symlink (`agentrun.ResolveWorkdir` applies
+both and the confining validators upstream of it do not, so a second,
+independent derivation from a differently-spelled workdir is exactly the
+shape that drifts). `fixedTranscriptDir(dir)` adapts one folder into the same
+resolver shape for a caller that genuinely has only one.
+
+The build-time nil rule reads the same way it does for `windows`: a `nil`
+folder resolver is decided on the resolver's *presence*, not on what it
+answers, so an unwired daemon's `session_settings` seam still collapses to
+the zero-reporting nil shape rather than becoming a working reader against
+the default window (AC 5). Per call, `""` is the folder resolver's only
+refusal — an unknown session id, a runner without the method, and a runner
+whose own derivation degraded all answer it, and `snapshotUsageFor` reads an
+empty folder as "nothing to stat," the same path a genuinely-absent
+transcript already takes. `sessionModelWindows` and `sessionTranscriptDir`
+therefore share one latent gap, recorded rather than fixed: `Pool.Lookup("")`
+can return `(nil, nil)` for the evicted-bootstrap or zero-value-map state
+`Pool.DefaultSettings` documents, and the comma-ok type assertion on a nil
+`Session` would panic rather than refuse. Not reachable today — both
+resolvers are only ever called with the non-empty id `resolveBoundRunSettings`
+produces — so no defence was added; if either resolver is touched again, one
+shared nil-check closes it in both rather than one.
+
+**`bootstrapSnapshotUsage` (the `screen_snapshot` seam) deliberately keeps its
+fixed folder.** The bootstrap session's working directory *is* the daemon's
+own trusted workdir, so it has no workspace to miss, and it is the one place
+left where the reader's folder (`filepath.Abs`) and the spawn probe's
+(`agentrun.ResolveWorkdir`, which also canonicalises case and resolves
+symlinks) could in principle still disagree — a divergence #1655 measured as
+absent in practice. #2423 chose not to touch a shipped reading to close a gap
+with no observed instance; routing this seam through `sessionTranscriptDir`
+needs a ticket that owns the reading it would change.
+
+**No unit table over the reader can prove this class of fix.** The defect was
+*which folder crossed the seam*, not what the reader does with one — a fixed
+folder and a per-session one behave identically once each is handed a
+directory, so both pass the same reader-level tests. The only test that
+discriminates plants two transcripts under two different workspace folders,
+drives a real daemon through two `create_conversation`s carrying distinct
+`cwd`s, and asserts each conversation's `session_settings` reports its own
+count (`TestRelayV2_StreamSessionSettingsReadsEachWorkspacesOwnTranscript`
+in `internal/e2e`) — it was run red against the pre-fix wiring before being
+accepted green.
+
 ## Error handling — four-way split
 
 - **`path == ""`** → `Usage{0, defaultWindowTokens}, nil` **without opening
@@ -255,7 +321,8 @@ it off the package.
   parameter is built from.
 - [sessions-package-key-types-runner-interface-runnerfactory.md](sessions-package-key-types-runner-interface-runnerfactory.md) —
   `resolveBoundModelList`, the resolver shape #2107's `sessionModelWindows`
-  copies minus the conversation hop.
+  copies minus the conversation hop, and the same shape #2423's
+  `sessionTranscriptDir` copies for the folder half.
 - [847](../codebase/847.md) / [848](../codebase/848.md) — the settings-leaf /
   settings-wire split this ticket mirrors.
 - [857](../codebase/857.md) — wires `Read` onto `screen_snapshot` via the

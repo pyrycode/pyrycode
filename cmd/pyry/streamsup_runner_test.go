@@ -1028,6 +1028,49 @@ var _ interface {
 	BackgroundTaskRoster() (turnevent.BackgroundTaskRoster, bool)
 } = streamRunner{}
 
+// The #2423 member, for the shape sessionTranscriptDir reaches by type assertion. A
+// fourth separate block for the reason the second one states.
+var _ interface {
+	ClaudeSessionsDir() string
+} = streamRunner{}
+
+// TestStreamRunnerFactory_ClaudeSessionsDirIsTheProbesOwnValue is #2423 AC 2 at the
+// only seam that can carry it: the folder the usage reader will be handed for a
+// session is the SAME string that session's spawn probe was built with, not a second
+// derivation that merely agrees.
+//
+// The workdir is a real temp dir and NOT the process directory, so the two candidate
+// derivations are distinguishable — a runner that answered resolveClaudeSessionsDir's
+// value, a bare sessions.DefaultClaudeSessionsDir, or "" would all miss here.
+// mapStreamsupConfig is consulted for the want rather than streamClaudeSessionsDir
+// directly, which is what makes this an assertion about the field that actually
+// crosses into streamsup.
+func TestStreamRunnerFactory_ClaudeSessionsDirIsTheProbesOwnValue(t *testing.T) {
+	t.Parallel()
+
+	cfg := sessions.RunnerConfig{
+		ClaudeBin:  os.Args[0],
+		WorkDir:    t.TempDir(),
+		SessionID:  "11111111-1111-4111-8111-111111111111",
+		ClaudeArgs: []string{"--settings", "p"},
+	}
+	runner, err := newStreamRunnerFactory(newStreamTurnSink(0, slog.Default()), "", streamApprovalConfig{})(cfg)
+	if err != nil {
+		t.Fatalf("newStreamRunnerFactory: %v", err)
+	}
+	holder, ok := runner.(interface{ ClaudeSessionsDir() string })
+	if !ok {
+		t.Fatalf("runner %T does not carry ClaudeSessionsDir — sessionTranscriptDir would refuse every session", runner)
+	}
+	want := mapStreamsupConfig(cfg).ClaudeSessionsDir
+	if want == "" {
+		t.Fatal("mapStreamsupConfig derived no sessions dir for a real temp workdir — the fixture proves nothing")
+	}
+	if got := holder.ClaudeSessionsDir(); got != want {
+		t.Errorf("ClaudeSessionsDir() = %q, want the probe's own value %q", got, want)
+	}
+}
+
 // TestStreamRunnerFactory_ErrorPropagation proves AC-3: a streamsup.New failure
 // surfaces as (nil runner, non-nil error) with no silent PTY fallback. A missing
 // binary fails streamsup.New's exec.LookPath; supervisor.New does NOT LookPath at

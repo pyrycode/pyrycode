@@ -308,6 +308,21 @@ type relayWiring struct {
 	// bootstrapIDFn has: a nil value leaves both usage seams working and reporting
 	// the default window, the pre-#2107 reading. See snapshotUsageFor.
 	modelWindows func(sessionID string) map[string]int
+	// sessionTranscriptDir answers the directory claude writes a named SESSION's
+	// <id>.jsonl into — that session's OWN spawn folder, not the daemon's (#2423).
+	// Built at main.go over *sessions.Pool for the SAME reason modelWindows above
+	// is: the internal/sessions dependency stays at the composition root, and
+	// startRelayV2 holds no pool reference at all. Keyed on the session id for that
+	// field's reason too — the seam consuming it already holds one, and asking both
+	// for the same id is what makes the folder and the windows two readings of one
+	// child.
+	//
+	// nil is the EITHER-HALF-UNWIRED shape bootstrapIDFn has, NOT modelWindows'
+	// degrade-one-integer shape, and the difference is deliberate: without a folder
+	// there is no transcript to read at all, so snapshotUsageFor builds no reader
+	// and the conversation-keyed seam reports zeros. Foreground / v1, and a daemon
+	// whose own claudeSessionsDir is "" (sessionTranscriptDir's gate).
+	sessionTranscriptDir func(sessionID string) string
 	// retainedModelLists enumerates the daemon's currently-retained model lists as
 	// marshal-ready model_list payloads — one per conversation whose bound session
 	// holds a list — for the relay's connect-time reconcile seam (#1867 fills
@@ -879,14 +894,22 @@ func startRelayV2(
 	// (main.go's resolveBoundRunSettings, over the conversations registry and the
 	// pool) with the by-id context-window reader, so ONE call reports a named
 	// conversation's own session id, model/effort/YOLO and occupancy together.
-	// snapshotUsageFor is called a second time over the same directory rather than
-	// reusing the binding above: bootstrapSnapshotUsage supplies the BOOTSTRAP id,
-	// so a seam composed through it would report the bootstrap's occupancy for
-	// every conversation. The closure it builds is stateless, so a second one costs
-	// nothing and leaves the three existing seams byte-identical. BOTH readers are
-	// handed the same w.modelWindows, so the two surfaces report one window for
-	// one session; wiring only one would make them disagree (#2107 AC 1).
-	runConfig := runConfigFor(w.runSettings, snapshotUsageFor(w.claudeSessionsDir, w.modelWindows))
+	// snapshotUsageFor is called a second time rather than reusing the binding
+	// above: bootstrapSnapshotUsage supplies the BOOTSTRAP id, so a seam composed
+	// through it would report the bootstrap's occupancy for every conversation. The
+	// closure it builds is stateless, so a second one costs nothing and leaves the
+	// three existing seams byte-identical. BOTH readers are handed the same
+	// w.modelWindows, so the two surfaces report one window for one session; wiring
+	// only one would make them disagree (#2107 AC 1).
+	//
+	// The two readers no longer share a FOLDER, and that asymmetry is #2423's fix
+	// rather than an oversight. This one resolves the folder per session from that
+	// session's own working directory, because a conversation carrying a cwd spawns
+	// claude somewhere the daemon's directory does not name and reported 0% context
+	// forever. The bootstrap reader above keeps the daemon's fixed directory, which
+	// is its session's workdir — see bootstrapSnapshotUsage for why that reading is
+	// deliberately left alone.
+	runConfig := runConfigFor(w.runSettings, snapshotUsageFor(w.sessionTranscriptDir, w.modelWindows))
 	// The system-prompt read seam (#2152), composed the same way and for the same
 	// reason: the resolution half is cmd/pyry-typed and the seam is not, so the
 	// shaping happens here rather than at the composition root, which does not
