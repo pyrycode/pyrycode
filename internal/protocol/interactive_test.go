@@ -1726,6 +1726,172 @@ func TestMCPStatusRequestPayload_WireShape(t *testing.T) {
 	}
 }
 
+func TestMCPReconnectPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "mcp_reconnect.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeMCPReconnect {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeMCPReconnect)
+	}
+	if env.InReplyTo != nil {
+		t.Errorf("InReplyTo: got %v, want nil for a request", env.InReplyTo)
+	}
+
+	var payload MCPReconnectPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "conversation-mcp-actuate" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "conversation-mcp-actuate")
+	}
+	if payload.ServerName != "context7" {
+		t.Errorf("ServerName: got %q, want %q", payload.ServerName, "context7")
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+func TestMCPReconnectPayload_WireShape(t *testing.T) {
+	b, err := json.Marshal(MCPReconnectPayload{
+		ConversationID: "conversation-mcp-actuate",
+		ServerName:     "context7",
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		t.Fatalf("unmarshal payload key set: %v", err)
+	}
+	if len(fields) != 2 {
+		t.Fatalf("wire keys: got %v, want exactly [conversation_id server_name]", fields)
+	}
+	for key, want := range map[string]string{
+		"conversation_id": "conversation-mcp-actuate",
+		"server_name":     "context7",
+	} {
+		raw, ok := fields[key]
+		if !ok {
+			t.Fatalf("wire keys: got %v, want %s", fields, key)
+		}
+		var got string
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("%s JSON value is not a string: %v", key, err)
+		}
+		if got != want {
+			t.Errorf("%s: got %q, want %q", key, got, want)
+		}
+	}
+
+	zero, err := json.Marshal(MCPReconnectPayload{})
+	if err != nil {
+		t.Fatalf("marshal zero payload: %v", err)
+	}
+	if got, want := string(zero), `{"conversation_id":"","server_name":""}`; got != want {
+		t.Errorf("zero payload: got %s, want %s", got, want)
+	}
+}
+
+func TestMCPTogglePayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "mcp_toggle.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeMCPToggle {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeMCPToggle)
+	}
+	if env.InReplyTo != nil {
+		t.Errorf("InReplyTo: got %v, want nil for a request", env.InReplyTo)
+	}
+
+	var payload MCPTogglePayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "conversation-mcp-actuate" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "conversation-mcp-actuate")
+	}
+	if payload.ServerName != "context7" {
+		t.Errorf("ServerName: got %q, want %q", payload.ServerName, "context7")
+	}
+	if !payload.Enabled {
+		t.Error("Enabled: got false, want true from the fixture")
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+func TestMCPTogglePayload_WireShape(t *testing.T) {
+	b, err := json.Marshal(MCPTogglePayload{
+		ConversationID: "conversation-mcp-actuate",
+		ServerName:     "context7",
+		Enabled:        true,
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		t.Fatalf("unmarshal payload key set: %v", err)
+	}
+	if len(fields) != 3 {
+		t.Fatalf("wire keys: got %v, want exactly [conversation_id server_name enabled]", fields)
+	}
+	for key, want := range map[string]string{
+		"conversation_id": "conversation-mcp-actuate",
+		"server_name":     "context7",
+	} {
+		raw, ok := fields[key]
+		if !ok {
+			t.Fatalf("wire keys: got %v, want %s", fields, key)
+		}
+		var got string
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("%s JSON value is not a string: %v", key, err)
+		}
+		if got != want {
+			t.Errorf("%s: got %q, want %q", key, got, want)
+		}
+	}
+	rawEnabled, ok := fields["enabled"]
+	if !ok {
+		t.Fatalf("wire keys: got %v, want enabled", fields)
+	}
+	var enabled bool
+	if err := json.Unmarshal(rawEnabled, &enabled); err != nil {
+		t.Fatalf("enabled JSON value is not a bool: %v", err)
+	}
+	if !enabled {
+		t.Errorf("enabled: got %v, want true", enabled)
+	}
+
+	// The zero value pins the two properties the plain-bool choice buys: the key is
+	// always present (so the fixture pins a complete shape), and its absent reading
+	// is false — "disable", the non-escalating direction.
+	zero, err := json.Marshal(MCPTogglePayload{})
+	if err != nil {
+		t.Fatalf("marshal zero payload: %v", err)
+	}
+	if got, want := string(zero), `{"conversation_id":"","server_name":"","enabled":false}`; got != want {
+		t.Errorf("zero payload: got %s, want %s", got, want)
+	}
+
+	var omitted MCPTogglePayload
+	if err := json.Unmarshal([]byte(`{"conversation_id":"c","server_name":"s"}`), &omitted); err != nil {
+		t.Fatalf("unmarshal payload with enabled omitted: %v", err)
+	}
+	if omitted.Enabled {
+		t.Error("an omitted enabled decoded as true; it must read as false (disable)")
+	}
+}
+
 // TestModelListPayload_NilModelsNormalises covers the case no fixture could —
 // and here that is the ONLY path there is. Unmarshalling "models":[] always
 // yields a non-nil empty slice, so the nil branch is reachable only by

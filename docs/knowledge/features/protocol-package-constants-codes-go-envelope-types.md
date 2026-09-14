@@ -238,6 +238,23 @@ record's canonical id. The request key remains lookup-only. See
 [`mcp_status`](../../protocol-mobile.md#mcp_status) and
 [the on-demand request](../../protocol-mobile.md#asking-for-mcp-status-on-demand).
 
+**v2 MCP-actuation vocabulary** (#2419; gate seam #2420):
+
+| Group | Constant |
+|-------|----------|
+| MCP reconnect | `TypeMCPReconnect` |
+| MCP toggle | `TypeMCPToggle` |
+
+`TypeMCPReconnect = "mcp_reconnect"` and `TypeMCPToggle = "mcp_toggle"` are bare
+verb names, not `TypeMCPStatusRequest`'s `*_request` suffix — neither collides
+with an outbound type, and both mirror the child's own control protocol. Both
+are switch-intercepted in `dispatchAppFrame` before `dispatch.Route` and stay
+outside `inboundAppTypeSet`, so v1 rejects both. The `MCPActuator` seam that
+would decode either payload is nil at every construction site until #2420 — see
+[Concurrency](v2-session-manager-concurrency.md) for the typed-nil interface
+trap its nil check carries. An accepted actuation answers with the existing
+`TypeMCPStatus` frame — see [`mcp_status`](../../protocol-mobile.md#mcp_status).
+
 **v2 model-list vocabulary** (#1704; producer #1848/#1849, fixtures #1705):
 
 | Group | Constant |

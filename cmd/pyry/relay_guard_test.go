@@ -203,6 +203,19 @@ var inboundTypes = map[string]string{
 	// worker because the resolver may wait on a child round trip. Its answer reuses
 	// TypeMCPStatus, which remains classified as an outbound push+reply.
 	"TypeMCPStatusRequest": "switch-intercepted",
+	// The two MCP actuation verbs (#2419), filed together because they share one
+	// handler file, one reject vocabulary and one seam. Like the read verb above they
+	// are tagged for the per-connection worker, because the actuator waits on a child
+	// round trip. Their answer is also TypeMCPStatus — neither has an ack type of its
+	// own — so nothing outbound is added here.
+	//
+	// REGISTERED HERE WHILE THE SEAM IS DELIBERATELY NIL, which is what this guard
+	// asserts and is easy to misread as premature. A registered arm is exactly what
+	// makes the frame CONSUMED rather than answered with dispatch.Route's unknown-type
+	// reply; what stays unwired until #2420 is V2SessionConfig.MCPActuator, not the
+	// dispatch entry.
+	"TypeMCPReconnect": "switch-intercepted",
+	"TypeMCPToggle":    "switch-intercepted",
 	// The conversation system-prompt read verb (#2152). Like TypeRequestModelList
 	// above and unlike the three before it, it NEVER sat in excludedTypes as
 	// "pending handler": its declaration, its handler and its reply half land in one

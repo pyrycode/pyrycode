@@ -22,6 +22,30 @@ halves — another connection replies before release, and the original connectio
 eventual reply decrypts after release — because either assertion alone misses one
 side of the ownership boundary.
 
+`mcp_reconnect` / `mcp_toggle` (#2419) join the same worker for the identical
+reason — the `MCPActuator` seam that would eventually back them may wait on a
+child round trip — but their nil/capability gates run on `Run` and return before
+either envelope is even decoded, so an unwired seam or a non-interactive
+connection never enqueues a job at all. Every reply, accepted or refused, crosses
+`forwardMCPStatusReply`, reused verbatim from #2381 rather than duplicated, so
+`CipherState` mutation stays on `Run` for these two verbs exactly as it does for
+`mcp_status_request`.
+
+**A nil-checked seam declared as an interface, not a func field, is a weaker
+gate — worth recording here because on `MCPActuator` the nil check is a security
+control, not a convenience.** `MCPActuator` is an interface, so
+`cfg.MCPActuator = (*someImpl)(nil)` is non-nil to `dispatchAppFrame`'s `== nil`
+test: the frame is admitted and the worker calls a method on a nil pointer.
+`internal/relay` has no `recover()` anywhere, so that crashes the daemon —
+fail-closed for authorization (nothing reaches a child) but a remote-triggerable
+crash once a wiring bug exists. Every optional seam on `V2SessionConfig`
+(`QuestionResolver`, `ModalResolver`, `AttachmentIntake`, `HistoryPager`, …)
+shares this exact shape; it is called out on `MCPActuator` specifically because
+here a mis-wire turns a stop-the-world crash into the fail path for an
+authorization gate rather than for a convenience feature. Not escalated to a
+build-time guard — no premature or nil wiring has been observed on any of these
+seams (Evidence-Based Fix Selection); revisit if one ever ships.
+
 **A zero-value enum member needs a producer that names it, or staticcheck flags it dead even though the type "handles" it by default.** The first cut of this widening leaned on `appFrameRoute`'s zero value implicitly — the v1 `enqueueAppFrame` call built `appFrameJob{plaintext: plaintext}` with no `kind`, and the worker caught it with a bare `default:` rather than a `case appFrameRoute:`. `staticcheck`'s `U1000` correctly called `appFrameRoute` unused: nothing in the source named the identifier, so the compiler couldn't see that the zero value was meaningful rather than accidental, and the doc-block claim that "the routing decision lives in one place" rested on a member neither producer nor consumer mentioned. The fix is to name it at both ends — the v1 call passes `kind: appFrameRoute` explicitly and the worker gains its own `case appFrameRoute:` — which makes `default:` genuinely unreachable in normal operation while still being the safe catch for a kind added without an arm. The general lesson: when a tagged-dispatch enum's zero value is meant to be a real, load-bearing case (not just "unset"), give it an explicit producer and an explicit consumer arm rather than trusting Go's zero-value default to stand in for both — the compiler cannot verify that a default arm and an elided zero-value case actually agree on what they mean.
 
 `V2Session.State()` is a plain field read. Safe today because no cross-goroutine reads exist. Both the push surface (#571, rewritten #610) and the #588 enumeration surface deliberately keep it that way: the #610 `Push` reads only `m.queues` under `pushMu` (never `s.state`), while `forwardEnvelope` reads `s.state` **on the `Run` goroutine** during the drain, and `handleActiveConns` reads `s.state` (and `s.interactive`, #626) **on the `Run` goroutine** (funneled through `m.snapshot`) — neither via a cross-goroutine `State()` call. So the broadcast/enumeration layer that this comment once anticipated (the [#589](../codebase/589.md) assistant-turn fan-out, built on #571's `Push` + #588's `ActiveConns`) introduces **no** new reader of `s.state` off the owner goroutine, and `State()` still needs no `atomic.Int32`/mutex. Should a future slice read `s.state` directly from a producer goroutine *outside* the funnel, that accessor will need the atomic/mutex then — not pre-emptively refactored.

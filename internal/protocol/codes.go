@@ -144,6 +144,25 @@ const (
 	// after membership succeeds, and never substitutes an empty or retained status.
 	CodeMCPStatusUnavailable = "mcp_status.unavailable" // hosted conversation has no current MCP status; retryable
 
+	// MCP actuation error (#2419; docs/protocol-mobile.md § Error codes). THE ONE
+	// ANSWER TO EVERY REFUSAL of an mcp_reconnect or an mcp_toggle: an unauthorized
+	// device, an unknown server, no live child and a child that declined alike. The
+	// merge is the contract rather than a simplification left to tidy up later —
+	// separating "not permitted" from "no such server" would make the verb an oracle
+	// for which MCP servers the host runs, and separating either from "actuation
+	// failed" would tell a device whether it is privileged. Both are facts about the
+	// daemon and about the asker that the request must not be able to learn; the
+	// daemon-side audit record is where the reasons stay apart.
+	//
+	// NON-RETRYABLE ON EVERY ARM, and that is load-bearing rather than incidental: a
+	// retryable refusal would read as "transient, so not the gate", re-splitting on
+	// the flag exactly what the single code merged. Distinct from
+	// CodeMCPStatusUnavailable above, which is the retryable read-path answer.
+	//
+	// It carries no server name and no claude-authored text; the message is a
+	// compile-time constant in internal/relay.
+	CodeMCPActuationRefused = "mcp_actuation.refused" // reconnect or toggle refused, reason deliberately merged; never retryable
+
 	// Workspace error (#2207; docs/protocol-mobile.md § Error codes). MINTED WITH
 	// THE HANDLER THAT SENDS IT, the sequencing #2052, the history group and #2125
 	// each followed: no reject vocabulary exists ahead of the code that can emit it.
@@ -835,19 +854,31 @@ const (
 	TypeSessionFacts = "session_facts" // binary → phone, outbound v2 session-facts report
 )
 
-// Mobile Protocol v2 MCP server-status request and report. TypeMCPStatus is the
-// single binary → phone envelope carrying the conversation-scoped MCP inventory
-// for both live publication and correlated replies. TypeMCPStatusRequest is the
-// phone → binary request intercepted by the v2 session manager before
+// Mobile Protocol v2 MCP server-status report, its request, and the two actuation
+// verbs. TypeMCPStatus is the single binary → phone envelope carrying the
+// conversation-scoped MCP inventory for live publication and for every correlated
+// reply. TypeMCPStatusRequest is the phone → binary read request, and
+// TypeMCPReconnect / TypeMCPToggle are the phone → binary write verbs (#2419). All
+// three inbound types are intercepted by the v2 session manager before
 // dispatch.Route.
 //
-// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go. This
-// pair is v2-only, and an old v1 client must reject both types. The v2OnlyTypes
-// partition classifies both; the relay guard records TypeMCPStatusRequest as
+// THE TWO ACTUATORS TAKE BARE VERB NAMES while the read verb carries a suffix, and
+// the asymmetry is deliberate. mcp_status_request is spelled that way only because
+// its answer reuses the mcp_status type name and the two would otherwise collide;
+// the actuators have no such collision, so they take the names the claude child's
+// own control protocol already uses (see WriteMCPReconnect / WriteMCPToggle in
+// internal/streamsup). Neither actuator has an ack type: an accepted actuation is
+// answered with a fresh TypeMCPStatus correlated by the request envelope's id.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go. All four
+// are v2-only, and an old v1 client must reject every one of them. The v2OnlyTypes
+// partition classifies all four; the relay guard records the three inbound types as
 // switch-intercepted and TypeMCPStatus as output used by pushes and replies.
 const (
 	TypeMCPStatus        = "mcp_status"         // binary → phone, outbound v2 MCP server-status report
 	TypeMCPStatusRequest = "mcp_status_request" // phone → binary, inbound v2 control (switch-intercepted — #2381)
+	TypeMCPReconnect     = "mcp_reconnect"      // phone → binary, inbound v2 control (switch-intercepted — #2419)
+	TypeMCPToggle        = "mcp_toggle"         // phone → binary, inbound v2 control (switch-intercepted — #2419)
 )
 
 // Mobile Protocol v2 screen-snapshot types. The always-available,

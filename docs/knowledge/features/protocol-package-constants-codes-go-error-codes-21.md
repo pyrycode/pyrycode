@@ -1,4 +1,4 @@
-# Error codes (30)
+# Error codes (31)
 
 Wire values for the `code` field of error payloads (spec § Error codes). Naming convention: `Code<Category><Reason>` mirrors the dotted-string `category.reason` shape.
 
@@ -31,6 +31,7 @@ Wire values for the `code` field of error payloads (spec § Error codes). Naming
 | `CodeHistoryUnavailable` | `history.unavailable` |
 | `CodeModelListUnavailable` | `model_list.unavailable` |
 | `CodeMCPStatusUnavailable` | `mcp_status.unavailable` |
+| `CodeMCPActuationRefused` | `mcp_actuation.refused` |
 | `CodeWorkspaceNotFound` | `workspace.not_found` |
 | `CodePairingNotPermitted` | `pairing.not_permitted` |
 | `CodePairingUnavailable` | `pairing.unavailable` |
@@ -64,5 +65,7 @@ only after that check may `MCPStatusFor` return false and produce the retryable
 `mcp_status.unavailable`. The false-result payload is ignored, so neither a zero
 value nor a retained value can escape as a misleading `mcp_status`. See
 [the mobile protocol request contract](../../protocol-mobile.md#asking-for-mcp-status-on-demand).
+
+**`CodeMCPActuationRefused` (#2419) merges four causes — gate denial, unknown server, no live child, failed actuation — into one non-retryable code, and the merge is wider than `CodeModelListUnavailable`'s because two different audiences are being kept in the dark at once.** Splitting "not authorized" from "no such server" would let the verb enumerate which MCP servers exist on the host; splitting "not authorized" from "actuation failed" would tell an unprivileged device the one fact it must never learn about itself. `retryable` has to be `false` on every one of the four causes for the same reason: a code that returned `retryable: true` only for the "child not live yet" case would let the flag itself re-open the distinction the code exists to close. The daemon-side audit record — #2420's, not this package's — is where the four causes stay distinguishable; the wire contract has to give none of them up. **Left open for #2420, recorded here rather than fixed:** a gate denial and a "no live child" refusal both return before any round trip, while a failed actuation returns only after the child responds, so a device that times its own replies can infer which of the four it earned even though the code and the flag cannot say so. The relay adds no timing of its own on this path and cannot close the gap from here.
 
 **Minting a code needs `TestErrorCode_Constants_MatchSpec` updated in the same change, or a spelling drift goes uncaught.** The four `history.*` codes (#2116) shipped without new rows in that pin; every assertion elsewhere in the PR compared `protocol.CodeHistory*` to itself, so a rename anywhere would move both sides together and stay green (confirmed by mutation: `go test -overlay` renaming two of the four still passed the full wired suite). #1751 populated this same map in the commit that minted its seven `attachment.*` codes — treat updating it as part of minting a code, not an optional follow-up a later ticket can catch.
