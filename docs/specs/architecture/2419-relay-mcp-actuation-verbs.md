@@ -338,6 +338,41 @@ Pending for the documentation stage — **not** done in this ticket.
    status-named event for an actuation; if one does, the fix is a verb-neutral lane, which would
    touch a sixth production file and is therefore called out here rather than taken silently.
 
+## Revisions
+
+### 2026-09-14 — Open questions resolved during implementation
+
+All three resolved as the Design section proposed; **no design departure**, so nothing in the
+sections above was rewritten.
+
+1. **`Enabled` stays a plain `bool`.** Implemented as designed. `TestMCPTogglePayload_WireShape`
+   pins both properties the choice buys — the key is always present, and an omitted key decodes as
+   `false`, the non-escalating direction — and
+   `TestV2Session_MCPActuation_PayloadCrossesSeamVerbatim` proves true, false and omitted each
+   reach the seam verbatim.
+2. **One static reject message for both verbs.** Implemented as `msgMCPActuationRefused`.
+   `in_reply_to` already carries the correlation a client needs, so nothing asked for a per-verb
+   message.
+3. **Reusing `forwardMCPStatusReply` does not mislead, confirmed.** Its one log record fires only
+   on re-marshalling an envelope whose payload is already valid `json.RawMessage` — unreachable
+   here. Every *reachable* record on this path is emitted from `v2session_mcpactuate.go` under a
+   `v2.mcp_actuation.*` event name, and the new file's header states the split so a reader who
+   ever sees a `v2.mcp_status.*` event on an actuation is not misled. No verb-neutral lane was
+   needed, so the sixth production file the question flagged was avoided.
+
+One addition the plan implied but did not name: `mcpActuationVerb`, a string type over the two
+wire-type constants, exists so log records can carry a verb label that is provably daemon-authored
+rather than a free-form string. The Error-handling table already required "the static verb name" to
+be the only verb-identifying thing logged; this gives that requirement a type.
+
+**Test-coverage note.** The handler-behaviour tests passed on first run — the RED before them was
+structural, from `TestEveryInboundV2TypeHasHandler`, which reddened first for unclassified
+constants and then for two inbound types registered on no dispatch surface. Two mutations were run
+to confirm the new assertions are not vacuous, and both reddened as intended: ignoring the seam's
+`accepted` bool (fails `…_RefusalIsOneMergedCode` on both verbs) and logging the decoder error on
+the malformed arm (fails `…_LogsContainNoRemoteValues` on the decoder-error assertion, which is
+precisely the gap a sentinel-only search leaves open).
+
 ## Sizing
 
 Boundary re-count against this plan:

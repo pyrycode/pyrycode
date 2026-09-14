@@ -876,6 +876,28 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 			}
 			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameMCPStatusRequest})
 			return
+		case protocol.TypeMCPReconnect:
+			// The WRITE half of the MCP pair (#2419), on the worker for the same
+			// reason as the read above — the actuator waits on a child round trip —
+			// and with the same two inert gates held here on Run, neither of which
+			// decodes the payload or consults membership. The nil gate is doing more
+			// work here than on any read arm: it is what keeps an ungated actuation
+			// unreachable until #2420 wires MCPActuator.
+			if m.cfg.MCPActuator == nil || !s.interactive {
+				return
+			}
+			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameMCPReconnect})
+			return
+		case protocol.TypeMCPToggle:
+			// The arm above's twin, kept a separate case rather than folded into it
+			// with a shared body: the guard reads THESE selectors as the registry of
+			// dispatch decisions, so one case per inbound type is the property being
+			// asserted. The two payloads differ and decode in their own handlers.
+			if m.cfg.MCPActuator == nil || !s.interactive {
+				return
+			}
+			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameMCPToggle})
+			return
 		case protocol.TypeRequestSystemPrompt:
 			// Inline on Run (#2152), beside the two shape twins above rather than
 			// with the hand-off arms below: answering is a registry lookup, one pool
@@ -1009,6 +1031,11 @@ const (
 	appFrameMintPairing
 	// appFrameMCPStatusRequest is the potentially blocking live-status read (#2381).
 	appFrameMCPStatusRequest
+	// appFrameMCPReconnect and appFrameMCPToggle are the two MCP actuations (#2419)
+	// — blocking like the read above, but WRITES to a running child's configuration,
+	// which is why their dispatch arms gate on a seam that stays nil until #2420.
+	appFrameMCPReconnect
+	appFrameMCPToggle
 )
 
 // appFrameWorker is the per-conn sub-actor that runs application handlers
@@ -1079,6 +1106,14 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				// reject return through forwardToRun, so the worker never seals under
 				// s.send or touches any other Run-owned session state.
 				m.handleMCPStatusRequest(ctx, s, job.plaintext)
+			case appFrameMCPReconnect:
+				// The actuator waits on a child round trip, so this stalls only the
+				// addressed conn's later frames. Its reply and every reject return
+				// through forwardToRun, so the worker seals nothing under s.send.
+				m.handleMCPReconnect(ctx, s, job.plaintext)
+			case appFrameMCPToggle:
+				// The arm above's twin; same placement for the same reason.
+				m.handleMCPToggle(ctx, s, job.plaintext)
 			case appFrameRoute:
 				// The v1 application dispatch chain, unchanged: build the outbound
 				// channel, call dispatch.Route, forward its replies to Run.

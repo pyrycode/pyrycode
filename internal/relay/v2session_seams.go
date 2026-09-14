@@ -307,6 +307,88 @@ type QuestionResolver interface {
 	ResolveRefusal(p protocol.QuestionRefusedPayload, dev *devices.Device) bool
 }
 
+// MCPActuator performs one inbound MCP actuation — an mcp_reconnect or an
+// mcp_toggle — against one conversation's live claude child, and reports whether it
+// was accepted (#2419). Declared here (consumer side), beside QuestionResolver, so
+// internal/relay imports neither internal/streamsup nor cmd/pyry (CODING-STYLE:
+// define interfaces where they are consumed); #2420 implements it. *devices.Device
+// crosses the seam (the per-conn s.device); internal/relay already imports
+// internal/devices, so no new import.
+//
+// The whole typed payload crosses rather than exploded fields — QuestionResolver's
+// shape, for its reason: exploding a three-field struct into three arguments is the
+// same thing spelled longer and invites a caller to reassemble it wrongly.
+//
+// THE ACCEPTED ANSWER'S PAYLOAD COMES BACK ACROSS THIS SEAM, and that is the one
+// place this contract departs from every read seam on V2SessionConfig. An accepted
+// actuation is answered with a fresh mcp_status frame, and the status it carries MUST
+// be a read taken AFTER the child acknowledged the actuation — so the implementation,
+// which is the only thing that knows when the ack landed, is what reads it. The relay
+// performs no second read and deliberately does NOT reach MCPStatusFor on this path:
+// a read the relay issued for itself could not be the post-ack one.
+//
+// COMMA-OK IS THE WHOLE REFUSAL VOCABULARY. false means refused, for ANY reason; a
+// caller MUST NOT read the payload on false. true with an empty Servers is a real
+// answer, not a degraded one. The relay answers every false with one merged
+// protocol.CodeMCPActuationRefused, whose own doc block carries why the reasons are
+// not distinguishable on the wire — and streamsup's actuateMCP already collapses
+// refusal and unavailability into one bool for the same published decision, so a
+// richer return here would have no reader on either side.
+//
+// SECURITY — what crosses this seam is remote-authored, and its two strings are NOT
+// equally checked. Restated here because this is where the implementer meets them and
+// Go's type system cannot say "untrusted":
+//
+//   - ConversationID has ALREADY passed KnownConversation, so it names a conversation
+//     this daemon hosts. It remains a lookup key: never returned as the answer's
+//     ConversationID, never logged, never joined into a path.
+//   - ServerName HAS PASSED NOTHING, anywhere. internal/protocol does not validate it
+//     and neither does the handler; this implementation is its sole validator. It MUST
+//     be shape-checked before any use, MUST NOT become a path component, and MUST NOT
+//     reach a shell. Its length is bounded only transitively, by the transport's AEAD
+//     frame cap — one name per frame, so the cap does bind, but sizing a buffer from
+//     it relies on a bound stated somewhere else. (Below this seam, streamsup's
+//     marshalMCPReconnectEnvelope / marshalMCPToggleEnvelope json.Marshal the name
+//     into the child's control request rather than concatenating it, so the child's
+//     control stream is not injectable through this field. That is a property of those
+//     functions, not of this contract.)
+//   - Every string in the returned payload is CLAUDE-AUTHORED and is never logged.
+//
+// THE AUTHORIZATION DECISION AND ITS AUDIT RECORD ARE THE IMPLEMENTATION'S, ENTIRELY.
+// The handler applies no privilege check and must not grow one: the refusal has to be
+// audited through internal/audit, which lives in cmd/pyry, and a second arbiter here
+// would be a second thing to keep in agreement with it — handleMintPairing's posture,
+// unchanged. Note that the merged wire reject also merges TIMING poorly: a gate denial
+// returns at once where a real actuation waits for a child round trip, so an
+// implementation that wants the reasons genuinely indistinguishable owes that
+// consideration; the relay adds no timing of its own and cannot close it from here.
+//
+// ORDERING OBLIGATION: nothing may be wired to V2SessionConfig.MCPActuator until the
+// per-device actuation gate (#2420) exists. The relay handler applies no authorization
+// at all — no per-device check, exactly as handleModalAnswer and the QuestionResolver
+// path apply none — so what makes the #2419 interception fail-safe is structural: the
+// seam is nil at every construction site, so no actuation reaches a live child. Wiring
+// an actuator ahead of the gate opens a window in which ANY paired device can
+// reconfigure a running child.
+//
+// Both methods run on the addressed connection's appFrameWorker, NOT on Run, because a
+// live implementation waits for a child round trip. An implementation MUST honor ctx so
+// manager shutdown terminates that wait, and MUST NOT touch V2Session or any Noise
+// state — replies return through forwardToRun for Run-owned sealing.
+type MCPActuator interface {
+	// Reconnect reconnects the named MCP server in the named conversation. Returns
+	// the post-acknowledgement status to answer with and true, or the zero payload
+	// and false for every refusal.
+	Reconnect(ctx context.Context, p protocol.MCPReconnectPayload, dev *devices.Device) (protocol.MCPStatusPayload, bool)
+
+	// SetEnabled moves the named MCP server to p.Enabled in the named conversation.
+	// Named for the flag rather than for the wire's `mcp_toggle`, matching
+	// streamsup.Runner.SetMCPServerEnabled: the request carries the value, so a
+	// Toggle spelling would invite an implementation to flip whatever the current
+	// state is. Same two-way answer as Reconnect.
+	SetEnabled(ctx context.Context, p protocol.MCPTogglePayload, dev *devices.Device) (protocol.MCPStatusPayload, bool)
+}
+
 // AttachmentIntake drives one decoded attachment_chunk from admission to stored
 // bytes, and releases a departing conn's uploads (#1897). *attachments.Intake
 // satisfies it. Declared here, consumer-side, so the seam's own signatures name
@@ -713,6 +795,37 @@ type V2SessionConfig struct {
 	// manager shutdown terminates the wait. Replies return through forwardToRun;
 	// implementations must never touch V2Session or Noise state.
 	MCPStatusFor func(ctx context.Context, conversationID string) (protocol.MCPStatusPayload, bool)
+
+	// MCPActuator performs an inbound mcp_reconnect or mcp_toggle against one
+	// conversation's live claude child (#2419). handleMCPReconnect and
+	// handleMCPToggle are its sole readers, and the seam's own doc block carries the
+	// contract — the authorization decision and its audit record are the
+	// implementation's, the accepted answer's status payload crosses back rather than
+	// being re-read here, and ServerName reaches it validated by nothing.
+	//
+	// The WRITE half of the MCP pair whose read half is MCPStatusFor above, which is
+	// why it gets a per-device gate where that one needs none: these two verbs change
+	// a running child's configuration.
+	//
+	// Optional: when nil the frame is CONSUMED BUT INERT — no reply, and not one byte
+	// of its payload parsed — mirroring the nil HistoryPage / AttachmentIntake /
+	// PairingMint guards and buying the same property, that an unwired daemon performs
+	// zero parsing of remote-authored bytes. That is what leaves every non-production
+	// construction site (unit tests, the fake-daemon e2e harness, foreground/v1)
+	// compiling and behaving unchanged, and it is the whole of the #2419 slice's
+	// fail-safety.
+	//
+	// SECURITY — NOTHING MAY BE WIRED HERE before the per-device actuation gate
+	// (#2420) exists; the seam's block states the obligation and why. And note the
+	// interface-nil trap, called out on THIS field because here the nil check is a
+	// security gate rather than a convenience: assigning a nil-valued CONCRETE type
+	// (`cfg.MCPActuator = (*impl)(nil)`) leaves this field non-nil, so dispatchAppFrame
+	// admits the frame and the handler calls a method on a nil pointer. internal/relay
+	// contains no recover(), so that is a crash rather than a refusal — fail-closed for
+	// authorization, since no actuation reaches a child, but a remote-triggerable one
+	// once the wiring bug exists. Wire a concrete non-nil implementation or leave the
+	// field unset.
+	MCPActuator MCPActuator
 
 	// SystemPromptFor reports the NAMED conversation's stored system prompt and how
 	// the running session's spawned-with value compares to it, already shaped as a

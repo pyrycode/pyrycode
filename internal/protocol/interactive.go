@@ -1459,6 +1459,55 @@ type MCPStatusRequestPayload struct {
 	ConversationID string `json:"conversation_id"`
 }
 
+// MCPReconnectPayload is the body of an Envelope whose Type == TypeMCPReconnect
+// (#2419). It asks the daemon to reconnect one named MCP server inside one
+// conversation. There is no ack type: an accepted actuation answers with a fresh
+// TypeMCPStatus frame correlated by Envelope.InReplyTo, so a client's next render is
+// the list it would have asked for anyway and this payload carries no request id.
+//
+// BOTH STRINGS ARE UNVERIFIED REMOTE-AUTHORED INPUT, and they are not equally
+// checked downstream, which is the part a reader is most likely to get wrong.
+// ConversationID is a lookup key the relay resolves against the daemon's own
+// registry before anything else sees it. ServerName is checked by NOTHING anywhere
+// in this package or in internal/relay — it crosses the actuation seam verbatim, and
+// the seam's implementation is its sole validator. Neither is logged, returned, or
+// joined into a path by any layer that handles this type; the answer's
+// ConversationID comes from the daemon's own record rather than being echoed back.
+//
+// Both keys are unconditional so a committed fixture pins the complete wire shape.
+type MCPReconnectPayload struct {
+	ConversationID string `json:"conversation_id"`
+	ServerName     string `json:"server_name"`
+}
+
+// MCPTogglePayload is the body of an Envelope whose Type == TypeMCPToggle (#2419):
+// MCPReconnectPayload's two fields plus the state to move one named MCP server to.
+// Same answer shape, same absence of a request id, and the same split trust in its
+// two strings — see that type's block, which this one does not restate.
+//
+// Declared flat rather than by embedding MCPReconnectPayload. Embedding would
+// promote the fields for JSON and encode identically, but it would route this verb's
+// wire-shape assertions through a type whose own doc block describes a different
+// verb, and it would couple two wire shapes that are free to diverge later.
+//
+// ENABLED IS A PLAIN BOOL, NOT A POINTER, and the choice is deliberate in a family
+// where SettingsUpdate reaches for pointers. An absent key therefore decodes as
+// false — "disable" — which is the NON-ESCALATING direction: an omission, a
+// truncation, or a client that forgot the field can only ever turn a server off,
+// never on. A pointer would add a third state (nil) that some layer would then have
+// to interpret, and interpreting it is exactly the judgement internal/relay is
+// forbidden from making on this path — the value crosses the seam as the client sent
+// it and the per-device gate below decides. A plain bool also marshals the key
+// unconditionally, which is what lets the committed fixture pin a complete key set.
+// Contrast marshalMCPToggleEnvelope in internal/streamsup, which does use a pointer:
+// that is the OUTBOUND leg to the claude child, where omitting the key would let the
+// child pick a default, a hazard that has no counterpart on this inbound decode.
+type MCPTogglePayload struct {
+	ConversationID string `json:"conversation_id"`
+	ServerName     string `json:"server_name"`
+	Enabled        bool   `json:"enabled"`
+}
+
 // ModelListPayload is the body of an Envelope whose Type == TypeModelList
 // (docs/protocol-mobile.md § model_list — that section lands with the fixtures in
 // #1705). Binary → phone direction; the wire form of the model inventory claude
