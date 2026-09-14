@@ -2070,7 +2070,102 @@ var ignoredLineTypes = map[string]bool{
 // but that it IS stamped is unproven — the same corpus carries zero
 // "isCompactSummary":true lines as of 2026-09-06. No second arm was written for
 // it, and none should be until one is observed.
+// AMENDED 2026-09-14 (#1611): a THIRD trigger joins the two above, and it is the
+// first that is neither a byte-exact literal nor a flag — see
+// harnessInterruptNoticePrefix for the matcher, its measurement, and why a table
+// of harness strings was considered and rejected. Everything above stands as
+// written; this entry is the census row.
+//
+// THE PAYLOAD is claude's interrupt notice: interrupting a turn makes the harness
+// inject a `user` message holding one `text` block narrating its own
+// cancellation. Measured 2026-09-14 on Opus 5 against the operator's local
+// ~/.claude/projects corpus (6684 transcript files) plus the committed real-claude
+// stdout captures spanning claude 2.1.220 to 2.1.259.
+//
+// TWO WORDINGS, both from claude 2.1.220, same branch, same day (2026-08-19):
+// "[Request interrupted by user for tool use]" on the dispatcher's real-claude
+// gate run, and "[Request interrupted by user]" on a local verification run of the
+// same branch. The trailing clause names what claude happened to interrupt.
+//
+// AND THE FLAG ARM CANNOT COVER IT: 31 interrupt notices in that corpus — 26 short
+// and 5 tool-use — and 31 of 31 carry no isMeta, no isSynthetic, no isReplay and no
+// isCompactSummary key at all. On the mapping the 2026-09-06 entry recorded
+// (transcript-isMeta tracks stdout-isSynthetic), claude does not stamp this line,
+// so nothing above it fires and the notice reached the operator's chat as an
+// Unrecognized row on every interrupt.
+//
+// THE FULL SET of harness-authored user text this surface can carry, as measured
+// on the date above, so the census records the whole population rather than only
+// the member being added:
+//
+//	KIND                                  ON STDOUT  FLAG              HANDLED BY
+//	no-output nudge                       yes        isSynthetic       the literal above, and the flag (#1247, #2087)
+//	skill body                            yes        isSynthetic       the flag (#2087)
+//	compaction summary, string content    yes        isSynthetic       dropHarnessProseLine (#2227)
+//	slash-command stdout echo             yes        isReplay          dropHarnessProseLine (#2227)
+//	interrupt notice, two wordings        yes        none              the prefix below (#1611)
+//	<task-notification>                   no         n/a               arrives as a `system` line, mapped by #2193
+//	[Image: …] placeholder                not seen   isMeta (CLI form) the flag arm would take it
+//	<command-name>/<command-message>      no         n/a               CLI transcripts only, not this surface
+//
+// NO USER-AUTHORED TEXT can reach this lane, which is what makes a text match
+// tolerable at all here: a message sent mid-turn parks in msgqueue until the turn
+// ends (#1199), and the CLI stores its own mid-turn messages as an `attachment`
+// line rather than a `user` line.
 const harnessNoOutputNudge = "[Your previous response had no visible output. Please continue and produce a user-visible response.]"
+
+// harnessInterruptNoticePrefix is the head of claude's interrupt notice, and the
+// name says PREFIX because that is the whole design decision — this constant is
+// not a pin like its neighbour above and must never be read as one.
+//
+// The measurement, the population and the flag-absence count are the census entry
+// at the end of harnessNoOutputNudge's docblock, which is where this surface's
+// harness-text census lives; this comment is the MATCHER's rationale only.
+//
+// WHY A PREFIX AND NOT A LITERAL. One claude version produced two wordings for the
+// same event on the same day. The trailing clause is claude naming what it
+// happened to interrupt, which is not the property being suppressed, and an
+// exact-literal carve-out would have gone red on whichever wording it was not
+// pinned to. That is not hypothetical: #1500's test-side carve-out started as this
+// shape for exactly that reason after the two runs disagreed.
+//
+// MATCHED WITH strings.HasPrefix ON THE BLOCK'S OWN TEXT — no trim, no fold, no
+// substring. Each half was decided against a live alternative rather than by
+// default:
+//
+//   - NO TRIM, against #1243, which matched this same prefix after TrimSpace in
+//     the tui-driver mapper (deleted with the terminal runner in #1348). That
+//     helper concatenated a transcript entry's text blocks into ONE string, so
+//     leading whitespace was reachable there. The match here is per BLOCK, which
+//     makes it unreachable, and all 31 corpus occurrences are the bare bracketed
+//     string with nothing before it. A trim would be tolerance bought with no
+//     observation behind it.
+//   - NO SUBSTRING. Contains would swallow any block merely MENTIONING the notice
+//     — a person quoting it back, or a future harness payload embedding it in a
+//     longer narration. It is also O(len(block)) where this is O(28 bytes), which
+//     matters on a surface whose sibling trigger has an observed 87244-char
+//     payload.
+//   - NO TRAILING ANCHOR. Both measured wordings end "]", but nothing measures
+//     that as stable; anchoring would buy nothing against an observed failure and
+//     would go red on a trailing period or space.
+//
+// AND NOT A TABLE of harness strings, which the ticket left open. The two string
+// triggers have DIFFERENT MATCH SHAPES: folding them into one prefix table would
+// silently widen harnessNoOutputNudge from equality to prefix — i.e. make
+// `nudge + anything` droppable — which is the exact property that constant's
+// docblock argues for at length. A table carrying a per-entry match MODE is more
+// machinery than two disjuncts for two entries. Revisit if a third STRING trigger
+// arrives, not before.
+//
+// THE FAILURE DIRECTION IS THE SAFE ONE, same as the constant above: a notice
+// reworded past this prefix falls back to the unrecognized lane and a human looks.
+// The unsafe direction — a genuinely new payload swallowed in silence — is bounded
+// by the prefix being 28 bytes of specific bracketed harness phrasing rather than
+// a loose word match. A payload shaped "[Request interrupted by user] <something
+// the operator needs>" WOULD be dropped whole; no such payload has been observed,
+// all 31 corpus occurrences being the bare notice, so no defence is shipped for it
+// and this sentence is where the failed prediction gets recorded if one arrives.
+const harnessInterruptNoticePrefix = "[Request interrupted by user"
 
 // Parser turns the child's stdout stream-json line stream into neutral
 // turnevent.Event values. It is an io.Writer wired as streamsup Config.Stdout;
@@ -9167,18 +9262,27 @@ func (p *Parser) emitUser(msg *streamMessage, line []byte) {
 		if !ok {
 			continue
 		}
-		if block.Type == "text" && (ul.IsSynthetic || block.Text == harnessNoOutputNudge) {
+		if block.Type == "text" && (ul.IsSynthetic ||
+			block.Text == harnessNoOutputNudge ||
+			strings.HasPrefix(block.Text, harnessInterruptNoticePrefix)) {
 			// Harness-authored prose, dropped in silence — see harnessNoOutputNudge
 			// for the captures, the census, and why the author being neither the
 			// person nor the model makes this a suppression rather than a mapping.
 			//
-			// TWO INDEPENDENT TRIGGERS, deliberately OR'd rather than one subsuming
-			// the other. The line-level flag (#2087) covers the whole class,
-			// skill invocations included, and is the only shape that can: a skill
-			// body varies per skill and ran to 87244 chars in one observed case, so
-			// no string match could ever pin it. The nudge constant stays as its own
-			// guard so a claude version that stops stamping the flag does not
-			// resurrect the row the constant was added to remove.
+			// THREE INDEPENDENT TRIGGERS, deliberately OR'd rather than any one
+			// subsuming the others. The line-level flag (#2087) covers the whole
+			// class, skill invocations included, and is the only shape that can: a
+			// skill body varies per skill and ran to 87244 chars in one observed
+			// case, so no string match could ever pin it. The nudge constant stays
+			// as its own guard so a claude version that stops stamping the flag does
+			// not resurrect the row the constant was added to remove.
+			//
+			// The third (#1611) is the interrupt notice, and it is the one the flag
+			// structurally CANNOT take: 31 of 31 corpus occurrences carry no harness
+			// flag at all. It is a PREFIX rather than a literal because one claude
+			// version produced two wordings for the same event — see
+			// harnessInterruptNoticePrefix for both, for why no trim/fold/substring,
+			// and for why the two string triggers are not a table.
 			//
 			// `continue`, not `return`: the suppression is scoped to this BLOCK, so
 			// a tool_result sharing the message still maps, with its sidecar detail

@@ -4637,6 +4637,203 @@ func TestParser_SyntheticUserLineDropsTextBlocks(t *testing.T) {
 	}
 }
 
+// interruptNoticeShortFixture and interruptNoticeToolUseFixture are the TWO
+// wordings claude 2.1.220 produced for the same event, on the same branch, on the
+// same day (2026-08-19) — the dispatcher gate run got the tool-use form, a local
+// verification run got the short one. They are LITERALS for harnessNudgeFixture's
+// reason, and here the rule bites harder than it does there: the production
+// matcher is a PREFIX, so a fixture built from the constant would be a prefix of
+// itself and every row below would pass under any wording whatsoever.
+//
+// Between them they are also the argument for the prefix. Neither is a substring
+// of the other past the shared head, so an exact-literal pin on either goes red on
+// the other — which is what #1500's test-side carve-out found by going red first.
+const (
+	interruptNoticeShortFixture   = "[Request interrupted by user]"
+	interruptNoticeToolUseFixture = "[Request interrupted by user for tool use]"
+)
+
+// TestParser_InterruptNoticeIsDropped is #1611 AC1 and AC2: the behaviour matrix
+// of the interrupt-notice arm.
+//
+// The arm exists because interrupting a turn makes claude's harness inject a
+// user/text block narrating its own cancellation, and it trips neither existing
+// trigger: it is not the nudge, and 31 of 31 occurrences in the operator's
+// transcript corpus carry no harness flag at all (measured 2026-09-14 over 6684
+// files). So every interrupt — a routine action — put an "Unrecognized message"
+// row in the operator's history, and the client already had the cancelled
+// turn_end for the same event.
+//
+// The rows are chosen so each one fails alone under a specific wrong
+// implementation. Pin an exact literal and one wording row reddens; return
+// instead of continue and the sibling-tool_result row reddens; TrimSpace and the
+// leading-space row reddens; Contains and the mid-string row reddens; widen past
+// `text` and the unknown-type row reddens; put the guard anywhere but emitUser and
+// the assistant row reddens.
+func TestParser_InterruptNoticeIsDropped(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		line string
+		want []turnevent.Event
+	}{
+		{
+			// THE TICKET, wording 1 of 2. Zero events — not an Unrecognized, not a
+			// TextChunk. Nothing reaches the client at all.
+			name: "short wording is dropped in silence",
+			line: syntheticUserLine("", textBlock(interruptNoticeShortFixture)),
+			want: nil,
+		},
+		{
+			// Wording 2 of 2, and the reason the match is a prefix rather than a
+			// literal. One claude version produced both; a pin on either sibling
+			// would leave this row red.
+			name: "tool-use wording is dropped by the same matcher",
+			line: syntheticUserLine("", textBlock(interruptNoticeToolUseFixture)),
+			want: nil,
+		},
+		{
+			// The suppression is scoped to the BLOCK (AC1's `continue`, not
+			// `return`). A message-level guard or an early return also emits no
+			// event for the text, and only a sibling that still maps tells them
+			// apart.
+			name: "the notice's sibling tool_result still maps",
+			line: syntheticUserLine("",
+				textBlock(interruptNoticeShortFixture)+","+toolResultBlock("tu-1611a")),
+			want: []turnevent.Event{turnevent.ToolUpdate{
+				ToolCallID: "tu-1611a",
+				Status:     turnevent.ToolStatusCompleted,
+				Content:    turnevent.TextContent{Text: "x"},
+			}},
+		},
+		{
+			// AC2: an unflagged text block sharing no prefix still reaches the
+			// unrecognized lane. The converse of row 1, and the pair is what says
+			// the arm did not quietly widen into "drop all user text".
+			name: "unflagged text sharing no prefix still surfaces",
+			line: syntheticUserLine("", textBlock("please stop doing that")),
+			want: []turnevent.Event{turnevent.Unrecognized{
+				Site: turnevent.UnrecognizedUserBlock,
+				Kind: "text",
+				Raw:  textBlock("please stop doing that"),
+			}},
+		},
+		{
+			// NO TRIM. #1243 matched this same prefix after strings.TrimSpace, but
+			// that helper concatenated a transcript entry's blocks into one string,
+			// so leading whitespace was reachable there. Matching per BLOCK here
+			// makes it unreachable, and all 31 corpus occurrences are the bare
+			// bracketed string with nothing before it — so a trim would be tolerance
+			// bought with no observation behind it.
+			name: "a leading space puts the notice back in the unrecognized lane",
+			line: syntheticUserLine("", textBlock(" "+interruptNoticeShortFixture)),
+			want: []turnevent.Event{turnevent.Unrecognized{
+				Site: turnevent.UnrecognizedUserBlock,
+				Kind: "text",
+				Raw:  textBlock(" " + interruptNoticeShortFixture),
+			}},
+		},
+		{
+			// NO SUBSTRING. A Contains would swallow any block that merely mentions
+			// the notice — a person quoting it back, or a future harness payload
+			// that embeds it in a longer narration.
+			name: "the notice mid-string does not suppress",
+			line: syntheticUserLine("", textBlock("quoting it back: "+interruptNoticeShortFixture+" — why?")),
+			want: []turnevent.Event{turnevent.Unrecognized{
+				Site: turnevent.UnrecognizedUserBlock,
+				Kind: "text",
+				Raw:  textBlock("quoting it back: " + interruptNoticeShortFixture + " — why?"),
+			}},
+		},
+		{
+			// THE TRUST BOUNDARY, mirroring the flag arm's own row. A genuinely new
+			// block type is the alarm the unrecognized lane exists to raise, and a
+			// third trigger must not blanket it. Hostile tool output cannot reach
+			// the text arm either — a tool_result's payload decodes into Content,
+			// never Text — so tripping this guard takes control of the block's TYPE,
+			// not just of a string.
+			name: "an unknown block type beside the notice still surfaces",
+			line: syntheticUserLine("",
+				textBlock(interruptNoticeShortFixture)+`,{"type":"image","text":"ignored"}`),
+			want: []turnevent.Event{turnevent.Unrecognized{
+				Site: turnevent.UnrecognizedUserBlock,
+				Kind: "image",
+				Raw:  `{"type":"image","text":"ignored"}`,
+			}},
+		},
+		{
+			// Scope is emitUser. The same bytes on an ASSISTANT line are model
+			// speech and still map — a guard placed in decodeBlock or emitAssistant
+			// would drop what the person came to read. Mirrors the nudge's and the
+			// flag's own assistant-surface rows.
+			name: "the notice on an assistant line does not suppress model speech",
+			line: `{"type":"assistant","message":{"id":"msg-1611","role":"assistant","content":[` +
+				textBlock(interruptNoticeShortFixture) + `]}}`,
+			want: []turnevent.Event{turnevent.TextChunk{
+				MessageID: "msg-1611",
+				Text:      interruptNoticeShortFixture,
+			}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := collectEvents(tc.line)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("events for %s:\ngot  %#v\nwant %#v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParser_InterruptNoticeDropIsLoggedContentFree is #1611 AC1's logging half,
+// in the shape TestParser_HarnessNudgeDropIsLoggedContentFree has: the drop is
+// Debug-logged with site and block type ONLY, at the SAME site as the two existing
+// triggers, and never with the text.
+//
+// Deliberately the same message and the same exactly-two attrs, which is what
+// makes this test also assert the absence of a `trigger` attribute naming which of
+// the three arms fired. That attribute is unavailable on the merits — the nudge is
+// itself flagged, so it could not tell a nudge from a skill body — and ruled out
+// on disclosure grounds at the drop site, because one careless attr there writes
+// an 87244-char skill body into the daemon's logs.
+//
+// The third assertion is the load-bearing one for the same reason it is in the
+// nudge's test: the first two only describe what is present, while the sweep is
+// what catches someone appending "text", block.Text later.
+func TestParser_InterruptNoticeDropIsLoggedContentFree(t *testing.T) {
+	t.Parallel()
+	rec := &logRecorder{}
+	p := NewParser(func(turnevent.Event) {}, slog.New(rec))
+
+	line := syntheticUserLine("", textBlock(interruptNoticeToolUseFixture))
+	if _, err := p.Write([]byte(line + "\n")); err != nil {
+		t.Fatalf("Write err = %v, want nil", err)
+	}
+
+	drops := rec.withMessage(harnessNudgeDropMsg)
+	if len(drops) != 1 {
+		t.Fatalf("records with message %q: got %d, want 1 (all records: %+v)", harnessNudgeDropMsg, len(drops), rec.all())
+	}
+	wantAttrs := map[string]string{
+		"site": string(turnevent.UnrecognizedUserBlock),
+		"type": "text",
+	}
+	if !reflect.DeepEqual(drops[0].attrs, wantAttrs) {
+		t.Errorf("drop attrs: got %v, want exactly %v", drops[0].attrs, wantAttrs)
+	}
+	for _, r := range rec.all() {
+		for k, v := range r.attrs {
+			if strings.Contains(v, interruptNoticeToolUseFixture) {
+				t.Errorf("record %q attr %q carries the block text; the drop site logs site and type only", r.msg, k)
+			}
+		}
+		if strings.Contains(r.msg, interruptNoticeToolUseFixture) {
+			t.Errorf("record message carries the block text: %q", r.msg)
+		}
+	}
+}
+
 // TestParser_CapturedSyntheticUserLinePinsTheWireSpelling is #2087 AC2: the
 // matcher is proven against REAL CAPTURED BYTES, inside `make check`.
 //

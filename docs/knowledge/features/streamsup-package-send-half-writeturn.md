@@ -35,7 +35,7 @@ forge a turn boundary:
 | Line `type` | Emits |
 |---|---|
 | `assistant` | one event per content block, in order: `text`→`TextChunk`, `thinking`→`ThoughtChunk`, `tool_use`→`ToolStart` |
-| `user` | one `ToolUpdate` per `tool_result` block (status from `is_error`, content from the string/array union); every other `text` block surfaces as `Unrecognized{Site: user_block}` **except** one on a line carrying claude's harness-synthetic flag, or one byte-exact match to `harnessNoOutputNudge` (#1247, #2087, below) — both dropped in silence; a block of any other type still surfaces regardless of the flag |
+| `user` | one `ToolUpdate` per `tool_result` block (status from `is_error`, content from the string/array union); every other `text` block surfaces as `Unrecognized{Site: user_block}` **except** one on a line carrying claude's harness-synthetic flag, one byte-exact match to `harnessNoOutputNudge`, or one prefix match to `harnessInterruptNoticePrefix` (#1247, #2087, #1611, below) — all three dropped in silence; a block of any other type still surfaces regardless of the flag |
 | `result` | exactly one `TurnEnd` — **the turn boundary**; `Reason` is `resultTurnEndReason(subtype)` (#1120): `error_during_execution` → `TurnEndReasonCancelled`, everything else (including no/unknown `subtype`) → `TurnEndReasonEndTurn` |
 | `system` (unmapped subtypes) | nothing — the **known-ignored** tier, Debug-logged by type only, never content |
 | `system/task_started` | one `BackgroundTaskStarted` (#1380, below) |
@@ -170,3 +170,64 @@ silence. The general lesson for the next subtype mapping: a "this subtype maps c
 zero-unrecognized criterion is free" argument is a claim about lines of that subtype, not about the turn
 those lines cause claude to emit as a side effect on a *different* type — check what else a live capture
 of the same turn contains before calling a surfaced-frames criterion structural.
+
+**AMENDED 2026-09-14 (#1611): a third block-level trigger, `harnessInterruptNoticePrefix`, and the first
+that is neither a byte-exact literal nor a flag.** Interrupting a turn makes the harness inject a
+`user`/`text` block narrating its own cancellation. Measured against the operator's local transcript
+corpus (6684 `.jsonl` files) plus the committed real-claude stdout captures spanning claude 2.1.220 to
+2.1.259: 31 occurrences, two wordings from the same claude version (2.1.220) on the same day —
+`[Request interrupted by user for tool use]` and `[Request interrupted by user]`, the trailing clause
+naming whatever claude happened to interrupt — and **31 of 31 carry no `isMeta`/`isSynthetic`/`isReplay`/
+`isCompactSummary` key at all**, so the flag arm structurally cannot cover it the way it covers the nudge
+and the skill body. The match is therefore on the text, and it is a **prefix**, `strings.HasPrefix`, no
+trim, no fold, no substring: a literal would go red on whichever wording it wasn't pinned to (the trap
+\#1243's now-deleted tui-driver matcher fell into, solved there with a `TrimSpace` that doesn't carry over
+— that helper concatenated a whole transcript entry's blocks into one string, while this match is
+per-block, making leading whitespace unreachable); a substring would drop any block merely *mentioning*
+the notice and costs O(len(block)) against a sibling trigger's observed 87244-char payload.
+
+**Two string matchers sharing a guard is not automatically a table.** The Technical Notes left open
+whether `harnessNoOutputNudge` and `harnessInterruptNoticePrefix` should become one measured table of
+harness prefixes. Rejected: the two have different match *shapes* — byte-exact equality vs. prefix — and
+folding them into a uniform prefix table would silently widen the nudge from equality to prefix, i.e.
+make `nudge + anything` droppable, which is the exact tolerance the nudge constant's own docblock argues
+against. Revisit only if a third *string* trigger arrives.
+
+**The full population of harness-authored `user`/`text` content on this surface, as measured 2026-09-14**
+(recorded here because the census entry is meant to hold the whole set, not just the member being added):
+
+| Kind | On stdout | Flag | Handled by |
+|---|---|---|---|
+| No-output nudge | yes | `isSynthetic` | the literal, and the flag (#1247, #2087) |
+| Skill body | yes | `isSynthetic` | the flag (#2087) |
+| Compaction summary (string content) | yes | `isSynthetic` | `dropHarnessProseLine` (#2227) |
+| Slash-command stdout echo | yes | `isReplay` | `dropHarnessProseLine` (#2227) |
+| Interrupt notice, two wordings | yes | none | `harnessInterruptNoticePrefix` (#1611) |
+| `<task-notification>` | no — arrives as a `system` line | n/a | mapped by #2193 |
+| `[Image: …]` placeholder | not seen on this surface | `isMeta` (CLI form) | the flag arm would take it |
+| `<command-name>`/`<command-message>` echo | no — CLI transcripts only | n/a | not applicable to this surface |
+
+No user-authored text can reach this lane at all: a message sent mid-turn parks in msgqueue until the
+turn ends (#1199), and the CLI stores its own mid-turn messages as an `attachment` line, never a `user`
+line.
+
+**Out of scope, on purpose (evidence-based fix selection):** a future payload shaped
+`[Request interrupted by user] <text the operator needs>` would be dropped whole by the prefix match. Not
+observed — all 31 corpus occurrences are the bare bracketed notice — so no defence is shipped; the trigger
+for revisiting is one measured occurrence of a notice carrying a trailing payload.
+
+**A fixture built from a prefix constant fails completely differently than one built from a literal
+constant.** `harnessNudgeFixture`'s rule — a fixture is a literal, never built from the production
+constant it validates — exists so that editing the constant goes red. Under a **prefix** matcher that
+rule is not merely nice-to-have but load-bearing in a new way: a fixture built from
+`harnessInterruptNoticePrefix` is trivially a prefix of itself, so every row would keep passing under
+*any* future rewording of the constant, not just some. The two wording fixtures in `parser_test.go` are
+independent literals for exactly this reason.
+
+**Deleting a test-side carve-out orphans its imports, and the build-tagged file compiles under no
+standard gate.** The `interruptNoticePrefix` carve-out this ticket removed from
+`internal/e2e/realclaude/interactive_stream_interrupt_test.go` was the sole use of the `strings` import in
+that file; `go test`/`go build` don't compile files behind `e2e_realclaude` at all, so only
+`go vet -tags e2e_realclaude ./internal/e2e/realclaude/` catches an orphaned import there — `make check`
+stays green with the package broken. See [live Claude tests](e2e-realclaude.md) and
+[development verification](development-verification.md).
