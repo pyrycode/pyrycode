@@ -144,28 +144,55 @@ func (r *modalResolverV2) emitFolderNotTrusted() {
 	r.notifyBlocked(r.activeConv(), reasonFolderNotTrusted)
 }
 
-// ResolveCancel consumes the named modal and routes the fail-safe ESC dismiss.
-// The registry Resolve is the single idempotency gate (AC #4): an unknown or
-// already-consumed id returns (zero, false) before any keystroke or audit, so a
-// replayed/stale cancel never double-acts. ESC actuation is best-effort — a
-// keystroke error (no live session / teardown) is logged and tolerated: the
-// modal is already consumed and moot, so the phone must still learn the
-// dismissal (broadcast) and the forensic record must still exist (audit).
+// ResolveCancel consumes the named modal and routes the fail-safe dismiss. The
+// registry Resolve is the single idempotency gate (AC #4): an unknown or
+// already-consumed id returns (zero, false) before any actuation or audit, so a
+// replayed/stale cancel never double-acts. Actuation is best-effort — an error
+// (no live session / teardown) is logged and tolerated: the modal is already
+// consumed and moot, so the phone must still learn the dismissal (broadcast) and
+// the forensic record must still exist (audit).
+//
+// It has the SAME TWO ARMS as ResolveAnswerWithAlwaysAllow, for the same reason
+// (#2416). A stream-json permission is a permbridge-parked completer, not an
+// on-screen modal, and the stream bootstrap's keystroker is a no-op — so before
+// the verdict arm existed a cancelled stream permission left claude blocked until
+// permbridge's own timer fired, mcpApprovalTimeout at ten minutes. The deny is
+// dispatched exactly where the ESC was, so the cancelled audit outcome and the
+// {cancelled, remote} dismissal below are untouched, and a PTY-path modal — never
+// in the bridge's correlation map, because only Surface writes it — takes the
+// !handled arm and its ESC is what it always was.
+//
+// TWO GATES THE ANSWER ARM APPLIES ARE DELIBERATELY ABSENT HERE, and both look
+// like omissions. RemoteAnswerable exists because an interaction-required
+// permission cannot be ALLOWED by a one-tap remote answer; a cancel is only ever a
+// deny, the fail-closed direction, so gating it would preserve exactly the
+// parked-for-ten-minutes state this arm removes. And no per-device privilege is
+// checked, as it never has been on this path: on the terminal path a cancel's ESC
+// is already a deny to claude, so the stream path is being brought level with it
+// rather than granted anything new. reasonRemoteDeny is a compile-time constant,
+// so nothing a client or the host authored reaches claude.
 func (r *modalResolverV2) ResolveCancel(modalID string, dev *devices.Device) (relay.ModalDismissal, bool) {
 	out, ok := r.reg.Resolve(modalID)
 	if !ok {
 		return relay.ModalDismissal{}, false
 	}
 
-	if err := r.kb.SendEsc(); err != nil {
-		// Best-effort actuation: the modal is already consumed (idempotency
-		// committed above), so do NOT abort the audit/broadcast — that would
-		// orphan the consumed modal. err is a supervisor sentinel / transport
-		// error, never a secret.
-		r.logger.Warn("relay: modal cancel keystroke failed",
-			"event", "modal_cancel.keystroke_err",
-			"modal_id", modalID,
-			"err", err)
+	// STREAM (#2416): a permbridge-parked approval keyed by modalID resolves its
+	// completer to deny. handled=true only when modalID is a stream approval;
+	// every other modal — and every modal when no bridge is wired (foreground /
+	// v1) — falls through to the KEYSTROKE arm below, unchanged.
+	handled := r.streamApprovals != nil && r.streamApprovals.ResolveStream(modalID, false, false, reasonRemoteDeny)
+	if !handled {
+		if err := r.kb.SendEsc(); err != nil {
+			// Best-effort actuation: the modal is already consumed (idempotency
+			// committed above), so do NOT abort the audit/broadcast — that would
+			// orphan the consumed modal. err is a supervisor sentinel / transport
+			// error, never a secret.
+			r.logger.Warn("relay: modal cancel keystroke failed",
+				"event", "modal_cancel.keystroke_err",
+				"modal_id", modalID,
+				"err", err)
+		}
 	}
 
 	var deviceHash, deviceLabel string

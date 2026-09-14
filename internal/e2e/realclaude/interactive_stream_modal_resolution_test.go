@@ -55,6 +55,7 @@ package realclaude
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -150,6 +151,70 @@ func TestInteractiveStreamStdioAlwaysAllowIsSessionScoped(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(fresh.workdir, witness)); !os.IsNotExist(err) {
 		t.Fatalf("fresh-session command executed before its new permission modal (stat error: %v)", err)
+	}
+}
+
+// cancelledApprovalTurnEndBudget is the budget for a stdio permission's turn to
+// close after the operator cancels its modal. Its SIZE is the assertion (#2416):
+// the daemon's approval window is mcpApprovalTimeout, ten minutes unless
+// PYRY_APPROVAL_TIMEOUT overrides it, and before the cancel path resolved the
+// parked completer the turn closed only when that window elapsed. So this must
+// stay an order of magnitude under it — a budget anywhere near ten minutes would
+// green on the parked behaviour this gate exists to catch. It is generous for what
+// it actually measures: the session is warm (the modal already surfaced), so all
+// that remains is claude reading the deny and writing one short reply.
+const cancelledApprovalTurnEndBudget = 60 * time.Second
+
+// TestInteractiveStreamStdioCancelDeniesParkedPermission is #2416's live gate: a
+// modal_cancel on a stream-json (stdio) permission must resolve claude's parked
+// completer to deny at once, not leave it blocked for the approval window.
+//
+// It is the sibling of TestInteractiveStreamStdioModalAllow — same harness, same
+// trigger shape, the cancel verb instead of the answer — and it goes red on the
+// pre-#2416 daemon by deadline at the turn_end drain.
+//
+// Non-vacuity rests on three legs, and each fails a different way. The modal is
+// asserted up BEFORE the cancel is sealed (raiseRealPermissionModalPayload's own
+// gate), so a cancel can never pass over a modal that never surfaced. The
+// dismissal broadcast is checked field by field, which is AC-1's "audit and
+// broadcast unchanged" half — the deny must be ADDED to the cancel path, not
+// substituted for what it already did. And the witness file must not exist:
+// turn_end alone cannot tell a denied tool call from an executed one, and a
+// permission path that ended the turn by ALLOWING the Write would satisfy every
+// other assertion here.
+func TestInteractiveStreamStdioCancelDeniesParkedPermission(t *testing.T) {
+	const (
+		witness = "pyrycode-cancel-denied-witness.txt"
+		// "do not retry" keeps the turn from raising a second permission modal
+		// after the deny, which would leave this drain waiting on a prompt nobody
+		// answers — a deadline that would read as the bug under test.
+		prompt = "Use the Write tool to create a file named " + witness + " containing the single word hello. " +
+			"If the tool call is denied, do not retry it, do not use any other tool, and reply with one short word."
+	)
+
+	h, convID := startStdioModalResolutionHarness(t, permissionDaemonModel)
+	shown := raiseRealPermissionModalPayload(t, h, 2, convID, prompt)
+
+	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
+		ID:      3,
+		Type:    protocol.TypeModalCancel,
+		TS:      time.Now().UTC(),
+		Payload: mustJSON(t, protocol.ModalCancelPayload{ModalID: shown.ModalID}),
+	})
+
+	env := drainForControlEvent(t, h.phone, h.initRecv, protocol.TypeModalDismissed, modalDismissBudget)
+	var dismissed protocol.ModalDismissedPayload
+	if err := json.Unmarshal(env.Payload, &dismissed); err != nil {
+		t.Fatalf("decode modal_dismissed payload: %v", err)
+	}
+	if dismissed.ModalID != shown.ModalID || dismissed.Outcome != "cancelled" || dismissed.Source != "remote" {
+		t.Fatalf("modal_dismissed = %+v, want {%s cancelled remote} — the cancel path's broadcast must be unchanged", dismissed, shown.ModalID)
+	}
+
+	drainForControlEvent(t, h.phone, h.initRecv, protocol.TypeTurnEnd, cancelledApprovalTurnEndBudget)
+
+	if _, err := os.Stat(filepath.Join(h.workdir, witness)); !os.IsNotExist(err) {
+		t.Fatalf("the cancelled permission's Write executed anyway (stat error: %v) — the cancel resolved the parked approval to allow, not deny", err)
 	}
 }
 

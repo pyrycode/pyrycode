@@ -45,6 +45,22 @@ therefore keep stdin open, assert the request and response correlation, and use 
 side-effect witness; a successful process exit alone cannot distinguish a denial
 from a silent bypass. See [the permission protocol findings](permission-protocol-spike.md).
 
+A live gate's timeout-sized budget constant should carry the reason it must stay
+well under the production timeout it is proving early, not just reuse an existing
+budget. `TestInteractiveStreamStdioCancelDeniesParkedPermission`'s `turn_end` drain
+needed to complete in seconds, not the ten-minute `mcpApprovalTimeout` a
+parked-completer bug would still (eventually) satisfy; reusing the suite's general
+per-turn reply budget would have stayed non-vacuous only by a factor of five, with
+nothing in the file explaining why that margin was enough. A dedicated named
+constant states the margin against the specific timeout under test, so a later
+widening reads as the regression it would be (#2416).
+
+A live test proving a permission denial must tell the model not to retry the tool.
+A denied call that leaves the turn free to try something else raises a second,
+unanswered permission modal, and the resulting hang looks exactly like the
+parked-completer bug the test exists to catch — in the one tier where a red run is
+most expensive to re-read (#2416).
+
 `TestInteractiveStreamStdioAlwaysAllowIsSessionScoped` proves that two identical
 Bash commands execute after one approval in a session, then requires a fresh
 session to ask before execution. A live failure came from a mixed offer:
