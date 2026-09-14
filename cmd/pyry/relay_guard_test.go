@@ -438,6 +438,21 @@ var excludedTypes = map[string]string{
 	// request verb belongs in inboundTypes with its real dispatch surface.
 	"TypeMCPStatus": "push+reply",
 
+	// outbound live push and correlated reply — the v2 context-window reading
+	// (#2370), filed the way TypeMCPStatus above was and for the same reason: both
+	// later producers reuse this one output shape, so the dual classification is
+	// recorded in the declaring commit rather than split across the two that arrive
+	// later. #2371 publishes it after a turn; #2293 answers an on-demand request
+	// with the same type, correlated by the request envelope's id. Mandatory from
+	// the moment the constant exists rather than from the moment something emits it
+	// — Assertion #3 reports an unclassified constant, not an unemitted one.
+	//
+	// NO INBOUND HALF IS PENDING HERE, unlike TypeMintPairing's entry. #2293 owns
+	// its request verb together with the handler that answers it, because Assertion
+	// #1 fails an inbound type with no dispatch surface and filing a handler-less
+	// verb here to dodge that would be a lie to the guard.
+	"TypeContextUsage": "push+reply",
+
 	// outbound push — the v2 slash-command-list report (#1726). Outbound-only like
 	// the seven above, and mandatory here from the moment the constant exists
 	// rather than from the moment something emits it (the producer is #1720) —

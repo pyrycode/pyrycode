@@ -2000,3 +2000,112 @@ func (c SlashCommand) MarshalJSON() ([]byte, error) {
 	type alias SlashCommand
 	return json.Marshal(alias(c))
 }
+
+// ContextUsagePayload is the body of an Envelope whose Type == TypeContextUsage.
+// Binary → phone direction; one conversation's context-window breakdown as claude
+// reported it. This is the sole outbound wire shape for both later producers —
+// #2371's post-turn publication and #2293's on-demand reply — so it carries no
+// request verb and no correlation field: a reply rides Envelope.InReplyTo.
+//
+// IT IS MIXED-PROVENANCE, and that is the field-level fact a reader is likeliest to
+// get wrong. ConversationID is DAEMON-authored: the mapper fills it from the daemon's
+// own registry record, never from claude's bytes. EVERY OTHER STRING here and on all
+// three row types is claude- or workspace-authored descriptive text. Assuming one
+// provenance for the whole struct errs in a harmful direction half the time, because
+// it promotes Model and the row strings to values they were never checked to be.
+// This layer neither validates nor sanitizes them, and a client MUST render each as
+// inert text rather than use it as an actuator, a link, or an authorization input.
+//
+// THE READING IS INFORMATIONAL, mirroring turnevent.ContextUsage's own constraint:
+// consumers may display it, but it does not replace the daemon-owned
+// contextwindow.Read value that control decisions use. The integers are claude's own
+// and the daemon neither recomputes nor normalizes them, so a client must not assume
+// Percentage is derivable from TotalTokens and MaxTokens, nor that the categories sum
+// to the total.
+//
+// Each list preserves the producer's descending-token order. All three keys are
+// always present and never null — see MarshalJSON. Bounds are not re-decided here:
+// internal/streamsup caps every string and list count at construction, and a second
+// cap in this package would be a second place the limit is decided, free to disagree
+// silently — SessionFactsPayload's stated reason.
+//
+// THE THREE DROPPED COUNTS ARE INDEPENDENT AND NOT INFERABLE. Each is copied verbatim
+// from its turnevent.ContextUsage counterpart by a later mapper; this layer must not
+// infer loss from a retained list's length, and the three pairs are never cross-read.
+// Each list's original size stays recoverable as len(list) + its own dropped count.
+type ContextUsagePayload struct {
+	ConversationID     string                   `json:"conversation_id"`
+	Model              string                   `json:"model"`
+	TotalTokens        int                      `json:"total_tokens"`
+	MaxTokens          int                      `json:"max_tokens"`
+	Percentage         int                      `json:"percentage"`
+	Categories         []ContextUsageCategory   `json:"categories"`
+	DroppedCategories  int                      `json:"dropped_categories"`
+	MCPTools           []ContextUsageMCPTool    `json:"mcp_tools"`
+	DroppedMCPTools    int                      `json:"dropped_mcp_tools"`
+	MemoryFiles        []ContextUsageMemoryFile `json:"memory_files"`
+	DroppedMemoryFiles int                      `json:"dropped_memory_files"`
+}
+
+// MarshalJSON normalises all three nil inventory slices to empty arrays. An empty
+// inventory is a positive reading — claude reported no MCP tools, or no memory files
+// — so clients receive [] rather than null and never have to distinguish the two.
+// The value receiver keeps normalisation local and does not mutate the caller.
+//
+// One normaliser on the payload rather than three on the row types: the nil-to-[]
+// question belongs to whoever owns the keys, and the rows encode correctly on their
+// own. MCPStatusPayload is arranged the same way.
+func (p ContextUsagePayload) MarshalJSON() ([]byte, error) {
+	if p.Categories == nil {
+		p.Categories = []ContextUsageCategory{}
+	}
+	if p.MCPTools == nil {
+		p.MCPTools = []ContextUsageMCPTool{}
+	}
+	if p.MemoryFiles == nil {
+		p.MemoryFiles = []ContextUsageMemoryFile{}
+	}
+	type alias ContextUsagePayload
+	return json.Marshal(alias(p))
+}
+
+// ContextUsageCategory is one named contribution to a ContextUsagePayload reading.
+// Both keys remain present even when Name is empty. Name is claude-authored
+// descriptive text, already bounded by the producer; it is a label, never a selector
+// a client may branch on for authority.
+type ContextUsageCategory struct {
+	Name   string `json:"name"`
+	Tokens int    `json:"tokens"`
+}
+
+// ContextUsageMCPTool is one MCP tool's contribution to a ContextUsagePayload
+// reading. All three keys remain present even when the strings are empty.
+//
+// SERVERNAME HERE IS INERT, and the name collision with MCPReconnectPayload.ServerName
+// is the trap this comment exists to defuse. That one crosses an actuation seam
+// verbatim and is validated by nothing in this package or in internal/relay. This one
+// names a contributor to a reading: it is never an actuation target, never an
+// authorization input, and must not be fed to an MCP verb on the strength of having
+// appeared here. Name carries the same constraint.
+type ContextUsageMCPTool struct {
+	Name       string `json:"name"`
+	ServerName string `json:"server_name"`
+	Tokens     int    `json:"tokens"`
+}
+
+// ContextUsageMemoryFile is one memory file's contribution to a ContextUsagePayload
+// reading. All three keys remain present even when the strings are empty.
+//
+// PATH IS PATH-SHAPED DESCRIPTIVE TEXT, NOT A FILE HANDLE. Nothing on this path joins,
+// cleans, resolves, or opens it — not this package, and not a later mapper either:
+// normalising the string would imply it names a real file this frame acts on, which it
+// does not. It is workspace-authored and unvalidated, so a client must render it as
+// inert text rather than as a link, and must not open it on the strength of this frame.
+// A committed fixture carries a traversal-shaped path so the pass-through is pinned by
+// a test rather than by this comment alone. Type is claude's own label for the entry
+// and carries the same constraint.
+type ContextUsageMemoryFile struct {
+	Path   string `json:"path"`
+	Type   string `json:"type"`
+	Tokens int    `json:"tokens"`
+}

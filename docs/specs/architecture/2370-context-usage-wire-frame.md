@@ -252,3 +252,15 @@ on demand) rather than claiming this declaration emits the frame.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-14
+
+## Revisions
+
+**2026-09-14 — fixture strengthened beyond the stated testing strategy.**
+§ Testing strategy asked only that the three dropped counts be "mutually distinct" so a
+cross-wired count fails. Implementation adds a second, stronger property: each count must also
+differ from its own list's length, asserted in `TestContextUsagePayload_RoundTrip`. The first
+draft of `context_usage.json` used `dropped_categories: 2` beside two category rows, and the new
+assertion caught it — a fixture in that shape cannot distinguish an explicit dropped count from
+one inferred via `len(list)`, which is the property AC #3 exists to pin. The fixture now carries
+3 / 5 / 7 against two rows per list. No design or contract change; the payload shape is exactly
+as committed in Phase A.
