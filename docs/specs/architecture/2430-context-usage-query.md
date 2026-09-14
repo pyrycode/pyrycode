@@ -339,3 +339,31 @@ for the documentation stage beyond folding the PR's Lessons learned into
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-14
+
+## Revisions
+
+### 2026-09-14 — Open questions resolved in Phase B
+
+Neither resolution changed the design; both are recorded so the questions are visibly
+answered rather than dropped.
+
+1. **The fake child needs no new arm — confirmed.** `contextUsageRequestID` keys on
+   subtype and detail only and `writeContextUsageAck` echoes whatever id it is handed, so
+   a query-minted id is already answered. The tagged e2e suite's context-usage test passes
+   untouched, which also re-proves that the automatic post-turn lane still publishes.
+   `internal/e2e/internal/fakeclaude/main.go` drops out of the ticket's estimated file
+   list, leaving **two** production files.
+2. **The post-`select` cancel re-check is `QueryMCPStatus`'s — matched exactly.** A
+   reading that arrives after the caller's context ended is discarded rather than
+   returned, so a caller cannot act on a value it stopped waiting for.
+
+### 2026-09-14 — one assertion added beyond the written strategy
+
+The Testing strategy's "a claimed reading does not reach the shared sink" is, on its own,
+a **vacuous** assertion for this design: a query-minted id is never registered in
+`contextUsageRequests`, so `emitContextUsage` could not have published it wherever the
+claim sat in the arm. The ordering the ticket calls for is really about what runs *below*
+the claims — `emitModelList` owns the control-response record.
+`TestRunner_QueryContextUsage_ClaimedReadingLeavesNoControlResponseRecord` pins it with a
+capturing logger, and was verified non-vacuous by temporarily moving the claim below
+`emitModelList` and watching it fail on that record before reverting.

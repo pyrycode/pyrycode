@@ -1400,9 +1400,105 @@ func (r *Runner) RequestContextUsage(detail string) error {
 	return err
 }
 
+// contextUsageQueryIDPrefix namespaces the request ids of requester-private context
+// readings, and its DISJOINTNESS from mcpStatusQueryIDPrefix, from mcpActuationIDPrefix
+// and from the bare decimal sequence RequestContextUsage mints is load-bearing for the
+// reason mcpActuationIDPrefix's own doc block gives — a collision costs a hang, not a
+// miss. It carries one hazard the other two do not: BOTH context-usage paths land in the
+// same control_response arm, so this prefix overlapping the bare sequence would have
+// claimContextUsageQuery swallow the automatic post-turn reading the shared sink must
+// still publish. Leading with a letter makes that impossible. Keep all four disjoint.
+const contextUsageQueryIDPrefix = "context-usage-query-"
+
+// QueryContextUsage asks the live child for a context breakdown at detail and waits for
+// the response carrying that request's own id, so a caller answering an inbound request
+// can correlate the reading to it. The parser claims that response before the shared
+// sink, so a reading returned here is NOT also republished as an unsolicited frame.
+// RequestContextUsage remains the fire-and-forget peer for the post-turn cadence.
+//
+// ONE BOOL COLLAPSES EVERY NOT-ANSWERED OUTCOME — an unsupported detail, no live child, a
+// rotation in flight, a child replaced before answering, a failed write, a caller whose
+// context ended, and an unusable payload alike. That is QueryMCPStatus's contract and
+// actuateMCP's stated decision, and this slice wires no caller above it that could
+// consume a richer one. A caller needing the vocabulary itself learns it from
+// RequestContextUsage's ErrUnsupportedContextUsageDetail.
+//
+// THE RETURNED READING CARRIES CHILD-AUTHORED STRINGS, memory-file paths from the user's
+// own filesystem among them. It is bounded but not sanitised for diagnostics, so a caller
+// must not log it wholesale. Nothing on this path logs, and no diagnostic may be added
+// here: the values in scope are the detail, the minted id and the writer's error.
+//
+// mcpStatusEligible is deliberately NOT part of the gate, unlike QueryMCPStatus's: it
+// reports whether argv confines the child to the daemon's one MCP config, which has no
+// bearing on whether a context reading can be asked for. A child that is live and not
+// rotating is askable. rotating and childGeneration are the parts that do carry over.
+//
+// THE CALLER'S CONTEXT IS THE ONLY BOUND ON THE WAIT when the child stays alive and
+// simply never answers — takeStdin and beginMCPStatusChild cover death and replacement,
+// silence they cannot — so pass a deadline rather than context.Background().
+//
+// The order below is QueryMCPStatus's, for the reasons actuateMCP records: snapshot the
+// binding under the leaf mutex, register OUTSIDE it, then re-check the generation.
+func (r *Runner) QueryContextUsage(ctx context.Context, detail string) (turnevent.ContextUsage, bool) {
+	// Vocabulary refusal precedes every other check, as RequestContextUsage and
+	// WriteContextUsage do it: an unsupported value is permanent regardless of child
+	// state, and refusing here is what keeps an id from being minted or a request
+	// written for one.
+	if !contextUsageDetailAllowed(detail) {
+		return turnevent.ContextUsage{}, false
+	}
+	if ctx.Err() != nil || r.parser == nil {
+		return turnevent.ContextUsage{}, false
+	}
+
+	r.mu.Lock()
+	if r.stdin == nil || r.rotating {
+		r.mu.Unlock()
+		return turnevent.ContextUsage{}, false
+	}
+	w := r.stdin
+	generation := r.childGeneration
+	r.mu.Unlock()
+
+	id := contextUsageQueryIDPrefix + r.nextControlID()
+	pending := r.parser.registerContextUsageQuery(id)
+
+	// Registration stays outside the runner's leaf mutex. Rechecking the binding
+	// generation closes the snapshot-to-registration gap without nesting locks.
+	r.mu.Lock()
+	current := r.stdin != nil && !r.rotating && r.childGeneration == generation
+	r.mu.Unlock()
+	if !current || ctx.Err() != nil {
+		r.parser.removeContextUsageQuery(id, pending)
+		pending.resolveWrite(false)
+		pending.complete(turnevent.ContextUsage{}, false)
+		return turnevent.ContextUsage{}, false
+	}
+
+	err := WriteContextUsage(w, id, detail)
+	pending.resolveWrite(err == nil)
+	if err != nil || ctx.Err() != nil {
+		r.parser.removeContextUsageQuery(id, pending)
+		pending.complete(turnevent.ContextUsage{}, false)
+		return turnevent.ContextUsage{}, false
+	}
+
+	select {
+	case result := <-pending.result:
+		if ctx.Err() != nil {
+			return turnevent.ContextUsage{}, false
+		}
+		return result.usage, result.ok
+	case <-ctx.Done():
+		r.parser.removeContextUsageQuery(id, pending)
+		return turnevent.ContextUsage{}, false
+	}
+}
+
 // nextControlID mints the next locally-unique control-request correlation id,
 // shared by Interrupt, SetModel, SetPermissionMode, RequestInitialize,
-// RequestMCPStatus, QueryMCPStatus and RequestContextUsage (RevokeBypass draws on it through SetPermissionMode,
+// RequestMCPStatus, QueryMCPStatus, RequestContextUsage and QueryContextUsage
+// (RevokeBypass draws on it through SetPermissionMode,
 // minting exactly one id per call, not two). The atomic counter is
 // unique within the runner's lifetime — one sequence, not one per subtype, since
 // request_id must be unique across all in-flight control requests on the stream
@@ -2149,6 +2245,11 @@ func (r *Runner) takeStdin() io.WriteCloser {
 	if r.parser != nil {
 		r.parser.failMCPStatusQueries()
 		r.parser.failMCPActuations()
+		// Context-usage waiters retire on this boundary too (#2430). The calls stay
+		// OUTSIDE the acquisition above, as the two beside them do: r.mu is a leaf and
+		// each correlator carries its own mutex, so nesting them here would be the one
+		// arrangement this file's lock discipline forbids.
+		r.parser.failContextUsageQueries()
 	}
 	return w
 }
