@@ -2023,16 +2023,31 @@ func (c SlashCommand) MarshalJSON() ([]byte, error) {
 // Percentage is derivable from TotalTokens and MaxTokens, nor that the categories sum
 // to the total.
 //
-// Each list preserves the producer's descending-token order. All three keys are
-// always present and never null — see MarshalJSON. Bounds are not re-decided here:
-// internal/streamsup caps every string and list count at construction, and a second
-// cap in this package would be a second place the limit is decided, free to disagree
-// silently — SessionFactsPayload's stated reason.
+// Each list preserves the producer's descending-token order, and arrives as a PREFIX
+// of it: any cut takes entries off the tail, so a shortened list is never a list with
+// holes. All three keys are always present and never null — see MarshalJSON. Bounds
+// are not re-decided here: internal/streamsup caps every string and list count at
+// construction, and a second cap in this package would be a second place the limit is
+// decided, free to disagree silently — SessionFactsPayload's stated reason. The one
+// bound decided outside the producer is on a dimension it does not cover, the frame's
+// BYTE cost against the v2 application-envelope cap, and it lives in the mapper
+// rather than here for that same no-second-place reason; see the dropped counts below.
 //
-// THE THREE DROPPED COUNTS ARE INDEPENDENT AND NOT INFERABLE. Each is copied verbatim
-// from its turnevent.ContextUsage counterpart by a later mapper; this layer must not
-// infer loss from a retained list's length, and the three pairs are never cross-read.
-// Each list's original size stays recoverable as len(list) + its own dropped count.
+// THE THREE DROPPED COUNTS ARE INDEPENDENT AND NOT INFERABLE. Each is TWO CUTS' worth
+// of loss: the count its turnevent.ContextUsage counterpart carries — the producer's,
+// recorded when its entry or string caps fired — plus whatever the mapper's own frame
+// budget removed from that same list to keep the envelope under the v2 cap
+// (internal/turnbridge's maxContextUsageListBytes). The mapper ADDS to the base rather
+// than replacing it, so this layer must still not infer loss from a retained list's
+// length, and the three pairs are still never cross-read. Each list's original size
+// stays recoverable as len(list) + its OWN dropped count, across both cuts.
+//
+// A NON-ZERO COUNT THEREFORE SAYS NOTHING ABOUT HOW MANY ENTRIES ARRIVED, and the
+// sibling's shortcut does not transfer: SlashCommandListPayload.DroppedCommands is the
+// same two-cut arithmetic on a frame with one list, where this frame divides one
+// envelope across three and can cut all three at once. A client that treats a full
+// list as proof nothing was dropped, or an empty one as proof everything was, is wrong
+// in both directions.
 type ContextUsagePayload struct {
 	ConversationID     string                   `json:"conversation_id"`
 	Model              string                   `json:"model"`

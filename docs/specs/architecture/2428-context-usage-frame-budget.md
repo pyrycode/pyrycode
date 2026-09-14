@@ -257,6 +257,57 @@ Owned by the documentation stage, not this builder. Carried forward verbatim fro
 
 **Status: pending.** No `docs/` file outside this spec is edited by this slice.
 
+## Revisions
+
+**2026-09-14 — both Open questions resolved, and two fixture defects that mutation-checking
+found and the plan's testing strategy would have shipped.**
+
+1. **The constant stays 60000 and the reserve is measured, not guessed** (Open question 1).
+   `TestMapEventContextUsageWorstCaseAgainstV2EnvelopeCap` reports a **2284 B** reserve outside
+   the three arrays against the 5519 the constant leaves — roughly 2.4× — with the escaped
+   worst-case envelope at **61240 B, 93.5%** of the cap, and the raw worst case at **44995 B** of
+   arrays, crossing uncut. The plan predicted ~2350 B and ~62350 B, so its arithmetic stands. The
+   constant's doc carries the measured figures and, more importantly, the **structural** bound
+   they are evidence for: the arrays cannot exceed 60000 whatever the input, so no envelope can
+   exceed 60000 + reserve — a tighter-packing reading than the worst case exists, and the
+   measurement alone would not cover it.
+
+2. **The degraded shape is short, and the doc says so** (Open question 2). At the escaped worst
+   case the frame keeps **8 categories, 8 MCP tools and 7 memory files of 32 each**. That is the
+   design working — every list keeps its heaviest entries and its own honest count — but a reader
+   should not infer the budget is roomy, so the constant's doc states the number.
+
+3. **A single-list fixture cannot test close-versus-skip in this arm, and the plan's did not.**
+   The plan carried #2002's lesson and still landed a fixture that a mutation removing all three
+   close flags left green. The reason is specific to this arm's control flow rather than to the
+   fixture's row sizes: the walk already ends on the first round that admits nothing, so with one
+   populated list a rejection ends it whether or not the list is marked closed — the flag is dead
+   weight there. It is load-bearing only while ANOTHER list is still admitting, which is when the
+   round counts as progress and an unclosed list would be offered its next entry. The fixture is
+   now two-list: 32 cheap categories keeping the walk alive past the cut, and 28 fat MCP rows
+   followed by 4 tiny ones. Three preconditions guard the window rather than assume it — the cut
+   must land inside the fat block, the cheap rows must outlive it, and the leftover must still
+   cover a tiny row — because that window is an arithmetic coincidence between two row sizes and a
+   budget. Measured: the cut lands after 24 of 28 fat rows with all 32 categories kept and 556 B
+   left against a 54 B row, and the mutation now names the four rows it wrongly admits.
+
+4. **Equal-length lists cannot catch a cross-wired dropped count.** The plan's additive fixture
+   used three 32-entry lists, which the budget cuts by 24/24/25 — so a mapper adding the
+   categories' cut to `dropped_mcp_tools` lands on the number the correct mapper produces, and
+   that mutation survived. The fixture is now **32/20/12**, giving three distinct cuts (24/12/5)
+   over three distinct bases (3/5/7); the cross-wiring mutation reports 29 against a wanted 17.
+   Five mutations are now checked in total — lanes never closing, a cross-wired count, a count
+   recomputed from its base alone, a budget charged on unescaped length, and sequential rather
+   than round-robin apportionment — and each reddens in the assertion written for it.
+
+5. **One production-doc correction beyond the two the plan named.**
+   `protocol.ContextUsagePayload`'s "Bounds are not re-decided here" paragraph sat directly above
+   a field that is now cut elsewhere, which invites the wrong read; it gains a clause naming the
+   frame's byte axis as the one bound decided outside the producer and saying why it lives in the
+   mapper. The same paragraph now states the **prefix** guarantee, which is a client-facing
+   property no type doc carried. No file count moved — both edits are in a file the plan already
+   names.
+
 ## Security review
 
 **Verdict:** PASS
