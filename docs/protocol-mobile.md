@@ -2543,11 +2543,11 @@ different cadences.
 | `max_tokens` | int | claude's own ceiling for the window. Always present. |
 | `percentage` | int | claude's own `total_tokens` / `max_tokens` reading. **Not derived by the daemon** — see below. |
 | `categories` | array of object | The named contributors to the total (system prompt, messages, and similar), in claude's own descending-token order. **Always present, never `null`**; a reading with none serialises as `[]`. |
-| `dropped_categories` | int | Count of tail entries omitted from `categories` when the source report was bounded. Always present, including `0`. |
+| `dropped_categories` | int | Count of tail entries omitted from `categories`, the sum of two cuts (see below). Always present, including `0`. |
 | `mcp_tools` | array of object | The MCP tools contributing to the total, in claude's own descending-token order. **Always present, never `null`**. |
-| `dropped_mcp_tools` | int | Count of tail entries omitted from `mcp_tools`. Always present, including `0`. |
+| `dropped_mcp_tools` | int | Count of tail entries omitted from `mcp_tools`, the sum of two cuts (see below). Always present, including `0`. |
 | `memory_files` | array of object | The memory files contributing to the total, in claude's own descending-token order. **Always present, never `null`**. |
-| `dropped_memory_files` | int | Count of tail entries omitted from `memory_files`. Always present, including `0`. |
+| `dropped_memory_files` | int | Count of tail entries omitted from `memory_files`, the sum of two cuts (see below). Always present, including `0`. |
 
 Each element of `categories` carries exactly two keys, both always present:
 
@@ -2574,11 +2574,29 @@ Each element of `memory_files` carries exactly three keys, all always present:
 
 **Each dropped count is independent and is never inferable from its list's
 length.** `dropped_categories`, `dropped_mcp_tools` and `dropped_memory_files`
-are each copied verbatim from `turnevent.ContextUsage`'s matching field by the
-mapper that emits this frame; none is derived by counting the retained list. A
-list's original size before any bound was applied is recoverable as
-`len(list) + <its own dropped count>` — the three pairs are never cross-read,
-so `len(categories) + dropped_mcp_tools` answers nothing.
+are each the **sum of two cuts**: the producer's own count — recorded when
+`internal/streamsup`'s per-list entry cap or per-string byte cap fired — plus
+whatever the mapper's own frame-level byte budget removed from that same list
+to keep the serialised envelope under the [v2 application-envelope
+cap](#application-envelope-size-cap) (`internal/turnbridge`'s
+`maxContextUsageListBytes`, apportioned round-robin across the three lists
+against one shared total). The mapper adds to the producer's base rather than
+replacing it, so a list's original size before either cut is still
+recoverable as `len(list) + <its own dropped count>` — the three pairs are
+never cross-read, so `len(categories) + dropped_mcp_tools` answers nothing.
+
+**The sibling's shortcut does not transfer.** [`slash_command_list`](#slash_command_list)
+divides one byte budget over a single list, so there a non-zero
+`dropped_commands` can arrive beside any number of entries. This frame divides
+**one shared budget across three lists**, round-robin in the fixed order
+`categories`, `mcp_tools`, `memory_files`, so the same non-transfer holds
+*and* compounds: a non-zero count on any one of the three can arrive beside
+any number of surviving entries in that same list, and a heavy `categories`
+reading can cost `mcp_tools` and `memory_files` entries even though neither
+of them grew. A short list is never evidence of a complete one, and — new to
+this frame relative to the sibling — a cut to one list is never evidence
+that another list was untouched. Read each field on its own terms; never
+infer one list's loss from another's length or from its own.
 
 **The reading is informational.** It is claude's own arithmetic, mirroring
 `turnevent.ContextUsage`'s own standing constraint: a client may display it,
@@ -4605,6 +4623,8 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 **Date:** 2026-05-16
 
 ## Changelog
+
+- `2026-09-14`: **[`context_usage`](#context_usage) can no longer be lost whole to an escape-heavy reading** (#2428) — the mapper now bounds the frame's three serialised inventories (`categories`, `mcp_tools`, `memory_files`) against one shared 60000-byte budget, so the marshalled envelope always fits the [v2 application-envelope cap](#application-envelope-size-cap). **Before this, only entry counts and string lengths were bounded, not wire bytes**: `encoding/json`'s HTML escaping charges six bytes per `&`, `<` or `>`, so an escape-heavy reading at the producer's own caps measured up to 3.8x the envelope cap, and the transport rejected the whole envelope with `message.too_long` rather than truncating it — the breakdown was lost entirely rather than shortened. **The cut is round-robin across the three lists against one shared budget**, in the fixed order `categories`, `mcp_tools`, `memory_files`: each round offers every still-open list its next entry, a list closes (never skips) on its first entry that does not fit, and the walk ends the first round nothing is admitted. Every kept list is a **prefix** of the producer's descending-token order, and every non-empty list keeps **at least one entry** when the budget fires — arithmetic guaranteed by round 0's combined worst case sitting well under the budget, not a special case. **Each `dropped_*` count is now two cuts' worth of loss, added rather than replacing**: the producer's own base plus whatever this frame's cut removed from that same list, so `len(list) + <its own dropped count>` still recovers the pre-cut size, and the three pairs stay independent and never cross-read. **A non-zero dropped count can now arrive beside any number of entries** — see § `context_usage`'s corrected dropped-count paragraph, which carries [`slash_command_list`](#slash_command_list)'s "the sibling's shortcut does not transfer" reasoning one step further for a three-list frame. No content dimension is re-decided: the producer's per-list entry cap and per-string byte cap are unchanged, order is never reordered, and the memory-file path is still never joined, cleaned, resolved or opened. The fail-closed branch (a row that cannot be marshalled) builds no error value and writes no log line, matching this frame's standing no-log rule.
 
 - `2026-09-14`: **The daemon's context-window breakdown has a stable frame to decode against, and now publishes it** (#2370, emitted by #2371) — a new outbound-only type, [`context_usage`](#context_usage), carrying `model`, the totals and percentage, and three independently bounded inventories (`categories`, `mcp_tools`, `memory_files`), each with its own dropped count. **Declared by #2370, emitted by #2371**: the daemon now publishes this frame once after every completed turn, mapped from `internal/turnevent.ContextUsage` via the solicited post-turn ask (`turnEndContextUsageRequester`, #2289), on the existing conversation-keyed interactive lane with no second capability gate. **A fresh on-demand request answers with this same shape** — [`request_context_usage`](#asking-for-a-context-usage-reading-on-demand) (#2431, split from #2293), correlated by `in_reply_to`. Two closely-spaced asks for the same conversation collapse into one round trip to claude, answered from its shared result, and an ask arriving while a turn is in flight defers until that turn ends rather than competing with it for the child's control channel. **One shape serves both producers**, [`mcp_status`](#mcp_status)'s arrangement: no request verb or correlation field belongs on this payload. **The payload is mixed-provenance, not uniformly untrusted or uniformly trusted**: `conversation_id` is daemon-authored, filled from the daemon's own registry, while every other string — `model` and every row's descriptive fields — is claude- or workspace-authored text this layer neither validates nor sanitises, and the mapper carries it unchanged (no re-sort, re-cap or recompute). **Three dropped counts, never inferred from a retained list's length** — each list's original size is `len(list) + its own dropped count`, and the three pairs are never cross-read. **`path` on a memory-file row is path-shaped text, not a file handle**: nothing on this path opens, joins, cleans or resolves it. **`server_name` on an MCP-tool row is inert** despite colliding by name with the actuating `MCPReconnectPayload.ServerName` — it names a contributor to a reading and must never be fed back as an actuation or authorization input. Empty lists encode as `[]`, never `null`, `MCPStatusPayload`'s precedent. The reading is informational and does not replace the daemon-owned context-window value that control decisions use, and it is a distinct reading from [`session_settings`](#session_settings)'s transcript-derived `used_tokens`/`window_tokens` — neither supersedes the other. No category name, MCP name or memory path reaches a daemon log record at any level.
 
