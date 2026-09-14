@@ -4120,3 +4120,75 @@ func TestContextUsagePayload_ZeroValueEncoding(t *testing.T) {
 		})
 	}
 }
+
+// TestRequestContextUsagePayload_WireKeys pins the payload's COMPLETE set of wire
+// keys (#2431). Its reason is TestRequestModelListPayload_WireKeys': correlation
+// rides the envelope's InReplyTo, so this frame carries NO request-id key, and
+// marshalling a freshly populated struct is what exercises the struct tags at all.
+//
+// It also pins the absence of a detail key. The daemon asks claude at
+// detail:"full" and that choice is the DAEMON'S — a client cannot select the cheap
+// reading through this verb, because a request that could would let one client
+// downgrade what another is shown for the same conversation once the asks collapse.
+func TestRequestContextUsagePayload_WireKeys(t *testing.T) {
+	b, err := json.Marshal(RequestContextUsagePayload{ConversationID: "c1"})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal payload into key set: %v", err)
+	}
+
+	want := map[string]bool{"conversation_id": true}
+	for k := range got {
+		if !want[k] {
+			t.Errorf("unexpected wire key %q: the payload's key set is fixed at %v — correlation rides the envelope's in_reply_to, and the reading's detail is the daemon's choice, not the client's", k, want)
+		}
+	}
+	for k := range want {
+		if _, ok := got[k]; !ok {
+			t.Errorf("missing wire key %q, got: %s — the key is always present (no omitempty), so absent and empty stay the same case", k, b)
+		}
+	}
+}
+
+// TestRequestContextUsagePayload_ZeroValue_KeyPresent pins the no-omitempty
+// decision directly: a zero-valued payload still carries the key. Separate from
+// the key-set test above because the two fail on different mutants — that one
+// marshals a POPULATED struct, so an omitempty added later leaves it green.
+//
+// The zero value is a REACHABLE state on this path, not a hypothetical: the relay
+// handler tolerates a payload decode failure rather than minting a third reject
+// code, and what it is left holding is exactly this.
+func TestRequestContextUsagePayload_ZeroValue_KeyPresent(t *testing.T) {
+	b, err := json.Marshal(RequestContextUsagePayload{})
+	if err != nil {
+		t.Fatalf("marshal zero payload: %v", err)
+	}
+	if got, want := string(b), `{"conversation_id":""}`; got != want {
+		t.Errorf("zero payload: got %s, want %s — an omitempty here would make absent and empty distinguishable on a frame whose two cases are deliberately the same", got, want)
+	}
+}
+
+// TestRequestContextUsageWireConstants pins the three vocabulary strings #2431
+// mints. The VALUES are the contract — a rename is a wire break for every client —
+// so they are asserted literally rather than against each other.
+func TestRequestContextUsageWireConstants(t *testing.T) {
+	for name, pair := range map[string][2]string{
+		"TypeRequestContextUsage":     {TypeRequestContextUsage, "request_context_usage"},
+		"CodeContextUsageUnavailable": {CodeContextUsageUnavailable, "context_usage.unavailable"},
+		"CapabilityContextUsage":      {CapabilityContextUsage, "context_usage"},
+	} {
+		if pair[0] != pair[1] {
+			t.Errorf("%s: got %q, want %q", name, pair[0], pair[1])
+		}
+	}
+
+	// The answer is the EXISTING frame, not a second outbound shape. A verb that
+	// minted its own reply type would leave two shapes for one reading, which is
+	// exactly what TypeContextUsage's declaration forbids.
+	if TypeRequestContextUsage == TypeContextUsage {
+		t.Error("the request verb and the reply type must be distinct strings")
+	}
+}

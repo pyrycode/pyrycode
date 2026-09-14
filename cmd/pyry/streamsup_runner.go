@@ -271,6 +271,18 @@ func (a streamRunner) QueryMCPStatus(ctx context.Context) (turnevent.MCPStatus, 
 	return a.r.QueryMCPStatus(ctx)
 }
 
+// QueryContextUsage asks this runner's exact live child for a requester-private
+// context-window reading at detail. It stays off sessions.Runner for QueryMCPStatus's
+// reason above: its only consumer is contextUsageResolver in this package.
+//
+// THE DETAIL IS THE CALLER'S AND IS NOT CHECKED HERE. streamsup's own allow-list is
+// its sole validator and refuses an unsupported value before minting a request id or
+// writing anything, so a second check here would be a second place that vocabulary is
+// decided. The one production caller passes a compile-time constant.
+func (a streamRunner) QueryContextUsage(ctx context.Context, detail string) (turnevent.ContextUsage, bool) {
+	return a.r.QueryContextUsage(ctx, detail)
+}
+
 // ReconnectMCPServer and SetMCPServerEnabled forward the two MCP actuations #2418
 // landed on the concrete runner. They are the WRITE half of the pair whose read half is
 // QueryMCPStatus above and stay off sessions.Runner for its reason: their only consumer

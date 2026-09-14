@@ -2069,6 +2069,50 @@ func (p ContextUsagePayload) MarshalJSON() ([]byte, error) {
 	return json.Marshal(alias(p))
 }
 
+// RequestContextUsagePayload is the body of an Envelope whose Type ==
+// TypeRequestContextUsage (docs/protocol-mobile.md § context_usage, published by
+// #2431). The frame a client sends to ask for one conversation's context breakdown
+// now, rather than waiting for the next turn to end.
+//
+// ONE DIRECTION ONLY, phone → binary, so there is no provenance to disambiguate:
+// EVERY FIELD IS AN UNVERIFIED CLAIM, ALWAYS. The frame it is answered with —
+// ContextUsagePayload above — rides the other way and shares no type with it, so
+// that type's mixed-provenance rule says nothing about this one. Here there is no
+// mixture to reason about: the single field is remote-authored, full stop.
+//
+// IT NAMES A CONVERSATION, because a context window is conversation-scoped and this
+// wire is multi-conversation. THE ID IS A LOOKUP KEY, NEVER A VALUE TRUSTED AS SENT:
+// it is resolved against the daemon's own registry, the reported conversation_id in
+// the reply comes out of the RESOLVED RECORD rather than being echoed back, and
+// NAMING A CONVERSATION IS NOT AUTHORIZATION — authorization is pairing, enforced
+// structurally at the Noise_IK handshake.
+//
+// LIKE RequestModelListPayload AND UNLIKE RequestHistoryPayload, THE ID NEVER
+// BECOMES A PATH COMPONENT. That single difference is why a decode failure of this
+// payload is TOLERATED rather than rejected: it leaves ConversationID empty, which
+// reaches only a registry membership check and is refused there, where an empty path
+// component would have resolved to a directory root.
+//
+// NO DETAIL KEY, and its absence is a decision rather than an omission. The daemon
+// always asks claude at detail:"full"; see TypeRequestContextUsage's block for why a
+// client-selected detail would let one client downgrade another's reading once
+// closely-spaced asks collapse.
+//
+// CORRELATION RIDES THE ENVELOPE'S InReplyTo, so the payload carries NO REQUEST-ID
+// KEY — TypeAttachmentStored's decision, transferred unchanged.
+// TestRequestContextUsagePayload_WireKeys pins the key set so this is checked rather
+// than reviewed.
+//
+// NO omitempty AND NO MarshalJSON, matching RequestModelListPayload and
+// MCPStatusRequestPayload. There is no presence contract: absent and empty are the
+// SAME case, "no conversation named", which names nothing and is refused, so nothing
+// needs to tell them apart. TestRequestContextUsagePayload_ZeroValue_KeyPresent
+// reddens if an omitempty is added later for tidiness — and the zero value is a
+// REACHABLE state here, being exactly what the tolerated decode failure leaves.
+type RequestContextUsagePayload struct {
+	ConversationID string `json:"conversation_id"`
+}
+
 // ContextUsageCategory is one named contribution to a ContextUsagePayload reading.
 // Both keys remain present even when Name is empty. Name is claude-authored
 // descriptive text, already bounded by the producer; it is a label, never a selector

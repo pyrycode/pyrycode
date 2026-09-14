@@ -285,6 +285,13 @@ type relayWiring struct {
 	// V2SessionConfig dispatches it on the requesting connection's worker.
 	// nil preserves the relay seam's inert-unwired contract.
 	mcpStatusFor func(context.Context, string) (protocol.MCPStatusPayload, bool)
+	// contextUsageResolve resolves a named conversation to its bound child as a
+	// context-usage querier, plus the registry's own id for it (#2431). Deliberately
+	// NOT the finished seam: it performs no wait and contacts no child, so the
+	// collapsing resolver composed in startRelayV2 can call it BEFORE consulting its
+	// per-conversation flight map — which is what keeps that map keyed by an id this
+	// daemon owns rather than by a string a client sent. nil in foreground/v1.
+	contextUsageResolve contextUsageResolveFunc
 	// mcpActuatorFor resolves the conversation's bound eligible child as the two
 	// actuation primitives #2418 landed — the WRITE half of the MCP pair whose read
 	// half is mcpStatusFor above, and the reason this one gets a per-device gate
@@ -813,6 +820,24 @@ func startRelayV2(
 	// refusal answers.
 	mcpActuator := newMCPActuatorV2(w.mcpStatusFor, w.mcpActuatorFor, logger)
 
+	// On-demand context-usage read (#2431): the mid-turn deferral, the
+	// per-conversation collapse of closely-spaced asks, and one round trip to the
+	// child. Composed here rather than at main.go because this is the scope holding
+	// all three of its inputs — the resolution half built over the registry and pool,
+	// the turn tracker, and ctx, the DAEMON context every flight runs under so that one
+	// client's disconnect cannot cancel a round trip another is waiting on.
+	//
+	// ASSIGNED AS A METHOD VALUE ONLY WHEN THE RESOLUTION HALF IS WIRED. A method value
+	// on a nil *contextUsageResolver would be a NON-nil func, which would defeat the
+	// relay seam's nil ⇒ inert contract and admit frames an unwired daemon must not
+	// parse — the interface-nil trap the MCPActuator field documents, in its func-typed
+	// form. The resolver's own nil-receiver guard makes that a refusal rather than a
+	// crash, but inertness is the contract and this is where it is kept.
+	var contextUsage func(context.Context, string) (protocol.ContextUsagePayload, bool)
+	if w.contextUsageResolve != nil {
+		contextUsage = newContextUsageResolver(ctx, w.contextUsageResolve, w.busy, nil).Get
+	}
+
 	// Inbound attachment-upload service (#1897): the one thing the v2 session
 	// manager calls for an attachment_chunk, and internal/attachments' first
 	// caller from outside its own package.
@@ -1065,6 +1090,13 @@ func startRelayV2(
 		// never reads retained inventory. The resolver waits for an exact child
 		// request id and returns through the worker's requester-only reply lane.
 		MCPStatusFor: w.mcpStatusFor,
+		// On-demand context-usage source (#2431). Composed above rather than assigned
+		// from w directly, because the collapsing and the mid-turn deferral are this
+		// binary's to own: the relay has no conversation-keyed state to collapse in,
+		// and the turn tracker lives here. contextUsage collapses to a nil seam when
+		// its resolution half is unwired, so no wrapper can defeat the seam's
+		// nil ⇒ inert contract — the ModelListFor note above states the hazard.
+		ContextUsageFor: contextUsage,
 		// The conversation system-prompt read seam (#2152): what the registry stores
 		// for the NAMED conversation, plus a verdict on whether the session it is
 		// bound to was spawned with that same value — the gap #2151's store-and-

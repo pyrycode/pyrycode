@@ -796,6 +796,63 @@ type V2SessionConfig struct {
 	// implementations must never touch V2Session or Noise state.
 	MCPStatusFor func(ctx context.Context, conversationID string) (protocol.MCPStatusPayload, bool)
 
+	// ContextUsageFor reports one hosted conversation's CURRENT context-window
+	// breakdown, already shaped as the existing context_usage payload, for an inbound
+	// request_context_usage (#2431). handleRequestContextUsage is its sole reader.
+	//
+	// MCPStatusFor's shape above, deliberately and in full: a context and a
+	// conversation id in, a payload and a comma-ok out, so internal/relay imports
+	// neither internal/sessions nor internal/streamsup and protocol is already
+	// imported on both sides.
+	//
+	// THE READING IS FRESH AND EXPENSIVE, which is the whole reason the verb exists.
+	// The implementation asks claude at detail:"full" — a token-count API call per
+	// category — where the automatic post-turn frame (#2371) carries the cheap
+	// detail:"summary" estimate. The DETAIL IS THE IMPLEMENTATION'S CHOICE and is
+	// deliberately absent from the request payload; see RequestContextUsagePayload.
+	//
+	// IT MAY WAIT TWICE AND THE RELAY BOUNDS NEITHER. An implementation defers a
+	// request that arrives mid-turn until that turn ends, then waits on a child round
+	// trip. Both waits belong to the implementation, which is why this seam takes a
+	// context and MUST honor it so manager shutdown terminates them.
+	//
+	// CLOSELY-SPACED ASKS COLLAPSE BELOW THIS SEAM, NEVER ABOVE IT. Each ask costs
+	// real tokens, so an implementation answers asks arriving close together from one
+	// round trip. That belongs below here because the collapse is PER CONVERSATION,
+	// not per connection — two clients watching one conversation is the case it exists
+	// for — and this package has no conversation-keyed state to do it in. A caller
+	// must therefore not assume its own ask caused the round trip it is answered from.
+	//
+	// Comma-ok distinguishes a real reading (true) from no reading to give (false). A
+	// caller MUST NOT inspect the payload when false; the relay translates that
+	// outcome to retryable context_usage.unavailable and never substitutes a zero or
+	// retained reading. That matters more here than on most seams, because a
+	// ContextUsagePayload of all zeros is indistinguishable from a genuine empty
+	// context — the refusal cannot be expressed in the values.
+	//
+	// Optional: nil makes the inbound type consumed but INERT before payload decode,
+	// membership, or reply — the nil HistoryPage / MCPActuator posture, buying the
+	// same property, that an unwired daemon parses zero remote-authored bytes.
+	// Foreground and v1 wirings leave it nil.
+	//
+	// SECURITY: conversationID is untrusted network input and reaches this seam only
+	// AFTER KnownConversation has passed on it. It stays a lookup key into the
+	// daemon's own registry — never returned, never joined into a path, never logged,
+	// never wrapped into an error — and the reported conversation_id in the payload
+	// comes out of the daemon's own registry record rather than being echoed back,
+	// RunConfigFor's and ModelListFor's posture. The returned payload is
+	// MIXED-PROVENANCE (ContextUsagePayload's own doc): its ConversationID is
+	// daemon-authored and EVERY OTHER STRING is claude- or workspace-authored,
+	// including memory-file paths off the operator's own filesystem. None of it is
+	// logged on this path at any level, and it reaches the wire only over the unicast,
+	// AEAD-sealed reply to the conn that asked.
+	//
+	// This call runs on the addressed connection's appFrameWorker, NOT on Run, for the
+	// waits above. It MUST NOT touch V2Session or any Noise state — replies return
+	// through forwardToRun for Run-owned sealing, and emitting from the worker would
+	// be a concurrent Encrypt under the single-owner send CipherState.
+	ContextUsageFor func(ctx context.Context, conversationID string) (protocol.ContextUsagePayload, bool)
+
 	// MCPActuator performs an inbound mcp_reconnect or mcp_toggle against one
 	// conversation's live claude child (#2419). handleMCPReconnect and
 	// handleMCPToggle are its sole readers, and the seam's own doc block carries the

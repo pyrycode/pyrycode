@@ -108,6 +108,11 @@ func TestIsKnownAppType(t *testing.T) {
 		// able to send a context_usage frame into dispatch.Route, which would let a
 		// client assert the daemon's own context arithmetic back at it.
 		{"context_usage-rejected", TypeContextUsage, false, ErrUnknownType},
+		// its on-demand request verb (#2431) is rejected for the mirrored reason: it
+		// IS phone → binary, but as a v2 control envelope the relay intercepts before
+		// dispatch.Route — so an old v1 phone must not be able to route one, and the
+		// v2 path never consults IsKnownAppType for it.
+		{"request_context_usage-rejected", TypeRequestContextUsage, false, ErrUnknownType},
 		// v2-only screen-snapshot types are likewise not v1-compatible.
 		{"request_snapshot-rejected", TypeRequestSnapshot, false, ErrUnknownType},
 		{"screen_snapshot-rejected", TypeScreenSnapshot, false, ErrUnknownType},
@@ -374,6 +379,11 @@ var v2OnlyTypes = map[string]bool{
 	// inbound half at all. Its on-demand request verb is #2293's to declare together
 	// with the handler that answers it; the answer reuses this same outbound type.
 	TypeContextUsage: true,
+	// v2 on-demand context-usage request verb (#2431): the inbound half the block
+	// above anticipated. It is a CONTROL envelope intercepted before dispatch.Route,
+	// so it belongs here and never in inboundAppTypeSet — rejection by IsKnownAppType
+	// is the structural bar against a v1 client pushing one into the v1 handler chain.
+	TypeRequestContextUsage: true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -489,8 +499,10 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeToolProgress,
 		// v2 operator-facing banner (outbound status, #2256).
 		TypeBanner,
-		// v2 context-window reading (outbound report, #2370).
+		// v2 context-window reading (outbound report, #2370) and the on-demand
+		// request verb that reuses it as its reply (#2431).
 		TypeContextUsage,
+		TypeRequestContextUsage,
 	}
 	for _, ty := range all {
 		inV1 := inboundAppTypeSet[ty]

@@ -53,6 +53,32 @@ const CapabilityQuestion = "question"
 // consumer, internal/relay, not here.
 const CapabilityModelList = "model_list"
 
+// CapabilityContextUsage is the wire vocabulary string a client advertises in its
+// hello.payload.capabilities to say it can ask for a conversation's context
+// breakdown on demand and render the answer, and that the daemon echoes in
+// hello_ack.payload.capabilities when it supports the verb
+// (docs/protocol-mobile.md § Capability negotiation). It detects #2431's
+// TypeRequestContextUsage. A daemon built before it drops the string in the
+// intersection, which is the stale-daemon signal a cross-repo test needs when a
+// commit sha gives it no ordering.
+//
+// IT DETECTS THE ASK, NOT THE FRAME. A client learns from this string only that it
+// may REQUEST a reading; it says nothing about receiving one. The automatic
+// post-turn context_usage frame (#2371) has shipped on the interactive lane since
+// before this string existed and keeps arriving for a client that never advertises
+// it — so a client must already handle the frame regardless, and gating its renderer
+// on this capability would blank the reading it was receiving before.
+//
+// Detection only — this string grants no access. The verb gates on
+// CapabilityInteractive alone, exactly as CapabilityModelList's verb does, so a
+// client advertising only this one is negotiated as non-interactive and reaches none
+// of it; and a client advertising interactive WITHOUT this string is answered
+// exactly as before. Gating on it would cut off pyrycode-mobile, which advertises
+// interactive only (ADR 037 makes gating a per-feature decision, not a default).
+// Like its neighbours this is pure vocabulary; the trust decision lives in the
+// consumer, internal/relay, not here.
+const CapabilityContextUsage = "context_usage"
+
 // HelloServerPayload is the body of a "hello" envelope sent by the binary
 // after WS upgrade (docs/protocol-mobile.md § Message types). Role is
 // always "server".

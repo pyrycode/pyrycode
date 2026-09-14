@@ -465,6 +465,37 @@ other than this plan is touched here.
    the e2e leg asserts the frame's arrival and correlation rather than the detail, and the
    `"full"` request value stays pinned by the `cmd/pyry` unit test instead.
 
+## Revisions
+
+**2026-09-14 — the flight runs on its own goroutine, and every caller awaits it.**
+§ Design specified the installing caller running the round trip inline and joiners
+awaiting it. `TestContextUsageResolver_CallerDepartureLeavesFlightRunning` — written
+for the security pass's second MUST FIX — reddened on that shape, and the finding is
+the same one generalised: moving the flight off the caller's *context* is not enough
+while it still runs on the caller's *goroutine*, because the installer then cannot
+leave early even though every joiner can. One client's disconnect would be answered
+differently depending on whether it happened to ask first. `Get` now installs the
+flight, spawns `fly`, and awaits it exactly as a joiner does. The goroutine's exit is
+bounded twice — `WaitIdle` by the daemon context, the query by
+`contextUsageQueryTimeout` — so it cannot outlive shutdown or a silent child.
+
+**2026-09-14 — Open Question 3 resolved: the fake claude does not distinguish the
+detail values.** `contextUsageRequestID` in the e2e fake accepts both `"summary"` and
+`"full"` and answers both from one canned payload. So the e2e leg asserts the reply's
+arrival and its correlation rather than the detail, and the `"full"` choice stays
+pinned by `TestContextUsageResolver_AsksAtFullDetail` in `cmd/pyry`, exactly as the
+question anticipated. No design change.
+
+**2026-09-14 — no handler-side nil-seam check, and one planned test dropped with it.**
+§ Design listed a nil `ContextUsageFor` as a handler arm. `handleMCPStatusRequest`, the
+handler this one copies, has no such check: the dispatch gate is the only one, which
+makes a handler-side copy a second thing to keep in agreement rather than a safety net.
+The nil seam is therefore enforced solely at the dispatch arm, where it is also inert
+(no decode, no reply), and the planned "nil seam refuses as unavailable" test was
+dropped rather than reached through a test-only hook into manager internals — it would
+have pinned unreachable code. The inert posture is covered instead, by
+`TestV2Session_RequestContextUsage_InertGates`.
+
 ## Security review
 
 **Verdict:** PASS (second pass; the first failed with two MUST FIX items, both now addressed
