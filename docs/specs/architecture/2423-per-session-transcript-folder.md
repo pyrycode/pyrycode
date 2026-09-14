@@ -287,3 +287,30 @@ is measured against that one sentence.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-14
+
+## Revisions
+
+### 2026-09-14 — implementation
+
+- **Open question resolved, no design change.**
+  `TestRelayV2_StreamSessionSettingsReportsTheObservedWindow` still passes. Its
+  conversation carries no `cwd`, so its session's workdir is the daemon's own, and
+  the runner's `canonicalCase`d, symlink-resolved folder and the harness's
+  `claudeSessionsDir(home)` derivation name the same directory on the harness's
+  temp home. The per-session route is therefore a strict superset of what that spec
+  exercised.
+- **The daemon-level arm was verified RED before it was accepted green.** With the
+  wiring pointed back at `fixedTranscriptDir(w.claudeSessionsDir)`, both workspace
+  conversations report `used_tokens = 0` — the measured "Context: 0%" symptom,
+  reproduced exactly — and both report their own counts with the resolver wired.
+- **Sizing: the forecast was wrong and the ticket landed over the ceiling.**
+  Planned ~794 lines of total written work; actual is 1093 (289 spec + 804
+  production and test). The whole miss is in prose at this package's comment
+  density and in e2e boilerplate: `cmd/pyry/session_transcript_dir.go` is 96 lines
+  for 14 of body, and the daemon-level arm is 250 rather than the ~160 forecast,
+  most of it the seal/await/read closures every relay-v2 stream spec re-declares.
+  The six boundary counts that decide a split all held and still do (5 production
+  files, 0 new exported types, 10 call sites, 5 criteria, 5 reject branches); it is
+  the line ceiling alone that was exceeded, and it was exceeded by an estimate that
+  counted bodies where this repo writes arguments. A future ticket in `cmd/pyry`
+  should budget roughly 6-7 written lines per line of new function body, not 2-3.
