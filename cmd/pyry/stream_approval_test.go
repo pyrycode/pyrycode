@@ -2278,3 +2278,94 @@ func TestStreamApproval_NoQuestionBodyLeakOnAnswer(t *testing.T) {
 		}
 	}
 }
+
+// TestModalResolverV2_Cancel_StreamDeny proves the ResolveCancel stream arm
+// (#2416): cancelling a stream-json permission resolves claude's parked completer
+// to deny with the fixed reason IMMEDIATELY, routes no keystroke, and leaves the
+// cancelled audit outcome and the {cancelled, remote} dismissal exactly as they
+// were. Before this arm existed the completer stayed parked until permbridge's own
+// timer fired — mcpApprovalTimeout, ten minutes in production — so the select
+// below is the assertion, not a convenience: it fails fast on the parked state
+// instead of waiting out parkApproval's minute.
+func TestModalResolverV2_Cancel_StreamDeny(t *testing.T) {
+	t.Parallel()
+
+	perm := permbridge.New()
+	modalReg := modalbridge.New()
+	bcast := oneInteractiveConn("c1")
+	bridge := newStreamApprovalBridge(perm, modalReg, bcast, func() string { return "" }, context.Background(), discardLogger())
+
+	req, pending := parkApproval(t, perm, "tu-1", "Bash", json.RawMessage(`{"cmd":"rm -rf /"}`))
+	retire := bridge.Surface(req)
+	modalID := lastModalShown(t, bcast.pushes).ModalID
+
+	kb := &fakeKeystroker{}
+	logger, logBuf := auditLogger()
+	r := newModalResolverV2(modalReg, kb, logger)
+	r.streamApprovals = bridge
+
+	dev := testDevice(t)
+	d, ok := r.ResolveCancel(modalID, dev)
+	if !ok {
+		t.Fatal("ResolveCancel ok = false, want true")
+	}
+	if d.Outcome != string(audit.OutcomeCancelled) || d.Source != string(audit.SourceRemote) {
+		t.Errorf("dismissal = %+v, want {cancelled remote}", d)
+	}
+	if !kb.routedNothing() {
+		t.Errorf("keystroke routed on a stream cancel: esc=%d trust=%d answers=%v", kb.escCalls, kb.trustCalls, kb.answerCalls)
+	}
+
+	verdicts := make(chan permbridge.Verdict, 1)
+	go func() { verdicts <- pending.Await() }()
+	select {
+	case v := <-verdicts:
+		if v.Behavior != permbridge.BehaviorDeny || v.Message != reasonRemoteDeny {
+			t.Errorf("verdict = %+v, want deny with %q", v, reasonRemoteDeny)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancel left the approval parked: no verdict within 5s — ResolveCancel did not resolve the stream completer, so claude waits out the approval timeout")
+	}
+
+	if recs := auditRecords(t, logBuf); len(recs) != 1 || recs[0]["outcome"] != "cancelled" {
+		t.Errorf("audit = %v, want one cancelled record", recs)
+	}
+
+	// retire on the cancelled path: modalbridge already consumed → no second
+	// dismissal, correlation still deleted.
+	retire()
+	if got := pushTypes(bcast.pushes); len(got) != 1 || got[0] != protocol.TypeModalShown {
+		t.Errorf("pushes = %v, want only the modal_shown (no retire dismissal)", got)
+	}
+	if n := bridgeLen(bridge); n != 0 {
+		t.Errorf("byModal len = %d after cancel+retire, want 0 (no leak)", n)
+	}
+}
+
+// TestModalResolverV2_Cancel_NonStreamRoutesEsc is the terminal-path half of
+// #2416 AC-1: with a stream bridge wired but the cancelled modal absent from its
+// correlation map (a PTY-path modal, recorded by the emitter rather than by
+// Surface), ResolveStream reports false and the fail-safe ESC routes exactly as it
+// did before the stream arm existed.
+func TestModalResolverV2_Cancel_NonStreamRoutesEsc(t *testing.T) {
+	t.Parallel()
+
+	perm := permbridge.New()
+	modalReg := modalbridge.New()
+	bcast := oneInteractiveConn("c1")
+	bridge := newStreamApprovalBridge(perm, modalReg, bcast, func() string { return "" }, context.Background(), discardLogger())
+
+	// A modal recorded directly (interactive PTY path), NOT via Surface.
+	modalID := recordPermissionModal(t, modalReg, secretModalBody)
+
+	kb := &fakeKeystroker{}
+	r := newModalResolverV2(modalReg, kb, discardLogger())
+	r.streamApprovals = bridge
+
+	if _, ok := r.ResolveCancel(modalID, testDevice(t)); !ok {
+		t.Fatal("ResolveCancel ok = false, want true")
+	}
+	if kb.escCalls != 1 {
+		t.Errorf("SendEsc calls = %d, want 1 (the terminal-path actuation must be unchanged)", kb.escCalls)
+	}
+}
