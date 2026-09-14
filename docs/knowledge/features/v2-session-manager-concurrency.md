@@ -31,6 +31,73 @@ connection never enqueues a job at all. Every reply, accepted or refused, crosse
 `CipherState` mutation stays on `Run` for these two verbs exactly as it does for
 `mcp_status_request`.
 
+`request_context_usage` (#2431) joins the same worker for a stronger version of
+`mcp_status_request`'s reason: answering it can wait **twice** — first on
+`turnBusyTracker.WaitIdle` for an open turn to end (unbounded by design, since
+AC-4 requires the answer to land only after the turn closes), then on the child
+round trip. Every reply, success or either reject, still crosses `forwardToRun`,
+reusing `mcp_status_request`'s ownership boundary rather than adding a new one.
+
+**This is the first handler on `appFrameWorker` that can park for an entire
+turn, and that turns `appFrameQueueDepth` overflow from a flood protection into
+an ordinary-use teardown — found on code review, not in production.** Every
+earlier occupant (`mcp_status_request`, `mcp_reconnect`/`mcp_toggle`,
+`request_attachment`, `attachment_chunk`) waits only on a child round trip, so
+the worst case is one slow response. While this handler is parked on
+`WaitIdle`, later frames from the **same conn** queue behind it in
+`s.appFrames` (depth 16) rather than being serviced, and `enqueueAppFrame`
+answers overflow by tearing the conn down at 4421 — the guard that exists to
+stop a flood instead fires on a well-behaved client. The concrete trigger: one
+admitted attachment transfer may span up to 373 chunks (`protocol.
+MaxAttachmentChunkBytes` is 45000; `internal/attachments/accumulator.go`'s
+per-upload byte bound divided by it), each its own app frame through this same
+queue, so a ~1 MB photo alone is ~23 frames — nearly 1.5× the queue depth.
+Asking for a reading mid-turn (the ticket's own headline use case) and then
+attaching a photo before the turn ends is enough to hit the ceiling and drop
+the connection. **Record the trigger this way, not as added latency**: the
+first-cut phrasing described the cost as "stalls that conn's later frames" and
+filed queue overflow separately as a protection against flooding, without
+noticing the two compose into a teardown of a client that did nothing wrong.
+Deliberately not fixed here (Evidence-Based Fix Selection — nothing reaches
+this path until a client adopts the verb); the follow-up this residual should
+trigger is a disconnect, not a latency complaint. Related and sharing the same
+root cause: `appFrameWorker` checks `s.done` only between jobs and is handed
+`runCtx` rather than a per-session context, so a parked worker is not released
+by its own conn's teardown either — bounded by the same two waits rather than a
+leak, and worth the same sentence wherever the bounded-hold fix for the queue
+lands.
+
+**Moving shared work off the caller's context is only half a fix for a
+collapsing seam; it has to come off the caller's goroutine too — the security
+pass on #2431's `cmd/pyry`-side resolver behind `ContextUsageFor` caught both
+halves as two separate findings.** The resolver collapses closely-spaced asks
+for one conversation into a single round trip shared by every waiting caller
+("a flight"). Deriving the flight's context from the daemon's own run context
+rather than the first caller's — so one client disconnecting mid-flight can't
+cancel a round trip others are waiting on, nor settle a cached refusal for
+every joiner — fixed the concurrency finding the review raised. It was not
+enough on its own: with the round trip still running **inline on the
+installing caller's goroutine**, that caller alone could not leave early while
+every joiner could, so the same client's disconnect was answered differently
+depending on whether it happened to ask first. The fix generalises to: every
+caller, installer included, spawns nothing and only awaits — the flight itself
+runs on its own goroutine, bounded by the daemon context for `WaitIdle` and by
+a request-scoped timeout for the child round trip, so it cannot outlive
+shutdown or a silently unresponsive child. **The test written for the
+context-only fix passed on the incomplete version** — it was written against
+the behaviour the finding named ("the caller that stays connected gets its
+answer"), which the context change alone already satisfied, not against the
+asymmetry the fix was supposed to remove. Only a test aimed at the mechanism
+(the *installer* specifically must be able to leave early too) caught the gap.
+The same review also relocated *when* the collapse map is consulted: the
+resolver now resolves the conversation to its registry-canonical id **before**
+touching the map, and keys the map on that id rather than the client's string
+— consulting the map first, keyed on the request string, would let any paired
+client mint unbounded map entries by naming conversations the daemon doesn't
+host, and the fact that `conversations.Registry.Get` happens to match
+byte-exactly today would have made that safe only by borrowing a property this
+package doesn't own.
+
 **A nil-checked seam declared as an interface, not a func field, is a weaker
 gate — worth recording here because on `MCPActuator` the nil check is a security
 control, not a convenience.** `MCPActuator` is an interface, so

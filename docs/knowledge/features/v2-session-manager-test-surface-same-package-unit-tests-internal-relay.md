@@ -126,6 +126,36 @@ trusting.
 
 Off-`Run` debug-bundle assembly ([#1491](../../specs/architecture/1491-assemble-debug-bundle-off-run.md)) — extends `v2session_debugbundle_test.go`, reusing `bundleManagerFor` / `requestBundle` / `assertBusyReject` / `queueLen` / `waitCallCount` plus a new `blockingBundler` double (mirrors `blockingHandler`: signals on `entered`, blocks on `release`, then returns an injectable `(archive, err)`). `TestV2Session_DebugBundle_AssemblyDoesNotStallRun` is the load-bearing proof for AC #1, built on the `TestV2Session_SlowHandler_*` (#965) template: with one conn's assembly parked mid-flight, asserts a second conn's application frame still gets a sealed reply (the `Frames` arm), a queued `Push` to a third conn still drains (the `drainCh` arm), and a fourth conn's armed modal-timeout still fires on schedule (the `modalTimeout` arm) — none of them waiting on the release; on the pre-#1491 tree, with the seam inline, all three time out instead. `TestV2Session_DebugBundle_RejectsSecondWhileAssembling` pins the accept-side gate half specifically: a second request arriving while the bundler is blocked and the queue is still empty (asserted via `queueLen == 0` and `!mgr.bundleInFlight(connID)`) is rejected with the bundler call count staying at 1 — non-vacuous proof that `s.bundleAssembling`, not the queue-derived scan, did the rejecting. `TestV2Session_DebugBundle_ServedAfterFailedAssembly` pins the deferred clear: an assembly error yields exactly one deterministic reply with the error text absent from both wire and log, then a fresh request on the same conn is served with a new assembly — failing if the marker clear is missed on the error branch. `TestV2Session_DebugBundle_ErrorReplies` was **amended**, not left stay-green: its assembly-error subtest now polls for the reply instead of taking a bare snapshot, because the reply lands one `Run` pass later than the old inline-synchronous assumption. `TestV2Session_DebugBundle_RejectsSecondWhileQueued`, `…_ServedAfterDrain`, `…_PerConnIsolation`, and `…_NeverLogsContentEncryptedOnly` pass unchanged — all already synchronise by polling, so the extra `Run` hop is invisible to them.
 
+The `request_context_usage` tests (#2431, `v2session_contextusage_test.go` plus
+`cmd/pyry`'s resolver tests) add one lesson to the `mcp_status_request` /
+`mcp_reconnect` proof-trap list above and one lesson specific to a collapsing
+seam. First, a planned nil-seam handler test was dropped rather than written:
+`handleMCPStatusRequest`, the precedent this handler copies, has no
+handler-side nil check at all — the dispatch gate is the only one — so a
+handler-side test would have pinned code the dispatch arm makes unreachable.
+The inert dispatch-gate posture is covered instead
+(`TestV2Session_RequestContextUsage_InertGates`). Second, on the `cmd/pyry`
+side, proving the collapse map is bounded by hosted conversations rather than
+by request volume needs an assertion on the map itself, not just on the reply:
+`TestContextUsageResolver_UnresolvableInstallsNoFlight` refuses an unresolvable
+id and then asserts `len(r.flights) == 0` — a test that only checked the reply
+shape would pass identically whether or not a resolver keyed on the raw
+request string had gone ahead and installed an entry.
+
+The `request_context_usage` e2e leg (`internal/e2e`) needed two corrections a
+prior ticket's own leg had already documented, and both cost a cycle here
+anyway. **A "requester-only reply" assertion is vacuous when an unsolicited
+frame of the same type already shares the lane.** `context_usage` is published
+automatically after every turn (#2371), so a leg that merely waits for one and
+checks its shape proves nothing about correlation — it has to put an
+unsolicited frame in flight *first*, then identify the reply to its own ask by
+`InReplyTo` alone, with `EventID == nil` proving the reply skipped the #647
+replay ring the unsolicited frame enters. **A frame solicited *by* `turn_end`
+always arrives *after* it**, so a drain loop that stops at `turn_end` collects
+zero of these every time and misreads as a regression rather than as the
+producer ordering `turnEndContextUsageRequester` guarantees; the fix drains
+past `turn_end` through a settle window, exactly as #2371's own leg documents.
+
 Two fixture traps surfaced building the above, worth knowing before touching this file again. `blockingBundler.release` must be closed from a `t.Cleanup` **registered after** the manager's `stop` cleanup — `t.Cleanup` runs LIFO, and release-before-stop unparks the seam before `stop` waits for `Run` to exit; registered the other way round, a pre-fix tree *hangs* in cleanup instead of failing, turning the RED proof AC #1 demands into a timeout with no diagnostic. And a pre-fix failure and a mutation-kill can redden the same test for unrelated reasons: `…_RejectsSecondWhileAssembling` also fails pre-fix, but only because `Run` is parked and never reaches the second request at all — that says nothing about the marker specifically. Only a mutant that drops `s.bundleAssembling` from the gate while leaving assembly off `Run` isolates the accept-side half, and it reddens as a missing-reply count rather than an obviously-wrong value — the absent reply *is* the two-concurrent-assemblies bug, read backwards.
 
 ### E2E (`internal/e2e/relay_v2_handshake_test.go`, build tag `e2e`)

@@ -819,6 +819,7 @@ Defined capability strings:
 | `interactive` | The phone can render the structured interactive event stream below. |
 | `question` | The client understands the clarifying-question batch types — it can render a `question_shown` batch, answer it with `question_answer` / `question_refused`, and handle `question_dismissed`. **Detection only: this string grants no access.** The batch fan-out and the connect-time question reconcile gate on `interactive` alone, so a client advertising `question` by itself negotiates as non-interactive and receives none of them (#2020). |
 | `model_list` | The daemon can answer a model menu for **any** conversation, including one whose bound session has spawned no child yet — the `request_model_list` verb (#2125) plus the daemon-wide retained-vocabulary fallback it answers from (#2124). One string covers the pair because neither half is separately useful: the fallback with no verb gives a client no way to ask, and the verb with no fallback has nothing to answer for a childless conversation. **Detection only: this string grants no access.** The verb gates on `interactive` alone and this string adds no gate of its own, so a client advertising `model_list` by itself negotiates as non-interactive, and a client advertising `interactive` without it is answered exactly as before (#2172). |
+| `context_usage` | The daemon can answer a fresh `detail:"full"` context-window reading on demand — the [`request_context_usage`](#asking-for-a-context-usage-reading-on-demand) verb (#2431). **Detection only: this string grants no access.** The verb gates on `interactive` alone and this string adds no gate of its own, so a client advertising `context_usage` by itself negotiates as non-interactive, and a client advertising `interactive` without it can still use the verb. |
 
 The daemon MUST echo only what it itself supports — the agreed set is the **intersection** of the phone's advertised set with the daemon's own, never a blind mirror of the phone's claims. A phone that does not advertise `interactive` (or whose `interactive` is not echoed back) simply does not receive the structured interactive event stream; there is no separate non-interactive `message` fan-out on v2 (it was removed in #699). The intersection logic — the daemon-side trust decision computing advertised ∩ supported, echoing it in `hello_ack`, and recording the negotiated `interactive` flag per connection — is implemented in #626 (`internal/relay` v2 session manager; `negotiateCapabilities` + the capability-aware `ActiveConns` enumeration). The capability-gated fan-out that routes the interactive event stream only to granted connections shipped in #632/#633.
 
@@ -2517,10 +2518,11 @@ after that turn's [`turn_end`](#turn_end), on the same conversation-keyed
 interactive lane every other turn-stream frame rides, with no second
 capability gate of its own. Delivery is best-effort: the ask is unconditional
 and re-issued after every completed turn, so a dropped frame is at most one
-turn stale rather than lost for the conversation's lifetime. #2293 will answer
-a fresh on-demand request with the same payload shape, correlated by
-`in_reply_to`, reusing this declaration rather than adding a second one; that
-verb has not landed yet.
+turn stale rather than lost for the conversation's lifetime. **A fresh
+on-demand request answers with this same payload shape**, correlated by
+`in_reply_to`, reusing this declaration rather than adding a second one — see
+[Asking for a context usage reading on demand](#asking-for-a-context-usage-reading-on-demand)
+below (#2431, split from #2293).
 
 **This is a different reading from [`session_settings`](#session_settings)'s
 `used_tokens`/`window_tokens`, and neither replaces the other.** That pair is
@@ -2607,6 +2609,64 @@ unrelated `MCPReconnectPayload.ServerName` (see
 *does* cross an actuation seam. Reading this frame's `server_name` back into
 an `mcp_reconnect` or `mcp_toggle` request on the strength of having seen it
 here is the confusion this note exists to foreclose.
+
+#### Asking for a context usage reading on demand
+
+**`request_context_usage`** (phone → binary, **#2431**, split from #2293) asks
+for a fresh `detail:"full"` reading right now, rather than waiting for the
+next turn to end. The automatic post-turn frame above is the cheap reading —
+`detail:"summary"`, answered from the last response's usage plus local
+estimates, no token-count API call. This verb asks claude to count every
+category through that API instead, which is worth its cost only when an
+operator is actually looking at the screen — exactly what an inbound request
+means. No second outbound shape is minted: the answer is [`context_usage`](#context_usage),
+correlated by `in_reply_to`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | The conversation whose reading is wanted. A lookup key checked against the daemon's registry, not a value trusted as sent. Always present (no `omitempty`); the empty string names nothing and is refused. |
+
+It is v2-only and gated on the negotiated `interactive` capability alone —
+**not** on the `context_usage` capability string below, which is detection-only
+and adds no gate of its own; a client advertising `interactive` without it is
+answered exactly as if it had. A conn that did not negotiate `interactive`
+gets nothing at all: no `context_usage`, no `error`, no signal of any kind.
+
+**A request that arrives while a turn is in flight writes nothing to the
+child until that turn ends, and is answered after it.** The daemon defers on
+the conversation's turn state before asking claude anything, so a mid-turn ask
+never competes with the running turn for the child's control channel. This
+wait has no timeout of its own — it ends when the turn does, however long that
+takes.
+
+**Two requests for the same conversation close together produce one round
+trip to claude, and both are answered from its result** — whether the second
+arrives while the first is still in flight or just after it completed. The
+collapsing is per **conversation**, not per connection: two different clients
+asking about the same conversation moments apart collapse exactly like one
+client asking twice, because each ask spends real operator tokens. A refusal
+collapses the same way a successful reading does, for the same short window,
+so a retryable reject clears quickly rather than being held past usefulness.
+
+**Two rejects, and the difference is worth branching on:**
+
+| Condition | Code | Retryable |
+|---|---|---|
+| `conversation_id` names no hosted conversation | [`conversation.not_found`](#error-codes) | no |
+| The hosted conversation has no reading to give — no bound session, no live child, a rotation in flight, or an unusable reply | [`context_usage.unavailable`](#error-codes) | yes, after a backoff |
+
+Neither reject is met with silence, and neither answers with an empty or
+zero-valued `context_usage` — a reading of all zeros is a shape a client
+cannot distinguish from a genuinely empty context, so it must never stand in
+for "no reading." A malformed payload is not a third reject: an undecodable
+body is tolerated down to an empty `conversation_id`, which names nothing and
+is refused at the same membership check as any other unknown id, rather than
+answered with `protocol.malformed`.
+
+**The reply carries no `event_id`**, like every other on-demand reply on this
+wire: it never enters the [reconnect replay ring](#reconnect-replay--resync-consumer-647),
+is never replayed, and advances no client cursor — only the automatic
+post-turn frame does that.
 
 #### `slash_command_list`
 
@@ -4228,6 +4288,7 @@ Application-level error codes (carried in `error` envelopes inside `noise_msg` p
 | **`history.invalid_cursor`** | no | A [`request_history`](#request_history) whose `cursor` does not decode, was minted for another conversation, or names a position not in this log (#2116). **Deliberately indistinguishable** across all three — a disclosure decision, not an imprecision: the distinctions are exactly what a probe would want, and the daemon's log raises one sentinel for all three, so the handler *cannot* branch on what it must not distinguish. The refusal **never echoes the cursor back**. Repair: restart the walk with an empty cursor. |
 | **`model_list.unavailable`** | yes, after a backoff | A [`request_model_list`](#asking-for-a-model-list-on-demand) naming a conversation the daemon **does** host, for which it has **no model vocabulary to answer with** (#2125), or a [`set_session_settings`](#set_session_settings) whose non-empty model cannot be checked conclusively because the retained vocabulary is missing, empty, reports dropped rows, or contains any row whose `value` was truncated (#2281). **It is not an empty menu**, and that distinction is the reason the code exists: `models` is documented never-`null` and never a stand-in for "unknown", so "no list" has to be said in an `error` frame rather than in a degraded `model_list`. On the settings path it refuses the whole frame before persistence or live delivery. These incomplete-vocabulary causes deliberately share one code because the client's repair is identical and the dominant cause clears on its own: back off until a complete menu may have arrived, then retry. Contrast a model absent from a complete menu (`protocol.malformed`, permanent for that value) and `conversation.not_found` (permanent for that request). The message is the static `model list is unavailable` and names no model, conversation or path. |
 | **`mcp_status.unavailable`** | yes, after a backoff | An [`mcp_status_request`](#asking-for-mcp-status-on-demand) naming a conversation the daemon **does** host, for which the configured resolver has no current status (#2381). **It is not an empty or retained snapshot**: the handler emits an error rather than fabricate or reuse an `mcp_status`, so the same request may be retried after the live source becomes available. The message is static and names no conversation, server, or resolver detail. |
+| **`context_usage.unavailable`** | yes, after a backoff | A [`request_context_usage`](#asking-for-a-context-usage-reading-on-demand) naming a conversation the daemon **does** host, for which there is no reading to give (#2431): no bound session, no live child, a rotation in flight, or an unusable reply — merged deliberately, on `model_list.unavailable`'s reasoning, since the client's repair is identical for every cause and distinguishing them would publish facts about the machine rather than the request. **It is not a zero-valued `context_usage`**, which a client cannot distinguish from a genuinely empty context. Cached for the same short window a successful reading is, so a retry inside that window answers from the same refusal. The message is static and names no conversation. |
 | **`mcp_actuation.refused`** | **no** | The single answer to **every** refusal of an [`mcp_reconnect`](#actuating-mcp-servers-on-demand) or [`mcp_toggle`](#actuating-mcp-servers-on-demand) actuation, once membership has passed: the device is not authorized, the named server is unknown, the live child is gone, or the actuation itself failed (#2419). **Deliberately indistinguishable across all four**, and non-retryable for all four — a disclosure decision, not an imprecision: splitting authorization from server-existence would make the verb a server-enumeration oracle, and splitting authorization from actuation-failure would tell an unprivileged device the one fact it must never learn about itself, while a retryable flag on only one cause would re-open the same split through the back door. The message is static and names no server or conversation. The daemon-side audit record, not this code, is where the causes stay apart. |
 | **`workspace.not_found`** | no | A [`rename_workspace`](#renaming-a-workspace) whose `path` matches no stored conversation's `cwd` (#2207). Comparison is **byte-exact** and includes archived conversations, so a near-miss — a trailing separator, a trailing space, a case difference — is a miss. **Not `conversation.not_found`**, and the distinction is the point rather than a naming preference: this request names no conversation at all, so the conversation code would send a client looking for a row it never asked about and could not act on. It applies to a **clear as much as to a set** — a `null` label at an unmatched path is refused, not silently accepted. Permanent for the request as sent: the same path fails identically until a conversation exists there, which is not something a retry accomplishes. The message is static and **never echoes the requested path**, which matters more here than on the conversation verbs because a path is a filesystem location on the daemon's host. |
 | **`pairing.not_permitted`** | no | A [`mint_pairing`](#mint_pairing) from a device that does not hold the daemon-side `allow_remote_permissions` flag (#2127). **Nothing is created** — the gate fires before the token is drawn, and the refusal is written to the daemon's audit sink as `denied_unauthorized`. **Not `auth.invalid_token`**, and the distinction is the group's defining decision: a frame reaching this handler has already presented a token the handshake validated, so an auth code would tell a legitimate client its credential was rejected and invite it to re-pair — the one repair that cannot help. The device is authenticated; what it lacks is privilege. **It is not an oracle**: it reports only that the asking device may not mint, a fact that device can already establish by answering any permission [modal](#modal-v2) and being denied, and it is not conditioned on the requested `device_name`, so it cannot probe which labels exist. Permanent for the device as paired — only `pyry pair --allow-remote-permissions` at a shell on the host changes it. |
@@ -4545,7 +4606,7 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 
 ## Changelog
 
-- `2026-09-14`: **The daemon's context-window breakdown has a stable frame to decode against, and now publishes it** (#2370, emitted by #2371) — a new outbound-only type, [`context_usage`](#context_usage), carrying `model`, the totals and percentage, and three independently bounded inventories (`categories`, `mcp_tools`, `memory_files`), each with its own dropped count. **Declared by #2370, emitted by #2371**: the daemon now publishes this frame once after every completed turn, mapped from `internal/turnevent.ContextUsage` via the solicited post-turn ask (`turnEndContextUsageRequester`, #2289), on the existing conversation-keyed interactive lane with no second capability gate. #2293 will answer a fresh on-demand request with the same shape, correlated by `in_reply_to`; that verb has not landed yet. **One shape serves both producers**, [`mcp_status`](#mcp_status)'s arrangement: no request verb or correlation field belongs on this payload. **The payload is mixed-provenance, not uniformly untrusted or uniformly trusted**: `conversation_id` is daemon-authored, filled from the daemon's own registry, while every other string — `model` and every row's descriptive fields — is claude- or workspace-authored text this layer neither validates nor sanitises, and the mapper carries it unchanged (no re-sort, re-cap or recompute). **Three dropped counts, never inferred from a retained list's length** — each list's original size is `len(list) + its own dropped count`, and the three pairs are never cross-read. **`path` on a memory-file row is path-shaped text, not a file handle**: nothing on this path opens, joins, cleans or resolves it. **`server_name` on an MCP-tool row is inert** despite colliding by name with the actuating `MCPReconnectPayload.ServerName` — it names a contributor to a reading and must never be fed back as an actuation or authorization input. Empty lists encode as `[]`, never `null`, `MCPStatusPayload`'s precedent. The reading is informational and does not replace the daemon-owned context-window value that control decisions use, and it is a distinct reading from [`session_settings`](#session_settings)'s transcript-derived `used_tokens`/`window_tokens` — neither supersedes the other. No category name, MCP name or memory path reaches a daemon log record at any level.
+- `2026-09-14`: **The daemon's context-window breakdown has a stable frame to decode against, and now publishes it** (#2370, emitted by #2371) — a new outbound-only type, [`context_usage`](#context_usage), carrying `model`, the totals and percentage, and three independently bounded inventories (`categories`, `mcp_tools`, `memory_files`), each with its own dropped count. **Declared by #2370, emitted by #2371**: the daemon now publishes this frame once after every completed turn, mapped from `internal/turnevent.ContextUsage` via the solicited post-turn ask (`turnEndContextUsageRequester`, #2289), on the existing conversation-keyed interactive lane with no second capability gate. **A fresh on-demand request answers with this same shape** — [`request_context_usage`](#asking-for-a-context-usage-reading-on-demand) (#2431, split from #2293), correlated by `in_reply_to`. Two closely-spaced asks for the same conversation collapse into one round trip to claude, answered from its shared result, and an ask arriving while a turn is in flight defers until that turn ends rather than competing with it for the child's control channel. **One shape serves both producers**, [`mcp_status`](#mcp_status)'s arrangement: no request verb or correlation field belongs on this payload. **The payload is mixed-provenance, not uniformly untrusted or uniformly trusted**: `conversation_id` is daemon-authored, filled from the daemon's own registry, while every other string — `model` and every row's descriptive fields — is claude- or workspace-authored text this layer neither validates nor sanitises, and the mapper carries it unchanged (no re-sort, re-cap or recompute). **Three dropped counts, never inferred from a retained list's length** — each list's original size is `len(list) + its own dropped count`, and the three pairs are never cross-read. **`path` on a memory-file row is path-shaped text, not a file handle**: nothing on this path opens, joins, cleans or resolves it. **`server_name` on an MCP-tool row is inert** despite colliding by name with the actuating `MCPReconnectPayload.ServerName` — it names a contributor to a reading and must never be fed back as an actuation or authorization input. Empty lists encode as `[]`, never `null`, `MCPStatusPayload`'s precedent. The reading is informational and does not replace the daemon-owned context-window value that control decisions use, and it is a distinct reading from [`session_settings`](#session_settings)'s transcript-derived `used_tokens`/`window_tokens` — neither supersedes the other. No category name, MCP name or memory path reaches a daemon log record at any level.
 
 - `2026-09-10`: **An open tool row now receives `claude`'s elapsed counter** (#2324) — a new push-only [`tool_progress`](#tool_progress) frame carries the current conversation and turn ids, the byte-identical `tool_use_id` join key, and `claude`'s signed `elapsed_seconds` reading. The daemon forwards each heartbeat without computing, clamping, retaining, deduplicating, or rate-limiting it; [`tool_result`](#tool_result) remains the only terminal frame. **Absence proves nothing** because a short call can finish before the first heartbeat and later frames can be lost independently. The payload deliberately carries no session id, UUID, tool name, sequence, or parent id. The join id was bounded and dropped-not-cut by #2323 before this mapping, but remains an untrusted display handle: neither the daemon nor a client may treat it or the elapsed value as authority or proof of execution. Populated and zero-value fixtures pin all four keys with no `omitempty`. The four live-event statements now read **twenty**, matching the `####` headings from `turn_state` through `model_announced`.
 
