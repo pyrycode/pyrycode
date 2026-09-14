@@ -539,8 +539,8 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`model_list`** | binary → phone | no | **New in v2** (interactive, capability-gated). The menu of models claude will accept for a conversation, from its `initialize` control reply — identifiers, labels, per-model effort levels and auto-mode support (#1704). **Not** the per-turn announcement [`model_announced`](#model_announced) carries. Shape declared by #1704, fixtures and section by #1705, the mapping onto this wire shape by #1848 and the **producer** by #1849, proven end to end by #1845 — it is emitted on the live interactive turn lane, once per child spawn to whatever clients are connected at that instant, and **best-effort rather than guaranteed**: several loss points mean a client may see none at all, so never block a model menu on it. It also has a **connect-time snapshot** (#1863/#1867, widened by #2124 to cover every conversation the registry carries), so a client that missed the live frame is brought current on its next connect. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`mcp_status`** | binary → phone | no | **New in v2.** The conversation-scoped MCP status payload serves both automatic publication and a fresh [`mcp_status_request`](#asking-for-mcp-status-on-demand) reply. Automatic publication occurs once per eligible daemon-configured strict child, including an empty server list. It creates one event-ring entry and one frame per connected interactive client. A query reply goes only to its requester, carries no `event_id`, and never enters the event ring. Both paths exclude bypass children and their privately loaded MCP servers. See [`mcp_status`](#mcp_status). |
 | **`mcp_status_request`** | phone → binary | no | **New in v2.** A paired interactive client requests fresh MCP status for the conversation named by `conversation_id`. The daemon queries that conversation's current live child only when its actual spawn used the daemon MCP config with `--strict-mcp-config`. One exact child response returns to the requester as [`mcp_status`](#mcp_status), correlated by `in_reply_to`. Failures return `protocol.malformed`, `conversation.not_found`, or retryable `mcp_status.unavailable`. An unconfigured resolver or a connection without the capability consumes the request without decoding or replying. See [Asking for MCP status on demand](#asking-for-mcp-status-on-demand). |
-| **`mcp_reconnect`** | phone → binary | no | **New in v2, declared ahead of its gate (#2419).** Asks the daemon to reconnect one named MCP server on a conversation's live child. An accepted actuation answers with a fresh [`mcp_status`](#mcp_status), not a separate acknowledgement. Every refusal answers the single merged, non-retryable `mcp_actuation.refused`. Consumed but inert — no payload decode, no reply — until the per-device actuation gate lands. See [Actuating MCP servers on demand](#actuating-mcp-servers-on-demand). |
-| **`mcp_toggle`** | phone → binary | no | **New in v2, declared ahead of its gate (#2419).** Asks the daemon to enable or disable one named MCP server on a conversation's live child. Same accepted-answer and refusal shape as `mcp_reconnect` above, and the same nil-seam inert posture until the gate lands. See [Actuating MCP servers on demand](#actuating-mcp-servers-on-demand). |
+| **`mcp_reconnect`** | phone → binary | no | **New in v2** (#2419), **gated per device (#2420).** Asks the daemon to reconnect one named MCP server on a conversation's live child. Gated first, before any control request reaches the child: an unauthorized device causes no membership look-up and no actuation. An accepted actuation answers with a fresh [`mcp_status`](#mcp_status), read *after* the child acknowledged the reconnect — not a separate acknowledgement, and a just-reconnected server may legitimately read back `pending`. Every refusal, and every accepted action, writes one audit record; every refusal answers the single merged, non-retryable `mcp_actuation.refused`. See [Actuating MCP servers on demand](#actuating-mcp-servers-on-demand). |
+| **`mcp_toggle`** | phone → binary | no | **New in v2** (#2419), **gated per device (#2420).** Asks the daemon to move one named MCP server to a requested enabled state on a conversation's live child. Same gate, audit, post-acknowledgement answer and refusal shape as `mcp_reconnect` above; the requested state is passed straight through to the child, never derived from a prior read of the server's current state. See [Actuating MCP servers on demand](#actuating-mcp-servers-on-demand). |
 | **`slash_command_list`** | binary → phone | no | **New in v2** (interactive, capability-gated). The slash commands this session's working directory will accept, from the `commands` array of the same `initialize` control reply — names, argument hints, descriptions and aliases (#1727). The sibling [`model_list`](#model_list) inventories *identities* from that reply; this one inventories *verbs*. Consumers are pyrycode-desktop#681 (Actions-menu grey-out) and pyrycode-desktop#694 (slash-command type-ahead). Type declared by #1726, shape by #1727, fixtures and section by #1718, the mapping onto this wire shape by #2001 with its frame-level byte bound by #2002, and the **producer** by #2003, proven end to end by #2008 — it is emitted on the live interactive turn lane, once per child spawn to whatever clients are connected at that instant, and **best-effort rather than guaranteed**. It also has a **connect-time snapshot** (#2006/#2007, proven by #2009), so a client that missed the live frame is brought current on its next connect. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`question_shown`** | binary → phone | no | **New in v2** (interactive, capability-gated). One whole batch of the clarifying questions claude's `AskUserQuestion` tool asks — questions, their options and a per-question multi-select flag, in claude's own order (#1962). The consumer is pyrycode-desktop#849. Type declared by #1962, shape by #1963, fixtures and section by #1964; the parse is #1965 and the producer #1973, which emits it the moment claude asks. **Not** a [`modal_shown`](#modal_shown): that frame is one prompt with flat options, this one is a batch with **two nesting levels** and a **two-verb** inbound half ([`question_answer`](#question_answer) / [`question_refused`](#question_refused), #1983) rather than the modal pair's single answer. See [Question](#question-v2). |
 | **`question_dismissed`** | binary → phone | no | **New in v2** (interactive, capability-gated). The frame that retires a [`question_shown`](#question_shown) batch, so a client clears the panel instead of rendering an ask that is already dead (#1974). Carries no claude-authored string. Its own type and **not** a [`modal_dismissed`](#modal_dismissed), which identifies what it clears by `modal_id` and routes to the modal panel. #1973 emits it on every no-answer terminal path, #1990 on a refusal and #1991 on an answer — all three terminal outcomes. See [Question](#question-v2). |
@@ -2416,9 +2416,10 @@ re-enters `Run` before Noise encryption so the cipher remains single-owner.
 
 #### Actuating MCP servers on demand
 
-**`mcp_reconnect`** and **`mcp_toggle`** (phone → binary, **#2419**) ask the
-daemon to change one MCP server's connection state on a conversation's live
-child. Both are v2-only and gated on the negotiated `interactive` capability.
+**`mcp_reconnect`** and **`mcp_toggle`** (phone → binary, declared by **#2419**,
+gated and wired by **#2420**) ask the daemon to change one MCP server's
+connection state on a conversation's live child. Both are v2-only and gated on
+the negotiated `interactive` capability.
 
 | Type | Field | Type | Meaning |
 |---|---|---|---|
@@ -2428,6 +2429,21 @@ child. Both are v2-only and gated on the negotiated `interactive` capability.
 | `mcp_toggle` | `server_name` | string | Same meaning as above. |
 | `mcp_toggle` | `enabled` | bool | The requested state. Always present on the wire — an omitted key decodes as `false`, the **non-escalating** direction, so a truncated or malformed frame can never turn a server on. |
 
+**Every asking device is gated before anything else happens.** The daemon
+checks the asking device's remote-permission eligibility *first*, ahead of
+even looking up which servers the conversation's child currently reports. A
+refused device causes no control request of any kind to reach the child —
+unlike [`mcp_status_request`](#asking-for-mcp-status-on-demand) above, reading
+"the servers this child currently reports" is itself a control request
+written to the child's stdin, not a cached lookup, so gating it after that
+read would let any paired device make a child do work on demand merely by
+asking. An eligible device's request then looks up the conversation's bound
+live child and the servers it currently reports, and only then actuates.
+Every accepted reconnect, accepted toggle, and refusal writes exactly one
+daemon-side audit record naming the conversation, the server as the device
+asked for it, and the device's non-secret identity — never the server's
+config, argv, environment, or a token.
+
 **The answer to an accepted actuation is a fresh [`mcp_status`](#mcp_status)
 frame, not a separate acknowledgement.** It is sent through the same
 requester-only reply lane [`mcp_status_request`](#asking-for-mcp-status-on-demand)
@@ -2435,8 +2451,12 @@ uses — correlated by `in_reply_to`, no `event_id`, no broadcast, never enterin
 the event ring — because a client's next render after either verb is the status
 list itself, and an ack it would then have to follow with a second request would
 buy nothing. The status crosses from the daemon's own actuation seam, taken
-*after* the live child has acknowledged the change; the relay does not perform
-a second status read of its own for this path.
+*after* the live child has acknowledged the change — a second read, distinct
+from the membership read taken earlier in the same call — and the relay does
+not perform a status read of its own for this path. **A server the daemon just
+reconnected commonly reports back `pending` rather than `connected` in that
+read; both states are real claude behaviour, and the daemon returns what it
+reads rather than waiting or polling for the server to settle.**
 
 **Every refusal, for any reason, answers the same single code:**
 
@@ -2462,17 +2482,24 @@ Decode and membership failures use the existing codes, in the same order
 | `conversation_id` names no hosted conversation | `conversation.not_found` | no |
 
 Neither of those two consults the actuation seam. A connection that has not
-negotiated `interactive`, or a daemon with no actuation seam configured,
-consumes the frame without decoding its payload or replying — the same inert
-posture [`mcp_status_request`](#asking-for-mcp-status-on-demand) has when its
-resolver is unconfigured.
+negotiated `interactive`, or a `V2SessionConfig` with a nil `MCPActuator`
+field, consumes the frame without decoding its payload or replying — the same
+inert posture [`mcp_status_request`](#asking-for-mcp-status-on-demand) has when
+its resolver is unconfigured. **As of #2420 no real daemon construction site
+leaves that field nil** — see below — so this remains a structural fallback
+rather than a state production reaches.
 
-**This declaration ships ahead of its gate.** The daemon-side actuators
-(`ReconnectMCPServer`, `SetMCPServerEnabled`) landed separately, and both
-verbs are intercepted and routed to a seam that is **nil at every construction
-site** — the frames are consumed but inert. Nothing is wired behind the seam
-until the per-device actuation gate lands; until then, neither verb can reach
-a live child regardless of which device sends it.
+**`V2SessionConfig.MCPActuator` is built unconditionally at every daemon
+construction site (#2420), never left nil.** A nil-valued concrete seam
+assigned to that non-nil interface field would let the relay admit the frame
+and call a method on a nil pointer; wiring the gate unconditionally, the same
+posture the question-answer resolver uses, avoids that trap entirely.
+Inertness instead lives *inside* the gate: a daemon with no live-child
+resolution at all (foreground / PTY) still gates the device first, then finds
+its own child-resolution closures unset and answers with the same merged
+`mcp_actuation.refused` any other refusal past the gate gets — the wire and
+the client cannot tell "no live child to resolve" apart from any other
+step-3 refusal, by design.
 
 #### `slash_command_list`
 
