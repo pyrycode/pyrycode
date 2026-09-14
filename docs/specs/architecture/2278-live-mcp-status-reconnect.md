@@ -252,6 +252,33 @@ section was written; they are recorded below as the fixes they became rather tha
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-14
 
+## Revisions
+
+### 2026-09-14 — three offline tests for the shim, not in the plan as committed
+
+The Testing strategy above said offline verification was vet, build and a tagged compile, on the reading that
+the gate is its own proof. That is wrong for one part of this slice: `mcpShimInjectServer` and
+`mcpShimConfigPath` are new logic with branches nothing else exercises, and the security review's first MUST
+FIX finding — a typed round trip silently stripping unmodelled keys from the two production entries — is
+precisely the kind of defect that leaves the live gate green. It needs a deterministic guard, not a live run.
+
+Added `TestMCPShimConfigPath`, `TestMCPShimInjectServerPreservesUnmodelledKeys` and
+`TestMCPShimInjectServerRefusesWithoutTwin`, all credential-free and all passing under the tag. The middle one
+was confirmed non-vacuous by removing the unmodelled key from its own fixture and watching the assertion
+redden.
+
+### 2026-09-14 — measured size, against the estimate
+
+901 lines landed (258 spec, 637 test, 6 in `TestMain`) against the ~750 this plan was sized at and the
+ticket's own ~850 estimate. Both underestimates come from the same place the sizing guidance names: tests were
+counted at a sketch's density rather than this package's, and the three offline tests above were not in the
+sketch at all. No boundary other than the line ceiling is near its limit — 0 production source files, 0 new
+exported types, 0 consumer call sites, 3 acceptance criteria, 0 reject branches — and the run finished well
+inside its turn and wall-clock budget, so the overage cost nothing here. Recorded for calibration rather than
+as a defect: had it been visible at § A1 the correct response would still have been to build, since splitting
+the status arm from the reconnect arm buys a second live claude spawn and a duplicated harness for no extra
+deliverable, which is the ticket's own argument.
+
 ## Documentation handoff
 
 None. The ticket carries no documentation acceptance criterion, and this slice captures no artefact — nothing
