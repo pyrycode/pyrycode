@@ -317,3 +317,28 @@ This slice's builder does not edit that file.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-14
+
+## Revisions
+
+### 2026-09-14 — implementation
+
+Both Open Questions resolved as led, neither changing the design. `actuateMCP` takes the writer as
+a closure parameter, so the helper owns the binding re-check and neither public method can write to
+a stale handle. The automatic-path assertion lives in the new file, since what it proves is that
+the new claim did not disturb the shipped path.
+
+Two departures from the plan as written, both recorded rather than absorbed:
+
+- `actuateMCP` merges the recheck-failed and context-cancelled branches into one, and the
+  write-error and post-write-cancellation branches into another. The plan said "in
+  `QueryMCPStatus`'s order", which has each as its own block with an identical body. Same
+  behaviour and the same six exit paths; fewer branches to read.
+- Both security-review SHOULD FIX items landed as doc contracts on `actuateMCP`: that nothing is
+  logged on this path and the writer's error is discarded deliberately, and that the caller's
+  context is the only bound on the wait when a live child stays silent.
+
+Production came in at 285 insertions against the ~220 projected in Sizing, all of it doc comments
+at this package's established density; tests at 394 against ~320. Total written work ~1000 lines
+rather than the ~850 projected. The judgement that it ships whole is unchanged — the seams still
+yield one-consumer children — but the projection was optimistic and the ceiling miss is larger than
+stated. The run finished inside budget.
