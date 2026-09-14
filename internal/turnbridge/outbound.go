@@ -1072,6 +1072,149 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			Commands:        commands,
 			DroppedCommands: e.DroppedCommands + (len(e.Commands) - len(commands)),
 		}, true
+	case turnevent.ContextUsage:
+		// One solicited reading of claude's context-window arithmetic (#2371),
+		// joining #2370's declared frame to #2357/#2291's source event. Conversation
+		// identity only, like the status peers above: tc.TurnID and tc.Seq are
+		// ignored and the payload has no field either could land in.
+		//
+		// IT IS NOT A TURN BOUNDARY, and the reason is sharper than the peers' above
+		// rather than merely the same. This event arrives AFTER the turn it describes
+		// has closed — cmd/pyry's turnEndContextUsageRequester asks for it on TurnEnd
+		// — so a consumer that opened a turn on it would mint one nothing will ever
+		// end. cmd/pyry's turnMarkFor answers turnMarkNone by construction (whitelist
+		// opener set, turnMarkNone default) and TestTurnMarkFor_TotalOverEveryVariant
+		// pins that independently.
+		//
+		// Every field crosses 1:1 and VERBATIM. This is translation, not policy:
+		// ConversationID is the only value the mapping supplies, and nothing here is
+		// derived, defaulted, recomputed or synthesised. Specifically:
+		//
+		//   - A nil inventory is FORWARDED, not pre-allocated, for all three.
+		//     ContextUsagePayload's MarshalJSON owns nil→[], and allocating here
+		//     would produce the same bytes while hiding which layer owns the
+		//     normalisation — the rule the ToolStart, BackgroundTaskRoster, ModelList
+		//     and SlashCommandList arms above all state. There is no TruncatedFields
+		//     analogue on this frame, so this arm carries none of their asymmetry:
+		//     all three lists take the SAME polarity, and that uniformity is a fact
+		//     about the payload type rather than an oversight to "fix".
+		//   - THE THREE DROPPED COUNTS ARE INDEPENDENT AND CARRIED, never recomputed
+		//     from a retained list's length and never a constant. Each is the count
+		//     its own boundContextUsageEntries call recorded when streamsup's
+		//     maxContextUsageEntries or maxContextUsageStringBytes fired, so each
+		//     list's original size stays recoverable as len(list) + its OWN count.
+		//     The three pairs are never cross-read: the measured fake-Claude reading
+		//     drops 0 categories, 1 MCP tool and 1 memory file, so a mapper that
+		//     wired one count into another's field is observable rather than
+		//     theoretical. Shipping 0 tells a client a cut inventory is the whole one.
+		//   - The scalars are CLAUDE'S OWN. Percentage is not derived from
+		//     TotalTokens and MaxTokens and the categories are not summed to check
+		//     the total — ContextUsagePayload's doc forbids a client assuming either,
+		//     and a mapper that recomputed one here would make the frame disagree
+		//     with the reading it claims to report.
+		//
+		// NOTHING IS RE-CAPPED, RE-ORDERED, CANONICALISED OR CHARSET-CHECKED. The
+		// producer bounded every dimension at construction — streamsup's
+		// maxContextUsageEntries caps each list at 32 and maxContextUsageStringBytes
+		// rejects an entry whose designated string exceeds 256 bytes, Model included
+		// — so a second cap here would be a second place the limit is decided and the
+		// two could disagree silently. maxSummaryLen and maxResultSummaryRunes live
+		// in THIS file and are NOT applicable bounds; reaching for either is the
+		// specific mistake to avoid. Entry order is the producer's descending-by-
+		// tokens ranking, so a sort is observable rather than harmless: a producer-
+		// side count cut keeps the heaviest entries, and re-ordering here would
+		// destroy the only signal saying which those were.
+		//
+		// THE MEMORY PATH IS NOT NORMALISED, and this is the one rule a well-meaning
+		// reader is likeliest to break, because the value is path-shaped. No
+		// filepath.Clean, no filepath.Join, no filepath.Abs, no os.Stat, no
+		// filepath.Match. ContextUsageMemoryFile's own doc assigns the reason:
+		// normalising the string would imply it names a real file this frame acts on,
+		// which it does not. A traversal-shaped path in the mapper's fixture crosses
+		// byte-for-byte so the rule is pinned by a failing test rather than by this
+		// paragraph.
+		//
+		// SERVERNAME HERE IS INERT, and the collision with MCPReconnectPayload's
+		// field of the same name is the trap worth naming at this layer too: that one
+		// crosses an actuation seam, this one names a contributor to a reading. No
+		// helper is shared with the MCPStatus arm above, deliberately — a shared row
+		// builder is how the two would drift into one another.
+		//
+		// CARRY, NEVER MUTATE THROUGH, and here the rule holds by construction rather
+		// than by discipline — which is why a reader must NOT add a deep copy that is
+		// already total. All three row types are flat string/int structs with no
+		// slice field, so the element-wise copy into a fresh outer slice shares no
+		// mutable backing array at all; the shared string headers are safe because Go
+		// strings are immutable. The ModelList arm above needs its rule because
+		// cmd/pyry's sessionModelHold retains that event across goroutines; NO
+		// analogue retains a ContextUsage, so the hazard differs in kind and this
+		// arm's read-only loops are sufficient.
+		//
+		// EVERY STRING HERE IS CLAUDE- OR WORKSPACE-AUTHORED and NONE MAY REACH A LOG
+		// RECORD — so this arm writes no log line at all, which is what cmd/pyry's
+		// eventKind arm for this variant enforces on its own side by returning the
+		// variant NAME only. This slice adds exactly ONE sink to the enumeration
+		// streamsup's caps own: the fields of a protocol.ContextUsagePayload. No
+		// exec.Command argument, no filepath.Join, no regexp, no log attribute. The
+		// bytes are bounded but NOT sanitized, and the render boundary owing that is
+		// the CLIENT's, as the payload type's SECURITY paragraphs assign.
+		//
+		// NO FRAME BYTE BUDGET, unlike the SlashCommandList arm one case up, and that
+		// asymmetry is deliberate rather than an omission. Its worst case is measured
+		// in TestMapEventContextUsageWorstCaseAgainstV2EnvelopeCap rather than argued
+		// here: three 32-entry lists of 256-byte strings fit the 65519-byte v2
+		// application-envelope cap with headroom, and only encoding/json's six-byte
+		// escaping of <, > and & can exhaust it. That residual loss is bounded and
+		// self-repairing — the reading is re-asked after the next turn — on a lane
+		// that is best-effort by construction. If the producer's caps ever RISE, that
+		// test reddens and this arm needs a budget of its own. #2428 carries the
+		// budget decision, which is a design question rather than a copy of the
+		// sibling arm: this frame has THREE independent lists and three independent
+		// dropped counts, so a budget has to decide how to apportion across them.
+		//
+		// No suppression branch, not even on three empty inventories. The gate that
+		// decides whether the event exists at all is the producer's — streamsup's
+		// emitContextUsage requires an exact pending request id and a success subtype
+		// — so a second, differently-shaped filter here would silently diverge from
+		// it, the hazard the ThinkingProgress, RateLimited, ModelAnnounced, ModelList
+		// and SlashCommandList arms each name. A zero-value ContextUsage therefore
+		// maps, and an empty reading is a POSITIVE report a client may display.
+		var categories []protocol.ContextUsageCategory
+		for _, c := range e.Categories {
+			categories = append(categories, protocol.ContextUsageCategory{
+				Name:   c.Name,
+				Tokens: c.Tokens,
+			})
+		}
+		var mcpTools []protocol.ContextUsageMCPTool
+		for _, tool := range e.MCPTools {
+			mcpTools = append(mcpTools, protocol.ContextUsageMCPTool{
+				Name:       tool.Name,
+				ServerName: tool.ServerName,
+				Tokens:     tool.Tokens,
+			})
+		}
+		var memoryFiles []protocol.ContextUsageMemoryFile
+		for _, file := range e.MemoryFiles {
+			memoryFiles = append(memoryFiles, protocol.ContextUsageMemoryFile{
+				Path:   file.Path,
+				Type:   file.Type,
+				Tokens: file.Tokens,
+			})
+		}
+		return protocol.TypeContextUsage, protocol.ContextUsagePayload{
+			ConversationID:     tc.ConversationID,
+			Model:              e.Model,
+			TotalTokens:        e.TotalTokens,
+			MaxTokens:          e.MaxTokens,
+			Percentage:         e.Percentage,
+			Categories:         categories,
+			DroppedCategories:  e.DroppedCategories,
+			MCPTools:           mcpTools,
+			DroppedMCPTools:    e.DroppedMCPTools,
+			MemoryFiles:        memoryFiles,
+			DroppedMemoryFiles: e.DroppedMemoryFiles,
+		}, true
 	default:
 		// ThoughtChunk and nil/unknown drop (see doc comment).
 		return "", nil, false
