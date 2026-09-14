@@ -2501,6 +2501,97 @@ its own child-resolution closures unset and answers with the same merged
 the client cannot tell "no live child to resolve" apart from any other
 step-3 refusal, by design.
 
+#### `context_usage`
+
+Direction **binary → phone** (outbound v2 only; the v1 inbound type predicate
+rejects it, and it is never added to `inboundAppTypeSet`). This is the
+single conversation-scoped context-window breakdown shared by a later
+publication path and a later on-demand reply, exactly as
+[`mcp_status`](#mcp_status) is shared by its own pair: one outbound shape,
+correlated at the envelope rather than by a second request verb.
+
+**Declared here; not yet emitted.** This slice declares the type and payload
+only. #2371 maps `internal/turnevent`'s `ContextUsage` event and publishes
+this frame once after a turn; #2293 answers a fresh on-demand request with
+the same frame, correlated by `in_reply_to`. Neither producer has landed yet
+— this section documents the shape a client can already decode against, not
+live traffic.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation the reading describes. **Daemon-authored** — filled from the daemon's own conversation record, never from claude's bytes. Always present. |
+| `model` | string | claude's own name for the model that produced the reading. Claude-authored; always present, may be empty. |
+| `total_tokens` | int | claude's total context-window usage for the conversation. Always present. |
+| `max_tokens` | int | claude's own ceiling for the window. Always present. |
+| `percentage` | int | claude's own `total_tokens` / `max_tokens` reading. **Not derived by the daemon** — see below. |
+| `categories` | array of object | The named contributors to the total (system prompt, messages, and similar), in claude's own descending-token order. **Always present, never `null`**; a reading with none serialises as `[]`. |
+| `dropped_categories` | int | Count of tail entries omitted from `categories` when the source report was bounded. Always present, including `0`. |
+| `mcp_tools` | array of object | The MCP tools contributing to the total, in claude's own descending-token order. **Always present, never `null`**. |
+| `dropped_mcp_tools` | int | Count of tail entries omitted from `mcp_tools`. Always present, including `0`. |
+| `memory_files` | array of object | The memory files contributing to the total, in claude's own descending-token order. **Always present, never `null`**. |
+| `dropped_memory_files` | int | Count of tail entries omitted from `memory_files`. Always present, including `0`. |
+
+Each element of `categories` carries exactly two keys, both always present:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `name` | string | claude's own label for the contributor. Claude-authored descriptive text, not a selector. |
+| `tokens` | int | The contributor's token count. |
+
+Each element of `mcp_tools` carries exactly three keys, all always present:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `name` | string | The tool's name. Claude-authored. |
+| `server_name` | string | The MCP server the tool belongs to. Claude-authored, and **inert** — see the SECURITY note below. |
+| `tokens` | int | The tool's token count. |
+
+Each element of `memory_files` carries exactly three keys, all always present:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `path` | string | The memory file's path, as claude or the workspace named it. Descriptive text — see the SECURITY note below. |
+| `type` | string | claude's own label for the entry (e.g. which memory tier it came from). |
+| `tokens` | int | The file's token count. |
+
+**Each dropped count is independent and is never inferable from its list's
+length.** `dropped_categories`, `dropped_mcp_tools` and `dropped_memory_files`
+are each copied verbatim from `turnevent.ContextUsage`'s matching field by the
+mapper that emits this frame; none is derived by counting the retained list. A
+list's original size before any bound was applied is recoverable as
+`len(list) + <its own dropped count>` — the three pairs are never cross-read,
+so `len(categories) + dropped_mcp_tools` answers nothing.
+
+**The reading is informational.** It is claude's own arithmetic, mirroring
+`turnevent.ContextUsage`'s own standing constraint: a client may display it,
+but it does not replace the daemon-owned context-window value that control
+decisions are keyed on. The daemon neither recomputes nor normalises any of
+claude's numbers, so a client must not assume `percentage` is derivable from
+`total_tokens` and `max_tokens`, nor that the three category/tool/file lists
+sum to the total.
+
+**SECURITY — mixed provenance, not a single trust level.** `conversation_id`
+is the one daemon-authored field on this frame, filled from the daemon's own
+registry rather than from claude's bytes. **Every other string** — `model`,
+every `categories[].name`, every `mcp_tools[].name` and `.server_name`, and
+every `memory_files[].path` and `.type` — is claude- or workspace-authored
+descriptive text that this layer neither validates nor sanitises. A client
+MUST render each as inert text, never fed to an HTML sink, an attribute, a
+URL, or an authorization decision.
+
+`path` in particular is **path-shaped text, not a file handle**: nothing on
+this path — not the daemon, not a client — opens, joins, cleans, or resolves
+it, and a client must not treat it as a link target or read it as naming a
+file the frame gives access to.
+
+`server_name` on an `mcp_tools` row names a contributor to this reading and
+**is not an actuation or authorization input** — it collides by name with the
+unrelated `MCPReconnectPayload.ServerName` (see
+[Actuating MCP servers on demand](#actuating-mcp-servers-on-demand)), which
+*does* cross an actuation seam. Reading this frame's `server_name` back into
+an `mcp_reconnect` or `mcp_toggle` request on the strength of having seen it
+here is the confusion this note exists to foreclose.
+
 #### `slash_command_list`
 
 Direction **binary → phone** (outbound v2 slash-command inventory; not in `v1TypeSet` — an old phone never receives it). This is a **conversation-scoped menu, distinct from the twenty-three turn-stream events above** — it is not a `turnevent` variant and is not one of those events, though the live-lane emission rides the same interactive lane they do and carries an `event_id` like them, which is what the delivery window below turns on; the connect-time copy deliberately carries none. It carries the `commands` array claude returns from a `control_request` with subtype `initialize`, the same reply [`model_list`](#model_list) is drawn from, so it arrives on a `control_response` rather than on the turn stream; receiving one **neither opens nor closes a turn**. It is a **snapshot** of the commands this session *in this working directory* will accept, not a delta. `model_list` inventories the **identities** claude will run as; this one inventories the **verbs**.
@@ -4437,6 +4528,8 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 **Date:** 2026-05-16
 
 ## Changelog
+
+- `2026-09-14`: **The daemon's context-window breakdown has a stable frame to decode against** (#2370) — a new outbound-only type, [`context_usage`](#context_usage), carrying `model`, the totals and percentage, and three independently bounded inventories (`categories`, `mcp_tools`, `memory_files`), each with its own dropped count. **Declared, not yet emitted**: this ticket adds the type and payload only, so a client can be written against it in parallel — #2371 maps `turnevent.ContextUsage` and publishes the frame after a turn, and #2293 answers a fresh on-demand request with the same shape, correlated by `in_reply_to`; neither has landed, and this section says so rather than claiming live traffic. **One shape serves both later producers**, [`mcp_status`](#mcp_status)'s arrangement: no request verb or correlation field belongs on this payload. **The payload is mixed-provenance, not uniformly untrusted or uniformly trusted**: `conversation_id` is daemon-authored, filled from the daemon's own registry, while every other string — `model` and every row's descriptive fields — is claude- or workspace-authored text this layer neither validates nor sanitises. **Three dropped counts, never inferred from a retained list's length** — each list's original size is `len(list) + its own dropped count`, and the three pairs are never cross-read. **`path` on a memory-file row is path-shaped text, not a file handle**: nothing on this path opens, joins, cleans or resolves it. **`server_name` on an MCP-tool row is inert** despite colliding by name with the actuating `MCPReconnectPayload.ServerName` — it names a contributor to a reading and must never be fed back as an actuation or authorization input. Empty lists encode as `[]`, never `null`, `MCPStatusPayload`'s precedent. The reading is informational and does not replace the daemon-owned context-window value that control decisions use.
 
 - `2026-09-10`: **An open tool row now receives `claude`'s elapsed counter** (#2324) — a new push-only [`tool_progress`](#tool_progress) frame carries the current conversation and turn ids, the byte-identical `tool_use_id` join key, and `claude`'s signed `elapsed_seconds` reading. The daemon forwards each heartbeat without computing, clamping, retaining, deduplicating, or rate-limiting it; [`tool_result`](#tool_result) remains the only terminal frame. **Absence proves nothing** because a short call can finish before the first heartbeat and later frames can be lost independently. The payload deliberately carries no session id, UUID, tool name, sequence, or parent id. The join id was bounded and dropped-not-cut by #2323 before this mapping, but remains an untrusted display handle: neither the daemon nor a client may treat it or the elapsed value as authority or proof of execution. Populated and zero-value fixtures pin all four keys with no `omitempty`. The four live-event statements now read **twenty**, matching the `####` headings from `turn_state` through `model_announced`.
 

@@ -81,6 +81,14 @@ secret. Timestamp and metadata text can contain the same digits and make an unre
 wall-clock value look like a disclosure. Use a distinctive sentinel or inspect the
 structured attribute being protected rather than substring-matching the whole log line.
 
+A fixture asserting that a count is independent of a list — an explicit dropped or
+omitted count, never inferred by measuring what was retained — must make the count
+differ from that list's own length, not merely from its sibling counts. "Mutually
+distinct" is the weaker property and passes even when a count equals `len(list)`,
+which is exactly the shape indistinguishable from inference; #2370's first fixture
+picked `dropped_categories: 2` beside two retained rows and had to be corrected once
+a stronger assertion caught it.
+
 ## Protocol boundaries
 
 Round-trip tests must marshal the decoded payload back into the envelope. Comparing
@@ -88,7 +96,12 @@ an untouched raw payload with itself does not check struct tags or new fields.
 Explicitly assert decoded field values. Distinct fixture values detect accidental
 field swaps. To distinguish an absent key from a present null, inspect raw JSON too.
 The current protocol test helper uses `json.Compact`, which removes whitespace but
-preserves key order; do not describe it as sorting keys.
+preserves key order; do not describe it as sorting keys. It also does not normalise
+string escaping — `encoding/json.Marshal` escapes a literal `<`, `>` or `&` byte to
+its `\u00XX` form, and `json.Compact` leaves a fixture's own bytes exactly as
+written, so a fixture carrying hostile-looking markup must already spell those three
+characters as `\u00XX` or a byte-exact round-trip fails for a reason that looks like
+a struct-tag bug rather than an unescaped fixture.
 
 An aggregate envelope-fit test and a producer's single-field limit prove different
 things. Reference the constant in the package that owns it. A second literal in
