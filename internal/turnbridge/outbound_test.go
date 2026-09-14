@@ -3,6 +3,7 @@ package turnbridge
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -4129,82 +4130,449 @@ func assertContextUsageKeys(t *testing.T, where string, got map[string]json.RawM
 	}
 }
 
-// TestMapEventContextUsageWorstCaseAgainstV2EnvelopeCap MEASURES the frame's worst
-// case rather than capping it, and it exists because the mapper deliberately owns
-// no byte budget — unlike the SlashCommandList arm's maxSlashCommandListBytes.
-//
-// WHY NO CAP HERE: #2370's ContextUsagePayload assigns every bound to the producer,
-// and a second one in this package would be a second place the limit is decided,
-// free to disagree silently. What justifies that is arithmetic, and this test is
-// where the arithmetic lives instead of in a comment that cannot fail.
-//
-// THE RESULT IS NOT A CLEAN PASS, which is the point. The raw worst case — three
-// 32-entry lists (streamsup's maxContextUsageEntries) of 256-byte strings
-// (maxContextUsageStringBytes) — FITS with headroom. But encoding/json HTML-escapes
-// <, > and & to six bytes each, and the escaped worst case does NOT fit: an
-// over-cap envelope is REJECTED BY THE TRANSPORT with message.too_long rather than
-// truncated, so the frame is lost. That loss is bounded and self-repairing (the
-// reading is re-asked after the next turn) on a lane that is best-effort by
-// construction, which is why it is recorded here and deferred to #2428 rather than
-// fixed by a cap this slice's contract forbids. If the producer's caps ever RISE,
-// this test is what reddens.
-func TestMapEventContextUsageWorstCaseAgainstV2EnvelopeCap(t *testing.T) {
-	t.Parallel()
+// The producer's bounds, restated as literals because this package cannot import
+// them — the discipline the sibling fit tests already follow. streamsup's
+// maxContextUsageEntries caps every list at 32 and maxContextUsageStringBytes
+// rejects an entry whose designated string exceeds 256 bytes. If one of them moves,
+// these fixtures state a worst case that is no longer the producer's, which is the
+// failure mode to watch for — slashFillRow names the same one.
+const (
+	contextUsageTestEntries     = 32
+	contextUsageTestStringBytes = 256
+)
 
-	// streamsup's bounds, restated as literals because this package cannot import
-	// them — the discipline the sibling fit tests already follow.
-	const (
-		maxEntries     = 32
-		maxStringBytes = 256
-	)
-	plain := strings.Repeat("q", maxStringBytes)
-	// One escaping byte, at the worst expansion encoding/json applies: & becomes
-	// &, one byte to six.
-	escaping := strings.Repeat("&", maxStringBytes)
-
-	build := func(s string) turnevent.ContextUsage {
-		ev := turnevent.ContextUsage{
-			Model:       s,
-			TotalTokens: -2147483648, MaxTokens: -2147483648, Percentage: -2147483648,
-			DroppedCategories: -2147483648, DroppedMCPTools: -2147483648, DroppedMemoryFiles: -2147483648,
-		}
-		for range maxEntries {
-			ev.Categories = append(ev.Categories, turnevent.ContextUsageCategory{Name: s, Tokens: -2147483648})
-			ev.MCPTools = append(ev.MCPTools, turnevent.ContextUsageMCPTool{
-				Name: s, ServerName: s, Tokens: -2147483648,
-			})
-			ev.MemoryFiles = append(ev.MemoryFiles, turnevent.ContextUsageMemoryFile{
-				Path: s, Type: s, Tokens: -2147483648,
-			})
-		}
-		return ev
+// contextUsageFill returns one designated string at the producer's byte cap.
+//
+// escape selects the alphabet, and the difference is a factor of six rather than a
+// detail: encoding/json has SetEscapeHTML on by default, so '&' becomes & —
+// one byte to six, the worst expansion it applies — where 'q' crosses unchanged. A
+// 'q' fill measures a sixth of the truth and would pass a budget it has no right
+// to, TestToolResultPayload_FitV2EnvelopeCap's reason unchanged.
+//
+// The TWO-DIGIT INDEX in front of the fill is what lets a kept list be checked for
+// being a PREFIX rather than merely the right length. An all-identical fill cannot
+// tell a prefix from a permutation, and — the sharper case — cannot tell a cut that
+// ENDS a lane's walk from one that skips an over-budget row and admits a smaller
+// one behind it. #2002's Revisions record that decorrelation as the assertion its
+// own plan would otherwise have shipped without.
+func contextUsageFill(i int, escape bool) string {
+	b := "q"
+	if escape {
+		b = "&"
 	}
-	size := func(s string) int {
-		t.Helper()
-		_, payload, ok := MapEvent(build(s), TurnContext{ConversationID: strings.Repeat("c", 64)})
-		if !ok {
-			t.Fatal("MapEvent refused a worst-case ContextUsage")
+	return fmt.Sprintf("%02d", i) + strings.Repeat(b, contextUsageTestStringBytes-2)
+}
+
+// contextUsageWorstCase builds a reading at EVERY one of the producer's caps: three
+// full lists, the widest integers a reading can carry, and the given per-list
+// dropped bases. The bases are parameters because two different worst cases are
+// needed — the widest possible integers for the byte measurement, and mutually
+// distinct small ones for the count arithmetic, where a cross-wired pair must fail.
+func contextUsageWorstCase(escape bool, droppedCategories, droppedMCP, droppedMemory int) turnevent.ContextUsage {
+	ev := turnevent.ContextUsage{
+		Model:       contextUsageFill(0, escape),
+		TotalTokens: -2147483648, MaxTokens: -2147483648, Percentage: -2147483648,
+		DroppedCategories:  droppedCategories,
+		DroppedMCPTools:    droppedMCP,
+		DroppedMemoryFiles: droppedMemory,
+	}
+	for i := range contextUsageTestEntries {
+		s := contextUsageFill(i, escape)
+		ev.Categories = append(ev.Categories, turnevent.ContextUsageCategory{Name: s, Tokens: -2147483648})
+		ev.MCPTools = append(ev.MCPTools, turnevent.ContextUsageMCPTool{
+			Name: s, ServerName: s, Tokens: -2147483648,
+		})
+		ev.MemoryFiles = append(ev.MemoryFiles, turnevent.ContextUsageMemoryFile{
+			Path: s, Type: s, Tokens: -2147483648,
+		})
+	}
+	return ev
+}
+
+// contextUsageMapped drives the REAL MapEvent with a HOSTILE conversation id: 64
+// runes of the worst-escaping byte, so the reserve outside the budgeted lists is
+// validated against 384 bytes rather than against a real id.
+//
+// That fixture is roughly TEN TIMES pessimistic rather than optimistic, and the
+// distinction is worth recording because it is the obvious attack on the reserve.
+// internal/conversations' NewConversationID mints a 36-character crypto/rand hex
+// UUID, no byte of which escapes, and the request frame's own doc pins that the
+// reported id comes from the RESOLVED RECORD rather than being echoed from a
+// client's string — so a remote caller cannot grow it. Nothing in this package
+// ENFORCES that, which is why the fixture is hostile anyway: it is the sibling's
+// inherited assumption, stated rather than relied on.
+func contextUsageMapped(t *testing.T, ev turnevent.ContextUsage) protocol.ContextUsagePayload {
+	t.Helper()
+	_, payload, ok := MapEvent(ev, TurnContext{ConversationID: strings.Repeat("&", 64)})
+	if !ok {
+		t.Fatal("MapEvent refused a ContextUsage; every reading must map")
+	}
+	got, isUsage := payload.(protocol.ContextUsagePayload)
+	if !isUsage {
+		t.Fatalf("payload: got %T, want protocol.ContextUsagePayload", payload)
+	}
+	return got
+}
+
+// contextUsageListBytes is exactly what maxContextUsageListBytes bounds: the three
+// serialised inventory arrays, each one's own brackets included. A nil list is
+// charged 2 B rather than null's 4, because ContextUsagePayload.MarshalJSON
+// normalises it to [] before those bytes reach the wire.
+func contextUsageListBytes(t *testing.T, p protocol.ContextUsagePayload) int {
+	t.Helper()
+	one := func(v any, isNil bool) int {
+		if isNil {
+			return 2
 		}
-		b, err := json.Marshal(payload)
+		b, err := json.Marshal(v)
 		if err != nil {
-			t.Fatalf("marshal worst-case payload: %v", err)
+			t.Fatalf("marshal inventory: %v", err)
 		}
 		return len(b)
 	}
+	return one(p.Categories, p.Categories == nil) +
+		one(p.MCPTools, p.MCPTools == nil) +
+		one(p.MemoryFiles, p.MemoryFiles == nil)
+}
 
-	rawWorst := size(plain)
-	if rawWorst >= maxV2AppEnvelope {
-		t.Errorf("raw worst-case frame = %d B, want under the %d B v2 application-envelope cap — "+
-			"the producer's caps have risen past what this frame can carry uncapped, and the arm "+
-			"now needs a byte budget of its own (the SlashCommandList arm's shape)",
-			rawWorst, maxV2AppEnvelope)
+// contextUsageEnvelopeBytes wraps a mapped payload in the WORST-CASE envelope —
+// max-uint64 ids and a populated EventID, so the outer frame costs as much as it
+// ever can — and measures what actually crosses. Measuring the ENVELOPE rather than
+// the payload is the point: the cap is an envelope cap, and the reserve this frame
+// leaves has to cover the frame as well as the payload's own scalars.
+func contextUsageEnvelopeBytes(t *testing.T, p protocol.ContextUsagePayload) int {
+	t.Helper()
+	body, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
 	}
-	escapedWorst := size(escaping)
-	if escapedWorst <= maxV2AppEnvelope {
-		t.Errorf("escaped worst-case frame = %d B, which now FITS the %d B cap — the deferral "+
-			"recorded above is obsolete and its follow-up ticket should be closed",
-			escapedWorst, maxV2AppEnvelope)
+	eventID := ^uint64(0)
+	out, err := json.Marshal(protocol.Envelope{
+		ID:      ^uint64(0),
+		Type:    protocol.TypeContextUsage,
+		TS:      time.Date(2026, 8, 21, 10, 33, 18, 0, time.UTC),
+		Payload: body,
+		EventID: &eventID,
+	})
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
 	}
-	t.Logf("context_usage worst case: raw %d B, escaped %d B, cap %d B (headroom %d B raw)",
-		rawWorst, escapedWorst, maxV2AppEnvelope, maxV2AppEnvelope-rawWorst)
+	return len(out)
+}
+
+// contextUsagePrefixCheck asserts the kept entries are the input's FIRST len(names)
+// in order: entry j must carry index j. One assertion covering three properties —
+// no re-ordering, no hole, and no row skipped over in favour of a smaller one
+// behind it.
+func contextUsagePrefixCheck(t *testing.T, where string, names []string) {
+	t.Helper()
+	for j, name := range names {
+		want := fmt.Sprintf("%02d", j)
+		if !strings.HasPrefix(name, want) {
+			t.Errorf("%s entry %d carries index %q, want %q — the cut keeps a PREFIX of the producer's order, never a hole",
+				where, j, name[:min(len(want), len(name))], want)
+		}
+	}
+}
+
+// TestMapEventContextUsageWorstCaseAgainstV2EnvelopeCap is the SUSPENDERS to
+// maxContextUsageListBytes' belt, TestSlashCommandListPayload_FitV2EnvelopeCap's
+// shape applied to this frame: it drives the REAL MapEvent with the largest reading
+// the producer's caps permit and measures the serialised ENVELOPE rather than
+// arguing about it. The constant is the conservative belt; this is the
+// deterministic per-frame measurement that catches it being wrong. If this ever
+// fails, LOWER the constant — never raise it.
+//
+// IT WAS A MEASUREMENT AND IS NOW AN ASSERTION, and both of its cases inverted with
+// #2428. It previously recorded that the escaped worst case did NOT fit and said in
+// its own failure message that a fit would make the deferral obsolete. It fits now,
+// because the arm cuts.
+//
+// THE RAW CASE IS THE TRIPWIRE FOR THE PRODUCER'S CAPS RISING, and it asserts
+// something stronger than its old size check. A size-only assertion would stay
+// green forever once a budget exists — the cut guarantees a fit by construction, so
+// the old check can no longer fail. What must not happen is the budget firing on an
+// ordinary worst-case reading, so the raw case asserts NOTHING WAS CUT: every entry
+// survives and every dropped count is the producer's own. That is the signal the
+// old check was standing in for.
+func TestMapEventContextUsageWorstCaseAgainstV2EnvelopeCap(t *testing.T) {
+	t.Parallel()
+
+	base := -2147483648
+	t.Run("raw worst case crosses whole", func(t *testing.T) {
+		t.Parallel()
+
+		ev := contextUsageWorstCase(false, base, base, base)
+		got := contextUsageMapped(t, ev)
+		envelope := contextUsageEnvelopeBytes(t, got)
+		t.Logf("context_usage raw worst case: lists %d B, envelope %d B, %.1f%% of the %d-byte v2 application-envelope cap; reserve outside the lists is %d B",
+			contextUsageListBytes(t, got), envelope,
+			float64(envelope)/float64(maxV2AppEnvelope)*100, maxV2AppEnvelope,
+			envelope-contextUsageListBytes(t, got))
+
+		if envelope >= maxV2AppEnvelope {
+			t.Errorf("serialised envelope: got %d B, want < %d B", envelope, maxV2AppEnvelope)
+		}
+		if len(got.Categories) != contextUsageTestEntries ||
+			len(got.MCPTools) != contextUsageTestEntries ||
+			len(got.MemoryFiles) != contextUsageTestEntries {
+			t.Errorf("the frame budget fired on an UNESCAPED worst-case reading: kept %d/%d/%d of %d each — "+
+				"the producer's caps have risen past what this frame carries whole, so maxContextUsageListBytes "+
+				"now cuts claude's ordinary output rather than bounding a hostile one",
+				len(got.Categories), len(got.MCPTools), len(got.MemoryFiles), contextUsageTestEntries)
+		}
+		if got.DroppedCategories != base || got.DroppedMCPTools != base || got.DroppedMemoryFiles != base {
+			t.Errorf("dropped counts = %d/%d/%d, want the producer's %d unchanged — nothing was cut here",
+				got.DroppedCategories, got.DroppedMCPTools, got.DroppedMemoryFiles, base)
+		}
+	})
+
+	t.Run("escaped worst case is cut to fit", func(t *testing.T) {
+		t.Parallel()
+
+		ev := contextUsageWorstCase(true, base, base, base)
+		got := contextUsageMapped(t, ev)
+		lists := contextUsageListBytes(t, got)
+		envelope := contextUsageEnvelopeBytes(t, got)
+		t.Logf("context_usage escaped worst case: kept %d/%d/%d of %d each, lists %d B of the %d-byte budget, envelope %d B, %.1f%% of the %d-byte cap; reserve outside the lists is %d B",
+			len(got.Categories), len(got.MCPTools), len(got.MemoryFiles), contextUsageTestEntries,
+			lists, maxContextUsageListBytes, envelope,
+			float64(envelope)/float64(maxV2AppEnvelope)*100, maxV2AppEnvelope, envelope-lists)
+
+		if envelope >= maxV2AppEnvelope {
+			t.Errorf("serialised envelope: got %d B, want < %d B", envelope, maxV2AppEnvelope)
+		}
+		if lists > maxContextUsageListBytes {
+			t.Errorf("inventory arrays: got %d B, want <= %d B", lists, maxContextUsageListBytes)
+		}
+		kept := len(got.Categories) + len(got.MCPTools) + len(got.MemoryFiles)
+		if kept >= 3*contextUsageTestEntries {
+			t.Fatalf("precondition: %d of %d entries survived, so this measurement no longer exercises the cut",
+				kept, 3*contextUsageTestEntries)
+		}
+		// AC3's floor, and it holds by ARITHMETIC rather than by luck: round 0
+		// offers all three lanes their first row at a combined worst case of
+		// roughly 7.8 KB against the budget, so no reading the producer's caps
+		// permit can spend the envelope on one list.
+		if len(got.Categories) == 0 || len(got.MCPTools) == 0 || len(got.MemoryFiles) == 0 {
+			t.Errorf("kept %d/%d/%d — the budget fired on three non-empty lists and spent the envelope on a subset of them; "+
+				"a breakdown reporting zero of one kind while claiming all of it was dropped is worse for a client than a shorter list of each",
+				len(got.Categories), len(got.MCPTools), len(got.MemoryFiles))
+		}
+	})
+}
+
+// TestMapEventContextUsageUnderBudgetIsUncut pins that the cut is INVISIBLE on a
+// reading that fits: every entry present, in the producer's order, all three counts
+// the producer's own. The measured fake-Claude reading is a fraction of the budget,
+// so this is the shape claude's ordinary output takes.
+//
+// THE HEADROOM PRECONDITION IS THE POINT, not the equality. The equality holds at
+// any budget whatsoever and therefore proves no headroom on its own — the lesson
+// docs/knowledge/features/streamsup-package-producing-turnevent-slashcommandlist.md
+// records. The precondition makes a fixture that grows to meet the budget redden and
+// name itself as the cause.
+func TestMapEventContextUsageUnderBudgetIsUncut(t *testing.T) {
+	t.Parallel()
+
+	got := contextUsageMapped(t, contextUsageFixture)
+	if n := contextUsageListBytes(t, got); n > maxContextUsageListBytes/4 {
+		t.Fatalf("precondition: the fixture's inventories measure %d B against a %d B budget, "+
+			"so this test no longer demonstrates headroom — shrink the fixture or re-derive the budget",
+			n, maxContextUsageListBytes)
+	}
+	if len(got.Categories) != len(contextUsageFixture.Categories) ||
+		len(got.MCPTools) != len(contextUsageFixture.MCPTools) ||
+		len(got.MemoryFiles) != len(contextUsageFixture.MemoryFiles) {
+		t.Fatalf("an under-budget reading was cut: kept %d/%d/%d of %d/%d/%d",
+			len(got.Categories), len(got.MCPTools), len(got.MemoryFiles),
+			len(contextUsageFixture.Categories), len(contextUsageFixture.MCPTools), len(contextUsageFixture.MemoryFiles))
+	}
+	if got.DroppedCategories != contextUsageFixture.DroppedCategories ||
+		got.DroppedMCPTools != contextUsageFixture.DroppedMCPTools ||
+		got.DroppedMemoryFiles != contextUsageFixture.DroppedMemoryFiles {
+		t.Errorf("dropped counts = %d/%d/%d, want the producer's %d/%d/%d carried unchanged",
+			got.DroppedCategories, got.DroppedMCPTools, got.DroppedMemoryFiles,
+			contextUsageFixture.DroppedCategories, contextUsageFixture.DroppedMCPTools, contextUsageFixture.DroppedMemoryFiles)
+	}
+	for i, c := range got.Categories {
+		if c.Name != contextUsageFixture.Categories[i].Name {
+			t.Errorf("category %d = %q, want %q — order is the producer's descending-token ranking", i, c.Name, contextUsageFixture.Categories[i].Name)
+		}
+	}
+}
+
+// TestMapEventContextUsageCutKeepsAPrefixOfEachList is AC2: entries come off the
+// TAIL of each list, never reordered and never hole-punched, so a client sees a
+// shortened inventory rather than one with gaps. The producer ranks descending by
+// tokens, so a hole would destroy the only signal saying which entries were the
+// heaviest.
+//
+// Each list is checked INDEPENDENTLY, because round-robin admission interleaves the
+// three: a lane that closes early must still have left a prefix of its own list
+// behind, whatever the other two did afterwards.
+func TestMapEventContextUsageCutKeepsAPrefixOfEachList(t *testing.T) {
+	t.Parallel()
+
+	got := contextUsageMapped(t, contextUsageWorstCase(true, 0, 0, 0))
+	if len(got.Categories) == 0 || len(got.MCPTools) == 0 || len(got.MemoryFiles) == 0 {
+		t.Fatalf("precondition: kept %d/%d/%d, so at least one list has no prefix to check",
+			len(got.Categories), len(got.MCPTools), len(got.MemoryFiles))
+	}
+
+	names := func(n int, at func(int) string) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = at(i)
+		}
+		return out
+	}
+	contextUsagePrefixCheck(t, "categories", names(len(got.Categories), func(i int) string { return got.Categories[i].Name }))
+	contextUsagePrefixCheck(t, "mcp_tools", names(len(got.MCPTools), func(i int) string { return got.MCPTools[i].Name }))
+	contextUsagePrefixCheck(t, "memory_files", names(len(got.MemoryFiles), func(i int) string { return got.MemoryFiles[i].Path }))
+}
+
+// TestMapEventContextUsageDroppedCountsAreAdditiveAndIndependent is AC4. Each count
+// is its producer-side base PLUS what this frame's own cut removed from its OWN
+// list — never recomputed from a retained length, never cross-read — so
+// len(list) + its own count still recovers that list's pre-cut size, independently
+// for all three pairs.
+//
+// The bases are mutually distinct and non-zero so a cross-wired pair cannot pass: a
+// mapper that added the categories' cut to the MCP field, or that read one base into
+// another's arithmetic, lands on a number no other pair expects.
+func TestMapEventContextUsageDroppedCountsAreAdditiveAndIndependent(t *testing.T) {
+	t.Parallel()
+
+	const (
+		baseCategories = 3
+		baseMCP        = 5
+		baseMemory     = 7
+	)
+	// THE THREE LISTS ARE DIFFERENT LENGTHS ON PURPOSE. Equal-length lists are cut
+	// by nearly equal amounts, and a mapper that adds one list's cut to another's
+	// count then lands on the number the correct mapper would have produced — the
+	// symmetry that let a cross-wiring mutation survive this suite's first draft.
+	// 32/20/12 entries against a cut that lands around the eighth round come out to
+	// three distinct cuts, so every wrong pairing is observable.
+	ev := contextUsageWorstCase(true, baseCategories, baseMCP, baseMemory)
+	ev.MCPTools = ev.MCPTools[:20]
+	ev.MemoryFiles = ev.MemoryFiles[:12]
+	got := contextUsageMapped(t, ev)
+
+	for _, pair := range []struct {
+		name   string
+		kept   int
+		source int
+		base   int
+		got    int
+	}{
+		{"dropped_categories", len(got.Categories), len(ev.Categories), baseCategories, got.DroppedCategories},
+		{"dropped_mcp_tools", len(got.MCPTools), len(ev.MCPTools), baseMCP, got.DroppedMCPTools},
+		{"dropped_memory_files", len(got.MemoryFiles), len(ev.MemoryFiles), baseMemory, got.DroppedMemoryFiles},
+	} {
+		if pair.kept >= pair.source {
+			t.Fatalf("precondition: %s kept %d of %d, so no frame-side cut is being counted", pair.name, pair.kept, pair.source)
+		}
+		if want := pair.base + (pair.source - pair.kept); pair.got != want {
+			t.Errorf("%s = %d, want %d (producer base %d + %d cut here)", pair.name, pair.got, want, pair.base, pair.source-pair.kept)
+		}
+		// The recovery property the payload's doc promises a client, stated from
+		// the client's side rather than the mapper's.
+		if recovered := pair.kept + pair.got; recovered != pair.source+pair.base {
+			t.Errorf("%s: len(list) + count = %d, want the list's pre-cut size %d", pair.name, recovered, pair.source+pair.base)
+		}
+	}
+	if got.DroppedCategories == got.DroppedMCPTools || got.DroppedMCPTools == got.DroppedMemoryFiles ||
+		got.DroppedCategories == got.DroppedMemoryFiles {
+		t.Errorf("two of the three counts coincide (%d/%d/%d), so this fixture can no longer catch a cross-wired pair",
+			got.DroppedCategories, got.DroppedMCPTools, got.DroppedMemoryFiles)
+	}
+}
+
+// TestMapEventContextUsageCutClosesTheLaneRatherThanSkipping pins that a list whose
+// entry does not fit CLOSES rather than skipping that entry and admitting a smaller
+// one behind it. #2002's Revisions record that its plan stated the same decision and
+// its suite did not test it; this one needs a sharper fixture still, and the reason
+// is worth stating because it is a property of THIS arm's control flow.
+//
+// A SINGLE-LIST FIXTURE CANNOT SEE THE DIFFERENCE. The walk already ends on the
+// first round that admits nothing, so with one populated list a rejection ends the
+// whole walk whether or not the list is also marked closed — the close flag is dead
+// weight and a mutation removing it stays green. The flag is load-bearing only when
+// ANOTHER list is still admitting: the round then counts as progress, the walk goes
+// on, and an unclosed list would be offered its next entry.
+//
+// So the fixture populates two: `categories` is 32 cheap rows that keep the walk
+// alive well past the cut, and `mcp_tools` is a block of fat rows followed by tiny
+// ones. The budget fires inside the fat block, and the tiny rows behind it are small
+// enough to fit in what remains — so a skipping implementation reaches and admits
+// them, and the prefix assertion names the first one it does.
+//
+// The three preconditions guard the window rather than assume it, because it is an
+// arithmetic coincidence between two row sizes and a budget: the cut must land
+// inside the fat block, cheap rows must outlive it, and the leftover must still
+// cover a tiny row. If any of them stops holding, the test says so instead of
+// passing vacuously. The prefix check deliberately runs BEFORE them — a skipping
+// implementation keeps MORE rows, and a count guard placed first would report the
+// failure as a stale fixture.
+func TestMapEventContextUsageCutClosesTheLaneRatherThanSkipping(t *testing.T) {
+	t.Parallel()
+
+	// fatFill is well under the producer's 256-byte cap: what this fixture needs is
+	// a row big enough to be rejected with room to spare behind it, not the largest
+	// row the producer permits — the worst-case tests above own that.
+	const (
+		fatFill  = 200
+		fatBlock = 28
+	)
+	fat := func(i int) string {
+		return fmt.Sprintf("%02d", i) + strings.Repeat("&", fatFill-2)
+	}
+
+	ev := turnevent.ContextUsage{}
+	for i := range contextUsageTestEntries {
+		ev.Categories = append(ev.Categories, turnevent.ContextUsageCategory{
+			Name: fmt.Sprintf("%02d", i), Tokens: -2147483648,
+		})
+		name := fmt.Sprintf("%02d", i)
+		if i < fatBlock {
+			name = fat(i)
+		}
+		ev.MCPTools = append(ev.MCPTools, turnevent.ContextUsageMCPTool{
+			Name: name, ServerName: name, Tokens: -2147483648,
+		})
+	}
+
+	got := contextUsageMapped(t, ev)
+	names := make([]string, len(got.MCPTools))
+	for i, tool := range got.MCPTools {
+		names[i] = tool.Name
+	}
+	contextUsagePrefixCheck(t, "mcp_tools", names)
+	for i, tool := range got.MCPTools {
+		if len(tool.Name) != fatFill {
+			t.Errorf("mcp_tools entry %d is a %d-byte row where every admitted row should be %d: a row from behind the cut was admitted, so the walk skipped rather than ended",
+				i, len(tool.Name), fatFill)
+		}
+	}
+
+	tiny, err := json.Marshal(protocol.ContextUsageMCPTool{Name: "30", ServerName: "30", Tokens: -2147483648})
+	if err != nil {
+		t.Fatalf("marshal a tiny row: %v", err)
+	}
+	leftover := maxContextUsageListBytes - contextUsageListBytes(t, got)
+	t.Logf("cut landed after %d of %d fat mcp_tools rows; %d of %d categories kept; %d B left of the budget against a %d B tiny row",
+		len(got.MCPTools), fatBlock, len(got.Categories), len(ev.Categories), leftover, len(tiny)+1)
+
+	switch {
+	case len(got.MCPTools) == 0 || len(got.MCPTools) >= fatBlock:
+		t.Fatalf("precondition: kept %d mcp_tools, want the cut to land inside the first %d fat rows", len(got.MCPTools), fatBlock)
+	case len(got.Categories) <= fatBlock:
+		t.Fatalf("precondition: only %d categories survived, so the walk did not outlive the cut at entry %d and an unclosed list would never have been offered a tiny row",
+			len(got.Categories), len(got.MCPTools))
+	case leftover <= len(tiny)+1:
+		t.Fatalf("precondition: %d B left of the budget at the cut, no more than the %d B a tiny row costs — a skipping implementation could not have admitted one either, so this fixture no longer distinguishes the two",
+			leftover, len(tiny)+1)
+	}
 }

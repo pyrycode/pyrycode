@@ -227,6 +227,115 @@ const maxResultSummaryRunes = 10000
 // fabric), maxDeltaTextBytes' pairing unchanged.
 const maxSlashCommandListBytes = 64000
 
+// maxContextUsageListBytes bounds the SERIALISED inventory arrays of a
+// context_usage payload — all THREE of them together, each array's own brackets
+// and separators included — so the marshalled protocol.Envelope stays under the
+// 65519-byte v2 application-envelope cap (docs/protocol-mobile.md § Application-
+// envelope size cap). maxSlashCommandListBytes' rule applies unchanged: it bounds
+// the BOUNDED FIELDS and not the envelope, so do not "correct" it towards 65519,
+// and do not confuse it with outbound_test.go's maxV2AppEnvelope, which IS that cap.
+//
+// WHAT IT DEFENDS AGAINST is the sibling constant's failure mode with a different
+// multiplier. streamsup bounds every CONTENT dimension — maxContextUsageEntries at
+// 32 entries per list, maxContextUsageStringBytes rejecting any entry whose
+// designated string exceeds 256 bytes — and those caps compose to 44995 B of
+// arrays, which FITS. What does not fit is the same reading after encoding/json's
+// escaping: SetEscapeHTML is on by default, '&', '<', '>' and U+2028/U+2029 each
+// cost six bytes, so a worst-case row is ~1568 B for a category and ~3121 B for an
+// MCP tool or a memory file, and 32 of each is ~249,700 B of arrays — 3.8x the whole
+// cap. Roughly 4000 such characters, about 9% of the string content, exhaust the raw
+// case's ~20 KB of headroom. AN OVER-CAP ENVELOPE IS REJECTED BY THE TRANSPORT WITH
+// message.too_long RATHER THAN TRUNCATED, so the frame is lost whole. A COUNT CAP
+// CANNOT CLOSE THAT, which is why the cut is MEASURED against marshalled bytes; the
+// producer's 32-per-list cap is already a count cap and is the thing that fails.
+//
+// THE RESERVE is 65519 - 60000 = 5519 B, for everything outside the three arrays,
+// and this frame needs a bigger one than the sibling's 1519 B for a concrete
+// reason: Model is a producer-bounded 256-byte string that lives OUTSIDE the
+// budgeted lists, so at the '&' worst case it alone costs ~1547 B of reserve where
+// slash_command_list has no such field. The rest is every integer at its widest, the
+// three dropped_* keys, the three list keys, the payload's braces, and the
+// envelope's id, type, ts, payload and event_id frame, all beside a HOSTILE 64-rune
+// all-escaping conversation_id — hostile because nothing in this package bounds that
+// field, maxResultSummaryRunes' stated assumption unchanged.
+// TestMapEventContextUsageWorstCaseAgainstV2EnvelopeCap measures that reserve at
+// 2284 B, so 5519 is roughly 2.4x an already-pessimistic worst case, and the
+// measured worst-case envelope is 61240 B, 93.5% of the cap.
+//
+// THE GUARANTEE IS STRUCTURAL RATHER THAN THAT MEASUREMENT, which matters because a
+// reading that packs the budget more tightly than the worst case does exists: the
+// arrays cannot exceed 60000 B whatever the input, so no envelope can exceed
+// 60000 + the reserve, and the ~3235 B of spare would take another ~539 escaped
+// runes of conversation_id to consume.
+//
+// ITS BRANCH IS UNREACHABLE ON CLAUDE'S ORDINARY OUTPUT, which is what makes it a
+// bound rather than dead code, and it is the property to preserve if the number ever
+// moves: the raw worst case at every producer cap is 44995 B of arrays against this
+// 60000, so the budget fires only once escaping is in play. The measured
+// fake-Claude reading is a small fraction of it. What the bound answers is the
+// workspace that capture is not — markup-dense MCP tool names or memory-file paths,
+// where a breakdown that would today be lost whole arrives cut and counted instead.
+//
+// THE DEGRADED SHAPE IS NOT ROOMY, and a reader should not assume otherwise: at the
+// escaped worst case only 8 categories, 8 MCP tools and 7 memory files survive of
+// 32 each. That is the design working — every list keeps its heaviest entries and
+// its own honest dropped count — but it is a short inventory, not a near-complete
+// one.
+//
+// The invariant is ENFORCED by TestMapEventContextUsageWorstCaseAgainstV2EnvelopeCap;
+// if that ever fails, LOWER this constant — never raise it. The conservative constant
+// is the belt; the deterministic per-frame cap test is the suspenders (different
+// fabric), maxSlashCommandListBytes' and maxDeltaTextBytes' pairing unchanged.
+const maxContextUsageListBytes = 60000
+
+// admitContextUsageRow charges one marshalled row against the context_usage frame's
+// SHARED byte budget and appends it when it fits. It reports whether the row was
+// admitted; false CLOSES that list's walk in the caller, and never means "skip this
+// row and try the next".
+//
+// size is the running total of all three serialised arrays, so the three lists
+// compete for one budget rather than for a share each — MapEvent's ContextUsage arm
+// carries the apportionment argument. It starts at 6, the three arrays' own "[" and
+// "]", which cost 2 B each on the wire whether or not a row is admitted because
+// ContextUsagePayload.MarshalJSON normalises a nil list to [].
+//
+// The cost is len(json.Marshal(row)) plus one byte for the comma separating this row
+// from the last one kept IN ITS OWN LIST. Marshalling the PROTOCOL row rather than
+// the turnevent one is what makes the measurement the wire's: the JSON key names are
+// inside those bytes, and so is any normalisation the row type owns. The marshalled
+// bytes are used for their LENGTH ONLY and discarded — they are not the bytes that
+// ship, not compared against anything and not retained.
+//
+// A row that cannot be marshalled at all closes the list the same way and is counted
+// as dropped. That is unreachable — encoding/json coerces invalid UTF-8 rather than
+// rejecting it, and the three row types are flat string/int structs — and it is
+// fail-closed rather than a path invented for a reachable state: an entry that cannot
+// be measured cannot be admitted to a measured budget. The branch builds NO ERROR
+// VALUE AND WRITES NO LOG LINE, because wrapping a row's Name or Path into one would
+// put claude- or workspace-authored text on the exact path the arm exists to keep it
+// off — and a path is the value a reader is likeliest to think worth logging.
+//
+// Generic for the reason streamsup's boundContextUsageEntries is, over the same
+// event: three inventories of unrelated row types need one piece of arithmetic, and
+// three copies of it are three places it can drift. It is package-private and
+// instantiated only at the three protocol.ContextUsage* row types.
+func admitContextUsageRow[T any](row T, dst *[]T, size *int) bool {
+	b, err := json.Marshal(row)
+	if err != nil {
+		return false
+	}
+	cost := len(b)
+	if len(*dst) > 0 {
+		cost++ // the comma separating this row from the last kept one
+	}
+	if *size+cost > maxContextUsageListBytes {
+		return false
+	}
+	*size += cost
+	*dst = append(*dst, row)
+	return true
+}
+
 // MapEvent maps one neutral turnevent.Event plus explicit turn context to the
 // matching v2 interactive wire payload and its envelope type discriminant.
 //
@@ -1098,32 +1207,40 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 		//     analogue on this frame, so this arm carries none of their asymmetry:
 		//     all three lists take the SAME polarity, and that uniformity is a fact
 		//     about the payload type rather than an oversight to "fix".
-		//   - THE THREE DROPPED COUNTS ARE INDEPENDENT AND CARRIED, never recomputed
-		//     from a retained list's length and never a constant. Each is the count
-		//     its own boundContextUsageEntries call recorded when streamsup's
-		//     maxContextUsageEntries or maxContextUsageStringBytes fired, so each
-		//     list's original size stays recoverable as len(list) + its OWN count.
-		//     The three pairs are never cross-read: the measured fake-Claude reading
-		//     drops 0 categories, 1 MCP tool and 1 memory file, so a mapper that
-		//     wired one count into another's field is observable rather than
-		//     theoretical. Shipping 0 tells a client a cut inventory is the whole one.
+		//   - THE THREE DROPPED COUNTS ARE INDEPENDENT, CARRIED AND ADDED TO, never
+		//     recomputed from a retained list's length and never a constant. The base
+		//     is the count its own boundContextUsageEntries call recorded when
+		//     streamsup's maxContextUsageEntries or maxContextUsageStringBytes fired,
+		//     and THE FRAME CUT BELOW ADDS WHATEVER IT REMOVES FROM THAT SAME LIST on
+		//     top, so each list's original size stays recoverable as len(list) + its
+		//     OWN count across BOTH cuts. Recomputing a count from the payload's own
+		//     rows yields the wrong number by construction, and shipping 0 tells a
+		//     client a cut inventory is the whole one. The three pairs are never
+		//     cross-read: the measured fake-Claude reading drops 0 categories, 1 MCP
+		//     tool and 1 memory file, so a mapper that wired one count into another's
+		//     field is observable rather than theoretical — and the frame cut makes
+		//     that sharper, since it feeds all three pairs at once where the producer
+		//     often feeds only one. SlashCommandList's DroppedCommands one case up is
+		//     the same two-cut arithmetic on a frame with a single list.
 		//   - The scalars are CLAUDE'S OWN. Percentage is not derived from
 		//     TotalTokens and MaxTokens and the categories are not summed to check
 		//     the total — ContextUsagePayload's doc forbids a client assuming either,
 		//     and a mapper that recomputed one here would make the frame disagree
 		//     with the reading it claims to report.
 		//
-		// NOTHING IS RE-CAPPED, RE-ORDERED, CANONICALISED OR CHARSET-CHECKED. The
-		// producer bounded every dimension at construction — streamsup's
-		// maxContextUsageEntries caps each list at 32 and maxContextUsageStringBytes
-		// rejects an entry whose designated string exceeds 256 bytes, Model included
-		// — so a second cap here would be a second place the limit is decided and the
-		// two could disagree silently. maxSummaryLen and maxResultSummaryRunes live
-		// in THIS file and are NOT applicable bounds; reaching for either is the
-		// specific mistake to avoid. Entry order is the producer's descending-by-
-		// tokens ranking, so a sort is observable rather than harmless: a producer-
-		// side count cut keeps the heaviest entries, and re-ordering here would
-		// destroy the only signal saying which those were.
+		// NOTHING IS RE-CAPPED, RE-ORDERED, CANONICALISED OR CHARSET-CHECKED ALONG ANY
+		// DIMENSION THE PRODUCER BOUNDS. It bounded every CONTENT dimension at
+		// construction — streamsup's maxContextUsageEntries caps each list at 32 and
+		// maxContextUsageStringBytes rejects an entry whose designated string exceeds
+		// 256 bytes, Model included — so a second cap on any of those here would be a
+		// second place that limit is decided and the two could disagree silently.
+		// maxSummaryLen and maxResultSummaryRunes live in THIS file and are NOT
+		// applicable bounds; reaching for either is the specific mistake to avoid.
+		// Entry order is the producer's descending-by-tokens ranking, so a sort is
+		// observable rather than harmless: a producer-side count cut keeps the
+		// heaviest entries, and re-ordering here would destroy the only signal saying
+		// which those were. No string is shortened, either — an entry is admitted
+		// WHOLE or not at all, so no client ever renders a name this layer trimmed.
 		//
 		// THE MEMORY PATH IS NOT NORMALISED, and this is the one rule a well-meaning
 		// reader is likeliest to break, because the value is path-shaped. No
@@ -1146,9 +1263,18 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 		// slice field, so the element-wise copy into a fresh outer slice shares no
 		// mutable backing array at all; the shared string headers are safe because Go
 		// strings are immutable. The ModelList arm above needs its rule because
-		// cmd/pyry's sessionModelHold retains that event across goroutines; NO
-		// analogue retains a ContextUsage, so the hazard differs in kind and this
-		// arm's read-only loops are sufficient.
+		// cmd/pyry's sessionModelHold retains that event across goroutines; no
+		// analogue retains a ContextUsage EVENT, so the hazard differs in kind and
+		// this arm's read-only loops are sufficient.
+		//
+		// WHAT IS RETAINED NOW IS THE MAPPED PAYLOAD, which #2371 could truthfully say
+		// nothing about and #2431 changed: contextUsageResolver holds one mapped
+		// payload in a contextUsageFlight and hands that SAME value to every asker
+		// that joins the flight. It is safe for the reason above — the payload's
+		// slices are fresh outer slices of flat value copies, sharing nothing with the
+		// event or with each other — and it is why the cut must build a fresh slice
+		// and STOP EARLY rather than reslice or truncate e.Categories, e.MCPTools or
+		// e.MemoryFiles in place, which is the shortcut a byte budget invites.
 		//
 		// EVERY STRING HERE IS CLAUDE- OR WORKSPACE-AUTHORED and NONE MAY REACH A LOG
 		// RECORD — so this arm writes no log line at all, which is what cmd/pyry's
@@ -1159,18 +1285,48 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 		// bytes are bounded but NOT sanitized, and the render boundary owing that is
 		// the CLIENT's, as the payload type's SECURITY paragraphs assign.
 		//
-		// NO FRAME BYTE BUDGET, unlike the SlashCommandList arm one case up, and that
-		// asymmetry is deliberate rather than an omission. Its worst case is measured
-		// in TestMapEventContextUsageWorstCaseAgainstV2EnvelopeCap rather than argued
-		// here: three 32-entry lists of 256-byte strings fit the 65519-byte v2
-		// application-envelope cap with headroom, and only encoding/json's six-byte
-		// escaping of <, > and & can exhaust it. That residual loss is bounded and
-		// self-repairing — the reading is re-asked after the next turn — on a lane
-		// that is best-effort by construction. If the producer's caps ever RISE, that
-		// test reddens and this arm needs a budget of its own. #2428 carries the
-		// budget decision, which is a design question rather than a copy of the
-		// sibling arm: this frame has THREE independent lists and three independent
-		// dropped counts, so a budget has to decide how to apportion across them.
+		// THE FRAME AXIS IS A DIFFERENT DIMENSION AND IT IS DECIDED HERE (#2428),
+		// which is why the paragraph above is scoped to the producer's dimensions
+		// rather than claiming this arm does nothing. No cap the producer applies
+		// bounds how many BYTES the three lists cost on the wire: 96 entries at their
+		// escaped per-entry terms measure ~249,700 B against a 65519-byte cap, and an
+		// over-cap envelope is REJECTED with message.too_long rather than truncated,
+		// so the frame is lost whole. This is the one place both wire consumers pass
+		// through — #2371's post-turn publication and #2431's on-demand resolver — so
+		// one bound here covers both where a bound at either would be that second
+		// place. maxContextUsageListBytes carries the arithmetic and the reserve.
+		//
+		// APPORTIONMENT IS ROUND-ROBIN ACROSS THE THREE LISTS AGAINST ONE SHARED
+		// BUDGET, and it is the design decision this arm owns rather than a copy of
+		// the sibling's straight tail cut — that frame has one list, this one has
+		// three that have to divide an envelope. Round n offers each still-open list
+		// its entry at index n, in the fixed order categories, mcp_tools,
+		// memory_files; a list whose entry does not fit is CLOSED; the walk ends on
+		// the first round that admits nothing. EQUAL TURNS, NOT EQUAL BYTES, which is
+		// the right currency: it charges a list for how expensive its rows are without
+		// letting it starve a list that still has rows left.
+		//
+		// The two alternatives and why they lose. FIXED THIRDS — 20000 B per list, cut
+		// independently — would satisfy the same floor but waste the envelope: a
+		// reading with no categories and a full escape-heavy MCP inventory would be cut
+		// at a third of the budget with 40000 B unspent, a shorter breakdown for no
+		// gain. SEQUENTIAL WITH A RESERVED FLOOR — walk categories to exhaustion
+		// holding back one row's worth for each unstarted list — is comparable code
+		// with a worse outcome: 32 categories, one MCP tool and one memory file is
+		// exactly the lopsided breakdown the floor exists to prevent, satisfied in its
+		// letter. The floor itself holds by ARITHMETIC rather than by a special case:
+		// round 0 offers all three lists their first row at a combined escaped worst
+		// case of roughly 7.8 KB against 60000, so no reading the producer's caps
+		// permit can spend the envelope on one list.
+		//
+		// The cut is MEASURED rather than counted, for maxContextUsageListBytes'
+		// stated reason, and it takes a PREFIX of each list: entries come off the TAIL
+		// in the producer's descending-token order, never reordered and never
+		// hole-punched, so a client sees a shortened inventory rather than one with
+		// gaps. A row that does not fit ENDS its list's walk rather than being skipped
+		// over in favour of a smaller one behind it — skipping would present a hole in
+		// a ranking whose whole meaning is that the entries above it were heavier.
+		// admitContextUsageRow owns that arithmetic and its failure branch.
 		//
 		// No suppression branch, not even on three empty inventories. The gate that
 		// decides whether the event exists at all is the producer's — streamsup's
@@ -1179,28 +1335,59 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 		// it, the hazard the ThinkingProgress, RateLimited, ModelAnnounced, ModelList
 		// and SlashCommandList arms each name. A zero-value ContextUsage therefore
 		// maps, and an empty reading is a POSITIVE report a client may display.
-		var categories []protocol.ContextUsageCategory
-		for _, c := range e.Categories {
-			categories = append(categories, protocol.ContextUsageCategory{
-				Name:   c.Name,
-				Tokens: c.Tokens,
-			})
-		}
-		var mcpTools []protocol.ContextUsageMCPTool
-		for _, tool := range e.MCPTools {
-			mcpTools = append(mcpTools, protocol.ContextUsageMCPTool{
-				Name:       tool.Name,
-				ServerName: tool.ServerName,
-				Tokens:     tool.Tokens,
-			})
-		}
-		var memoryFiles []protocol.ContextUsageMemoryFile
-		for _, file := range e.MemoryFiles {
-			memoryFiles = append(memoryFiles, protocol.ContextUsageMemoryFile{
-				Path:   file.Path,
-				Type:   file.Type,
-				Tokens: file.Tokens,
-			})
+		var (
+			categories  []protocol.ContextUsageCategory
+			mcpTools    []protocol.ContextUsageMCPTool
+			memoryFiles []protocol.ContextUsageMemoryFile
+		)
+		// size starts at 6, the three arrays' own "[" and "]", so the running total
+		// is what the three marshalled inventories will measure rather than a
+		// content-only sum. openCategories and its peers each close at their own
+		// list's first row that does not fit; the round ends the walk when it admits
+		// nothing, which covers both "every list is closed" and "every list is
+		// exhausted" without a separate check.
+		size := 6
+		openCategories, openMCPTools, openMemoryFiles := true, true, true
+		for round := 0; ; round++ {
+			admitted := false
+			if openCategories && round < len(e.Categories) {
+				c := e.Categories[round]
+				row := protocol.ContextUsageCategory{Name: c.Name, Tokens: c.Tokens}
+				if admitContextUsageRow(row, &categories, &size) {
+					admitted = true
+				} else {
+					openCategories = false
+				}
+			}
+			if openMCPTools && round < len(e.MCPTools) {
+				tool := e.MCPTools[round]
+				row := protocol.ContextUsageMCPTool{
+					Name:       tool.Name,
+					ServerName: tool.ServerName,
+					Tokens:     tool.Tokens,
+				}
+				if admitContextUsageRow(row, &mcpTools, &size) {
+					admitted = true
+				} else {
+					openMCPTools = false
+				}
+			}
+			if openMemoryFiles && round < len(e.MemoryFiles) {
+				file := e.MemoryFiles[round]
+				row := protocol.ContextUsageMemoryFile{
+					Path:   file.Path,
+					Type:   file.Type,
+					Tokens: file.Tokens,
+				}
+				if admitContextUsageRow(row, &memoryFiles, &size) {
+					admitted = true
+				} else {
+					openMemoryFiles = false
+				}
+			}
+			if !admitted {
+				break
+			}
 		}
 		return protocol.TypeContextUsage, protocol.ContextUsagePayload{
 			ConversationID:     tc.ConversationID,
@@ -1209,11 +1396,11 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			MaxTokens:          e.MaxTokens,
 			Percentage:         e.Percentage,
 			Categories:         categories,
-			DroppedCategories:  e.DroppedCategories,
+			DroppedCategories:  e.DroppedCategories + (len(e.Categories) - len(categories)),
 			MCPTools:           mcpTools,
-			DroppedMCPTools:    e.DroppedMCPTools,
+			DroppedMCPTools:    e.DroppedMCPTools + (len(e.MCPTools) - len(mcpTools)),
 			MemoryFiles:        memoryFiles,
-			DroppedMemoryFiles: e.DroppedMemoryFiles,
+			DroppedMemoryFiles: e.DroppedMemoryFiles + (len(e.MemoryFiles) - len(memoryFiles)),
 		}, true
 	default:
 		// ThoughtChunk and nil/unknown drop (see doc comment).
