@@ -25,7 +25,7 @@ the ACP session lifecycle.
 - Ticket record: [codebase/769.md](../codebase/769.md).
 - Contract: [ADR 027](../decisions/027-acp-mapping.md) — internal turn-event ↔ ACP mapping.
 - Pivot model: [turnevent-package.md](turnevent-package.md) (#606) — what `MapUpdate` maps OUT of.
-- Template / mobile mirror: [turnbridge-package.md § The outbound adapter](turnbridge-package.md#the-outbound-adapter-mapevent--buildturnstate) (#627).
+- Template / mobile mirror: [turnbridge-package-outbound-adapter.md § The outbound adapter](turnbridge-package-outbound-adapter.md) (#627).
 
 ## Files
 

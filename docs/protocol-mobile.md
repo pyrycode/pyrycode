@@ -2510,12 +2510,28 @@ publication path and a later on-demand reply, exactly as
 [`mcp_status`](#mcp_status) is shared by its own pair: one outbound shape,
 correlated at the envelope rather than by a second request verb.
 
-**Declared here; not yet emitted.** This slice declares the type and payload
-only. #2371 maps `internal/turnevent`'s `ContextUsage` event and publishes
-this frame once after a turn; #2293 answers a fresh on-demand request with
-the same frame, correlated by `in_reply_to`. Neither producer has landed yet
-— this section documents the shape a client can already decode against, not
-live traffic.
+**Emitted after a turn (#2371).** The daemon asks claude for a fresh reading
+once a turn ends (`turnEndContextUsageRequester`, #2289) and publishes this
+frame — mapped from `internal/turnevent`'s `ContextUsage` event — immediately
+after that turn's [`turn_end`](#turn_end), on the same conversation-keyed
+interactive lane every other turn-stream frame rides, with no second
+capability gate of its own. Delivery is best-effort: the ask is unconditional
+and re-issued after every completed turn, so a dropped frame is at most one
+turn stale rather than lost for the conversation's lifetime. #2293 will answer
+a fresh on-demand request with the same payload shape, correlated by
+`in_reply_to`, reusing this declaration rather than adding a second one; that
+verb has not landed yet.
+
+**This is a different reading from [`session_settings`](#session_settings)'s
+`used_tokens`/`window_tokens`, and neither replaces the other.** That pair is
+transcript-derived — read by the daemon off the addressed session's own
+transcript file — and answers a settings request. This frame is
+claude-solicited — claude's own arithmetic, returned as an answer to the
+daemon's post-turn ask — and carries the categorised breakdown
+(`categories`/`mcp_tools`/`memory_files`) the transcript reading has no
+concept of. A client showing both should not expect their percentages to
+agree: they are computed by different parties from different sources on
+different cadences.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -4529,7 +4545,7 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 
 ## Changelog
 
-- `2026-09-14`: **The daemon's context-window breakdown has a stable frame to decode against** (#2370) — a new outbound-only type, [`context_usage`](#context_usage), carrying `model`, the totals and percentage, and three independently bounded inventories (`categories`, `mcp_tools`, `memory_files`), each with its own dropped count. **Declared, not yet emitted**: this ticket adds the type and payload only, so a client can be written against it in parallel — #2371 maps `turnevent.ContextUsage` and publishes the frame after a turn, and #2293 answers a fresh on-demand request with the same shape, correlated by `in_reply_to`; neither has landed, and this section says so rather than claiming live traffic. **One shape serves both later producers**, [`mcp_status`](#mcp_status)'s arrangement: no request verb or correlation field belongs on this payload. **The payload is mixed-provenance, not uniformly untrusted or uniformly trusted**: `conversation_id` is daemon-authored, filled from the daemon's own registry, while every other string — `model` and every row's descriptive fields — is claude- or workspace-authored text this layer neither validates nor sanitises. **Three dropped counts, never inferred from a retained list's length** — each list's original size is `len(list) + its own dropped count`, and the three pairs are never cross-read. **`path` on a memory-file row is path-shaped text, not a file handle**: nothing on this path opens, joins, cleans or resolves it. **`server_name` on an MCP-tool row is inert** despite colliding by name with the actuating `MCPReconnectPayload.ServerName` — it names a contributor to a reading and must never be fed back as an actuation or authorization input. Empty lists encode as `[]`, never `null`, `MCPStatusPayload`'s precedent. The reading is informational and does not replace the daemon-owned context-window value that control decisions use.
+- `2026-09-14`: **The daemon's context-window breakdown has a stable frame to decode against, and now publishes it** (#2370, emitted by #2371) — a new outbound-only type, [`context_usage`](#context_usage), carrying `model`, the totals and percentage, and three independently bounded inventories (`categories`, `mcp_tools`, `memory_files`), each with its own dropped count. **Declared by #2370, emitted by #2371**: the daemon now publishes this frame once after every completed turn, mapped from `internal/turnevent.ContextUsage` via the solicited post-turn ask (`turnEndContextUsageRequester`, #2289), on the existing conversation-keyed interactive lane with no second capability gate. #2293 will answer a fresh on-demand request with the same shape, correlated by `in_reply_to`; that verb has not landed yet. **One shape serves both producers**, [`mcp_status`](#mcp_status)'s arrangement: no request verb or correlation field belongs on this payload. **The payload is mixed-provenance, not uniformly untrusted or uniformly trusted**: `conversation_id` is daemon-authored, filled from the daemon's own registry, while every other string — `model` and every row's descriptive fields — is claude- or workspace-authored text this layer neither validates nor sanitises, and the mapper carries it unchanged (no re-sort, re-cap or recompute). **Three dropped counts, never inferred from a retained list's length** — each list's original size is `len(list) + its own dropped count`, and the three pairs are never cross-read. **`path` on a memory-file row is path-shaped text, not a file handle**: nothing on this path opens, joins, cleans or resolves it. **`server_name` on an MCP-tool row is inert** despite colliding by name with the actuating `MCPReconnectPayload.ServerName` — it names a contributor to a reading and must never be fed back as an actuation or authorization input. Empty lists encode as `[]`, never `null`, `MCPStatusPayload`'s precedent. The reading is informational and does not replace the daemon-owned context-window value that control decisions use, and it is a distinct reading from [`session_settings`](#session_settings)'s transcript-derived `used_tokens`/`window_tokens` — neither supersedes the other. No category name, MCP name or memory path reaches a daemon log record at any level.
 
 - `2026-09-10`: **An open tool row now receives `claude`'s elapsed counter** (#2324) — a new push-only [`tool_progress`](#tool_progress) frame carries the current conversation and turn ids, the byte-identical `tool_use_id` join key, and `claude`'s signed `elapsed_seconds` reading. The daemon forwards each heartbeat without computing, clamping, retaining, deduplicating, or rate-limiting it; [`tool_result`](#tool_result) remains the only terminal frame. **Absence proves nothing** because a short call can finish before the first heartbeat and later frames can be lost independently. The payload deliberately carries no session id, UUID, tool name, sequence, or parent id. The join id was bounded and dropped-not-cut by #2323 before this mapping, but remains an untrusted display handle: neither the daemon nor a client may treat it or the elapsed value as authority or proof of execution. Populated and zero-value fixtures pin all four keys with no `omitempty`. The four live-event statements now read **twenty**, matching the `####` headings from `turn_state` through `model_announced`.
 
