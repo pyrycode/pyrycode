@@ -2462,6 +2462,18 @@ type Parser struct {
 	// relay workers and claims from the stdout forwarder.
 	mcpStatusQueries mcpStatusQueries
 
+	// mcpActuations correlates the daemon-private MCP reconnect and toggle acks,
+	// with the same privacy property as mcpStatusQueries above: a claimed ack
+	// completes one waiter and never reaches the shared event sink. Its own mutex
+	// covers registration from callers while Write consumes stdout on another
+	// goroutine.
+	//
+	// A SECOND MAP rather than a shared one, because the two id namespaces must stay
+	// disjoint: mcpStatusQueries.claim consumes every unregistered id carrying ITS
+	// prefix, so an actuation minting under that prefix would have its acks swallowed
+	// before this correlator saw them — a hang, not a miss.
+	mcpActuations mcpActuations
+
 	// mcpStatusPolicy belongs to the current child. The runner replaces it before
 	// cmd.Start, and cmd.Wait joins the prior stdout forwarder before another child
 	// can replace it, so Parser's single-writer lifecycle covers the fields without
@@ -2529,8 +2541,10 @@ type mcpStatusChildPolicy struct {
 func (p *Parser) beginMCPStatusChild(eligible bool, request func() error) {
 	// A child replacement terminates every query aimed at its predecessor. The
 	// request-id prefix keeps any already-buffered late reply private even after
-	// its pending entry is gone.
+	// its pending entry is gone. Actuations retire on the same boundary and for the
+	// same reason: a waiter must not outlive the exact child it targeted.
 	p.mcpStatusQueries.failAll()
+	p.mcpActuations.failAll()
 	p.mcpStatusPolicy = mcpStatusChildPolicy{
 		installed: true,
 		eligible:  eligible,
@@ -2556,6 +2570,18 @@ func (p *Parser) removeMCPStatusQuery(id string, pending *pendingMCPStatusQuery)
 
 func (p *Parser) failMCPStatusQueries() {
 	p.mcpStatusQueries.failAll()
+}
+
+func (p *Parser) registerMCPActuation(id string) *pendingMCPActuation {
+	return p.mcpActuations.register(id)
+}
+
+func (p *Parser) removeMCPActuation(id string, pending *pendingMCPActuation) {
+	p.mcpActuations.remove(id, pending)
+}
+
+func (p *Parser) failMCPActuations() {
+	p.mcpActuations.failAll()
 }
 
 // SetCanUseToolHandler installs h as the destination for claude's inbound
@@ -3577,6 +3603,106 @@ func (q *mcpStatusQueries) failAll() {
 	q.mu.Unlock()
 	for _, query := range pending {
 		query.complete(turnevent.MCPStatus{}, false)
+	}
+}
+
+// pendingMCPActuation is one caller waiting on the ack to its own MCP reconnect or
+// toggle. The result is a BARE VERDICT and that is the capture's finding, not a
+// simplification: internal/e2e/realclaude/testdata/mcp_status_v2.1.259.json records
+// claude answering both verbs with a control_response carrying subtype and
+// request_id and NOTHING ELSE — no server list, no per-server row. There is no
+// payload to carry back, so a caller wanting a fresh inventory asks QueryMCPStatus
+// for one separately.
+//
+// The shape is pendingMCPStatusQuery's deliberately, writeDone gate included, and
+// the two are NOT unified behind a generic: the status path is shipped and proven,
+// and parameterising its result type would put it inside an actuation diff for no
+// behavioural gain.
+type pendingMCPActuation struct {
+	writeDone  chan struct{}
+	writeOK    bool
+	writeOnce  sync.Once
+	result     chan bool
+	resultOnce sync.Once
+}
+
+func newPendingMCPActuation() *pendingMCPActuation {
+	return &pendingMCPActuation{
+		writeDone: make(chan struct{}),
+		result:    make(chan bool, 1),
+	}
+}
+
+func (p *pendingMCPActuation) resolveWrite(ok bool) {
+	p.writeOnce.Do(func() {
+		p.writeOK = ok
+		close(p.writeDone)
+	})
+}
+
+// written blocks until the write outcome is known. It is what lets a FAILED WRITE
+// beat an ack the parser has already claimed: the child answering some request does
+// not establish that THIS one reached it intact, so a claim that arrives while the
+// writer is still failing must not report accepted.
+func (p *pendingMCPActuation) written() bool {
+	<-p.writeDone
+	return p.writeOK
+}
+
+func (p *pendingMCPActuation) complete(accepted bool) {
+	p.resultOnce.Do(func() {
+		p.result <- accepted
+	})
+}
+
+type mcpActuations struct {
+	mu      sync.Mutex
+	pending map[string]*pendingMCPActuation
+}
+
+func (a *mcpActuations) register(id string) *pendingMCPActuation {
+	pending := newPendingMCPActuation()
+	a.mu.Lock()
+	if a.pending == nil {
+		a.pending = make(map[string]*pendingMCPActuation)
+	}
+	a.pending[id] = pending
+	a.mu.Unlock()
+	return pending
+}
+
+// claim removes an exact pending actuation before its subtype is interpreted. An
+// unregistered id in the actuation namespace is still claimed: it is a duplicate or
+// an ack whose waiter was canceled, failed, or retired at a child boundary.
+func (a *mcpActuations) claim(id string) (*pendingMCPActuation, bool) {
+	a.mu.Lock()
+	pending := a.pending[id]
+	delete(a.pending, id)
+	a.mu.Unlock()
+	if pending != nil {
+		return pending, true
+	}
+	return nil, strings.HasPrefix(id, mcpActuationIDPrefix)
+}
+
+func (a *mcpActuations) remove(id string, pending *pendingMCPActuation) {
+	a.mu.Lock()
+	if a.pending[id] == pending {
+		delete(a.pending, id)
+	}
+	a.mu.Unlock()
+}
+
+func (a *mcpActuations) failAll() {
+	a.mu.Lock()
+	pending := make([]*pendingMCPActuation, 0, len(a.pending))
+	for id, actuation := range a.pending {
+		pending = append(pending, actuation)
+		delete(a.pending, id)
+	}
+	a.mu.Unlock()
+	for _, actuation := range pending {
+		actuation.complete(false)
 	}
 }
 
@@ -4841,6 +4967,13 @@ func (p *Parser) consumeLine(line []byte) {
 		// behind an emit into a downstream sink, and it reads its own decode target, so
 		// which rung a models or commands payload lands on is untouched by construction.
 		if p.claimMCPStatusQuery(line) {
+			return
+		}
+		// Beside the status claim and for its reason: both consume a daemon-private
+		// reply ahead of every shared consumer, so a claimed line reaches no sink and
+		// no record. Their id namespaces are disjoint, so the order between these two
+		// is free; the order relative to what follows is not.
+		if p.claimMCPActuation(line) {
 			return
 		}
 		p.emitContextUsage(line)
@@ -7475,6 +7608,43 @@ func (p *Parser) claimMCPStatusQuery(line []byte) bool {
 	}
 	status, ok := decodeMCPStatus(line)
 	pending.complete(status, ok)
+	return true
+}
+
+// claimMCPActuation consumes the ack to a daemon-private MCP reconnect or toggle
+// before any shared control-response consumer sees it. Matching the id retires the
+// actuation before the subtype is read, so the first ack is terminal whatever it says.
+//
+// ACCEPTANCE IS subtype == controlResponseSuccess AND NOTHING ELSE. Matching the id
+// says only that the child answered THIS request; the observed `error` reply to
+// reconnecting a server whose command does not exist (recorded in
+// docs/knowledge/features/e2e-realclaude-mcp-status-capture-test-go.md under
+// "Readiness belongs to the control replies") is what makes the distinction load-bearing
+// rather than defensive. Every other value — an invented subtype, an absent one — takes
+// the not-accepted arm, which is what makes the classification total.
+//
+// It decodes into controlAckLine, REUSED rather than re-declared, and that reuse is
+// what makes this path's privacy structural: that target declares subtype and
+// request_id and no payload key at all, so a server name and claude-authored error
+// text are unreachable from here — not merely unlogged. Nothing on this path emits a
+// record; logControlResponse belongs to emitModelList, which a claim returns ahead of.
+func (p *Parser) claimMCPActuation(line []byte) bool {
+	var ack controlAckLine
+	if err := json.Unmarshal(line, &ack); err != nil || ack.Response.RequestID == "" {
+		return false
+	}
+	pending, claimed := p.mcpActuations.claim(ack.Response.RequestID)
+	if !claimed {
+		return false
+	}
+	if pending == nil {
+		return true
+	}
+	if !pending.written() {
+		pending.complete(false)
+		return true
+	}
+	pending.complete(ack.Response.Subtype == controlResponseSuccess)
 	return true
 }
 

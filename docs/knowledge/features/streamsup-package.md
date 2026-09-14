@@ -194,6 +194,23 @@ mutex. It registers an exact request id outside that lock, then rechecks the
 generation before writing. This preserves the runner's leaf-lock rule while
 rejecting a child replaced during registration.
 
+`Runner.ReconnectMCPServer` and `Runner.SetMCPServerEnabled` (#2418) copy this
+same snapshot/register/recheck/write shape through a shared `actuateMCP` helper,
+under their own `mcpActuationIDPrefix` namespace so their acks cannot be
+swallowed by `mcpStatusQueries.claim`, which consumes any unregistered id
+carrying the status prefix. Both acks are a bare `control_response` with no
+server list: a `success` subtype reports accepted, anything else — including
+`error` — reports not-accepted, and a caller that wants a fresh inventory after
+either call still issues a separate `QueryMCPStatus`. `Parser.claimMCPActuation`
+sits beside `claimMCPStatusQuery` ahead of the shared control-response
+consumers, so an unclaimed ack — an unknown id, or a reply after the pending
+actuation already retired on cancellation or a child boundary — falls through
+to the shape decoders below and would otherwise reach the shared turn sink as
+an ordinary `MCPStatus`-shaped event; claiming it first is what keeps a
+daemon-private ack off that sink. It decodes into the same payload-free
+`controlAckLine` target, so server names and claude-authored error text are
+structurally unreachable from this path.
+
 `Parser.claimMCPStatusQuery` runs before the shared control-response consumers.
 The first matching response retires the query, including an error or malformed
 payload. A successful write must finish before an early reply can succeed.
