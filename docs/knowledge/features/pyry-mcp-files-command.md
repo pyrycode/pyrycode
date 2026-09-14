@@ -72,3 +72,6 @@ Mutation evidence (run over `go test -overlay`, no worktree writes) for the thre
 - [control-plane-attachment-file-confine-and-store-a-claude-named-path.md](control-plane-attachment-file-confine-and-store-a-claude-named-path.md) — the daemon-side verb this forwards to: confinement, TOCTOU, and why its refusals are static sentences.
 - [streamsup-package-buildargs-the-id-flag-inversion-that-keeps.md](streamsup-package-buildargs-the-id-flag-inversion-that-keeps.md) — `spawnEnv`/`beginSpawn`, composing this session id's binding from the same snapshot the child's argv is built from.
 - [control-plane.md](control-plane.md) § Attachment.file — the wire verb and `SetFileAttacher` seam.
+- [`mcp_status_reconnect_test.go`](e2e-realclaude-mcp-status-reconnect-test-go.md) — a second
+  process substituted into claude's spawn slot that states and honours the same stdout-silence
+  rule, for the same reason: stdout there is exclusively the stream-json the parser reads.
