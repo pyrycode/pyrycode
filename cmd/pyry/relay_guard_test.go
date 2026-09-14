@@ -209,11 +209,12 @@ var inboundTypes = map[string]string{
 	// round trip. Their answer is also TypeMCPStatus — neither has an ack type of its
 	// own — so nothing outbound is added here.
 	//
-	// REGISTERED HERE WHILE THE SEAM IS DELIBERATELY NIL, which is what this guard
-	// asserts and is easy to misread as premature. A registered arm is exactly what
-	// makes the frame CONSUMED rather than answered with dispatch.Route's unknown-type
-	// reply; what stays unwired until #2420 is V2SessionConfig.MCPActuator, not the
-	// dispatch entry.
+	// Registered by #2419 while V2SessionConfig.MCPActuator was still nil at every
+	// construction site, which is what made the interception fail-safe before a gate
+	// existed: a registered arm makes the frame CONSUMED rather than answered with
+	// dispatch.Route's unknown-type reply. #2420 wired that seam to the per-device
+	// gate, so the two are no longer split — this guard classifies dispatch entries
+	// either way and never read the seam.
 	"TypeMCPReconnect": "switch-intercepted",
 	"TypeMCPToggle":    "switch-intercepted",
 	// The conversation system-prompt read verb (#2152). Like TypeRequestModelList

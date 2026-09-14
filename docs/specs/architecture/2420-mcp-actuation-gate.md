@@ -288,13 +288,17 @@ not, against a fake child that answers both verbs:
 
 ## Open questions
 
-- The deadline constant's value. `30 * time.Second` for the whole actuation is the
-  starting point: it bounds worker occupancy at one figure rather than three, and a
-  budget consumed by a slow membership read fails in the refusing direction. Revisit if
-  the fake-daemon suite shows a reconnect legitimately needing longer.
-- Whether the e2e's unprivileged-phone arm fits inside this slice's budget. It proves
-  AC-1 at the daemon level, which no unit test can; if it does not fit it is dropped and
-  said so, not weakened.
+Both resolved during implementation; recorded here rather than deleted, because the
+verifier reads this section for questions that were ignored rather than answered.
+
+- ~~The deadline constant's value.~~ **Settled at `30 * time.Second` for the whole
+  actuation, unchanged from the plan's proposal.** The hermetic daemon spec completes
+  both verbs — six child round trips — in about a second, so nothing observed argues for
+  a longer bound or for splitting it per round trip.
+- ~~Whether the e2e's unprivileged-phone arm fits inside this slice's budget.~~ **It
+  fit and it landed.** `assertMCPActuationRefused` proves AC-1 at the daemon level: an
+  unprivileged device's `mcp_reconnect` is answered with the single merged,
+  non-retryable reject and reaches no child.
 
 ## Documentation handoff
 
@@ -312,6 +316,35 @@ not, against a fake child that answers both verbs:
 - `docs/knowledge/features/audit-package.md`: `Entry` gains `ConversationID` and
   `Target`, and the overview's twice-stated "reuse the id/class pair rather than grow a
   field" precedent needs the boundary of its own reasoning recorded — see **Context**.
+
+## Revisions
+
+### 2026-09-14 — a sixth production file: the `streamRunner` adapter
+
+**What changed.** `cmd/pyry/streamsup_runner.go` gains `ReconnectMCPServer` and
+`SetMCPServerEnabled` forwards. The plan's file list did not have it, and the ticket's
+estimate explicitly counted three production files.
+
+**What drove it.** `Session.Runner()` does not return `*streamsup.Runner`. It returns
+`sessions.Runner`, whose single production implementation is `cmd/pyry`'s `streamRunner`
+adapter — a value type that forwards each method explicitly, because
+`(*streamsup.Runner).State` has a covariant return the interface cannot accept. So the
+`mcpChildActuator` assertion in `boundMCPChildActuator` failed against the adapter, and
+every actuation refused. The e2e daemon test caught it on its first run; no unit test
+could have, because every unit test injects the interface directly.
+
+The same reasoning governs `resolveBoundMCPStatus`'s `mcpStatusQuerier`, which the plan
+read and copied without noticing that `QueryMCPStatus` has a matching forward in that
+adapter. That forward was the evidence, and reading it as "the concrete runner satisfies
+the assertion" rather than "an adapter was widened for it" is the miss.
+
+**Consequence for the design:** none. The forwards add no check — membership and
+authorization are settled above the adapter, in the only place that can audit them, and
+the concrete methods say the same from below.
+
+**Consequence for the size:** the production file count is 6, one over the one-ticket
+boundary's five. It is stated rather than acted on, for the reason **Context** gives:
+the split-depth gate is closed and the run continues.
 
 ## Security review
 

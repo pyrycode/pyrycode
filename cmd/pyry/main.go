@@ -1078,6 +1078,7 @@ func runSupervisor(args []string) error {
 		// enumerating twin below over the same registry and pool.
 		modelListFor:                  modelListFor(convReg, pool),
 		mcpStatusFor:                  mcpStatusFor(convReg, pool),
+		mcpActuatorFor:                boundMCPChildActuator(convReg, pool),
 		retainedModelLists:            retainedModelLists(convReg, pool),
 		retainedSlashCommandLists:     retainedSlashCommandLists(convReg, pool),
 		retainedBackgroundTaskRosters: retainedBackgroundTaskRosters(convReg, pool),

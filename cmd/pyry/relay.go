@@ -285,6 +285,16 @@ type relayWiring struct {
 	// V2SessionConfig dispatches it on the requesting connection's worker.
 	// nil preserves the relay seam's inert-unwired contract.
 	mcpStatusFor func(context.Context, string) (protocol.MCPStatusPayload, bool)
+	// mcpActuatorFor resolves the conversation's bound eligible child as the two
+	// actuation primitives #2418 landed — the WRITE half of the MCP pair whose read
+	// half is mcpStatusFor above, and the reason this one gets a per-device gate
+	// where that one needs none: these verbs change a running child's configuration.
+	//
+	// A daemon-local registry and pool read that contacts no child, which is what
+	// lets the gate consult it without making a child work. Built at main.go over
+	// *sessions.Pool, mcpStatusFor's shape, so the internal/sessions dependency stays
+	// at the composition root. nil in foreground/v1, together with mcpStatusFor.
+	mcpActuatorFor func(convID string) (mcpChildActuator, bool)
 	// modelWindows answers the context windows a named SESSION's child has
 	// reported, keyed by claude's own model id, for the context-window half of
 	// both usage seams below (#2107). Built at main.go over *sessions.Pool for the
@@ -772,6 +782,22 @@ func startRelayV2(
 	// resolve nothing and nothing panics.
 	questionResolver := newQuestionResolverV2(questionReg, logger)
 
+	// Inbound MCP actuation gate (#2420): the per-device authorization boundary for an
+	// mcp_reconnect / mcp_toggle, the audit record of every decision it makes, and the
+	// reader of the post-acknowledgement status an accepted actuation answers with.
+	// Constructed over the two live-child seams built at the composition root, both of
+	// which may be nil (foreground / PTY).
+	//
+	// CONSTRUCTED AND ASSIGNED UNCONDITIONALLY, the shape questionResolver above uses
+	// and for a reason the MCPActuator field states even more sharply: building it only
+	// under non-nil seams and assigning the typed-nil pointer would leave that interface
+	// field NON-nil, so the relay would admit the frame and call a method on a nil
+	// pointer — and internal/relay has no recover(), making that a remote-triggerable
+	// crash rather than a refusal. Inertness therefore lives inside the gate, where a
+	// nil seam is a plain field compare and answers the same merged reject every other
+	// refusal answers.
+	mcpActuator := newMCPActuatorV2(w.mcpStatusFor, w.mcpActuatorFor, logger)
+
 	// Inbound attachment-upload service (#1897): the one thing the v2 session
 	// manager calls for an attachment_chunk, and internal/attachments' first
 	// caller from outside its own package.
@@ -1133,6 +1159,15 @@ func startRelayV2(
 		// ineligible device before anything is consumed, records the decision, and
 		// only then hands the batch to the daemon-side primitives.
 		QuestionResolver: questionResolver,
+		// Inbound MCP actuation seam (#2420), discharging the written ordering
+		// obligation on MCPActuator: nothing could be wired here until the per-device
+		// actuation gate existed, because the relay handler applies no authorization
+		// at all and what kept the #2419 interception fail-safe was this field being
+		// nil at every construction site. The gate constructed above IS that
+		// implementation — it judges the device before any control request reaches a
+		// child, records the decision, and only then looks up the conversation's
+		// bound child and the servers it currently reports.
+		MCPActuator: mcpActuator,
 		// Inbound attachment-upload seam (#1897), the intake constructed above.
 		// Wired unconditionally: the seam's whole security surface is inside
 		// internal/attachments — the declaration cross-check, both resource

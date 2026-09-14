@@ -81,12 +81,14 @@ func TestLog_FieldCompleteness(t *testing.T) {
 	t.Parallel()
 
 	in := Entry{
-		DeviceHash:  "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-		DeviceLabel: "pixel-8",
-		ModalID:     "modal-9f3c",
-		ModalClass:  "permission",
-		Outcome:     OutcomeAllowed,
-		Source:      SourceRemote,
+		DeviceHash:     "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+		DeviceLabel:    "pixel-8",
+		ModalID:        "modal-9f3c",
+		ModalClass:     "permission",
+		ConversationID: "conversation-51e0",
+		Target:         "pyry_mcp_fresh",
+		Outcome:        OutcomeAllowed,
+		Source:         SourceRemote,
 	}
 	records := logToRecords(t, in)
 	if len(records) != 1 {
@@ -95,12 +97,14 @@ func TestLog_FieldCompleteness(t *testing.T) {
 	rec := records[0]
 
 	for key, want := range map[string]string{
-		"device_hash":  in.DeviceHash,
-		"device_label": in.DeviceLabel,
-		"modal_id":     in.ModalID,
-		"modal_class":  in.ModalClass,
-		"outcome":      string(in.Outcome),
-		"source":       string(in.Source),
+		"device_hash":     in.DeviceHash,
+		"device_label":    in.DeviceLabel,
+		"modal_id":        in.ModalID,
+		"modal_class":     in.ModalClass,
+		"conversation_id": in.ConversationID,
+		"target":          in.Target,
+		"outcome":         string(in.Outcome),
+		"source":          string(in.Source),
 	} {
 		if got := rec[key]; got != want {
 			t.Errorf("%s = %v, want %q", key, got, want)
@@ -123,12 +127,14 @@ func TestLog_ExactKeySet(t *testing.T) {
 	t.Parallel()
 
 	records := logToRecords(t, Entry{
-		DeviceHash:  "hash",
-		DeviceLabel: "label",
-		ModalID:     "modal",
-		ModalClass:  "permission",
-		Outcome:     OutcomeDenied,
-		Source:      SourceRemote,
+		DeviceHash:     "hash",
+		DeviceLabel:    "label",
+		ModalID:        "modal",
+		ModalClass:     "permission",
+		ConversationID: "conversation",
+		Target:         "target",
+		Outcome:        OutcomeDenied,
+		Source:         SourceRemote,
 	})
 	if len(records) != 1 {
 		t.Fatalf("Log emitted %d records, want exactly 1", len(records))
@@ -138,6 +144,7 @@ func TestLog_ExactKeySet(t *testing.T) {
 		"time": true, "level": true, "msg": true,
 		"device_hash": true, "device_label": true,
 		"modal_id": true, "modal_class": true,
+		"conversation_id": true, "target": true,
 		"outcome": true, "source": true,
 	}
 	for key := range records[0] {
