@@ -3840,3 +3840,371 @@ func TestMapEvent_BannerCarriesNothingElse(t *testing.T) {
 		}
 	}
 }
+
+// --- #2371: the turnevent.ContextUsage arm -----------------------------------
+//
+// contextUsageFixture is deliberately HOSTILE along every axis the arm must not
+// touch, so a mapper that helpfully normalised anything reddens here rather than
+// in a client months later:
+//
+//   - The three inventories are UNSORTED and mutually inconsistent in direction.
+//     The producer sorts descending before this layer sees them; re-sorting here
+//     would be observable, so the fixture's order is the assertion.
+//   - The three dropped counts are MUTUALLY DISTINCT, which is what makes a
+//     cross-wired pair fail. Equal counts would let a mapper that read
+//     DroppedMCPTools into DroppedMemoryFiles pass.
+//   - One memory path is TRAVERSAL-SHAPED. Nothing on this path joins, cleans,
+//     resolves or opens it, and the byte-for-byte crossing is what pins that.
+//   - One category name is 300 bytes, over the producer's 256-byte bound. The
+//     producer decides that limit; a second cap here would be a second place it
+//     is decided, free to disagree silently.
+var contextUsageFixture = turnevent.ContextUsage{
+	Model:       "qq-model-sentinel",
+	TotalTokens: 9500,
+	MaxTokens:   200000,
+	Percentage:  5,
+	Categories: []turnevent.ContextUsageCategory{
+		{Name: "qq-cat-light-sentinel", Tokens: 900},
+		{Name: "qq-cat-heavy-sentinel", Tokens: 4200},
+		{Name: strings.Repeat("q", 300), Tokens: 1},
+	},
+	DroppedCategories: 3,
+	MCPTools: []turnevent.ContextUsageMCPTool{
+		{Name: "qq-tool-heavy-sentinel", ServerName: "qq-server-sentinel", Tokens: 700},
+		{Name: "qq-tool-light-sentinel", ServerName: "qq-server-sentinel", Tokens: 40},
+	},
+	DroppedMCPTools: 5,
+	MemoryFiles: []turnevent.ContextUsageMemoryFile{
+		{Path: "../../etc/passwd", Type: "qq-type-sentinel", Tokens: 31},
+		{Path: "/qq/memory/project.md", Type: "", Tokens: 19},
+	},
+	DroppedMemoryFiles: 7,
+}
+
+// TestMapEventContextUsageCarriesEveryField is AC 1's carry half: every scalar and
+// every row crosses unchanged, the three dropped counts stay independent, and
+// ConversationID is the ONLY value the mapping supplies.
+func TestMapEventContextUsageCarriesEveryField(t *testing.T) {
+	t.Parallel()
+
+	const convSentinel = "qq-conv-sentinel"
+	// TurnID and Seq are set to values that would be VISIBLE if the arm leaked
+	// them: the payload declares no field either could land in, so the key-set
+	// test below is what proves they did not arrive under some other name.
+	typ, payload, ok := MapEvent(contextUsageFixture, TurnContext{
+		ConversationID: convSentinel,
+		TurnID:         "qq-turn-sentinel",
+		Seq:            77,
+	})
+	if !ok || typ != protocol.TypeContextUsage {
+		t.Fatalf("MapEvent ContextUsage = (%q, %#v, %v), want mapped %q",
+			typ, payload, ok, protocol.TypeContextUsage)
+	}
+	got, isPayload := payload.(protocol.ContextUsagePayload)
+	if !isPayload {
+		t.Fatalf("payload type = %T, want protocol.ContextUsagePayload", payload)
+	}
+
+	want := protocol.ContextUsagePayload{
+		ConversationID: convSentinel,
+		Model:          contextUsageFixture.Model,
+		TotalTokens:    contextUsageFixture.TotalTokens,
+		MaxTokens:      contextUsageFixture.MaxTokens,
+		Percentage:     contextUsageFixture.Percentage,
+		Categories: []protocol.ContextUsageCategory{
+			{Name: "qq-cat-light-sentinel", Tokens: 900},
+			{Name: "qq-cat-heavy-sentinel", Tokens: 4200},
+			{Name: strings.Repeat("q", 300), Tokens: 1},
+		},
+		DroppedCategories: 3,
+		MCPTools: []protocol.ContextUsageMCPTool{
+			{Name: "qq-tool-heavy-sentinel", ServerName: "qq-server-sentinel", Tokens: 700},
+			{Name: "qq-tool-light-sentinel", ServerName: "qq-server-sentinel", Tokens: 40},
+		},
+		DroppedMCPTools: 5,
+		MemoryFiles: []protocol.ContextUsageMemoryFile{
+			{Path: "../../etc/passwd", Type: "qq-type-sentinel", Tokens: 31},
+			{Path: "/qq/memory/project.md", Type: "", Tokens: 19},
+		},
+		DroppedMemoryFiles: 7,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("payload:\n got %+v\nwant %+v", got, want)
+	}
+
+	// CARRY, NEVER MUTATE THROUGH. The rows are flat scalar structs, so the
+	// element-wise copy is total and shares no backing array — but a mapper that
+	// sorted or filtered in place would corrupt the event it was handed. Asserting
+	// the source is untouched is what catches that.
+	if contextUsageFixture.Categories[0].Tokens != 900 ||
+		contextUsageFixture.MCPTools[0].Tokens != 700 ||
+		contextUsageFixture.MemoryFiles[0].Path != "../../etc/passwd" {
+		t.Errorf("MapEvent mutated the event it was handed: %+v", contextUsageFixture)
+	}
+}
+
+// TestMapEventContextUsageOnTheWire is AC 1's bytes half. Each row forbids the
+// exact bytes a normalising mapper would emit.
+func TestMapEventContextUsageOnTheWire(t *testing.T) {
+	t.Parallel()
+
+	const convSentinel = "qq-conv-sentinel"
+	tc := TurnContext{ConversationID: convSentinel, TurnID: "qq-turn-sentinel", Seq: 77}
+
+	tests := []struct {
+		name    string
+		ev      turnevent.ContextUsage
+		want    []string
+		notWant []string
+	}{
+		{
+			// A zero-value event maps, like every status peer, and all three nil
+			// inventories reach the wire as [] — owned by
+			// ContextUsagePayload.MarshalJSON, not by this arm.
+			name: "nil inventories reach the wire as []",
+			ev:   turnevent.ContextUsage{},
+			want: []string{
+				`"categories":[]`, `"mcp_tools":[]`, `"memory_files":[]`,
+				`"dropped_categories":0`, `"dropped_mcp_tools":0`, `"dropped_memory_files":0`,
+				`"conversation_id":"` + convSentinel + `"`,
+				`"model":""`, `"total_tokens":0`, `"max_tokens":0`, `"percentage":0`,
+			},
+			notWant: []string{
+				`"categories":null`, `"mcp_tools":null`, `"memory_files":null`,
+			},
+		},
+		{
+			// The control: [] is not what the mapping emits for everything, so the
+			// nil row above passes for the right reason.
+			name: "populated inventories carry their rows",
+			ev:   contextUsageFixture,
+			want: []string{
+				`"model":"qq-model-sentinel"`,
+				`"total_tokens":9500`, `"max_tokens":200000`, `"percentage":5`,
+			},
+			notWant: []string{`"categories":[]`, `"mcp_tools":[]`, `"memory_files":[]`},
+		},
+		{
+			// ORDER IS CLAUDE'S. The producer ranks descending by tokens; this
+			// fixture arrives light-then-heavy, and the sorted spelling is named
+			// so a canonicalising mapper fails on the exact bytes it would emit.
+			name: "source order is preserved, never re-sorted",
+			ev:   contextUsageFixture,
+			want: []string{
+				`"categories":[{"name":"qq-cat-light-sentinel","tokens":900},` +
+					`{"name":"qq-cat-heavy-sentinel","tokens":4200},`,
+			},
+			notWant: []string{
+				`"categories":[{"name":"qq-cat-heavy-sentinel","tokens":4200},`,
+			},
+		},
+		{
+			// NOT RE-CAPPED. The producer's maxContextUsageStringBytes decided the
+			// limit; a 300-byte name crosses whole. maxSummaryLen and
+			// maxResultSummaryRunes live in the mapper's own file and are NOT
+			// applicable bounds — reaching for either is the mistake to avoid.
+			name: "an over-bound string is not re-capped here",
+			ev:   contextUsageFixture,
+			want: []string{`"name":"` + strings.Repeat("q", 300) + `"`},
+		},
+		{
+			// THE PATH IS NOT NORMALISED. No filepath.Clean, Join, Abs or Stat —
+			// normalising would imply the frame names a real file it acts on.
+			name: "a traversal-shaped memory path crosses byte-for-byte",
+			ev:   contextUsageFixture,
+			want: []string{`"path":"../../etc/passwd"`},
+			notWant: []string{
+				`"path":"/etc/passwd"`, `"path":"etc/passwd"`,
+			},
+		},
+		{
+			// The three counts are INDEPENDENT and not inferable. Mutually
+			// distinct, so a cross-wired pair cannot pass.
+			name: "the three dropped counts stay independent",
+			ev:   contextUsageFixture,
+			want: []string{
+				`"dropped_categories":3`, `"dropped_mcp_tools":5`, `"dropped_memory_files":7`,
+			},
+		},
+		{
+			// An empty Type keeps its key rather than vanishing: the canned
+			// fixtures carry no `type`, so this is the live shape, not a corner.
+			name: "an empty row string keeps its key",
+			ev:   contextUsageFixture,
+			want: []string{`"type":""`},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, payload, ok := MapEvent(tt.ev, tc)
+			if !ok {
+				t.Fatal("MapEvent refused a ContextUsage; every reading must map")
+			}
+			b, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal payload: %v", err)
+			}
+			for _, needle := range tt.want {
+				if !strings.Contains(string(b), needle) {
+					t.Errorf("payload missing %s\ngot %s", needle, b)
+				}
+			}
+			for _, needle := range tt.notWant {
+				if strings.Contains(string(b), needle) {
+					t.Errorf("payload carries forbidden %s\ngot %s", needle, b)
+				}
+			}
+		})
+	}
+}
+
+// TestMapEventContextUsageKeySets is AC 1's "adds no fields" half, and it needs the
+// RAW bytes: decoding into the payload type cannot answer "did a twelfth key
+// arrive", because it discards what it does not declare. TurnID and Seq are set on
+// the context, so a mapper that leaked either under any spelling reddens here.
+func TestMapEventContextUsageKeySets(t *testing.T) {
+	t.Parallel()
+
+	_, payload, ok := MapEvent(contextUsageFixture, TurnContext{
+		ConversationID: "qq-conv-sentinel",
+		TurnID:         "qq-turn-sentinel",
+		Seq:            77,
+	})
+	if !ok {
+		t.Fatal("MapEvent refused a ContextUsage")
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		t.Fatalf("decode payload as an object: %v", err)
+	}
+	assertContextUsageKeys(t, "top level", top, []string{
+		"conversation_id", "model", "total_tokens", "max_tokens", "percentage",
+		"categories", "dropped_categories",
+		"mcp_tools", "dropped_mcp_tools",
+		"memory_files", "dropped_memory_files",
+	})
+
+	for _, row := range []struct {
+		field string
+		want  []string
+	}{
+		{"categories", []string{"name", "tokens"}},
+		{"mcp_tools", []string{"name", "server_name", "tokens"}},
+		{"memory_files", []string{"path", "type", "tokens"}},
+	} {
+		var rows []map[string]json.RawMessage
+		if err := json.Unmarshal(top[row.field], &rows); err != nil {
+			t.Fatalf("decode %s rows: %v", row.field, err)
+		}
+		if len(rows) == 0 {
+			t.Fatalf("%s carried no rows; the key-set claim would be vacuous", row.field)
+		}
+		for i, got := range rows {
+			assertContextUsageKeys(t, row.field+" row "+string(rune('0'+i)), got, row.want)
+		}
+	}
+}
+
+func assertContextUsageKeys(t *testing.T, where string, got map[string]json.RawMessage, want []string) {
+	t.Helper()
+	allowed := make(map[string]bool, len(want))
+	for _, key := range want {
+		allowed[key] = true
+	}
+	for key := range got {
+		if !allowed[key] {
+			t.Errorf("%s carries unexpected key %q", where, key)
+		}
+	}
+	for _, key := range want {
+		if _, present := got[key]; !present {
+			t.Errorf("%s is missing key %q", where, key)
+		}
+	}
+}
+
+// TestMapEventContextUsageWorstCaseAgainstV2EnvelopeCap MEASURES the frame's worst
+// case rather than capping it, and it exists because the mapper deliberately owns
+// no byte budget — unlike the SlashCommandList arm's maxSlashCommandListBytes.
+//
+// WHY NO CAP HERE: #2370's ContextUsagePayload assigns every bound to the producer,
+// and a second one in this package would be a second place the limit is decided,
+// free to disagree silently. What justifies that is arithmetic, and this test is
+// where the arithmetic lives instead of in a comment that cannot fail.
+//
+// THE RESULT IS NOT A CLEAN PASS, which is the point. The raw worst case — three
+// 32-entry lists (streamsup's maxContextUsageEntries) of 256-byte strings
+// (maxContextUsageStringBytes) — FITS with headroom. But encoding/json HTML-escapes
+// <, > and & to six bytes each, and the escaped worst case does NOT fit: an
+// over-cap envelope is REJECTED BY THE TRANSPORT with message.too_long rather than
+// truncated, so the frame is lost. That loss is bounded and self-repairing (the
+// reading is re-asked after the next turn) on a lane that is best-effort by
+// construction, which is why it is recorded here and deferred to #2428 rather than
+// fixed by a cap this slice's contract forbids. If the producer's caps ever RISE,
+// this test is what reddens.
+func TestMapEventContextUsageWorstCaseAgainstV2EnvelopeCap(t *testing.T) {
+	t.Parallel()
+
+	// streamsup's bounds, restated as literals because this package cannot import
+	// them — the discipline the sibling fit tests already follow.
+	const (
+		maxEntries     = 32
+		maxStringBytes = 256
+	)
+	plain := strings.Repeat("q", maxStringBytes)
+	// One escaping byte, at the worst expansion encoding/json applies: & becomes
+	// &, one byte to six.
+	escaping := strings.Repeat("&", maxStringBytes)
+
+	build := func(s string) turnevent.ContextUsage {
+		ev := turnevent.ContextUsage{
+			Model:       s,
+			TotalTokens: -2147483648, MaxTokens: -2147483648, Percentage: -2147483648,
+			DroppedCategories: -2147483648, DroppedMCPTools: -2147483648, DroppedMemoryFiles: -2147483648,
+		}
+		for range maxEntries {
+			ev.Categories = append(ev.Categories, turnevent.ContextUsageCategory{Name: s, Tokens: -2147483648})
+			ev.MCPTools = append(ev.MCPTools, turnevent.ContextUsageMCPTool{
+				Name: s, ServerName: s, Tokens: -2147483648,
+			})
+			ev.MemoryFiles = append(ev.MemoryFiles, turnevent.ContextUsageMemoryFile{
+				Path: s, Type: s, Tokens: -2147483648,
+			})
+		}
+		return ev
+	}
+	size := func(s string) int {
+		t.Helper()
+		_, payload, ok := MapEvent(build(s), TurnContext{ConversationID: strings.Repeat("c", 64)})
+		if !ok {
+			t.Fatal("MapEvent refused a worst-case ContextUsage")
+		}
+		b, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal worst-case payload: %v", err)
+		}
+		return len(b)
+	}
+
+	rawWorst := size(plain)
+	if rawWorst >= maxV2AppEnvelope {
+		t.Errorf("raw worst-case frame = %d B, want under the %d B v2 application-envelope cap — "+
+			"the producer's caps have risen past what this frame can carry uncapped, and the arm "+
+			"now needs a byte budget of its own (the SlashCommandList arm's shape)",
+			rawWorst, maxV2AppEnvelope)
+	}
+	escapedWorst := size(escaping)
+	if escapedWorst <= maxV2AppEnvelope {
+		t.Errorf("escaped worst-case frame = %d B, which now FITS the %d B cap — the deferral "+
+			"recorded above is obsolete and its follow-up ticket should be closed",
+			escapedWorst, maxV2AppEnvelope)
+	}
+	t.Logf("context_usage worst case: raw %d B, escaped %d B, cap %d B (headroom %d B raw)",
+		rawWorst, escapedWorst, maxV2AppEnvelope, maxV2AppEnvelope-rawWorst)
+}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"reflect"
@@ -4436,5 +4437,293 @@ func TestInteractiveTurnEmitterV2_ToolProgressFansOutToInteractiveOnly(t *testin
 	}
 	if len(pushesFor(bcast.pushes, "b")) != 0 {
 		t.Fatal("non-interactive conn b received tool_progress")
+	}
+}
+
+// --- #2371: the turnevent.ContextUsage arm -----------------------------------
+
+// emitterContextUsageFixture carries a DISTINCTIVE NEEDLE in every claude- and
+// workspace-authored string, so the log-leak sweep below can look for each by name.
+// The memory paths sit under the fictional /__pyry_fake__/memory/ root the
+// fake-Claude canned reading uses, for the same reason: they cannot collide with a
+// real path a log line might legitimately carry.
+//
+// The three dropped counts are MUTUALLY DISTINCT so a cross-wired pair reddens.
+var emitterContextUsageFixture = turnevent.ContextUsage{
+	Model:       "QQ-Zulu-Model-ZZ",
+	TotalTokens: 9500,
+	MaxTokens:   200000,
+	Percentage:  5,
+	Categories: []turnevent.ContextUsageCategory{
+		{Name: "QQ-Zulu-Category-ZZ", Tokens: 4200},
+		{Name: "QQ-Alpha-Category-ZZ", Tokens: 900},
+	},
+	DroppedCategories: 3,
+	MCPTools: []turnevent.ContextUsageMCPTool{
+		{Name: "QQ-Zulu-Tool-ZZ", ServerName: "QQ-Zulu-Server-ZZ", Tokens: 700},
+	},
+	DroppedMCPTools: 5,
+	MemoryFiles: []turnevent.ContextUsageMemoryFile{
+		{Path: "/__pyry_fake__/memory/QQ-Zulu-Path-ZZ.md", Type: "QQ-Zulu-Type-ZZ", Tokens: 31},
+	},
+	DroppedMemoryFiles: 7,
+}
+
+// contextUsageNeedles is every string of the fixture that MUST NOT reach a log
+// record at any level (AC 5).
+func contextUsageNeedles() []string {
+	out := []string{emitterContextUsageFixture.Model}
+	for _, c := range emitterContextUsageFixture.Categories {
+		out = append(out, c.Name)
+	}
+	for _, tool := range emitterContextUsageFixture.MCPTools {
+		out = append(out, tool.Name, tool.ServerName)
+	}
+	for _, file := range emitterContextUsageFixture.MemoryFiles {
+		out = append(out, file.Path, file.Type)
+	}
+	return out
+}
+
+// TestInteractiveTurnEmitterV2_ContextUsageAfterTurnEndIsLifecycleNeutral is AC 2 at
+// the event's REAL arrival order: the reading is solicited on TurnEnd, so it lands
+// with the turn already closed. An arm that opened a turn here would mint one
+// nothing will ever end — no later TurnEnd is coming to clear it.
+func TestInteractiveTurnEmitterV2_ContextUsageAfterTurnEndIsLifecycleNeutral(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "hello"})
+	e.Handle(context.Background(), turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+	// The turn is closed here — this is the state the real event arrives in.
+	inTurn, turnID, state := e.inTurn, e.turnID, e.currentState
+
+	e.Handle(context.Background(), emitterContextUsageFixture)
+
+	if e.inTurn != inTurn || e.turnID != turnID || e.currentState != state {
+		t.Fatalf("context_usage mutated a CLOSED turn's lifecycle: inTurn=%v/%v turnID=%q/%q state=%q/%q",
+			e.inTurn, inTurn, e.turnID, turnID, e.currentState, state)
+	}
+	wantTypes := []string{
+		protocol.TypeTurnState,      // responding
+		protocol.TypeAssistantDelta, // hello
+		protocol.TypeTurnEnd,
+		protocol.TypeTurnState,    // idle
+		protocol.TypeContextUsage, // AC 2: after that turn's turn_end
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("post-turn context_usage order:\n got %v\nwant %v — an extra turn_state here "+
+			"is a re-minted turn no TurnEnd will ever close", got, wantTypes)
+	}
+}
+
+// TestInteractiveTurnEmitterV2_ContextUsageIdleIsLifecycleNeutral is the same claim
+// from the OTHER starting state: no turn has ever opened, so a lifecycle mutation
+// shows up as a non-empty turnID rather than as an extra frame.
+func TestInteractiveTurnEmitterV2_ContextUsageIdleIsLifecycleNeutral(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.ContextUsage{})
+
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, []string{protocol.TypeContextUsage}) {
+		t.Fatalf("idle empty context_usage envelopes = %v, want [%s] — an empty reading is a "+
+			"POSITIVE report and must still publish", got, protocol.TypeContextUsage)
+	}
+	if e.inTurn || e.turnID != "" || e.currentState != "" {
+		t.Fatalf("empty context_usage changed lifecycle: inTurn=%v turnID=%q state=%q",
+			e.inTurn, e.turnID, e.currentState)
+	}
+	var payload protocol.ContextUsagePayload
+	if err := json.Unmarshal(bcast.pushes[0].env.Payload, &payload); err != nil {
+		t.Fatalf("decode empty context_usage: %v", err)
+	}
+	for _, list := range []struct {
+		name string
+		got  int
+		nil_ bool
+	}{
+		{"categories", len(payload.Categories), payload.Categories == nil},
+		{"mcp_tools", len(payload.MCPTools), payload.MCPTools == nil},
+		{"memory_files", len(payload.MemoryFiles), payload.MemoryFiles == nil},
+	} {
+		if list.nil_ || list.got != 0 {
+			t.Errorf("%s = len %d nil=%v, want non-nil empty slice decoded from wire []",
+				list.name, list.got, list.nil_)
+		}
+	}
+}
+
+// TestInteractiveTurnEmitterV2_ContextUsageFansOutAndGatesCapability is AC 4: the
+// frame rides the emitter's existing conversation-keyed fan-out, and the interactive
+// capability is filtered ONCE inside emit. Conn "c" is non-interactive on the SAME
+// conversation and must receive nothing.
+func TestInteractiveTurnEmitterV2_ContextUsageFansOutAndGatesCapability(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{
+		{ConnID: "a", Interactive: true},
+		{ConnID: "b", Interactive: true},
+		{ConnID: "c", Interactive: false},
+	}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), emitterContextUsageFixture)
+
+	for _, connID := range []string{"a", "b"} {
+		got := pushesFor(bcast.pushes, connID)
+		if len(got) != 1 || got[0].env.Type != protocol.TypeContextUsage {
+			t.Fatalf("conn %s pushes = %#v, want one %s", connID, got, protocol.TypeContextUsage)
+		}
+	}
+	if got := pushesFor(bcast.pushes, "c"); len(got) != 0 {
+		t.Fatalf("non-interactive conn on the same conversation received %d envelopes, want 0 — "+
+			"the capability gate lives in emit and must cover this frame like every other", len(got))
+	}
+
+	pushA := pushesFor(bcast.pushes, "a")[0].env
+	var payload protocol.ContextUsagePayload
+	if err := json.Unmarshal(pushA.Payload, &payload); err != nil {
+		t.Fatalf("decode context_usage: %v", err)
+	}
+	if payload.ConversationID != testConvID {
+		t.Errorf("conversation_id = %q, want %q", payload.ConversationID, testConvID)
+	}
+	if payload.DroppedCategories != 3 || payload.DroppedMCPTools != 5 || payload.DroppedMemoryFiles != 7 {
+		t.Errorf("dropped counts = (%d,%d,%d), want (3,5,7) — mutually distinct, so an equal pair "+
+			"here means two counts are cross-wired", payload.DroppedCategories,
+			payload.DroppedMCPTools, payload.DroppedMemoryFiles)
+	}
+	if len(payload.Categories) != 2 || payload.Categories[0].Name != "QQ-Zulu-Category-ZZ" ||
+		payload.Categories[1].Name != "QQ-Alpha-Category-ZZ" {
+		t.Fatalf("category order changed: %+v", payload.Categories)
+	}
+
+	// ONE logical event: the ring records once, before the per-conn fan-out, and
+	// every conn's envelope carries that one durable id.
+	ring, gap := e.ring.After(testConvID, 0)
+	if gap || len(ring) != 1 {
+		t.Fatalf("ring = %#v (gap=%v), want one logical event", ring, gap)
+	}
+	if ring[0].Type != protocol.TypeContextUsage || !bytes.Equal(ring[0].Payload, pushA.Payload) {
+		t.Fatalf("ring event differs from wire: ring=%s/%s wire=%s/%s",
+			ring[0].Type, ring[0].Payload, pushA.Type, pushA.Payload)
+	}
+	if pushA.EventID == nil || *pushA.EventID != ring[0].ID {
+		t.Fatalf("wire event id = %v, want ring id %d", pushA.EventID, ring[0].ID)
+	}
+}
+
+// TestInteractiveTurnEmitterV2_ContextUsagePreservesMidTurnSequence pins the
+// flushDelta-first ordering. The arrival order in production is post-turn, but the
+// event is not structurally barred from landing mid-turn (a follow-active switch can
+// reorder the lane), and buffered text must keep its wire position either way.
+func TestInteractiveTurnEmitterV2_ContextUsagePreservesMidTurnSequence(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "before"})
+	turnID, state := e.turnID, e.currentState
+	e.Handle(context.Background(), emitterContextUsageFixture)
+	if !e.inTurn || e.turnID != turnID || e.currentState != state {
+		t.Fatalf("context_usage disturbed an OPEN turn: inTurn=%v turnID=%q/%q state=%q/%q",
+			e.inTurn, e.turnID, turnID, e.currentState, state)
+	}
+	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m2", Text: "after"})
+	e.Handle(context.Background(), turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+
+	wantTypes := []string{
+		protocol.TypeTurnState,
+		protocol.TypeAssistantDelta, // "before", flushed AHEAD of the reading
+		protocol.TypeContextUsage,
+		protocol.TypeAssistantDelta,
+		protocol.TypeTurnEnd,
+		protocol.TypeTurnState,
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("mid-turn context_usage order = %v, want %v", got, wantTypes)
+	}
+	deltas := assistantDeltas(t, bcast.pushes)
+	if len(deltas) != 2 || deltas[0].TurnID != turnID || deltas[1].TurnID != turnID ||
+		deltas[0].Seq != 0 || deltas[1].Seq != 1 {
+		t.Fatalf("deltas around context_usage = %+v, want same turn %q at seq 0,1", deltas, turnID)
+	}
+}
+
+// TestInteractiveTurnEmitterV2_ContextUsageLogsNameOnlyTheVariant is AC 5, swept
+// across every log site the frame can reach.
+//
+// The temptation here is larger than for any neighbouring variant: the event carries
+// a model, category names, MCP tool and server names, and memory-file PATHS — the
+// operator's and the workspace's own text, exactly what a diagnostic line explaining
+// an unexpected reading would reach for. None of it is returned, and neither is any
+// list length or dropped count.
+func TestInteractiveTurnEmitterV2_ContextUsageLogsNameOnlyTheVariant(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		drive func(t *testing.T, logs *bytes.Buffer)
+		want  string
+	}{
+		{
+			// The no-cursor drop: it returns BEFORE the type switch, so it stays a
+			// reachable site for this variant even once Handle claims it.
+			name: "no-cursor drop",
+			drive: func(t *testing.T, logs *bytes.Buffer) {
+				logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+				e := newInteractiveTurnEmitterV2(&stubCursor{}, &fakeInteractiveBcast{}, logger)
+				e.Handle(context.Background(), emitterContextUsageFixture)
+			},
+			want: "kind=context_usage",
+		},
+		{
+			// The push-failure path, which logs a TRANSPORT error. This is the site
+			// whose safety would otherwise be inherited rather than checked: emit
+			// logs "err", err there, and this proves that error carries no payload.
+			name: "push failure",
+			drive: func(t *testing.T, logs *bytes.Buffer) {
+				logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+				cur := &stubCursor{}
+				cur.set(testConvID)
+				bcast := &fakeInteractiveBcast{
+					snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}},
+					pushErr:   map[string]error{"a": errors.New("qq-transport-failure-zz")},
+				}
+				e := newInteractiveTurnEmitterV2(cur, bcast, logger)
+				e.Handle(context.Background(), emitterContextUsageFixture)
+			},
+			want: "interactive_turn.push_err",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			tt.drive(t, &logs)
+
+			got := logs.String()
+			if !strings.Contains(got, tt.want) {
+				t.Fatalf("log does not record %s: %s", tt.want, got)
+			}
+			if strings.Contains(got, "kind=unknown") {
+				t.Errorf("log reads kind=unknown for a variant the daemon recognizes: %s", got)
+			}
+			for _, needle := range contextUsageNeedles() {
+				if strings.Contains(got, needle) {
+					t.Errorf("event content %q leaked into the log: %s", needle, got)
+				}
+			}
+		})
 	}
 }

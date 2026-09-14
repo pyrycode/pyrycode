@@ -688,6 +688,67 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// No capability gate in the arm, for the arms above's reason.
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
+	case turnevent.ContextUsage:
+		// One solicited reading of claude's context-window arithmetic (#2371),
+		// taking the same shape as the status peers above: NO turn-lifecycle
+		// mutation (no startTurnIfNeeded / transitionTo / endTurn; inTurn, turnID,
+		// currentState untouched).
+		//
+		// Kept a separate case from the three inventories above despite the identical
+		// body, following the rule the ModelAnnounced arm states: this switch merges
+		// arms that share a REASON and keeps apart the ones that do not. Every arm
+		// above argues about HOW FAR OUT its fact sits — per-turn configuration, or a
+		// property of the child reported once per initialize exchange. THIS ONE IS
+		// THE FIRST ON THE SWITCH WHOSE ARGUMENT IS ABOUT WHEN IT ARRIVES, and that
+		// difference is the whole reason the arm is written this way.
+		//
+		// IT ARRIVES AFTER THE TURN IT DESCRIBES HAS CLOSED. turnEndContextUsageRequester
+		// asks for the reading from its own Sink on TurnEnd (#2289), so by the time
+		// the answer is parsed and reaches this lane the turn is over and
+		// startTurnIfNeeded would open a FRESH one. That is worse than merely wrong,
+		// and worse here than for the ModelList arm above: a menu at least arrives
+		// with no turn expected, where this event arrives immediately after a turn
+		// end, so a re-minted turn would look plausible in a client and would sit
+		// there forever — nothing is coming to close it. The event's own cadence
+		// guarantees no later TurnEnd clears the mark. cmd/pyry's turnMarkFor answers
+		// turnMarkNone by construction (whitelist opener set, turnMarkNone default)
+		// and TestTurnMarkFor_TotalOverEveryVariant pins that independently, so this
+		// arm needs no change there and must not acquire one.
+		//
+		// Flush any pending delta first so buffered text keeps its wire position
+		// ahead of the reading. In the production order there is rarely anything
+		// buffered — the turn's own end already flushed — but the flush is not
+		// conditional on that, because a follow-active switch can reorder this lane
+		// and the mid-turn ordering is pinned by its own test.
+		//
+		// The event is passed through UNTOUCHED and no field of it is read here. That
+		// costs nothing and is what keeps this arm out of the enumeration of places
+		// the reading's strings can reach: turnbridge.MapEvent's arm is the ONLY
+		// consumer of them on this path, and its own comment owns the no-normalisation
+		// rule for the memory paths.
+		//
+		// TWO QUEUES, TWO ANSWERS, the arms above's unchanged. DOWNSTREAM at pushQueue
+		// this is not a droppable delta (the droppable set there is assistant_delta
+		// only, #610). UPSTREAM at the fan-in it is: turnMarkFor answers turnMarkNone,
+		// so streamTurnSink's sinkFor classes the event droppable and can refuse it at
+		// droppableCap under load. DELIVERY ON THIS LANE IS BEST-EFFORT BY
+		// CONSTRUCTION and this arm does not pretend otherwise — but the loss here is
+		// SELF-REPAIRING in a way an inventory's is not, and that is the one place
+		// this variant is easier than its neighbours rather than harder: a fresh
+		// reading is solicited after the very next turn, so no connect-time resolver
+		// is owed for it. A client that missed one is at most one turn stale.
+		//
+		// Nothing bounds the rate on either side and that is deliberate: one reading
+		// per completed turn is the cadence, driven by the daemon's own post-turn ask
+		// rather than by anything network-reachable, and every dimension of the
+		// reading is already bounded at construction by streamsup's
+		// maxContextUsageEntries and maxContextUsageStringBytes. A second,
+		// differently-shaped filter here is the hazard the ThinkingProgress,
+		// RateLimited, ModelAnnounced, ModelList and SlashCommandList arms each name.
+		//
+		// No capability gate in the arm, for the arms above's reason.
+		e.flushDelta(ctx)
+		e.emitMapped(ctx, convID, ev)
 	default:
 		e.logger.Debug("relay: interactive-turn drop; unknown event",
 			"event", "interactive_turn.unknown",
@@ -1208,6 +1269,33 @@ func eventKind(ev turnevent.Event) string {
 		// strictly the stronger statement, so do not read the shortened enumeration
 		// above as a weakening.
 		return "slash_command_list"
+	case turnevent.ContextUsage:
+		// The variant NAME only, and here the temptation is the LARGEST on the
+		// switch rather than merely present. This event carries a Model, a Name per
+		// category, a Name and a ServerName per MCP tool, and a PATH per memory file
+		// — and the paths are the operator's and the workspace's own filesystem text,
+		// the lowest-trust origin any arm here handles. Every one of them is exactly
+		// what a diagnostic line explaining an unexpected reading would reach for.
+		// NONE is returned, and neither is any list length nor any of the three
+		// dropped counts: a count of what was cut is still a fact about the reading's
+		// content, the SessionFacts arm's rule for TruncatedFields unchanged.
+		//
+		// The #833 posture the arms above name — restated across internal/relay's
+		// v2session_settings.go and internal/sessions' pool.go as "model / effort /
+		// YOLO values are NEVER logged at any level" — covers the Model directly and
+		// the workspace-authored strings a fortiori.
+		//
+		// Like the five arms above, this variant is now claimed by a Handle case on
+		// this lane (#2371), so this file's `interactive_turn.unknown` Debug is no
+		// longer a live call site for it, and neither is emitMapped's unmapped drop:
+		// turnbridge.MapEvent never refuses the variant, mapping even a zero-value
+		// ContextUsage. STILL LIVE AND REACHABLE: the no-cursor drop, which returns
+		// before the type switch, plus acp_turn_stream.go, stream_turn_busy.go and
+		// stream_turn_drain.go — every one of which would read kind=unknown without
+		// this arm for a variant the daemon does recognize. stream_turn_drain.go's
+		// droppable drop is reachable for this variant specifically, because
+		// turnMarkFor classes it turnMarkNone and therefore droppable at the fan-in.
+		return "context_usage"
 	case turnevent.ConversationReset:
 		// The variant NAME only, for the arms above's reason. NewConversationID is
 		// claude-authored and names a transcript on the operator's own disk; it is not

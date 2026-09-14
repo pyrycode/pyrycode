@@ -381,3 +381,32 @@ frame. Every finding below is about what that text may and may not touch.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-14
+
+## Revisions
+
+### 2026-09-14 — the byte-budget deferral has a ticket number
+
+The security review's one substantive finding (Network & I/O) committed to filing a
+follow-up rather than capping the frame in this slice. That ticket is **#2428**, now on
+the board at Inbox. The number is recorded in `MapEvent`'s arm and in
+`TestMapEventContextUsageWorstCaseAgainstV2EnvelopeCap`, so the deferral is findable
+from the code rather than only from this plan.
+
+The worst case is no longer an estimate. Measured by that test: **raw 45568 B, escaped
+251648 B, against the 65519 B cap — 19951 B of raw headroom.** The plan's arithmetic
+predicted ~45.5 KB raw and ~246 KB escaped, so the design reasoning stands as written.
+
+### 2026-09-14 — Open Questions resolved
+
+1. **Dropped counts.** Resolved before the plan commit by measurement, and now
+   confirmed end to end by the e2e against live wire bytes: **0 / 1 / 1**, not the three
+   distinct values the ticket's Technical Notes predicted. Both the e2e and the unit
+   tier carry the correction in comments; the unit fixture uses mutually distinct counts
+   (3/5/7) so a cross-wired pair still reddens somewhere.
+2. **Mapper byte cap.** Resolved as planned: not in this slice, deferred to #2428, with
+   the arithmetic pinned by a test rather than by a comment.
+3. **Settle window.** Resolved at the repo's 2 s idiom — no widening needed. The ask is
+   written as `TurnEnd` is sunk and fakeclaude answers inline, so the window covers a
+   parse and a push rather than a poll interval. The spec passed on its first run and
+   was mutation-checked (a deliberately wrong expected MCP-tool count reddens it), so
+   the window is not hiding a vacuous pass.
