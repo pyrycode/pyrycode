@@ -1261,6 +1261,119 @@ func (r *Runner) QueryMCPStatus(ctx context.Context) (turnevent.MCPStatus, bool)
 	}
 }
 
+// mcpActuationIDPrefix namespaces the request ids of the daemon's MCP actuations,
+// and its DISJOINTNESS FROM mcpStatusQueryIDPrefix is load-bearing rather than
+// cosmetic. mcpStatusQueries.claim treats ANY unregistered id carrying its own
+// prefix as claimed and consumed, and claimMCPStatusQuery runs first in the parser's
+// control_response arm — so an actuation minting ids under that prefix would have
+// every ack swallowed before claimMCPActuation ever saw one, and the symptom is a
+// caller hanging until its context expires, not a missed reading. Neither constant
+// is a prefix of the other; keep it that way.
+const mcpActuationIDPrefix = "mcp-actuate-"
+
+// ReconnectMCPServer asks the exact eligible live child to reconnect one MCP server
+// and reports whether that child accepted it. See actuateMCP for the contract both
+// actuations share — notably that the caller's context is the only bound on the wait.
+//
+// Server membership and authorization belong to the caller boundary, as
+// WriteMCPReconnect's own doc block states; this method adds neither. No wire surface
+// reaches it: it is on the concrete runner and not on sessions.Runner, so nothing
+// outside the daemon can actuate a configuration change until #2419 lands a forwarder
+// together with its gate.
+func (r *Runner) ReconnectMCPServer(ctx context.Context, serverName string) bool {
+	return r.actuateMCP(ctx, func(w io.Writer, id string) error {
+		return WriteMCPReconnect(w, id, serverName)
+	})
+}
+
+// SetMCPServerEnabled enables or disables one MCP server on the exact eligible live
+// child and reports whether that child accepted it. enabled is passed through to the
+// write in both directions rather than one value being fixed or derived from a state
+// this package does not hold; marshalMCPToggleEnvelope's pointer field is what keeps
+// a false explicit on the wire.
+//
+// Named for the flag rather than the wire's `mcp_toggle` subtype deliberately: the
+// request carries the value, so a Toggle spelling would invite a caller to expect a
+// flip of whatever the current state is. Membership, authorization and the absence of
+// any wire surface are as ReconnectMCPServer states.
+func (r *Runner) SetMCPServerEnabled(ctx context.Context, serverName string, enabled bool) bool {
+	return r.actuateMCP(ctx, func(w io.Writer, id string) error {
+		return WriteMCPToggle(w, id, serverName, enabled)
+	})
+}
+
+// actuateMCP writes one MCP actuation to the exact eligible live child and waits for
+// the control response carrying that request's own id. It returns whether the child
+// accepted it.
+//
+// ONE BOOL COLLAPSES REFUSAL AND UNAVAILABILITY, and that is a contract decision
+// rather than lost information: #2419 publishes a single merged reject for gate,
+// unknown server, no live child and failed actuation alike, and #2420's audit record
+// names no reason, so a richer return would have no reader above. What the failure arm
+// does buy is narrower and load-bearing — matching an id must not by itself read as
+// accepted, which claimMCPActuation's subtype test is what delivers.
+//
+// NOTHING IS LOGGED HERE, and a diagnostic must not be added: the values in scope are
+// the server name and the writer's error, which is exactly what must stay out of every
+// record on this path. The writer's error is deliberately DISCARDED rather than
+// returned for the same reason; the discard is the guarantee, not an oversight.
+//
+// THE CALLER'S CONTEXT IS THE ONLY BOUND ON THE WAIT when the child stays alive and
+// simply never answers. Child death and replacement are covered — takeStdin and
+// beginMCPStatusChild each fail every pending actuation — but silence is not, so a
+// caller must pass a deadline rather than context.Background(). QueryMCPStatus carries
+// the same contract, which is why this is stated rather than fixed with a timeout
+// invented at this layer.
+//
+// The order below is QueryMCPStatus's and each step earns its place: snapshot the
+// binding under the leaf mutex, register OUTSIDE it (r.mu is never held across a
+// call-out), then re-check the generation. Registering before that re-check is what
+// makes the check meaningful — a child replaced in the gap retires an entry that
+// already exists, where the reverse order would leave a registration nothing can find.
+func (r *Runner) actuateMCP(ctx context.Context, write func(io.Writer, string) error) bool {
+	if ctx.Err() != nil || r.parser == nil {
+		return false
+	}
+
+	r.mu.Lock()
+	if r.stdin == nil || r.rotating || !r.mcpStatusEligible {
+		r.mu.Unlock()
+		return false
+	}
+	w := r.stdin
+	generation := r.childGeneration
+	r.mu.Unlock()
+
+	id := mcpActuationIDPrefix + r.nextControlID()
+	pending := r.parser.registerMCPActuation(id)
+
+	r.mu.Lock()
+	current := r.stdin != nil && !r.rotating && r.mcpStatusEligible && r.childGeneration == generation
+	r.mu.Unlock()
+	if !current || ctx.Err() != nil {
+		r.parser.removeMCPActuation(id, pending)
+		pending.resolveWrite(false)
+		pending.complete(false)
+		return false
+	}
+
+	err := write(w, id)
+	pending.resolveWrite(err == nil)
+	if err != nil || ctx.Err() != nil {
+		r.parser.removeMCPActuation(id, pending)
+		pending.complete(false)
+		return false
+	}
+
+	select {
+	case accepted := <-pending.result:
+		return accepted && ctx.Err() == nil
+	case <-ctx.Done():
+		r.parser.removeMCPActuation(id, pending)
+		return false
+	}
+}
+
 // RequestContextUsage asks the live child for its summary or full context
 // breakdown. The detail vocabulary is checked before child lookup and ID minting;
 // WriteContextUsage repeats the same boundary for direct callers. The request ID
@@ -2035,6 +2148,7 @@ func (r *Runner) takeStdin() io.WriteCloser {
 	r.mu.Unlock()
 	if r.parser != nil {
 		r.parser.failMCPStatusQueries()
+		r.parser.failMCPActuations()
 	}
 	return w
 }
