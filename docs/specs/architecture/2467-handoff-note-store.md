@@ -358,3 +358,49 @@ Two tickets build on this contract before anything else reads it.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-16
+
+## Revisions
+
+### 2026-09-16 — the measured size, and why the disposition is unchanged
+
+*§ Sizing position* predicted the written total would land "slightly over" the
+800-line boundary. It did not. Measured at implementation:
+
+| | Lines |
+|---|---|
+| This plan | 360 |
+| `internal/sessions/handoff.go` | 282 |
+| `internal/sessions/handoff_test.go` | 560 |
+| **Total** | **1202** |
+
+That is 50% over the ceiling, not slightly. The error was in the test estimate —
+330 forecast against 560 actual. The cause is this package's test idiom, not
+scope creep: the twelve test functions each carry a doc comment stating what the
+assertion pins and why, which is what the surrounding files do (`pool_remove_test.go`
+758, `pool_system_prompt_test.go` 875) and what makes a reddening test legible to
+whoever hits it. Per-test overhead of that kind does not show up in a
+function-count estimate.
+
+**The disposition does not change, and no proof was cut to chase the number.**
+The split remains forbidden by the floor rule for the reason *§ Sizing position*
+gives: every candidate child has exactly one consumer and that consumer is a
+sibling in the same #2454 family. Each of the twelve tests maps to a distinct
+clause of a distinct acceptance criterion — there is no redundant one to drop —
+and trimming assertions to fit a line budget would trade the ticket's proof for
+its arithmetic. The overage is recorded here rather than argued away, which is
+the whole reason this section exists.
+
+One consequence worth naming for whoever re-measures the boundary: the ceiling is
+calibrated on total written lines, and on a ticket whose deliverable is a
+contract rather than a behaviour, the test file is the deliverable's larger half.
+The refiner's estimate for this ticket (~700, nearest analogue #2093 at 807) was
+built the same way and missed for the same reason.
+
+### 2026-09-16 — `os.Lstat` in `HandoffNotePath`
+
+Added by the security review before the plan commit, not after; recorded here
+only because it is the one place the shipped surface departs from what the
+ticket's AC #2 literally asks for. AC #2 asks whether a note exists; the
+implementation answers "is there a regular file here", so a symlink planted at
+the note path reports **absent**. `TestPool_HandoffNotePath_SymlinkIsNotANote`
+pins it. Rationale is in the security review's file-operations finding.
