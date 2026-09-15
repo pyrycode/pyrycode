@@ -16,11 +16,19 @@ package realclaude
 // hand-writes that root's entry into the pre-fix production state (trusted, but
 // includes not approved). Same CLAUDE.md shape, same spawn subfolder, opposite
 // expectations.
+//
+// Which entry claude consults is the whole subtlety, and it is not the spawn
+// folder: the projects key is the git root of the child's cwd, falling back to
+// the cwd itself when there is no repository. Production's workspace root is a
+// repository, so a child spawned in <root>/default is governed by <root>'s
+// entry — the one runSupervisor marks. Both fixtures below are therefore real
+// repositories; see makeGitRoot for what happens when they are not.
 
 import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -43,24 +51,64 @@ const (
 	externalIncludeSentinelControl = "PYRY-2451-EXTERNAL-INCLUDE-SENTINEL-CONTROL-4b18de"
 )
 
+// These live only in CLAUDE.md itself, never in the imported file, and both
+// arms require them present. They are the vacuity guard: an arm that expects
+// the IMPORTED sentinel to be absent otherwise passes whenever nothing reached
+// the child at all. On 2026-09-15 that is precisely what happened — a fixture
+// defect kept the root CLAUDE.md from governing either child, the marked arm
+// went red and the control arm went green while proving nothing. A missing
+// CLAUDE.md sentinel now says "the fixture is wrong" instead of being read as
+// evidence about the flag.
+const (
+	rootClaudeMDSentinelMarked  = "PYRY-2451-ROOT-CLAUDEMD-SENTINEL-MARKED-2c5e81"
+	rootClaudeMDSentinelControl = "PYRY-2451-ROOT-CLAUDEMD-SENTINEL-CONTROL-9a4d07"
+)
+
+// makeGitRoot turns dir into a git repository, which is load-bearing rather
+// than fixture decoration.
+//
+// claude reads hasClaudeMdExternalIncludesApproved from the ~/.claude.json
+// projects entry keyed by the git root of the child's cwd, falling back to the
+// cwd itself when no repository encloses it. Production's workspace root is a
+// repository, so the entry governing a child in <root>/default is <root> —
+// exactly the entry MarkWorkdirTrusted establishes. Without a repository here
+// the key degrades to <root>/default, which nothing in this test marks and
+// which `pyry agent-run` does not mark either (the verb carries no trustMark
+// call). Both arms would then see an unexpanded import: the marked arm red and
+// the control arm green for the wrong reason.
+func makeGitRoot(t *testing.T, dir string) {
+	t.Helper()
+	out, err := exec.Command("git", "init", "--quiet", dir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git init %s: %v\n%s\nThe workspace root must be a repository or "+
+			"claude keys its projects entry on the spawn subfolder instead, and "+
+			"neither arm measures the flag.", dir, err, out)
+	}
+}
+
 // writeExternalIncludeWorkspace builds a workspace shaped like production: a
-// root CLAUDE.md whose sole import resolves to a sibling file in the root, and
-// an empty subfolder to spawn in. From the spawn cwd (<root>/default) the
-// import target (<root>/brain.md) is outside the session's working directory,
-// which is the condition the approval flag gates. Returns the root and the
-// spawn subfolder.
-func writeExternalIncludeWorkspace(t *testing.T, home, name, sentinel string) (root, spawnDir string) {
+// git root holding a CLAUDE.md whose sole import resolves to a sibling file in
+// that root, and an empty subfolder to spawn in. From the spawn cwd
+// (<root>/default) the import target (<root>/brain.md) is outside the session's
+// working directory, which is the condition the approval flag gates, while the
+// repository at <root> is what makes <root>'s entry the one claude consults.
+// Returns the root and the spawn subfolder.
+func writeExternalIncludeWorkspace(t *testing.T, home, name, claudeMDSentinel, importSentinel string) (root, spawnDir string) {
 	t.Helper()
 	root = filepath.Join(home, name)
 	spawnDir = filepath.Join(root, "default")
 	if err := os.MkdirAll(spawnDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll %s: %v", spawnDir, err)
 	}
-	claudeMD := "# Workspace brain\n\n@./brain.md\n"
+	makeGitRoot(t, root)
+	// The import sits in a plain paragraph: claude's extractor skips code and
+	// codespan tokens, and the "./" prefix is one of the spellings it accepts,
+	// resolved against the CLAUDE.md's own directory.
+	claudeMD := "# Workspace brain\n\nThe root marker is " + claudeMDSentinel + ".\n\n@./brain.md\n"
 	if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte(claudeMD), 0o600); err != nil {
 		t.Fatalf("write CLAUDE.md in %s: %v", root, err)
 	}
-	brain := "# Imported brain file\n\nThe import marker is " + sentinel + ".\n"
+	brain := "# Imported brain file\n\nThe import marker is " + importSentinel + ".\n"
 	if err := os.WriteFile(filepath.Join(root, "brain.md"), []byte(brain), 0o600); err != nil {
 		t.Fatalf("write brain.md in %s: %v", root, err)
 	}
@@ -140,8 +188,10 @@ func runExternalIncludeChild(t *testing.T, home, spawnDir string) []byte {
 func TestClaudeMdExternalIncludes_SubfolderChildGetsRootImports(t *testing.T) {
 	home := WithWorktreeAuthenticated(t)
 
-	markedRoot, markedSpawn := writeExternalIncludeWorkspace(t, home, "ws-marked", externalIncludeSentinelMarked)
-	controlRoot, controlSpawn := writeExternalIncludeWorkspace(t, home, "ws-control", externalIncludeSentinelControl)
+	markedRoot, markedSpawn := writeExternalIncludeWorkspace(t, home, "ws-marked",
+		rootClaudeMDSentinelMarked, externalIncludeSentinelMarked)
+	controlRoot, controlSpawn := writeExternalIncludeWorkspace(t, home, "ws-control",
+		rootClaudeMDSentinelControl, externalIncludeSentinelControl)
 
 	// Both arms mutate the same ~/.claude.json, so establish both states
 	// before either spawn reads it.
@@ -165,21 +215,37 @@ func TestClaudeMdExternalIncludes_SubfolderChildGetsRootImports(t *testing.T) {
 	// forbids parallel descendants.
 	t.Run("marked_root_expands_external_import", func(t *testing.T) {
 		data := runExternalIncludeChild(t, home, markedSpawn)
+		if !bytes.Contains(data, []byte(rootClaudeMDSentinelMarked)) {
+			t.Fatalf("transcript for %s does not carry the root CLAUDE.md sentinel %q, so "+
+				"the root CLAUDE.md never reached the child at all. This arm says nothing "+
+				"about the include flag — read it as a broken fixture or a wrong observation "+
+				"point (the instructions attachment not landing in the session JSONL), not as "+
+				"evidence against MarkWorkdirTrusted.",
+				markedSpawn, rootClaudeMDSentinelMarked)
+		}
 		if !bytes.Contains(data, []byte(externalIncludeSentinelMarked)) {
-			t.Fatalf("transcript for %s does not carry the imported sentinel %q; "+
-				"the root CLAUDE.md's external import was not expanded even though "+
-				"MarkWorkdirTrusted approved includes on %s",
+			t.Fatalf("transcript for %s carries the root CLAUDE.md but not the imported "+
+				"sentinel %q; the external import was not expanded even though "+
+				"MarkWorkdirTrusted approved includes on %s. The CLAUDE.md arrived, so the "+
+				"observation point is sound and the flag is what failed.",
 				markedSpawn, externalIncludeSentinelMarked, markedRealpath)
 		}
 	})
 
-	// The control arm also pins the ticket's second measurement: agent-run
-	// pre-marks the folder it spawns in, so this arm's <root>/default entry is
-	// fully approved while its root entry is not. Marking the spawn folder must
-	// not rescue the import. If claude ever starts honouring the spawn folder's
-	// entry this reddens — which is the correct signal, not a flake.
+	// This arm holds the root entry — the one claude consults, since the spawn
+	// folder's git root is the root — at the exact pre-fix production state:
+	// trusted, includes unapproved. Its import must stay unexpanded while the
+	// marked arm's expands, which is what rules out imports expanding
+	// unconditionally and makes the marked arm's green mean something.
 	t.Run("unapproved_root_drops_external_import", func(t *testing.T) {
 		data := runExternalIncludeChild(t, home, controlSpawn)
+		if !bytes.Contains(data, []byte(rootClaudeMDSentinelControl)) {
+			t.Fatalf("transcript for %s does not carry the root CLAUDE.md sentinel %q. The "+
+				"root CLAUDE.md never reached this child, so its missing import proves "+
+				"nothing and this arm cannot license the marked arm. Fix the fixture before "+
+				"reading either arm.",
+				controlSpawn, rootClaudeMDSentinelControl)
+		}
 		if bytes.Contains(data, []byte(externalIncludeSentinelControl)) {
 			t.Fatalf("transcript for %s carries the imported sentinel %q even though "+
 				"%s has hasClaudeMdExternalIncludesApproved=false; the flag is not "+

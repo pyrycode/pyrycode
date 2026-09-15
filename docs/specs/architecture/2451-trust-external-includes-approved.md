@@ -6,7 +6,7 @@
 - `internal/agentrun/trust/trust_test.go` → `TestMarkWorkdirTrusted_IdempotentPreservesExtraEntryFields` — asserts byte-identity of `~/.claude.json` across a repeat call against a fixture entry that holds only `hasTrustDialogAccepted` + `mcpServers`. Adding keys makes the second write differ from the fixture, so this test goes red unless its fixture carries the new keys. This is the one existing test the change breaks.
 - `internal/agentrun/trust/trust_test.go` → `TestMarkWorkdirTrusted_PreservesSiblingProjects`, `writeJSON`, `readJSON` — the fixture/assertion helpers and the sibling-entry pattern the new test mirrors.
 - `internal/e2e/workdir_trust_test.go` → `TestE2E_Supervisor_PreMarksWorkdirTrusted` — decodes the entry into a struct carrying only `HasTrustDialogAccepted`. `encoding/json` ignores unknown keys, so this test is unaffected; checked because it is the other place that reads what this helper writes.
-- `cmd/pyry/agent_run.go` → `trustMark` — `agent-run` calls `MarkWorkdirTrusted` on the workdir it is about to spawn in, which is what lets the live arm drive a real child through the marked state.
+- `cmd/pyry/agent_run.go` → `trustMark` — the shared test seam. **Corrected 2026-09-15 rework: the `agent-run` verb does not call it.** The production callers are `runSupervisor` and the ACP lane in `cmd/pyry/main.go`, plus `selfcheck`. See § Revisions — the original claim here is what put the live fixture in the wrong shape.
 - `internal/e2e/realclaude/fixtures.go` → `WithWorktreeAuthenticated`, `RunPyryAgentRun`, `resolveAndOpenJSONL` — the live-tier primitives: a temp `$HOME` seeded with the operator's `~/.claude.json` and re-pinned credentials, a real `pyry agent-run` spawn, and `tuidriver.SessionJSONLPath(home, workdir, sessionID)` for locating the child's transcript.
 - `docs/knowledge/features/agentrun-trust-subpackage.md` § "Public API", § "Testing", § "Consumers" — states the written contract as the single trust key and enumerates the test matrix. Both go stale with this change; recorded under Documentation handoff, not edited here.
 
@@ -49,7 +49,9 @@ Each arm gets its own workspace root under that home, shaped like production: `<
 - **Marked arm.** Calls `trust.MarkWorkdirTrusted(<root>)` — the unit under test — then spawns via `RunPyryAgentRun` with `Workdir: <root>/default`. Asserts the child's transcript contains the sentinel.
 - **Control arm.** Hand-writes its root's entry with `hasTrustDialogAccepted: true` and `hasClaudeMdExternalIncludesApproved: false` — the exact pre-fix production state — merging into the seeded `~/.claude.json` rather than replacing it, so the operator's onboarding state survives. Spawns the same way. Asserts the transcript does **not** contain its sentinel.
 
-The control arm is what makes the marked arm's pass mean something: without it a green marked arm is also consistent with imports expanding unconditionally. It additionally pins the ticket's second measurement — `agent-run` marks the *spawn* folder's entry on its way in, so the control arm's `<root>/default` entry is fully marked while its root entry is not, and the arm asserts that this does not rescue the import. If Claude Code ever starts honouring the spawn folder's entry, this arm reddens, which is the correct signal rather than a flake.
+The control arm is what makes the marked arm's pass mean something: without it a green marked arm is also consistent with imports expanding unconditionally.
+
+**Corrected 2026-09-15 rework.** The sentence that stood here claimed the control arm also pins the ticket's second measurement, because `agent-run` marks the spawn folder's entry on its way in. It does not — the verb carries no `trustMark` call — and that false premise is what shaped the fixture wrongly. The arm does not cover the spawn-folder measurement at all; what governs the child is the entry keyed by its cwd's git root. See § Revisions.
 
 Distinct sentinels per arm so cross-contamination between the two transcripts is visible rather than silently passing.
 
@@ -97,3 +99,60 @@ The design landed as planned; no finding forced a change to it. Recording the tw
 - **Open question 2 (seeded `~/.claude.json` interfering with the control arm) stays open pending the live gate**, which is where it was always going to be decided. The control arm's failure message is written to make that outcome legible: if it reddens, the per-entry premise is wrong and the marked arm proves nothing, which is the finding to report rather than a test to relax.
 - **The control arm resolves its root through `agentrun.ResolveWorkdir` before hand-writing the entry.** The plan said "hand-writes its root's entry" without naming how the key is spelled. It must go through the same realpath rule the helper uses — macOS resolves `/var` to `/private/var` and folds to the on-disk case — or the control arm would write a key claude never reads, quietly degrading into a no-flag arm that passes for the wrong reason. This adds an `internal/agentrun` import to the live test file.
 - **Verification added beyond the plan's gate:** the `e2e`-tagged fake-daemon supervisor trust tests, which are the other consumer of what this helper writes. Green — they decode the entry into a struct carrying only the trust key, so the two added keys pass through unread, as the reading list predicted.
+
+### 2026-09-15 — rework after the live gate's marked arm went red
+
+The live gate ran the suite (1415 executed, 1 failed) and reddened exactly one
+test: the marked arm. The control arm passed. **The production change is
+unaffected and stays as designed** — the defect was in the live fixture, and the
+control arm's green was vacuous.
+
+**The mechanism, read out of the claude 2.1.259 binary rather than inferred.**
+The approval is a per-project key, and the project it belongs to is not the one
+the plan assumed:
+
+- Both include flags sit in claude's *project* config defaults alongside
+  `hasTrustDialogAccepted`, so the ticket's premise that they live on a
+  `projects[...]` entry is right.
+- The gate on an import is "resolves outside the child's cwd", and it is lifted
+  by `hasClaudeMdExternalIncludesApproved` read from the current project config.
+- That config is keyed by **the canonical git root of the cwd, falling back to
+  the cwd itself when no repository encloses it.**
+
+That single rule reconciles both measurements. In production the workspace root
+is a repository, so a child in `<root>/default` is governed by `<root>`'s entry —
+which is why the operator saw marking the root work and marking `default` do
+nothing, and why marking the bootstrap workdir is the correct fix. In the live
+fixture the workspace was a bare `MkdirAll` tree with no repository, so the key
+degraded to `<root>/default` — an entry the test never marks and that
+`agent-run` does not mark either, since the verb carries no `trustMark` call.
+Neither arm ever had an approved entry: the marked arm went red and the control
+arm went green because *nothing* reached either child.
+
+**Two changes, both in the live test.**
+
+1. `makeGitRoot` makes each workspace root a real repository, restoring the
+   production topology the ticket describes. Plain `git init`, not a linked
+   worktree — claude skips a main-repo ancestor's CLAUDE.md only when cwd sits
+   in a *linked* worktree, which a plain repo is not.
+2. A second sentinel per arm, living only in CLAUDE.md and required present by
+   **both** arms. This is the vacuity guard the first cut lacked: an arm
+   asserting the imported sentinel is *absent* passes whenever nothing reached
+   the child. With it, the broken fixture would have reported itself on the
+   first live run instead of spending a second one.
+
+**Both Open Questions are now closed.** Question 1: `WarningShown` does not gate
+the approval — the include decision reads `hasClaudeMdExternalIncludesApproved`
+alone, and `WarningShown` only suppresses the dialog. Writing both remains
+correct, since a headless child cannot answer a warning either. Question 2: the
+seeded `~/.claude.json` does not interact with the control arm — the lookup is a
+single keyed entry, so the operator's unrelated entries cannot reach it.
+
+The import spelling was checked while confirming the above and is fine: the
+extractor accepts a `./`-prefixed target, resolves it against the CLAUDE.md's own
+directory, and skips code spans, so `@./brain.md` in a paragraph is a real
+import. Ruling it out mattered because `git init` alone would not have helped had
+the syntax been wrong.
+
+**Still not run in this session:** the live tier itself. The builder role does
+not obtain Claude credentials, so AC-2 remains the dispatcher gate's to decide.
