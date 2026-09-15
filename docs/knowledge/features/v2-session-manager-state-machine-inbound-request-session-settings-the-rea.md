@@ -1,4 +1,4 @@
-# Inbound `request_session_settings` (#491/#1214, extended #1586, conversation-keyed #1610, permission mode #1687) — the read half of the #844 cluster
+# Inbound `request_session_settings` (#491/#1214, extended #1586, conversation-keyed #1610, permission mode #1687, dormant reply #2449) — the read half of the #844 cluster
 
 `request_session_settings` is a v2 **control** envelope (phone → binary),
 intercepted in `dispatchAppFrame`'s discriminator switch **before**
@@ -94,8 +94,20 @@ outright; every branch produces the same reply shape:
   acquisition before reporting anything, so no reported field can describe a
   session another field does not — even against a concurrent idle eviction.
   This handler inherits that refusal rather than re-deriving a weaker one.
+  **Since #2449, a resolved id that the pool does not hold live is not
+  automatically a refusal.** `resolveBoundRunSettings` tries `Pool.SettingsFor`
+  first and, on a miss, `Pool.DormantSettingsFor` — the dormant registry entry
+  #2448 keeps across a restart, when `Pool.New` has materialised only the
+  bootstrap. A dormant hit still reaches this handler as one ordinary
+  `RunConfig`, `ok == true`: the seam's shape and this handler's control flow
+  are unchanged, because the live/dormant distinction is resolved entirely on
+  the `cmd/pyry` side of the seam (it rides an unexported `live` bool on
+  `boundRunSettings` that `RunConfig` itself does not carry) and is spent
+  there gating the context-usage read — see the field table below.
   See [`internal/relay/v2session_seams.go`](../../../internal/relay/v2session_seams.go)'s
-  `RunConfig`/`RunConfigFor` doc comments and [codebase/1609.md](../codebase/1609.md).
+  `RunConfig`/`RunConfigFor` doc comments, [codebase/1609.md](../codebase/1609.md)
+  and [`Pool.SettingsFor`](sessions-package-key-types-pool-settingsfor.md) for
+  `DormantSettingsFor`.
 - **`KnownConversation` and `BootstrapSessionID` are no longer read here.**
   `KnownConversation` (`func(conversationID string) bool`) is now consulted
   **only** by `handleRequestSnapshot` — this handler stopped calling it
@@ -120,8 +132,9 @@ outright; every branch produces the same reply shape:
   | Non-interactive conn | *(none — inert)* |
   | Decode failure / no payload / empty `conversation_id` | Zero-valued `session_settings` |
   | `RunConfigFor` nil (foreground / v1 / unwired) | Zero-valued `session_settings` |
-  | Named `conversation_id`, `RunConfigFor` returns `ok == false` (unhosted or unbound) | Zero-valued `session_settings` |
-  | Named `conversation_id`, `RunConfigFor` returns `ok == true` | That conversation's own run configuration |
+  | Named `conversation_id`, `RunConfigFor` returns `ok == false` (unhosted, or bound to no session and no persisted record of one) | Zero-valued `session_settings` |
+  | Named `conversation_id`, bound to a session the pool holds live | That session's own run configuration, including context usage |
+  | Named `conversation_id`, bound to a session the pool holds only as a dormant registry entry (#2449) | That entry's `session_id`, `model` and `effort`; `yolo` false and `permission_mode` `"default"` regardless of what the entry persisted (#1487); `used_tokens` and `window_tokens` both zero — no transcript exists to read until the session is revived |
 
   `session_id: ""` is already the wire contract's defined "no session to
   address" answer, so the zero rows above are a real answer, not an error
@@ -141,7 +154,10 @@ gating *whether* the answer is populated rather than *which* session it
 describes) was the defect #1610 closed. `handleRequestSnapshot`'s
 `screen_snapshot` side-load is the one place in the manager that still
 reports bootstrap-scoped settings/usage, and it is out of scope by design
-(see the seam bullet above).
+(see the seam bullet above). #2449's dormant answer does not reopen that
+route: it still names only the one session the conversation is bound to,
+sourced from that session's own persisted registry entry, never the
+bootstrap's.
 
 **Security / log discipline.** `conversation_id` is untrusted network input,
 a lookup key only: it crosses to trusted only through `RunConfigFor`, whose

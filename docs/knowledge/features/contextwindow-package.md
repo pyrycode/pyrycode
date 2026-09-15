@@ -191,6 +191,8 @@ degrades to today's default-window reading rather than collapsing the seam to
 nil, the same "degrading one integer must not make a resolvable session
 unresolvable" rule `runConfigFor` already applies to its `usage` half.
 
+**#2449 — a dormant session needs a second gate above this seam, not a change to it.** `sessionTranscriptDir` already answers `""` for an id `Pool.Lookup` misses, which reads as "nothing to stat" and looks at first glance like it already degrades a dormant conversation's usage to zero. It doesn't: `path == ""` reports `Usage{0, defaultWindowTokens}`, the fresh-session default, not `Usage{0, 0}`. Composed into `session_settings` unguarded, a dormant reply would have claimed a genuine fresh 200000-token window beside `used_tokens: 0` for a channel that may in fact be near full — a **plausible-looking wrong answer**, not an obviously-empty one, and the kind a reviewer skimming for "does this collapse to zero" would miss. The fix is not inside this package: `runConfigFor` (`cmd/pyry/relay.go`) now calls the `usage` closure only when the resolution is `live` (a session the pool holds, not a dormant registry entry), so a dormant reply reports both context fields at zero by never reaching this reader at all. Read to the end of a reader's refusal path before assuming it degrades to zero — the fresh-session default and "no usage to report" are different values.
+
 **Naming trap: a `cmd/pyry` file cannot be named `session_model_windows.go`.**
 Go applies an implicit `GOOS=windows` build constraint to any file whose name
 ends `_windows.go` — the plan named the resolver's file that, and the package
