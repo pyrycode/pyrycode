@@ -161,6 +161,42 @@ edit: it is scoped to the event family rather than the parser, and its "diffing 
 is a legitimate thing for a *consumer* to do on its own terms" survives verbatim, since the hold makes
 no inference.
 
+## Persisting the retained model list across a restart, a decorator beside the hold rather than a fifth hold (#2450)
+
+`modelVocabularyStore` (`cmd/pyry/model_vocabulary_store.go`) makes the daemon-wide vocabulary
+survive a restart by writing `model_list.json`, one file per daemon instance beside `sessions.json`,
+whenever a `ModelList` lands, and reading it once at daemon start. It is **not** a fifth
+`sessionRetentions` member and does not widen `newSessionModelHold`/`newSessionParser`: it is a
+second, independent sink chained in `newStreamRunnerFactory` — the `sessionResetFollower` /
+`newTurnEndContextUsageRequester` shape, a non-retaining decorator spliced on the parser's side of
+`sinkFor`'s droppable send, fed by a per-daemon object the hold constructors have no business
+knowing about. Two decorators now watch the same `ModelList` event for two different reasons: the
+hold retains it for *this* process's readers, the store retains it for the *next* process's. Ingest
+clones on the store's side, because `sessionModelHold.Sink` already documents itself sole owner of
+what it's handed, and a second retainer on the same chain would falsify that unless it took its own
+copy.
+
+**Unit tests of a store cannot redden a factory that forgot to chain it — only a wiring test can.**
+Every test in `model_vocabulary_store_test.go` (round trip, coalescing, deep copy, the write-skip)
+would pass unchanged if `newStreamRunnerFactory` never called `vocab.sinkFor(...)` at all — the
+store would simply never receive an event, and the feature would be silently dead. The one test that
+can catch that is `TestStreamRunnerFactory_PersistsTheModelVocabulary`, which drives a real
+`streamRunner` against a fake claude answering one genuine `initialize` control request and asserts
+both the in-memory retention and the file. General shape, generalising `newTurnEndContextUsageRequester`'s
+and `sessionResetFollower`'s own wiring-guard precedent one more time: a decorator's unit tests prove
+its *contract*; only a test that exercises the factory that chains it proves the chain wasn't
+dropped.
+
+**CODING-STYLE's persistent-data sort rule is wrong for this file, on purpose, and the encoder needs
+to say why.** § Persistent data conventions ends with "sort records by a stable key before
+serialising" — correct for `sessions.json`/`conversations.json`, whose in-memory order is a map
+iteration, and silently wrong here: `turnevent.ModelList.Models` is claude's own order, and
+`ModelOption.EffortLevels` goes further (low, medium, high, xhigh, max is neither alphabetical nor
+sorted) — reordering either would replace claude's answer with the daemon's opinion of it, and no
+test would go red, since a round-trip test built from a pre-sorted fixture can't distinguish
+"preserved order" from "sorted order." Worth a one-line comment on any encoder that copies this
+package's persistence recipe for producer-ordered data rather than registry data.
+
 ## Retaining the per-model context windows, the fourth application (#2106)
 
 `sessionModelWindowHold` applies the identical placement to `turnevent.TurnEnd`'s `ModelWindows` /
