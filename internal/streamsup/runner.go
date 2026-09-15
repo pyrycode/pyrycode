@@ -577,9 +577,8 @@ func (g *PostureGate) refusedByClaude() bool {
 // Runner supervises the claude child lifecycle. Construct with New; drive with
 // Run. The held-open stdin handle is exposed via Stdin.
 type Runner struct {
-	cfg     Config
-	log     *slog.Logger
-	workDir string // resolved absolute path (agentrun.ResolveWorkdir)
+	cfg Config
+	log *slog.Logger
 
 	// mu is a leaf mutex guarding WHICH CHILD, IF ANY, MAY RECEIVE A TURN: stdin
 	// (the write end of the live child's StdinPipe) together with the rotation gate
@@ -736,6 +735,12 @@ type Runner struct {
 	// first field without the other two — which is what makes following claude's own
 	// announced reset distinguishable here from ordering a fresh restart.
 	//
+	// SetSpawnWorkDir (#1475) writes the directory PAIR (workDir +
+	// claudeSessionsDir) and nothing else, which is what makes moving the next
+	// spawn's working directory distinguishable from rotating its id — and what
+	// keeps a spawn from ever observing a directory and a transcript folder that
+	// name different places.
+	//
 	// The charter is ONE ACQUISITION PER SPAWN SETUP (#1481): beginSpawn both reads
 	// the spawn inputs (args + the id pair) and publishes iterCancel in a single
 	// section, so a racing Restart/RestartFresh/SetSpawnArgs/AdoptSessionID is serialised either
@@ -770,6 +775,38 @@ type Runner struct {
 	// reads it in the section it already takes, so the one-acquisition-per-spawn-setup
 	// charter holds with no second acquisition.
 	spawnMode string
+
+	// workDir is the directory each spawn chdirs into (spawnAndWait's cmd.Dir), a
+	// resolved absolute path (agentrun.ResolveWorkdir). Seeded from cfg.WorkDir in
+	// New and replaced by SetSpawnWorkDir; the mutable analogue of that immutable
+	// field exactly as sessionID is of cfg.SessionID.
+	//
+	// It became a spawn INPUT at #1475, when a new_session rotation gained the job
+	// of bringing the successor up in the workspace the operator recorded on the
+	// conversation. Before that it was a construction constant read live off the
+	// Runner by both spawnAndWait and Run's "spawning claude" log; with a swapper
+	// in play either read is a data race, so both now take beginSpawn's snapshot.
+	//
+	// claudeSessionsDir MOVES WITH IT and the pairing is not cosmetic — see that
+	// field. The two are written in ONE restartMu section so no spawn can observe a
+	// directory and a transcript folder that name different places.
+	workDir string
+
+	// claudeSessionsDir is the folder useCreateForm probes to decide --session-id
+	// vs --resume for this spawn: the projects directory claude writes <id>.jsonl
+	// into, which it names after the directory it resolved. Seeded from
+	// cfg.ClaudeSessionsDir in New and replaced, always together with workDir, by
+	// SetSpawnWorkDir. "" keeps Config's meaning: run no probe, latch on firstRun.
+	//
+	// WHY IT CANNOT BE LEFT BEHIND when workDir moves. The rotation spawn itself
+	// would survive a stale value — forceFirst is set and the fresh id is absent
+	// from either folder — but the successor's NEXT crash-respawn would probe the
+	// pre-move folder, find the transcript absent because claude wrote it under the
+	// new one, choose create form, and re-issue --session-id against a live
+	// transcript, which claude refuses (ADR 032). A supplied directory makes
+	// useCreateForm decide OUTRIGHT rather than latch, so that is a permanent
+	// respawn loop rather than one wasted spawn.
+	claudeSessionsDir string
 
 	// postureGate is cfg.PostureGate, hoisted so the turn path reads one field. Nil
 	// is the ungated runner, and every method on the type is nil-receiver-safe, so no
@@ -870,16 +907,17 @@ func New(cfg Config) (*Runner, error) {
 	cfg.Args = slices.Clone(cfg.Args)
 	parser, _ := cfg.Stdout.(*Parser)
 	return &Runner{
-		cfg:         cfg,
-		log:         cfg.Logger,
-		workDir:     workDir,
-		state:       State{Phase: PhaseStarting},
-		args:        slices.Clone(cfg.Args),
-		sessionID:   cfg.SessionID,
-		spawnMode:   cfg.SpawnPermissionMode,
-		postureGate: cfg.PostureGate,
-		parser:      parser,
-		restartCh:   make(chan struct{}, 1),
+		cfg:               cfg,
+		log:               cfg.Logger,
+		state:             State{Phase: PhaseStarting},
+		args:              slices.Clone(cfg.Args),
+		sessionID:         cfg.SessionID,
+		spawnMode:         cfg.SpawnPermissionMode,
+		workDir:           workDir,
+		claudeSessionsDir: cfg.ClaudeSessionsDir,
+		postureGate:       cfg.PostureGate,
+		parser:            parser,
+		restartCh:         make(chan struct{}, 1),
 	}, nil
 }
 
@@ -1778,6 +1816,83 @@ func (r *Runner) setArgsLocked(args []string) {
 	r.args = slices.Clone(args)
 }
 
+// SetSpawnWorkDir installs the directory the NEXT spawn chdirs into, together
+// with the transcript folder that spawn's create/resume probe reads. It does NOT
+// restart: a live child keeps running where it is, and the swap lands on whatever
+// spawn happens next — the crash-respawn the loop was going to make anyway, or
+// the one a following RestartFresh orders. #1475's consumer pairs it with
+// RestartFresh for exactly that reason.
+//
+// It is SetSpawnArgs' sibling. One restartMu acquisition, writing only the
+// directory pair — never sessionID, rotatePending, freshSeq, iterCancel or args —
+// so it preserves the #1481 single-acquisition property by construction and
+// cannot reach the forbidden state beginSpawn's doc names (that state is defined
+// over fields it does not touch). Against a racing beginSpawn it serialises
+// wholly before (that spawn observes the swap) or wholly after (that spawn keeps
+// the old directory and the next one takes the new); both are correct, because
+// the contract is the NEXT spawn and it promises nothing about a spawn already in
+// flight. Like Restart it drives only Runner-internal state and touches neither
+// Pool.mu nor Session.lcMu, so the sessions layer can call it after releasing
+// Pool.mu with no lock-order concern.
+//
+// THE RESOLVE SITS ABOVE THE LOCK, and both halves of that placement are
+// load-bearing. Above, because restartMu is a leaf — nothing under it may take
+// another lock or do synchronous I/O, the invariant setArgsLocked states — and
+// ResolveWorkdir stats the path and resolves symlinks. Present at all, because
+// New applies the same function to cfg.WorkDir: skipping it would break
+// workDir's "resolved absolute path" invariant and, worse, desynchronise the pair
+// — the caller derives claudeSessionsDir through ResolveWorkdir too, including
+// the canonicalCase step resolveSpawnDir does not apply, so a raw workDir here
+// would name a directory whose transcript folder is the resolved one's.
+//
+// A resolve failure writes NEITHER field: the pair is fail-closed on the
+// directory the runner already had, never half-applied. That is the same
+// direction the whole #1475 reject set takes — a workspace that cannot be
+// resolved leaves the successor where it was rather than moving it somewhere
+// unvalidated.
+//
+// An empty workDir is a no-op (logged at Warn): the runner never chdirs into "".
+// This is the deterministic last-resort guard RestartFresh's empty-id early
+// return already models — the validating boundary is the caller (cmd/pyry's
+// resolveSpawnDir, which answers "" for "no recorded workspace" and never asks
+// for an install), and this upholds New's non-empty contract regardless.
+//
+// Must never be called with restartMu already held — the mutex is not reentrant.
+func (r *Runner) SetSpawnWorkDir(workDir, claudeSessionsDir string) error {
+	if workDir == "" {
+		r.log.Warn("streamsup: SetSpawnWorkDir called with empty dir; ignoring")
+		return nil
+	}
+	resolved, err := agentrun.ResolveWorkdir(workDir)
+	if err != nil {
+		return fmt.Errorf("streamsup: resolve spawn workdir: %w", err)
+	}
+	r.restartMu.Lock()
+	r.workDir = resolved
+	r.claudeSessionsDir = claudeSessionsDir
+	r.restartMu.Unlock()
+	return nil
+}
+
+// ClaudeSessionsDir reports the folder the live spawn inputs name — where claude
+// writes this session's <id>.jsonl, and what the next spawn's create/resume probe
+// will read. "" means no probe is configured.
+//
+// It exists so cmd/pyry's transcript reader can answer for the directory the
+// session is CURRENTLY spawning in rather than the one it was constructed with:
+// since #1475 a rotation can move that, and a stored copy would report the
+// pre-move folder — the #2423 reading ("Context: 0%") re-introduced for exactly
+// the conversations that moved.
+//
+// It takes restartMu alone, never mu, so it is safe to call from any goroutine
+// and adds no edge to the daemon's lock order — the treatment liveSessionID
+// already gets for the same reason.
+func (r *Runner) ClaudeSessionsDir() string {
+	r.restartMu.Lock()
+	defer r.restartMu.Unlock()
+	return r.claudeSessionsDir
+}
+
 // RestartFresh rotates the runner's persistent session id to newID and forces the
 // next spawn to use --session-id <newID> (a fresh transcript, no fork),
 // re-establishing first-run semantics. A subsequent crash-respawn then --resumes
@@ -1963,9 +2078,24 @@ func (r *Runner) AdoptSessionID(newID string) {
 // name one session" true by construction: a second restartMu acquisition at spawn
 // time could land on the far side of a racing rotation and skew the two apart, and
 // would also break the one-acquisition charter above.
+//
+// workDir is this spawn's snapshot of the directory to chdir into, threaded
+// through to spawnAndWait's cmd.Dir and to Run's "spawning claude" log — both of
+// which read the live field until #1475 made it swappable, which is precisely
+// what a snapshot removes: a live read races SetSpawnWorkDir. The transcript
+// folder is snapshotted in the SAME section and consumed locally by useCreateForm
+// below, which is what makes "the directory and the transcript probe name one
+// place" true by construction, the same way env and args name one session.
+//
+// The return list deliberately places no two same-typed results adjacent: workDir
+// sits between env []string and forceFirst bool, and spawnMode after freshSeq
+// uint64, so transposing the two strings at the call site is a compile error
+// rather than a child spawned in a directory named "acceptEdits". That is
+// boundRunSettings' stated reasoning for named-field wiring, applied to a return
+// list that cannot have names.
 func (r *Runner) beginSpawn(ctx context.Context, firstRun bool) (
 	iterCtx context.Context, cancel context.CancelFunc, args, env []string,
-	forceFirst bool, freshSeq uint64, spawnMode string,
+	workDir string, forceFirst bool, freshSeq uint64, spawnMode string,
 ) {
 	// Derived BEFORE the acquisition on purpose: context.WithCancel takes the
 	// parent cancelCtx's own internal mutex, and restartMu must never be held
@@ -1979,12 +2109,14 @@ func (r *Runner) beginSpawn(ctx context.Context, firstRun bool) (
 	base, id := r.args, r.sessionID
 	freshSeq = r.freshSeq
 	spawnMode = r.spawnMode
+	workDir = r.workDir
+	sessionsDir := r.claudeSessionsDir
 	r.iterCancel = cancel
 	r.restartMu.Unlock()
 
-	args = buildArgs(base, useCreateForm(r.cfg.ClaudeSessionsDir, id, firstRun || forceFirst), id)
+	args = buildArgs(base, useCreateForm(sessionsDir, id, firstRun || forceFirst), id)
 	env = spawnEnv(r.cfg.Env, r.cfg.SessionIDEnvVar, id)
-	return iterCtx, cancel, args, env, forceFirst, freshSeq, spawnMode
+	return iterCtx, cancel, args, env, workDir, forceFirst, freshSeq, spawnMode
 }
 
 // liveSessionID snapshots the live session id under restartMu, for a diagnostic
@@ -2060,17 +2192,20 @@ func (r *Runner) Run(ctx context.Context) error {
 		// with --session-id (a fresh transcript). firstRun's flip-back to false on a
 		// successful spawn (below) then makes the next respawn --resume the new id —
 		// see the started-gated flip.
-		iterCtx, cancel, args, env, forceFirst, freshSeq, spawnMode := r.beginSpawn(ctx, firstRun)
+		iterCtx, cancel, args, env, workDir, forceFirst, freshSeq, spawnMode := r.beginSpawn(ctx, firstRun)
 		if forceFirst {
 			firstRun = true
 		}
 		// Logged AFTER the section: synchronous log I/O must never run under a leaf
 		// mutex. It is also what puts a racer arriving here on the already-published
-		// cancel's side of the invariant.
-		r.log.Info("spawning claude", "args", args, "workdir", r.workDir)
+		// cancel's side of the invariant. The workdir is the SNAPSHOT, not r.workDir:
+		// since #1475 the field is swappable, so a live read here would both race the
+		// swapper and be able to name a directory other than the one this spawn is
+		// about to enter.
+		r.log.Info("spawning claude", "args", args, "workdir", workDir)
 
 		start := time.Now()
-		started, waitErr := r.spawnAndWait(iterCtx, args, env, freshSeq, spawnMode)
+		started, waitErr := r.spawnAndWait(iterCtx, args, env, workDir, freshSeq, spawnMode)
 		cancel()
 		r.clearIterCancel()
 		uptime := time.Since(start)
@@ -2151,9 +2286,14 @@ func (r *Runner) Run(ctx context.Context) error {
 // Config.SessionIDEnvVar is set, this spawn's live session id — and is likewise
 // carried through untouched. Empty leaves cmd.Env nil, which inherits the parent's
 // environment implicitly; the same set of variables either way.
-func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, freshSeq uint64, spawnMode string) (started bool, waitErr error) {
+//
+// workDir is beginSpawn's setup-time snapshot of the directory to chdir into,
+// carried through as a parameter rather than read off the Runner (#1475): the
+// field is swappable, and a live read here would race SetSpawnWorkDir and could
+// enter a directory this spawn's argv and transcript probe were not built for.
+func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, workDir string, freshSeq uint64, spawnMode string) (started bool, waitErr error) {
 	cmd := exec.CommandContext(ctx, r.cfg.ClaudeBin, args...)
-	cmd.Dir = r.workDir
+	cmd.Dir = workDir
 	cmd.Stdout = r.cfg.Stdout
 	cmd.Stderr = r.cfg.Stderr
 	if len(env) > 0 {

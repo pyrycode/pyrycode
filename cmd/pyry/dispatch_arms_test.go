@@ -166,7 +166,7 @@ func TestStartFreshRunner_StartNewSessionRunnerIsInert(t *testing.T) {
 		return sessions.SessionID("fresh-" + string(old)), nil
 	}
 
-	if err := startFreshRunner(r, sessions.SessionID("old-session-id"), rotate); err != nil {
+	if err := startFreshRunner(r, sessions.SessionID("old-session-id"), "", rotate, nil); err != nil {
 		t.Errorf("startFreshRunner = %v, want nil", err)
 	}
 	if r.calls != 0 {

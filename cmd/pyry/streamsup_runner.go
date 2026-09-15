@@ -43,13 +43,9 @@ import (
 // neither this declaration nor the factory a line. sessionRetentions declares no methods,
 // so nothing is promoted into this type's method set and the four accessors below reach
 // their holds by ordinary field promotion.
-// claudeSessionsDir is the folder this runner's spawn probe was built with,
-// retained verbatim so the usage reader can be handed the same value (#2423).
-// See ClaudeSessionsDir below for why it is stored rather than re-derived.
 type streamRunner struct {
 	r *streamsup.Runner
 	sessionRetentions
-	claudeSessionsDir string
 }
 
 func (a streamRunner) State() sessions.State { return mapStreamState(a.r.State()) }
@@ -246,19 +242,22 @@ func (a streamRunner) ModelWindows() (modelWindowReport, bool) { return a.window
 // derivation degraded and no folder can be named, which is the same inert state
 // streamsup.Config.ClaudeSessionsDir gives the probe.
 //
-// IT RETURNS A STORED STRING, NOT A DERIVATION, and that is the method's whole
-// reason to exist. mapStreamsupConfig calls streamClaudeSessionsDir ONCE per runner
-// and the factory keeps that exact value, so the usage reader
-// (sessionTranscriptDir → snapshotUsageFor) and the spawn probe read one field of
-// one struct and cannot name different folders for one session. Re-deriving here
-// from a workdir would agree today and is the shape that drifts: ResolveWorkdir
-// applies canonicalCase and symlink resolution, which the confining validators do
-// not, so a differently-spelled workdir would name a folder claude never writes —
-// the failure streamClaudeSessionsDir's own doc enumerates.
+// IT FORWARDS THE RUNNER'S LIVE FIELD, NOT A DERIVATION, and that is the method's
+// whole reason to exist. The runner holds the folder its own spawn probe keys on,
+// so the usage reader (sessionTranscriptDir → snapshotUsageFor) and that probe read
+// one field of one struct and cannot name different folders for one session.
+// Re-deriving here from a workdir would agree today and is the shape that drifts:
+// ResolveWorkdir applies canonicalCase and symlink resolution, which the confining
+// validators do not, so a differently-spelled workdir would name a folder claude
+// never writes — the failure streamClaudeSessionsDir's own doc enumerates.
 //
-// A stored string rather than a reach into a.r for the same reason the retention
-// forwards are accessors: the value is fixed at construction, so there is nothing
-// to ask a live child about and no turn to be outside of.
+// It FORWARDED A STORED COPY until #1475, when a new_session rotation gained the
+// ability to move the session's spawn directory. A copy taken at construction
+// would report the pre-move folder from then on, which is the #2423 reading
+// ("Context: 0%") re-introduced for exactly the conversations that moved. The
+// value is no longer fixed at construction, so there is now something to ask the
+// runner about — but still nothing to ask a live CHILD about, so the forward stays
+// a plain field read and no turn boundary is involved.
 //
 // It is the EIGHTH concrete method OFF the sessions.Runner interface (un-widened,
 // #1077), after Interrupt (#1120), RestartFresh (#1124), BeginRotation (#1330),
@@ -278,7 +277,38 @@ func (a streamRunner) ModelWindows() (modelWindowReport, bool) { return a.window
 // (mapStreamsupConfig's doc states that no resolver crosses and neither side scans),
 // and a device-influenced directory reaching exec.Command would be a different
 // design.
-func (a streamRunner) ClaudeSessionsDir() string { return a.claudeSessionsDir }
+func (a streamRunner) ClaudeSessionsDir() string { return a.r.ClaudeSessionsDir() }
+
+// SetSpawnWorkDir installs the directory this session's NEXT spawn chdirs into —
+// the seam a new_session rotation uses to bring the successor up in the workspace
+// the operator recorded on the conversation (#1475). It restarts nothing; the
+// caller pairs it with RestartFresh.
+//
+// THE DERIVATION LIVES HERE, not in streamsup, because mapStreamsupConfig already
+// does it here with this same helper: one call site for the construction-time
+// value and one for the swap, both streamClaudeSessionsDir, so the two can never
+// name different folders for one workdir. streamsup cannot do it itself —
+// sessions.DefaultClaudeSessionsDir is the sessions package's, and the mapper
+// exists precisely so streamsup imports neither it nor this one.
+//
+// The runner applies ResolveWorkdir to workDir under its own contract, and
+// streamClaudeSessionsDir applies it to the same input on the way to the projects
+// folder, so the pair the runner installs is derived from one resolution of one
+// path. A degraded derivation answers "" — the inert probe state — rather than a
+// wrong folder, which is streamClaudeSessionsDir's documented contract.
+//
+// It is the NINTH concrete method OFF the sessions.Runner interface, for the
+// reason ClaudeSessionsDir above states: its consumer is startFreshRunner in this
+// package, reaching it by type assertion off Session.Runner.
+//
+// SECURITY: workDir is resolveSpawnDir's confined, symlink-resolved output and
+// nothing else — the caller re-runs that validator on the recorded value at
+// rotation time rather than trusting it, because a path confined when it was
+// stored can be re-pointed before it is spawned in. A refusal never reaches here;
+// it leaves the runner in the directory it already had.
+func (a streamRunner) SetSpawnWorkDir(workDir string) error {
+	return a.r.SetSpawnWorkDir(workDir, streamClaudeSessionsDir(workDir))
+}
 
 // QueryMCPStatus asks this runner's exact live child for a requester-private
 // status reading. It stays off sessions.Runner because its only consumer is the
@@ -599,13 +629,14 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, approva
 		// sits inside internal/sessions, and this consumer sits here.
 		follow.adoptRunner = r.AdoptSessionID
 		contextUsage.request = r.RequestContextUsage
-		// The probe's OWN folder is retained on the adapter, taken off scfg rather
-		// than re-derived from cfg.WorkDir (#2423): the usage reader is handed this
-		// exact string, so the reader and the probe cannot name different folders
-		// for one session. See ClaudeSessionsDir's doc for what a second derivation
-		// would cost. A plain string copied off the config, so unlike the seams
-		// above it needs no publication argument beyond the factory's own goroutine.
-		return streamRunner{r: r, sessionRetentions: held, claudeSessionsDir: scfg.ClaudeSessionsDir}, nil
+		// The probe's OWN folder is NOT copied onto the adapter. It travels in
+		// scfg.ClaudeSessionsDir, which streamsup.New seeds the runner's live field
+		// from, and the usage reader forwards to that field (#2423, made live at
+		// #1475 so a rotation that moves the workdir moves the reading with it). One
+		// field on one struct, so the reader and the probe cannot name different
+		// folders for one session; see ClaudeSessionsDir's doc for what a second
+		// derivation would cost.
+		return streamRunner{r: r, sessionRetentions: held}, nil
 	}
 }
 

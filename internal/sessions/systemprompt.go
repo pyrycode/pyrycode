@@ -659,9 +659,12 @@ func (p *Pool) refreshSystemPromptForRotation(sess *Session) {
 // comes up on the first message, so the operator's normal flow — create the
 // channel, set its prompt, talk — sets the prompt after buildSession has already
 // frozen the argv. Composing only at build time would satisfy every other clause
-// of AC #1 and ship dead for the flow operators actually use, which is the shape
-// Conversation.Cwd is stuck in: its doc claims a change takes effect on the next
-// fresh spawn, and no production path reads it.
+// of AC #1 and ship dead for the flow operators actually use — the shape
+// Conversation.Cwd was stuck in until #1475, which gave the new_session rotation
+// the re-read that makes its doc's "takes effect on the next fresh spawn" claim
+// true. Two production paths read it now, and they are the two fresh spawns: that
+// rotation, and the post-restart revive (#1487). An idle-evict re-activation is a
+// resume rather than a fresh spawn and keeps the directory its runner already has.
 //
 // The composition itself, including the verbatim write and the swallowed write
 // error, is writeComposedPrompt's; this function owns the two guards above it and

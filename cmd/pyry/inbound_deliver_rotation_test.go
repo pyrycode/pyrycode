@@ -445,7 +445,7 @@ func TestInboundDeliver_RotationInProductionOrder_DeliversToFreshChild(t *testin
 		tr.clearForSession(rotationNewSID)
 		return sessions.SessionID(rotationNewSID), nil
 	}
-	if err := startFreshRunner(rr, rotationOldSID, rotate); err != nil {
+	if err := startFreshRunner(rr, rotationOldSID, "", rotate, nil); err != nil {
 		t.Fatalf("startFreshRunner: %v", err)
 	}
 	if !slices.Equal(rr.restartFreshIDs, []string{rotationNewSID}) {

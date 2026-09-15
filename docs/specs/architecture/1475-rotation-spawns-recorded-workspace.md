@@ -202,3 +202,17 @@ One line trips. The floor rule overrides it: the only seam a split could cut is 
 3. **Should the rejection Warn fire on `SetSpawnWorkDir`'s own error as well as on `resolveSpawnDir`'s?** Planned answer: yes, as a distinct event — the two are different failures (refused by confinement vs. vanished before install) and collapsing them would make the record ambiguous.
 
 Each is resolved in Phase B; anything that changes the design above is recorded in a `## Revisions` entry.
+
+## Revisions
+
+### 2026-09-15 — implementation
+
+**Open questions, resolved.**
+
+1. *Does `SetSpawnWorkDir` need a guard against a directory that vanishes between the confinement and the install?* No. `agentrun.ResolveWorkdir` rejects a non-existent directory, confirmed by the `non-existent directory` row of `TestSetSpawnWorkDir_Rejected`, and the error path writes neither field. No design change.
+2. *Does removing `streamRunner.claudeSessionsDir` break a construction site?* No. Only `newStreamRunnerFactory` set it; no test literal did. The accessor now forwards to the runner's live field. No design change.
+3. *Should the install's own failure get its own event?* Yes, as planned — `v2.new_session.spawn_dir_install_failed` for "vanished before the install", distinct from `v2.new_session.spawn_dir_rejected` for "refused by confinement".
+
+**Departure: `startFreshRunner` takes a logger.** The plan's signature was `(runner, oldID, spawnDir, rotate)` and left `installSpawnDir`'s failure record unsourced. `slog.Default()` turned out to be wrong: `cmd/pyry` never calls `slog.SetDefault`, so that record would have left the daemon's log entirely rather than joining it. The function therefore takes `log *slog.Logger`, threaded from `activeSessionStarter.log`, nil-tolerant so the two direct test callers need no logger. The resolve-side refusal record (AC-4's) was always going to use `a.logger()` and is unaffected.
+
+**Shape: the confinement is a method, not an inline block.** `activeSessionStarter.resolveSpawnDir(convID, recordedCwd)` holds the nil-seam guard, the empty-recording guard, the call and the refusal record. The data flow in § Design is unchanged — it still sits below every inert arm and above `startFreshRunner` — but the posture argument and the no-path-in-the-log rule needed a docstring of their own rather than a comment inside a switch.

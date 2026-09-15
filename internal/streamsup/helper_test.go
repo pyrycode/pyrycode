@@ -28,6 +28,19 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// helperSpawnID returns the session id this spawn was launched with, read out of
+// the child's OWN argv — buildArgs emits it as "--session-id <id>" on a fresh
+// spawn and "--resume <id>" on a respawn, so both forms are scanned. "unknown"
+// keeps the marker name well-formed if neither flag is present.
+func helperSpawnID() string {
+	for i, a := range os.Args {
+		if (a == "--session-id" || a == "--resume") && i+1 < len(os.Args) {
+			return os.Args[i+1]
+		}
+	}
+	return "unknown"
+}
+
 // helperChild is the fake-claude entry point, keyed by GO_STREAMSUP_HELPER_MODE:
 //
 //   - "echo_lines":    write "READY", echo every stdin line back as
@@ -53,6 +66,13 @@ func TestMain(m *testing.M) {
 //     text echoing the prompt → result/success). The session_id
 //     stays constant across turns while init repeats per turn
 //     (spike § 1). Used by the turn-I/O round-trip test.
+//   - "record_cwd_block": write this spawn's own working directory into a marker
+//     file named by GO_STREAMSUP_HELPER_CWD_MARKER, created at that
+//     RELATIVE path so it lands inside the cwd itself, then block
+//     like "record_block". The marker's LOCATION is the proof of
+//     the spawn directory and its CONTENT is the child's own
+//     os.Getwd() — neither is readable from a production config
+//     field. Used by the spawn-workdir swap tests.
 //   - "mcp_status_policy": answer initialize with both inventory variants,
 //     answer mcp_status with an empty status report and record
 //     that request on stderr, and answer other input with a
@@ -95,6 +115,26 @@ func helperChild() {
 				_ = f.Sync()
 				_ = f.Close()
 			}
+		}
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGTERM)
+		go func() { _, _ = io.Copy(io.Discard, os.Stdin) }()
+		select {
+		case <-sigCh:
+			os.Exit(0)
+		case <-time.After(30 * time.Second):
+			os.Exit(0)
+		}
+	case "record_cwd_block":
+		if prefix := os.Getenv("GO_STREAMSUP_HELPER_CWD_MARKER"); prefix != "" {
+			// os.Getwd is the child's own answer, and the RELATIVE name puts the
+			// file in the directory it answers with — so a test can prove the
+			// spawn directory by the marker's location, which is immune to the
+			// macOS /tmp → /private/tmp rewrite that a content compare trips on.
+			// The id suffix makes one spawn's marker distinguishable from the
+			// next's even when both land in the same directory.
+			wd, _ := os.Getwd()
+			_ = os.WriteFile(prefix+"-"+helperSpawnID()+".txt", []byte(wd+"\n"), 0o600)
 		}
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGTERM)
