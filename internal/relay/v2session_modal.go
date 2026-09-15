@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"time"
 
@@ -636,19 +637,39 @@ func (m *V2SessionManager) handleInterrupt(s *V2Session, env protocol.Envelope) 
 	}
 }
 
+// msgNewSessionWorkspaceRefused is the user-facing message emitted in the
+// new_session.workspace_refused error payload when a rotation completed but the
+// conversation's recorded workspace was refused by re-confinement, so the
+// successor child stayed in the directory the runner already had (#2443).
+//
+// STATIC BY CONTRACT, and it names no path. The confinement error that caused the
+// refusal names the offending directory and the $HOME boundary, and it is
+// discarded at its own site rather than travelling here — the posture
+// handlers.ChangeWorkspace keeps for the same bytes with msgChangeWorkspaceRejected.
+// It says what happened rather than why, because the why is the operator's
+// filesystem state and the client can read the recorded path from the
+// conversation record it already has.
+const msgNewSessionWorkspaceRefused = "the recorded workspace could not be used; the new session " +
+	"started in the previous directory"
+
 // handleNewSession starts a fresh session in the conversation an inbound
 // `new_session` control frame names (#831, #2099). On the stream path that is a
 // kill and respawn under a freshly minted session id, not a `/clear` keystroke.
-// There is no reply and no broadcast (fire-and-forget) — the client observes the
-// break via the existing session_transition marker (#656/#657), which carries the
-// ROTATED conversation's id because the emitter resolves it from the new session
-// id rather than from any cursor. Intercepted in dispatchAppFrame before
+// There is no broadcast, and there is EXACTLY ONE outcome that replies (#2443):
+// a rotation that completed while the conversation's recorded workspace was
+// refused. Every other outcome stays fire-and-forget, with the client observing
+// the break via the existing session_transition marker (#656/#657), which carries
+// the ROTATED conversation's id because the emitter resolves it from the new
+// session id rather than from any cursor. Intercepted in dispatchAppFrame before
 // dispatch.Route, like handleInterrupt, and runs on the manager's single Run
 // dispatch goroutine — so the s.interactive read is lock-free under the package's
-// single-owner invariant.
+// single-owner invariant, and the reply seals on the same goroutine that owns the
+// send CipherState.
 //
-// The signature takes (s, env) — no ctx — mirroring handleDequeueMessage: there
-// is a payload to decode but no cancellable work.
+// The signature takes ctx since #2443, unlike its shape twins handleInterrupt and
+// handleDequeueMessage: the one reply it can owe seals through forwardEnvelope,
+// which takes one. The seam's own work is still uncancellable — ctx reaches the
+// reply path and nothing else.
 //
 // This handler is a COURIER for conversation_id and validates nothing. It cannot:
 // internal/relay imports neither internal/conversations nor internal/sessions, so
@@ -677,8 +698,18 @@ func (m *V2SessionManager) handleInterrupt(s *V2Session, env protocol.Envelope) 
 //     session, mid-teardown) is Warn-logged with the conn_id and tolerated —
 //     there is nothing to roll back and no reply is owed. The conversation_id is
 //     NOT logged here; it is client-supplied and unbounded until the seam's shape
-//     check has run, and the seam records it there under its own bound.
-func (m *V2SessionManager) handleNewSession(s *V2Session, env protocol.Envelope) {
+//     check has run, and the seam records it there under its own bound. That
+//     stays true of arm 5, whose id IS daemon-resolved and bounded: the seam
+//     already recorded it, and a second record here would only make this
+//     handler's rule conditional.
+//  5. A *RotatedWithoutWorkspaceError is the ONE answer that is not best-effort,
+//     and it is NOT a failed rotation (#2443). It means the rotation COMPLETED
+//     and the successor stayed in the directory it was already in, because the
+//     conversation's recorded workspace failed re-confinement at the spawn site.
+//     Discriminated on the TYPE and above the Warn arm, so an ordinary error that
+//     merely mentions a workspace still takes the best-effort path. The reply is
+//     unicast to the conn that asked — this handler still broadcasts nothing.
+func (m *V2SessionManager) handleNewSession(ctx context.Context, s *V2Session, env protocol.Envelope) {
 	if !s.interactive {
 		return // non-interactive conn: inert, no rotation (the AC-4 negative path)
 	}
@@ -693,9 +724,68 @@ func (m *V2SessionManager) handleNewSession(s *V2Session, env protocol.Envelope)
 	// ConversationID is the cursor path. Never echoed back to the phone or logged.
 	_ = json.Unmarshal(env.Payload, &p)
 
-	if err := m.cfg.SessionStarter.StartNewSession(p.ConversationID); err != nil {
-		m.cfg.Logger.Warn("relay: v2 new_session start failed",
-			"event", "v2.new_session.keystroke_err",
+	err := m.cfg.SessionStarter.StartNewSession(p.ConversationID)
+	if err == nil {
+		return
+	}
+	var refused *RotatedWithoutWorkspaceError
+	if errors.As(err, &refused) {
+		// Arm 5: the rotation happened; only the move did not. Recorded at Info
+		// because it reports a live-daemon runtime state an operator needs at the
+		// daemon's default level (handleInterrupt's step-1 reasoning), and with
+		// conn_id alone — the seam already recorded the conversation id.
+		m.cfg.Logger.Info("relay: v2 new_session rotated without the recorded workspace",
+			"event", "v2.new_session.workspace_refused",
+			"conn_id", s.connID)
+		m.newSessionReplyWorkspaceRefused(ctx, s, env.ID, refused.ConversationID)
+		return
+	}
+	m.cfg.Logger.Warn("relay: v2 new_session start failed",
+		"event", "v2.new_session.keystroke_err",
+		"conn_id", s.connID,
+		"err", err)
+}
+
+// newSessionReplyWorkspaceRefused pushes this verb's ONLY reply: a single
+// TypeError correlated to inReplyTo, naming the conversation that rotated,
+// through the same m.forwardEnvelope seal-and-forward path every other v2 reply
+// uses (no parallel send path). A fourth near-identical copy of the snapshot /
+// settings / debug-bundle error-reply helper is the established package posture
+// (each reply-owing handler owns its helper); do NOT extract a shared one
+// (over-DRY). It differs from its siblings in taking conversationID — the one
+// thing a bare new_session's in_reply_to cannot identify — and in taking no
+// code / message / retryable, because this handler has exactly one reply to send
+// and a parameterised helper would invite a second.
+//
+// SECURITY: the message is a compile-time constant and conversationID is the
+// seam's daemon-resolved id, never the client's raw string and never a path.
+func (m *V2SessionManager) newSessionReplyWorkspaceRefused(ctx context.Context, s *V2Session,
+	inReplyTo uint64, conversationID string) {
+	errPayload, err := json.Marshal(protocol.ErrorPayload{
+		Code:           protocol.CodeNewSessionWorkspaceRefused,
+		Message:        msgNewSessionWorkspaceRefused,
+		Retryable:      false,
+		ConversationID: conversationID,
+	})
+	if err != nil {
+		// A closed struct of strings + bool; marshal cannot fail in practice.
+		m.cfg.Logger.Warn("relay: v2 new_session error reply marshal failed",
+			"event", "v2.new_session.err_marshal",
+			"conn_id", s.connID)
+		return
+	}
+	reply := protocol.Envelope{
+		ID:        1, // non-load-bearing; the phone correlates on InReplyTo.
+		Type:      protocol.TypeError,
+		TS:        time.Now().UTC(),
+		Payload:   errPayload,
+		InReplyTo: &inReplyTo,
+	}
+	if err := m.forwardEnvelope(ctx, s.connID, reply); err != nil {
+		// Dropped, not retried: the rotation is already committed, so there is
+		// nothing to roll back — the package's outbound-drop posture.
+		m.cfg.Logger.Debug("relay: v2 new_session error reply push dropped",
+			"event", "v2.new_session.err_push",
 			"conn_id", s.connID,
 			"err", err)
 	}

@@ -253,6 +253,45 @@ const (
 	// host-side failure is the transient one.
 	CodePairingNotPermitted = "pairing.not_permitted" // the device is authenticated but is not privileged to mint; permanent
 	CodePairingUnavailable  = "pairing.unavailable"   // the mint could not be completed on the host; one merged, retryable answer
+
+	// New-session workspace refusal (#2443; docs/protocol-mobile.md § Error codes).
+	// MINTED WITH THE HANDLER THAT SENDS IT, the sequencing #2052, the history
+	// group, #2125, #2207 and #2419 each followed: no reject vocabulary exists
+	// ahead of the code that can emit it.
+	//
+	// IT REPORTS A ROTATION THAT SUCCEEDED, which is what makes it unlike every
+	// other code in this file. new_session rotated the conversation and the
+	// successor child came up; what did not happen is the MOVE into the
+	// conversation's recorded workspace, because re-confining that stored path at
+	// spawn time refused it — the folder was deleted, or re-pointed outside $HOME,
+	// since change_workspace stored it (#1475 wired the move; this code reports its
+	// one caveat). An error frame is the carrier because the client needs the
+	// refusal CORRELATED to the frame it sent, and a conversation record carries no
+	// in_reply_to.
+	//
+	// IT IS NOT AN ORACLE, and the derivation matters because this verb is silent in
+	// every other outcome. The frame fires only after a rotation that actually
+	// happened, whose session_transition the client already receives carrying the
+	// rotated conversation's id; the conversation's recorded cwd is already
+	// published in ConversationSummary; and change_workspace already answers "is
+	// this path acceptable?" directly for any path a client names. A client could
+	// already derive this refusal from frames it is entitled to send, so what this
+	// adds is one round trip of convenience rather than a fact. Every INERT arm
+	// stays silent — an unknown conversation, an unbound one, a non-canonical id, a
+	// conversation with no live child, a non-interactive conn — so the verb still
+	// cannot answer "does this conversation exist?".
+	//
+	// NON-RETRYABLE: the same stored workspace fails identically until the operator
+	// repairs the folder or re-points it with change_workspace, which is not
+	// something a retry accomplishes — CodeWorkspaceNotFound's reasoning, unchanged.
+	//
+	// IT CARRIES THE CONVERSATION ID and no fragment of the operator's filesystem
+	// path. The id is needed because a bare new_session names no conversation and
+	// rotates the daemon's cursor one, so in_reply_to alone cannot identify the
+	// subject; it travels in ErrorPayload.ConversationID, whose own doc carries the
+	// never-echo obligation. The message is a compile-time constant in
+	// internal/relay and the confinement error's text reaches neither it nor a log.
+	CodeNewSessionWorkspaceRefused = "new_session.workspace_refused" // the rotation completed; the recorded workspace was refused, so the successor stayed put
 )
 
 // Envelope-type constants — wire values for Envelope.Type

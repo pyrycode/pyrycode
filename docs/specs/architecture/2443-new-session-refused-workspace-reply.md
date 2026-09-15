@@ -317,3 +317,34 @@ Owned by the documentation stage; pending, not done here.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-15
+
+## Revisions
+
+### 2026-09-15 — implementation
+
+The design above held; nothing in it was reversed. Recorded here are the two Open
+Questions' resolutions and one discovery that changed how a criterion is PROVEN rather
+than what it is.
+
+- **Open question 1 (does the relay log the conversation id?) — resolved as designed: no.**
+  `handleNewSession`'s new arm records `v2.new_session.workspace_refused` at Info with
+  `conn_id` alone, and the relay test asserts the id reaches the wire and not the log.
+- **Open question 2 (other `SessionStarter` implementations?) — resolved: none.** The seam
+  kept its arity, so the only implementations are `activeSessionStarter` and the relay's
+  `fakeSessionStarter`; neither the fake-daemon harness nor any construction site needed a
+  change, and `go build ./... && go vet ./...` confirm it.
+- **The e2e refusal had to be a SYMLINK, and the two obvious alternatives are traps.**
+  The first draft of the e2e case planned to delete the recorded directory, then to replace
+  it with a regular file. Reading `confineWorkdirToHomeCreating` shows both are ACCEPTED:
+  a missing directory is re-created by its `MkdirAll` leg, and an existing regular file
+  inside `$HOME` passes both containment checks untouched (`rest` is empty, so nothing is
+  created and `EvalSymlinks` resolves it fine). Either would have produced a test that
+  passes green while proving nothing — the rotation would have succeeded with the workspace
+  ACCEPTED and the missing error frame would have been read as a deadline. Re-pointing the
+  recorded path at a directory outside `$HOME` with a symlink is the one mutation that
+  reaches the refusal, and it is also the ticket's literal scenario. The e2e case records
+  this in its own doc block so the next reader does not re-derive it.
+- **Implementation detail, decided at the call site rather than in the plan:** the reply
+  helper is `newSessionReplyWorkspaceRefused` and takes no code / message / retryable
+  parameters, unlike its `settingsReplyError` sibling. This handler has exactly one reply to
+  send; a parameterised helper would invite a second and quietly widen the verb.

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 )
@@ -230,6 +231,12 @@ func TestStartNewSession_ConfinesRecordedWorkspaceBeforeInstalling(t *testing.T)
 
 // AC-4: a refused workspace leaves the successor where it was, the rotation still
 // completes, and the refusal is recorded with the conversation id and no path.
+//
+// #2443 widened the return rather than the record: the refusal now ALSO leaves the
+// seam as a *relay.RotatedWithoutWorkspaceError so the relay can tell the
+// requesting client. The pre-#2443 assertion here was that StartNewSession answers
+// nil, and every other property below is unchanged — the rotation still completes,
+// nothing installs, and no path reaches the log.
 func TestStartNewSession_RefusedWorkspace_RotatesAndRecords(t *testing.T) {
 	t.Parallel()
 
@@ -239,8 +246,19 @@ func TestStartNewSession_RefusedWorkspace_RotatesAndRecords(t *testing.T) {
 	sd := &spawnDirProbe{err: handlers.ErrSpawnDirRejected}
 	s := starterWithWorkspace(t, r, rotationRecordedCwd, sd, &logs)
 
-	if err := s.StartNewSession(starterConvB); err != nil {
-		t.Fatalf("StartNewSession = %v, want nil — a refused workspace must not fail the rotation", err)
+	err := s.StartNewSession(starterConvB)
+	var refused *relay.RotatedWithoutWorkspaceError
+	if !errors.As(err, &refused) {
+		t.Fatalf("StartNewSession = %v, want a *relay.RotatedWithoutWorkspaceError — the refusal is "+
+			"what the relay answers the client with", err)
+	}
+	if refused.ConversationID != starterConvB {
+		t.Errorf("refusal names conversation %q, want %q", refused.ConversationID, starterConvB)
+	}
+	// The error text is what handleNewSession's OTHER arm logs verbatim, so it must
+	// name neither the workspace nor the conversation.
+	if msg := refused.Error(); strings.Contains(msg, rotationRecordedCwd) || strings.Contains(msg, starterConvB) {
+		t.Errorf("Error() = %q, want a constant naming neither the path nor the conversation", msg)
 	}
 
 	if len(r.installed) != 0 {
@@ -257,6 +275,65 @@ func TestStartNewSession_RefusedWorkspace_RotatesAndRecords(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), rotationRecordedCwd) {
 		t.Errorf("the refusal record names the workspace path; it must not:\n%s", logs.String())
+	}
+}
+
+// #2443's bare-frame half, and the reason the refusal carries an id at all: a
+// frame naming NO conversation rotates the daemon's cursor one, so in_reply_to
+// alone cannot tell the client which conversation stayed put. The refusal must
+// name the RESOLVED cursor conversation, never the empty string the frame carried.
+func TestStartNewSession_RefusedWorkspace_BareFrameNamesTheCursorConversation(t *testing.T) {
+	t.Parallel()
+
+	var steps []string
+	var logs bytes.Buffer
+	r := &movableRunner{steps: &steps}
+	sd := &spawnDirProbe{err: handlers.ErrSpawnDirRejected}
+	s := starterWithWorkspace(t, r, rotationRecordedCwd, sd, &logs)
+	// The fixture's resolveBound answers only for starterConvB, so pointing the
+	// cursor there is what makes the bare path reach the rotation at all.
+	s.currentConv = func() string { return starterConvB }
+
+	err := s.StartNewSession("")
+	var refused *relay.RotatedWithoutWorkspaceError
+	if !errors.As(err, &refused) {
+		t.Fatalf("StartNewSession(\"\") = %v, want a *relay.RotatedWithoutWorkspaceError", err)
+	}
+	if refused.ConversationID != starterConvB {
+		t.Errorf("refusal names conversation %q, want the resolved cursor %q — the client named "+
+			"nothing, so this is the only place it learns which conversation rotated",
+			refused.ConversationID, starterConvB)
+	}
+}
+
+// A refusal followed by a FAILED rotation reports the rotation failure, not the
+// refusal. Losing a race to a concurrent new_session is the ordinary way to land
+// here, and "rotated without the workspace" would be a lie about a rotation that
+// never happened — the client's session_transition never arrives either. The
+// refusal record is still written; only the wire report is withheld.
+func TestStartNewSession_RefusedWorkspaceThenRotateError_ReportsTheRotateError(t *testing.T) {
+	t.Parallel()
+
+	var steps []string
+	var logs bytes.Buffer
+	wantErr := errors.New("rotate lost the race")
+	r := &movableRunner{steps: &steps}
+	sd := &spawnDirProbe{err: handlers.ErrSpawnDirRejected}
+	s := starterWithWorkspace(t, r, rotationRecordedCwd, sd, &logs)
+	s.rotate = func(sessions.SessionID) (sessions.SessionID, error) { return "", wantErr }
+
+	err := s.StartNewSession(starterConvB)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("StartNewSession = %v, want the rotate error %v", err, wantErr)
+	}
+	var refused *relay.RotatedWithoutWorkspaceError
+	if errors.As(err, &refused) {
+		t.Errorf("a failed rotation was reported as a refused workspace; the client would be told a " +
+			"rotation happened that did not")
+	}
+	if !strings.Contains(logs.String(), "v2.new_session.spawn_dir_rejected") {
+		t.Errorf("the refusal record was withheld along with the report; it must still be written:\n%s",
+			logs.String())
 	}
 }
 
