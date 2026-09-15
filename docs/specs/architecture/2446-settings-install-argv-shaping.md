@@ -350,11 +350,9 @@ drives a phone-created session, and by the adapter's unit table. The plan's
 modal harness uses; the arm's doc states the split.
 
 The second question — whether any existing fake-tier test composes the refused
-pair and would newly be refused by the fidelity guard — is not settled here. A
-full `internal/e2e` tier run was started and had not reported by the end of this
-session; the new arm and the fake's own unit table are green, and the guard fires
-only on an argv the daemon composes through the defect this ticket fixes, so the
-expectation is none. The verifier's `make check` is what settles it.
+pair and would newly be refused by the fidelity guard — is settled: a full
+`internal/e2e` tier run is green (113s), so no arm in that tier composes the pair
+and the unconditional guard costs the suite nothing.
 
 The settings change the live arm sends is an EFFORT change rather than a
 permission mode. A posture change would alter whether the Write is gated at all,
