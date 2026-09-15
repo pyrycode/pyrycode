@@ -151,6 +151,18 @@ place is what keeps them safe.):
   permission posture, model acknowledgement is not a turn-admission condition.
   There is exactly one posture send for an update naming either
   posture field.
+
+  **Since #2447, that `set_model` request carries `familyAlias(*update.Model)`,
+  not `*update.Model` verbatim** — the same rewrite `claudeSettingsArgs`
+  applies to the spawn argv (above), so the live child and the next-spawn
+  argv can never name different models even when a client picks a
+  full-id row. `merged.Model` — the stored, picked value — is what
+  `saveLocked` persists and `SettingsFor` returns; only the wire send is
+  rewritten. See [`SessionSettings` /
+  `claudeSettingsArgs`](sessions-package-key-types-sessionsettings-claudesettingsargs.md)
+  for the rewrite rule and why pyry storing one value and sending claude
+  another is by design, not a divergence to close.
+
   That arithmetic is deliberate and load-bearing: the pre-#2043 shape (a mode
   clause kept beside the old `!*update.YOLO → RevokeBypass()` clause) would
   emit *two* identical control requests for one revocation, because the

@@ -1101,6 +1101,15 @@ func inBandDeliverable(update SettingsUpdate) bool {
 //     killed the child and so ended it. `interrupt` remains the verb for ending a
 //     running turn; #1605 measures the in-flight window live.
 //
+// THE MODEL SENT IS THE FAMILY ALIAS, NOT THE FRAME'S VALUE (#2447). A mid-session
+// pick of a row claude publishes as an exact id — Fable's, or "Haiku 4.5" — would
+// otherwise hold the session on a model claude has superseded, so familyAlias
+// rewrites it on the way out. This site and claudeSettingsArgs are its complete
+// caller set and cannot disagree: Pool.UpdateSettings has already assigned
+// update.Model into merged before releasing p.mu, so the live child and the argv
+// installed for the next spawn name the same model. What is STORED stays the row
+// as picked — the menu matches it by exact equality.
+//
 // Fire-and-forget: every write error is logged and swallowed, which is the
 // contract Restart has had on this path since #842. The settings are already
 // persisted and the argv already installed, so a failed write loses nothing and
@@ -1138,7 +1147,7 @@ func (p *Pool) deliverSettingsInBand(id SessionID, sup Runner, update SettingsUp
 		}
 	}
 	if update.Model != nil {
-		if err := sup.SetModel(*update.Model); err != nil {
+		if err := sup.SetModel(familyAlias(*update.Model)); err != nil {
 			notDelivered("model", err)
 		}
 	}

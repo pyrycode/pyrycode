@@ -101,6 +101,15 @@ func TestClaudeSettingsArgs(t *testing.T) {
 		{"model only", SessionSettings{Model: "sonnet"}, []string{"--model", "sonnet", bypass}},
 		{"effort only", SessionSettings{Effort: "high"}, []string{"--effort", "high", bypass}},
 		{"model and effort", SessionSettings{Model: "opus", Effort: "low"}, []string{"--model", "opus", "--effort", "low", bypass}},
+		// #2447 AC 2: the --model VALUE is the family alias, not the stored one.
+		// A row claude publishes as an exact id pins the session to a model claude
+		// supersedes, so the spawn argv names the family and the stored value is
+		// left alone for the menu to keep matching by exact equality. A row
+		// published as a bare alias already names its family and composes itself,
+		// which is why both directions are rows here: a rewrite that fired on
+		// everything would be just as wrong as one that fired on nothing.
+		{"a stored exact id composes the family alias", SessionSettings{Model: "claude-fable-5-1[1m]"}, []string{"--model", "fable[1m]", bypass}},
+		{"a stored bare alias composes itself", SessionSettings{Model: "haiku"}, []string{"--model", "haiku", bypass}},
 		{"yolo appends the escalation and no mode", SessionSettings{YOLO: true}, []string{bypass}},
 		{"all three in deterministic order", SessionSettings{Model: "opus", Effort: "max", YOLO: true}, []string{"--model", "opus", "--effort", "max", bypass}},
 		// The default posture now NAMES itself. Before #2065 it appended nothing,

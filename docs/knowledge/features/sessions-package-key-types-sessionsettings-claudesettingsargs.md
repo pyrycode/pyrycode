@@ -76,6 +76,35 @@ func claudeSettingsArgs(s SessionSettings) []string
 Pure helper, unexported. `Model != ""` → `--model <x>`; `Effort != ""` →
 `--effort <x>`; then the posture.
 
+**Since #2447, the `--model` value is a family alias, not the stored
+`s.Model` verbatim.** `claudeSettingsArgs` passes `s.Model` through the
+unexported `familyAlias` (`modelfamily.go`) first: an exact Anthropic model id
+shaped `claude-<family>-<digits...>`, with an optional trailing bracket group
+kept as-is, rewrites to `<family><group>` (`claude-fable-5-1[1m]` →
+`fable[1m]`); a bare alias (`sonnet`, `opus[1m]`, `default`) or anything not
+shaped like that — including `""` — passes through unchanged. This is a
+deliberate divergence between what pyry stores and what it sends claude, not
+a bug: `SessionSettings.Model` keeps the row the user picked, byte for byte —
+`saveLocked`, `Pool.SettingsFor`, and `cmd/pyry`'s run-config snapshot all
+still read that value untouched — so the model menu's exact-equality match
+and `validateModelVocabulary`'s membership check both keep working against
+the picked row. Only the argv sees the alias (`Pool.UpdateSettings`'s
+`deliverSettingsInBand` applies the same rewrite to the in-band `set_model`
+request, below). A session that picked a full-id row therefore keeps
+following that family's newest release after every claude update, with no
+user action.
+
+**Intended, not accidental:** the published menu offers both `haiku` (→
+`claude-haiku-4-5-20251001`) and `claude-haiku-4-5` as distinct rows. A
+session on the second is sent the alias `haiku` and so runs whatever `haiku`
+currently resolves to — the same model the first row would run — while the
+menu keeps highlighting "Haiku 4.5". That is the operator's decision applied
+consistently across every family, not a case to special-case away.
+
+`familyAlias`'s docblock names #2447 and is the one place in this package a
+model string is parsed at all; the standing rule that model values are
+opaque and never parsed for matching, indexing or keying otherwise holds.
+
 **Since #2065 the escalation flag is unconditional, and the posture slot is no
 longer mutually exclusive.** Every argv this function composes carries
 `--dangerously-skip-permissions`, always, including the zero value — so

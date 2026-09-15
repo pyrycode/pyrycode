@@ -383,3 +383,71 @@ func TestPool_UpdateSettings_ClearModel_KeepsRestart(t *testing.T) {
 		t.Errorf("clearing the model invented a control request: %q", got)
 	}
 }
+
+// TestPool_UpdateSettings_ExactIDStoresAsPickedAndSendsTheFamilyAlias is #2447's
+// AC 2, AC 3 and AC 4 in one run, and they belong in one run because they are
+// three readings of a SINGLE store-then-deliver call: what went outbound to the
+// live child, what was installed for the next spawn, and what stayed behind in
+// memory and on disk. Split across three tests, each could pass against a
+// different call and the divergence this ticket exists to prevent — a rewritten
+// value leaking into storage, or an unrewritten one reaching claude — would have
+// no single place to redden.
+//
+// The picked row is one claude publishes as an exact id, which is the only case
+// with anything to prove: a bare-alias row is its own family, so it cannot tell a
+// working rewrite from an absent one. TestClaudeSettingsArgs carries the
+// bare-alias direction on its table.
+//
+// Byte-for-byte on the way back is the assertion, not "contains" or "resolves
+// to": the desktop's model menu matches its aria-current row by exact equality
+// and cmd/pyry's validateModelVocabulary looks the stored value up in the
+// published list the same way, so a value that merely round-trips to something
+// equivalent breaks both.
+func TestPool_UpdateSettings_ExactIDStoresAsPickedAndSendsTheFamilyAlias(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "sessions.json")
+	tplWorkDir := t.TempDir()
+
+	// The row value as published, and the alias claude is to be asked for. The
+	// two are written out rather than derived through familyAlias, so a change to
+	// the rule reddens here instead of moving the expectation with itself.
+	const picked, alias = "claude-fable-5-1[1m]", "fable[1m]"
+
+	pool := helperRestartPool(t, regPath, tplWorkDir, SessionSettings{Model: "sonnet"})
+	runPoolInBackground(t, pool)
+	id := pool.Default().ID()
+	runner := runnerDouble(t, pool, id)
+	waitRunning(t, runner)
+
+	// Model only: a present YOLO or an empty value would route onto the restart
+	// path, which would leave AC 3's in-band send unexercised.
+	if err := pool.UpdateSettings(id, SettingsUpdate{Model: ptr(picked)}); err != nil {
+		t.Fatalf("UpdateSettings(model=%q): %v", picked, err)
+	}
+
+	// AC 3 — the live child is asked for the family, not the superseded id.
+	if got, want := runner.modelRequests(), []string{alias}; !reflect.DeepEqual(got, want) {
+		t.Errorf("delivered model requests = %q, want %q", got, want)
+	}
+	// AC 2 — and so is the next spawn, without the user reopening the menu.
+	installs := runner.spawnArgSets()
+	if len(installs) != 1 {
+		t.Fatalf("SetSpawnArgs called %d times, want exactly 1: %v", len(installs), installs)
+	}
+	if got, want := installedArgv(t, installs[0]), append([]string{"--model", alias}, alwaysOnPosture(permissionModeDefault)...); !reflect.DeepEqual(got, want) {
+		t.Errorf("installed argv = %v, want %v", got, want)
+	}
+	// AC 4 — the rewrite is confined to those two outbound sites. The value a
+	// Session read reports and the value on disk are the row as picked.
+	got, err := pool.SettingsFor(id)
+	if err != nil {
+		t.Fatalf("SettingsFor: %v", err)
+	}
+	if got.Model != picked {
+		t.Errorf("SettingsFor().Model = %q, want the row as picked %q; the alias leaked into storage", got.Model, picked)
+	}
+	if disk := diskSettings(t, regPath); disk.Model != picked {
+		t.Errorf("on-disk model = %q, want the row as picked %q", disk.Model, picked)
+	}
+}
