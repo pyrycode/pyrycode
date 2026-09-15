@@ -10880,34 +10880,71 @@ func TestParser_TaskProgressDropsClaudesUnmappedKeys(t *testing.T) {
 // The SILENT branches are swept too, and that is the half a copy of the neighbouring
 // tests would miss: four of this arm's five rejects log nothing at all, and a drop
 // with no diagnostic is where "just the task id" gets added later.
+//
+// It sweeps CAPTURED RECORDS rather than a rendered handler dump, and that is #2472
+// rather than a style preference. A TextHandler opens every record with its own
+// `time=`, a rendered millisecond field holds two consecutive nines often enough to
+// fail 3.5% of runs (.991, .399, .099), and the counter token is a bare "99" — so the
+// assertion fired on the handler's framing, never on anything the parser wrote. The
+// forbidden set is what must NOT give: dropping the counter would end the flake and
+// quietly lose a third of the coverage, so it is the SURFACE that narrows, to what the
+// parser actually logged. Do not put a rendering handler back.
+//
+// Attr KEYS are swept alongside values, which the dump covered for free and the
+// mirrored TestParser_HarnessNudgeDropIsLoggedContentFree does not: p.log.Debug(msg,
+// tl.TaskID, "x") is the one shape that lands claude's text in a key.
 func TestParser_TaskProgressDropIsLoggedContentFree(t *testing.T) {
 	t.Parallel()
 	const secretID = "task-id-that-must-not-be-logged"
 	const secretDescription = "Reading /Users/somebody/secrets.txt"
+	// The fixture's usage.total_tokens, named so the forbidden token below is derived
+	// from the value the rows actually send rather than re-typed beside them. A
+	// hand-written "99" goes stale in silence the day this number changes, leaving a
+	// guard that scans for a counter no row carries.
+	const counterFixture = 99
 
 	tests := []struct {
 		name string
 		line string
+		// wantDrops is the positive control. Without it a recorder that captured
+		// nothing — mis-wired, or a handler that stopped being Enabled at Debug —
+		// leaves the sweep below scanning an empty slice, and the subtest passes for
+		// the worst available reason. Only the undecodable arm logs; the other two
+		// rows are two of the four silent rejects.
+		wantDrops int
 	}{
 		{"undecodable", `{"type":"system","subtype":"task_progress","task_id":` +
 			strconv.Quote(secretID) + `,"description":` + strconv.Quote(secretDescription) +
-			`,"usage":"not-an-object"}`},
-		{"non-positive counter", taskProgressLineFixture(secretID, secretDescription, "s", "l", 99, 0, 3)},
-		{"below the bound", taskProgressLineFixture(secretID, secretDescription, "s", "l", 99, 1, 3)},
+			`,"usage":"not-an-object"}`, 1},
+		{"non-positive counter", taskProgressLineFixture(secretID, secretDescription, "s", "l", counterFixture, 0, 3), 0},
+		{"below the bound", taskProgressLineFixture(secretID, secretDescription, "s", "l", counterFixture, 1, 3), 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var buf bytes.Buffer
-			p := NewParser(func(turnevent.Event) {},
-				slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-			_, _ = p.Write([]byte(tc.line + "\n"))
+			rec := &logRecorder{}
+			p := NewParser(func(turnevent.Event) {}, slog.New(rec))
+			if _, err := p.Write([]byte(tc.line + "\n")); err != nil {
+				t.Fatalf("Write err = %v, want nil", err)
+			}
 
-			logged := buf.String()
-			for _, forbidden := range []string{secretID, secretDescription, "99"} {
-				if strings.Contains(logged, forbidden) {
-					t.Errorf("the drop log carries %q. Nothing derived from claude's output reaches a "+
-						"log in this package: %s", forbidden, logged)
+			if drops := rec.withMessage(undecodableSystemLineMsgFixture); len(drops) != tc.wantDrops {
+				t.Errorf("records with message %q: got %d, want %d (all records: %+v)",
+					undecodableSystemLineMsgFixture, len(drops), tc.wantDrops, rec.all())
+			}
+			forbidden := []string{secretID, secretDescription, strconv.Itoa(counterFixture)}
+			for _, r := range rec.all() {
+				for _, f := range forbidden {
+					if strings.Contains(r.msg, f) {
+						t.Errorf("a record message carries %q. Nothing derived from claude's output "+
+							"reaches a log in this package: %q", f, r.msg)
+					}
+					for k, v := range r.attrs {
+						if strings.Contains(k, f) || strings.Contains(v, f) {
+							t.Errorf("record %q attr %q=%q carries %q. Nothing derived from claude's "+
+								"output reaches a log in this package", r.msg, k, v, f)
+						}
+					}
 				}
 			}
 		})
