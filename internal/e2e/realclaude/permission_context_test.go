@@ -48,9 +48,18 @@ type permissionObservation struct {
 	} `json:"permission_denials"`
 	// Present only on a control_response, and only while the posture arm is armed
 	// (#2474). A POINTER UNDER omitempty is load-bearing rather than stylistic:
-	// writePermissionOfferDiagnostic marshals this type into a published artifact and
-	// TestPermissionObservation_PreservesAlwaysAllowSource round-trips it, so a value
-	// field would add a response key to every existing path's bytes. Nil omits.
+	// runPermissionObserver re-encodes the WHOLE observation over its socket, and both
+	// TestPermissionObservation_PreservesAlwaysAllowSource and
+	// TestPermissionObservation_PreservesReasonPresence round-trip this type through
+	// json.Marshal and assert presence semantics over the result. A value field would
+	// add a response key to every one of those paths' bytes. Nil omits.
+	//
+	// It is NOT writePermissionOfferDiagnostic that constrains this, though that is the
+	// nearby function a reader reaches for: it marshals permissionOfferDiagnostic, a
+	// separate record it builds from selected fields of an observation, so nothing on
+	// this type reaches a published artifact. Said explicitly because the wrong citation
+	// stood here first, and on a shared type in a security-sensitive change it would
+	// point a future exposure audit at bytes that are never written.
 	Response *permissionControlResponse `json:"response,omitempty"`
 }
 
