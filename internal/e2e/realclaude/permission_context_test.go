@@ -46,6 +46,28 @@ type permissionObservation struct {
 	PermissionDenials []struct {
 		ToolUseID string `json:"tool_use_id"`
 	} `json:"permission_denials"`
+	// Present only on a control_response, and only while the posture arm is armed
+	// (#2474). A POINTER UNDER omitempty is load-bearing rather than stylistic:
+	// writePermissionOfferDiagnostic marshals this type into a published artifact and
+	// TestPermissionObservation_PreservesAlwaysAllowSource round-trips it, so a value
+	// field would add a response key to every existing path's bytes. Nil omits.
+	Response *permissionControlResponse `json:"response,omitempty"`
+}
+
+// permissionControlResponse carries the two fields that identify claude's SUCCESS
+// answer to the spawn-time set_permission_mode request, and nothing else.
+//
+// THE NAK's `error` IS DELIBERATELY ABSENT. A non-success subtype already identifies a
+// NAK, and the error string is unbounded claude prose that would otherwise cross this
+// socket into a test log — the channel noteControlAck refuses to open for exactly this
+// reason. A field never declared cannot reach a log. Both retained fields are
+// claude-authored and pass through stdioPermissionSafeLabel before any comparison or
+// log; see isDefaultPostureAck, which is their only reader.
+type permissionControlResponse struct {
+	Subtype  string `json:"subtype"`
+	Response struct {
+		Mode string `json:"mode"`
+	} `json:"response"`
 }
 
 // Invoked by TestMain only when this test binary stands in front of real Claude.
@@ -67,12 +89,20 @@ func runPermissionObserver() int {
 		return 93
 	}
 	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	// Read once, outside the loop: the arm is fixed for the process's life. Off by
+	// default, so the two existing observer callers forward exactly what they always
+	// did — startPermissionObserver's channel holds 16 and its accept loop returns
+	// permanently once full, so an unconditional third arm could silently end their
+	// observation (#2474).
+	posture := os.Getenv("PYRY_PERMISSION_OBSERVER_POSTURE") == "1"
 	reader := bufio.NewReader(stdout)
 	for {
 		line, readErr := reader.ReadBytes('\n')
 		var observed permissionObservation
 		if json.Unmarshal(line, &observed) == nil &&
-			((observed.Type == "control_request" && observed.Request.Subtype == "can_use_tool") || observed.Type == "result") {
+			((observed.Type == "control_request" && observed.Request.Subtype == "can_use_tool") ||
+				observed.Type == "result" ||
+				(posture && observed.Type == "control_response")) {
 			conn, err := net.DialTimeout("tcp", os.Getenv("PYRY_PERMISSION_OBSERVER_ADDR"), 5*time.Second)
 			if err != nil {
 				return 94
