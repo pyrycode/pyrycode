@@ -1005,8 +1005,13 @@ const (
 )
 
 // autoNameSeedTime is the seeded row's LastUsedAt — a fixed instant, so the
-// "auto-naming does not bump last_used_at" assertion compares against a known
-// value rather than against a window.
+// "a rejected send does not bump last_used_at" assertions compare against a
+// known value rather than against a window.
+//
+// Since #2438 it is no longer what an ACCEPTED send leaves behind: the send is
+// itself a use and re-stamps the field, so the accepted rows bracket the call
+// with the clock instead. Naming still does not bump — the announced record
+// simply carries the instant the send that provoked it just wrote.
 var autoNameSeedTime = time.Date(2026, 6, 1, 9, 30, 0, 0, time.UTC)
 
 // newAutoNameReg returns a registry backed by a throwaway path (so the eager Save
@@ -1065,9 +1070,11 @@ func TestSendMessage_AutoNamesUnnamedConversation(t *testing.T) {
 	})
 
 	h := SendMessage(routeTo(&stubTurnWriter{}), q, nil, reg, path, announce, sendMsgLogger(t))
+	before := time.Now()
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
+	after := time.Now()
 
 	// The ack is unchanged — auto-naming is a side effect of an accepted message.
 	assertSendMsgEnvelopeShape(t, recv(), protocol.TypeAck)
@@ -1106,8 +1113,12 @@ func TestSendMessage_AutoNamesUnnamedConversation(t *testing.T) {
 	if p.WorkspaceLabel == nil || *p.WorkspaceLabel != autoNameLabel {
 		t.Errorf("pushed WorkspaceLabel = %v, want pointer to %q", p.WorkspaceLabel, autoNameLabel)
 	}
-	if !p.LastUsedAt.Equal(autoNameSeedTime) {
-		t.Errorf("pushed LastUsedAt = %v, want %v (naming is not a use)", p.LastUsedAt, autoNameSeedTime)
+	// The announced record carries the instant the SEND just stamped, not the
+	// seeded one (#2438). Naming is still not a use — it reads the row's own value
+	// under the lock — but the send that provoked it is, and it wrote first, so a
+	// record carrying the seed would be stale the moment it left the daemon.
+	if p.LastUsedAt.Before(before) || p.LastUsedAt.After(after) {
+		t.Errorf("pushed LastUsedAt = %v, want an instant within [%v, %v] (the send is a use)", p.LastUsedAt, before, after)
 	}
 }
 
@@ -1426,5 +1437,177 @@ func TestSendMessage_AcksBeforeAutoNaming(t *testing.T) {
 	assertSendMsgEnvelopeShape(t, recv(), protocol.TypeAck)
 	if len(*pushed) != 1 {
 		t.Errorf("announce calls = %d, want 1", len(*pushed))
+	}
+}
+
+// --- #2438: an accepted send keeps its conversation out of the idle sweep ----
+
+// storedLastUsed reads a conversation's LastUsedAt straight off the registry,
+// the sibling of storedName.
+func storedLastUsed(t *testing.T, reg *conversations.Registry, id string) time.Time {
+	t.Helper()
+	conv, ok := reg.Get(conversations.ConversationID(id))
+	if !ok {
+		t.Fatalf("conversation %q not in registry", id)
+	}
+	return conv.LastUsedAt
+}
+
+// TestSendMessage_BumpsLastUsedAtOnAcceptedSendOnly covers AC 1: an ACCEPTED
+// send stamps the conversation's LastUsedAt with the accept time and persists
+// it, and every branch that refuses the message leaves the field alone.
+//
+// The reject rows are the same four the auto-naming table enumerates, and for
+// the same structural reason: the bump sits past the last reject branch, so
+// "a rejected send is not a use" is a property of where the step is rather
+// than of a guard inside it. Two of them — an unresolvable attachment aside —
+// pass Route and are still refused, which is why the step hangs off ACCEPTANCE
+// and not off Route succeeding.
+//
+// Every row seeds an ALREADY-NAMED row so the auto-naming step declines and the
+// only registry write under test is the bump.
+func TestSendMessage_BumpsLastUsedAtOnAcceptedSendOnly(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		router   SessionRouter
+		reject   bool
+		payload  protocol.SendMessagePayload
+		wantBump bool
+	}{
+		{
+			name:   "accepted",
+			router: routeTo(&stubTurnWriter{}),
+			payload: protocol.SendMessagePayload{
+				ConversationID: sendMsgConvID,
+				MessageID:      sendMsgMessageID,
+				Text:           sendMsgText,
+			},
+			wantBump: true,
+		},
+		{
+			name:    "unknown conversation",
+			router:  &stubSessionRouter{err: conversations.ErrConversationNotFound},
+			payload: protocol.SendMessagePayload{ConversationID: sendMsgConvID, Text: sendMsgText},
+		},
+		{
+			name:    "no bound session",
+			router:  &stubSessionRouter{err: errors.New("no bound session")},
+			payload: protocol.SendMessagePayload{ConversationID: sendMsgConvID, Text: sendMsgText},
+		},
+		{
+			name:   "too many attachments",
+			router: routeTo(&stubTurnWriter{}),
+			payload: protocol.SendMessagePayload{
+				ConversationID: sendMsgConvID,
+				Text:           sendMsgText,
+				AttachmentIDs:  repeatID(attachID(1), protocol.MaxAttachmentIDsPerMessage+1),
+			},
+		},
+		{
+			name:    "backlog full",
+			router:  routeTo(&stubTurnWriter{}),
+			reject:  true,
+			payload: protocol.SendMessagePayload{ConversationID: sendMsgConvID, Text: sendMsgText},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			existing := autoNameExisting
+			reg, path := newAutoNameReg(t, &existing)
+			c, recv, _ := newSendMsgConn(t)
+
+			h := SendMessage(tc.router, &fakeEnqueuer{reject: tc.reject}, nil, reg, path, nil, sendMsgLogger(t))
+			before := time.Now()
+			if err := h(context.Background(), c, sendMsgRequest(t, tc.payload)); err != nil {
+				t.Fatalf("handler: %v", err)
+			}
+			after := time.Now()
+
+			wantType := protocol.TypeError
+			if tc.wantBump {
+				wantType = protocol.TypeAck
+			}
+			assertSendMsgEnvelopeShape(t, recv(), wantType)
+
+			got := storedLastUsed(t, reg, sendMsgConvID)
+			if !tc.wantBump {
+				if !got.Equal(autoNameSeedTime) {
+					t.Errorf("stored LastUsedAt = %v, want the untouched %v (a rejected send is not a use)", got, autoNameSeedTime)
+				}
+				return
+			}
+
+			// A window rather than an instant: the handler reads the clock itself,
+			// which is the whole point — nothing else in the daemon knows when the
+			// message was accepted.
+			if got.Before(before) || got.After(after) {
+				t.Errorf("stored LastUsedAt = %v, want an instant within [%v, %v]", got, before, after)
+			}
+
+			// Persisted eagerly, so the bump survives a daemon restart — without
+			// that, a registry reloaded at startup carries the stale instant and
+			// the sweep deletes the conversation anyway.
+			reloaded, err := conversations.Load(path)
+			if err != nil {
+				t.Fatalf("reload registry: %v", err)
+			}
+			if persisted := storedLastUsed(t, reloaded, sendMsgConvID); !persisted.Equal(got) {
+				t.Errorf("reloaded LastUsedAt = %v, want the stored %v", persisted, got)
+			}
+		})
+	}
+}
+
+// TestSendMessage_BumpSparesIdleConversationFromSweep covers AC 2 end to end
+// through the predicate that owns the decision: a conversation created 31 days
+// ago whose last accepted message is one day old is NOT swept.
+//
+// ShouldArchive takes now as a parameter, so "one day old" is expressed by
+// asking the predicate a day after the send rather than by faking the clock the
+// handler reads.
+func TestSendMessage_BumpSparesIdleConversationFromSweep(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	reg, err := conversations.Load(path)
+	if err != nil {
+		t.Fatalf("load registry: %v", err)
+	}
+	name := autoNameExisting
+	seed := conversations.Conversation{
+		ID:         conversations.ConversationID(sendMsgConvID),
+		Name:       &name,
+		Cwd:        autoNameCwd,
+		LastUsedAt: time.Now().Add(-31 * 24 * time.Hour),
+	}
+	reg.Create(seed)
+
+	// Non-vacuous first: as seeded, this row is exactly what the sweep deletes.
+	// Without this line the assertion below would also pass against a handler
+	// that never touched the registry at all.
+	if !conversations.ShouldArchive(seed, time.Now()) {
+		t.Fatalf("seeded row (LastUsedAt = %v) is not sweep-eligible; the assertion below would be vacuous", seed.LastUsedAt)
+	}
+
+	c, recv, _ := newSendMsgConn(t)
+	h := SendMessage(routeTo(&stubTurnWriter{}), &fakeEnqueuer{}, nil, reg, path, nil, sendMsgLogger(t))
+	if err := h(context.Background(), c, sendMsgRequest(t, protocol.SendMessagePayload{
+		ConversationID: sendMsgConvID,
+		MessageID:      sendMsgMessageID,
+		Text:           sendMsgText,
+	})); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	assertSendMsgEnvelopeShape(t, recv(), protocol.TypeAck)
+
+	stored, ok := reg.Get(conversations.ConversationID(sendMsgConvID))
+	if !ok {
+		t.Fatalf("conversation %q not in registry", sendMsgConvID)
+	}
+	if conversations.ShouldArchive(stored, time.Now().Add(24*time.Hour)) {
+		t.Errorf("ShouldArchive = true one day after an accepted message (LastUsedAt = %v); "+
+			"a conversation in daily use must outlive the 30-day sweep", stored.LastUsedAt)
 	}
 }

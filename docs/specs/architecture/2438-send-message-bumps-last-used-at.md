@@ -177,3 +177,17 @@ pending for the documentation stage:
   deferred; the bullet needs narrowing to the arms that remain (rotate session, attach), and
   § "How it works" should name `send_message` as the writer that keeps a live conversation out
   of the sweep. **Pending — documentation stage.** Not edited here.
+
+## Revisions
+
+### 2026-09-15 — reject rows assert memory only, not disk
+
+Planned under *Testing strategy*: "Each reject row asserts the seed instant is unchanged, in
+memory and on disk." Implemented as an in-memory assertion only.
+
+The fixture (`newAutoNameReg`) builds its registry over a path in a fresh temp dir and never
+saves it, so on a rejected send no `conversations.json` exists at all — a reload would fail
+on "conversation not in registry" and would be asserting the fixture's shape rather than the
+handler's conduct. The in-memory check is the direct contract and catches every way the bump
+could land on the wrong side of a reject branch. The accepted row still reloads off disk,
+which is where the persistence half of AC 1 is proved.
