@@ -38,7 +38,7 @@ done
 
 	sink := newStreamTurnSink(8, discardLogger())
 	const daemonConfig = "/run/pyry/mcp.json"
-	factory := newStreamRunnerFactory(sink, daemonConfig, streamApprovalConfig{})
+	factory := newStreamRunnerFactory(sink, daemonConfig, nil, streamApprovalConfig{})
 	runner, err := factory(sessions.RunnerConfig{
 		ClaudeBin: claudePath,
 		WorkDir:   workDir,
@@ -669,7 +669,7 @@ func TestWithApprovalArgs_BypassChildGetsNoFilesServer(t *testing.T) {
 func TestStreamRunnerFactory_Construct(t *testing.T) {
 	t.Parallel()
 
-	factory := newStreamRunnerFactory(newStreamTurnSink(0, slog.Default()), "/tmp/pyry-mcp-approve-test.json", streamApprovalConfig{})
+	factory := newStreamRunnerFactory(newStreamTurnSink(0, slog.Default()), "/tmp/pyry-mcp-approve-test.json", nil, streamApprovalConfig{})
 	shapes := []struct {
 		name string
 		args []string
@@ -1054,7 +1054,7 @@ func TestStreamRunnerFactory_ClaudeSessionsDirIsTheProbesOwnValue(t *testing.T) 
 		SessionID:  "11111111-1111-4111-8111-111111111111",
 		ClaudeArgs: []string{"--settings", "p"},
 	}
-	runner, err := newStreamRunnerFactory(newStreamTurnSink(0, slog.Default()), "", streamApprovalConfig{})(cfg)
+	runner, err := newStreamRunnerFactory(newStreamTurnSink(0, slog.Default()), "", nil, streamApprovalConfig{})(cfg)
 	if err != nil {
 		t.Fatalf("newStreamRunnerFactory: %v", err)
 	}
@@ -1084,7 +1084,7 @@ func TestStreamRunnerFactory_ErrorPropagation(t *testing.T) {
 		SessionID:  "sess-uuid",
 		ClaudeArgs: []string{"--settings", "p"},
 	}
-	runner, err := newStreamRunnerFactory(newStreamTurnSink(0, slog.Default()), "", streamApprovalConfig{})(cfg)
+	runner, err := newStreamRunnerFactory(newStreamTurnSink(0, slog.Default()), "", nil, streamApprovalConfig{})(cfg)
 	if err == nil {
 		t.Fatalf("newStreamRunnerFactory error = nil, want non-nil for a missing binary")
 	}
@@ -1528,7 +1528,7 @@ func TestStreamRunnerFactory_BuildsTheInstallSeam(t *testing.T) {
 	t.Parallel()
 
 	const mcpPath = "/run/pyry/mcp-2446.json"
-	factory := newStreamRunnerFactory(newStreamTurnSink(0, discardLogger()), mcpPath, streamApprovalConfig{})
+	factory := newStreamRunnerFactory(newStreamTurnSink(0, discardLogger()), mcpPath, nil, streamApprovalConfig{})
 	runner, err := factory(sessions.RunnerConfig{
 		ClaudeBin:      os.Args[0],
 		WorkDir:        t.TempDir(),

@@ -61,7 +61,7 @@ func TestSettingsUpdaterAdapter_RejectsBeforeWholeFrameMutation(t *testing.T) {
 	pool, plan := newModelListTestPool(t)
 	id := pool.Default().ID()
 	plan.arm(id, turnevent.ModelList{Models: []turnevent.ModelOption{{Value: "sonnet"}}})
-	adapter := settingsUpdaterAdapter{pool}
+	adapter := settingsUpdaterAdapter{p: pool}
 
 	requested, effort, mode := "opus", "high", "plan"
 	err := adapter.UpdateSettings(string(id), relay.SettingsUpdate{
@@ -277,7 +277,7 @@ func TestResolveBoundModelList_ResolvesTheBoundSessionsMenu(t *testing.T) {
 		LastUsedAt:       time.Now().UTC(),
 	})
 
-	got, ok := resolveBoundModelList(reg, pool, "conv-bound")
+	got, ok := resolveBoundModelList(reg, pool, nil, "conv-bound")
 	if !ok {
 		t.Fatalf("resolveBoundModelList(conv-bound) refused; want the bound session's menu")
 	}
@@ -324,7 +324,7 @@ func TestResolveBoundModelList_RefusesAnIdTheRegistryDoesNotCarry(t *testing.T) 
 		CurrentSessionID: string(pool.BootstrapID()),
 		LastUsedAt:       time.Now().UTC(),
 	})
-	if _, ok := resolveBoundModelList(reg, pool, "conv-resolvable"); !ok {
+	if _, ok := resolveBoundModelList(reg, pool, nil, "conv-resolvable"); !ok {
 		t.Fatal("the fixture's own resolvable conversation refused; the rows below would pin nothing")
 	}
 
@@ -339,7 +339,7 @@ func TestResolveBoundModelList_RefusesAnIdTheRegistryDoesNotCarry(t *testing.T) 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, ok := resolveBoundModelList(reg, pool, tc.convID)
+			got, ok := resolveBoundModelList(reg, pool, nil, tc.convID)
 			if ok {
 				t.Fatalf("resolveBoundModelList(%q) = (%+v, true), want a refusal — %s", tc.convID, got, tc.why)
 			}
@@ -389,7 +389,7 @@ func TestResolveBoundModelList_FallsBackToTheDaemonWideVocabulary(t *testing.T) 
 	reg.Create(conversations.Conversation{ID: "conv-dangling", CurrentSessionID: "session-not-in-pool", LastUsedAt: now})
 	reg.Create(conversations.Conversation{ID: "conv-silent", CurrentSessionID: string(silent), LastUsedAt: now})
 
-	baseline, ok := resolveBoundModelList(reg, pool, "conv-bootstrap-bound")
+	baseline, ok := resolveBoundModelList(reg, pool, nil, "conv-bootstrap-bound")
 	if !ok {
 		t.Fatal("the conversation bound to the session HOLDING the vocabulary refused; there is no baseline to compare against")
 	}
@@ -406,7 +406,7 @@ func TestResolveBoundModelList_FallsBackToTheDaemonWideVocabulary(t *testing.T) 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, ok := resolveBoundModelList(reg, pool, tc.convID)
+			got, ok := resolveBoundModelList(reg, pool, nil, tc.convID)
 			if !ok {
 				t.Fatalf("resolveBoundModelList(%q) refused; want the daemon-wide vocabulary — %s", tc.convID, tc.why)
 			}
@@ -452,7 +452,7 @@ func TestResolveBoundModelList_TheBoundSessionsOwnListWins(t *testing.T) {
 		LastUsedAt:       time.Now().UTC(),
 	})
 
-	got, ok := resolveBoundModelList(reg, pool, "conv-own")
+	got, ok := resolveBoundModelList(reg, pool, nil, "conv-own")
 	if !ok {
 		t.Fatal("resolveBoundModelList(conv-own) refused; the bound session holds its own list")
 	}
@@ -494,7 +494,7 @@ func TestResolveBoundModelList_NoVocabularyRetainedAnywhere(t *testing.T) {
 	for _, convID := range []string{"conv-unbound", "conv-dangling", "conv-silent"} {
 		t.Run(convID, func(t *testing.T) {
 			t.Parallel()
-			got, ok := resolveBoundModelList(reg, pool, convID)
+			got, ok := resolveBoundModelList(reg, pool, nil, convID)
 			if ok {
 				t.Fatalf("resolveBoundModelList(%q) = (%+v, true); nothing is retained anywhere, so there is no vocabulary to answer with", convID, got)
 			}
@@ -535,7 +535,7 @@ func TestResolveBoundModelList_NoBootstrapToFallBackTo(t *testing.T) {
 	for _, convID := range []string{"conv-unbound", "conv-dangling"} {
 		t.Run(convID, func(t *testing.T) {
 			t.Parallel()
-			got, ok := resolveBoundModelList(reg, &sessions.Pool{}, convID)
+			got, ok := resolveBoundModelList(reg, &sessions.Pool{}, nil, convID)
 			if ok {
 				t.Fatalf("resolveBoundModelList(%q) = (%+v, true); a pool with no bootstrap holds no vocabulary", convID, got)
 			}
@@ -565,7 +565,7 @@ func TestResolveBoundModelList_UnreportedSessionAnswersNoList(t *testing.T) {
 		LastUsedAt:       time.Now().UTC(),
 	})
 
-	got, ok := resolveBoundModelList(reg, pool, "conv-silent")
+	got, ok := resolveBoundModelList(reg, pool, nil, "conv-silent")
 	if ok {
 		t.Fatalf("resolveBoundModelList = (%+v, true); a session that reported nothing must answer no list", got)
 	}
@@ -592,7 +592,7 @@ func TestResolveBoundModelList_RunnerWithoutTheMethodRefuses(t *testing.T) {
 		LastUsedAt:       time.Now().UTC(),
 	})
 
-	got, ok := resolveBoundModelList(reg, pool, "conv-plain")
+	got, ok := resolveBoundModelList(reg, pool, nil, "conv-plain")
 	if ok {
 		t.Fatalf("resolveBoundModelList = (%+v, true); a runner without ModelList must refuse", got)
 	}
@@ -630,7 +630,7 @@ func TestResolveBoundModelList_IsolatesConversations(t *testing.T) {
 	reg.Create(conversations.Conversation{ID: "conv-a", CurrentSessionID: string(sessA), LastUsedAt: now})
 	reg.Create(conversations.Conversation{ID: "conv-b", CurrentSessionID: string(sessB), LastUsedAt: now})
 
-	gotA, ok := resolveBoundModelList(reg, pool, "conv-a")
+	gotA, ok := resolveBoundModelList(reg, pool, nil, "conv-a")
 	if !ok {
 		t.Fatal("resolveBoundModelList(conv-a) refused")
 	}
@@ -639,7 +639,7 @@ func TestResolveBoundModelList_IsolatesConversations(t *testing.T) {
 	}
 	assertPayloadCarries(t, gotA, listA)
 
-	gotB, ok := resolveBoundModelList(reg, pool, "conv-b")
+	gotB, ok := resolveBoundModelList(reg, pool, nil, "conv-b")
 	if !ok {
 		t.Fatal("resolveBoundModelList(conv-b) refused")
 	}
@@ -688,13 +688,13 @@ func TestResolveBoundModelList_LogsNothing(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
-	got, ok := resolveBoundModelList(reg, pool, "conv-logneg")
+	got, ok := resolveBoundModelList(reg, pool, nil, "conv-logneg")
 	if !ok {
 		t.Fatalf("resolveBoundModelList refused; the log negative needs the happy path")
 	}
 	// Refused resolutions are the other half: the untrusted convID must not reach
 	// a log line either.
-	if _, ok := resolveBoundModelList(reg, pool, "conv-ZZUNTRUSTEDZZ"); ok {
+	if _, ok := resolveBoundModelList(reg, pool, nil, "conv-ZZUNTRUSTEDZZ"); ok {
 		t.Fatal("resolveBoundModelList resolved an unknown conversation")
 	}
 
@@ -754,7 +754,7 @@ func TestRetainedModelLists_EnumeratesTheBoundSessionsMenu(t *testing.T) {
 		LastUsedAt:       time.Now().UTC(),
 	})
 
-	got := retainedModelLists(reg, pool)()
+	got := retainedModelLists(reg, pool, nil)()
 	if len(got) != 1 {
 		t.Fatalf("retainedModelLists returned %d payloads, want exactly 1: %+v", len(got), got)
 	}
@@ -811,7 +811,7 @@ func TestRetainedModelLists_EveryRowContributesOnceAVocabularyIsRetained(t *test
 	reg.Create(conversations.Conversation{ID: "conv-dangling", CurrentSessionID: "session-not-in-pool", LastUsedAt: now})
 	reg.Create(conversations.Conversation{ID: "conv-live", CurrentSessionID: string(pool.BootstrapID()), LastUsedAt: now})
 
-	got := retainedModelLists(reg, pool)()
+	got := retainedModelLists(reg, pool, nil)()
 	if len(got) != 4 {
 		t.Fatalf("retainedModelLists returned %d payloads, want 4 — every registry row contributes once a vocabulary is retained: %+v", len(got), got)
 	}
@@ -852,7 +852,7 @@ func TestRetainedModelLists_NothingToSend(t *testing.T) {
 		t.Parallel()
 		pool, plan := newModelListTestPool(t)
 		plan.arm(pool.BootstrapID(), sentinelModelList("UNREACHABLE"))
-		if got := retainedModelLists(&conversations.Registry{}, pool)(); len(got) != 0 {
+		if got := retainedModelLists(&conversations.Registry{}, pool, nil)(); len(got) != 0 {
 			t.Fatalf("retainedModelLists returned %d payloads over an empty registry, want none — the enumeration walks the registry, not the pool: %+v", len(got), got)
 		}
 	})
@@ -865,7 +865,7 @@ func TestRetainedModelLists_NothingToSend(t *testing.T) {
 		reg.Create(conversations.Conversation{ID: "conv-unbound", CurrentSessionID: "", LastUsedAt: now})
 		reg.Create(conversations.Conversation{ID: "conv-dangling", CurrentSessionID: "session-not-in-pool", LastUsedAt: now})
 		reg.Create(conversations.Conversation{ID: "conv-bootstrap-bound", CurrentSessionID: string(pool.BootstrapID()), LastUsedAt: now})
-		if got := retainedModelLists(reg, pool)(); len(got) != 0 {
+		if got := retainedModelLists(reg, pool, nil)(); len(got) != 0 {
 			t.Fatalf("retainedModelLists returned %d payloads with nothing retained anywhere, want none: %+v", len(got), got)
 		}
 	})
@@ -894,7 +894,7 @@ func TestRetainedModelLists_ArchivedConversationsContribute(t *testing.T) {
 		LastUsedAt:       time.Now().UTC(),
 	})
 
-	got := retainedModelLists(reg, pool)()
+	got := retainedModelLists(reg, pool, nil)()
 	if len(got) != 1 {
 		t.Fatalf("retainedModelLists returned %d payloads, want 1 — archiving does not unbind the session: %+v", len(got), got)
 	}
@@ -932,7 +932,7 @@ func TestRetainedModelLists_DoesNotCrossConversations(t *testing.T) {
 	reg.Create(conversations.Conversation{ID: "conv-a", CurrentSessionID: string(sessA), LastUsedAt: now})
 	reg.Create(conversations.Conversation{ID: "conv-b", CurrentSessionID: string(sessB), LastUsedAt: now})
 
-	got := retainedModelLists(reg, pool)()
+	got := retainedModelLists(reg, pool, nil)()
 	if len(got) != 2 {
 		t.Fatalf("retainedModelLists returned %d payloads, want 2: %+v", len(got), got)
 	}
@@ -991,7 +991,7 @@ func TestRetainedModelLists_LogsNothing(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
-	got := retainedModelLists(reg, pool)()
+	got := retainedModelLists(reg, pool, nil)()
 	if len(got) != 3 {
 		t.Fatalf("retainedModelLists returned %d payloads, want 3; the log negative needs both the bound reading and the two fallbacks", len(got))
 	}
@@ -1049,10 +1049,10 @@ func TestModelListFor_ForwardsTheResolversAnswer(t *testing.T) {
 	reg.Create(conversations.Conversation{ID: "conv-bound", CurrentSessionID: string(pool.BootstrapID()), LastUsedAt: now})
 	reg.Create(conversations.Conversation{ID: "conv-unbound", CurrentSessionID: "", LastUsedAt: now})
 
-	seam := modelListFor(reg, pool)
+	seam := modelListFor(reg, pool, nil)
 
 	for _, convID := range []string{"conv-bound", "conv-unbound"} {
-		want, wantOK := resolveBoundModelList(reg, pool, convID)
+		want, wantOK := resolveBoundModelList(reg, pool, nil, convID)
 		if !wantOK {
 			t.Fatalf("resolveBoundModelList(%q) refused; the fixture is wrong, not the adapter", convID)
 		}
@@ -1074,5 +1074,202 @@ func TestModelListFor_ForwardsTheResolversAnswer(t *testing.T) {
 	// turnevent.ModelList.Models' never-empty contract forbids.
 	if got, ok := seam("conv-not-hosted"); ok {
 		t.Errorf("modelListFor(...)(%q) = (%+v, true); an id the registry does not carry must refuse", "conv-not-hosted", got)
+	}
+}
+
+// savedVocabularyDouble is the third source as a test double: the one method
+// retainedModelVocabulary reaches it through, and nothing else. It exists so the
+// ORDERING table below can arm each of the three sources independently — a real
+// store would need a file per row and would make the test about the file rather
+// than about the order.
+type savedVocabularyDouble struct {
+	list turnevent.ModelList
+	have bool
+}
+
+func (d savedVocabularyDouble) ModelList() (turnevent.ModelList, bool) {
+	return d.list, d.have
+}
+
+// #2450 AC 2: the three sources are read in order — the bound session's hold, the
+// bootstrap's hold, then the file — so a live child's own report wins over both
+// and the bootstrap's wins over the file.
+//
+// BOTH ROWS ARM ALL THREE SOURCES with distinguishable sentinels and name which one
+// must answer, so a reordering is red on the CONTENTS rather than merely on a
+// refusal: these are the sole reds for a fallback that consulted the file first, or
+// that preferred it to either hold. The third rung has no row here BY CONSTRUCTION —
+// a fixture that arms the bootstrap cannot also express "neither hold answers" — so
+// it is proven next door, where nothing is armed but the file.
+func TestRetainedModelVocabulary_OrdersItsThreeSources(t *testing.T) {
+	t.Parallel()
+
+	pool, plan := newModelListTestPool(t)
+	ctx := runPoolReady(t, pool)
+	own, err := pool.Create(ctx, "session-own")
+	if err != nil {
+		t.Fatalf("Pool.Create: %v", err)
+	}
+	silent, err := pool.Create(ctx, "session-silent")
+	if err != nil {
+		t.Fatalf("Pool.Create: %v", err)
+	}
+
+	bound := sentinelModelList("BOUNDHOLD")
+	bootstrap := sentinelModelList("BOOTSTRAPHOLD")
+	saved := sentinelModelList("SAVEDFILE")
+	plan.arm(own, bound)
+	plan.arm(pool.BootstrapID(), bootstrap)
+	file := savedVocabularyDouble{list: saved, have: true}
+
+	for _, tc := range []struct {
+		name      string
+		sessionID string
+		want      turnevent.ModelList
+		why       string
+	}{
+		{
+			name:      "the bound session's own hold wins",
+			sessionID: string(own),
+			want:      bound,
+			why:       "a child that answered initialize is the authority on what IT will accept",
+		},
+		{
+			name:      "the bootstrap's hold wins over the file",
+			sessionID: string(silent),
+			want:      bootstrap,
+			why:       "this process's observation beats a previous process's",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := retainedModelVocabulary(pool, file, tc.sessionID)
+			if !ok {
+				t.Fatalf("retainedModelVocabulary refused; want the %s — %s", tc.name, tc.why)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("retainedModelVocabulary = %#v, want %#v — %s", got, tc.want, tc.why)
+			}
+		})
+	}
+}
+
+// The bootstrap arm above needs its own negative: with NO bootstrap hold armed the
+// file answers, which is what pins the second source as a real rung rather than a
+// coincidence of the fixture.
+func TestRetainedModelVocabulary_FileAnswersWhenNoHoldDoes(t *testing.T) {
+	t.Parallel()
+
+	pool, _ := newModelListTestPool(t)
+	saved := sentinelModelList("ONLYFILE")
+	got, ok := retainedModelVocabulary(pool, savedVocabularyDouble{list: saved, have: true}, "")
+	if !ok {
+		t.Fatal("retainedModelVocabulary refused with a file armed and no hold anywhere")
+	}
+	if !reflect.DeepEqual(got, saved) {
+		t.Errorf("retainedModelVocabulary = %#v, want the file's %#v", got, saved)
+	}
+	// A store that has seen nothing is the cold-start state and must still refuse,
+	// so "a file exists" is never confused with "a file has contents".
+	if got, ok := retainedModelVocabulary(pool, savedVocabularyDouble{}, ""); ok {
+		t.Errorf("retainedModelVocabulary = (%+v, true) with an empty store; want the refusal", got)
+	}
+	// A nil third source is a daemon that never built one, and is two sources.
+	if got, ok := retainedModelVocabulary(pool, nil, ""); ok {
+		t.Errorf("retainedModelVocabulary = (%+v, true) with no store at all; want the refusal", got)
+	}
+}
+
+// #2450 AC 3, end to end through the REAL store and the REAL file: a daemon
+// restarted with model_list.json present, having spawned no claude, answers
+// request_model_list and the connect-time reconcile with the last list it saw.
+//
+// The list crosses a genuine write and a genuine Load rather than a double, so the
+// round trip, the payload mapping and the resolver's ordering are proven as ONE
+// composition — #1840's argument for minting a parser and its holds in one call,
+// applied to the seam between this ticket's two halves.
+//
+// DroppedModels and TruncatedFields are asserted because a restore that dropped
+// either would turn a truncated list into one that reads as complete;
+// assertPayloadCarries walks all six ModelOption fields.
+func TestSavedVocabularyAnswersARestartedDaemon(t *testing.T) {
+	t.Parallel()
+
+	path := storePath(t)
+	want := sentinelModelList("RESTART")
+	retainAndClose(t, path, want)
+
+	restored := newModelVocabularyStore(path)
+	restored.Load()
+	t.Cleanup(restored.Close)
+
+	// A cold pool: nothing spawned, so no hold anywhere holds a thing.
+	pool, _ := newModelListTestPool(t)
+	now := time.Now().UTC()
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{ID: "conv-cold", CurrentSessionID: "", LastUsedAt: now})
+
+	got, ok := resolveBoundModelList(reg, pool, restored, "conv-cold")
+	if !ok {
+		t.Fatal("resolveBoundModelList refused on a restarted daemon with a saved file; the third source did not answer")
+	}
+	if got.ConversationID != "conv-cold" {
+		t.Errorf("ConversationID = %q, want %q", got.ConversationID, "conv-cold")
+	}
+	assertPayloadCarries(t, got, want)
+	if got.DroppedModels != want.DroppedModels {
+		t.Errorf("DroppedModels = %d, want %d — a cut list must not come back reading as complete", got.DroppedModels, want.DroppedModels)
+	}
+
+	// The connect-time reconcile enumerates the same answer for every row.
+	lists := retainedModelLists(reg, pool, restored)()
+	byID := indexByConversation(t, lists)
+	if _, ok := byID["conv-cold"]; !ok {
+		t.Fatalf("the reconcile enumerated %d payloads, none for conv-cold: %+v", len(lists), lists)
+	}
+	assertPayloadCarries(t, byID["conv-cold"], want)
+
+	// And the on-demand request seam answers it too.
+	seam := modelListFor(reg, pool, restored)
+	fromSeam, ok := seam("conv-cold")
+	if !ok {
+		t.Fatal("modelListFor refused on a restarted daemon with a saved file")
+	}
+	assertPayloadCarries(t, fromSeam, want)
+}
+
+// #2450 AC 4's log half, for the arm this ticket adds: a resolution answered by
+// the FILE writes nothing either. The existing negative covers the two holds; this
+// one covers the third source, whose values took a different route into memory.
+func TestResolveBoundModelList_SavedVocabularyLogsNothing(t *testing.T) {
+	pool, _ := newModelListTestPool(t)
+	saved := sentinelModelList("SAVEDLOGNEG")
+
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{
+		ID:               "conv-savedlogneg",
+		CurrentSessionID: "",
+		LastUsedAt:       time.Now().UTC(),
+	})
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	got, ok := resolveBoundModelList(reg, pool, savedVocabularyDouble{list: saved, have: true}, "conv-savedlogneg")
+	if !ok {
+		t.Fatal("resolveBoundModelList refused; the log negative needs the happy path")
+	}
+	logs := buf.String()
+	if logs != "" {
+		t.Fatalf("a file-answered resolution wrote %d bytes of log; it must write none:\n%s", len(logs), logs)
+	}
+	for _, m := range got.Models {
+		for _, v := range append([]string{m.ResolvedModel, m.Value, m.DisplayName}, m.EffortLevels...) {
+			if v != "" && strings.Contains(logs, v) {
+				t.Errorf("a model value leaked into a log record: %q", v)
+			}
+		}
 	}
 }

@@ -120,7 +120,7 @@ exec sleep 3600
 	}
 
 	sink := newStreamTurnSink(8, discardLogger())
-	runner, err := newStreamRunnerFactory(sink, "", streamApprovalConfig{})(sessions.RunnerConfig{
+	runner, err := newStreamRunnerFactory(sink, "", nil, streamApprovalConfig{})(sessions.RunnerConfig{
 		ClaudeBin: childPath,
 		WorkDir:   dir,
 		SessionID: "factory-session-2353",

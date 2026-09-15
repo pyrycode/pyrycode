@@ -723,9 +723,15 @@ func (h *stdioPermissionHandler) childExited() {
 	}
 }
 
-// newStreamRunnerFactory binds the shared event sink and optional stdio approval
-// transport to each streamsup runner it constructs.
-func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, approval streamApprovalConfig) sessions.RunnerFactory {
+// newStreamRunnerFactory binds the shared event sink, the daemon-wide model
+// vocabulary store and the optional stdio approval transport to each streamsup
+// runner it constructs.
+//
+// vocab may be nil — a daemon that persists no vocabulary (every test factory, and
+// any host built without a state directory) then gets a runner whose chain is
+// byte-identical to the pre-#2450 one, because the decorator that would feed the
+// store is simply not inserted.
+func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *modelVocabularyStore, approval streamApprovalConfig) sessions.RunnerFactory {
 	return func(cfg sessions.RunnerConfig) (sessions.Runner, error) {
 		scfg := mapStreamsupConfig(cfg)
 		// The posture and its provenance are BOTH read off cfg, never off scfg.Args:
@@ -748,7 +754,22 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, approva
 		// sitting here.
 		follow := newSessionResetFollower(tag, cfg.AdoptAnnouncedReset, sink.sinkForTag(tag.ID), cfg.Logger)
 		contextUsage := newTurnEndContextUsageRequester(follow.Sink, cfg.Logger)
-		parser, held := newSessionParser(contextUsage.Sink, cfg.Logger)
+		// #2450 chains the vocabulary persister at the head of the same run of
+		// non-retaining decorators, for the reason the two above it sit here: it needs
+		// a per-DAEMON object newSessionParser has no business knowing about, and
+		// threading a persist parameter through the hold constructors would touch
+		// every one of their call sites for no behaviour gained. WHERE in the chain it
+		// sits is immaterial — what puts a link upstream of the droppable fan-in send
+		// is sitting on the PARSER'S SIDE of the channel, which the chain's own doc
+		// states — but being upstream is not: turnMarkFor answers turnMarkNone for
+		// ModelList, one initialize exchange per child produces exactly one of these,
+		// and no later event replaces it, so a persist point below the send could lose
+		// the list for the whole life of the child.
+		parserSink := contextUsage.Sink
+		if vocab != nil {
+			parserSink = vocab.sinkFor(parserSink)
+		}
+		parser, held := newSessionParser(parserSink, cfg.Logger)
 		scfg.Stdout = parser
 		onChildExit := sink.exitForTag(tag.ID)
 		var r *streamsup.Runner

@@ -138,6 +138,26 @@ func resolveConversationsRegistryPath(name string) string {
 	return filepath.Join(home, ".pyry", sanitizeName(name), "conversations.json")
 }
 
+// resolveModelVocabularyPath returns ~/.pyry/<sanitized-name>/model_list.json —
+// the daemon-wide model vocabulary this instance last saw (#2450), a sibling of
+// the two registry files above. Falls back to a CWD-relative path if $HOME can't
+// be resolved (matches resolveRegistryPath's contract).
+//
+// ONE FILE PER DAEMON INSTANCE is the grain because the vocabulary is a property
+// of the machine and account rather than of a conversation — the same fact that
+// licenses #2124's cross-conversation read — so it is keyed exactly as the
+// instance's other daemon-wide state is and carries no conversation id.
+//
+// The name is the operator's own -name flag through the same sanitizeName as its
+// siblings; nothing remote reaches this path.
+func resolveModelVocabularyPath(name string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return filepath.Join(sanitizeName(name), "model_list.json")
+	}
+	return filepath.Join(home, ".pyry", sanitizeName(name), "model_list.json")
+}
+
 // resolveClaudeSessionsDir returns the directory where claude writes
 // <uuid>.jsonl files for the given workdir. An empty workdir is resolved to
 // the process cwd (matching claude's behaviour). Returns "" when the path
@@ -673,11 +693,11 @@ func selectsStreamRunner(cfg config.Config) bool {
 // Validation lives here, not in config.Load, because the accepted set is defined
 // by the factory mapping — which the leaf config package cannot import
 // (streamsup). config.Load stays parse-only, matching DebugCapture.
-func selectInteractiveRunner(cfg config.Config, logger *slog.Logger, mcpServersPath string, approval streamApprovalConfig) (sessions.RunnerFactory, *streamTurnSink, error) {
+func selectInteractiveRunner(cfg config.Config, logger *slog.Logger, mcpServersPath string, vocab *modelVocabularyStore, approval streamApprovalConfig) (sessions.RunnerFactory, *streamTurnSink, error) {
 	switch cfg.InteractiveRunner {
 	case "", "stream-json":
 		sink := newStreamTurnSink(0, logger)
-		return newStreamRunnerFactory(sink, mcpServersPath, approval), sink, nil
+		return newStreamRunnerFactory(sink, mcpServersPath, vocab, approval), sink, nil
 	case "pty":
 		return nil, nil, fmt.Errorf(`interactive_runner "pty" was removed in #1348: the terminal-driving interactive runner no longer exists. Remove the key or set it to "stream-json"`)
 	default:
@@ -707,6 +727,18 @@ func runSupervisor(args []string) error {
 	socketPath := resolveSocketPath(*socketFlag, *name)
 	registryPath := resolveRegistryPath(*name)
 	convRegistryPath := resolveConversationsRegistryPath(*name)
+	// The daemon-wide model vocabulary (#2450), read ONCE here and never on a
+	// request path. It is built and loaded before the runner factory and the pool
+	// because both consume it: the factory's persist decorator writes into it, and
+	// the three read seams below answer from it when no hold holds anything —
+	// which, since #2085 removed the spawn at daemon start, is the whole of a
+	// restarted daemon's life until a turn runs in the bootstrap-bound
+	// conversation. Load never fails loudly: an absent, unreadable or undecodable
+	// file leaves the store empty and the daemon starts exactly as it does today.
+	// Close joins the writer goroutine at shutdown.
+	modelVocabulary := newModelVocabularyStore(resolveModelVocabularyPath(*name))
+	modelVocabulary.Load()
+	defer modelVocabulary.Close()
 	claudeSessionsDir := resolveClaudeSessionsDir(*workdir)
 	defaultCwd := resolveDefaultCwd(*workdir)
 
@@ -805,7 +837,7 @@ func runSupervisor(args []string) error {
 	approvals := permbridge.New()
 	approvalWindow := approvalTimeout()
 	approvalSurfaces := &approvalSurfaceReport{}
-	runnerFactory, streamSink, err := selectInteractiveRunner(cfg, logger, mcpServersPath, streamApprovalConfig{
+	runnerFactory, streamSink, err := selectInteractiveRunner(cfg, logger, mcpServersPath, modelVocabulary, streamApprovalConfig{
 		stdio:    cfg.StdioPermissionPrompt,
 		registry: approvals,
 		timeout:  approvalWindow,
@@ -1071,7 +1103,7 @@ func runSupervisor(args []string) error {
 		sessionErr:       see,
 		blockedNotify:    blocked,
 		debugBundler:     debugBundler,
-		settings:         settingsUpdaterAdapter{pool},
+		settings:         settingsUpdaterAdapter{pool, modelVocabulary},
 		snapshotSettings: snapshotSettings,
 		runSettings: func(convID string) (boundRunSettings, bool) {
 			return resolveBoundRunSettings(convReg, pool, convID)
@@ -1092,7 +1124,7 @@ func runSupervisor(args []string) error {
 		sessionTranscriptDir: sessionTranscriptDir(pool, claudeSessionsDir),
 		// The conversation-keyed half of the model-list pair (#2125), built beside its
 		// enumerating twin below over the same registry and pool.
-		modelListFor: modelListFor(convReg, pool),
+		modelListFor: modelListFor(convReg, pool, modelVocabulary),
 		mcpStatusFor: mcpStatusFor(convReg, pool),
 		// The resolution half of the on-demand context-usage read (#2431), built
 		// beside its MCP twin over the same registry and pool. The collapsing and
@@ -1100,7 +1132,7 @@ func runSupervisor(args []string) error {
 		// tracker and the daemon context.
 		contextUsageResolve:           contextUsageResolve(convReg, pool),
 		mcpActuatorFor:                boundMCPChildActuator(convReg, pool),
-		retainedModelLists:            retainedModelLists(convReg, pool),
+		retainedModelLists:            retainedModelLists(convReg, pool, modelVocabulary),
 		retainedSlashCommandLists:     retainedSlashCommandLists(convReg, pool),
 		retainedBackgroundTaskRosters: retainedBackgroundTaskRosters(convReg, pool),
 		approvals:                     approvals,
@@ -1349,7 +1381,17 @@ func (m sessionMinter) Create(_ context.Context, label, spawnDir string) (string
 // TestSettingsUpdaterAdapter_CarriesPermissionMode exists to catch, and why it
 // asserts on a REJECTED mode: the pool validates a posture only when the update
 // names one, so a dropped field returns nil rather than an error.
-type settingsUpdaterAdapter struct{ p *sessions.Pool }
+type settingsUpdaterAdapter struct {
+	p *sessions.Pool
+	// saved is the daemon's persisted model vocabulary (#2450), the third source
+	// retainedModelVocabulary reads when neither hold holds anything. It is carried
+	// here rather than re-derived so this gate and the two client-facing seams in
+	// relayWiring answer from the SAME three sources — a membership check that saw
+	// fewer sources than the menu the client was offered would refuse a model that
+	// menu had just advertised. nil is a daemon built without a store and is two
+	// sources, not an error.
+	saved savedModelVocabulary
+}
 
 func (a settingsUpdaterAdapter) UpdateSettings(id string, u relay.SettingsUpdate) error {
 	sessionID := sessions.SessionID(id)
@@ -1370,7 +1412,7 @@ func (a settingsUpdaterAdapter) UpdateSettings(id string, u relay.SettingsUpdate
 			}
 			return err
 		}
-		list, have := retainedModelVocabulary(a.p, id)
+		list, have := retainedModelVocabulary(a.p, a.saved, id)
 		if err := validateModelVocabulary(list, have, *u.Model); err != nil {
 			return err
 		}

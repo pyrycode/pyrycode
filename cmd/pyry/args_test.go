@@ -415,6 +415,32 @@ func TestResolveRegistryPath(t *testing.T) {
 	}
 }
 
+// TestResolveModelVocabularyPath confirms #2450's file is a SIBLING of
+// sessions.json inside the same per-instance directory, and that no instance name
+// can move it out of one under ~/.pyry — the containment TestResolveRegistryPath
+// pins for its own twin, which this resolver must not be the exception to.
+func TestResolveModelVocabularyPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	got := resolveModelVocabularyPath("test")
+	want := filepath.Join(home, ".pyry", "test", "model_list.json")
+	if got != want {
+		t.Errorf("resolveModelVocabularyPath(%q)=%q want %q", "test", got, want)
+	}
+	// The sibling relationship is the point, so it is asserted rather than implied
+	// by two literals that could drift apart.
+	if dir := filepath.Dir(got); dir != filepath.Dir(resolveRegistryPath("test")) {
+		t.Errorf("model_list.json lives in %q, want sessions.json's directory %q", dir, filepath.Dir(resolveRegistryPath("test")))
+	}
+
+	for _, name := range traversalNames {
+		t.Run(name, func(t *testing.T) {
+			assertInsideInstanceDir(t, home, resolveModelVocabularyPath(name), "model_list.json")
+		})
+	}
+}
+
 // TestResolveSocketPath_DotNamesStayInPyryDir pins the one resolver that was
 // never vulnerable to "." / "..": it concatenates a .sock suffix instead of
 // joining the name as a directory component, so the socket lands directly in
