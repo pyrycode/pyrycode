@@ -354,7 +354,10 @@ func startObservedPermissionHarness(t *testing.T, model string, stdioPermissionP
 	serverID := readPersistedServerID(t, home)
 	waitBinaryHello(t, fr, serverID)
 
-	h := &perConvHarness{home: home, workdir: workdir}
+	// The daemon travels on the harness since #2446, whose arm needs its control
+	// socket to name the live child's pid and its stderr to say why a respawn
+	// died. Every existing case ignores the field.
+	h := &perConvHarness{home: home, workdir: workdir, daemon: d}
 	connect := func() {
 		dialCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

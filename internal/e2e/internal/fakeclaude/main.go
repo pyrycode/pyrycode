@@ -643,6 +643,15 @@ func writeStdout(p []byte) {
 }
 
 func main() {
+	// Argv fidelity (#2446), ABOVE every mode branch and every env read: real
+	// claude parses its flags before it decides what to be, so an argv it refuses
+	// must be refused here whatever mode this process was going to serve, and
+	// every later e2e inherits the guard without opting in. Ungated for the reason
+	// argvIDFlag's stem guard is ungated — it fires only on an argv the daemon
+	// should never compose, so there is nothing for a test to switch off.
+	if refusesIDPair(os.Args[1:]) {
+		fatalf("%s", refusedIDPairMessage)
+	}
 	// Stream-json mode (envStreamJSON) is checked FIRST — above the
 	// mustEnv(envSessionsDir/…) calls — so it binds no sessions dir and opens no
 	// transcript (the daemon's streamsup path deliberately watches no <uuid>.jsonl),
@@ -1368,6 +1377,41 @@ func argvIDFlag(args []string) (string, bool, bool) {
 		return "", false, false
 	}
 	return id, resume, true
+}
+
+// refusedIDPairMessage is real claude's refusal of --session-id beside a resume
+// form, re-confirmed by hand against claude 2.1.259 during #2446's refinement
+// (exit status 1, this one line on stderr, nothing served).
+const refusedIDPairMessage = "Error: --session-id can only be used with --continue or --resume if --fork-session is also specified."
+
+// refusesIDPair reports whether real claude would refuse args outright: a
+// --session-id together with a --resume or a --continue, and no --fork-session
+// to make the combination mean "branch this conversation".
+//
+// It is the argv half of the fidelity contract argvIDFlag's stem guard belongs
+// to, and it exists because argvIDFlag HIDES this case: it keeps the LAST id
+// flag, so "--session-id X … --resume X" reads here as a plain resume and this
+// stand-in serves turns against an argv real claude will not start on. That gap
+// is what let #2446's crash-loop reach a user — the daemon composed the refused
+// pair on every respawn after a live settings change, and the whole fake-daemon
+// tier stayed green.
+//
+// Both spellings of every flag are checked for namesPermissionMode' reason: the
+// daemon only ever composes the two-token form, but a test's pass-through claude
+// args can spell a flag either way.
+func refusesIDPair(args []string) bool {
+	named := func(flag string) bool {
+		for _, a := range args {
+			if a == flag || strings.HasPrefix(a, flag+"=") {
+				return true
+			}
+		}
+		return false
+	}
+	if !named("--session-id") || named("--fork-session") {
+		return false
+	}
+	return named("--resume") || named("--continue")
 }
 
 // unattributedStdinLogStem is the id component of the per-child stream stdin log

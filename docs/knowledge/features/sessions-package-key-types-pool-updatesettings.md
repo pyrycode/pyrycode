@@ -81,6 +81,22 @@ verbatim so the YOLO fail-safe has exactly one origin. `UpdateSettings` captures
 releases the lock before either live-apply branch runs — **outside** `Pool.mu`,
 never touching `Session.lcMu`.
 
+**`newArgs` is a base for the adapter to shape, not a finished argv (#2446).**
+This package composes only `spawnBase + claudeSettingsArgs` — deliberately: it
+knows nothing about `mcpServersPath`, the stdio-prompt bit, or claude's approval
+flags, and must not. Both branches below hand `newArgs` to `sup`, which is
+`cmd/pyry`'s `streamRunner` adapter, and before #2446 that adapter forwarded it
+to `streamsup.Runner` unchanged. That skipped the two shapings the construction
+path applies to every runner's argv — stripping the baked `--session-id` and
+reapplying the daemon's approval flags — so a respawn after a live settings
+change could spawn `--session-id X … --resume X` (claude refuses it outright)
+with the approval gate silently absent. The fix lives entirely on the adapter
+side, in a `*settingsInstaller` `streamRunner` now carries: see [Constructing a
+`streamRunner`](streamsup-package-constructing-a-streamrunner-newstreamrunnerfacto.md).
+This package's contract is unchanged by that fix — `sup.SetSpawnArgs`/`.Restart`
+still take the pool's own composition — which is what let the fix land without
+touching `internal/sessions` at all.
+
 **`sup.SetSpawnPermissionMode(merged.PermissionMode)` runs unconditionally on the line
 above the branch split (#2064)**, the one place both branches pass through. Without it
 a runner's spawn-time posture write is construction-time-only — nothing rebuilds the

@@ -43,10 +43,153 @@ import (
 // neither this declaration nor the factory a line. sessionRetentions declares no methods,
 // so nothing is promoted into this type's method set and the four accessors below reach
 // their holds by ordinary field promotion.
+//
+// The install field is the #2446 seam: the three methods Pool.UpdateSettings
+// drives go through it rather than straight to the runner, so the argv that
+// update recomposes is shaped the way the construction path shapes one. A
+// POINTER, unlike the embedded retentions above, because one of its fields
+// moves — see settingsInstaller. A hand-built streamRunner{} leaves it nil,
+// which is inert: the compile-time interface assertions in this package's tests
+// are the only such values and they call nothing.
 type streamRunner struct {
 	r *streamsup.Runner
 	sessionRetentions
+	install *settingsInstaller
 }
+
+// spawnArgvInstaller is the half of *streamsup.Runner that Pool.UpdateSettings
+// drives — the two argv installs and the posture install that always precedes
+// them. Declared as an interface rather than taking the concrete runner so the
+// shaping below can be asserted against a recording double: the runner exposes
+// no reader for its installed argv (setArgsLocked is its sole writer and there
+// is no getter), so the alternative is spawning a child and reading its command
+// line, which makes a timing-dependent integration test out of a pure argv
+// transformation.
+//
+// Narrow on purpose. It is not a second sessions.Runner: it names the three
+// methods whose inputs this file has to shape, and nothing else.
+type spawnArgvInstaller interface {
+	Restart(args []string)
+	SetSpawnArgs(args []string)
+	SetSpawnPermissionMode(mode string)
+}
+
+// settingsInstaller reapplies BOTH construction-time argv shapings to the argv
+// Pool.UpdateSettings recomposes, then forwards it to the runner (#2446).
+//
+// # What it fixes
+//
+// Pool.UpdateSettings recomposes argv as Session.spawnBase + claudeSettingsArgs
+// and installs it verbatim on either branch — SetSpawnArgs in band, Restart
+// otherwise. Neither branch rebuilds the runner, so neither re-runs what
+// newStreamRunnerFactory does to an argv on the way in:
+//
+//   - stripSessionIDFlags, which mapStreamsupConfig applies, because
+//     streamsup.buildArgs injects the create or resume form itself per spawn.
+//     Without it the id Pool.buildSession bakes into spawnBase survives, and the
+//     next respawn that takes the resume form spawns "--session-id X … --resume
+//     X" — which claude REFUSES outright, one stderr line and exit 1, so the
+//     session crash-loops with every queued message stuck behind a child that
+//     never lives. That is the 2026-09-15 incident this type exists for.
+//   - withApprovalArgs, which puts the daemon's permission-approval flags on the
+//     argv of every child the daemon downgrades in band. Without it such a
+//     session respawns with no --permission-prompt-tool, no --mcp-config and no
+//     --strict-mcp-config beside the --dangerously-skip-permissions every argv
+//     carries since #2065 — the approval gate gone from a child that launches in
+//     bypass. Masked until now by the crash-loop above; fixing the strip alone is
+//     what makes it reachable.
+//
+// # The three fixed inputs, and the one that moves
+//
+// mcpServersPath, stdioPrompt and operatorBypass are settled before the runner
+// exists and never change: the first two are newStreamRunnerFactory's own
+// closure values, and the third is RunnerConfig.OperatorBypass, which the pool
+// derives ONCE from the settings-free spawnBase.
+//
+// READING operatorBypass BACK OFF THE ARGV BEING INSTALLED WOULD BE THE WHOLE
+// BUG AGAIN. claudeSettingsArgs appends the escalation flag to every
+// composition, so a predicate keyed on the installed argv answers "this child
+// keeps its bypass" for every session, withApprovalArgs returns args unchanged
+// every time, and the approval gate silently disappears from every install. See
+// operatorBypass' own doc in internal/sessions for the derivation; the rule here
+// is that provenance travels in a field and is never re-derived downstream.
+//
+// mode is the session's STORED POSTURE and is the one value that moves, which is
+// why this is a pointer type with a mutex rather than a value copied per call.
+// Pool.UpdateSettings calls SetSpawnPermissionMode(merged.PermissionMode)
+// unconditionally, immediately above its branch split and therefore immediately
+// before either install, so the posture recorded here is the one that update
+// just persisted. It is seeded from RunnerConfig.PermissionMode so an install
+// arriving before any posture install still shapes with a real mode — and a
+// degenerate value is fail-safe anyway, since withApprovalArgs treats an
+// unrecognised or empty posture as a downgraded child and leaves the gate on.
+//
+// # Precondition on args
+//
+// args is a SETTINGS-COMPOSED argv — Session.spawnArgs output, i.e. spawnBase
+// plus claudeSettingsArgs — and never an already-shaped one. The shaping is not
+// idempotent for the approval set: handed its own output it would append a
+// second --permission-prompt-tool / --mcp-config pair. The sole caller
+// recomposes from spawnBase on every update, so nothing reaches here twice, and
+// a future caller that wants to re-install the runner's current argv needs a
+// different entry point rather than this one.
+type settingsInstaller struct {
+	target         spawnArgvInstaller
+	mcpServersPath string
+	stdioPrompt    bool
+	operatorBypass bool
+
+	mu   sync.Mutex
+	mode string
+}
+
+func newSettingsInstaller(target spawnArgvInstaller, mcpServersPath string, stdioPrompt, operatorBypass bool, mode string) *settingsInstaller {
+	return &settingsInstaller{
+		target:         target,
+		mcpServersPath: mcpServersPath,
+		stdioPrompt:    stdioPrompt,
+		operatorBypass: operatorBypass,
+		mode:           mode,
+	}
+}
+
+// shape applies the two construction-time shapings in the construction-time
+// ORDER — strip first, then inject — so that for one session and one posture the
+// installed argv is what newStreamRunnerFactory would have produced for the same
+// composition. The order is load-bearing in one direction only: withApprovalArgs
+// consults namesPermissionMode on what it is given, and stripSessionIDFlags
+// never adds or removes a --permission-mode token, so reversing them would agree
+// today — but the strip has to run on the pool's composition rather than on an
+// argv already carrying injected flags, which is the order stated here.
+//
+// The returned slice aliases neither args nor spawnBase: stripSessionIDFlags
+// always allocates, and withApprovalArgs either returns that fresh slice or a
+// clone of it.
+func (s *settingsInstaller) shape(args []string) []string {
+	s.mu.Lock()
+	mode := s.mode
+	s.mu.Unlock()
+	return withApprovalArgs(stripSessionIDFlags(args), s.mcpServersPath, mode, s.operatorBypass, s.stdioPrompt)
+}
+
+// setSpawnPermissionMode records the posture the shaping above reads, then
+// forwards it to the runner. Recording FIRST is not an ordering requirement —
+// neither half can fail and the forward makes no call back into this type — but
+// it keeps the cell and the runner from disagreeing for the length of a
+// non-blocking call.
+//
+// The mutex is a leaf: nothing under it takes another lock or does I/O, and the
+// forward happens after the unlock.
+func (s *settingsInstaller) setSpawnPermissionMode(mode string) {
+	s.mu.Lock()
+	s.mode = mode
+	s.mu.Unlock()
+	s.target.SetSpawnPermissionMode(mode)
+}
+
+func (s *settingsInstaller) restart(args []string) { s.target.Restart(s.shape(args)) }
+
+func (s *settingsInstaller) setSpawnArgs(args []string) { s.target.SetSpawnArgs(s.shape(args)) }
 
 func (a streamRunner) State() sessions.State { return mapStreamState(a.r.State()) }
 
@@ -58,7 +201,12 @@ func (a streamRunner) WaitForPTY(ctx context.Context) error { return a.r.WaitFor
 
 func (a streamRunner) Run(ctx context.Context) error { return a.r.Run(ctx) }
 
-func (a streamRunner) Restart(args []string) { a.r.Restart(args) }
+// Restart installs the recomposed argv WITH the kill, through the #2446 shaping
+// seam rather than straight to the runner: the argv Pool.UpdateSettings hands
+// down is the pool's own composition, which still carries the baked session id
+// and carries no approval flags. settingsInstaller states what that costs when
+// it is forwarded verbatim.
+func (a streamRunner) Restart(args []string) { a.install.restart(args) }
 
 // SetSpawnArgs forwards to (*streamsup.Runner).SetSpawnArgs (#1580), installing
 // the next spawn's argv without terminating the running child. Unlike Interrupt /
@@ -68,7 +216,12 @@ func (a streamRunner) Restart(args []string) { a.r.Restart(args) }
 // whereas a type assertion at a future call site would fail silently at runtime and
 // fall back to Restart, which is the one outcome a swap-only caller exists to
 // avoid. Dispatched from the in-band branch of Pool.UpdateSettings since #1581.
-func (a streamRunner) SetSpawnArgs(args []string) { a.r.SetSpawnArgs(args) }
+//
+// It goes through the #2446 shaping seam for Restart's reason exactly: the two
+// branches differ in whether they kill the live child, not in what argv they
+// hand down, so a shaping applied to one and not the other would fix half an
+// incident.
+func (a streamRunner) SetSpawnArgs(args []string) { a.install.setSpawnArgs(args) }
 
 // SetModel forwards the non-turning live model change to the stream supervisor.
 // Validation stays at the relay boundary; this adapter neither logs nor rewrites
@@ -86,7 +239,13 @@ func (a streamRunner) SetModel(model string) error { return a.r.SetModel(model) 
 // The concrete method installs the mode verbatim and cannot fail, so this forward
 // carries no validation of its own; the vocabulary gate runs at the spawn, where the
 // runner's own allow-list decides whether anything is written at all.
-func (a streamRunner) SetSpawnPermissionMode(mode string) { a.r.SetSpawnPermissionMode(mode) }
+//
+// Since #2446 it also records the posture for the argv shaping the two installs
+// below apply. That is why the seam can shape at all: the stored posture is the
+// one shaping input that moves, and Pool.UpdateSettings calls this
+// unconditionally above its branch split — immediately before either install —
+// so the value recorded here is always the one that update just persisted.
+func (a streamRunner) SetSpawnPermissionMode(mode string) { a.install.setSpawnPermissionMode(mode) }
 
 // SetPermissionMode forwards to (*streamsup.Runner).SetPermissionMode (#2042),
 // switching the live child's permission posture via a set_permission_mode control
@@ -636,7 +795,14 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, approva
 		// field on one struct, so the reader and the probe cannot name different
 		// folders for one session; see ClaudeSessionsDir's doc for what a second
 		// derivation would cost.
-		return streamRunner{r: r, sessionRetentions: held}, nil
+		//
+		// #2446's install seam is built from the SAME four values withApprovalArgs
+		// was called with at the top of this function — each named once, none
+		// re-derived — so the construction path and the settings-update install
+		// path cannot be handed different shaping inputs. It sits below
+		// streamsup.New because the runner is what it forwards to.
+		install := newSettingsInstaller(r, mcpServersPath, approval.stdio, cfg.OperatorBypass, cfg.PermissionMode)
+		return streamRunner{r: r, sessionRetentions: held, install: install}, nil
 	}
 }
 

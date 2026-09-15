@@ -1243,3 +1243,318 @@ func TestSessionParser_MintsOneStablePostureGate(t *testing.T) {
 	// that handed the runner a gate the parser does not release would refuse every
 	// turn in every one of those tests rather than showing up as one missed assertion.
 }
+
+// recordingInstaller is the spawnArgvInstaller double the #2446 install tests
+// drive. *streamsup.Runner exposes no reader for its installed argv, so this is
+// what makes the adapter's two install methods assertable without spawning a
+// child: it captures exactly what the shaping handed down.
+type recordingInstaller struct {
+	restarted [][]string
+	swapped   [][]string
+	modes     []string
+}
+
+func (r *recordingInstaller) Restart(args []string)           { r.restarted = append(r.restarted, args) }
+func (r *recordingInstaller) SetSpawnArgs(args []string)      { r.swapped = append(r.swapped, args) }
+func (r *recordingInstaller) SetSpawnPermissionMode(m string) { r.modes = append(r.modes, m) }
+
+// installerAdapter wraps a recording target in the REAL streamRunner, so these
+// tests drive the production methods rather than settingsInstaller directly. The
+// nil *streamsup.Runner is deliberate and inert: the three install methods reach
+// only the install field.
+func installerAdapter(target spawnArgvInstaller, mcpPath string, stdio, operatorBypass bool, mode string) streamRunner {
+	return streamRunner{install: newSettingsInstaller(target, mcpPath, stdio, operatorBypass, mode)}
+}
+
+// approvalSet is what withApprovalArgs injects for a downgraded child, with the
+// mode pair dropped — the shape every argv Session.spawnArgs composes for a
+// non-bypass posture gets, since such an argv always names its own mode.
+func approvalSet(mcpPath string) []string {
+	return []string{"--permission-prompt-tool", approveToolRef, "--mcp-config", mcpPath, "--strict-mcp-config"}
+}
+
+// TestStreamRunnerInstall_StripsBakedSessionID is #2446 AC 1 on both install
+// methods: the argv Pool.UpdateSettings recomposes still carries the
+// "--session-id <id>" Pool.buildSession bakes into spawnBase, and installing it
+// verbatim is what spawns "--session-id X … --resume X" on the next respawn that
+// takes the resume form — which claude refuses outright, so the session
+// crash-loops with every queued message stuck behind it.
+//
+// The assertion is on the WHOLE installed argv rather than on the absence of the
+// flag, because "no --session-id" is also true of an argv the shaping mangled.
+func TestStreamRunnerInstall_StripsBakedSessionID(t *testing.T) {
+	t.Parallel()
+
+	const mcpPath = "/run/pyry/mcp-2446.json"
+	cases := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "two-token form, the one Pool.buildSession bakes",
+			args: []string{"--session-id", "sess-2446", "--settings", "p", "--dangerously-skip-permissions", "--permission-mode", "plan"},
+			want: append([]string{"--settings", "p", "--dangerously-skip-permissions", "--permission-mode", "plan"}, approvalSet(mcpPath)...),
+		},
+		{
+			name: "joined form, reachable through the operator's pass-through claude args",
+			args: []string{"--session-id=sess-2446", "--settings", "p", "--dangerously-skip-permissions", "--permission-mode", "plan"},
+			want: append([]string{"--settings", "p", "--dangerously-skip-permissions", "--permission-mode", "plan"}, approvalSet(mcpPath)...),
+		},
+		{
+			name: "a resume already on the base is stripped too — streamsup owns the id flag either way",
+			args: []string{"--resume", "sess-2446", "--settings", "p", "--dangerously-skip-permissions", "--permission-mode", "plan"},
+			want: append([]string{"--settings", "p", "--dangerously-skip-permissions", "--permission-mode", "plan"}, approvalSet(mcpPath)...),
+		},
+		{
+			name: "dangling flag drops the lone token and consumes nothing after it",
+			args: []string{"--settings", "p", "--dangerously-skip-permissions", "--permission-mode", "plan", "--session-id"},
+			want: append([]string{"--settings", "p", "--dangerously-skip-permissions", "--permission-mode", "plan"}, approvalSet(mcpPath)...),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			for _, install := range []struct {
+				branch string
+				drive  func(streamRunner, []string)
+				read   func(*recordingInstaller) [][]string
+			}{
+				{"restart", streamRunner.Restart, func(r *recordingInstaller) [][]string { return r.restarted }},
+				{"swap", streamRunner.SetSpawnArgs, func(r *recordingInstaller) [][]string { return r.swapped }},
+			} {
+				var rec recordingInstaller
+				install.drive(installerAdapter(&rec, mcpPath, false, false, "default"), tc.args)
+				got := install.read(&rec)
+				if len(got) != 1 {
+					t.Fatalf("%s: installed %d argvs, want exactly 1", install.branch, len(got))
+				}
+				if !slices.Equal(got[0], tc.want) {
+					t.Errorf("%s installed\n got %q\nwant %q", install.branch, got[0], tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestStreamRunnerInstall_ReappliesApprovalArgs is #2446 AC 2: the same install
+// path puts the daemon's approval flags back on the argv of a session the daemon
+// downgrades in band, and injects nothing for one that keeps the bypass it
+// launches with.
+//
+// The bypass rows are the security-relevant ones and they are split by
+// PROVENANCE, not by spelling: since #2065 claudeSettingsArgs appends
+// --dangerously-skip-permissions to EVERY composition, so the argv cannot answer
+// which children the daemon walks back. A shaping that re-derived the answer
+// from the argv it was handed would return every argv unchanged and delete the
+// approval gate from every install — this ticket's second defect, re-introduced
+// through its own fix.
+func TestStreamRunnerInstall_ReappliesApprovalArgs(t *testing.T) {
+	t.Parallel()
+
+	const mcpPath = "/run/pyry/mcp-2446.json"
+	// What Pool.UpdateSettings hands down for a session storing a non-escalated
+	// posture: the base plus claudeSettingsArgs, which names the mode itself.
+	downgraded := []string{"--settings", "p", "--dangerously-skip-permissions", "--permission-mode", "acceptEdits"}
+	// And for one storing the escalation: the flag alone, no mode pair.
+	escalated := []string{"--settings", "p", "--dangerously-skip-permissions"}
+
+	cases := []struct {
+		name           string
+		args           []string
+		mode           string
+		operatorBypass bool
+		stdio          bool
+		want           []string
+	}{
+		{
+			name: "downgraded in band — the gate goes back on, minus the mode pair the argv already names",
+			args: downgraded,
+			mode: "acceptEdits",
+			want: append(slices.Clone(downgraded), approvalSet(mcpPath)...),
+		},
+		{
+			name: "downgraded, stdio transport — the prompt tool names stdio",
+			args: downgraded, mode: "acceptEdits", stdio: true,
+			want: append(slices.Clone(downgraded),
+				"--permission-prompt-tool", "stdio", "--mcp-config", mcpPath, "--strict-mcp-config"),
+		},
+		{
+			name: "stored escalation — nothing injected, and no second bypass flag",
+			args: escalated,
+			mode: sessions.PermissionModeBypass,
+			want: escalated,
+		},
+		{
+			name:           "operator bypass — provenance the daemon may not walk back, so nothing injected",
+			args:           downgraded,
+			mode:           "acceptEdits",
+			operatorBypass: true,
+			want:           downgraded,
+		},
+		{
+			name: "unrecognised stored posture falls through to injection — the fail-safe direction",
+			args: downgraded,
+			mode: "",
+			want: append(slices.Clone(downgraded), approvalSet(mcpPath)...),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var rec recordingInstaller
+			a := installerAdapter(&rec, mcpPath, tc.stdio, tc.operatorBypass, tc.mode)
+			a.Restart(tc.args)
+			a.SetSpawnArgs(tc.args)
+			if len(rec.restarted) != 1 || len(rec.swapped) != 1 {
+				t.Fatalf("installed %d restarts and %d swaps, want 1 of each", len(rec.restarted), len(rec.swapped))
+			}
+			if !slices.Equal(rec.restarted[0], tc.want) {
+				t.Errorf("Restart installed\n got %q\nwant %q", rec.restarted[0], tc.want)
+			}
+			if !slices.Equal(rec.swapped[0], tc.want) {
+				t.Errorf("SetSpawnArgs installed\n got %q\nwant %q", rec.swapped[0], tc.want)
+			}
+		})
+	}
+}
+
+// TestStreamRunnerInstall_MatchesConstructionPath is the other half of #2446
+// AC 2: for one session and one posture, what the install path produces is what
+// the construction path produces. It composes the expectation from the
+// production functions themselves — mapStreamsupConfig then withApprovalArgs, in
+// newStreamRunnerFactory's order — rather than from a literal, so the two paths
+// are compared rather than each compared to a transcription that could drift
+// from both.
+func TestStreamRunnerInstall_MatchesConstructionPath(t *testing.T) {
+	t.Parallel()
+
+	const mcpPath = "/run/pyry/mcp-2446.json"
+	for _, tc := range []struct {
+		name           string
+		mode           string
+		operatorBypass bool
+	}{
+		{"downgraded", "plan", false},
+		{"stored escalation", sessions.PermissionModeBypass, false},
+		{"operator bypass", "default", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// The pool's own composition: spawnBase (with its baked id) plus the
+			// settings suffix claudeSettingsArgs would append for this posture.
+			composed := []string{"--session-id", "sess-2446", "--settings", "p", "--dangerously-skip-permissions"}
+			if tc.mode != sessions.PermissionModeBypass {
+				composed = append(composed, "--permission-mode", tc.mode)
+			}
+			cfg := sessions.RunnerConfig{
+				ClaudeBin:      "/usr/bin/claude",
+				WorkDir:        t.TempDir(),
+				SessionID:      "sess-2446",
+				ClaudeArgs:     composed,
+				PermissionMode: tc.mode,
+				OperatorBypass: tc.operatorBypass,
+			}
+			want := withApprovalArgs(mapStreamsupConfig(cfg).Args, mcpPath, cfg.PermissionMode, cfg.OperatorBypass, false)
+
+			var rec recordingInstaller
+			installerAdapter(&rec, mcpPath, false, tc.operatorBypass, tc.mode).SetSpawnArgs(composed)
+			if len(rec.swapped) != 1 {
+				t.Fatalf("installed %d argvs, want 1", len(rec.swapped))
+			}
+			if !slices.Equal(rec.swapped[0], want) {
+				t.Errorf("install path and construction path disagree for posture %q\ninstalled  %q\nconstructed %q",
+					tc.mode, rec.swapped[0], want)
+			}
+		})
+	}
+}
+
+// TestStreamRunnerInstall_ShapesWithTheLivePosture pins the one shaping input
+// that MOVES. Pool.UpdateSettings calls SetSpawnPermissionMode unconditionally
+// above its branch split, immediately before either install, so an install must
+// shape with the posture that update just persisted — not with the one the
+// session had when the daemon composed this runner.
+//
+// Both directions are driven from one runner, because the failure this guards is
+// a stale cell rather than a wrong seed: a revoke that still shaped with the old
+// bypass would install an argv with no approval gate, and an escalation that
+// still shaped with the old downgrade would inject a set the child does not need.
+func TestStreamRunnerInstall_ShapesWithTheLivePosture(t *testing.T) {
+	t.Parallel()
+
+	const mcpPath = "/run/pyry/mcp-2446.json"
+	var rec recordingInstaller
+	// Constructed as an escalated session, the posture the 2026-09-15 incident's
+	// desktop had just set.
+	a := installerAdapter(&rec, mcpPath, false, false, sessions.PermissionModeBypass)
+
+	escalated := []string{"--settings", "p", "--dangerously-skip-permissions"}
+	a.SetSpawnArgs(escalated)
+
+	// The operator revokes: UpdateSettings persists the downgrade, tells the
+	// adapter, then installs the recomposed argv.
+	downgraded := []string{"--settings", "p", "--dangerously-skip-permissions", "--permission-mode", "default"}
+	a.SetSpawnPermissionMode("default")
+	a.SetSpawnArgs(downgraded)
+
+	// And back up again.
+	a.SetSpawnPermissionMode(sessions.PermissionModeBypass)
+	a.Restart(escalated)
+
+	if want := []string{"default", sessions.PermissionModeBypass}; !slices.Equal(rec.modes, want) {
+		t.Errorf("posture forwards = %q, want %q — the runner must still be told every posture", rec.modes, want)
+	}
+	if len(rec.swapped) != 2 || len(rec.restarted) != 1 {
+		t.Fatalf("installed %d swaps and %d restarts, want 2 and 1", len(rec.swapped), len(rec.restarted))
+	}
+	if !slices.Equal(rec.swapped[0], escalated) {
+		t.Errorf("the escalated install injected %q, want the argv unchanged", rec.swapped[0])
+	}
+	if want := append(slices.Clone(downgraded), approvalSet(mcpPath)...); !slices.Equal(rec.swapped[1], want) {
+		t.Errorf("the post-revoke install carries\n got %q\nwant %q — a stale bypass here is the approval gate gone", rec.swapped[1], want)
+	}
+	if !slices.Equal(rec.restarted[0], escalated) {
+		t.Errorf("the re-escalated install injected %q, want the argv unchanged", rec.restarted[0])
+	}
+}
+
+// TestStreamRunnerFactory_BuildsTheInstallSeam pins that the seam reaches the
+// production adapter at all. Every assertion above drives a hand-built installer,
+// so without this one the whole set could pass against a factory that never wired
+// it — and a nil install field is not an inert adapter, it is a panic on the
+// first settings change.
+func TestStreamRunnerFactory_BuildsTheInstallSeam(t *testing.T) {
+	t.Parallel()
+
+	const mcpPath = "/run/pyry/mcp-2446.json"
+	factory := newStreamRunnerFactory(newStreamTurnSink(0, discardLogger()), mcpPath, streamApprovalConfig{})
+	runner, err := factory(sessions.RunnerConfig{
+		ClaudeBin:      os.Args[0],
+		WorkDir:        t.TempDir(),
+		SessionID:      "sess-2446-factory",
+		ClaudeArgs:     []string{"--session-id", "sess-2446-factory", "--settings", "p"},
+		PermissionMode: "plan",
+		Logger:         discardLogger(),
+	})
+	if err != nil {
+		t.Fatalf("factory: %v", err)
+	}
+	sr, ok := runner.(streamRunner)
+	if !ok {
+		t.Fatalf("runner is %T, want streamRunner", runner)
+	}
+	if sr.install == nil {
+		t.Fatal("streamRunner.install is nil — every settings change on this session would panic")
+	}
+	if sr.install.target != sr.r {
+		t.Error("the installer forwards to a different runner than the adapter wraps")
+	}
+	if sr.install.mcpServersPath != mcpPath {
+		t.Errorf("installer mcpServersPath = %q, want %q — the approval set would name the wrong document",
+			sr.install.mcpServersPath, mcpPath)
+	}
+	if sr.install.mode != "plan" {
+		t.Errorf("installer seeded posture = %q, want %q", sr.install.mode, "plan")
+	}
+}

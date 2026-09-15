@@ -418,6 +418,24 @@ never crossed initialize retention or client publication. When a capture is the
 claimed provenance, feed an exact projection of every complete row into the
 producer and compare the full ordered output before testing downstream behavior.
 
+**A fake that normalises an argv real claude refuses hides a whole defect class
+indefinitely, not just one test (#2446).** `fakeclaude.argvIDFlag` keeps the
+LAST id flag on the argv it's handed, so `--session-id X … --resume X` — which
+real claude refuses outright, exit 1, one stderr line — read here as an ordinary
+resume, and the fake tier stayed green through a production crash-loop
+(`Pool.UpdateSettings` installing a recomposed argv that still carried the baked
+session id; see [`Pool.UpdateSettings`](sessions-package-key-types-pool-updatesettings.md)).
+The fix is a second, unconditional guard at the top of `fakeclaude`'s `main`,
+above every mode branch: it refuses the same `--session-id` + `--resume`/
+`--continue` (without `--fork-session`) pair claude refuses, with claude's own
+stderr line. Ungated by env, for `argvIDFlag`'s stem guard's reason — it fires
+only on an argv the daemon should never compose, so there is nothing for a test
+to opt out of. Reproducing the defect in the fake tier also needed a seeded
+`<id>.jsonl`: stream-mode fakeclaude establishes no transcript on its own, so
+without one every spawn takes the create form and the composed pair is the
+harmless `--session-id` twice — the arm has to plant the fixture that makes the
+per-spawn probe pick the resume form before the guard has anything to catch.
+
 **Editing the source in place still needs `-count=1` against a daemon-spawning
 suite (#2099).** `-overlay` isn't the only way a mutant fails to reach the
 spawned binary: even with `cmd/pyry`'s source edited directly on disk, a

@@ -48,15 +48,19 @@ package realclaude
 // Phase B). It skips cleanly when claude / creds are absent.
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
@@ -300,4 +304,124 @@ func requireTriggerFileAbsent(t *testing.T, workdir string, nonce int64) {
 	if found != "" {
 		t.Fatalf("fail-open regression: the gated Write executed despite reject_once — %s materialised at %s", target, found)
 	}
+}
+
+// TestInteractiveStreamPermissionDenyAfterSettingsRespawn is #2446 AC 4: the
+// same deny round-trip, run against a child the daemon respawned AFTER a live
+// settings change.
+//
+// # What it adds over the arm above
+//
+// Pool.UpdateSettings recomposes a session's argv from spawnBase plus
+// claudeSettingsArgs and installs it on the runner, and until #2446 the adapter
+// forwarded it without reapplying either construction-time shaping. The half
+// this arm reaches is withApprovalArgs: the recomposed argv carries no
+// --permission-prompt-tool, no --mcp-config and no --strict-mcp-config, beside
+// the --dangerously-skip-permissions claudeSettingsArgs has appended to every
+// composition since #2065. So the respawned child has the daemon's approval gate
+// missing entirely and executes the gated Write with no modal at all — which
+// raiseRealPermissionModal fails on, because its non-vacuity gate requires a
+// modal to genuinely surface before anything else is asserted.
+//
+// That is a real-claude-only reading. The fake tier cannot produce it: its
+// stand-in raises a permission request when a rider tells it to, so "no approval
+// flags on the argv" is invisible there. Here the flags are the ONLY reason the
+// tool is gated, and their absence is the fail-OPEN direction — the tool runs.
+//
+// # Which session, and what this arm therefore does not cover
+//
+// The subject is the harness's bootstrap-bound conversation, whose spawnBase
+// carries no baked session id — so the OTHER half of the defect, the
+// "--session-id X … --resume X" pair that crash-looped pyrybox on 2026-09-15, is
+// not reachable on this session kind and is not what this arm proves. That half
+// belongs to the fake tier's TestE2E_SettingsChangeSurvivesTheNextRespawn, which
+// drives a phone-created session, and to the adapter's own unit table. Read the
+// three together: this one is the security half, live.
+//
+// # The forced exit
+//
+// A SIGKILL of the live child, read off the control plane — the crash arm, which
+// needs nothing else in the system to be true, and the one the incident's denied
+// permission produced. The respawn is waited for by pid change, so the round-trip
+// below runs against the successor rather than racing the corpse.
+func TestInteractiveStreamPermissionDenyAfterSettingsRespawn(t *testing.T) {
+	h, convID := startStreamModalResolutionHarness(t, permissionDaemonModel)
+
+	// A real settings change, and deliberately one that touches neither the
+	// permission posture nor the model: a posture change would alter whether the
+	// Write is gated at all, and a model change would move the deny round-trip
+	// onto a different model. Effort is in-band deliverable, so this drives the
+	// SetSpawnArgs install branch — the one the incident took.
+	effort := "high"
+	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
+		ID:   900,
+		Type: protocol.TypeSetSessionSettings,
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, protocol.SetSessionSettingsPayload{
+			SessionID: streamModalBootstrapUUID,
+			Effort:    &effort,
+		}),
+	})
+	// The daemon's own witness that the change persisted AND the recomposed argv
+	// was installed; both happen before this reply is emitted. Killing the child
+	// without waiting for it would race the install.
+	drainForControlEvent(t, h.phone, h.initRecv, protocol.TypeSessionSettingsUpdated, modalSurfaceBudget)
+
+	restartLiveChild(t, h)
+
+	// And the round-trip, verbatim: same gated Write, same attributed reject, same
+	// filesystem witness — against the respawned child.
+	driveInteractiveStreamPermissionDeny(t, h, convID)
+}
+
+// restartLiveChild SIGKILLs the daemon's live claude child and returns once a
+// different one is running. The pid comes from the control plane rather than a
+// process scan, so it is this daemon's child and not another test's.
+//
+// It fails loudly rather than returning on a timeout: every assertion after it
+// is about the successor, and a run that proceeded against the original child —
+// or against no child — would report this ticket's fix as working when nothing
+// had been respawned.
+func restartLiveChild(t *testing.T, h *perConvHarness) {
+	t.Helper()
+	before := liveChildPID(t, h)
+	proc, err := os.FindProcess(before)
+	if err != nil {
+		t.Fatalf("#2446: find supervised child pid=%d: %v", before, err)
+	}
+	if err := proc.Signal(syscall.SIGKILL); err != nil {
+		t.Fatalf("#2446: SIGKILL supervised child pid=%d: %v", before, err)
+	}
+
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		st, err := control.Status(ctx, h.daemon.socketPath)
+		cancel()
+		if err == nil && st.Phase == "running" && st.ChildPID != 0 && st.ChildPID != before {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Fatalf("#2446: no successor child within 60s of killing pid=%d — the respawn under the recomposed argv never came up\ndaemon stderr:\n%s",
+		before, h.daemon.stderr.String())
+}
+
+// liveChildPID reads the supervised child's pid off the control plane, failing
+// when no child is running: an arm that killed nothing would prove nothing.
+func liveChildPID(t *testing.T, h *perConvHarness) int {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		st, err := control.Status(ctx, h.daemon.socketPath)
+		cancel()
+		if err == nil && st.Phase == "running" && st.ChildPID != 0 {
+			return st.ChildPID
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Fatalf("#2446: the daemon reported no live child within 30s; there is nothing to respawn\ndaemon stderr:\n%s",
+		h.daemon.stderr.String())
+	return 0
 }
