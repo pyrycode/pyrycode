@@ -171,5 +171,30 @@ itself, so an un-stripped id flag in `Args` would double-inject. Required at the
 (`Pool.buildSession` bakes `--session-id <id>` into `ClaudeArgs`); a harmless no-op at the bootstrap site
 (`Pool.New`'s `ClaudeArgs` carry no id flag).
 
+**Neither shaping stayed construction-only past #2446.** `Pool.UpdateSettings` recomposes a session's
+spawn argv from `Session.spawnBase` plus `claudeSettingsArgs`
+([`Pool.UpdateSettings`](sessions-package-key-types-pool-updatesettings.md)) and installs it through
+`streamRunner.SetSpawnArgs`/`.Restart` — a *second* call site for both `stripSessionIDFlags` and
+`withApprovalArgs`, distinct from the one this section describes. Before #2446 that install forwarded the
+pool's composition to `streamsup.Runner` verbatim: the baked `--session-id` survived past construction, so
+a respawn taking the resume form spawned `--session-id X … --resume X`, which claude refuses outright
+(exit 1); and the approval set was simply absent from a session the daemon downgrades in band, masked
+until the id defect was fixed made it reachable. The fix is a `*settingsInstaller` field on `streamRunner`
+(`cmd/pyry/streamsup_runner.go`), built in this factory from the *same* four values already bound here —
+`mcpServersPath`, `approval.stdio`, `cfg.OperatorBypass`, `cfg.PermissionMode` — so the construction path
+and the settings-update install path can never be handed different shaping inputs. `SetSpawnPermissionMode`
+now also records the session's current stored posture on the installer (behind a leaf mutex), because that
+is the one shaping input that moves after construction; `Pool.UpdateSettings` calls it unconditionally
+immediately before either install branch, so the posture the installer shapes with is always the one that
+call just persisted.
+
+**Reading `operatorBypass` back off the argv being installed would reintroduce the exact bug the strip
+fixes.** `claudeSettingsArgs` appends `--dangerously-skip-permissions` to every composition unconditionally
+(#2065, above), so a predicate keyed on the installed argv would answer "this child keeps its bypass" for
+every session and `withApprovalArgs` would return every argv unchanged — the approval gate silently absent
+from every install, not just the operator-bypass ones. `operatorBypass` and the mcp/stdio values travel in
+fields settled once at construction and are never re-derived from the argv on the install path; only the
+posture cell moves, and it moves through `SetSpawnPermissionMode`, never by inspection of `args`.
+
 Neither #1109 nor #1098 wired the factory into production on their own — that was #1081's scope (below).
 See [codebase/1109.md](../codebase/1109.md).
