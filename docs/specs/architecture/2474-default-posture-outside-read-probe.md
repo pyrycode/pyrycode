@@ -143,3 +143,25 @@ Pending for the documentation stage; not done here.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-16
+
+## Revisions
+
+### 2026-09-16 — as-built notes
+
+**Open question 1 (eager or lazy bootstrap spawn) stands resolved by design, unchanged.** The ack is drained after the message is sealed and before the phone's turn frames, which is correct either way, so the probe never had to learn the answer. No design change.
+
+**Open question 2 (what the run measures) remains open by construction** and is this ticket's live-artifact handoff — see below. The `MEASURED` block in `interactive_stream_default_posture_read_test.go` says PENDING and names the log line that fills it.
+
+**The branch came in at 808 lines added against the 800-line one-ticket ceiling — 1% over, stated rather than rounded away.** The § A4 self-check measured the written plan at ~530 and held; the overage is entirely doc-comment prose in the probe itself (the posture argument, the two-disagreeing-measurements framing, and the non-vacuity reasoning), which is the part of this file that makes a green run mean something.
+
+It is not split, and the reason is the floor rule rather than an appeal to the edits being easy. The ticket has **one** deliverable — one live measurement — so there is no seam to cut on: any child would produce a slice whose only consumer is its sibling, which § A1's floor says is part of that sibling, and the floor wins over the ceiling when they disagree. The ticket's own `Estimate:` line predicted this range from the right analogue: #2039, the nearest read-shaped probe, spent 617 lines on its test file, and this one spent 632. Zero production files change, zero call sites need updating, and the fan-out check is inapplicable. Flagged for the verifier as a measured overage, not a silent one.
+
+## Documentation handoff — live-artifact dependency
+
+AC 4 requires the finding — the question, the answer, the claude version and the date — to be **recorded in the test file**, and only the live gate can produce it. This ticket therefore carries `needs-live-artifacts` alongside `needs-real-claude`:
+
+- **Capture source:** the single `#2474 finding:` line the probe logs on either branch, plus the `#2474: permission modal raised …` line on the gated branch only.
+- **Commit target:** the `# MEASURED` block in `internal/e2e/realclaude/interactive_stream_default_posture_read_test.go`, replacing `PENDING THE LIVE GATE`.
+- **Coupled changes:** none. No reader, schema or fixture depends on the captured text; it is prose in the file that produced it.
+- **Offline checks to re-run after the capture lands:** `go vet ./...`, `go build ./cmd/pyry`, and the tagged compile plus offline tests (`go test -tags e2e_realclaude -run 'TestDefaultPostureAckDiscriminant|TestPermissionObservation' ./internal/e2e/realclaude/`).
+- **Arming:** the probe fails rather than measuring when `claudeVersion()` is empty or collapses to `<empty>`/`<invalid>`, because a finding that cannot name the version it holds for is not a usable record. That is the "fail loudly when no usable capture exists" guard; it is deliberately *not* an assertion that the MEASURED block is already filled, which would make the gate that fills it unable to run.
