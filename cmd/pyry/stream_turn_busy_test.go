@@ -1369,6 +1369,25 @@ func TestStreamTurnDrainV2_BusyFedBeforeActiveGate(t *testing.T) {
 // on the active session cannot tell the two placements apart.
 func exitLaneDrain(t *testing.T) (sink *streamTurnSink, busy *turnBusyTracker, drops chan string) {
 	t.Helper()
+	sink, busy, drops, start := exitLaneDrainDeferred(t)
+	start()
+	return sink, busy, drops
+}
+
+// exitLaneDrainDeferred is exitLaneDrain with the drain NOT yet running: the
+// returned start() launches it and registers its cleanup. Split out for #1483, whose
+// filed scenario needs envelopes queued on the fan-in and a tracker mark placed
+// against a known fan-in position BEFORE anything is consumed. The fan-in is
+// buffered, so deferring the drain turns that ordering into a statement rather than
+// something to race for.
+//
+// The tracker is ARMED — withExitEpoch bound to the very sink these tests push their
+// exits onto. That is load-bearing for the four incumbent tests above as well: on an
+// unarmed tracker every mark records 0, the guard declines nothing, and the AC3
+// assertion ("an observe-placed mark still clears on its child's exit") would hold
+// for a reason with nothing to do with the code under test.
+func exitLaneDrainDeferred(t *testing.T) (sink *streamTurnSink, busy *turnBusyTracker, drops chan string, start func()) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
@@ -1379,17 +1398,19 @@ func exitLaneDrain(t *testing.T) (sink *streamTurnSink, busy *turnBusyTracker, d
 	bcast := newChanBcast("conn-b")
 	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
 
+	drops = make(chan string, 8)
+	sink = newStreamTurnSink(0, discardLogger())
 	busy = newTurnBusyTracker(stubBusyResolve(map[string]string{
 		"sess-a": testConvID,
 		"sess-b": testConvIDB,
-	}), discardLogger())
+	}), discardLogger(), withExitEpoch(sink.exitEpoch))
 
-	drops = make(chan string, 8)
-	sink = newStreamTurnSink(0, discardLogger())
-	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, busy,
-		slog.New(dropWatcher{kinds: drops}))
-	t.Cleanup(func() { cancel(); cleanup() }) // cancel-then-join; joining first deadlocks
-	return sink, busy, drops
+	start = func() {
+		cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, busy,
+			slog.New(dropWatcher{kinds: drops}))
+		t.Cleanup(func() { cancel(); cleanup() }) // cancel-then-join; joining first deadlocks
+	}
+	return sink, busy, drops, start
 }
 
 // #1209 AC2: [opener for S, exit for S] pushed in that order leaves S idle.
@@ -1580,5 +1601,325 @@ func TestStreamTurnDrainV2_BusyOpenThenCloseThroughParser(t *testing.T) {
 	collectEnvs(t, bcast.pushed, 3)
 	if busy.Busy(testConvID) {
 		t.Errorf("Busy = true after the result line's TurnEnd, want false")
+	}
+}
+
+// --- #1483: the exit-lane epoch guard -----------------------------------------
+
+// exitGuardTracker builds an ARMED tracker over a real fan-in, plus a push helper
+// that offers a child-exit signal to that fan-in and hands back the envelope the
+// drain would have read off it.
+//
+// A real sink rather than a stub counter, and no drain: the stamping under test is
+// exitForTag's own and the accessor is the one runSupervisor binds, while the
+// ordering is pure program order on this goroutine. Nothing here is timed, so no
+// sub-case below can flake in either direction.
+func exitGuardTracker(t *testing.T, logger *slog.Logger) (*turnBusyTracker, func(sessionID string) streamTurnEnvelope) {
+	t.Helper()
+	sink := newStreamTurnSink(0, discardLogger())
+	tr := newTurnBusyTracker(stubBusyResolve(map[string]string{
+		"sess-a": testConvID,
+		"sess-b": testConvIDB,
+	}), logger, withExitEpoch(sink.exitEpoch))
+
+	push := func(sessionID string) streamTurnEnvelope {
+		t.Helper()
+		sink.exitFor(sessionID)()
+		select {
+		case env := <-sink.ch:
+			return env
+		default:
+			t.Fatalf("exit envelope for %q never reached the fan-in", sessionID)
+			return streamTurnEnvelope{}
+		}
+	}
+	return tr, push
+}
+
+// findRecord returns the first forwarded record whose "event" attr is want, or
+// fails. Drains what has arrived rather than blocking: every producer in these
+// unit-tier tests runs synchronously on the test goroutine.
+func findRecord(t *testing.T, recs chan slog.Record, want string) slog.Record {
+	t.Helper()
+	var seen []string
+	for {
+		select {
+		case r := <-recs:
+			var event string
+			r.Attrs(func(a slog.Attr) bool {
+				if a.Key == "event" {
+					event = a.Value.String()
+				}
+				return true
+			})
+			if event == want {
+				return r
+			}
+			seen = append(seen, event)
+		default:
+			t.Fatalf("no record with event=%q was emitted; saw %v", want, seen)
+			return slog.Record{}
+		}
+	}
+}
+
+// #1483 AC1 and AC2 in one test, because the CONTRAST is the assertion. The two
+// sub-cases differ in exactly one thing — whether the exit was offered to the fan-in
+// before or after the mark — and an implementation that clears unconditionally
+// passes the second while failing the first, while one that declines
+// unconditionally does the reverse. Either alone could be satisfied by a constant.
+func TestTurnBusyTracker_ClearForExitGuardsTheDeliveryMark(t *testing.T) {
+	t.Parallel()
+
+	t.Run("exit enqueued before the mark is declined", func(t *testing.T) {
+		t.Parallel()
+		recs := make(chan slog.Record, 16)
+		tr, push := exitGuardTracker(t, slog.New(dropWatcher{recs: recs}))
+
+		// The dying child's exit, offered first. After the #2066/rotation path it
+		// carries the NEW session id and resolves to the same conversation as the mark
+		// below, which is why the session id cannot tell the two apart and a position
+		// has to.
+		stale := push("sess-a")
+
+		// ...and only then the delivery seam's mark, placed for a write into the
+		// RESPAWNED child.
+		_ = tr.openForDelivery(testConvID)
+		if !tr.Busy(testConvID) {
+			t.Fatalf("Busy(A) = false right after openForDelivery; the assertion below would pass vacuously")
+		}
+
+		tr.clearForExit("sess-a", stale.exitEpoch)
+
+		if !tr.Busy(testConvID) {
+			t.Errorf("Busy(A) = false after a stale exit; an exit offered before the mark must not clear it")
+		}
+
+		// The decline's record, content-free and NARROWER than a reader might want:
+		// event + session_id and nothing else. No conversation id (the routing key this
+		// type treats as sensitive) and no epoch values — the counter is global across
+		// runners, so stamping it on one conversation's record would disclose the
+		// daemon's total exit volume into a record about a single conversation.
+		r := findRecord(t, recs, "stream_turn.clear_stale_exit")
+		if r.Level != slog.LevelDebug {
+			t.Errorf("declined-clear record level = %v, want %v", r.Level, slog.LevelDebug)
+		}
+		var keys []string
+		r.Attrs(func(a slog.Attr) bool {
+			keys = append(keys, a.Key)
+			if a.Key == "session_id" && a.Value.String() != "sess-a" {
+				t.Errorf("declined-clear session_id = %q, want %q", a.Value.String(), "sess-a")
+			}
+			return true
+		})
+		slices.Sort(keys)
+		if want := []string{"event", "session_id"}; !slices.Equal(keys, want) {
+			t.Errorf("declined-clear record attrs = %v, want exactly %v", keys, want)
+		}
+	})
+
+	t.Run("exit after the mark still clears", func(t *testing.T) {
+		t.Parallel()
+		tr, push := exitGuardTracker(t, discardLogger())
+
+		// The mark first: the write commits, and only then does this delivery's own
+		// child die with no TurnEnd for the turn it was running. Leaving the mark
+		// standing here would make every later delivery to the conversation time out
+		// at streamTurnHoldTimeout until some other feed cleared it.
+		_ = tr.openForDelivery(testConvID)
+		own := push("sess-a")
+
+		tr.clearForExit("sess-a", own.exitEpoch)
+
+		if tr.Busy(testConvID) {
+			t.Errorf("Busy(A) = true after the mark's OWN child exited; an exit offered after the mark must clear it")
+		}
+	})
+}
+
+// #1483 AC3, plus the fail-open direction the guard is deliberately given when it
+// sits behind no fan-in. Both sub-cases assert the same outcome for different
+// reasons, and both are regressions a too-eager guard would break.
+func TestTurnBusyTracker_ClearForExitClearsUnguardedMarks(t *testing.T) {
+	t.Parallel()
+
+	t.Run("observe-placed mark clears, per the FIFO argument", func(t *testing.T) {
+		t.Parallel()
+		tr, push := exitGuardTracker(t, discardLogger())
+
+		// A mark from the child's OWN events. observe runs on the drain goroutine in
+		// envelope order, so an exit pushed before this mark would have been drained
+		// before it existed — which is why marks from this feed record no position and
+		// #1209/#1210's crash-clear is unchanged.
+		tr.observe("sess-a", turnevent.TextChunk{MessageID: "m1", Text: "hello"})
+		if !tr.Busy(testConvID) {
+			t.Fatalf("Busy(A) = false after an opener; the assertion below would pass vacuously")
+		}
+
+		tr.clearForExit("sess-a", push("sess-a").exitEpoch)
+
+		if tr.Busy(testConvID) {
+			t.Errorf("Busy(A) = true after the child's exit closed an observe-placed mark, want false")
+		}
+	})
+
+	t.Run("unarmed tracker declines nothing", func(t *testing.T) {
+		t.Parallel()
+		// No withExitEpoch: the ~36 incumbent construction sites, and a reminder that
+		// dropping the option from runSupervisor restores the pre-#1483 behaviour with
+		// nothing red. Every mark records 0 and every real stamp is >= 1.
+		tr := newTurnBusyTracker(stubBusyResolve(map[string]string{"sess-a": testConvID}), discardLogger())
+
+		_ = tr.openForDelivery(testConvID)
+		tr.clearForExit("sess-a", 1)
+
+		if tr.Busy(testConvID) {
+			t.Errorf("Busy(A) = true on a tracker built with no exit-epoch source; the guard must be disarmed there, not fail closed")
+		}
+	})
+}
+
+// #1483 AC4: the teardown feed is not ordered against the fan-in and must acquire no
+// epoch condition. It clears a delivery mark placed at a position far above any exit
+// this tracker has seen — the exact input clearForExit would decline.
+func TestTurnBusyTracker_ClearForSessionIgnoresTheExitEpoch(t *testing.T) {
+	t.Parallel()
+	tr, push := exitGuardTracker(t, discardLogger())
+
+	push("sess-a") // advance the lane so the mark below records a non-zero position
+	_ = tr.openForDelivery(testConvID)
+	if !tr.Busy(testConvID) {
+		t.Fatalf("Busy(A) = false right after openForDelivery; the assertion below would pass vacuously")
+	}
+
+	tr.clearForSession("sess-a")
+
+	if tr.Busy(testConvID) {
+		t.Errorf("Busy(A) = true after the pool teardown feed cleared it; that feed is ordered against nothing on the fan-in and must clear unconditionally")
+	}
+}
+
+// #1483: a mark keeps the position of whoever PLACED it. Neither feed that arrives
+// on an already-busy conversation may re-stamp it, in either direction — one would
+// lower a standing guard, the other would raise one that was deliberately absent.
+func TestTurnBusyTracker_DeliveryMarkKeepsItsPlacersEpoch(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a later observe opener does not lower the guard", func(t *testing.T) {
+		t.Parallel()
+		tr, push := exitGuardTracker(t, discardLogger())
+
+		stale := push("sess-a")
+		_ = tr.openForDelivery(testConvID)
+		// The respawned child's first event, landing on an already-busy conversation.
+		// setBusy is idempotent on membership, so this must change nothing at all.
+		tr.observe("sess-a", turnevent.TextChunk{MessageID: "m1", Text: "hello"})
+
+		tr.clearForExit("sess-a", stale.exitEpoch)
+
+		if !tr.Busy(testConvID) {
+			t.Errorf("Busy(A) = false; an opener arriving after the delivery mark re-stamped it to 0 and let the stale exit through")
+		}
+	})
+
+	t.Run("a later openForDelivery does not raise an absent guard", func(t *testing.T) {
+		t.Parallel()
+		tr, push := exitGuardTracker(t, discardLogger())
+
+		tr.observe("sess-a", turnevent.TextChunk{MessageID: "m1", Text: "hello"})
+		push("sess-a") // advance the lane between the mark and the no-op open
+		_ = tr.openForDelivery(testConvID)
+
+		tr.clearForExit("sess-a", push("sess-a").exitEpoch)
+
+		if tr.Busy(testConvID) {
+			t.Errorf("Busy(A) = true; openForDelivery opened nothing here, so it must not have stamped a guard onto somebody else's mark")
+		}
+	})
+}
+
+// #1483: the two answers clearForExit gives before it ever reaches the guard, both
+// inherited from clearForSession rather than re-derived.
+func TestTurnBusyTracker_ClearForExitUnresolvedAndNil(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an unresolvable session clears nothing", func(t *testing.T) {
+		t.Parallel()
+		tr, push := exitGuardTracker(t, discardLogger())
+
+		tr.observe("sess-a", turnevent.TextChunk{MessageID: "m1", Text: "hello"})
+
+		// sess-c resolves to no conversation. A wildcard or empty-key clear would
+		// report A's LIVE turn idle, which is the fail-open this skip exists to refuse.
+		tr.clearForExit("sess-c", push("sess-c").exitEpoch)
+
+		if !tr.Busy(testConvID) {
+			t.Errorf("Busy(A) = false after an exit for an unresolvable session; the skip must be fail-closed")
+		}
+	})
+
+	t.Run("nil receiver does not panic", func(t *testing.T) {
+		t.Parallel()
+		var tr *turnBusyTracker
+		tr.clearForExit("sess-a", 1) // the drain's own tests run with no tracker at all
+	})
+}
+
+// #1483 AC1 at the DRAIN tier: the filed scenario end to end, through the real sink,
+// the real drain goroutine and the real exit arm.
+//
+// The ordering is stated rather than raced for. The exit is offered while the drain
+// is not yet running, so the envelope is provably queued and provably unprocessed
+// when openForDelivery places its mark — which is exactly the interleaving the
+// filing describes, where a stale exit sits behind a background conversation's event
+// burst while the respawned child takes a queued message.
+func TestStreamTurnDrainV2_StaleExitDoesNotClearTheDeliveryMark(t *testing.T) {
+	t.Parallel()
+
+	sink, busy, drops, start := exitLaneDrainDeferred(t)
+
+	sink.exitFor("sess-a")() // the dying child's exit, enqueued and unprocessed
+	_ = busy.openForDelivery(testConvID)
+	if !busy.Busy(testConvID) {
+		t.Fatalf("Busy(A) = false right after openForDelivery; the assertion below would pass vacuously")
+	}
+
+	start()
+
+	// Barrier: a trailing event for a third, unresolvable session. Its not-active
+	// drop is logged only after the drain has returned from the exit arm, so seeing
+	// it proves the exit was processed — the shape
+	// TestStreamTurnDrainV2_ExitClearsInlineBeforeTheNextEnvelope already uses, and
+	// the reason this asserts an absence without a sleep.
+	feedLines(sink, "sess-c", assistantTextLine("mc", "for-C"))
+	waitDropKind(t, drops, "text_chunk")
+
+	if !busy.Busy(testConvID) {
+		t.Errorf("Busy(A) = false once the stale exit envelope had been drained; it was enqueued before the delivery mark and must not clear it")
+	}
+}
+
+// #1483 AC2 at the DRAIN tier: the same seam, opposite ordering. The mark is placed
+// against a live fan-in and the child dies afterwards, so the exit that follows is
+// the mark's own and must clear it.
+func TestStreamTurnDrainV2_ExitAfterTheDeliveryMarkStillClears(t *testing.T) {
+	t.Parallel()
+
+	sink, busy, _ := exitLaneDrain(t)
+
+	_ = busy.openForDelivery(testConvID)
+	if !busy.Busy(testConvID) {
+		t.Fatalf("Busy(A) = false right after openForDelivery; the wait below would pass vacuously")
+	}
+
+	sink.exitFor("sess-a")()
+
+	// Barrier: the clear's applyBusyLocked closes t.changed, which is what wakes
+	// WaitIdle — the one barrier an exit envelope offers, since its arm continues
+	// before the gate's drop log and before any push.
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer waitCancel()
+	if err := busy.WaitIdle(waitCtx, testConvID); err != nil {
+		t.Fatalf("WaitIdle(A) = %v after the delivery mark's own child exited, want nil", err)
 	}
 }

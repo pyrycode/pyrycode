@@ -9,6 +9,21 @@ already emitted, re-marking the conversation busy with the clear already spent a
 This slice closes that ordering hole by putting the clear signal **on the fan-in itself**: FIFO with a
 single reader, so it cannot be overtaken.
 
+That guarantee covers every mark fed **through** the fan-in — `observe`'s, and the exit-driven clear
+itself, because both run in envelope order on the single drain goroutine. It does not cover a mark placed
+directly on `turnBusyTracker` from outside the fan-in: `openForDelivery` (#1199) writes its mark from the
+msgqueue drain goroutine, with no envelope of its own, so an exit still queued behind a busy conversation's
+event burst could be drained *after* that mark and clear it. #1483 closes that gap with a second, narrower
+guarantee — an exit-lane epoch stamped on each exit envelope and checked against the mark before clearing
+— rather than widening this one; see [turn-busy-track-delivery-seam-consumer-mid-turn-hold.md](streamsup-package-per-conversation-turn-busy-track-delivery-seam-consumer-mid-turn-hold.md)
+for the guard itself.
+
+That guard also caught a fixture bug worth naming: the shared drain-tier test fixture built its tracker
+with no fan-in bound to it, so the four incumbent exit-lane regression tests would have kept passing
+whether the #1483 guard was armed or absent — a regression assertion that reads green either way. Wiring
+the fixture's tracker to its own sink is what makes those tests exercise the guard at all; an unwired
+fixture is not a smaller test, it is a vacuous one.
+
 `streamTurnEnvelope` gains an explicit `exit bool` field — never a nil `turnevent.Event` used as a
 sentinel, since `eventKind(nil)` returns `"unknown"` rather than failing (`interactive_turn_v2.go:419-421`),
 which would make a missed nil-check silent rather than loud, and would make the exit signal a value of the
@@ -21,17 +36,19 @@ the point: a dropped ordinary event is a lost delta, invisible at the default `L
 dropped exit is a conversation that (once #1210 wires a producer) stays busy forever, which is degraded
 operation and must be visible by default.
 
-The drain's `sink.ch` arm handles `env.exit` as its **first** statement —
-`busy.clearForSession(env.sessionID); continue` — ahead of `observe`, the active-session gate, and
-`emitter.Handle`. Each position is load-bearing: before `observe`, because an exit carries no event to
-route through the event path; before the gate, for the same reason the tracker itself is fed before it —
-the gate would otherwise drop a background conversation's exit, and background is the common case for a
-crash; before `Handle`, which (combined with the explicit field) keeps `Handle` structurally unable to
-receive a non-event. `clearForSession` (`stream_turn_busy.go:240`, extended in #1202) is called **as-is** —
-no second session→conversation resolution, no second copy of the membership-mutation protocol — so it
-inherits the nil-receiver no-op and the fail-closed `clear_unresolved` skip on an unresolvable session for
-free; that is why this slice's own drop diagnostic withholds the conversation id (the sink closure holds no
-resolver and structurally cannot name one).
+The drain's `sink.ch` arm handles `env.exit` as its **first** statement — ahead of `observe`, the
+active-session gate, and `emitter.Handle`. Each position is load-bearing: before `observe`, because an
+exit carries no event to route through the event path; before the gate, for the same reason the tracker
+itself is fed before it — the gate would otherwise drop a background conversation's exit, and background
+is the common case for a crash; before `Handle`, which (combined with the explicit field) keeps `Handle`
+structurally unable to receive a non-event. The arm originally called `clearForSession` directly; since
+\#1483 it calls `clearForExit(env.sessionID, env.exitEpoch)`, the exit-lane-epoch-guarded sibling described
+above. Both still resolve the session and inherit the nil-receiver no-op and the fail-closed
+`clear_unresolved` skip on an unresolvable session from the same shared core — no second session→conversation
+resolution, no second copy of the membership-mutation protocol — which is why this slice's own drop
+diagnostic withholds the conversation id (the sink closure holds no resolver and structurally cannot name
+one). `clearForSession` itself (`stream_turn_busy.go`, extended in #1202) survives with its unconditional
+semantics for its one remaining caller, the pool teardown feed — see the boundary note above.
 
 **No new goroutine.** The clear runs inline on the drain goroutine — the same single reader/writer
 `observe` already uses — so this feed is serialised against the event feed by construction rather than by

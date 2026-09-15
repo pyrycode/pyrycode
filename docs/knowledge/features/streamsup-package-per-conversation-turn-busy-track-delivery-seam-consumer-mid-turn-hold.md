@@ -46,6 +46,16 @@ in the gap between the wait returning nil and the mark; without the report, a na
 turn this delivery never opened and let the next message through unheld. Deriving the same answer from a
 separate `Busy` read would reintroduce the TOCTOU this closes.
 
+**The mark also records an ordering token (#1483).** This is the one mark the fan-in's FIFO argument
+(see [turn-busy-track-exit-lane-on-the-turn-busy-fan.md](streamsup-package-per-conversation-turn-busy-track-exit-lane-on-the-turn-busy-fan.md))
+does not cover, because it is placed here, outside the fan-in, not drained in envelope order. A stale exit
+for the child this delivery is about to replace can still be sitting in that fan-in behind a busy
+conversation's event burst; `openForDelivery` reads the fan-in's exit-lane position under the same lock
+acquisition that places the mark, and the drain's exit arm declines to clear a mark whose recorded
+position is at or after the exit's own. The read has to happen under that lock, not before it — reading
+early leaves a window in which an exit offered in the gap is genuinely stale but would carry a stamp above
+the position read, and be honoured.
+
 **`streamTurnHoldTimeout` (15 min, `main.go`, beside `inboundActivateTimeout`) bounds one delivery
 attempt**, not the message — msgqueue's own retry (1s) and give-up (2m) bounds mean a turn that never
 ends surfaces as a typed `session_error`/`CodeSessionBlocked` after ≈2× the timeout (≈30 min) rather than

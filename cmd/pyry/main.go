@@ -828,10 +828,19 @@ func runSupervisor(args []string) error {
 	// stays byte-identical to the discriminant relayWiring.streamSink documents. In
 	// PTY mode the tracker is nil and every method reached from either consumer is a
 	// nil-receiver no-op.
+	//
+	// withExitEpoch is what ARMS the stale-exit guard (#1483): it binds the very
+	// fan-in whose exit lane the tracker's clear is ordered against, which is in
+	// scope here and nowhere else the tracker is built. Dropping it compiles, passes
+	// every test and silently restores the pre-#1483 behaviour — a stale exit
+	// clearing a mark opened on the respawned child — so it is not an optional knob
+	// on this call, only on the ~36 test constructions that want the incumbent
+	// semantics.
 	var turnBusy *turnBusyTracker
 	if streamSink != nil {
 		turnBusy = newTurnBusyTracker(
-			func(sid string) (string, bool) { return conversationForSession(convReg, sid) }, logger)
+			func(sid string) (string, bool) { return conversationForSession(convReg, sid) }, logger,
+			withExitEpoch(streamSink.exitEpoch))
 	}
 	pool, err := sessions.New(sessions.Config{
 		Logger:                    logger,
