@@ -267,19 +267,27 @@ func admitClient(c ClientIdentity) (ClientIdentity, bool) {
 	return ClientIdentity{Name: name, Version: version}, true
 }
 
-// clientSection renders the section naming clients, or "" when there is none to
-// render — no admissible identity, or more than maxNamedClients of them.
+// admittedClients returns the identities that may appear in a composed prompt —
+// admitClient's survivors, SORTED and DEDUPLICATED — or nil when there is no
+// section to render: no admissible identity, or more than maxNamedClients of them.
 //
-// Admitted identities are SORTED and DEDUPLICATED before rendering, and neither
-// is cosmetic. V2SessionManager.ActiveConns returns Go's randomized map-iteration
-// order, so an unsorted section would rewrite the prompt file with different
-// bytes on every refresh of an unchanged conn set. Dedup collapses one client
-// holding two conns — a reconnect whose previous conn is not yet reaped — into
-// the one client it is.
+// Neither the sort nor the dedup is cosmetic. V2SessionManager.ActiveConns returns
+// Go's randomized map-iteration order, so an unsorted set would rewrite the prompt
+// file with different bytes on every refresh of an unchanged conn set. Dedup
+// collapses one client holding two conns — a reconnect whose previous conn is not
+// yet reaped — into the one client it is.
 //
-// The returned section ends in "\n", exactly as systemPromptText does, so both
-// joins in composeSystemPromptFor use the same blank-line separator convention.
-func clientSection(clients []ClientIdentity) string {
+// Over-cap collapsing to nil rather than to a subset is maxNamedClients' rule, and
+// the whole-or-nothing reading belongs here because this is where the count is known.
+//
+// It is split out of clientSection so #2436 can RETAIN a set rather than only render
+// one: Session.promptClients holds this function's output, which is what keeps
+// unadmitted remote-authored bytes off a long-lived struct and bounds what one client
+// can park there. It is IDEMPOTENT for that reason — re-running it over its own output
+// is the identity, since every predicate already holds and the set is already sorted
+// and deduplicated — so a rotation composing from a carried set reproduces the section
+// the earlier compose wrote, byte for byte.
+func admittedClients(clients []ClientIdentity) []ClientIdentity {
 	named := make([]ClientIdentity, 0, len(clients))
 	for _, c := range clients {
 		if admitted, ok := admitClient(c); ok {
@@ -294,6 +302,23 @@ func clientSection(clients []ClientIdentity) string {
 	})
 	named = slices.Compact(named)
 	if len(named) == 0 || len(named) > maxNamedClients {
+		return nil
+	}
+	return named
+}
+
+// clientSection renders the section naming clients, or "" when admittedClients
+// finds nothing to render.
+//
+// It admits its own input rather than trusting the caller to have done it, which is
+// what keeps composeSystemPromptFor total over hostile values for every caller —
+// including #2436's, which passes an already-admitted set through the idempotent path.
+//
+// The returned section ends in "\n", exactly as systemPromptText does, so both
+// joins in composeSystemPromptFor use the same blank-line separator convention.
+func clientSection(clients []ClientIdentity) string {
+	named := admittedClients(clients)
+	if len(named) == 0 {
 		return ""
 	}
 
@@ -529,10 +554,105 @@ func (p *Pool) conversationPrompt(label string) string {
 	return *conv.SystemPrompt
 }
 
+// writeComposedPrompt composes sess's appended system prompt from the conversations
+// registry plus clients, writes it to the path sess's spawnBase already names, and
+// records what the session was composed with.
+//
+// It is the step the two refresh funnels share — refreshSystemPrompt for a spawn
+// Pool.Activate drives, refreshSystemPromptForRotation for a `new_session` rotation.
+// What differs between them is where clients comes from and which guards precede the
+// call; everything from the registry read down is identical and lives here.
+//
+// The write targets sess.systemPromptPath VERBATIM rather than re-deriving from
+// sess.id: every re-key moves a session in place (Pool.rekeyLocked), so after one the
+// path in spawnBase still carries the pre-rotation id.
+//
+// Only what would render is retained — see Session.promptClients, whose doc carries
+// the reason a raw resolver answer must not be stored.
+//
+// A write failure is logged and swallowed, deliberately. buildSession already
+// wrote this file and the write is a rename, so a failed compose leaves the
+// previous COMPLETE composition in place — never a missing or truncated one.
+// Failing an operator's message, or their rotation, on a transient disk error when
+// the fallback is one-revision-stale prompt bytes, is the worse trade. The log
+// carries the error, whose paths are already public (the argv record names this
+// file), and no fragment of the prompt and no client name: a refusal is silent, so a
+// hostile name has no line to appear in. The composed-with fields are left untouched
+// on that path, so they keep describing what the file actually holds.
+//
+// Concurrency: sess.label is read under p.mu (RLock) and the composed-with fields are
+// written under p.mu (write) — the discipline Session.settings documents. The file
+// write runs between the two, off the lock, so no I/O executes inside the pool's
+// critical section. MUST be called with p.mu unheld.
+func (p *Pool) writeComposedPrompt(sess *Session, clients []ClientIdentity) {
+	p.mu.RLock()
+	label := sess.label
+	p.mu.RUnlock()
+
+	operator := p.conversationPrompt(label)
+	named := admittedClients(clients)
+	if _, err := writeSystemPromptFile(sess.systemPromptPath, composeSystemPromptFor(operator, named)); err != nil {
+		p.log.Warn("compose appended system prompt", "error", err)
+		return
+	}
+
+	p.mu.Lock()
+	sess.systemPrompt = operator
+	sess.promptClients = named
+	p.mu.Unlock()
+}
+
+// refreshSystemPromptForRotation recomposes sess's appended system prompt for a
+// rotation that is about to discard its child, so the successor comes up on the
+// prompt the operator has stored rather than on the one composed before they saved
+// it (#2436).
+//
+// It is refreshSystemPrompt's twin and departs from it on exactly two axes, both of
+// which are the whole of this ticket:
+//
+//   - NO stateActive GUARD. That guard keeps a disk write off Activate's LRU-touch hot
+//     path and honours "setting a prompt does not restart a running session"; neither
+//     is in tension with a rotation that is already replacing the child. It also has
+//     to be absent rather than merely unreached: nothing in a rotation leaves
+//     stateActive — only Session.Evict does — so a rotated session routed through
+//     Activate's funnel would keep the stale composition for every later turn as well,
+//     not just for the one child.
+//   - NO CLIENT-IDENTITY RESOLVE. The whole new_session dispatch, from handleNewSession
+//     down through Pool.RotateForNewSession, runs on V2SessionManager's single Run
+//     dispatch goroutine — the goroutine Pool.attachedClients funnels its request onto
+//     and then waits for a reply from. Called from Run it cannot be answered: it would
+//     stall that goroutine for clientIdentityTimeout and then return nil, silently
+//     dropping the section from every rotated session's prompt. That is the
+//     never-from-Run rule clientIdentityTimeout's doc names, and with rate limiting
+//     deferred (docs/protocol-mobile.md § Security model, threat 7) the stall is
+//     reachable once per remotely-sent new_session frame. The session's carried
+//     promptClients is composed instead, which clientSectionLead's past tense is what
+//     licenses: it transcribes the clients attached when the session started and is
+//     never restated mid-session.
+//
+// MUST be called with p.mu unheld, and MUST complete before the respawn is triggered:
+// startFreshRunner feeds the rotation's new id to (*streamsup.Runner).RestartFresh,
+// which cancels the live child at once, so a write landing after that is a race
+// against the successor's spawn.
+func (p *Pool) refreshSystemPromptForRotation(sess *Session) {
+	if sess.systemPromptPath == "" {
+		// The bootstrap — its file is daemon-scoped, lives on the Pool, and is read by
+		// every session, so one conversation's operator text must never reach it — and
+		// any test-constructed Session literal that never spawns.
+		return
+	}
+
+	p.mu.RLock()
+	clients := sess.promptClients
+	p.mu.RUnlock()
+
+	p.writeComposedPrompt(sess, clients)
+}
+
 // refreshSystemPrompt re-composes sess's appended system prompt from the
 // registry and rewrites the file its spawnBase already names. Called from
-// Pool.Activate, the pool-owned funnel every first spawn and every re-activate
-// passes through.
+// Pool.Activate, the funnel every first spawn and every re-activate passes through;
+// since #2436 it is one of two, refreshSystemPromptForRotation being the other.
 //
 // It exists because spawnBase is immutable after construction while the prompt
 // is not. Since #2085 a conversation's session is MINTED at create and its child
@@ -543,34 +663,25 @@ func (p *Pool) conversationPrompt(label string) string {
 // Conversation.Cwd is stuck in: its doc claims a change takes effect on the next
 // fresh spawn, and no production path reads it.
 //
-// The write targets sess.systemPromptPath VERBATIM rather than re-deriving from
-// sess.id: a `/clear` rotation re-keys a session in place (Pool.rekeyLocked), so
-// after one the path in spawnBase still carries the pre-rotation id.
+// The composition itself, including the verbatim write and the swallowed write
+// error, is writeComposedPrompt's; this function owns the two guards above it and
+// the resolve.
 //
 // An already-active session is skipped. That is Juhana's ruling in code —
 // setting a prompt does not restart a running session, it takes effect at the
 // next session start — and it keeps a disk write off Activate's LRU-touch hot
-// path.
+// path. Since #2436 that guard is also why the `new_session` rotation does NOT come
+// through here: the rotation is a next session start, and it is replacing the child
+// anyway. refreshSystemPromptForRotation's doc has both halves of the difference.
 //
-// A write failure is logged and swallowed, deliberately. buildSession already
-// wrote this file and the write is a rename, so a failed refresh leaves the
-// previous COMPLETE composition in place — never a missing or truncated one.
-// Failing an operator's message on a transient disk error, when the fallback is
-// one-revision-stale prompt bytes, is the worse trade. The log carries the
-// error, whose paths are already public (the argv record names this file), and
-// no fragment of the prompt.
-//
-// Concurrency: sess.label is read under p.mu (RLock) and sess.systemPrompt is
-// written under p.mu (write) — the discipline Session.settings documents. The
-// file write runs between the two, off the lock, so no I/O executes inside the
-// pool's critical section. Both acquisitions are released before Pool.Activate
-// takes p.capMu, so the documented capMu → mu → lcMu order is not inverted.
-// Since #2148 it also names the clients attached at this moment, resolved through
-// attachedClients. That resolve happens AFTER both early returns above, which is
+// Concurrency: the resolve happens AFTER both early returns above, which is
 // load-bearing: an already-active session skips it, so no cross-goroutine wait is
-// ever paid on Activate's LRU-touch hot path. The snapshot's staleness is benign —
-// clientSectionLead is written in the past tense as a transcription, so a client
-// detaching between the resolve and the write makes the sentence no less true.
+// ever paid on Activate's LRU-touch hot path. Every lock acquisition below is
+// released before Pool.Activate takes p.capMu, so the documented capMu → mu → lcMu
+// order is not inverted. Since #2148 the composition also names the clients attached
+// at this moment, resolved through attachedClients. The snapshot's staleness is
+// benign — clientSectionLead is written in the past tense as a transcription, so a
+// client detaching between the resolve and the write makes the sentence no less true.
 func (p *Pool) refreshSystemPrompt(ctx context.Context, sess *Session) {
 	if sess.systemPromptPath == "" {
 		// The bootstrap (its file is daemon-scoped and lives on the Pool) and any
@@ -581,20 +692,7 @@ func (p *Pool) refreshSystemPrompt(ctx context.Context, sess *Session) {
 		return
 	}
 
-	p.mu.RLock()
-	label := sess.label
-	p.mu.RUnlock()
-
-	operator := p.conversationPrompt(label)
-	clients := p.attachedClients(ctx)
-	if _, err := writeSystemPromptFile(sess.systemPromptPath, composeSystemPromptFor(operator, clients)); err != nil {
-		p.log.Warn("refresh appended system prompt", "error", err)
-		return
-	}
-
-	p.mu.Lock()
-	sess.systemPrompt = operator
-	p.mu.Unlock()
+	p.writeComposedPrompt(sess, p.attachedClients(ctx))
 }
 
 // SystemPromptFor returns the operator-set system prompt bytes the named session

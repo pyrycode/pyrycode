@@ -107,13 +107,26 @@ func (p *Pool) rebindConversation(oldID, newID SessionID) {
 // self-rotation and double-rotate. #2137 retired the watcher and deleted the
 // skip-set, so the mint-and-drive is the whole of the difference now.
 //
+// It also RECOMPOSES the rotated session's appended system-prompt file before it
+// returns (#2436), which is what makes set_system_prompt's "the new value takes
+// effect at the conversation's NEXT session start" true of the one action that is a
+// next session start. The ordering is load-bearing in both directions: the caller
+// (startFreshRunner) feeds this call's return value to RestartFresh, which cancels
+// the live child at once, so the write has to land before the return — and it is
+// placed above the notifyTransition fan-out so no observer can act on the rotation
+// while the file still holds the pre-rotation composition.
+// refreshSystemPromptForRotation's doc carries why that path resolves no client
+// identity, which matters most here: this method runs on the relay's Run dispatch
+// goroutine.
+//
 // Errors: a crypto/rand mint failure, or an absent oldID (TOCTOU: the binding may
 // vanish between the caller's resolve and this call), returns ("", err) with no
-// mutation and no transition. A saveLocked failure is logged at Warn and
-// swallowed — the in-memory rotation + rebind are already authoritative, matching
-// rebindConversation's / RotateID's best-effort-durability posture. The
-// notifyTransition fan-out runs off Pool.mu, the established leaf-callback
-// discipline.
+// mutation, no transition and no recompose — both returns precede it. A saveLocked
+// failure is logged at Warn and swallowed — the in-memory rotation + rebind are
+// already authoritative, matching rebindConversation's / RotateID's
+// best-effort-durability posture; a prompt-write failure is swallowed for its own
+// reasons, which writeComposedPrompt states. The notifyTransition fan-out runs off
+// Pool.mu, the established leaf-callback discipline.
 func (p *Pool) RotateForNewSession(oldID SessionID) (SessionID, error) {
 	newID, err := NewID()
 	if err != nil {
@@ -121,7 +134,8 @@ func (p *Pool) RotateForNewSession(oldID SessionID) (SessionID, error) {
 	}
 
 	p.mu.Lock()
-	if _, ok := p.sessions[oldID]; !ok {
+	sess, ok := p.sessions[oldID]
+	if !ok {
 		p.mu.Unlock()
 		return "", ErrSessionNotFound
 	}
@@ -134,6 +148,12 @@ func (p *Pool) RotateForNewSession(oldID SessionID) (SessionID, error) {
 			"err", err)
 	}
 	p.mu.Unlock()
+
+	// Below the unlock: the recompose writes to disk and takes p.mu itself, so it
+	// must not run inside the section above. The captured pointer is what carries the
+	// session across the release — re-reading the map here would be a second lookup
+	// against an id the re-key has already moved.
+	p.refreshSystemPromptForRotation(sess)
 
 	p.notifyTransition(SessionTransition{
 		PreviousID: oldID,

@@ -476,6 +476,28 @@ type Session struct {
 	// The same discipline settings follows, and deliberately NOT lcMu.
 	systemPrompt string
 
+	// promptClients is the ADMITTED client set the session's appended prompt was
+	// last composed with (#2148's section), carried so a `new_session` rotation can
+	// recompose without resolving (#2436). The rotation dispatch runs on the relay
+	// manager's own Run goroutine, which is the goroutine Pool.attachedClients needs
+	// an answer from, so a resolve there cannot be answered — refreshSystemPrompt's
+	// never-from-Run rule. Carrying the previous resolve forward keeps
+	// clientSectionLead true: it transcribes the clients attached when the session
+	// started, in the past tense, and is never restated mid-session.
+	//
+	// It holds only values that have already crossed admitClient — the output of
+	// admittedClients, nil whenever nothing would render. Retaining the resolver's
+	// raw answer instead would park unadmitted remote-authored bytes on a long-lived
+	// struct, and would bound the retention by however many conns a client holds
+	// rather than by maxNamedClients × (maxClientNameBytes + maxClientVersionBytes).
+	//
+	// Written under Pool.mu (write) and read under Pool.mu (RLock) — systemPrompt's
+	// discipline exactly, and deliberately NOT lcMu. The slice is IMMUTABLE once
+	// stored: a later compose must REPLACE it and MUST NOT append into the backing
+	// array, which is what lets refreshSystemPromptForRotation read the header under
+	// a short RLock and compose off the lock.
+	promptClients []ClientIdentity
+
 	// pool is the back-pointer used to persist registry changes after a
 	// state transition. Set once, in Pool.New.
 	pool *Pool

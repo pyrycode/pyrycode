@@ -7,6 +7,8 @@ func writeSystemPrompt(registryPath string, id SessionID, text string) (string, 
 func (p *Pool) conversationPrompt(label string) string
 func (p *Pool) attachedClients(ctx context.Context) []ClientIdentity
 func (p *Pool) refreshSystemPrompt(sess *Session)
+func (p *Pool) refreshSystemPromptForRotation(sess *Session)
+func (p *Pool) writeComposedPrompt(sess *Session, clients []ClientIdentity)
 func (p *Pool) SystemPromptFor(id SessionID) (string, error)
 ```
 
@@ -70,6 +72,22 @@ at both production call sites (`create_conversation` → `Pool.Mint`, and
 `sessionRouter.revive` → `Pool.Revive`), so no mint/revive signature widened
 to carry a resolver.
 
+A prompt saved while a session is running reaches that conversation's next
+child regardless of which of three funnels grows it. A first message and a
+revive both go through `Pool.Activate` → `refreshSystemPrompt`; a
+`new_session` rotation goes through `Pool.RotateForNewSession` →
+`refreshSystemPromptForRotation` (#2436), called after the rotation's `p.mu`
+release and before its `notifyTransition` fan-out, so the write lands before
+`RestartFresh` cancels the live child. Both funnels share the actual compose
+step, `(*Pool).writeComposedPrompt(sess, clients)`: resolve the operator bytes
+via `conversationPrompt`, compose through `composeSystemPromptFor`, write
+`sess.systemPromptPath` verbatim, and record what the session was composed
+with. What differs is only the guards each funnel puts in front of that call —
+`refreshSystemPrompt` skips an already-`stateActive` session and resolves
+clients through `attachedClients`; `refreshSystemPromptForRotation` runs
+unconditionally, since nothing a rotation does leaves `stateActive`, and
+resolves no client identity at all (see below).
+
 ## Naming the attached client (#2148)
 
 `composeSystemPromptFor(operator, clients)` names the clients attached *at
@@ -107,7 +125,35 @@ character-set refusal is what actually holds the prompt's structure.
 `clientSection` then sorts and dedupes the admitted set and renders it as one
 daemon-authored, quoted transcription; more than `maxNamedClients` admitted
 collapses to no section at all rather than a truncated list under a sentence
-that claims completeness.
+that claims completeness. The admit-sort-dedup-cap prologue is its own
+function, `admittedClients(clients) []ClientIdentity`, and `clientSection`
+renders whatever it returns; the split exists so #2436 can *retain* an
+admitted set on `Session.promptClients` rather than only ever render one
+inline. `admittedClients` is idempotent over its own output — every predicate
+already holds and the set is already sorted and deduplicated — so re-admitting
+a carried set reproduces the section byte-for-byte.
+
+**Never resolve client identity from the relay's Run goroutine (#2436).** A
+`new_session` rotation's entire dispatch — `handleNewSession` →
+`StartNewSession` → `startFreshRunner` → `RotateForNewSession` — executes on
+`V2SessionManager`'s single Run dispatch goroutine, and `attachedClients`
+funnels its request back onto that same goroutine and waits for a reply.
+Called from there it cannot be answered: it would stall all v2 dispatch for
+`clientIdentityTimeout` and then return `nil`, silently dropping the section —
+and since `docs/protocol-mobile.md` § Security model leaves rate limiting
+deferred (threat 7), that stall is reachable once per remotely-sent
+`new_session` frame. `refreshSystemPromptForRotation` resolves nothing on this
+path; instead `Session.promptClients` carries the admitted set the session's
+last compose produced forward into the rotation's recompose. This is licensed
+by `clientSectionLead`'s past tense above — the section already claims only
+who was attached *when this session started*, never a live per-turn fact, so
+carrying a prior resolve forward keeps the sentence true rather than making it
+stale. `promptClients` is written and read under `Pool.mu`, `systemPrompt`'s
+discipline exactly and deliberately not `lcMu`, and it stores only
+`admittedClients`' output — never a resolver's raw answer — so retention never
+becomes a second place for unadmitted remote-authored bytes to live, and is
+bounded at `maxNamedClients × (maxClientNameBytes + maxClientVersionBytes)`
+per session rather than by however many conns one client holds.
 
 **A resource bound and a display-validation door are different concerns and
 belong in different packages.** `internal/relay` retains `DeviceName` /
@@ -188,7 +234,11 @@ after `Remove`'s `os.Remove`, it resurrects an orphan file under
 `session-prompts/` holding operator text. Bounded — `Pool.Run`'s `RemoveAll`
 and `Pool.New`'s purge both reap it, so "never outlives the daemon" still
 holds — but it is the one new race the per-session lifecycle introduces, worth
-a sentence for whoever next touches this file's teardown.
+a sentence for whoever next touches this file's teardown. #2436's rotation
+recompose shares the identical window against the same `Pool.Remove` — the
+capture of `*Session` and the write are equally split across `p.mu` releases —
+and is bounded the same way; it is not a second race to reason about
+separately, just the same one with a second caller.
 
 ## No log line ever carries prompt bytes
 
