@@ -376,3 +376,30 @@ the reason the plan gave. No design change.
 place: `turnTargetWithGate` answers "which gate?", `turnTarget` answers "any gate?", every read stays
 inside the one `mu` acquisition, and the eight existing in-package assertion sites are untouched.
 Confirmed not to trip staticcheck's unused-code check. No sizing change.
+
+### 2026-09-15 — rework (verifier FAIL, PR #2441)
+
+No production behaviour changed; the design above stands unamended.
+
+**The blocking finding — `TestSession_IdleEviction_ArmsTeardownGateBeforeKill` was flaky by
+construction.** The row waited on `Session.LifecycleState() == stateEvicted`, but `beginEvict` flips
+`lcState` and releases `lcMu` *before* `runActive`'s idle arm reaches `cancelSup`, while
+`teardownRecorder.Run` can only append `evRunEnded` after it. The wait edge was therefore ordered
+strictly **earlier** than the event the row asserts, leaving `pollUntil`'s 10 ms sleep standing in
+for a happens-after relation: green unloaded, red under CPU contention with a log holding the arm and
+no kill. The row now polls the recorder's own log for `evRunEnded`, which is the edge it actually
+needs — the shape its sibling `TestSession_ForcedEviction_…` already had for free, since `Evict`
+blocks on `evictedCh` and `endEvict` closes that after `drainSup`. `assertArmedBefore`'s `kill == -1`
+branch is kept and becomes a genuine "the kill never happened" diagnostic rather than a race.
+
+The Testing strategy above is unchanged in substance — the row proves the same ordering on the same
+path; only the synchronisation it proves it through is corrected.
+
+**Three documentation nits, no behaviour change.** `WriteUserTurn`'s two adjacent gate `if`s became a
+`switch gate`, which states the mutual exclusion the three-valued type already implies. `turnTarget`'s
+doc now says it is the test-facing face — Open Question 2 above resolved to keep it, but recorded the
+reason without recording that `WriteUserTurn` taking `turnTargetWithGate` leaves it with no
+production caller, which is what a later reader would otherwise go hunting for. `armChildGen`'s doc
+now names the one residual its "ANY successor child" rule carries: a crash respawn landing between
+the arm and the teardown beside it also releases the gate. Named rather than fixed, for the reason
+the Design section rejects a `rotateGen`-style correlation.

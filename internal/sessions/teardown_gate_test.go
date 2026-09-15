@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -130,10 +131,19 @@ func TestSession_IdleEviction_ArmsTeardownGateBeforeKill(t *testing.T) {
 	t.Cleanup(cancel)
 	go func() { _ = sess.Run(ctx) }()
 
+	// Wait on the recorder's OWN kill event, not on stateEvicted. beginEvict flips
+	// lcState and releases lcMu BEFORE runActive's idle arm reaches cancelSup, while
+	// teardownRecorder.Run can only append evRunEnded after it — so the state edge is
+	// ordered strictly EARLIER than the event asserted below, and waiting on it would
+	// put pollUntil's 10 ms sleep where a happens-after relation belongs. Unloaded that
+	// passes; under CPU contention it reds this row with a log holding the arm and no
+	// kill, which is a flake against every PR sharing the gate rather than a defect in
+	// any of them. The sibling below needs no such care: Evict blocks on evictedCh,
+	// which endEvict closes after drainSup — a real edge, and the shape copied here.
 	if !pollUntil(t, 3*time.Second, func() bool {
-		return sess.LifecycleState() == stateEvicted
+		return slices.Contains(rec.log(), evRunEnded)
 	}) {
-		t.Fatalf("session did not idle-evict within 3s; state=%v", sess.LifecycleState())
+		t.Fatalf("the idle timer did not tear the child down within 3s; state=%v, events = %v", sess.LifecycleState(), rec.log())
 	}
 	assertArmedBefore(t, rec.log(), evRunEnded, "idle eviction")
 }

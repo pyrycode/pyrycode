@@ -694,6 +694,14 @@ type Runner struct {
 	// every bind, ANY successor child satisfies it. That is the property the arm
 	// needs and the one armFreshSeq deliberately withholds.
 	//
+	// "ANY successor" is literal, and it carries one residual: a respawn the arm did
+	// NOT cause — a crash respawn landing between BeginTeardown and the cancelSup or
+	// Restart beside it — also releases the gate, reopening the window for the kill
+	// that follows. That is a narrower instance of the residual mu's charter already
+	// names, its odds are a crash inside two adjacent statements, and closing it means
+	// correlating the arm with a specific teardown, i.e. rotateGen's shape — which is
+	// the wedge this gate exists to avoid. Named, not fixed.
+	//
 	// Written in the SAME mu acquisition that sets tearingDown, for armFreshSeq's
 	// reason verbatim: arming first and stamping second would leave a bind able to
 	// observe an armed gate carrying a retired arm's threshold.
@@ -1047,8 +1055,12 @@ func (r *Runner) turnTargetWithGate() (w io.Writer, gate turnGate) {
 }
 
 // turnTarget is turnTargetWithGate's boolean face, for callers that need only "may
-// a turn be written?" and not which gate refused. WriteUserTurn needs the fuller
-// answer because the two gates carry different operator records; nothing else does.
+// a turn be written?" and not which gate refused. Since #1513 that is the TEST-FACING
+// face and has no production caller: WriteUserTurn, the only one there was, takes the
+// fuller answer because the two gates carry different operator records. It is kept
+// because the in-package assertion sites read the boolean and rewriting them all to
+// compare against gateOpen would say nothing they do not already say — so a later
+// reader should not go looking for the production consumer, there is none.
 func (r *Runner) turnTarget() (w io.Writer, gated bool) {
 	w, gate := r.turnTargetWithGate()
 	return w, gate != gateOpen
@@ -1120,7 +1132,11 @@ func (r *Runner) WriteUserTurn(ctx context.Context, conversationID string, paylo
 		}
 		w = nil
 	}
-	if gate == gateTeardown {
+	// A switch rather than two ifs: the causes are mutually exclusive over a
+	// three-valued type, and stating that lets a fourth gate fail loudly at the
+	// compiler rather than refuse silently with no record naming why.
+	switch gate {
+	case gateTeardown:
 		// A deliberate teardown (#1513): an eviction, or the respawn
 		// Pool.UpdateSettings drives for a setting with no in-band form. Its own
 		// record rather than the rotation's, because "rotation in flight" would name a
@@ -1130,8 +1146,7 @@ func (r *Runner) WriteUserTurn(ctx context.Context, conversationID string, paylo
 		// not Debug, with the session id as the ONLY field.
 		r.log.Info("streamsup: turn refused; session teardown in flight",
 			"session", r.liveSessionID())
-	}
-	if gate == gateRotation {
+	case gateRotation:
 		// Emitted OUTSIDE r.mu: a slow slog handler must never block the Run
 		// goroutine's setStdin, which is the thing that ends this very window.
 		//
