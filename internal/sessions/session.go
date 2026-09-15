@@ -274,8 +274,8 @@ func canonicalPermissionMode(mode string, yolo bool) string {
 
 // canonicalSettings returns s with its permission posture normalised. Applied at
 // both construction sites so a Pool-held Session never carries the empty mode,
-// and so Pool.mintSettings' and Pool.Revive's zero values become the default
-// posture rather than an unspelled one.
+// and so the unset posture Pool.mintSettings and Pool.revivedSettings both leave
+// behind becomes the default one rather than an unspelled one.
 func canonicalSettings(s SessionSettings) SessionSettings {
 	s.PermissionMode = canonicalPermissionMode(s.PermissionMode, s.YOLO)
 	return s

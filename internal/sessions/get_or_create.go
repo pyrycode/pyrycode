@@ -93,10 +93,15 @@ func (p *Pool) GetOrCreateIn(ctx context.Context, id SessionID, label, spawnDir 
 // settings is forwarded verbatim to buildSession and is the caller's decision,
 // not this function's — the second thing that separates the two callers.
 // GetOrCreateIn passes Pool.mintSettings, so a minted session starts at the
-// operator's configured model and effort; Revive passes the zero value, so a
-// revived one inherits nothing. Keeping it a parameter is what stops a change
-// to the mint path from silently re-pointing revive at the bootstrap's
-// settings; reading mintSettings here instead would do exactly that.
+// operator's configured model and effort; Revive passes Pool.revivedSettings, so
+// a revived one starts at the model and effort ITS OWN dropped entry persisted
+// and at no posture (#2448). Keeping it a parameter is what stops a change to
+// one path from silently re-pointing the other; reading either source here
+// instead would do exactly that.
+//
+// Registering an id also RETIRES its dormant entry, so the pool holds exactly one
+// source for it — see the delete below, which both rollbacks undo. The take path
+// returns before reaching it and correctly so: a live id is never dormant.
 //
 // Returns:
 //   - (sess, true, nil) — id was already registered; sess is the EXISTING entry
@@ -133,8 +138,20 @@ func (p *Pool) materialise(id SessionID, label, spawnDir string, settings Sessio
 	}
 
 	p.sessions[id] = sess
+	// An id this call materialises is no longer dormant: the live session becomes
+	// the single writer of its on-disk entry, and leaving the entry behind would
+	// offer saveLocked two sources for one id (#2448). Retired HERE rather than in
+	// Revive because GetOrCreateIn also takes a caller-supplied id and can land on
+	// a dormant one. Both rollbacks below put it back, so a failed materialise
+	// leaves the file byte-identical — TestPool_Revive_PoolNotRunning_RestoresDormantEntry
+	// is that assertion, and it is only non-vacuous because of this delete.
+	entry, wasDormant := p.dormant[id]
+	delete(p.dormant, id)
 	if err := p.saveLocked(); err != nil {
 		delete(p.sessions, id)
+		if wasDormant {
+			p.dormant[id] = entry
+		}
 		p.mu.Unlock()
 		return nil, false, err
 	}
@@ -147,6 +164,9 @@ func (p *Pool) materialise(id SessionID, label, spawnDir string, settings Sessio
 		// the source of truth for this process; the next successful save
 		// will catch up).
 		delete(p.sessions, id)
+		if wasDormant {
+			p.dormant[id] = entry
+		}
 		_ = p.saveLocked()
 		p.mu.Unlock()
 		return nil, false, ErrPoolNotRunning

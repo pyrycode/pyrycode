@@ -179,6 +179,27 @@ type Pool struct {
 	registryPath      string
 	claudeSessionsDir string
 
+	// dormant holds the entries loadRegistry returned that this pool did not
+	// materialise, keyed by id — precisely, a persisted entry with no live
+	// *Session behind it. Guarded by p.mu, the same lock as sessions, on the same
+	// discipline: mutated under the write lock, read under either.
+	//
+	// It exists because saveLocked rewrites the whole file from p.sessions, and
+	// New materialises only the bootstrap: without this the first save after a
+	// daemon restart erased every other session's record, model and effort
+	// included, so the entry did not survive the restart it was written to
+	// survive (#2448). saveLocked writes these back beside the live sessions.
+	//
+	// Populated only in New and only ever shrinking thereafter — materialise
+	// retires the entry it takes over and Remove drops the one it deletes — which
+	// is what keeps the "no live *Session" half of the meaning true, and what
+	// Pool.revivedSettings and #2449's dormant read rest on. A nil map (the bare
+	// &Pool{} literals in this package's tests) is safe for every operation
+	// outside New: read, delete and range all tolerate it, and the one write —
+	// materialise's rollback restore — is reachable only after a read hit, which
+	// a nil map cannot produce.
+	dormant map[SessionID]registryEntry
+
 	// systemPromptPath is the absolute path to the daemon's appended
 	// system-prompt file (#2093), a member of every session's spawnBase as
 	// "--append-system-prompt-file <path>". ONE file serves the whole daemon —
@@ -584,6 +605,7 @@ func New(cfg Config) (*Pool, error) {
 	}
 	p = &Pool{
 		sessions:           map[SessionID]*Session{bootstrapID: sess},
+		dormant:            dormantEntries(reg, bootstrapID),
 		bootstrap:          bootstrapID,
 		systemPromptPath:   systemPromptPath,
 		readyCh:            make(chan struct{}),
@@ -1242,6 +1264,15 @@ func (p *Pool) Remove(ctx context.Context, id SessionID, opts RemoveOptions) err
 		return ErrCannotRemoveBootstrap
 	}
 	delete(p.sessions, id)
+	// The other half of #2448's invariant, at the one site that deletes a live
+	// session: a removal is final, so the id must not also be sitting in the
+	// dormant map waiting to be written back on the next save. materialise
+	// retired it when the session was registered, so this is a no-op on every
+	// reachable path — it is here because the removal's finality is this
+	// function's claim to make, not a property borrowed from a distant call site.
+	// Nothing to roll back below: saveLocked writes a live id from its session
+	// either way, so restoring p.sessions[id] restores the file unchanged.
+	delete(p.dormant, id)
 	if err := p.saveLocked(); err != nil {
 		p.sessions[id] = sess
 		p.mu.Unlock()
@@ -1580,6 +1611,46 @@ func (p *Pool) mintSettings() SessionSettings {
 	}
 }
 
+// revivedSettings returns the SessionSettings a revive of id starts from: the
+// model and effort id's own dropped entry persisted, and no posture. An id with
+// no dormant entry yields the zero value, which is what every revive got before
+// #2448 — so an unknown id, and an entry that persisted neither field, both
+// revive exactly as they did.
+//
+// The asymmetry is the whole decision, and it is narrower than it looks. A
+// restart stays a revocation point for a permission bypass (#1487): a persisted
+// yolo or permission_mode is not read here, so it cannot reach the revived
+// session however the entry was written. Model and effort carry no privilege and
+// are the operator's choice for that conversation, so dropping them only made the
+// next turn run under claude's defaults.
+//
+// Built field by field rather than from settingsFromEntry with the posture
+// cleared afterwards, matching mintSettings above for mintSettings' own recorded
+// reason: the posture is then excluded STRUCTURALLY rather than by a clearing
+// statement someone could later delete, and any field added to registryEntry in
+// future is likewise not inherited until someone opts it in. That is the
+// fail-closed direction. The cleared posture is spelled out downstream —
+// buildSession's canonicalSettings turns the zero value into the default mode,
+// exactly as it did for the zero value this replaces.
+//
+// Concurrency: MUST be called with p.mu unheld — Go's RWMutex is not reentrant
+// and materialise takes the write lock, which is mintSettings' contract and the
+// same call shape (evaluate, then materialise). The window between this read and
+// that Lock is benign: a concurrent revive of the same id sends the caller down
+// materialise's take path, where the settings are dropped by contract.
+func (p *Pool) revivedSettings(id SessionID) SessionSettings {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	entry, ok := p.dormant[id]
+	if !ok {
+		return SessionSettings{}
+	}
+	return SessionSettings{
+		Model:  entry.Model,
+		Effort: entry.Effort,
+	}
+}
+
 // BootstrapID returns the pool's current bootstrap session id under p.mu
 // (RLock). It resolves p.bootstrap fresh on each call — mirroring
 // Default/DefaultSettings — so it stays correct across a /clear rotation:
@@ -1865,14 +1936,15 @@ func (p *Pool) Mint(label, spawnDir string) (SessionID, error) {
 // (#833) and stored on the returned Session. The zero value appends no flags,
 // so an unconfigured spawn's argv carries none. CreateIn and GetOrCreateIn pass
 // mintSettings — the operator's configured model and effort, never the bypass
-// (#1575). Pool.Revive is the one caller that still passes the zero value, so a
-// phone-granted bypass cannot survive a daemon restart (#1487).
+// (#1575). Pool.Revive passes revivedSettings — the model and effort the dropped
+// session's own entry persisted, and no posture, so a phone-granted bypass still
+// cannot survive a daemon restart (#1487/#2448).
 func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings SessionSettings) (*Session, error) {
 	tpl := p.sessionTpl
 	// Normalise the posture before it reaches either the argv or the stored
-	// value, so a minted session (mintSettings' two-field literal) and a revived
-	// one (the zero value) both hold the default mode spelled out rather than an
-	// empty string. It is a normalisation, not a gate: neither caller takes a
+	// value, so a minted session and a revived one — both two-field literals,
+	// mintSettings' and revivedSettings' — hold the default mode spelled out
+	// rather than an empty string. It is a normalisation, not a gate: neither caller takes a
 	// mode from operator input — Pool.UpdateSettings is where an unrecognised
 	// mode is rejected.
 	settings = canonicalSettings(settings)
@@ -2012,6 +2084,11 @@ func (p *Pool) Snapshot() []SnapshotEntry {
 // writes it atomically. Caller MUST hold p.mu (write). No-op when
 // registryPath is empty (test-only persistence-disabled mode).
 //
+// The file is the union of the live sessions and p.dormant — the entries this
+// process parsed at New and has not materialised. Writing the live half alone is
+// what erased a dropped session's record, model and effort included, on the first
+// save after a daemon restart (#2448).
+//
 // Each session's lifecycle state and lastActiveAt are read under Session.lcMu.
 // Lock order: Pool.mu (held by caller) → Session.lcMu. transitionTo enforces
 // the symmetric rule (release lcMu before acquiring Pool.mu via persist).
@@ -2021,7 +2098,7 @@ func (p *Pool) saveLocked() error {
 	}
 	reg := &registryFile{
 		Version:  1,
-		Sessions: make([]registryEntry, 0, len(p.sessions)),
+		Sessions: make([]registryEntry, 0, len(p.sessions)+len(p.dormant)),
 	}
 	for _, s := range p.sessions {
 		s.lcMu.Lock()
@@ -2054,6 +2131,24 @@ func (p *Pool) saveLocked() error {
 		}
 		reg.Sessions = append(reg.Sessions, entry)
 	}
+	for id, entry := range p.dormant {
+		// The invariant: an id reaches disk exactly once, from its live session
+		// whenever one exists. materialise retires the entry it takes over and
+		// Remove drops the one it deletes, so this skip fires on no path today —
+		// it is kept because it is the invariant's enforcement at the single
+		// write point, where a delete per mutation site is one site per path.
+		// rekeyLocked is the live reason: it moves a session onto an id this
+		// package does not choose (claude announces it), and a duplicate id in
+		// sessions.json is silent corruption no loadRegistry reader can
+		// disambiguate.
+		if _, live := p.sessions[id]; live {
+			continue
+		}
+		reg.Sessions = append(reg.Sessions, entry)
+	}
+	// Already the merged list's ordering rule: the dormant entries carry the
+	// CreatedAt they were written with, so a file this process only passes
+	// through keeps its order.
 	sortEntriesByCreatedAt(reg.Sessions)
 	return saveRegistryLocked(p.registryPath, reg)
 }

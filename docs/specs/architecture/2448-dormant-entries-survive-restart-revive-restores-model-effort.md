@@ -123,6 +123,20 @@ Pending for the documentation stage; not edited by this ticket.
 
 Both are resolved in Phase B; anything that moves the design lands in `## Revisions`.
 
+## Revisions
+
+**2026-09-15 — Open questions resolved, design unchanged.**
+
+1. No existing test pinned the erase: the whole `internal/sessions` suite passes unmodified, as do `internal/e2e`'s restart tests, whose registry assertions compare post-restart counts against pre-restart ones and therefore only ever wanted the entries kept.
+2. `sortEntriesByCreatedAt` over the merged list does not reorder a file this process passes through — dormant entries carry the `CreatedAt` they were written with. Confirmed by `TestPool_Revive_PoolNotRunning_RestoresDormantEntry`, which is byte-level and reddens today.
+
+No design change followed from either, so the implementation is the plan above as committed.
+
+**2026-09-15 — two production files beyond the three the plan named.** Five in total, still inside the one-ticket boundary, and neither addition changes the design:
+
+- `internal/sessions/registry.go` gains `dormantEntries`, the helper `New` populates the map through. It sits beside `pickBootstrap`, whose complement it is, rather than inline in `New` — the plan described the behaviour and not its address.
+- `internal/sessions/session.go` — a four-line docstring correction only. `canonicalSettings` named `Pool.Revive`'s *zero value* as one of the two it normalises, which this ticket makes false; it now names the unset posture that `mintSettings` and `revivedSettings` both leave behind. `buildSession`'s and `materialise`'s matching sentences were corrected in `pool.go` and `get_or_create.go` for the same reason.
+
 ## Security review
 
 **Verdict:** PASS
