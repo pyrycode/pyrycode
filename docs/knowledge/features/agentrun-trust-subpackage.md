@@ -1,20 +1,26 @@
-# `internal/agentrun/trust` — pre-mark workdirs trusted in `~/.claude.json`
+# `internal/agentrun/trust` — pre-answer startup gates on the `~/.claude.json` workdir entry
 
-Pre-writes `projects[<realpath(workdir)>].hasTrustDialogAccepted = true` in `~/.claude.json` so interactive `claude` (spawned by [`ptyrunner`](ptyrunner-package.md) under PTY drive) skips the workspace-trust modal at startup. The dispatcher's automated flow has no human present to dismiss that modal; pre-marking side-steps it entirely.
+Pre-answers, on the same `projects[<realpath(workdir)>]` entry in `~/.claude.json`, the startup gates a headless `claude` child cannot answer for itself: `hasTrustDialogAccepted = true` skips the workspace-trust modal, and — widened by [#2451](https://github.com/pyrycode/pyrycode/issues/2451) — `hasClaudeMdExternalIncludesApproved = true` plus `hasClaudeMdExternalIncludesWarningShown = true` let a CLAUDE.md `@` import that resolves outside the session's working directory expand. The dispatcher's automated flow has no human present to answer any of these dialogs; pre-marking side-steps them entirely.
 
 Introduced [#475](https://github.com/pyrycode/pyrycode/issues/475) as a **slimmed resurrection** of the helper [#341](https://github.com/pyrycode/pyrycode/issues/341) shipped and [#392](https://github.com/pyrycode/pyrycode/issues/392) deleted. The 2026-05-19 pivot back to PTY drive ([`codebase/471.md`](../codebase/471.md)) made the modal a problem again. The slimming drops the cross-process flock the original required, because `ptyrunner`'s post-idle `HasTrustModal` detector is the runtime safety net.
 
 ## Public API
 
 ```go
-// MarkWorkdirTrusted ensures
-//   ~/.claude.json :: projects[<realpath(workdir)>].hasTrustDialogAccepted = true
-// Idempotent. Atomic — writes to a tempfile in the same directory then renames
-// over the target. Returns the resolved realpath on success.
+// MarkWorkdirTrusted ensures, on ~/.claude.json's
+// projects[<realpath(workdir)>] entry:
+//
+//	hasTrustDialogAccepted                  = true
+//	hasClaudeMdExternalIncludesApproved     = true
+//	hasClaudeMdExternalIncludesWarningShown = true
+//
+// All three are written unconditionally — an existing false is overwritten.
+// Idempotent. Atomic — writes to a tempfile in the same directory then
+// renames over the target. Returns the resolved realpath on success.
 func MarkWorkdirTrusted(workdir string) (realpath string, err error)
 ```
 
-No exported types, no constructor, one function. Returns the resolved realpath so the caller (#470's `runAgentRun`) can pass it straight to `ptyrunner.Config.WorkDir` without a second `agentrun.ResolveWorkdir` call.
+No exported types, no constructor, one function. Returns the resolved realpath so a caller can pass it straight to the spawned claude's `cmd.Dir` (or equivalent) without a second `agentrun.ResolveWorkdir` call, keeping the marked key and the child's cwd byte-identical. See § Consumers for who calls this today.
 
 ## Internal test seam
 
@@ -40,9 +46,9 @@ The public wrapper is two lines: `os.UserHomeDir()` then delegate to unexported 
 
 ## No lock — best-effort cross-process write
 
-Unlike #341, this helper holds no file-lock. Concurrent invocations against the same `~/.claude.json` (e.g. pyry pre-writing while the user's interactive claude rewrites its own config) can race. The worst case is a lost update — one writer's `projects` entry overwrites the other's — which means pyry's trust pre-mark may not be present when `ptyrunner` spawns claude.
+Unlike #341, this helper holds no file-lock. Concurrent invocations against the same `~/.claude.json` (e.g. pyry pre-writing while the user's interactive claude rewrites its own config) can race. The worst case is a lost update — one writer's `projects` entry overwrites the other's — which means pyry's trust pre-mark may not be present when the supervised claude spawns.
 
-The safety net is `ptyrunner.Run`'s post-idle `HasTrustModal(snap)` detector. If the modal appears because pre-marking lost the race, `ptyrunner` returns `ErrTrustModalDetected` and the operator-facing surface (cutover in #470) names the remediation hint (which still says "#469's `MarkWorkdirTrusted`" — the issue this ticket was split out of).
+The safety net, per this package's own doc-comment, is [`tui-driver`](https://github.com/pyrycode/tui-driver)'s post-idle `HasTrustModal(snap)` detector: if the modal appears because pre-marking lost the race, it is dismissed at runtime rather than wedging the session. `ptyrunner`, the package that originally owned this detector, was deleted in #1348; the detector's current call site was not re-verified for this ticket and is worth confirming before citing a specific symbol here.
 
 **The single-writer atomic-write property is preserved.** A SIGKILL'd pyry mid-write must not leave `~/.claude.json` torn for the user's own interactive claude sessions. Tempfile + `Sync` + `Close` + `os.Rename` guarantees that the rename point is either pre- or post-write; the file is never partial.
 
@@ -72,11 +78,11 @@ Pinned by `TestMarkWorkdirTrusted_PreservesFileMode`.
 
 Three terminal classes:
 
-1. **`fs.ErrNotExist` on the data file** — not an error; helper creates a fresh `{"projects": {<key>: {"hasTrustDialogAccepted": true}}}` skeleton. Parent directory (`$HOME`) is assumed to exist.
+1. **`fs.ErrNotExist` on the data file** — not an error; helper creates a fresh `{"projects": {<key>: {"hasTrustDialogAccepted": true, "hasClaudeMdExternalIncludesApproved": true, "hasClaudeMdExternalIncludesWarningShown": true}}}` skeleton. Parent directory (`$HOME`) is assumed to exist.
 2. **Malformed input** (unparseable JSON, `projects` not an object, `projects[realpath]` not an object) — wrapped error; the file is left untouched (pinned via `bytes.Equal` pre/post in `TestMarkWorkdirTrusted_MalformedJSONFails`, `TestMarkWorkdirTrusted_ProjectsNotObjectFails`, and `TestMarkWorkdirTrusted_EntryNotObjectFails`). The helper refuses to silently destroy state it doesn't understand.
 3. **I/O failure** (read, stat, chmod, encode, fsync, close, rename) — wrapped error with the step name.
 
-**Workdir-missing short-circuits via `ResolveWorkdir` BEFORE any `~/.claude.json` access** — pinned by `TestMarkWorkdirTrusted_WorkdirMissingReturnsError`. The error wraps `fs.ErrNotExist` (via `errors.Is`) and `~/.claude.json` is not created. The eventual caller (#470) surfaces the failure as the verb's exit-1 path with a `pyry: agent-run: …` stderr line.
+**Workdir-missing short-circuits via `ResolveWorkdir` BEFORE any `~/.claude.json` access** — pinned by `TestMarkWorkdirTrusted_WorkdirMissingReturnsError`. The error wraps `fs.ErrNotExist` (via `errors.Is`) and `~/.claude.json` is not created. Each caller surfaces the failure in its own idiom (see § Consumers): `runSupervisor` fails the daemon's startup outright, `resolveSpawnDir` returns it plain so the handler classifies it as a retryable per-conversation spawn failure, and `selfcheck.SelfCheckDenyDefault` wraps it into its `Result` error.
 
 No retries. The caller chooses.
 
@@ -110,14 +116,15 @@ Cross-process concurrent invocations are explicitly **not** serialised — see �
 
 `internal/agentrun/trust/trust_test.go` — same-package, stdlib `testing` only, no testify.
 
-Each behavioural test uses `home := t.TempDir()` + `wd := t.TempDir()` and calls `markWorkdirTrustedIn(home, wd)`. All nine behavioural tests call `t.Parallel()`. Two helpers — `writeJSON(t, path, root, mode)` (encode + write + chmod for fixtures) and `readJSON(t, path)` (decode with `UseNumber` for assertions) — keep test bodies focused.
+Each behavioural test uses `home := t.TempDir()` + `wd := t.TempDir()` and calls `markWorkdirTrustedIn(home, wd)`. Every behavioural test below calls `t.Parallel()` except `TestMarkWorkdirTrusted_PublicSmoke`, which cannot (see below). Two helpers — `writeJSON(t, path, root, mode)` (encode + write + chmod for fixtures) and `readJSON(t, path)` (decode with `UseNumber` for assertions) — keep test bodies focused.
 
 Test cases:
 
 - `TestMarkWorkdirTrusted_CreatesFileWhenMissing` — no pre-existing file → creates mode-`0o600` file with one-entry skeleton.
 - `TestMarkWorkdirTrusted_AddsToExistingFileWithoutProjects` — pre-existing top-level fields (`userID`, `telemetry`) preserved; `projects` added.
 - `TestMarkWorkdirTrusted_PreservesSiblingProjects` — pre-existing `projects["/some/other/path"]` with its own `hasTrustDialogAccepted: false` + `extra` field survives untouched alongside the new entry.
-- `TestMarkWorkdirTrusted_IdempotentPreservesExtraEntryFields` — pre-existing target entry with `mcpServers` subfield → repeat call produces byte-identical output (pins idempotency AND within-entry preservation).
+- `TestMarkWorkdirTrusted_IdempotentPreservesExtraEntryFields` — pre-existing target entry carries all three flags plus an `mcpServers` subfield → repeat call produces byte-identical output (pins idempotency AND within-entry preservation). The fixture was widened to carry the two include keys when [#2451](https://github.com/pyrycode/pyrycode/issues/2451) added them to the write — this is the one existing test that ticket reddened, and the fix was carrying the new keys in the fixture, not loosening the byte-identity assertion.
+- `TestMarkWorkdirTrusted_SetsExternalIncludeFlagsOverExistingFalse` — [#2451](https://github.com/pyrycode/pyrycode/issues/2451)'s AC-1 check: target entry pre-set with all three flags explicitly `false` plus an `mcpServers` sibling key, and a second project entry also at `false`. After the call: the target carries all three flags `true` with `mcpServers` intact; the sibling project entry is untouched, still `false`. One test covers every clause — flags set, an existing `false` overwritten, sibling keys preserved.
 - `TestMarkWorkdirTrusted_MalformedJSONFails` — pre-existing file containing `"not json"` → non-nil error; file bytes unchanged.
 - `TestMarkWorkdirTrusted_WorkdirMissingReturnsError` — workdir does not exist → `errors.Is(err, fs.ErrNotExist)`; `~/.claude.json` not created.
 - `TestMarkWorkdirTrusted_WorkdirSymlinkResolvesToRealpath` — `os.Symlink(target, link)`, call with `link` → returned realpath equals `agentrun.ResolveWorkdir(target)` (NOT `link`); `projects` has one entry under the resolved key.
@@ -127,32 +134,50 @@ Test cases:
 - `TestMarkWorkdirTrusted_EntryNotObjectFails` — pre-existing `{"projects": {<realpath>: "not an object"}}` → non-nil error; file untouched.
 - `TestMarkWorkdirTrusted_PublicSmoke` (non-parallel) — `t.Setenv("HOME", t.TempDir())` → `MarkWorkdirTrusted(wd)` succeeds and writes the expected entry; pins `os.UserHomeDir` plumbing without duplicating the full behavioural matrix.
 
+**Live tier:** `TestClaudeMdExternalIncludes_SubfolderChildGetsRootImports` in `internal/e2e/realclaude/claude_md_external_includes_test.go` (`//go:build e2e_realclaude`, run by `make e2e-realclaude`) is the only test that proves AC-2 of [#2451](https://github.com/pyrycode/pyrycode/issues/2451) — that a real child spawned in a workspace subfolder gets the root CLAUDE.md with every import expanded — since that requires a real claude child and its transcript. Two-arm differential: a marked arm (`trust.MarkWorkdirTrusted` on the workspace root) whose import must expand, and a control arm (root hand-written to the pre-fix state: trusted, includes unapproved) whose import must not. See § "The external-includes gate is keyed on the git root..." above for why both fixture roots must be real git repositories and why each arm also requires a CLAUDE.md-only sentinel as a vacuity guard.
+
 ## What this helper deliberately does NOT do
 
-- **No cross-process serialisation.** No flock. Concurrent writers may produce lost updates; `ptyrunner.HasTrustModal` is the runtime safety net.
+- **No cross-process serialisation.** No flock. Concurrent writers may produce lost updates; the runtime safety net is `HasTrustModal` (see § "No lock" above).
 - **No retries.** Caller decides.
-- **No logging.** Operator-visible diagnostics happen at the consumer (#470).
+- **No logging.** Operator-visible diagnostics happen at the consumer.
 - **No size cap on `~/.claude.json`.** A hostile-sized file is the same-uid threat model as pyry; same trust boundary as the running user. Generic hardening, not specific to this helper.
+
+## The external-includes gate is keyed on the git root of the child's cwd, not the cwd itself
+
+This is the fact that makes marking the bootstrap workdir cover every subfolder conversation, rather than being an arbitrary fix. Read directly out of the claude 2.1.259 binary (not inferred) while chasing a live-gate red on [#2451](https://github.com/pyrycode/pyrycode/issues/2451):
+
+- `hasClaudeMdExternalIncludesApproved` and `hasClaudeMdExternalIncludesWarningShown` sit in claude's *project* config defaults on the same `projects[...]` entry as `hasTrustDialogAccepted` — this package's premise that they live on one entry is right.
+- An `@` import is gated when it resolves outside the child's cwd, and the gate is lifted by `hasClaudeMdExternalIncludesApproved` read from the *current project config*.
+- That config is keyed by **the canonical git root of the cwd, falling back to the cwd itself when no repository encloses it** — not by the cwd directly.
+
+In production the workspace root is a repository, so a child spawned in `<root>/default` is governed by `<root>`'s entry: marking the bootstrap workdir (`<root>`) with `MarkWorkdirTrusted` is therefore sufficient for every child spawned anywhere under it, and marking `<root>/default` directly — which was tried before this fix — does nothing, because claude never consults that entry.
+
+**This caught out the first cut of the live differential test in `internal/e2e/realclaude/claude_md_external_includes_test.go`.** Its workspace was a bare `os.MkdirAll` tree with no repository, so the key degraded to `<root>/default` — an entry neither the test nor `pyry agent-run` ever marks (the verb carries no `trustMark` call; see § Consumers). Neither arm had an approved entry, so neither child expanded its import: the marked arm went red and the control arm went green for the wrong reason. The fix, `makeGitRoot`, gives each fixture workspace root a real `git init` (not a linked worktree — claude only skips a main-repo ancestor's CLAUDE.md from inside a *linked* worktree, which a plain repo is not) to restore the production topology. A second, CLAUDE.md-only sentinel required present by both arms is the accompanying vacuity guard: without it, an arm asserting an import is *absent* passes whenever nothing reached the child at all, which is exactly how the broken fixture produced a "passing" control arm.
+
+**Lesson for any future differential test in this space:** an arm that asserts something is absent only means something if a companion assertion proves the fixture could have made it present.
 
 ## Consumers
 
-- `pyry agent-run` (cutover in #470) — after flag validation, calls `MarkWorkdirTrusted(parsed.workdir)`, then passes the returned realpath to `ptyrunner.Config.WorkDir`. The trust pre-write must run before `ptyrunner.Run` to side-step the modal; if pre-writing fails the verb exits 1 (the helper surfaces the failure; the caller chooses to abort).
-- **`pyry` daemon serve path** (`runSupervisor`, #670) — the long-lived supervised host is the second consumer. Before any spawn it pre-marks its workdir and threads the returned realpath into `Bootstrap.WorkDir` (→ `supervisor.Config.WorkDir` → `cmd.Dir`), so the marked key and the child's cwd are byte-identical. Without this, the supervised claude wedged on the trust modal — and unlike agent-run, the daemon has no dispatcher retry: it fell into the #421 clean-exit restart loop (`claude exited cleanly` forever), invisible to the phone (the bridge forwards only transcript events). See [`codebase/670.md`](../codebase/670.md).
+`trustMark` (a package-level `var` in `cmd/pyry/agent_run.go` aliasing `trust.MarkWorkdirTrusted`, overridable in tests) has three production call sites, all in `cmd/pyry` or `internal/agentrun/selfcheck`. **`pyry agent-run` itself is not one of them** — the verb carries no `trustMark` call. That is a load-bearing negative: an earlier draft of [#2451](https://github.com/pyrycode/pyrycode/issues/2451)'s implementation plan assumed `agent-run` pre-marked the folder it spawns in, which shaped a live-test fixture around a premise that was never true and produced a false-passing control arm — see § "The external-includes gate is keyed on the git root..." above.
+
+- **`pyry` daemon serve path** (`runSupervisor`, #670) — before any spawn, confines `-pyry-workdir` to `$HOME` via `confineWorkdirToHome`, then pre-marks the confined realpath and threads it into `Bootstrap.WorkDir` (→ `cmd.Dir`), so the marked key and the supervised child's cwd are byte-identical. This is the bootstrap workdir [#2451](https://github.com/pyrycode/pyrycode/issues/2451) targets: because the include-approval entry is keyed on the child's git root rather than its cwd, marking this one entry also covers every conversation spawned in a subfolder beneath it. Without the trust pre-write the supervised claude wedged on the trust modal — and unlike agent-run, the daemon has no dispatcher retry: it fell into the #421 clean-exit restart loop (`claude exited cleanly` forever), invisible to the phone (the bridge forwards only transcript events). See [`codebase/670.md`](../codebase/670.md).
+- **`resolveSpawnDir`** (`cmd/pyry/main.go`) — validates a phone-requested per-conversation spawn workdir for `create_conversation`. A non-empty request is expanded (`~` → `$HOME`), confined and created under `$HOME` via `confineWorkdirToHomeCreating`, then trust-marked; the empty-request case returns early and never calls `trustMark` (the pool spawns in the shared trusted template workdir instead). Confinement runs strictly before trust-marking, since `trustMark` carries no `$HOME` bound of its own.
+- **`internal/agentrun/selfcheck.SelfCheckDenyDefault`** — the `--self-check` diagnostic verb calls `trustMark(cfg.WorkDir)` directly, with **no** `$HOME` confinement ahead of it. This is the unconfined path referenced below.
 
 ### `$HOME` confinement is caller-side, not in this helper (#670)
 
-`MarkWorkdirTrusted` performs **no** confinement and must not — it is shared by an *unconfined* agent-run path. The daemon serve path is `security-sensitive` because it auto-accepts the trust gate for the host that executes phone-originated (untrusted-party) turns, so #670 added a `$HOME` bound as a strict-tightening deny-gate **at the `runSupervisor` call site only**: a workdir whose realpath resolves outside `$HOME` is rejected as a loud startup failure, never trusted, never launched. The check canonicalises *both* sides (`EvalSymlinks` on `$HOME` and the workdir) and uses a boundary-aware `filepath.Rel` containment test (not a string prefix), so a symlinked home isn't a false reject and `/home/userfoo` isn't treated as inside `/home/user` (the #118/#221 gotcha). Rejection errors name the path and the boundary, never `~/.claude.json` contents. Pushing the bound into this helper would silently confine agent-run too — which is why it stays at the caller. The same canonicalise-and-confine check will extend to the phone-supplied `conversation.Cwd` once per-conversation sessions (#672) land (rejection then surfaced to the phone, not at startup); not built yet.
+`MarkWorkdirTrusted` performs **no** confinement and must not — it is shared by the unconfined self-check path above. The daemon serve path is `security-sensitive` because it auto-accepts the trust gate for the host that executes phone-originated (untrusted-party) turns, so #670 added a `$HOME` bound as a strict-tightening deny-gate at its own call site (`runSupervisor`), and `resolveSpawnDir` carries the equivalent bound for the per-conversation path: a workdir whose realpath resolves outside `$HOME` is rejected as a loud startup failure (`runSupervisor`) or a non-retryable `handlers.ErrSpawnDirRejected` (`resolveSpawnDir`), never trusted, never launched. The check canonicalises *both* sides (`EvalSymlinks` on `$HOME` and the workdir) and uses a boundary-aware `filepath.Rel` containment test (not a string prefix), so a symlinked home isn't a false reject and `/home/userfoo` isn't treated as inside `/home/user` (the #118/#221 gotcha). Rejection errors name the path and the boundary, never `~/.claude.json` contents. Pushing the bound into this helper would silently confine the self-check path too — which is why it stays at each caller.
 
 ## Out of scope
 
-- The ptyrunner consumer → [`ptyrunner-package.md`](ptyrunner-package.md) (#471 / #472).
-- The `cmd/pyry/agent_run.go` wiring → #470.
+- The `cmd/pyry/agent_run.go` wiring — declares the `trustMark` seam but does not call it; see § Consumers.
 - Cross-process concurrency serialisation — explicitly descoped; revisit only on an observed failure.
 
 ## Related
 
 - [agentrun-package.md](agentrun-package.md) — surrounding parent package; `ResolveWorkdir` (the realpath rule) lives there.
-- [ptyrunner-package.md](ptyrunner-package.md) — the spawn primitive that consumes the pre-marked trust state and provides the runtime safety net via the post-idle `HasTrustModal` detector. `ErrTrustModalDetected`'s message embeds the remediation hint.
+- [ptyrunner-package.md](ptyrunner-package.md) — the original spawn primitive this trust state was written for; deleted in #1348. Historical only — its runtime `HasTrustModal` safety net has a live successor (see § "No lock" above) that this doc does not yet name precisely.
 - [devices-registry.md](devices-registry.md) — the canonical atomic-write recipe this package mirrors.
 - [rotation-watcher.md](rotation-watcher.md) — existing user of the same `EvalSymlinks`-via-`ResolveWorkdir` pattern.
 - [`codebase/475.md`](../codebase/475.md) — build notes (file inventory, patterns, lessons).
