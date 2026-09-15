@@ -131,3 +131,49 @@ func TestArgvIDFlagResume(t *testing.T) {
 		})
 	}
 }
+
+// TestRefusesIDPair is #2446's fidelity guard: the argv real claude refuses
+// outright. argvIDFlag above keeps the LAST id flag and so reads the refused
+// pair as an ordinary resume — this predicate is what stops this stand-in
+// serving turns against an argv claude will not start on, and what makes the
+// daemon-side defect (a baked --session-id surviving a settings-update install,
+// beside the runner's own --resume) red in the fake tier instead of invisible.
+func TestRefusesIDPair(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"create form alone", []string{"--session-id", "u1", "--settings", "p"}, false},
+		{"resume alone", []string{"--resume", "u1", "--settings", "p"}, false},
+		{"continue alone", []string{"--continue", "--settings", "p"}, false},
+		{"no id flags at all", []string{"--settings", "p"}, false},
+		{
+			name: "the #2446 argv: a baked create form beside the runner's resume",
+			args: []string{"--session-id", "u1", "--settings", "p", "--resume", "u1"},
+			want: true,
+		},
+		{"session-id beside continue", []string{"--session-id", "u1", "--continue"}, true},
+		{
+			name: "joined spellings count — a pass-through arg can spell either way",
+			args: []string{"--session-id=u1", "--resume=u1"},
+			want: true,
+		},
+		{
+			name: "fork-session makes the pair legal, which is exactly what claude's message says",
+			args: []string{"--session-id", "u2", "--resume", "u1", "--fork-session"},
+			want: false,
+		},
+		{"joined fork-session is honoured too", []string{"--session-id", "u2", "--resume", "u1", "--fork-session=true"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := refusesIDPair(tc.args); got != tc.want {
+				t.Errorf("refusesIDPair(%q) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
