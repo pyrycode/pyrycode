@@ -326,3 +326,43 @@ Pending for the documentation stage; the builder does not edit these:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-15
+
+## Revisions
+
+### 2026-09-15 — the live arm covers one defect, not both
+
+Both Open Questions are resolved, and the first one moved the live arm's claim.
+
+The live arm forces the respawn by pid after all: `bootstrapDaemon` carries the
+control socket, so the child is read off `control.Status` and SIGKILLed, and the
+successor is waited for by pid change. That cost one additive line —
+`startObservedPermissionHarness` now puts the daemon on the `perConvHarness` it
+returns, a field that already existed for its stderr and that every other case
+ignores.
+
+What did change: that harness seeds a conversation bound to the BOOTSTRAP
+session, whose `spawnBase` carries no baked id, so the id half of the defect is
+not reachable on it and the live arm proves the APPROVAL half —
+`withApprovalArgs` reapplied, without which the respawned child runs the gated
+Write with no modal at all. The id half is proven by the fake-tier arm, which
+drives a phone-created session, and by the adapter's unit table. The plan's
+"covers both defects at once" reading was wrong about which session kind the live
+modal harness uses; the arm's doc states the split.
+
+The second question — whether any existing fake-tier test composes the refused
+pair and would newly be refused by the fidelity guard — is not settled here. A
+full `internal/e2e` tier run was started and had not reported by the end of this
+session; the new arm and the fake's own unit table are green, and the guard fires
+only on an argv the daemon composes through the defect this ticket fixes, so the
+expectation is none. The verifier's `make check` is what settles it.
+
+The settings change the live arm sends is an EFFORT change rather than a
+permission mode. A posture change would alter whether the Write is gated at all,
+which is the very thing the round-trip measures, and a model change would move
+the round-trip onto a different model. Effort is in-band deliverable, so it still
+drives the `SetSpawnArgs` branch the incident took.
+
+The RED was measured rather than assumed: with `shape` reduced to a pass-through,
+the fake-tier arm reproduces the incident exactly — the daemon logs
+`--session-id X … --resume X`, `claude exited err="exit status 1"
+uptime=9.5ms`, and a widening backoff — and the unit table fails on every row.
