@@ -127,7 +127,7 @@ Both are resolved in Phase B; anything that moves the design lands in `## Revisi
 
 **2026-09-15 — Open questions resolved, design unchanged.**
 
-1. No existing test pinned the erase: the whole `internal/sessions` suite passes unmodified, as do `internal/e2e`'s restart tests, whose registry assertions compare post-restart counts against pre-restart ones and therefore only ever wanted the entries kept.
+1. ~~No existing test pinned the erase.~~ **Wrong — corrected by the 2026-09-15 rework entry below.** One test did pin it, in a package this gate never ran.
 2. `sortEntriesByCreatedAt` over the merged list does not reorder a file this process passes through — dormant entries carry the `CreatedAt` they were written with. Confirmed by `TestPool_Revive_PoolNotRunning_RestoresDormantEntry`, which is byte-level and reddens today.
 
 No design change followed from either, so the implementation is the plan above as committed.
@@ -136,6 +136,14 @@ No design change followed from either, so the implementation is the plan above a
 
 - `internal/sessions/registry.go` gains `dormantEntries`, the helper `New` populates the map through. It sits beside `pickBootstrap`, whose complement it is, rather than inline in `New` — the plan described the behaviour and not its address.
 - `internal/sessions/session.go` — a four-line docstring correction only. `canonicalSettings` named `Pool.Revive`'s *zero value* as one of the two it normalises, which this ticket makes false; it now names the unset posture that `mintSettings` and `revivedSettings` both leave behind. `buildSession`'s and `materialise`'s matching sentences were corrected in `pool.go` and `get_or_create.go` for the same reason.
+
+**2026-09-15 — rework: Open Question #1 was answered wrongly, and the gate is what hid it.** Verifier triage on PR #2462 found one regression, `TestSessionRouter_Resolve_RevivesAfterDaemonRestart` in `cmd/pyry`. The finding is correct; no production file changes because of it.
+
+- **What Open Question #1 actually resolves to.** One existing test did pin the erasure, and it states it as a *precondition*: `TestSessionRouter_Resolve_RevivesAfterDaemonRestart` warm-starts a second pool over the first's registry, drives a bootstrap `Rename`, and asserts the minted entry is gone from `sessions.json`. That is exactly the behaviour AC#1 deletes, so the rung reddens by design. Re-checked tree-wide across `*.go` this time rather than in the two packages the first pass happened to run: it is the only such site.
+- **Why the first answer read as true.** The plan's Testing-strategy gate line runs `go build ./cmd/pyry` but never `go test` there, and `cmd/pyry` is where the pin lives. A persistence change to `sessions.Pool` is consumed by `sessionRouter`, whose restart test is the only end-to-end pin of the behaviour being changed — so the consumer package belonged in the gate, not merely in the compile. The gate for this push is `go test -race ./internal/sessions/... ./cmd/pyry/...`.
+- **The fix, and it is the plan's own instruction: re-pointed, not deleted.** The pre-touch persist rung inverts — after the `Rename` the entry must now be *present* — and its comment is rewritten rather than amended, the same treatment `Revive`'s docstring got. The `Lookup`/`ErrSessionNotFound` rung above it is untouched and stays load-bearing: a warm start still does not materialise the entry, it now lands in `Pool.dormant`, and that rung is what keeps the assertions below it non-vacuous. The AC#2 `registryHasSession` check after the post-revive persist is unaffected and still passes, but what makes it non-vacuous shifts from the erasure to `materialise`'s retire — the rewritten comment says so, since the sentence that explained the old rationale is gone.
+
+No design change followed: the regression was a stale test precondition, not a defect in the change.
 
 ## Security review
 

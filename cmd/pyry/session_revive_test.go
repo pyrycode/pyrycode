@@ -163,15 +163,21 @@ func TestSessionRouter_Resolve_RevivesAfterDaemonRestart(t *testing.T) {
 	if _, err := poolB.Lookup(id); !errors.Is(err, sessions.ErrSessionNotFound) {
 		t.Fatalf("precondition: poolB.Lookup(%q) = %v, want ErrSessionNotFound (warm start must drop minted entries)", id, err)
 	}
-	// ...and the erasure that follows it: a state-changing persist BEFORE the
-	// conversation is touched rewrites sessions.json without the minted entry.
-	// Documenting it here also proves the AC#2 assertion below is not inherited
-	// from what pool A happened to leave on disk.
+	// Dropped from the pool, but no longer dropped from disk: a state-changing
+	// persist BEFORE the conversation is touched now rewrites sessions.json with
+	// the minted entry still in it, because a warm start keeps what it did not
+	// materialise and saveLocked writes those back beside the live sessions
+	// (#2448). This rung inverted there — it previously asserted the erasure,
+	// which is how a restart lost the session's model and effort. The AC#2
+	// assertion below no longer rests on that erasure but on the handoff it
+	// precedes: materialise retires the dormant entry as it takes the id live,
+	// so a post-revive persist still carrying the id proves the live session
+	// wrote it rather than the entry merely never having left.
 	if err := poolB.Rename(poolB.BootstrapID(), "pre-touch"); err != nil {
 		t.Fatalf("Rename (pre-touch persist): %v", err)
 	}
-	if registryHasSession(t, regPath, id) {
-		t.Fatalf("precondition: %q survived a pre-touch persist; the erasure this ticket describes did not happen", id)
+	if !registryHasSession(t, regPath, id) {
+		t.Fatalf("precondition: %q erased by a pre-touch persist; a warm start must keep the entries it did not materialise (#2448)", id)
 	}
 
 	reg := &conversations.Registry{}
