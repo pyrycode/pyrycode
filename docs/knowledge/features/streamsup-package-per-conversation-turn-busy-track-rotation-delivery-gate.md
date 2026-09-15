@@ -97,6 +97,66 @@ than closed speculatively. If evidence appears, the fix is a re-read-and-re-stam
 own `rotateGen`, not a widening of the mutex discipline. See [codebase/1330.md](../codebase/1330.md)
 for the original gate this paragraph's fix builds on.
 
+**A second, separate gate covers deliberate teardowns outside rotation — eviction and
+settings-restart (#1513).** `BeginRotation`'s gate only ever armed on the `new_session` path.
+Both eviction arms of `sessions.Session.runActive` (the idle-timer arm and the `evictCh`
+cap/force arm, which `Pool.Remove` also drives through `Session.Evict`) and
+`Pool.UpdateSettings`' restart branch — immediately above `sup.Restart(newArgs)`, **inside**
+that branch only, since the in-band branch beside it tears nothing down — killed a live child
+with no gate armed at all: a write already past the delivery seam landed in the doomed child's
+stdin pipe, returned nil, and msgqueue read nil as a confirmed commit and dropped the queue head
+silently, same defect, different door.
+
+The obvious fix — call the existing gate from these three sites — wedges the session instead of
+fixing it. Every one of these teardowns *ends in* a `Restart`-driven or crash respawn, which is
+exactly the bind whose `freshSeq` snapshot reads **equal** to `armFreshSeq` and which the
+rotation gate's release rule (above) therefore refuses to clear. Arming `rotating` here would
+leave every turn refused until some unrelated later `RestartFresh` happened to land. So `Runner`
+carries a second flag, `tearingDown`, armed by the new `BeginTeardown()` together with its own
+threshold `armChildGen` (the `childGeneration` value standing at arm time — the counter `setStdin`
+and `takeStdin` already bump on every bind, since #2384). `setStdin` releases `tearingDown`
+whenever the post-bump `childGeneration` reads strictly greater than `armChildGen` — and because
+the bump happens before the comparison, **every** bind after the arm satisfies it, including the
+equal-`freshSeq` binds the rotation gate refuses. `BeginTeardown` returns no disarm, unlike
+`BeginRotation`: the gate is self-clearing at the next bind of any child, so a stray arm costs at
+most one respawn's worth of refused turns rather than needing an abort to bound it.
+
+`turnTarget`'s single boolean widened to `turnTargetWithGate` / `turnGate` (`gateOpen` /
+`gateRotation` / `gateTeardown`) so `WriteUserTurn` can log a cause-specific record — still one
+`r.mu` acquisition, the property this file's whole gate rests on. `gateRotation` is tested first
+(the stricter release, the record worth an operator's attention), and `gateTeardown` is reported
+only while a handle is bound: a stale `tearingDown` on an evicted session with nothing rebound is
+an ordinary resting state, not an anomaly, and reporting it on every delivery attempt would be a
+pure log-volume regression rather than a diagnostic gain — with no child bound the refusal falls
+through to the pre-existing nil-handle path unconditionally.
+
+`BeginTeardown()` sits on `sessions.Runner` itself, not behind a capability type-assertion, for
+the reason this file's `Runner` interface section (see
+[sessions-package's `Runner` interface](sessions-package-key-types-runner-interface-runnerfactory.md))
+already applies to `SetSpawnPermissionMode`: the three arm sites live inside `internal/sessions`,
+which must not import `internal/streamsup`, and a structural assertion there fails **open** — an
+unmatched arm would silently leave a teardown ungated while every layer reported success, the
+exact failure being closed. All six implementations (the production `streamRunner` adapter and
+the five test doubles) gained the method as a build-time requirement rather than an optional hook.
+
+**Two lessons that only show up once you try to test the ordering, not just the arming.** A test
+built on `lifecycleRunner`'s existing per-method record slices can prove an arm *happened* but
+never that it happened *before* the kill — "armed after the kill" reads identically to "armed
+before it" on a set of independent slices. The ordering rows instead use a purpose-built recorder
+(`internal/sessions/teardown_gate_test.go`'s `teardownRecorder`) that appends every call —
+`BeginTeardown`, `Restart`, `Run`'s ctx-fired teardown — into one ordered log, because only a
+shared log can express "first". And the first version of the idle-eviction row was itself flaky
+by construction: it polled `Session.LifecycleState() == stateEvicted`, but `beginEvict` flips
+that state and releases its lock **before** `runActive`'s idle arm reaches `cancelSup`, while the
+recorder can only log the actual kill **after** `cancelSup` runs — so the wait condition was
+ordered strictly earlier than the event the test asserted about, and a `pollUntil` sleep silently
+stood in for a happens-after relation that did not exist. Green unloaded, red under CPU
+contention. The fix was to poll the recorder's own log for the kill event instead of a published
+state transition — the same edge its sibling forced-eviction row already had for free, since
+`Session.Evict` blocks on the eviction's own completion channel. The general tell: if the
+condition being waited on is published by a call that returns before the event under test, a
+poll against it is a sleep with extra steps, not a synchronization point.
+
 **Testing this kind of authorisation window: the vacuity guard and the arm placement both depend
 on the harness mode, and a flat test function hides the per-row evidence a mutant needs (#1482).**
 `WriteUserTurn` returns `ErrNoLiveChild` for both "gated" and "no child bound", so every row must
