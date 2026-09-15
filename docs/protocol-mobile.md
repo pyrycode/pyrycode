@@ -1235,6 +1235,35 @@ so every other key is discarded — including ones `claude` has not shipped yet.
 line also carries three UUIDs naming entries in the **operator's own transcript**, and
 those are the reason the allowlist is stated here rather than left implicit.
 
+#### `resetting`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation running the reset. |
+| `active` | bool | Rising edge (`true`) or falling edge (`false`, clear the indicator). Unlike every other status peer's strict edge pair, one reset emits **two** rising frames before the single falling one — see below. |
+| `phase` | string | **Closed set:** `wrapping_up` or `restarting` while `active` is `true`; `""` once the reset is over. Meaningless while `active` is `false`. |
+| `handoff` | string | **Closed set:** `pending`, `written` or `skipped` while `active` is `true`; `""` once the reset is over. Meaningless while `active` is `false`. |
+
+`resetting` (#2453) reports a conversation reset: the daemon runs a wrap-up turn that writes a handoff note for the successor, then kills and respawns `claude` under a new session id. Without this frame a client sees neither phase — the screen simply pauses for however long both take. It has the status-peer shape [`api_retry`](#api_retry) and [`compacting`](#compacting) share — binary → phone, gated on the negotiated `interactive` capability, and emitting it never opens, closes, or alters a turn — but its **source is not a stream-json detector reading `claude`'s own output**, unlike every status peer before it: it is the wire form of the daemon's own reset routine. It is therefore **not** a `turnevent` variant and not one of the twenty-three turn-stream events counted at the top of this section — [`slash_command_list`](#slash_command_list) already draws that same distinction, for the same reason.
+
+**One reset emits two `active: true` frames before a single `active: false`, and that is where this frame departs from every status peer's strict edge pair.** The sequence is:
+
+```
+active:true  phase:wrapping_up  handoff:pending
+active:true  phase:restarting   handoff:written | skipped
+active:false phase:""           handoff:""
+```
+
+A repeated `active: true` carrying a new `phase` is a **phase change**, not a second reset — a client that opens a fresh indicator on the second rising edge draws two resets where one happened.
+
+**`phase` and `handoff` are meaningful only while `active` is `true`.** A falling edge carries both as the empty string rather than omitting them, this section's standing no-`omitempty` rule: the key is always on the wire and its zero value is the statement. `handoff` resolves once, on the `wrapping_up` → `restarting` transition — `pending` throughout the wrap-up turn, then `written` or `skipped` depending on whether that turn actually produced a note. `skipped` is a **reported outcome, not a missing value**: it covers every daemon-side reason a note was not made — the wrap-up turn produced nothing usable, it failed, or it was not run at all — and all of them mean the same thing to a client, that the successor starts without one.
+
+**Every rising sequence ends in a falling edge, on success and on every error path.** A wrap-up turn that fails, produces nothing usable, or never runs still reaches `restarting` with `handoff: skipped`, and the respawn — whether it succeeds or not — still closes with `active: false`. A client may rely on the falling edge always arriving and needs no timeout of its own to clear the indicator.
+
+**Nothing on this frame is `claude`-authored.** `conversation_id` is the daemon's own routing key, `active` is a bool it computes, and `phase`/`handoff` are tokens it selects from named constants — a class difference from [`compacting`](#compacting) next door, whose `compact_result`/`compact_error` carry `claude`'s own unsanitized prose under [§ Security model](#security-model)'s threat 1. The handoff note's own content never crosses this wire: `handoff` reports only *whether* a note was made, never the note itself, so no render-as-inert-text rule is owed here. The `restarting` phase also does not name the new session id — that identity has its own frame, [`session_transition`](#session_transition).
+
+**No producer yet**: #2455 owns the reset routine that emits this frame, and #2456 routes a client's `/clear` into it.
+
 #### `banner`
 
 | Field | Type | Meaning |
@@ -2737,6 +2766,8 @@ Four things a client will otherwise get wrong:
 **4. A cut is reportable and must be read, and the size has to be quoted with its unit.** The capture's 51 entries serialise to **14,277 bytes of compact UTF-8**; the same array with its non-ASCII `\u`-escaped is **14,371**, and the two disagree precisely because 14 of the 51 descriptions carry non-ASCII. The wire is neither number exactly: Go's encoder escapes `<`, `>`, `&` and U+2028/U+2029 (of which the capture contains none) and passes every other non-ASCII rune through as raw UTF-8, so a real frame is the UTF-8 form plus 6 bytes per escaped `<`/`>`/`&`. The committed fixture shows both behaviours side by side — `model`'s `<model>` hint against `claude-api`'s raw em dashes — which is why the unit is named rather than implied. The longest single description is **1,145 bytes / 1,135 runes**, the longest argument hint 121 B / 115 runes, the longest name 24 B; the mean description is 207 B, the median 69, and **10 of 51 exceed 256** in both units. A per-field bound will therefore cut real rows, and a client that ignores `truncated_fields` presents cut text as complete.
 
 **SECURITY.** `name`, `argument_hint`, `description` and **every string in `aliases`** are **workspace-authored** strings that crossed the subprocess trust boundary. That strengthens `model_list`'s claude-authored warning rather than restating it: the author is whoever wrote the repository, not claude. They are safe to **render as inert text** and must never be fed to an HTML sink, an attribute, or a URL. The daemon **bounds them but does not sanitize them** — nothing on this path strips control characters or terminal escape sequences, and property 3 names the one that actually occurs — so they stay untrusted text all the way to the client, and **the render boundary that owes the sanitization is the client's, not the daemon's**. The frame is a **report, never a control input**, with one amendment: a client is meant to send a `name` **back**, as the text of an ordinary message, because sending the slash command *is* the feature. Publishing a name does not make it trusted. It arrives inbound as ordinary message text, on a path that does not treat it as a command vocabulary and does not consult this list, and no field here reaches a child process as an argv element. This frame declares **no inbound verb**.
+
+**`2026-09-15`, not yet live:** #2456 introduces the one exception to the paragraph above — the literal `/clear`, matched once before an inbound message reaches this path, and routed to the conversation-reset routine ([`resetting`](#resetting), #2453) instead of falling through as ordinary message text. Every other string this paragraph describes is unaffected: the match is against the literal token alone, not against any name or alias `slash_command_list` publishes, and nothing else inbound is compared against this list. Until #2456 lands, the paragraph above remains accurate as written.
 
 #### Reconnect replay & resync (consumer, #647)
 
