@@ -189,7 +189,9 @@ func TestMarkWorkdirTrusted_IdempotentPreservesExtraEntryFields(t *testing.T) {
 	pre := map[string]any{
 		"projects": map[string]any{
 			realpath: map[string]any{
-				"hasTrustDialogAccepted": true,
+				"hasTrustDialogAccepted":                  true,
+				"hasClaudeMdExternalIncludesApproved":     true,
+				"hasClaudeMdExternalIncludesWarningShown": true,
 				"mcpServers": map[string]any{
 					"example": "value",
 				},
@@ -209,6 +211,84 @@ func TestMarkWorkdirTrusted_IdempotentPreservesExtraEntryFields(t *testing.T) {
 
 	if !bytes.Equal(bytesA, bytesB) {
 		t.Fatalf("idempotency violated\nA:\n%s\nB:\n%s", bytesA, bytesB)
+	}
+}
+
+// TestMarkWorkdirTrusted_SetsExternalIncludeFlagsOverExistingFalse is the
+// #2451 AC-1 check. Claude expands an `@` import resolving outside the
+// session's cwd only when hasClaudeMdExternalIncludesApproved is true on the
+// entry of the folder that owns the CLAUDE.md. Production held false there,
+// so every subfolder conversation silently lost its imports; the helper must
+// overwrite that false rather than leave an existing key alone. The sibling
+// project entry pins the blast radius: only the target entry is touched.
+func TestMarkWorkdirTrusted_SetsExternalIncludeFlagsOverExistingFalse(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	wd := t.TempDir()
+	realpath, err := agentrun.ResolveWorkdir(wd)
+	if err != nil {
+		t.Fatalf("ResolveWorkdir: %v", err)
+	}
+
+	dataPath := filepath.Join(home, ".claude.json")
+	pre := map[string]any{
+		"projects": map[string]any{
+			realpath: map[string]any{
+				"hasTrustDialogAccepted":                  false,
+				"hasClaudeMdExternalIncludesApproved":     false,
+				"hasClaudeMdExternalIncludesWarningShown": false,
+				"mcpServers": map[string]any{
+					"example": "value",
+				},
+			},
+			"/some/other/path": map[string]any{
+				"hasTrustDialogAccepted":                  false,
+				"hasClaudeMdExternalIncludesApproved":     false,
+				"hasClaudeMdExternalIncludesWarningShown": false,
+			},
+		},
+	}
+	writeJSON(t, dataPath, pre, 0o600)
+
+	if _, err := markWorkdirTrustedIn(home, wd); err != nil {
+		t.Fatalf("markWorkdirTrustedIn: %v", err)
+	}
+
+	root := readJSON(t, dataPath)
+	projects, ok := root["projects"].(map[string]any)
+	if !ok {
+		t.Fatalf("projects type %T", root["projects"])
+	}
+	target, ok := projects[realpath].(map[string]any)
+	if !ok {
+		t.Fatalf("target entry type %T", projects[realpath])
+	}
+	for _, key := range []string{
+		"hasTrustDialogAccepted",
+		"hasClaudeMdExternalIncludesApproved",
+		"hasClaudeMdExternalIncludesWarningShown",
+	} {
+		if target[key] != true {
+			t.Errorf("target %s = %v, want true", key, target[key])
+		}
+	}
+	mcp, ok := target["mcpServers"].(map[string]any)
+	if !ok || mcp["example"] != "value" {
+		t.Errorf("target mcpServers = %v, want {example: value}", target["mcpServers"])
+	}
+
+	other, ok := projects["/some/other/path"].(map[string]any)
+	if !ok {
+		t.Fatalf("sibling entry type %T", projects["/some/other/path"])
+	}
+	for _, key := range []string{
+		"hasTrustDialogAccepted",
+		"hasClaudeMdExternalIncludesApproved",
+		"hasClaudeMdExternalIncludesWarningShown",
+	} {
+		if other[key] != false {
+			t.Errorf("sibling %s = %v, want false (untouched)", key, other[key])
+		}
 	}
 }
 

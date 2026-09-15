@@ -1,5 +1,8 @@
-// Package trust pre-marks a workdir as trusted in ~/.claude.json so
-// interactive claude (spawned via PTY drive) skips the workspace-trust modal.
+// Package trust pre-answers, in ~/.claude.json, the startup gates a headless
+// claude child cannot answer for itself: the workspace-trust modal that
+// interactive claude (spawned via PTY drive) would render, and the approval
+// that lets a CLAUDE.md `@` import resolving outside the session's working
+// directory expand.
 //
 // Best-effort: no file lock. A concurrent writer may produce a lost update;
 // tui-driver's HasTrustModal(snap) provides the runtime safety net that
@@ -25,10 +28,14 @@ import (
 	"github.com/pyrycode/pyrycode/internal/agentrun"
 )
 
-// MarkWorkdirTrusted ensures
+// MarkWorkdirTrusted ensures, on ~/.claude.json's
+// projects[<realpath(workdir)>] entry:
 //
-//	~/.claude.json :: projects[<realpath(workdir)>].hasTrustDialogAccepted = true
+//	hasTrustDialogAccepted                  = true
+//	hasClaudeMdExternalIncludesApproved     = true
+//	hasClaudeMdExternalIncludesWarningShown = true
 //
+// All three are written unconditionally — an existing false is overwritten.
 // Idempotent. Atomic — writes to a tempfile in the same directory then
 // renames over the target. Returns the resolved realpath on success.
 //
@@ -98,6 +105,16 @@ func markWorkdirTrustedIn(homeDir, workdir string) (string, error) {
 		entry = map[string]any{}
 	}
 	entry["hasTrustDialogAccepted"] = true
+	// Claude expands an `@` import resolving outside the session's working
+	// directory only when hasClaudeMdExternalIncludesApproved is true on the
+	// entry of the folder that OWNS the CLAUDE.md — marking the folder a child
+	// was spawned in does nothing. A headless child cannot answer the approval
+	// dialog and nothing is logged when imports are skipped, so an entry left
+	// at false silently strips every external import from the injected
+	// instructions block (#2451). Assigned unconditionally, like the trust
+	// key: an existing false is the state this fixes.
+	entry["hasClaudeMdExternalIncludesApproved"] = true
+	entry["hasClaudeMdExternalIncludesWarningShown"] = true
 	projects[realpath] = entry
 
 	tmp, err := os.CreateTemp(homeDir, ".claude.json.tmp-*")
