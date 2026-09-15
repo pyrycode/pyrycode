@@ -310,6 +310,16 @@ type SettingsUpdate struct {
 // deterministic order (model, effort, posture) for testability. Empty Model or
 // Effort emits no flag (inherit the template).
 //
+// THE --model VALUE IS THE FAMILY ALIAS, NOT THE STORED ONE (#2447), and the two
+// differ by design. Not every row claude publishes is an alias — Fable and the
+// "Haiku 4.5" row are published as exact ids — so composing the stored value
+// verbatim pinned a session to a model claude had since superseded. familyAlias
+// rewrites an exact id to its family here and at Pool.deliverSettingsInBand, and
+// nowhere else: the stored value is left as picked so the model menu keeps
+// matching its row by exact equality and cmd/pyry's validateModelVocabulary keeps
+// finding it in the published list. Read familyAlias for why its output cannot
+// weaken what internal/relay's validModel buys this argv sink.
+//
 // THE ESCALATION FLAG IS UNCONDITIONAL (#2065). Every child the daemon spawns —
 // bootstrap, minted and revived — launches with --dangerously-skip-permissions,
 // and the posture it actually RUNS in is decided by the in-band write
@@ -353,7 +363,7 @@ type SettingsUpdate struct {
 func claudeSettingsArgs(s SessionSettings) []string {
 	var args []string
 	if s.Model != "" {
-		args = append(args, "--model", s.Model)
+		args = append(args, "--model", familyAlias(s.Model))
 	}
 	if s.Effort != "" {
 		args = append(args, "--effort", s.Effort)
