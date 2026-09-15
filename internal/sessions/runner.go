@@ -136,6 +136,40 @@ type Runner interface {
 	// Returns the runner's retryable no-live-child error when nothing is bound.
 	// Safe from any goroutine.
 	SetPermissionMode(mode string) error
+	// BeginTeardown arms the runner's write-refusal gate for a DELIBERATE KILL this
+	// package is about to perform (#1513): from the call until the next child binds,
+	// every WriteUserTurn is refused with the runner's retryable no-live-child error
+	// instead of being written into the child that is about to die. Without it the
+	// write lands in the doomed child's stdin pipe and RETURNS NIL, msgqueue reads
+	// nil as a confirmed commit and drops the queue head, and the message dies
+	// unread — no retry, no session_error, and queue_state reporting it delivered.
+	//
+	// Three callers, each arming strictly BEFORE the kill it pairs with and before
+	// anything that publishes the teardown to clients: both eviction arms of
+	// Session.runActive (the idle timer, and the cap/force evictCh that Pool.Remove
+	// drives through Session.Evict), and Pool.UpdateSettings' restart branch — the
+	// in-band branch beside it MUST NOT call this, since it tears no child down and
+	// an arm there would refuse turns for a delivery that kills nothing.
+	//
+	// It is the deliberate-teardown twin of the runner's own new_session rotation
+	// arm, NOT a second caller of it, and the difference is the release rule: a
+	// rotation arm must survive a Restart-driven or crash respawn, while these
+	// teardowns END IN exactly such a respawn and must be released by it. The
+	// implementation owns that distinction; this seam only promises that any
+	// successor child ends the window, so a stray arm cannot wedge a session.
+	//
+	// It returns nothing and cannot fail. It is non-blocking, takes no lock this
+	// package holds, and makes no call-out — so it cannot delay the kill that
+	// follows it — and it is safe from any goroutine.
+	//
+	// It is ON this interface for SetSpawnPermissionMode's reason exactly, and the
+	// stakes are the same shape: its consumers sit inside internal/sessions, which
+	// must not import internal/streamsup (see Pool.deliverSettingsInBand), and a
+	// structural assertion there fails OPEN. An unmatched arm would be a silent
+	// no-op leaving the teardown ungated while every layer reported success — which
+	// is precisely the silent loss this method exists to close. The interface method
+	// makes a runner that cannot arm a build failure instead.
+	BeginTeardown()
 }
 
 // RunnerFactory constructs a Runner from a RunnerConfig. It is the injection seam

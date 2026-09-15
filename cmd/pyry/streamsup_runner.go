@@ -109,6 +109,22 @@ func (a streamRunner) SetSpawnPermissionMode(mode string) { a.r.SetSpawnPermissi
 // vocabulary to keep in step with the writer's.
 func (a streamRunner) SetPermissionMode(mode string) error { return a.r.SetPermissionMode(mode) }
 
+// BeginTeardown forwards to (*streamsup.Runner).BeginTeardown (#1513), arming the
+// write-refusal gate for a deliberate kill so a racing turn is refused and retried
+// against the successor instead of being written into the dying child — where the
+// write returns nil and msgqueue drops the queue head as committed.
+//
+// It is ON the sessions.Runner interface for the fail-open reason stated above, and
+// here that reason IS the ticket: its consumers are Session.runActive's two eviction
+// arms and Pool.UpdateSettings' restart branch, all inside internal/sessions, and an
+// assertion whose unmatched arm silently no-oped would leave the teardown ungated
+// while every layer reported success — the exact silent loss being closed.
+//
+// The concrete method cannot fail and is non-blocking, so this forward adds nothing;
+// the release rule that distinguishes it from the rotation arm lives entirely in the
+// runner.
+func (a streamRunner) BeginTeardown() { a.r.BeginTeardown() }
+
 // Interrupt forwards to (*streamsup.Runner).Interrupt (#1120), ending the running
 // turn via a control_request line. It is OFF the sessions.Runner interface (which
 // stays un-widened, #1077) — a concrete method the #1121 interrupt dispatch

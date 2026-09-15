@@ -823,6 +823,16 @@ func (s *Session) runActive(ctx context.Context) error {
 				"session_id", string(s.currentID()),
 				"idle_timeout", s.idleTimeout,
 				"bootstrap", s.bootstrap)
+			// Refuse writes BEFORE anything publishes this teardown (#1513). #1186's
+			// non-active flip below covers a delivery that has not yet been dispatched;
+			// it cannot help one already past the seam, whose bytes would land in the
+			// dying child's pipe, return nil, and be dropped from the queue as
+			// committed. The arm is above beginEvict rather than merely above
+			// cancelSup because beginEvict FIRES the eviction signal, and #1330's
+			// placement rule is to arm before the client is told anything. It takes one
+			// leaf mutex on the runner and makes no call-out, so it delays neither the
+			// signal nor the kill.
+			s.sup.BeginTeardown()
 			// Fire the eviction signal and commit stateEvicted BEFORE tearing down
 			// the child so a delivery racing this teardown window sees a non-active
 			// session and drives a real respawn instead of no-oping against the
@@ -834,6 +844,11 @@ func (s *Session) runActive(ctx context.Context) error {
 			s.endEvict()
 			return nil
 		case <-s.evictCh:
+			// Same arm as the idle path above, and the one that matters most in
+			// ordinary use (#1513): a cap eviction is uncorrelated with the victim's
+			// own deliveries, so multi-conversation traffic reaches this window without
+			// any contrived interleaving.
+			s.sup.BeginTeardown()
 			// Cap-policy eviction: forced, regardless of attached count. Same
 			// two-phase commit as the idle path (#1186): signal, then flip to
 			// evicted before teardown so a racing Activate is never lost, close out

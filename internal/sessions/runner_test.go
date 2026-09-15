@@ -40,6 +40,8 @@ func (fakeRunner) SetSpawnPermissionMode(string) {}
 
 func (fakeRunner) SetPermissionMode(mode string) error { return nil }
 
+func (fakeRunner) BeginTeardown() {}
+
 // TestRunnerFactory_InvokedAtEveryConstructionSite covers AC-4: a non-nil
 // Config.RunnerFactory is invoked in place of the default runner at BOTH construction
 // sites — the bootstrap (Pool.New) and the per-session create (Pool.buildSession,
@@ -286,6 +288,13 @@ func (r *lifecycleRunner) SetSpawnPermissionMode(mode string) {
 	r.spawnModes = append(r.spawnModes, mode)
 	r.mu.Unlock()
 }
+
+// BeginTeardown is a no-op here, deliberately (#1513). This double's records are
+// per-method slices, and the teardown arm's property is an ORDER — that it precedes
+// the kill — which no per-method slice can express. teardownRecorder in
+// teardown_gate_test.go carries the one shared ordered log that can, and it is the
+// double the three arm-ordering rows use.
+func (r *lifecycleRunner) BeginTeardown() {}
 
 // spawnPermissionModes is the read side of the record above, deep-copied under r.mu
 // like its three siblings.

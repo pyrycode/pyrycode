@@ -347,3 +347,32 @@ reuse the first. No file under `docs/knowledge/` is edited by this ticket.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-15
+
+## Revisions
+
+### 2026-09-15 — implementation
+
+**AC3's runner double.** The Testing strategy above proposed extending `lifecycleRunner` with an
+ordered `events` log. Implemented instead as a new, self-contained `teardownRecorder` in
+`internal/sessions/teardown_gate_test.go`, embedding `fakeRunner` for the method set it does not
+exercise and overriding `BeginTeardown`, `Restart` and `Run`. Two reasons, both found while writing
+it: `lifecycleRunner`'s records are per-method slices read by a dozen existing rows, and adding a
+cross-cutting ordered log beside them invites a later reader to assert ordering against records that
+cannot express it; and `lifecycleRunner.Run` spawns a real `/bin/sleep`, which these three rows do
+not need. `lifecycleRunner` therefore takes a documented no-op `BeginTeardown` pointing at the
+double that does record.
+
+**A fourth row.** `TestPool_UpdateSettings_InBandBranchDoesNotArm` was added beyond the three the
+plan named. The Design section's "not above the branch split" is a real constraint with no assertion
+behind it otherwise: hoisting the arm above `inBandDeliverable`'s split leaves all three planned rows
+green while every in-band settings change starts refusing turns for a teardown that never happens.
+
+**Open question 1 — record level and wording: resolved as predicted.** Info, with `session` as the
+only field, and its own message (`"streamsup: turn refused; session teardown in flight"`) rather than
+sharing the rotation record, which would name a cause that did not happen. Debug is unavailable for
+the reason the plan gave. No design change.
+
+**Open question 2 — `turnTarget`'s boolean face: kept.** It reads as a layering rather than a shim in
+place: `turnTargetWithGate` answers "which gate?", `turnTarget` answers "any gate?", every read stays
+inside the one `mu` acquisition, and the eight existing in-package assertion sites are untouched.
+Confirmed not to trip staticcheck's unused-code check. No sizing change.

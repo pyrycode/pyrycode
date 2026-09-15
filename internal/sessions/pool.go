@@ -917,6 +917,12 @@ func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error {
 	// under the recomposed argv. #1574 may still NOT delete Restart, and a future
 	// slice that gives the empty value an in-band form is the one that inherits the
 	// question.
+	// Refuse writes before the kill (#1513). Inside this branch and NOT above the
+	// split: the in-band branch tears no child down, so an arm hoisted above it would
+	// refuse turns for every live settings change until the next respawn. It is
+	// non-blocking, takes no Pool lock and makes no call-out, so it is safe here past
+	// the unlock beside the two SetSpawn* calls, and it cannot delay the Restart.
+	sup.BeginTeardown()
 	sup.Restart(newArgs)
 	return nil
 }

@@ -583,7 +583,8 @@ type Runner struct {
 
 	// mu is a leaf mutex guarding WHICH CHILD, IF ANY, MAY RECEIVE A TURN: stdin
 	// (the write end of the live child's StdinPipe) together with the rotation gate
-	// (rotating + rotateGen + armFreshSeq). stdin is swapped at spawn/teardown by the Run
+	// (rotating + rotateGen + armFreshSeq) and the teardown gate (tearingDown +
+	// armChildGen). stdin is swapped at spawn/teardown by the Run
 	// goroutine and read by Stdin() from #1088's writer goroutine, so every access
 	// is serialised.
 	//
@@ -661,6 +662,50 @@ type Runner struct {
 	// first and stamping second would leave a bind able to observe an armed gate
 	// carrying a RETIRED arm's threshold and disarm by stale comparison.
 	armFreshSeq uint64
+
+	// tearingDown reports that a DELIBERATE TEARDOWN is armed and no child has bound
+	// since. BeginTeardown sets it; the three callers are both eviction arms of
+	// sessions.Session.runActive (idle timer, and the cap/force evictCh that
+	// Pool.Remove also drives) and Pool.UpdateSettings' restart branch, each arming
+	// strictly BEFORE the cancel or Restart that kills the child. While it stands
+	// every WriteUserTurn refuses with ErrNoLiveChild rather than writing into that
+	// child — #1330's loss, reached through a door #1330 did not close: the write
+	// into a doomed child's pipe returns nil, msgqueue reads nil as a confirmed
+	// commit and drops the queue head, and the message dies unread.
+	//
+	// SEPARATE FROM rotating, and the separation is the ticket (#1513) rather than
+	// bookkeeping. The two gates refuse identically and differ entirely in their
+	// RELEASE rule, because they are armed for opposite reasons: a rotation must
+	// survive a Restart-driven or crash respawn (that is armFreshSeq's whole job),
+	// while a teardown that ENDS IN exactly such a respawn must be released by it.
+	// Arming rotating from these three callers would therefore wedge the session —
+	// every turn refusing until some later RestartFresh landed — which is a worse
+	// outcome than the loss it set out to fix.
+	//
+	// Like rotating it survives takeStdin: the teardown is the MIDDLE of the window
+	// the gate covers, not its end.
+	tearingDown bool
+
+	// armChildGen is the childGeneration value standing when BeginTeardown placed the
+	// arm, and is meaningful only while tearingDown is true. It is the RELEASE-side
+	// threshold, and it is armFreshSeq's opposite number in shape and in effect:
+	// setStdin releases the teardown gate for a binding child whose post-bump
+	// childGeneration is STRICTLY GREATER, and since setStdin bumps that counter on
+	// every bind, ANY successor child satisfies it. That is the property the arm
+	// needs and the one armFreshSeq deliberately withholds.
+	//
+	// Written in the SAME mu acquisition that sets tearingDown, for armFreshSeq's
+	// reason verbatim: arming first and stamping second would leave a bind able to
+	// observe an armed gate carrying a retired arm's threshold.
+	//
+	// Two overlapping teardown arms need no rotateGen-style stamp and no abort. The
+	// later arm carries the higher threshold and one bind satisfies both, and a
+	// stray arm cannot wedge anything because the next bind of ANY child clears it —
+	// which is exactly what rotating's abort exists to compensate for and what this
+	// release rule makes unnecessary. Monotonic and process-local: never persisted,
+	// never serialised, never logged, and not an authorisation token — it gates only
+	// the permissive direction, the release of a refusal.
+	armChildGen uint64
 
 	// stateMu is a leaf mutex guarding state, the control-plane snapshot. The
 	// Run goroutine writes it via updateState; State() reads it from any
@@ -910,25 +955,103 @@ func (r *Runner) BeginRotation() (abort func()) {
 	}
 }
 
-// turnTarget reports the writer a turn may be written to — nil while a rotation is
-// armed and nil when no child is live — together with whether the ROTATION GATE is
-// what refused, under ONE r.mu acquisition. That single acquisition is the whole
-// property: see mu's doc for why splitting the two reads reopens #1330's race at
-// nanosecond width.
+// BeginTeardown arms the teardown gate: from this call until the next child binds
+// its stdin, every WriteUserTurn refuses with ErrNoLiveChild instead of writing into
+// the child the accompanying kill is about to take down (#1513). Its three callers
+// are in internal/sessions — both eviction arms of Session.runActive and
+// Pool.UpdateSettings' restart branch — and each places it strictly BEFORE the
+// cancel or Restart it pairs with, and before anything that publishes the teardown
+// to clients, which is #1330's placement rule applied to a deliberate kill.
+//
+// It captures the RELEASE-side threshold in the same acquisition: the
+// childGeneration value standing when the arm is placed, against which setStdin
+// measures each binding child. Because setStdin bumps that counter on every bind,
+// ANY successor child ends this window — including the Restart-driven and
+// crash-off-the-backoff-ladder binds whose freshSeq snapshot reads EQUAL to
+// armFreshSeq and which therefore leave a rotation arm standing (#1482). That
+// difference is why this is a second gate rather than a third caller of
+// BeginRotation: these teardowns END IN exactly the respawns a rotation must
+// survive, so arming rotating here would wedge the session until some later
+// RestartFresh landed.
+//
+// Unlike BeginRotation it takes ONE leaf mutex, not two: the threshold it needs
+// lives under mu beside the flag, so there is no restartMu read to sequence and the
+// residual window BeginRotation documents between its two acquisitions does not
+// exist here.
+//
+// It returns NO disarm, deliberately. BeginRotation needs one because its gate can
+// outlive a rotation that never happened, and nothing else would bring it down;
+// this gate is self-clearing at the next bind of any child, so a stray arm costs at
+// most the turns inside one respawn. Both callers are unconditional in any case —
+// cancelSup always runs on the arms that reach it, and Restart returns nothing and
+// cannot fail.
+//
+// Like BeginRotation it drives only Runner-internal state — one leaf mutex, no
+// channel, no log call, no call-out — so the sessions layer calls it with no Pool
+// lock held and it cannot delay the kill that follows it. Safe from any goroutine.
+func (r *Runner) BeginTeardown() {
+	r.mu.Lock()
+	r.tearingDown = true
+	r.armChildGen = r.childGeneration
+	r.mu.Unlock()
+}
+
+// turnGate names which gate, if any, refused a turn. The zero value is "none", so a
+// caller that only needs the boolean question can compare against gateOpen — which
+// is what turnTarget does.
+type turnGate uint8
+
+const (
+	gateOpen turnGate = iota
+	gateRotation
+	gateTeardown
+)
+
+// turnTargetWithGate reports the writer a turn may be written to — nil while either
+// gate is armed and nil when no child is live — together with WHICH gate refused,
+// under ONE r.mu acquisition. That single acquisition is the whole property: see
+// mu's doc for why splitting the reads reopens #1330's race at nanosecond width.
+// Widening the answer from a bool to a turnGate keeps every read inside it, so the
+// charter is unchanged rather than stretched.
+//
+// gateRotation is tested FIRST, so a doubly-armed runner reports the rotation: it is
+// the arm with the stricter release rule and the record an operator can act on.
+//
+// gateTeardown is reported only while a handle is BOUND. With stdin nil the method
+// falls through to the nil-handle branch, and the refusal is byte-identical either
+// way — nil writer, ErrNoLiveChild, zero bytes — so nothing is weakened: with no
+// child bound the gate has nothing to protect. What this avoids is a log-volume
+// regression, since an arm placed by an eviction that ends in no respawn stands
+// until the session is next activated, and reporting it unconditionally would turn
+// an evicted session's silent refusal into one record per delivery attempt for as
+// long as it sits evicted. The rotation gate's own ordering is deliberately left
+// byte-identical: its window always ends in a respawn, so a standing arm past one is
+// the anomaly its record is argued to be loud about.
 //
 // The nil-handle branch returns an untyped nil rather than r.stdin, for the same
 // reason Stdin() does: a typed-nil io.WriteCloser widened to io.Writer is not nil,
 // and WriteTurn's no-live-child refusal keys on the interface being nil.
-func (r *Runner) turnTarget() (w io.Writer, gated bool) {
+func (r *Runner) turnTargetWithGate() (w io.Writer, gate turnGate) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.rotating {
-		return nil, true
+		return nil, gateRotation
 	}
 	if r.stdin == nil {
-		return nil, false
+		return nil, gateOpen
 	}
-	return r.stdin, false
+	if r.tearingDown {
+		return nil, gateTeardown
+	}
+	return r.stdin, gateOpen
+}
+
+// turnTarget is turnTargetWithGate's boolean face, for callers that need only "may
+// a turn be written?" and not which gate refused. WriteUserTurn needs the fuller
+// answer because the two gates carry different operator records; nothing else does.
+func (r *Runner) turnTarget() (w io.Writer, gated bool) {
+	w, gate := r.turnTargetWithGate()
+	return w, gate != gateOpen
 }
 
 // WriteUserTurn writes the user envelope to the live child's stdin and claims
@@ -958,7 +1081,7 @@ func (r *Runner) turnTarget() (w io.Writer, gated bool) {
 // stream_turn_busy.go, session_transition_v2.go), and streamsup logs none today.
 // Neither may payload bytes be.
 func (r *Runner) WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error {
-	w, gated := r.turnTarget()
+	w, gate := r.turnTargetWithGate()
 	// The POSTURE gate is read SECOND, in its own acquisition, and the order is the
 	// correctness argument rather than a detail (#2064). arm() strictly precedes
 	// setStdin, so a handle observed live has already had its child's gate armed;
@@ -997,7 +1120,18 @@ func (r *Runner) WriteUserTurn(ctx context.Context, conversationID string, paylo
 		}
 		w = nil
 	}
-	if gated {
+	if gate == gateTeardown {
+		// A deliberate teardown (#1513): an eviction, or the respawn
+		// Pool.UpdateSettings drives for a setting with no in-band form. Its own
+		// record rather than the rotation's, because "rotation in flight" would name a
+		// cause that did not happen and send an operator looking for a new_session
+		// frame there is none of. Every constraint on the rotation record below
+		// applies here verbatim and for the same reasons: OUTSIDE r.mu, at Info and
+		// not Debug, with the session id as the ONLY field.
+		r.log.Info("streamsup: turn refused; session teardown in flight",
+			"session", r.liveSessionID())
+	}
+	if gate == gateRotation {
 		// Emitted OUTSIDE r.mu: a slow slog handler must never block the Run
 		// goroutine's setStdin, which is the thing that ends this very window.
 		//
@@ -2227,6 +2361,15 @@ func (r *Runner) setStdin(w io.WriteCloser, spawnFreshSeq uint64, mcpEligible bo
 	r.childGeneration++
 	if spawnFreshSeq > r.armFreshSeq {
 		r.rotating = false
+	}
+	// The teardown gate's release, beside the rotation gate's so the two thresholds
+	// read together (#1513). Same shape, different counter, and deliberately the
+	// weaker authorisation: the bump above happens first, so EVERY bind after an arm
+	// reads strictly greater and ends the window — including the Restart-driven and
+	// crash respawns the line above refuses, which are precisely the successors a
+	// teardown ends in.
+	if r.childGeneration > r.armChildGen {
+		r.tearingDown = false
 	}
 	r.mu.Unlock()
 }
