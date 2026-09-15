@@ -26,12 +26,22 @@ import (
 // control work on the stream path, and it is why the signal is a guarantee rather
 // than a hint — see waitIdleForDelivery for the ordering argument.
 //
-// It stores membership only: a conversation key and the fact that it is mid-turn.
-// Never the event, its content, a turn id, a timestamp, or a count. Absent key ≡
-// idle ≡ unknown ≡ unbound ≡ never seen, all through one map lookup, which is what
-// keeps Busy from becoming a "does conversation X exist" oracle (#1101, the
-// posture screenSnapshotterOrNil records). The map is bounded by the
-// conversations currently mid-turn, not by every conversation ever seen.
+// It stores membership and ONE ordering token: a conversation key, the fact that it
+// is mid-turn, and the fan-in exit-lane position that mark is guarded against
+// (#1483). Never the event, its content, a turn id, or a timestamp. This sentence
+// used to end at "membership only … never a count" and is corrected HERE, in the
+// change that falsified it, because nothing reddens when a comment goes stale.
+//
+// The correction is narrower than it looks, and the narrowness is the security
+// property rather than a consolation. The token is daemon-minted — one atomic
+// counter on streamTurnSink, never derived from anything a child produced or
+// anything a payload carried — it is written only on the idle→busy transition, it
+// dies with the mark, and NO METHOD RETURNS IT. Busy and ToolCallInFlight keep their
+// signatures, so absent key ≡ idle ≡ unknown ≡ unbound ≡ never seen still collapse to
+// one bool through one map lookup, which is what keeps Busy from becoming a "does
+// conversation X exist" oracle (#1101, the posture screenSnapshotterOrNil records).
+// The map is bounded by the conversations currently mid-turn, not by every
+// conversation ever seen.
 //
 // A SECOND membership set sits beside it, and it is membership too: inflight
 // holds the tool calls that have not finished, keyed by conversation and then by
@@ -48,8 +58,19 @@ import (
 // (observe); a pool teardown transition — a /clear rotation or an idle/cap
 // eviction — reaching clearForSession (#1202); and a child that dies mid-turn,
 // which fires no pool transition and emits no result line for the abandoned turn,
-// reaching clearForSession through the drain's exit arm (the #1209 lane, fired in
+// reaching clearForExit through the drain's exit arm (the #1209 lane, fired in
 // production by the producer newStreamRunnerFactory installs, #1210).
+//
+// The third of those is CONDITIONAL since #1483, and the "no reachable sequence"
+// claim above survives it feed by feed. clearForExit declines an exit that was
+// offered to the fan-in at or before the mark it would clear — a mark the dying
+// child cannot have opened, since the mark postdates its exit. Such a mark is
+// openForDelivery's, and it is closed by that delivery's own turn: by its TurnEnd if
+// the write commits, by openForDelivery's undo if the write fails (which is what a
+// child that never respawned produces — ErrNoLiveSession, in the same statement
+// sequence), by a pool teardown, or by that respawned child's own later exit. What a
+// decline can never do is the thing this tracker exists to prevent: report a LIVE
+// turn idle and release the next queued message into it.
 //
 // ONE FEED BESIDES observe OPENS one: openForDelivery, called by the delivery seam
 // (#1199) inside the same statement sequence that immediately performs the write.
@@ -115,9 +136,37 @@ type turnBusyTracker struct {
 	// session_transition_v2.go keeps.
 	resolve func(sessionID string) (conversationID string, ok bool)
 	logger  *slog.Logger
+	// exitEpoch reads the fan-in's exit-lane position, and is the source of the
+	// token openForDelivery stamps on its mark (#1483). Production binds
+	// (*streamTurnSink).exitEpoch through withExitEpoch; nil means this tracker sits
+	// behind no fan-in.
+	//
+	// CALLED WITH t.mu HELD, which is the opposite of resolve's contract one field
+	// up, and both directions are load-bearing. resolve must stay OUTSIDE the lock
+	// because it takes the conversations registry's mutex; this one must be read
+	// INSIDE it because reading the position before the mark reopens the very race
+	// the guard closes — an exit offered in the gap would carry a stamp above the
+	// recorded position and be honoured. So whatever is bound here must be
+	// non-blocking and must take no lock. One atomic load is the production answer.
+	//
+	// FAIL-OPEN WHEN UNBOUND, and a reader touching the wiring should know it: a nil
+	// source stamps every mark 0, every real exit stamp is >= 1, and the guard
+	// therefore declines nothing — the exact pre-#1483 behaviour. That is deliberate
+	// for the ~36 test constructions that want the incumbent semantics and for a PTY
+	// daemon that has no fan-in, but it also means DROPPING withExitEpoch from
+	// runSupervisor silently retires the guard with nothing red and nothing logged.
+	// Panicking instead would break every incumbent construction site, and a
+	// construction-time Warn would fire on all of them to defend a failure that has
+	// not been observed; this comment is the deterrent, and the single production
+	// binding is review-verified.
+	exitEpoch func() uint64
 
-	mu   sync.Mutex
-	busy map[string]struct{}
+	mu sync.Mutex
+	// busy maps a mid-turn conversation to the exit-lane position its mark is
+	// guarded against — 0 for every feed that needs no guard, which is all of them
+	// but openForDelivery. Membership is the answer Busy and WaitIdle read; the
+	// value is read by exactly one caller, clearGuarded.
+	busy map[string]uint64
 	// inflight holds the tool calls currently in flight, keyed by conversation and
 	// then by claude's tool_use_id. NESTED rather than a flat
 	// map[toolCallID]conversationID, and that is a SECURITY property rather than a
@@ -137,24 +186,48 @@ type turnBusyTracker struct {
 	changed chan struct{}
 }
 
+// turnBusyOption is a construction-time binding on turnBusyTracker. There is
+// exactly one, and the variadic form is load-bearing rather than stylistic: a
+// required third parameter would touch 38 construction sites across eight test
+// files, which is over the one-ticket call-site boundary and is not made cheaper by
+// each edit being trivial. A post-construction setter would trade that for a "call
+// before publishing" contract the race detector cannot check, so the binding stays
+// inside the constructor where it is atomic by construction.
+type turnBusyOption func(*turnBusyTracker)
+
+// withExitEpoch binds the fan-in's exit-lane position source, arming the stale-exit
+// guard clearForExit applies (#1483). Production passes
+// (*streamTurnSink).exitEpoch from runSupervisor, where the sink and this
+// constructor are already adjacent.
+//
+// Omitting it — or passing nil — leaves the guard disarmed rather than failing: see
+// the exitEpoch field for why that direction was chosen and what it costs.
+func withExitEpoch(exitEpoch func() uint64) turnBusyOption {
+	return func(t *turnBusyTracker) { t.exitEpoch = exitEpoch }
+}
+
 // newTurnBusyTracker constructs the tracker. It panics if resolve is nil — a
 // programmer error the type cannot function without, matching eventring.New's
 // panic-on-misconfig (`New` in ring.go). A nil logger falls back to slog.Default,
 // mirroring newStreamTurnSink.
-func newTurnBusyTracker(resolve func(sessionID string) (conversationID string, ok bool), logger *slog.Logger) *turnBusyTracker {
+func newTurnBusyTracker(resolve func(sessionID string) (conversationID string, ok bool), logger *slog.Logger, opts ...turnBusyOption) *turnBusyTracker {
 	if resolve == nil {
 		panic("turnBusyTracker: resolve must not be nil")
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &turnBusyTracker{
+	t := &turnBusyTracker{
 		resolve:  resolve,
 		logger:   logger,
-		busy:     make(map[string]struct{}),
+		busy:     make(map[string]uint64),
 		inflight: make(map[string]map[string]struct{}),
 		changed:  make(chan struct{}),
 	}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
 }
 
 // turnMark is one fan-in event's effect on this tracker's per-conversation mark.
@@ -336,16 +409,21 @@ func (t *turnBusyTracker) observe(sessionID string, ev turnevent.Event) {
 	t.setBusy(convID, opens, toolCallDeltaFor(ev))
 }
 
-// clearForSession closes any open turn on the conversation that owns sessionID.
-// Those are exactly the turns whose TurnEnd never arrives, so observe alone would
-// leave the conversation busy forever. It has TWO callers:
+// clearForSession closes any open turn on the conversation that owns sessionID,
+// UNCONDITIONALLY. Those are exactly the turns whose TurnEnd never arrives, so
+// observe alone would leave the conversation busy forever.
 //
-//   - the teardown feed (#1202), driven from the pool's TransitionObserver on a
-//     /clear rotation or an idle/cap eviction (`startSessionTransitionStreamV2`);
-//   - the drain's exit arm (#1209), reached when a child-exit signal rides the
-//     fan-in ahead of the tracker feed (stream_turn_drain.go). That lane is fired
-//     in production by the per-runner producer newStreamRunnerFactory installs
-//     (streamsup_runner.go, #1210), so a child that dies mid-turn clears here.
+// It has ONE caller since #1483: the teardown feed (#1202), driven from the pool's
+// TransitionObserver on a /clear rotation or an idle/cap eviction
+// (`startSessionTransitionStreamV2`). The drain's exit arm used to be the second and
+// now goes through clearForExit instead, because the two wanted opposite things from
+// the same method. The exit arm is ordered against the fan-in and must refuse an
+// exit enqueued before the mark it would clear; this feed is ordered against nothing
+// on that channel — it is driven by a pool transition on the pool's own goroutine —
+// so an epoch condition here would have no position to compare against and would
+// decline clears it is the last feed for. That is why the condition lives on a
+// method THIS caller cannot reach by name, rather than on a parameter this one
+// passes a zero to.
 //
 // A nil receiver is a no-op, mirroring observe. This is not defensive padding:
 // the transition observer is wired UNCONDITIONALLY (relay.go) while the tracker
@@ -356,24 +434,20 @@ func (t *turnBusyTracker) observe(sessionID string, ev turnevent.Event) {
 // and to no other. The caller's parameter is likewise the concrete
 // *turnBusyTracker and never an interface, for the reason observe documents.
 //
-// It runs SYNCHRONOUSLY on its caller's goroutine — the one that fired the
-// transition, or the drain goroutine for the exit arm — and must not block on
-// either. #659's observer contract requires it of the first; for the second the
-// requirement is the drain's own, since a stalled clear would wedge the whole
-// fan-in, the coalescing flush timer included. That holds: the work is one resolve
-// (a slice-header copy under the conversations registry's mutex — Save releases
-// that mutex BEFORE any file I/O), one map delete
+// It runs SYNCHRONOUSLY on the goroutine that fired the transition and must not
+// block it — #659's observer contract requires that. That holds: the work is one
+// resolve (a slice-header copy under the conversations registry's mutex — Save
+// releases that mutex BEFORE any file I/O), one map delete
 // and one close, all bounded with no channel receive, no I/O and no callback out.
 // The transition caller already pays a full atomic write including fsync one line
 // earlier on the /clear path (`notifyTransition` → rebindConversation →
 // Save), so a leaf-mutex membership delete is orders of magnitude cheaper than
 // what it has already spent before the observer is even called.
 //
-// On the drain goroutine this feed is additionally serialised against observe by
-// CONSTRUCTION — same single reader, one envelope at a time — rather than by t.mu.
-// The two callers still run concurrently with each other, which is what setBusy's
-// single lock acquisition covers; both clears are idempotent and same-direction,
-// so no interleaving of them can produce a spurious open.
+// This feed and clearForExit still run concurrently with each other, which is what
+// the single lock acquisition under applyBusyLocked covers; both clears are
+// idempotent and same-direction, so no interleaving of them can produce a spurious
+// open.
 //
 // The key is a SESSION id, never a conversation id. The only production producer
 // of the value is internal/sessions' own record of a lifecycle event it
@@ -409,6 +483,103 @@ func (t *turnBusyTracker) clearForSession(sessionID string) {
 	t.setBusy(convID, false, toolCallDelta{})
 }
 
+// clearForExit is the drain exit arm's door onto the clear (#1483): it closes any
+// open turn on the conversation that owns sessionID UNLESS the exit envelope that
+// carried exitEpoch was offered to the fan-in at or before the mark it would clear.
+//
+// It exists because the FIFO argument the exit lane rests on (#1209 — the fan-in has
+// a single reader, so a clear riding it cannot overtake the openers the dead child
+// already pushed) covers every mark placed FROM the fan-in and not the one placed
+// beside it. openForDelivery writes its mark straight into this tracker from the
+// msgqueue drain goroutine, so a stale exit still queued behind a background
+// conversation's event burst can be drained after that mark and spend itself on the
+// RESPAWNED child's turn — releasing the next queued message into a live turn, which
+// is the race #1199's tracker exists to prevent.
+//
+// THE SESSION ID CANNOT DISCRIMINATE, which is why a position is needed at all:
+// RestartFresh rotates sessionID and fires OnSessionRotate before it cancels, so the
+// dying child's exit envelope carries the NEW id and resolves to the same
+// conversation as the mark.
+//
+// WHERE IT IS UNCERTAIN IT DECLINES. A declined clear is recovered by four other
+// feeds — the delivered turn's own TurnEnd, openForDelivery's undo on a failed
+// write, a pool teardown, and that runner's next exit — and the residual beyond all
+// four is a legitimately running turn, bounded per attempt by streamTurnHoldTimeout
+// and across attempts by msgqueue's give-up, surfacing as a typed session_error
+// exactly as #1199 AC3 specifies. A clear performed wrongly has no recovery at all:
+// the message is already in the child's stdin, interleaved into somebody else's
+// turn. The two errors are not symmetric, so neither is the guard.
+//
+// Nil-receiver safe and structured exactly as clearForSession — the resolve outside
+// t.mu for the lock-order reason observe documents, the same fail-closed
+// clear_unresolved skip, the same content-free record. It is reached only from the
+// drain goroutine, so it inherits that goroutine's single-reader serialisation
+// against observe by CONSTRUCTION rather than by t.mu.
+func (t *turnBusyTracker) clearForExit(sessionID string, exitEpoch uint64) {
+	if t == nil {
+		return
+	}
+
+	// Resolved OUTSIDE t.mu — the identical lock-order reason observe documents, and
+	// the identical fail-closed answer clearForSession gives on a miss.
+	convID, ok := t.resolve(sessionID)
+	if !ok || convID == "" {
+		// SECURITY: content-free, and session_id ONLY — the resolved conversation id
+		// is withheld for the reason clearForSession's own skip states.
+		t.logger.Debug("relay: stream-turn clear skip; session resolves to no conversation",
+			"event", "stream_turn.clear_unresolved",
+			"session_id", sessionID)
+		return
+	}
+
+	if t.clearGuarded(convID, exitEpoch) {
+		// Logged AFTER clearGuarded has released t.mu, never under it: this type
+		// takes no I/O under its own lock, and a handler doing real work is I/O.
+		//
+		// Debug, matching clear_unresolved rather than the exit lane's Warn drops.
+		// This is an expected, millisecond-bounded outcome on a rotation path, not
+		// degraded operation — the four recovery feeds above are all still live.
+		//
+		// SECURITY: content-free, and deliberately NARROWER than the field set a
+		// reader might want. No conversation id (the routing key this type treats as
+		// sensitive alongside session ids and workspace_cwd) and no epoch values: the
+		// counter is global across runners, so stamping it on one conversation's
+		// record would disclose the daemon's total exit volume into a record about a
+		// single conversation. Convenience is not reason enough to widen a surface
+		// this type keeps auditable at a glance.
+		t.logger.Debug("relay: stream-turn clear declined; exit predates the delivery mark",
+			"event", "stream_turn.clear_stale_exit",
+			"session_id", sessionID)
+	}
+}
+
+// clearGuarded applies the exit-lane guard and the membership delete under ONE
+// acquisition of t.mu, reporting whether the guard declined the clear.
+//
+// The single acquisition is the whole point rather than an optimisation. Split
+// across two, a mark placed in the gap — openForDelivery runs on the msgqueue drain
+// goroutine while this runs on the stream-turn drain goroutine — would be cleared by
+// an exit that predates it, which is the filed bug re-opened one layer further down
+// and invisible to -race because both paths hold t.mu.
+//
+// The predicate: an exit stamped at or below the mark's recorded position was
+// offered to the fan-in before that mark was placed, so it belongs to a child the
+// mark did not name. A mark recording 0 — every feed but openForDelivery, and
+// openForDelivery itself on a tracker with no epoch source — is below every real
+// stamp (exitEpoch pre-increments, so the first exit carries 1) and is therefore
+// never declined. An absent mark is not a decline either: there is nothing to
+// protect, and applyBusyLocked's close is the incumbent no-op delete.
+func (t *turnBusyTracker) clearGuarded(conversationID string, exitEpoch uint64) (declined bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if mark, marked := t.busy[conversationID]; marked && exitEpoch <= mark {
+		return true
+	}
+	t.applyBusyLocked(conversationID, false, toolCallDelta{}, 0)
+	return false
+}
+
 // setBusy applies one membership change for conversationID — AND that event's
 // tool-call delta — under a SINGLE t.mu acquisition, broadcasting on t.changed
 // only when the busy set actually moved, and reports whether it moved.
@@ -436,10 +607,34 @@ func (t *turnBusyTracker) clearForSession(sessionID string) {
 // never opened, reporting a live turn idle and letting the next message through
 // unheld. The two event-driven callers discard it, which Go permits with no edit
 // at their call sites.
+//
+// It stamps epoch 0 — no guard — for every feed that reaches it, which since #1483
+// is every feed but openForDelivery. That is not a default chosen for convenience:
+// an exit can only be stale with respect to a mark placed OUTSIDE the fan-in's
+// order, and observe's marks are placed from the fan-in itself, in envelope order,
+// so an exit pushed before one of them is drained before it exists. Epoch 0 for
+// observe is the FIFO argument restated, not an exemption from the guard.
 func (t *turnBusyTracker) setBusy(conversationID string, open bool, tool toolCallDelta) (changed bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.applyBusyLocked(conversationID, open, tool, 0)
+}
 
+// applyBusyLocked is setBusy's body, requiring t.mu HELD. Extracted in #1483 so the
+// guarded clear and the stamped open can each take the lock once — around their own
+// read-and-mutate — while still sharing ONE copy of the close-and-replace protocol
+// below. That protocol is the invariant WaitIdle's check-and-subscribe atomicity
+// depends on, and a second, independently-written copy of it is precisely the
+// lost-wakeup bug #1202's extraction foreclosed; this split preserves that, where a
+// hand-rolled guarded clear would have undone it.
+//
+// epoch is the exit-lane position the mark is guarded against, and is written ONLY
+// on the idle→busy transition. That falls out of the membership early return rather
+// than needing a branch, and it is the behaviour the guard needs: a mark keeps the
+// position of whoever actually placed it, so neither a later opener from observe nor
+// a later openForDelivery on an already-busy conversation can lower a standing
+// mark's guard. On a close it is meaningless and unread — the entry is deleted.
+func (t *turnBusyTracker) applyBusyLocked(conversationID string, open bool, tool toolCallDelta, epoch uint64) (changed bool) {
 	// The tool delta is applied BEFORE the membership comparison, and that
 	// ordering is a contract rather than a detail. A ToolStart mid-turn arrives on
 	// an ALREADY-BUSY conversation, so open == was and the early return below
@@ -475,7 +670,7 @@ func (t *turnBusyTracker) setBusy(conversationID string, open bool, tool toolCal
 		return false // membership unchanged: no mutation, and no broadcast
 	}
 	if open {
-		t.busy[conversationID] = struct{}{}
+		t.busy[conversationID] = epoch
 	} else {
 		delete(t.busy, conversationID)
 		// The whole sweep, one statement: a closing turn takes its retained calls
@@ -655,8 +850,42 @@ func (t *turnBusyTracker) openForDelivery(conversationID string) (undo func()) {
 	// the old child is still streaming. Discarding it there is correct rather than
 	// incidental: inflight moves with busy under one lock acquisition, so a
 	// conversation this tracker reports idle never retains a call.
-	if !t.setBusy(conversationID, true, toolCallDelta{}) {
+	//
+	// THE EPOCH IS READ UNDER THE SAME LOCK ACQUISITION AS THE MARK (#1483), never
+	// before it. This mark is the one placed outside the fan-in's order, so it is the
+	// one a stale exit can reach; the position it records is what clearForExit
+	// compares that exit's stamp against. Reading the position before taking the lock
+	// would reopen the race in miniature — an exit offered in the gap was enqueued
+	// before the mark, yet would carry a stamp above the recorded position and be
+	// honoured. Reading it late is the conservative direction: too high declines a
+	// clear four other feeds recover, too low releases a message into a live turn and
+	// nothing recovers that.
+	//
+	// The read is a call-out under t.mu, which this type otherwise refuses (resolve
+	// is kept outside it). The exitEpoch field carries the contract that makes it
+	// safe — non-blocking, takes no lock — and production satisfies it with a single
+	// atomic load, so no lock order is established and none has to be kept answered.
+	t.mu.Lock()
+	changed := t.applyBusyLocked(conversationID, true, toolCallDelta{}, t.exitEpochLocked())
+	t.mu.Unlock()
+
+	if !changed {
 		return func() {}
 	}
 	return func() { t.setBusy(conversationID, false, toolCallDelta{}) }
+}
+
+// exitEpochLocked reads the bound fan-in's exit-lane position, answering 0 when this
+// tracker sits behind no fan-in. Requires t.mu held, per the exitEpoch field's
+// contract; the suffix is the reminder, since the read itself would be race-free
+// either way and only its ATOMICITY WITH THE MARK makes the guard sound.
+//
+// The nil answer of 0 disarms the guard rather than failing closed, and that
+// direction is deliberate — see the exitEpoch field for what it buys and what it
+// costs.
+func (t *turnBusyTracker) exitEpochLocked() uint64 {
+	if t.exitEpoch == nil {
+		return 0
+	}
+	return t.exitEpoch()
 }

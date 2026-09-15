@@ -343,6 +343,29 @@ No documentation file is edited by this ticket.
    Resolve during implementation; if the pairing reads badly, rename the accessor rather than the
    field — the field is the one that appears in test literals.
 
+## Revisions
+
+**2026-09-15 — Phase B.** The design landed as planned; the three Open Questions resolved without
+changing it.
+
+1. **Arming `exitLaneDrain` moved no incumbent assertion.** All four #1209/#1917 exit-lane tests
+   pass against the armed fixture, as predicted: every mark in them is `observe`-placed and
+   therefore records 0, which is below every real stamp. The fixture was split into
+   `exitLaneDrainDeferred` (drain not yet started) with `exitLaneDrain` delegating to it, so the
+   new AC1 drain-tier test can state its ordering instead of racing for it. No incumbent caller
+   changed.
+2. **`go vet ./...` is clean** with `atomic.Uint64` on `streamTurnSink`; nothing in the tree copies
+   the sink by value. `staticcheck`, `gofmt`, `make cite-guard` and `make docs-guard` are clean too.
+3. **Naming kept.** `exitEpoch` names the sink accessor, the envelope field and the tracker's
+   injected source, because in all three it means the same thing — a position on the fan-in's exit
+   lane. One addition the plan did not name: `exitEpochLocked`, a two-line reader on the tracker
+   that answers 0 for an unbound source, so `openForDelivery`'s single lock acquisition stays one
+   statement and the `…Locked` suffix carries the held-mutex requirement.
+
+The SHOULD FIX from the security review is implemented as specified: the fail-open direction is
+stated on the `exitEpoch` field, on `withExitEpoch`, on `exitEpochLocked`, and at the
+`runSupervisor` binding, and it is asserted by the "unarmed tracker declines nothing" sub-case.
+
 ## Security review
 
 **Verdict:** PASS

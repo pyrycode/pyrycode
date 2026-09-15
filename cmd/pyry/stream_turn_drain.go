@@ -79,6 +79,21 @@ type streamTurnEnvelope struct {
 	ev        turnevent.Event
 	// exit marks a child-exit signal for sessionID; ev is unset and never read.
 	exit bool
+	// exitEpoch is this exit's position on the fan-in's exit lane, stamped by
+	// exitForTag at push and left zero on an event envelope, where it is
+	// meaningless and never read.
+	//
+	// It answers the one question the FIFO argument above cannot (#1483). That
+	// argument covers every mark placed FROM this channel, because the drain places
+	// those in envelope order — but openForDelivery writes a mark straight into
+	// turnBusyTracker from the msgqueue drain goroutine, bypassing the fan-in
+	// entirely, so an exit still queued behind a busy conversation's event burst can
+	// be drained AFTER that mark. Comparing this stamp against the position the mark
+	// recorded is what tells a dying child's already-stale exit from the respawned
+	// child's own. The session id cannot: RestartFresh rotates sessionID and fires
+	// OnSessionRotate BEFORE it cancels, so the dying child's exit carries the NEW id
+	// and resolves to the same conversation.
+	exitEpoch uint64
 }
 
 // streamTurnSink is the late-bound, daemon-singleton fan-in that lines up two
@@ -101,6 +116,22 @@ type streamTurnSink struct {
 	// take. Computed once at construction so the hot path is one integer compare.
 	droppableCap int
 	logger       *slog.Logger
+	// exits counts the child-exit signals offered to this fan-in and is the sole
+	// source of every envelope's exitEpoch (#1483). EXITS ONLY, never events: only
+	// exit stamps are ever compared, so leaving the event path untouched keeps
+	// claude's stdout forwarder free of it and shrinks the invariant a reader has to
+	// hold to "how many exits has this fan-in accepted".
+	//
+	// Atomic rather than mutex-guarded, for the reason streamSessionTag gives on this
+	// same pair of goroutines: the writer is the runner's supervision goroutine and
+	// the reader sits on turnBusyTracker's lock path, and a single atomic word has no
+	// ordering to state where a mutex would have one to keep answered.
+	//
+	// A monotone counter and nothing else. It is fully predictable by construction,
+	// so it is never a nonce, a token, or a uniqueness source for anything
+	// security-relevant. Wraparound is not defended against: uint64 needs ~1.8e19
+	// child exits, ~5.8e8 years at a sustained 1000 crashes per second.
+	exits atomic.Uint64
 }
 
 // newStreamTurnSink constructs the fan-in. buf <= 0 falls back to
@@ -222,6 +253,13 @@ func (t *streamSessionTag) CompareAndSwap(oldID, newID string) bool {
 func (s *streamTurnSink) sinkFor(sessionID string) func(turnevent.Event) {
 	return s.sinkForTag(func() string { return sessionID })
 }
+
+// exitEpoch reports the fan-in's exit-lane position right now — the stamp the most
+// recently offered exit envelope carried, or 0 before the first one. It is what
+// runSupervisor binds into the turn-busy tracker (withExitEpoch), which reads it
+// while holding its own mutex, so it must stay exactly what it is: one atomic load,
+// no lock taken, no allocation, nothing that can block.
+func (s *streamTurnSink) exitEpoch() uint64 { return s.exits.Load() }
 
 // exitFor is exitForTag's frozen-tag form, standing to it exactly as sinkFor
 // stands to sinkForTag and for the same reason.
@@ -365,8 +403,15 @@ func (s *streamTurnSink) sinkForTag(tag func() string) func(turnevent.Event) {
 func (s *streamTurnSink) exitForTag(tag func() string) func() {
 	return func() {
 		sessionID := tag()
+		// Stamped BEFORE the send and never after (#1483). The guard's correctness
+		// rests on an exit offered ahead of a mark carrying a stamp that mark's own
+		// read cannot miss, and sync/atomic is sequentially consistent: a Load issued
+		// after this Add returned observes at least this value. A DROPPED exit still
+		// consumes a stamp, which only inflates later ones — and inflation moves the
+		// guard toward declining, the safe direction (`clearForExit`).
+		epoch := s.exits.Add(1)
 		select {
-		case s.ch <- streamTurnEnvelope{sessionID: sessionID, exit: true}:
+		case s.ch <- streamTurnEnvelope{sessionID: sessionID, exit: true, exitEpoch: epoch}:
 		default:
 			// SECURITY: content-free, and no "kind" — there is no event to name.
 			// The resolved conversation id is absent because this closure holds no
@@ -444,12 +489,20 @@ func startStreamTurnDrainV2(
 					//
 					// Called synchronously on this goroutine, never handed to another:
 					// a deferred clear could land after a turn opened by the RESPAWNED
-					// child and report a live turn idle. clearForSession is reused as-is
-					// — no second session→conversation resolution and no second copy of
-					// the membership-mutation protocol (`setBusy`) —
-					// and it is a nil-receiver no-op, so a drain with no tracker is
-					// unaffected.
-					busy.clearForSession(env.sessionID)
+					// child and report a live turn idle.
+					//
+					// clearForExit rather than clearForSession, and the split is the
+					// whole of #1483. The two callers of the clear have opposite
+					// ordering needs: this arm is ordered against the fan-in and must
+					// refuse an exit that was enqueued before the mark it would clear,
+					// while the teardown feed (the pool's transition observer) is not
+					// ordered against anything here and must clear unconditionally. So
+					// the epoch condition lives on a door the teardown feed cannot reach
+					// by name. Everything else is unchanged: one session→conversation
+					// resolution, one copy of the membership-mutation protocol
+					// (`applyBusyLocked`), and a nil-receiver no-op so a drain with no
+					// tracker is unaffected.
+					busy.clearForExit(env.sessionID, env.exitEpoch)
 					continue
 				}
 

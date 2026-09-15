@@ -1028,6 +1028,60 @@ func TestStreamTurnSink_TagRotationRetagsBothLanes(t *testing.T) {
 	}
 }
 
+// #1483 at the fan-in tier: the exit lane is stamped with its own position, in push
+// order, and the EVENT lane is not stamped at all.
+//
+// Both halves are the assertion. A counter that also advanced on events would still
+// give the guard a monotone position, so the positive half alone cannot catch it —
+// but it would put an unsynchronised increment on claude's stdout forwarder for
+// every event, which is the cost the exits-only choice exists to avoid.
+//
+// No drain runs: the envelopes are read straight off the channel, so the ordering is
+// the send ordering and nothing is timing-dependent — the shape
+// TestStreamTurnSink_TagRotationRetagsBothLanes established.
+func TestStreamTurnSink_ExitEpochStampsExitsOnly(t *testing.T) {
+	t.Parallel()
+	sink := newStreamTurnSink(0, discardLogger())
+
+	if got := sink.exitEpoch(); got != 0 {
+		t.Fatalf("exitEpoch() on a fresh sink = %d, want 0", got)
+	}
+
+	events := sink.sinkFor("sess-a")
+	exit := sink.exitFor("sess-a")
+
+	events(turnevent.TextChunk{MessageID: "m1", Text: "before"})
+	exit()
+	events(turnevent.TextChunk{MessageID: "m2", Text: "after"})
+	exit()
+
+	want := []struct {
+		exit      bool
+		exitEpoch uint64
+	}{
+		{exit: false, exitEpoch: 0},
+		{exit: true, exitEpoch: 1},
+		{exit: false, exitEpoch: 0},
+		{exit: true, exitEpoch: 2},
+	}
+	for i, w := range want {
+		var got streamTurnEnvelope
+		select {
+		case got = <-sink.ch:
+		default:
+			t.Fatalf("envelope %d never arrived; want exit=%t exit_epoch=%d", i, w.exit, w.exitEpoch)
+		}
+		if got.exit != w.exit || got.exitEpoch != w.exitEpoch {
+			t.Errorf("envelope %d: exit=%t exit_epoch=%d, want exit=%t exit_epoch=%d",
+				i, got.exit, got.exitEpoch, w.exit, w.exitEpoch)
+		}
+	}
+
+	if got := sink.exitEpoch(); got != 2 {
+		t.Errorf("exitEpoch() after two exits and two events = %d, want 2 — only exits advance the lane", got)
+	}
+}
+
 // TestStreamTurnSink_TagRotationRefusedLeavesEnvelopeTag is AC3 carried through to
 // what actually rides on it: a refused rotation must leave the ENVELOPES tagged as
 // they were, not merely the tag's field. An empty tag would match no bound session,
