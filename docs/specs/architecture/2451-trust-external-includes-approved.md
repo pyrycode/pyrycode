@@ -1,0 +1,88 @@
+# 2451 — pre-mark CLAUDE.md external includes approved on the bootstrap workdir entry
+
+## Files read
+
+- `internal/agentrun/trust/trust.go` → `markWorkdirTrustedIn` — the read-modify-write that owns the `projects[realpath]` entry; the one line `entry["hasTrustDialogAccepted"] = true` is where the two new keys go. Also its package doc-comment and `MarkWorkdirTrusted`'s doc, both of which state the written contract as a single key.
+- `internal/agentrun/trust/trust_test.go` → `TestMarkWorkdirTrusted_IdempotentPreservesExtraEntryFields` — asserts byte-identity of `~/.claude.json` across a repeat call against a fixture entry that holds only `hasTrustDialogAccepted` + `mcpServers`. Adding keys makes the second write differ from the fixture, so this test goes red unless its fixture carries the new keys. This is the one existing test the change breaks.
+- `internal/agentrun/trust/trust_test.go` → `TestMarkWorkdirTrusted_PreservesSiblingProjects`, `writeJSON`, `readJSON` — the fixture/assertion helpers and the sibling-entry pattern the new test mirrors.
+- `internal/e2e/workdir_trust_test.go` → `TestE2E_Supervisor_PreMarksWorkdirTrusted` — decodes the entry into a struct carrying only `HasTrustDialogAccepted`. `encoding/json` ignores unknown keys, so this test is unaffected; checked because it is the other place that reads what this helper writes.
+- `cmd/pyry/agent_run.go` → `trustMark` — `agent-run` calls `MarkWorkdirTrusted` on the workdir it is about to spawn in, which is what lets the live arm drive a real child through the marked state.
+- `internal/e2e/realclaude/fixtures.go` → `WithWorktreeAuthenticated`, `RunPyryAgentRun`, `resolveAndOpenJSONL` — the live-tier primitives: a temp `$HOME` seeded with the operator's `~/.claude.json` and re-pinned credentials, a real `pyry agent-run` spawn, and `tuidriver.SessionJSONLPath(home, workdir, sessionID)` for locating the child's transcript.
+- `docs/knowledge/features/agentrun-trust-subpackage.md` § "Public API", § "Testing", § "Consumers" — states the written contract as the single trust key and enumerates the test matrix. Both go stale with this change; recorded under Documentation handoff, not edited here.
+
+## Context
+
+Claude Code expands an `@` import that resolves outside the session's working directory only when `hasClaudeMdExternalIncludesApproved` is true on the `~/.claude.json` entry of the folder that **owns the CLAUDE.md** — not the folder the child was spawned in. The ticket's first comment carries the measurement: with the workspace root entry holding `false`, a child spawned in the `default/` subfolder received the bare root CLAUDE.md with all eight `@` lines unexpanded, and marking the `default/` entry changed nothing in either folder. Setting the flag on the root entry expanded all eight. The miss is silent — Claude Code's debug log says nothing about skipped imports — and a headless child cannot answer the approval dialog, so nothing recovers it at runtime.
+
+`MarkWorkdirTrusted` already owns exactly this entry and already runs on the bootstrap workdir from `runSupervisor`. Writing the two include keys alongside the trust key is a one-line-shaped change at the single point that already establishes this entry.
+
+No ADR is warranted: this widens an existing helper's written contract within its stated purpose (pre-answer the gates a headless child cannot answer), it adds no boundary and no new consumer.
+
+## Design
+
+### Production change — `markWorkdirTrustedIn`
+
+The entry-mutation step becomes three assignments instead of one:
+
+```go
+entry["hasTrustDialogAccepted"] = true
+entry["hasClaudeMdExternalIncludesApproved"] = true
+entry["hasClaudeMdExternalIncludesWarningShown"] = true
+```
+
+Unconditional assignment, matching the existing key's treatment — an existing `false` is overwritten, which is the production state the ticket measured. Everything else about the helper is untouched: same read-modify-write through `map[string]any` with `UseNumber`, same pass-through preservation of sibling projects and sibling keys on the target entry, same atomic tempfile-then-rename, same error taxonomy, same silence in the logs.
+
+`hasClaudeMdExternalIncludesWarningShown` is set for the same reason the approval is: it is the other half of the dialog's state, and leaving it false invites Claude Code to re-raise a warning no headless child can answer.
+
+The package doc-comment and `MarkWorkdirTrusted`'s doc-comment both state the written contract as the single trust key; both are widened to name all three, since that comment is the contract a reader checks against.
+
+**Why no confinement change.** The `$HOME` bound that gates this helper's daemon consumer lives at the `runSupervisor` call site, not in the helper, because the helper is shared with an unconfined `agent-run` path. That split is unchanged here — this ticket widens what is written to an entry the caller already decided to trust, not which entries may be written.
+
+### Live arm — `internal/e2e/realclaude/claude_md_external_includes_test.go`
+
+AC-2 asks for a real child's injected instructions block, so the check belongs in the live tier. One top-level test, two subtest arms sharing a temp `$HOME` from `WithWorktreeAuthenticated`.
+
+Each arm gets its own workspace root under that home, shaped like production: `<root>/CLAUDE.md` holding an `@./brain.md` import line, `<root>/brain.md` holding a unique sentinel, and an empty `<root>/default/` subfolder to spawn in. The import resolves to `<root>/brain.md`, which is outside the spawn cwd `<root>/default` — the condition the flag gates.
+
+**The sentinel lives only in the imported file, never in CLAUDE.md.** That is what makes a raw-transcript containment check sound rather than a schema guess: an unexpanded import puts the literal `@./brain.md` line into the instructions block and leaves the sentinel nowhere, so the sentinel's presence is evidence of expansion and nothing else. The prompt is a single-word reply request, so the model has no reason to emit the sentinel itself.
+
+- **Marked arm.** Calls `trust.MarkWorkdirTrusted(<root>)` — the unit under test — then spawns via `RunPyryAgentRun` with `Workdir: <root>/default`. Asserts the child's transcript contains the sentinel.
+- **Control arm.** Hand-writes its root's entry with `hasTrustDialogAccepted: true` and `hasClaudeMdExternalIncludesApproved: false` — the exact pre-fix production state — merging into the seeded `~/.claude.json` rather than replacing it, so the operator's onboarding state survives. Spawns the same way. Asserts the transcript does **not** contain its sentinel.
+
+The control arm is what makes the marked arm's pass mean something: without it a green marked arm is also consistent with imports expanding unconditionally. It additionally pins the ticket's second measurement — `agent-run` marks the *spawn* folder's entry on its way in, so the control arm's `<root>/default` entry is fully marked while its root entry is not, and the arm asserts that this does not rescue the import. If Claude Code ever starts honouring the spawn folder's entry, this arm reddens, which is the correct signal rather than a flake.
+
+Distinct sentinels per arm so cross-contamination between the two transcripts is visible rather than silently passing.
+
+## Concurrency model
+
+Unchanged. The helper spawns no goroutines and is sequential within an invocation; it holds no lock, by the existing deliberate choice. The live test's two arms run sequentially (non-parallel subtests — the shared `$HOME` comes from `t.Setenv`, which forbids parallel ancestors).
+
+## Error handling
+
+No new failure modes. The three assignments are infallible map writes on an entry the helper has already type-asserted to `map[string]any`; every error path (workdir missing, unparseable JSON, `projects` not an object, entry not an object, and each I/O step) is reached before or after this step and keeps its current wrapping and its current leave-the-file-untouched guarantee.
+
+## Testing strategy
+
+**Offline (AC-1), `internal/agentrun/trust`:**
+
+- New `TestMarkWorkdirTrusted_SetsExternalIncludeFlagsOverExistingFalse` — fixture has the target entry with all three flags explicitly `false` plus an `mcpServers` sibling key, and a second project entry with all three `false`. After the call: the target carries all three flags true with `mcpServers` intact; the other project entry is untouched with all three still false. One test covers every clause of AC-1 — flags set, existing `false` overwritten, sibling keys preserved.
+- `TestMarkWorkdirTrusted_IdempotentPreservesExtraEntryFields` — fixture entry gains the two new keys so the byte-identity assertion pins idempotency of the widened write. This is a fixture update, not a weakened assertion; the test keeps asserting exact byte equality.
+- The remaining eleven tests are unchanged and must stay green — they pin the preservation, error, mode and realpath behaviour this change must not disturb.
+
+**Live (AC-2):** the two-arm differential test above, run by the dispatcher's `make e2e-realclaude` gate. Not run in this session — the builder role does not obtain Claude credentials or run the live tier. The ticket gets `needs-real-claude` so the gate runs it.
+
+**Builder gate:** `go test -race ./internal/agentrun/trust/...`, `go vet ./...`, `go build ./cmd/pyry`, plus `go vet -tags e2e_realclaude ./internal/e2e/realclaude/` so the live file's compilation is proven offline — `make check` never compiles that package, and a package that fails to build reports zero tests run through a green exit.
+
+## Documentation handoff
+
+Pending for the documentation stage — not edited in this ticket.
+
+- `docs/knowledge/features/agentrun-trust-subpackage.md` § "Public API" — the quoted contract names only `hasTrustDialogAccepted`; widen to all three keys.
+- Same file, § "Testing" — add the new test to the enumerated matrix and note the idempotency fixture now carries the include keys.
+- Same file, § "Error handling" clause 1 — the fresh-file skeleton shown as `{"projects": {<key>: {"hasTrustDialogAccepted": true}}}` now carries three keys.
+- Same file, opening paragraph and § "Consumers" — the helper's purpose widens from "skip the workspace-trust modal" to "pre-answer the startup gates a headless child cannot answer", of which the external-includes approval is the second; the `runSupervisor` consumer entry is the one that makes subfolder conversations inherit the root CLAUDE.md's imports.
+
+## Open questions
+
+1. Does `hasClaudeMdExternalIncludesWarningShown` need to be true for the approval to take effect, or is it independent bookkeeping? The ticket specifies both, and the manual stopgap set both, so both are written either way; resolving this changes nothing about the design. Recorded because the live arm cannot distinguish them.
+2. Does the seeded `~/.claude.json` in the live tier carry operator-side state that interacts with the control arm's hand-written `false`? Expected no — the evidence is explicit that the flag is read per-entry, and both arms' roots are fresh temp paths with no pre-existing entry. Confirm when the live gate runs; if the control arm expands its import anyway, the per-entry premise is wrong and the finding is worth more than the test.
