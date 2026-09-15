@@ -95,6 +95,7 @@ func (baseRunner) SetSpawnArgs(args []string)           {}
 func (baseRunner) SetModel(model string) error          { return nil }
 func (baseRunner) SetSpawnPermissionMode(string)        {}
 func (baseRunner) SetPermissionMode(mode string) error  { return nil }
+func (baseRunner) BeginTeardown()                       {}
 
 func (c childSnapshot) String() string {
 	return fmt.Sprintf("{session=%s dead=%t stdin=%q}", c.sessionID, c.dead, c.stdin)

@@ -1,4 +1,4 @@
-# `Runner` interface + `RunnerFactory` (#1077, corrected #1580 for #1348 fallout, widened #2042, `RevokeBypass` retired #2043, widened #2064/#2280)
+# `Runner` interface + `RunnerFactory` (#1077, corrected #1580 for #1348 fallout, widened #2042, `RevokeBypass` retired #2043, widened #2064/#2280/#1513)
 
 `Session.sup` is typed `Runner` (`internal/sessions/runner.go`):
 
@@ -13,10 +13,23 @@ type Runner interface {
     SetModel(model string) error // #2280 — switches the LIVE child's model by control request, no turn or kill
     SetPermissionMode(mode string) error // #2042 — switches the LIVE child to a caller-named mode, no kill
     SetSpawnPermissionMode(mode string) // #2064 — installs the NEXT spawn's posture write, no kill, no live effect
+    BeginTeardown() // #1513 — arms the write-refusal gate ahead of a deliberate kill; released by any successor child's bind
 }
 
 type RunnerFactory func(cfg RunnerConfig) (Runner, error)
 ```
+
+**`BeginTeardown` is on this interface for the same reason `SetSpawnPermissionMode` is (#1513).**
+Its three callers — both eviction arms of `Session.runActive` and `Pool.UpdateSettings`' restart
+branch — live inside `internal/sessions`, which must not import `internal/streamsup`, so a
+capability type-assertion at those call sites would fail **open**: a runner double missing the
+method would silently leave the teardown ungated while every layer reported success. It is a
+sibling of the `new_session` rotation gate (`BeginRotation`, off this interface, reached only via
+`beginRotationOrNoop`'s capability assertion in `cmd/pyry/main.go`) rather than a call into it —
+the two gates refuse identically but release on different, incompatible thresholds. See
+[Rotation-delivery gate (#1330) §
+teardown](streamsup-package-per-conversation-turn-busy-track-rotation-delivery-gate.md) for why
+reusing the rotation gate here would wedge a session.
 
 **#1348 deleted `internal/supervisor`.** There is now exactly **one** production implementation:
 `cmd/pyry`'s `streamRunner` adapter, wrapping `*streamsup.Runner` — the adapter exists because Go has no

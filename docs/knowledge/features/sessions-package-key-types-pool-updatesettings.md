@@ -170,17 +170,23 @@ place is what keeps them safe.):
   the seam's own bare unsupported-mode sentinel — which does not echo the
   rejected string, so it may be logged verbatim) all warrants the same
   response, with the dominant case — an evicted session — not a degradation.
-- **Everything else** → `sup.Restart(newArgs)`, unchanged. Since #2066 the
-  escalation no longer reaches this branch, so what is left is clearing model
-  or effort to `""` ("run at claude's own default", which `claudeSettingsArgs`
-  expresses by *omitting* the flag; the control layer's reset spellings do not
-  change Pyrycode's explicit-clear contract) — including a `yolo:true` or
-  `bypassPermissions` mode mixed into
-  the same frame as a cleared `Model`/`Effort`. The empty-value reject wins,
-  but costs nothing: the restart recomposes argv from the **merged** settings,
-  so the respawn still carries the escalation. No frame can lose a posture
-  change by mixing. Clean partition — never both mechanisms for one change, no
-  case left unserved.
+- **Everything else** → `sup.BeginTeardown()` then `sup.Restart(newArgs)`
+  (the arm added by #1513, **inside** this branch only — the in-band branch
+  above tears no child down, so arming there would refuse turns for a
+  delivery that kills nothing). Since #2066 the escalation no longer reaches
+  this branch, so what is left is clearing model or effort to `""` ("run at
+  claude's own default", which `claudeSettingsArgs` expresses by *omitting*
+  the flag; the control layer's reset spellings do not change Pyrycode's
+  explicit-clear contract) — including a `yolo:true` or `bypassPermissions`
+  mode mixed into the same frame as a cleared `Model`/`Effort`. The
+  empty-value reject wins, but costs nothing: the restart recomposes argv
+  from the **merged** settings, so the respawn still carries the escalation.
+  No frame can lose a posture change by mixing. Clean partition — never both
+  mechanisms for one change, no case left unserved. Without the arm, a write
+  already past the delivery seam when `Restart` tears the child down lands in
+  its doomed stdin pipe and is silently dropped as a false commit — see
+  [Rotation-delivery gate (#1330) §
+  teardown](streamsup-package-per-conversation-turn-busy-track-rotation-delivery-gate.md).
 
 **A no-log test must capture the pool's logger, not a spawning runner's.**
 `(*streamsup.Runner)` already logs the full spawn argv at `Info`
