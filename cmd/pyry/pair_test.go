@@ -508,6 +508,16 @@ func TestRunPairRevoke_PreservesRedeemByOnSurvivors(t *testing.T) {
 // Skipped on Windows (we're Linux+macOS only) and skipped if chmod 0500
 // on the parent dir doesn't actually block writes for the test user
 // (e.g. running as root).
+//
+// THE BLOCKER PRE-CREATES THE LOCK SIDECAR, and that line is the whole of this
+// test (#1532 repaying the deferred fix #1531 recorded). Since the verb's write
+// moved inside devices.WithLock, an unwritable parent directory fails the sidecar
+// open — which WithLock does BEFORE it runs anything the caller passed it — so the
+// verb never reaches Save and this test asserted a `pair revoke:` prefix that came
+// from somewhere else entirely. It stayed green while proving nothing. Creating the
+// sidecar at 0600 first lets the acquisition through (O_CREATE on an existing file
+// needs only x on the directory) and puts the EACCES back on Save's temp file; the
+// assertion on Save's own step word is what stops it re-hollowing.
 func TestRunPairRevoke_SaveFailure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("posix-only permission test")
@@ -528,6 +538,11 @@ func TestRunPairRevoke_SaveFailure(t *testing.T) {
 	})
 	if err := registry.Save(path); err != nil {
 		t.Fatalf("Save: %v", err)
+	}
+
+	lockPath := path + ".lock"
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatalf("pre-create sidecar: %v", err)
 	}
 
 	dir := filepath.Dir(path)
@@ -551,6 +566,13 @@ func TestRunPairRevoke_SaveFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "pair revoke:") {
 		t.Errorf("error %q missing prefix %q", err.Error(), "pair revoke:")
+	}
+	// "registry: create temp" is Save's own step word, so its presence proves the
+	// lock was acquired and the region entered. A failure at the acquisition would
+	// name "devices: open lock" instead and satisfy the prefix check above while
+	// testing nothing this test is named for.
+	if !strings.Contains(err.Error(), "registry: create temp") {
+		t.Errorf("error %q names no Save step; the failure landed before Save, which is how this test was hollowed out", err.Error())
 	}
 }
 

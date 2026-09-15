@@ -316,3 +316,26 @@ Owned by the documentation stage, not this builder. Pending:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-15
+
+## Revisions
+
+**2026-09-15 — Open questions resolved, design unchanged.** Recorded rather than
+folded in, since neither answer moved a contract.
+
+1. *Did the reconcile-first ordering disturb a currently-green test?* Only
+   `TestRegisterPushToken_SaveFailure_EmitsServerBinaryBusy`, which AC-5 was
+   repairing regardless. Every other test in the suite seeds a real `devices.json`
+   before driving the handler and passed untouched, including
+   `TestRegisterPushToken_ReloadPreventsClobberOfNewlyPairedDevice`.
+2. *Does `chmod 0500` leave a pre-created sidecar openable?* Yes, confirmed
+   empirically rather than by reading. Both repaired tests were mutation-checked by
+   deleting the pre-creation: each then fails at `devices: open lock ... permission
+   denied`, which is exactly the hollowed-out shape AC-5 names, so the new step-word
+   assertions are non-vacuous.
+
+The interleaving test was mutation-checked the same way, against the mutant AC-2
+names: with `Reload` and `UpdatePushRegistration` hoisted out so only `Save` runs
+under the lock, `TestRegisterPushToken_SurvivesWriteCommittedWhileParkedOnLock`
+fails on both directions at once — device B erased, device C resurrected — while its
+grace assertion still passes, which is the concrete demonstration that a busy-lock
+test could not have caught it.

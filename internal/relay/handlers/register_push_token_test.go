@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,7 +10,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -106,6 +109,362 @@ func assertEnvelopeShape(t *testing.T, resp protocol.RoutingEnvelope, wantType s
 	return env
 }
 
+// pushLockGrace is how long an interleaving test waits before concluding that the
+// handler is genuinely parked on the devices lock rather than merely slow. Mirrors
+// mintBlockGrace in cmd/pyry/pair_lock_test.go.
+const pushLockGrace = 150 * time.Millisecond
+
+// holdPushLock acquires the devices lock for path on a background goroutine and
+// returns once the critical section is entered, so a test can race the handler
+// against a live holder deterministically. flock(2) contends per open file
+// description rather than per process, so an in-process holder is a real
+// contender for a handler running in this same binary — the interleaving needs no
+// second OS process and no daemon harness.
+//
+// The returned release ends the region and waits for the holder to unwind. It is
+// idempotent and also runs at cleanup, so a t.Fatalf before the explicit call
+// cannot strand the goroutine. Both waits are bounded: a holder that never enters,
+// or never unwinds, reports a failure instead of hanging the package. Mirrors
+// holdPairLock in cmd/pyry.
+func holdPushLock(t *testing.T, path string) (release func()) {
+	t.Helper()
+	held := make(chan struct{})
+	rel := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- devices.WithLock(path, devices.DefaultLockWait, func() error {
+			close(held)
+			<-rel
+			return nil
+		})
+	}()
+	select {
+	case <-held:
+	case err := <-done:
+		t.Fatalf("holder never entered the region for %s: %v", path, err)
+	}
+
+	var once sync.Once
+	release = func() {
+		once.Do(func() {
+			close(rel)
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("holder WithLock(%s): %v", path, err)
+				}
+			case <-time.After(devices.DefaultLockWait):
+				t.Errorf("holder for %s did not unwind within %v", path, devices.DefaultLockWait)
+			}
+		})
+	}
+	t.Cleanup(release)
+	return release
+}
+
+// raisePushLockWait widens the handler's acquisition bound for the duration of the
+// test. An interleaving test has to keep the handler parked for longer than its
+// grace, and the production bound is deliberately shorter than that.
+//
+// SAFE DESPITE THE SHARED VAR: every test that calls this is deliberately NOT
+// t.Parallel(), and Go resumes a package's parallel tests only once its sequential
+// tests have finished — so no parallel reader of pushRegistryLockWait ever overlaps
+// this write, and the cleanup restores the production value before any resumes.
+func raisePushLockWait(t *testing.T) {
+	t.Helper()
+	orig := pushRegistryLockWait
+	pushRegistryLockWait = devices.DefaultLockWait
+	t.Cleanup(func() { pushRegistryLockWait = orig })
+}
+
+// backdatePush stamps path with a distinctly old mtime and returns it. Save
+// commits by renaming a freshly created temp file over the target, so a Save
+// always installs a current mtime — which makes an unchanged old one proof that no
+// Save ran, rather than the vacuous observation that the bytes happen to match
+// what an idempotent rewrite would have produced.
+func backdatePush(t *testing.T, path string) time.Time {
+	t.Helper()
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatalf("Chtimes(%s): %v", path, err)
+	}
+	return pushModTime(t, path)
+}
+
+func pushModTime(t *testing.T, path string) time.Time {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(%s): %v", path, err)
+	}
+	return fi.ModTime()
+}
+
+func assertPushNotRewritten(t *testing.T, path string, want time.Time) {
+	t.Helper()
+	if got := pushModTime(t, path); !got.Equal(want) {
+		t.Errorf("devices.json mtime = %v, want the untouched %v — a Save ran", got, want)
+	}
+}
+
+// assertNoSidecar is the "the locked region was never entered" witness. WithLock
+// creates path+".lock" before it runs anything the caller passed it, so the
+// sidecar's continued absence is a strictly stronger claim than "no Save ran" — it
+// needs no seam, no counter and no fake, and it is what pins that the dedupe and
+// display-safety fast paths stay outside the region.
+func assertNoSidecar(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path + ".lock"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("lock sidecar %s.lock exists (stat err = %v); this path must acquire no lock", path, err)
+	}
+}
+
+// capturePushLogger returns a logger writing into a buffer plus a reader for what
+// it collected, for the two assertions that are about what a branch LOGGED rather
+// than what it replied: the event that tells a busy lock from a save failure (the
+// replies are deliberately identical), and the no-leak rule that no branch may name
+// the device token or its hash. No mutex: every caller reads the buffer only after
+// the handler call it captures has returned.
+func capturePushLogger() (*slog.Logger, func() string) {
+	buf := &bytes.Buffer{}
+	return slog.New(slog.NewTextHandler(buf, nil)), buf.String
+}
+
+// TestRegisterPushToken_SurvivesWriteCommittedWhileParkedOnLock is this ticket's
+// central interleaving, and it covers both directions of the race in one run: the
+// writer that commits while the handler is parked on the lock adds device B and
+// revokes device C, and the handler's save may undo neither.
+//
+// A BUSY-LOCK TEST CANNOT REPLACE THIS. A build that wraps only the existing Save
+// in WithLock genuinely refuses when busy and passes every contention assertion,
+// while still reading its snapshot before the lock was ever taken — so its save
+// silently erases B. Only an interleaving assertion tells the two apart; #1531 hit
+// exactly that mutant, and devices-registry.md § Testing a best-effort,
+// lock-guarded persist records it.
+//
+// Not t.Parallel(): it retunes pushRegistryLockWait and depends on a grace.
+func TestRegisterPushToken_SurvivesWriteCommittedWhileParkedOnLock(t *testing.T) {
+	raisePushLockWait(t)
+
+	a := devices.Device{
+		TokenHash:  devices.HashToken(testPlainToken),
+		Name:       "device-a",
+		PairedAt:   time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		LastSeenAt: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	devC := devices.Device{
+		TokenHash: devices.HashToken("plain-c"),
+		Name:      "device-c",
+		PairedAt:  time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+	}
+	// The daemon's long-lived registry and disk both start at [A, C].
+	reg := &devices.Registry{}
+	reg.Add(a)
+	reg.Add(devC)
+	path := filepath.Join(t.TempDir(), "devices.json")
+	if err := reg.Save(path); err != nil {
+		t.Fatalf("Save [A,C]: %v", err)
+	}
+
+	release := holdPushLock(t, path)
+
+	snapshot := a
+	conn, recv := newTestConn(t, &snapshot)
+	h := RegisterPushToken(reg, path, testLogger(t))
+	done := make(chan error, 1)
+	go func() {
+		done <- h(context.Background(), conn, makeRequest(t, protocol.RegisterPushTokenPayload{
+			Platform:   testPlatform,
+			Token:      testPushToken,
+			DeviceName: "device-a",
+		}))
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("handler completed while another holder had the devices lock (err=%v); its reconcile-and-save is not inside a locked region", err)
+	case <-time.After(pushLockGrace):
+	}
+
+	// The racing writer commits [A, B] from under the holder: B is newly paired
+	// and C is revoked. Both changes are invisible to the registry the parked
+	// handler holds in memory.
+	b := devices.Device{
+		TokenHash: devices.HashToken("plain-b"),
+		Name:      "device-b",
+		PairedAt:  time.Date(2025, 2, 2, 0, 0, 0, 0, time.UTC),
+	}
+	racer := &devices.Registry{}
+	racer.Add(a)
+	racer.Add(b)
+	if err := racer.Save(path); err != nil {
+		t.Fatalf("Save [A,B]: %v", err)
+	}
+	release()
+
+	if err := <-done; err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	assertEnvelopeShape(t, recv(), protocol.TypeAck)
+
+	back, err := devices.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	gotA, ok := back.FindByTokenHash(devices.HashToken(testPlainToken))
+	if !ok {
+		t.Fatal("device A missing from disk after its own register_push_token")
+	}
+	if gotA.Platform != testPlatform || gotA.PushToken != testPushToken {
+		t.Errorf("A = Platform %q PushToken %q, want %q/%q — the registration was not persisted",
+			gotA.Platform, gotA.PushToken, testPlatform, testPushToken)
+	}
+	if _, ok := back.FindByTokenHash(devices.HashToken("plain-b")); !ok {
+		t.Error("device B, paired while the handler was parked on the lock, was erased by its save")
+	}
+	if _, ok := back.FindByTokenHash(devices.HashToken("plain-c")); ok {
+		t.Error("device C, revoked while the handler was parked on the lock, was resurrected by its save")
+	}
+}
+
+// TestRegisterPushToken_ReconcileDropsDevice_RefusedNotAcked is AC-3, and the one
+// test that can tell the two operation orderings apart. This conn's device was
+// revoked on disk after it authenticated, so the in-region reconcile drops it and
+// the mutation reports no match: the frame is refused on the existing
+// non-retryable auth.invalid_token and no row is written. Under the old
+// mutate-then-reconcile ordering the very same input is ACKED and the survivor set
+// rewritten, which is the free guarantee this ordering buys — the same one
+// ClearRedeemBy gets from it.
+//
+// It needs no lock holder: the revocation has already committed, so the race is
+// over by the time the handler runs. Not t.Parallel(), because it reads
+// pushRegistryLockWait, which the interleaving test retunes.
+func TestRegisterPushToken_ReconcileDropsDevice_RefusedNotAcked(t *testing.T) {
+	a := devices.Device{
+		TokenHash: devices.HashToken(testPlainToken),
+		Name:      "device-a",
+		PairedAt:  time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	b := devices.Device{
+		TokenHash: devices.HashToken("plain-b"),
+		Name:      "device-b",
+		PairedAt:  time.Date(2025, 2, 2, 0, 0, 0, 0, time.UTC),
+	}
+	// Memory is the daemon's startup snapshot [A, B]; `pyry pair revoke` has
+	// since committed [B] alone.
+	reg := &devices.Registry{}
+	reg.Add(a)
+	reg.Add(b)
+	path := filepath.Join(t.TempDir(), "devices.json")
+	onDisk := &devices.Registry{}
+	onDisk.Add(b)
+	if err := onDisk.Save(path); err != nil {
+		t.Fatalf("Save [B]: %v", err)
+	}
+	before := backdatePush(t, path)
+
+	snapshot := a
+	conn, recv := newTestConn(t, &snapshot)
+	h := RegisterPushToken(reg, path, testLogger(t))
+	req := makeRequest(t, protocol.RegisterPushTokenPayload{
+		Platform:   testPlatform,
+		Token:      testPushToken,
+		DeviceName: "device-a",
+	})
+	if err := h(context.Background(), conn, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	env := assertEnvelopeShape(t, recv(), protocol.TypeError)
+	var payload protocol.ErrorPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal error payload: %v", err)
+	}
+	if payload.Code != protocol.CodeAuthInvalidToken {
+		t.Errorf("Code = %q, want %q — a device the reconcile dropped must be refused, not acked", payload.Code, protocol.CodeAuthInvalidToken)
+	}
+	if payload.Retryable {
+		t.Errorf("Retryable = true, want false")
+	}
+
+	assertPushNotRewritten(t, path, before)
+	back, err := devices.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, ok := back.FindByTokenHash(devices.HashToken(testPlainToken)); ok {
+		t.Error("the revoked device was written back to disk by the refused frame")
+	}
+}
+
+// TestRegisterPushToken_LockBusy_EmitsServerBinaryBusyWithoutWriting is AC-4: a
+// lock this handler cannot acquire within its bound is surfaced on the existing
+// retryable server.binary_busy reply rather than skipped to write unlocked.
+//
+// The busy branch's REPLY is deliberately identical to a save failure's — a phone
+// can act on neither distinction — so the only place the two are told apart is the
+// log event, which is why this asserts on captured output. The same capture pins
+// AC-4's no-leak half directly: neither the plain token nor its hash may appear
+// anywhere the handler logged.
+//
+// Not t.Parallel(): it holds a real flock and reads pushRegistryLockWait.
+func TestRegisterPushToken_LockBusy_EmitsServerBinaryBusyWithoutWriting(t *testing.T) {
+	d := devices.Device{
+		TokenHash:  devices.HashToken(testPlainToken),
+		Name:       "phone",
+		Platform:   "fcm",
+		PushToken:  "old-fcm",
+		PairedAt:   time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		LastSeenAt: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	reg := &devices.Registry{}
+	reg.Add(d)
+	path := filepath.Join(t.TempDir(), "devices.json")
+	if err := reg.Save(path); err != nil {
+		t.Fatalf("Save seed: %v", err)
+	}
+	before := backdatePush(t, path)
+
+	holdPushLock(t, path)
+
+	logger, logged := capturePushLogger()
+	snapshot := d
+	conn, recv := newTestConn(t, &snapshot)
+	h := RegisterPushToken(reg, path, logger)
+	req := makeRequest(t, protocol.RegisterPushTokenPayload{
+		Platform:   "fcm",
+		Token:      "new-fcm",
+		DeviceName: "phone",
+	})
+	if err := h(context.Background(), conn, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	env := assertEnvelopeShape(t, recv(), protocol.TypeError)
+	var payload protocol.ErrorPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal error payload: %v", err)
+	}
+	if payload.Code != protocol.CodeServerBinaryBusy {
+		t.Errorf("Code = %q, want %q — a busy lock must refuse, never fall through to an unlocked write", payload.Code, protocol.CodeServerBinaryBusy)
+	}
+	if !payload.Retryable {
+		t.Errorf("Retryable = false, want true")
+	}
+	assertPushNotRewritten(t, path, before)
+
+	out := logged()
+	if !strings.Contains(out, "register_push_token.lock_busy") {
+		t.Errorf("log %q carries no lock_busy event; the replies are identical, so the event is the only place a busy lock is told from a save failure", out)
+	}
+	if strings.Contains(out, testPlainToken) {
+		t.Errorf("log %q names the plain device token", out)
+	}
+	if strings.Contains(out, devices.HashToken(testPlainToken)) {
+		t.Errorf("log %q names the device token hash", out)
+	}
+}
+
 func TestRegisterPushToken_FirstTimeRegister_WritesAndAcks(t *testing.T) {
 	t.Parallel()
 	d := devices.Device{
@@ -185,6 +544,9 @@ func TestRegisterPushToken_ReregisterIdentical_NoWriteAndAcks(t *testing.T) {
 	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("expected registry file to NOT exist (dedupe path skips Save); stat err = %v", err)
 	}
+	// The dedupe fast path stays OUTSIDE the locked region, so a deduped frame —
+	// which the phone sends on every WS connect — costs no acquisition at all.
+	assertNoSidecar(t, path)
 }
 
 func TestRegisterPushToken_ReregisterChanged_WritesAndAcks(t *testing.T) {
@@ -329,8 +691,24 @@ func TestRegisterPushToken_GoneMidConn_EmitsAuthInvalidToken(t *testing.T) {
 	}
 }
 
+// TestRegisterPushToken_SaveFailure_EmitsServerBinaryBusy pins the disk-failure
+// reply and the documented post-condition that memory is NOT rolled back with it.
+//
+// THE BLOCKER IS BUILT SO THE FAILURE LANDS ON Save, which is the whole of #1532's
+// repair to this test. Making the registry's parent unopenable is not enough on its
+// own once the persist runs under a lock: WithLock does its MkdirAll and opens its
+// sidecar BEFORE it runs anything the caller passed it, so a parent that blocks
+// those fails a layer early and the test proves nothing about Save — it stays green
+// while asserting a reply that no longer comes from where it claims. Seeding a real
+// devices.json, pre-creating the sidecar at 0600 and only then dropping the
+// directory to 0500 puts the acquisition back inside reach (O_CREATE on an existing
+// file needs only x on the directory) and the EACCES back on Save's temp file. The
+// assertion on Save's own step word is what keeps it there.
 func TestRegisterPushToken_SaveFailure_EmitsServerBinaryBusy(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("posix-only permission test")
+	}
 	d := devices.Device{
 		TokenHash:  devices.HashToken(testPlainToken),
 		Name:       "phone",
@@ -344,13 +722,29 @@ func TestRegisterPushToken_SaveFailure_EmitsServerBinaryBusy(t *testing.T) {
 	snapshot := d
 	c, recv := newTestConn(t, &snapshot)
 
-	// Block Save: a regular file at the parent path makes MkdirAll fail.
 	dir := t.TempDir()
-	blocker := filepath.Join(dir, "blocker")
-	if err := os.WriteFile(blocker, []byte("file-not-dir"), 0o600); err != nil {
-		t.Fatalf("write blocker: %v", err)
+	registryPath := filepath.Join(dir, "devices.json")
+	// A real on-disk registry, so the in-region reconcile finds the device rather
+	// than reconciling membership to empty and refusing before Save is reached.
+	if err := reg.Save(registryPath); err != nil {
+		t.Fatalf("Save seed: %v", err)
 	}
-	registryPath := filepath.Join(blocker, "devices.json")
+	if err := os.WriteFile(registryPath+".lock", nil, 0o600); err != nil {
+		t.Fatalf("pre-create sidecar: %v", err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	// Pre-flight: ensure 0500 actually blocks writes for this user (root bypasses
+	// DAC). If a probe write succeeds, Save will too — skip.
+	probe := filepath.Join(dir, ".probe.tmp")
+	if f, perr := os.OpenFile(probe, os.O_CREATE|os.O_WRONLY, 0o600); perr == nil {
+		_ = f.Close()
+		_ = os.Remove(probe)
+		t.Skip("chmod 0500 did not block writes for this user (running as root?)")
+	}
 
 	req := makeRequest(t, protocol.RegisterPushTokenPayload{
 		Platform:   "fcm",
@@ -358,7 +752,8 @@ func TestRegisterPushToken_SaveFailure_EmitsServerBinaryBusy(t *testing.T) {
 		DeviceName: "phone",
 	})
 
-	h := RegisterPushToken(reg, registryPath, testLogger(t))
+	logger, logged := capturePushLogger()
+	h := RegisterPushToken(reg, registryPath, logger)
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -386,6 +781,14 @@ func TestRegisterPushToken_SaveFailure_EmitsServerBinaryBusy(t *testing.T) {
 	if got.PushToken != "new-fcm" {
 		t.Errorf("in-memory PushToken = %q, want %q (save failure must not roll back memory)",
 			got.PushToken, "new-fcm")
+	}
+
+	// The anti-hollow-out assertion: "registry: create temp" is Save's own step
+	// word, so its presence proves the lock was acquired and the region entered.
+	// A failure at the sidecar open would name "devices: open lock" instead and
+	// satisfy every assertion above while testing nothing this test is named for.
+	if out := logged(); !strings.Contains(out, "registry: create temp") {
+		t.Errorf("log %q names no Save step; the failure landed before Save, which is how this test was hollowed out", out)
 	}
 }
 
@@ -426,6 +829,7 @@ func TestRegisterPushToken_UnauthenticatedConn_EmitsAuthInvalidTokenNoWrite(t *t
 	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("expected registry file to NOT exist after unauth reject; stat err = %v", err)
 	}
+	assertNoSidecar(t, path)
 	if got := len(reg.List()); got != before {
 		t.Errorf("in-memory device count = %d, want %d (unauth must not mutate registry)", got, before)
 	}
@@ -469,6 +873,7 @@ func TestRegisterPushToken_MalformedPayload_EmitsProtocolMalformed(t *testing.T)
 	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("expected registry file to NOT exist after malformed reject; stat err = %v", err)
 	}
+	assertNoSidecar(t, path)
 }
 
 // pushStoredName, pushStoredPlatform and pushStoredPush are the seeded triple every
@@ -522,6 +927,9 @@ func assertRejectedNoWrite(t *testing.T, env protocol.Envelope, reg *devices.Reg
 	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("expected registry file to NOT exist after a rejected frame; stat err = %v", err)
 	}
+	// The display-safety gate runs ahead of the locked region, so a refused frame
+	// creates no sidecar either — a stronger claim than "no Save ran".
+	assertNoSidecar(t, path)
 	return payload.Message
 }
 
@@ -729,6 +1137,7 @@ func TestRegisterPushToken_UnsafeNameMatchingStored_RefusedNotDeduped(t *testing
 	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("expected registry file to NOT exist after a rejected frame; stat err = %v", err)
 	}
+	assertNoSidecar(t, path)
 }
 
 // TestRegisterPushToken_AdmissibleFieldValues_StoredVerbatim is the other half of
