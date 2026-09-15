@@ -603,6 +603,155 @@ func TestCompactingPayload_OldDecoderReadsTheExtendedFrame(t *testing.T) {
 	}
 }
 
+// The four resetting tests below are #2453 at the wire, and they are four fixtures
+// rather than one table because a single payload carries one edge and one phase.
+// Together they pin the whole sequence a client decodes for ONE reset: two rising
+// edges, then a falling one.
+//
+// Each asserts the closed-set fields against the exported constants rather than
+// against a repeated literal. That is what makes them non-vacuous on the property
+// nothing else in this package can catch — every registry entry in both structural
+// guards keys on the Go SYMBOL, so a mutated constant VALUE moves consistently
+// through all of them and reddens none (measured on #1895). Here the constant is
+// compared against the committed fixture's bytes, so a typo in either one reddens.
+
+// TestResettingPayload_RoundTrip is the first of a reset's two rising edges: the
+// wrap-up turn is running and the handoff note does not exist yet.
+func TestResettingPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "resetting.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeResetting {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeResetting)
+	}
+
+	var payload ResettingPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "c1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "c1")
+	}
+	if !payload.Active {
+		t.Errorf("Active: got %v, want true", payload.Active)
+	}
+	if payload.Phase != ResetPhaseWrappingUp {
+		t.Errorf("Phase: got %q, want %q", payload.Phase, ResetPhaseWrappingUp)
+	}
+	if payload.Handoff != ResetHandoffPending {
+		t.Errorf("Handoff: got %q, want %q — the note cannot be resolved while the "+
+			"turn that writes it is still running", payload.Handoff, ResetHandoffPending)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestResettingPayload_RestartingWrittenRoundTrip is the SECOND rising edge, and the
+// one a client gets wrong: a repeated active:true carrying a new phase is a phase
+// change, not a second reset. This is where the frame departs from compacting's
+// strict edge pair.
+func TestResettingPayload_RestartingWrittenRoundTrip(t *testing.T) {
+	raw := readFixture(t, "resetting_restarting_written.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeResetting {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeResetting)
+	}
+
+	var payload ResettingPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "c1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "c1")
+	}
+	if !payload.Active {
+		t.Errorf("Active: got %v, want true — the second rising edge stays active", payload.Active)
+	}
+	if payload.Phase != ResetPhaseRestarting {
+		t.Errorf("Phase: got %q, want %q", payload.Phase, ResetPhaseRestarting)
+	}
+	if payload.Handoff != ResetHandoffWritten {
+		t.Errorf("Handoff: got %q, want %q", payload.Handoff, ResetHandoffWritten)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestResettingPayload_RestartingSkippedRoundTrip is the same edge reporting the
+// other outcome. It is a fixture of its own rather than a column on the test above
+// because the pair is the frame's whole point: a client can say whether a note was
+// made, and both answers have to be on the wire for that claim to be checkable.
+func TestResettingPayload_RestartingSkippedRoundTrip(t *testing.T) {
+	raw := readFixture(t, "resetting_restarting_skipped.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeResetting {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeResetting)
+	}
+
+	var payload ResettingPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if !payload.Active {
+		t.Errorf("Active: got %v, want true", payload.Active)
+	}
+	if payload.Phase != ResetPhaseRestarting {
+		t.Errorf("Phase: got %q, want %q", payload.Phase, ResetPhaseRestarting)
+	}
+	if payload.Handoff != ResetHandoffSkipped {
+		t.Errorf("Handoff: got %q, want %q — a skipped note is a reported outcome, not "+
+			"a missing value", payload.Handoff, ResetHandoffSkipped)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestResettingPayload_FallingEdgeRoundTrip pins the shape that closes every reset.
+// Both closed-set fields carry the EMPTY STRING, which this wire states rather than
+// omits: no omitempty means the keys are present and their zero value is the
+// statement that no phase is in progress. The round trip is what makes that
+// non-vacuous — an omitempty added here later for tidiness drops both keys from the
+// re-marshalled bytes and reddens against the committed fixture.
+func TestResettingPayload_FallingEdgeRoundTrip(t *testing.T) {
+	raw := readFixture(t, "resetting_ended.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeResetting {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeResetting)
+	}
+
+	var payload ResettingPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "c1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "c1")
+	}
+	if payload.Active {
+		t.Errorf("Active: got %v, want false", payload.Active)
+	}
+	if payload.Phase != "" || payload.Handoff != "" {
+		t.Errorf("falling edge carries Phase=%q Handoff=%q, want both empty — neither "+
+			"field is meaningful once the reset is over", payload.Phase, payload.Handoff)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
 func TestUnrecognizedMessagePayload_RoundTrip(t *testing.T) {
 	raw := readFixture(t, "unrecognized_message.json")
 

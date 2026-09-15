@@ -1,4 +1,4 @@
-# Interactive event payloads (#607, #638, #1074, #2237, #2233, #2261, #2265, #2266, #2324, #2329, #2330)
+# Interactive event payloads (#607, #638, #1074, #2237, #2233, #2261, #2265, #2266, #2324, #2329, #2330, #2453)
 
 The **v2 additive application events** — the wire representation of
 `internal/turnevent`'s neutral turn-event model (#606). They are **binary → phone
@@ -119,6 +119,33 @@ type CompactionBoundaryPayload struct {
     Trigger        string `json:"trigger"`     // claude's compact_metadata.trigger, open-set, bounded+dropped not cut
     PreTokens      *int   `json:"pre_tokens"`  // NO omitempty — absence must reach the wire as null, never 0
     PostTokens     *int   `json:"post_tokens"` // claude's own shape marks this one optional
+}
+
+// #2453 — the wire form of the daemon's OWN conversation-reset routine, not of a
+// claude output line: no producer yet (#2455), and NOT a PTY-derived status peer
+// of Stall the way ApiRetryPayload/CompactingPayload above it are. One reset
+// emits Active:true TWICE — Phase ResetPhaseWrappingUp, then ResetPhaseRestarting
+// — before a single Active:false; a repeated true with a new Phase is a phase
+// change, not a second reset. Phase/Handoff are meaningful only while Active is
+// true; the falling edge carries both as "" (no omitempty — the file-wide rule).
+// The handoff note's own text never crosses this wire: Handoff reports only
+// whether one was written.
+const (
+    ResetPhaseWrappingUp = "wrapping_up" // the wrap-up turn is running
+    ResetPhaseRestarting = "restarting"  // wrap-up is over; claude is being killed and respawned
+)
+
+const (
+    ResetHandoffPending = "pending" // only seen with ResetPhaseWrappingUp
+    ResetHandoffWritten = "written"
+    ResetHandoffSkipped = "skipped" // a reported outcome, not a missing value
+)
+
+type ResettingPayload struct {
+    ConversationID string `json:"conversation_id"`
+    Active         bool   `json:"active"`
+    Phase          string `json:"phase"`   // closed set above; "" once Active is false
+    Handoff        string `json:"handoff"` // closed set above; "" once Active is false
 }
 
 // #2233 — the wire form of turnevent.ToolCallDenied: claude REFUSED a tool call it had
@@ -334,6 +361,30 @@ type BannerPayload struct {
   to the line later. A sweep asserting no uuid appears in the marshalled event is
   a tripwire against a future field, not a proof about today's code — the actual
   guarantee is the three-field decode target itself.
+- **`ResettingPayload` (#2453) shares `CompactingPayload`'s show/clear shape and
+  none of its provenance.** Every status peer before it — `ApiRetryPayload`,
+  `CompactingPayload`, `CompactionBoundaryPayload` — is the wire form of a
+  stream-json detector reading claude's own output; this one is the wire form of
+  the daemon's own conversation-reset routine (a wrap-up turn that writes a
+  handoff note, then a kill-and-respawn of claude under a new session id), so it
+  is not a `turnevent` variant at all. That flips the trust read `CompactingPayload`
+  taught: nothing here is claude-authored — `ConversationID` is the daemon's
+  routing key, `Active` is a bool it computes, `Phase`/`Handoff` are tokens it
+  selects from its own closed sets — so none of `CompactingPayload.ErrorText`'s
+  unsanitized-prose SECURITY paragraph transfers, and a client must not inherit it
+  from the neighbourhood. **One reset emits `Active:true` TWICE before a single
+  `Active:false`, departing from every status peer's strict edge pair**:
+  `wrapping_up`/`pending`, then `restarting`/`written-or-skipped`, then the
+  falling edge with both fields `""`. A repeated `Active:true` carrying a new
+  `Phase` is a phase change, not a second reset. `Handoff` resolves once, on that
+  phase change — `pending` throughout `wrapping_up`, `written` or `skipped` on
+  `restarting` — and every rising sequence ends in a falling edge, on success and
+  on every error path, so a client needs no timeout of its own to clear the
+  indicator. The handoff note's own text never crosses this wire: `Handoff`
+  reports only *whether* one was written, never the note itself, which is why the
+  frame declares no prose channel and owes no bound or sanitization statement.
+  Declared with **no producer**: #2455 owns the reset routine, #2456 routes a
+  client's `/clear` into it. See `docs/protocol-mobile.md` § `resetting`.
 - **`ToolDeniedPayload` (#2233) spells its tool token `tool_name`, not `name`, and the
   divergence from `ToolUsePayload.Name` is deliberate, not drift.** On `tool_use` the
   tool *is* the subject, so an unqualified `name` is unambiguous; here it is one named
