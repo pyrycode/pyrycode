@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
@@ -19,12 +20,25 @@ import (
 // prefix flags the runner prepends (--input-format …, --output-format …,
 // --verbose) never reach the test flag set — the child behaves as claude, not
 // as `go test` (which would exit 2 on the unknown leading flags). Without the
-// env var it runs the package's tests normally.
+// env var it runs the package's tests normally — under a discarding default
+// logger, see below.
 func TestMain(m *testing.M) {
 	if os.Getenv("GO_STREAMSUP_HELPER") == "1" {
 		helperChild() // always os.Exits
 		return
 	}
+	// Silence the lifecycle records this package's tests write to the test
+	// binary's own stderr (#2470). A test that leaves Config.Logger unset gets
+	// slog.Default() — via the fallback in New and the two in watchdog.go — and
+	// the stdlib default writes to os.Stderr. `go test` discards a passing
+	// package's output but dumps all of it when the package fails, so those
+	// records (25,671 bytes over 101 lines at dbf97327) crowd a failing
+	// sibling's "--- FAIL:" line out of the last 4000 characters of the gate log
+	// the dispatcher injects. Tests that assert on log content pass their own
+	// recorder and are unaffected; this is process-local to this test binary, so
+	// internal/e2e's assertion on the daemon's stderr is untouched.
+	// TestDefaultLogger_DiscardsEveryRecord guards it.
+	slog.SetDefault(slog.New(slog.DiscardHandler))
 	os.Exit(m.Run())
 }
 
