@@ -661,6 +661,93 @@ type CompactionBoundaryPayload struct {
 	PostTokens *int `json:"post_tokens"`
 }
 
+// The two values ResettingPayload.Phase can carry (#2453). A CLOSED set, and closed
+// in the strong sense the daemon can actually keep: it authors both tokens itself
+// rather than forwarding one of claude's, so a client switches on two cases and has
+// no third to guess at. Contrast CompactingPayload.Result above, an OPEN set carried
+// verbatim precisely because claude may ship a token at any time.
+//
+// The two are ORDERED, and one reset emits both — see ResettingPayload.
+//
+// The Reset prefix rather than Resetting names the DOMAIN, "a reset's phase", rather
+// than the frame it rides on; SystemPromptStatus* in system_prompt.go is the
+// package's precedent for both the shape and the spelling.
+const (
+	ResetPhaseWrappingUp = "wrapping_up" // the wrap-up turn is running; it writes the handoff note
+	ResetPhaseRestarting = "restarting"  // the wrap-up turn is over; claude is being killed and respawned
+)
+
+// The three values ResettingPayload.Handoff can carry (#2453). A CLOSED set on the
+// same terms as the phases above: the daemon authors all three.
+//
+// The set is what lets a client SAY WHETHER A NOTE WAS MADE, which is the part of a
+// reset an operator cannot otherwise find out. It resolves once, on the phase change:
+// pending throughout wrapping_up, then written or skipped on restarting.
+//
+// ResetHandoffSkipped IS A REPORTED OUTCOME, NOT A MISSING VALUE, and it merges every
+// daemon-side reason a note was not made — the wrap-up turn produced nothing usable,
+// it failed, or it was not run at all. All of them mean the same thing to a client:
+// the successor starts without a note, and nothing the client sends would repair it.
+// No reason field is declared, so no prose channel exists on this frame; whoever adds
+// one owes it a bound and a sanitization statement, as CompactingPayload.ErrorText
+// carries above.
+const (
+	ResetHandoffPending = "pending" // the note is not resolved yet; only ever seen with ResetPhaseWrappingUp
+	ResetHandoffWritten = "written" // a handoff note was written for the successor
+	ResetHandoffSkipped = "skipped" // no note was written, and the successor starts without one
+)
+
+// ResettingPayload is the body of an Envelope whose Type == TypeResetting
+// (docs/protocol-mobile.md § resetting, #2453). Binary → phone direction, gated on
+// the already-negotiated interactive capability. Like compacting it is
+// conversation-scoped rather than turn-scoped, so there is no turn_id, and emitting
+// it never opens or closes a turn.
+//
+// IT HAS compacting's SHAPE AND NONE OF ITS PROVENANCE, which is the one thing to
+// carry away from the adjacency. Every status peer before it is the wire form of a
+// stream-json detector reading claude's own output, and CompactingPayload beside it
+// carries two claude-authored strings under a SECURITY paragraph. NOTHING ON THIS
+// FRAME IS claude's: the id is one the daemon assigned, Active is a bool it computed,
+// and Phase and Handoff are tokens it selected from the closed sets above. A client
+// must not inherit the neighbour's render rules from the neighbourhood — there is no
+// untrusted text here to strip, escape or attribute.
+//
+// THE HANDOFF NOTE'S CONTENT DOES NOT CROSS THIS WIRE, and that is the design
+// decision the paragraph above rests on rather than a gap. The note is prose a claude
+// wrap-up turn writes; Handoff reports only WHETHER one was made. A field carrying
+// the note itself would be this frame's one genuinely untrusted value and would need
+// a bound, a sanitization statement and a render rule; none is declared, so none is
+// owed.
+//
+// ONE RESET EMITS TWO RISING EDGES BEFORE ONE FALLING EDGE, and this is where the
+// frame departs from compacting's strict edge pair:
+//
+//	active:true  phase:wrapping_up  handoff:pending
+//	active:true  phase:restarting   handoff:written | skipped
+//	active:false phase:""           handoff:""
+//
+// A REPEATED active:true CARRYING A NEW PHASE IS A PHASE CHANGE, NOT A SECOND RESET.
+// A client that treats every rising edge as a new reset draws two. Every rising
+// sequence ends in a falling edge, on success and on every error path.
+//
+// Phase and Handoff are MEANINGFUL ONLY WHILE Active IS TRUE. A falling edge carries
+// both as the empty string, so a client switching exhaustively over either set needs
+// a case for "" — gate on Active rather than adding a fourth token. No omitempty on
+// any field, per this file's rule as stated at ToolResultPayload: the key is always
+// on the wire and its zero value is the statement.
+type ResettingPayload struct {
+	ConversationID string `json:"conversation_id"`
+	Active         bool   `json:"active"`
+	// Phase is ResetPhaseWrappingUp or ResetPhaseRestarting while Active, "" once the
+	// reset is over. It exists so the pause has a name: the two phases fail
+	// differently and take visibly different lengths of time.
+	Phase string `json:"phase"`
+	// Handoff is ResetHandoffPending, ResetHandoffWritten or ResetHandoffSkipped while
+	// Active, "" once the reset is over. It resolves on the phase change, never
+	// mid-phase.
+	Handoff string `json:"handoff"`
+}
+
 // BannerPayload is the body of an Envelope whose Type == TypeBanner
 // (docs/protocol-mobile.md § banner, #2256). Binary → phone direction; the wire form
 // of turnevent.Banner. Like compacting and unrecognized_message it is

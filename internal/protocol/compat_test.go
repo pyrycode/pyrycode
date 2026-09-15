@@ -55,6 +55,12 @@ func TestIsKnownAppType(t *testing.T) {
 		{"api_retry-rejected", TypeApiRetry, false, ErrUnknownType},
 		{"compacting-rejected", TypeCompacting, false, ErrUnknownType},
 		{"unrecognized_message-rejected", TypeUnrecognizedMessage, false, ErrUnknownType},
+		// the v2-only conversation-reset status (#2453): an outbound binary → phone
+		// status an old phone never receives, so IsKnownAppType must reject it.
+		// Rejection is also what keeps the type off the inbound path, and here that is
+		// the point rather than a side effect — a phone naming this type must not be
+		// able to push a reset into dispatch.Route.
+		{"resetting-rejected", TypeResetting, false, ErrUnknownType},
 		// the v2-only background-task frames: outbound binary → phone events an
 		// old phone never receives, so IsKnownAppType must reject all three.
 		{"background_task_started-rejected", TypeBackgroundTaskStarted, false, ErrUnknownType},
@@ -283,10 +289,15 @@ var v2OnlyTypes = map[string]bool{
 	TypeToolProgress:        true,
 	TypeBanner:              true,
 	TypeUnrecognizedMessage: true,
-	TypeRequestSnapshot:     true,
-	TypeScreenSnapshot:      true,
-	TypeResync:              true,
-	TypeSessionTransition:   true,
+	// v2 conversation-reset status (#2453). Outbound-only, and its membership here is
+	// what makes IsKnownAppType reject an inbound "resetting" — no phone may actuate a
+	// reset by naming this type. Mandatory from the moment the constant exists rather
+	// than from the moment something emits it (the producer is #2455).
+	TypeResetting:         true,
+	TypeRequestSnapshot:   true,
+	TypeScreenSnapshot:    true,
+	TypeResync:            true,
+	TypeSessionTransition: true,
 	// v2 modal vocabulary.
 	TypeModalShown:     true,
 	TypeModalAnswer:    true,
@@ -503,6 +514,11 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		// request verb that reuses it as its reply (#2431).
 		TypeContextUsage,
 		TypeRequestContextUsage,
+		// v2 conversation-reset status (outbound status, #2453). This slice moves with
+		// the v2OnlyTypes entry above rather than after it: the size assertion below
+		// compares len(inboundAppTypeSet)+len(v2OnlyTypes) against len(all), so a map
+		// entry without a slice entry reddens with a bare count mismatch.
+		TypeResetting,
 	}
 	for _, ty := range all {
 		inV1 := inboundAppTypeSet[ty]

@@ -406,6 +406,18 @@ var excludedTypes = map[string]string{
 	// three are.
 	"TypeBackgroundTaskProgress": "push",
 
+	// outbound push — the v2 conversation-reset status (#2453). An entry of its own
+	// rather than a line in the anonymous "push" block above, because every member of
+	// that block is the wire form of a stream-json detector reading claude's output and
+	// this one is not: its source is the daemon's own reset routine. "push" is still
+	// true rather than borrowed — the slice declares no inbound verb at all, and that
+	// is the point. A phone naming this type must actuate nothing, and this entry plus
+	// the absent inboundAppTypeSet membership is what leaves it with no dispatchAppFrame
+	// arm to reach. Mandatory from the moment the constant exists rather than from the
+	// moment something emits it (the producer is #2455): Assertion #3 reports an
+	// unclassified constant, not an unemitted one.
+	"TypeResetting": "push",
+
 	// outbound push — the v2 thinking-progress reading (#1386). Outbound-only
 	// like the three above, so it must be excluded here from the moment the
 	// constant exists or Assertion #3 reports it unclassified.

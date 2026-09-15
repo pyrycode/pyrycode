@@ -504,6 +504,45 @@ const (
 	TypeCompacting = "compacting" // binary → phone, outbound v2 compaction status
 )
 
+// Mobile Protocol v2 conversation-reset status. A reset runs in two daemon-side
+// phases — a wrap-up turn that writes a handoff note for the successor, then a kill
+// and respawn of claude under a new session id — and without this frame a client
+// sees neither: the screen simply pauses for however long both take
+// (docs/protocol-mobile.md § resetting, #2453).
+//
+// Grouped alone rather than with api_retry/compacting, and the reason is PROVENANCE
+// rather than shape. It has that pair's show/clear shape exactly, but their block
+// comment reads "PTY-derived status peers" and counts its own two members: both are
+// the wire form of a stream-json detector reading claude's own output. THIS FRAME'S
+// SOURCE IS THE DAEMON'S OWN RESET ROUTINE. Every value on it is the daemon's — an
+// id it assigned, a bool it computed, and two tokens it selected from the closed sets
+// declared beside ResettingPayload — so nothing claude authored crosses on it.
+// TypeUnrecognizedMessage below is the package's precedent for being grouped alone on
+// exactly this ground: not a claude sub-state.
+//
+// It is therefore NOT a turnevent variant and not one of the turn-stream events the
+// § Interactive events intro counts, the distinction slash_command_list already draws
+// in that file. Like every status peer it never opens or closes a turn.
+//
+// ONE RESET EMITS TWO active:true FRAMES before a single active:false — see
+// ResettingPayload, where that property and the closed sets are stated in full.
+//
+// NO PRODUCER YET: #2455 owns the reset routine that emits this, and #2456 routes a
+// client's /clear into it. Declaring a contract ahead of its producers is this file's
+// established sequencing (#2052→#2054, #1983→#1984), and it lets the client slices
+// start against a published shape.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: an old
+// phone never receives it, and no phone may send it. The drift detector in
+// internal/protocol/compat_test.go partitions Type* constants between
+// inboundAppTypeSet and v2OnlyTypes; this lives in the latter, which is what makes
+// IsKnownAppType reject an inbound "resetting" rather than letting one reach a
+// handler — cmd/pyry/relay_guard_test.go's excludedTypes carries it as a push for the
+// same reason.
+const (
+	TypeResetting = "resetting" // binary → phone, outbound v2 conversation-reset status
+)
+
 // Mobile Protocol v2 unrecognized-message diagnostic. The stream-json parser
 // recognises three top-level message types from claude and a fixed set of
 // content blocks; everything outside the measured known-ignored list used to be
