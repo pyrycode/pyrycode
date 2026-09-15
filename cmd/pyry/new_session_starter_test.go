@@ -87,12 +87,12 @@ type starterProbe struct {
 func (p *starterProbe) newStarter(cursor, boundConv string, runner sessions.Runner, rotateErr error) activeSessionStarter {
 	return activeSessionStarter{
 		currentConv: func() string { return cursor },
-		resolveBound: func(convID string) (sessions.Runner, sessions.SessionID, bool) {
+		resolveBound: func(convID string) (sessions.Runner, sessions.SessionID, string, bool) {
 			p.resolvedWith = append(p.resolvedWith, convID)
 			if runner == nil || convID != boundConv {
-				return nil, "", false
+				return nil, "", "", false
 			}
-			return runner, sessions.SessionID("session-of-" + convID), true
+			return runner, sessions.SessionID("session-of-" + convID), "", true
 		},
 		rotate: func(old sessions.SessionID) (sessions.SessionID, error) {
 			p.rotatedFrom = append(p.rotatedFrom, old)
@@ -348,7 +348,7 @@ func TestActiveSessionStarter_NilLoggerDoesNotPanic(t *testing.T) {
 
 	s := activeSessionStarter{
 		currentConv:  func() string { return starterConvA },
-		resolveBound: func(string) (sessions.Runner, sessions.SessionID, bool) { return nil, "", false },
+		resolveBound: func(string) (sessions.Runner, sessions.SessionID, string, bool) { return nil, "", "", false },
 		rotate: func(sessions.SessionID) (sessions.SessionID, error) {
 			t.Fatal("rotate must not be reached from an inert arm")
 			return "", nil

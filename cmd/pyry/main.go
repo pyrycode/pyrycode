@@ -1036,15 +1036,18 @@ func runSupervisor(args []string) error {
 		},
 		activeSessionStarter: activeSessionStarter{
 			currentConv: active.CurrentConversation,
-			resolveBound: func(convID string) (sessions.Runner, sessions.SessionID, bool) {
-				sess, id, ok := resolveBoundSession(convReg, pool, convID)
+			resolveBound: func(convID string) (sessions.Runner, sessions.SessionID, string, bool) {
+				sess, id, cwd, ok := resolveBoundSession(convReg, pool, convID)
 				if !ok {
-					return nil, "", false
+					return nil, "", "", false
 				}
-				return sess.Runner(), id, true
+				return sess.Runner(), id, cwd, true
 			},
 			rotate: pool.RotateForNewSession,
-			log:    logger,
+			// #1475: the same validator the mint and revive paths use, re-run at
+			// rotation time on the recorded workspace rather than trusting it.
+			spawnDirFor: resolveSpawnDir,
+			log:         logger,
 		},
 		claudeSessionsDir: claudeSessionsDir,
 		bootstrapIDFn:     func() string { return string(pool.BootstrapID()) },
@@ -1798,16 +1801,23 @@ func (a activeInterrupter) SendEsc(conversationID string) error {
 // resolveBoundRunner is accepted: keeping interrupt's resolveBoundRunner
 // byte-stable is worth more than folding the two (the same tolerance #1121 was
 // granted for its isolation-guard duplication).
-func resolveBoundSession(convReg *conversations.Registry, pool *sessions.Pool, convID string) (*sessions.Session, sessions.SessionID, bool) {
+// Since #1475 it also returns the conversation's RECORDED WORKSPACE, taken off
+// the same row the binding came from so the two can never describe different
+// conversations. It is returned RAW — unvalidated, exactly as change_workspace
+// stored it — because re-confining it belongs at the spawn site (the posture
+// sessionRouter.revive's doc argues for a persisted Cwd), not at a resolver that
+// also serves callers with no spawn to perform. The empty string is the ordinary
+// answer for a conversation whose workspace was never set.
+func resolveBoundSession(convReg *conversations.Registry, pool *sessions.Pool, convID string) (*sessions.Session, sessions.SessionID, string, bool) {
 	conv, ok := convReg.Get(conversations.ConversationID(convID))
 	if !ok || conv.CurrentSessionID == "" {
-		return nil, "", false
+		return nil, "", "", false
 	}
 	sess, err := pool.Lookup(sessions.SessionID(conv.CurrentSessionID))
 	if err != nil {
-		return nil, "", false
+		return nil, "", "", false
 	}
-	return sess, sessions.SessionID(conv.CurrentSessionID), true
+	return sess, sessions.SessionID(conv.CurrentSessionID), conv.Cwd, true
 }
 
 // boundRunSettings is the settings half of one conversation's run configuration:
@@ -2027,8 +2037,38 @@ func resolveConversationPrompt(convReg *conversations.Registry, pool spawnedProm
 // the turn is gone. Arming first makes every WriteUserTurn in the window return
 // the retryable ErrNoLiveChild instead, so msgqueue re-attempts the same head
 // until the fresh child binds.
-func startFreshRunner(r sessions.Runner, oldID sessions.SessionID,
-	rotate func(sessions.SessionID) (sessions.SessionID, error)) error {
+// spawnDir, when non-empty, is the directory the successor must come up in —
+// already re-confined by resolveSpawnDir at the caller (#1475). "" means "leave
+// the runner where it is", which is both the no-recorded-workspace case and the
+// refused case; either way the rotation still completes and the child still comes
+// up. Installing it is an OPTIONAL capability on the same terms
+// beginRotationOrNoop treats the gate: a runner that can RestartFresh but cannot
+// move still rotates, rather than being sent to the inert path where it would
+// rotate nothing.
+//
+// THE INSTALL SITS BETWEEN rotate AND RestartFresh, the window
+// refreshSystemPromptForRotation occupies, and both edges are load-bearing.
+// Below rotate, because a FAILED rotation must leave the runner untouched:
+// installed above it, a rotate error would leave the directory swapped and the
+// next crash-respawn would silently move a child no rotation ever replaced —
+// which is exactly the "change_workspace alone does not move a running child"
+// promise, broken from a remotely-driven frame that merely lost a race. Above
+// RestartFresh, because that call cancels the live child at once and the Run loop
+// answers on its own goroutine, so an install landing after it races the
+// successor's own beginSpawn and the loser comes up in the pre-move directory.
+//
+// The resolve itself is deliberately NOT here. It does filesystem I/O, and the
+// #1330 gate is armed across this whole function: every WriteUserTurn on the
+// conversation returns ErrNoLiveChild while it is, so a blocking syscall inside
+// the armed window would widen a ~4 ms refusal into a filesystem's worth.
+// StartNewSession resolves before it calls, below all of its inert arms.
+// log records the install's own failure and must be the daemon's, not
+// slog.Default(): cmd/pyry never calls slog.SetDefault, so a default-logger record
+// would leave the daemon's log entirely. Nil is tolerated and discards, which is
+// what keeps the two direct test callers (dispatch_arms_test.go,
+// inbound_deliver_rotation_test.go) free of a logger they have no assertion for.
+func startFreshRunner(r sessions.Runner, oldID sessions.SessionID, spawnDir string,
+	rotate func(sessions.SessionID) (sessions.SessionID, error), log *slog.Logger) error {
 	v, ok := r.(interface{ RestartFresh(string) })
 	if !ok {
 		return nil
@@ -2051,8 +2091,47 @@ func startFreshRunner(r sessions.Runner, oldID sessions.SessionID,
 		abort()
 		return err
 	}
+	installSpawnDir(r, spawnDir, log)
 	v.RestartFresh(string(newID))
 	return nil
+}
+
+// installSpawnDir moves the runner's next spawn into spawnDir when the runner can
+// be moved and there is somewhere to move it to (#1475); anything else is inert.
+//
+// An OPTIONAL assertion, deliberately, for beginRotationOrNoop's stated reason
+// rather than by resemblance to it: folding the method into startFreshRunner's
+// RestartFresh assertion would send a runner that can restart but cannot move to
+// the inert path, where it would rotate NOTHING — where today it rotates, just
+// without moving. Both existing capability probes (startFreshRunner's and
+// StartNewSession's) therefore keep asserting RestartFresh alone, so the
+// inert-arm log keeps matching the dispatch.
+//
+// The install's own failure is Warned and SWALLOWED. It is reachable only when
+// the directory disappears between the caller's confinement and this call, and by
+// then the rotation is already committed — the pool is re-keyed, the conversation
+// rebound, the transition broadcast — so refusing to respawn would leave the
+// conversation with no child at all. Fail-closed means keeping the old directory,
+// not withholding the successor. It is a DISTINCT event from the caller's
+// rejection record: "refused by confinement" and "vanished before the install"
+// are different failures and one event name for both would be unreadable.
+//
+// SECURITY: spawnDir is resolveSpawnDir's confined output or "". No path reaches
+// the log — the record names the conversation and nothing else, the posture
+// Pool.Revive's contract and sessionTranscriptDir's SECURITY paragraph both hold
+// for phone-influenced workspace paths.
+func installSpawnDir(r sessions.Runner, spawnDir string, log *slog.Logger) {
+	if spawnDir == "" {
+		return
+	}
+	m, ok := r.(interface{ SetSpawnWorkDir(string) error })
+	if !ok {
+		return
+	}
+	if err := m.SetSpawnWorkDir(spawnDir); err != nil && log != nil {
+		log.Warn("relay: v2 new_session could not install the recorded workspace",
+			"event", "v2.new_session.spawn_dir_install_failed")
+	}
 }
 
 // beginRotationOrNoop arms r's rotation gate when the runner has one (#1330) and
@@ -2096,9 +2175,25 @@ func beginRotationOrNoop(r sessions.Runner) (abort func()) {
 // neither internal/conversations nor internal/sessions, so it hands the string over
 // unvalidated and every check lives here.
 type activeSessionStarter struct {
-	currentConv  func() string
-	resolveBound func(convID string) (runner sessions.Runner, oldID sessions.SessionID, ok bool)
+	currentConv func() string
+	// resolveBound also hands back the conversation's RECORDED workspace — the raw
+	// Conversation.Cwd, unvalidated, exactly as ChangeWorkspace stored it (#1475).
+	// It is raw on purpose: re-confining it is spawnDirFor's job and must happen at
+	// the spawn site, not at the resolve.
+	resolveBound func(convID string) (runner sessions.Runner, oldID sessions.SessionID, recordedCwd string, ok bool)
 	rotate       func(oldID sessions.SessionID) (sessions.SessionID, error)
+
+	// spawnDirFor re-confines a recorded workspace to $HOME at rotation time,
+	// answering the directory the successor must spawn in — production wires
+	// resolveSpawnDir, the same validator the mint and revive paths use. ("", nil)
+	// means no recorded workspace; an error means refused.
+	//
+	// Optional: nil leaves every successor in the directory its runner already has,
+	// which is pre-#1475 behaviour. That tolerance exists for this struct's shape —
+	// a constructor-less bag of injected seams built as a named-field literal, where
+	// an omitted field is a reachable state — and matches how logger() treats its
+	// own nil, degrading rather than panicking on a remotely-driven path.
+	spawnDirFor func(recordedCwd string) (string, error)
 
 	// log records which arm an inbound new_session took (#2099). Optional: nil
 	// falls back to slog.Default() via logger(), mirroring activeInterrupter.
@@ -2177,7 +2272,7 @@ func (a activeSessionStarter) StartNewSession(conversationID string) error {
 		return nil
 	}
 
-	runner, oldID, ok := a.resolveBound(convID)
+	runner, oldID, recordedCwd, ok := a.resolveBound(convID)
 	if !ok {
 		a.logger().Debug("relay: v2 new_session inert; conversation has no bound session",
 			"event", "v2.new_session.no_bound_session",
@@ -2223,7 +2318,57 @@ func (a activeSessionStarter) StartNewSession(conversationID string) error {
 			"conversation_id", convID)
 		return nil
 	}
-	return startFreshRunner(runner, oldID, a.rotate)
+	return startFreshRunner(runner, oldID, a.resolveSpawnDir(convID, recordedCwd), a.rotate, a.log)
+}
+
+// resolveSpawnDir re-confines the conversation's recorded workspace to $HOME and
+// answers the directory the successor must spawn in, or "" to leave the runner
+// where it is (#1475).
+//
+// IT RE-VALIDATES RATHER THAN TRUSTING, taking sessionRouter.revive's posture and
+// explicitly not sessionMinter.Create's. Create may defer without re-validating
+// because resolveSpawnDir's realpath is frozen onto the session at build time, so
+// no phone-influenced state is re-read between the check and the chdir. Nothing is
+// frozen here: recordedCwd is raw persisted bytes in a mutable file, written by
+// change_workspace at an arbitrary earlier moment and possibly across a daemon
+// restart, which is revive's situation exactly — "a path valid then can be turned
+// into an escape before the restart, and this is the spawn site that would
+// otherwise believe the stale check". So the validator runs again, here, on every
+// rotation.
+//
+// FAIL-CLOSED MEANS KEEPING THE OLD DIRECTORY, never spawning in an unconfined
+// one: both an empty recording and a refusal answer "", and the rotation still
+// completes with the child still coming up where it was. The two differ only in
+// whether a record is written — an unset workspace is not a refusal.
+//
+// IT IS CALLED BELOW EVERY INERT ARM, which is load-bearing rather than tidy:
+// resolveSpawnDir creates a directory and writes ~/.claude.json, so hoisting it
+// would let a frame naming a conversation with no live child drive MkdirAll on the
+// daemon's behalf. It also blocks in syscalls on V2SessionManager's single Run
+// dispatch goroutine — the honest consequence handlers.createConversationMintTimeout
+// already records for the neighbouring mint path, and deliberately NOT defended
+// with a deadline, which cannot interrupt a syscall and would claim a protection it
+// does not provide. Only a frame that will actually rotate pays it.
+//
+// SECURITY: the wrapped error names the resolved path and the $HOME boundary and
+// MUST NOT be logged. Pool.Revive's contract is that a phone-influenced workspace
+// path must not reach a log, and sessionTranscriptDir's SECURITY paragraph closes
+// the same channel (#833). The record carries the event and the conversation id —
+// which is already logged unbounded on the resolvable arms above — and nothing
+// else. At Warn rather than the arms' Debug: this one is about the daemon's own
+// stored state failing its own validator, not about a string a client just sent.
+func (a activeSessionStarter) resolveSpawnDir(convID, recordedCwd string) string {
+	if a.spawnDirFor == nil || recordedCwd == "" {
+		return ""
+	}
+	dir, err := a.spawnDirFor(recordedCwd)
+	if err != nil {
+		a.logger().Warn("relay: v2 new_session rejected the recorded workspace; keeping the current one",
+			"event", "v2.new_session.spawn_dir_rejected",
+			"conversation_id", convID)
+		return ""
+	}
+	return dir
 }
 
 // maxLoggedConvID bounds how much of a REFUSED conversation id reaches a log

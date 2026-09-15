@@ -219,15 +219,31 @@ in place of the fixed `dir`. `sessionTranscriptDir`
 (`cmd/pyry/session_transcript_dir.go`) answers it exactly like
 `sessionModelWindows` above — `Pool.Lookup` on the id, then a type assertion
 off `Session.Runner()` — but for a `ClaudeSessionsDir() string` method instead
-of `ModelWindows`. That method (on `streamRunner`) hands back the *stored*
-string `mapStreamsupConfig` already computed for that same runner's own spawn
-probe, never a fresh derivation, so the reader and the probe read one field of
-one struct and cannot name different folders for one session — including
-under case canonicalisation or a symlink (`agentrun.ResolveWorkdir` applies
-both and the confining validators upstream of it do not, so a second,
-independent derivation from a differently-spelled workdir is exactly the
-shape that drifts). `fixedTranscriptDir(dir)` adapts one folder into the same
-resolver shape for a caller that genuinely has only one.
+of `ModelWindows`. That method (on `streamRunner`) hands back the runner's own
+live field — until [#1475](streamsup-package-satisfying-sessions-runner.md) a
+copy `mapStreamsupConfig` stored once at construction, never a fresh
+derivation; since #1475 a `new_session` rotation can move a session's spawn
+directory (`(*streamsup.Runner).SetSpawnWorkDir`), so the adapter now forwards
+to the runner's live field instead of holding its own copy — either way the
+reader and the probe read one field of one struct and cannot name different
+folders for one session, including under case canonicalisation or a symlink
+(`agentrun.ResolveWorkdir` applies both and the confining validators upstream
+of it do not, so a second, independent derivation from a differently-spelled
+workdir is exactly the shape that drifts). `fixedTranscriptDir(dir)` adapts
+one folder into the same resolver shape for a caller that genuinely has only
+one.
+
+**The `Pool.Lookup → ClaudeSessionsDir` TOCTOU widened at #1475.** Before, no
+rotation could change a session's working directory, so the two sequential,
+never-nested reads always named the same folder. Now a `new_session` rotation
+landing in that window can move the directory between the two reads, so this
+resolver can answer either the pre- or post-move folder for that one call. The
+residual is a single stale `session_settings` reply computed against one of
+two *real* folders claude has written to, self-correcting on the next call —
+not the #2423 "Context: 0%" failure, which was a folder claude never wrote to
+at all. Closing the window would mean holding `Pool.mu` across a runner lock,
+a new lock-order edge bought for an already-self-correcting stale read; see
+`sessionTranscriptDir`'s own doc comment for the full accounting.
 
 The build-time nil rule reads the same way it does for `windows`: a `nil`
 folder resolver is decided on the resolver's *presence*, not on what it

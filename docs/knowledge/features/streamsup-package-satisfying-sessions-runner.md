@@ -105,6 +105,39 @@ fixture directory holds a transcript for the adopted id specifically. `useCreate
 same argv without the adoption ever having run. Stage the transcript for the id under test, not the
 previous one, or the assertion rides the wrong route and stays green on a runner that never adopted.
 
+**`SetSpawnWorkDir(workDir, claudeSessionsDir string) error` / `ClaudeSessionsDir() string` — the
+directory pair as a spawn input (#1475).** `workDir` stopped being a construction constant read live off
+the `Runner` and joined `args`/`sessionID`/`spawnMode` as a snapshot-only field: seeded in `New`, swapped
+by `SetSpawnWorkDir` under one `restartMu` acquisition, and read only through `beginSpawn`'s single
+snapshot (threaded to `Run`'s log and `spawnAndWait`'s `cmd.Dir` as a parameter, never a live field read).
+It is `SetSpawnArgs`' sibling — writes only the directory pair, touches neither `sessionID` nor
+`rotatePending` nor `iterCancel`, so it cannot reach the state `beginSpawn`'s single-acquisition doc
+forbids, and a running child is left alone until whichever spawn comes next (a crash-respawn, or the
+`RestartFresh` its one production caller pairs it with). `claudeSessionsDir` — the folder `useCreateForm`
+probes to pick `--session-id` vs `--resume` — moves in the **same call and the same lock section** as
+`workDir`, never separately: left behind, the successor's next crash-respawn would probe the pre-move
+folder, find no transcript there (claude wrote it under the new one), choose create form, and re-issue
+`--session-id` against a transcript that already exists — which claude refuses (ADR 032) — a **permanent**
+respawn loop rather than one wasted spawn, because a non-empty `ClaudeSessionsDir` makes `useCreateForm`
+decide outright instead of latching on `firstRun`.
+
+`agentrun.ResolveWorkdir` runs **above** the lock on every install — `restartMu` is a leaf, and
+`ResolveWorkdir` stats the path and resolves symlinks — so a resolve failure writes **neither** field:
+fail-closed on the directory the runner already had, never half-applied. An empty `workDir` is a
+Warn-logged no-op, the same last-resort guard `RestartFresh`'s empty-id check already models.
+`ClaudeSessionsDir()` reads the live field under `restartMu` alone, the same treatment `liveSessionID`
+gets.
+
+`cmd/pyry`'s `streamRunner` adapter derives the transcript folder the same way `mapStreamsupConfig` does —
+`streamClaudeSessionsDir`, one helper, two call sites, so construction and swap can never name different
+folders for one workdir — and its own stored `claudeSessionsDir` copy was **removed** in favour of
+forwarding to this method: a copy taken at construction would keep answering the pre-move folder after a
+rotation, reopening the #2423 "Context: 0%" defect (see
+[contextwindow-package.md](contextwindow-package.md)) for exactly the conversations that moved. See [the
+`new_session` seam's workspace
+re-read](v2-session-manager-state-machine-inbound-new-session-sessionstarter-seam.md#workspace-re-read-on-rotation-1475)
+for the rotation-side caller, ordering and security posture.
+
 **`WriteUserTurn`/`WaitForPTY`.** `WriteUserTurn(ctx, conversationID, payload)` is a one-line wrap of the
 already-reviewed `WriteTurn` free function (#1088/#1093) — no new envelope construction, and it inherits
 `WriteTurn`'s exact contract (`ErrNoLiveChild` with no live child, `turncommit.ErrDropped` with zero bytes
@@ -115,3 +148,12 @@ stream path has no PTY to wait for, and the no-live-child window is already hand
 
 Concurrency model: three **leaf** mutexes on `Runner` (`mu`, `stateMu`, `restartMu`), never nested, each
 owned by a different goroutine/concern. See [codebase/1097.md](../codebase/1097.md).
+
+**Testing trap: moving a field off `Config` onto the live `Runner` silently strands any test that builds
+a `&Runner{}` literal directly (#1475).** `beginSpawn` reads `useCreateForm`'s directory from the live
+`claudeSessionsDir` field now, not `cfg.ClaudeSessionsDir` — but a test that constructs a `Runner` by hand
+and sets only the `cfg` half compiles fine and silently probes against `""`, latching on `firstRun`
+instead of exercising the create/resume decision it meant to test. This package's convention (already
+followed for `cfg.SessionID`/`sessionID`) is to set **both** halves of a config/live pair in a hand-built
+literal, but nothing in the type system enforces it. Grep for `&Runner{` before moving any further field
+out of `cfg` and onto a live counterpart.

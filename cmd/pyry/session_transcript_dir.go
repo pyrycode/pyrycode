@@ -29,11 +29,16 @@ import (
 // used tokens against the default window, which the desktop draws as "Context: 0%".
 //
 // THE FOLDER IS NOT DERIVED HERE, and that is the whole of the fix's correctness.
-// What comes back is the value the session's own runner already computed for its
-// spawn probe (streamClaudeSessionsDir, called once in mapStreamsupConfig and
-// stored on the adapter), so the reader and the probe read ONE field of ONE
-// struct and no path exists on which they can name different folders for one
-// session. A second streamClaudeSessionsDir call here would agree today and is
+// What comes back is the value the session's own runner holds for its spawn probe
+// (streamClaudeSessionsDir, called in mapStreamsupConfig at construction and again
+// in streamRunner.SetSpawnWorkDir on a rotation that moves the workspace), so the
+// reader and the probe read ONE field of ONE struct and no path exists on which
+// they can name different folders for one session. Since #1475 that field is the
+// RUNNER'S rather than the adapter's, which is what keeps the two together now
+// that it can change: a copy taken at construction would answer the pre-move
+// folder for every reading after a workspace move, restoring the pre-#2423
+// reading on exactly the conversations that moved.
+// A second streamClaudeSessionsDir call here would agree today and is
 // exactly the shape that drifts: agentrun.ResolveWorkdir applies canonicalCase
 // and symlink resolution, which neither confineWorkdirToHome nor resolveSpawnDir
 // does, so re-deriving from a differently-spelled workdir names a folder claude
@@ -75,9 +80,14 @@ import (
 // Concurrency: a synchronous read on the caller's goroutine. The pool's lock and
 // the runner's field read are acquired SEQUENTIALLY and never nested, so this
 // adds no edge to the daemon's lock order. The Lookup → ClaudeSessionsDir window
-// is the benign TOCTOU the resolver family documents, and a weaker one than
-// sessionModelWindows': a /clear rotation landing in it keeps the session's
-// working directory, so either reading names the same folder.
+// is the benign TOCTOU the resolver family documents. It used to be weaker than
+// sessionModelWindows' because no rotation could change a session's working
+// directory; #1475 made a new_session rotation able to, so a rotation landing in
+// the window can now make the two readings name different folders. The residual is
+// one session_settings reply computed against one of two REAL folders for that
+// session, both of which claude has written to, and the next reply is correct.
+// Closing it would mean holding Pool.mu across a runner lock — a new lock-order
+// edge bought for a stale read that is already self-correcting.
 func sessionTranscriptDir(pool *sessions.Pool, daemonSessionsDir string) func(sessionID string) string {
 	if daemonSessionsDir == "" {
 		return nil
