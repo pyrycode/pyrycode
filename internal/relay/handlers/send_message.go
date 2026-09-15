@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
@@ -147,6 +148,26 @@ type SessionRouter interface {
 	Route(conversationID string) (TurnWriter, error)
 }
 
+// ConversationToucher is the registry write surface the last-used bump consumes
+// (#2438): one locked mutation, plus the eager persist that follows it.
+//
+// Deliberately NARROWER than ConversationAutoNamer rather than a reuse of it,
+// even though the same value satisfies both and SendMessage hands its one
+// registry parameter to each step — an interface value is assignable to any
+// interface its method set covers, so the narrowing costs no adapter and no
+// constructor argument. The separate name is what keeps the auto-namer's stated
+// contract honest: that interface promises it writes Name only over a nil one,
+// and a step writing LastUsedAt on every accepted message must not quietly
+// arrive under that promise.
+//
+// Update's callback contract is the registry's own (ADR 022): it runs holding the
+// registry mutex, so it must not call back into the registry, and it must not
+// retain the *Conversation past return.
+type ConversationToucher interface {
+	Update(id conversations.ConversationID, fn func(*conversations.Conversation)) bool
+	Save(path string) error
+}
+
 // SendMessage returns a dispatch.Handler that processes a send_message frame
 // from the phone. router validates the frame's ConversationID against its bound
 // claude session (#678) and stamps the active-conversation cursor (#687);
@@ -199,6 +220,11 @@ type SessionRouter interface {
 // registry (nil means no registry leg, which names nothing), registryPath is the
 // canonical on-disk path passed to the eager Save, and announce fans the renamed
 // row to every interactive client and may be nil. See autoNameConversation.
+//
+// Since #2438 reg and registryPath carry a second registry write as well: an
+// accepted message stamps its conversation's LastUsedAt so the 30-day idle sweep
+// spares a conversation in use. A nil registry therefore now names nothing AND
+// stamps nothing. See touchConversation.
 func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolver, reg ConversationAutoNamer, registryPath string, announce ConversationAnnouncer, logger *slog.Logger) dispatch.Handler {
 	return func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error {
 		var p protocol.SendMessagePayload
@@ -347,6 +373,11 @@ func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolve
 		// queued is still going to run, so its conversation still deserves its name.
 		ackErr := replyAck(ctx, c, env)
 
+		// The conversation was just used, so stamp it and keep the 30-day idle
+		// sweep off it (#2438). Ahead of the naming step, so the record that step
+		// announces carries the instant written here — see touchConversation.
+		touchConversation(reg, registryPath, logger, c.ConnID(), p.ConversationID)
+
 		// Auto-name the conversation from this message, if it is the first one and
 		// the row is still unnamed. Reached only on an accepted message: every reject
 		// branch above has already returned, which is what makes "a rejected send
@@ -358,6 +389,69 @@ func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolve
 		autoNameConversation(reg, registryPath, announce, logger, c.ConnID(), p.ConversationID, p.Text)
 
 		return ackErr
+	}
+}
+
+// touchConversation stamps a conversation's LastUsedAt with the instant its
+// message was accepted, and persists it (#2438).
+//
+// Conversation.LastUsedAt is documented as bumped on user activity, and
+// conversations.ShouldArchive reads it to decide — at 30 days idle — that nobody
+// wants the conversation any more. Until this existed the only writers were the
+// two creation stamps, so a conversation used every day was swept 30 days after
+// it was CREATED. Sending a message is the one unambiguous use, which is why the
+// bump lives here and why the sibling verbs that carry the field through —
+// rename, promote, archive, set-system-prompt, change-workspace — still do.
+// Those edit a conversation; this one uses it.
+//
+// ON ACCEPTANCE, NOT ON ROUTING. It is called after a non-zero EnqueueDelivery,
+// which puts it past the last branch that can still refuse the message: an
+// unresolvable attachment and a full backlog both pass Route and are rejected
+// anyway. "A rejected send is not a use" is therefore structural, exactly as the
+// naming step's equivalent rule is, rather than a guard someone must remember.
+//
+// It runs AFTER THE ACK and BEFORE the naming step. After the ack for the reason
+// autoNameConversation gives at length: the step costs an fsync, and the drain is
+// already delivering the turn on its own goroutine, so work done ahead of the ack
+// lets the child's frames overtake it on the wire. Before the naming step so the
+// conversation_updated record that step snapshots carries the timestamp just
+// written rather than one that is stale the instant it is announced.
+//
+// It reports nothing and fails nothing. The sender has already been told the
+// message was accepted, and no outcome here may change that.
+func touchConversation(reg ConversationToucher, registryPath string, logger *slog.Logger, connID, conversationID string) {
+	// A nil registry means "no registry leg wired" and stamps nothing, the same
+	// fail-closed shape the naming step takes.
+	if reg == nil {
+		return
+	}
+	if !reg.Update(conversations.ConversationID(conversationID), func(cv *conversations.Conversation) {
+		cv.LastUsedAt = time.Now().UTC()
+	}) {
+		// The row was deleted between the enqueue and here. Nothing was written, so
+		// there is nothing to persist — and saving regardless could only produce a
+		// spurious failure line about a write nobody asked for.
+		return
+	}
+
+	// Eager persist, so the stamp survives a daemon restart: the registry is
+	// reloaded from this file at startup, and a stale instant there is precisely
+	// the bug this fixes. The sweep loop's own Save is lazy (it writes only on a
+	// tick that archived something), so it cannot be relied on to carry this.
+	//
+	// WARN, and not the Error the naming step logs for its own failed Save. The
+	// difference is what a miss costs: this value is self-healing — the in-memory
+	// stamp is what the running daemon's sweep reads, and the next accepted message
+	// re-stamps and re-persists — so a failure here is a degraded write rather than
+	// a lost one. There is also no success line to pair a level with, because one
+	// per accepted message would double this handler's log volume to tell an
+	// operator nothing actionable. This is the only line the step emits.
+	if err := reg.Save(registryPath); err != nil {
+		logger.Warn("relay: send_message last-used persist failed",
+			"event", "send_message.last_used_persist_failed",
+			"conn_id", connID,
+			"conversation_id", conversationID,
+			"err", err)
 	}
 }
 

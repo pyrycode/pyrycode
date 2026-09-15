@@ -56,6 +56,8 @@ The `IsArchived` guard (#1488) is what keeps the two archive mechanisms from con
 
 Pure value semantics. Safe to call from any goroutine. Cannot fail — reads three fields, returns a bool.
 
+`ShouldArchive` only reads `LastUsedAt`; something on the messaging path has to advance it, or every conversation is swept 30 days after creation regardless of use. As of #2438, `SendMessage` (`internal/relay/handlers/send_message.go`) is that writer: `touchConversation` stamps `LastUsedAt` to now and persists it once a `send_message` frame is accepted (past every branch that can still refuse the message, so a rejected send is not a use). The sibling verbs — rename, promote, archive, set-system-prompt, change-workspace — still carry the field through unchanged; they edit a conversation, they don't use it.
+
 `Sweep`'s body is a four-line composition:
 
 ```go
@@ -362,7 +364,7 @@ Seeds two 60-day-idle conversations (one promoted, one unpromoted) into `<home>/
 - `ConversationsRegistry`-shaped façade types or mockable interfaces — the function takes the concrete `*Registry`; the package owns both. An interface seam is premature.
 - Archive destination — `Sweep` still archives by removing the row (history retention is a separate concern). The reconciliation with #880's *durable, recoverable* manual archive (`Conversation.IsArchived` + `Registry.SetArchived`) is **decided, not deferred**, as of #1488: archived rows are exempt from the idle sweep, and deletion applies only to non-archived idle discussions — see § Decisions → *Manual archive is durable until the user unarchives*, [`features/conversations-registry.md`](conversations-registry.md) § `SetArchived`, and [codebase/880.md](../codebase/880.md). Still out of scope is the **other** fix direction: making `Sweep` *set* `IsArchived` instead of deleting, paired with a separate longer retention policy. That changes what auto-archive means for every existing idle discussion and needs its own decision; #1488 deliberately scoped itself to the exemption.
 - Configurable threshold — exported knob deferred until a real ask.
-- Integration with `LastUsedAt` bumps — the future conversations API (rotate session, attach, send message) is what advances `LastUsedAt`; the predicate only reads it.
+- Integration with `LastUsedAt` bumps for the arms other than sending a message — a future rotate-session or attach verb is what would advance `LastUsedAt` for those; the predicate only reads it. The send-message arm is no longer deferred — see § How it works.
 - Clock interface / `Clock` type for injection — `now time.Time` is the injection point; tests pass deterministic literals, no fake clock needed.
 - Map-based registry indexing for O(1) `Delete` — premature; the registry size and call frequency don't warrant it.
 
