@@ -86,3 +86,14 @@ Pending for the documentation stage — not edited in this ticket.
 
 1. Does `hasClaudeMdExternalIncludesWarningShown` need to be true for the approval to take effect, or is it independent bookkeeping? The ticket specifies both, and the manual stopgap set both, so both are written either way; resolving this changes nothing about the design. Recorded because the live arm cannot distinguish them.
 2. Does the seeded `~/.claude.json` in the live tier carry operator-side state that interacts with the control arm's hand-written `false`? Expected no — the evidence is explicit that the flag is read per-entry, and both arms' roots are fresh temp paths with no pre-existing entry. Confirm when the live gate runs; if the control arm expands its import anyway, the per-entry premise is wrong and the finding is worth more than the test.
+
+## Revisions
+
+### 2026-09-15 — implementation
+
+The design landed as planned; no finding forced a change to it. Recording the two Open Questions' state and one detail the plan did not name.
+
+- **Open question 1 (does `WarningShown` gate the approval?) stays open, by design.** It is not answerable offline and it does not branch the implementation — the ticket specifies both keys and the manual stopgap set both, so both are written on either answer. The live gate cannot separate them either, since no arm writes one without the other. Deliberately left as bookkeeping rather than turned into a second control arm: an arm that isolated `WarningShown` would spend a live child to answer a question whose answer changes nothing here.
+- **Open question 2 (seeded `~/.claude.json` interfering with the control arm) stays open pending the live gate**, which is where it was always going to be decided. The control arm's failure message is written to make that outcome legible: if it reddens, the per-entry premise is wrong and the marked arm proves nothing, which is the finding to report rather than a test to relax.
+- **The control arm resolves its root through `agentrun.ResolveWorkdir` before hand-writing the entry.** The plan said "hand-writes its root's entry" without naming how the key is spelled. It must go through the same realpath rule the helper uses — macOS resolves `/var` to `/private/var` and folds to the on-disk case — or the control arm would write a key claude never reads, quietly degrading into a no-flag arm that passes for the wrong reason. This adds an `internal/agentrun` import to the live test file.
+- **Verification added beyond the plan's gate:** the `e2e`-tagged fake-daemon supervisor trust tests, which are the other consumer of what this helper writes. Green — they decode the entry into a struct carrying only the trust key, so the two added keys pass through unread, as the reading list predicted.
