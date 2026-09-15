@@ -159,6 +159,37 @@ func pickBootstrap(reg *registryFile) *registryEntry {
 	return nil
 }
 
+// dormantEntries returns every entry in reg that is not the bootstrap's, keyed
+// by id — the set Pool.New parses and does not materialise, which Pool.dormant
+// then keeps so a later saveLocked writes them back instead of erasing them
+// (#2448). A nil reg (cold start) yields an empty map.
+//
+// It is pickBootstrap's complement and sits beside it for that reason, but it is
+// keyed on the resolved bootstrapID rather than on the Bootstrap flag: the flag
+// can appear on more than one entry in a hand-edited file, where pickBootstrap
+// materialises the first and the rest are as dormant as any other entry. A
+// registry holding no bootstrap entry at all — New mints a fresh id — therefore
+// keeps every entry it held, which is the correct reading of "not materialised".
+//
+// Entries are carried verbatim rather than filtered or repaired. They are the
+// operator's record, this is the only reader that could silently drop one, and an
+// id that decodes but is malformed can do no harm from here: it is a map key, and
+// nothing derives a filesystem path or an argv from it. Duplicate ids collapse to
+// one, which is strictly better than what the file held.
+func dormantEntries(reg *registryFile, bootstrapID SessionID) map[SessionID]registryEntry {
+	out := make(map[SessionID]registryEntry)
+	if reg == nil {
+		return out
+	}
+	for _, e := range reg.Sessions {
+		if e.ID == bootstrapID {
+			continue
+		}
+		out[e.ID] = e
+	}
+	return out
+}
+
 // sortEntriesByCreatedAt sorts entries by CreatedAt then ID, giving the disk
 // file a deterministic byte-content shape that does not depend on Go's
 // randomized map iteration order. Required for the AC's idempotent-reload

@@ -12,7 +12,7 @@ func (p *Pool) Remove(ctx context.Context, id SessionID) error
 1. Take `Pool.mu` (write).
 2. Resolve `id` in `p.sessions`. Unknown ⇒ release `Pool.mu`, return `ErrSessionNotFound` (in-memory + on-disk state byte-identical, no `saveLocked` call).
 3. If `sess.bootstrap` ⇒ release `Pool.mu`, return `ErrCannotRemoveBootstrap` (bytes-identical, same as above).
-4. `delete(p.sessions, id)`, then `saveLocked()`. On save failure: restore `p.sessions[id] = sess`, release the lock, return the error verbatim. (Mirrors `Pool.Rename`'s rollback discipline.)
+4. `delete(p.sessions, id)`, then `delete(p.dormant, id)` (#2448), then `saveLocked()`. On save failure: restore `p.sessions[id] = sess`, release the lock, return the error verbatim. (Mirrors `Pool.Rename`'s rollback discipline.) The `p.dormant` delete has nothing to roll back: `id` was live, so `materialise` already retired any dormant entry for it when the session was registered, and `saveLocked` writes a live id from its `Session` either way — restoring `p.sessions[id]` alone restores the file byte-for-byte. The delete is here anyway because removal's finality is `Remove`'s own claim to make: without it, a future change to where the retire happens could resurrect a removed session on the next save.
 5. Release `Pool.mu`.
 6. Call `sess.Evict(ctx)`. Returns only after the child has exited (or `ctx` cancels). The on-disk JSONL is **not** touched — disposition (archive / purge) is 64-A2 / #95.
 
