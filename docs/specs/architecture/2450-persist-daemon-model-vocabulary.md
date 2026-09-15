@@ -408,3 +408,44 @@ a restarted daemon that has spawned nothing answers from the persisted file, and
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-15
+
+## Revisions
+
+### 2026-09-15 — the third source is an explicit parameter, not a substituted struct
+
+**What changed.** § Design proposed replacing the `pool *sessions.Pool` parameter of
+`resolveBoundModelList`, `retainedModelVocabulary`, `modelListFor` and
+`retainedModelLists` with a `modelVocabularySources` struct carrying the pool and the
+saved source together. The implementation adds an explicit `saved savedModelVocabulary`
+parameter beside the pool instead, and `savedModelList` owns the one nil check.
+
+**Why.** The substitution's whole justification was that 24 existing call sites would
+compile unchanged. They would not. Reading the tests rather than the call lines showed
+that the value `newModelListTestPool` returns is also used as a pool — `pool.Default()`,
+`pool.BootstrapID()`, `pool.Create`, `pool.SettingsFor` — at roughly twenty further
+sites, so a named-field struct moves the churn rather than removing it, and the only
+shape that would have kept both sets compiling is one embedding `*sessions.Pool`, which
+promotes the pool's whole method set onto a value named "sources" and makes
+`sources.Create(...)` a legal call. That is a worse type than the parameter it was
+avoiding. With the substitution's benefit gone, the explicit parameter is simply the
+better design: each caller states both sources, nothing is hidden behind promotion, and
+the interface is defined at the consumer as CODING-STYLE asks.
+
+**What it costs.** The call-site count in § Sizing note rises from ~27 to ~39: 23 in
+`session_model_list_test.go`, 10 across the factory and selector's tests, and 6 in
+production. The overage is the same overage already declared there, under the same
+floor rule and for the same reason — it is larger, not different in kind.
+
+**Open question 2 is resolved.** `Close` is deferred immediately after the store is
+built in `runSupervisor`, so LIFO ordering runs it LAST — after the pool and the relay
+leg have drained. That is the correct end: the store must outlive every producer that
+could still be retaining into it, and it depends on nothing that shuts down before it.
+
+**Open question 1 was resolved in § Security review** and did not move during
+implementation: the file is read as daemon-written, bounded only by
+`maxModelVocabularyFile`.
+
+**The security review's one SHOULD FIX landed.** `drain` compares the encoded bytes
+against `lastWritten` and skips the write when they are equal; `Load` seeds
+`lastWritten` with what it read, so a restart does not rewrite what it just restored.
+`TestModelVocabularyStore_IdenticalRetentionSkipsTheWrite` is the red for it.

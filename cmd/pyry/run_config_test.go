@@ -517,7 +517,7 @@ func TestSettingsUpdaterAdapter_CarriesPermissionMode(t *testing.T) {
 
 	pool := newRouterTestPool(t)
 	id := string(pool.Default().ID())
-	adapter := settingsUpdaterAdapter{pool}
+	adapter := settingsUpdaterAdapter{p: pool}
 
 	mode := "plan"
 	if err := adapter.UpdateSettings(id, relay.SettingsUpdate{PermissionMode: &mode}); err != nil {

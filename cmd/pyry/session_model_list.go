@@ -85,7 +85,10 @@ import (
 // id the registry does not carry, and NOTHING RETAINED ANYWHERE — no bootstrap in
 // the pool, a bootstrap constructed evicted (sessions.Config.BootstrapEvicted,
 // set by pyry acp, which spawns no claude), or its initialize reply not yet
-// arrived. An unbound conversation, a binding the pool cannot resolve, a runner
+// arrived. #2450 NARROWED the second state without adding a third: it now also
+// requires that no vocabulary was persisted by a previous process — an absent,
+// unreadable or undecodable model_list.json, or a daemon built with no store at
+// all. An unbound conversation, a binding the pool cannot resolve, a runner
 // without the method and an empty hold no longer refuse; they fall back. Absence
 // of the frame stays the only "no list" signal a client gets — reconcileModelLists
 // sends nothing for an empty enumeration — so do NOT invent an empty Models array
@@ -130,12 +133,12 @@ import (
 // either leaves the answer either the menu of the session bound a moment ago or
 // the daemon-wide copy, and both are correct because the vocabulary is a property
 // of the machine and account rather than of one child. No re-read, no retry.
-func resolveBoundModelList(convReg *conversations.Registry, pool *sessions.Pool, convID string) (protocol.ModelListPayload, bool) {
+func resolveBoundModelList(convReg *conversations.Registry, pool *sessions.Pool, saved savedModelVocabulary, convID string) (protocol.ModelListPayload, bool) {
 	conv, ok := convReg.Get(conversations.ConversationID(convID))
 	if !ok {
 		return protocol.ModelListPayload{}, false
 	}
-	list, ok := retainedModelVocabulary(pool, conv.CurrentSessionID)
+	list, ok := retainedModelVocabulary(pool, saved, conv.CurrentSessionID)
 	if !ok {
 		return protocol.ModelListPayload{}, false
 	}
@@ -161,38 +164,71 @@ func resolveBoundModelList(convReg *conversations.Registry, pool *sessions.Pool,
 	return out, true
 }
 
+// savedModelVocabulary is the file-backed THIRD source: the last vocabulary this
+// daemon saw in any previous process, restored once at start (#2450).
+// *modelVocabularyStore is the only production implementation.
+//
+// It is the SAME ONE-METHOD SHAPE sessionRetainedModelList asserts for off a
+// Runner, and deliberately so: the third source then answers the same comma-ok
+// contract as the first two, the bool stays the only spelling of "no list", and no
+// arm of retainedModelVocabulary has to learn a second vocabulary-shaped protocol.
+// Defined at the CONSUMER, per CODING-STYLE, which is also what keeps this file
+// free of any dependency on how the store persists anything.
+type savedModelVocabulary interface {
+	ModelList() (turnevent.ModelList, bool)
+}
+
 // retainedModelVocabulary answers the model vocabulary to stamp with a
-// conversation's id (#2124): the bound session's OWN retained list when it has
-// one, and otherwise the daemon-wide copy the bootstrap child retains.
+// conversation's id: the bound session's OWN retained list when it has one, else
+// the daemon-wide copy a bootstrap child retains (#2124), else the copy this
+// daemon persisted in a previous process (#2450).
 //
-// ORDER IS THE CONTRACT. The bound session is read first and the daemon-wide copy
-// is reached only when the binding yields nothing, so a live child's own report
-// is never overridden — a child that has answered initialize is the authority on
-// what IT will accept, and the fallback is a stand-in for silence rather than a
-// second opinion. Do not reorder these two reads, and do not "simplify" by
-// reading the bootstrap unconditionally and preferring the bound list afterwards:
-// that spends a lock and a deep copy on every call for the common case where the
-// binding already answered.
+// ORDER IS THE CONTRACT, and it is now THREE DEEP. Each source is reached only
+// when the one above it yields nothing, so a live child's own report is never
+// overridden — a child that has answered initialize is the authority on what IT
+// will accept, and every fallback below it is a stand-in for silence rather than a
+// second opinion. The file is LAST for that rule applied once more: a hold is this
+// process's observation and the file is a previous process's. Do not reorder these
+// reads, and do not "simplify" by reading a lower source unconditionally and
+// preferring the bound list afterwards: that spends a lock and a deep copy on every
+// call for the common case where the binding already answered.
 //
-// The daemon-wide copy exists because RequestInitializeOnSpawn is true for every
-// child this daemon spawns, so the bootstrap child asks at daemon start and its
-// runner's hold retains the reply for the process lifetime. It is read through
-// Pool.Default rather than through Pool.Lookup(""), and that choice is
-// load-bearing TWICE. It names what is being read, which is what keeps this a
-// documented vocabulary exception rather than the #678 hazard reopened by
-// accident. And Pool.Lookup("") returns p.sessions[p.bootstrap] with a NIL ERROR
+// WHY THE THIRD SOURCE EXISTS, stated because this doc previously asserted the
+// premise that removed the need for it. It used to say the daemon-wide copy is
+// always there "because RequestInitializeOnSpawn is true for every child this
+// daemon spawns, so the bootstrap child asks at daemon start" — and #2085 had
+// already deleted the spawn at daemon start. Nothing spawns at start, so a
+// restarted daemon holds no vocabulary in EITHER hold until a turn runs in the
+// conversation bound to the bootstrap session; every minted conversation gets its
+// own session, so on a daemon whose bootstrap-bound conversation is idle that is
+// never, for the whole process lifetime. The file closes exactly that window and
+// nothing else: it changes which answers are available on a COLD daemon, and
+// changes no answer a warm one gives.
+//
+// The bootstrap is read through Pool.Default rather than through Pool.Lookup(""),
+// and that choice is load-bearing TWICE. It names what is being read, which is what
+// keeps this a documented vocabulary exception rather than the #678 hazard reopened
+// by accident. And Pool.Lookup("") returns p.sessions[p.bootstrap] with a NIL ERROR
 // rather than an error, so a version of this function that dropped the
 // boundSessionID != "" check and let an unbound conversation fall through to the
 // lookup would get back a possibly-nil session with no signal that anything was
 // wrong — which sessionRetainedModelList's nil guard would then have to catch
 // anyway, one layer further from the decision.
 //
+// A NIL saved IS A DAEMON WITH TWO SOURCES, not an error and not a special case: a
+// host that never built a store (every test pool, and pyry acp) falls through the
+// same arms and refuses at the same place it did before #2450. savedModelList owns
+// that guard so neither this function nor its callers repeat it.
+//
 // SECURITY: the boundSessionID is the daemon's own — it comes off a resolved
 // conversations.Conversation, never from a caller — and the untrusted id was
 // already spent on the registry lookup one frame up. Nothing here logs, and
 // Pool.Lookup's error is discarded rather than wrapped, for the reason
-// resolveBoundModelList states.
-func retainedModelVocabulary(pool *sessions.Pool, boundSessionID string) (turnevent.ModelList, bool) {
+// resolveBoundModelList states. The file's strings are claude-authored and were
+// bounded by streamsup at construction before this daemon wrote them; the store
+// treats the file as daemon-written and applies one aggregate size bound of its own
+// — see maxModelVocabularyFile, which carries that decision and its residual risk.
+func retainedModelVocabulary(pool *sessions.Pool, saved savedModelVocabulary, boundSessionID string) (turnevent.ModelList, bool) {
 	if boundSessionID != "" {
 		if sess, err := pool.Lookup(sessions.SessionID(boundSessionID)); err == nil {
 			if list, ok := sessionRetainedModelList(sess); ok {
@@ -200,7 +236,31 @@ func retainedModelVocabulary(pool *sessions.Pool, boundSessionID string) (turnev
 			}
 		}
 	}
-	return sessionRetainedModelList(pool.Default())
+	if list, ok := sessionRetainedModelList(pool.Default()); ok {
+		return list, true
+	}
+	return savedModelList(saved)
+}
+
+// savedModelList reads the third source, or reports that there is none to read. It
+// is the single place a nil store is handled, which is why retainedModelVocabulary
+// has no guard of its own — sessionRetainedModelList's argument for owning the nil
+// session and the type assertion, applied to the one absence THIS source can have.
+//
+// The nil check is on the INTERFACE, and it catches the daemon that never built a
+// store. A store that exists but has seen nothing is a different state and answers
+// through its own comma-ok, and *modelVocabularyStore.ModelList is additionally
+// nil-receiver-safe, so a typed nil inside a non-nil interface also lands on the
+// unreported state rather than panicking.
+//
+// Value ownership: the store hands back a DEEP COPY the caller solely owns, exactly
+// as sessionModelHold.ModelList does. This function forwards it untouched — no
+// clone, no normalisation, no recomputation of DroppedModels.
+func savedModelList(saved savedModelVocabulary) (turnevent.ModelList, bool) {
+	if saved == nil {
+		return turnevent.ModelList{}, false
+	}
+	return saved.ModelList()
 }
 
 // sessionRetainedModelList reads one session's retained model list, or reports
@@ -280,9 +340,9 @@ func sessionRetainedModelList(sess *sessions.Session) (turnevent.ModelList, bool
 // dispatch goroutine, which is new for this resolver and is why the body must stay
 // what it is. It spawns nothing, mints nothing and mutates nothing, and the locks it
 // takes are resolveBoundModelList's, acquired sequentially and never nested.
-func modelListFor(convReg *conversations.Registry, pool *sessions.Pool) func(convID string) (protocol.ModelListPayload, bool) {
+func modelListFor(convReg *conversations.Registry, pool *sessions.Pool, saved savedModelVocabulary) func(convID string) (protocol.ModelListPayload, bool) {
 	return func(convID string) (protocol.ModelListPayload, bool) {
-		return resolveBoundModelList(convReg, pool, convID)
+		return resolveBoundModelList(convReg, pool, saved, convID)
 	}
 }
 
@@ -386,12 +446,12 @@ func modelListFor(convReg *conversations.Registry, pool *sessions.Pool) func(con
 // resolver documents: a row created, deleted, rebound or rotated inside it either
 // resolves to the menu of the session bound a moment ago or refuses, and both are
 // correct. No re-read, no retry, no re-list.
-func retainedModelLists(convReg *conversations.Registry, pool *sessions.Pool) func() []protocol.ModelListPayload {
+func retainedModelLists(convReg *conversations.Registry, pool *sessions.Pool, saved savedModelVocabulary) func() []protocol.ModelListPayload {
 	return func() []protocol.ModelListPayload {
 		convs := convReg.List()
 		out := make([]protocol.ModelListPayload, 0, len(convs))
 		for _, c := range convs {
-			payload, ok := resolveBoundModelList(convReg, pool, string(c.ID))
+			payload, ok := resolveBoundModelList(convReg, pool, saved, string(c.ID))
 			if !ok {
 				continue
 			}
