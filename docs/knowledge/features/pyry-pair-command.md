@@ -191,7 +191,11 @@ uses the same `devices.WithLock`-guarded `mintDevice` primitive as remote
 `mint_pairing`, while offline `pair revoke` takes the same per-instance lock.
 Concurrent bare invocations and a revoke racing issuance therefore serialize at
 the registry write boundary. The CLI itself holds no registry lock during
-discovery or control I/O.
+discovery or control I/O. The daemon's `register_push_token` writer
+(`internal/relay/handlers/register_push_token.go`) now takes the same lock too
+(#1532), so a `pyry pair` or `pyry pair revoke` racing a phone's background
+push-token re-registration serializes on the same sidecar rather than one
+silently clobbering the other's `Save`.
 
 ## Tests
 
@@ -352,8 +356,11 @@ Exit `2` is reserved for **usage** errors only — flag parse failure, missing p
 
 Two concurrent revokes, and an offline revoke racing daemon-owned issuance,
 serialize on the per-instance `devices.json.lock` sidecar and re-read inside the
-lock before mutating. The separate `register_push_token` writer remains outside
-this lock until #1532.
+lock before mutating. The daemon's `register_push_token` writer takes the same
+lock too (#1532), so a revoke racing the daemon's own background push-token
+persist now serializes on the same sidecar instead of one clobbering the
+other's `Save` — see [`features/devices-registry.md`](devices-registry.md)
+§ *Two-writer clobber guard*.
 
 ### Tests
 
@@ -361,7 +368,7 @@ Unit (`cmd/pyry/pair_test.go`):
 
 - `TestParsePairRevokeArgs` — table: happy (`phone`), with-instance (`-pyry-name=foo phone`), missing positional (`nil` → `missing device name`), extra positional (`a b` → `unexpected positional`), unknown flag (`--bogus phone` → `flag provided but not defined`). Pins `t.Setenv("PYRY_NAME", "")` for deterministic `defaultName()`.
 - `TestRunPairRevoke_RemovesEntry` — two-device fixture; call `runPairRevoke([]string{"alpha"})`; reload via `devices.Load`; assert one survivor (`bravo`) byte-for-byte (`Name`, `TokenHash`, `PairedAt.Equal`, `LastSeenAt.Equal`).
-- `TestRunPairRevoke_SaveFailure` — fixture as above, then `os.Chmod(<dir>, 0o500)`; assert returned error contains `pair revoke:`. **Its doc comment still says this exercises a `Save` failure; since #1531 it doesn't.** `WithLock` now opens the `.lock` sidecar before `fn` runs, and that open fails against the `0500` parent first — the error is a lock-acquisition failure one layer earlier than `Save`, not a `Save` failure, though it still carries the asserted `pair revoke:` prefix so the test stays green. No test in the package currently exercises revoke's `Save` failing inside an acquired lock; a fix (pre-create the sidecar at `0600` before the chmod, so the lock opens but the temp-file rename still fails) was identified in code review and deferred rather than landed in this ticket — worth picking up alongside #1532 rather than treating the green run as coverage it no longer provides.
+- `TestRunPairRevoke_SaveFailure` — fixture as above, then `os.Chmod(<dir>, 0o500)`; assert returned error contains `pair revoke:`. **Repaired in #1532.** #1531 had hollowed this test out: `WithLock` opens the `.lock` sidecar before `fn` runs, and that open failed against the `0500` parent first, one layer earlier than `Save` — still green, but no longer exercising a `Save` failure. The fix is to pre-create the sidecar at `0600` *before* the `chmod 0500` (`O_CREATE` on an existing file needs only `x` on the directory, so the lock opens; the temp-file rename still fails), and to assert the error also contains `Save`'s own step word, `registry: create temp` — that second assertion is what stops the test re-hollowing at the acquisition step without anyone noticing. `internal/relay/handlers/register_push_token_test.go`'s `TestRegisterPushToken_SaveFailure_EmitsServerBinaryBusy` was repaired the identical way for the same reason.
 
 Not-found and missing-positional paths can't be unit-tested without `os.Exit` capture machinery (not present in this repo); they're covered E2E.
 
@@ -465,8 +472,9 @@ The exit-2 non-empty-registry path (`os.Exit(2)` from inside `runPairPreflight`)
   and bounded request exchange.
 - [Inbound `mint_pairing` (#2127)](v2-session-manager-state-machine-inbound-mint-pairing-pairingminter-seam.md)
   — the authenticated remote caller of the same daemon-owned mint step.
-- [Devices registry](devices-registry.md) — locked mint/revoke persistence and
-  the still-open `register_push_token` writer boundary.
+- [Devices registry](devices-registry.md) — locked mint/revoke persistence;
+  every `devices.json` writer, including `register_push_token`, now holds the
+  same lock (#1532).
 - [Pair payload](pair-package.md) — `Payload`, `Decode`, `Render`, fingerprint,
   and token-visibility contracts.
 - [Keys package](keys-package.md) and [identity package](identity-package.md) —
@@ -487,4 +495,5 @@ The exit-2 non-empty-registry path (`os.Exit(2)` from inside `runPairPreflight`)
 - `docs/specs/architecture/215-pair-revoke.md` — architect's spec for `pyry pair revoke`.
 - `docs/specs/architecture/436-pair-preflight-empty-check.md` — architect's spec for `pyry pair preflight`.
 - `docs/specs/architecture/1531-pair-writers-through-devices-lock.md` — architect's spec for routing mint and revoke through `devices.WithLock`; carries the full security review and the mutant-verification note for the interleaving tests.
+- `docs/specs/architecture/1532-register-push-token-through-devices-lock.md` — architect's spec for the last writer, `register_push_token`; closes the headline daemon-vs-CLI race this doc's § Concurrency now describes.
 - [ADR 024](../decisions/024-noise-ik-mobile-e2e.md) — Mobile Protocol v2 / Noise_IK parent decision; § *Pre-flight* names #436 as the implementation slice.

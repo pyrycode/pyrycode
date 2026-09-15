@@ -89,7 +89,10 @@ error and leaves memory **unchanged** (fail closed); callers proceed to
   reconciles memory into disk, with disk authoritative for membership, so a
   `Save` that races out a `pyry pair` write erases it from disk permanently.
   Nothing resurrects it.** Same last-writer-wins baseline as before #782 — no
-  new vulnerability, but the window is not self-healing.
+  new vulnerability, but the window is not self-healing. ~~Narrowed, not
+  closed.~~ **Superseded — see [Superseded (2026-09-15, #1532)](#superseded-2026-09-15-1532)
+  below: every writer now holds `devices.WithLock`, so the window is closed,
+  not narrowed.**
 
 - **One bounded JSON read per handshake.** On the single manager Run goroutine,
   gated on `DevicesPath != ""`, only on the post-IK path (the peer already
@@ -172,6 +175,44 @@ pair-then-restart bug (#782) — is unaffected and still correct; only the
 See also the same correction applied to
 [`features/devices-registry.md`](../features/devices-registry.md) §
 *Two-writer clobber guard*.
+
+## Superseded (2026-09-15, #1532)
+
+Every `devices.json` writer (`mintDevice`, `runPairRevoke`, `recordRedemption`,
+and — closing the set — `RegisterPushToken`) now wraps its read, mutate and
+`Save` in one `devices.WithLock` region, so the cross-process race this
+Correction describes is closed, not merely narrowed. The consequence this
+Correction struck through — "the next reload reconciles it" — does not come
+back true; a `Save` that raced a `pyry pair` add is no longer *possible*,
+because the lock excludes that interleaving entirely rather than relying on a
+later read to notice it.
+
+**What changes in this ADR's core mechanism: `Reload` stops being the guard and
+becomes the in-region read.** The read-through reconcile this ADR decided on is
+still exactly what runs — every locked writer still reloads before it mutates —
+but the property doing the work is no longer "reload narrows the window,"
+it's "the lock excludes every other writer from the whole region, and the
+in-region reload is what catches a write that landed in the gap between an
+earlier, unlocked read (the v2 handshake's own pre-`Validate` `Reload`, which
+takes no lock and needs none — see `features/devices-registry.md` § *Two-writer
+clobber guard*) and this region's acquisition." That is the same reasoning
+`recordRedemption` (#1528) established first: the reload is not redundant under
+the lock, because the lock says nothing about a commit that already landed
+*before* the lock was taken. `RegisterPushToken` additionally reorders its
+reconcile ahead of its mutation, which makes a revoke-mid-conn refuse
+(`auth.invalid_token`) rather than resurrect — the same free consequence
+`ClearRedeemBy` gets from the identical ordering.
+
+The v2 handshake's own `Reload` (before `Validate`) is deliberately still
+unlocked and stays that way: it is a read into a value the handshake does not
+persist, so it cannot race a locked writer's `Save` in a way that loses data —
+a reload that observes a mid-write state before or after any writer's atomic
+rename just reads the pre- or post-commit set, never a torn one.
+
+See [`features/devices-registry.md`](../features/devices-registry.md) §
+*Two-writer clobber guard* for the closing update, and
+`docs/specs/architecture/1532-register-push-token-through-devices-lock.md` for
+the full design and security review.
 
 ## Related
 

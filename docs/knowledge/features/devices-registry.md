@@ -331,6 +331,38 @@ revoked device (the security-relevant direction), and CLI-vs-`recordRedemption`
 now serializes on the same sidecar. See [`features/pyry-pair-command.md`](pyry-pair-command.md)
 for the retrofit's operation-order and concurrency detail.
 
+**Update (2026-09-15, #1532): every `devices.json` writer now holds the
+lock, closing the headline daemon-vs-CLI race in both directions.**
+`RegisterPushToken` (`internal/relay/handlers/register_push_token.go`) wraps its
+reconcile, its `UpdatePushRegistration` mutation and its `Save` in one
+`devices.WithLock` region, acquired before the reconcile's read — the reload is
+run *inside* the region rather than only before it, for the same reason
+`recordRedemption`'s is: the lock excludes a writer from committing *during* the
+region but says nothing about one that already committed between this conn's
+handshake reload and this acquisition. A `pyry pair` that commits while the
+handler is parked on the lock now survives the handler's `Save`; a device `pyry
+pair revoke` removed out from under this conn is no longer resurrected by it.
+
+The reconcile also moved to run **before** the mutation, which buys the revoke
+direction for free — the same ordering `ClearRedeemBy` already gets. A device
+the in-region reload drops (because it was revoked mid-conn) makes
+`UpdatePushRegistration` report no match, so nothing is saved and the frame is
+refused on the existing non-retryable `auth.invalid_token` rather than acked.
+That reordering is the one deliberate reply change in this slice; every other
+reply is byte-unchanged. The handler's dedupe and three display-safety guards
+(#2219) stay ahead of the region and take no lock, so a deduped or refused frame
+still creates no lock sidecar.
+
+A lock the handler cannot acquire within its bounded `pushRegistryLockWait`
+(250ms, matching `redemptionLockWait` and `pairLockWait`'s sibling shape) surfaces
+on the existing retryable `server.binary_busy` reply rather than skipping to an
+unlocked write, with a log event (`register_push_token.lock_busy`) distinct from
+an in-region `Save` failure so an operator can tell "another writer held it" from
+"the disk write failed" — a distinction that costs nothing at the reply layer,
+since both map to the same retryable refusal the phone cannot act on
+differently. See [`features/relay-package-handlers.md`](relay-package-handlers.md)
+for the handler's full contract and log table.
+
 Retrofitting mint surfaced the general trap in this pattern, worth naming for
 the next `WithLock` caller: **wrapping the existing `Save` in `WithLock` is not
 the same as moving the `Load` inside it.** A build that only locks around
@@ -411,6 +443,17 @@ both from `internal/relay/v2session_redemption_test.go`:
   `cmd/pyry/pair_lock_test.go`'s `TestRunPairDefault_ReadsSnapshotInsideLock`
   is the worked example; its discriminating power against that exact mutant
   was verified with a `go test -overlay` run rather than assumed.
+- **A best-effort in-region reload's failure branch needs its own leak
+  assertion, not just its own log line (#1532, gap not yet closed).**
+  `RegisterPushToken`'s security posture rests on "`Reload`'s error is consumed
+  inside the region and never returned from the closure, so it cannot reach a
+  log field" — a structural claim about code shape, not a tested one. No test
+  writes a malformed `devices.json`, drives the handler, and asserts the
+  captured log names `path` but none of the corrupt file's bytes; a future edit
+  that returns the reload error instead of swallowing it would change the
+  reply *and* reopen the `token_hash`-in-a-decode-error path this design closes
+  by construction, and nothing would redden. Worth pinning on the next
+  `WithLock` caller with a best-effort (rather than abandon-on-failure) reload.
 
 ## Out of scope (deferred)
 
