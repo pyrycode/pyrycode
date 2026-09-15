@@ -605,6 +605,22 @@ func boundSessionIDForActive(active *activeConversation, convReg *conversations.
 // transcript.StatByID is always one the pool holds, taken from the daemon's own
 // registry record, never a string a caller supplied.
 //
+// The live gate is the second half of that same rule (#2449). resolve now also
+// answers conversations bound to a session the daemon has only a PERSISTED record
+// of — dormant after a restart, never materialised — and for those there is no
+// transcript to read: the folder comes from the live runner's ClaudeSessionsDir,
+// and registryEntry persists no spawn dir to derive one from. Asking anyway is not
+// a harmless miss. sessionTranscriptDir answers "" for an id Pool.Lookup does not
+// hold, and contextwindow.Read("") reports the DEFAULT window against a zero used
+// count — so the reply would claim a genuine fresh session on a channel that may
+// be near full, where a zero WindowTokens is the wire contract's "do not render a
+// percentage" sentinel. Both figures stay zero instead, which is the same shape a
+// daemon with no sessions directory already reports.
+//
+// Reporting a dormant session's REAL occupancy is out of scope and needs the
+// session revived first; it is not deferred by omission but by the absence of
+// anything on disk to read.
+//
 // resolve == nil ⇒ nil, decided at BUILD time before any closure exists, so "no
 // path can invoke a nil resolver" is structural rather than a promise (the
 // bootstrapSnapshotUsage pattern). Foreground / v1.
@@ -636,7 +652,7 @@ func runConfigFor(
 			YOLO:           b.yolo,
 			PermissionMode: b.permissionMode,
 		}
-		if usage != nil {
+		if usage != nil && b.live {
 			cfg.UsedTokens, cfg.WindowTokens = usage(b.sessionID)
 		}
 		return cfg, true

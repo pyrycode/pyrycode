@@ -1840,17 +1840,45 @@ type boundRunSettings struct {
 	// describe a different session, and the pool normalises it at construction —
 	// a resolved session always names one of claude's six modes, never "".
 	permissionMode string
+	// live says the four fields above came from a session the pool HOLDS, rather
+	// than from the persisted entry of one it has not materialised (#2449). It
+	// carries no run configuration and never reaches the wire; its one consumer is
+	// runConfigFor, which reads a dormant session's context occupancy as zero
+	// because there is no transcript to stat until that session is revived.
+	//
+	// A separate field because the id cannot carry the distinction — both cases
+	// report a real, addressable session id — and runConfigFor cannot re-derive it
+	// without a pool of its own, which is the dependency that seam exists to avoid.
+	//
+	// The polarity is the fail-closed direction and not an accident of phrasing:
+	// the zero boundRunSettings is NOT live, so "do not stat a transcript for a
+	// session nobody confirmed the pool holds" falls out of the zero value rather
+	// than out of a branch someone has to keep correct.
+	live bool
 }
 
-// sessionSettingsReader is the single pool method resolveBoundRunSettings needs,
+// sessionSettingsReader is the pair of pool reads resolveBoundRunSettings needs,
 // declared at the consumer per CODING-STYLE; *sessions.Pool satisfies it with no
 // adapter. It exists for a stated testing need rather than pre-emptively: "no
-// pool session lookup is performed for an unresolvable conversation" is a claim
-// about CALLS, and the returned values cannot carry it — a conversation bound to
-// an all-defaults session reports exactly the zeros a refusal reports — so the
-// double has to be able to count. Do not widen it past SettingsFor.
+// pool read is performed for an unresolvable conversation" is a claim about
+// CALLS, and the returned values cannot carry it — a conversation bound to an
+// all-defaults session reports exactly the zeros a refusal reports — so the
+// double has to be able to count.
+//
+// It was one method until #2449, whose whole subject is the second one: after a
+// daemon restart the pool has materialised only the bootstrap, so SettingsFor
+// alone answers "not addressable" for every other conversation the daemon holds a
+// persisted record of. Widening it here is that ticket's intended change, and the
+// counting need widened with it rather than being outgrown — the sequence a double
+// records now also carries "a session the pool HOLDS is never read from the
+// dormant half", which no single-method double could state.
+//
+// Do not widen it past these two. Each further method is a pool capability this
+// resolver can reach for, and the seam's value is that a reviewer can see the
+// whole of what a conversation-keyed settings read may touch in three lines.
 type sessionSettingsReader interface {
 	SettingsFor(id sessions.SessionID) (sessions.SessionSettings, error)
+	DormantSettingsFor(id sessions.SessionID) (sessions.SessionSettings, error)
 }
 
 // resolveBoundRunSettings is the run-configuration twin of resolveBoundSession:
@@ -1866,16 +1894,48 @@ type sessionSettingsReader interface {
 // bootstrap child's run configuration. An empty convID lands in the first guard:
 // no conversation carries an empty id, so the pool is never touched for it.
 //
+// TWO READS, LIVE FIRST, EACH WITH ITS OWN MISS (#2449). A conversation bound to
+// a session the pool holds is answered from Pool.SettingsFor; one bound to a
+// session the daemon has only a persisted record of is answered from
+// Pool.DormantSettingsFor, which reports that entry's model and effort. Only an id
+// in neither half is unresolvable. Before this the dormant case fell through to
+// the refusal, and since Pool.New materialises just the bootstrap, that was EVERY
+// conversation after a daemon restart — a reply whose every field sat at its zero,
+// which a client renders as inert menus and a model label the channel is not on.
+//
+// The order is not interchangeable. Live first means a session the pool holds is
+// never reported from a stale persisted entry, which is a guarantee of this
+// function and not merely of the pool's bookkeeping (Pool.materialise retires the
+// dormant entry it takes over, so the halves partition — but a resolver that
+// asked in the other order would depend on that to stay true forever).
+//
+// The refusal is reached only after BOTH reads miss, and that is the whole of the
+// last acceptance criterion: an id the daemon has no record of at all still gets
+// the all-zero reply, because the dormant read has a miss of its own rather than
+// collapsing an unknown id into empty settings (the reason Pool.revivedSettings,
+// which does collapse it, could not be reused).
+//
+// The posture is NOT re-derived here. Both reads answer a sessions.SessionSettings
+// whose YOLO and PermissionMode are already what that session runs (or would run)
+// under, and this function copies them; the dormant half's revocation of a
+// persisted bypass (#1487) is enforced where the value is built, in
+// Pool.DormantSettingsFor, so there is exactly one place that decides it.
+//
 // Pool.SettingsFor, not Lookup-then-read, for two reasons load-bearing enough to
 // state so a later reader does not "simplify" them away:
 //
-//   - ONE acquisition. SettingsFor answers both questions asked here — does the
-//     pool still hold this id, and what are its settings — under a single RLock. A
+//   - ONE acquisition PER ANSWER. SettingsFor answers both questions asked here —
+//     does the pool still hold this id, and what are its settings — under a single
+//     RLock, and DormantSettingsFor does the same for its half. A
 //     Lookup-then-SettingsFor shape opens a window (idle eviction is live, see
 //     Pool.IdleTimeout) in which the reported id names a session the reported
 //     settings no longer describe. Reporting the values together is the whole
 //     point of the seam, so the single acquisition is the design, not a
-//     micro-optimisation.
+//     micro-optimisation. The window BETWEEN the two reads carries no such hazard:
+//     a revive landing in it makes the dormant answer describe a session that is
+//     now live, whose model and effort are the values Revive just materialised
+//     from that same entry, and nothing can move an id the other way — p.dormant
+//     only ever shrinks.
 //   - No ""-is-bootstrap convention. SettingsFor deliberately does not
 //     special-case the empty id (its doc says why: read and write must agree), so
 //     "" is an ordinary map miss here. Building on it means fall-through-to-
@@ -1899,17 +1959,33 @@ func resolveBoundRunSettings(convReg *conversations.Registry, pool sessionSettin
 	if !ok || conv.CurrentSessionID == "" {
 		return boundRunSettings{}, false
 	}
-	s, err := pool.SettingsFor(sessions.SessionID(conv.CurrentSessionID))
+	if s, err := pool.SettingsFor(sessions.SessionID(conv.CurrentSessionID)); err == nil {
+		return settingsOf(conv.CurrentSessionID, s, true), true
+	}
+	s, err := pool.DormantSettingsFor(sessions.SessionID(conv.CurrentSessionID))
 	if err != nil {
 		return boundRunSettings{}, false
 	}
+	return settingsOf(conv.CurrentSessionID, s, false), true
+}
+
+// settingsOf decodes one pool answer into the primitive-typed value that crosses
+// into relay.go, tagged with which half of the pool answered.
+//
+// It exists so the two return sites above cannot drift: a field added to
+// sessions.SessionSettings and wired into only one of two hand-written literals
+// compiles, ships, and reports that field for a live session while silently
+// dropping it for a dormant one — the failure mode boundRunSettings' own doc
+// records for transposed same-typed returns, in its other form.
+func settingsOf(sessionID string, s sessions.SessionSettings, live bool) boundRunSettings {
 	return boundRunSettings{
-		sessionID:      conv.CurrentSessionID,
+		sessionID:      sessionID,
 		model:          s.Model,
 		effort:         s.Effort,
 		yolo:           s.YOLO,
 		permissionMode: s.PermissionMode,
-	}, true
+		live:           live,
+	}
 }
 
 // spawnedPromptReader is the single pool method resolveConversationPrompt needs,
