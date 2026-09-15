@@ -193,7 +193,7 @@ type Pool struct {
 	// Populated only in New and only ever shrinking thereafter — materialise
 	// retires the entry it takes over and Remove drops the one it deletes — which
 	// is what keeps the "no live *Session" half of the meaning true, and what
-	// Pool.revivedSettings and #2449's dormant read rest on. A nil map (the bare
+	// Pool.revivedSettings and Pool.DormantSettingsFor (#2449) rest on. A nil map (the bare
 	// &Pool{} literals in this package's tests) is safe for every operation
 	// outside New: read, delete and range all tolerate it, and the one write —
 	// materialise's rollback restore — is reachable only after a read hit, which
@@ -1577,6 +1577,68 @@ func (p *Pool) SettingsFor(id SessionID) (SessionSettings, error) {
 		return SessionSettings{}, ErrSessionNotFound
 	}
 	return sess.settings, nil
+}
+
+// DormantSettingsFor returns the SessionSettings a Revive of id would
+// materialise — the model and effort id's own persisted entry carries, and the
+// default posture — or ErrSessionNotFound if this pool holds no dormant entry
+// under that id. It is SettingsFor's dormant half: the two partition the ids the
+// daemon has a record of, because materialise retires the entry it takes over
+// and Remove drops the one it deletes (see Pool.dormant).
+//
+// It exists so request_session_settings can answer a conversation bound to a
+// session this daemon has not materialised (#2449). Pool.New materialises only
+// the bootstrap, so after a restart that is EVERY conversation until its first
+// message revives it, and the reply's every field sat at its zero: a client's
+// model and effort menus went inert and its model label resolved the daemon's
+// default row — a model the channel is not on.
+//
+// A SECOND READ rather than a fallback inside SettingsFor, deliberately. Folding
+// it in would change what "not found" means for every other caller of the live
+// read, several of which use exactly that answer to decide a session is not
+// addressable. Here the two meanings are kept apart and the caller composes them.
+//
+// NOT Pool.revivedSettings, which is the same map read and cannot be reused as it
+// stands: it collapses "no entry" into the zero SessionSettings, which is correct
+// for a revive (an id with no record revives to claude's defaults) and wrong for
+// a reader, which would then report an unknown bound id beside empty settings.
+// The miss is this method's own.
+//
+// THE POSTURE IS BUILT, NOT CLEARED. The literal names Model and Effort only and
+// is then canonicalised, so YOLO false and the default mode are structural:
+// mintSettings' and revivedSettings' recorded reason, which is that a clearing
+// statement is something a later edit can delete, and that a field added to
+// registryEntry is not inherited until someone opts it in. Two things follow that
+// a caller depends on. A restart stays a revocation point for a phone-granted
+// permission bypass (#1487): a persisted yolo or permission_mode cannot reach
+// this reply however the entry was written. And the reported posture is the one
+// Revive will actually materialise, because canonicalSettings here is the same
+// function buildSession applies to what Revive hands it — an agreement by
+// construction rather than by two places spelling the same constant.
+//
+// Concurrency: MUST be called with p.mu unheld — one RLock acquisition, no
+// delegation to another locking accessor. Go's RWMutex is not reentrant, so a
+// call from inside a critical section self-deadlocks as soon as a writer queues;
+// this is the hazard SettingsFor and mintSettings already record. The returned
+// value is a snapshot copy, not a lease: SessionSettings is a value type and
+// registryEntry is stored by value in p.dormant.
+//
+// No id validation and no logging, SettingsFor's posture verbatim: the id names
+// no file and never leaves the map lookup, so a malformed id is a map miss —
+// already the correct answer — and the error is returned bare rather than
+// wrapped with it, so a hostile id cannot be reflected into a log line or a wire
+// frame a consumer builds from the error.
+func (p *Pool) DormantSettingsFor(id SessionID) (SessionSettings, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	entry, ok := p.dormant[id]
+	if !ok {
+		return SessionSettings{}, ErrSessionNotFound
+	}
+	return canonicalSettings(SessionSettings{
+		Model:  entry.Model,
+		Effort: entry.Effort,
+	}), nil
 }
 
 // mintSettings returns the SessionSettings a freshly-minted session starts

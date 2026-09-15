@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"testing"
@@ -12,33 +14,48 @@ import (
 	"github.com/pyrycode/pyrycode/internal/sessions"
 )
 
-// settingsReaderDouble is a sessionSettingsReader over a fixed id → settings map
-// that RECORDS every id it is asked for.
+// settingsReaderDouble is a sessionSettingsReader over two fixed id → settings
+// maps — the pool's live half and its dormant half — that RECORDS every id it is
+// asked for, TAGGED with which half was asked.
 //
 // The recording is the point. "No pool session lookup is performed at all" is a
 // claim about calls, and the returned values cannot carry it: a conversation
 // bound to a session whose settings are all defaults reports exactly the zeros a
 // refusal reports, so an assertion on the return value alone passes under a
 // resolver that asks the pool for "" first and ignores the answer.
+//
+// ONE ordered sequence rather than a slice per half, because the ORDER is a
+// property the resolver owes: the live read comes first, so a session the pool
+// actually holds is never reported from a stale dormant entry (#2449). Two
+// independent counters cannot state that.
 type settingsReaderDouble struct {
 	settings map[sessions.SessionID]sessions.SessionSettings
+	dormant  map[sessions.SessionID]sessions.SessionSettings
 
 	mu    sync.Mutex
-	asked []sessions.SessionID
+	asked []string
 }
 
 func (d *settingsReaderDouble) SettingsFor(id sessions.SessionID) (sessions.SessionSettings, error) {
+	return d.answer("live", d.settings, id)
+}
+
+func (d *settingsReaderDouble) DormantSettingsFor(id sessions.SessionID) (sessions.SessionSettings, error) {
+	return d.answer("dormant", d.dormant, id)
+}
+
+func (d *settingsReaderDouble) answer(half string, from map[sessions.SessionID]sessions.SessionSettings, id sessions.SessionID) (sessions.SessionSettings, error) {
 	d.mu.Lock()
-	d.asked = append(d.asked, id)
+	d.asked = append(d.asked, half+":"+string(id))
 	d.mu.Unlock()
-	s, ok := d.settings[id]
+	s, ok := from[id]
 	if !ok {
 		return sessions.SessionSettings{}, sessions.ErrSessionNotFound
 	}
 	return s, nil
 }
 
-func (d *settingsReaderDouble) calls() []sessions.SessionID {
+func (d *settingsReaderDouble) calls() []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return slices.Clone(d.asked)
@@ -48,10 +65,12 @@ func (d *settingsReaderDouble) calls() []sessions.SessionID {
 // conversation-keyed run-configuration seam (#1609) against a counting double.
 //
 // Every row asserts the returned values AND the exact sequence of pool reads the
-// resolver performed, because the two failures this resolver exists to prevent
-// are invisible in the values alone: asking the pool for "" (which the real
-// Pool.Lookup resolves to the BOOTSTRAP session — the #678 isolation break), and
-// reporting one session's id beside another session's settings.
+// resolver performed, because the failures this resolver exists to prevent are
+// invisible in the values alone: asking the pool for "" (which the real
+// Pool.Lookup resolves to the BOOTSTRAP session — the #678 isolation break),
+// reporting one session's id beside another session's settings, and — since
+// #2449 widened the reader to two halves — consulting the dormant half for a
+// session the pool actually holds.
 //
 // Each row builds its own double so the call assertions stay independent under
 // t.Parallel(); the registry is read-only and shared.
@@ -65,19 +84,30 @@ func TestResolveBoundRunSettings(t *testing.T) {
 	reg.Create(conversations.Conversation{ID: "conv-defaults", CurrentSessionID: "sess-defaults", LastUsedAt: now})
 	reg.Create(conversations.Conversation{ID: "conv-unbound", CurrentSessionID: "", LastUsedAt: now})
 	reg.Create(conversations.Conversation{ID: "conv-dangling", CurrentSessionID: "sess-evicted", LastUsedAt: now})
+	reg.Create(conversations.Conversation{ID: "conv-dormant", CurrentSessionID: "sess-dormant", LastUsedAt: now})
 
 	// A and B carry deliberately different settings — one YOLO:true, one empty
 	// Model — so a resolver that ignores its argument and reports some captured
 	// session gets at least one field wrong whichever of the two it captured.
-	// sess-defaults holds the zero SessionSettings; sess-evicted is absent, which
-	// is what the pool looks like after an idle eviction dropped the session a
-	// conversation is still bound to.
+	// sess-defaults holds the zero SessionSettings; sess-evicted is in neither
+	// half, which is what an id the daemon has no record of at all looks like.
+	//
+	// sess-dormant is in the dormant half only — the shape every non-bootstrap
+	// session has after a daemon restart (#2449). Its settings carry the default
+	// posture the pool's own dormant read canonicalises to, so the row below also
+	// pins that this resolver COPIES what it is handed rather than re-deriving a
+	// posture of its own.
 	newReader := func() *settingsReaderDouble {
-		return &settingsReaderDouble{settings: map[sessions.SessionID]sessions.SessionSettings{
-			"sess-a":        {Model: "claude-opus-4-8", Effort: "high", YOLO: true, PermissionMode: "bypassPermissions"},
-			"sess-b":        {Model: "", Effort: "low", PermissionMode: "plan"},
-			"sess-defaults": {},
-		}}
+		return &settingsReaderDouble{
+			settings: map[sessions.SessionID]sessions.SessionSettings{
+				"sess-a":        {Model: "claude-opus-4-8", Effort: "high", YOLO: true, PermissionMode: "bypassPermissions"},
+				"sess-b":        {Model: "", Effort: "low", PermissionMode: "plan"},
+				"sess-defaults": {},
+			},
+			dormant: map[sessions.SessionID]sessions.SessionSettings{
+				"sess-dormant": {Model: "claude-sonnet-4-5", Effort: "low", PermissionMode: "default"},
+			},
+		}
 	}
 
 	cases := []struct {
@@ -85,9 +115,10 @@ func TestResolveBoundRunSettings(t *testing.T) {
 		convID string
 		want   boundRunSettings
 		wantOK bool
-		// wantAsked is the exact sequence of ids handed to the pool. nil means the
-		// pool was never touched.
-		wantAsked []sessions.SessionID
+		// wantAsked is the exact sequence of reads the resolver performed, each
+		// tagged with the pool half it went to. nil means the pool was never
+		// touched.
+		wantAsked []string
 	}{
 		{
 			name:   "empty conversation id never reaches the pool",
@@ -102,30 +133,37 @@ func TestResolveBoundRunSettings(t *testing.T) {
 			convID: "conv-unbound",
 		},
 		{
-			name:      "dangling binding is fail-closed after exactly one pool read",
+			name:      "a binding in neither half is fail-closed after both reads",
 			convID:    "conv-dangling",
-			wantAsked: []sessions.SessionID{"sess-evicted"},
+			wantAsked: []string{"live:sess-evicted", "dormant:sess-evicted"},
 		},
 		{
 			name:      "conversation A reports its own session and settings",
 			convID:    "conv-a",
-			want:      boundRunSettings{sessionID: "sess-a", model: "claude-opus-4-8", effort: "high", yolo: true, permissionMode: "bypassPermissions"},
+			want:      boundRunSettings{sessionID: "sess-a", model: "claude-opus-4-8", effort: "high", yolo: true, permissionMode: "bypassPermissions", live: true},
 			wantOK:    true,
-			wantAsked: []sessions.SessionID{"sess-a"},
+			wantAsked: []string{"live:sess-a"},
 		},
 		{
 			name:      "conversation B reports its own session and settings",
 			convID:    "conv-b",
-			want:      boundRunSettings{sessionID: "sess-b", model: "", effort: "low", yolo: false, permissionMode: "plan"},
+			want:      boundRunSettings{sessionID: "sess-b", model: "", effort: "low", yolo: false, permissionMode: "plan", live: true},
 			wantOK:    true,
-			wantAsked: []sessions.SessionID{"sess-b"},
+			wantAsked: []string{"live:sess-b"},
 		},
 		{
 			name:      "an all-defaults session resolves — zeros are a real answer",
 			convID:    "conv-defaults",
-			want:      boundRunSettings{sessionID: "sess-defaults"},
+			want:      boundRunSettings{sessionID: "sess-defaults", live: true},
 			wantOK:    true,
-			wantAsked: []sessions.SessionID{"sess-defaults"},
+			wantAsked: []string{"live:sess-defaults"},
+		},
+		{
+			name:      "a dormant binding reports its id, model and effort, marked not live",
+			convID:    "conv-dormant",
+			want:      boundRunSettings{sessionID: "sess-dormant", model: "claude-sonnet-4-5", effort: "low", permissionMode: "default"},
+			wantOK:    true,
+			wantAsked: []string{"live:sess-dormant", "dormant:sess-dormant"},
 		},
 	}
 
@@ -144,9 +182,9 @@ func TestResolveBoundRunSettings(t *testing.T) {
 
 			asked := reader.calls()
 			if !slices.Equal(asked, tc.wantAsked) {
-				t.Errorf("pool was asked for %q, want %q — an unresolvable conversation must reach no pool read at all", asked, tc.wantAsked)
+				t.Errorf("pool reads were %q, want %q — an unresolvable conversation must reach no pool read at all, and a live hit must not go on to the dormant half", asked, tc.wantAsked)
 			}
-			if slices.Contains(asked, sessions.SessionID("")) {
+			if slices.Contains(asked, "live:") || slices.Contains(asked, "dormant:") {
 				t.Errorf("pool was asked for the empty session id (%q) — Pool.Lookup resolves \"\" to the BOOTSTRAP session, which is the fall-through this resolver exists to make impossible", asked)
 			}
 		})
@@ -190,6 +228,74 @@ func TestResolveBoundRunSettings_RealPool(t *testing.T) {
 			t.Errorf("resolveBoundRunSettings(conv-gone) = (%+v, %v), want (zero, false)", got, ok)
 		}
 	})
+}
+
+// TestResolveBoundRunSettings_DormantRealPool is the restart case against a real
+// *sessions.Pool: a registry holding a bootstrap entry plus one configured entry,
+// warm-started, so the second session is exactly what every non-bootstrap session
+// is after a daemon restart — persisted, bound, and not materialised (#2449).
+//
+// It exists because the counting double above cannot prove the two things that
+// make the reply correct rather than merely non-empty. That Pool.New really does
+// leave the entry unmaterialised (the double is TOLD which half holds what), and
+// that the reported posture is the DEFAULT the pool canonicalises to rather than
+// the bypass the entry persisted — the double returns whatever its map carries,
+// so the revocation is only ever asserted where the clearing happens.
+func TestResolveBoundRunSettings_DormantRealPool(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "sessions.json")
+	const (
+		bootID    = "550e8400-e29b-41d4-a716-446655440000"
+		dormantID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+	)
+	// The dormant entry persists a bypass posture in BOTH of its on-disk
+	// spellings, so an implementation that reported what the file holds is red
+	// here rather than in a comment.
+	registry := `{"version":1,"sessions":[
+		{"id":"` + bootID + `","label":"boot","bootstrap":true,"created_at":"2026-09-01T00:00:00Z","last_active_at":"2026-09-01T00:00:00Z"},
+		{"id":"` + dormantID + `","label":"conv-1","model":"claude-opus-4-8","effort":"high","yolo":true,"permission_mode":"bypassPermissions","created_at":"2026-09-01T00:00:01Z","last_active_at":"2026-09-01T00:00:01Z"}
+	]}`
+	if err := os.WriteFile(regPath, []byte(registry), 0o600); err != nil {
+		t.Fatalf("write registry: %v", err)
+	}
+
+	pool, err := sessions.New(sessions.Config{
+		Bootstrap:     sessions.SessionConfig{ClaudeBin: os.Args[0]},
+		RegistryPath:  regPath,
+		RunnerFactory: func(sessions.RunnerConfig) (sessions.Runner, error) { return stubRunner{}, nil },
+	})
+	if err != nil {
+		t.Fatalf("sessions.New: %v", err)
+	}
+
+	now := time.Now().UTC()
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{ID: "conv-dormant", CurrentSessionID: dormantID, LastUsedAt: now})
+
+	got, ok := resolveBoundRunSettings(reg, pool, "conv-dormant")
+	if !ok {
+		t.Fatalf("resolveBoundRunSettings(conv-dormant) ok = false, want true — a bound session the daemon has a persisted record of must resolve")
+	}
+	want := boundRunSettings{
+		sessionID:      dormantID,
+		model:          "claude-opus-4-8",
+		effort:         "high",
+		permissionMode: "default",
+	}
+	if got != want {
+		t.Errorf("resolveBoundRunSettings(conv-dormant) = %+v, want %+v — yolo and the mode must be the ones a revive materialises, never the ones the entry persisted (#1487)", got, want)
+	}
+
+	// The read answered without materialising: still one live session, the
+	// bootstrap, and the dormant id is still not in the live half.
+	if live := pool.List(); len(live) != 1 || string(live[0].ID) != bootID {
+		t.Errorf("live sessions after the read = %+v, want the bootstrap alone — request_session_settings must spawn nothing", live)
+	}
+	if _, err := pool.SettingsFor(sessions.SessionID(dormantID)); !errors.Is(err, sessions.ErrSessionNotFound) {
+		t.Errorf("SettingsFor(dormant) err = %v, want ErrSessionNotFound", err)
+	}
 }
 
 // usageRecorder is a by-id context-window reader with per-id figures that records
@@ -243,7 +349,7 @@ func TestRunConfigFor_NoSessionsDirectoryStillResolves(t *testing.T) {
 	t.Parallel()
 
 	resolve := func(convID string) (boundRunSettings, bool) {
-		return boundRunSettings{sessionID: "sess-a", model: "claude-opus-4-8", effort: "high", yolo: true, permissionMode: "bypassPermissions"}, true
+		return boundRunSettings{sessionID: "sess-a", model: "claude-opus-4-8", effort: "high", yolo: true, permissionMode: "bypassPermissions", live: true}, true
 	}
 
 	seam := runConfigFor(resolve, nil)
@@ -271,8 +377,8 @@ func TestRunConfigFor_ReadsUsageForTheResolvedSession(t *testing.T) {
 	t.Parallel()
 
 	bound := map[string]boundRunSettings{
-		"conv-a": {sessionID: "sess-a", model: "claude-opus-4-8", effort: "high", yolo: true, permissionMode: "bypassPermissions"},
-		"conv-b": {sessionID: "sess-b", effort: "low", permissionMode: "acceptEdits"},
+		"conv-a": {sessionID: "sess-a", model: "claude-opus-4-8", effort: "high", yolo: true, permissionMode: "bypassPermissions", live: true},
+		"conv-b": {sessionID: "sess-b", effort: "low", permissionMode: "acceptEdits", live: true},
 	}
 	resolve := func(convID string) (boundRunSettings, bool) {
 		b, ok := bound[convID]
@@ -332,6 +438,64 @@ func TestRunConfigFor_UnresolvableReachesNoUsageRead(t *testing.T) {
 	}
 	if asked := usage.calls(); len(asked) != 0 {
 		t.Errorf("usage reader was asked for %q, want no calls — an unresolvable conversation must reach no transcript path", asked)
+	}
+}
+
+// TestRunConfigFor_DormantSessionReachesNoUsageRead is AC 4 of #2449: a
+// conversation resolved from a DORMANT registry entry reports its id, model and
+// effort with both context figures at zero, and the transcript reader is not
+// reached at all.
+//
+// The recorded call count is the assertion, not the zeros. Without the gate the
+// chain answers (0, 200000) rather than (0, 0) — sessionTranscriptDir returns ""
+// for an id Pool.Lookup misses, and contextwindow.Read("") reports the DEFAULT
+// window — and a zero window_tokens is this reply's published "do not render a
+// percentage" sentinel. Reporting the default window beside a zero used count
+// would claim a genuine fresh session on a channel that may be near full.
+//
+// The live row beside it is what keeps the gate from being satisfied by deleting
+// the usage read outright.
+func TestRunConfigFor_DormantSessionReachesNoUsageRead(t *testing.T) {
+	t.Parallel()
+
+	bound := map[string]boundRunSettings{
+		"conv-live":    {sessionID: "sess-live", model: "claude-opus-4-8", effort: "high", permissionMode: "default", live: true},
+		"conv-dormant": {sessionID: "sess-dormant", model: "claude-sonnet-4-5", effort: "low", permissionMode: "default"},
+	}
+	resolve := func(convID string) (boundRunSettings, bool) {
+		b, ok := bound[convID]
+		return b, ok
+	}
+	// Both ids carry figures, so a seam that read usage for the dormant one
+	// reports them and is red on the values as well as on the call list.
+	usage := &usageRecorder{figures: map[string][2]int{
+		"sess-live":    {1000, 200_000},
+		"sess-dormant": {7000, 200_000},
+	}}
+
+	seam := runConfigFor(resolve, usage.read)
+	if seam == nil {
+		t.Fatal("runConfigFor(wired, wired) returned nil, want a seam")
+	}
+
+	gotLive, okLive := seam("conv-live")
+	gotDormant, okDormant := seam("conv-dormant")
+	if !okLive || !okDormant {
+		t.Fatalf("seam ok = (%v, %v) for (conv-live, conv-dormant), want (true, true) — a dormant binding is addressable, not a refusal", okLive, okDormant)
+	}
+
+	wantLive := relay.RunConfig{SessionID: "sess-live", Model: "claude-opus-4-8", Effort: "high", PermissionMode: "default", UsedTokens: 1000, WindowTokens: 200_000}
+	wantDormant := relay.RunConfig{SessionID: "sess-dormant", Model: "claude-sonnet-4-5", Effort: "low", PermissionMode: "default"}
+	if gotLive != wantLive {
+		t.Errorf("seam(conv-live) = %+v, want %+v", gotLive, wantLive)
+	}
+	if gotDormant != wantDormant {
+		t.Errorf("seam(conv-dormant) = %+v, want %+v — a session the daemon is not running has no transcript to read, so both context fields stay zero", gotDormant, wantDormant)
+	}
+
+	wantAsked := []string{"sess-live"}
+	if asked := usage.calls(); !slices.Equal(asked, wantAsked) {
+		t.Errorf("usage reader was asked for %q, want %q — a dormant session must reach no transcript read at all", asked, wantAsked)
 	}
 }
 

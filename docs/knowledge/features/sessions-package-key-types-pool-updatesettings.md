@@ -57,6 +57,18 @@ Never takes `Session.lcMu` — `settings` is a `Pool.mu`-guarded field, same as
 `label`, so no lock-order hazard with `saveLocked`'s internal `lcMu`
 re-acquire (`docs/lessons.md` § "Lock order with callback into the host").
 
+**This lookup is `p.sessions` only — a dormant registry entry (#2448) is an
+`ErrSessionNotFound` miss here, the same as an unknown id, never a revive.**
+`sessionRouter.resolve`, the message-delivery seam a turn goes through, does
+revive a dormant session, but `handleSetSessionSettings` does not route
+through it — it hands the payload's id straight to `SettingsUpdater.UpdateSettings`
+(`settingsUpdaterAdapter` → here), so a `set_session_settings` for a
+conversation the daemon has only a dormant record of surfaces as
+`session.not_found` rather than reviving. [`Pool.DormantSettingsFor`](sessions-package-key-types-pool-settingsfor.md)
+(#2449) is the **read**-side counterpart and does not touch this method;
+reviving on a settings write is a distinct, deferred design (#2463), because
+it would make a settings frame able to spawn a claude child.
+
 Validating untrusted model/effort values is explicitly **not** this method's
 job — it operates on operator-trusted input. The relay handler owns the
 charset/length shape check for `Model` and closed enum for `Effort`; for a
