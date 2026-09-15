@@ -1,7 +1,9 @@
 package relay
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -291,5 +293,166 @@ func TestV2Session_NewSession_NamedConversationStillCapabilityGated(t *testing.T
 	if got := fake.startedConvIDs(); len(got) != 0 {
 		t.Errorf("StartNewSession calls = %q, want none: naming a conversation must not bypass the "+
 			"interactive capability gate", got)
+	}
+}
+
+// --- #2443 a refused recorded workspace is reported back to the requester ---
+
+// rotatedConvID is the conversation the seam reports as rotated. It is what the
+// reply must carry, and — per handleNewSession's logging contract — what the
+// relay's own log record must NOT.
+const rotatedConvID = "33333333-3333-4333-8333-333333333333"
+
+// TestV2Session_NewSession_RefusedWorkspaceReplies is #2443's whole relay-side
+// contract: a *RotatedWithoutWorkspaceError from the seam becomes exactly one
+// coded error frame, correlated to the frame that asked, carrying the conversation
+// the seam named and nothing else.
+//
+// The BARE frame is the one driven here rather than a named one, deliberately.
+// That is the path the correlation cannot cover on its own — the client named no
+// conversation, so in_reply_to alone cannot tell it which one stayed put — and it
+// is why the id is in the payload at all. A named frame reaches the identical code
+// with less to prove.
+func TestV2Session_NewSession_RefusedWorkspaceReplies(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	fake := &fakeSessionStarter{err: &RotatedWithoutWorkspaceError{ConversationID: rotatedConvID}}
+	frames := make(chan protocol.RoutingEnvelope, 8)
+	rec := &v2Recorder{}
+	logger, logBuf := bufferLogger()
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:         frames,
+		Outbound:       rec.outbound,
+		StaticPriv:     respPriv,
+		Devices:        v2PairedRegistry(t, v2TestToken),
+		ServerID:       v2TestServerID,
+		Logger:         logger,
+		SessionStarter: fake,
+	})
+	t.Cleanup(stop)
+
+	send, recv := openModalConn(t, mgr, frames, rec, respPub, "c-int", []string{protocol.CapabilityInteractive})
+	const reqID uint64 = 77
+	frames <- sealAppFrameConn(t, send, "c-int", protocol.Envelope{
+		ID:   reqID,
+		Type: protocol.TypeNewSession,
+		TS:   time.Now().UTC(),
+	})
+
+	// Barrier: the reply is forwarded synchronously on the Run goroutine, so once a
+	// later conn is open the reply is already recorded.
+	openModalConn(t, mgr, frames, rec, respPub, "c-barrier", []string{protocol.CapabilityInteractive})
+
+	msgs := noiseMsgsForConn(t, rec, "c-int")
+	if len(msgs) != 1 {
+		t.Fatalf("got %d app frame(s) for the requester, want exactly 1 error reply", len(msgs))
+	}
+	reply := decryptAppFrame(t, msgs[0], recv)
+	if reply.Type != protocol.TypeError {
+		t.Fatalf("reply Type = %q, want %q", reply.Type, protocol.TypeError)
+	}
+	if reply.InReplyTo == nil || *reply.InReplyTo != reqID {
+		t.Fatalf("reply InReplyTo = %v, want a pointer to %d — the client correlates on this and a bare "+
+			"frame has nothing else to correlate on", reply.InReplyTo, reqID)
+	}
+	var p protocol.ErrorPayload
+	if err := json.Unmarshal(reply.Payload, &p); err != nil {
+		t.Fatalf("decode error payload: %v", err)
+	}
+	if p.Code != protocol.CodeNewSessionWorkspaceRefused {
+		t.Errorf("error Code = %q, want %q", p.Code, protocol.CodeNewSessionWorkspaceRefused)
+	}
+	if p.Message != msgNewSessionWorkspaceRefused {
+		t.Errorf("error Message = %q, want the static %q", p.Message, msgNewSessionWorkspaceRefused)
+	}
+	if p.Retryable {
+		t.Errorf("error Retryable = true, want false: the same stored workspace fails identically " +
+			"until the operator repairs it, which a retry does not accomplish")
+	}
+	if p.ConversationID != rotatedConvID {
+		t.Errorf("error ConversationID = %q, want %q — the bare path names no conversation, so the "+
+			"reply is the only place the client learns which one rotated", p.ConversationID, rotatedConvID)
+	}
+
+	// The reply is UNICAST to the requester. A second interactive conn is a live
+	// observer of the same daemon and must see nothing: this is a reply, not a
+	// broadcast, and the barrier conn above is that observer.
+	if got := noiseMsgsForConn(t, rec, "c-barrier"); len(got) != 0 {
+		t.Errorf("the barrier conn received %d app frame(s), want 0 — the refusal answers the conn "+
+			"that asked and no other", len(got))
+	}
+
+	// handleNewSession does not log this verb's conversation id (its own doc says
+	// so); the seam records it below the boundary under its own bound. The id
+	// reaches the wire and not the log.
+	if s := logBuf.String(); strings.Contains(s, rotatedConvID) {
+		t.Errorf("the relay logged the conversation id; only the seam records it:\n%s", s)
+	}
+}
+
+// TestV2Session_NewSession_SilentOutcomesReplyNothing is AC-3's negative space at
+// the relay layer: exactly one seam answer produces a frame, and every other
+// outcome leaves the verb as silent as it was before #2443. A client that ignores
+// the new frame must see precisely today's behaviour.
+//
+// The plain-error case carries a path-shaped marker. It proves the discrimination
+// is on the TYPE and not on "the error mentions a workspace": a look-alike error
+// must fall through to the pre-#2443 best-effort log arm with no reply at all.
+func TestV2Session_NewSession_SilentOutcomesReplyNothing(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		nilSeam bool
+		caps    []string
+		seamErr error
+	}{
+		{name: "a clean rotation owes nothing", caps: []string{protocol.CapabilityInteractive}},
+		{
+			name:    "a look-alike error is still the best-effort arm",
+			caps:    []string{protocol.CapabilityInteractive},
+			seamErr: errors.New("recorded workspace /Users/someone/secret-project refused"),
+		},
+		{name: "a non-interactive conn is inert", caps: nil},
+		{name: "a nil seam is inert", nilSeam: true, caps: []string{protocol.CapabilityInteractive}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			respPriv, respPub := genV2Keypair(t)
+			var starter SessionStarter
+			if !tc.nilSeam {
+				starter = &fakeSessionStarter{err: tc.seamErr}
+			}
+			frames := make(chan protocol.RoutingEnvelope, 8)
+			rec := &v2Recorder{}
+			mgr, stop := startManager(t, V2SessionConfig{
+				Frames:         frames,
+				Outbound:       rec.outbound,
+				StaticPriv:     respPriv,
+				Devices:        v2PairedRegistry(t, v2TestToken),
+				ServerID:       v2TestServerID,
+				Logger:         silentLogger(),
+				SessionStarter: starter,
+			})
+			t.Cleanup(stop)
+
+			send, _ := openModalConn(t, mgr, frames, rec, respPub, "c-int", tc.caps)
+			frames <- sealAppFrameConn(t, send, "c-int", protocol.Envelope{
+				ID:   42,
+				Type: protocol.TypeNewSession,
+				TS:   time.Now().UTC(),
+			})
+
+			openModalConn(t, mgr, frames, rec, respPub, "c-barrier", []string{protocol.CapabilityInteractive})
+
+			if got := noiseMsgsForConn(t, rec, "c-int"); len(got) != 0 {
+				t.Errorf("got %d app frame(s), want 0 — new_session stays fire-and-forget in every "+
+					"outcome but the refused-workspace one", len(got))
+			}
+		})
 	}
 }

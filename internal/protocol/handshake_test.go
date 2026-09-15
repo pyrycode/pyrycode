@@ -343,6 +343,47 @@ func TestErrorPayload_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestErrorPayload_ConversationIDIsOptional pins both halves of #2443's addition
+// to this shared payload. Shared is the operative word: every error reply on every
+// v2 verb marshals through this struct, so an unset field that emitted a key would
+// change the wire shape of frames that have nothing to do with new_session.
+//
+// The round-trip test above already proves the fixture is byte-stable; what is
+// pinned here is that the KEY is absent rather than empty, which is what a client
+// distinguishing "no subject named" from "subject named as nothing" depends on.
+func TestErrorPayload_ConversationIDIsOptional(t *testing.T) {
+	t.Parallel()
+
+	unset, err := json.Marshal(ErrorPayload{Code: CodeProtocolMalformed, Message: "nope"})
+	if err != nil {
+		t.Fatalf("marshal unset: %v", err)
+	}
+	if bytes.Contains(unset, []byte("conversation_id")) {
+		t.Errorf("an unset ConversationID emitted the key: %s — every pre-#2443 error reply must stay "+
+			"byte-identical", unset)
+	}
+
+	const conv = "44444444-4444-4444-8444-444444444444"
+	set, err := json.Marshal(ErrorPayload{
+		Code:           CodeNewSessionWorkspaceRefused,
+		Message:        "nope",
+		ConversationID: conv,
+	})
+	if err != nil {
+		t.Fatalf("marshal set: %v", err)
+	}
+	var back ErrorPayload
+	if err := json.Unmarshal(set, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.ConversationID != conv {
+		t.Errorf("ConversationID round-tripped as %q, want %q", back.ConversationID, conv)
+	}
+	if !bytes.Contains(set, []byte(`"conversation_id":"`+conv+`"`)) {
+		t.Errorf("wire key is not conversation_id: %s", set)
+	}
+}
+
 func TestAckPayload_RoundTrip(t *testing.T) {
 	raw := readFixture(t, "ack.json")
 

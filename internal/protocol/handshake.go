@@ -158,11 +158,27 @@ type HelloAckPayload struct {
 // ErrorPayload is the body of an "error" envelope (docs/protocol-mobile.md
 // § Message types, § Error codes). RetryAfterS is optional and advisory;
 // it is meaningful only when Retryable is true.
+//
+// ConversationID names the conversation an error is ABOUT, and it exists for the
+// replies whose subject in_reply_to cannot identify (#2443). Most error replies
+// answer a request that named its own subject, so the client already knows what
+// the refusal is about and the field is omitted — new_session is the exception
+// that minted it: a bare frame names no conversation and rotates the daemon's
+// cursor one, so only the daemon knows which conversation the answer describes.
+// Omitted (omitempty) by every other reply, which keeps their wire shape
+// byte-identical to the pre-#2443 one.
+//
+// SECURITY: the value is DAEMON-AUTHORED and MUST NOT be an echo of a
+// client-supplied id — the discipline V2SessionConfig's RunConfigFor and
+// ModelListFor already state for their own reported ids. A producer sets it from
+// the daemon's own registry or cursor, never from the request it is answering;
+// echoing would make an error reply a mirror for arbitrary remote bytes.
 type ErrorPayload struct {
-	Code        string `json:"code"`
-	Message     string `json:"message"`
-	Retryable   bool   `json:"retryable"`
-	RetryAfterS *int   `json:"retry_after_s,omitempty"`
+	Code           string `json:"code"`
+	Message        string `json:"message"`
+	Retryable      bool   `json:"retryable"`
+	RetryAfterS    *int   `json:"retry_after_s,omitempty"`
+	ConversationID string `json:"conversation_id,omitempty"`
 }
 
 // AckPayload is the body of a generic "ack" envelope; empty by spec

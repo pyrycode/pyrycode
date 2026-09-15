@@ -98,8 +98,59 @@ type Interrupter interface {
 // handleNewSession maps every "nothing named" wire shape — absent payload, absent
 // field, explicit "", undecodable body — onto it, so an implementation has exactly
 // one such state to handle.
+// An ERROR IS NOT ALWAYS A FAILED ROTATION, since #2443: a returned
+// *RotatedWithoutWorkspaceError reports a rotation that COMPLETED with one
+// caveat, and handleNewSession discriminates on it before it reaches the
+// best-effort log arm. Every other non-nil error keeps the pre-#2443 meaning —
+// the rotation did not happen, log it, owe nothing.
 type SessionStarter interface {
 	StartNewSession(conversationID string) error
+}
+
+// RotatedWithoutWorkspaceError is what a SessionStarter returns when a rotation
+// COMPLETED and the conversation's recorded workspace was refused, so the
+// successor child stayed in the directory the runner already had (#2443, over
+// #1475's move). handleNewSession answers it with a single coded error reply to
+// the conn that asked, correlated on in_reply_to; nothing else reads it.
+//
+// IT IS NOT A FAILURE, and the name is the warning. The pool is re-keyed, the
+// conversation rebound, the successor respawning and the session_transition
+// already broadcast by the time this value exists — a reader that treats every
+// non-nil error from the seam as "nothing happened" is wrong here, which is
+// precisely why the refusal travels as a distinct TYPE rather than as a second
+// meaning layered onto the existing error. An implementation MUST NOT return it
+// when the rotation itself failed: that outcome is the plain error it always was,
+// and reporting "rotated without the workspace" for a rotation that never
+// happened would be a lie the client cannot check.
+//
+// A TYPE RATHER THAN A SENTINEL because the reply must NAME a conversation and a
+// sentinel carries no fields. A bare new_session names none — it rotates the
+// daemon's cursor conversation — so in_reply_to alone cannot tell the client which
+// conversation stayed put, and only the implementation, which resolved the cursor,
+// knows. Callers match with errors.As.
+//
+// SECURITY — the two halves of the no-leak bound this error is subject to:
+//
+//   - ConversationID is DAEMON-RESOLVED, never the raw client string. On the named
+//     path it has passed conversations.ValidID; on the bare path it is the daemon's
+//     own cursor id. It is never a path and never a path component.
+//   - Error() returns a CONSTANT. It names neither the workspace path nor the
+//     conversation id, because handleNewSession's other arm logs a seam error
+//     verbatim — so an interpolated id or path would reach the daemon log the
+//     moment a future edit reordered the discrimination, which is the one channel
+//     #2443's AC-4 exists to close. The id is readable from the field and from
+//     nowhere else. The confinement error that caused the refusal is discarded at
+//     its own site (cmd/pyry's activeSessionStarter.resolveSpawnDir) and never
+//     reaches this value at all.
+type RotatedWithoutWorkspaceError struct {
+	// ConversationID is the conversation that rotated: the one the frame named, or
+	// the daemon's cursor conversation when it named none.
+	ConversationID string
+}
+
+func (e *RotatedWithoutWorkspaceError) Error() string {
+	// Constant by contract — see the type's SECURITY block.
+	return "relay: new_session rotated without the conversation's recorded workspace"
 }
 
 // QueueRemover drops a not-yet-drained queued message from a conversation's

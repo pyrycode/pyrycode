@@ -2318,7 +2318,23 @@ func (a activeSessionStarter) StartNewSession(conversationID string) error {
 			"conversation_id", convID)
 		return nil
 	}
-	return startFreshRunner(runner, oldID, a.resolveSpawnDir(convID, recordedCwd), a.rotate, a.log)
+	spawnDir, refused := a.resolveSpawnDir(convID, recordedCwd)
+	if err := startFreshRunner(runner, oldID, spawnDir, a.rotate, a.log); err != nil {
+		// The rotation did not happen, so the refusal is not reportable: "rotated
+		// without the workspace" would describe a rotation the client's own
+		// session_transition never announced. The rotate error is the pre-#2443
+		// answer and stays the answer; resolveSpawnDir's record still stands.
+		return err
+	}
+	if refused {
+		// The rotation COMPLETED and only the move did not (#2443). Not a failure —
+		// the type's own doc block says so — and the only outcome handleNewSession
+		// answers the client about. convID is resolved: the frame's id after
+		// conversations.ValidID, or the cursor's own, so it is bounded and canonical
+		// on both paths and is never the raw client string.
+		return &relay.RotatedWithoutWorkspaceError{ConversationID: convID}
+	}
+	return nil
 }
 
 // resolveSpawnDir re-confines the conversation's recorded workspace to $HOME and
@@ -2338,8 +2354,18 @@ func (a activeSessionStarter) StartNewSession(conversationID string) error {
 //
 // FAIL-CLOSED MEANS KEEPING THE OLD DIRECTORY, never spawning in an unconfined
 // one: both an empty recording and a refusal answer "", and the rotation still
-// completes with the child still coming up where it was. The two differ only in
-// whether a record is written — an unset workspace is not a refusal.
+// completes with the child still coming up where it was. The two differ in the
+// SECOND return and in whether a record is written — an unset workspace is not a
+// refusal.
+//
+// THE BOOL IS THE SAME CONDITION THE RECORD REPORTS, deliberately so the wire and
+// the log cannot disagree: refused is true on exactly the arm that writes
+// spawn_dir_rejected, and on no other. It carries no text at all, which is what
+// keeps the confinement error's path out of everything downstream — the caller
+// turns it into a relay.RotatedWithoutWorkspaceError naming the conversation and
+// nothing else (#2443). installSpawnDir's later failure is a DIFFERENT condition
+// with its own record and is deliberately not reported here: by then the
+// directory was accepted and the rotation is already committed.
 //
 // IT IS CALLED BELOW EVERY INERT ARM, which is load-bearing rather than tidy:
 // resolveSpawnDir creates a directory and writes ~/.claude.json, so hoisting it
@@ -2357,18 +2383,18 @@ func (a activeSessionStarter) StartNewSession(conversationID string) error {
 // which is already logged unbounded on the resolvable arms above — and nothing
 // else. At Warn rather than the arms' Debug: this one is about the daemon's own
 // stored state failing its own validator, not about a string a client just sent.
-func (a activeSessionStarter) resolveSpawnDir(convID, recordedCwd string) string {
+func (a activeSessionStarter) resolveSpawnDir(convID, recordedCwd string) (dir string, refused bool) {
 	if a.spawnDirFor == nil || recordedCwd == "" {
-		return ""
+		return "", false
 	}
 	dir, err := a.spawnDirFor(recordedCwd)
 	if err != nil {
 		a.logger().Warn("relay: v2 new_session rejected the recorded workspace; keeping the current one",
 			"event", "v2.new_session.spawn_dir_rejected",
 			"conversation_id", convID)
-		return ""
+		return "", true
 	}
-	return dir
+	return dir, false
 }
 
 // maxLoggedConvID bounds how much of a REFUSED conversation id reaches a log
