@@ -357,19 +357,34 @@ method's. The exclusion is doubled: the guard returns before any mutation,
 *and* the merge names `Model`/`Effort` literally, so a posture could not reach
 the entry even with the guard deleted.
 
-**Two concurrency windows sit outside the method, both bounded by `p.dormant`
-only ever shrinking.** A caller composing this after a live write (the adapter,
+**One concurrency window sits outside the method, bounded by `p.dormant` only
+ever shrinking.** A caller composing this after a live write (the adapter,
 below) can have a revive land between the two — the id can only move
 live-ward, so this method finds a clean miss rather than a torn entry, and
 `ErrSessionNotFound` is correct rather than merely safe: the settings reached
 nothing, and the operator's next pick lands on the revived session through the
-live write, no retry needed. Separately, `Pool.Revive` evaluates
-`revivedSettings` as an *argument* to `materialise`, so that read's RLock is
-released before `materialise` takes the write lock and retires the entry — a
-dormant write landing in that gap is persisted and then dropped. That window
-belongs to `Revive`'s evaluate-then-materialise call shape, not to this
-method, so it is filed as #2492 rather than fixed here; it carries no security
-consequence and self-corrects on the next read.
+live write, no retry needed.
+
+**A second window this passage used to name is closed (#2492).** `Pool.Revive`
+used to evaluate `revivedSettings` as an *argument* to `materialise`, so that
+read's RLock was released before `materialise` took the write lock and retired
+the entry — a dormant write landing in that gap was persisted, acknowledged,
+and then dropped, with the session materialising under the value read before
+the write. `materialise` now takes its settings as a `settingsSource` (see [§
+Pool.Revive](sessions-package-key-types-reviving-a-dropped-session-pool-revive.md))
+and evaluates it inside the same critical section that retires the entry, so a
+write reaching this method before that section is carried by the revived
+session, and one reaching it after gets `ErrSessionNotFound` above — the two
+outcomes this seam's docstrings always reasoned about; what is gone is the
+third.
+
+The old paragraph's "benign" claim about that window was correct about the
+case it named — a concurrent *revive*, which lands on `materialise`'s take
+path and drops the caller's settings by contract — and silently wrong about a
+case that did not exist when it was written: a concurrent dormant *write*, for
+which there was no writer until this method (#2463) shipped. A "this window is
+benign" claim is only as current as the set of writers it enumerated at the
+time; re-read it when a new writer is added, not when the reader changes.
 
 Validating untrusted `Model`/`Effort` is not this method's job either, the
 same division as `UpdateSettings`: the relay handler owns the shape check,
