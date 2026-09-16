@@ -9,6 +9,8 @@ const (
     StatusIdleTimeout      websocket.StatusCode = 4408 // idle-session teardown by the in-repo sweep (#774); echoes HTTP 408
     StatusProtocolMismatch websocket.StatusCode = 4421 // state-machine / discriminator violation
     StatusHandshakeFailure websocket.StatusCode = 4426 // Noise_IK failure before CipherStates exist
+    StatusQueueOverflow    websocket.StatusCode = 4413 // push-queue byte ceiling exceeded (#1505); echoes HTTP 413
+    StatusSessionGone      websocket.StatusCode = 4410 // noise_msg on a conn id the manager holds no session for (#2488); retryable, echoes HTTP 410
 )
 
 type V2SessionState int

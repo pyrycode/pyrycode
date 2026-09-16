@@ -64,6 +64,29 @@ const (
 	// handshake, not a message. A future change that adds a sealed error frame
 	// here reintroduces the nonce hazard.
 	StatusQueueOverflow websocket.StatusCode = 4413
+
+	// StatusSessionGone is the WS close code the binary asks the relay to
+	// apply when a noise_msg arrives on a conn the manager holds no session
+	// for (#2488). handleFrame creates a bare V2StateAwaitingInit session for
+	// any unheld conn id, so the frame reaches handleNoiseMsg with no
+	// CipherStates: it can be neither decrypted nor answered with a sealed
+	// error, and the close code is the only signal. Echoes HTTP 410 (Gone),
+	// consistent with the 44xx←HTTP convention. Wire spec:
+	// docs/protocol-mobile.md § Error codes, close-code row 4410.
+	//
+	// Deliberately NOT StatusProtocolMismatch, which this arm used before:
+	// clients treat 4421 as a permanent mismatch and stop re-dialling, yet a
+	// legitimate client lands here whenever it still holds cipher state for a
+	// session the daemon dropped. Because closeWith deletes the conn from the
+	// session map, all three causes — a daemon restart, an idle sweep (4408)
+	// and the push-queue ceiling (4413) — reduce to a conn id the manager no
+	// longer holds, and the documented recovery for each is a fresh Noise
+	// handshake, which only a retryable close lets the client reach.
+	//
+	// Deliberately NOT StatusIdleTimeout either: 4408 means "your session
+	// idled out", and a restart or an overflow is not that — the same mislabel
+	// StatusQueueOverflow's comment already records rejecting.
+	StatusSessionGone websocket.StatusCode = 4410
 )
 
 // idleTimeout is the bounded window a v2 session may go without any
