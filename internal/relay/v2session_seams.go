@@ -107,6 +107,39 @@ type SessionStarter interface {
 	StartNewSession(conversationID string) error
 }
 
+// LateSessionStarter is an OPTIONAL widening of SessionStarter for an
+// implementation whose rotation does not finish before the call returns (#2477:
+// the outgoing child is asked to write a handoff note first, bounded at ninety
+// seconds). handleNewSession asserts it on the configured SessionStarter and
+// falls back to the plain method when it is absent, so an implementation that
+// rotates inline — the PTY posture — needs no change and sees no new behaviour.
+//
+// IT EXISTS BECAUSE THE VERB'S ONE REPLY HAS A TENSE. StartNewSession's only
+// non-best-effort answer is *RotatedWithoutWorkspaceError, whose own doc fixes the
+// pool as re-keyed and the session_transition as already broadcast by the time the
+// value exists, and forbids it outright for a rotation that has not happened. An
+// implementation that defers its rotation therefore cannot answer that method
+// truthfully at all: it must either lie about a rotation ninety seconds away or
+// stay silent and drop a shipped reply. This widening removes the dilemma rather
+// than choosing a side of it — the answer is given when it becomes true.
+//
+// outcome CARRIES EXACTLY WHAT StartNewSession WOULD HAVE RETURNED, with the same
+// meanings: nil for an inert arm or a clean rotation, *RotatedWithoutWorkspaceError
+// for a rotation that COMPLETED without the recorded workspace, any other error for
+// a rotation that did not happen. An implementation MUST call it exactly once, and
+// MAY call it after StartNewSessionLate has returned — that is the whole point —
+// but MUST NOT call it from inside a lock a caller could be holding.
+//
+// THE CALLBACK RUNS ON THE IMPLEMENTATION'S GOROUTINE, so handleNewSession passes
+// one that does nothing but hand the value to Run, where the reply is sealed. A
+// caller supplying a closure that touches its own single-owner state directly
+// would be the bug this shape exists to make hard to write.
+type LateSessionStarter interface {
+	SessionStarter
+
+	StartNewSessionLate(conversationID string, outcome func(error))
+}
+
 // RotatedWithoutWorkspaceError is what a SessionStarter returns when a rotation
 // COMPLETED and the conversation's recorded workspace was refused, so the
 // successor child stayed in the directory the runner already had (#2443, over

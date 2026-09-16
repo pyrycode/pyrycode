@@ -173,6 +173,44 @@ func (p *resetProbe) seen() []string {
 	return append([]string(nil), p.wrappedUp...)
 }
 
+// lateOutcome is the relay.LateSessionStarter callback, instrumented. It counts
+// calls as well as carrying values because "exactly once" is half the seam's
+// contract and a second call would otherwise be invisible — the channel is
+// buffered, so an extra report would sit in it unnoticed rather than deadlocking.
+type lateOutcome struct {
+	mu    sync.Mutex
+	calls int
+	ch    chan error
+}
+
+func newLateOutcome() *lateOutcome { return &lateOutcome{ch: make(chan error, 4)} }
+
+func (o *lateOutcome) report(err error) {
+	o.mu.Lock()
+	o.calls++
+	o.mu.Unlock()
+	o.ch <- err
+}
+
+func (o *lateOutcome) count() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.calls
+}
+
+// await blocks for the reported outcome, failing rather than hanging the package
+// when the seam never reports — which is the failure this whole file guards.
+func (o *lateOutcome) await(t *testing.T) error {
+	t.Helper()
+	select {
+	case err := <-o.ch:
+		return err
+	case <-time.After(3 * time.Second):
+		t.Fatalf("no outcome reported within the budget; the late seam owes exactly one")
+		return nil
+	}
+}
+
 // TestActiveSessionStarter_LiveChildWrapsUpThenRotates is AC 1's dispatch half:
 // the wrap-up runs, and the rotation follows it rather than preceding it.
 //
@@ -294,22 +332,30 @@ func TestActiveSessionStarter_NoLiveChildKeepsTheSynchronousPath(t *testing.T) {
 	}
 }
 
-// TestActiveSessionStarter_WrapUpArmWithholdsTheWorkspaceReply pins the seam
-// contract on the async arm: #2443's value asserts a rotation that COMPLETED, and
-// at the moment this call returns the rotation is still ahead of the wrap-up and
-// may never happen — so the arm must answer nil rather than make a claim the client
-// cannot check. The refusal is not lost; it is recorded once the rotation lands.
-func TestActiveSessionStarter_WrapUpArmWithholdsTheWorkspaceReply(t *testing.T) {
+// refusingStarter builds the wrap-up-arm starter for the #2443 rows: a live child,
+// a recorded workspace, and a spawn-dir validator that refuses it.
+func refusingStarter(p *resetProbe, runner *asyncRunner, logs *safeLog) activeSessionStarter {
+	s := p.starter(runner, logs)
+	s.spawnDirFor = func(string) (string, error) { return "", errors.New("outside $HOME") }
+	s.resolveBound = func(convID string) (sessions.Runner, sessions.SessionID, string, bool) {
+		return runner, sessions.SessionID("session-of-" + convID), "/recorded/cwd", true
+	}
+	return s
+}
+
+// TestActiveSessionStarter_SyncSeamWithholdsTheWorkspaceReply pins the PLAIN
+// relay.SessionStarter form on the wrap-up arm. That method must answer before the
+// rotation has happened, and #2443's value asserts a rotation that COMPLETED — so
+// this form answers nil rather than making a claim the client cannot check. The
+// refusal is not lost even here: it is recorded once the rotation lands, and the
+// late form below is how a client actually receives it.
+func TestActiveSessionStarter_SyncSeamWithholdsTheWorkspaceReply(t *testing.T) {
 	t.Parallel()
 
 	runner := newAsyncRunner(starterLiveChildPID)
 	p := &resetProbe{}
 	var logs safeLog
-	s := p.starter(runner, &logs)
-	s.spawnDirFor = func(string) (string, error) { return "", errors.New("outside $HOME") }
-	s.resolveBound = func(convID string) (sessions.Runner, sessions.SessionID, string, bool) {
-		return runner, sessions.SessionID("session-of-" + convID), "/recorded/cwd", true
-	}
+	s := refusingStarter(p, runner, &logs)
 
 	err := s.StartNewSession(starterConvB)
 	var refused *relay.RotatedWithoutWorkspaceError
@@ -324,6 +370,192 @@ func TestActiveSessionStarter_WrapUpArmWithholdsTheWorkspaceReply(t *testing.T) 
 
 	// The refusal survives as a record, and only below a rotation that returned.
 	logs.awaitRecord(t, "v2.new_session.workspace_refused")
+}
+
+// TestActiveSessionStarter_WrapUpArmDeliversTheWorkspaceReplyLate is the row the
+// e2e regression on PR #2482 asked for, and the one that reconciles this ticket
+// with #2443: the reply is neither faked at dispatch time nor dropped, it is
+// DELIVERED when it becomes true.
+//
+// THE GATE IS THE ASSERTION. While the wrap-up is parked, nothing has rotated and
+// nothing may have been reported — a seam that answered here would be answering
+// for a rotation ninety seconds away, which is the claim the type's doc forbids.
+// Only once the gate opens and RestartFresh has landed may the refusal arrive.
+func TestActiveSessionStarter_WrapUpArmDeliversTheWorkspaceReplyLate(t *testing.T) {
+	t.Parallel()
+
+	runner := newAsyncRunner(starterLiveChildPID)
+	p := &resetProbe{gate: make(chan struct{})}
+	var logs safeLog
+	s := refusingStarter(p, runner, &logs)
+	out := newLateOutcome()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.StartNewSessionLate(starterConvB, out.report)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("StartNewSessionLate did not return while the wrap-up was still running")
+	}
+
+	// Parked on the gate: no rotation, and therefore nothing may have been claimed.
+	if got := runner.restartCount(); got != 0 {
+		t.Fatalf("rotated %d times before the wrap-up finished, want 0", got)
+	}
+	if got := out.count(); got != 0 {
+		t.Errorf("the seam reported %d outcomes before the rotation happened, want 0 — "+
+			"RotatedWithoutWorkspaceError asserts a rotation that COMPLETED", got)
+	}
+
+	close(p.gate)
+	runner.awaitRotation(t)
+
+	err := out.await(t)
+	var refused *relay.RotatedWithoutWorkspaceError
+	if !errors.As(err, &refused) {
+		t.Fatalf("late outcome = %v, want a *relay.RotatedWithoutWorkspaceError", err)
+	}
+	if refused.ConversationID != starterConvB {
+		t.Errorf("refusal named %q, want the resolved conversation %q", refused.ConversationID, starterConvB)
+	}
+	if got := out.count(); got != 1 {
+		t.Errorf("the seam reported %d outcomes, want exactly 1", got)
+	}
+}
+
+// TestActiveSessionStarter_LateOutcomeIsPlainErrorWhenTheRotationFails is the
+// other half of the late form's contract, and the reason delivering late is not
+// the same as delivering optimistically. A rotation that failed reports the plain
+// error and makes NO workspace claim — even though the workspace really was
+// refused — because "rotated without the workspace" for a rotation that never
+// happened is the lie the type's doc forbids outright.
+//
+// The failure is the ORDINARY one startFreshRunner's own doc names: a concurrent
+// new_session won the race, which this ticket's ninety-second window makes likelier
+// rather than rarer.
+func TestActiveSessionStarter_LateOutcomeIsPlainErrorWhenTheRotationFails(t *testing.T) {
+	t.Parallel()
+
+	runner := newAsyncRunner(starterLiveChildPID)
+	p := &resetProbe{}
+	var logs safeLog
+	s := refusingStarter(p, runner, &logs)
+	s.rotate = func(sessions.SessionID) (sessions.SessionID, error) {
+		return "", sessions.ErrSessionNotFound
+	}
+	out := newLateOutcome()
+
+	s.StartNewSessionLate(starterConvB, out.report)
+
+	err := out.await(t)
+	var refused *relay.RotatedWithoutWorkspaceError
+	if errors.As(err, &refused) {
+		t.Fatalf("late outcome = %v after a FAILED rotation; want the plain error, since "+
+			"RotatedWithoutWorkspaceError MUST NOT report a rotation that did not happen", err)
+	}
+	if !errors.Is(err, sessions.ErrSessionNotFound) {
+		t.Errorf("late outcome = %v, want the rotate error", err)
+	}
+}
+
+// TestActiveSessionStarter_LateOutcomeIsNilWhenTheRotationIsClean is the third
+// outcome: a wrap-up arm that rotated with its recorded workspace intact owes the
+// client nothing, and must say so rather than staying silent — handleNewSession
+// answers nil by sending no reply, and a seam that never called back would leave
+// the manager holding a frame it can neither answer nor forget.
+func TestActiveSessionStarter_LateOutcomeIsNilWhenTheRotationIsClean(t *testing.T) {
+	t.Parallel()
+
+	runner := newAsyncRunner(starterLiveChildPID)
+	p := &resetProbe{}
+	var logs safeLog
+	s := p.starter(runner, &logs) // no spawnDirFor: nothing is refused
+	out := newLateOutcome()
+
+	s.StartNewSessionLate(starterConvB, out.report)
+	runner.awaitRotation(t)
+
+	if err := out.await(t); err != nil {
+		t.Errorf("late outcome = %v, want nil for a clean rotation", err)
+	}
+	if got := out.count(); got != 1 {
+		t.Errorf("the seam reported %d outcomes, want exactly 1", got)
+	}
+}
+
+// TestActiveSessionStarter_LateSeamReportsInertArmsSynchronously pins that the
+// late form defers ONLY the wrap-up arm. Every other arm resolves on the caller's
+// goroutine and must report there too — a relay manager that had to wait for a
+// callback before it could move on from an inert frame would have gained the
+// latency the async tail exists to remove.
+func TestActiveSessionStarter_LateSeamReportsInertArmsSynchronously(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		starter func(p *resetProbe, runner *asyncRunner, logs *safeLog) activeSessionStarter
+		convID  string
+		wantErr error
+	}{
+		{
+			name:    "named conversation with no live child is inert",
+			starter: func(p *resetProbe, r *asyncRunner, l *safeLog) activeSessionStarter { return p.starter(r, l) },
+			convID:  starterConvB,
+		},
+		{
+			name: "unresolvable conversation is inert",
+			starter: func(p *resetProbe, r *asyncRunner, l *safeLog) activeSessionStarter {
+				s := p.starter(r, l)
+				s.resolveBound = func(string) (sessions.Runner, sessions.SessionID, string, bool) {
+					return nil, "", "", false
+				}
+				return s
+			},
+			convID: starterConvB,
+		},
+		{
+			name: "a synchronous rotation that fails reports its error",
+			starter: func(p *resetProbe, r *asyncRunner, l *safeLog) activeSessionStarter {
+				s := p.starter(r, l)
+				s.rotate = func(sessions.SessionID) (sessions.SessionID, error) {
+					return "", sessions.ErrSessionNotFound
+				}
+				return s
+			},
+			convID:  "",
+			wantErr: sessions.ErrSessionNotFound,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// A childless runner: every row here must avoid the wrap-up arm, which is
+			// gated on liveness, so none of them may defer.
+			runner := newAsyncRunner(0)
+			p := &resetProbe{}
+			var logs safeLog
+			s := tc.starter(p, runner, &logs)
+			out := newLateOutcome()
+
+			s.StartNewSessionLate(tc.convID, out.report)
+
+			// Synchronous: reported by the time the call returned, with no wait.
+			if got := out.count(); got != 1 {
+				t.Fatalf("the seam reported %d outcomes on return, want exactly 1 — "+
+					"only the wrap-up arm may defer", got)
+			}
+			if err := out.await(t); !errors.Is(err, tc.wantErr) {
+				t.Errorf("late outcome = %v, want %v", err, tc.wantErr)
+			}
+			if got := p.seen(); len(got) != 0 {
+				t.Errorf("wrapped up %v, want nothing — no row here has a live child", got)
+			}
+		})
+	}
 }
 
 // TestActiveSessionStarter_RefusedWorkspaceIsNotRecordedWhenTheRotationFails is the

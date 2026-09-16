@@ -518,6 +518,20 @@ type V2SessionManager struct {
 	// exit; an in-flight producer unblocks via runCtx / s.done.
 	bundleReady chan bundleResult
 
+	// newSessionDone carries one deferred new_session outcome from a
+	// LateSessionStarter's own goroutine back to Run, which answers it in
+	// handleNewSessionDone (#2477). The same "off-Run producer, Run
+	// consumes-and-seals" shape as bundleReady and appReply, for the same reason:
+	// the seam's rotation runs wherever it likes, but the reply it may owe —
+	// answerNewSession → newSessionReplyWorkspaceRefused → forwardEnvelope — reads
+	// m.sessions and calls s.send.Encrypt, both single-owned by Run.
+	//
+	// Buffered (wakeBufferSize) like wake / modalTimeout / bundleReady, and the
+	// producer's send BLOCKS with escapes rather than dropping (the assembleBundle
+	// hand-off), so a Run that is briefly busy delays a reply instead of losing it.
+	// Not closed on Run exit; an in-flight producer unblocks via its escapes.
+	newSessionDone chan newSessionResult
+
 	// modalTimeout carries a surfaced modal's id from its time.AfterFunc
 	// callback goroutine (armed off-Run by ArmModalTimeout) to the Run goroutine
 	// for the deny-on-timeout safe-deny (#725). Daemon-global (a modal is not
@@ -577,6 +591,8 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 		modalTimeout: make(chan string, wakeBufferSize),
 		pushOverflow: make(chan string, wakeBufferSize),
 		bundleReady:  make(chan bundleResult, wakeBufferSize),
+
+		newSessionDone: make(chan newSessionResult, wakeBufferSize),
 	}, nil
 }
 
@@ -614,6 +630,13 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 			// assembly goroutine performed no crypto and touched nothing Run
 			// owns.
 			m.handleBundleReady(runCtx, res)
+		case res := <-m.newSessionDone:
+			// A LateSessionStarter finished a deferred rotation off Run (#2477).
+			// Answer it here — the reply it may owe seals through forwardEnvelope,
+			// so it belongs on the single-owner goroutine like every other v2
+			// reply. The seam's goroutine performed no crypto and touched nothing
+			// Run owns.
+			m.handleNewSessionDone(runCtx, res)
 		case req := <-m.manualRekey:
 			req.reply <- m.handleManualRekey(runCtx, req.connID)
 		case <-m.drainCh:

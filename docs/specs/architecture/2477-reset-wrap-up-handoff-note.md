@@ -540,3 +540,87 @@ instant the payload moves, and does not outlive the turn), and
 `UndoesTheMarkWhenTheWriteFails`. `WithoutATrackerStillDelivers` pins the nil
 branch that was previously the only one reachable. All five were mutation-checked:
 removing the wait, the mark, or the undo reddens the row that names it.
+
+### 2026-09-16 — Open Question 2 re-resolved AGAIN: the reply is DELIVERED LATE, not withheld
+
+**Driven by:** the verifier's regression finding on PR #2482 — `make check` red at
+the e2e tier, `TestRelayV2_NewSessionRefusedWorkspaceRepliesToRequester` failing
+with `error reply seen = false (AC-1), session_transition seen = true (AC-2)`.
+
+**What the previous revision missed.** Withholding the reply was defended above as
+"a shipped behaviour lost is strictly better than a shipped behaviour made false",
+and that trade was weighed without noticing that the lost behaviour *has an e2e
+pin*: #2443's AC-1 is asserted end-to-end against a real spawned daemon, and the
+scenario it drives — a named frame, a live child, a resetter wired — takes the
+wrap-up arm. The branch shipped two contradicting pins, a unit test asserting the
+arm answers nil and an untouched e2e test asserting the client gets the reply on
+the same path. Retiring another ticket's acceptance criterion is not a builder's
+call, and it certainly is not one made by not noticing it.
+
+**What was actually wrong with the reasoning.** Both previous revisions accepted
+the seam's synchrony as fixed and then argued about which of two bad answers to
+give inside it. The real constraint was never "the reply must seal at dispatch
+time" — it was that `SessionStarter.StartNewSession(conversationID string) error`
+is the only shape the seam has, and it carries no frame id to correlate a late
+reply on. That is a seam limitation, not a protocol one, and this package already
+solved the identical problem once: #1491's debug bundle assembles off Run and
+funnels its outcome back through `V2SessionManager.bundleReady`, where
+`handleBundleReady` streams it *or sends the deterministic error reply* — "so
+every `s.send.Encrypt` stays on the single-owner Run goroutine". An off-Run
+producer that owes a reply is a shape this manager already has.
+
+**What now happens.** The seam grows an OPTIONAL widening, asserted at
+`handleNewSession` and falling back to today's method when absent:
+
+```go
+type LateSessionStarter interface {
+        SessionStarter
+        StartNewSessionLate(conversationID string, outcome func(error))
+}
+```
+
+`outcome` is called exactly once with the same value `StartNewSession` would have
+returned — synchronously on every arm but the wrap-up one, which calls it from the
+reset goroutine *after* `startFreshRunner` has returned. So
+`RotatedWithoutWorkspaceError`'s precondition is not softened, deferred or
+narrated around: by the time the value exists the pool is re-keyed and the
+`session_transition` is broadcast, which is exactly what its doc fixes as the
+tense. A rotation that failed reports the plain error and makes no workspace claim,
+as it always did.
+
+The closure the manager passes is a **blocking send with escapes** onto a new
+`newSessionDone chan newSessionResult`, buffered at `wakeBufferSize` — the
+`assembleBundle` hand-off verbatim, with `s.done` and the run context as the two
+escapes. Run's new arm calls `handleNewSessionDone`, which drops a result whose
+session is no longer `V2StateOpen` (`handleBundleReady`'s staleness guard, for its
+reason: sealing under a dead session burns a send-nonce for a frame no live peer
+awaits) and otherwise hands it to `answerNewSession` — arms 4 and 5 of today's
+handler, extracted so the synchronous and late paths discriminate in ONE place
+rather than in two that can drift.
+
+**`cmd/pyry` keeps one implementation of the arms**, not two. `start(convID,
+outcome) (err error, deferred bool)` holds every arm; `StartNewSession` calls it
+with a nil outcome and returns `err`, `StartNewSessionLate` calls it with the real
+one and reports `err` itself unless the arm deferred. A nil outcome is a real
+state — the PTY posture and every test literal — and on the wrap-up arm it means
+b4c850cc's behaviour exactly: rotate asynchronously, answer nothing, record the
+refusal below a rotation that returned. Nothing about the inert arms or #2099's
+reject set moves.
+
+**Why not the other two directions the review named.** Keeping the wrap-up
+synchronous only when the workspace was refused makes whether a conversation gets
+a handoff note depend on an unrelated filesystem error — the ticket's entire
+deliverable, disabled by a stale symlink. Retiring the e2e assertion needs
+Juhana's sign-off and would trade a shipped, proven client behaviour for an
+implementation convenience. This direction is the one the review called "the only
+direction that keeps both contracts whole", and the cost is one optional interface
+in a package that already has the machinery behind it.
+
+**Pinned by** `TestActiveSessionStarter_WrapUpArmDeliversTheWorkspaceReplyLate`
+(the refusal arrives through `outcome`, and only after the rotation returned),
+`TestActiveSessionStarter_LateOutcomeIsPlainErrorWhenTheRotationFails`,
+`TestActiveSessionStarter_SyncSeamStillWithholdsOnTheWrapUpArm` (the nil-outcome
+arm is unchanged), `TestV2Session_NewSession_LateRefusalRepliesToRequester`,
+`TestV2Session_NewSession_LateOutcomeAfterConnClosedIsDropped`, and the e2e pin
+that found this, `TestRelayV2_NewSessionRefusedWorkspaceRepliesToRequester`,
+which passes as written.
