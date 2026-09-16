@@ -1079,7 +1079,14 @@ func runSupervisor(args []string) error {
 			// #1475: the same validator the mint and revive paths use, re-run at
 			// rotation time on the recorded workspace rather than trusting it.
 			spawnDirFor: resolveSpawnDir,
-			log:         logger,
+			// #2477: the wrap-up turn that writes the outgoing session's handoff note
+			// before the rotation. Built over the SAME registry, pool, tracker and
+			// queue the rest of this literal's seams are built over, and under the
+			// daemon ctx — never a frame's — because the reset outlives the dispatch
+			// that started it. nil on a daemon with no registry or pool, which leaves
+			// the rotation exactly as it was.
+			reset: newConversationReset(ctx, convReg, pool, turnBusy, queue, logger),
+			log:   logger,
 		},
 		claudeSessionsDir: claudeSessionsDir,
 		bootstrapIDFn:     func() string { return string(pool.BootstrapID()) },
@@ -2313,9 +2320,98 @@ type activeSessionStarter struct {
 	// own nil, degrading rather than panicking on a remotely-driven path.
 	spawnDirFor func(recordedCwd string) (string, error)
 
+	// reset runs the outgoing session's wrap-up turn and writes its reply as the
+	// conversation's handoff note before the rotation (#2477). Optional: nil keeps
+	// the synchronous pre-#2477 rotation, which is the PTY posture and the shape
+	// every test literal in this package still gets for free.
+	reset *conversationReset
+
 	// log records which arm an inbound new_session took (#2099). Optional: nil
 	// falls back to slog.Default() via logger(), mirroring activeInterrupter.
 	log *slog.Logger
+}
+
+// activeSessionStarter MUST satisfy the LATE seam, not merely the plain one. The
+// config field it is assigned to is typed relay.SessionStarter, so only that half
+// is compile-checked at the wiring site, and handleNewSession picks the late form
+// by a runtime type assertion — meaning a signature that drifted would not fail to
+// build, it would silently fall back to the synchronous path and drop #2443's
+// reply on every wrap-up. That is precisely how this ticket shipped red once, so
+// the assertion is here rather than left to a test to notice (#2477).
+var _ relay.LateSessionStarter = activeSessionStarter{}
+
+// resetThenRotate is the reset's tail, run on its own goroutine: the wrap-up turn,
+// then the rotation StartNewSession would otherwise have performed inline.
+//
+// IT IS OFF THE CALLER'S GOROUTINE BECAUSE THE CALLER IS relay's Run LOOP.
+// handleNewSession calls StartNewSession inline on the V2SessionManager's single
+// Run dispatch goroutine, and a wrap-up is bounded at ninety seconds; blocking
+// there would freeze frame dispatch for every connection and every conversation
+// the daemon hosts while one background chat wrote a paragraph.
+//
+// It terminates unconditionally: the wrap-up is bounded by its own deadline and by
+// the daemon context, and the rotation below is two map operations and a restart.
+//
+// THE OUTCOME IS REPORTED WHEN IT BECOMES TRUE, which is the whole reason this
+// tail may run at all. #2443's reply is not a status line but a claim with a
+// tense: RotatedWithoutWorkspaceError's own doc fixes the pool as re-keyed and the
+// session_transition as already broadcast BY THE TIME THE VALUE EXISTS, and then
+// forbids it outright for a rotation that failed — "a lie the client cannot
+// check". At dispatch time, ninety seconds above this line, that precondition is
+// not merely unproven but routinely false: startFreshRunner's own doc calls losing
+// the race to a concurrent new_session "the ORDINARY way to land here", and the
+// arm below logs it. So the value is minted HERE, under the rotation it describes,
+// and handed to outcome — relay.LateSessionStarter's callback, which carries it to
+// the Run goroutine where the reply is sealed. A rotation that failed reports the
+// plain error and makes no workspace claim, exactly as the synchronous path does.
+//
+// outcome MAY BE NIL, and that is a reachable state rather than a defensive check:
+// a caller holding only the plain SessionStarter method has nowhere to put a late
+// answer. The rotation still happens and both outcomes are still recorded; only
+// the client reply is absent. The records are written on BOTH paths, not as a
+// fallback — they carry conversation_id, which handleNewSession deliberately never
+// logs, so they are the daemon-side half of a pair rather than a substitute.
+//
+// The runner and oldID are the ones resolved at DISPATCH time, which is a wider
+// window than the synchronous path's. That is handled where it already was: if a
+// rotation won in between, Pool.RotateForNewSession answers ErrSessionNotFound and
+// startFreshRunner disarms the #1330 gate and returns it.
+func (a activeSessionStarter) resetThenRotate(release func(), outcome func(error),
+	runner sessions.Runner, oldID sessions.SessionID, convID, spawnDir string, refused bool) {
+	defer release()
+	a.reset.wrapUp(convID)
+	if err := startFreshRunner(runner, oldID, spawnDir, a.rotate, a.log); err != nil {
+		a.logger().Warn("relay: v2 new_session could not rotate after the wrap-up turn",
+			"event", "v2.new_session.rotate_failed",
+			"conversation_id", convID,
+			"err", err)
+		reportNewSessionOutcome(outcome, err)
+		return
+	}
+	if refused {
+		// Reached only with the rotation returned nil, which is the tense the reply
+		// claims. No path: resolveSpawnDir's confinement error is not carried here,
+		// matching the posture that function keeps for its own record.
+		a.logger().Warn("relay: v2 new_session rotated without the conversation's recorded workspace",
+			"event", "v2.new_session.workspace_refused",
+			"conversation_id", convID)
+		reportNewSessionOutcome(outcome, &relay.RotatedWithoutWorkspaceError{ConversationID: convID})
+		return
+	}
+	reportNewSessionOutcome(outcome, nil)
+}
+
+// reportNewSessionOutcome delivers one new_session outcome to a
+// relay.LateSessionStarter callback, tolerating the nil callback a plain
+// SessionStarter caller leaves behind (#2477). A free function rather than a
+// method because it reads nothing from the starter, and one place rather than a
+// nil check at each of resetThenRotate's three exits, where the fourth edit would
+// forget it.
+func reportNewSessionOutcome(outcome func(error), err error) {
+	if outcome == nil {
+		return
+	}
+	outcome(err)
 }
 
 // logger returns a's logger, falling back to slog.Default() when unset.
@@ -2367,7 +2463,43 @@ func (a activeSessionStarter) logger() *slog.Logger {
 //
 // The cursor is never WRITTEN here; only sessionRouter.Route stamps it. Rotating a
 // named conversation therefore leaves the active conversation where it was.
+//
+// It is relay.SessionStarter's method and answers only what it can prove: the
+// wrap-up arm's rotation outlives this call, so this form returns nil there. The
+// answer is not lost — StartNewSessionLate is the form that receives it (#2477).
 func (a activeSessionStarter) StartNewSession(conversationID string) error {
+	err, _ := a.start(conversationID, nil)
+	return err
+}
+
+// StartNewSessionLate is relay.LateSessionStarter's method: the same arms, with
+// the wrap-up arm's outcome delivered through outcome once its rotation has
+// actually happened (#2477). handleNewSession asserts this method on the seam and
+// prefers it, so in the daemon it is the form that runs.
+//
+// outcome IS CALLED EXACTLY ONCE on every arm. Synchronously here for every arm
+// that resolves inline — including the inert ones, which report nil and elicit no
+// reply — and from resetThenRotate's goroutine for the one that defers. The split
+// is `deferred`, answered by start itself, so neither this function nor a future
+// arm has to infer "did that one defer?" from the error being nil.
+func (a activeSessionStarter) StartNewSessionLate(conversationID string, outcome func(error)) {
+	if err, deferred := a.start(conversationID, outcome); !deferred {
+		reportNewSessionOutcome(outcome, err)
+	}
+}
+
+// start holds every arm of both seam forms, so the two cannot drift (#2477).
+//
+// It answers (err, deferred): err is what the synchronous forms return, and
+// deferred says the outcome has been handed to the wrap-up tail and will arrive
+// through outcome instead. The pair is exhaustive — deferred == true always comes
+// with a nil err, and a caller that ignores deferred gets exactly the pre-#2477
+// synchronous contract, which is what StartNewSession relies on.
+//
+// outcome is carried rather than consumed: only the wrap-up arm uses it, and a nil
+// one there is the PTY / unwired-caller posture, in which the rotation still runs
+// asynchronously and only the client reply is absent.
+func (a activeSessionStarter) start(conversationID string, outcome func(error)) (err error, deferred bool) {
 	convID := conversationID
 	named := conversationID != ""
 	switch {
@@ -2381,13 +2513,13 @@ func (a activeSessionStarter) StartNewSession(conversationID string) error {
 			// reached here and nothing was active.
 			a.logger().Debug("relay: v2 new_session inert; no active conversation",
 				"event", "v2.new_session.no_active_conv")
-			return nil
+			return nil, false
 		}
 	case !conversations.ValidID(convID):
 		a.logger().Debug("relay: v2 new_session inert; named conversation id is not canonical",
 			"event", "v2.new_session.invalid_conv_id",
 			"conversation_id", boundedConvID(convID))
-		return nil
+		return nil, false
 	}
 
 	runner, oldID, recordedCwd, ok := a.resolveBound(convID)
@@ -2395,7 +2527,7 @@ func (a activeSessionStarter) StartNewSession(conversationID string) error {
 		a.logger().Debug("relay: v2 new_session inert; conversation has no bound session",
 			"event", "v2.new_session.no_bound_session",
 			"conversation_id", convID)
-		return nil
+		return nil, false
 	}
 	// The rotation capability is probed HERE as well as inside startFreshRunner,
 	// which is deliberate rather than an oversight: this is the arm AC-4 asks to be
@@ -2409,7 +2541,7 @@ func (a activeSessionStarter) StartNewSession(conversationID string) error {
 		a.logger().Debug("relay: v2 new_session inert; bound runner cannot restart",
 			"event", "v2.new_session.no_restart",
 			"conversation_id", convID)
-		return nil
+		return nil, false
 	}
 	// AC-4's fourth row, and the ONE arm the capability probe above does not already
 	// cover — which is exactly how it was first shipped broken. The probe asks what
@@ -2430,11 +2562,49 @@ func (a activeSessionStarter) StartNewSession(conversationID string) error {
 	// that has started but not yet published its pid reads 0 too and refuses; that is
 	// the same fail-safe direction the whole reject set takes, and the frame is
 	// re-sendable.
-	if named && runner.State().ChildPID == 0 {
+	live := runner.State().ChildPID != 0
+	if named && !live {
 		a.logger().Debug("relay: v2 new_session inert; named conversation has no live child",
 			"event", "v2.new_session.no_live_child",
 			"conversation_id", convID)
-		return nil
+		return nil, false
+	}
+	// #2477: a LIVE child is asked to write a handoff note for its successor before
+	// it is replaced, and that turn moves the whole tail off this goroutine. See
+	// resetThenRotate for why, and conversationReset's file header for the bound.
+	//
+	// The gate is liveness, not namedness, and the asymmetry above is not repeated
+	// here. A bare frame on a childless conversation keeps rotating exactly as #2099
+	// promised, because it takes the synchronous path below; a bare frame on a live
+	// one gets the same wrap-up a named one gets, because the operator pressed the
+	// same control and there is the same session's worth of context to lose.
+	if a.reset != nil && live {
+		release, armed := a.reset.begin(convID)
+		if !armed {
+			// AC-4: DROPPED, not queued. A second reset would run another wrap-up turn
+			// against a child the first one is about to replace — real tokens spent to
+			// write a note over the one being written. Recorded at Debug beside the
+			// other client-driven refusals on this verb.
+			a.logger().Debug("relay: v2 new_session inert; a reset is already in progress",
+				"event", "v2.new_session.reset_in_progress",
+				"conversation_id", convID)
+			return nil, false
+		}
+		// Resolved SYNCHRONOUSLY so it stays BELOW every inert arm AND below the guard
+		// above, which is what keeps a repeated frame from driving MkdirAll — the
+		// containment resolveSpawnDir's own doc requires. The refusal it answers
+		// travels WITH the tail rather than being answered from here; resetThenRotate
+		// mints #2443's value under the rotation that makes it true.
+		spawnDir, refused := a.resolveSpawnDir(convID, recordedCwd)
+		go a.resetThenRotate(release, outcome, runner, oldID, convID, spawnDir, refused)
+		// DEFERRED, AND THE ONLY ARM THAT IS: this frame owes the client a reply it
+		// cannot yet make true. The only reply this verb has is #2443's, and that value
+		// asserts a COMPLETED rotation — one that is ninety seconds away here and may
+		// not happen at all. Answering now would be the "lie the client cannot check"
+		// its own doc forbids, so the answer travels with the tail and arrives when it
+		// is true. A caller with no late channel (outcome == nil) simply does not get
+		// it; the rotation is unaffected.
+		return nil, true
 	}
 	spawnDir, refused := a.resolveSpawnDir(convID, recordedCwd)
 	if err := startFreshRunner(runner, oldID, spawnDir, a.rotate, a.log); err != nil {
@@ -2442,7 +2612,7 @@ func (a activeSessionStarter) StartNewSession(conversationID string) error {
 		// without the workspace" would describe a rotation the client's own
 		// session_transition never announced. The rotate error is the pre-#2443
 		// answer and stays the answer; resolveSpawnDir's record still stands.
-		return err
+		return err, false
 	}
 	if refused {
 		// The rotation COMPLETED and only the move did not (#2443). Not a failure —
@@ -2450,9 +2620,9 @@ func (a activeSessionStarter) StartNewSession(conversationID string) error {
 		// answers the client about. convID is resolved: the frame's id after
 		// conversations.ValidID, or the cursor's own, so it is bounded and canonical
 		// on both paths and is never the raw client string.
-		return &relay.RotatedWithoutWorkspaceError{ConversationID: convID}
+		return &relay.RotatedWithoutWorkspaceError{ConversationID: convID}, false
 	}
-	return nil
+	return nil, false
 }
 
 // resolveSpawnDir re-confines the conversation's recorded workspace to $HOME and

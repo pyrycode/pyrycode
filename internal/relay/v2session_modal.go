@@ -709,6 +709,11 @@ const msgNewSessionWorkspaceRefused = "the recorded workspace could not be used;
 //     Discriminated on the TYPE and above the Warn arm, so an ordinary error that
 //     merely mentions a workspace still takes the best-effort path. The reply is
 //     unicast to the conn that asked — this handler still broadcasts nothing.
+//
+// ARMS 4 AND 5 LIVE IN answerNewSession, not here, because since #2477 there are
+// TWO ways to reach them: the seam's plain method, answering inline below, and a
+// LateSessionStarter, answering from its own goroutine once its rotation has
+// actually happened. One discrimination site rather than two that can drift.
 func (m *V2SessionManager) handleNewSession(ctx context.Context, s *V2Session, env protocol.Envelope) {
 	if !s.interactive {
 		return // non-interactive conn: inert, no rotation (the AC-4 negative path)
@@ -724,7 +729,80 @@ func (m *V2SessionManager) handleNewSession(ctx context.Context, s *V2Session, e
 	// ConversationID is the cursor path. Never echoed back to the phone or logged.
 	_ = json.Unmarshal(env.Payload, &p)
 
-	err := m.cfg.SessionStarter.StartNewSession(p.ConversationID)
+	// #2477: a starter whose rotation may outlive the call answers through a
+	// callback instead of a return value. The assertion is on the configured seam
+	// rather than a second config field, so wiring is unchanged and an
+	// implementation opts in by having the method — the ScreenSnapshotter-style
+	// optional-capability posture this package already takes at the consumer.
+	if late, ok := m.cfg.SessionStarter.(LateSessionStarter); ok {
+		// env.ID and s are captured, NOT re-read later: the reply must correlate to
+		// THIS frame, and the callback may run long after this handler returned.
+		late.StartNewSessionLate(p.ConversationID, func(err error) {
+			m.deferNewSessionOutcome(ctx, s, env.ID, err)
+		})
+		return
+	}
+	m.answerNewSession(ctx, s, env.ID, m.cfg.SessionStarter.StartNewSession(p.ConversationID))
+}
+
+// deferNewSessionOutcome hands one LateSessionStarter outcome to Run (#2477). It
+// runs on the SEAM's goroutine — which for the production starter is the reset
+// goroutine, up to ninety seconds after the frame was dispatched — so it reads
+// nothing Run owns: not m.sessions, not s.state, not s.send. It touches only
+// m.newSessionDone and s.done, both created before the conn opened and never
+// reassigned, which is exactly the set assembleBundle is documented to be allowed.
+//
+// The send BLOCKS with escapes rather than dropping, matching assembleBundle for a
+// weaker version of its reason: a dropped outcome loses the frame's only reply
+// with nothing to retry it, where the drainCh latch idiom is safe precisely
+// because a later Push re-drives it. Both escapes are teardown — the conn going
+// away (s.done) or the manager exiting (ctx) — and in both cases there is no live
+// peer left to answer, so parking a caller that has already finished its rotation
+// costs nothing that matters.
+func (m *V2SessionManager) deferNewSessionOutcome(ctx context.Context, s *V2Session,
+	inReplyTo uint64, err error) {
+	select {
+	case m.newSessionDone <- newSessionResult{s: s, inReplyTo: inReplyTo, err: err}:
+	case <-s.done:
+		// This conn tore down while the rotation ran. Nobody is waiting for the
+		// reply, and a reconnecting conn_id gets a fresh V2Session.
+	case <-ctx.Done():
+		// Run is exiting; there is nothing left to seal a reply with.
+	}
+}
+
+// handleNewSessionDone completes one deferred new_session on the Run goroutine,
+// from the outcome its LateSessionStarter produced off Run (#2477). Reached only
+// from Run's m.newSessionDone arm, which is what makes the answerNewSession call
+// below — and the forwardEnvelope inside it — single-owned like every other reply.
+//
+// The staleness guard is handleBundleReady's, for its reason: closeWith may have
+// run between the dispatch and this outcome, and sealing under a dead session
+// would burn a send-nonce for a frame no live peer awaits. Consulting m.sessions
+// instead would buy nothing — a reconnected same-conn_id session is a DIFFERENT
+// pointer, and this frame's reply belongs to the conn that sent it.
+func (m *V2SessionManager) handleNewSessionDone(ctx context.Context, res newSessionResult) {
+	if res.s.state != V2StateOpen {
+		m.cfg.Logger.Debug("relay: v2 new_session outcome dropped; session not open",
+			"event", "v2.new_session.stale",
+			"conn_id", res.s.connID)
+		return
+	}
+	m.answerNewSession(ctx, res.s, res.inReplyTo, res.err)
+}
+
+// answerNewSession is arms 4 and 5 of handleNewSession's contract, applied to an
+// outcome however it arrived — returned inline by a plain SessionStarter, or
+// delivered later by a LateSessionStarter (#2477). ALWAYS ON THE Run GOROUTINE.
+//
+// Nothing here is conditional on which path produced the value, and that is the
+// point: the late path's whole justification is that its outcome MEANS the same
+// thing, so it must be discriminated by the same code. In particular arm 5's
+// precondition — RotatedWithoutWorkspaceError reports a rotation that COMPLETED —
+// is the seam's to keep on both paths, and the late starter keeps it by calling
+// back only once its rotation has returned.
+func (m *V2SessionManager) answerNewSession(ctx context.Context, s *V2Session,
+	inReplyTo uint64, err error) {
 	if err == nil {
 		return
 	}
@@ -737,13 +815,24 @@ func (m *V2SessionManager) handleNewSession(ctx context.Context, s *V2Session, e
 		m.cfg.Logger.Info("relay: v2 new_session rotated without the recorded workspace",
 			"event", "v2.new_session.workspace_refused",
 			"conn_id", s.connID)
-		m.newSessionReplyWorkspaceRefused(ctx, s, env.ID, refused.ConversationID)
+		m.newSessionReplyWorkspaceRefused(ctx, s, inReplyTo, refused.ConversationID)
 		return
 	}
 	m.cfg.Logger.Warn("relay: v2 new_session start failed",
 		"event", "v2.new_session.keystroke_err",
 		"conn_id", s.connID,
 		"err", err)
+}
+
+// newSessionResult is one deferred new_session outcome in transit from a
+// LateSessionStarter's goroutine to Run (#2477). Mirrors bundleResult: the conn
+// and the frame id the reply must correlate to, captured at dispatch, plus the
+// value the seam produced. Defined here beside the verb's other machinery rather
+// than in v2session.go, the #1025 carve-out bundleResult already follows.
+type newSessionResult struct {
+	s         *V2Session
+	inReplyTo uint64
+	err       error
 }
 
 // newSessionReplyWorkspaceRefused pushes this verb's ONLY reply: a single

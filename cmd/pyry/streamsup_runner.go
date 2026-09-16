@@ -55,7 +55,21 @@ type streamRunner struct {
 	r *streamsup.Runner
 	sessionRetentions
 	install *settingsInstaller
+	// wrapUp is the #2477 reply capture chained into this runner's sink chain. A
+	// POINTER, like install and for the same reason — a hand-built streamRunner{}
+	// leaves it nil, which is inert: every method on a nil *wrapUpCapture refuses.
+	wrapUp *wrapUpCapture
 }
+
+// BeginWrapUp arms this runner's wrap-up reply capture and returns the reply, the
+// disarm the caller must run, and whether it armed (#2477).
+//
+// An OPTIONAL capability asserted for at the consumer, the posture
+// contextUsageQuerier and the interrupt dispatch already keep: it stays OFF
+// sessions.Runner because its only consumer is conversationReset in this package,
+// and widening that interface would pull every test double in the tree into the
+// slice for a method none of them can answer.
+func (s streamRunner) BeginWrapUp() (*wrapUpReply, func(), bool) { return s.wrapUp.begin() }
 
 // spawnArgvInstaller is the half of *streamsup.Runner that Pool.UpdateSettings
 // drives — the two argv installs and the posture install that always precedes
@@ -765,7 +779,18 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 		// ModelList, one initialize exchange per child produces exactly one of these,
 		// and no later event replaces it, so a persist point below the send could lose
 		// the list for the whole life of the child.
-		parserSink := contextUsage.Sink
+		// #2477 chains the wrap-up reply capture into the same run of non-retaining
+		// decorators, and for the placement reason the two below it were chained here
+		// rather than being folded into newSessionParser: what puts a link upstream of
+		// the droppable fan-in send is sitting on the PARSER'S SIDE of the channel.
+		// Here that is not merely sufficient but necessary, twice over — turnMarkFor
+		// answers turnMarkOpen for TextChunk, so assistant text is droppable class and
+		// sinkForTag refuses it at droppableCap; and the drain's active-session gate
+		// drops every event of a BACKGROUND conversation, which is most of the ones a
+		// reset names. A capture below either writes a silently truncated note. See
+		// wrapUpCapture's own doc block.
+		wrapUp := newWrapUpCapture(contextUsage.Sink)
+		parserSink := wrapUp.Sink
 		if vocab != nil {
 			parserSink = vocab.sinkFor(parserSink)
 		}
@@ -823,7 +848,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 		// path cannot be handed different shaping inputs. It sits below
 		// streamsup.New because the runner is what it forwards to.
 		install := newSettingsInstaller(r, mcpServersPath, approval.stdio, cfg.OperatorBypass, cfg.PermissionMode)
-		return streamRunner{r: r, sessionRetentions: held, install: install}, nil
+		return streamRunner{r: r, sessionRetentions: held, install: install, wrapUp: wrapUp}, nil
 	}
 }
 

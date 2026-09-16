@@ -1,4 +1,4 @@
-# `writeSystemPrompt` + `systemPromptText` (#2093, per-session since #2150, client-named since #2148, handoff note since #2475)
+# `writeSystemPrompt` + `systemPromptText` (#2093, per-session since #2150, client-named since #2148, handoff note since #2475, fence exported since #2477)
 
 ```go
 func composeSystemPrompt(operator string) string
@@ -256,6 +256,32 @@ See [docs/specs/architecture/2475-handoff-note-in-system-prompt.md](../../specs/
 for the full design, the two-refusal security walk (including the
 `## Revisions` entry recording the whitespace gap above), and the security
 review.
+
+### The fence was exported, not the predicate (#2477)
+
+The conversation reset's wrap-up turn (#2477, `cmd/pyry`) carries the
+*previous* handoff note into the prompt it sends the outgoing child, and that
+prompt needs the same fence and the same refusals as this section — a forged
+end marker is exactly as dangerous whether it is heading into a system prompt
+or a user turn — but not `handoffNoteLead`, whose sentence ("consult it when
+the user refers to earlier work") is written for a system prompt and is wrong
+for a turn asking its reader to prune and rewrite the note. The seam is cut
+below the lead: `FencedHandoffNote(note string) (string, bool)` renders the
+fence and its refusals alone, and `handoffNoteSection` is now
+`handoffNoteLead + fenced` over it, byte-identically. **One predicate and one
+fence, two leads** — exporting a second predicate over the same untrusted
+bytes was rejected because that is exactly how two admission rules drift
+apart from each other; only the sentence that differs per destination lives
+outside the shared package.
+
+`cmd/pyry`'s wrap-up write side runs the *outgoing* child's reply through this
+same `FencedHandoffNote` before ever calling `Pool.WriteHandoffNote` — not
+only the note this section reads back. A reply carrying a forged fence marker
+would otherwise be stored happily and refused later by this section's own
+`handoffNoteSection`, silently destroying the previous note and handing the
+successor nothing; running the read side's predicate on the write path closes
+that gap rather than trusting the store's blank-only check. See
+[`sessions-package-key-types-handoffnote-store.md`](sessions-package-key-types-handoffnote-store.md#the-wrap-ups-write-side-2477).
 
 ## The mint-window trap this design exists to avoid
 

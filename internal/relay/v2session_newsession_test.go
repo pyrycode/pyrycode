@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -454,5 +455,252 @@ func TestV2Session_NewSession_SilentOutcomesReplyNothing(t *testing.T) {
 					"outcome but the refused-workspace one", len(got))
 			}
 		})
+	}
+}
+
+// --- #2477 LateSessionStarter: an outcome that arrives after the handler returned ---
+
+// fakeLateSessionStarter is a SessionStarter that ALSO implements
+// LateSessionStarter: it parks the callback instead of answering, so a test can
+// report the outcome from its own goroutine at a moment of its choosing — which is
+// the whole shape the production starter has, where the callback fires from the
+// reset goroutine up to ninety seconds after dispatch.
+//
+// fakeSessionStarter above deliberately stays plain, so every pre-#2477 test in
+// this file keeps exercising handleNewSession's fallback path unchanged.
+type fakeLateSessionStarter struct {
+	mu      sync.Mutex
+	convIDs []string
+	armed   chan func(error)
+}
+
+func newFakeLateSessionStarter() *fakeLateSessionStarter {
+	return &fakeLateSessionStarter{armed: make(chan func(error), 4)}
+}
+
+// StartNewSession satisfies SessionStarter so the config field accepts the fake.
+// handleNewSession prefers the late form, so reaching this method in a test that
+// wired this type means the capability assertion did not fire.
+func (f *fakeLateSessionStarter) StartNewSession(conversationID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.convIDs = append(f.convIDs, "SYNC:"+conversationID)
+	return nil
+}
+
+func (f *fakeLateSessionStarter) StartNewSessionLate(conversationID string, outcome func(error)) {
+	f.mu.Lock()
+	f.convIDs = append(f.convIDs, conversationID)
+	f.mu.Unlock()
+	f.armed <- outcome
+}
+
+func (f *fakeLateSessionStarter) seen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.convIDs...)
+}
+
+// awaitCallback returns the parked outcome callback, failing rather than hanging
+// when the manager never reached the late seam.
+func (f *fakeLateSessionStarter) awaitCallback(t *testing.T) func(error) {
+	t.Helper()
+	select {
+	case fn := <-f.armed:
+		return fn
+	case <-time.After(3 * time.Second):
+		t.Fatalf("handleNewSession never called StartNewSessionLate")
+		return nil
+	}
+}
+
+// awaitReplyForConn polls until connID has received at least one app frame, which
+// is how a reply sealed from Run's m.newSessionDone arm is observed. A Frames
+// barrier cannot serve: the outcome arrives on a DIFFERENT channel, and Run's
+// select picks among ready cases at random, so a later frame being handled proves
+// nothing about the outcome having been.
+func awaitReplyForConn(t *testing.T, rec *v2Recorder, connID string) []protocol.RoutingEnvelope {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		if msgs := noiseMsgsForConn(t, rec, connID); len(msgs) > 0 {
+			return msgs
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("no app frame reached %s; the deferred outcome never produced its reply", connID)
+			return nil
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// TestV2Session_NewSession_LateRefusalRepliesToRequester is the relay half of the
+// fix for the regression PR #2482 shipped: #2443's coded reply survives a starter
+// whose rotation outlives the call, because the outcome is carried back to Run and
+// answered there rather than being answered early or dropped.
+//
+// THE TWO HALVES ARE ORDERED, and the order is the assertion. Nothing may be sent
+// while the callback is still parked — a reply then would be exactly the "lie the
+// client cannot check" RotatedWithoutWorkspaceError forbids — and the reply must
+// appear once it fires, correlated to the frame that asked.
+func TestV2Session_NewSession_LateRefusalRepliesToRequester(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	fake := newFakeLateSessionStarter()
+	frames := make(chan protocol.RoutingEnvelope, 8)
+	rec := &v2Recorder{}
+	logger, logBuf := bufferLogger()
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:         frames,
+		Outbound:       rec.outbound,
+		StaticPriv:     respPriv,
+		Devices:        v2PairedRegistry(t, v2TestToken),
+		ServerID:       v2TestServerID,
+		Logger:         logger,
+		SessionStarter: fake,
+	})
+	t.Cleanup(stop)
+
+	send, recv := openModalConn(t, mgr, frames, rec, respPub, "c-int", []string{protocol.CapabilityInteractive})
+	const reqID uint64 = 2477
+	frames <- sealAppFrameConn(t, send, "c-int", protocol.Envelope{
+		ID:   reqID,
+		Type: protocol.TypeNewSession,
+		TS:   time.Now().UTC(),
+	})
+
+	outcome := fake.awaitCallback(t)
+	if got := fake.seen(); len(got) != 1 || got[0] != "" {
+		t.Fatalf("seam received %v, want exactly one bare (cursor) call — reaching the SYNC: form "+
+			"would mean handleNewSession did not assert LateSessionStarter", got)
+	}
+
+	// Barrier on Frames: once a later conn is open, Run has finished the new_session
+	// frame. The callback is still parked, so no reply may exist yet.
+	openModalConn(t, mgr, frames, rec, respPub, "c-barrier", []string{protocol.CapabilityInteractive})
+	if got := noiseMsgsForConn(t, rec, "c-int"); len(got) != 0 {
+		t.Fatalf("the requester got %d app frame(s) while the rotation was still pending, want 0", len(got))
+	}
+
+	outcome(&RotatedWithoutWorkspaceError{ConversationID: rotatedConvID})
+
+	msgs := awaitReplyForConn(t, rec, "c-int")
+	if len(msgs) != 1 {
+		t.Fatalf("got %d app frame(s) for the requester, want exactly 1 error reply", len(msgs))
+	}
+	reply := decryptAppFrame(t, msgs[0], recv)
+	if reply.Type != protocol.TypeError {
+		t.Fatalf("reply Type = %q, want %q", reply.Type, protocol.TypeError)
+	}
+	if reply.InReplyTo == nil || *reply.InReplyTo != reqID {
+		t.Fatalf("reply InReplyTo = %v, want a pointer to %d — the frame id is captured at dispatch and "+
+			"must survive the deferral", reply.InReplyTo, reqID)
+	}
+	var p protocol.ErrorPayload
+	if err := json.Unmarshal(reply.Payload, &p); err != nil {
+		t.Fatalf("decode error payload: %v", err)
+	}
+	if p.Code != protocol.CodeNewSessionWorkspaceRefused {
+		t.Errorf("error Code = %q, want %q", p.Code, protocol.CodeNewSessionWorkspaceRefused)
+	}
+	if p.ConversationID != rotatedConvID {
+		t.Errorf("error ConversationID = %q, want %q", p.ConversationID, rotatedConvID)
+	}
+	// The reply is unicast, on the deferred path exactly as on the inline one.
+	if got := noiseMsgsForConn(t, rec, "c-barrier"); len(got) != 0 {
+		t.Errorf("the barrier conn received %d app frame(s), want 0", len(got))
+	}
+	// handleNewSession's no-conversation-id logging rule is not relaxed by the
+	// deferral: the id still reaches the wire and not the log.
+	if s := logBuf.String(); strings.Contains(s, rotatedConvID) {
+		t.Errorf("the conversation id reached a log record; logs are:\n%s", s)
+	}
+}
+
+// TestV2Session_NewSession_LateCleanOutcomeRepliesNothing pins the nil arm of the
+// same path. A deferred rotation that went cleanly owes the client nothing, and
+// "nothing" must mean no frame — not an error frame carrying a nil error.
+func TestV2Session_NewSession_LateCleanOutcomeRepliesNothing(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	fake := newFakeLateSessionStarter()
+	frames := make(chan protocol.RoutingEnvelope, 8)
+	rec := &v2Recorder{}
+	logger, _ := bufferLogger()
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:         frames,
+		Outbound:       rec.outbound,
+		StaticPriv:     respPriv,
+		Devices:        v2PairedRegistry(t, v2TestToken),
+		ServerID:       v2TestServerID,
+		Logger:         logger,
+		SessionStarter: fake,
+	})
+	t.Cleanup(stop)
+
+	send, _ := openModalConn(t, mgr, frames, rec, respPub, "c-int", []string{protocol.CapabilityInteractive})
+	frames <- sealAppFrameConn(t, send, "c-int", protocol.Envelope{
+		ID:   9,
+		Type: protocol.TypeNewSession,
+		TS:   time.Now().UTC(),
+	})
+
+	fake.awaitCallback(t)(nil)
+
+	// Two Frames barriers after the outcome: the first may race the newSessionDone
+	// arm, the second cannot — Run drains a buffered channel it is already selecting
+	// on before it can service two later frames.
+	openModalConn(t, mgr, frames, rec, respPub, "c-b1", []string{protocol.CapabilityInteractive})
+	openModalConn(t, mgr, frames, rec, respPub, "c-b2", []string{protocol.CapabilityInteractive})
+	if got := noiseMsgsForConn(t, rec, "c-int"); len(got) != 0 {
+		t.Errorf("a clean deferred rotation produced %d app frame(s), want 0", len(got))
+	}
+}
+
+// TestV2Session_NewSession_LateOutcomeOnAClosedSessionIsDropped pins
+// handleNewSessionDone's staleness guard: a conn torn down while its rotation ran
+// must not be sealed against, because that burns a Noise send-nonce for a frame no
+// live peer awaits — handleBundleReady's rule, reached by the same off-Run route.
+//
+// A DIRECT CALL rather than a driven teardown, the posture
+// TestV2Session_AppReply_NotOpenPrecedesTransportDown already takes here: driving
+// it would mean closing the conn between the dispatch and the outcome, and with
+// s.done closed the producer's select picks among ready cases at random, so the
+// result might never reach the arm under test. Run is never started, so no
+// single-owner invariant is touched, and the guard returns before anything would
+// dereference the hand-built session's nil s.send.
+func TestV2Session_NewSession_LateOutcomeOnAClosedSessionIsDropped(t *testing.T) {
+	t.Parallel()
+
+	respPriv, _ := genV2Keypair(t)
+	var sent int
+	logger, logBuf := bufferLogger()
+	mgr, err := NewV2SessionManager(V2SessionConfig{
+		Frames:     make(chan protocol.RoutingEnvelope),
+		Outbound:   func(protocol.RoutingEnvelope) error { sent++; return nil },
+		StaticPriv: respPriv,
+		Devices:    v2PairedRegistry(t, v2TestToken),
+		ServerID:   v2TestServerID,
+		Logger:     logger,
+	})
+	if err != nil {
+		t.Fatalf("NewV2SessionManager: %v", err)
+	}
+
+	s := &V2Session{connID: v2TestConnID, state: V2StateClosed}
+	mgr.handleNewSessionDone(context.Background(), newSessionResult{
+		s:         s,
+		inReplyTo: 1,
+		err:       &RotatedWithoutWorkspaceError{ConversationID: rotatedConvID},
+	})
+
+	if sent != 0 {
+		t.Errorf("Outbound sends = %d, want 0 — a torn-down conn must not be sealed against", sent)
+	}
+	if out := logBuf.String(); !strings.Contains(out, "v2.new_session.stale") {
+		t.Errorf("the dropped outcome left no record; logs are:\n%s", out)
 	}
 }
