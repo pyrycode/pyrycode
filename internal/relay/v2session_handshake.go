@@ -501,22 +501,30 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	}
 }
 
-// handleNoiseMsg processes an inbound noise_msg frame. The
-// handshakeComplete branch is the gating invariant: a noise_msg
-// arriving while we hold CipherStates but have not yet validated the
-// token is rejected as auth.invalid_token. The open branch AEAD-decrypts
-// the payload and dispatches the inner v1-shaped envelope through the
-// existing handler chain; AEAD failures close the conn at 4421.
+// handleNoiseMsg processes an inbound noise_msg frame. The awaitingInit
+// branch holds no CipherStates and closes at the retryable 4410, telling a
+// client whose session the daemon no longer has to handshake again. The
+// handshakeComplete branch is the gating invariant: a noise_msg arriving
+// while we hold CipherStates but have not yet validated the token is
+// rejected as auth.invalid_token. The open branch AEAD-decrypts the payload
+// and dispatches the inner v1-shaped envelope through the existing handler
+// chain; AEAD failures close the conn at 4421.
 func (m *V2SessionManager) handleNoiseMsg(ctx context.Context, s *V2Session, inner InnerFrameV2Decoded) {
 	switch s.state {
 	case V2StateAwaitingInit:
-		// No CipherStates yet; close-only at 4421.
+		// No CipherStates yet; close-only at 4410. The state is reached by
+		// any conn id the manager does not hold (handleFrame creates a bare
+		// awaitingInit session for one), so the ordinary sender here is a
+		// legitimate client still holding cipher state for a session the
+		// daemon dropped. StatusSessionGone is retryable where the former
+		// StatusProtocolMismatch was fatal, which is what lets that client
+		// re-handshake on its own (#2488).
 		m.cfg.Logger.Warn("relay: v2 state reject",
 			"event", "v2.state.reject",
 			"conn_id", s.connID,
-			"close_code", int(StatusProtocolMismatch),
+			"close_code", int(StatusSessionGone),
 			"reason", "noise_msg_before_handshake")
-		m.closeWith(ctx, s, StatusProtocolMismatch, nil)
+		m.closeWith(ctx, s, StatusSessionGone, nil)
 		return
 	case V2StateHandshakeComplete:
 		// Gating invariant: try to AEAD-decrypt and decode. If the frame

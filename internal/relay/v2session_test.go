@@ -614,37 +614,47 @@ func TestV2Session_Gating_NoiseMsgInHandshakeComplete_4401(t *testing.T) {
 
 // TestV2Session_OutOfStateRejections covers the malformed-frame /
 // unknown-type / bad-version rows from the spec's transition table.
-// All paths drop to a 4421 close-only routing envelope.
+// All paths drop to a close-only routing envelope; every case closes at
+// 4421 except noise_msg_before_handshake, which closes at the retryable
+// 4410 so a client still holding cipher state for a session the daemon
+// dropped re-handshakes instead of stopping on a fatal code (#2488).
 func TestV2Session_OutOfStateRejections(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		name  string
-		frame json.RawMessage
+		name     string
+		frame    json.RawMessage
+		wantCode uint16
 	}{
 		{
-			name:  "non_json_frame",
-			frame: json.RawMessage(`not json`),
+			name:     "non_json_frame",
+			frame:    json.RawMessage(`not json`),
+			wantCode: uint16(StatusProtocolMismatch),
 		},
 		{
-			name:  "wrong_version",
-			frame: mustMarshalFrame(t, protocol.InnerFrameV2{Version: 99, Type: protocol.TypeNoiseInit, Data: ""}),
+			name:     "wrong_version",
+			frame:    mustMarshalFrame(t, protocol.InnerFrameV2{Version: 99, Type: protocol.TypeNoiseInit, Data: ""}),
+			wantCode: uint16(StatusProtocolMismatch),
 		},
 		{
-			name:  "unknown_type",
-			frame: mustMarshalFrame(t, protocol.InnerFrameV2{Version: protocol.V2Version, Type: "ascii-banana", Data: ""}),
+			name:     "unknown_type",
+			frame:    mustMarshalFrame(t, protocol.InnerFrameV2{Version: protocol.V2Version, Type: "ascii-banana", Data: ""}),
+			wantCode: uint16(StatusProtocolMismatch),
 		},
 		{
-			name:  "bad_base64_data",
-			frame: mustMarshalFrame(t, protocol.InnerFrameV2{Version: protocol.V2Version, Type: protocol.TypeNoiseInit, Data: "!!!"}),
+			name:     "bad_base64_data",
+			frame:    mustMarshalFrame(t, protocol.InnerFrameV2{Version: protocol.V2Version, Type: protocol.TypeNoiseInit, Data: "!!!"}),
+			wantCode: uint16(StatusProtocolMismatch),
 		},
 		{
-			name:  "noise_resp_from_phone",
-			frame: mustMarshalFrame(t, protocol.InnerFrameV2{Version: protocol.V2Version, Type: protocol.TypeNoiseResp, Data: base64.StdEncoding.EncodeToString([]byte("x"))}),
+			name:     "noise_resp_from_phone",
+			frame:    mustMarshalFrame(t, protocol.InnerFrameV2{Version: protocol.V2Version, Type: protocol.TypeNoiseResp, Data: base64.StdEncoding.EncodeToString([]byte("x"))}),
+			wantCode: uint16(StatusProtocolMismatch),
 		},
 		{
-			name:  "noise_msg_before_handshake",
-			frame: mustMarshalFrame(t, protocol.InnerFrameV2{Version: protocol.V2Version, Type: protocol.TypeNoiseMsg, Data: base64.StdEncoding.EncodeToString([]byte("x"))}),
+			name:     "noise_msg_before_handshake",
+			frame:    mustMarshalFrame(t, protocol.InnerFrameV2{Version: protocol.V2Version, Type: protocol.TypeNoiseMsg, Data: base64.StdEncoding.EncodeToString([]byte("x"))}),
+			wantCode: uint16(StatusSessionGone),
 		},
 	}
 
@@ -670,8 +680,8 @@ func TestV2Session_OutOfStateRejections(t *testing.T) {
 			if len(envs) != 1 {
 				t.Fatalf("envs: got %d, want exactly 1", len(envs))
 			}
-			if envs[0].CloseCode != uint16(StatusProtocolMismatch) {
-				t.Errorf("close_code = %d, want %d", envs[0].CloseCode, StatusProtocolMismatch)
+			if envs[0].CloseCode != tc.wantCode {
+				t.Errorf("close_code = %d, want %d", envs[0].CloseCode, tc.wantCode)
 			}
 			if envs[0].Frame != nil {
 				t.Errorf("Frame = %s, want nil", string(envs[0].Frame))
@@ -4893,6 +4903,53 @@ func TestV2Session_IdleChurn_ReturnsToBaseline(t *testing.T) {
 			t.Fatalf("after idle sweep of %s: ActiveConns = %v, want [] (baseline)", connID, conns)
 		}
 	}
+}
+
+// TestV2Session_SweptThenNoiseMsg_4410_ThenReHandshakes pins #2488: a client
+// that still holds cipher state for a session the daemon has dropped sends its
+// next sealed frame into V2StateAwaitingInit, and must get the retryable 4410
+// rather than the fatal 4421 — a client that stops re-dialling on 4421 never
+// reaches the fresh handshake the spec promises as the recovery. The idle sweep
+// is the reachable stand-in for all three causes (restart, sweep, push-queue
+// overflow): closeWith deletes the conn either way, so they reduce to one conn
+// id the manager no longer holds. The second conn proves the manager keeps
+// serving handshakes after the reject, i.e. the 4410 tore down only that conn.
+func TestV2Session_SweptThenNoiseMsg_4410_ThenReHandshakes(t *testing.T) {
+	setIdleTimeout(t, 120*time.Millisecond)
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+	frames := make(chan protocol.RoutingEnvelope, 8)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	// Leg 1: the daemon drops the session under the client's feet.
+	waitForConnClose(t, sess.rec, v2TestConnID, uint16(StatusIdleTimeout))
+
+	// Leg 2: the client, which never saw the close, seals its next frame under
+	// the CipherState it still holds and sends it on the same conn id. The
+	// manager holds no session for that conn, so handleFrame creates a fresh
+	// V2StateAwaitingInit one and handleNoiseMsg rejects close-only.
+	env := protocol.Envelope{ID: 1, Type: protocol.TypeInterrupt, TS: time.Now().UTC()}
+	sess.frames <- sealAppFrame(t, sess.initSend, env)
+
+	closeEnv := waitForConnClose(t, sess.rec, v2TestConnID, uint16(StatusSessionGone))
+	if closeEnv.Frame != nil {
+		t.Errorf("4410 close Frame = %s, want nil (no CipherStates exist, so nothing can be sealed)", string(closeEnv.Frame))
+	}
+
+	// Leg 3: the recovery the retryable code buys — a fresh handshake on a new
+	// conn id against the same still-running manager.
+	handshakeConnToOpen(t, frames, rec, "c-2488-rehandshake", respPub, initPriv)
 }
 
 // TestV2Session_SweptThenReconnect_ReHandshakes pins AC-3's reconnect clause: a
