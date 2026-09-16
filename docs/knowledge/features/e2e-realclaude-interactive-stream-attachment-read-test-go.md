@@ -24,14 +24,24 @@ mutant too, so the red is isolated to composition, not transfer.
 
 ## Lessons that outlive this ticket
 
-- **A live claude opens an absolute path outside its own cwd without
-  hesitation, when told to read it.** The design flagged this as the
-  ticket's main open risk — the attachment lands under the daemon's instance
-  directory (`<instanceDir>/conversations/<id>/attachments/<id>/`), not under
+- **Under a bypassed posture, a live claude opens an absolute path outside
+  its own cwd without hesitation, when told to read it — this does not hold
+  under the `default` posture a daemon session actually runs in.** The
+  harness here spawns with `--dangerously-skip-permissions`, so "no modal"
+  is a bypass-posture observation, not a general answer about Reads outside
+  the workspace. #2474 measured the same shape (a Read of an absolute path
+  outside the workspace) under the in-band `default` posture and found the
+  opposite: claude 2.1.259 raises a permission modal with
+  `reason_type: workingDir`, the same gate an outside-directory Write hits.
+  See the "outside-directory gate" paragraph in
+  [e2e-realclaude.md § Test infrastructure](e2e-realclaude.md). The design
+  risk this ticket flagged was real, and only closed for the bypass
+  posture — the attachment lands under the daemon's instance directory
+  (`<instanceDir>/conversations/<id>/attachments/<id>/`), not under
   claude's workspace, so the composed prompt hands claude a path it has no
-  other reason to trust. No workaround was needed; this closes the second
-  half of the 2026-05-16 decision to put the path in the prompt rather than
-  inlining the bytes — see
+  other reason to trust. This closes the second half of the 2026-05-16
+  decision to put the path in the prompt rather than inlining the bytes for
+  bypass-posture sessions — see
   [relay-package-handlers.md § Handlers](relay-package-handlers.md#handlers-per-envelope-type-processors-handlers-250).
 - **A short token round-trips byte-exact.** 24 lowercase hex characters came
   back with no case-folding, spacing, or chunking. A future test asserting on
