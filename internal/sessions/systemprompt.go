@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
@@ -411,20 +412,28 @@ const handoffNoteLead = "A handoff note from this conversation's previous sessio
 //
 // What the fence needs in return is that a note cannot produce a marker line,
 // because a forged end marker would put the note's remaining bytes OUTSIDE the
-// fence, at daemon level. admissibleHandoffNote buys exactly that by refusing any
-// note line that starts with handoffNoteFence, which is why the markers are
-// derived from that constant rather than spelled independently: a marker that did
-// not start with the fence would leave the refusal guarding a shape the framing
+// fence, at daemon level. admissibleHandoffNote buys that with two independent
+// refusals — a line-anchored one on the fence and a whole-note one on the marker
+// tags — which is why the markers are derived from these constants rather than
+// spelled independently: a marker that did not start with the fence, or a tag the
+// refusal did not test, would leave the guarantee protecting a shape the framing
 // does not have. TestHandoffNoteLead_Pinned asserts the derivation mechanically.
 //
 // The fence is a FIXED string rather than a per-compose random nonce. A nonce
 // would buy unforgeability the line-start refusal already provides, and would cost
 // the byte stability admittedClients' sort exists to protect — the prompt file
 // would be rewritten with different bytes on every compose of unchanged inputs.
+// The two tags are the marker lines WITHOUT their terminating newline, and the
+// refusal tests against those rather than against the full markers. The newline is
+// not part of what a forgery has to supply: handoffNoteSection appends one to a
+// note that lacks it, so a note ending in a bare tag would have the framing itself
+// complete the marker.
 const (
-	handoffNoteFence = "-----"
-	handoffNoteBegin = handoffNoteFence + " BEGIN HANDOFF NOTE " + handoffNoteFence + "\n"
-	handoffNoteEnd   = handoffNoteFence + " END HANDOFF NOTE " + handoffNoteFence + "\n"
+	handoffNoteFence    = "-----"
+	handoffNoteBeginTag = handoffNoteFence + " BEGIN HANDOFF NOTE " + handoffNoteFence
+	handoffNoteEndTag   = handoffNoteFence + " END HANDOFF NOTE " + handoffNoteFence
+	handoffNoteBegin    = handoffNoteBeginTag + "\n"
+	handoffNoteEnd      = handoffNoteEndTag + "\n"
 )
 
 // admissibleHandoffNote reports whether a note may be composed into a system
@@ -444,12 +453,29 @@ const (
 //     reaches the same no-section outcome as an empty one.
 //   - Invalid UTF-8. The composed text is written to a file claude reads as text,
 //     and the store judged the note's size and its mode and nothing else.
-//   - Any line that, after leading spaces and tabs, begins with handoffNoteFence.
-//     This is the whole of the structural guarantee: it is what a note would have
-//     to write to forge or close the framing around itself. A fence run appearing
-//     MID-LINE is admitted, because the markers are line-anchored and a mid-line
-//     run cannot be read as one; widening the refusal to any occurrence would
-//     start catching prose for nothing.
+//   - U+2028 and U+2029, the two line separators that are not control characters.
+//     The line-anchored refusal below splits on "\n", so it can only be sound if
+//     "\n" is the note's ONLY line break; a note carrying U+2028 would render a
+//     forged marker line-anchored to the reader while sitting mid-line to the
+//     split. Refusing the two characters is what makes that split honest rather
+//     than incidentally correct. Claude writes "\n"; neither appears in prose.
+//   - Any line that, after leading WHITESPACE OR FORMAT characters, begins with
+//     handoffNoteFence. The trim is Unicode-aware in both senses because a forgery
+//     is invisible in both: unicode.IsSpace covers NBSP, EN QUAD and IDEOGRAPHIC
+//     SPACE, and unicode.Cf covers ZWSP, the BOM and the other zero-width format
+//     characters, which IsSpace does not report as space. An ASCII-only trim
+//     admits a marker prefixed by any of them, and it renders indistinguishably
+//     from the real one to the only reader the framing exists to protect.
+//   - Any occurrence of handoffNoteBeginTag or handoffNoteEndTag ANYWHERE in the
+//     note, line-anchored or not. This is a second fabric over the same property
+//     rather than a restatement of the first: the line-anchored refusal generalises
+//     over shapes that merely LOOK like framing (a near-miss marker, a bare fence
+//     run), while this one refuses the exact announced bytes wherever they fall,
+//     which is what closes a marker sitting mid-line. Neither subsumes the other.
+//
+// A bare fence run appearing MID-LINE is still admitted, because the markers are
+// line-anchored and a mid-line run that is not an exact tag cannot be read as one;
+// widening THAT to any occurrence would start catching prose for nothing.
 //
 // The character set is admissibleClientField's MINUS the two characters this
 // feature actually needs: "\n", because a note is multi-line by design, and "\t",
@@ -472,16 +498,29 @@ func admissibleHandoffNote(note string) (string, bool) {
 		if r == '\n' || r == '\t' {
 			continue
 		}
-		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) || r == '\u2028' || r == '\u2029' {
 			return "", false
 		}
 	}
+	if strings.Contains(note, handoffNoteBeginTag) || strings.Contains(note, handoffNoteEndTag) {
+		return "", false
+	}
 	for _, line := range strings.Split(note, "\n") {
-		if strings.HasPrefix(strings.TrimLeft(line, " \t"), handoffNoteFence) {
+		if strings.HasPrefix(strings.TrimLeftFunc(line, invisibleRune), handoffNoteFence) {
 			return "", false
 		}
 	}
 	return note, true
+}
+
+// invisibleRune reports whether r occupies a line without showing anything at its
+// start — whitespace in Unicode's sense, or a format character that renders as
+// nothing at all. It is the trim predicate guarding the fence test, and it spans
+// both categories because a marker indented with either is a forgery that reads
+// exactly like the real thing: unicode.IsSpace does not report ZWSP or the BOM as
+// space, and unicode.Cf does not cover NBSP or IDEOGRAPHIC SPACE.
+func invisibleRune(r rune) bool {
+	return unicode.IsSpace(r) || unicode.Is(unicode.Cf, r)
 }
 
 // handoffNoteSection renders the heading and the fenced note, or "" when there is
