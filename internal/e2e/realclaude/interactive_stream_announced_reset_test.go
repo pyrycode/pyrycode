@@ -41,6 +41,15 @@ package realclaude
 // half of this case, and it rides the same reset as the first. Two cases would
 // double the tokens the gate spends for one round trip's worth of evidence.
 //
+// WHICH SESSION THE CONVERSATION IS BOUND TO IS A PRECONDITION OF THAT HALF, not a
+// setup detail. A note is only ever composed into a PER-SESSION appended prompt, so a
+// conversation seeded onto the daemon's bootstrap session gets a reset that writes a
+// note and a successor that is never handed one — with every frame on the wire
+// reporting success, because handoff="written" describes the note store and not any
+// later compose. This case therefore binds its conversation to a session of its own
+// and proves that it did, deterministically, before it spends a wrap-up: see the
+// constants' doc for the mechanism and assertPerSessionPrompt for the guard.
+//
 // THE ORDERING DECISION. The three `resetting` edges are asserted in order: they are
 // pushed synchronously from resetThenRotate's own goroutine, and V2SessionManager.Push
 // appends to a per-conn FIFO, so their order on the wire is the order they were
@@ -119,17 +128,44 @@ import (
 
 // Fixed identifiers for the seeded state. The package's repeated-digit stem
 // convention was nearly exhausted when this file landed — 1 and 3–f are taken by
-// siblings in internal/e2e/realclaude — so these are the last two: 2 for the
-// seeded bootstrap session, 0 for the driving conversation. Both are valid UUIDv4
-// stems (version nibble 4, variant nibble 8) and both match uuidStemPattern, which
-// the transition's new_session_id is asserted against. Reuse across internal/e2e and
-// internal/e2e/realclaude is harmless; the constraint is within the package.
-// clearBootstrapUUID is the bootstrap session's POOL id (pinned via
-// seedBootstrapRegistry, which also makes the stream runner spawn
-// `claude --session-id <it>`); clearConvID is the driving conversation, bound to
-// it via seedBoundConversation.
+// siblings in internal/e2e/realclaude — so this file took the last two, 2 and 0, and
+// clearSessUUID combines them rather than claiming a third. All three are valid
+// UUIDv4 stems (version nibble 4, variant nibble 8) and all three match
+// uuidStemPattern, which the transition's new_session_id is asserted against. Reuse
+// across internal/e2e and internal/e2e/realclaude is harmless; the constraint is
+// within the package.
+//
+// THE CONVERSATION IS BOUND TO clearSessUUID, NOT TO THE BOOTSTRAP, and that is what
+// makes AC 2 reachable at all. The note is composed into a session's appended system
+// prompt by Pool.writeComposedPrompt, which a rotation reaches through
+// refreshSystemPromptForRotation — and that function RETURNS EARLY on a session whose
+// systemPromptPath is empty. The bootstrap's is empty by construction:
+// systemPromptPathFor hands the empty id the daemon-scoped <dataDir>/system-prompt.txt
+// and states the reason, that the bootstrap "can never become a conversation's bound
+// session" and so carries no per-conversation text. Its label is "" for the same
+// reason, which handoffNoteFor independently refuses via conversations.ValidID. A
+// conversation seeded onto the bootstrap therefore gets a reset that writes a note and
+// a successor that is never composed one — the two halves of this case disagreeing
+// with nothing on the wire saying so, because handoff="written" is a true report about
+// the STORE and says nothing about any later compose.
+//
+// That is not hypothetical: the first two live runs of this case were seeded that way
+// and both reddened on AC 2, the second with the successor answering that it had no
+// access to prior sessions. assertPerSessionPrompt turns the mistake into an immediate
+// failure that names itself, rather than into a recall miss a wrap-up later.
+//
+// clearSessUUID is deliberately ABSENT from the seeded sessions.json. An id the pool
+// lacks is the daemon-restart shape, so the conversation's first message drives
+// sessionRouter.revive → Pool.Revive → materialise → buildSession, which mints the
+// session AT that id, with the conversation id as its label and a per-session prompt
+// file under session-prompts/. That is the seam
+// TestInteractiveConversationSystemPrompt_ReachesTheReply uses to put a composed
+// prompt in front of a live claude, and the only one reachable without a write verb.
+// The bootstrap is still seeded and still spawns — the daemon needs one — it simply is
+// no longer what this conversation talks to.
 const (
 	clearBootstrapUUID = "22222222-2222-4222-8222-222222222222"
+	clearSessUUID      = "00000000-2222-4222-8222-222222222222"
 	clearConvID        = "00000000-0000-4000-8000-000000000000"
 )
 
@@ -193,9 +229,12 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 	}
 
 	// Seed the deterministic bootstrap id + the driving conversation binding BEFORE
-	// the daemon starts (the registry is loaded once at startup, no reload).
+	// the daemon starts (the registry is loaded once at startup, no reload). The
+	// binding names clearSessUUID, which sessions.json does NOT carry, so the first
+	// message mints the conversation its own session — see the constants' doc for why
+	// binding to the bootstrap instead makes AC 2 unreachable.
 	seedBootstrapRegistry(t, home, clearBootstrapUUID)
-	seedBoundConversation(t, home, clearConvID, clearBootstrapUUID, workdir)
+	seedBoundConversation(t, home, clearConvID, clearSessUUID, workdir)
 
 	d := spawnBootstrapDaemon(t, home, workdir, claudeBin, relayURL)
 	t.Cleanup(func() { d.stop(t) })
@@ -241,17 +280,20 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 			"run is %s. I have not written it down anywhere. Reply with just the word ok.", token))
 	drainForCompletedTurn(t, phone, initRecv, clearConvID, perTurnReplyBudget)
 
-	// The transition's previous_session_id anchor, read from the registry rather than
-	// assumed. A normal turn appends to the same transcript and never rotates, so this
-	// is still the seeded value; asserting that here turns a seed drift into a failure
-	// that names itself, rather than into a confusing previous_session_id mismatch
-	// below.
-	idBefore := waitBootstrapID(t, home, idSettleTimeout)
-	if idBefore != clearBootstrapUUID {
-		t.Fatalf("the bootstrap id before the /clear is %q, want the seeded %q — the session rotated for some "+
-			"reason other than this test's /clear, and the previous_session_id anchor is not trustworthy",
-			idBefore, clearBootstrapUUID)
-	}
+	// The precondition AC 2 rests on, checked deterministically and checked HERE. The
+	// plant turn has just minted the conversation its own session; this asserts the
+	// session is the kind that gets a composed prompt at all, seconds after the plant,
+	// rather than leaving the answer to a recall miss on the far side of a
+	// ninety-second wrap-up — where it reads like a claude fault and is not one. The
+	// returned path is also the transition's previous_session_id anchor: the record it
+	// comes from is the spawn of clearSessUUID, so finding it is what proves the revive
+	// minted the session at the seeded id rather than taking some other one.
+	promptPath := assertPerSessionPrompt(t, d, clearSessUUID, idSettleTimeout)
+	idBefore := clearSessUUID
+	// Daemon-authored, like the CAPTURE below: a path the daemon put in its own argv
+	// record. Nothing claude wrote is in this line, and the note's bytes are not read.
+	t.Logf("the conversation's session %s spawned with a per-session appended prompt at %q — "+
+		"the compose the rotation recomposes into is this file", clearSessUUID, promptPath)
 
 	// --- The /clear send: the window opens here --------------------------------
 	// Ordinary send_message text, nothing else — the client verb, not the new_session
@@ -343,23 +385,30 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 	// pass vacuously.
 	prior := w.snapshotTurnIDs()
 
-	// THE PHRASING IS MEASURED, NOT CASUAL. The first live run of this case (the
-	// #2485 gate, 2026-09-16) asked "Earlier in this conversation I told you my build
-	// tag for this run" and the successor replied "I don't see a build tag mentioned
-	// earlier in this conversation. This appears to be the first message." That is a
-	// CORRECT answer to the question as it was asked: the successor's transcript is
-	// genuinely empty, so a reference to "this conversation" resolves against it,
-	// comes up empty, and the premise reads as the user's mistake rather than as
-	// context the successor is missing.
+	// THE PHRASING IS ALIGNED WITH handoffNoteLead, WHICH IS NOT WHAT WAS BROKEN. The
+	// distinction is worth keeping, because the wrong half of it cost a live run.
 	//
-	// handoffNoteLead tells the successor to consult the note "when the user refers
-	// to earlier work, or when you lack context the conversation seems to assume",
-	// and not to act on it "unprompted". The recall therefore has to put the
-	// successor into one of those two states, and the old phrasing put it into
-	// neither. Naming the previous session and conceding the transcript is empty does
-	// it — without naming the note, and without supplying the token. The only place
-	// the tag exists for this child is the note in its appended system prompt, so a
-	// reply carrying it still proves exactly what AC 2 asks and nothing weaker.
+	// handoffNoteLead tells the successor to consult the note "when the user refers to
+	// earlier work, or when you lack context the conversation seems to assume", and not
+	// to act on it "unprompted". So the recall has to put the successor into one of
+	// those two states, and naming the previous session while conceding the transcript
+	// is empty does it — without naming the note and without supplying the token. That
+	// is why the wording is what it is, and it should stay.
+	//
+	// It is NOT, however, why either of the first two live runs reddened. Run 1 asked
+	// "Earlier in this conversation I told you my build tag" and got "I don't see a
+	// build tag mentioned earlier in this conversation"; that reply was read as a
+	// phrasing fault and the phrasing was repaired to what stands above. Run 2, with
+	// the repair in, got "I don't have access to information from prior sessions or
+	// conversations outside this transcript" — a second red, and the one that settled
+	// it. The conversation was bound to the BOOTSTRAP session both times, so there was
+	// no composed note behind either reply and no phrasing could have reached one. A
+	// reply that is a correct answer to the question asked is weak evidence about the
+	// question's wording when the thing being recalled is absent; the deterministic
+	// check for absence is assertPerSessionPrompt, and it now runs before this send.
+	//
+	// The only place the tag exists for this child remains the note in its appended
+	// system prompt, so a reply carrying it proves exactly what AC 2 asks.
 	sealSendMessage(t, phone, initSend, recallReqID, clearConvID, "m-2",
 		"What is my build tag for this run? I told it to you before this session "+
 			"started, so it is not in this transcript. Reply with only the tag "+
@@ -371,13 +420,18 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 			"stored — either the fact never entered it (the wrap-up prompt's last clause did not pull a fact "+
 			"the user stated), or the successor did not use it (the note is composed into the appended system "+
 			"prompt under handoffNoteLead, which tells the successor to consult it rather than obey it). "+
-			"'The note never reached the child' is NOT a third reading and should not be chased: "+
-			"Pool.writeComposedPrompt targets the session's prompt path VERBATIM across a re-key, and "+
-			"RotateForNewSession recomposes through refreshSystemPromptForRotation BEFORE it fires the "+
-			"transition this test already observed — so the successor spawned from a file that had the note "+
-			"in it. The note's bytes are not observable from a client BY DESIGN — do not reach for the note "+
-			"file to tell the two readings apart. Planted %q; reply was %q",
-			w.edges[1].Handoff, token, reply)
+			"'The note was never composed into a prompt' is NOT a third reading HERE, and the exclusion is "+
+			"earned rather than assumed: assertPerSessionPrompt already proved this conversation's session "+
+			"spawned with a per-session file under %s/ (%q), which is the one precondition "+
+			"refreshSystemPromptForRotation needs — it returns early only on an empty systemPromptPath, and a "+
+			"minted session's is never empty. Above that guard, Pool.writeComposedPrompt targets the path "+
+			"VERBATIM across a re-key and RotateForNewSession recomposes BEFORE it fires the transition this "+
+			"test already observed. Without that guard the reading would be live, and it was: the first two "+
+			"live runs bound this conversation to the BOOTSTRAP session, whose prompt file is daemon-scoped "+
+			"and whose label is empty, so no compose could ever have happened. The note's bytes are not "+
+			"observable from a client BY DESIGN — do not reach for the note file to tell the two readings "+
+			"apart. Planted %q; reply was %q",
+			w.edges[1].Handoff, clearSessionPromptsDir, promptPath, token, reply)
 	}
 	t.Logf("AC 2: the successor's first reply (%d bytes) carried the planted fact, which this test never "+
 		"repeated to it — the handoff note crossed the rotation (send_message #%d)", len(reply), recallReqID)
@@ -399,6 +453,60 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 		t.Errorf("the client saw %d session_transition frames across the whole window, want exactly 1: %+v — "+
 			"more than 1 means something re-keyed a second time for the same reset",
 			len(w.transitions), w.transitions)
+	}
+}
+
+// clearSessionPromptsDir is the directory a MINTED session's appended system-prompt
+// file lives in, transcribed from sessions.sessionPromptsDir, which is unexported.
+// The bootstrap's file sits at the data dir's root instead, so the parent directory
+// is the whole discriminator between the two.
+const clearSessionPromptsDir = "session-prompts"
+
+// assertPerSessionPrompt waits for the daemon's own "spawning claude" record for
+// sessID and returns the --append-system-prompt-file path it names, failing unless
+// that path is a per-session one under session-prompts/.
+//
+// IT IS THE DETERMINISTIC HALF OF AC 2's PROOF, and deliberately not a second
+// assertion about claude. The recall below observes only whether a fact came back; it
+// cannot separate a note that was never composed from one the successor declined to
+// use, and the frames cannot either, because handoff="written" is a true report about
+// the note STORE and says nothing about any later compose. This reads the daemon's own
+// argv record instead and answers the one question the wire does not: whether this
+// session is the kind that gets a composed prompt. systemPromptPathFor puts a minted
+// session's file at <dataDir>/session-prompts/<id>.txt and the bootstrap's at
+// <dataDir>/system-prompt.txt, so the parent directory settles it.
+//
+// Bounded rather than instant: the record is written when the child spawns and reaches
+// this buffer through the daemon's piped stderr, so a poll is owed even though the
+// plant turn's reply has already arrived.
+func assertPerSessionPrompt(t *testing.T, d *bootstrapDaemon, sessID string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		for _, rec := range sysPromptSpawnRecords(d.stderr.String()) {
+			if !strings.Contains(rec, "--session-id "+sessID) {
+				continue
+			}
+			path := sysPromptArgFromRecord(rec)
+			if filepath.Base(filepath.Dir(path)) != clearSessionPromptsDir {
+				t.Fatalf("the session bound to this conversation spawned with %s %q, which is not a per-session "+
+					"file under %s/ — so it is the daemon-scoped bootstrap prompt and this conversation is "+
+					"talking to the BOOTSTRAP session. refreshSystemPromptForRotation returns early on a session "+
+					"whose systemPromptPath is empty, which the bootstrap's is by construction, so the reset "+
+					"below would write a handoff note that is composed into nothing and AC 2 could not pass "+
+					"however the recall is phrased. Check that seedBoundConversation names clearSessUUID and "+
+					"that clearSessUUID is absent from the seeded sessions.json.",
+					sysPromptFlag, path, clearSessionPromptsDir)
+			}
+			return path
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no \"spawning claude\" record names --session-id %s within %s — the conversation's own "+
+				"session never spawned, so the revive seam did not fire and the note has no per-session prompt "+
+				"to be composed into. seedBoundConversation must bind clearConvID to an id sessions.json does "+
+				"NOT carry: an id the pool already holds is taken rather than minted.", sessID, timeout)
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 }
 
