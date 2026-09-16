@@ -57,10 +57,12 @@ func (p *Pool) GetOrCreate(ctx context.Context, id SessionID, label string) (Ses
 // take/create semantics, concurrency, and return shapes.
 func (p *Pool) GetOrCreateIn(ctx context.Context, id SessionID, label, spawnDir string) (SessionID, error) {
 	// A minted session starts at the operator's configured model and effort
-	// (#1575). Read here rather than inside materialise, which Revive also
-	// calls: revive must keep inheriting nothing. mintSettings takes p.mu.RLock
-	// internally, so it must be evaluated before materialise takes p.mu.
-	_, took, err := p.materialise(id, label, spawnDir, p.mintSettings())
+	// (#1575). Passed as a SOURCE rather than as a value, which is what keeps the
+	// choice this caller's while letting materialise evaluate it under its own
+	// lock (#2492); mintSettings is an already-locked reader for that reason.
+	// Still not read inside materialise: Revive calls that too, and a revive must
+	// keep inheriting nothing.
+	_, took, err := p.materialise(id, label, spawnDir, p.mintSettings)
 	if err != nil {
 		return "", err
 	}
@@ -74,6 +76,19 @@ func (p *Pool) GetOrCreateIn(ctx context.Context, id SessionID, label, spawnDir 
 	}
 	return id, nil
 }
+
+// settingsSource yields the SessionSettings a materialise gives the session it
+// registers. It is the seam that lets each caller keep its own answer —
+// Pool.mintSettings for a mint, Pool.revivedSettings for a revive — while
+// materialise decides WHEN the answer is read.
+//
+// MUST be safe to call with p.mu held, read or write, and must therefore take no
+// pool lock of its own: materialise evaluates it inside its critical section
+// (#2492) and Go's RWMutex is not reentrant. It returns a value and cannot fail —
+// both sources answer a map miss with the zero SessionSettings, which is how an
+// unknown id revives to claude's own defaults. The value is PRE-canonicalisation;
+// materialise and buildSession each normalise the posture.
+type settingsSource func() SessionSettings
 
 // materialise is the take-or-register core shared by GetOrCreateIn and Revive:
 // validate the id, build the session off-lock, then under p.mu either hand back
@@ -90,14 +105,34 @@ func (p *Pool) GetOrCreateIn(ctx context.Context, id SessionID, label, spawnDir 
 // loser of a same-id race can never Activate before the winner's lifecycle
 // goroutine exists) lives here.
 //
-// settings is forwarded verbatim to buildSession and is the caller's decision,
-// not this function's — the second thing that separates the two callers.
+// settings is a SOURCE, not a value, and it is the caller's decision rather than
+// this function's — the second thing that separates the two callers.
 // GetOrCreateIn passes Pool.mintSettings, so a minted session starts at the
 // operator's configured model and effort; Revive passes Pool.revivedSettings, so
 // a revived one starts at the model and effort ITS OWN dropped entry persisted
 // and at no posture (#2448). Keeping it a parameter is what stops a change to
 // one path from silently re-pointing the other; reading either source here
 // instead would do exactly that.
+//
+// IT IS A SOURCE BECAUSE THE VALUE MUST BE READ UNDER THE LOCK THAT RETIRES THE
+// ENTRY (#2492). While it was a value, both callers evaluated it as an ARGUMENT,
+// so the read's RLock was released before the write lock below deleted the
+// dormant entry, and a Pool.UpdateDormantSettings landing in that gap was
+// acknowledged and then dropped: the entry it wrote was deleted, and the session
+// was registered under the value read before the write. Evaluating it here, in
+// the same critical section as the delete, is what closes that — and closes it
+// for both callers at once, which is why the shape changed rather than Revive's
+// call alone. Every settings source is therefore an ALREADY-LOCKED reader; Go's
+// RWMutex is not reentrant, so one that takes p.mu itself self-deadlocks.
+//
+// The source is read TWICE and only the second read decides anything. The first
+// is provisional, taken under RLock before the build, and exists so buildSession
+// composes the right argv at runner CONSTRUCTION on the overwhelmingly common
+// path where nothing races — the runner then spawns the argv it was built with,
+// as it always has. The second is authoritative. When they disagree — exactly the
+// race above — the authoritative value is stored on the session and installed on
+// its runner before anything can observe either. Nothing branches on the
+// provisional value, so it is not a check-then-use.
 //
 // Registering an id also RETIRES its dormant entry, so the pool holds exactly one
 // source for it — see the delete below, which both rollbacks undo. The take path
@@ -109,17 +144,26 @@ func (p *Pool) GetOrCreateIn(ctx context.Context, id SessionID, label, spawnDir 
 //   - (sess, false, nil) — sess was registered, persisted, and scheduled
 //   - (nil, false, err) — nothing registered; ErrInvalidSessionID, a buildSession
 //     error, a saveLocked error, or ErrPoolNotRunning, each rolled back
-func (p *Pool) materialise(id SessionID, label, spawnDir string, settings SessionSettings) (*Session, bool, error) {
+func (p *Pool) materialise(id SessionID, label, spawnDir string, settings settingsSource) (*Session, bool, error) {
 	if !ValidID(string(id)) {
 		return nil, false, ErrInvalidSessionID
 	}
+
+	// The provisional read (see the docstring): what the runner is CONSTRUCTED
+	// with, and on every path where no dormant write races, what it spawns with.
+	// The RLock is this function's because the source cannot take one itself.
+	p.mu.RLock()
+	provisional := settings()
+	p.mu.RUnlock()
 
 	// buildSession touches no Pool state and is non-blocking
 	// (supervisor.New does not spawn anything yet). Build it before taking
 	// p.mu so the critical section stays small for concurrent same-id
 	// callers and so we can discard the loser's freshly-built session
-	// cheaply.
-	sess, err := p.buildSession(id, label, spawnDir, settings)
+	// cheaply. It also keeps two file writes and the injected RunnerFactory
+	// call-out out of the pool's write lock, which is why the settings are
+	// carried onto the built session below rather than the build moved down.
+	sess, err := p.buildSession(id, label, spawnDir, provisional)
 	if err != nil {
 		return nil, false, err
 	}
@@ -135,6 +179,40 @@ func (p *Pool) materialise(id SessionID, label, spawnDir string, settings Sessio
 		// file and re-open the #943 modal wedge. The payload is fixed, so the
 		// redundant write is harmless and leaving the file is the correct action.
 		return existing, true, nil
+	}
+
+	// The authoritative read (#2492), in the same critical section as the delete
+	// below, so nothing can change the source between the two. Reached only on the
+	// register path: the take path returns above without evaluating the source at
+	// all, which is the contract that a revive racing a live session drops the
+	// caller's settings.
+	//
+	// The install is ABOVE the registration, and both halves of that placement
+	// matter. Above, because a session published first could be Activated by the
+	// loser of a same-id race before its argv was composed — trading this window
+	// for a narrower one rather than closing it. And above the saveLocked below,
+	// because that is what writes the entry back to disk: applied AFTER it, the fix
+	// would correct memory and leave the file holding the stale model.
+	//
+	// Calling the runner under p.mu is safe HERE and is not licence to do it
+	// elsewhere — Pool.UpdateSettings installs past its unlock precisely because
+	// its runner is live and shared. This one is a local that no other goroutine
+	// can reach (it is not in p.sessions yet), so nothing else can hold its
+	// internal lock and the Pool.mu → runner order cannot close a cycle. It relies
+	// on the installers being what the Runner docs say they are: non-blocking,
+	// taking no lock this package holds, making no call-out — in particular none
+	// back into RunnerConfig.AdoptAnnouncedReset, which would take p.mu again.
+	//
+	// The posture install is unconditional within the branch for #2064's reason:
+	// the runner asserts its STORED posture to every child it spawns, so a
+	// construction-time value left behind by a changed settings value would be
+	// re-asserted on a later crash-respawn. Both sources build the posture
+	// structurally today, so it cannot actually differ; a future source that
+	// carried one would not silently go stale.
+	if applied := canonicalSettings(settings()); applied != sess.settings {
+		sess.settings = applied
+		sess.sup.SetSpawnArgs(sess.spawnArgs(applied))
+		sess.sup.SetSpawnPermissionMode(applied.PermissionMode)
 	}
 
 	p.sessions[id] = sess

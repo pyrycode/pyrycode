@@ -364,3 +364,26 @@ Owned by the documentation stage, not this ticket. Pending:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-16
+
+## Revisions
+
+### 2026-09-16 — implementation
+
+- **`waitArgv` rather than `waitArgvRaw` in the AC 1 argv assertion.** The
+  security review's first SHOULD FIX asked for `waitArgvRaw` so a recompose that
+  dropped the `--settings` or `--append-system-prompt-file` pair would be red.
+  `waitArgv` already carries that property and carries it more sharply:
+  `stripMCPSettings` and `stripSystemPrompt` each `t.Fatalf` when their pair is
+  absent, so the assertion fails by name rather than by an exact-slice mismatch,
+  and the expected argv stays comparable to its siblings in
+  `pool_mint_settings_test.go`. The finding is discharged, by a different mechanism
+  than the one named.
+- **Open questions, resolved, none of which moved the design.** (1) Nothing
+  publishes the session before the install — it sits above `p.sessions[id] = sess`,
+  which is the only publication point in `materialise`. (2) No existing
+  `SetSpawnArgs` count assertion sits on a session built through `materialise`;
+  they are all `Pool.UpdateSettings` tests driven against the bootstrap, which
+  `Pool.New` constructs directly, and the package is green. (3)
+  `TestPool_MintSettings_NoBootstrap_NoFlags` now takes `p.mu.RLock` around its
+  direct `mintSettings` call — behaviour-neutral on a single-goroutine pool, but it
+  keeps the call site off a contract it would otherwise violate.

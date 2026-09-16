@@ -1037,22 +1037,24 @@ func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error {
 // there is no check-then-mutate gap of this method's own. Never takes
 // Session.lcMu; p.dormant is a p.mu-guarded field like sessions and label.
 //
-// TWO WINDOWS OUTSIDE IT, both bounded by p.dormant only ever shrinking:
+// ONE WINDOW OUTSIDE IT, bounded by p.dormant only ever shrinking: a caller
+// composing this after a live write (settingsUpdaterAdapter) can have a revive
+// land between the two. The id can only move live-ward, so this method finds a
+// CLEAN MISS rather than a torn entry, and answers ErrSessionNotFound. That
+// refusal is correct rather than merely safe: the settings were applied to
+// nothing. No retry is attempted — the operator's next pick reaches the now-live
+// session through the live write.
 //
-//   - A caller composing this after a live write (settingsUpdaterAdapter) can have
-//     a revive land between the two. The id can only move live-ward, so this
-//     method finds a CLEAN MISS rather than a torn entry, and answers
-//     ErrSessionNotFound. That refusal is correct rather than merely safe: the
-//     settings were applied to nothing. No retry is attempted — the operator's
-//     next pick reaches the now-live session through the live write.
-//   - Pool.Revive evaluates revivedSettings as an ARGUMENT to materialise, so
-//     that read's RLock is released before materialise takes the write lock and
-//     retires the entry. A write landing in that gap is persisted and then
-//     dropped: the session materialises under the value read before the write.
-//     Filed as #2492 — the fix is to Revive's evaluate-then-materialise call
-//     shape, not to this seam. It carries no security consequence (neither model
-//     nor effort is a privilege, and the posture is on neither path) and is
-//     self-correcting: the next read reports the live session's real value.
+// The SECOND window this doc used to name is closed (#2492). Pool.Revive
+// evaluated revivedSettings as an ARGUMENT to materialise, so that read's RLock
+// was released before materialise took the write lock and retired the entry, and
+// a write landing in the gap was acknowledged and then dropped — the session
+// materialised under the value read before it. materialise now takes its settings
+// as a source and evaluates it inside the critical section that retires the
+// entry, so a write reaching this method before that section is CARRIED by the
+// revived session and one reaching it after gets ErrSessionNotFound above. Those
+// were always the two outcomes this seam's docstrings reasoned about; what is
+// gone is the third.
 //
 // No id validation and no logging, DormantSettingsFor's posture verbatim: the id
 // names no file and never leaves the map lookup, so a malformed id is a map miss
@@ -1800,20 +1802,33 @@ func (p *Pool) DormantSettingsFor(id SessionID) (SessionSettings, error) {
 // likewise not inherited until someone opts it in. That is the fail-closed
 // direction and it is the same reasoning Revive's docstring records (#1487).
 //
-// The existence bool is discarded deliberately. DefaultSettings already returns
-// the zero SessionSettings when there is no bootstrap, so an early return for
-// that case would be a second return site emitting byte-identical output — the
-// no-configuration argv falls out of the zero value, not out of a branch.
+// It resolves p.bootstrap and reads its settings DIRECTLY rather than through
+// DefaultSettings, which takes an RLock of its own. Since #2492 both settings
+// sources are evaluated under the CALLER's p.mu — materialise reads this inside
+// the critical section that retires a dormant entry — and Go's RWMutex is not
+// reentrant, so a delegating body would self-deadlock as soon as a writer queued.
+// The two reads stay in one critical section either way, which is
+// DefaultSettings' own atomicity property against a RotateID landing between
+// them; it is now the caller's to hold rather than this function's.
 //
-// Concurrency: MUST be called with p.mu unheld. DefaultSettings takes
-// p.mu.RLock() and Go's RWMutex is not reentrant, so a call from inside a
-// critical section self-deadlocks the pool. Both call sites (CreateIn,
-// GetOrCreateIn) build the session before taking p.mu.
+// The nil-bootstrap arm is that delegation's other half made explicit:
+// DefaultSettings used to supply the zero SessionSettings for a pool with no
+// bootstrap and this function discarded its existence bool. The no-configuration
+// argv still falls out of the zero value.
+//
+// Concurrency: MUST be called with p.mu HELD, read or write. Takes no lock
+// itself. This is the inverse of the contract it carried before #2492, and the
+// inversion is shared with revivedSettings — see settingsSource. Its three
+// callers hold the lock accordingly: materialise (write, via the source it is
+// passed as), CreateIn (read, around its own call).
 func (p *Pool) mintSettings() SessionSettings {
-	boot, _ := p.DefaultSettings()
+	boot := p.sessions[p.bootstrap]
+	if boot == nil {
+		return SessionSettings{}
+	}
 	return SessionSettings{
-		Model:  boot.Model,
-		Effort: boot.Effort,
+		Model:  boot.settings.Model,
+		Effort: boot.settings.Effort,
 	}
 }
 
@@ -1839,14 +1854,22 @@ func (p *Pool) mintSettings() SessionSettings {
 // buildSession's canonicalSettings turns the zero value into the default mode,
 // exactly as it did for the zero value this replaces.
 //
-// Concurrency: MUST be called with p.mu unheld — Go's RWMutex is not reentrant
-// and materialise takes the write lock, which is mintSettings' contract and the
-// same call shape (evaluate, then materialise). The window between this read and
-// that Lock is benign: a concurrent revive of the same id sends the caller down
-// materialise's take path, where the settings are dropped by contract.
+// Concurrency: MUST be called with p.mu HELD, read or write. Takes no lock
+// itself, which is mintSettings' contract too — see settingsSource, the seam both
+// are passed through.
+//
+// That contract is #2492's, and it inverts what this function carried before.
+// Revive used to evaluate it as an ARGUMENT to materialise, so this RLock was
+// released before materialise's write lock deleted the entry, and the previous
+// revision of this paragraph called the gap benign — reasoning only about a
+// concurrent REVIVE, which does land on materialise's take path and does drop the
+// caller's settings by contract. What it did not reason about was a concurrent
+// dormant WRITE, which had no writer until Pool.UpdateDormantSettings (#2463):
+// such a write was persisted, acknowledged, and then deleted by the retirement,
+// and the session came up on the value read before it. materialise now evaluates
+// this INSIDE the critical section that retires the entry, so the read and the
+// delete cannot be split and no window remains between them.
 func (p *Pool) revivedSettings(id SessionID) SessionSettings {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
 	entry, ok := p.dormant[id]
 	if !ok {
 		return SessionSettings{}
@@ -2088,9 +2111,21 @@ func (p *Pool) Mint(label, spawnDir string) (SessionID, error) {
 	}
 
 	// A minted session starts at the operator's configured model and effort
-	// (#1575). mintSettings must be read here, above p.mu.Lock — it takes
-	// p.mu.RLock internally and the mutex is not reentrant.
-	sess, err := p.buildSession(id, label, spawnDir, p.mintSettings())
+	// (#1575). Since #2492 mintSettings is an already-locked reader, so the RLock
+	// is taken here rather than inside it — and released before buildSession, which
+	// must stay off p.mu.
+	//
+	// This entry point does NOT go through materialise and needs none of its
+	// #2492 machinery: id comes fresh from NewID above, so it can name no dormant
+	// entry and no dormant write can race it. The window that remains — a
+	// concurrent Pool.UpdateSettings on the BOOTSTRAP between this read and the
+	// registration below — is the pre-existing, benign one every lock-releasing
+	// settings accessor carries, and it changes what a new session inherits, never
+	// what an existing one holds.
+	p.mu.RLock()
+	minted := p.mintSettings()
+	p.mu.RUnlock()
+	sess, err := p.buildSession(id, label, spawnDir, minted)
 	if err != nil {
 		return "", err
 	}
@@ -2140,11 +2175,19 @@ func (p *Pool) Mint(label, spawnDir string) (SessionID, error) {
 //
 // settings are the per-session model / effort / YOLO applied to the spawn argv
 // (#833) and stored on the returned Session. The zero value appends no flags,
-// so an unconfigured spawn's argv carries none. CreateIn and GetOrCreateIn pass
-// mintSettings — the operator's configured model and effort, never the bypass
-// (#1575). Pool.Revive passes revivedSettings — the model and effort the dropped
-// session's own entry persisted, and no posture, so a phone-granted bypass still
-// cannot survive a daemon restart (#1487/#2448).
+// so an unconfigured spawn's argv carries none. CreateIn and GetOrCreateIn source
+// them from mintSettings — the operator's configured model and effort, never the
+// bypass (#1575). Pool.Revive sources them from revivedSettings — the model and
+// effort the dropped session's own entry persisted, and no posture, so a
+// phone-granted bypass still cannot survive a daemon restart (#1487/#2448).
+//
+// Via materialise (GetOrCreateIn and Revive) the value reaching here is the
+// PROVISIONAL one, read before this build; materialise re-reads the source under
+// its own lock and, on the rare path where the two disagree, replaces both the
+// stored settings and the runner's argv before the session is published (#2492).
+// This function is unchanged by that and stays off p.mu deliberately: it writes
+// two files and calls the injected RunnerFactory, none of which belongs inside
+// the pool's write lock.
 func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings SessionSettings) (*Session, error) {
 	tpl := p.sessionTpl
 	// Normalise the posture before it reaches either the argv or the stored

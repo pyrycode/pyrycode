@@ -71,9 +71,18 @@ func (p *Pool) Revive(id SessionID, label, spawnDir string) (*Session, error) {
 	// review) — as the default posture the revived child is downgraded into, since
 	// #2065 (see the contract above). Deliberately NOT mintSettings, which
 	// GetOrCreateIn passes: a revived session inherits nothing from the bootstrap,
-	// only what it was itself set to. Evaluated before materialise, which takes
-	// p.mu: revivedSettings takes it too and RWMutex is not reentrant.
-	sess, _, err := p.materialise(id, label, spawnDir, p.revivedSettings(id))
+	// only what it was itself set to.
+	//
+	// Handed over as a SOURCE for materialise to call, not as a value evaluated
+	// here (#2492). While this was an argument, revivedSettings' RLock was released
+	// before materialise took the write lock that retires the entry, so a
+	// Pool.UpdateDormantSettings landing in between was acknowledged and then
+	// dropped — the revived session came up on the value read before the write.
+	// materialise evaluates this under that same lock; revivedSettings therefore
+	// takes no lock itself, since RWMutex is not reentrant.
+	sess, _, err := p.materialise(id, label, spawnDir, func() SessionSettings {
+		return p.revivedSettings(id)
+	})
 	if err != nil {
 		return nil, err
 	}

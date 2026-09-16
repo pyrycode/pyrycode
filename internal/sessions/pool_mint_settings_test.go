@@ -240,7 +240,15 @@ func TestPool_MintSettings_NoBootstrap_NoFlags(t *testing.T) {
 	// TestPool_CreateIn_NoConfiguration_ArgvByteIdentical pins that, and
 	// TestRunnerConfigPermissionModeIsAlwaysKnown pins that no construction path can
 	// hand a runner an unnameable mode.
-	if got, want := claudeSettingsArgs(p.mintSettings()), escalatedPosture(); !reflect.DeepEqual(got, want) {
+	//
+	// The RLock is the call's own because mintSettings is an already-locked reader
+	// since #2492 — materialise evaluates it inside the section that retires a
+	// dormant entry. This pool is single-goroutine, so the acquisition changes
+	// nothing here beyond keeping the call site off a contract violation.
+	p.mu.RLock()
+	minted := p.mintSettings()
+	p.mu.RUnlock()
+	if got, want := claudeSettingsArgs(minted), escalatedPosture(); !reflect.DeepEqual(got, want) {
 		t.Errorf("claudeSettingsArgs(mintSettings()) with no bootstrap = %v, want %v", got, want)
 	}
 }
