@@ -152,3 +152,11 @@ Owned by the documentation stage; pending, not done here.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-16
+
+### Delta — 2026-09-16, the binding fix
+
+Re-checked against the categories above; the verdict is unchanged and no boundary moves. The rework changes which session the conversation binds to and adds one read of the daemon's own captured stderr. Three categories are touched and none adversely:
+
+- **[Error messages, logs, telemetry]** `assertPerSessionPrompt` returns a filesystem path taken from the daemon's own `spawning claude` argv record, and the new `t.Logf` prints it. It is daemon-authored, not claude-authored, and the argv record already names the file — the same standing the review grants the composed-prompt path elsewhere. No note bytes are read and no claude text is added to any green-path log; the recall reply is still logged as a byte count and printed in full only under `t.Fatalf`, which is the SHOULD FIX above, still honoured.
+- **[File operations]** Still none. The new code reads an in-memory buffer (`bootstrapDaemon.stderr`) and calls `filepath.Base`/`filepath.Dir` on a path for comparison only — it opens nothing, and in particular does not open the note file, which the ticket forbids.
+- **[Trust boundaries]** Unmoved and, if anything, better witnessed. Admission stays `sessions.FencedHandoffNote` via `conversationReset.storeNote`; the test still adds no second predicate over the note's bytes. What the fix corrects is that the note now actually crosses into a successor's appended prompt, which is the boundary this case was written to exercise and — as the two live reds showed — was not exercising at all.
