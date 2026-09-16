@@ -183,6 +183,101 @@ nothing to show for it, not merely because the sibling needed one.
 
 **Two known residuals from code review, deferred rather than fixed (2026-09-15).** `streamRunner.SetSpawnWorkDir` (`cmd/pyry/streamsup_runner.go`) is reached by type assertion off `Session.Runner()` with no compile-time pin (`var _ interface{ SetSpawnWorkDir(string) error } = streamRunner{}`) — the file keeps one for each of its other capability shapes, and without it a signature drift on the adapter would make this whole ticket inert in production (the rotation still "succeeds", nothing moves) behind a fully green suite and no log line. And `startFreshRunner`'s own doc states no blocking filesystem I/O happens inside the #1330-armed window — true of `resolveSpawnDir` (correctly hoisted above every inert arm here) but not of `installSpawnDir`: `streamRunner.SetSpawnWorkDir` runs two `agentrun.ResolveWorkdir` symlink-resolution walks *inside* that window, between `beginRotationOrNoop` and `RestartFresh`. Neither was blocking (both SHOULD FIX), so neither was fixed pre-merge; worth closing before either becomes an observed failure rather than a reviewed risk.
 
+## The wrap-up turn, and the reply's tense (#2477)
+
+A named or cursor conversation with a **live child** now gets a wrap-up turn
+before `startFreshRunner` runs at all: the daemon drops the conversation's
+queued backlog (`msgqueue.Queue.Snapshot` + `Remove`, tolerating a refused
+committing head — see [msgqueue-package.md § Introspection, removal, and
+change notification](msgqueue-package.md#introspection-removal-and-change-notification-719)),
+interrupts and waits idle, delivers a fixed daemon-owned prompt as an
+ordinary user turn bounded at 90 seconds, and writes that turn's assistant
+text as the conversation's handoff note
+([`Pool.WriteHandoffNote`](sessions-package-key-types-handoffnote-store.md))
+before rotating. The reply is captured by `wrapUpCapture`, a sink decorator
+chained into `newStreamRunnerFactory` beside `newSessionResetFollower` — see
+[Following claude's announced reset § A second instance of the placement
+rule](streamsup-package-announced-reset-follower.md#a-second-instance-of-the-placement-rule-wrapupcapture-2477).
+Every failure along this path — idle timeout, an empty or blank reply, a
+reply the store's own admission refuses, `ErrHandoffNotesDisabled`, any store
+error — leaves the previous note standing and never fails the reset.
+
+**Blocking `handleNewSession` for up to 90 seconds was not an option**, because
+it runs on `V2SessionManager`'s single Run dispatch goroutine and would freeze
+frame dispatch for every connection the daemon hosts. So `StartNewSession`'s
+new arm hands `wrap-up → rotate` to its own goroutine and returns at once —
+**the synchronicity of this seam is a fact that is only visible from reading
+the handler**, not from anything this ticket's own filed body or technical
+notes said. Trace any new blocking work up to its actual dispatch site before
+sizing it; a 90-second bound reads very differently once you know what it
+blocks.
+
+### Three attempts at the reply, and why the third one stuck
+
+Moving the tail off Run reopens the [workspace refusal reply](#workspace-refusal-reply-2443)
+above, because that reply can no longer seal at the moment `StartNewSession`
+returns — the wrap-up has not run yet. Two earlier answers were tried and
+retracted before the shipped one:
+
+1. **Return `*relay.RotatedWithoutWorkspaceError` immediately, before the
+   rotation happens.** Rejected on review: that type's own doc fixes the
+   completed rotation as a **precondition with a tense** — the pool re-keyed,
+   the transition already broadcast, "by the time this value exists" — and
+   forbids the value outright for a rotation that fails. **A doc comment that
+   states a precondition as a tense is a contract, not colour**; reading it as
+   a connotation that could be softened ("committed to" rather than
+   "completed") was the mistake, not a defensible interpretation.
+2. **Withhold the reply on this arm (return `nil`).** Shipped, then reverted:
+   it broke `TestRelayV2_NewSessionRefusedWorkspaceRepliesToRequester`, an
+   **e2e pin belonging to #2443**, another shipped ticket. The reasoning that
+   led here — "a shipped behaviour lost is strictly better than a shipped
+   behaviour made false" — was made without checking whether the behaviour
+   being traded away had a test. It did. **Weighing a behaviour you are about
+   to drop means finding out who asserts it — `grep` for the behaviour, not
+   just the symbol, before trading it away.**
+3. **Deliver the reply late, once the rotation actually lands.** Both
+   commitments — the type's tense, and #2443's e2e pin — hold simultaneously
+   once the reply is allowed to travel on its own schedule. `internal/relay`
+   grows `LateSessionStarter`, an **optional** widening of `SessionStarter`:
+   ```go
+   type LateSessionStarter interface {
+       SessionStarter
+       StartNewSessionLate(conversationID string, outcome func(error))
+   }
+   ```
+   `handleNewSession` asserts it on the configured seam and falls back to the
+   plain method when absent, so the PTY posture and every pre-#2477 test
+   double keep taking the inline path unchanged. `outcome` is called exactly
+   once with what `StartNewSession` would have returned, **after** the
+   rotation it may report — `resetThenRotate` mints
+   `RotatedWithoutWorkspaceError` under the rotation that makes it true, so a
+   rotation that fails still reports the plain error and makes no workspace
+   claim. The value travels back to Run on a new `newSessionDone` channel and
+   is answered in `handleNewSessionDone` — **the identical off-Run-producer
+   shape #1491 already built for the debug bundle**
+   ([Inbound debug-bundle request § `assembleBundle`](v2-session-manager-state-machine-inbound-debug-bundle-request-request-deb.md)):
+   a bounded blocking send with `s.done`/`ctx` as the only escapes, and a
+   staleness guard (`res.s.state != V2StateOpen`) borrowed from
+   `handleBundleReady` for the identical reason — sealing under a dead session
+   burns a send-nonce nobody awaits. Arms 4 and 5 of `handleNewSession`'s
+   contract (the workspace-refused reply and the best-effort Warn) moved into
+   one `answerNewSession`, so the inline and deferred paths discriminate in a
+   single place rather than two that can drift. `var _
+   relay.LateSessionStarter = activeSessionStarter{}` pins the capability at
+   compile time — the config field stays typed as the plain `SessionStarter`,
+   so without that assertion a drifted signature would silently fall back to
+   the synchronous path and drop the reply rather than fail to build, which is
+   exactly how attempt 2 shipped red once its own regression was found.
+
+**Generalizes: when two contracts look mutually exclusive, suspect the seam
+before picking a victim.** Both retracted attempts accepted `StartNewSession(string) error`'s
+signature as fixed and then argued over which of two bad answers to give
+inside it. The actual constraint was that the seam carries no frame id to
+correlate a late reply on — a seam limitation, not a protocol one — and this
+package had already solved that exact problem once, for the debug bundle.
+Asking "has this package had an off-Run producer that owed a reply before?"
+would have been cheaper than either retracted attempt.
+
 ## Log-bounding: only the invalid-shape arm needs it
 
 Every arm past `conversations.ValidID` logs a string already known to be 36
@@ -213,6 +308,13 @@ it was.
 
 ## Related
 
+- [`sessions-package-key-types-handoffnote-store.md`](sessions-package-key-types-handoffnote-store.md)
+  — the store the wrap-up turn's reply is written through, and the write-side
+  admission #2477 added.
+- [`streamsup-package-announced-reset-follower.md`](streamsup-package-announced-reset-follower.md#a-second-instance-of-the-placement-rule-wrapupcapture-2477)
+  — where `wrapUpCapture` sits in the sink chain, and why.
+- [`v2-session-manager-state-machine-inbound-debug-bundle-request-request-deb.md`](v2-session-manager-state-machine-inbound-debug-bundle-request-request-deb.md)
+  — the off-Run-producer / Run-answers shape `LateSessionStarter` reuses.
 - [`v2-session-manager-state-machine-inbound-dequeue-message-queueremover-sea.md`](v2-session-manager-state-machine-inbound-dequeue-message-queueremover-sea.md)
   — the tolerant-decode / debug-no-op shape this handler mirrors.
 - [`v2-session-manager-state-machine-inbound-interrupt-interrupter-seam-esc.md`](v2-session-manager-state-machine-inbound-interrupt-interrupter-seam-esc.md)

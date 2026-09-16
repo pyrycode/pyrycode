@@ -138,6 +138,50 @@ echoes the rejected id with `%q` (never `%s`), `systemPromptPathFor`'s
 precedent, so a control character or newline in a malformed id cannot forge a
 log line.
 
+**An absolute "no content in logs" rule cannot be discharged by citing a
+downstream package's discipline — it has to be enforced at the call site that
+could break it (#2477 review).** The conversation reset's wrap-up turn writes
+this store from `cmd/pyry`, and its `WriteUserTurn` call carries the composed
+prompt — the previous note's bytes included — as its payload. An early
+version of that caller logged `WriteUserTurn`'s error verbatim, reasoning
+correctly that *this file's* wrapped errors name only paths and OS errors and
+never note bytes. That reasoning was true and irrelevant: the value flowing
+through that particular error was the rejected prompt from a different
+package entirely, and a later edit to either package could make the citation
+false without either package's own tests noticing. The fix records that one
+error's event key and the conversation id only, never its value — caught by a
+test whose fake `WriteUserTurn` returns an error that quotes the payload back,
+which is the shape a rule stated this way needs to catch a violation, not a
+fake that merely returns a generic error.
+
+## The wrap-up's write side (#2477)
+
+The conversation reset's wrap-up turn writes this store from a reply that
+crossed the subprocess boundary the same way the read side's note did, and
+runs it through the read side's own admission first —
+[`FencedHandoffNote`](sessions-package-key-types-writesystemprompt-systemprompttext.md#the-fence-was-exported-not-the-predicate-2477),
+not a second predicate. A reply this predicate refuses (a forged fence
+marker, blank after trimming) leaves the previous note standing, the same
+outcome every other wrap-up failure produces — see [Inbound new_session § The
+wrap-up turn](v2-session-manager-state-machine-inbound-new-session-sessionstarter-seam.md#the-wrap-up-turn-and-the-replys-tense-2477)
+for the coordinator and its full failure table. What is stored is the raw
+admitted reply, never the fenced rendering — the fence belongs to whichever
+prompt is being composed, and this store's contract stays "holds the note
+verbatim."
+
+**Not every failure on this path belongs in that "previous note stands"
+table, though — a failed read of the previous note is a different kind of
+failure from the rest.** The wrap-up prompt reads the existing note back
+(through `HandoffNote`) so its own writer can prune it; if that read fails,
+the wrap-up still runs and still produces a new note, just without the old
+one to prune against. Every *other* row in the failure table — idle timeout,
+empty reply, an admission refusal, a write error — means nothing new is
+stored and the existing note is untouched. The two cases were nearly
+collapsed into one table during review: a read failure is not a write
+failure, and a test asserting "the previous note stands" would pass for the
+wrong reason if it were fed a read failure that actually still produced a
+fresh note.
+
 See [`writeMCPSettings`](sessions-package-key-types-writemcpsettings-session-settingspath.md)
 and [`writeSystemPrompt`](sessions-package-key-types-writesystemprompt-systemprompttext.md#carrying-the-conversations-handoff-note-2475)
 for the placement and atomic-write recipe this store copies and for the

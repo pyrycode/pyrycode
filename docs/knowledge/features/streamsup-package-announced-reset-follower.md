@@ -177,6 +177,31 @@ widening's cost was its signature, not its call sites. Worth pricing an interfac
 before sizing against it — a widening with many call sites but a pre-existing satisfying type can be
 far cheaper than the file count alone suggests.
 
+## A second instance of the placement rule: `wrapUpCapture` (#2477)
+
+`newStreamRunnerFactory` chains a second decorator on the parser's side of the
+fan-in channel for the identical reason this file states: `wrapUpCapture`
+(`cmd/pyry/wrapup_capture.go`) accumulates a conversation reset's wrap-up-turn
+assistant text so it can be written as the conversation's handoff note. It
+sits **above** `newSessionResetFollower` in the chain (`contextUsage.Sink` →
+`wrapUp.Sink` → `vocab.sinkFor` → `newSessionResetFollower` → `sink.sinkForTag`),
+for the same two-gate argument this file makes for the reset follower: the
+drain's active-session gate would drop the capture's events for every
+*background* conversation, which is most of the ones a reset names, and
+`TextChunk` is droppable class (`turnMarkFor` answers `turnMarkOpen`), so a
+capture behind the fan-in send would silently truncate the note under load
+rather than lose it outright — worse, because nothing downstream can tell a
+truncated handoff from a short one. `TestWrapUpCapture_AccumulatesPastASaturatedSink`
+is this instance's `TestSessionResetFollower_ObservesPastASaturatedSink`.
+
+The same "why not `busy.observe`" argument this file makes applies verbatim:
+that hold runs inside the drain loop on events the sink already admitted, so
+it satisfies the active-session concern and fails the droppable-send one.
+See [`sessions-package-key-types-handoffnote-store.md`](sessions-package-key-types-handoffnote-store.md)
+for the store the captured reply is written through, and [Inbound new_session
+§ The wrap-up turn](v2-session-manager-state-machine-inbound-new-session-sessionstarter-seam.md#the-wrap-up-turn-and-the-replys-tense-2477)
+for the coordinator that arms and reads it.
+
 See [`docs/specs/architecture/2135-follow-announced-reset.md`](../../specs/architecture/2135-follow-announced-reset.md) for the full design, concurrency model, and security review,
 [`docs/specs/architecture/2136-adopt-announced-session-id.md`](../../specs/architecture/2136-adopt-announced-session-id.md) for the runner-side extension, and
 [`docs/specs/architecture/2176-conditional-tag-writes.md`](../../specs/architecture/2176-conditional-tag-writes.md) for the conditional-write design and its security review.
