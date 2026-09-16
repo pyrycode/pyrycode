@@ -348,6 +348,7 @@ var pyryFlagValues = map[string]bool{
 	"pyry-idle-timeout":        true,
 	"pyry-active-cap":          true,
 	"pyry-conv-sweep-interval": true,
+	"pyry-wrapup-deadline":     true,
 	"pyry-relay":               true,
 }
 
@@ -720,6 +721,11 @@ func runSupervisor(args []string) error {
 	idleTimeout := fs.Duration("pyry-idle-timeout", 0, "evict idle claudes after this duration (0 disables; pass e.g. 15m to enable)")
 	activeCap := fs.Int("pyry-active-cap", 0, "max concurrently active claudes (0 = uncapped)")
 	convSweepInterval := fs.Duration("pyry-conv-sweep-interval", 0, "override conversations sweep tick interval (testing; 0 = production default)")
+	// SHORTEN-ONLY, and conversationReset.bound is where that is enforced (#2486): a
+	// value at or above wrapUpDeadline means the production ninety seconds, exactly as
+	// zero does. The live suite needs a bound it can arm from a spawned daemon's argv;
+	// wrapUpDeadline's own doc refuses an operator a LONGER one, and both hold.
+	wrapUpDeadlineFlag := fs.Duration("pyry-wrapup-deadline", 0, "shorten the conversation reset's wrap-up bound (testing; 0 or >= the 90s default = production default)")
 	relayFlag := fs.String("pyry-relay", "", "relay URL override (default: $PYRY_RELAY_URL or ~/.pyry/config.json)")
 	if err := fs.Parse(pyryArgs); err != nil {
 		return err
@@ -1095,7 +1101,7 @@ func runSupervisor(args []string) error {
 			// daemon ctx — never a frame's — because the reset outlives the dispatch
 			// that started it. nil on a daemon with no registry or pool, which leaves
 			// the rotation exactly as it was.
-			reset: newConversationReset(ctx, convReg, pool, turnBusy, queue, logger),
+			reset: newConversationReset(ctx, convReg, pool, turnBusy, queue, *wrapUpDeadlineFlag, logger),
 			// #2478: the same emitter the relay leg attaches its broadcaster to, so the
 			// tail that orders the three edges and the producer that puts them on the
 			// wire are one object rather than two that could disagree.
@@ -3800,6 +3806,9 @@ Pyry flags (must come before claude args, or after a -- separator):
                         (default 0 / disabled; pass e.g. 15m to enable)
   -pyry-conv-sweep-interval duration  override conversations sweep tick interval
                         (testing; 0 = production default of 1h)
+  -pyry-wrapup-deadline duration  shorten the conversation reset's wrap-up bound
+                        (testing; 0 or >= the 90s default = production default.
+                        It can only shorten: the ceiling is not operator-raisable)
   -pyry-relay string    relay URL (default: $PYRY_RELAY_URL or ~/.pyry/config.json)
 
 Examples:

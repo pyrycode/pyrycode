@@ -202,6 +202,24 @@ Every failure along this path — idle timeout, an empty or blank reply, a
 reply the store's own admission refuses, `ErrHandoffNotesDisabled`, any store
 error — leaves the previous note standing and never fails the reset.
 
+**The 90-second bound is a testing seam that can only shorten (#2486).**
+`-pyry-wrapup-deadline` (`cmd/pyry/main.go`) feeds `conversationReset.deadline`,
+and `bound()` clamps it on both sides — zero *and* anything above
+`wrapUpDeadline` both answer `wrapUpDeadline`, so the only reachable effect is
+a *shorter* wrap-up. Every production daemon runs with the flag unset, which
+is the same zero-means-default shape as `-pyry-conv-sweep-interval`
+([`conversations-auto-archive.md` § Single seam](conversations-auto-archive.md#single-seam-configsweepinterval-262)).
+The ceiling exists because `wrapUpDeadline`'s own doc fixes ninety seconds as
+not operator-editable, on the ground that a longer bound is a way to hold a
+child open — a bare override flag would have repealed that sentence, so the
+clamp lives in `bound()` itself, the one function total over every
+construction path including the struct literals this package's unit tests
+build directly. The live suite arms it to prove the reset's failure path:
+[`e2e-realclaude.md`](e2e-realclaude.md) covers
+`TestInteractiveStreamClearWrapUpSkipped`, which drives a `/clear` under a
+one-millisecond bound and observes `skipped` on the `restarting` edge with
+the conversation's stored note left byte-identical.
+
 **Blocking `handleNewSession` for up to 90 seconds was not an option**, because
 it runs on `V2SessionManager`'s single Run dispatch goroutine and would freeze
 frame dispatch for every connection the daemon hosts. So `StartNewSession`'s

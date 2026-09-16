@@ -841,6 +841,56 @@ func TestComposeWrapUpPrompt_OmitsTheSectionWithoutANote(t *testing.T) {
 	}
 }
 
+// TestConversationReset_Bound_ResolvesTheWrapUpBound pins both ends of the rule
+// bound() answers, which since #2486 is the one place the daemon decides how long a
+// wrap-up may run.
+//
+// THE CEILING IS THE SECURITY HALF and the reason this test exists at all.
+// wrapUpDeadline's doc fixes ninety seconds "in the daemon with the prompt and not
+// operator-editable … an operator-supplied bound would be a way to hold a child
+// open", and -pyry-wrapup-deadline plumbs an operator-supplied value into the field
+// this reads. A flag that could RAISE the bound would repeal that sentence — every
+// /clear held for as long as the operator liked, with begin refusing the second reset
+// that might have recovered the conversation — so the flag may only shorten, and the
+// clamp lives HERE rather than at the wiring site because this function is total over
+// every construction path, the struct literals above included.
+//
+// The floor is the older half: zero means production, which is what lets a daemon
+// spawned without the flag behave exactly as it did before it existed.
+func TestConversationReset_Bound_ResolvesTheWrapUpBound(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		deadline time.Duration
+		want     time.Duration
+	}{
+		{name: "zero is the production default", deadline: 0, want: wrapUpDeadline},
+		{name: "negative is the production default", deadline: -time.Second, want: wrapUpDeadline},
+		{name: "a shorter bound is honoured", deadline: time.Millisecond, want: time.Millisecond},
+		{name: "one tick under the ceiling is honoured", deadline: wrapUpDeadline - 1, want: wrapUpDeadline - 1},
+		{name: "the ceiling itself is honoured", deadline: wrapUpDeadline, want: wrapUpDeadline},
+		{name: "one tick over the ceiling is clamped", deadline: wrapUpDeadline + 1, want: wrapUpDeadline},
+		{name: "a bound that would hold a child open is clamped", deadline: 24 * time.Hour, want: wrapUpDeadline},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := &conversationReset{deadline: tt.deadline}
+			if got := r.bound(); got != tt.want {
+				t.Errorf("bound() with deadline=%v = %v, want %v", tt.deadline, got, tt.want)
+			}
+		})
+	}
+
+	// The nil receiver answers the production default too: an unwired daemon reaches
+	// no wrap-up at all, and a bound that panicked would turn that posture into a crash.
+	var nilReset *conversationReset
+	if got := nilReset.bound(); got != wrapUpDeadline {
+		t.Errorf("(*conversationReset)(nil).bound() = %v, want %v", got, wrapUpDeadline)
+	}
+}
+
 func equalSteps(got, want []string) bool {
 	if len(got) != len(want) {
 		return false
