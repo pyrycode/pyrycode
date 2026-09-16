@@ -66,7 +66,11 @@ Mirrors v1's `internal/relay/auth.go` posture. The implementation MUST adhere; C
 
 `V2SessionConfig.StaticPriv` is the binary's 32-byte X25519 static private key. The doc-comment on the field declares it MUST NOT be logged, wrapped into an error message, or emitted on any wire surface — [`internal/keys`](keys-package.md) and [`internal/noise`](noise-package.md) document the same contract for the same bytes.
 
-The AEAD-sealed error envelope on the 4401 path emits a static `MsgInvalidToken` string and a fixed `CodeAuthInvalidToken` code; no attacker-influenced content is echoed. Close-only paths (4421 / 4426) emit no envelope at all — no leakage surface.
+The AEAD-sealed error envelope on the 4401 path emits a static `MsgInvalidToken` string and a fixed `CodeAuthInvalidToken` code; no attacker-influenced content is echoed. Close-only paths (4410 / 4421 / 4426) emit no envelope at all — no leakage surface.
+
+**Splitting a shared close code creates a distinguisher, so audit it as one (#2488).** Before #2488, `awaitingInit`'s bare-conn-id reject and `open`'s AEAD-failure teardown both closed at 4421, so the code alone couldn't tell "conn id the manager holds nothing for" (now `StatusSessionGone`, 4410) from "open session whose AEAD check failed" (still 4421). That distinction is only observable to whoever can inject a frame on an arbitrary conn id — on this binary's single multiplexed WebSocket, that's the relay itself, which already assigns conn ids and watches every close it routes, so nothing new is disclosed. A future split of a different shared 44xx arm needs its own version of this check, not a citation of this one.
+
+Making that arm's close retryable is a load-shedding decision, not just a recovery one: a peer that previously stopped re-dialling after 4421 now re-dials after 4410. It is safe only because `awaitingInit` allocates nothing durable — the push queue and the app-frame worker are built in `handleNoiseInit`, which this path never reaches, and `closeWith` deletes the bare session in the same `Run`-goroutine turn. An arm that allocates before rejecting would need a rate limit in place before its close could be made retryable the same way.
 
 ## Test surface
 
