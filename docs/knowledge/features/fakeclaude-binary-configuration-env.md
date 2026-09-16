@@ -47,15 +47,6 @@ PYRY_FAKE_CLAUDE_MODAL_CLEAR_ON_ANSWER  when non-empty AND MODAL_TRIGGER is set 
                                     #706 local arm resolves it (#793; see § Modal-
                                     clear-on-answer mode). A flag, not a path. EXTENDS
                                     modal mode; byte-identical when unset.
-PYRY_FAKE_CLAUDE_CLEAR_ROTATES      when non-empty, watch stdin for the "/clear"
-                                    slash-command bytes (supervisor.StartNewSession's
-                                    ClearInputLine + TypePrompt keystroke) and, on the
-                                    first match, rotate the live session JSONL once —
-                                    same close-old/open-new as the file trigger
-                                    (#1004; see § Clear-rotate mode). A flag, not a
-                                    path. Shares the `rotated` one-shot gate with the
-                                    file trigger, so the two rotation sources are
-                                    mutually exclusive in practice.
 PYRY_FAKE_CLAUDE_STREAM_JSON        when non-empty, skip the PTY/TUI surface
                                     entirely and speak line-delimited stream-json
                                     instead (#1140; see § Stream-json mode). Checked
@@ -97,7 +88,9 @@ PYRY_FAKE_CLAUDE_REJECT_ABSENT_RESUME  directory; when set, a stream-mode spawn
 env is the entire configuration surface, matching how the harness consumer
 configures the child via `cmd.Env`. fakeclaude reads stdin only when
 `STDIN_LOG`, `TUI`, `MODAL_TRIGGER`, `ESC_ENDS_TURN`, `MODAL_CLEAR_ON_ANSWER`,
-`CLEAR_ROTATES`, or `STREAM_JSON` is set; otherwise it ignores stdin entirely.
+or `STREAM_JSON` is set; otherwise it ignores stdin entirely. (`CLEAR_ROTATES`
+was one of these arms until #2456 retired it — stranded since #1348 deleted the
+terminal supervisor that typed `/clear` into a PTY.)
 `STREAM_JSON` never inspects `os.Args` either — the daemon's injected
 `--input-format`/`--output-format`/`--verbose`/`--session-id`/`--resume` flags
 are silently tolerated by construction, not parsed.

@@ -7,7 +7,7 @@
   Esc-ends-turn mode: `docs/specs/architecture/794-interrupt-stops-turn-two-phone-e2e-capstone.md`;
   modal-clear-on-answer mode: `docs/specs/architecture/793-two-head-first-answer-wins-e2e-capstone.md`;
   on-turn growth: `docs/specs/architecture/673-fakeclaude-transcript-growth.md`;
-  clear-rotate mode: `docs/specs/architecture/1004-new-session-e2e.md`;
+  clear-rotate mode (retired #2456): `docs/specs/architecture/1004-new-session-e2e.md`;
   stream-json mode: `docs/specs/architecture/1140-fakeclaude-stream-json-mode.md`;
   interrupt rider: `docs/specs/architecture/1136-stream-e2e-interrupt.md`;
   new_session rider: `docs/specs/architecture/1137-stream-new-session-rotation-e2e.md`;
@@ -33,9 +33,11 @@
   two-head first-answer-wins capstone this mode feeds — the keystroke-is-the-cause
   structural causality, the local `pyry attach` head bound before the modal is raised, the
   two ordered observe-positives, the `dismissed_local` live audit oracle)
-- Clear-rotate per-ticket notes: [codebase/1004.md](../codebase/1004.md) (the live
-  `new_session` e2e this mode feeds — the never-created file-trigger structural-causality
-  guard, and the bounded re-send loop that makes the fire-and-forget verb deterministic)
+- Clear-rotate per-ticket notes (mode retired #2456): [codebase/1004.md](../codebase/1004.md)
+  (the live `new_session` e2e this mode fed — the never-created file-trigger
+  structural-causality guard, and the bounded re-send loop that made the fire-and-forget
+  verb deterministic). The mode itself is gone: stranded since #1348 deleted the terminal
+  supervisor that typed `/clear` into a PTY, and nothing in the repo set its env var.
 - Stream-json mode per-ticket notes: [codebase/1140.md](../codebase/1140.md) (the
   gate-above-mustEnv structural AC satisfier, the echo-the-prompt response, the
   different-fabric real-`streamsup.Parser` verification); feeds the sibling #1135
