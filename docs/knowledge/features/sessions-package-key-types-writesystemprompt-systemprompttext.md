@@ -1,11 +1,12 @@
-# `writeSystemPrompt` + `systemPromptText` (#2093, per-session since #2150, client-named since #2148)
+# `writeSystemPrompt` + `systemPromptText` (#2093, per-session since #2150, client-named since #2148, handoff note since #2475)
 
 ```go
 func composeSystemPrompt(operator string) string
-func composeSystemPromptFor(operator string, clients []ClientIdentity) string
+func composeSystemPromptFor(operator string, clients []ClientIdentity, note string) string
 func writeSystemPrompt(registryPath string, id SessionID, text string) (string, error)
 func (p *Pool) conversationPrompt(label string) string
 func (p *Pool) attachedClients(ctx context.Context) []ClientIdentity
+func (p *Pool) handoffNoteFor(label string) string
 func (p *Pool) refreshSystemPrompt(sess *Session)
 func (p *Pool) refreshSystemPromptForRotation(sess *Session)
 func (p *Pool) writeComposedPrompt(sess *Session, clients []ClientIdentity)
@@ -80,9 +81,14 @@ revive both go through `Pool.Activate` → `refreshSystemPrompt`; a
 release and before its `notifyTransition` fan-out, so the write lands before
 `RestartFresh` cancels the live child. Both funnels share the actual compose
 step, `(*Pool).writeComposedPrompt(sess, clients)`: resolve the operator bytes
-via `conversationPrompt`, compose through `composeSystemPromptFor`, write
+via `conversationPrompt`, resolve the conversation's handoff note via
+`handoffNoteFor` (#2475), compose through `composeSystemPromptFor`, write
 `sess.systemPromptPath` verbatim, and record what the session was composed
-with. What differs is only the guards each funnel puts in front of that call —
+with. Because both resolves and the write live in this one shared step, this
+is also the single lookup site for the note across all three spawn paths that
+carry one — first spawn, revive, and the rotation recompose — rather than
+three call sites that could drift. What differs between the two funnels is
+only the guards each puts in front of that call —
 `refreshSystemPrompt` skips an already-`stateActive` session and resolves
 clients through `attachedClients`; `refreshSystemPromptForRotation` runs
 unconditionally, since nothing a rotation does leaves `stateActive`, and
@@ -90,14 +96,16 @@ resolves no client identity at all (see below).
 
 ## Naming the attached client (#2148)
 
-`composeSystemPromptFor(operator, clients)` names the clients attached *at
+`composeSystemPromptFor(operator, clients, note)` names the clients attached *at
 compose time* — spawn-time, not per-turn, and never restated mid-session,
 because the appended prompt file is read once when the child spawns. It
 **delegates to `composeSystemPrompt(operator)` whenever `clientSection(clients)`
-returns `""`**, rather than branching on an equivalent condition, so the
-no-clients / all-fields-empty path is byte-identical to the pre-#2148 text
-*structurally* — `TestSystemPromptText_Pinned` and `TestComposeSystemPrompt`
-needed no call-site edit and no re-transcription of the pin.
+and `handoffNoteSection(note)` both return `""`** (since #2475 both optional
+sections, not just the client one), rather than branching on an equivalent
+condition, so the no-clients / all-fields-empty path is byte-identical to the
+pre-#2148 text *structurally* — `TestSystemPromptText_Pinned` and
+`TestComposeSystemPrompt` needed no call-site edit and no re-transcription of
+the pin for either ticket.
 
 `(*Pool).attachedClients(ctx)` is the resolver, and — like `conversationPrompt`
 — it is **total**: no resolver installed, a resolver returning `nil`, and an
@@ -170,6 +178,84 @@ for the retention side.
 
 See [docs/specs/architecture/2148-client-identity-system-prompt.md](../../specs/architecture/2148-client-identity-system-prompt.md)
 for the full design, the trust-boundary walk, and the security review.
+
+## Carrying the conversation's handoff note (#2475)
+
+`composeSystemPromptFor` gained a third contributor: the conversation's
+handoff note, resolved by `(*Pool).handoffNoteFor(label)` and rendered by
+`handoffNoteSection(note)`. Composed order is **constant, then clients, then
+the note, then the operator's bytes** — the operator's text stays last, where
+it has always been. The note was filed as a *pointer* (one line naming the
+note's absolute path); #2474 measured that a `Read` outside the workspace is
+gated under the daemon's in-band `default` posture, so a background
+conversation could never act on a bare path, and the design shipped as inline
+composition instead.
+
+The note is claude-authored and multi-line, so `admissibleClientField`'s
+"one line, inside quotes, mid-line" construction — the thing that makes "no
+line originates from a client" true by construction — is unavailable. A fence
+carries the structure instead: `admissibleHandoffNote` admits a note only when
+it contains no line beginning with `handoffNoteFence` (`"-----"`, trimmed of
+leading whitespace *and* Unicode format characters via `invisibleRune`) and no
+occurrence, anywhere, of either exact marker tag (`handoffNoteBeginTag` /
+`handoffNoteEndTag`). Everything between `handoffNoteBegin` and `handoffNoteEnd`
+is then the note *by position*, so a note line that reads like
+`systemPromptText`, like `clientSectionLead`'s section, or like the operator's
+own bytes is still attributed to the note. A refused note yields no section at
+all — `maxNamedClients`' fail-closed direction, never a repaired one. The
+bound is `MaxHandoffNoteBytes` (16 KiB), inherited from the store rather than
+re-imposed here: `maxClientNameBytes`' ceiling is reasoned for a transcribed
+self-report of marginal value, not for a note whose whole purpose is the
+successor's context, so a second, smaller bound would silently undercut the
+feature.
+
+**A refusal predicate has to be checked against what it actually admits, not
+against its stated intent — and disagreement between two predicates in the
+same function is the fastest tell.** The shipped predicate's first version
+trimmed the fence-test line with `strings.TrimLeft(line, " \t")` (ASCII only)
+while the blank test one line above used the Unicode-aware `strings.TrimSpace`.
+A note line prefixed with a zero-width character (U+200B, the BOM, U+2060) or
+non-ASCII whitespace (NBSP, EN QUAD, IDEOGRAPHIC SPACE) therefore passed the
+fence test and reproduced the end marker byte-for-byte inside the fence,
+closing the framing early — the exact property the ticket's
+`security-sensitive` label existed to hold. Neither the plan's design section
+nor its own security-review pass caught it; both asserted the line-anchored
+refusal was "exactly that guarantee" without examining its extension. The fix
+(`bc4bafc5`) is two independent refusals, neither subsuming the other: the
+line-anchored trim now spans `unicode.IsSpace` ∪ `unicode.Cf` (neither
+category covers the other — verify a Unicode-category claim by running it,
+not by recalling it), and a second, position-blind refusal on the exact marker
+tags closes a tag sitting mid-line, which no line-anchored test can see at
+all. U+2028 and U+2029 are refused outright, because the line-anchored refusal
+splits on `"\n"` and is only sound if `"\n"` is the note's one line break.
+**When two predicates that should agree about "nothing here" or "no structural
+prefix" use different character classes, that disagreement is where the
+bypass lives — grep for it wherever this package validates untrusted bytes
+against a fixed marker or delimiter.**
+
+`(*Pool).handoffNoteFor` is total, `conversationPrompt`'s posture: an empty or
+non-canonical label, persistence disabled, no note on disk, and any read
+failure all yield `""`, and it logs nothing at any level — `HandoffNote`'s
+wrapped `*fs.PathError` names the note path, so even swallowing it into a log
+line would leak the path. It gates the read on `(*Pool).HandoffNotePath`
+before opening the file, and that gate is doing two jobs, not one: it keeps a
+symlink's target out of the composed prompt (`HandoffNotePath`'s original
+reason), and — found only in security review, not stated in the ticket —
+**it is what stops a FIFO at the note path from hanging a spawn**. `open(2)`
+on a FIFO blocks until a writer appears, and on the rotation funnel the caller
+is the relay's single Run dispatch goroutine, so an ungated read would not
+fail a spawn, it would stall daemon-wide dispatch forever. `Lstat` answers
+before any `open` happens, so a FIFO reports as non-regular and composes as
+"no note" instead. The note is never retained on `Session` — re-derived at
+every compose, because #2477's wrap-up turn writes the note *during* the reset
+and before the rotation that follows it, so the rotation's recompose is the
+first compose that can observe it; freezing it at an earlier compose would
+ship the feature dead for the flow it exists for.
+
+See [docs/specs/architecture/2475-handoff-note-in-system-prompt.md](../../specs/architecture/2475-handoff-note-in-system-prompt.md)
+for the full design, the two-refusal security walk (including the
+`## Revisions` entry recording the whitespace gap above), and the security
+review.
 
 ## The mint-window trap this design exists to avoid
 

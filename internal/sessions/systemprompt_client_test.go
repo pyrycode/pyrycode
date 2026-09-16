@@ -72,7 +72,7 @@ func TestComposeSystemPromptFor_NoClients(t *testing.T) {
 		for _, tc := range inputs {
 			t.Run(tc.name+"/operator="+opLabel(op), func(t *testing.T) {
 				t.Parallel()
-				got := composeSystemPromptFor(op, tc.clients)
+				got := composeSystemPromptFor(op, tc.clients, "")
 				if want := composeSystemPrompt(op); got != want {
 					t.Errorf("composeSystemPromptFor(%q, %v) =\n%q\nwant\n%q", op, tc.clients, got, want)
 				}
@@ -143,7 +143,7 @@ func TestComposeSystemPromptFor_NamesClients(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := composeSystemPromptFor(tc.operator, tc.clients)
+			got := composeSystemPromptFor(tc.operator, tc.clients, "")
 			if got != tc.want {
 				t.Errorf("composeSystemPromptFor =\n%q\nwant\n%q", got, tc.want)
 			}
@@ -203,12 +203,12 @@ func TestComposeSystemPromptFor_HostileInput(t *testing.T) {
 	// The daemon-authored baselines: the constant alone, and the constant plus a
 	// one-client section. Every row's output must be one of these two shapes.
 	bare := composeSystemPrompt("")
-	oneClient := composeSystemPromptFor("", []ClientIdentity{{Name: "x"}})
+	oneClient := composeSystemPromptFor("", []ClientIdentity{{Name: "x"}}, "")
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := composeSystemPromptFor("", tc.clients)
+			got := composeSystemPromptFor("", tc.clients, "")
 
 			wantLines := strings.Count(bare, "\n")
 			if tc.named != "" {
@@ -439,7 +439,7 @@ func assertPromptFileNames(t *testing.T, path string, clients ...ClientIdentity)
 	if err != nil {
 		t.Fatalf("read system-prompt file %q: %v", path, err)
 	}
-	if want := composeSystemPromptFor("", clients); string(raw) != want {
+	if want := composeSystemPromptFor("", clients, ""); string(raw) != want {
 		t.Errorf("system-prompt file %q content =\n%q\nwant\n%q", path, raw, want)
 	}
 }
