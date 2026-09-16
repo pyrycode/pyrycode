@@ -22,11 +22,14 @@ type historyEntry struct {
 	TS      time.Time       `json:"ts"`
 }
 
-// messageBody is the decoded protocol.MessagePayload a "message" entry carries.
-type messageBody struct {
+// assistantDeltaBody is the decoded protocol.AssistantDeltaPayload an
+// "assistant_delta" entry carries. Declared locally for historyEntry's reason:
+// the test reads the FILE's contract, so a field renamed on the struct without a
+// tag change must not silently pass here.
+type assistantDeltaBody struct {
 	ConversationID string `json:"conversation_id"`
-	MessageID      string `json:"message_id"`
-	Role           string `json:"role"`
+	TurnID         string `json:"turn_id"`
+	Seq            int    `json:"seq"`
 	Text           string `json:"text"`
 }
 
@@ -67,9 +70,9 @@ func waitForHistoryEntries(t *testing.T, home, convID string) []historyEntry {
 }
 
 // TestChannelPost_E2E_RecordsAssistantEntry drives `pyry channel post` against a
-// real daemon over its control socket and asserts the whole of AC#1 and AC#3:
-// the verb exits 0 printing nothing at all, and the content is readable back out
-// of the named channel's durable log as an assistant-role entry.
+// real daemon over its control socket and asserts the whole of #2497's AC#1 and
+// AC#3: the verb exits 0 printing nothing at all, and the content is readable
+// back out of the named channel's durable log in the shape a client draws.
 //
 // The silence assertion is not cosmetic. The first consumer is a cron, where any
 // byte on stdout or stderr becomes mail, so an accidental `fmt.Println(id)`
@@ -106,21 +109,30 @@ func TestChannelPost_E2E_RecordsAssistantEntry(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("history holds %d entries, want exactly 1 — one message per call", len(entries))
 	}
-	if entries[0].Type != "message" {
-		t.Errorf("entry type = %q, want %q", entries[0].Type, "message")
+	// assistant_delta, not the message/role-assistant entry #2497 wrote. That
+	// shape reached a client and drew nothing, on the live path and the served
+	// history path both; this one is what the current clients render as assistant
+	// text. One entry of one type is also the whole of "one post is one
+	// rendering": a second record in another shape is what a client would draw
+	// twice.
+	if entries[0].Type != "assistant_delta" {
+		t.Errorf("entry type = %q, want %q", entries[0].Type, "assistant_delta")
 	}
-	var body messageBody
+	var body assistantDeltaBody
 	if err := json.Unmarshal(entries[0].Payload, &body); err != nil {
 		t.Fatalf("decode entry payload: %v", err)
-	}
-	if body.Role != "assistant" {
-		t.Errorf("entry role = %q, want %q", body.Role, "assistant")
 	}
 	if body.Text != text {
 		t.Errorf("entry text = %q, want %q", body.Text, text)
 	}
 	if body.ConversationID != id {
 		t.Errorf("entry conversation_id = %q, want the posted-into channel %q", body.ConversationID, id)
+	}
+	if body.TurnID == "" {
+		t.Error("entry turn_id is empty; a client coalesces on it and every empty-turn post would draw as one message")
+	}
+	if body.Seq != 0 {
+		t.Errorf("entry seq = %d, want 0 — the first frame of the post's own turn", body.Seq)
 	}
 }
 

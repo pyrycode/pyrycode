@@ -511,7 +511,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | `error` | either | no | `ErrorPayload` carries an optional `conversation_id` (#2443, `omitempty`), set only where `in_reply_to` cannot identify the reply's subject — as of #2443 only [`new_session`](#new-session-v2)'s workspace-refusal reply sets it. Every other error reply omits the key, so their wire shape stays byte-identical to before #2443. |
 | **`rekey_request`** | either | no | **New in v2.** See [Re-key](#re-key). |
 | **`turn_state`** | binary → phone | no | **New in v2** (interactive, capability-gated). See [Interactive events](#interactive-events-v2-capability-gated). |
-| **`assistant_delta`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
+| **`assistant_delta`** | binary → phone | no | **New in v2** (interactive, capability-gated). Has **two kinds of producer** since #2498: `interactiveTurnEmitterV2` derives it from claude's own supervised turn stream, and `channelPostEmitterV2` also emits it for a `pyry channel post` — a host-side control verb with no claude in the path at all, addressed to a `turn_id` it mints itself and closed with **no** `turn_state` or `turn_end`, so a turn actually running in the same conversation is left undisturbed. See [`assistant_delta`](#assistant_delta). |
 | **`tool_use`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
 | **`tool_result`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
 | **`tool_progress`** | binary → phone | no | **New in v2** (interactive, capability-gated). Updates an open tool row with `claude`'s signed elapsed-seconds reading (#2324). Push-only; absence proves nothing. See [Interactive events](#interactive-events-v2-capability-gated). |
@@ -876,6 +876,23 @@ Coalescing also stays lane-local: adjacent text is combined only while both
 active buffer, so a main/child or child/child switch flushes the earlier text and
 preserves global arrival order instead of letting per-lane buffers reorder
 interleaved prose.
+
+**Since #2498, `assistant_delta` has a second producer: a host-side control verb,
+not a supervised claude turn.** `pyry channel post` (`channelPoster`, #2497)
+records the post as one or more `assistant_delta` chunks in the conversation's
+durable log, and `channelPostEmitterV2` fans the identical payload to every
+interactive-capable conn immediately after the durable append succeeds. This
+producer mints its own `turn_id` — a fresh one per post, never derived from or
+reused by any outer turn — and emits `assistant_delta` alone: no `turn_state`,
+no `turn_end`. A client relies on the fresh, never-repeated `turn_id` to start a
+new bubble; the lane this producer opens has no closing frame, only its final
+chunk. `parent_tool_use_id` is always `""` (main lane) and `seq` restarts at `0`
+for each post, independent of any turn's own lane numbering. A synthetic
+`turn_end` was deliberately not added to give this producer a symmetric close:
+`turn_end` carries claude-authored fields this verb has nothing to report, and a
+channel is an ordinary bound conversation in which the operator can be mid-turn,
+so a synthetic end would close that turn rather than the post's own. See
+[control-plane.md § Fanning `channel.post` out](knowledge/features/control-plane-channel-post-live-delivery.md).
 
 #### `tool_use`
 

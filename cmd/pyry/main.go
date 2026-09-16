@@ -1063,7 +1063,7 @@ func runSupervisor(args []string) error {
 		return s.Model, s.Effort, s.YOLO
 	}
 
-	relayCleanup, approvalSurface, announceAttachment, announceConversation, pairingProvider, err := startRelay(ctx, logger, relayWiring{
+	relayCleanup, approvalSurface, announceAttachment, announceConversation, announcePost, pairingProvider, err := startRelay(ctx, logger, relayWiring{
 		instanceName:  *name,
 		relayURL:      relayURL,
 		version:       Version,
@@ -1272,7 +1272,13 @@ func runSupervisor(args []string) error {
 	// conversationHistory.Append rather than appendConversationHistory: the poster
 	// must be able to FAIL when the write fails, which that seam's contract
 	// deliberately does not allow. See channelPoster.
-	ctrl.SetChannelPoster(channelPoster(convReg, createChannel, defaultCwd, conversationHistory.Append, logger))
+	//
+	// announcePost (#2498) is the relay leg's posted-message fan-out, so a message
+	// a cron posts reaches every open client without a reconnect rather than
+	// waiting for its next connect. It arrives nil from startRelay's no-URL early
+	// return — announceConversation's shape one wiring up — and the poster records
+	// exactly as before when it is.
+	ctrl.SetChannelPoster(channelPoster(convReg, createChannel, defaultCwd, conversationHistory.Append, announcePost, logger))
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)
 	}

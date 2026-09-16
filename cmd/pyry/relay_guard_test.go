@@ -74,14 +74,14 @@ func TestLocalPairingProviderWiredFromRelayConstructionToControl(t *testing.T) {
 		formattedGoFunc(t, relayPath, "startRelayV2"): {
 			"pairingMinter := newPairingMinterV2(",
 			"PairingMint: pairingMinter,",
-			"}, surface, announce, announceConversation, pairingMinter.MintLocalPairing, nil",
+			"}, surface, announce, announceConversation, announcePost, pairingMinter.MintLocalPairing, nil",
 		},
 		formattedGoFunc(t, relayPath, "startRelay"): {
-			"drain, surface, announce, announceConversation, pairingProvider, err := startRelayV2(",
-			"return cleanup, surface, announce, announceConversation, pairingProvider, nil",
+			"drain, surface, announce, announceConversation, announcePost, pairingProvider, err := startRelayV2(",
+			"return cleanup, surface, announce, announceConversation, announcePost, pairingProvider, nil",
 		},
 		formattedGoFunc(t, "main.go", "runSupervisor"): {
-			"relayCleanup, approvalSurface, announceAttachment, announceConversation, pairingProvider, err := startRelay(",
+			"relayCleanup, approvalSurface, announceAttachment, announceConversation, announcePost, pairingProvider, err := startRelay(",
 			"ctrl.SetPairingProvider(pairingProvider)",
 		},
 	}
