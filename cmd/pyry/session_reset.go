@@ -173,8 +173,10 @@ type conversationReset struct {
 	backlog resetBacklog
 	notes   handoffNoteStore
 
-	// deadline bounds one wrap-up; zero means wrapUpDeadline. Named so a test can
-	// cross it without sleeping out a real ninety seconds.
+	// deadline bounds one wrap-up; zero means wrapUpDeadline, and so does anything
+	// LONGER than it. Named so a test can cross it without sleeping out a real ninety
+	// seconds — in-process since #2477, and since #2486 from a spawned daemon too, via
+	// -pyry-wrapup-deadline. See bound() for why the flag may only shorten.
 	deadline time.Duration
 
 	log *slog.Logger
@@ -195,12 +197,19 @@ type conversationReset struct {
 // because a typed nil in an interface is non-nil at the interface level and would
 // route straight past dropBacklog's guard into a method call on nothing — the
 // hazard turnBusyTracker.observe's doc names for its own concrete parameter.
+//
+// deadline is -pyry-wrapup-deadline's value (#2486), passed through UNJUDGED: zero is
+// the production default and so is anything above wrapUpDeadline, and bound() is where
+// both rules live. Nothing is validated here, because a second copy of that rule is how
+// the two drift apart — and because bound() has to cover the struct literals this
+// package's tests build, which never reach this constructor.
 func newConversationReset(
 	base context.Context,
 	convReg *conversations.Registry,
 	pool *sessions.Pool,
 	busy *turnBusyTracker,
 	queue *msgqueue.Queue,
+	deadline time.Duration,
 	log *slog.Logger,
 ) *conversationReset {
 	if convReg == nil || pool == nil {
@@ -220,9 +229,10 @@ func newConversationReset(
 			}
 			return resetTarget{write: sess.WriteUserTurn, runner: sess.Runner()}, true
 		},
-		busy:  busy,
-		notes: pool,
-		log:   log,
+		busy:     busy,
+		notes:    pool,
+		deadline: deadline,
+		log:      log,
 	}
 	if queue != nil {
 		r.backlog = queue
@@ -237,8 +247,28 @@ func (r *conversationReset) logger() *slog.Logger {
 	return r.log
 }
 
+// bound answers how long this wrap-up may run: the field when it names a SHORTER
+// bound than wrapUpDeadline, and wrapUpDeadline otherwise.
+//
+// THE CEILING IS WHAT KEEPS wrapUpDeadline'S PROMISE TRUE once #2486 gave the field
+// an operator-supplied source. That constant's doc fixes ninety seconds "in the
+// daemon with the prompt and not operator-editable … an operator-supplied bound
+// would be a way to hold a child open", and -pyry-wrapup-deadline is exactly such a
+// supply. Clamping rather than honouring is what lets both sentences stand: the live
+// suite gets a bound it can arm, and no value of that flag makes any wrap-up outlive
+// ninety seconds — so the reset a client cannot cancel stays as brief as it always
+// was, with begin's one-at-a-time claim released as promptly.
+//
+// It is clamped HERE and not at the wiring site, deliberately: this is the single
+// function every caller asks, so the ceiling is total over every construction path —
+// including the struct literals cmd/pyry's own tests build, which newConversationReset
+// never sees. A ceiling above this line would be a ceiling with a way around it.
+//
+// Zero and negative both mean the production default, which is the older half of the
+// rule and the reason the field's own doc can promise that a daemon spawned without
+// the flag behaves exactly as it did before there was one.
 func (r *conversationReset) bound() time.Duration {
-	if r == nil || r.deadline <= 0 {
+	if r == nil || r.deadline <= 0 || r.deadline > wrapUpDeadline {
 		return wrapUpDeadline
 	}
 	return r.deadline
