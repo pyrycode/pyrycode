@@ -152,6 +152,22 @@ type interactiveTurnEmitterV2 struct {
 	// lives.
 	hist *history.Store
 
+	// usageRec is the per-conversation context-reading memory (#2460): the daemon's
+	// answer to "what did claude last report for this conversation" after a daemon
+	// restart, an app restart, or from a second device. Written from the
+	// turnevent.ContextUsage arm below; the on-demand request_context_usage flight
+	// writes the SAME recorder, because one memory with two producers is the point
+	// — a value written from only one arm goes stale the moment a client uses the
+	// other.
+	//
+	// nil means no memory, and emitting is then exactly what it was before this
+	// field existed — which is what lets every emitter test here keep constructing
+	// without one. Assigned after construction for hist's reason, one field up:
+	// newInteractiveTurnEmitterV2 has 86 call sites across 8 test files and a
+	// positional parameter is not separable from them in Go. The nil guard lives in
+	// contextUsageRecorder.record, beside the rest of that seam's inertness.
+	usageRec *contextUsageRecorder
+
 	// Delta-coalescing state (#609) — read/written only on the single Handle/
 	// flush goroutine, same contract as the lifecycle fields above. The invariant
 	// the timer relies on: flushTimer is armed iff deltaBuf is non-empty.
@@ -721,11 +737,17 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// conditional on that, because a follow-active switch can reorder this lane
 		// and the mid-turn ordering is pinned by its own test.
 		//
-		// The event is passed through UNTOUCHED and no field of it is read here. That
-		// costs nothing and is what keeps this arm out of the enumeration of places
-		// the reading's strings can reach: turnbridge.MapEvent's arm is the ONLY
-		// consumer of them on this path, and its own comment owns the no-normalisation
-		// rule for the memory paths.
+		// The event is passed through UNTOUCHED on the WIRE leg and no field of it is
+		// read to build one. turnbridge.MapEvent's arm is still the only consumer of
+		// the reading's strings on that path, and its own comment owns the
+		// no-normalisation rule for the memory paths.
+		//
+		// SINCE #2460 THE ARM HAS A SECOND, NON-WIRE CONSUMER: the registry memory
+		// below, which reads exactly five fields — Model, TotalTokens, MaxTokens,
+		// Percentage — and stamps its own clock. The three inventories (Categories,
+		// MCPTools, MemoryFiles) and their dropped counts are NOT among them and must
+		// not become so; contextUsageRecorder.record's block owns that argument and
+		// drops them by never naming them.
 		//
 		// TWO QUEUES, TWO ANSWERS, the arms above's unchanged. DOWNSTREAM at pushQueue
 		// this is not a droppable delta (the droppable set there is assistant_delta
@@ -749,6 +771,18 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// No capability gate in the arm, for the arms above's reason.
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
+		// #2460, and it runs AFTER the publish so the wire frame is never delayed
+		// behind an fsync. It is the one side effect on this switch that is not a
+		// send, and it is deliberately not gated on the send succeeding: the two
+		// have different failure modes and a conn-side drop is not a reason to
+		// forget a reading. Lifecycle stays untouched, per this arm's whole point.
+		//
+		// convID is the follow-active cursor this arm already stamps the frame
+		// with, so the registry write inherits the frame's attribution rather than
+		// making a second one — there is no state in which the row and the frame
+		// disagree about which conversation reported. An id the registry does not
+		// hold writes nothing and saves nothing; see record.
+		e.usageRec.record(conversations.ConversationID(convID), v)
 	default:
 		e.logger.Debug("relay: interactive-turn drop; unknown event",
 			"event", "interactive_turn.unknown",

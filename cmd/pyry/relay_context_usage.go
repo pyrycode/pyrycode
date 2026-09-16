@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -75,6 +76,97 @@ const (
 	// deliberately bounded only by the daemon context.
 	contextUsageQueryTimeout = 30 * time.Second
 )
+
+// contextUsageRecorder is the registry memory behind #2460: the ONE place a
+// reading's summary becomes durable, shared by both producers of a reading — the
+// post-turn emitter arm (#2371, reached through interactiveTurnEmitterV2.usageRec)
+// and the on-demand flight below. It lives in this file rather than in a sixth of
+// its own because the second producer is here; nothing about it is specific to
+// the on-demand lane.
+//
+// ONE MEMORY, TWO PRODUCERS is the whole point. A value written from only one arm
+// goes stale the moment a client uses the other, so the recorder takes the raw
+// turnevent.ContextUsage both lanes carry rather than either lane's mapped form.
+//
+// THE PROJECTION DROPS THE THREE INVENTORIES BY NEVER NAMING THEM. Categories,
+// MCPTools and MemoryFiles carry workspace memory-file paths and MCP server names
+// the frame's no-log rule keeps out of records; record's composite literal lists
+// exactly the five stored fields, so there is no field to forget to strip and no
+// ordering in which they reach disk. Do not "complete" it from the event.
+type contextUsageRecorder struct {
+	// reg is the conversation registry. nil leaves the recorder inert, which is
+	// the foreground / PTY posture and the reason every emitter and resolver test
+	// that constructs without one stays green.
+	reg *conversations.Registry
+
+	// path is the registry file, resolveConversationsRegistryPath's answer for
+	// this instance — the same path every other registry-writing handler saves to.
+	path string
+
+	// logger records a save failure and nothing else. See record.
+	logger *slog.Logger
+
+	// now is the injected clock; nil means time.Now. Tests pin as_of with it.
+	now func() time.Time
+}
+
+// record stores the summary of u on id's registry row and persists the registry
+// best-effort — appendConversationHistory's shape, for the registry rather than
+// for the durable log.
+//
+// A nil receiver or a nil registry is inert: no write, no save, no log. An id with
+// no registry row writes nothing AND saves nothing, which is structural rather
+// than incidental — the Save sits behind SetLastContextUsage's bool, so there is
+// no path on which an unknown id reaches the disk.
+//
+// ONE Save PER SETTLE, SYNCHRONOUSLY, and no background saver. The post-turn
+// reading arrives after the turn it describes has closed, so the fsync sits in an
+// idle gap on the emitter's lane; the on-demand one runs on its flight's own
+// goroutine after the flight has already settled, so no client waits behind it.
+//
+// LAST WRITE WINS. The two producers can settle seconds apart and both save; the
+// registry's own saveMu serializes the snapshot→rename sequence, and because Save
+// snapshots in-memory state at save time, whichever save renames last writes the
+// NEWEST row rather than its own caller's. No interleaving leaves the file holding
+// an older reading than memory. Ordering machinery here would be a second answer
+// to a question the registry has already answered.
+//
+// THE ONLY LOG LINE IS THE SAVE FAILURE, and it carries the event name, the
+// conversation id and the registry error — never a field of the reading. The
+// conversation id is safe to record for a structural reason worth keeping: this
+// branch is inside the one SetLastContextUsage's true opened, so an id that
+// matched no row never reaches a logger at all, and only registry-canonical ids
+// are ever written here. The registry error names the registry path and an OS
+// error; its encode arm cannot carry the reading, since this struct holds no
+// floats, no channels and no custom marshaller, and encoding/json substitutes
+// invalid UTF-8 rather than reporting it.
+func (r *contextUsageRecorder) record(id conversations.ConversationID, u turnevent.ContextUsage) {
+	if r == nil || r.reg == nil {
+		return
+	}
+	now := time.Now
+	if r.now != nil {
+		now = r.now
+	}
+	if !r.reg.SetLastContextUsage(id, conversations.ContextUsageReading{
+		Model:       u.Model,
+		TotalTokens: u.TotalTokens,
+		MaxTokens:   u.MaxTokens,
+		Percentage:  u.Percentage,
+		AsOf:        now(),
+	}) {
+		return
+	}
+	if err := r.reg.Save(r.path); err != nil {
+		// Warn for appendConversationHistory's reason: the in-memory row keeps the
+		// new reading and the next settle retries, but until then a restart reads
+		// back a stale one — a durable-record loss rather than one dropped frame.
+		r.logger.Warn("relay: context-usage registry save failed",
+			"event", "context_usage.registry_save_err",
+			"conversation_id", string(id),
+			"err", err)
+	}
+}
 
 // contextUsageQuerier is the optional per-runner capability #2430 landed. It stays off
 // sessions.Runner for QueryMCPStatus's stated reason: its only consumer is the
@@ -157,6 +249,17 @@ type contextUsageResolver struct {
 	// now is the injected clock; nil means time.Now. Tests supply their own so the
 	// collapse window can be crossed by advancing it rather than by sleeping.
 	now func() time.Time
+
+	// rec is the #2460 registry memory, written when a flight settles with ok.
+	// nil leaves this lane's write inert, which is what keeps every existing test
+	// here constructing through newContextUsageResolver unchanged.
+	//
+	// Assigned after construction rather than passed, the shape
+	// interactiveTurnEmitterV2.hist uses. The call-site count argument is weaker
+	// here — six, not eighty-six — but a fifth positional parameter on a
+	// four-parameter constructor is worse either way, and ctxUsageResolverFor
+	// would have to grow one too.
+	rec *contextUsageRecorder
 
 	mu sync.Mutex
 	// flights is keyed by the CANONICAL id contextUsageResolveFunc returned, never by
@@ -273,21 +376,38 @@ func (r *contextUsageResolver) Get(ctx context.Context, conversationID string) (
 // mid-turn request to be answered after the turn ends however long it runs, while the
 // child round trip gets contextUsageQueryTimeout.
 //
-// NOTHING HERE LOGS, and nothing may be added that does. QueryContextUsage's own block
-// states the prohibition and its reason: the values in scope include a reading carrying
-// memory-file paths off the operator's filesystem. Every refusal below is silent by
-// construction, and the relay's handler records the outcome with the merged wire code
-// instead.
+// NOTHING HERE LOGS THE READING, and nothing may be added that does.
+// QueryContextUsage's own block states the prohibition and its reason: the values in
+// scope include a reading carrying memory-file paths off the operator's filesystem.
+// Every refusal below is silent by construction, and the relay's handler records the
+// outcome with the merged wire code instead.
+//
+// THE BOUNDARY #2460 ADDED, stated rather than broken silently: the recorder called
+// from the settle below can emit ONE record, and only when persisting the reading
+// fails. It carries the conversation id and the registry error — neither of which is
+// a string of the reading — and record's own block owns that argument. The
+// prohibition above is about the reading's strings, and it is intact.
 func (r *contextUsageResolver) fly(f *contextUsageFlight, querier contextUsageQuerier, canonicalID conversations.ConversationID) {
 	var (
 		payload protocol.ContextUsagePayload
 		ok      bool
+		// usage is hoisted out of the query below so the settle can hand it to the
+		// registry memory. Meaningful only when ok.
+		usage turnevent.ContextUsage
 	)
 	// Deferred so a panic below cannot strand joiners waiting on a channel that never
 	// closes. The writes precede the close, which is the barrier every reader gates on.
 	defer func() {
 		f.payload, f.ok, f.settled = payload, ok, r.clock()
 		close(f.done)
+		// #2460: remember this reading. AFTER the close, deliberately — every asker
+		// joined to this flight is released before the registry's fsync rather than
+		// behind it. Gated on ok, so the memory holds readings claude produced and
+		// never the absence of one: a refusal that wrote would blank a client's
+		// display on a transient child failure. Nothing touches f past the close.
+		if ok {
+			r.rec.record(canonicalID, usage)
+		}
 	}()
 
 	flightCtx, cancel := context.WithCancel(r.base)
@@ -304,7 +424,8 @@ func (r *contextUsageResolver) fly(f *contextUsageFlight, querier contextUsageQu
 
 	queryCtx, cancelQuery := context.WithTimeout(flightCtx, contextUsageQueryTimeout)
 	defer cancelQuery()
-	usage, queried := querier.QueryContextUsage(queryCtx, fullContextUsageDetail)
+	var queried bool
+	usage, queried = querier.QueryContextUsage(queryCtx, fullContextUsageDetail)
 	if !queried {
 		return
 	}

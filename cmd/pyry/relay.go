@@ -855,9 +855,28 @@ func startRelayV2(
 	// parse — the interface-nil trap the MCPActuator field documents, in its func-typed
 	// form. The resolver's own nil-receiver guard makes that a refusal rather than a
 	// crash, but inertness is the contract and this is where it is kept.
+	// The per-conversation memory of the last reading (#2460). ONE recorder value,
+	// shared by both producers — the on-demand flight just below and the post-turn
+	// emitter arm wired further down — because one memory with two producers is the
+	// ticket's whole shape: a value written from only one of them goes stale the
+	// moment a client uses the other. This is the scope that holds both, which is
+	// why it is built here rather than at main.go, and it is the same registry and
+	// the same path every other registry-writing handler in this function saves to.
+	//
+	// w.convReg is nil in the foreground / PTY posture, which leaves the recorder
+	// inert rather than absent — so neither producer needs a wiring branch of its
+	// own. See contextUsageRecorder.record for where that nil is answered.
+	contextUsageRec := &contextUsageRecorder{
+		reg:    w.convReg,
+		path:   resolveConversationsRegistryPath(w.instanceName),
+		logger: logger,
+	}
+
 	var contextUsage func(context.Context, string) (protocol.ContextUsagePayload, bool)
 	if w.contextUsageResolve != nil {
-		contextUsage = newContextUsageResolver(ctx, w.contextUsageResolve, w.busy, nil).Get
+		resolver := newContextUsageResolver(ctx, w.contextUsageResolve, w.busy, nil)
+		resolver.rec = contextUsageRec
+		contextUsage = resolver.Get
 	}
 
 	// Inbound attachment-upload service (#1897): the one thing the v2 session
@@ -1523,6 +1542,12 @@ func startRelayV2(
 		// instance directory — two stores mint duplicate ids for a conversation
 		// and each can truncate away the other's just-appended entry.
 		emitter.hist = w.hist
+		// The #2460 registry memory, assigned the same way and for the same
+		// call-site reason. It is the SAME value the on-demand flight above holds,
+		// not a second one over the same registry: the two producers write one
+		// conversation's one memory, and two recorders would merely be two names
+		// for it.
+		emitter.usageRec = contextUsageRec
 		// The drain's AC2 scoping gate follows the ACTIVE conversation's bound
 		// session — the same follow-active cursor the PTY emitter reads, with the
 		// #678 conv.CurrentSessionID == "" isolation guard resolveBoundSession

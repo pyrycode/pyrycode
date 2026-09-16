@@ -1,9 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -419,5 +425,259 @@ func TestContextUsageResolver_NilSeamsRefuse(t *testing.T) {
 	r := newContextUsageResolver(context.Background(), nil, nil, nil)
 	if _, ok := r.Get(context.Background(), string(ctxUsageTestConv)); ok {
 		t.Error("a resolver with no conversation source answered a request")
+	}
+}
+
+// --- #2460: the registry memory -----------------------------------------------
+
+const ctxUsageRecordedConv = conversations.ConversationID("11111111-2222-4333-8444-555555555555")
+
+// ctxUsageRecorderFor builds a recorder over a registry holding one row for
+// ctxUsageRecordedConv, a registry path inside a fresh temp dir, a pinned clock,
+// and a capturing logger.
+func ctxUsageRecorderFor(t *testing.T) (*contextUsageRecorder, string, *fakeClock, *bytes.Buffer) {
+	t.Helper()
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{
+		ID:         ctxUsageRecordedConv,
+		Cwd:        "/home/user/project",
+		LastUsedAt: time.Date(2026, 9, 14, 11, 0, 0, 0, time.UTC),
+	})
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	clock := newFakeClock()
+	logger, buf := auditLogger()
+	return &contextUsageRecorder{reg: reg, path: path, logger: logger, now: clock.now}, path, clock, buf
+}
+
+// ctxUsageLogRecords parses every JSON log line in buf.
+func ctxUsageLogRecords(t *testing.T, buf *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var recs []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("log line is not JSON: %q: %v", line, err)
+		}
+		recs = append(recs, rec)
+	}
+	return recs
+}
+
+// TestContextUsageRecorder_RecordsSummaryAndPersists is AC-1 and AC-4 at the daemon
+// boundary: the five summary values reach the file with as_of from the daemon
+// clock, and NONE of the reading's category names, MCP server names or memory-file
+// paths do. The needles come from #2371's fixture, so a cross-wired field reddens.
+func TestContextUsageRecorder_RecordsSummaryAndPersists(t *testing.T) {
+	t.Parallel()
+	rec, path, clock, buf := ctxUsageRecorderFor(t)
+
+	rec.record(ctxUsageRecordedConv, emitterContextUsageFixture)
+
+	back, err := conversations.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, ok := back.Get(ctxUsageRecordedConv)
+	if !ok {
+		t.Fatal("row missing after reload")
+	}
+	if got.LastContextUsage == nil {
+		t.Fatal("LastContextUsage = nil on disk")
+	}
+	want := conversations.ContextUsageReading{
+		Model:       emitterContextUsageFixture.Model,
+		TotalTokens: emitterContextUsageFixture.TotalTokens,
+		MaxTokens:   emitterContextUsageFixture.MaxTokens,
+		Percentage:  emitterContextUsageFixture.Percentage,
+		AsOf:        clock.now().UTC(),
+	}
+	if *got.LastContextUsage != want {
+		t.Errorf("stored reading = %+v, want %+v", *got.LastContextUsage, want)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read registry: %v", err)
+	}
+	for _, needle := range contextUsageNeedles() {
+		if needle == emitterContextUsageFixture.Model {
+			continue // the model IS stored, by AC-1
+		}
+		if strings.Contains(string(data), needle) {
+			t.Errorf("registry file carries %q — the three inventories must never reach disk", needle)
+		}
+	}
+	if recs := ctxUsageLogRecords(t, buf); len(recs) != 0 {
+		t.Errorf("a successful record logged %d records, want 0: %v", len(recs), recs)
+	}
+}
+
+// TestContextUsageRecorder_UnknownConversationWritesNothing is AC-2's second half
+// in its strongest available form: an id with no row leaves no registry file on
+// disk at all, so "writes nothing AND saves nothing" is one assertion.
+func TestContextUsageRecorder_UnknownConversationWritesNothing(t *testing.T) {
+	t.Parallel()
+	rec, path, _, buf := ctxUsageRecorderFor(t)
+
+	rec.record("99999999-0000-4000-8000-000000000000", emitterContextUsageFixture)
+
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Stat(%s) err = %v, want ErrNotExist — a miss must not Save", path, err)
+	}
+	if recs := ctxUsageLogRecords(t, buf); len(recs) != 0 {
+		t.Errorf("a miss logged %d records, want 0: %v", len(recs), recs)
+	}
+}
+
+// TestContextUsageRecorder_SaveFailureLogsIDAndErrorOnly is AC-4's log side: the
+// failure record carries the conversation id and the registry error, and nothing
+// else — no category name, no MCP server name, no memory-file path.
+func TestContextUsageRecorder_SaveFailureLogsIDAndErrorOnly(t *testing.T) {
+	t.Parallel()
+	rec, path, _, buf := ctxUsageRecorderFor(t)
+	// A regular file where Save wants a directory component: MkdirAll fails with
+	// ENOTDIR, deterministically and without a permission dance.
+	blocker := filepath.Join(filepath.Dir(path), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	rec.path = filepath.Join(blocker, "sub", "conversations.json")
+
+	rec.record(ctxUsageRecordedConv, emitterContextUsageFixture)
+
+	recs := ctxUsageLogRecords(t, buf)
+	if len(recs) != 1 {
+		t.Fatalf("save failure logged %d records, want 1: %v", len(recs), recs)
+	}
+	got := recs[0]
+	if got["conversation_id"] != string(ctxUsageRecordedConv) {
+		t.Errorf("conversation_id = %v, want %q", got["conversation_id"], ctxUsageRecordedConv)
+	}
+	if _, ok := got["err"]; !ok {
+		t.Errorf("record carries no err: %v", got)
+	}
+	wantKeys := map[string]bool{"time": true, "level": true, "msg": true, "event": true, "conversation_id": true, "err": true}
+	for key := range got {
+		if !wantKeys[key] {
+			t.Errorf("record carries unexpected field %q — AC-4 allows the id and the registry error and nothing else: %v", key, got)
+		}
+	}
+	for _, needle := range contextUsageNeedles() {
+		if strings.Contains(buf.String(), needle) {
+			t.Errorf("save-failure record carries %q from the reading", needle)
+		}
+	}
+
+	// The in-memory row still holds the reading: the write is what failed, not the
+	// set, so the next settle retries against a row that is already current.
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Stat(%s) err = %v, want ErrNotExist", path, err)
+	}
+}
+
+// TestContextUsageRecorder_NilIsInert pins the posture every optional seam in this
+// binary keeps, and is why every existing emitter and resolver test stays green
+// with no edit: an unwired daemon records nothing and panics on nothing.
+func TestContextUsageRecorder_NilIsInert(t *testing.T) {
+	t.Parallel()
+	var nilRec *contextUsageRecorder
+	nilRec.record(ctxUsageRecordedConv, emitterContextUsageFixture)
+
+	logger, buf := auditLogger()
+	unwired := &contextUsageRecorder{path: filepath.Join(t.TempDir(), "conversations.json"), logger: logger}
+	unwired.record(ctxUsageRecordedConv, emitterContextUsageFixture)
+
+	if _, err := os.Stat(unwired.path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Stat err = %v, want ErrNotExist — a nil registry must not Save", err)
+	}
+	if recs := ctxUsageLogRecords(t, buf); len(recs) != 0 {
+		t.Errorf("an unwired recorder logged %d records, want 0: %v", len(recs), recs)
+	}
+}
+
+// TestContextUsageResolver_SettledFlightRecordsReading is AC-3: a reading the
+// on-demand verb obtained is remembered, so the stored value is whichever reading
+// claude produced last rather than whichever producer happens to be wired.
+func TestContextUsageResolver_SettledFlightRecordsReading(t *testing.T) {
+	t.Parallel()
+	q := newFakeContextUsageQuerier(true)
+	q.usage = emitterContextUsageFixture
+	rec, path, clock, _ := ctxUsageRecorderFor(t)
+
+	resolve := func(convID string) (contextUsageQuerier, conversations.ConversationID, bool) {
+		if convID != string(ctxUsageRecordedConv) {
+			return nil, "", false
+		}
+		return q, ctxUsageRecordedConv, true
+	}
+	r := newContextUsageResolver(context.Background(), resolve, nil, clock.now)
+	r.rec = rec
+
+	if _, ok := r.Get(context.Background(), string(ctxUsageRecordedConv)); !ok {
+		t.Fatal("Get refused a resolvable conversation")
+	}
+
+	// The record lands inside the settle defer, after close(done) — so the Get
+	// above may return before the write. Wait on the observable outcome rather
+	// than on a sleep.
+	var got conversations.Conversation
+	for range 200 {
+		back, err := conversations.Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if row, ok := back.Get(ctxUsageRecordedConv); ok && row.LastContextUsage != nil {
+			got = row
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got.LastContextUsage == nil {
+		t.Fatal("a settled ok flight recorded no reading")
+	}
+	want := conversations.ContextUsageReading{
+		Model:       emitterContextUsageFixture.Model,
+		TotalTokens: emitterContextUsageFixture.TotalTokens,
+		MaxTokens:   emitterContextUsageFixture.MaxTokens,
+		Percentage:  emitterContextUsageFixture.Percentage,
+		AsOf:        clock.now().UTC(),
+	}
+	if *got.LastContextUsage != want {
+		t.Errorf("stored reading = %+v, want %+v", *got.LastContextUsage, want)
+	}
+}
+
+// TestContextUsageResolver_RefusedFlightRecordsNothing is AC-3's other side: the
+// memory holds readings claude produced, never the absence of one. A refusal that
+// wrote would blank a client's display on a transient child failure.
+func TestContextUsageResolver_RefusedFlightRecordsNothing(t *testing.T) {
+	t.Parallel()
+	q := newFakeContextUsageQuerier(false)
+	rec, path, clock, buf := ctxUsageRecorderFor(t)
+
+	resolve := func(convID string) (contextUsageQuerier, conversations.ConversationID, bool) {
+		if convID != string(ctxUsageRecordedConv) {
+			return nil, "", false
+		}
+		return q, ctxUsageRecordedConv, true
+	}
+	r := newContextUsageResolver(context.Background(), resolve, nil, clock.now)
+	r.rec = rec
+
+	if _, ok := r.Get(context.Background(), string(ctxUsageRecordedConv)); ok {
+		t.Fatal("Get answered from a refusing querier")
+	}
+	// The flight has settled by the time Get returns; the record, if any, would be
+	// on the same goroutine immediately after. Give it a window it cannot use.
+	time.Sleep(20 * time.Millisecond)
+
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Stat(%s) err = %v, want ErrNotExist — a refusal must record nothing", path, err)
+	}
+	if recs := ctxUsageLogRecords(t, buf); len(recs) != 0 {
+		t.Errorf("a refusal logged %d records, want 0: %v", len(recs), recs)
 	}
 }
