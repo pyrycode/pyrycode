@@ -17,6 +17,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
@@ -679,5 +680,325 @@ func TestContextUsageResolver_RefusedFlightRecordsNothing(t *testing.T) {
 	}
 	if recs := ctxUsageLogRecords(t, buf); len(recs) != 0 {
 		t.Errorf("a refusal logged %d records, want 0: %v", len(recs), recs)
+	}
+}
+
+// --- #2461: answering from the remembered reading -------------------------------
+
+// ctxUsageStoredReading is the summary a dormant conversation is answered from. Its
+// values are distinct from newFakeContextUsageQuerier's fixture in every field, so a
+// test that expects the remembered answer cannot be satisfied by a live one.
+var ctxUsageStoredReading = conversations.ContextUsageReading{
+	Model:       "MODEL_2461_REMEMBERED",
+	TotalTokens: 24680,
+	MaxTokens:   180000,
+	Percentage:  13,
+	AsOf:        time.Date(2026, 9, 15, 9, 30, 0, 0, time.UTC),
+}
+
+// ctxUsageFallbackFor builds the whole dormant-conversation arrangement: a resolver
+// over a registry holding one row, a recorder wired to that same registry, and a
+// stored reading already on the row.
+//
+// querier is what contextUsageResolveFunc hands back, and NIL IS THE POINT — it is
+// how this file expresses "hosted, but there is nothing to ask", the state
+// contextUsageResolve now returns for a conversation with no bound session, no live
+// child, or a runner that does not implement contextUsageQuerier. A double is the
+// right tool here because all three of those states are indistinguishable at this
+// seam by construction; pinning that they collapse to one is contextUsageResolve's
+// own test's job, below.
+func ctxUsageFallbackFor(t *testing.T, querier contextUsageQuerier, store bool) (*contextUsageResolver, string, *fakeClock, *bytes.Buffer) {
+	t.Helper()
+	rec, path, clock, buf := ctxUsageRecorderFor(t)
+	if store {
+		if !rec.reg.SetLastContextUsage(ctxUsageRecordedConv, ctxUsageStoredReading) {
+			t.Fatal("precondition: SetLastContextUsage found no row to store on")
+		}
+	}
+	resolve := func(convID string) (contextUsageQuerier, conversations.ConversationID, bool) {
+		if convID != string(ctxUsageRecordedConv) {
+			return nil, "", false
+		}
+		return querier, ctxUsageRecordedConv, true
+	}
+	r := newContextUsageResolver(context.Background(), resolve, nil, clock.now)
+	r.rec = rec
+	return r, path, clock, buf
+}
+
+// assertRememberedAnswer checks every value AC-2 pins on a remembered reply: the
+// registry-canonical id, the five stored values including as_of, empty inventories
+// and zero dropped counts.
+func assertRememberedAnswer(t *testing.T, got protocol.ContextUsagePayload) {
+	t.Helper()
+	if got.ConversationID != string(ctxUsageRecordedConv) {
+		t.Errorf("conversation_id = %q, want the registry-canonical %q", got.ConversationID, ctxUsageRecordedConv)
+	}
+	if got.Model != ctxUsageStoredReading.Model {
+		t.Errorf("model = %q, want the stored %q", got.Model, ctxUsageStoredReading.Model)
+	}
+	if got.TotalTokens != ctxUsageStoredReading.TotalTokens ||
+		got.MaxTokens != ctxUsageStoredReading.MaxTokens ||
+		got.Percentage != ctxUsageStoredReading.Percentage {
+		t.Errorf("numbers = %d/%d/%d%%, want the stored %d/%d/%d%%",
+			got.TotalTokens, got.MaxTokens, got.Percentage,
+			ctxUsageStoredReading.TotalTokens, ctxUsageStoredReading.MaxTokens, ctxUsageStoredReading.Percentage)
+	}
+	if got.AsOf == nil {
+		t.Fatal("as_of is nil on a remembered answer — a client cannot tell it from a live reading whose breakdown was empty")
+	}
+	if !got.AsOf.Equal(ctxUsageStoredReading.AsOf) {
+		t.Errorf("as_of = %v, want the stored %v", *got.AsOf, ctxUsageStoredReading.AsOf)
+	}
+	if len(got.Categories) != 0 || len(got.MCPTools) != 0 || len(got.MemoryFiles) != 0 {
+		t.Errorf("inventories = %d/%d/%d entries, want 0/0/0 — the stored reading holds none",
+			len(got.Categories), len(got.MCPTools), len(got.MemoryFiles))
+	}
+	if got.DroppedCategories != 0 || got.DroppedMCPTools != 0 || got.DroppedMemoryFiles != 0 {
+		t.Errorf("dropped counts = %d/%d/%d, want 0/0/0 — nothing was cut from a reading that stored no lists",
+			got.DroppedCategories, got.DroppedMCPTools, got.DroppedMemoryFiles)
+	}
+}
+
+// TestContextUsageResolver_AnswersFromMemory is AC-2 across both of its arms: a
+// hosted conversation with nothing to ask, and one whose flight settles not-ok. Both
+// are answered from the registry row rather than refused, and the child is asked
+// nothing extra on either — zero round trips on the first, exactly the one that
+// failed on the second.
+func TestContextUsageResolver_AnswersFromMemory(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		querier   *fakeContextUsageQuerier
+		wantCalls int64
+	}{
+		{"no bound session or live child", nil, 0},
+		{"the flight settles not-ok", newFakeContextUsageQuerier(false), 1},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// A typed nil would make querier non-nil as an interface, which is the
+			// one shape the fallback must not see; hand the seam an untyped nil.
+			var q contextUsageQuerier
+			if tc.querier != nil {
+				q = tc.querier
+			}
+			r, path, _, buf := ctxUsageFallbackFor(t, q, true)
+
+			got, ok := r.Get(context.Background(), string(ctxUsageRecordedConv))
+			if !ok {
+				t.Fatal("Get refused a hosted conversation holding a stored reading")
+			}
+			assertRememberedAnswer(t, got)
+
+			if tc.querier != nil {
+				if calls := tc.querier.calls.Load(); calls != tc.wantCalls {
+					t.Errorf("querier called %d times, want %d — the fallback adds no round trip", calls, tc.wantCalls)
+				}
+			}
+			// AC-5: nothing the fallback adds writes a record at any level.
+			if recs := ctxUsageLogRecords(t, buf); len(recs) != 0 {
+				t.Errorf("answering from memory logged %d records, want 0: %v", len(recs), recs)
+			}
+			// AC-4: a remembered answer is a read. Nothing is re-recorded, so the
+			// registry is never saved and no file appears at all.
+			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("Stat(%s) err = %v, want ErrNotExist — answering from memory must write nothing", path, err)
+			}
+		})
+	}
+}
+
+// TestContextUsageResolver_MemoryInstallsNoFlight is the security pass's SHOULD FIX
+// pinned as an invariant rather than as a behaviour. contextUsageResolve now returns
+// TRUE with a NIL querier for a hosted conversation with nothing to ask, so the
+// nil check has to fire before the collapse map is touched: an entry installed here
+// would hand fly a nil interface to call, and fly dereferences it unconditionally.
+//
+// It asserts on the FLIGHT MAP because the answer above is what a resolver that
+// installed a flight and then panicked in a goroutine would ALSO appear to produce
+// on this one — the reply is delivered from the registry either way.
+func TestContextUsageResolver_MemoryInstallsNoFlight(t *testing.T) {
+	t.Parallel()
+	r, _, _, _ := ctxUsageFallbackFor(t, nil, true)
+
+	if _, ok := r.Get(context.Background(), string(ctxUsageRecordedConv)); !ok {
+		t.Fatal("Get refused a hosted conversation holding a stored reading")
+	}
+	r.mu.Lock()
+	n := len(r.flights)
+	r.mu.Unlock()
+	if n != 0 {
+		t.Errorf("flight map holds %d entries after an unaskable ask, want 0 — a nil querier must never reach fly", n)
+	}
+}
+
+// TestContextUsageResolver_BothRefusalsSurvive is AC-3. The fallback must not soften
+// either existing refusal: an id the registry does not hold is still permanent, and a
+// hosted conversation with no stored reading is still retryable.
+func TestContextUsageResolver_BothRefusalsSurvive(t *testing.T) {
+	t.Parallel()
+	t.Run("an id the registry does not hold", func(t *testing.T) {
+		t.Parallel()
+		r, _, _, _ := ctxUsageFallbackFor(t, nil, true)
+
+		for _, id := range []string{"NOT_HOSTED_2461", "", "../../etc/passwd"} {
+			if _, ok := r.Get(context.Background(), id); ok {
+				t.Errorf("Get(%q) was answered, want a refusal — an unhosted id has no canonical id to key on and no reading to fall back to", id)
+			}
+		}
+		// The containment property: an unresolvable ask still leaves no trace.
+		r.mu.Lock()
+		n := len(r.flights)
+		r.mu.Unlock()
+		if n != 0 {
+			t.Errorf("flight map holds %d entries after unresolvable asks, want 0", n)
+		}
+	})
+
+	t.Run("hosted with neither a fresh reading nor a stored one", func(t *testing.T) {
+		t.Parallel()
+		q := newFakeContextUsageQuerier(false)
+		r, _, _, buf := ctxUsageFallbackFor(t, q, false)
+
+		if _, ok := r.Get(context.Background(), string(ctxUsageRecordedConv)); ok {
+			t.Error("Get answered a conversation with no reading of either kind")
+		}
+		if recs := ctxUsageLogRecords(t, buf); len(recs) != 0 {
+			t.Errorf("a refusal logged %d records, want 0: %v", len(recs), recs)
+		}
+	})
+}
+
+// TestContextUsageResolver_MemoryNeverShadowsLive is AC-4's first half. A remembered
+// answer is a fallback, not a cache: once the child can answer again, the next ask
+// past the collapse window returns the FRESH reading and carries no as_of.
+//
+// The window has to be crossed because a settled refusal is held for it like any
+// other result — so the ask immediately after the failure is answered from memory by
+// design, and only the one past the window earns a new round trip.
+func TestContextUsageResolver_MemoryNeverShadowsLive(t *testing.T) {
+	t.Parallel()
+	q := newFakeContextUsageQuerier(false)
+	r, _, clock, _ := ctxUsageFallbackFor(t, q, true)
+
+	got, ok := r.Get(context.Background(), string(ctxUsageRecordedConv))
+	if !ok {
+		t.Fatal("Get refused while a stored reading was available")
+	}
+	assertRememberedAnswer(t, got)
+
+	// The child comes back. Writing q.ok here does not race the query above: that
+	// call returned before the flight closed its done channel, and the close is what
+	// released the Get that has already returned.
+	q.ok = true
+	clock.advance(contextUsageCollapseWindow)
+
+	got, ok = r.Get(context.Background(), string(ctxUsageRecordedConv))
+	if !ok {
+		t.Fatal("Get refused once the child could answer again")
+	}
+	if got.AsOf != nil {
+		t.Errorf("a live reading carries as_of = %v, want nil — the key is what marks an answer remembered", *got.AsOf)
+	}
+	if got.Model != "MODEL_2431" || got.TotalTokens != 31337 {
+		t.Errorf("payload = %+v, want the live reading; the stored one must not shadow it", got)
+	}
+	if calls := q.calls.Load(); calls != 2 {
+		t.Errorf("querier called %d times, want 2 — the ask past the window must reach the child", calls)
+	}
+}
+
+// TestContextUsageResolver_MemoryDoesNotAgeItself is AC-4's second half, and the
+// ticket's sharpest prohibition: a fallback that settled its flight as ok would hand
+// the remembered reading back to fly's deferred recorder, rewriting it with a fresh
+// as_of on every ask — a stale figure that renews itself and can never look stale.
+//
+// Asking repeatedly with the clock advanced between is the shape that would expose
+// it: if anything re-recorded, as_of would track the clock instead of standing still.
+func TestContextUsageResolver_MemoryDoesNotAgeItself(t *testing.T) {
+	t.Parallel()
+	r, path, clock, _ := ctxUsageFallbackFor(t, nil, true)
+
+	for i := range 3 {
+		got, ok := r.Get(context.Background(), string(ctxUsageRecordedConv))
+		if !ok {
+			t.Fatalf("ask %d refused", i)
+		}
+		if got.AsOf == nil || !got.AsOf.Equal(ctxUsageStoredReading.AsOf) {
+			t.Fatalf("ask %d as_of = %v, want the stored %v unmoved", i, got.AsOf, ctxUsageStoredReading.AsOf)
+		}
+		clock.advance(time.Hour)
+	}
+
+	// The in-memory row is the authority; the file must never have been written.
+	row, ok := r.rec.reg.Get(ctxUsageRecordedConv)
+	if !ok {
+		t.Fatal("the registry row vanished")
+	}
+	if row.LastContextUsage == nil {
+		t.Fatal("answering from memory cleared the stored reading")
+	}
+	if *row.LastContextUsage != ctxUsageStoredReading {
+		t.Errorf("stored reading = %+v, want %+v unchanged", *row.LastContextUsage, ctxUsageStoredReading)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Stat(%s) err = %v, want ErrNotExist — a read path must not Save", path, err)
+	}
+}
+
+// TestContextUsageResolve_HostedWithNothingToAsk pins the seam change itself, which
+// the resolver tests above take as given: resolveBoundRunner collapses three outcomes
+// into one false, and contextUsageResolve must now separate the first from the other
+// two. Only "no registry row" stays a hard refusal — it alone has neither a canonical
+// id to key the flight map on nor a row to hold a reading.
+//
+// The three true cases are driven through the REAL registry and pool rather than a
+// double, because what is being pinned is which of resolveBoundRunner's outcomes maps
+// where; a double would be a restatement of the table rather than a test of it.
+func TestContextUsageResolve_HostedWithNothingToAsk(t *testing.T) {
+	t.Parallel()
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{
+		ID:         ctxUsageRecordedConv,
+		Cwd:        "/home/user/project",
+		LastUsedAt: time.Date(2026, 9, 14, 11, 0, 0, 0, time.UTC),
+	})
+	pool := &sessions.Pool{}
+	resolve := contextUsageResolve(reg, pool)
+	if resolve == nil {
+		t.Fatal("contextUsageResolve returned nil with both dependencies wired")
+	}
+
+	// Hosted, but the row carries no CurrentSessionID: resolveBoundRunner's #678
+	// isolation guard refuses, and that refusal must now surface as hosted-with-
+	// nothing-to-ask rather than as not-found.
+	querier, canonicalID, ok := resolve(string(ctxUsageRecordedConv))
+	if !ok {
+		t.Fatal("an unbound hosted conversation was reported as not hosted; it has a row and may hold a reading")
+	}
+	if querier != nil {
+		t.Errorf("querier = %v, want nil — there is no child to ask", querier)
+	}
+	if canonicalID != ctxUsageRecordedConv {
+		t.Errorf("canonical id = %q, want %q", canonicalID, ctxUsageRecordedConv)
+	}
+
+	// Not hosted at all: the one case that stays a hard refusal, and the one where
+	// returning an id would let a client key the flight map on a name of its own.
+	querier, canonicalID, ok = resolve("99999999-0000-4000-8000-000000000000")
+	if ok {
+		t.Error("an id the registry does not hold was reported as hosted")
+	}
+	if querier != nil || canonicalID != "" {
+		t.Errorf("a refusal returned %v / %q, want nil and empty", querier, canonicalID)
+	}
+
+	if resolve := contextUsageResolve(nil, pool); resolve != nil {
+		t.Error("contextUsageResolve with no registry returned a non-nil seam; the unwired posture is inert")
+	}
+	if resolve := contextUsageResolve(reg, nil); resolve != nil {
+		t.Error("contextUsageResolve with no pool returned a non-nil seam; the unwired posture is inert")
 	}
 }

@@ -168,6 +168,38 @@ func (r *contextUsageRecorder) record(id conversations.ConversationID, u turneve
 	}
 }
 
+// last reads back what record wrote: the stored summary for id, or false when the
+// registry holds no row for it or claude has never reported on it. It is the other half
+// of the #2460 memory, added by #2461 so a conversation that cannot yield a fresh
+// reading still has an answer.
+//
+// ON THIS TYPE rather than on the resolver, because the write door already is: keeping
+// both directions here leaves the registry handle in one place, and means
+// contextUsageResolver still holds no registry of its own. A nil receiver or a nil
+// registry answers false, record's inert posture, so the unwired daemon simply has
+// nothing to remember.
+//
+// THE DEREFERENCE IS RACE-FREE FOR A STRUCTURAL REASON, not by luck.
+// SetLastContextUsage copies its argument into a fresh local and replaces the row's
+// POINTER under the registry's mutex; it never mutates a pointee that has already been
+// published. Registry.Get returns the row under that same mutex, so the pointer this
+// reads was fully written before it became visible, and dereferencing yields a value
+// copy nothing else holds.
+//
+// IT TAKES NO LOGGER AND RETURNS NO ERROR, which is what makes #2461's no-log criterion
+// structural: there is no error value for a caller to wrap a model string or a
+// timestamp into, and no branch here that could grow a record.
+func (r *contextUsageRecorder) last(id conversations.ConversationID) (conversations.ContextUsageReading, bool) {
+	if r == nil || r.reg == nil {
+		return conversations.ContextUsageReading{}, false
+	}
+	conv, ok := r.reg.Get(id)
+	if !ok || conv.LastContextUsage == nil {
+		return conversations.ContextUsageReading{}, false
+	}
+	return *conv.LastContextUsage, true
+}
+
 // contextUsageQuerier is the optional per-runner capability #2430 landed. It stays off
 // sessions.Runner for QueryMCPStatus's stated reason: its only consumer is the
 // resolver in this package, and widening that interface would pull every test double
@@ -176,16 +208,37 @@ type contextUsageQuerier interface {
 	QueryContextUsage(ctx context.Context, detail string) (turnevent.ContextUsage, bool)
 }
 
-// contextUsageResolveFunc answers "which live child do I ask about this conversation,
-// and what is this daemon's own name for it". It touches no child and performs no
-// wait, which is what lets the resolver call it BEFORE consulting the collapse map.
+// contextUsageResolveFunc answers "is this conversation one this daemon hosts, what is
+// the daemon's own name for it, and which live child — if any — can be asked about it".
+// It touches no child and performs no wait, which is what lets the resolver call it
+// BEFORE consulting the collapse map.
+//
+// THE BOOL AND THE QUERIER ANSWER DIFFERENT QUESTIONS, and #2461 is what separated
+// them. The bool is membership: false means the registry holds no row, which is the
+// one state with neither a canonical id to key the collapse map on nor a row that
+// could hold a remembered reading, and it stays a permanent refusal. A true with a NIL
+// querier is "hosted, but there is nothing to ask" — the state a remembered answer
+// exists for. Callers MUST check the querier for nil separately; see fresh, where that
+// check is load-bearing rather than defensive.
 type contextUsageResolveFunc func(conversationID string) (contextUsageQuerier, conversations.ConversationID, bool)
 
 // contextUsageResolve builds the registry-and-pool half over resolveBoundRunner, the
-// shape resolveBoundMCPStatus already has. Every non-resolvable state returns false, so
-// there is NO BOOTSTRAP FALLTHROUGH: resolveBoundRunner's CurrentSessionID == "" guard
-// is the #678 cross-conversation isolation enforcement point, and an unbound
-// conversation must never be answered with the shared bootstrap child's reading.
+// shape resolveBoundMCPStatus already has. There is NO BOOTSTRAP FALLTHROUGH:
+// resolveBoundRunner's CurrentSessionID == "" guard is the #678 cross-conversation
+// isolation enforcement point, and an unbound conversation must never be answered with
+// the shared bootstrap child's reading. That guard is untouched here and stays the only
+// place "bound" is decided.
+//
+// WHAT #2461 CHANGED IS WHICH OUTCOMES REFUSE. resolveBoundRunner collapses three into
+// one false — no registry row, no bound session or no live child, and a lookup that
+// fails — and only the FIRST may remain a hard refusal. The other two describe a
+// conversation this daemon hosts, which is exactly the conversation a stored reading
+// belongs to, so they return the canonical id with a nil querier and a true. A runner
+// that does not implement contextUsageQuerier joins them for the same reason.
+//
+// THE MEMBERSHIP LOOKUP IS THIS FUNCTION'S OWN rather than inferred from
+// resolveBoundRunner's bool, because the two questions genuinely differ and inferring
+// one from the other is what produced the refusal this ticket removes.
 //
 // nil when either dependency is missing, which leaves the seam unwired and the verb
 // inert — the foreground / PTY posture.
@@ -194,13 +247,21 @@ func contextUsageResolve(convReg *conversations.Registry, pool *sessions.Pool) c
 		return nil
 	}
 	return func(convID string) (contextUsageQuerier, conversations.ConversationID, bool) {
-		runner, canonicalID, ok := resolveBoundRunner(convReg, pool, convID)
-		if !ok {
+		conv, hosted := convReg.Get(conversations.ConversationID(convID))
+		if !hosted {
 			return nil, "", false
 		}
-		querier, ok := runner.(contextUsageQuerier)
-		if !ok {
-			return nil, "", false
+		// From here the id is REGISTRY-CANONICAL: conv.ID is the daemon's own
+		// record, never the client's string, so nothing downstream keys a map or
+		// stamps a payload with remote-authored bytes even if a future Get
+		// normalises rather than matching byte-exactly.
+		runner, canonicalID, bound := resolveBoundRunner(convReg, pool, convID)
+		if !bound {
+			return nil, conv.ID, true
+		}
+		querier, isQuerier := runner.(contextUsageQuerier)
+		if !isQuerier {
+			return nil, canonicalID, true
 		}
 		return querier, canonicalID, true
 	}
@@ -310,6 +371,19 @@ func (r *contextUsageResolver) clock() time.Time {
 // style choice: the map is keyed by the id resolution returns, and an unresolvable
 // conversation must leave no trace in it at all. See the flights field.
 //
+// THREE STEPS, WITH EXACTLY ONE FALLBACK POINT (#2461). Membership refuses or yields a
+// canonical id; fresh tries for a reading claude produces now; remembered answers from
+// what the registry stored if it could not. The split exists because fresh has FOUR
+// exits that can report no-reading — a cached settled refusal, a joined flight, an
+// awaited one, and the nothing-to-ask arm — and bolting the fallback onto each would be
+// four places to keep in agreement about a decision that is one decision.
+//
+// A DEPARTED CALLER IS ANSWERED FROM MEMORY LIKE ANY OTHER. fresh returns false both
+// when a flight settled not-ok and when the caller's own context ended, and the two are
+// deliberately not separated: telling them apart would mean await reporting three
+// states, and this seam's contract is about whether there is an answer, not about who
+// is still listening.
+//
 // A nil receiver and an unwired resolve seam both refuse, so an unwired daemon is inert
 // rather than a crash — the posture every optional seam in this binary keeps.
 func (r *contextUsageResolver) Get(ctx context.Context, conversationID string) (protocol.ContextUsagePayload, bool) {
@@ -318,6 +392,62 @@ func (r *contextUsageResolver) Get(ctx context.Context, conversationID string) (
 	}
 	querier, canonicalID, ok := r.resolve(conversationID)
 	if !ok {
+		return protocol.ContextUsagePayload{}, false
+	}
+	if payload, fresh := r.fresh(ctx, querier, canonicalID); fresh {
+		return payload, true
+	}
+	return r.remembered(canonicalID)
+}
+
+// remembered answers from the summary #2460 stored on the conversation's registry row:
+// the four numbers claude last reported, stamped with when the daemon recorded them.
+// No stored reading is the retryable refusal the relay was already producing.
+//
+// IT IS A READ, AND NOTHING ABOUT IT MAY BECOME A WRITE. A fallback expressed as a
+// flight settling ok would hand this reading to fly's deferred recorder, writing it
+// straight back with a fresh AsOf — a stale figure that renews itself on every ask and
+// can never look stale again. Only a reading claude actually produced may reach
+// contextUsageRecorder.record.
+//
+// THE THREE INVENTORIES ARE LEFT NIL ON PURPOSE. ContextUsagePayload.MarshalJSON
+// normalises them to [], and AsOf is what tells a client that those empty lists mean
+// "never stored" rather than "claude reported none" — the two are byte-identical
+// without it. Filling them from anywhere would be inventing a breakdown.
+//
+// The id is stamped from the CANONICAL value resolution returned, so the reported
+// conversation_id is the daemon's own record rather than an echo of the request, and
+// the address taken is of this frame's own copy of the stored time.
+func (r *contextUsageResolver) remembered(canonicalID conversations.ConversationID) (protocol.ContextUsagePayload, bool) {
+	reading, ok := r.rec.last(canonicalID)
+	if !ok {
+		return protocol.ContextUsagePayload{}, false
+	}
+	asOf := reading.AsOf
+	return protocol.ContextUsagePayload{
+		ConversationID: string(canonicalID),
+		Model:          reading.Model,
+		TotalTokens:    reading.TotalTokens,
+		MaxTokens:      reading.MaxTokens,
+		Percentage:     reading.Percentage,
+		AsOf:           &asOf,
+	}, true
+}
+
+// fresh is the collapse map and the round trip: one reading claude produces now, or
+// false. It is Get's body from #2431 with one gate in front of it.
+//
+// THE NIL-QUERIER CHECK IS THE FIRST STATEMENT AND MUST STAY THERE, before the mutex
+// and before any map access. Since #2461 the resolve seam returns true with a nil
+// querier for a hosted conversation with nothing to ask, so this is the only thing
+// standing between that state and fly, which dereferences the querier unconditionally
+// — a nil interface call, a panic on a goroutine, on a path a paired client reaches by
+// asking about any dormant conversation. A flight installed here would also be keyed to
+// a conversation no round trip can ever settle.
+// TestContextUsageResolver_MemoryInstallsNoFlight asserts the map stays empty rather
+// than asserting the reply, because the reply looks the same either way.
+func (r *contextUsageResolver) fresh(ctx context.Context, querier contextUsageQuerier, canonicalID conversations.ConversationID) (protocol.ContextUsagePayload, bool) {
+	if querier == nil {
 		return protocol.ContextUsagePayload{}, false
 	}
 

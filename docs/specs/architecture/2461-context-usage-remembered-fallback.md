@@ -334,3 +334,24 @@ pending:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-16
+
+## Revisions
+
+**2026-09-16 — implementation.** No design departure: every interface, split and decision above
+landed as written, and both Open Questions were resolved in the plan rather than during the build.
+Two things are worth recording.
+
+- **The security review's first SHOULD FIX was demonstrated, not hypothesised.** The RED run — the
+  fallback tests against the unmodified resolver — panicked with a nil-pointer dereference inside
+  `fly`, reached from `Get`'s flight installation, exactly as the finding predicted. The guard is
+  therefore the first statement of `fresh`, ahead of the mutex, and
+  `TestContextUsageResolver_MemoryInstallsNoFlight` asserts the invariant directly. The second
+  SHOULD FIX checked out: `internal/turnbridge` is green in the touched scope, so the v2
+  application-envelope reserve is unmoved — `AsOf` is nil on the `MapEvent` path.
+
+- **Measured size: ~924 lines of total written work** (617 in the implementation commit, ~307 in
+  this plan) against a one-ticket ceiling of 800, and the ticket's own estimate of ~850. The
+  overage is stated rather than fixed, per the floor-beats-ceiling rule: the only cut available is
+  the `as_of` field from the fallback that is its sole consumer, which would produce a child
+  nothing outside the family calls. Every other line of the table holds with room — 3 production
+  files, no new exported type, no consumer call site updated, 5 criteria, no new reject branch.

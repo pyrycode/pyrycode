@@ -4270,6 +4270,85 @@ func TestContextUsagePayload_ZeroValueEncoding(t *testing.T) {
 	}
 }
 
+// TestContextUsagePayload_AsOf pins the REMEMBERED-answer key (#2461) from both
+// sides, and the two sides are one contract rather than two tests that happen to be
+// adjacent.
+//
+// The absent side is already asserted three times over — contextUsageWireKeys is
+// shared by the populated, empty-fixture and zero-value tests, and assertWireKeys
+// rejects an unexpected key as well as a missing one, so a field that lost its
+// omitempty reddens all three. What this test adds is the PRESENT side: exactly one
+// extra key, spelled as_of, carrying the RFC 3339 Z form, and decoding back to an
+// equal instant.
+//
+// THE Z FORM IS NOT PRODUCED HERE. time.Time marshals with whatever offset it
+// carries, and the normalisation lives at the one door that stores a reading,
+// conversations.Registry.SetLastContextUsage. This test feeds a non-UTC instant
+// through the payload to state that boundary out loud: this layer preserves the
+// offset it is handed rather than forcing one, so a producer that skipped the door
+// would emit a local offset and no assertion here would catch it — which is why the
+// door is where it is.
+func TestContextUsagePayload_AsOf(t *testing.T) {
+	stored := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	payload := ContextUsagePayload{
+		ConversationID: "conversation-remembered",
+		Model:          "claude-opus-5",
+		TotalTokens:    31337,
+		MaxTokens:      200000,
+		Percentage:     16,
+		AsOf:           &stored,
+	}
+
+	out, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	assertWireKeys(t, out, append(append([]string{}, contextUsageWireKeys...), "as_of")...)
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(out, &fields); err != nil {
+		t.Fatalf("unmarshal payload key values: %v", err)
+	}
+	if got, want := string(fields["as_of"]), `"2026-09-14T12:00:00Z"`; got != want {
+		t.Errorf("as_of: got JSON %s, want %s", got, want)
+	}
+	// A remembered answer stores no inventories, and the three keys must still be
+	// present and empty rather than null — the property that makes as_of necessary
+	// in the first place, since an empty inventory is otherwise a positive reading.
+	for _, key := range []string{"categories", "mcp_tools", "memory_files"} {
+		if got := string(fields[key]); got != `[]` {
+			t.Errorf("%s: got JSON %s, want []", key, got)
+		}
+	}
+
+	var back ContextUsagePayload
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if back.AsOf == nil {
+		t.Fatal("as_of decoded to nil")
+	}
+	if !back.AsOf.Equal(stored) {
+		t.Errorf("as_of round trip: got %v, want %v", *back.AsOf, stored)
+	}
+
+	// The offset is carried, not normalised: a caller handing this layer a non-UTC
+	// instant gets one back on the wire. The one door that stores a reading is what
+	// makes the daemon's own frames Z-formed.
+	local := stored.In(time.FixedZone("UTC+3", 3*60*60))
+	payload.AsOf = &local
+	out, err = json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal non-UTC payload: %v", err)
+	}
+	if err := json.Unmarshal(out, &fields); err != nil {
+		t.Fatalf("unmarshal non-UTC payload: %v", err)
+	}
+	if got, want := string(fields["as_of"]), `"2026-09-14T15:00:00+03:00"`; got != want {
+		t.Errorf("non-UTC as_of: got JSON %s, want %s", got, want)
+	}
+}
+
 // TestRequestContextUsagePayload_WireKeys pins the payload's COMPLETE set of wire
 // keys (#2431). Its reason is TestRequestModelListPayload_WireKeys': correlation
 // rides the envelope's InReplyTo, so this frame carries NO request-id key, and

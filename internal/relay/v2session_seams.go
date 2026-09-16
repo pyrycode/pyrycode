@@ -880,16 +880,18 @@ type V2SessionConfig struct {
 	// implementations must never touch V2Session or Noise state.
 	MCPStatusFor func(ctx context.Context, conversationID string) (protocol.MCPStatusPayload, bool)
 
-	// ContextUsageFor reports one hosted conversation's CURRENT context-window
-	// breakdown, already shaped as the existing context_usage payload, for an inbound
-	// request_context_usage (#2431). handleRequestContextUsage is its sole reader.
+	// ContextUsageFor reports one hosted conversation's context-window breakdown —
+	// current where one can be taken, last known otherwise — already shaped as the
+	// existing context_usage payload, for an inbound request_context_usage (#2431).
+	// handleRequestContextUsage is its sole reader.
 	//
 	// MCPStatusFor's shape above, deliberately and in full: a context and a
 	// conversation id in, a payload and a comma-ok out, so internal/relay imports
 	// neither internal/sessions nor internal/streamsup and protocol is already
 	// imported on both sides.
 	//
-	// THE READING IS FRESH AND EXPENSIVE, which is the whole reason the verb exists.
+	// THE READING IS FRESH AND EXPENSIVE WHEN ONE CAN BE TAKEN, which is the whole
+	// reason the verb exists; see the AsOf paragraph below for when one cannot.
 	// The implementation asks claude at detail:"full" — a token-count API call per
 	// category — where the automatic post-turn frame (#2371) carries the cheap
 	// detail:"summary" estimate. The DETAIL IS THE IMPLEMENTATION'S CHOICE and is
@@ -907,12 +909,29 @@ type V2SessionConfig struct {
 	// for — and this package has no conversation-keyed state to do it in. A caller
 	// must therefore not assume its own ask caused the round trip it is answered from.
 	//
-	// Comma-ok distinguishes a real reading (true) from no reading to give (false). A
+	// Comma-ok distinguishes a reading to show (true) from none at all (false). A
 	// caller MUST NOT inspect the payload when false; the relay translates that
-	// outcome to retryable context_usage.unavailable and never substitutes a zero or
-	// retained reading. That matters more here than on most seams, because a
-	// ContextUsagePayload of all zeros is indistinguishable from a genuine empty
-	// context — the refusal cannot be expressed in the values.
+	// outcome to retryable context_usage.unavailable and substitutes NOTHING of its
+	// own — no zero payload, no previous answer, no empty frame. That matters more
+	// here than on most seams, because a ContextUsagePayload of all zeros is
+	// indistinguishable from a genuine empty context, so the refusal cannot be
+	// expressed in the values.
+	//
+	// A TRUE IS NOT A PROMISE THAT CLAUDE WAS JUST ASKED (#2461). When no fresh
+	// reading can be taken — no bound session, no live child, a child that never
+	// answers — an implementation MAY answer from a reading it stored earlier, and
+	// the production one does, so a dormant conversation shows a figure instead of an
+	// error. That is a licence for THIS seam only, and it is why the paragraph above
+	// says "a reading to show" rather than "a current reading".
+	//
+	// AN IMPLEMENTATION THAT DOES SO MUST STAMP ContextUsagePayload.AsOf, and the
+	// requirement is not stylistic. A stored reading carries the five headline values
+	// and empty inventories, while that payload's own contract makes an empty
+	// inventory a POSITIVE reading — claude reporting no MCP tools. The two are
+	// byte-identical without the key, so an unstamped remembered answer would tell a
+	// client that a conversation has no memory files rather than that nobody looked.
+	// A fresh reading omits it. The relay neither sets nor inspects the key; it
+	// forwards the payload it is handed.
 	//
 	// Optional: nil makes the inbound type consumed but INERT before payload decode,
 	// membership, or reply — the nil HistoryPage / MCPActuator posture, buying the
