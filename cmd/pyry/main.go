@@ -1424,20 +1424,19 @@ type settingsUpdaterAdapter struct {
 func (a settingsUpdaterAdapter) UpdateSettings(id string, u relay.SettingsUpdate) error {
 	sessionID := sessions.SessionID(id)
 	if u.Model != nil && *u.Model != "" {
-		// Check membership only for a session the daemon actually hosts. Apart from
-		// preserving session.not_found precedence, this prevents an unknown id from
-		// probing whether the bootstrap vocabulary is complete.
+		// Check membership only for a session the daemon actually has a record of.
+		// Apart from preserving session.not_found precedence, this prevents an
+		// unknown id from probing whether the bootstrap vocabulary is complete —
+		// which is why requireKnownSession must stay AHEAD of the vocabulary read
+		// below rather than being folded into the write.
 		// Pool.Lookup("") deliberately resolves the bootstrap session for legacy
-		// internal callers, while Pool.UpdateSettings requires an exact map key.
-		// Preserve the update seam's unknown-session behavior before consulting
-		// the vocabulary.
+		// internal callers, while neither pool write accepts anything but an exact
+		// map key. Preserve the update seam's unknown-session behavior before
+		// consulting the vocabulary.
 		if sessionID == "" {
 			return relay.ErrSessionUnknown
 		}
-		if _, err := a.p.Lookup(sessionID); err != nil {
-			if errors.Is(err, sessions.ErrSessionNotFound) {
-				return relay.ErrSessionUnknown
-			}
+		if err := a.requireKnownSession(sessionID); err != nil {
 			return err
 		}
 		list, have := retainedModelVocabulary(a.p, a.saved, id)
@@ -1446,16 +1445,85 @@ func (a settingsUpdaterAdapter) UpdateSettings(id string, u relay.SettingsUpdate
 		}
 	}
 
-	err := a.p.UpdateSettings(sessionID, sessions.SettingsUpdate{
+	update := sessions.SettingsUpdate{
 		Model:          u.Model,
 		Effort:         u.Effort,
 		YOLO:           u.YOLO,
 		PermissionMode: u.PermissionMode,
-	})
-	if errors.Is(err, sessions.ErrSessionNotFound) {
+	}
+
+	// TWO WRITES, LIVE FIRST, EACH WITH ITS OWN MISS (#2463) — resolveBoundRunSettings'
+	// composition for the read half (#2449), applied to the write. A session the pool
+	// holds is written through Pool.UpdateSettings; one the daemon has only a persisted
+	// record of is merged into that entry by Pool.UpdateDormantSettings, which is what
+	// the first message will then revive it under. Only an id in neither half is
+	// unknown. Before this the dormant case fell through to the refusal, and since
+	// Pool.New materialises just the bootstrap, that was EVERY conversation after a
+	// daemon restart — a model or effort picked before the channel's first message
+	// simply did not land.
+	//
+	// The order is not interchangeable, for the reason the read's twin records: live
+	// first means a session the pool holds is never written into a stale persisted
+	// entry, and that is a guarantee of this function rather than merely of the pool's
+	// bookkeeping (Pool.materialise retires the dormant entry it takes over, so the
+	// halves partition — but a composition that asked in the other order would depend
+	// on that staying true forever).
+	//
+	// ONLY ErrSessionNotFound falls through. Every other error from the live write —
+	// an unsupported mode, a contradicting posture pair, a failed save — is that
+	// session's answer and is returned as it is today; retrying such a frame against
+	// the dormant half would be asking a second writer to re-judge a verdict already
+	// reached.
+	//
+	// A revive can land between the two writes and retire the entry. p.dormant only
+	// ever shrinks, so the id can only move that way and the dormant write finds a
+	// clean miss rather than a torn entry; session.not_found is then the correct
+	// answer, since the settings reached nothing. No retry — the operator's next pick
+	// goes through the live half.
+	if err := a.p.UpdateSettings(sessionID, update); !errors.Is(err, sessions.ErrSessionNotFound) {
+		return err
+	}
+	err := a.p.UpdateDormantSettings(sessionID, update)
+	// Both sentinels become session.not_found, which is a deliberate decision and not
+	// a lost distinction: a dormant session cannot store a posture (a revive does not
+	// restore one, #1487), and the user-visible outcome is identical either way — the
+	// client's menu snaps back. A distinguishable code is wire vocabulary plus client
+	// work, and no client has been observed mis-reading this one. The two stay
+	// separate sentinels INSIDE internal/sessions for the reason
+	// ErrDormantPostureUnsupported records; it is this seam that collapses them.
+	if errors.Is(err, sessions.ErrSessionNotFound) || errors.Is(err, sessions.ErrDormantPostureUnsupported) {
 		return relay.ErrSessionUnknown
 	}
 	return err
+}
+
+// requireKnownSession reports whether this daemon has any record of id — live or
+// dormant — mapping an absence to relay.ErrSessionUnknown. It is the gate's
+// existence probe, hoisted out of UpdateSettings because it now asks two
+// questions and the ordering constraint above is easier to see with one call.
+//
+// Pool.DormantSettingsFor is reused as the dormant probe and its value discarded:
+// it already answers exactly "does this pool hold a dormant entry for id", with a
+// miss of its own, so no new pool surface is needed for a question the read half
+// already exposes.
+//
+// Both probes are advisory by the time the write runs — a revive can retire an
+// entry in between — and that is sound rather than tolerated: the id can only move
+// dormant→live, the live write is attempted first, and an id that moved is written
+// by the half that now holds it. The probe's job is to refuse an id the daemon has
+// NO record of before the vocabulary is consulted, and an unknown id stays unknown.
+func (a settingsUpdaterAdapter) requireKnownSession(id sessions.SessionID) error {
+	_, err := a.p.Lookup(id)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sessions.ErrSessionNotFound) {
+		return err
+	}
+	if _, err := a.p.DormantSettingsFor(id); err != nil {
+		return relay.ErrSessionUnknown
+	}
+	return nil
 }
 
 // validateModelVocabulary classifies one non-empty client model against the same

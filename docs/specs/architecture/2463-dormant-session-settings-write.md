@@ -470,3 +470,32 @@ ticket:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-16
+
+## Revisions
+
+### 2026-09-16 — implementation
+
+No design change: the method, the sentinel, the field-by-field merge, the
+live-first adapter composition and the test set all landed as planned. Two things
+worth recording against the plan above.
+
+- **The existence probe was extracted into a named method**,
+  `settingsUpdaterAdapter.requireKnownSession`, rather than left inline where the
+  old single `Pool.Lookup` call sat. Same two probes in the same order; the
+  extraction is so the security pass's ordering constraint — the probe stands
+  ahead of `retainedModelVocabulary` — is legible at one call instead of being
+  buried in a nested branch.
+- **The Sizing section's arithmetic was understated.** Actual written work is
+  about 1240 lines (≈775 production and test, ≈470 spec), against the ~990 that
+  section estimated; the gap is docstring density in `internal/sessions`, where
+  the new method's ~35 lines of code carry ~125 of comment in the style the file
+  already sets. The structural count is unchanged — 2 production files, 1 consumer
+  call site, 5 ACs, 2 reject branches — and the floor-rule conclusion stands: no
+  split of this ticket produces a child with a consumer outside its own family.
+  Recorded rather than quietly left standing, because the estimate is one of the
+  things the plan is audited against.
+
+Both SHOULD FIX items from the security review landed: `Pool.UpdateDormantSettings`'
+docstring states that validating model and effort is not its job and names the
+argv sink, and `requireKnownSession` sits ahead of the vocabulary read with the
+reason written at the call site.
