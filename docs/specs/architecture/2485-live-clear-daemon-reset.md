@@ -98,6 +98,13 @@ Non-vacuity: the recall cannot pass on a respawned, memory-less child — the su
 1. **Does a live wrap-up reliably produce `written`?** `admissibleHandoffNote` is permissive (non-empty, valid UTF-8, no control runes, no fence line), so ordinary prose passes; the residual risks are the 90 s bound and a disabled note store. Resolve on the first live run; a `skipped` is routed, not accommodated.
 2. **Does the wrap-up turn produce any `unrecognized_message`?** The prompt forbids tool calls and questions, and no delegation is involved, so the window-wide negative should hold. If a live run says otherwise, the negative is what reports it.
 
+## Revisions
+
+**2026-09-16 — implementation.** The design landed as planned; two notes.
+
+- **The exclusion set turned out to be the second of two guards, not the only one.** The recall drain already refuses any delta arriving before its own ack, and that guard rests on wire order: the ack is pushed when the daemon receives the recall frame, so every delta already in flight — the predecessor's wrap-up reply included — precedes it. The turn-id exclusion rests on turn identity instead and holds even where that ordering does not. Both are kept and both are stated at the code; they are different fabric, not the same check twice.
+- **Both Open Questions stay open by construction, and are the live gate's to answer.** Neither is decidable offline: whether a live wrap-up produces `written` and whether the wrap-up turn emits any `unrecognized_message` are observations of a real claude, and the case is built so that each one reddens with a message naming its readings rather than passing quietly. Nothing in the design waits on them.
+
 ## Documentation handoff
 
 Owned by the documentation stage; pending, not done here.
