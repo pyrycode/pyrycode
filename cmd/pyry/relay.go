@@ -1036,12 +1036,22 @@ func startRelayV2(
 			// assignment: unreachable in practice, since no frame can dispatch until
 			// mgr.Run starts, but a hook read from a dispatch goroutine is not a
 			// place to rely on an argument.
+			//
+			// The reset seam is the SAME activeSessionStarter the SessionStarter
+			// field below is given (#2456), which is what makes "a client's /clear
+			// gives the same reset as the New session frame" structural rather than
+			// two implementations that happen to agree. It is passed as the plain
+			// relay.SessionStarter, never the late form: #2443's workspace_refused
+			// reply correlates against a new_session frame by in_reply_to, so a
+			// send_message must not be answered with it. An unwired starter
+			// (foreground / v1) leaves a nil seam, which still DROPS the /clear
+			// rather than delivering it — see the intercept's fail-closed note.
 			protocol.TypeSendMessage: handlers.SendMessage(w.router, w.queue, attachmentResolve, w.convReg, resolveConversationsRegistryPath(w.instanceName), func(p protocol.ConversationUpdatedPayload) {
 				if announceConversation == nil {
 					return
 				}
 				announceConversation(p)
-			}, logger),
+			}, w.activeSessionStarter, logger),
 		},
 		// Screen-snapshot seam (#618): the supervisor renders the live screen
 		// inside the tui-driver seal; KnownConversation gates request_snapshot

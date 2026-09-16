@@ -340,6 +340,12 @@ conversation that was never named. `handleDequeueMessage` has the identical
 unbounded exposure today and was the thing this would have copied verbatim had
 it not been caught in security review.
 
+## A second caller, in a different goroutine position (#2456)
+
+`send_message`'s `/clear` intercept ([`relay-package-handlers.md` § `send_message` grows an eighth seam](relay-package-handlers.md#send_message-grows-an-eighth-seam-the-clear-intercept-2456)) gives this seam a second caller, and the two sit in materially different places: `handleNewSession` runs on `V2SessionManager`'s single `Run` dispatch goroutine (§ *The wrap-up turn* above explains why blocking it for 90 seconds was never an option), while `SendMessage` — a `dispatch.Route` handler — runs on the per-conn worker goroutine `routeAppFrame` spawns (see [`v2-session-manager-concurrency.md`](v2-session-manager-concurrency.md)), never on `Run`.
+
+**Reasoning transferred from one caller to the other would have been wrong in both directions.** `resolveSpawnDir`'s documented blocking (realpath, `MkdirAll`, a `~/.claude.json` write, no timeout) stalls `Run` — and therefore every connection the daemon hosts — when `handleNewSession` calls it; from the `/clear` intercept it stalls only that one connection's own later frames, never `Run` and never another conversation. That difference is also what makes an inline, synchronous seam call safe here with no `LateSessionStarter`-style deferred reply: `StartNewSession` (the plain form, not the late one — see § *Workspace refusal reply* above for why the late form exists at all) is documented safe from any goroutine, and the one slow arm (the wrap-up) already hands itself to its own goroutine inside `resetThenRotate` regardless of which caller invoked it. Nothing about the seam itself changed to support the second caller; only the caller's own goroutine position determined what was safe to do around it. **Before reusing a blocking-cost or concurrency argument made for one caller of a seam, check which goroutine the new caller actually runs on — the seam's own safety contract can be identical while the consequence of calling it is not.**
+
 ## Multi-phone / scoping
 
 Any interactive paired phone can send `new_session`; naming a conversation
@@ -378,3 +384,7 @@ it was.
 - [fakephone-harness.md § Library trade-off](fakephone-harness.md#library-trade-off-timed-out-receive)
   — why the e2e case asserts "nothing rotated" from the daemon's log rather
   than by waiting on a `Receive` that will never arrive.
+- [`relay-package-handlers.md` § `send_message` grows an eighth seam](relay-package-handlers.md#send_message-grows-an-eighth-seam-the-clear-intercept-2456)
+  — the seam's second caller (#2456): a `/clear` in message text reaches this
+  same entry point instead of claude, on a different goroutine than
+  `handleNewSession`'s.

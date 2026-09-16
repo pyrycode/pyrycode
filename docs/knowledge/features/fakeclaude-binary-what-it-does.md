@@ -24,18 +24,17 @@ mode** (`PYRY_FAKE_CLAUDE_MODAL_CLEAR_ON_ANSWER`, #793) that **extends** modal m
 (`PYRY_FAKE_CLAUDE_MODAL_TRIGGER`, #791 — the permission-prompt raiser): after the modal
 is shown it clears it on the first post-modal stdin byte (the local `pyry attach` head's
 answer keystroke) so tui-driver fires `EventKindPtyModalHidden` and the daemon's #706
-**local** first-answer-wins arm resolves it, and the **clear-rotate mode**
-(`PYRY_FAKE_CLAUDE_CLEAR_ROTATES`, #1004) that watches stdin for the `/clear`
-slash-command bytes (the keystroke `supervisor.StartNewSession` types on a phone's
-`new_session` frame) and, on the first match, rotates the live session JSONL once —
-mirroring real claude's `/clear`-starts-a-new-session behaviour so the #1004
-new_session e2e can observe the rotation on disk, likewise
+**local** first-answer-wins arm resolves it, likewise
 extend the binary past pure rotation; see [§ Configuration](#configuration--env),
 [§ JSONL-trigger mode](#jsonl-trigger-mode-642),
 [§ Idle-trigger mode](#idle-trigger-mode-792),
-[§ Esc-ends-turn mode](#esc-ends-turn-mode-794),
-[§ Modal-clear-on-answer mode](#modal-clear-on-answer-mode-793), and
-[§ Clear-rotate mode](#clear-rotate-mode-1004). Whenever the stdin reader is
+[§ Esc-ends-turn mode](#esc-ends-turn-mode-794), and
+[§ Modal-clear-on-answer mode](#modal-clear-on-answer-mode-793). The earlier
+**clear-rotate mode** (`PYRY_FAKE_CLAUDE_CLEAR_ROTATES`, #1004) — which watched stdin
+for the `/clear` bytes `supervisor.StartNewSession` typed on a phone's `new_session`
+frame — was retired by #2456: it had been stranded since #1348 deleted the terminal
+supervisor that drove it, and a client's `new_session` now rotates through
+`activeSessionStarter.start` instead of a PTY keystroke. Whenever the stdin reader is
 active (TUI or `STDIN_LOG`), a delivered turn also triggers **on-turn
 transcript growth** (#673): the live session JSONL grows by one inert line so
 the daemon's #668 transcript-growth commit-confirm observes growth and acks

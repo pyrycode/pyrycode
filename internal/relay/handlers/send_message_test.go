@@ -207,7 +207,7 @@ func TestSendMessage_AckOnEnqueue(t *testing.T) {
 		Text:           sendMsgText,
 	})
 
-	h := SendMessage(router, q, nil, nil, "", nil, sendMsgLogger(t))
+	h := SendMessage(router, q, nil, nil, "", nil, nil, sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestSendMessage_TwoConversations_EachEnqueuesIndependently(t *testing.T) {
 			MessageID:      sendMsgMessageID,
 			Text:           text,
 		})
-		h := SendMessage(router, q, nil, nil, "", nil, sendMsgLogger(t))
+		h := SendMessage(router, q, nil, nil, "", nil, nil, sendMsgLogger(t))
 		if err := h(context.Background(), c, req); err != nil {
 			t.Fatalf("handler(%s): %v", convID, err)
 		}
@@ -306,7 +306,7 @@ func TestSendMessage_UnknownConversation_RejectedBeforeEnqueue(t *testing.T) {
 		Text:           sendMsgText,
 	})
 
-	h := SendMessage(router, q, nil, nil, "", nil, sendMsgLogger(t))
+	h := SendMessage(router, q, nil, nil, "", nil, nil, sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -348,7 +348,7 @@ func TestSendMessage_NoBoundSession_RejectedBeforeEnqueue(t *testing.T) {
 		Text:           sendMsgText,
 	})
 
-	h := SendMessage(router, q, nil, nil, "", nil, sendMsgLogger(t))
+	h := SendMessage(router, q, nil, nil, "", nil, nil, sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestSendMessage_BacklogFull_RetryableReject(t *testing.T) {
 		Text:           sendMsgText,
 	})
 
-	h := SendMessage(router, q, nil, nil, "", nil, logger)
+	h := SendMessage(router, q, nil, nil, "", nil, nil, logger)
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -445,7 +445,7 @@ func TestSendMessage_MalformedPayload_RejectedBeforeEnqueue(t *testing.T) {
 		Payload: []byte("not-json"),
 	}
 
-	h := SendMessage(router, q, nil, nil, "", nil, sendMsgLogger(t))
+	h := SendMessage(router, q, nil, nil, "", nil, nil, sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -572,7 +572,7 @@ func TestSendMessage_NoAttachments_DeliveredVerbatim(t *testing.T) {
 			res := &fakeAttachmentResolver{}
 			c, recv, _ := newSendMsgConn(t)
 
-			h := SendMessage(router, q, res.resolve, nil, "", nil, sendMsgLogger(t))
+			h := SendMessage(router, q, res.resolve, nil, "", nil, nil, sendMsgLogger(t))
 			if err := h(context.Background(), c, sendMsgRawRequest(t, tt.payload)); err != nil {
 				t.Fatalf("handler: %v", err)
 			}
@@ -656,7 +656,7 @@ func TestSendMessage_ComposesPromptFromAttachments(t *testing.T) {
 				AttachmentIDs:  tt.ids,
 			})
 
-			h := SendMessage(router, q, res.resolve, nil, "", nil, sendMsgLogger(t))
+			h := SendMessage(router, q, res.resolve, nil, "", nil, nil, sendMsgLogger(t))
 			if err := h(context.Background(), c, req); err != nil {
 				t.Fatalf("handler: %v", err)
 			}
@@ -729,7 +729,7 @@ func TestSendMessage_UnresolvedAttachment_RejectedBeforeEnqueue(t *testing.T) {
 				AttachmentIDs:  ids,
 			})
 
-			h := SendMessage(router, q, resolve, nil, "", nil, sendMsgLogger(t))
+			h := SendMessage(router, q, resolve, nil, "", nil, nil, sendMsgLogger(t))
 			if err := h(context.Background(), c, req); err != nil {
 				t.Fatalf("handler: %v", err)
 			}
@@ -806,7 +806,7 @@ func TestSendMessage_AttachmentIDBound(t *testing.T) {
 				AttachmentIDs:  tt.ids,
 			})
 
-			h := SendMessage(router, q, res.resolve, nil, "", nil, sendMsgLogger(t))
+			h := SendMessage(router, q, res.resolve, nil, "", nil, nil, sendMsgLogger(t))
 			if err := h(context.Background(), c, req); err != nil {
 				t.Fatalf("handler: %v", err)
 			}
@@ -856,7 +856,7 @@ func TestSendMessage_RouteBeforeResolve(t *testing.T) {
 		AttachmentIDs:  []string{attachID(1)},
 	})
 
-	h := SendMessage(router, q, res.resolve, nil, "", nil, sendMsgLogger(t))
+	h := SendMessage(router, q, res.resolve, nil, "", nil, nil, sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -912,7 +912,7 @@ func TestSendMessage_AttachmentPathsNeverLogged(t *testing.T) {
 				AttachmentIDs:  ids,
 			})
 
-			h := SendMessage(router, q, res.resolve, nil, "", nil, logger)
+			h := SendMessage(router, q, res.resolve, nil, "", nil, nil, logger)
 			if err := h(context.Background(), c, req); err != nil {
 				t.Fatalf("handler: %v", err)
 			}
@@ -972,7 +972,7 @@ func TestSendMessage_RelaysClientMessageIDVerbatim(t *testing.T) {
 				Text:           sendMsgText,
 			})
 
-			h := SendMessage(router, q, nil, nil, "", nil, sendMsgLogger(t))
+			h := SendMessage(router, q, nil, nil, "", nil, nil, sendMsgLogger(t))
 			if err := h(context.Background(), c, req); err != nil {
 				t.Fatalf("handler: %v", err)
 			}
@@ -1069,7 +1069,7 @@ func TestSendMessage_AutoNamesUnnamedConversation(t *testing.T) {
 		Text:           sendMsgText,
 	})
 
-	h := SendMessage(routeTo(&stubTurnWriter{}), q, nil, reg, path, announce, sendMsgLogger(t))
+	h := SendMessage(routeTo(&stubTurnWriter{}), q, nil, reg, path, announce, nil, sendMsgLogger(t))
 	before := time.Now()
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
@@ -1132,7 +1132,7 @@ func TestSendMessage_AutoNamePushesNullLabelWhenUnlabelled(t *testing.T) {
 	c, _, _ := newSendMsgConn(t)
 	req := sendMsgRequest(t, protocol.SendMessagePayload{ConversationID: sendMsgConvID, Text: sendMsgText})
 
-	h := SendMessage(routeTo(&stubTurnWriter{}), &fakeEnqueuer{}, nil, reg, path, announce, sendMsgLogger(t))
+	h := SendMessage(routeTo(&stubTurnWriter{}), &fakeEnqueuer{}, nil, reg, path, announce, nil, sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -1157,7 +1157,7 @@ func TestSendMessage_AutoNameNeverOverwrites(t *testing.T) {
 	c, recv, _ := newSendMsgConn(t)
 	req := sendMsgRequest(t, protocol.SendMessagePayload{ConversationID: sendMsgConvID, Text: sendMsgText})
 
-	h := SendMessage(routeTo(&stubTurnWriter{}), q, nil, reg, path, announce, sendMsgLogger(t))
+	h := SendMessage(routeTo(&stubTurnWriter{}), q, nil, reg, path, announce, nil, sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -1220,7 +1220,7 @@ func TestSendMessage_AutoNameSkipsRejectedSends(t *testing.T) {
 			announce, pushed := capturingAnnouncer()
 			c, recv, _ := newSendMsgConn(t)
 
-			h := SendMessage(tc.router, &fakeEnqueuer{reject: tc.reject}, nil, reg, path, announce, sendMsgLogger(t))
+			h := SendMessage(tc.router, &fakeEnqueuer{reject: tc.reject}, nil, reg, path, announce, nil, sendMsgLogger(t))
 			if err := h(context.Background(), c, sendMsgRequest(t, tc.payload)); err != nil {
 				t.Fatalf("handler: %v", err)
 			}
@@ -1278,7 +1278,7 @@ func TestSendMessage_AutoNameFromTextNotComposedPrompt(t *testing.T) {
 				AttachmentIDs:  []string{attachID(1)},
 			})
 
-			h := SendMessage(routeTo(&stubTurnWriter{}), q, res.resolve, reg, path, announce, sendMsgLogger(t))
+			h := SendMessage(routeTo(&stubTurnWriter{}), q, res.resolve, reg, path, announce, nil, sendMsgLogger(t))
 			if err := h(context.Background(), c, req); err != nil {
 				t.Fatalf("handler: %v", err)
 			}
@@ -1323,7 +1323,7 @@ func TestSendMessage_AutoNameLogsWithoutTitleOrText(t *testing.T) {
 	const secret = "zqxjvbrit confidential merger memo for the board tomorrow"
 	req := sendMsgRequest(t, protocol.SendMessagePayload{ConversationID: sendMsgConvID, Text: secret})
 
-	h := SendMessage(routeTo(&stubTurnWriter{}), &fakeEnqueuer{}, nil, reg, path, nil, logger)
+	h := SendMessage(routeTo(&stubTurnWriter{}), &fakeEnqueuer{}, nil, reg, path, nil, nil, logger)
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -1351,7 +1351,7 @@ func TestSendMessage_AutoNameNilSeamsStillAck(t *testing.T) {
 		c, recv, _ := newSendMsgConn(t)
 		req := sendMsgRequest(t, protocol.SendMessagePayload{ConversationID: sendMsgConvID, Text: sendMsgText})
 
-		h := SendMessage(routeTo(&stubTurnWriter{}), &fakeEnqueuer{}, nil, nil, "", announce, sendMsgLogger(t))
+		h := SendMessage(routeTo(&stubTurnWriter{}), &fakeEnqueuer{}, nil, nil, "", announce, nil, sendMsgLogger(t))
 		if err := h(context.Background(), c, req); err != nil {
 			t.Fatalf("handler: %v", err)
 		}
@@ -1367,7 +1367,7 @@ func TestSendMessage_AutoNameNilSeamsStillAck(t *testing.T) {
 		c, recv, _ := newSendMsgConn(t)
 		req := sendMsgRequest(t, protocol.SendMessagePayload{ConversationID: sendMsgConvID, Text: sendMsgText})
 
-		h := SendMessage(routeTo(&stubTurnWriter{}), &fakeEnqueuer{}, nil, reg, path, nil, sendMsgLogger(t))
+		h := SendMessage(routeTo(&stubTurnWriter{}), &fakeEnqueuer{}, nil, reg, path, nil, nil, sendMsgLogger(t))
 		if err := h(context.Background(), c, req); err != nil {
 			t.Fatalf("handler: %v", err)
 		}
@@ -1422,7 +1422,7 @@ func TestSendMessage_AcksBeforeAutoNaming(t *testing.T) {
 		Text:           sendMsgText,
 	})
 
-	h := SendMessage(routeTo(&stubTurnWriter{}), &fakeEnqueuer{}, nil, namer, path, announce, sendMsgLogger(t))
+	h := SendMessage(routeTo(&stubTurnWriter{}), &fakeEnqueuer{}, nil, namer, path, announce, nil, sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -1519,7 +1519,7 @@ func TestSendMessage_BumpsLastUsedAtOnAcceptedSendOnly(t *testing.T) {
 			reg, path := newAutoNameReg(t, &existing)
 			c, recv, _ := newSendMsgConn(t)
 
-			h := SendMessage(tc.router, &fakeEnqueuer{reject: tc.reject}, nil, reg, path, nil, sendMsgLogger(t))
+			h := SendMessage(tc.router, &fakeEnqueuer{reject: tc.reject}, nil, reg, path, nil, nil, sendMsgLogger(t))
 			before := time.Now()
 			if err := h(context.Background(), c, sendMsgRequest(t, tc.payload)); err != nil {
 				t.Fatalf("handler: %v", err)
@@ -1592,7 +1592,7 @@ func TestSendMessage_BumpSparesIdleConversationFromSweep(t *testing.T) {
 	}
 
 	c, recv, _ := newSendMsgConn(t)
-	h := SendMessage(routeTo(&stubTurnWriter{}), &fakeEnqueuer{}, nil, reg, path, nil, sendMsgLogger(t))
+	h := SendMessage(routeTo(&stubTurnWriter{}), &fakeEnqueuer{}, nil, reg, path, nil, nil, sendMsgLogger(t))
 	if err := h(context.Background(), c, sendMsgRequest(t, protocol.SendMessagePayload{
 		ConversationID: sendMsgConvID,
 		MessageID:      sendMsgMessageID,
@@ -1610,4 +1610,344 @@ func TestSendMessage_BumpSparesIdleConversationFromSweep(t *testing.T) {
 		t.Errorf("ShouldArchive = true one day after an accepted message (LastUsedAt = %v); "+
 			"a conversation in daily use must outlive the 30-day sweep", stored.LastUsedAt)
 	}
+}
+
+// --- #2456: a client's /clear runs the reset path instead of reaching claude ---
+
+// clearText is the one literal the handler intercepts. Spelled here rather than
+// inlined so a test that means "the command" and a test that means "text that
+// merely resembles it" cannot drift into the same string by accident.
+const clearText = "/clear"
+
+// fakeResetter is the test double for ConversationResetter. It records every
+// conversation id the handler handed the seam, in call order, and returns an
+// injectable error so the best-effort arms (an inert conversation, a reset
+// already in progress, a rotation that failed) can be driven from here — the
+// handler cannot tell those apart and must treat all of them alike.
+//
+// onStart runs before the return, which is how the ack-ordering test observes
+// what had already been emitted at the moment the seam was called.
+type fakeResetter struct {
+	gotIDs  []string
+	err     error
+	onStart func()
+}
+
+func (f *fakeResetter) StartNewSession(conversationID string) error {
+	f.gotIDs = append(f.gotIDs, conversationID)
+	if f.onStart != nil {
+		f.onStart()
+	}
+	return f.err
+}
+
+// TestSendMessage_ClearInterceptedIntoReset covers AC-1: a "/clear" is neither
+// enqueued nor delivered, it starts the reset for the conversation Route just
+// resolved, and the client still gets the ordinary ack. Nothing enqueued is also
+// what makes "no queue_state item is published" hold, since that frame is emitted
+// by the queue's own observer over what was appended.
+func TestSendMessage_ClearInterceptedIntoReset(t *testing.T) {
+	t.Parallel()
+	bound := &stubTurnWriter{}
+	router := &stubSessionRouter{tw: bound}
+	q := &fakeEnqueuer{}
+	reset := &fakeResetter{}
+	c, recv, _ := newSendMsgConn(t)
+	req := sendMsgRequest(t, protocol.SendMessagePayload{
+		ConversationID: sendMsgConvID,
+		MessageID:      sendMsgMessageID,
+		Text:           clearText,
+	})
+
+	h := SendMessage(router, q, nil, nil, "", nil, reset, sendMsgLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	assertSendMsgEnvelopeShape(t, recv(), protocol.TypeAck)
+
+	if got := router.gotIDs; len(got) != 1 || got[0] != sendMsgConvID {
+		t.Errorf("router routed %v, want [%q]: the intercept must sit BELOW Route so the "+
+			"id is registry-validated and the follow-active cursor is stamped", got, sendMsgConvID)
+	}
+	if got := reset.gotIDs; len(got) != 1 || got[0] != sendMsgConvID {
+		t.Errorf("StartNewSession calls = %v, want [%q] exactly once", got, sendMsgConvID)
+	}
+	if len(q.calls) != 0 {
+		t.Errorf("Enqueue calls = %d, want 0: an intercepted /clear is never queued, which is "+
+			"also what keeps a queue_state item from being published for it", len(q.calls))
+	}
+	if bound.activateCalls != 0 || bound.calls != 0 {
+		t.Errorf("write surface reached: activate=%d write=%d, want 0/0 — /clear must never "+
+			"reach claude", bound.activateCalls, bound.calls)
+	}
+}
+
+// TestSendMessage_ClearDropsAttachments covers AC-2: attachment ids on an
+// intercepted /clear are dropped. The resolver is never consulted, so no
+// attachment.not_found can be answered for one, and the message never becomes the
+// conversation's auto-name. The resolver here refuses EVERY id, so a handler that
+// resolved before intercepting would answer an error instead of an ack and fail
+// loudly rather than by a silent count.
+func TestSendMessage_ClearDropsAttachments(t *testing.T) {
+	t.Parallel()
+	res := &fakeAttachmentResolver{}
+	reset := &fakeResetter{}
+	q := &fakeEnqueuer{}
+	reg, path := newAutoNameReg(t, nil)
+	c, recv, _ := newSendMsgConn(t)
+	req := sendMsgRequest(t, protocol.SendMessagePayload{
+		ConversationID: sendMsgConvID,
+		MessageID:      sendMsgMessageID,
+		Text:           clearText,
+		AttachmentIDs:  []string{attachID(1), attachID(2)},
+	})
+
+	h := SendMessage(routeTo(&stubTurnWriter{}), q, res.resolve, reg, path, nil, reset, sendMsgLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	assertSendMsgEnvelopeShape(t, recv(), protocol.TypeAck)
+
+	if len(res.calls) != 0 {
+		t.Errorf("resolver calls = %d, want 0: a /clear's attachment ids are dropped, never "+
+			"resolved — resolving them would answer attachment.not_found for a frame that is "+
+			"not a message", len(res.calls))
+	}
+	if len(reset.gotIDs) != 1 {
+		t.Errorf("StartNewSession calls = %d, want 1", len(reset.gotIDs))
+	}
+	if len(q.calls) != 0 {
+		t.Errorf("Enqueue calls = %d, want 0", len(q.calls))
+	}
+	if got := storedName(t, reg, sendMsgConvID); got != nil {
+		t.Errorf("stored Name = %q, want nil: a /clear must never become the conversation's "+
+			"auto-name", *got)
+	}
+}
+
+// TestSendMessage_OnlyTheExactLiteralIsIntercepted covers AC-3: the match is one
+// fixed, case-sensitive, first-position token. Every other text reaches claude
+// byte-for-byte, delivery included. This table is what pins the literal against
+// drift into a prefix match, a case-insensitive compare, or a vocabulary — the
+// security constraint the protocol doc's one stated exception carries.
+func TestSendMessage_OnlyTheExactLiteralIsIntercepted(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		text      string
+		intercept bool
+	}{
+		{"the literal", "/clear", true},
+		{"surrounding whitespace is trimmed", "  /clear\n", true},
+		{"first token, with an argument after it", "/clear the decks", true},
+		{"longer command sharing the prefix", "/clearcache", false},
+		{"different case", "/CLEAR", false},
+		{"a sibling slash command", "/compact", false},
+		{"another sibling slash command", "/model opus", false},
+		{"not the first token", "please run /clear now", false},
+		{"the literal inside a word", "x/clear", false},
+		{"empty text", "", false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			q := &fakeEnqueuer{}
+			reset := &fakeResetter{}
+			c, recv, _ := newSendMsgConn(t)
+			req := sendMsgRequest(t, protocol.SendMessagePayload{
+				ConversationID: sendMsgConvID,
+				MessageID:      sendMsgMessageID,
+				Text:           tc.text,
+			})
+
+			h := SendMessage(routeTo(&stubTurnWriter{}), q, nil, nil, "", nil, reset, sendMsgLogger(t))
+			if err := h(context.Background(), c, req); err != nil {
+				t.Fatalf("handler: %v", err)
+			}
+			// Both arms ack, so the reply alone does not discriminate — which is the
+			// point. The queue and the seam are what tell them apart.
+			assertSendMsgEnvelopeShape(t, recv(), protocol.TypeAck)
+
+			if tc.intercept {
+				if len(reset.gotIDs) != 1 {
+					t.Errorf("StartNewSession calls = %d, want 1 for %q", len(reset.gotIDs), tc.text)
+				}
+				if len(q.calls) != 0 {
+					t.Errorf("Enqueue calls = %d, want 0 for %q", len(q.calls), tc.text)
+				}
+				return
+			}
+			if len(reset.gotIDs) != 0 {
+				t.Errorf("StartNewSession calls = %d, want 0 for %q: only the exact first-token "+
+					"literal is intercepted", len(reset.gotIDs), tc.text)
+			}
+			if len(q.calls) != 1 {
+				t.Fatalf("Enqueue calls = %d, want 1 for %q", len(q.calls), tc.text)
+			}
+			if q.calls[0].text != tc.text || q.calls[0].delivery != tc.text {
+				t.Errorf("Enqueue(text=%q, delivery=%q), want both %q byte-for-byte",
+					q.calls[0].text, q.calls[0].delivery, tc.text)
+			}
+		})
+	}
+}
+
+// TestSendMessage_ClearOnUnroutableConversationRejectedAsToday covers AC-4's third
+// row: a /clear naming an unknown or unbound conversation is rejected exactly as
+// today, and never reaches the seam. That holds structurally because the intercept
+// sits below Route — this pins it so a future edit cannot hoist the match above
+// the validation and turn /clear into a way to drive a reset on an id the registry
+// never approved.
+func TestSendMessage_ClearOnUnroutableConversationRejectedAsToday(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		routeErr      error
+		wantCode      string
+		wantRetryable bool
+	}{
+		{"unknown conversation", conversations.ErrConversationNotFound, protocol.CodeConversationNotFound, false},
+		{"no bound session", errors.New("no live session"), protocol.CodeServerBinaryOffline, true},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			q := &fakeEnqueuer{}
+			reset := &fakeResetter{}
+			c, recv, _ := newSendMsgConn(t)
+			req := sendMsgRequest(t, protocol.SendMessagePayload{
+				ConversationID: sendMsgConvID,
+				MessageID:      sendMsgMessageID,
+				Text:           clearText,
+			})
+
+			h := SendMessage(&stubSessionRouter{err: tc.routeErr}, q, nil, nil, "", nil, reset, sendMsgLogger(t))
+			if err := h(context.Background(), c, req); err != nil {
+				t.Fatalf("handler: %v", err)
+			}
+
+			env := assertSendMsgEnvelopeShape(t, recv(), protocol.TypeError)
+			got := sendMsgErrorPayload(t, env)
+			if got.Code != tc.wantCode {
+				t.Errorf("Code = %q, want %q", got.Code, tc.wantCode)
+			}
+			if got.Retryable != tc.wantRetryable {
+				t.Errorf("Retryable = %v, want %v", got.Retryable, tc.wantRetryable)
+			}
+			if len(reset.gotIDs) != 0 {
+				t.Errorf("StartNewSession calls = %d, want 0: the intercept must stay BELOW "+
+					"Route, so an id the registry refused never reaches the reset", len(reset.gotIDs))
+			}
+			if len(q.calls) != 0 {
+				t.Errorf("Enqueue calls = %d, want 0", len(q.calls))
+			}
+		})
+	}
+}
+
+// TestSendMessage_ClearToleratesEverySeamOutcome covers AC-4's first two rows as
+// this handler can see them. A conversation already resetting, one with no live
+// child, and one whose rotation failed are all arms of the seam's own entry point
+// (cmd/pyry's activeSessionStarter.start, pinned there by #2477) — from here they
+// are indistinguishable, and the contract is that ALL of them leave the message
+// dropped and the client acked. A seam error must never become an error frame:
+// the message is already gone, so there is nothing to retry and nothing to roll
+// back.
+func TestSendMessage_ClearToleratesEverySeamOutcome(t *testing.T) {
+	t.Parallel()
+	q := &fakeEnqueuer{}
+	reset := &fakeResetter{err: errors.New("rotation lost the race")}
+	logger, buf := sendMsgCapturingLogger(t)
+	c, recv, _ := newSendMsgConn(t)
+	req := sendMsgRequest(t, protocol.SendMessagePayload{
+		ConversationID: sendMsgConvID,
+		MessageID:      sendMsgMessageID,
+		Text:           clearText + " wrap it up",
+	})
+
+	h := SendMessage(routeTo(&stubTurnWriter{}), q, nil, nil, "", nil, reset, logger)
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	assertSendMsgEnvelopeShape(t, recv(), protocol.TypeAck)
+
+	if len(q.calls) != 0 {
+		t.Errorf("Enqueue calls = %d, want 0: a failed reset must not fall back to delivering "+
+			"the /clear to claude", len(q.calls))
+	}
+	// The message text is never logged, on this branch as on every other. "wrap it
+	// up" is the argument half of the text, so finding it in the record would mean
+	// the whole text was written.
+	if strings.Contains(buf.String(), "wrap it up") {
+		t.Errorf("log contains the message text; payload.Text is never logged.\nlog: %s", buf.String())
+	}
+}
+
+// TestSendMessage_ClearWithNoResetterWiredIsStillDropped pins the fail-closed
+// direction of the nil seam. An unwired resetter (foreground / v1) must NOT fall
+// back to delivering the text, because reachability of claude's in-place clear is
+// precisely what #2456 removes — a nil seam restoring it would be the one
+// regression this ticket cannot tolerate.
+func TestSendMessage_ClearWithNoResetterWiredIsStillDropped(t *testing.T) {
+	t.Parallel()
+	bound := &stubTurnWriter{}
+	q := &fakeEnqueuer{}
+	c, recv, _ := newSendMsgConn(t)
+	req := sendMsgRequest(t, protocol.SendMessagePayload{
+		ConversationID: sendMsgConvID,
+		MessageID:      sendMsgMessageID,
+		Text:           clearText,
+	})
+
+	h := SendMessage(routeTo(bound), q, nil, nil, "", nil, nil, sendMsgLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	assertSendMsgEnvelopeShape(t, recv(), protocol.TypeAck)
+
+	if len(q.calls) != 0 {
+		t.Errorf("Enqueue calls = %d, want 0: a nil resetter drops the /clear, it does not "+
+			"deliver it", len(q.calls))
+	}
+	if bound.calls != 0 {
+		t.Errorf("WriteUserTurn calls = %d, want 0", bound.calls)
+	}
+}
+
+// TestSendMessage_ClearAcksBeforeStartingTheReset pins the ack ordering. Every arm
+// of the reset entry point except the wrap-up runs INLINE on the calling
+// goroutine, so a reset started before the ack would put that work between the
+// frame and its reply. The double is what observes it: by the time StartNewSession
+// runs, the ack must already be on the conn's outbound channel.
+func TestSendMessage_ClearAcksBeforeStartingTheReset(t *testing.T) {
+	t.Parallel()
+	c, recv, out := newSendMsgConn(t)
+	ackedFirst := false
+	reset := &fakeResetter{onStart: func() { ackedFirst = len(out) == 1 }}
+	req := sendMsgRequest(t, protocol.SendMessagePayload{
+		ConversationID: sendMsgConvID,
+		MessageID:      sendMsgMessageID,
+		Text:           clearText,
+	})
+
+	h := SendMessage(routeTo(&stubTurnWriter{}), &fakeEnqueuer{}, nil, nil, "", nil, reset, sendMsgLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	if !ackedFirst {
+		t.Error("the reset started before the ack was emitted; the ack must go out first, " +
+			"because every arm of the reset but the wrap-up runs inline on this goroutine")
+	}
+	assertSendMsgEnvelopeShape(t, recv(), protocol.TypeAck)
 }
