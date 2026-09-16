@@ -103,11 +103,36 @@ func newTestPoster(t *testing.T, reg *conversations.Registry, create *stubCreate
 // assertions about the durable record.
 func newTestPosterAnnouncing(t *testing.T, reg *conversations.Registry, create *stubCreate, appender *stubAppender, announcer *stubAnnouncer) func(name, text string) error {
 	t.Helper()
+	return newTestPosterCarrying(t, reg, create, appender, announcer, nil)
+}
+
+// newTestPosterCarrying is newTestPosterAnnouncing with #2499's carry hook visible,
+// split from it for the reason that one was split from newTestPoster: the cases
+// above are assertions about the durable record and the wire, and threading a
+// fourth stub through every one of them would bury what each is actually about.
+// A nil carry is the poster's supported posture, not a test shortcut.
+func newTestPosterCarrying(t *testing.T, reg *conversations.Registry, create *stubCreate, appender *stubAppender, announcer *stubAnnouncer, carry *stubCarry) func(name, text string) error {
+	t.Helper()
 	var announce func(protocol.AssistantDeltaPayload)
 	if announcer != nil {
 		announce = announcer.announce
 	}
-	return channelPoster(reg, create.create, "/home/op/default", appender.append, announce, quietLogger())
+	var record func(conversations.ConversationID, string)
+	if carry != nil {
+		record = carry.record
+	}
+	return channelPoster(reg, create.create, "/home/op/default", appender.append, announce, record, quietLogger())
+}
+
+// stubCarry captures what the poster handed #2499's carry-forward hook.
+type stubCarry struct {
+	convIDs []conversations.ConversationID
+	texts   []string
+}
+
+func (s *stubCarry) record(id conversations.ConversationID, text string) {
+	s.convIDs = append(s.convIDs, id)
+	s.texts = append(s.texts, text)
 }
 
 // TestChannelPoster_PostsIntoExactMatch is the happy path: a single promoted,
@@ -694,5 +719,51 @@ func TestChannelVerdict(t *testing.T) {
 					tt.sub, tt.err, code, line, tt.wantCode, tt.wantLine)
 			}
 		})
+	}
+}
+
+// #2499: the poster hands the carry hook the WHOLE post, keyed by the same
+// daemon-derived conversation id it recorded under — not a chunk, and not the
+// caller's label. The split above exists because a v2 application envelope is
+// byte-capped; claude's stdin is not.
+func TestChannelPoster_CarriesTheWholePostForward(t *testing.T) {
+	t.Parallel()
+	reg := &conversations.Registry{}
+	id := addConversation(t, reg, "questions", true, false)
+
+	carry := &stubCarry{}
+	text := strings.Repeat("q", maxDeltaTextBytes+100) // forces a multi-chunk post
+	post := newTestPosterCarrying(t, reg, &stubCreate{}, &stubAppender{}, &stubAnnouncer{}, carry)
+
+	if err := post("questions", text); err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	if got := len(carry.texts); got != 1 {
+		t.Fatalf("carry hook called %d times, want exactly 1 — one post is one carry", got)
+	}
+	if carry.texts[0] != text {
+		t.Errorf("carried %d bytes, want the whole %d-byte post", len(carry.texts[0]), len(text))
+	}
+	if carry.convIDs[0] != id {
+		t.Errorf("carried under %q, want the recorded conversation %q", carry.convIDs[0], id)
+	}
+}
+
+// #2499: a post that could not be recorded is a post that did not happen, so it is
+// never carried into claude's next turn either. The ordering in the poster body —
+// append, then carry — is what enforces this.
+func TestChannelPoster_RefusedPostCarriesNothing(t *testing.T) {
+	t.Parallel()
+	reg := &conversations.Registry{}
+	addConversation(t, reg, "questions", true, false)
+
+	carry := &stubCarry{}
+	post := newTestPosterCarrying(t, reg, &stubCreate{}, &stubAppender{returnErr: errors.New("disk full")}, &stubAnnouncer{}, carry)
+
+	if err := post("questions", "a question"); err == nil {
+		t.Fatal("post reported success though the durable append failed")
+	}
+	if len(carry.texts) != 0 {
+		t.Errorf("a refused post was carried forward: %q", carry.texts)
 	}
 }

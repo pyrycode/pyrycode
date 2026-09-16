@@ -326,12 +326,23 @@ func channelCreator(
 // is a loud ambiguity refusal on the next post rather than a silent
 // misdelivery, and bounding it would mean a uniqueness rule the registry
 // deliberately does not have.
+//
+// carry records the content as pending carry-forward state (#2499), so the next user
+// turn the daemon delivers for this conversation reaches claude with the post ahead
+// of the operator's reply. It runs AFTER the durable record and BEFORE announce: the
+// carry is a durable registry write and belongs with the other one, while announce
+// is the fire-and-forget push that is deliberately last. It returns nothing and
+// cannot fail the post, for announce's reason turned around — the post's own
+// deliverable is the log entry, which has already landed, and a cron reads the exit
+// code. Like announce it MAY BE NIL, which is the PTY posture and every unit test
+// that wires no registry; a nil hook records and answers exactly as before.
 func channelPoster(
 	reg *conversations.Registry,
 	create func(cwd, name string) (string, error),
 	defaultCwd string,
 	appendEntry func(conversations.ConversationID, string, json.RawMessage, time.Time) (uint64, error),
 	announce func(protocol.AssistantDeltaPayload),
+	carry func(conversations.ConversationID, string),
 	log *slog.Logger,
 ) func(name, text string) error {
 	return func(name, text string) error {
@@ -460,6 +471,17 @@ func channelPoster(
 					"reason", historyAppendFailure(err))
 				return errors.New(msgChannelPostRecordFailed)
 			}
+		}
+
+		// Carry the content into claude's next turn for this conversation (#2499).
+		// AFTER the durable record, because a post that could not be recorded is a
+		// post that did not happen and must not reach claude either; the return above
+		// is what enforces that ordering. THE WHOLE TEXT, not the chunks: the split
+		// above exists because a v2 application envelope is byte-capped, and claude's
+		// stdin is not — so re-joining what was only ever split for the wire would be
+		// a round trip through a constraint this side does not have.
+		if carry != nil {
+			carry(convID, text)
 		}
 
 		// Tell every connected client (#2498). LAST, and only once the whole post is

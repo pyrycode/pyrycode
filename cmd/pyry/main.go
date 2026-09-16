@@ -967,8 +967,23 @@ func runSupervisor(args []string) error {
 	// instance directory is resolved lazily, per Append. It is read again below by
 	// relayWiring.hist, which the #2114 producers reach it through.
 	conversationHistory := history.New(resolveInstanceDirPath(*name))
+	// #2499's carry-forward, the fifth value in this block built BEFORE
+	// msgqueue.New: it wraps the delivery seam AND hangs off OnDelivered, so both
+	// of its queue-facing halves are set in the literal below. Its third half is
+	// wired into the channel poster further down, which is the whole point — ONE
+	// value, so the post that records pending text and the delivery that carries it
+	// cannot come from two stores holding different records of one conversation.
+	//
+	// It takes the SAME registry and registry path every other conversation-keyed
+	// seam resolves against, both already in scope here.
+	postCarry := &channelCarry{reg: convReg, path: convRegistryPath, logger: logger}
 	queue, err := msgqueue.New(msgqueue.Config{
-		Deliver:  approvalParked.markApprovalHolds(newInboundDeliver(router.resolve, turnBusy, streamTurnHoldTimeout)),
+		// Carry OUTERMOST, so the pending posted text is composed onto the payload
+		// once, at the boundary with the queue, and markApprovalHolds stays adjacent to
+		// the seam that produces the hold error it marks. The composed value goes no
+		// further than newInboundDeliver's WriteUserTurn — see channelCarry on why the
+		// "clients see no change" property is structural here rather than a filter.
+		Deliver:  postCarry.carryPending(approvalParked.markApprovalHolds(newInboundDeliver(router.resolve, turnBusy, streamTurnHoldTimeout))),
 		OnChange: queueStateNotify(queueChanges, logger),
 		OnGiveUp: blocked,
 		// #2115: the operator's own message reaches the durable log HERE and
@@ -976,7 +991,17 @@ func runSupervisor(args []string) error {
 		// receives the composed payload that may name an on-host path; this one
 		// carries the client-readable text. Fires only on a confirmed write, so a
 		// dequeued or abandoned message is never recorded as said.
-		OnDelivered: newOperatorMessageHistory(conversationHistory, logger),
+		//
+		// #2499 shares the seam through deliveredFuncs. History FIRST — its doc block
+		// states that its record is written as close to the commit as possible — then
+		// the carry's clear, which drops exactly the pending text this delivery
+		// carried. The clear cannot be done from the Deliver seam either: that seam
+		// runs per ATTEMPT, and a head cleared on an attempt that then fails would
+		// lose the text the retry was meant to carry.
+		OnDelivered: deliveredFuncs(
+			newOperatorMessageHistory(conversationHistory, logger),
+			postCarry.clearDelivered,
+		),
 		// Pending exempts a head held behind an approval parked on a PERSON from the
 		// give-up bound (#1911). #1014 wired this seam to claude's startup trust modal;
 		// that modal only ever appeared on the terminal surface, which #1348 removed,
@@ -1278,7 +1303,11 @@ func runSupervisor(args []string) error {
 	// waiting for its next connect. It arrives nil from startRelay's no-URL early
 	// return — announceConversation's shape one wiring up — and the poster records
 	// exactly as before when it is.
-	ctrl.SetChannelPoster(channelPoster(convReg, createChannel, defaultCwd, conversationHistory.Append, announcePost, logger))
+	//
+	// postCarry.record (#2499) is the third half of the carry built above the queue:
+	// this is where a post becomes pending state, and the queue's two seams are where
+	// it is carried to claude and cleared.
+	ctrl.SetChannelPoster(channelPoster(convReg, createChannel, defaultCwd, conversationHistory.Append, announcePost, postCarry.record, logger))
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)
 	}
