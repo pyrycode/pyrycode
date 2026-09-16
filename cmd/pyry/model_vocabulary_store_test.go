@@ -264,7 +264,13 @@ func TestModelVocabularyStore_SinkForForwardsEveryVariant(t *testing.T) {
 		t.Errorf("retained %#v, want %#v", got, want)
 	}
 
-	nilNext := newModelVocabularyStore(storePath(t)).sinkFor(nil)
+	// A nil next still Retains, so this store starts a drain writer like any
+	// other and has to be joined like any other: an unjoined one can create
+	// instance/ and its scratch file inside this TempDir after cleanup's
+	// RemoveAll has walked it (#2480). The defer runs before that cleanup.
+	nilStore := newModelVocabularyStore(storePath(t))
+	defer nilStore.Close()
+	nilNext := nilStore.sinkFor(nil)
 	nilNext(want) // must not panic
 }
 

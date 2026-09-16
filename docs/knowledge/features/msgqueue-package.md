@@ -251,6 +251,18 @@ semantics untouched.
   (the #723 handler, via the `QueueRemover` seam) **cannot cancel a write already
   in progress**, but can cancel anything before it.
 
+  **Second caller since #2477: a conversation reset drops the whole backlog
+  before its wrap-up turn**, one `Snapshot` + one `Remove` per queued id,
+  precisely so `msgqueue`'s own drain cannot deliver a queued message into the
+  idle window the wrap-up needs. It tolerates the same committing-head refusal
+  `dequeue_message` does and for the identical reason — past that gate the
+  message is already going into the outgoing child, so the reset's "drop the
+  backlog" goal is already satisfied for that one id without `Remove` needing
+  to be made total. `Remove`'s own change-notify republishes the emptied
+  `queue_state`, so the reset needs no second publish of its own. See [Inbound
+  new_session § The wrap-up
+  turn](v2-session-manager-state-machine-inbound-new-session-sessionstarter-seam.md#the-wrap-up-turn-and-the-replys-tense-2477).
+
   Head-drop safety does **not** come from this gate — it comes from
   `advanceLocked`, which drops the front only when the FIFO is non-empty **and**
   its front still carries the id the drain attempted (#1484). See § Concurrency

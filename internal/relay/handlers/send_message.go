@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
@@ -61,6 +63,13 @@ const msgSendMessageAttachmentNotFound = "attachment not found"
 // attachments. It is appended AFTER the user's own text so a message naming none
 // is an identity — see composeAttachmentPrompt.
 const attachmentPromptHeader = "Attached files (use the Read tool to view each):"
+
+// clearCommand is the ONE message text the daemon does not deliver (#2456): a
+// send_message whose first whitespace-delimited token is exactly this runs the
+// conversation reset instead of reaching claude. One fixed token, matched
+// case-sensitively and in first position only — see isClearCommand for why it must
+// stay that and nothing broader.
+const clearCommand = "/clear"
 
 // TurnWriter is the minimal per-conversation write-surface that the inbound
 // delivery seam drives. *sessions.Session satisfies it via one-line
@@ -148,6 +157,43 @@ type SessionRouter interface {
 	Route(conversationID string) (TurnWriter, error)
 }
 
+// ConversationResetter starts the conversation reset an intercepted "/clear"
+// runs (#2456): the outgoing child's wrap-up turn, its handoff note, and the
+// rotation onto a fresh session. cmd/pyry's activeSessionStarter is the
+// production implementation, and it is the SAME value an inbound new_session
+// reaches through relay.SessionStarter — which is the whole point of this seam.
+// The two verbs give the same reset because they call one entry point, not
+// because two implementations agree.
+//
+// Named for the role this handler puts it to (the package convention that gives
+// us SessionRouter and ConversationToucher) while keeping the method name of the
+// sealed surface — the same split relay.SessionStarter's own doc argues for. That
+// name difference costs nothing at the wiring site: handlers/ imports neither
+// internal/relay nor internal/sessions, and an interface value is assignable to
+// any interface its method set covers, so cmd/pyry passes its existing
+// relay.SessionStarter-typed field with no adapter (as it already does for
+// ConversationToucher over the registry).
+//
+// THE PLAIN FORM, NOT relay.LateSessionStarter, and deliberately so. #2443's
+// new_session.workspace_refused reply is the late form's entire reason, and it is
+// correlated by in_reply_to against a new_session frame; answering a send_message
+// with it would misreport which frame it describes. A "/clear" whose rotation
+// cannot re-enter the conversation's recorded workspace therefore gets no error
+// frame at all — see the intercept in SendMessage.
+//
+// conversationID MUST already be registry-validated by the caller. SendMessage
+// discharges that by intercepting only BELOW SessionRouter.Route, so the id
+// crossing this seam is a known registry key with a live binding — stricter than
+// the raw client string relay's own new_session path hands the same entry point.
+//
+// Every outcome is BEST-EFFORT from this handler's side: an inert arm, a reset
+// already in progress, and a failed rotation all mean the message is gone and the
+// client has its ack, so there is nothing to roll back and no reply is owed. That
+// is handleNewSession's posture for the same seam, and SendMessage keeps it.
+type ConversationResetter interface {
+	StartNewSession(conversationID string) error
+}
+
 // ConversationToucher is the registry write surface the last-used bump consumes
 // (#2438): one locked mutation, plus the eager persist that follows it.
 //
@@ -225,7 +271,10 @@ type ConversationToucher interface {
 // accepted message stamps its conversation's LastUsedAt so the 30-day idle sweep
 // spares a conversation in use. A nil registry therefore now names nothing AND
 // stamps nothing. See touchConversation.
-func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolver, reg ConversationAutoNamer, registryPath string, announce ConversationAnnouncer, logger *slog.Logger) dispatch.Handler {
+// Since #2456 it also takes reset, the conversation-reset seam an intercepted
+// "/clear" runs instead of enqueuing. See the intercept below and
+// ConversationResetter.
+func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolver, reg ConversationAutoNamer, registryPath string, announce ConversationAnnouncer, reset ConversationResetter, logger *slog.Logger) dispatch.Handler {
 	return func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error {
 		var p protocol.SendMessagePayload
 		if err := json.Unmarshal(env.Payload, &p); err != nil {
@@ -294,6 +343,97 @@ func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolve
 					"err", routeErr)
 				return replyError(ctx, c, env, protocol.CodeServerBinaryOffline, msgServerBinaryOffline, true)
 			}
+		}
+
+		// THE ONE INTERCEPTED LITERAL (#2456). A "/clear" is not a message: it runs
+		// the conversation reset — the wrap-up turn, the handoff note and the
+		// rotation — instead of reaching claude, so the verb a client types and the
+		// New session control it presses give the same thing. claude's own in-place
+		// clear is no longer reachable from a client, which is the decision this
+		// implements rather than a side effect of it.
+		//
+		// ITS POSITION IS THE DESIGN, on all three sides:
+		//   - BELOW Route, so the id crossing the seam is registry-validated with a
+		//     live binding and the follow-active cursor is stamped. That is also what
+		//     leaves the unknown/unbound answers exactly as they were: those frames
+		//     are rejected above and never reach the match.
+		//   - ABOVE resolveAttachments, so a /clear's attachment ids are DROPPED —
+		//     none is resolved, so no attachment.not_found can be answered for one and
+		//     no directory is read on its behalf.
+		//   - ABOVE the enqueue, so nothing is queued and no queue_state item is
+		//     published for it. Intercepting after the enqueue would instead put the
+		//     reset behind every message already in the backlog.
+		// It also sits above touchConversation and autoNameConversation, so a /clear
+		// never becomes the conversation's auto-name and stamps no LastUsedAt — the
+		// new_session frame driving this same reset stamps nothing either, and the two
+		// routes are meant to be one behaviour.
+		//
+		// The 32-id bound deliberately stays above Route: a /clear naming 33
+		// attachment ids is still a non-conforming send_message.
+		//
+		// NOT INTERACTIVE-GATED, unlike the new_session that reaches the same entry
+		// point. dispatch.Conn carries no such flag, and plumbing one here would be
+		// new machinery for no authorization gain: pairing is the authorization
+		// boundary, and docs/protocol-mobile.md § New session already publishes that
+		// this verb is exempt from the per-device permission gate (#702). A
+		// non-interactive client's /clear resets and simply does not see the
+		// `resetting` frames it declined.
+		if isClearCommand(p.Text) {
+			// A count of nothing: the text is not logged here any more than anywhere
+			// else on this handler, and the ids are not resolved, so there is nothing
+			// to count. conversation_id is a validated registry key by this point.
+			logger.Info("relay: send_message intercepted /clear; running the conversation reset",
+				"event", "send_message.clear_intercepted",
+				"conn_id", c.ConnID(),
+				"conversation_id", p.ConversationID,
+				"message_id", p.MessageID)
+
+			// THE ACK GOES OUT FIRST, for the reason touchConversation records for its
+			// own step: only the wrap-up arm of the reset moves itself onto another
+			// goroutine, and every other arm — an inert conversation, a reset already
+			// running, a synchronous rotation — resolves inline on THIS goroutine. A
+			// reset started ahead of the ack would put that work between the frame and
+			// its reply.
+			ackErr := replyAck(ctx, c, env)
+
+			switch {
+			case reset == nil:
+				// FAIL-CLOSED MEANS DROPPING IT, not delivering it. An unwired seam
+				// (foreground / v1) must not hand the text to claude, because claude's
+				// in-place clear being unreachable is the property this intercept
+				// exists to establish — restoring it on the path where nothing is
+				// wired would be the one regression it cannot tolerate.
+				logger.Debug("relay: send_message dropped /clear; no conversation resetter wired",
+					"event", "send_message.clear_no_resetter",
+					"conn_id", c.ConnID(),
+					"conversation_id", p.ConversationID)
+			default:
+				// BEST-EFFORT, exactly as handleNewSession treats the same seam. An
+				// inert conversation, a reset already in progress and a rotation that
+				// failed are indistinguishable from here and all mean the same thing:
+				// the message is gone and the client has its ack, so there is nothing
+				// to roll back and no reply is owed.
+				//
+				// The error is recorded verbatim, which is safe by construction rather
+				// than by trust: RotatedWithoutWorkspaceError.Error() is a constant by
+				// design, and the confinement error that produced a refusal is
+				// discarded at its own site, so no phone-influenced workspace path can
+				// reach this line.
+				//
+				// A *RotatedWithoutWorkspaceError is NOT answered to the client here.
+				// That reply is correlated by in_reply_to against a new_session frame,
+				// so answering a send_message with it would misreport which frame it
+				// describes — which is also why this seam is the plain form and not
+				// the late one.
+				if err := reset.StartNewSession(p.ConversationID); err != nil {
+					logger.Warn("relay: send_message /clear did not reset the conversation",
+						"event", "send_message.clear_reset_failed",
+						"conn_id", c.ConnID(),
+						"conversation_id", p.ConversationID,
+						"err", err)
+				}
+			}
+			return ackErr
 		}
 
 		// Resolve the named attachments AFTER Route, never before, and against the
@@ -453,6 +593,41 @@ func touchConversation(reg ConversationToucher, registryPath string, logger *slo
 			"conversation_id", conversationID,
 			"err", err)
 	}
+}
+
+// isClearCommand reports whether text's first whitespace-delimited token is
+// exactly clearCommand — the one literal SendMessage intercepts (#2456).
+//
+// EXACT, CASE-SENSITIVE, FIRST TOKEN ONLY: never a prefix, never a table, never a
+// case-insensitive compare. docs/protocol-mobile.md's stance that inbound message
+// text is never a command vocabulary takes exactly one published exception here,
+// and keeping it to one fixed token is what keeps that statement true — which is
+// why the test table pins /compact, /model, /clearcache, /CLEAR and a /clear that
+// is not the first token as ordinary messages.
+//
+// DELIBERATELY NOT strings.Fields. This predicate runs on EVERY send_message, and
+// payload.Text is bounded only by the transport's 1 MiB WS read ceiling, so a
+// field split would let a remote client buy one string header per token — some
+// hundreds of thousands of allocations on a text of whitespace — for an answer
+// that only ever needs the first token. TrimSpace returns a subslice rather than
+// a copy, so the form below allocates nothing and is one linear scan strictly
+// cheaper than the json.Unmarshal that already ran over the same bytes.
+//
+// The boundary check is what separates the command from a longer command sharing
+// its spelling: "/clearcache" continues with 'c', not a space, so it is a message.
+// unicode.IsSpace on both ends, matching what TrimSpace itself trims, so "a token"
+// means one thing in both halves of the predicate.
+func isClearCommand(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if !strings.HasPrefix(trimmed, clearCommand) {
+		return false
+	}
+	rest := trimmed[len(clearCommand):]
+	if rest == "" {
+		return true
+	}
+	r, _ := utf8.DecodeRuneInString(rest)
+	return unicode.IsSpace(r)
 }
 
 // resolveAttachments maps a message's named attachment ids to their on-host

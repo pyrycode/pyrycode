@@ -224,6 +224,12 @@ type relayWiring struct {
 	// startRelayV2 starts over the v2 manager. Built at main.go (channel shared with
 	// the msgqueue OnGiveUp seam) for the same chicken-and-egg reason as qse.
 	sessionErr *sessionErrorEmitterV2
+	// resetting is the pre-built conversation-reset producer (#2478). Pre-built for a
+	// DIFFERENT chicken-and-egg than qse and sessionErr's: its caller is the
+	// activeSessionStarter literal, built in the composition root above this leg. It
+	// starts no Run goroutine, so it takes no bcast parameter — startRelayV2 attaches
+	// the broadcaster into it instead.
+	resetting *resettingEmitterV2
 	// blockedNotify routes a folder-not-trusted session_error (a trust deny /
 	// deny-on-timeout) into the same give-up → session_error frame path the
 	// msgqueue OnGiveUp seam uses (#1014). It is main.go's shared `blocked` closure
@@ -1030,12 +1036,22 @@ func startRelayV2(
 			// assignment: unreachable in practice, since no frame can dispatch until
 			// mgr.Run starts, but a hook read from a dispatch goroutine is not a
 			// place to rely on an argument.
+			//
+			// The reset seam is the SAME activeSessionStarter the SessionStarter
+			// field below is given (#2456), which is what makes "a client's /clear
+			// gives the same reset as the New session frame" structural rather than
+			// two implementations that happen to agree. It is passed as the plain
+			// relay.SessionStarter, never the late form: #2443's workspace_refused
+			// reply correlates against a new_session frame by in_reply_to, so a
+			// send_message must not be answered with it. An unwired starter
+			// (foreground / v1) leaves a nil seam, which still DROPS the /clear
+			// rather than delivering it — see the intercept's fail-closed note.
 			protocol.TypeSendMessage: handlers.SendMessage(w.router, w.queue, attachmentResolve, w.convReg, resolveConversationsRegistryPath(w.instanceName), func(p protocol.ConversationUpdatedPayload) {
 				if announceConversation == nil {
 					return
 				}
 				announceConversation(p)
-			}, logger),
+			}, w.activeSessionStarter, logger),
 		},
 		// Screen-snapshot seam (#618): the supervisor renders the live screen
 		// inside the tui-driver seal; KnownConversation gates request_snapshot
@@ -1582,6 +1598,14 @@ func startRelayV2(
 	// unconditionally whenever the v2 manager exists.
 	streamSessionErrCleanup := startSessionErrorStreamV2(ctx, w.sessionErr, mgr)
 
+	// Wire the resetting producer (#2478): hand the pre-built emitter this leg's
+	// fan-out surface so a conversation reset's two phases and its falling edge reach
+	// capability-gated interactive phones. No Run goroutine and no ctx — this producer
+	// emits synchronously on the reset tail goroutine activeSessionStarter already
+	// spawns, so there is nothing to drain; the cleanup detaches instead, which is what
+	// keeps a late edge from racing a winding-down manager.
+	streamResettingCleanup := startResettingStreamV2(w.resetting, mgr)
+
 	return func() {
 		// Stop the producers — the structured turn stream's drain, the
 		// session-transition producer, the queue_state producer, and the session_error
@@ -1595,6 +1619,7 @@ func startRelayV2(
 		streamTransitionsCleanup()
 		streamQueueStateCleanup()
 		streamSessionErrCleanup()
+		streamResettingCleanup()
 		<-mgrDone
 	}, surface, announce, announceConversation, pairingMinter.MintLocalPairing, nil
 }

@@ -133,23 +133,33 @@ test's marker text; the bootstrap transcript must not).
 ```
 internal/e2e/internal/fakeclaude/
   main.go        ~990 LOC, package main, no build tag (grew from the #122
-                 rotation core with the #311/#323/#603/#642/#791/#792/#793/#794/#1004
+                 rotation core with the #311/#323/#603/#642/#791/#792/#793/#794
                  optional modes, the #673 on-turn transcript growth, the #1140
                  stream-json mode, the #1136 interrupt rider, the #1137 stdin tee,
                  the #1138 startup hold, and the #1195 argv-derived stem +
-                 per-child JSONL trigger modes)
+                 per-child JSONL trigger modes; the #1004 clear-rotate mode was
+                 retired by #2456 — stranded since #1348 deleted the terminal
+                 supervisor that typed `/clear` into a PTY, and nothing in the
+                 repo ever set its env var)
   main_test.go   ~125 LOC, //go:build e2e
   modal_detect_test.go  untagged unit test for the modal-class detector
   esc_detect_test.go    ~60 LOC untagged unit test — TestContainsBareESC pins the
                         bare-ESC discriminator the #794 Esc-ends-turn mode relies on
-  clear_detect_test.go  untagged unit test — TestContainsClearCommand pins the
-                        /clear discriminator the #1004 clear-rotate mode relies on
   stream_detect_test.go  untagged unit test — drives runStreamJSON against
                         in-memory buffers and the real streamsup.Parser (#1140)
   argv_session_id_test.go  untagged unit test — TestArgvSessionID pins the
                         last-occurrence-wins argv parse + stem guard the #1195
                         argv-derived stem mode relies on
 ```
+
+**Retiring a mode here can orphan a detector that only staticcheck catches.**
+\#2456's deletion of the clear-rotate reader arm left `containsClearCommand`
+and its `bytes` import with no caller; `go build` and `go vet` both stayed
+green; the tell was the deleted `clear_detect_test.go`, not the compiler.
+Removing an env-gated mode from this file means walking every symbol the
+removed arm alone called, not just the arm itself — staticcheck (part of
+`make check`) catches the orphan, but only if nothing in the same commit
+happens to give the symbol a new, accidental caller.
 
 The `internal/e2e/internal/` nesting visibility-fences the binary so
 only e2e-package code can import it. Since it's `package main` that's
@@ -244,7 +254,6 @@ search can reach it.
 - [Idle-trigger mode (#792)](fakeclaude-binary-idle-trigger-mode.md) — TUI mode (#603) emits the idle glyph `❯` at **startup**, so claude is idle immediately and can serve exactly one turn (the spinner then…
 - [Esc-ends-turn mode (#794)](fakeclaude-binary-esc-ends-turn-mode.md) — `PYRY_FAKE_CLAUDE_ESC_ENDS_TURN` makes the **remote interrupt keystroke itself** end the running turn — the harness piece behind the live…
 - [Modal-clear-on-answer mode (#793)](fakeclaude-binary-modal-clear-on-answer-mode.md) — Modal mode (`PYRY_FAKE_CLAUDE_MODAL_TRIGGER`, #791) raises a permission prompt (`modalScreen`, the `"Do you want to proceed?"` anchor) and…
-- [Clear-rotate mode (#1004)](fakeclaude-binary-clear-rotate-mode.md) — `PYRY_FAKE_CLAUDE_CLEAR_ROTATES` makes the **phone-driven `new_session` keystroke itself** rotate the session — the harness piece behind…
 - [Stream-json mode (#1140)](fakeclaude-binary-stream-json-mode.md) — Every mode above models claude's **PTY/TUI** surface — a screen to read, a `<uuid>.jsonl` transcript to grow. 
 - [Argv-derived stem mode (#1195)](fakeclaude-binary-argv-derived-stem-mode.md) — Every mode above binds its transcript stem to `PYRY_FAKE_CLAUDE_INITIAL_UUID` — a single **process-wide** value, so every child of one…
 - [On-turn transcript growth (#673)](fakeclaude-binary-on-turn-transcript-growth.md) — \#668 made the supervised-bootstrap delivery path confirm a turn by observing the resolved claude session JSONL **grow** past a…

@@ -150,6 +150,20 @@ bundle. This closes the specific amplification the [drop-policy §](#concurrency
 above documents: one small untrusted inbound frame could otherwise drive an
 unbounded batch of never-droppable outbound frames. See [`codebase/911.md`](../codebase/911.md).
 
+**Reused for a second off-Run producer (#2477).** `new_session`'s wrap-up turn
+can take up to 90 seconds and cannot answer its reply from `handleNewSession`
+on Run either, for the identical reason `assembleBundle` moved off it. Its
+`LateSessionStarter` shape copies this one verbatim — a bounded blocking send
+(`newSessionDone`, escapes on `s.done`/`ctx`) to a channel Run selects on
+(`handleNewSessionDone`), with `handleBundleReady`'s staleness guard reused
+for the same reason (a torn-down session must not seal a reply nobody
+awaits). See [Inbound new_session § The wrap-up turn, and the reply's
+tense](v2-session-manager-state-machine-inbound-new-session-sessionstarter-seam.md#the-wrap-up-turn-and-the-replys-tense-2477).
+The generalisable shape, now instantiated twice: an off-Run producer that
+owes a caller a reply funnels its outcome back to Run on a dedicated channel
+rather than answering from its own goroutine, because the reply's seal
+(`s.send.Encrypt` via `forwardEnvelope`) is single-owned there.
+
 **No new authorization gate — and, unlike `interrupt`/`dequeue_message`, NOT gated
 on the `interactive` capability.** Authorization is **pairing**, enforced
 structurally at the Noise IK handshake: an unpaired device is refused with WS 4401

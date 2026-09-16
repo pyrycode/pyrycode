@@ -89,6 +89,25 @@ is published can leave both simpler tests green.
 
 **#1630 added three tests, all pure insertions — the four argv-through-a-real-spawn pins and the three `buildArgs`-shape tests above stay byte-unmodified.** `TestUseCreateForm_ProbeDecidesIDFlag` (pure, table, composes `useCreateForm`+`buildArgs` over `t.TempDir()` fixtures with hand-written `<uuid>.jsonl` files, mtime-differentiated via `os.Chtimes` so a "newer unrelated transcript" row is deterministic rather than write-order-dependent); `TestRunner_BeginSpawn_FirstSpawnResumesExistingTranscript` (the wiring pin — proves `beginSpawn` actually feeds the probe's answer to `buildArgs` rather than passing `firstRun` straight through); `TestRunner_RestartFresh_ProbeDecidesPerSpawn` (the per-spawn pin — an *asymmetric* fixture, transcript present only for the pre-rotation id, is the one arrangement that discriminates a per-spawn decision from one memoised at construction; a fixture with both ids absent would pass either way). One general lesson from building the table: a row composing two functions (`useCreateForm` then `buildArgs`) only proves the override if its `latchCreate` column is set *against* the expected flag — a row where the latch already agrees with the probe's answer stays green under a mutant that deletes the probe entirely, so it reads as coverage while proving nothing about the override.
 
+A content-free-logging guard must scan what was actually logged, not a rendered
+handler dump: `TestParser_TaskProgressDropIsLoggedContentFree` substring-scanned
+a `slog.TextHandler` render, whose own leading `time=` attribute renders two
+consecutive nines often enough (`.991`, `.399`, `.099`) to trip a forbidden bare
+`"99"` that `emitBackgroundTaskProgress` never actually logged — a 3.5% flake
+(#2472) on the handler's framing, not the parser. The fix swept the file's own
+`logRecorder` capture (message plus attr pairs, no timestamp) instead, the shape
+sibling `TestParser_HarnessNudgeDropIsLoggedContentFree` already used, and
+derived the numeric forbidden token from the fixture constant with
+`strconv.Itoa` rather than hand-typing it beside the fixture, so the guard can't
+drift from the value actually sent. Two further lessons from that swap: a
+captured-record sweep must cover attr **keys** as well as values, since
+`p.log.Debug(msg, tl.TaskID, "x")` compiles and lands claude's task id in a key
+that a values-only sweep misses — `TestParser_HarnessNudgeDropIsLoggedContentFree`
+still only sweeps values and carries the same latent gap unfixed; and a sweep
+over rows that include silent branches (two of this test's three do) needs a
+positive control — `wantDrops`, checked via `logRecorder.withMessage` — or a
+recorder that was never wired to the parser reads as a pass on every row.
+
 ## Turn I/O — envelope write + stdout parser (#1088)
 
 `buildArgs` requests both `--include-partial-messages` and

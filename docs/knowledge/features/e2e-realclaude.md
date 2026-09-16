@@ -79,6 +79,20 @@ practice: Claude 2.1.259 omitted both reason fields for an ordinary Bash write,
 while an outside-working-directory Write supplied `workingDir` plus non-empty
 reason text.
 
+The outside-directory gate applies to Read, not just Write, and only under the
+posture a daemon session actually runs in. `TestInteractiveStreamDefaultPostureOutsideWorkspaceRead`
+measured whether a live claude, walked back to the `default` permission mode
+in band (the daemon always launches with `--dangerously-skip-permissions` and
+then writes the running posture via `set_permission_mode`, per
+`claudeSettingsArgs` and `SpawnPermissionMode`), can read an absolute path
+outside its workspace without a modal. Under claude 2.1.259, it prompts: the
+Read raised a permission modal with `reason_type: workingDir`, the same
+reason and the same gate as the sibling Write, measured 2026-09-15. The
+posture matters as much as the permission class — see the corrected #2039
+finding in
+[interactive_stream_attachment_read_test.go](e2e-realclaude-interactive-stream-attachment-read-test-go.md#lessons-that-outlive-this-ticket),
+which read the opposite way only because it measured a bypassed child.
+
 Live delegation turns have an extra, valid envelope before the forwarded child
 response: claude emits the delegated prompt as a `user` text block, which the
 stream parser intentionally surfaces as `unrecognized_message` with

@@ -187,6 +187,15 @@ and `sessionResetFollower`'s own wiring-guard precedent one more time: a decorat
 its *contract*; only a test that exercises the factory that chains it proves the chain wasn't
 dropped.
 
+**A store built only to reach `sinkFor`'s nil-forwarding branch still needs a `Close`.** `sinkFor`
+calls `Retain` unconditionally, before it checks whether `next` is nil, so a store minted only to
+prove `sinkFor(nil)` doesn't panic starts the same `drain` writer goroutine as a fully wired one.
+Left unjoined, `drain` can create `instance/` and its scratch file inside the test's `t.TempDir()`
+after `t.Cleanup`'s `RemoveAll` has already walked it — a ~2.4%-rate `directory not empty` flake in
+`TestModelVocabularyStore_SinkForForwardsEveryVariant` (#2480), not a `make check` defect. `Close` —
+already this store's documented join point for tests — has to be deferred on every store a test
+mints through `Retain` or `sinkFor`, including one built only to exercise a no-op path.
+
 **CODING-STYLE's persistent-data sort rule is wrong for this file, on purpose, and the encoder needs
 to say why.** § Persistent data conventions ends with "sort records by a stable key before
 serialising" — correct for `sessions.json`/`conversations.json`, whose in-memory order is a map
