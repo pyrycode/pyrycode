@@ -379,6 +379,20 @@ See `docs/specs/architecture/2156-conversation-updated-host-create-fanout.md` fo
 
 See [Fanning `channel.post` out: `assistant_delta` live delivery (#2498)](control-plane-channel-post-live-delivery.md) for the equivalent unsolicited push a successful `channel.post` makes.
 
+## Carrying a posted channel message into claude's next turn (#2499)
+
+A post now leads the next user turn the daemon delivers for that conversation's client message path, so claude sees the question and the operator's reply in the order the two happened. `channelCarry` (`cmd/pyry/channel_carry.go`) holds the pending text in memory and composes it; `conversations.Registry.AppendPendingChannelPost` / `PendingChannelPosts` / `ClearPendingChannelPosts` (see [conversations-registry-crud.md § `AppendPendingChannelPost` / `PendingChannelPosts` / `ClearPendingChannelPosts`](conversations-registry-crud.md#appendpendingchannelpost--pendingchannelposts--clearpendingchannelposts-2499)) hold it durably.
+
+**Composed at delivery, not at enqueue — a `msgqueue.DeliverFunc` decorator, not a `newInboundDeliver` parameter.** Composing at enqueue misses a post that lands while a reply is already queued, since the queue's head can sit through a whole claude turn before it is written. `newInboundDeliver` has 17 call sites (`codegraph_callers`), 16 of them tests, which is what made a signature widening the wrong shape; `carryPending` wraps it the same way `markApprovalHolds` already does in that file, so the wiring cost is one line rather than a fan-out. Check call-site count before reaching for a new parameter on an existing seam — a decorator is often both cheaper to wire and better factored.
+
+**Cleared from `OnDelivered`, the msgqueue seam that fires once per confirmed delivery — chained, not replaced.** `msgqueue.Config.OnDelivered` is a single-valued field already held by `newOperatorMessageHistory` ([msgqueue-package.md § Delivered notification](msgqueue-package.md#delivered-notification-2115)); a `deliveredFuncs(...msgqueue.DeliveredFunc) msgqueue.DeliveredFunc` combinator in `channel_carry.go` fans it to both consumers, history first and the clear second, preserving #2115's "as close to the commit as possible" ordering. A failed delivery retried at the same head recomposes on every attempt, so a post that lands during a failed attempt is carried by the retry and cleared exactly once, by the attempt that actually succeeds.
+
+**The composed text reaches claude only, structurally, not by filtering.** `OnDelivered` carries a `msgqueue.QueuedMessage`, which declares no field for the composed payload — only `Text`, the client's own — so the durable history producer and the wire cannot see the carried text even if a future edit tried to read it from there. The same barrier #2115 built for the operator-history producer.
+
+**Why the growth bound refuses the newest post instead of evicting the oldest is a concurrency-correctness finding, not a style choice** — see [conversations-registry-crud.md § `AppendPendingChannelPost`...](conversations-registry-crud.md#appendpendingchannelpost--pendingchannelposts--clearpendingchannelposts-2499).
+
+See `docs/specs/architecture/2499-carry-posted-channel-message.md` for the full design and security review.
+
 ## Process-Global vs Per-Session
 
 | Concern | Scope today | Source |
