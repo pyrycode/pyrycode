@@ -13,6 +13,7 @@ Lives in the same `internal/conversations` package as the `Conversation` type (#
 - **Durable manual-archive primitive (#880):** `(*Registry).SetArchived(id, archived bool) bool` flips the durable `Conversation.IsArchived` flag under the registry lock; `ListFilter.IsArchived *bool` narrows `List` to active-only/archived-only/both, ANDing with `IsPromoted` when both are set on one filter. Distinct from the auto-archive `Sweep` ([`features/conversations-auto-archive.md`](conversations-auto-archive.md)), which permanently deletes rather than flagging — but no longer independent of it: since #1488 `ShouldArchive` reads `IsArchived` and the sweep skips archived rows, so a manual archive is durable until the user unarchives. Called by the `archive_conversation`/`unarchive_conversation` wire verbs (#881), the sole production caller. See [codebase/880.md](../codebase/880.md), [codebase/881.md](../codebase/881.md).
 - **Bounded system-prompt primitive (#2149):** `(*Registry).SetSystemPrompt(id ConversationID, prompt *string) error` validates and sets `Conversation.SystemPrompt` under the registry lock; `MaxSystemPromptBytes = 8192` (inclusive) and two sentinels (`ErrSystemPromptTooLong`, `ErrSystemPromptInvalidUTF8`) join `ErrConversationNotFound` as the refusal set. #2150 reads the stored value at spawn (`Pool.refreshSystemPrompt`, called from `Pool.Activate`), #2151 wires `SetSystemPrompt` to the `set_system_prompt` wire verb (`handlers.SetSystemPrompt`, [`relay-package.md`](relay-package.md)), and #2152 reads it back over the wire (`request_system_prompt` / `system_prompt`, [v2-session-manager doc](v2-session-manager-state-machine-inbound-request-system-prompt-systempromptfor-seam.md)) — the full cluster is landed. `Registry.Update` remains the unvalidated escape hatch for the field, exactly as for every other field.
 - **Workspace-label storage primitive (#2206):** `(*Registry).WorkspaceLabel(cwd string) (string, bool)` / `(*Registry).SetWorkspaceLabel(cwd string, label *string)` persist an operator-chosen display name for a workspace, keyed by the exact `cwd` string (byte-exact, no normalization) rather than by conversation id — a workspace has no row of its own, so the label lives in its own top-level map instead of a per-conversation field. Storage only: no wire verb sets it yet (#2207) and no payload reads it onto the wire yet (#2208, #2210). See § *`WorkspaceLabel` / `SetWorkspaceLabel`* below.
+- **Last context-usage reading primitive (#2460):** `(*Registry).SetLastContextUsage(id ConversationID, reading ContextUsageReading) bool` records the summary of the last context-window reading claude reported for a conversation — `Model`, `TotalTokens`, `MaxTokens`, `Percentage`, `AsOf` — under the registry lock, structurally touching only `Conversation.LastContextUsage`. Takes a value rather than a pointer, unlike `SetSystemPrompt`'s tri-state door: no producer ever clears a reading, so "set it back to nil" is unreachable rather than merely unused. Two production callers write through the same recorder — the post-turn interactive-turn emitter arm and the on-demand `request_context_usage` flight — so the stored value is whichever reading claude produced last; last write wins by design (see § *`SetLastContextUsage`* in [`conversations-registry-crud.md`](conversations-registry-crud.md)). No wire verb reads it back yet — deferred as a named follow-up, see *Out of scope* below.
 
 ## Surface
 
@@ -53,6 +54,15 @@ func (r *Registry) SetArchived(id ConversationID, archived bool) bool
 func (r *Registry) SetSystemPrompt(id ConversationID, prompt *string) error
 func (r *Registry) WorkspaceLabel(cwd string) (string, bool)
 func (r *Registry) SetWorkspaceLabel(cwd string, label *string)
+func (r *Registry) SetLastContextUsage(id ConversationID, reading ContextUsageReading) bool
+
+type ContextUsageReading struct {
+    Model       string
+    TotalTokens int
+    MaxTokens   int
+    Percentage  int
+    AsOf        time.Time
+}
 ```
 
 `Registry` holds the in-memory conversation slice plus a guarding mutex. Construct via `Load` (cold-start mints empty; warm-start reads from disk) or directly via `&Registry{}` (zero value is the empty registry — documented). Methods are safe for concurrent use.
@@ -113,6 +123,36 @@ example above because no label is set; when present it looks like:
 ```
 
 See § *`WorkspaceLabel` / `SetWorkspaceLabel`* below.
+
+`last_context_usage` (#2460) is likewise omitted here — this row has never had a reading recorded.
+When present it looks like:
+
+```json
+{
+  "last_context_usage": {
+    "model": "claude-opus-5",
+    "total_tokens": 41000,
+    "max_tokens": 200000,
+    "percentage": 21,
+    "as_of": "2026-09-16T07:05:03Z"
+  }
+}
+```
+
+All five inner keys always emit — no `omitempty` inside `ContextUsageReading` — because a
+fresh session genuinely reads zero tokens at zero percent, and `omitempty` there would encode that
+fact as an absence. The outer field on `Conversation` carries the never-reported state instead:
+`nil` (an absent `last_context_usage` key) means claude has never reported for this conversation,
+not "reported a zero reading." `as_of` is normalized to UTC by the setter, so it always encodes
+with a `Z` offset regardless of what the daemon clock's `time.Time` carried.
+
+**The event's three inventories are deliberately absent.** `turnevent.ContextUsage` — the event
+both producers read this summary from — also carries `Categories`, `MCPTools`, and `MemoryFiles`
+breakdowns with their dropped counts. None of the three reaches this file: they carry workspace
+memory-file paths and MCP server names that the frame's no-log rule keeps out of records, and a
+reconnecting client needs the headline numbers rather than a breakdown taken some turns ago. The
+projection that builds a `ContextUsageReading` lists exactly the five stored fields, so there is no
+field to forget to strip.
 
 Envelope shape (`{"conversations": [...]}`), not a bare top-level array. Reserves room for future top-level fields (schema version, archive cursor) without breaking jq pipelines or stdlib decoder discipline. Same future-proofing rationale as the sessions and devices registries.
 
@@ -206,7 +246,7 @@ The returned `*Registry` is independent of the on-disk file — subsequent `Save
 Split into [`conversations-registry-crud.md`](conversations-registry-crud.md) (2026-09-07, this
 document was over the 50000-byte cap). Covers `Create`, `Get`, `List`, `Update`, `Delete`,
 `RebindSession` (#739), `SetArchived` (#880), `SetSystemPrompt` (#2149), `WorkspaceLabel` /
-`SetWorkspaceLabel` (#2206), and `Promote`.
+`SetWorkspaceLabel` (#2206), `SetLastContextUsage` (#2460), and `Promote`.
 
 ## Tests
 
@@ -248,6 +288,15 @@ New (no devices counterpart):
   `TestRegistry_Save_NoLabelsOmitsKey` (two arms: never-set, and set-then-cleared — the second is
   the one a `IsArchived`/`SystemPrompt`-shaped byte-stability test structurally cannot cover) and
   `TestRegistry_Load_AbsentLabelKeyDecodesEmpty` (mirrors `_AbsentPromptKeyDecodesNone`).
+- `TestRegistry_SetLastContextUsage_*` (#2460) — hit stores exactly the five values and leaves
+  every other field of the row and every other row untouched; miss returns `false` and modifies
+  nothing; a non-UTC `AsOf` is stored as UTC and marshals with a `Z` offset; the stored pointer is
+  not the caller's (mutating the caller's local after the call does not affect the stored row); the
+  setter does not persist (mirrors `TestRegistry_SetSystemPrompt_DoesNotPersist`). Plus
+  `TestRegistry_Save_NilLastContextUsageOmitsKey` (an all-nil registry's `Save` output contains no
+  `last_context_usage` substring — the `IsArchived`/`SystemPrompt`-shaped byte-stability pair) and a
+  `Save` → `Load` round trip using `time.Date` fixtures, never `time.Now`, so no monotonic component
+  survives to break `DeepEqual`.
 
 `internal/conversations/id_test.go` mirrors `internal/sessions/id_test.go`:
 
@@ -266,10 +315,11 @@ New (no devices counterpart):
 - **Migration from existing `Session` registry.** TBD ticket once Conversations is proven on disk; Phase 1/2 sessions stay untouched.
 - **Shared atomic-write helper across `devices` and `conversations`.** Issue tech note explicitly forbids; revisit only if real divergence cost surfaces.
 - **Workspace-label wire surface.** #2206 lands storage only. Setting a label over the wire (#2207, which also owns the not-found/non-blank/length refusals), surfacing it on `list_conversations` (#2208), and pushing it on live frames (#2210) are separate tickets against the same two accessors.
+- **Answering `request_context_usage` from the stored `last_context_usage` field when no fresh reading can be taken.** #2460 lands storage only, written by both producers; no wire verb reads this field back yet — a reconnecting client still gets a fresh reading or nothing, never the stored one. Named as this ticket's own follow-up.
 
 ## Related
 
-- [`features/conversations-registry-crud.md`](conversations-registry-crud.md) — the CRUD method reference (`Create`/`Get`/`List`/`Update`/`Delete`/`RebindSession`/`SetArchived`/`SetSystemPrompt`/`WorkspaceLabel`+`SetWorkspaceLabel`/`Promote`), split out of this document.
+- [`features/conversations-registry-crud.md`](conversations-registry-crud.md) — the CRUD method reference (`Create`/`Get`/`List`/`Update`/`Delete`/`RebindSession`/`SetArchived`/`SetSystemPrompt`/`WorkspaceLabel`+`SetWorkspaceLabel`/`SetLastContextUsage`/`Promote`), split out of this document.
 - [`features/conversations-package.md`](conversations-package.md) — `Conversation` + `ConversationID` (#216), the on-disk record shape this registry persists.
 - [`features/devices-registry.md`](devices-registry.md) — the structural reference implementation (atomic write, envelope shape, snapshot-then-write Save).
 - [`features/sessions-registry.md`](sessions-registry.md) — the older atomic-rename recipe both registries trace to.
@@ -288,3 +338,5 @@ New (no devices counterpart):
 - `docs/specs/architecture/880-durable-archived-state.md` — architect's spec for `SetArchived` + `ListFilter.IsArchived` + the read-surface projection.
 - `docs/specs/architecture/2149-conversation-system-prompt.md` — architect's spec for `SystemPrompt` + `SetSystemPrompt`.
 - `docs/specs/architecture/2206-workspace-label-registry-storage.md` — architect's spec for `WorkspaceLabel` + `SetWorkspaceLabel`.
+- [`features/v2-session-manager-concurrency.md`](v2-session-manager-concurrency.md) § `request_context_usage` — the on-demand producer's resolver/flight machinery `SetLastContextUsage`'s second caller (`contextUsageResolver.fly`) writes into.
+- `docs/specs/architecture/2460-conversation-last-context-usage.md` — architect's spec for `ContextUsageReading` + `SetLastContextUsage` + the two-producer `contextUsageRecorder`.

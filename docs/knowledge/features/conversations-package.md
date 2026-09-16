@@ -44,6 +44,7 @@ Canonical shape (#217): UUIDv4, 36 chars, lowercase hex, dashes at positions 8/1
 | `IsPromoted` | `bool` | `is_promoted` | yes — `false` = discussion, `true` = channel |
 | `IsArchived` | `bool` | `is_archived,omitempty` | no — absent key decodes as active (#880) |
 | `SystemPrompt` | `*string` | `system_prompt,omitempty` | no — pointer distinguishes nil ("no prompt", the default) from `""` ("explicitly empty"); operator-set text is the third state (#2149) |
+| `LastContextUsage` | `*ContextUsageReading` | `last_context_usage,omitempty` | no — pointer distinguishes nil ("claude has never reported for this conversation") from a recorded reading (#2460) |
 | `LastUsedAt` | `time.Time` | `last_used_at` | yes — bumped on user activity |
 
 `Name`, `CurrentSessionID`, `SessionHistory` carry `,omitempty` so unpromoted/unnamed conversations and conversations with no session bound serialize without those keys. `IsPromoted`, `Cwd`, `ID`, `LastUsedAt` do **not** use `omitempty` — they must always appear, even at zero value. The `IsPromoted: false` default ("discussion") must be explicit on disk.
@@ -72,6 +73,18 @@ that as "the only *validated* writer," not "the only writer." `Registry.Update` 
 value reached through `Get` is guaranteed ≤ `MaxSystemPromptBytes` and valid UTF-8 only
 if every writer in practice goes through `SetSystemPrompt` — the type does not enforce
 this.
+
+**`LastContextUsage` (#2460) needs a pointer for a reason adjacent to `Name`'s and
+`SystemPrompt`'s but not identical.** Those two need one to split "absent" from
+"explicitly empty." Here a zero-valued `ContextUsageReading` would be a *false* reading —
+0 tokens, 0%, the zero time — that a client would render as fact, so the pointer instead
+splits "claude has never reported" (nil) from "claude reported, and this is what it said"
+(non-nil). There is no explicitly-empty third state and nothing mints one: the only
+writer, `Registry.SetLastContextUsage`, takes a `ContextUsageReading` value rather than a
+pointer, so "clear it back to nil" is structurally unreachable. `ContextUsageReading`
+itself carries no `omitempty` on any of its five fields — unlike `Conversation`, where a
+zero value is usually the un-set default, a zero-valued *reading* (a fresh session
+reading zero tokens at zero percent) is a fact worth recording, not an absence.
 
 ## Decisions
 
@@ -114,7 +127,7 @@ None. Pure value type — no goroutines, no channels, no mutexes. Safe to copy b
 
 ## Related
 
-- [`features/conversations-registry.md`](conversations-registry.md) — `Registry` + `Load` / `Save` / `Create` / `Get` / `List` / `Update` / `SetArchived` / `SetSystemPrompt` (#217, #880, #2149); the on-disk persistence layer for this type.
+- [`features/conversations-registry.md`](conversations-registry.md) — `Registry` + `Load` / `Save` / `Create` / `Get` / `List` / `Update` / `SetArchived` / `SetSystemPrompt` / `SetLastContextUsage` (#217, #880, #2149, #2460); the on-disk persistence layer for this type.
 - [codebase/880.md](../codebase/880.md) — per-ticket note for the `IsArchived` field + its `omitempty` asymmetry with `IsPromoted`.
 - [ADR 022](../decisions/022-conversations-update-callback-under-lock.md) — `Registry.Update` runs the caller's callback under the registry lock.
 - [`internal/sessions`](sessions-package.md) — the existing `Session` model. Lives alongside `internal/conversations`; not coupled.
