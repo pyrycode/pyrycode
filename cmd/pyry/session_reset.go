@@ -286,11 +286,17 @@ func (r *conversationReset) release(convID string) {
 	delete(r.inFlight, convID)
 }
 
-// wrapUp runs the whole routine for convID and returns nothing, which is the
-// contract rather than an omission: AC 2 says a wrap-up that fails, times out,
-// produces nothing usable or meets a disabled store leaves the previous note
-// standing and does NOT fail the reset — so there is no failure a caller could act
-// on, and a returned error would invite one to try.
+// wrapUp runs the whole routine for convID and answers whether a handoff note was
+// written for the successor.
+//
+// IT IS AN OUTCOME AND NOT AN ERROR, which is the contract rather than an omission:
+// AC 2 says a wrap-up that fails, times out, produces nothing usable or meets a
+// disabled store leaves the previous note standing and does NOT fail the reset — so
+// there is no failure a caller could act on, and a returned error would invite one to
+// try. The bool exists for #2478, whose restarting edge reports to a client WHETHER a
+// note was made; every exit below that is not storeNote's completed write answers
+// false, which is the closed skip set ResetHandoffSkipped merges. Nothing here
+// branches on it.
 //
 // EVERY STEP'S POSITION IS LOAD-BEARING:
 //
@@ -313,9 +319,9 @@ func (r *conversationReset) release(convID string) {
 // startFreshRunner arms it, and it runs after this returns; armed here, every
 // WriteUserTurn below would answer the retryable ErrNoLiveChild and the wrap-up
 // could never be delivered at all.
-func (r *conversationReset) wrapUp(convID string) {
+func (r *conversationReset) wrapUp(convID string) (wrote bool) {
 	if r == nil || r.resolve == nil {
-		return
+		return false
 	}
 	ctx, cancel := context.WithTimeout(r.baseContext(), r.bound())
 	defer cancel()
@@ -329,14 +335,14 @@ func (r *conversationReset) wrapUp(convID string) {
 		r.logger().Debug("relay: reset wrap-up skipped; conversation has no bound session",
 			"event", "reset.wrapup.unresolved",
 			"conversation_id", convID)
-		return
+		return false
 	}
 	capturer, ok := target.runner.(wrapUpCapturer)
 	if !ok {
 		r.logger().Debug("relay: reset wrap-up skipped; bound runner captures no reply",
 			"event", "reset.wrapup.no_capture",
 			"conversation_id", convID)
-		return
+		return false
 	}
 
 	// Tolerated on both arms. arm is logged as a plain string, never the named type:
@@ -355,7 +361,7 @@ func (r *conversationReset) wrapUp(convID string) {
 			r.logger().Debug("relay: reset wrap-up abandoned; the conversation did not go idle in time",
 				"event", "reset.wrapup.not_idle",
 				"conversation_id", convID)
-			return
+			return false
 		}
 	}
 
@@ -367,7 +373,7 @@ func (r *conversationReset) wrapUp(convID string) {
 		r.logger().Debug("relay: reset wrap-up skipped; a reply capture is already armed",
 			"event", "reset.wrapup.capture_busy",
 			"conversation_id", convID)
-		return
+		return false
 	}
 	defer stop()
 
@@ -384,16 +390,16 @@ func (r *conversationReset) wrapUp(convID string) {
 		r.logger().Warn("relay: reset wrap-up prompt was not delivered",
 			"event", "reset.wrapup.write_failed",
 			"conversation_id", convID)
-		return
+		return false
 	}
 	text, ended := reply.wait(ctx)
 	if !ended {
 		r.logger().Warn("relay: reset wrap-up hit its deadline; the previous handoff note stands",
 			"event", "reset.wrapup.deadline",
 			"conversation_id", convID)
-		return
+		return false
 	}
-	r.storeNote(convID, text)
+	return r.storeNote(convID, text)
 }
 
 // baseContext answers the daemon context, or Background for a literal built
@@ -496,9 +502,9 @@ func (r *conversationReset) previousNote(convID string) string {
 //
 // The blank case needs no arm of its own: admissibleHandoffNote refuses a note that
 // is blank after trimming, which is the first thing it tests.
-func (r *conversationReset) storeNote(convID, text string) {
+func (r *conversationReset) storeNote(convID, text string) (wrote bool) {
 	if r.notes == nil {
-		return
+		return false
 	}
 	if _, ok := sessions.FencedHandoffNote(text); !ok {
 		// Content-free by construction: the record says the reply was unusable and
@@ -506,7 +512,7 @@ func (r *conversationReset) storeNote(convID, text string) {
 		r.logger().Warn("relay: reset wrap-up produced no usable note; the previous one stands",
 			"event", "reset.wrapup.reply_unusable",
 			"conversation_id", convID)
-		return
+		return false
 	}
 	if _, err := r.notes.WriteHandoffNote(conversations.ConversationID(convID), text); err != nil {
 		if errors.Is(err, sessions.ErrHandoffNotesDisabled) {
@@ -515,12 +521,12 @@ func (r *conversationReset) storeNote(convID, text string) {
 			r.logger().Debug("relay: reset wrap-up note not stored; handoff notes are disabled",
 				"event", "reset.wrapup.notes_disabled",
 				"conversation_id", convID)
-			return
+			return false
 		}
 		r.logger().Warn("relay: reset wrap-up note could not be stored; the previous one stands",
 			"event", "reset.wrapup.note_write_failed",
 			"conversation_id", convID)
-		return
+		return false
 	}
 	// The one Info on the happy path, and it carries no path: WriteHandoffNote
 	// returns where it wrote, and the location of a conversation's note is a fact
@@ -529,4 +535,5 @@ func (r *conversationReset) storeNote(convID, text string) {
 	r.logger().Info("relay: reset wrote the outgoing session's handoff note",
 		"event", "reset.wrapup.note_written",
 		"conversation_id", convID)
+	return true
 }
