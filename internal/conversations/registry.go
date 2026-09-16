@@ -49,6 +49,31 @@ type registryFile struct {
 // claude through a file, never as a command-line value.
 const MaxSystemPromptBytes = 8192
 
+// MaxPendingChannelPosts and MaxPendingChannelPostsBytes bound
+// Conversation.PendingChannelPosts, both inclusive: a post landing exactly on
+// either is admitted (#2499). Nothing else bounds the carry — a channel nobody
+// answers would otherwise grow the registry file and the eventual stdin write
+// without limit, reachable by any caller of the `channel.post` verb.
+//
+// TWO CONSTANTS, BECAUSE ONE DOES NOT DO THE JOB. The byte cap alone admits 65536
+// one-byte posts, and every carried entry costs a separator in the rendered block
+// the delivery seam composes, so the rendered size is not bounded by the byte cap
+// on its own. The count cap alone would admit 64 posts of 64 KiB each.
+//
+// MaxPendingChannelPostsBytes is the summed byte length of the stored texts, sized
+// at ONE post's admitted size (control.MaxChannelPostBytes), so what accumulates
+// can never make the eventual write to claude larger than a single post already
+// can. The number is restated rather than imported for MaxSystemPromptBytes's
+// reason: this package is a leaf and must not import internal/control. The two
+// must move together.
+//
+// MaxPendingChannelPosts is far above any plausible unanswered channel — a daily
+// cron would need two months to reach it.
+const (
+	MaxPendingChannelPosts      = 64
+	MaxPendingChannelPostsBytes = 64 << 10
+)
+
 // Sentinel errors returned by Promote and SetSystemPrompt. Callers (CLI,
 // wire-protocol layer) distinguish refusal cases via errors.Is and map to
 // user-facing codes.
@@ -474,6 +499,136 @@ func (r *Registry) SetLastContextUsage(id ConversationID, reading ContextUsageRe
 			r.conversations[i].LastContextUsage = &stored
 			return true
 		}
+	}
+	return false
+}
+
+// AppendPendingChannelPost appends text to the carry-forward record of the
+// conversation whose ID equals id (#2499), so the daemon's next user turn for that
+// conversation carries it to claude. Returns true when the text was recorded.
+//
+// It sets exactly one field — PendingChannelPosts — so id, cwd, name,
+// promoted/archived state, system prompt, last reading and session binding are
+// structurally untouched, the same guarantee SetArchived and SetLastContextUsage
+// give for theirs. The scan, the bound check and the append happen atomically under
+// r.mu, so two concurrent posts into one channel are ordered rather than racing,
+// and there is no find-then-mutate window a concurrent Create/Delete could redirect.
+//
+// FALSE MEANS EITHER "no such row" OR "the bound is full", and the two are
+// deliberately not distinguished. Every caller's response is the same — log and
+// carry on, because a carry that could not be recorded must never turn a recorded
+// post into a refusal — so a finer answer would be a distinction with no consumer.
+//
+// THE BOUND REFUSES THE NEWEST POST RATHER THAN EVICTING THE OLDEST, and that
+// direction is a correctness requirement rather than a preference. The consumer
+// reads this record at composition time and clears the leading n entries once the
+// write is confirmed, with a whole claude turn possible in between. Head eviction
+// during that window would shift the entries the pending clear is counting, and the
+// clear would then drop text that was never carried. Refusing at the tail leaves a
+// clear as the ONLY thing that removes an entry from the head, which makes entries
+// [0..n) provably stable across the window. See ClearPendingChannelPosts.
+//
+// No UTF-8 validation, for SetWorkspaceLabel's stated reason: the text reached Go
+// through encoding/json at the control-plane boundary, which has already
+// substituted U+FFFD, so the round-trip-fidelity hazard SetSystemPrompt refuses
+// cannot arrive at this door. The empty string is admitted — the verb's own handler
+// refuses an empty message, and this layer stores what it is given.
+//
+// AppendPendingChannelPost does NOT call Save — disk persistence is the caller's
+// concern, matching the convention every other setter in this file states. It takes
+// no logger, and nothing in this package logs a record field, so the posted text
+// cannot leave the registry file by way of a log line.
+func (r *Registry) AppendPendingChannelPost(id ConversationID, text string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.conversations {
+		if r.conversations[i].ID != id {
+			continue
+		}
+		pending := r.conversations[i].PendingChannelPosts
+		if len(pending) >= MaxPendingChannelPosts {
+			return false
+		}
+		total := len(text)
+		for _, p := range pending {
+			total += len(p)
+		}
+		if total > MaxPendingChannelPostsBytes {
+			return false
+		}
+		r.conversations[i].PendingChannelPosts = append(pending, text)
+		return true
+	}
+	return false
+}
+
+// PendingChannelPosts returns the carry-forward record of the conversation whose ID
+// equals id, oldest first (#2499), or nil when the registry holds no row for id or
+// the row has nothing pending. The two absent cases are one answer because the
+// consumer composes the same identity prompt for both.
+//
+// IT RETURNS A FRESH COPY, never the stored slice. WorkspaceLabel's argument
+// transfers: handing back a collection that a mutator writes under r.mu is an escape
+// the signature should make impossible rather than one a caller must remember not to
+// take. The elements are strings, so the copy is as deep as it needs to be.
+func (r *Registry) PendingChannelPosts(id ConversationID) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.conversations {
+		if r.conversations[i].ID == id {
+			pending := r.conversations[i].PendingChannelPosts
+			if len(pending) == 0 {
+				return nil
+			}
+			out := make([]string, len(pending))
+			copy(out, pending)
+			return out
+		}
+	}
+	return nil
+}
+
+// ClearPendingChannelPosts drops the leading n entries from the carry-forward record
+// of the conversation whose ID equals id (#2499). Returns true on hit, false on
+// miss; on a miss no field of any record is modified.
+//
+// N, NOT "ALL", is the whole point. The consumer reads the record at composition
+// time and clears once the write to claude is confirmed, and a post can land in
+// between — so clearing everything would discard text that was never carried, and
+// the ticket's "carried exactly once" would hold in one direction only. n is the
+// count the consumer actually composed; entries past it stay pending for the next
+// turn. AppendPendingChannelPost's refuse-the-newest bound is what makes the leading
+// n the same entries the consumer read.
+//
+// n <= 0 mutates nothing and still reports the hit, which is the right answer for a
+// confirmed delivery that carried nothing. n >= len clears the record; a reslice
+// past the end is deliberately not a panic here, because the consumer's count and
+// this record are read under two separate lock acquisitions and a shorter record is
+// a legitimate outcome rather than a programming error.
+//
+// The tail is kept by RESLICING rather than by copying down. The elements ahead of
+// the new head are not written, which is what keeps a concurrently-held snapshot
+// from PendingChannelPosts consistent, and the retained backing array is bounded by
+// MaxPendingChannelPostsBytes.
+//
+// ClearPendingChannelPosts does NOT call Save — disk persistence is the caller's
+// concern, matching the convention every other setter in this file states.
+func (r *Registry) ClearPendingChannelPosts(id ConversationID, n int) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.conversations {
+		if r.conversations[i].ID != id {
+			continue
+		}
+		if n <= 0 {
+			return true
+		}
+		if n >= len(r.conversations[i].PendingChannelPosts) {
+			r.conversations[i].PendingChannelPosts = nil
+			return true
+		}
+		r.conversations[i].PendingChannelPosts = r.conversations[i].PendingChannelPosts[n:]
+		return true
 	}
 	return false
 }

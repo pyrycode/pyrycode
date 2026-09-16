@@ -127,6 +127,34 @@ type Conversation struct {
 	// setter. Last write wins; see SetLastContextUsage.
 	LastContextUsage *ContextUsageReading `json:"last_context_usage,omitempty"`
 
+	// PendingChannelPosts is the text posted into this channel that claude has not
+	// been shown yet, oldest first (#2499). A `channel.post` records the content in
+	// the durable log and pushes it to connected clients, but deliberately starts no
+	// turn, so without this the operator's reply reaches claude with nothing before
+	// it. The daemon's delivery seam carries these ahead of the next user turn it
+	// writes and clears them once that write is confirmed.
+	//
+	// THIS IS THE ONE FIELD ON THIS RECORD THAT HOLDS CONVERSATION CONTENT, and it
+	// is why the file's mode matters: Save already writes at 0600 through a temp +
+	// rename, and SystemPrompt is already operator-authored content here, so the
+	// row's sensitivity class is unchanged. Nothing in this package logs a record
+	// field, so the text cannot leave the file by way of a log line.
+	//
+	// It is durable rather than in-memory because the whole point is a question
+	// posted in the morning still being carried by a reply that evening, across a
+	// daemon restart in between.
+	//
+	// omitempty carries the same contract as IsArchived's, SystemPrompt's and
+	// LastContextUsage's: "an absent key decodes as nothing pending, with no
+	// migration step." On a slice omitempty tests length, so a record whose last
+	// entry was cleared omits the key exactly as one that never held a post does.
+	//
+	// Bounded by MaxPendingChannelPosts and MaxPendingChannelPostsBytes, enforced at
+	// the one door — AppendPendingChannelPost. The bound refuses the NEWEST post
+	// rather than evicting the oldest; that direction is load-bearing, and
+	// ClearPendingChannelPosts records why.
+	PendingChannelPosts []string `json:"pending_channel_posts,omitempty"`
+
 	// LastUsedAt is bumped whenever the conversation has user activity.
 	// Used by "recently active" sorts and by the auto-archive predicate
 	// (#219). Always present.

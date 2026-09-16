@@ -2269,3 +2269,241 @@ func TestRegistry_SetLastContextUsage_DoesNotPersist(t *testing.T) {
 		t.Errorf("on-disk LastContextUsage = %+v, want nil (the setter must not Save)", *got.LastContextUsage)
 	}
 }
+
+// #2499. The pending carry-forward record: text posted into a channel is held on
+// the conversation's row until the next user turn carries it to claude.
+//
+// The fixture id and the one-line Create are the shape every setter test above
+// uses; nothing here needs a populated row beyond the identity.
+func newPendingRegistry(t *testing.T, id ConversationID) *Registry {
+	t.Helper()
+	r := &Registry{}
+	r.Create(Conversation{ID: id, Cwd: "/x", LastUsedAt: mustParseTime(t, "2026-09-04T12:34:56.789Z")})
+	return r
+}
+
+// #2499 AC3: two posts before one reply are held in POST order, which is the order
+// the carry renders them in.
+func TestRegistry_AppendPendingChannelPost_AppendsInOrder(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	r := newPendingRegistry(t, id)
+
+	for _, text := range []string{"first", "second", "third"} {
+		if !r.AppendPendingChannelPost(id, text) {
+			t.Fatalf("AppendPendingChannelPost(%q) returned false for a present row", text)
+		}
+	}
+	want := []string{"first", "second", "third"}
+	if got := r.PendingChannelPosts(id); !reflect.DeepEqual(got, want) {
+		t.Errorf("PendingChannelPosts = %q, want %q", got, want)
+	}
+}
+
+func TestRegistry_AppendPendingChannelPost_Miss(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	r := newPendingRegistry(t, id)
+	before := r.List()
+
+	if r.AppendPendingChannelPost("99999999-0000-4000-8000-000000000000", "orphan") {
+		t.Fatal("AppendPendingChannelPost returned true for an absent id")
+	}
+	if after := r.List(); !reflect.DeepEqual(before, after) {
+		t.Errorf("a miss modified the registry:\nbefore = %+v\n after = %+v", before, after)
+	}
+	if got := r.PendingChannelPosts("99999999-0000-4000-8000-000000000000"); got != nil {
+		t.Errorf("PendingChannelPosts for an absent id = %q, want nil", got)
+	}
+}
+
+// #2499: BOTH bounds refuse the NEWEST post rather than evicting the oldest, and
+// the already-stored prefix is left byte-identical. The refusal direction is the
+// load-bearing half — see the carry's compose/clear window, which is only safe
+// because nothing but a clear ever removes an entry from the head.
+func TestRegistry_AppendPendingChannelPost_BoundsRefuseTheNewest(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+
+	tests := []struct {
+		name string
+		fill func(*Registry)
+		next string
+	}{
+		{
+			name: "count bound",
+			fill: func(r *Registry) {
+				for i := 0; i < MaxPendingChannelPosts; i++ {
+					r.AppendPendingChannelPost(id, fmt.Sprintf("post-%d", i))
+				}
+			},
+			next: "one too many",
+		},
+		{
+			name: "byte bound",
+			fill: func(r *Registry) {
+				r.AppendPendingChannelPost(id, strings.Repeat("a", MaxPendingChannelPostsBytes-1))
+			},
+			next: "xx", // one byte over
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newPendingRegistry(t, id)
+			tt.fill(r)
+			before := r.PendingChannelPosts(id)
+
+			if r.AppendPendingChannelPost(id, tt.next) {
+				t.Fatal("AppendPendingChannelPost returned true past the bound")
+			}
+			after := r.PendingChannelPosts(id)
+			if !reflect.DeepEqual(before, after) {
+				t.Errorf("a refused post disturbed the stored record: %d entries before, %d after",
+					len(before), len(after))
+			}
+		})
+	}
+}
+
+// #2499: a post landing exactly ON each bound is admitted — the bounds are
+// inclusive, the shape MaxSystemPromptBytes already has.
+func TestRegistry_AppendPendingChannelPost_BoundsAreInclusive(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	r := newPendingRegistry(t, id)
+
+	for i := 0; i < MaxPendingChannelPosts-1; i++ {
+		r.AppendPendingChannelPost(id, "x")
+	}
+	if !r.AppendPendingChannelPost(id, "y") {
+		t.Fatal("the entry landing exactly on MaxPendingChannelPosts was refused")
+	}
+	if got := len(r.PendingChannelPosts(id)); got != MaxPendingChannelPosts {
+		t.Errorf("stored %d entries, want %d", got, MaxPendingChannelPosts)
+	}
+
+	r2 := newPendingRegistry(t, id)
+	if !r2.AppendPendingChannelPost(id, strings.Repeat("a", MaxPendingChannelPostsBytes)) {
+		t.Fatal("the post landing exactly on MaxPendingChannelPostsBytes was refused")
+	}
+}
+
+// #2499: the reader hands back a COPY. WorkspaceLabel's argument transfers — a
+// caller holding the stored slice could disturb a record the registry mutates
+// under its own lock.
+func TestRegistry_PendingChannelPosts_ReturnsACopy(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	r := newPendingRegistry(t, id)
+	r.AppendPendingChannelPost(id, "question")
+
+	got := r.PendingChannelPosts(id)
+	got[0] = "tampered"
+
+	if again := r.PendingChannelPosts(id); again[0] != "question" {
+		t.Errorf("mutating the returned slice changed the registry: %q", again)
+	}
+}
+
+// #2499 AC2: the clear drops exactly the leading n entries — the count the carry
+// recorded at compose time — so a post that landed during the delivery survives.
+func TestRegistry_ClearPendingChannelPosts(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+
+	tests := []struct {
+		name string
+		n    int
+		want []string
+	}{
+		{name: "zero clears nothing", n: 0, want: []string{"a", "b", "c"}},
+		{name: "negative clears nothing", n: -1, want: []string{"a", "b", "c"}},
+		{name: "leading prefix", n: 2, want: []string{"c"}},
+		{name: "exactly all", n: 3, want: nil},
+		{name: "more than held", n: 9, want: nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newPendingRegistry(t, id)
+			for _, s := range []string{"a", "b", "c"} {
+				r.AppendPendingChannelPost(id, s)
+			}
+			if !r.ClearPendingChannelPosts(id, tt.n) {
+				t.Fatal("ClearPendingChannelPosts returned false for a present row")
+			}
+			if got := r.PendingChannelPosts(id); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("after clearing %d: got %q, want %q", tt.n, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRegistry_ClearPendingChannelPosts_Miss(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	r := newPendingRegistry(t, id)
+	r.AppendPendingChannelPost(id, "kept")
+	before := r.List()
+
+	if r.ClearPendingChannelPosts("99999999-0000-4000-8000-000000000000", 1) {
+		t.Fatal("ClearPendingChannelPosts returned true for an absent id")
+	}
+	if after := r.List(); !reflect.DeepEqual(before, after) {
+		t.Errorf("a miss modified the registry:\nbefore = %+v\n after = %+v", before, after)
+	}
+}
+
+// #2499 AC4: pending text survives a daemon restart, which on this layer is
+// Save → Load. The absent-key half is the no-migration contract IsArchived and
+// SystemPrompt already carry: a pre-#2499 file decodes as nothing pending.
+func TestRegistry_PendingChannelPosts_RoundTrip(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	path := filepath.Join(t.TempDir(), "conversations.json")
+
+	r := newPendingRegistry(t, id)
+	r.AppendPendingChannelPost(id, "What are you avoiding today?")
+	r.AppendPendingChannelPost(id, "And why?")
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !strings.Contains(string(raw), `"pending_channel_posts"`) {
+		t.Errorf("saved file omits the pending key:\n%s", raw)
+	}
+
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{"What are you avoiding today?", "And why?"}
+	if got := back.PendingChannelPosts(id); !reflect.DeepEqual(got, want) {
+		t.Errorf("after Save→Load: got %q, want %q", got, want)
+	}
+}
+
+func TestRegistry_Save_NoPendingChannelPostsOmitsKey(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	path := filepath.Join(t.TempDir(), "conversations.json")
+
+	r := newPendingRegistry(t, id)
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if strings.Contains(string(raw), "pending_channel_posts") {
+		t.Errorf("a row with nothing pending emitted the key:\n%s", raw)
+	}
+}
