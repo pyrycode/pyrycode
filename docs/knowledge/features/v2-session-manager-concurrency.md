@@ -38,6 +38,30 @@ AC-4 requires the answer to land only after the turn closes), then on the child
 round trip. Every reply, success or either reject, still crosses `forwardToRun`,
 reusing `mcp_status_request`'s ownership boundary rather than adding a new one.
 
+**#2461 adds a remembered-answer fallback to that same resolver, and it
+deliberately never becomes a flight.** When no fresh reading can be taken — no
+bound runner, a runner that isn't a `contextUsageQuerier`, or a flight that
+settled not-ok — `contextUsageResolver.Get` answers from the conversation's
+stored `LastContextUsage` instead of refusing. That answer is one
+`Registry.Get`, never a collapsed flight: `fly`'s deferred settle re-records
+whatever the flight produced, so a fallback expressed as a flight settled `ok`
+would hand the remembered reading straight back to the recorder with a
+freshly-stamped time — a stale figure that renews its own staleness marker on
+every ask and can never look stale again. **The nil-querier guard has to be
+the first statement of the fresh-reading path, ahead of `r.mu.Lock()`, not a
+condition somewhere inside it** — `fly` dereferences the querier
+unconditionally, and before this ticket a nil querier only ever arrived paired
+with `ok == false`, so nothing downstream expected one to reach the flight
+map. Widening the resolve step to return `ok == true` with a nil querier for
+the two hosted-but-unaskable cases made that invariant load-bearing for the
+first time, and the RED run against the unmodified resolver reproduced the
+predicted nil-pointer panic inside `fly` before the guard was added — a
+demonstrated failure, not a hypothesized one. The regression test asserts the
+structural invariant directly (`len(flights) == 0` after a
+hosted-but-unaskable ask) rather than the reply, because the reply looks
+identical whether or not a flight was installed and then panicked on a
+goroutine.
+
 **This is the first handler on `appFrameWorker` that can park for an entire
 turn, and that turns `appFrameQueueDepth` overflow from a flood protection into
 an ordinary-use teardown — found on code review, not in production.** Every

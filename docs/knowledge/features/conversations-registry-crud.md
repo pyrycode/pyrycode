@@ -190,6 +190,15 @@ other named setter in this family. No implicit `Save`.
   `Save` only behind this setter's `true` — an unknown conversation id never reaches a `Save`,
   which is also what makes the save-failure log line safe: a client-chosen id that matched no row
   can never reach that logger at all.
+- **A read door landed on the same type as the write door (#2461).** `contextUsageRecorder` gains
+  `last(id) (ContextUsageReading, bool)`, for `request_context_usage`'s remembered-answer fallback
+  when no fresh reading can be taken. It reads `conv.LastContextUsage` through an ordinary
+  `Registry.Get`, not a new accessor: `Get` returns a row copy that shares the
+  `*ContextUsageReading` pointee, and `SetLastContextUsage` replaces that pointer under `r.mu`
+  rather than mutating it in place, so dereferencing the copy yields a race-free value snapshot
+  with no new lock needed. `last` matches `record`'s inert posture on a nil receiver or nil
+  registry, so the unwired daemon and every resolver test built without a recorder keep behaving
+  exactly as before.
 
 Had no production callers as of the primitive landing; `contextUsageRecorder.record`
 (`cmd/pyry/relay_context_usage.go`) is the sole caller, shared by both producers rather than
