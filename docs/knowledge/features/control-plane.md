@@ -345,6 +345,26 @@ Two choices worth keeping in mind for the next verb built this way:
 
 See `docs/specs/architecture/2155-channel-new-control-verb.md` for the full design and security review.
 
+## Channel: post a message into an existing channel (channel.post, #2497)
+
+`channel.post` records one message in a named channel's durable log without spawning claude or starting a turn: `channelPoster` (`cmd/pyry/channel.go`) resolves the label, `handleChannelPost` (`internal/control/server.go`) is the wire boundary, and `Server.SetChannelPoster` is the same late-bound-closure shape as `SetChannelCreator`. First consumer is a daily cron on pyrybox posting one open question from the vault into a `questions` channel, replacing a kept Discord bot token nothing read.
+
+**No `Cwd` crosses this wire — the single largest security difference from `channel.new`.** The miss path always creates under the daemon's own `resolveDefaultCwd` value, reusing `channelCreator` unchanged rather than a second create path (both `runSupervisor` setters now close over one hoisted `createChannel` local). A verb with no caller-supplied path has none of `channel.new`'s `$HOME`-confinement surface to get wrong.
+
+**The name scan must set both `ListFilter` pointer fields, not just `IsPromoted`.** `IsPromoted` and `IsArchived` AND (see [conversations-registry-crud.md](conversations-registry-crud.md) § `List`); a filter setting only the first silently includes archived channels, and this verb would then post into one that was archived precisely so it would stop being read. Zero matches create; exactly one posts; two or more refuse by count without repeating the caller's name in the refusal — the registry enforces no name-uniqueness rule, so a mistyped `--name` creates rather than refuses and stays diagnosable only through `channelCreator`'s own `channel_new.created` log line.
+
+**A result-free verb answers `Response{OK: true}` — no `ChannelPostResult` type.** Second use of the shape `sessions.rename` established; a verb whose only client is a cron that wants silence on success needs nothing back.
+
+**The byte cap (`MaxChannelPostBytes`, 64 KiB, comfortably under `wssclient.maxFrameBytes`'s 1 MiB) is checked on both sides for different reasons, not redundantly.** The daemon's check is the authorization contract. The CLI's check (`channelPostContent`) is a resource bound on its own `--file` read, and it must open the file once under an `io.LimitReader` rather than `os.Stat` the size and then open — the check-then-use shape reports one inode's size and reads another, and only the bounded read makes `--file /dev/zero` a refusal instead of a hang.
+
+**Flag "given" is decided by `fs.Visit`, not by an empty value.** `--text ""` is a caller who chose an empty message, not an absent flag; reading it as "not given" would report a usage error (exit 2) for a content problem that `channel.post: empty message` (exit 1) already owns.
+
+**Why the poster does not route through `appendConversationHistory`.** That seam returns nothing by contract because its two stream producers have already sent their wire frame by the time it runs — a failed append must never suppress an emit that already went out. Here there is no wire emit; the durable record *is* the deliverable, so a failed append has to fail the post, or a cron would exit 0 having delivered nothing. The poster calls `history.Store.Append` (narrowed to a func, `conversationHistory.Append`) directly and maps its error through the existing `historyAppendFailure` discriminant instead.
+
+**No relay reachability.** No `protocol` type is minted and `internal/relay` never constructs a `control.Request`; a relay client structurally has no frame with which to send this verb. Live delivery to an already-connected client is #2498's problem, not this verb's.
+
+See `docs/specs/architecture/2497-channel-post-control-verb.md` for the full design and security review.
+
 ## Fanning `channel.new` out: `conversation_updated` as an unsolicited push (#2156)
 
 A successful create now fans one `conversation_updated` frame to every interactive-capable client, so a channel created from the host's shell appears in an open desktop client without a reconnect. This is `conversation_updated`'s first unsolicited producer — the wire family's four other producers (`promote_conversation`, `rename_conversation`, `archive_conversation`, `change_workspace`) all reply to the requester only, because a host-side create has no requester to reply to. `conversationUpdateEmitterV2` copies `attachmentOfferEmitterV2`'s shape (see [§ Announcing the store](control-plane-attachment-file-confine-and-store-a-claude-named-path.md#announcing-the-store-attachment_offered-and-the-name-it-must-not-derive-from-2166)): a bare func returned from `startRelay`, nil when the relay leg is off, called last on the success path, and never able to turn a successful create into a refusal.
