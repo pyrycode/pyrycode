@@ -394,8 +394,11 @@ func TestConversationReset_WrapUp_AbandonsAConversationThatNeverGoesIdle(t *test
 		startBusy:    true, // and nothing ever clears it
 		deadline:     50 * time.Millisecond,
 	})
-	f.reset.wrapUp(resetConvA)
+	wrote := f.reset.wrapUp(resetConvA)
 
+	if wrote {
+		t.Errorf("wrapUp reported a written note for a turn that never ended (#2478)")
+	}
 	if got := f.prompts(); len(got) != 0 {
 		t.Errorf("delivered %d prompts into a running turn, want 0", len(got))
 	}
@@ -492,8 +495,13 @@ func TestConversationReset_WrapUp_WritesTheReplyAsTheNote(t *testing.T) {
 		backlogItems:  []msgqueue.QueuedMessage{{ID: 7, Text: "queued one"}, {ID: 8, Text: "queued two"}},
 		answerOnWrite: answerWith(resetReplyText + "\n\nUnfinished: land the reset."),
 	})
-	f.reset.wrapUp(resetConvA)
+	wrote := f.reset.wrapUp(resetConvA)
 
+	// #2478: storeNote's completed write is the ONLY path that reports a written
+	// note, so this is the one test in the file that may assert true.
+	if !wrote {
+		t.Errorf("wrapUp reported no note on the path that stored one")
+	}
 	want := []string{"remove", "remove", "interrupt", "write-turn", "write-note"}
 	if got := f.steps.seen(); !equalSteps(got, want) {
 		t.Errorf("step order = %v, want %v", got, want)
@@ -632,10 +640,16 @@ func TestConversationReset_WrapUp_LeavesThePreviousNoteStanding(t *testing.T) {
 			t.Parallel()
 			tc.opt.previousNote = resetPreviousNote
 			f := newResetFixture(t, tc.opt)
-			f.reset.wrapUp(resetConvA)
+			wrote := f.reset.wrapUp(resetConvA)
 
 			if got := f.notes.stored(conversations.ConversationID(resetConvA)); got != resetPreviousNote {
 				t.Errorf("stored note = %q, want the previous note %q left standing", got, resetPreviousNote)
+			}
+			// #2478: this table IS the closed skip set, so the outcome it reports has to
+			// be false on every row of it — that is what makes the restarting edge say
+			// skipped rather than claiming a note the successor will not find.
+			if wrote {
+				t.Errorf("wrapUp reported a written note on a row that left the previous one standing")
 			}
 		})
 	}
@@ -802,11 +816,15 @@ func TestConversationReset_NilAndUnwiredAreInert(t *testing.T) {
 	if _, ok := nilReset.begin(resetConvA); ok {
 		t.Errorf("a nil coordinator admitted a reset")
 	}
-	nilReset.wrapUp(resetConvA) // must not panic
+	if nilReset.wrapUp(resetConvA) { // must not panic
+		t.Errorf("a nil coordinator reported a written note")
+	}
 
 	// Wired with nothing: no resolve, no tracker, no backlog, no store.
 	bare := &conversationReset{base: context.Background(), deadline: time.Second}
-	bare.wrapUp(resetConvA) // must not panic
+	if bare.wrapUp(resetConvA) { // must not panic
+		t.Errorf("an unwired coordinator reported a written note")
+	}
 }
 
 // TestComposeWrapUpPrompt_OmitsTheSectionWithoutANote pins the shape of the

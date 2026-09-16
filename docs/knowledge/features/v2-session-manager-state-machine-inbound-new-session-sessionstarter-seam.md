@@ -278,6 +278,54 @@ package had already solved that exact problem once, for the debug bundle.
 Asking "has this package had an off-Run producer that owed a reply before?"
 would have been cheaper than either retracted attempt.
 
+## The `resetting` producer, and why it doesn't buffer (#2478)
+
+`resetThenRotate` (the wrap-up-then-rotate tail above) now brackets itself with
+three `resettingEmitterV2` calls — a rising `wrapping_up`/`pending` before
+`wrapUp`, a rising `restarting` carrying the handoff outcome after it, and a
+`defer`-registered falling edge — reported to every interactive client as
+[`resetting`](../../protocol-mobile.md#resetting). `wrapUp` and `storeNote`
+(`cmd/pyry/session_reset.go`) were widened from no return value to a `bool`
+so the emitter learns `written` vs `skipped` without ever seeing the note's
+own text: the emitter holds no note store, no reply text and no
+`conversationReset`, so the trust boundary the SECURITY review asked for is
+structural rather than a discipline someone has to remember.
+
+**Matching the nearest sibling by class was the wrong question; matching the
+caller's blocking contract was the right one.** `queueStateEmitterV2` and
+`sessionErrorEmitterV2` — the two other v2 status producers, and the obvious
+shape to copy — buffer their frames onto a `Run` goroutine with a
+drop-on-full send. That shape exists because *their* callers (msgqueue's
+`OnChange`/`OnGiveUp` seams) are under a MUST-NOT-BLOCK contract the producer
+has to honor. `resetThenRotate` already runs on its own goroutine precisely
+so a 90-second wrap-up can't block dispatch, so the queue buys nothing — and
+copying it anyway would have cost something real: a drop-on-full send can
+drop exactly the falling edge, and `resetting`'s published wire contract
+(every rising sequence ends in a falling one, so a client needs no timeout of
+its own) depends on that edge never being droppable. `resettingEmitterV2` is
+synchronous instead, copying `attachmentOfferEmitterV2`'s shape — the other
+v2 emitter that already fans out off its caller's own goroutine. **Generalizes:**
+before shaping a new producer after the nearest one of the same wire class,
+check what contract the *caller* is under, not just what the sibling looks
+like — two producers can be the same class of frame and owe opposite
+concurrency answers.
+
+**The falling edge has to land before `release()`, and only defer-stack LIFO
+makes that true — it is not something a reviewer can spot by reading the
+single-reset path.** `resetThenRotate` registers `defer release()` first and
+`defer resetting.done(convID)` second, so `done` runs *before* `release` on
+unwind. Reversed, every single-reset test still passes — the bug only shows
+up across two resets, where `release` admits a second reset whose
+`wrapping_up` can then reach the wire ahead of the first reset's
+`active:false`, and a client clears an indicator it had just re-opened. The
+shipped test doesn't infer the ordering from behavior; it reads the frame
+count standing *at* the `release` call itself
+(`TestResetThenRotate_FallingEdgePrecedesTheRelease`). **Generalizes:** an
+ordering guarantee that depends on where in a defer stack a cleanup call sits
+needs a test that observes the stack mid-unwind, not one that only checks the
+final frame sequence — the failure mode is invisible on the path every other
+test already exercises.
+
 ## Log-bounding: only the invalid-shape arm needs it
 
 Every arm past `conversations.ValidID` logs a string already known to be 36

@@ -1008,6 +1008,16 @@ func runSupervisor(args []string) error {
 	// shape as qse. It holds no queue reference, so it cannot reach queued text.
 	see := newSessionErrorEmitterV2(giveUps, logger)
 
+	// The resetting producer (#2478): as a conversation reset runs, it fans the
+	// wrap-up and restart phases and the falling edge that closes them to interactive
+	// phones, so the pause an operator is watching has a name and says whether a
+	// handoff note was made. Built here because the activeSessionStarter literal below
+	// is its caller; it holds NO broadcaster yet, and startRelayV2 attaches the relay
+	// leg's one. Unlike qse and see it starts no Run goroutine — its caller is the
+	// reset tail, which already runs off the dispatch goroutine, so it emits
+	// synchronously and cannot drop or reorder an edge.
+	resetting := newResettingEmitterV2(ctx, logger)
+
 	// The debug-bundle producer (#813): a paired `request_debug_bundle` frame
 	// assembles the daemon-global bundle — the recent log ring plus the newest
 	// terminal recording — as one in-memory archive and streams it back over the
@@ -1086,7 +1096,11 @@ func runSupervisor(args []string) error {
 			// that started it. nil on a daemon with no registry or pool, which leaves
 			// the rotation exactly as it was.
 			reset: newConversationReset(ctx, convReg, pool, turnBusy, queue, logger),
-			log:   logger,
+			// #2478: the same emitter the relay leg attaches its broadcaster to, so the
+			// tail that orders the three edges and the producer that puts them on the
+			// wire are one object rather than two that could disagree.
+			resetting: resetting,
+			log:       logger,
 		},
 		claudeSessionsDir: claudeSessionsDir,
 		bootstrapIDFn:     func() string { return string(pool.BootstrapID()) },
@@ -1108,6 +1122,7 @@ func runSupervisor(args []string) error {
 		},
 		qse:              qse,
 		sessionErr:       see,
+		resetting:        resetting,
 		blockedNotify:    blocked,
 		debugBundler:     debugBundler,
 		settings:         settingsUpdaterAdapter{pool, modelVocabulary},
@@ -2326,6 +2341,16 @@ type activeSessionStarter struct {
 	// every test literal in this package still gets for free.
 	reset *conversationReset
 
+	// resetting reports the reset's two phases and its falling edge to interactive
+	// clients (#2478). Optional on the same terms as reset and every other field in
+	// this literal: a nil emitter emits nothing, which is the PTY posture and what
+	// keeps every pre-#2478 test literal in this package compiling unchanged.
+	//
+	// It is deliberately SEPARATE from reset rather than a field on it. The
+	// coordinator owns one phase of the two and would have to be told when the other
+	// began; the tail below is the one place all three edges sit in sequence.
+	resetting *resettingEmitterV2
+
 	// log records which arm an inbound new_session took (#2099). Optional: nil
 	// falls back to slog.Default() via logger(), mirroring activeInterrupter.
 	log *slog.Logger
@@ -2376,10 +2401,30 @@ var _ relay.LateSessionStarter = activeSessionStarter{}
 // window than the synchronous path's. That is handled where it already was: if a
 // rotation won in between, Pool.RotateForNewSession answers ErrSessionNotFound and
 // startFreshRunner disarms the #1330 gate and returns it.
+//
+// IT IS ALSO THE ONE PLACE THE THREE resetting EDGES SIT IN SEQUENCE (#2478), which
+// is why they are emitted here rather than inside the coordinator: wrapUp owns one
+// phase of the two and knows nothing of the rotation that is the other.
+//
+// THE FALLING EDGE IS DEFERRED, AND ITS POSITION RELATIVE TO release IS
+// LOAD-BEARING. Registered below `defer release()`, LIFO runs it FIRST — so the
+// conversation is still claimed when active:false goes out. Reversed, release would
+// admit a second reset whose own wrapping_up could reach a client AHEAD of this
+// one's falling edge, and a client that cleared its indicator on the late arrival
+// would strand the second reset's — the one ordering error the "every rising
+// sequence ends in a falling edge" guarantee cannot recover from. Deferring also
+// puts it on all three exits at once, which is the argument reportNewSessionOutcome
+// records for itself: the fourth edit would forget one.
 func (a activeSessionStarter) resetThenRotate(release func(), outcome func(error),
 	runner sessions.Runner, oldID sessions.SessionID, convID, spawnDir string, refused bool) {
 	defer release()
-	a.reset.wrapUp(convID)
+	a.resetting.wrappingUp(convID)
+	// The bool is an OUTCOME, not an error: a wrap-up that produced no note does not
+	// fail the reset, and nothing below branches on it. It exists so the phase change
+	// can say whether the successor starts with a note.
+	wroteNote := a.reset.wrapUp(convID)
+	a.resetting.restarting(convID, wroteNote)
+	defer a.resetting.done(convID)
 	if err := startFreshRunner(runner, oldID, spawnDir, a.rotate, a.log); err != nil {
 		a.logger().Warn("relay: v2 new_session could not rotate after the wrap-up turn",
 			"event", "v2.new_session.rotate_failed",

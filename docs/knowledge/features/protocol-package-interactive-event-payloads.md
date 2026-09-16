@@ -122,8 +122,9 @@ type CompactionBoundaryPayload struct {
 }
 
 // #2453 — the wire form of the daemon's OWN conversation-reset routine, not of a
-// claude output line: no producer yet (#2455), and NOT a PTY-derived status peer
-// of Stall the way ApiRetryPayload/CompactingPayload above it are. One reset
+// claude output line. Producer shipped in #2478 (resettingEmitterV2), and NOT a
+// PTY-derived status peer of Stall the way ApiRetryPayload/CompactingPayload
+// above it are. One reset
 // emits Active:true TWICE — Phase ResetPhaseWrappingUp, then ResetPhaseRestarting
 // — before a single Active:false; a repeated true with a new Phase is a phase
 // change, not a second reset. Phase/Handoff are meaningful only while Active is
@@ -383,8 +384,11 @@ type BannerPayload struct {
   indicator. The handoff note's own text never crosses this wire: `Handoff`
   reports only *whether* one was written, never the note itself, which is why the
   frame declares no prose channel and owes no bound or sanitization statement.
-  Declared with **no producer**: #2455 owns the reset routine, #2456 routes a
-  client's `/clear` into it. See `docs/protocol-mobile.md` § `resetting`.
+  Producer shipped in #2478: `resettingEmitterV2` runs synchronously off the reset
+  tail goroutine rather than buffering onto a `Run` goroutine like its v2 status
+  siblings, so the falling edge this frame's contract promises cannot be dropped.
+  #2456 routes a client's `/clear` into the reset routine that triggers it. See
+  `docs/protocol-mobile.md` § `resetting`.
 - **`ToolDeniedPayload` (#2233) spells its tool token `tool_name`, not `name`, and the
   divergence from `ToolUsePayload.Name` is deliberate, not drift.** On `tool_use` the
   tool *is* the subject, so an unqualified `name` is unambiguous; here it is one named

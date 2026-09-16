@@ -224,6 +224,12 @@ type relayWiring struct {
 	// startRelayV2 starts over the v2 manager. Built at main.go (channel shared with
 	// the msgqueue OnGiveUp seam) for the same chicken-and-egg reason as qse.
 	sessionErr *sessionErrorEmitterV2
+	// resetting is the pre-built conversation-reset producer (#2478). Pre-built for a
+	// DIFFERENT chicken-and-egg than qse and sessionErr's: its caller is the
+	// activeSessionStarter literal, built in the composition root above this leg. It
+	// starts no Run goroutine, so it takes no bcast parameter — startRelayV2 attaches
+	// the broadcaster into it instead.
+	resetting *resettingEmitterV2
 	// blockedNotify routes a folder-not-trusted session_error (a trust deny /
 	// deny-on-timeout) into the same give-up → session_error frame path the
 	// msgqueue OnGiveUp seam uses (#1014). It is main.go's shared `blocked` closure
@@ -1582,6 +1588,14 @@ func startRelayV2(
 	// unconditionally whenever the v2 manager exists.
 	streamSessionErrCleanup := startSessionErrorStreamV2(ctx, w.sessionErr, mgr)
 
+	// Wire the resetting producer (#2478): hand the pre-built emitter this leg's
+	// fan-out surface so a conversation reset's two phases and its falling edge reach
+	// capability-gated interactive phones. No Run goroutine and no ctx — this producer
+	// emits synchronously on the reset tail goroutine activeSessionStarter already
+	// spawns, so there is nothing to drain; the cleanup detaches instead, which is what
+	// keeps a late edge from racing a winding-down manager.
+	streamResettingCleanup := startResettingStreamV2(w.resetting, mgr)
+
 	return func() {
 		// Stop the producers — the structured turn stream's drain, the
 		// session-transition producer, the queue_state producer, and the session_error
@@ -1595,6 +1609,7 @@ func startRelayV2(
 		streamTransitionsCleanup()
 		streamQueueStateCleanup()
 		streamSessionErrCleanup()
+		streamResettingCleanup()
 		<-mgrDone
 	}, surface, announce, announceConversation, pairingMinter.MintLocalPairing, nil
 }
