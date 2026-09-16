@@ -334,23 +334,49 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 		w.edges[2].Active, w.edges[2].Phase, w.edges[2].Handoff)
 
 	// --- AC 2: the note reached the successor ----------------------------------
-	// The snapshot is taken BEFORE the send and names every turn the client has seen
-	// so far — the plant turn and the predecessor's wrap-up reply among them. The
-	// wrap-up reply contains the planted fact by design, so a late delta of that turn
-	// answering this assertion is the one way it could pass vacuously.
+	// The snapshot is taken BEFORE the send and names every turn THIS WINDOW has seen.
+	// That is not every turn of the run: the window opens at the /clear send, so the
+	// plant turn — drained to completion by drainForCompletedTurn, a different reader —
+	// is not in it and does not need to be. What the window does hold is the
+	// predecessor's wrap-up reply, which carries the planted fact by design, and a late
+	// delta of that turn counted as the successor's is the one way this assertion could
+	// pass vacuously.
 	prior := w.snapshotTurnIDs()
+
+	// THE PHRASING IS MEASURED, NOT CASUAL. The first live run of this case (the
+	// #2485 gate, 2026-09-16) asked "Earlier in this conversation I told you my build
+	// tag for this run" and the successor replied "I don't see a build tag mentioned
+	// earlier in this conversation. This appears to be the first message." That is a
+	// CORRECT answer to the question as it was asked: the successor's transcript is
+	// genuinely empty, so a reference to "this conversation" resolves against it,
+	// comes up empty, and the premise reads as the user's mistake rather than as
+	// context the successor is missing.
+	//
+	// handoffNoteLead tells the successor to consult the note "when the user refers
+	// to earlier work, or when you lack context the conversation seems to assume",
+	// and not to act on it "unprompted". The recall therefore has to put the
+	// successor into one of those two states, and the old phrasing put it into
+	// neither. Naming the previous session and conceding the transcript is empty does
+	// it — without naming the note, and without supplying the token. The only place
+	// the tag exists for this child is the note in its appended system prompt, so a
+	// reply carrying it still proves exactly what AC 2 asks and nothing weaker.
 	sealSendMessage(t, phone, initSend, recallReqID, clearConvID, "m-2",
-		"Earlier in this conversation I told you my build tag for this run. What is it? "+
-			"Reply with only the tag and nothing else.")
+		"What is my build tag for this run? I told it to you before this session "+
+			"started, so it is not in this transcript. Reply with only the tag "+
+			"and nothing else.")
 	reply := w.awaitRecallReply(t, phone, initRecv, clearConvID, recallReqID, prior, perTurnReplyBudget)
 	if !strings.Contains(strings.ToUpper(reply), token) {
 		t.Fatalf("the successor's first reply does not carry the fact the predecessor was told. TWO READINGS, "+
 			"and this test structurally cannot separate them: the reset reported handoff=%q, so a note WAS "+
 			"stored — either the fact never entered it (the wrap-up prompt's last clause did not pull a fact "+
 			"the user stated), or the successor did not use it (the note is composed into the appended system "+
-			"prompt under handoffNoteLead, which tells the successor to consult it rather than obey it). The "+
-			"note's bytes are not observable from a client BY DESIGN — do not reach for the note file to tell "+
-			"these apart. Planted %q; reply was %q",
+			"prompt under handoffNoteLead, which tells the successor to consult it rather than obey it). "+
+			"'The note never reached the child' is NOT a third reading and should not be chased: "+
+			"Pool.writeComposedPrompt targets the session's prompt path VERBATIM across a re-key, and "+
+			"RotateForNewSession recomposes through refreshSystemPromptForRotation BEFORE it fires the "+
+			"transition this test already observed — so the successor spawned from a file that had the note "+
+			"in it. The note's bytes are not observable from a client BY DESIGN — do not reach for the note "+
+			"file to tell the two readings apart. Planted %q; reply was %q",
 			w.edges[1].Handoff, token, reply)
 	}
 	t.Logf("AC 2: the successor's first reply (%d bytes) carried the planted fact, which this test never "+
