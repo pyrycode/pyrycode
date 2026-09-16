@@ -295,6 +295,23 @@ type Server struct {
 	// panicking.
 	channelCreator func(cwd, name string) (string, error)
 
+	// channelPoster, when set, services VerbChannelPost: given a channel's
+	// display label and a message body, it resolves the label to a conversation
+	// — creating one under the daemon's default workspace when nothing matches —
+	// and records the content in that conversation's durable log. Installed via
+	// SetChannelPoster, channelCreator's shape and for its reasons.
+	//
+	// Read once per request under s.mu, then the lock is RELEASED before the
+	// call, the leaf-lock discipline handleApprove, handleAttachFile and
+	// handleChannelNew follow. Load-bearing here because the miss path runs the
+	// channel creator whole — minting a session and writing two registries — so
+	// holding s.mu across it would serialise every control verb behind one post.
+	//
+	// Nil is the state until the daemon composition wires it, and stays nil in
+	// v1/foreground — handleChannelPost then answers Response.Error rather than
+	// panicking.
+	channelPoster func(name, text string) error
+
 	// pairingProvider services VerbPairingMint using daemon-authored runtime
 	// values. Its pairing and error are both sensitive and never logged or
 	// passed through as error detail by the control layer.
@@ -482,6 +499,40 @@ func (s *Server) SetFileAttacher(attach func(sessionID, path string) (string, er
 func (s *Server) SetChannelCreator(create func(cwd, name string) (string, error)) {
 	s.mu.Lock()
 	s.channelCreator = create
+	s.mu.Unlock()
+}
+
+// SetChannelPoster installs the dependency that services VerbChannelPost: given
+// a channel's display label and a message body, it records that content in the
+// named conversation's durable log, creating the channel first when the label
+// matches nothing. Safe to call from any goroutine; canonically called once
+// between NewServer and Serve as part of daemon startup. Passing nil clears a
+// previously-installed poster (used by tests; production startup installs once
+// and never clears).
+//
+// Mirrors SetChannelCreator, and for the same reason: everything the work needs
+// — the conversation registry, the durable log, the daemon's resolved default
+// workspace, and the channel creator itself — lives at cmd/pyry's composition
+// root. This package therefore owns the wire and the guard order and nothing
+// else. It does NO name handling in particular: the label reaches the poster
+// exactly as it arrived, not trimmed and not case-folded, so the matching rule
+// lives in one place.
+//
+// TWO OBLIGATIONS on an implementation, both load-bearing:
+//
+// The returned error's TEXT reaches the wire verbatim, so every refusal reason
+// must be STATIC — or, where a count genuinely has to be reported, a static
+// format over a value the DAEMON derived. In particular a refusal must not fold
+// back the label it was given: that is caller-authored text, and this verb's
+// whole answer to a mistyped label is that the operator sees a diagnostic, not
+// an echo.
+//
+// And the message body must never be logged. It is conversation content, and
+// the durable log is the one place it may be written — the discipline
+// appendConversationHistory records for the producers that share it.
+func (s *Server) SetChannelPoster(post func(name, text string) error) {
+	s.mu.Lock()
+	s.channelPoster = post
 	s.mu.Unlock()
 }
 
@@ -727,6 +778,8 @@ func (s *Server) handle(conn net.Conn) {
 		s.handleAttachFile(conn, enc, req.AttachFile)
 	case VerbChannelNew:
 		s.handleChannelNew(conn, enc, req.Channel)
+	case VerbChannelPost:
+		s.handleChannelPost(conn, enc, req.ChannelPost)
 	case VerbPairingMint:
 		s.handlePairingMint(conn, enc, req.Pairing)
 	default:
@@ -1139,6 +1192,82 @@ func (s *Server) handleChannelNew(conn net.Conn, enc *json.Encoder, payload *Cha
 		return
 	}
 	_ = enc.Encode(Response{ChannelNew: &ChannelNewResult{ConversationID: id}})
+}
+
+// handleChannelPost serves a VerbChannelPost request: hand the caller's label
+// and message to the installed poster, and answer OK or the poster's refusal.
+//
+// Guard order mirrors handleChannelNew's — nil dependency BEFORE payload
+// validation — so a daemon that never wired the poster answers the same way
+// whatever the request looks like, and a caller cannot use the shape of the
+// refusal to probe which dependencies a daemon has installed.
+//
+// Fail-closed in the literal sense: every branch encodes exactly one Response
+// and returns, so a caller never hangs waiting for an answer that was never
+// written, and nothing dereferences payload before the nil check.
+//
+// The payload checks are wire-SHAPE checks and nothing more. An empty name and
+// an empty body are refused here because ChannelPostPayload declares both
+// invalid rather than defaulted — an empty label would otherwise reach the
+// resolver as a request to match the empty name, which nothing sensible carries,
+// and an empty body would record a blank entry a cron could not tell from a
+// delivered one. The cap is enforced here because the poster cannot assume the
+// pyry CLI is what dialled: the socket is local and 0600, so the peer is the
+// operator, but any process running as the operator can send this frame. The
+// CLI checks the same constant before dialling, which is a bound on its own read
+// rather than a second copy of this rule.
+//
+// This handler does NO name handling: the label reaches the poster exactly as it
+// arrived, which keeps the matching rule in one place.
+//
+// The conn write deadline is extended past the handshake window before the call,
+// exactly as handleChannelNew does: the create-on-miss path mints a session and
+// fsyncs two registries, which can outrun the 5s handshake bound on a loaded
+// system. sessionOpTimeout is not a budget on the poster — nothing here cancels
+// it — only a backstop on a genuinely stuck response write.
+//
+// The poster's error text reaches Response.Error verbatim, which is only safe
+// because SetChannelPoster's contract obliges every reason to be static or
+// daemon-derived. This handler adds the verb prefix and nothing else; in
+// particular it never folds the request's label or body back into the refusal.
+func (s *Server) handleChannelPost(conn net.Conn, enc *json.Encoder, payload *ChannelPostPayload) {
+	s.mu.Lock()
+	post := s.channelPoster
+	s.mu.Unlock()
+
+	if post == nil {
+		_ = enc.Encode(Response{Error: "channel.post: no channel poster configured"})
+		return
+	}
+	if payload == nil || payload.Name == "" {
+		_ = enc.Encode(Response{Error: "channel.post: missing name"})
+		return
+	}
+	if payload.Text == "" {
+		_ = enc.Encode(Response{Error: "channel.post: empty message"})
+		return
+	}
+	// The refusal names no number: MaxChannelPostBytes is the one home of the
+	// bound, and a message restating it is a second copy that goes stale the
+	// first time the constant moves.
+	if len(payload.Text) > MaxChannelPostBytes {
+		_ = enc.Encode(Response{Error: "channel.post: message too large"})
+		return
+	}
+
+	// Best-effort, like handleChannelNew's: a SetDeadline error on a broken conn
+	// surfaces on the Encode below rather than needing its own branch.
+	_ = conn.SetDeadline(time.Now().Add(sessionOpTimeout + sessionOpConnGrace))
+
+	if err := post(payload.Name, payload.Text); err != nil {
+		_ = enc.Encode(Response{Error: fmt.Sprintf("channel.post: %v", err)})
+		return
+	}
+	// OK rather than a result body, handleSessionsRename's shape: the caller
+	// prints nothing and needs nothing back, and a verb that answers with more
+	// than its caller needs is a verb whose wire has to be kept compatible for
+	// no reason.
+	_ = enc.Encode(Response{OK: true})
 }
 
 // handlePairingMint invokes the optional provider exactly once for a valid

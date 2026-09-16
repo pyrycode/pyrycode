@@ -723,9 +723,9 @@ func TestChannelNewVerdict(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			code, line := channelNewVerdict(tt.err)
+			code, line := channelVerdict("new", tt.err)
 			if code != tt.wantCode || line != tt.wantLine {
-				t.Errorf("channelNewVerdict(%v) = (%d, %q), want (%d, %q)",
+				t.Errorf("channelVerdict(\"new\", %v) = (%d, %q), want (%d, %q)",
 					tt.err, code, line, tt.wantCode, tt.wantLine)
 			}
 		})

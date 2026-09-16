@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -45,6 +46,24 @@ const (
 	// msgChannelMintFailed covers id generation or session-mint failure (the
 	// pool not running, or its registry save failing).
 	msgChannelMintFailed = "could not start channel session"
+
+	// msgChannelPostRecordFailed covers a failure to write the message into the
+	// conversation's durable log. Static for the reason above, and with an extra
+	// one of its own: internal/history's errors format absolute filesystem paths
+	// ("open segment %q", "resolve log directory %q"), so forwarding one would
+	// put the daemon's layout on a wire the operator's own scripts read. The
+	// content-free discriminant goes to the daemon's log instead, through the
+	// historyAppendFailure the other history producers already share.
+	msgChannelPostRecordFailed = "could not record the message"
+
+	// fmtChannelPostAmbiguous is the one refusal in this file that is not a bare
+	// constant, and the exception is bounded on purpose: the format is static and
+	// the single interpolated value is an int counted off the daemon's own
+	// registry. The requested label is deliberately absent. An operator who
+	// mistyped a name learns that several channels answer to it, which is what
+	// they can act on; echoing their input back would breach the same
+	// no-verbatim-echo rule every message above exists to keep.
+	fmtChannelPostAmbiguous = "%d channels share that name; rename all but one and retry"
 )
 
 // channelCreator builds the dependency control.Server.SetChannelCreator
@@ -242,9 +261,169 @@ func channelCreator(
 	}
 }
 
-// channelUsage is the one-line usage banner both parse-failure paths print
-// before exiting 2.
-const channelUsage = "usage: pyry channel new [-pyry-name=<instance>] [-pyry-socket=<path>] [--name <label>]"
+// channelPoster builds the dependency control.Server.SetChannelPoster installs:
+// given a channel's display label and a message body, record that content in the
+// named conversation's durable log, creating the channel first when the label
+// matches nothing.
+//
+// It takes create — channelCreator's own return value, wired from the same
+// composition-root call — rather than minting a second create path. That is what
+// keeps the confinement order, the eager persist, the bound session and the
+// announcement in one named place, and it is why a mistyped label stays
+// diagnosable: the row it creates carries channelCreator's existing
+// channel_new.created log line, which is what lets the happy path print nothing.
+//
+// appendEntry is history.Store.Append narrowed to a func, and it is narrowed for
+// the reason mint is: the poster unit-tests without an instance directory or a
+// segment layout between the test and the one property under test, which is what
+// bytes this hands the log.
+//
+// IT DOES NOT ROUTE THROUGH appendConversationHistory, and the divergence is the
+// design rather than an oversight. That seam returns nothing by contract — a
+// failed append must never suppress the caller's wire emit, which is right for
+// its two stream producers, whose frame has already gone out by then. Here there
+// is no wire emit at all: the durable record IS what this verb delivers, so an
+// append that failed has to be a post that failed. A cron exiting 0 having
+// delivered nothing is the exact failure that would otherwise ship.
+//
+// SECURITY: name is caller-authored text arriving unvalidated past
+// handleChannelPost's shape checks, and it is used for exactly one thing — an
+// equality comparison against stored names. It never reaches a filesystem path
+// (the log keys on the daemon-minted conversation id), never reaches an argv,
+// and never appears in a refusal or a log line. text is conversation content and
+// the durable log is the one place it may be written, so it is never logged
+// either — appendConversationHistory's discipline, kept here by hand because
+// this path does not share its body.
+//
+// The registry enforces NO uniqueness rule on names — channelCreator's doc block
+// says so outright — which is why two or more matches need an answer rather than
+// a silent pick. List and create are two lock acquisitions and not atomic, so
+// concurrent posts naming one absent channel can each create a row; the outcome
+// is a loud ambiguity refusal on the next post rather than a silent
+// misdelivery, and bounding it would mean a uniqueness rule the registry
+// deliberately does not have.
+func channelPoster(
+	reg *conversations.Registry,
+	create func(cwd, name string) (string, error),
+	defaultCwd string,
+	appendEntry func(conversations.ConversationID, string, json.RawMessage, time.Time) (uint64, error),
+	log *slog.Logger,
+) func(name, text string) error {
+	return func(name, text string) error {
+		// BOTH filter fields are set. They are pointers that AND, and a nil field
+		// means "no filter on this field", so a filter naming only IsPromoted
+		// would silently include channels the operator archived — and post into
+		// one.
+		promoted, archived := true, false
+		var matches []conversations.Conversation
+		for _, c := range reg.List(conversations.ListFilter{IsPromoted: &promoted, IsArchived: &archived}) {
+			// Name is a *string: absent and stored-empty are distinct states, and
+			// neither can match a label handleChannelPost has already refused to
+			// let through empty.
+			if c.Name != nil && *c.Name == name {
+				matches = append(matches, c)
+			}
+		}
+
+		var convID conversations.ConversationID
+		switch len(matches) {
+		case 1:
+			convID = matches[0].ID
+		case 0:
+			// The workspace is the daemon's own resolved default, never a
+			// caller-supplied path — this verb carries none across its wire.
+			// channelCreator still confines it, because it confines whatever it is
+			// given and this caller is not an exception to that.
+			id, err := create(defaultCwd, name)
+			if err != nil {
+				// Forwarded verbatim: every reason create can return is already a
+				// static constant for the reason its own doc block records, so
+				// re-wrapping would either double a prefix or trade a precise reason
+				// for a vague one. It has already logged the detail.
+				return err
+			}
+			convID = conversations.ConversationID(id)
+		default:
+			log.Warn("control: channel.post refused an ambiguous name",
+				"event", "channel_post.ambiguous_name",
+				"matches", len(matches))
+			return fmt.Errorf(fmtChannelPostAmbiguous, len(matches))
+		}
+
+		// The id is daemon-derived in both arms above — a registry match or a
+		// freshly minted one — never a value a caller asserted. That is
+		// Store.Append's precondition, and it is the whole of this call's
+		// authorisation property: conversations.ValidID is a shape predicate, so a
+		// canonical-shaped id from a caller would resolve genuinely inside the
+		// conversation it named.
+		payload, err := json.Marshal(protocol.MessagePayload{
+			ConversationID: string(convID),
+			// Fresh per post, from the same crypto/rand mint the conversation ids
+			// use. Nothing upstream supplies one: unlike newOperatorMessageHistory,
+			// which carries the queue's id for the operator's own turn, this entry
+			// has no prior identity to preserve.
+			MessageID: newChannelPostMessageID(),
+			// The role literal, matching internal/streamsup's envelope builder and
+			// newOperatorMessageHistory's — the repo declares no role constants.
+			// "assistant" where that producer writes "user": both are legal per
+			// MessagePayload's doc block, and this content did not come from the
+			// operator's own turn.
+			Role: "assistant",
+			Text: text,
+		})
+		if err != nil {
+			// Defensive, matching both #2114 producers: MessagePayload is four
+			// strings and cannot fail to marshal in practice. Never echo the payload
+			// or err.Error() — encoding/json quotes invalid input bytes into its
+			// error, which would put conversation content in a log line.
+			log.Error("control: channel.post payload marshal failed",
+				"event", "channel_post.marshal_err",
+				"conversation_id", string(convID))
+			return errors.New(msgChannelPostRecordFailed)
+		}
+
+		// Stamped HERE, at the confirmed write, newOperatorMessageHistory's rule, so
+		// a served page orders this entry by when it landed rather than by when
+		// anything upstream was composed. UTC matches what every other producer
+		// hoists, so entries from all of them are orderable by the stored field.
+		if _, err := appendEntry(convID, protocol.TypeMessage, payload, time.Now().UTC()); err != nil {
+			log.Warn("control: channel.post history append failed",
+				"event", "channel_post.history_append_err",
+				"conversation_id", string(convID),
+				"reason", historyAppendFailure(err))
+			return errors.New(msgChannelPostRecordFailed)
+		}
+
+		log.Info("control: channel.post recorded",
+			"event", "channel_post.posted",
+			"conversation_id", string(convID),
+			"created", len(matches) == 0)
+		return nil
+	}
+}
+
+// newChannelPostMessageID mints the id this verb stamps on its message payload.
+//
+// It borrows conversations.NewID, whose output is a UUIDv4 from crypto/rand, for
+// the reason fileAttacher borrows it for an attachment id: it is the repo's one
+// id mint and the shape is what a client already expects in this field. An rng
+// failure falls back to the empty string rather than failing the post — the
+// field is an identity a client dedupes on, not an authorisation value, and
+// refusing to deliver a message because the system rng hiccuped would trade the
+// deliverable for a cosmetic.
+func newChannelPostMessageID() string {
+	id, err := conversations.NewID()
+	if err != nil {
+		return ""
+	}
+	return string(id)
+}
+
+// channelUsage is the usage banner every parse-failure path prints before
+// exiting 2 — one line per sub-verb, so an operator who typed the wrong one
+// learns the other exists.
+const channelUsage = "usage: pyry channel new [-pyry-name=<instance>] [-pyry-socket=<path>] [--name <label>]\n" +
+	"       pyry channel post [-pyry-name=<instance>] [-pyry-socket=<path>] --name <label> (--text <string> | --file <path>)"
 
 // parseChannelNewArgs is the flag-parse + arity check for
 // `pyry channel new [--name LABEL]`. Extracted from runChannelNew so the
@@ -267,11 +446,106 @@ func parseChannelNewArgs(args []string) (name string, err error) {
 	return *nameFlag, nil
 }
 
-// channelNewVerdict returns (exitCode, stderrLine) for a `pyry channel new`
+// parseChannelPostArgs is the flag-parse + arity check for
+// `pyry channel post --name LABEL (--text STRING | --file PATH)`. Extracted from
+// runChannelPost for parseChannelNewArgs' reason: the parsing rules unit-test
+// without dialling the control socket.
+//
+// Every failure it returns is a USAGE failure — the exit-2 class. Nothing here
+// touches the filesystem and nothing here inspects content; the read and the
+// size bound live in channelPostContent, so the exit-code split is a function
+// boundary rather than a condition inside one.
+//
+// --text and --file are mutually exclusive and one is required. Both rules are
+// checked against how many flags the caller actually SET, via fs.Visit, not
+// against whether the values came back empty: `--text ""` is a caller who chose
+// an empty message and must be told so by the daemon's empty-message refusal,
+// not silently re-read as "no --text given" and rejected here as a usage error.
+//
+// The FlagSet discards its own output (io.Discard) so the caller owns every byte
+// on stderr — runChannelPost prints the error and the usage banner itself.
+func parseChannelPostArgs(args []string) (name, text, file string, err error) {
+	fs := flag.NewFlagSet("pyry channel post", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	nameFlag := fs.String("name", "", "display name of the channel to post into")
+	textFlag := fs.String("text", "", "message content, given inline")
+	fileFlag := fs.String("file", "", "message content, read from this file")
+	if err := fs.Parse(args); err != nil {
+		return "", "", "", err
+	}
+	if fs.NArg() > 0 {
+		return "", "", "", fmt.Errorf("unexpected positional %q", fs.Arg(0))
+	}
+	if *nameFlag == "" {
+		return "", "", "", errors.New("--name is required")
+	}
+
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	switch {
+	case set["text"] && set["file"]:
+		return "", "", "", errors.New("--text and --file are mutually exclusive")
+	case !set["text"] && !set["file"]:
+		return "", "", "", errors.New("one of --text or --file is required")
+	}
+	return *nameFlag, *textFlag, *fileFlag, nil
+}
+
+// channelPostContent resolves the message body from whichever source
+// parseChannelPostArgs accepted, and bounds it. Exactly one of text and file is
+// meaningful; the caller has already enforced that.
+//
+// Every failure here is the exit-1 class: an unreadable file and an over-long
+// message are verdicts on the operator's input, not on their command line.
+//
+// The file is OPENED ONCE and read under an io.LimitReader, never stat-ed for a
+// size and then opened. A check-then-use pair reports the size of one inode and
+// reads another, and the bytes actually read are the only value that matters
+// here; bounding the read is also what turns `--file /dev/zero` into a refusal
+// rather than a hang.
+//
+// The bound is control.MaxChannelPostBytes, the same constant handleChannelPost
+// refuses past — read, not copied. This check is not a duplicate of the
+// daemon's: that one is the contract, which holds for any process that dials the
+// socket, and this one is a bound on this process's own read, which the daemon
+// cannot perform on its behalf. The empty-content rule has no such second job
+// and therefore lives daemon-side only.
+func channelPostContent(text, file string) (string, error) {
+	if file == "" {
+		if len(text) > control.MaxChannelPostBytes {
+			return "", fmt.Errorf("message is larger than the %d-byte limit", control.MaxChannelPostBytes)
+		}
+		return text, nil
+	}
+
+	f, err := os.Open(file)
+	if err != nil {
+		return "", fmt.Errorf("read message file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// One byte past the cap, so a file that sits exactly on it is accepted and
+	// the byte after it is detected without reading the rest of the file.
+	body, err := io.ReadAll(io.LimitReader(f, control.MaxChannelPostBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read message file: %w", err)
+	}
+	if len(body) > control.MaxChannelPostBytes {
+		return "", fmt.Errorf("message is larger than the %d-byte limit", control.MaxChannelPostBytes)
+	}
+	return string(body), nil
+}
+
+// channelVerdict returns (exitCode, stderrLine) for a `pyry channel <sub>`
 // result. exitCode == 0 means success and stderrLine is ""; exitCode == 1 means
 // failure and stderrLine is the one-line operator-readable message to print
 // before os.Exit(1). Pure: deterministic on err, so the unit test never has to
 // intercept os.Exit. Mirrors rekeyVerdict, the same idiom.
+//
+// sub is the sub-verb, carried only so the prefix names the command the operator
+// typed. It is the reason this is one shared formatter rather than one per verb:
+// a twin would be four copied lines that drift the first time either message is
+// reworded.
 //
 // Unlike rekeyVerdict it takes no second argument to quote, and that is the
 // point: every message it can format either originates in the daemon — where
@@ -285,11 +559,11 @@ func parseChannelNewArgs(args []string) (name string, err error) {
 // hand-maintained list of message prefixes that goes stale silently the first
 // time a message is reworded. Both classes are one stderr line and exit 1, so
 // this verb routes every failure through here and keeps the prefix uniform.
-func channelNewVerdict(err error) (exitCode int, stderrLine string) {
+func channelVerdict(sub string, err error) (exitCode int, stderrLine string) {
 	if err == nil {
 		return 0, ""
 	}
-	return 1, fmt.Sprintf("pyry channel new: %s", err.Error())
+	return 1, fmt.Sprintf("pyry channel %s: %s", sub, err.Error())
 }
 
 // runChannel implements `pyry channel <verb>`: peel the global pyry flags via
@@ -312,6 +586,8 @@ func runChannel(args []string) error {
 	switch sub {
 	case "new":
 		return runChannelNew(socketPath, subArgs)
+	case "post":
+		return runChannelPost(socketPath, subArgs)
 	default:
 		return channelUsageExit(fmt.Sprintf("unknown verb %q", sub))
 	}
@@ -353,7 +629,7 @@ func runChannelNew(socketPath string, args []string) error {
 	// there is no daemon-side check this could fall through to.
 	cwd, err := os.Getwd()
 	if err != nil {
-		return channelExit(fmt.Errorf("resolve current directory: %w", err))
+		return channelExit("new", fmt.Errorf("resolve current directory: %w", err))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -361,17 +637,56 @@ func runChannelNew(socketPath string, args []string) error {
 
 	id, err := control.ChannelNew(ctx, socketPath, cwd, name)
 	if err != nil {
-		return channelExit(err)
+		return channelExit("new", err)
 	}
 	fmt.Println(id)
 	return nil
 }
 
-// channelExit prints channelNewVerdict's line and exits with its code. Split
-// from runChannelNew so the formatting stays in the pure verdict function and
+// runChannelPost implements
+// `pyry channel post --name LABEL (--text STRING | --file PATH)`: record one
+// message in the named channel, creating that channel under the daemon's default
+// workspace when the label matches nothing.
+//
+// IT PRINTS NOTHING ON SUCCESS, and that is a contract rather than a style
+// choice: the first consumer is a cron on the operator's box, where any byte on
+// stdout or stderr becomes mail. There is deliberately no created-id echo of the
+// kind `channel new` writes — a caller who needs the id asks for a conversation
+// list, and a caller who is a cron needs an exit code.
+//
+// Unlike runChannelNew it sends NO cwd. The create-on-miss workspace is resolved
+// daemon-side, so this side has nothing to resolve and no os.Getwd to fail on.
+//
+// Exit codes: 0 and silence; 2 for usage failures (flag parse, stray positional,
+// missing --name, neither or both of --text/--file), printed without main's
+// `pyry: ` prefix; 1 for everything else — an unreadable --file, an over-long
+// message, a daemon refusal, or a transport failure — as a single
+// `pyry channel post: …` line on stderr.
+func runChannelPost(socketPath string, args []string) error {
+	name, text, file, err := parseChannelPostArgs(args)
+	if err != nil {
+		return channelUsageExit(err.Error())
+	}
+
+	body, err := channelPostContent(text, file)
+	if err != nil {
+		return channelExit("post", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := control.ChannelPost(ctx, socketPath, name, body); err != nil {
+		return channelExit("post", err)
+	}
+	return nil
+}
+
+// channelExit prints channelVerdict's line and exits with its code. Split from
+// the run functions so the formatting stays in the pure verdict function and
 // only this three-line wrapper touches os.Exit.
-func channelExit(err error) error {
-	exitCode, stderrLine := channelNewVerdict(err)
+func channelExit(sub string, err error) error {
+	exitCode, stderrLine := channelVerdict(sub, err)
 	fmt.Fprintln(os.Stderr, stderrLine)
 	os.Exit(exitCode)
 	return nil // unreachable

@@ -1248,10 +1248,31 @@ func runSupervisor(args []string) error {
 	// reconnect rather than waiting for its next list. It arrives nil from
 	// startRelay's no-URL early return — announceAttachment's shape one wiring
 	// up — and the creator creates exactly as before when it is.
-	ctrl.SetChannelCreator(channelCreator(convReg, func(label, spawnDir string) (string, error) {
+	//
+	// Hoisted to a local because #2497's poster needs the SAME creator: a post
+	// whose label matches nothing creates the channel through it rather than
+	// minting a second create path, so the confinement order, the eager persist,
+	// the bound session, the announcement and the channel_new.created log line
+	// have one home for both entry points.
+	createChannel := channelCreator(convReg, func(label, spawnDir string) (string, error) {
 		id, err := pool.Mint(label, spawnDir)
 		return string(id), err
-	}, convRegistryPath, announceConversation, logger))
+	}, convRegistryPath, announceConversation, logger)
+	ctrl.SetChannelCreator(createChannel)
+	// Install the channel.post poster (#2497) over that creator and the SAME
+	// conversation registry and durable log every other conversation-keyed seam
+	// above resolves against, so a posted message and a served history page
+	// cannot come from two stores that mint duplicate ids for one conversation.
+	//
+	// defaultCwd is the workspace a label that matches nothing creates under —
+	// resolved once at the top of this function, where create_conversation's
+	// null-cwd path already takes it, rather than a second time here. The verb
+	// carries no cwd on its wire, so this is the only path value it can have.
+	//
+	// conversationHistory.Append rather than appendConversationHistory: the poster
+	// must be able to FAIL when the write fails, which that seam's contract
+	// deliberately does not allow. See channelPoster.
+	ctrl.SetChannelPoster(channelPoster(convReg, createChannel, defaultCwd, conversationHistory.Append, logger))
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)
 	}

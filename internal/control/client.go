@@ -124,6 +124,40 @@ func ChannelNew(ctx context.Context, socketPath, cwd, name string) (string, erro
 	return resp.ChannelNew.ConversationID, nil
 }
 
+// ChannelPost asks the daemon to record text in the channel named by label,
+// creating that channel under the daemon's own default workspace when the label
+// matches nothing. It returns nil only when the daemon confirms the message
+// reached the durable log.
+//
+// Same one-shot dial → encode → decode → close lifecycle as ChannelNew, and the
+// same absence of any ErrorCode mapping: every refusal this verb produces is a
+// message the caller prints rather than a sentinel it must reconstruct.
+//
+// The missing-OK guard is not defensive padding — it is the difference between
+// "delivered" and "the daemon answered nothing", and the first caller is a cron
+// whose exit code is the only thing anyone reads. SessionsRename's shape, for
+// the same reason.
+//
+// This side does NO name or content handling. It does not trim the label, and
+// the bound on text is enforced by the daemon; a caller that wants to refuse an
+// over-long message before dialling reads MaxChannelPostBytes itself.
+func ChannelPost(ctx context.Context, socketPath, name, text string) error {
+	resp, err := request(ctx, socketPath, Request{
+		Verb:        VerbChannelPost,
+		ChannelPost: &ChannelPostPayload{Name: name, Text: text},
+	})
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return errors.New(resp.Error)
+	}
+	if !resp.OK {
+		return errors.New("control: channel.post response missing ok flag")
+	}
+	return nil
+}
+
 // MintPairing asks the selected daemon to mint a pairing for deviceLabel with
 // the explicit remote-permission choice. The returned string is an opaque
 // bearer credential and is never included in an error.

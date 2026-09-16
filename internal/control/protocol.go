@@ -156,6 +156,40 @@ const (
 	// documentation convention, not a parser rule.
 	VerbChannelNew Verb = "channel.new"
 
+	// VerbChannelPost records one message in a channel conversation named by
+	// its display label. Request.ChannelPost carries the label and the
+	// content; success answers Response.OK with no result body, because the
+	// caller prints nothing and needs nothing back.
+	//
+	// It exists so a host-local script — a cron on the operator's box — can
+	// reach the operator through the clients they already have open, now that
+	// the chat-plugin channels are gone. The label resolves against
+	// non-archived promoted conversations by exact name: one match is posted
+	// into, no match creates the channel under the DAEMON's default workspace
+	// and posts into that, and two or more refuse rather than pick, since the
+	// conversation registry enforces no uniqueness rule on names.
+	//
+	// It is LOCAL-ONLY BY CONSTRUCTION, not by a check: internal/relay builds
+	// no control.Request anywhere — it touches this package for ErrConnNotFound
+	// and one interface assertion — and this verb mints no protocol type, so a
+	// relay client has no frame with which to send it. Live delivery to an
+	// already-connected client is #2498's problem; what this verb guarantees is
+	// the durable record, which a client reads on its next history request.
+	//
+	// No path crosses this wire, which is the security difference from
+	// VerbChannelNew: the create-on-miss workspace is the daemon's own resolved
+	// default, so this verb has none of channel.new's confinement surface. The
+	// caller-authored values are the label and the content, and neither reaches
+	// a filesystem path — the conversation id the durable log keys on is minted
+	// daemon-side.
+	//
+	// Fail-closed: every path answers exactly one Response, and a daemon with
+	// no poster installed (v1/foreground, or a composition that never wired it)
+	// returns "channel.post: no channel poster configured" rather than
+	// panicking — VerbChannelNew's shape. No refusal echoes the label or the
+	// content back.
+	VerbChannelPost Verb = "channel.post"
+
 	// VerbPairingMint asks the selected daemon to mint a pairing through its
 	// installed provider. Request.Pairing carries only the new device's label
 	// and explicit remote-permission choice; Response.Pairing carries the
@@ -215,6 +249,12 @@ type Request struct {
 	AttachFile *AttachFilePayload `json:"attachFile,omitempty"` // populated for VerbAttachFile
 	Channel    *ChannelPayload    `json:"channel,omitempty"`    // populated for VerbChannelNew
 	Pairing    *PairingPayload    `json:"pairing,omitempty"`    // populated for VerbPairingMint
+
+	// ChannelPost is a field of its own rather than two more members on
+	// ChannelPayload, whose Cwd has no meaning for a post. Additive and
+	// omitempty, so every existing verb's encoding stays byte-identical — the
+	// property TestProtocol_SessionsRoundTripBackCompat pins.
+	ChannelPost *ChannelPostPayload `json:"channelPost,omitempty"` // populated for VerbChannelPost
 }
 
 // PairingPayload carries the only caller-selected inputs to a local pairing
@@ -268,6 +308,39 @@ type ChannelPayload struct {
 // is a verb whose wire has to be kept compatible for no reason.
 type ChannelNewResult struct {
 	ConversationID string `json:"conversationID"`
+}
+
+// MaxChannelPostBytes bounds ChannelPostPayload.Text. It is the ONE home of
+// this bound: handleChannelPost refuses past it and the CLI reads the same
+// constant to bound its own --file read, so neither side carries a second
+// number that could drift from this one.
+//
+// Sized against the consumer rather than against the storage. A paired client's
+// frame is held to 1 MiB by maxFrameBytes in internal/transport, and a served
+// history page carries many entries in one frame, so an entry near that bound
+// could never be read back by the client this verb exists to reach. 64 KiB
+// leaves a page room for a dozen such entries and is still far more than a
+// reminder or an open question needs. Nothing downstream would have bounded it:
+// history.MaxPageEntries caps entries per page, not bytes per entry.
+const MaxChannelPostBytes = 64 << 10
+
+// ChannelPostPayload names the channel to post into and the content to record.
+//
+// Name is the channel's display label, matched by EXACT name against
+// non-archived promoted conversations. It is caller-authored text and is never
+// echoed by a refusal, never logged, and never used to derive a filesystem
+// path — the durable log keys on the daemon-minted conversation id.
+//
+// Text is the message body. Neither field carries omitempty: an empty name and
+// an empty message are invalid input rather than defaulted ones, which is
+// ChannelPayload.Cwd's reasoning, and both are refused by handleChannelPost.
+//
+// There is deliberately NO Cwd. A label that matches nothing creates its channel
+// under the daemon's own default workspace, so no caller-supplied path crosses
+// this wire and this verb carries none of channel.new's confinement surface.
+type ChannelPostPayload struct {
+	Name string `json:"name"`
+	Text string `json:"text"`
 }
 
 // SessionsPayload carries arguments shared across the sessions.* verb

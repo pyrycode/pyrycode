@@ -288,6 +288,40 @@ pair across exactly these five files for ~1540 lines of code, tests and e2e (`34
 measure materially above it: it adds no path handling to the wire at all, where #2155's confinement work was
 its largest single piece.
 
+## Revisions
+
+### 2026-09-16 — implementation
+
+Both Open Questions resolved, and three points where the code says more than the plan did.
+
+1. **Open question 1 resolved: no test asserts `channelUsage`.** The constant has one production reader
+   (`channelUsageExit`) and no test references it, so extending it was free. It is now two lines, one per
+   sub-verb, so an operator who typed the wrong one learns the other exists.
+2. **Open question 2 resolved: left as designed.** An empty `defaultCwd` from a failed `os.Getwd` still
+   refuses through `channelCreator`'s existing `msgChannelCwdRejected`. Minting a post-specific message for a
+   path that is the daemon's own rather than the caller's would add a constant for an unobserved failure.
+3. **`parseChannelPostArgs` decides "given" by `fs.Visit`, not by an empty value.** The plan said "neither
+   flag / both flags" without saying how the flags are counted, and the two readings differ where it
+   matters: `--text ""` is a caller who chose an empty message, and reading it as "no `--text` given" would
+   report a usage error (exit 2) for a content problem. It now parses cleanly and is refused by the daemon's
+   `channel.post: empty message` (exit 1), which keeps the empty-content rule in the one place the plan put
+   it. `TestParseChannelPostArgs`'s "empty text is still a choice" case pins this.
+4. **`newChannelPostMessageID` is a named helper the plan did not have.** It wraps `conversations.NewID` and
+   answers `""` on an rng failure rather than failing the post: the field is an identity a client dedupes
+   on, not an authorisation value, and losing the message because the system rng hiccuped would trade the
+   deliverable for a cosmetic. Split out of the poster body so that judgement has somewhere to be written.
+5. **One e2e case beyond the plan's testing strategy.** `TestChannelPost_E2E_RefusalShapes` drives the real
+   binary through the four remaining AC-1 failures — neither flag, both flags, an unreadable `--file`, and a
+   daemon that is not running — asserting the exit code, an empty stdout, a one-line stderr on the exit-1
+   class, and that none of them created a channel. The plan's unit tests covered the formatting and the
+   parsing separately; nothing proved the composed CLI actually exits the way AC 1 says.
+
+**On AC 1's "one stderr line".** The exit-1 failures print exactly one line, asserted in the e2e above. The
+usage failures (exit 2) print their detail above the usage banner, which is the shape `pyry channel new`
+already has and which AC 1 defers to by naming `channelNewVerdict`'s split. Collapsing them to one line would
+mean either dropping the banner for both verbs or giving this verb a different usage shape from its sibling —
+neither of which the acceptance criteria ask for, and the first of which is a change to `channel new`.
+
 ## Security review
 
 **Verdict:** PASS
