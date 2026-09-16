@@ -48,11 +48,38 @@ package realclaude
 //
 // # MEASURED
 //
-// PENDING THE LIVE GATE. This block is filled from the committed capture the run writes
-// at testdata/default_posture_outside_read_v<version>.json, which carries the question,
-// the answer, the claude version and the date. The probe refuses to run without a claude
-// version to name (see startDefaultPostureReadProbe), because a finding that cannot say
-// what it was measured against is not a usable record.
+// IT PROMPTS. Under `default` as written in band, a Read of an absolute path outside the
+// workspace raised a permission modal.
+//
+//	answer          MODAL RAISED — the read was gated
+//	reason_type     workingDir
+//	claude version  2.1.259
+//	measured        2026-09-15T23:54:23Z, by the dispatcher's real-claude gate on #2474
+//	                (1429 tests executed, 0 failed, wall clock 793.8s)
+//	witnesses       the set_permission_mode success naming `default`, seen before the turn;
+//	                tools_called [Read]; the note's token found in the 24-byte reply
+//	                (read_witnessed=true) after the modal was answered allow_once
+//
+// So a READ is gated the way the sibling WRITE was and for the same `workingDir` reason.
+// The two nearest data points disagreed only because #2039's "no hesitation" was measured
+// under --dangerously-skip-permissions: that finding is about a bypassed child and is not
+// a general answer, which is what makes it the trap this file was written to disarm.
+//
+// WHAT IT COSTS #2475: handing a successor the note's path and letting it decide whether
+// to read does NOT work unattended — the read prompts, so a conversation could not reach
+// its own handoff without an operator answering a modal. The inline fallback (appending
+// the note's text under a heading saying to consult it only when needed) is the shape the
+// evidence licenses.
+//
+// ONE FIELD OF THE RECORD DID NOT SURVIVE ITS OWN ALLOWLIST: the modal's title came back
+// `<invalid>`, because stdioPermissionSafeLabel caps at [A-Za-z0-9_.-] and claude's title
+// carries characters outside it. The correlation that actually tied the modal to this read
+// was tools_called — see postureProbeModal, which now says so, and defaultPostureReadAnswer,
+// which derives the headline from it rather than from the modal alone.
+//
+// The capture is testdata/default_posture_outside_read_v2.1.259.json. Read its `provenance`
+// before treating its bytes as run-written, and see § WHY THE FINDING IS A FILE for which
+// channel survives which gate.
 //
 // # WHY THE FINDING IS A FILE AND NOT A LOG LINE
 //
@@ -78,6 +105,27 @@ package realclaude
 // The capture is therefore the deliverable and the t.Logf below is supplementary,
 // exactly as TestRealClaude_InBandModeSwitch_Probe has it. Do not "simplify" the writer
 // back into a print.
+//
+// # BUT KEEP BOTH, BECAUSE WHICH ONE SURVIVES DEPENDS ON WHO RUNS THE GATE
+//
+// The table above is `make e2e-realclaude`. The DISPATCHER's real-claude gate is a
+// different invocation — `go test -tags e2e_realclaude -timeout 20m -json ./...` — and
+// -json implies verbose, so it captures a PASSING test's t.Logf into its evidence log.
+// The two channels fail in opposite directions, and #2474 hit both in one ticket:
+//
+//	make e2e-realclaude, human checkout  file survives; log line dropped
+//	dispatcher gate, -json, worktree     log line survives; FILE DIES WITH THE WORKTREE
+//
+// The second row is the one that cost a round trip. A pipeline gate runs in a detached
+// worktree that is removed when the run ends, so the capture this probe wrote on
+// 2026-09-15 went out with it and never reached a commit — CLAUDE.md § Testing's rule
+// ("a test that writes a fixture does not commit it") applied to the very artifact added
+// to satisfy that rule. What made the finding recoverable anyway was that the t.Logf
+// carries EVERY field of the record, so the answer could be transcribed from the evidence
+// log field by field.
+//
+// So keep the log line complete enough to rebuild the record from, and keep the capture:
+// neither is redundant, and the one that survives is whichever one you did not plan for.
 //
 // # Running it
 //
@@ -149,6 +197,13 @@ const (
 // drain share, which is what makes the 5x claim above true. Arming it twice in sequence
 // — a fresh timer in each helper — would put the worst case at 240s and quietly halve
 // the margin the constant exists to state.
+//
+// The headroom is measured, not assumed. On the 2026-09-15 gate run — posture ack, one
+// modal round trip, the read and the reply — the shared deadline was 3.7s spent of 120s,
+// and the test as a whole took 3.86s. So the review concern that 120s now has to cover
+// spawn plus modal plus read plus reply, where the sibling spends that on modal surfacing
+// alone, does not bite at this shape: the margin is ~32x on the only run there is. Widen
+// it if a real run ever comes close, and say which run.
 const outsideReadTurnBudget = 120 * time.Second
 
 // postureReadFamilyPrefix names this probe's committed-capture family.
@@ -160,6 +215,50 @@ const outsideReadTurnBudget = 120 * time.Second
 // name that fell inside one of those would have another suite reading this record as one
 // of its own and failing on a shape it never expected.
 const postureReadFamilyPrefix = "default_posture_outside_read"
+
+// postureProbeReadTool is the tool whose permission decision this probe is measuring.
+//
+// It is what CORRELATES the finding to the question. The prompt asks for Read and forbids
+// other tools, but a live claude is not bound by that, and reaching the same file with
+// `Bash cat` would measure a different tool's gate while looking identical in the headline.
+const postureProbeReadTool = "Read"
+
+// How a committed capture's bytes reached the repo. A capture that cannot say is one a
+// reader has to trust rather than check.
+const (
+	// provenanceLiveRun marks a capture the probe wrote itself, in the worktree the run
+	// happened in.
+	provenanceLiveRun = "live-run"
+	// provenanceTranscribed marks one rebuilt field by field from a gate's evidence log,
+	// because the run's worktree — and the capture inside it — was removed before the
+	// bytes could be committed. The measurement is the same one; only its route here
+	// differs, and a transcription carries no credential_scan_applied because whoever
+	// wrote it did not witness that scan.
+	provenanceTranscribed = "transcribed-from-gate-evidence-log"
+)
+
+// defaultPostureReadAnswer renders the finding's headline from the two facts that together
+// identify it: whether a modal was raised, and whether Read is what claude actually reached
+// for.
+//
+// NEITHER ALONE IS THE ANSWER, and both halves of that have now been caught in review.
+// `modal != nil` says a modal appeared somewhere in the turn, not that this read raised it.
+// A Read in tools_called says Read ran, not that it ran ungated. The two inconclusive
+// corners are recorded as inconclusive rather than rounded to the nearest headline: a turn
+// that reached the note with `Bash cat` measured some other tool's gate, and filing that
+// under this question is how a probe reports a confident wrong answer.
+func defaultPostureReadAnswer(modalRaised, readToolCalled bool) string {
+	switch {
+	case modalRaised && readToolCalled:
+		return "MODAL RAISED — the read was gated"
+	case modalRaised:
+		return "MODAL RAISED, BUT NO Read CALL — inconclusive, some other tool was gated"
+	case readToolCalled:
+		return "NO MODAL — the read was ungated"
+	default:
+		return "NO MODAL AND NO Read CALL — inconclusive, this turn did not exercise a Read"
+	}
+}
 
 // postureProbeModalCap bounds how many permission modals this probe will answer before
 // declaring that claude is reissuing past the cap. denyModalsUntilIdle takes the same
@@ -234,10 +333,13 @@ func TestInteractiveStreamDefaultPostureOutsideWorkspaceRead(t *testing.T) {
 	// which by carrying read_witnessed. The t.Logf is supplementary; see the header for
 	// why a log line cannot be the deliverable here.
 	readWitnessed := strings.Contains(reply, token)
-	answer := "NO MODAL — the read was ungated"
-	if modal != nil {
-		answer = "MODAL RAISED — the read was gated"
+	readTool := false
+	for _, name := range tools {
+		if name == postureProbeReadTool {
+			readTool = true
+		}
 	}
+	answer := defaultPostureReadAnswer(modal != nil, readTool)
 	rec := defaultPostureReadFinding{
 		Ticket: "2474",
 		Question: "Does a Read of an absolute path outside the workspace, in the shape a " +
@@ -251,6 +353,7 @@ func TestInteractiveStreamDefaultPostureOutsideWorkspaceRead(t *testing.T) {
 		ModalRaised:         modal != nil,
 		ModalsAnswered:      answered,
 		ReadWitnessed:       readWitnessed,
+		ReadToolCalled:      readTool,
 		NoteBaseName:        filepath.Base(notePath),
 		ToolsCalled:         tools,
 		ReplyBytes:          len(reply),
@@ -263,9 +366,14 @@ func TestInteractiveStreamDefaultPostureOutsideWorkspaceRead(t *testing.T) {
 	}
 	capturePath := writeDefaultPostureReadFinding(t, h, rec)
 
-	t.Logf("#2474 finding: %s%s claude_version=%s read_witnessed=%t tools=%v reply_bytes=%d "+
-		"capture=%s", answer, rec.modalDetail(), claudeVersion, readWitnessed, tools, len(reply),
-		filepath.Base(capturePath))
+	// EVERY FIELD OF THE RECORD APPEARS HERE, which is not decoration: under the
+	// dispatcher's -json gate this line is what survives and the capture is what dies, so
+	// the record has to be rebuildable from it. See § BUT KEEP BOTH.
+	t.Logf("#2474 finding: %s%s claude_version=%s measured_utc=%s read_witnessed=%t "+
+		"read_tool_called=%t posture_mode=%s tools=%v reply_bytes=%d note_base_name=%s "+
+		"provenance=%s capture=%s", answer, rec.modalDetail(), claudeVersion, rec.MeasuredUTC,
+		readWitnessed, readTool, rec.PostureMode, tools, len(reply), rec.NoteBaseName,
+		provenanceLiveRun, filepath.Base(capturePath))
 
 	// ── AC 3: ungated, or never attempted? ──
 	//
@@ -360,6 +468,15 @@ func awaitDefaultPostureAck(t *testing.T, observations <-chan permissionObservat
 // and the MEASURED block filled from that one headline, with only the tools list left to
 // catch it after the fact. ModalShownPayload.Title carries the tool identity (#2039's
 // template logs it), so the record carries it too.
+//
+// IN PRACTICE IT DID NOT CARRY, and that is worth knowing before trusting it again. On the
+// 2026-09-15 gate run the title came back `<invalid>`: stdioPermissionSafeLabel allows
+// [A-Za-z0-9_.-] and claude's title carries characters outside it, so the allowlist that
+// makes the field safe to commit is also what empties it. The correlation that actually
+// held was tools_called — one entry, `Read` — which is why defaultPostureReadAnswer derives
+// the headline from that and not from this. Keep ToolLabel: when it survives it is the
+// tighter signal, and when it collapses it collapses visibly rather than into a wrong tool
+// name.
 //
 // Every claude-authored string here is stored ALREADY through stdioPermissionSafeLabel —
 // 64 bytes of [A-Za-z0-9_.-] — not merely passed through it at the log call. These reach
@@ -621,6 +738,14 @@ type defaultPostureReadFinding struct {
 	ClaudeVersion string `json:"claude_version"`
 	MeasuredUTC   string `json:"measured_utc"`
 
+	// Provenance is how these bytes reached the repo — see provenanceLiveRun and
+	// provenanceTranscribed. A pipeline gate runs in a worktree that is removed when it
+	// ends, so a capture this probe writes there dies before it can be committed, and the
+	// committed one is a transcription of the same run's evidence log. The distinction is
+	// in the record because it is invisible in the values: a reader auditing this finding
+	// needs to know whether they are looking at bytes a run produced.
+	Provenance string `json:"provenance"`
+
 	// AC 2: the posture the read happened under, witnessed rather than assumed.
 	PostureAckWitnessed bool   `json:"posture_ack_witnessed"`
 	PostureMode         string `json:"posture_mode"`
@@ -636,12 +761,17 @@ type defaultPostureReadFinding struct {
 
 	// AC 3: ungated, or never attempted? A capture with read_witnessed false is a run
 	// that measured neither, and says so rather than reading as an answer.
-	ReadWitnessed bool     `json:"read_witnessed"`
-	NoteBaseName  string   `json:"note_base_name"`
-	ToolsCalled   []string `json:"tools_called"`
-	ReplyBytes    int      `json:"reply_bytes"`
+	ReadWitnessed bool `json:"read_witnessed"`
+	// ReadToolCalled is the other half of the headline: Read is what the question is
+	// about, and a turn that reached the note some other way answers a different one.
+	ReadToolCalled bool     `json:"read_tool_called"`
+	NoteBaseName   string   `json:"note_base_name"`
+	ToolsCalled    []string `json:"tools_called"`
+	ReplyBytes     int      `json:"reply_bytes"`
 
-	CredentialScanApplied map[string]bool `json:"credential_scan_applied"`
+	// Omitted on a transcription, which describes a scan it did not witness. Always
+	// present on a live run, where the writer fills it from the scanner it actually ran.
+	CredentialScanApplied map[string]bool `json:"credential_scan_applied,omitempty"`
 }
 
 // modalDetail renders the gated branch's extras for the supplementary log line, and
@@ -685,6 +815,9 @@ func writeDefaultPostureReadFinding(t *testing.T, h *perConvHarness, rec default
 
 	scanner := newDropcapScanner(h.home, dir, h.workdir)
 	rec.CredentialScanApplied = scanner.applied()
+	// Stamped here rather than by the caller, so the one path that writes a capture from a
+	// live run is the one path that can claim to be one.
+	rec.Provenance = provenanceLiveRun
 	blob, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
 		t.Fatalf("marshal #2474 finding: %v", err)
@@ -896,9 +1029,11 @@ func TestDefaultPostureReadFindingCarriesNoProse(t *testing.T) {
 		ModalDefaultToNo:        true,
 		ModalsAnswered:          1,
 		ReadWitnessed:           true,
+		ReadToolCalled:          true,
 		NoteBaseName:            filepath.Base(absPath),
-		ToolsCalled:             []string{"Read"},
+		ToolsCalled:             []string{postureProbeReadTool},
 		ReplyBytes:              len(prose),
+		Provenance:              provenanceLiveRun,
 		CredentialScanApplied:   map[string]bool{"temp_home": true},
 	}
 	blob, err := json.MarshalIndent(rec, "", "  ")
@@ -918,6 +1053,45 @@ func TestDefaultPostureReadFindingCarriesNoProse(t *testing.T) {
 	// reader ties the capture to the note the probe named.
 	if !strings.Contains(string(blob), `"note_base_name": "conv.txt"`) {
 		t.Fatalf("the note's base name did not survive the record: %s", blob)
+	}
+	// Provenance is never omitempty: a capture that does not say how its bytes got here is
+	// one a reader has to trust, and the committed one is a transcription.
+	if !strings.Contains(string(blob), `"provenance"`) {
+		t.Fatalf("the record does not say how its bytes reached the repo: %s", blob)
+	}
+}
+
+// TestDefaultPostureReadAnswer pins the headline to BOTH facts that identify it, which is
+// the deterministic half of a finding whose live half passes on either branch.
+//
+// Each inconclusive row is a way this probe could otherwise report a confident wrong
+// answer: a modal raised for some other tool reading as this read being gated, and a turn
+// that reached the note without a Read reading as this read being ungated. Both were
+// review findings, one per round, and neither is caught by anything the live run asserts.
+func TestDefaultPostureReadAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		modal, read  bool
+		wantContains string
+	}{
+		{"modal for the read under test", true, true, "the read was gated"},
+		{"no modal and the read ran", false, true, "the read was ungated"},
+		{"modal but claude never called Read", true, false, "inconclusive"},
+		{"no modal and no Read either", false, false, "inconclusive"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := defaultPostureReadAnswer(tc.modal, tc.read)
+			if !strings.Contains(got, tc.wantContains) {
+				t.Fatalf("defaultPostureReadAnswer(%t, %t) = %q, want it to contain %q",
+					tc.modal, tc.read, got, tc.wantContains)
+			}
+			// An inconclusive corner must never also read as an answer to this question.
+			if strings.Contains(got, "inconclusive") &&
+				(strings.Contains(got, "the read was gated") ||
+					strings.Contains(got, "the read was ungated")) {
+				t.Fatalf("an inconclusive result also states an answer: %q", got)
+			}
+		})
 	}
 }
 

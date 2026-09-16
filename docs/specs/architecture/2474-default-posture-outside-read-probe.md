@@ -181,9 +181,41 @@ Also in this revision, from the same review:
 - **SHOULD FIX — the miscitation is corrected in three places** (the field's doc comment, the offline test, and § Design above). What constrains the pointer-plus-`omitempty` is `runPermissionObserver` re-encoding the whole observation over its socket plus the two `TestPermissionObservation_Preserves*` round-trips — **not** `writePermissionOfferDiagnostic`, which marshals a separate record. The decision was right and only the reason was wrong, which on a shared type in a `security-sensitive` change would have pointed a future exposure audit at bytes that are never written.
 - **NIT — the budget claim is now true rather than downgraded.** `outsideReadTurnBudget` was armed twice in sequence, making the real worst case 240s against a comment claiming a 5× margin. Both helpers now share one wall-clock deadline computed once, so 120s bounds the whole measurement and the margin is the 5× the constant says.
 
-## Documentation handoff — live-artifact dependency
+### 2026-09-16 — the answer, and the artifact leg that recovered it
 
-AC 4 requires the finding — the question, the answer, the claude version and the date — to be **recorded in the test file**, and only the live gate can produce it. This ticket therefore carries `needs-live-artifacts` alongside `needs-real-claude`:
+The live gate ran (1429 executed, 0 failed, 793.8s) and **the design question is settled: it prompts.** Under `default` as written in band, a Read of an absolute path outside the workspace raised a permission modal with `reason_type: workingDir` under claude 2.1.259 — the same reason the sibling Write raised. The `# MEASURED` block is filled, and #2475 is licensed for the **inline fallback**, not the pointer: a successor cannot reach its own handoff note unattended.
+
+Non-vacuity held on both remaining legs: the posture ack naming `default` was witnessed before the turn, and the minted token came back in the 24-byte reply (`read_witnessed=true`) after the modal was answered `allow_once`, so this is a gated read that happened rather than a read that never did.
+
+**The capture design was right about the failure mode and wrong about which gate.** § Design argued the finding must be a file because `make e2e-realclaude` drops a passing test's `t.Logf`. True — but the *dispatcher's* gate is `go test -json`, which implies verbose and therefore **preserved** the log line, while running in a detached worktree that was removed at the end of the run and **destroyed the capture**. The two channels fail in opposite directions:
+
+| who runs it | file | log line |
+|---|---|---|
+| `make e2e-realclaude`, human checkout | survives | dropped |
+| dispatcher gate (`-json`, worktree) | **destroyed with the worktree** | survives |
+
+So the artifact added to satisfy `CLAUDE.md` § Testing's "a test that writes a fixture does not commit it" was itself eaten by that rule. What made the finding recoverable is that the `t.Logf` carried every field of the record; the committed capture is transcribed from it field by field. Both channels are now load-bearing by design, the log line is explicitly required to stay complete enough to rebuild the record from, and the header says so.
+
+**Provenance is now in the record rather than in a memory.** `defaultPostureReadFinding` gains a non-`omitempty` `Provenance`; the writer stamps `live-run` on the one path that can claim it, and the committed file says `transcribed-from-gate-evidence-log` and names the log, the line and the gate invocation. `credential_scan_applied` became `omitempty` and is absent from the transcription, which did not witness that scan. Transcribing values a run produced is recovery; a file that cannot say which it is would have been the manufactured recording the role forbids.
+
+Also in this leg, both carried forward from the verifier's PASS review:
+
+- **SHOULD FIX — the ungated branch is correlated too.** The headline came off `modal != nil` alone, so a turn reaching the note with `Bash cat` would have read as *this read* being ungated — the mirror of the gated-branch finding fixed last round. `defaultPostureReadAnswer` now derives it from the modal **and** whether `Read` is in `tools_called`, with the two mixed corners recorded as `inconclusive` rather than rounded to the nearest answer, and `TestDefaultPostureReadAnswer` pins all four rows offline.
+- **NIT — the budget claim is now backed by a measurement.** The shared deadline spent **3.7s of 120s** on the gate run (test elapsed 3.86s), so the concern that 120s must now cover spawn-plus-modal-plus-read-plus-reply does not bite at this shape: the margin is ~32×. Recorded with the run it came from, so a future widening has something to argue against.
+
+**One field did not survive its own allowlist.** `ModalToolLabel` — added last round precisely to tie the modal to this read — came back `<invalid>`, because `stdioPermissionSafeLabel` allows `[A-Za-z0-9_.-]` and claude's modal title carries characters outside it. The correlation that actually held was `tools_called`. The field is kept (when it survives it is the tighter signal, and it collapses visibly rather than into a wrong tool name) but it is no longer what the headline rests on, and both the capture and `postureProbeModal` now say so. Widening the shared allowlist would be an out-of-scope change to a helper other suites depend on.
+
+## Documentation handoff — live-artifact dependency — SATISFIED 2026-09-16
+
+The live gate ran, the finding is recovered, the capture is committed at `internal/e2e/realclaude/testdata/default_posture_outside_read_v2.1.259.json`, and the `# MEASURED` block is filled. `needs-live-artifacts` comes off with this push; `needs-real-claude` stays, because review and the live gate both run again on this change.
+
+**What the documentation stage records, now that there is an answer** (still pending — that stage owns `docs/knowledge/`, and this role writes none of it):
+
+1. **The finding**, in `docs/knowledge/features/e2e-realclaude.md` under `## Test infrastructure`, beside the permission-protocol paragraphs contrasting the 2.1.143 spike with 2.1.259's `can_use_tool` behaviour: *under the `default` permission mode as written in band, claude 2.1.259 raises a permission modal with `reason_type: workingDir` for a **Read** of an absolute path outside the workspace — the same reason and the same gate as the sibling **Write**, measured 2026-09-15.* The document was 24,333 bytes at review, so this is a paragraph, not a split.
+2. **Scope the #2039 finding to bypass**, at `docs/knowledge/features/e2e-realclaude-interactive-stream-attachment-read-test-go.md` (the verifier corrected the path: **not** `docs/knowledge/codebase/`, which has no such file and is frozen history). The sentence "a live claude opens an absolute path outside its own cwd without hesitation, when told to read it" is now measurably a **bypass-posture** observation and the opposite of what `default` does. It is the exact trap this ticket existed to disarm, and #2475's design turns on the distinction.
+3. **Optionally, the gate-channel lesson** from § Revisions: which of a capture file and a `t.Logf` survives depends on who runs the live suite, and a pipeline gate destroys the file while preserving the log.
+
+The original dependency, kept for the record:
 
 - **Capture source:** `internal/e2e/realclaude/testdata/default_posture_outside_read_v<version>.json`, written by the run itself. The `#2474 finding:` line the probe logs carries the same content, but is visible only under `-v` — see the revision above. **The capture file is the artifact to recover and `git add`;** a pipeline run happens in a worktree that is removed when the run ends, so an uncommitted capture goes out with it.
 - **Commit target:** the capture under `testdata/`, plus the `# MEASURED` block in `internal/e2e/realclaude/interactive_stream_default_posture_read_test.go`, filled from it in place of `PENDING THE LIVE GATE`.
