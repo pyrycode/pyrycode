@@ -186,11 +186,22 @@ type BannerPayload struct {
 ```
 
 - **No `omitempty` on any field — the deliberate inverse of the handshake/optional
-  discipline.** Every field is always present on the wire so the fixtures pin the
-  full shape and boundary zero-values can't silently vanish: `assistant_delta` with
-  `seq: 0` and `parent_tool_use_id: ""`, and `tool_result` with `is_error: false`,
-  are pinned exactly. Pick the tag by whether a field's absence is meaningful —
-  here it never is.
+  discipline — with one exception as of #2461.** Every field is always present on
+  the wire so the fixtures pin the full shape and boundary zero-values can't
+  silently vanish: `assistant_delta` with `seq: 0` and `parent_tool_use_id: ""`,
+  and `tool_result` with `is_error: false`, are pinned exactly. Pick the tag by
+  whether a field's absence is meaningful — here it almost always isn't.
+  `ContextUsagePayload.AsOf *time.Time` (`as_of,omitempty`, #2461) is the sole
+  departure: its **absence** is the meaningful, ordinary case (a fresh reading),
+  and its presence marks the opposite (a reading answered from a stored summary,
+  never one claude produced this time) — exactly the kind of fact this rule says
+  to give a tag. A value field couldn't have served: `omitempty` does not test a
+  zero `time.Time`, so a plain field would have put `"0001-01-01T00:00:00Z"` on
+  every live frame. `CompactionBoundaryPayload`'s two counts bend the rule the
+  other way — pointers with NO `omitempty`, marshalling a literal `null` — because
+  that frame was new and an always-present key cost nothing; that option was
+  closed here because `ContextUsagePayload` already ships from two producers
+  whose bytes a criterion (#2461's AC-1) freezes.
 - **`State` and `StopReason` stay plain `string`, not named enums.** Same
   `MessagePayload.Role` precedent: the closed-set guarantee belongs at the consumer,
   not in the wire type. `State` is documented (`thinking` / `responding` / `idle`)

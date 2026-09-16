@@ -1,6 +1,9 @@
 package protocol
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Interactive v2 event payloads. These are additive, capability-gated
 // application events sent binary → phone when the phone has advertised the
@@ -14,6 +17,15 @@ import "encoding/json"
 // No field carries omitempty: every field is always present on the wire so
 // the testdata fixtures pin the full shape and boundary values like seq:0
 // and is_error:false do not silently vanish.
+//
+// ONE FIELD IN THIS FILE DEPARTS FROM THAT RULE, and it is the only one:
+// ContextUsagePayload.AsOf (#2461), whose own block carries the argument.
+// Adding a second requires the same argument made again — that absence and
+// presence are DIFFERENT FACTS a client must branch on, and that the frame
+// already ships from a producer whose bytes a criterion freezes.
+// CompactionBoundaryPayload's two counts are how the rule is normally bent
+// instead: pointers with NO omitempty, so an absent value marshals as a
+// literal null and every key stays present.
 
 // TurnStatePayload is the body of an Envelope whose Type == TypeTurnState
 // (docs/protocol-mobile.md § turn_state). Binary → phone direction; signals
@@ -2147,6 +2159,40 @@ type ContextUsagePayload struct {
 	DroppedMCPTools    int                      `json:"dropped_mcp_tools"`
 	MemoryFiles        []ContextUsageMemoryFile `json:"memory_files"`
 	DroppedMemoryFiles int                      `json:"dropped_memory_files"`
+
+	// AsOf marks this reading as REMEMBERED rather than live (#2461), and is the
+	// one key on this frame whose ABSENCE is the ordinary case. Present: the daemon
+	// could not take a fresh reading and answered from the summary it stored when
+	// claude last reported, and this is when that was. Absent: claude produced this
+	// reading in response to this frame's own trigger.
+	//
+	// A CLIENT MUST READ IT BEFORE TRUSTING THE THREE INVENTORIES, and that is the
+	// whole reason the key exists rather than being a nicety. A remembered answer
+	// carries empty Categories, MCPTools and MemoryFiles because the daemon never
+	// stored them — conversations.ContextUsageReading deliberately holds the five
+	// headline values and nothing else — while MarshalJSON's own block promises that
+	// an empty inventory is a POSITIVE reading, claude reporting no MCP tools. Those
+	// two states are byte-identical without this key. The five headline numbers ARE
+	// claude's, on both kinds of answer; it is the breakdown that is missing rather
+	// than zeroed, and the three dropped counts are 0 for the same reason.
+	//
+	// Pointer plus omitempty, this file's ONE departure from its no-omitempty rule
+	// (see the header). Both halves are forced. A plain time.Time would encode
+	// "0001-01-01T00:00:00Z" on every live frame, because omitempty does not test a
+	// struct; and a pointer WITHOUT omitempty — CompactionBoundaryPayload's shape,
+	// which is how this file normally bends the rule — would put "as_of": null on
+	// every live frame, moving bytes that two shipped producers already emit and
+	// that internal/protocol/testdata/context_usage.json pins.
+	// HelloClientPayload.LastSeenTS is the precedent for the shape.
+	//
+	// RFC 3339 WITH A Z OFFSET, and this layer does not enforce that — time.Time
+	// marshals with whatever offset it carries. The normalisation lives at the one
+	// door that stores a reading, conversations.Registry.SetLastContextUsage, so a
+	// producer reaching the wire any other way is the thing to fix rather than a
+	// formatter here. Daemon-authored, unlike every other non-id field on this
+	// frame: it is the daemon's own clock at the moment it recorded, never a value
+	// claude reported.
+	AsOf *time.Time `json:"as_of,omitempty"`
 }
 
 // MarshalJSON normalises all three nil inventory slices to empty arrays. An empty
