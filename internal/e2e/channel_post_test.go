@@ -4,11 +4,19 @@ package e2e
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	"github.com/pyrycode/pyrycode/internal/noise"
+	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
 // historyEntry mirrors the fields of an on-disk history segment line this suite
@@ -252,4 +260,202 @@ func waitForConversationNamed(t *testing.T, home, name string) convRow {
 	raw, _ := os.ReadFile(path)
 	t.Fatalf("no conversation named %q in %s within 5s\nfile:\n%s", name, path, raw)
 	return convRow{}
+}
+
+// seedPromotedBoundConversation is seedBoundConversation with the two fields
+// #2499's proof needs: the row is a promoted CHANNEL carrying name, so
+// `pyry channel post --name` resolves to it, and it is bound to boundSessionID so
+// send_message routes to the same child. Written here rather than by widening the
+// harness helper, which has many callers that want neither field.
+func seedPromotedBoundConversation(t *testing.T, home, convID, name, boundSessionID string) {
+	t.Helper()
+	dir := filepath.Join(home, ".pyry", "test")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("seed conversations.json: mkdir: %v", err)
+	}
+	convJSON := []byte(`{"conversations":[{"id":"` + convID +
+		`","name":"` + name +
+		`","cwd":"` + home +
+		`","current_session_id":"` + boundSessionID +
+		`","is_promoted":true,"last_used_at":"2026-01-01T00:00:00Z"}]}`)
+	if err := os.WriteFile(filepath.Join(dir, "conversations.json"), convJSON, 0o600); err != nil {
+		t.Fatalf("seed conversations.json: write: %v", err)
+	}
+}
+
+// waitForChildTurn polls the child's stdin tee until a single line carries needle,
+// and returns that line. One turn is one stream-json envelope on one line, so the
+// returned line IS the turn — which is what lets the caller assert that two pieces
+// of text reached claude in the SAME turn rather than merely both reaching it.
+//
+// The read error is carried into the failure message: without it, len(nil) == 0
+// renders "the tee was never wired" as "the turn was empty", a broken instrument
+// reporting itself as a measurement.
+func waitForChildTurn(t *testing.T, stem, sessionID, needle string) []byte {
+	t.Helper()
+	path := childStdinLog(stem, sessionID)
+	deadline := time.Now().Add(25 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		raw, err := os.ReadFile(path)
+		lastErr = err
+		for _, line := range bytes.Split(raw, []byte("\n")) {
+			if bytes.Contains(line, []byte(needle)) {
+				return line
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	raw, _ := os.ReadFile(path)
+	t.Fatalf("no turn carrying %q reached the child within 25s (read err: %v)\nstdin log %s:\n%s",
+		needle, lastErr, path, raw)
+	return nil
+}
+
+// TestChannelPost_E2E_CarriesIntoTheNextTurn is #2499's proof, end to end against
+// the fake: a cron posts a question into a channel, the operator answers it from a
+// phone, and CLAUDE SEES BOTH — the question first — in one turn.
+//
+// It reads the child's stdin tee (PYRY_FAKE_CLAUDE_STDIN_LOG) rather than anything
+// the clients see, because what claude receives is the whole deliverable and is
+// invisible on every other surface by design: the composed text reaches claude and
+// nothing else.
+//
+// Three acceptance criteria in one run, because they are three properties of one
+// sequence and splitting them would pay the relay-handshake setup three times:
+//
+//   - AC1 the post leads the reply, in the order the two happened, in ONE turn.
+//   - AC2 carried exactly once — the SECOND reply carries only itself.
+//   - AC3's second half — that second reply, with nothing pending, is byte-for-byte
+//     the turn it would have been before this slice existed.
+//
+// Fake-daemon tier (fakeclaude in stream-json mode, fakerelay, one paired
+// fakephone), so `make check` covers the carry.
+func TestChannelPost_E2E_CarriesIntoTheNextTurn(t *testing.T) {
+	const (
+		initialUUID = "11111111-1111-4111-8111-111111111111"
+		convID      = "22222222-2222-4222-8222-222222222222"
+		channelName = "questions"
+		postText    = "e2e-2499-post:what-are-you-avoiding"
+		replyOne    = "e2e-2499-reply-one:the-tax-return"
+		replyTwo    = "e2e-2499-reply-two:anything-else"
+	)
+
+	home := shortHome(t)
+	stdinStem := filepath.Join(t.TempDir(), "fakeclaude-stdin")
+
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
+
+	payload, err := paireddevice.Setup(paireddevice.Config{
+		Home:                   home,
+		InstanceName:           "test",
+		Relay:                  relayURL,
+		DeviceName:             "phone-a",
+		AllowRemotePermissions: false,
+	})
+	if err != nil {
+		t.Fatalf("setup paired device: %v", err)
+	}
+	pubKey, err := base64.StdEncoding.DecodeString(payload.ServerStaticPubkey)
+	if err != nil {
+		t.Fatalf("decode server static pubkey: %v", err)
+	}
+
+	// The channel and the phone's target are ONE conversation — that is the whole
+	// premise. The daemon loads conversations.json once at startup, so the row must
+	// exist before it starts.
+	seedPromotedBoundConversation(t, home, convID, channelName, initialUUID)
+
+	h := StartStreamInteractiveWithRelay(t, home, initialUUID, relayURL,
+		"PYRY_FAKE_CLAUDE_STDIN_LOG="+stdinStem)
+	t.Cleanup(func() { h.Stop(t) })
+
+	serverID := readPersistedServerID(t, home)
+	waitBinaryHello(t, fr, serverID)
+
+	dialCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	phone, err := fakephone.Dial(dialCtx, fr.URL(), serverID, payload.Token, "phone-a")
+	if err != nil {
+		t.Fatalf("phone dial: %v", err)
+	}
+	t.Cleanup(func() { _ = phone.Close() })
+	sendKey, recvKey := driveHandshakeToOpenDaemonInteractive(t, phone, pubKey, payload.Token)
+
+	// The cron posts. This returns only once the content is in the durable log AND
+	// recorded as pending, so the send below cannot race it.
+	p := runVerb(t, h.SocketPath, home, "channel", "post", "--name", channelName, "--text", postText)
+	if p.ExitCode != 0 {
+		t.Fatalf("pyry channel post exit=%d\nstdout:\n%s\nstderr:\n%s", p.ExitCode, p.Stdout, p.Stderr)
+	}
+
+	// The operator answers that evening.
+	sendPhoneMessage(t, phone, sendKey, recvKey, 2499, convID, "u-1", replyOne)
+	turnOne := waitForChildTurn(t, stdinStem, initialUUID, replyOne)
+
+	postAt := bytes.Index(turnOne, []byte(postText))
+	replyAt := bytes.Index(turnOne, []byte(replyOne))
+	if postAt < 0 {
+		t.Fatalf("AC1: the turn claude received carries the reply but NOT the posted question — "+
+			"the carry never reached the delivery seam:\n%s", turnOne)
+	}
+	if postAt > replyAt {
+		t.Errorf("AC1: the posted question reached claude AFTER the reply (post at %d, reply at %d); "+
+			"claude must see them in the order the two happened:\n%s", postAt, replyAt, turnOne)
+	}
+
+	// A second reply, with nothing pending.
+	sendPhoneMessage(t, phone, sendKey, recvKey, 2500, convID, "u-2", replyTwo)
+	turnTwo := waitForChildTurn(t, stdinStem, initialUUID, replyTwo)
+
+	if bytes.Contains(turnTwo, []byte(postText)) {
+		t.Errorf("AC2: the posted question was carried a SECOND time; it must be cleared by the "+
+			"confirmed delivery that carried it:\n%s", turnTwo)
+	}
+	// AC3's second half, asserted as an absence rather than a byte comparison: the
+	// only thing this slice can add to a turn is the carried block, so a turn holding
+	// nothing but the reply IS the turn it would have been before #2499. The needle
+	// is unique to this reply, so this also proves turnTwo is not turnOne re-read.
+	if !bytes.Contains(turnTwo, []byte(replyTwo)) {
+		t.Fatalf("the second turn does not carry its own reply:\n%s", turnTwo)
+	}
+}
+
+// sendPhoneMessage seals one send_message for convID and waits for its ack, which
+// is what establishes that the daemon ACCEPTED the turn into the backlog. It is not
+// delivery — the drain owns that, and the stdin tee is where delivery is observed.
+func sendPhoneMessage(t *testing.T, phone *fakephone.Client, sendKey, recvKey *noise.CipherState, reqID uint64, convID, messageID, text string) {
+	t.Helper()
+	env, err := json.Marshal(protocol.Envelope{
+		ID:   reqID,
+		Type: protocol.TypeSendMessage,
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, protocol.SendMessagePayload{
+			ConversationID: convID,
+			MessageID:      messageID,
+			Text:           text,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("marshal send_message envelope: %v", err)
+	}
+	cipher, err := sendKey.Encrypt(env)
+	if err != nil {
+		t.Fatalf("seal send_message envelope: %v", err)
+	}
+	sendNoiseMsg(t, phone, cipher)
+
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			t.Fatalf("no ack for send_message %d; the turn was never accepted", reqID)
+		}
+		got := decryptInnerEnvelope(t, readInnerFrame(t, phone, remaining), recvKey)
+		if got.Type == protocol.TypeAck && got.InReplyTo != nil && *got.InReplyTo == reqID {
+			return
+		}
+	}
 }

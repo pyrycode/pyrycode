@@ -6,7 +6,8 @@ model, sort discipline, and load semantics all of these methods sit on top of.
 
 Covers `Create`, `Get`, `List`, `Update`, `Delete`, `RebindSession` (#739), `SetArchived` (#880),
 `SetSystemPrompt` (#2149), `WorkspaceLabel` / `SetWorkspaceLabel` (#2206),
-`SetLastContextUsage` (#2460), and `Promote`.
+`SetLastContextUsage` (#2460),
+`AppendPendingChannelPost` / `PendingChannelPosts` / `ClearPendingChannelPosts` (#2499), and `Promote`.
 
 ## `Create(c Conversation)`
 
@@ -27,7 +28,7 @@ Returns a copy of the in-memory list, optionally narrowed by filter:
 - `r.List(ListFilter{IsArchived: ptrTo(true)})` — only archived (#880). `ptrTo(false)` — only active. `nil` (or the field omitted) — both, today's/unfiltered behavior.
 - `r.List(ListFilter{IsPromoted: ptrTo(true), IsArchived: ptrTo(true)})` — both non-nil fields on **one** `ListFilter` AND (#880): archived channels only.
 
-Variadic for ergonomics, **not** AND-composition **across separate `ListFilter` args**: when more than one `ListFilter` is supplied as separate variadic args, only `filter[0]` is consulted (documented in the doc comment). This is orthogonal to the AND-of-non-nil-fields rule *within* one `ListFilter` struct — the two rules operate at different levels (across args vs. within one arg) and are not in tension, though a skim can misread them as contradictory (code review NIT on #880; left as-is, not worth a rework). The returned slice is a copy; callers may mutate it freely without affecting registry state. `IsPromoted *bool` / `IsArchived *bool` each distinguish "filter to true" / "filter to false" / "no filter" (`nil`) — three states, which a bare `bool` cannot express.
+Variadic for ergonomics, **not** AND-composition **across separate `ListFilter` args**: when more than one `ListFilter` is supplied as separate variadic args, only `filter[0]` is consulted (documented in the doc comment). This is orthogonal to the AND-of-non-nil-fields rule *within* one `ListFilter` struct — the two rules operate at different levels (across args vs. within one arg) and are not in tension, though a skim can misread them as contradictory (code review NIT on #880; left as-is, not worth a rework). The returned `[]Conversation` slice is always a copy callers may mutate freely without disturbing the registry — but each `Conversation` is copied *by value*, so a reference-typed field's backing storage is not: see § `AppendPendingChannelPost` / `PendingChannelPosts` / `ClearPendingChannelPosts` below for the one field (#2499) where that distinction now has a concrete consequence. `IsPromoted *bool` / `IsArchived *bool` each distinguish "filter to true" / "filter to false" / "no filter" (`nil`) — three states, which a bare `bool` cannot express.
 
 ## `Update(id ConversationID, fn func(*Conversation)) bool`
 
@@ -214,6 +215,20 @@ fail-open shape a default-arm review flagged), and it stays live for the registr
 callers (`Update`, a future CLI) — but a test that feeds hostile bytes through the wire payload
 expecting this refusal will instead land on the success path. #2151 pins the unreachability
 itself with its own test rather than discovering it as a failing assertion.
+
+## `AppendPendingChannelPost` / `PendingChannelPosts` / `ClearPendingChannelPosts` (#2499)
+
+Hold channel-post text carried forward into a conversation's next user turn (see [control-plane.md § Carrying a posted channel message into claude's next turn](control-plane.md#carrying-a-posted-channel-message-into-claudes-next-turn-2499)) durably on `Conversation.PendingChannelPosts []string`, tag `pending_channel_posts,omitempty` — absent decodes as nothing pending, so no migration step is owed, `SetLastContextUsage`'s and `SetSystemPrompt`'s stated contract.
+
+- **`AppendPendingChannelPost(id, text) bool`** appends under `r.mu`; `false` on a missing row **or** a full bound — the two collapsed because the caller's response is identical either way.
+- **`PendingChannelPosts(id) []string`** returns a fresh copy, never the stored slice — `WorkspaceLabel`'s reasoning transfers: handing back a collection a mutator writes under `r.mu` is an escape the signature should make impossible.
+- **`ClearPendingChannelPosts(id, n) bool`** drops the first `n` entries by reslicing; `n <= 0` mutates nothing, `n >= len` clears the record.
+
+None of the three calls `Save` — persistence stays the caller's concern, this package's convention for every setter.
+
+**Two bounds, not one, because a byte cap alone admits an unbounded entry count.** `MaxPendingChannelPostsBytes` (64 KiB, restated rather than imported from `internal/control`'s `MaxChannelPostBytes` — this package is a leaf and must not import `internal/control`) caps the summed stored length; `MaxPendingChannelPosts` (64 entries) exists because the byte cap alone would admit 65536 one-byte posts, each costing a separator in the rendered carry.
+
+**A full bound refuses the newest post's carry rather than evicting the oldest — a correctness requirement, not a style choice.** The composing seam (delivery) and the clearing seam (`OnDelivered`) are two separate `r.mu` acquisitions with a whole claude turn possible between them: compose reads `[A, B]` and records `n=2`; if eviction dropped the *oldest* entries to admit a large post `C`, the record would become `[C]`, and the confirmed delivery's clear would then drop the first 2 — deleting `C`, which was never actually carried. Refusing the newest instead makes a clear the only mutation that ever touches the head of the slice, so entries `[0..n)` are provably stable across the compose/clear window. A security-review concurrency pass caught the eviction-based first draft before it shipped; no planned test exercised a bound and a delivery landing in the same window, so this shape is worth checking by inspection whenever two seams agree via a count or an index — check every other writer for which end of the collection it mutates.
 
 ## `WorkspaceLabel(cwd string) (string, bool)` / `SetWorkspaceLabel(cwd string, label *string)` (#2206)
 
