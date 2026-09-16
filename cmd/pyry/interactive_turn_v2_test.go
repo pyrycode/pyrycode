@@ -7,12 +7,15 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/eventring"
@@ -4725,5 +4728,83 @@ func TestInteractiveTurnEmitterV2_ContextUsageLogsNameOnlyTheVariant(t *testing.
 				}
 			}
 		})
+	}
+}
+
+// TestInteractiveTurnEmitterV2_ContextUsageRecordsToRegistry is AC-2: the arm that
+// publishes the post-turn reading also files its summary in the conversation's
+// registry row, so a client that reconnects after a daemon restart is shown the
+// real numbers. The wire frames are asserted alongside, because a write added to
+// this arm must not disturb what it emits or its lifecycle neutrality.
+func TestInteractiveTurnEmitterV2_ContextUsageRecordsToRegistry(t *testing.T) {
+	t.Parallel()
+	const convID = conversations.ConversationID("11111111-2222-4333-8444-555555555555")
+
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{
+		ID:         convID,
+		Cwd:        "/home/user/project",
+		LastUsedAt: time.Date(2026, 9, 14, 11, 0, 0, 0, time.UTC),
+	})
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	when := time.Date(2026, 9, 16, 8, 30, 15, 0, time.UTC)
+
+	cur := &stubCursor{}
+	cur.set(string(convID))
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e.usageRec = &contextUsageRecorder{
+		reg:    reg,
+		path:   path,
+		logger: discardLogger(),
+		now:    func() time.Time { return when },
+	}
+
+	e.Handle(context.Background(), turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+	inTurn, turnID := e.inTurn, e.turnID
+	e.Handle(context.Background(), emitterContextUsageFixture)
+
+	if e.inTurn != inTurn || e.turnID != turnID {
+		t.Errorf("the registry write disturbed turn lifecycle: inTurn=%v/%v turnID=%q/%q",
+			e.inTurn, inTurn, e.turnID, turnID)
+	}
+	if got := pushTypes(bcast.pushes); !slices.Contains(got, protocol.TypeContextUsage) {
+		t.Errorf("the arm stopped publishing: %v", got)
+	}
+
+	back, err := conversations.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	row, ok := back.Get(convID)
+	if !ok {
+		t.Fatal("row missing after reload")
+	}
+	if row.LastContextUsage == nil {
+		t.Fatal("the post-turn arm recorded no reading")
+	}
+	want := conversations.ContextUsageReading{
+		Model:       emitterContextUsageFixture.Model,
+		TotalTokens: emitterContextUsageFixture.TotalTokens,
+		MaxTokens:   emitterContextUsageFixture.MaxTokens,
+		Percentage:  emitterContextUsageFixture.Percentage,
+		AsOf:        when,
+	}
+	if *row.LastContextUsage != want {
+		t.Errorf("stored reading = %+v, want %+v", *row.LastContextUsage, want)
+	}
+
+	// AC-4's disk side on this producer too: the inventories never reach the file.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read registry: %v", err)
+	}
+	for _, needle := range contextUsageNeedles() {
+		if needle == emitterContextUsageFixture.Model {
+			continue // the model IS stored, by AC-1
+		}
+		if strings.Contains(string(data), needle) {
+			t.Errorf("registry file carries %q from the reading's inventories", needle)
+		}
 	}
 }

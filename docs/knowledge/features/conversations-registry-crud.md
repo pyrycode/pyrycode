@@ -4,6 +4,10 @@ Split out of [`conversations-registry.md`](conversations-registry.md) (2026-09-0
 50000-byte cap) — see that document for the envelope, atomic-write recipe, save-concurrency
 model, sort discipline, and load semantics all of these methods sit on top of.
 
+Covers `Create`, `Get`, `List`, `Update`, `Delete`, `RebindSession` (#739), `SetArchived` (#880),
+`SetSystemPrompt` (#2149), `WorkspaceLabel` / `SetWorkspaceLabel` (#2206),
+`SetLastContextUsage` (#2460), and `Promote`.
+
 ## `Create(c Conversation)`
 
 Lock, append, unlock. **Caller owns uniqueness** — `Create` does not validate that `c.ID` is unique, well-formed, or non-empty. Same convention as `devices.Add`: keeping the registry I/O-thin lets the consuming layer (the conversations API in #218) own validation policy, which may evolve. AC pins the literal signature with no return value; match it exactly.
@@ -140,6 +144,57 @@ Scan and mutation are one critical section under `r.mu` — same no-TOCTOU postu
 
 Store-only as of #2149: no getter, no wire verb, no CLI binding. `Get`/`List` are the read
 path the sibling slices (#2150, #2152) use.
+
+## `SetLastContextUsage(id ConversationID, reading ContextUsageReading) bool` (#2460)
+
+Records the summary of the last context-window reading claude reported: locate the entry whose
+`ID` matches, set `LastContextUsage = &reading`, return `true`. On miss, return `false` and mutate
+nothing. Scan and mutation are one critical section under `r.mu` — same no-TOCTOU posture as every
+other named setter in this family. No implicit `Save`.
+
+- **Flips exactly one field, structurally**, the same guarantee `SetArchived` and `SetSystemPrompt`
+  give for theirs: the method has no way to touch `Cwd`, `Name`, session binding,
+  promoted/archived state, or the system prompt.
+- **Takes a value, not a pointer — the one place this setter departs from `SetSystemPrompt`'s
+  tri-state door.** No producer of a reading ever clears one: a conversation that has never been
+  reported on carries `nil` from creation, and once claude has answered there is always a last
+  reading. A value argument makes "set it back to nil" unreachable rather than merely unused,
+  which is a stronger guarantee than a pointer parameter with an undocumented "don't pass nil"
+  convention would give.
+- **Normalises `AsOf` to UTC before storing**, so the encoded form is always RFC 3339 with a `Z`
+  offset. `time.Time` marshals with whatever offset it carries, so doing this inside the setter —
+  rather than trusting each producer to call `.UTC()` — makes it one place to get right instead of
+  two. The instant is unchanged; only the location is.
+- **No value validation and no second byte bound.** `Model` arrives from streamsup's
+  `decodeContextUsage`, the single decoder both producers share, which already bounds it at
+  `maxContextUsageStringBytes`; the other three stored values are decoded ints. No invalid-UTF-8
+  sentinel either, for `SetWorkspaceLabel`'s stated reason: the string reaches Go through
+  `encoding/json`, which has already substituted U+FFFD, so the round-trip-fidelity hazard
+  `SetSystemPrompt` refuses cannot arrive at this door.
+- **Pointer ownership.** The value is copied into a fresh local before its address is taken, so the
+  stored pointer never aliases a caller-held variable — the idiom `Promote` uses for `Name` and
+  `SetSystemPrompt` for its prompt.
+- **No implicit `Save`, no logger, nothing logged.** Matches every other setter in this package.
+  `SetLastContextUsage` itself never logs; the one new log line in #2460 lives one layer up, in
+  `cmd/pyry`'s `contextUsageRecorder.record`, and fires only on a `Save` failure — carrying the
+  conversation id and the registry error, never a field of the reading.
+- **Two production callers write through one shared value**, not two independent setters: the
+  post-turn interactive-turn emitter arm (#2371) and the on-demand `request_context_usage` flight
+  (#2431) both call the same `*contextUsageRecorder`, built once in `startRelayV2`. **Last write
+  wins, and that is the intended behaviour** — the two producers run on different goroutines and
+  can settle seconds apart, both readings are valid "last reading" values, and `r.mu` makes the
+  write safe. `Registry.Save` snapshots in-memory state at save time, so whichever `Save` renames
+  last always writes the newest row regardless of which caller's `Save` gets there first; no
+  `AsOf` comparison or other ordering machinery is needed or wanted.
+- **A miss writes nothing and saves nothing, structurally.** `contextUsageRecorder.record` calls
+  `Save` only behind this setter's `true` — an unknown conversation id never reaches a `Save`,
+  which is also what makes the save-failure log line safe: a client-chosen id that matched no row
+  can never reach that logger at all.
+
+Had no production callers as of the primitive landing; `contextUsageRecorder.record`
+(`cmd/pyry/relay_context_usage.go`) is the sole caller, shared by both producers rather than
+called independently by each. See [`features/v2-session-manager-concurrency.md`](v2-session-manager-concurrency.md)
+§ `request_context_usage` for the on-demand flight's own concurrency story.
 
 **`ErrSystemPromptInvalidUTF8` is unreachable from the `set_system_prompt` wire verb (#2151).**
 `encoding/json` substitutes U+FFFD for both an invalid byte and an unpaired surrogate escape
