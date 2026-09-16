@@ -453,23 +453,24 @@ func startRelay(
 	ctx context.Context,
 	logger *slog.Logger,
 	w relayWiring,
-) (cleanup func(), surface func(permbridge.Request) func(), announce func(conversationID, attachmentID, filename string), announceConversation func(protocol.ConversationUpdatedPayload), pairingProvider localPairingProvider, err error) {
+) (cleanup func(), surface func(permbridge.Request) func(), announce func(conversationID, attachmentID, filename string), announceConversation func(protocol.ConversationUpdatedPayload), announcePost func(protocol.AssistantDeltaPayload), pairingProvider localPairingProvider, err error) {
 	if w.relayURL == "" {
 		logger.Info("relay: disabled (no URL configured)")
-		// No relay leg ⇒ no stream-approval bridge, neither fan-out emitter, and
-		// no local pairing provider; all four stay nil.
+		// No relay leg ⇒ no stream-approval bridge, none of the three fan-out
+		// emitters, and no local pairing provider; all five stay nil.
 		// SetApprovalSurfacer(nil) leaves mcp.approve
 		// modal-less, a nil announce hook leaves attachment.file storing and
-		// minting with nobody to tell (#2166), and a nil conversation hook leaves
-		// channel.new creating with nobody to tell (#2156). The nil pairing
+		// minting with nobody to tell (#2166), a nil conversation hook leaves
+		// channel.new creating with nobody to tell (#2156), and a nil post hook
+		// leaves channel.post recording with nobody to tell (#2498). The nil pairing
 		// provider leaves pairing.mint unconfigured rather than deriving state from
 		// files for a relay leg that does not exist.
-		return func() {}, nil, nil, nil, nil, nil
+		return func() {}, nil, nil, nil, nil, nil, nil
 	}
 
 	serverID, err := identity.LoadOrCreate(resolveServerIDPath(w.instanceName))
 	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("load server-id: %w", err)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("load server-id: %w", err)
 	}
 
 	// Load the device registry once at daemon startup. A missing file
@@ -477,7 +478,7 @@ func startRelay(
 	// `pyry pair` runs. Malformed JSON fails fast.
 	registry, err := devices.Load(resolveDevicesPath(w.instanceName))
 	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("load device registry: %w", err)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("load device registry: %w", err)
 	}
 
 	if w.allowInsecure {
@@ -494,17 +495,17 @@ func startRelay(
 		ServerIDConflictThreshold: relay4409Threshold(logger),
 	})
 	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("relay connect: %w", err)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("relay connect: %w", err)
 	}
 
 	// legCleanup tears down the v2 Noise manager — the sole consumer of
 	// conn.Frames() (ADR 024: v2 is a hard cutover, no mixed-mode path). The
 	// shared waitDone classifier below is appended to it in the returned cleanup.
 	logger.Info("relay: Mobile Protocol v2 (Noise_IK)")
-	drain, surface, announce, announceConversation, pairingProvider, err := startRelayV2(ctx, logger, w, conn, registry, serverID)
+	drain, surface, announce, announceConversation, announcePost, pairingProvider, err := startRelayV2(ctx, logger, w, conn, registry, serverID)
 	if err != nil {
 		_ = conn.Close()
-		return nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 	legCleanup := func() {
 		// Close the connection first so Connection.run closes Frames,
@@ -544,7 +545,7 @@ func startRelay(
 		legCleanup()
 		<-waitDone
 	}
-	return cleanup, surface, announce, announceConversation, pairingProvider, nil
+	return cleanup, surface, announce, announceConversation, announcePost, pairingProvider, nil
 }
 
 // relay4409Threshold reads the PYRY_RELAY_4409_THRESHOLD test-only seam: a
@@ -768,10 +769,10 @@ func startRelayV2(
 	conn *relay.Connection,
 	registry *devices.Registry,
 	serverID identity.ServerID,
-) (drain func(), surface func(permbridge.Request) func(), announce func(conversationID, attachmentID, filename string), announceConversation func(protocol.ConversationUpdatedPayload), pairingProvider localPairingProvider, err error) {
+) (drain func(), surface func(permbridge.Request) func(), announce func(conversationID, attachmentID, filename string), announceConversation func(protocol.ConversationUpdatedPayload), announcePost func(protocol.AssistantDeltaPayload), pairingProvider localPairingProvider, err error) {
 	staticKey, err := keys.LoadOrCreate(resolveStaticKeyBaseDir(), sanitizeName(w.instanceName))
 	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("load static key: %w", err)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("load static key: %w", err)
 	}
 	priv := staticKey.PrivateKey()
 
@@ -1357,7 +1358,7 @@ func startRelayV2(
 		SettingsUpdater: w.settings,
 	})
 	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("build v2 session manager: %w", err)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("build v2 session manager: %w", err)
 	}
 
 	// Attachment-offer announcer (#2166): the producer half of a frame #2082
@@ -1392,6 +1393,18 @@ func startRelayV2(
 	// written concurrently. Its route out is the same: a bare func returned to the
 	// composition root, which hands it to channelCreator.
 	announceConversation = newConversationUpdateEmitterV2(mgr, ctx, logger).announce
+
+	// Host-side posted-message announcer (#2498): the second producer of
+	// assistant_delta, and the first that is not a supervised claude turn. Once
+	// `pyry channel post` has recorded the content, this carries it to every
+	// interactive client so a cron's message draws in an open app — before, the
+	// record sat in the durable log and no connected client learned of it.
+	//
+	// Built beside the two emitters above and in the same window — after mgr,
+	// before mgr.Run's goroutine starts below — so nothing that goroutine reads is
+	// written concurrently. Its route out is theirs: a bare func returned to the
+	// composition root, which hands it to channelPoster.
+	announcePost = newChannelPostEmitterV2(mgr, ctx, logger).announce
 
 	// Workspace-rename announcer (#2209): the second producer of workspace_updated,
 	// a frame #2207 shipped as a reply to its requester and nothing more. Once
@@ -1646,7 +1659,7 @@ func startRelayV2(
 		streamSessionErrCleanup()
 		streamResettingCleanup()
 		<-mgrDone
-	}, surface, announce, announceConversation, pairingMinter.MintLocalPairing, nil
+	}, surface, announce, announceConversation, announcePost, pairingMinter.MintLocalPairing, nil
 }
 
 // conversationForSession resolves a claude session id to the id of the

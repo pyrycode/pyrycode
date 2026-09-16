@@ -54,6 +54,12 @@ const (
 	// put the daemon's layout on a wire the operator's own scripts read. The
 	// content-free discriminant goes to the daemon's log instead, through the
 	// historyAppendFailure the other history producers already share.
+	//
+	// Since #2498 it also covers a turn-id mint failure, which refuses BEFORE
+	// anything is written. The message is accurate on that branch too — nothing
+	// was recorded — and a second constant would split one operator-visible
+	// outcome across two spellings for a distinction only the daemon's own log
+	// can act on.
 	msgChannelPostRecordFailed = "could not record the message"
 
 	// fmtChannelPostAmbiguous is the one refusal in this file that is not a bare
@@ -281,10 +287,28 @@ func channelCreator(
 // IT DOES NOT ROUTE THROUGH appendConversationHistory, and the divergence is the
 // design rather than an oversight. That seam returns nothing by contract — a
 // failed append must never suppress the caller's wire emit, which is right for
-// its two stream producers, whose frame has already gone out by then. Here there
-// is no wire emit at all: the durable record IS what this verb delivers, so an
-// append that failed has to be a post that failed. A cron exiting 0 having
-// delivered nothing is the exact failure that would otherwise ship.
+// its two stream producers, whose frame has already gone out by then. Here the
+// order is the other way round: the durable record IS what this verb delivers and
+// it is written FIRST, so an append that failed has to be a post that failed, and
+// a post that failed pushes nothing. A cron exiting 0 having delivered nothing is
+// the exact failure that would otherwise ship.
+//
+// announce carries the recorded content to every connected client (#2498), so a
+// message a cron posts appears in an open app without a reconnect. THE SAME
+// PAYLOAD VALUE goes to both halves — the log and the wire — which is what makes
+// "one post is one rendering" a property rather than two derivations that agree
+// today. A bare func for the reason channelCreator's own announce hook is one,
+// and IT MAY BE NIL for that hook's reason exactly: startRelay returns before any
+// manager exists when no URL is configured, so that daemon has nobody to tell. A
+// nil hook records the post and answers success.
+//
+// The entry type is assistant_delta and NOT the message/role-assistant shape
+// #2497 shipped. That shape reaches a client and draws nothing — desktop's
+// translateTimelineEvent returns a row only for role "user" and null for
+// "assistant", on the live path and the served-history path both — so the record
+// was invisible on the very path it existed for. assistant_delta is what the
+// current clients draw as assistant text, and writing the shape that is pushed is
+// also what keeps a served page from carrying a second record of one post.
 //
 // SECURITY: name is caller-authored text arriving unvalidated past
 // handleChannelPost's shape checks, and it is used for exactly one thing — an
@@ -307,6 +331,7 @@ func channelPoster(
 	create func(cwd, name string) (string, error),
 	defaultCwd string,
 	appendEntry func(conversations.ConversationID, string, json.RawMessage, time.Time) (uint64, error),
+	announce func(protocol.AssistantDeltaPayload),
 	log *slog.Logger,
 ) func(name, text string) error {
 	return func(name, text string) error {
@@ -350,50 +375,107 @@ func channelPoster(
 			return fmt.Errorf(fmtChannelPostAmbiguous, len(matches))
 		}
 
-		// The id is daemon-derived in both arms above — a registry match or a
-		// freshly minted one — never a value a caller asserted. That is
-		// Store.Append's precondition, and it is the whole of this call's
-		// authorisation property: conversations.ValidID is a shape predicate, so a
-		// canonical-shaped id from a caller would resolve genuinely inside the
-		// conversation it named.
-		payload, err := json.Marshal(protocol.MessagePayload{
-			ConversationID: string(convID),
-			// Fresh per post, from the same crypto/rand mint the conversation ids
-			// use. Nothing upstream supplies one: unlike newOperatorMessageHistory,
-			// which carries the queue's id for the operator's own turn, this entry
-			// has no prior identity to preserve.
-			MessageID: newChannelPostMessageID(),
-			// The role literal, matching internal/streamsup's envelope builder and
-			// newOperatorMessageHistory's — the repo declares no role constants.
-			// "assistant" where that producer writes "user": both are legal per
-			// MessagePayload's doc block, and this content did not come from the
-			// operator's own turn.
-			Role: "assistant",
-			Text: text,
-		})
+		// ONE turn per post, minted before anything is written, because every chunk
+		// below shares it and a client coalesces assistant_delta on exactly this
+		// key. A post that reused another post's turn id would draw as part of that
+		// message instead of as its own.
+		turnID, err := newChannelPostTurnID()
 		if err != nil {
-			// Defensive, matching both #2114 producers: MessagePayload is four
-			// strings and cannot fail to marshal in practice. Never echo the payload
-			// or err.Error() — encoding/json quotes invalid input bytes into its
-			// error, which would put conversation content in a log line.
-			log.Error("control: channel.post payload marshal failed",
-				"event", "channel_post.marshal_err",
+			log.Error("control: channel.post turn-id mint failed",
+				"event", "channel_post.rand_err",
 				"conversation_id", string(convID))
 			return errors.New(msgChannelPostRecordFailed)
 		}
 
-		// Stamped HERE, at the confirmed write, newOperatorMessageHistory's rule, so
-		// a served page orders this entry by when it landed rather than by when
-		// anything upstream was composed. UTC matches what every other producer
-		// hoists, so entries from all of them are orderable by the stored field.
-		if _, err := appendEntry(convID, protocol.TypeMessage, payload, time.Now().UTC()); err != nil {
-			log.Warn("control: channel.post history append failed",
-				"event", "channel_post.history_append_err",
-				"conversation_id", string(convID),
-				"reason", historyAppendFailure(err))
-			return errors.New(msgChannelPostRecordFailed)
+		// SPLIT BEFORE MARSHALLING. control.MaxChannelPostBytes admits 64 KiB and
+		// the v2 application envelope caps at 65519 B, which encoding/json's
+		// six-bytes-per-escaped-byte expansion puts far out of reach for a
+		// single-frame post — so this is a precondition of delivery at the size the
+		// verb already accepts, not a refinement. maxDeltaTextBytes is read, never
+		// re-derived: interactiveTurnEmitterV2's own flushDelta bounds its frames
+		// with the same call, and a second constant here would be a second place
+		// the cap is decided. Every chunk is a substring, so concatenation
+		// reproduces the post byte-for-byte and the split never cuts a rune.
+		//
+		// Empty text cannot reach here — handleChannelPost refuses an empty message
+		// — and would emit nothing if it did.
+		chunks := splitDeltaText(text, maxDeltaTextBytes)
+		payloads := make([]protocol.AssistantDeltaPayload, 0, len(chunks))
+		raws := make([]json.RawMessage, 0, len(chunks))
+		for i, chunk := range chunks {
+			// The conversation id is daemon-derived in both arms above — a registry
+			// match or a freshly minted one — never a value a caller asserted. That is
+			// Store.Append's precondition, and it is the whole of this call's
+			// authorisation property: conversations.ValidID is a shape predicate, so a
+			// canonical-shaped id from a caller would resolve genuinely inside the
+			// conversation it named.
+			p := protocol.AssistantDeltaPayload{
+				ConversationID: string(convID),
+				TurnID:         turnID,
+				Seq:            i,
+				// The main lane. A post is the host's own text rather than a
+				// subagent's, so naming a parent tool call would claim an attribution
+				// nothing produced. The key carries no omitempty, so the empty string
+				// is emitted rather than omitted.
+				ParentToolUseID: "",
+				Text:            chunk,
+			}
+			raw, err := json.Marshal(p)
+			if err != nil {
+				// Defensive, matching both #2114 producers: AssistantDeltaPayload is
+				// three strings and an int and cannot fail to marshal in practice.
+				// Never echo the payload or err.Error() — encoding/json quotes invalid
+				// input bytes into its error, which would put conversation content in a
+				// log line.
+				log.Error("control: channel.post payload marshal failed",
+					"event", "channel_post.marshal_err",
+					"conversation_id", string(convID))
+				return errors.New(msgChannelPostRecordFailed)
+			}
+			payloads = append(payloads, p)
+			raws = append(raws, raw)
 		}
 
+		// Stamped ONCE for the whole post, at the confirmed write —
+		// newOperatorMessageHistory's rule, so a served page orders these entries by
+		// when they landed rather than by when anything upstream was composed. One
+		// stamp rather than one per chunk because one post is one message: a client
+		// showing a time for it should not have to pick among N. UTC matches what
+		// every other producer hoists, so entries from all of them are orderable by
+		// the stored field.
+		//
+		// EVERY CHUNK IS RECORDED BEFORE ANY IS PUSHED. A post that cannot be
+		// recorded must not appear on a screen, because a frame drawn for a message
+		// the log does not hold vanishes on the next connect. The cost is that a
+		// failure partway through a multi-chunk post leaves a PREFIX on disk and
+		// still refuses: history.Store is append-only, so this is not transactional
+		// and cannot be made so here. It is flushDelta's existing exposure, and a
+		// prefix is at least not a mixture.
+		ts := time.Now().UTC()
+		for _, raw := range raws {
+			if _, err := appendEntry(convID, protocol.TypeAssistantDelta, raw, ts); err != nil {
+				log.Warn("control: channel.post history append failed",
+					"event", "channel_post.history_append_err",
+					"conversation_id", string(convID),
+					"reason", historyAppendFailure(err))
+				return errors.New(msgChannelPostRecordFailed)
+			}
+		}
+
+		// Tell every connected client (#2498). LAST, and only once the whole post is
+		// on disk. Its result is deliberately not consulted and it returns no error
+		// of its own — a failed push must not turn a recorded post into a refusal,
+		// because the content is in the durable log whether or not anyone heard, and
+		// a cron reads the exit code.
+		if announce != nil {
+			for _, p := range payloads {
+				announce(p)
+			}
+		}
+
+		// Neither the chunk count nor any per-chunk field is logged: across a
+		// chunked post both are proxies for the message's length, and this verb's
+		// content stays out of the daemon's log entirely.
 		log.Info("control: channel.post recorded",
 			"event", "channel_post.posted",
 			"conversation_id", string(convID),
@@ -402,21 +484,30 @@ func channelPoster(
 	}
 }
 
-// newChannelPostMessageID mints the id this verb stamps on its message payload.
+// newChannelPostTurnID mints the turn this verb addresses its assistant_delta
+// frames to.
 //
 // It borrows conversations.NewID, whose output is a UUIDv4 from crypto/rand, for
 // the reason fileAttacher borrows it for an attachment id: it is the repo's one
-// id mint and the shape is what a client already expects in this field. An rng
-// failure falls back to the empty string rather than failing the post — the
-// field is an identity a client dedupes on, not an authorisation value, and
-// refusing to deliver a message because the system rng hiccuped would trade the
-// deliverable for a cosmetic.
-func newChannelPostMessageID() string {
+// id mint and the shape is what a client already expects in this field.
+//
+// AN RNG FAILURE FAILS THE POST, where #2497's message-id mint fell back to the
+// empty string. That fallback was right for what it addressed — a message id is
+// an identity a client dedupes on, so refusing delivery over an rng hiccup would
+// have traded the deliverable for a cosmetic. A turn id is not that. It is the
+// ADDRESS that decides which bubble the content lands in, and every post minting
+// "" would coalesce into one bubble with every other, so the empty value silently
+// breaks the one-post-one-message property rather than degrading a field nobody
+// reads. startTurnIfNeeded is the precedent in this package: it declines to emit
+// without a turn id. It can retry on the next event where a post has none, so
+// refusing is the only form that precedent can take here — and a cron reads a
+// non-zero exit.
+func newChannelPostTurnID() (string, error) {
 	id, err := conversations.NewID()
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return string(id)
+	return string(id), nil
 }
 
 // channelUsage is the usage banner every parse-failure path prints before

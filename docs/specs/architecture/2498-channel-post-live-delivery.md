@@ -271,3 +271,25 @@ Pending for the documentation stage; not implemented by this slice:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-16
+
+## Revisions
+
+**2026-09-16 — Open Questions resolved during implementation. Neither changed the design.**
+
+1. **No daemon-side consumer keys off `turn_id` expecting a matching `turn_state`.**
+   Checked before wiring: the only other producers that construct a payload with
+   this field — `session_model_list.go`, `session_slash_command_list.go` and
+   `session_background_task_list.go` — set `TurnID` and `Seq` to zero precisely
+   because their arms ignore both, and nothing reads the field back. So a turn id
+   that names no supervised turn is inert daemon-side, and emitting the delta with
+   no lifecycle frame stands as planned.
+2. **`EventID` stays unset.** Nothing surfaced during implementation to revisit
+   it: the emitter owns no ring, the durable log serves the reconnecting client,
+   and `Envelope.EventID` is an omitempty pointer that `conversation_updated` and
+   `attachment_offered` already leave nil. `TestChannelPostEmitterV2_FrameShape`
+   pins the absence so a future producer cannot advertise an id it did not mint.
+
+One addition the plan did not name: `TestChannelPoster_AppendFailureAnnouncesNothing`,
+the inverse of the append-then-announce order. A frame drawn for a message the log
+does not hold would vanish on the next connect, which is worse than never having
+been drawn, so the order is pinned from both sides rather than one.

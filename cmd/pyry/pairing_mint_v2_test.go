@@ -609,7 +609,7 @@ func TestStartRelay_DisabledLeavesLocalPairingProviderUnconfigured(t *testing.T)
 	t.Parallel()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	cleanup, _, _, _, provider, err := startRelay(context.Background(), logger, relayWiring{})
+	cleanup, _, _, _, _, provider, err := startRelay(context.Background(), logger, relayWiring{})
 	if err != nil {
 		t.Fatalf("startRelay with no URL: %v", err)
 	}
