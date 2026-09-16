@@ -145,3 +145,93 @@ func TestConversation_SystemPromptThreeStates(t *testing.T) {
 		})
 	}
 }
+
+// #2460 AC1: the stored reading survives a marshal → unmarshal round trip, and a
+// row that has never held one omits the key entirely.
+//
+// time.Date rather than time.Now for TestConversation_JSONRoundTrip's stated
+// reason: a monotonic reading does not survive JSON and would break DeepEqual.
+func TestConversation_LastContextUsageRoundTrip(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 9, 16, 8, 30, 15, 0, time.UTC)
+
+	tests := []struct {
+		name    string
+		reading *ContextUsageReading
+		wantKey bool
+	}{
+		{name: "never reported", reading: nil, wantKey: false},
+		{
+			name: "reported",
+			reading: &ContextUsageReading{
+				Model:       "claude-opus-5",
+				TotalTokens: 31337,
+				MaxTokens:   200000,
+				Percentage:  16,
+				AsOf:        when,
+			},
+			wantKey: true,
+		},
+		{
+			// A fresh session reports zeroes, and they are a FACT rather than an
+			// absent value — so every inner key must still emit. This is what the
+			// outer pointer buys and what omitempty on the inner fields would
+			// destroy.
+			name: "reported all zero",
+			reading: &ContextUsageReading{
+				AsOf: when,
+			},
+			wantKey: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			in := Conversation{
+				ID:               "11111111-2222-4333-8444-555555555555",
+				Cwd:              "/home/user/project",
+				LastContextUsage: tc.reading,
+				LastUsedAt:       when,
+			}
+			data, err := json.Marshal(in)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			if hasKey := bytes.Contains(data, []byte(`"last_context_usage"`)); hasKey != tc.wantKey {
+				t.Errorf("last_context_usage key present = %v, want %v:\n%s", hasKey, tc.wantKey, data)
+			}
+			if tc.wantKey {
+				for _, key := range []string{"model", "total_tokens", "max_tokens", "percentage", "as_of"} {
+					if !bytes.Contains(data, []byte(`"`+key+`"`)) {
+						t.Errorf("reading is missing inner key %q:\n%s", key, data)
+					}
+				}
+			}
+
+			var out Conversation
+			if err := json.Unmarshal(data, &out); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if !reflect.DeepEqual(in, out) {
+				t.Errorf("round-trip mismatch:\n in = %+v\nout = %+v", in, out)
+			}
+		})
+	}
+}
+
+// #2460 AC1: as_of serialises as RFC 3339 with a Z offset. time.Time marshals with
+// whatever offset it carries, so this is the observable half of the setter's UTC
+// normalisation — a value stored with an offset would encode as +HH:MM here.
+func TestContextUsageReading_AsOfEncodesAsRFC3339UTC(t *testing.T) {
+	t.Parallel()
+	data, err := json.Marshal(ContextUsageReading{
+		Model: "claude-opus-5",
+		AsOf:  time.Date(2026, 9, 16, 8, 30, 15, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if want := `"as_of":"2026-09-16T08:30:15Z"`; !bytes.Contains(data, []byte(want)) {
+		t.Errorf("encoding missing %s:\n%s", want, data)
+	}
+}

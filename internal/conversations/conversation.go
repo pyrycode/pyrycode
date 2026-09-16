@@ -104,8 +104,71 @@ type Conversation struct {
 	// verb (#2150, #2152).
 	SystemPrompt *string `json:"system_prompt,omitempty"`
 
+	// LastContextUsage is the last context-window reading claude reported for
+	// this conversation (#2460), so a client that reconnects, restarts, or opens
+	// the conversation from a second device is shown the real numbers rather than
+	// nothing or a transcript guess. nil means claude has never reported for this
+	// conversation.
+	//
+	// A pointer for a reason adjacent to Name's and SystemPrompt's but not
+	// identical: those need one to split "absent" from "explicitly empty", while
+	// here a zero-valued reading is a FALSE reading — 0 tokens, 0%, the zero time
+	// — that a client would render as fact. There is no explicitly-empty state
+	// and nothing mints one: the only door, Registry.SetLastContextUsage, takes a
+	// value rather than a pointer, so "clear it back to nil" is unreachable.
+	//
+	// omitempty carries the same contract as IsArchived's and SystemPrompt's: "an
+	// absent key decodes as no reading, with no migration step." omitempty on a
+	// pointer tests the pointer, so a registry whose rows all hold nil is
+	// byte-identical to its pre-#2460 form.
+	//
+	// Written by both producers of a reading — the post-turn emitter arm (#2371)
+	// and the on-demand request_context_usage flight (#2431) — through the one
+	// setter. Last write wins; see SetLastContextUsage.
+	LastContextUsage *ContextUsageReading `json:"last_context_usage,omitempty"`
+
 	// LastUsedAt is bumped whenever the conversation has user activity.
 	// Used by "recently active" sorts and by the auto-archive predicate
 	// (#219). Always present.
 	LastUsedAt time.Time `json:"last_used_at"`
+}
+
+// ContextUsageReading is the SUMMARY of one context-window reading: the headline
+// numbers a reconnecting client needs, and nothing else.
+//
+// THE THREE INVENTORIES ARE DELIBERATELY ABSENT. The event this is projected from
+// (turnevent.ContextUsage) also carries per-category, per-MCP-tool and
+// per-memory-file breakdowns with their dropped counts. Those are not stored, for
+// two independent reasons: they carry workspace memory-file paths and MCP server
+// names that the frame's no-log rule keeps out of records, and a client coming
+// back needs the headline numbers rather than a breakdown taken some turns ago.
+// Do not "complete" this type by adding them.
+//
+// All five keys always emit. A fresh session genuinely reads zero tokens at zero
+// percent, so omitempty on the inner fields would encode a fact as an absence;
+// the outer pointer on Conversation.LastContextUsage already carries the
+// never-reported state.
+//
+// The values are claude-authored and arrive bounded: streamsup's
+// decodeContextUsage caps Model at its own string bound and is the single decoder
+// BOTH lanes share, so nothing here re-bounds it.
+type ContextUsageReading struct {
+	// Model is the model claude reported the reading for.
+	Model string `json:"model"`
+
+	// TotalTokens is the context the conversation currently occupies.
+	TotalTokens int `json:"total_tokens"`
+
+	// MaxTokens is the window that context is measured against.
+	MaxTokens int `json:"max_tokens"`
+
+	// Percentage is claude's own rounded TotalTokens-of-MaxTokens figure, carried
+	// rather than recomputed so a client sees the number claude reported.
+	Percentage int `json:"percentage"`
+
+	// AsOf is when the daemon recorded the reading, always UTC — normalised by
+	// SetLastContextUsage, which is what makes the encoded form RFC 3339 with a Z
+	// offset. time.Time marshals with whatever offset it carries, so the
+	// normalisation lives at the one door rather than at each producer.
+	AsOf time.Time `json:"as_of"`
 }

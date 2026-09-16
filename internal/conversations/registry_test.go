@@ -2059,3 +2059,213 @@ func TestRegistry_WorkspaceLabel_ConcurrentAccess(t *testing.T) {
 	close(start)
 	wg.Wait()
 }
+
+// --- #2460: the last context reading -----------------------------------------
+
+func ctxReadingFixture() ContextUsageReading {
+	return ContextUsageReading{
+		Model:       "claude-opus-5",
+		TotalTokens: 31337,
+		MaxTokens:   200000,
+		Percentage:  16,
+		AsOf:        time.Date(2026, 9, 16, 8, 30, 15, 0, time.UTC),
+	}
+}
+
+// #2460 AC1: a hit stores exactly the five values and structurally cannot touch
+// another field of the row or another row — SetArchived's guarantee, for this
+// field.
+func TestRegistry_SetLastContextUsage_HitStoresFiveValues(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	const other ConversationID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	when := mustParseTime(t, "2026-09-04T12:34:56.789Z")
+
+	r := &Registry{}
+	target := Conversation{
+		ID:               id,
+		Name:             ptrTo("general"),
+		Cwd:              "/home/user/project",
+		CurrentSessionID: "sess-current",
+		SessionHistory:   []string{"sess-old"},
+		IsPromoted:       true,
+		SystemPrompt:     ptrTo("be terse"),
+		LastUsedAt:       when,
+	}
+	untouched := Conversation{ID: other, Cwd: "/tmp/work", LastUsedAt: when}
+	r.Create(target)
+	r.Create(untouched)
+
+	reading := ctxReadingFixture()
+	if !r.SetLastContextUsage(id, reading) {
+		t.Fatal("SetLastContextUsage returned false for a present id")
+	}
+
+	got, ok := r.Get(id)
+	if !ok {
+		t.Fatal("row missing after set")
+	}
+	if got.LastContextUsage == nil {
+		t.Fatal("LastContextUsage = nil after a hit")
+	}
+	if *got.LastContextUsage != reading {
+		t.Errorf("stored reading = %+v, want %+v", *got.LastContextUsage, reading)
+	}
+
+	// Every other field of the row, compared as a whole so a future field added
+	// to Conversation is covered without editing this test.
+	want := target
+	want.LastContextUsage = got.LastContextUsage
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the set touched another field:\n got = %+v\nwant = %+v", got, want)
+	}
+	if sibling, _ := r.Get(other); !reflect.DeepEqual(sibling, untouched) {
+		t.Errorf("the set touched another row:\n got = %+v\nwant = %+v", sibling, untouched)
+	}
+}
+
+// #2460 AC2/AC3: an id with no row is a miss, and the registry is left entirely
+// unmodified. The daemon-side callers hang their "writes nothing and saves
+// nothing" on this bool.
+func TestRegistry_SetLastContextUsage_Miss(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	when := mustParseTime(t, "2026-09-04T12:34:56.789Z")
+
+	r := &Registry{}
+	r.Create(Conversation{ID: id, Cwd: "/x", LastUsedAt: when})
+	before := r.List()
+
+	if r.SetLastContextUsage("99999999-0000-4000-8000-000000000000", ctxReadingFixture()) {
+		t.Fatal("SetLastContextUsage returned true for an absent id")
+	}
+	if after := r.List(); !reflect.DeepEqual(before, after) {
+		t.Errorf("a miss modified the registry:\nbefore = %+v\n after = %+v", before, after)
+	}
+}
+
+// #2460 AC1: the setter normalises as_of to UTC, so the RFC 3339 UTC contract is
+// enforced by the package that owns the file rather than by each producer.
+func TestRegistry_SetLastContextUsage_NormalisesAsOfToUTC(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	r := &Registry{}
+	r.Create(Conversation{ID: id, Cwd: "/x", LastUsedAt: mustParseTime(t, "2026-09-04T12:34:56.789Z")})
+
+	zone := time.FixedZone("UTC+7", 7*60*60)
+	local := time.Date(2026, 9, 16, 15, 30, 15, 0, zone)
+	reading := ctxReadingFixture()
+	reading.AsOf = local
+	if !r.SetLastContextUsage(id, reading) {
+		t.Fatal("SetLastContextUsage returned false for a present id")
+	}
+
+	got, _ := r.Get(id)
+	if loc := got.LastContextUsage.AsOf.Location(); loc != time.UTC {
+		t.Errorf("stored AsOf location = %v, want UTC", loc)
+	}
+	if !got.LastContextUsage.AsOf.Equal(local) {
+		t.Errorf("normalisation moved the instant: got %v, want %v", got.LastContextUsage.AsOf, local)
+	}
+}
+
+// #2460 AC1: the stored pointer never aliases a caller-held value — Promote's
+// idiom for Name and SetSystemPrompt's for its prompt.
+func TestRegistry_SetLastContextUsage_DoesNotAliasCaller(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	r := &Registry{}
+	r.Create(Conversation{ID: id, Cwd: "/x", LastUsedAt: mustParseTime(t, "2026-09-04T12:34:56.789Z")})
+
+	r.SetLastContextUsage(id, ctxReadingFixture())
+	first, _ := r.Get(id)
+	r.SetLastContextUsage(id, ContextUsageReading{Model: "claude-haiku-4-5", TotalTokens: 1})
+	second, _ := r.Get(id)
+
+	if first.LastContextUsage == second.LastContextUsage {
+		t.Fatal("a second set reused the first set's pointer")
+	}
+	if first.LastContextUsage.Model != ctxReadingFixture().Model {
+		t.Errorf("a second set mutated the value a prior Get handed out: %+v", *first.LastContextUsage)
+	}
+}
+
+// #2460 AC1: the reading survives Save → Load through a real file unchanged.
+func TestRegistry_SetLastContextUsage_RoundTrip(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	r := &Registry{}
+	r.Create(Conversation{ID: id, Cwd: "/x", LastUsedAt: mustParseTime(t, "2026-09-04T12:34:56.789Z")})
+	reading := ctxReadingFixture()
+	if !r.SetLastContextUsage(id, reading) {
+		t.Fatal("SetLastContextUsage returned false for a present id")
+	}
+
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, ok := back.Get(id)
+	if !ok {
+		t.Fatal("row missing after reload")
+	}
+	if got.LastContextUsage == nil {
+		t.Fatal("LastContextUsage = nil after reload")
+	}
+	if *got.LastContextUsage != reading {
+		t.Errorf("reloaded reading = %+v, want %+v", *got.LastContextUsage, reading)
+	}
+}
+
+// #2460 AC1: a registry whose rows all hold nil is byte-identical to its
+// pre-#2460 form — the key appears nowhere in the file. TestRegistry_Save_
+// ActiveOmitsArchivedKey states its own contract this way.
+func TestRegistry_Save_NilLastContextUsageOmitsKey(t *testing.T) {
+	t.Parallel()
+	when := mustParseTime(t, "2026-09-04T12:34:56.789Z")
+	r := &Registry{}
+	r.Create(Conversation{ID: "11111111-2222-4333-8444-555555555555", Cwd: "/x", LastUsedAt: when})
+	r.Create(Conversation{ID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", Cwd: "/y", LastUsedAt: when})
+
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if strings.Contains(string(data), "last_context_usage") {
+		t.Errorf("an all-nil registry emitted the key:\n%s", data)
+	}
+}
+
+// #2460: the setter does not persist — the convention every other setter in this
+// package keeps, mirroring TestRegistry_SetSystemPrompt_DoesNotPersist.
+func TestRegistry_SetLastContextUsage_DoesNotPersist(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	r := &Registry{}
+	r.Create(Conversation{ID: id, Cwd: "/x", LastUsedAt: mustParseTime(t, "2026-09-04T12:34:56.789Z")})
+
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if !r.SetLastContextUsage(id, ctxReadingFixture()) {
+		t.Fatal("SetLastContextUsage returned false for a present id")
+	}
+
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, _ := back.Get(id)
+	if got.LastContextUsage != nil {
+		t.Errorf("on-disk LastContextUsage = %+v, want nil (the setter must not Save)", *got.LastContextUsage)
+	}
+}

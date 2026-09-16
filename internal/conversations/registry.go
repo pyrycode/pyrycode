@@ -421,6 +421,63 @@ func (r *Registry) SetSystemPrompt(id ConversationID, prompt *string) error {
 	return ErrConversationNotFound
 }
 
+// SetLastContextUsage records the last context-window reading claude reported for
+// the conversation whose ID equals id (#2460). Returns true on hit, false on miss;
+// on a miss no field of any record is modified.
+//
+// It sets exactly one field — LastContextUsage — so id, cwd, name,
+// promoted/archived state, system prompt and session binding are structurally
+// untouched, the same guarantee SetArchived and SetSystemPrompt give for theirs.
+// The scan and mutation happen atomically under r.mu, so there is no
+// find-then-mutate window a concurrent Create/Delete could redirect.
+//
+// IT TAKES A VALUE, NOT A POINTER, which is the one place it deliberately departs
+// from SetSystemPrompt's tri-state door. No producer of a reading ever clears one:
+// a conversation that has never been reported on carries nil from creation, and
+// once claude has answered there is always a last reading. A value argument makes
+// "set it back to nil" unreachable rather than merely unused.
+//
+// LAST WRITE WINS, AND THAT IS THE INTENDED BEHAVIOUR. The two producers — the
+// post-turn emitter arm and the on-demand request_context_usage flight — run on
+// different goroutines and can settle seconds apart; both readings are valid "last
+// reading" values and r.mu makes the write safe. Do not add AsOf comparison or any
+// other ordering machinery here.
+//
+// AsOf is normalised to UTC so the encoded form is RFC 3339 with a Z offset:
+// time.Time marshals with whatever offset it carries, so a caller-side .UTC()
+// would be one forgettable step per producer. The instant is preserved — this
+// changes the location, not the time.
+//
+// No value validation and no second byte bound. Model arrives from streamsup's
+// decodeContextUsage, the single decoder both lanes share, which already caps it;
+// the other three are decoded ints. No invalid-UTF-8 sentinel either, for
+// SetWorkspaceLabel's stated reason: the string reached Go through encoding/json,
+// which has already substituted U+FFFD, so the round-trip-fidelity hazard
+// SetSystemPrompt refuses cannot arrive at this door.
+//
+// The value is copied into a fresh local before its address is taken, so the stored
+// pointer never aliases a caller-held variable — the idiom Promote uses for Name
+// and SetSystemPrompt for its prompt.
+//
+// SetLastContextUsage does NOT call Save — disk persistence is the caller's
+// concern, matching the Create / Update / Promote / Delete / RebindSession /
+// SetArchived / SetSystemPrompt / SetWorkspaceLabel convention. It takes no logger,
+// and nothing in this package logs a record field, so a reading cannot leave the
+// registry file by way of a log line.
+func (r *Registry) SetLastContextUsage(id ConversationID, reading ContextUsageReading) bool {
+	reading.AsOf = reading.AsOf.UTC()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.conversations {
+		if r.conversations[i].ID == id {
+			stored := reading
+			r.conversations[i].LastContextUsage = &stored
+			return true
+		}
+	}
+	return false
+}
+
 // Promote flips the conversation with id to promoted state and sets its
 // display name to a non-nil pointer to name. Returns one of the exported
 // sentinels on refusal:
