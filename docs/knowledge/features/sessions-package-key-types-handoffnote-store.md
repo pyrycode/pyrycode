@@ -19,10 +19,22 @@ would break or lose. Written atomically (scratch file, fsync, rename,
 `os.CreateTemp`'s 0600 preserved through the rename) in a directory created at
 0700, `writeMCPSettings`'/`writeSystemPromptFile`'s recipe verbatim.
 
-Nothing calls this store yet. #2455 writes a note from the outgoing session's
-wrap-up reply and reads the previous one back into the next wrap-up prompt;
-\#2468 needs `HandoffNotePath`'s path and existence answer to compose a
-pointer line, omitted entirely when there is no note.
+\#2477 writes a note from the outgoing session's wrap-up reply and reads the
+previous one back into the next wrap-up prompt. #2475 is the reading
+consumer: `(*Pool).handoffNoteFor` reads the note's *text* through
+`HandoffNote` and composes it, fenced, into the appended system prompt every
+successor spawns with — see
+[`writeSystemPrompt` + `systemPromptText`](sessions-package-key-types-writesystemprompt-systemprompttext.md#carrying-the-conversations-handoff-note-2475).
+That supersedes this ticket's original shape: #2475 was filed as a *pointer*
+that named `HandoffNotePath`'s path and let the successor decide whether to
+read it, and #2468 was the ticket that would have consumed that answer.
+\#2474 measured the pointer shape dead — a `Read` outside the workspace is
+gated under the daemon's in-band `default` posture, so a background
+conversation has nobody to answer the modal — and #2475 shipped inline
+composition instead. `HandoffNotePath` keeps a production consumer under the
+new shape too: `handoffNoteFor` calls it before ever opening the file, not to
+answer existence for a pointer line, but to gate the read itself — see
+below.
 
 ## Keyed by conversation, not session — and never removed
 
@@ -77,8 +89,9 @@ placing it into a composed prompt is the composing site's obligation, the same
 one `clientSection` discharges for a client's name
 (`admitClient`/`clientSection`, see
 [`writeSystemPrompt`](sessions-package-key-types-writesystemprompt-systemprompttext.md)).
-Re-validating here would be a second opinion in a second place. #2455 is where
-this obligation next has to be honoured.
+Re-validating here would be a second opinion in a second place. #2477 (the
+wrap-up prompt) and #2475 (the appended system prompt, see below) are where
+this obligation is honoured.
 
 ## `HandoffNotePath` answers `Lstat`, not `Stat`
 
@@ -93,6 +106,29 @@ nothing extra. The read path deliberately does not add `O_NOFOLLOW` — that is
 syscall-level and platform-dependent for a boundary the directory mode already
 holds.
 
+**#2475's security review found a second reason this gate matters, one the
+symlink case alone would never have surfaced: it is load-bearing for
+availability, not only for confidentiality.** `(*Pool).handoffNoteFor`, the
+composing site, calls `HandoffNotePath` and refuses to read unless it reports
+a regular file — *before* `HandoffNote` ever calls `os.Open`. A FIFO planted
+at the note path blocks in `open(2)` until a writer appears, and on the
+rotation funnel the caller is the relay's single Run dispatch goroutine, so an
+ungated read would not fail one spawn — it would hang that goroutine, and with
+it all v2 dispatch, forever. `Lstat` answers before any `open` happens, so a
+FIFO composes as "no note" instead of a stall. That is why the gate precedes
+the read rather than merely accompanying it: without it, "nothing on the
+compose path may fail or delay a spawn" — the posture #2475 requires of every
+read against this store — would be false. `TestPool_HandoffNoteFor_Total`
+drives the FIFO case under a bounded wait rather than a bare call, because a
+build that dropped this gate would hang that test rather than redden it.
+
+`HandoffNotePath` was originally the pointer design's method: #2468 would
+have used its path-and-existence answer to compose a one-line pointer,
+omitted when there was no note. #2474 measured that design dead and #2475
+shipped inline composition instead — but `HandoffNotePath` kept a production
+consumer under the new shape, for both reasons above, rather than becoming
+dead code.
+
 ## No log line carries note text
 
 The store holds no logger and takes none — AC is structural rather than
@@ -103,7 +139,8 @@ precedent, so a control character or newline in a malformed id cannot forge a
 log line.
 
 See [`writeMCPSettings`](sessions-package-key-types-writemcpsettings-session-settingspath.md)
-and [`writeSystemPrompt`](sessions-package-key-types-writesystemprompt-systemprompttext.md)
-for the placement and atomic-write recipe this store copies, and
+and [`writeSystemPrompt`](sessions-package-key-types-writesystemprompt-systemprompttext.md#carrying-the-conversations-handoff-note-2475)
+for the placement and atomic-write recipe this store copies and for the
+reading consumer, and
 [docs/specs/architecture/2467-handoff-note-store.md](../../specs/architecture/2467-handoff-note-store.md)
 for the full design and security review.
