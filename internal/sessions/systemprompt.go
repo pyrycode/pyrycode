@@ -523,13 +523,14 @@ func invisibleRune(r rune) bool {
 	return unicode.IsSpace(r) || unicode.Is(unicode.Cf, r)
 }
 
-// handoffNoteSection renders the heading and the fenced note, or "" when there is
-// no section to render: an absent note, an empty one, or one admissibleHandoffNote
-// refuses.
+// FencedHandoffNote renders note between the two markers, or ("", false) when
+// admissibleHandoffNote refuses it. It is the fence WITHOUT any lead: the
+// structural half of the trust boundary, separated from the sentence that governs
+// how the note is read.
 //
 // It admits its own input rather than trusting the caller to have done it, which
-// is clientSection's rule and keeps composeSystemPromptFor total over hostile
-// values for every caller, the tests included.
+// is clientSection's rule and keeps every caller total over hostile values, the
+// tests included.
 //
 // The ONE byte this adds that the note did not supply is a trailing newline when
 // the note lacks one. That is framing, not repair: without it the end marker would
@@ -537,17 +538,43 @@ func invisibleRune(r rune) bool {
 // bytes is precisely what the fence exists to prevent. The note's own trailing
 // newlines, however many, are left alone.
 //
-// The returned section ends in "\n", exactly as systemPromptText and clientSection
-// do, so every join in composeSystemPromptFor uses the same blank-line separator.
-func handoffNoteSection(note string) string {
+// EXPORTED FOR A SECOND DESTINATION, not for reuse in general. #2477 composes the
+// wrap-up prompt in cmd/pyry — a user turn to the OUTGOING child, carrying the
+// previous note so the writer can prune it — and that prompt needs this fence and
+// these refusals but not handoffNoteLead, whose sentence is written for a system
+// prompt ("consult it when the user refers to earlier work") and is wrong for a
+// turn asking the reader to rewrite the note. Cutting the seam below the lead is
+// what keeps ONE predicate and ONE fence across both destinations: a second
+// predicate over the same untrusted bytes is how the two drift apart, and a
+// hand-spelled marker in the other package would leave admissibleHandoffNote's
+// refusals guarding a shape that composition no longer has.
+//
+// The BOOL rather than a bare "" is for that caller: cmd/pyry composes a prompt
+// around the answer and has to choose between two shapes, where this package's own
+// caller below only has to choose whether to emit a section.
+func FencedHandoffNote(note string) (string, bool) {
 	text, ok := admissibleHandoffNote(note)
 	if !ok {
-		return ""
+		return "", false
 	}
 	if !strings.HasSuffix(text, "\n") {
 		text += "\n"
 	}
-	return handoffNoteLead + handoffNoteBegin + text + handoffNoteEnd
+	return handoffNoteBegin + text + handoffNoteEnd, true
+}
+
+// handoffNoteSection renders the heading and the fenced note, or "" when there is
+// no section to render: an absent note, an empty one, or one admissibleHandoffNote
+// refuses.
+//
+// The returned section ends in "\n", exactly as systemPromptText and clientSection
+// do, so every join in composeSystemPromptFor uses the same blank-line separator.
+func handoffNoteSection(note string) string {
+	fenced, ok := FencedHandoffNote(note)
+	if !ok {
+		return ""
+	}
+	return handoffNoteLead + fenced
 }
 
 // sessionPromptsDir is the per-session prompt directory's name under the daemon

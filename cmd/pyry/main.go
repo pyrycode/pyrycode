@@ -1079,7 +1079,14 @@ func runSupervisor(args []string) error {
 			// #1475: the same validator the mint and revive paths use, re-run at
 			// rotation time on the recorded workspace rather than trusting it.
 			spawnDirFor: resolveSpawnDir,
-			log:         logger,
+			// #2477: the wrap-up turn that writes the outgoing session's handoff note
+			// before the rotation. Built over the SAME registry, pool, tracker and
+			// queue the rest of this literal's seams are built over, and under the
+			// daemon ctx — never a frame's — because the reset outlives the dispatch
+			// that started it. nil on a daemon with no registry or pool, which leaves
+			// the rotation exactly as it was.
+			reset: newConversationReset(ctx, convReg, pool, turnBusy, queue, logger),
+			log:   logger,
 		},
 		claudeSessionsDir: claudeSessionsDir,
 		bootstrapIDFn:     func() string { return string(pool.BootstrapID()) },
@@ -2313,9 +2320,51 @@ type activeSessionStarter struct {
 	// own nil, degrading rather than panicking on a remotely-driven path.
 	spawnDirFor func(recordedCwd string) (string, error)
 
+	// reset runs the outgoing session's wrap-up turn and writes its reply as the
+	// conversation's handoff note before the rotation (#2477). Optional: nil keeps
+	// the synchronous pre-#2477 rotation, which is the PTY posture and the shape
+	// every test literal in this package still gets for free.
+	reset *conversationReset
+
 	// log records which arm an inbound new_session took (#2099). Optional: nil
 	// falls back to slog.Default() via logger(), mirroring activeInterrupter.
 	log *slog.Logger
+}
+
+// resetThenRotate is the reset's tail, run on its own goroutine: the wrap-up turn,
+// then the rotation StartNewSession would otherwise have performed inline.
+//
+// IT IS OFF THE CALLER'S GOROUTINE BECAUSE THE CALLER IS relay's Run LOOP.
+// handleNewSession calls StartNewSession inline on the V2SessionManager's single
+// Run dispatch goroutine, and a wrap-up is bounded at ninety seconds; blocking
+// there would freeze frame dispatch for every connection and every conversation
+// the daemon hosts while one background chat wrote a paragraph. Everything the
+// reply owes the client — the workspace refusal — is decided before the hand-off,
+// so the only thing that moves is work nobody is waiting on.
+//
+// It terminates unconditionally: the wrap-up is bounded by its own deadline and by
+// the daemon context, and the rotation below is two map operations and a restart.
+//
+// THE ROTATE ERROR HAS NO RETURN CHANNEL HERE, so it is recorded instead. It is the
+// pre-#2443 answer's only loss on this path, and the sentinels it carries
+// (RotateForNewSession's ErrSessionNotFound, chiefly — a concurrent rotation having
+// won) are daemon-authored and carry no conversation content.
+//
+// The runner and oldID are the ones resolved at DISPATCH time, which is a wider
+// window than the synchronous path's. That is handled where it already was: if a
+// rotation won in between, Pool.RotateForNewSession answers ErrSessionNotFound and
+// startFreshRunner disarms the #1330 gate and returns it — the case its own doc
+// calls "the ORDINARY way to land here".
+func (a activeSessionStarter) resetThenRotate(release func(), runner sessions.Runner,
+	oldID sessions.SessionID, convID, spawnDir string) {
+	defer release()
+	a.reset.wrapUp(convID)
+	if err := startFreshRunner(runner, oldID, spawnDir, a.rotate, a.log); err != nil {
+		a.logger().Warn("relay: v2 new_session could not rotate after the wrap-up turn",
+			"event", "v2.new_session.rotate_failed",
+			"conversation_id", convID,
+			"err", err)
+	}
 }
 
 // logger returns a's logger, falling back to slog.Default() when unset.
@@ -2430,10 +2479,49 @@ func (a activeSessionStarter) StartNewSession(conversationID string) error {
 	// that has started but not yet published its pid reads 0 too and refuses; that is
 	// the same fail-safe direction the whole reject set takes, and the frame is
 	// re-sendable.
-	if named && runner.State().ChildPID == 0 {
+	live := runner.State().ChildPID != 0
+	if named && !live {
 		a.logger().Debug("relay: v2 new_session inert; named conversation has no live child",
 			"event", "v2.new_session.no_live_child",
 			"conversation_id", convID)
+		return nil
+	}
+	// #2477: a LIVE child is asked to write a handoff note for its successor before
+	// it is replaced, and that turn moves the whole tail off this goroutine. See
+	// resetThenRotate for why, and conversationReset's file header for the bound.
+	//
+	// The gate is liveness, not namedness, and the asymmetry above is not repeated
+	// here. A bare frame on a childless conversation keeps rotating exactly as #2099
+	// promised, because it takes the synchronous path below; a bare frame on a live
+	// one gets the same wrap-up a named one gets, because the operator pressed the
+	// same control and there is the same session's worth of context to lose.
+	if a.reset != nil && live {
+		release, armed := a.reset.begin(convID)
+		if !armed {
+			// AC-4: DROPPED, not queued. A second reset would run another wrap-up turn
+			// against a child the first one is about to replace — real tokens spent to
+			// write a note over the one being written. Recorded at Debug beside the
+			// other client-driven refusals on this verb.
+			a.logger().Debug("relay: v2 new_session inert; a reset is already in progress",
+				"event", "v2.new_session.reset_in_progress",
+				"conversation_id", convID)
+			return nil
+		}
+		// Resolved SYNCHRONOUSLY, which is what keeps #2443's one reply on this path:
+		// refused is known before this method returns, so the client still learns its
+		// recorded workspace was rejected. It also stays BELOW every inert arm AND
+		// below the guard above, so a repeated frame cannot drive MkdirAll — the
+		// containment resolveSpawnDir's own doc requires.
+		spawnDir, refused := a.resolveSpawnDir(convID, recordedCwd)
+		go a.resetThenRotate(release, runner, oldID, convID, spawnDir)
+		if refused {
+			// The rotation is COMMITTED TO rather than completed when this seals, which
+			// is the one thing the async tail changes about this reply. The outcome the
+			// client renders is identical — the successor comes up in the directory it
+			// was already in — and the alternative, withholding the reply on the
+			// wrap-up path, drops a shipped behaviour outright.
+			return &relay.RotatedWithoutWorkspaceError{ConversationID: convID}
+		}
 		return nil
 	}
 	spawnDir, refused := a.resolveSpawnDir(convID, recordedCwd)
