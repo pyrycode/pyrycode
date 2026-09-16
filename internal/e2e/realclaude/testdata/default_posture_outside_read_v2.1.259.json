@@ -1,0 +1,30 @@
+{
+  "ticket": "2474",
+  "question": "Does a Read of an absolute path outside the workspace, in the shape a handoff note occupies, raise a permission modal under the `default` permission mode as written in band?",
+  "answer": "MODAL RAISED — the read was gated",
+  "claude_version": "2.1.259",
+  "measured_utc": "2026-09-15T23:54:23Z",
+  "provenance": "transcribed-from-gate-evidence-log",
+  "transcription": {
+    "why": "The run that measured this wrote its own capture, but a pipeline gate runs in a detached worktree that is removed when the run ends, so those bytes were destroyed before they could be committed. Every field below is transcribed from the #2474 finding line in that run's evidence log, which carries the whole record for exactly this reason.",
+    "source_log": "logs/2026-09-15T23-50-26-974Z_real-claude-gate_#2474.log",
+    "source_line": "interactive_stream_default_posture_read_test.go:266: #2474 finding: MODAL RAISED — the read was gated modal_title=\"<invalid>\" reason_type=\"workingDir\" blocked_path_present=false default_to_no=false modals_answered=1 claude_version=2.1.259 read_witnessed=true tools=[Read] reply_bytes=24 capture=default_posture_outside_read_v2.1.259.json",
+    "gate_run": "go test -tags e2e_realclaude -timeout 20m -json ./internal/e2e/realclaude/... on feature/2474 at bc714118c0 merged with origin/main at 95603a47ca; 1429 executed, 0 failed, 22 skipped, exit 0, 793.8s",
+    "measured_utc_is": "the timestamp of the finding line in that log, not a value read back off the destroyed capture",
+    "credential_scan_applied_absent_because": "the deny-scan ran inside the gate's worktree and is not something this transcription witnessed"
+  },
+  "posture_ack_witnessed": true,
+  "posture_mode": "default",
+  "modal_raised": true,
+  "modal_tool_label": "<invalid>",
+  "modal_tool_label_note": "stdioPermissionSafeLabel allows [A-Za-z0-9_.-] and claude's modal title carries characters outside it, so the field that was added to tie the modal to this read collapsed. tools_called is the correlation that held.",
+  "modal_reason_type": "workingDir",
+  "modals_answered": 1,
+  "read_witnessed": true,
+  "read_tool_called": true,
+  "note_base_name": "55555555-5555-4555-8555-555555555555.txt",
+  "tools_called": [
+    "Read"
+  ],
+  "reply_bytes": 24
+}
