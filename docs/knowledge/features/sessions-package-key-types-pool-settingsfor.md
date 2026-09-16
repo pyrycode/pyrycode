@@ -79,3 +79,9 @@ found" means for every other caller of the live read, several of which use
 exactly that answer to decide a session is not addressable. Consumed by
 `cmd/pyry`'s `resolveBoundRunSettings` as the second of two reads, live
 first — see [`request_session_settings`](v2-session-manager-state-machine-inbound-request-session-settings-the-rea.md).
+
+Since #2463 this read has a write counterpart on the same partition:
+[`Pool.UpdateDormantSettings`](sessions-package-key-types-pool-updatesettings.md#pool-updatedormantsettings-2463)
+merges a `set_session_settings`' model/effort into the same `p.dormant` entry
+this method reads, also used as `settingsUpdaterAdapter`'s existence probe for
+a dormant id.
