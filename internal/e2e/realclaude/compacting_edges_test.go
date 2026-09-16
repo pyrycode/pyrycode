@@ -155,11 +155,12 @@ func cedgeAwaitTurnEnds(c *cedgeCollector, want int, budget time.Duration) bool 
 
 // cedgeAwaitCompactTurn waits for the compact turn to be over on the earliest of
 // three conditions, returning which one fired. It deliberately does NOT depend on a
-// `result` line: the /clear precedent (interactive_stream_announced_reset_test.go)
-// records that a slash command sent as ordinary message text is honoured on this
-// input path and that whether such a turn closes on its own is unknowable in
-// advance, so a wait that only ended on a result could hang for the whole budget on
-// a turn that already finished.
+// `result` line: whether a slash command sent as ordinary message text closes its own
+// turn is unknowable in advance, so a wait that only ended on a result could hang for
+// the whole budget on a turn that already finished. The `/clear` case cited here
+// before no longer speaks to that question — #2456 intercepts that one literal in
+// SendMessage and it never reaches claude (see #2485) — which leaves the caution
+// standing and unmeasured, the state this wait is built for.
 func cedgeAwaitCompactTurn(c *cedgeCollector, wantEnds, sentAt int, quiet, budget time.Duration) string {
 	deadline := time.Now().Add(budget)
 	lastLen, lastChange := len(c.snapshot()), time.Now()

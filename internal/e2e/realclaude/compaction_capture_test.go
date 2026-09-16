@@ -40,13 +40,14 @@ package realclaude
 // rather than a finding, so staged_context_tokens measures what was actually in
 // context and ccapRecord.stagingVerdict names which reading a zero-hit run is.
 //
-// A slash command sent as ordinary message text IS honoured on this input path —
-// #2138 drives the literal `/clear` through this runner and a real claude
-// announces a conversation_reset. That precedent carries its own hazard in its
-// header: whether such a turn ever CLOSES is unmeasured, "a slash command
-// replying with nothing is a plausible shape". So the compact turn does not block
-// on a `result`; ccapAwaitCompactTurn also ends on quiescence or on the budget,
-// and every arm still lands the census.
+// A slash command sent as ordinary message text reaches claude on this input path,
+// with `/clear` the one literal that does not: SendMessage has intercepted it since
+// #2456 and runs the daemon's own conversation reset instead (#2485 is the live
+// proof). So the `/clear` precedent this paragraph used to cite says nothing about
+// `/compact` any more — and what it supplied, that whether such a turn ever CLOSES is
+// unmeasured, is left unmeasured rather than settled the other way. So the compact
+// turn does not block on a `result`; ccapAwaitCompactTurn also ends on quiescence or
+// on the budget, and every arm still lands the census.
 //
 // # What is deliberately NOT inherited
 //
