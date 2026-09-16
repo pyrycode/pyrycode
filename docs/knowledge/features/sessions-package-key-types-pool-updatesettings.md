@@ -1,4 +1,4 @@
-# `Pool.UpdateSettings` (#840, `PermissionMode` #2043, keeps the spawn posture current #2064, escalation routed in-band #2066)
+# `Pool.UpdateSettings` (#840, `PermissionMode` #2043, keeps the spawn posture current #2064, escalation routed in-band #2066) and `Pool.UpdateDormantSettings` (#2463)
 
 The persistence seam the v2 settings verb (#841, split into wire vocabulary #844 + handler #845) calls to change an existing session's `Model` / `Effort`
 / permission posture after creation — `SessionSettings` above was immutable
@@ -62,12 +62,16 @@ re-acquire (`docs/lessons.md` § "Lock order with callback into the host").
 `sessionRouter.resolve`, the message-delivery seam a turn goes through, does
 revive a dormant session, but `handleSetSessionSettings` does not route
 through it — it hands the payload's id straight to `SettingsUpdater.UpdateSettings`
-(`settingsUpdaterAdapter` → here), so a `set_session_settings` for a
-conversation the daemon has only a dormant record of surfaces as
-`session.not_found` rather than reviving. [`Pool.DormantSettingsFor`](sessions-package-key-types-pool-settingsfor.md)
-(#2449) is the **read**-side counterpart and does not touch this method;
-reviving on a settings write is a distinct, deferred design (#2463), because
-it would make a settings frame able to spawn a claude child.
+(`settingsUpdaterAdapter` → here). Reviving on a settings write remains out of
+scope for this method specifically — it would make a settings frame able to
+spawn a claude child, and `Pool.Revive` has no spawn directory to re-validate
+for a seam keyed by session rather than by conversation. Since #2463 the miss
+is no longer the end of the story for the *caller*, though: the adapter below
+falls through to [`Pool.UpdateDormantSettings`](#pool-updatedormantsettings-2463),
+so a `set_session_settings` for a conversation the daemon has only a dormant
+record of now merges into that entry instead of surfacing `session.not_found`.
+[`Pool.DormantSettingsFor`](sessions-package-key-types-pool-settingsfor.md)
+(#2449) is the **read**-side counterpart and does not touch this method.
 
 Validating untrusted model/effort values is explicitly **not** this method's
 job — it operates on operator-trusted input. The relay handler owns the
@@ -297,6 +301,95 @@ explicitly out of scope here and deferred to #826b.
 `--permission-mode dontAsk` instead. The two packages do not share code.
 
 See [codebase/833.md](../codebase/833.md) for the full implementation writeup.
+
+### `Pool.UpdateDormantSettings` (#2463)
+
+The write half of the seam `DormantSettingsFor` (#2449) reads: `UpdateSettings`
+above changes a session the pool holds live; this changes one the daemon holds
+only as a persisted `p.dormant` entry — every conversation but the bootstrap,
+between a restart and that session's first message.
+
+```go
+func (p *Pool) UpdateDormantSettings(id SessionID, update SettingsUpdate) error
+```
+
+A **second write, not a fallback folded into `UpdateSettings`** — the same
+reason `DormantSettingsFor` was not folded into `SettingsFor`: folding it in
+would change what `ErrSessionNotFound` means for every other live-write
+caller, and `UpdateSettings`' body past its persist (recomposed argv, posture
+install, in-band delivery, supervisor capture) has no dormant analogue.
+Merges only `Model`/`Effort` into a copy of the entry — the live write's
+presence contract, `""` included — no-op short-circuits on those two scalars
+unchanged (not on the whole `registryEntry`, whose embedded `time.Time`s would
+make `==` compare representation rather than instant), and rolls the entry
+back on a failed `saveLocked`. One `p.mu.Lock()`, taken once; lookup, merge and
+save run inside that single critical section, so there is no check-then-mutate
+gap of the method's own.
+
+**It materialises nothing** — #2449 AC 3's rule for the read, applied to the
+write, so a client re-asserting its footer state on activation cannot wake
+every dormant channel it touches. Reviving on a write is also not available on
+its own terms here: `Pool.Revive` needs a spawn directory to re-validate
+through `resolveSpawnDir`, this seam is keyed by session rather than by
+conversation, and a session no conversation binds has no `Cwd` at all.
+
+`p.dormant`'s field comment states its key set is populated only in `New` and
+only ever shrinks thereafter; that constrains the map's *keys*, not the values
+under an existing one, so this method's value-replacing write adds no key and
+removes none, and the field's nil-map safety argument is unchanged.
+
+**A `YOLO` or `PermissionMode` field is refused before any mutation**, as
+`ErrDormantPostureUnsupported` — a **distinct** sentinel from
+`ErrSessionNotFound`, even though `cmd/pyry`'s adapter maps both to
+`session.not_found` on the wire. The two cannot share a sentinel at the pool
+layer: the adapter (below) reads a live write's `ErrSessionNotFound` as "try
+the dormant half", so the same value from the dormant write would mean both
+"try again" and "refuse" one call apart, and this method would be reporting
+"not found" about an id it did find. The refusal itself is structural, not a
+policy call this method invents: both readers of `p.dormant` —
+`revivedSettings` and `DormantSettingsFor` — build the posture from `Model` /
+`Effort` alone and never look at the entry's `YOLO` or `PermissionMode`, so a
+persisted posture would be invisible to both, and accepting one would report
+success for a change the very next read contradicts. Teaching a revive to read
+a persisted posture back would resurrect exactly the bypass a restart revokes
+(#1487, ADR 035 as amended by #2448) — a distinct security decision, not this
+method's. The exclusion is doubled: the guard returns before any mutation,
+*and* the merge names `Model`/`Effort` literally, so a posture could not reach
+the entry even with the guard deleted.
+
+**Two concurrency windows sit outside the method, both bounded by `p.dormant`
+only ever shrinking.** A caller composing this after a live write (the adapter,
+below) can have a revive land between the two — the id can only move
+live-ward, so this method finds a clean miss rather than a torn entry, and
+`ErrSessionNotFound` is correct rather than merely safe: the settings reached
+nothing, and the operator's next pick lands on the revived session through the
+live write, no retry needed. Separately, `Pool.Revive` evaluates
+`revivedSettings` as an *argument* to `materialise`, so that read's RLock is
+released before `materialise` takes the write lock and retires the entry — a
+dormant write landing in that gap is persisted and then dropped. That window
+belongs to `Revive`'s evaluate-then-materialise call shape, not to this
+method, so it is filed as #2492 rather than fixed here; it carries no security
+consequence and self-corrects on the next read.
+
+Validating untrusted `Model`/`Effort` is not this method's job either, the
+same division as `UpdateSettings`: the relay handler owns the shape check,
+`cmd/pyry`'s `settingsUpdaterAdapter` owns the membership check against the
+retained published vocabulary, and only past that gate does a written `Model`
+become a revived child's `--model`.
+
+**`cmd/pyry`'s `settingsUpdaterAdapter` composes the two pool writes
+live-first**, the way `resolveBoundRunSettings` composes the two reads (#2449):
+`Pool.UpdateSettings` runs first, and only its `ErrSessionNotFound` falls
+through to `Pool.UpdateDormantSettings` — any other error (an unsupported
+mode, a failed save) is that session's answer as it always was. The membership
+gate's existence probe, `requireKnownSession`, learned to check
+`Pool.DormantSettingsFor` on a live miss before the vocabulary read runs — the
+ordering is load-bearing, not incidental: reversed, an unknown id could infer
+whether the bootstrap vocabulary is complete. See [Inbound
+`set_session_settings`](v2-session-manager-state-machine-inbound-set-session-settings-settingsupd.md)
+and `docs/protocol-mobile.md`'s `set_session_settings` section for the wire
+picture. No ADR: this is the write-side application of a boundary ADR 035 and
+\#2449 already decided.
 
 ### `Pool.DefaultSettings` (#847)
 

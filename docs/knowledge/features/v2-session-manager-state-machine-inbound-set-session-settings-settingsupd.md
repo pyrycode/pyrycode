@@ -60,7 +60,11 @@ success or failure, never a silent drop. Control flow, in load-bearing order:
    `nil` error → `session_settings_updated`; `ErrSessionUnknown` →
    `session.not_found`; any remaining error → `server.binary_offline`. All
    rejection messages and event names are fixed and carry no requested or
-   published model value.
+   published model value. Since #2463, `settingsUpdaterAdapter.UpdateSettings`
+   itself composes two pool writes — a live session first, then a dormant
+   registry entry — so a hit on either still yields `nil`/`session_settings_updated`,
+   and `session.not_found` now also covers a dormant session whose frame named
+   `yolo` or `permission_mode`. See [`Pool.UpdateDormantSettings`](sessions-package-key-types-pool-updatesettings.md#pool-updatedormantsettings-2463).
 
 - **`SettingsUpdater` / `SettingsUpdate` / outcome-sentinel consumer seam**
   (beside `Interrupter` / `SessionStarter` / `QueueRemover`). `SettingsUpdate{

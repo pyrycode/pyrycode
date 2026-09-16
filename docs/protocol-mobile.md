@@ -3939,6 +3939,30 @@ backoff, once a complete menu may have arrived. An explicit `model: ""` is not a
 membership query: it keeps the existing reset operation, clearing the override
 and restarting onto claude's own default model.
 
+**A dormant session accepts this too, since #2463.** `session_id` need not name
+a session the daemon currently holds live — for every conversation but the
+bootstrap, the window between a daemon restart and that conversation's first
+message leaves its session as a persisted, non-live registry entry (see the
+dormant case under [`request_session_settings`](#request_session_settings)
+below). A `model` and/or `effort` sent for such a session is **merged into that
+entry** rather than refused: it is what the session is revived under, is
+readable back immediately through `request_session_settings`, and survives a
+second restart. The write **materialises nothing** — it neither spawns a
+claude child nor moves the session into the live pool, for the same reason the
+dormant read below does not: a settings frame must not be able to wake every
+dormant channel a client re-asserts its footer state on.
+
+**A `yolo` or `permission_mode` field is refused outright on a dormant
+session**, whatever else the frame carries — a `model`/`effort` sent alongside
+is refused too, not persisted on its own. A revive does not restore a
+persisted posture (see the dormant row under
+[`request_session_settings`](#request_session_settings)): the daemon reports
+`false` / `"default"` regardless of what was ever stored, so accepting a
+posture write here would report success for a change the very next read
+contradicts, and a restart would stop being a revocation point for a
+phone-granted bypass (#1487). This refusal reuses `session.not_found` — see
+[Error codes](#error-codes).
+
 ##### `permission_mode` (#1687)
 
 Claude has six permission modes, and `yolo` can spell only two of them. This field carries the other four, so a client can offer what claude actually supports instead of an on-or-off switch.
@@ -4363,7 +4387,7 @@ Application-level error codes (carried in `error` envelopes inside `noise_msg` p
 | `noise.rekey_failed` | yes | The peer's `rekey_request` was rejected (e.g. rate-limited) or the subsequent handshake didn't complete; sender may retry after a backoff. |
 | `protocol.malformed` | no | Among the existing malformed-request cases, an [`mcp_status_request`](#asking-for-mcp-status-on-demand) whose payload cannot decode to its one-field shape is rejected before conversation membership or the resolver is consulted (#2381). An [`mcp_reconnect`](#actuating-mcp-servers-on-demand) or [`mcp_toggle`](#actuating-mcp-servers-on-demand) whose payload cannot decode is rejected the same way, before membership or the actuation seam (#2419). Its message is static and neither the decoder error nor remote-authored values are returned or logged. A [`set_session_settings`](#set_session_settings) carrying a well-shaped non-empty model that is absent from a **complete** retained published vocabulary is likewise rejected with the static message `requested model is not offered` (#2281). |
 | `conversation.not_found` | no | Among its existing uses, an [`mcp_status_request`](#asking-for-mcp-status-on-demand) whose decoded `conversation_id` names no hosted conversation (#2381); an [`mcp_reconnect`](#actuating-mcp-servers-on-demand) or [`mcp_toggle`](#actuating-mcp-servers-on-demand) with the same shape of `conversation_id` is rejected identically, before the actuation seam is consulted (#2419). Neither the resolver nor the seam is consulted, and the static reply does not echo the id. Permanent for the request as sent; re-list conversations or correct the id rather than retrying unchanged. |
-| `session.not_found` | no | The `set_session_settings` target `session_id` names no live session. Returned by the handler (#845). |
+| `session.not_found` | no | The `set_session_settings` target `session_id` names no session this daemon has any record of — live or persisted-dormant — **or** names a dormant one while the frame carries `yolo` or `permission_mode` (#845, dormant write #2463). The two causes are merged deliberately: no client has been observed mis-reading the code, and the user-visible outcome is identical either way — the menu snaps back. |
 | `session.blocked` | no | Terminal — the daemon gave up delivering a conversation's queued backlog after repeated failures (msgqueue give-up, #1000). Carried in a `session_error` frame, not an `error` envelope; the emitting producer is #1008. A client attaches it to the `conversation_id` and MUST NOT retry (contrast the transient `server.binary_busy`). |
 | `attachment.invalid_chunk` | no | An `attachment_chunk`'s framing claims are inconsistent or out of range: a duplicate `index`, an `index` outside `[0, total_chunks)`, or a `total_chunks` disagreeing with the stream's earlier chunks (#1741). **Since #2143 it also answers an unusable destination** — an absent `conversation_id`, or one naming a conversation the daemon does not host — refused on the **first** chunk carrying it, before any byte is admitted. The three destination causes are **deliberately merged** into this one code so the upload leg is not a conversation-existence oracle; the daemon separates them in its own logs only. Not `attachment.storage_failed`, whose row is for a *verified* attachment the host could not write. The receiver discards the whole in-flight stream; resending the same frames reproduces it, so the repair is to re-chunk, or to name a conversation the daemon hosts. See [Attachments](#attachments). |
 | `attachment.integrity_failed` | no | The assembled bytes do not match the declared `sha256`, **or** the assembled length does not match the declared `size` (#1741). One code for both mismatches: a client's repair for either is to re-derive the metadata from the file and re-upload, never to retry the same bytes against the same claims. |

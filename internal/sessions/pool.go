@@ -22,6 +22,20 @@ import (
 // ErrSessionNotFound is returned by Pool.Lookup for a non-empty unknown id.
 var ErrSessionNotFound = errors.New("sessions: session not found")
 
+// ErrDormantPostureUnsupported is returned by Pool.UpdateDormantSettings for an
+// update naming YOLO or PermissionMode. A dormant entry's persisted posture is
+// read by nothing — a revive builds the default structurally from model and
+// effort (#1487) — so storing one would report success for a change the next
+// read contradicts. See Pool.UpdateDormantSettings for the whole decision.
+//
+// DISTINCT FROM ErrSessionNotFound on purpose, even though cmd/pyry's
+// settingsUpdaterAdapter maps both to the same wire code. That adapter composes
+// the live write and the dormant one, and reads the live write's
+// ErrSessionNotFound as "try the other half"; one shared sentinel would mean
+// that and "refuse" one line apart. It would also have this method reporting
+// "not found" about an id it did find. Matchable via errors.Is.
+var ErrDormantPostureUnsupported = errors.New("sessions: dormant session cannot store a permission posture")
+
 // ErrCannotRemoveBootstrap is returned by Pool.Remove for the bootstrap
 // session. The bootstrap is a per-process invariant, not an operator
 // resource — removing it would leave the pool in a state Pool.Lookup("")
@@ -190,14 +204,20 @@ type Pool struct {
 	// included, so the entry did not survive the restart it was written to
 	// survive (#2448). saveLocked writes these back beside the live sessions.
 	//
-	// Populated only in New and only ever shrinking thereafter — materialise
-	// retires the entry it takes over and Remove drops the one it deletes — which
-	// is what keeps the "no live *Session" half of the meaning true, and what
-	// Pool.revivedSettings and Pool.DormantSettingsFor (#2449) rest on. A nil map (the bare
-	// &Pool{} literals in this package's tests) is safe for every operation
-	// outside New: read, delete and range all tolerate it, and the one write —
-	// materialise's rollback restore — is reachable only after a read hit, which
-	// a nil map cannot produce.
+	// The KEY SET is populated only in New and only ever shrinks thereafter —
+	// materialise retires the entry it takes over and Remove drops the one it
+	// deletes — which is what keeps the "no live *Session" half of the meaning
+	// true, and what Pool.revivedSettings and Pool.DormantSettingsFor (#2449) rest
+	// on. Read it as a statement about KEYS, not about values: since #2463 an
+	// entry's Model and Effort are mutable in place, via
+	// Pool.UpdateDormantSettings, which replaces a value under an existing key and
+	// so adds no key and removes none. Nothing else about an entry is ever
+	// rewritten here, the persisted posture included.
+	//
+	// A nil map (the bare &Pool{} literals in this package's tests) is safe for
+	// every operation outside New: read, delete and range all tolerate it, and
+	// both writes — materialise's rollback restore and the merge above — are
+	// reachable only after a read hit, which a nil map cannot produce.
 	dormant map[SessionID]registryEntry
 
 	// systemPromptPath is the absolute path to the daemon's appended
@@ -946,6 +966,130 @@ func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error {
 	// the unlock beside the two SetSpawn* calls, and it cannot delay the Restart.
 	sup.BeginTeardown()
 	sup.Restart(newArgs)
+	return nil
+}
+
+// UpdateDormantSettings merges update's Model and Effort into id's dormant
+// registry entry and persists it, or returns ErrSessionNotFound if this pool
+// holds no dormant entry under that id. It is UpdateSettings' dormant half: the
+// two partition the ids the daemon has a record of, on the same basis
+// DormantSettingsFor and SettingsFor partition them.
+//
+// It exists so set_session_settings can land on a conversation this daemon has
+// not materialised (#2463). Pool.New materialises only the bootstrap, so after a
+// restart that is EVERY conversation until its first message revives it, and a
+// model or effort chosen before that message was refused with session.not_found
+// while the menus the client had just rendered said otherwise (#2449 fixed the
+// read and made this reachable).
+//
+// A SECOND WRITE rather than a fallback folded into UpdateSettings, for the
+// reason DormantSettingsFor records one layer up and one more of its own.
+// Folding it in would change what ErrSessionNotFound means for every other caller
+// of the live write, several of which use exactly that answer to decide a session
+// is not addressable. And UpdateSettings' body past its persist is entirely about
+// a live session — the recomposed argv, the posture install, the in-band
+// delivery, the supervisor capture — none of which has a dormant analogue.
+//
+// IT MATERIALISES NOTHING, deliberately, and that is a contract rather than an
+// implementation detail. #2449 AC 3 made the settings READ materialise nothing so
+// that N channel activations cannot become N sessions; the write rides the same
+// frame family on the same restart edge, and a client that re-asserts its footer
+// state on activation would otherwise wake every channel it touched. Reviving
+// here is also not available on its own terms: Pool.Revive needs a spawn
+// directory to re-validate through the caller's $HOME confinement, this seam is
+// keyed by SESSION rather than by conversation, and a session no conversation
+// binds has no Cwd at all.
+//
+// THE POSTURE IS REFUSED, NOT PERSISTED, and the refusal is honesty rather than
+// caution. Both readers of p.dormant build the posture structurally from Model
+// and Effort alone — revivedSettings never looks at the entry's yolo or
+// permission_mode, and DormantSettingsFor derives the default from the same two
+// fields — so a persisted posture is invisible to both, and accepting one would
+// report success for a change the very next read contradicts. Making it visible
+// instead would mean teaching the revive to read a persisted posture back, and
+// the disk cannot tell a posture granted after a restart from one granted before
+// it, so that would resurrect exactly the bypass a restart revokes (#1487, ADR
+// 035 as amended by #2448). Carrying a NON-ESCALATING mode across a revive is a
+// real option and a security decision of its own; it is not this method's.
+//
+// The exclusion is doubled rather than singled: the refusal below returns before
+// any mutation, AND the merge names Model and Effort literally, so a posture
+// could not reach the entry even if the guard were deleted. That is mintSettings'
+// and revivedSettings' recorded discipline — a field added to registryEntry later
+// is not carried until someone opts it in — applied to a write.
+//
+// VALIDATING THE VALUES IS NOT THIS METHOD'S JOB, exactly as it is not
+// UpdateSettings'. It operates on operator-trusted input. The relay handler owns
+// the charset and length shape check for Model and the closed enum for Effort,
+// and for a non-empty model cmd/pyry's settingsUpdaterAdapter then owns the
+// membership check against the retained published vocabulary before this method
+// can write anything. A written Model becomes the revived child's --model, so a
+// caller that skips that gate is handing an unvalidated value to an argv sink.
+//
+// Carried over from UpdateSettings' shape: a no-op returns success without
+// rewriting the registry (compared on the two scalar fields rather than on the
+// whole entry, which embeds time.Time values whose == compares representation
+// rather than instant), and a failed save restores the previous entry.
+//
+// Concurrency: MUST be called with p.mu unheld — one Lock acquisition, no
+// delegation to another locking accessor, UpdateSettings' contract verbatim. The
+// lookup, the merge and the save all run inside that one critical section, so
+// there is no check-then-mutate gap of this method's own. Never takes
+// Session.lcMu; p.dormant is a p.mu-guarded field like sessions and label.
+//
+// TWO WINDOWS OUTSIDE IT, both bounded by p.dormant only ever shrinking:
+//
+//   - A caller composing this after a live write (settingsUpdaterAdapter) can have
+//     a revive land between the two. The id can only move live-ward, so this
+//     method finds a CLEAN MISS rather than a torn entry, and answers
+//     ErrSessionNotFound. That refusal is correct rather than merely safe: the
+//     settings were applied to nothing. No retry is attempted — the operator's
+//     next pick reaches the now-live session through the live write.
+//   - Pool.Revive evaluates revivedSettings as an ARGUMENT to materialise, so
+//     that read's RLock is released before materialise takes the write lock and
+//     retires the entry. A write landing in that gap is persisted and then
+//     dropped: the session materialises under the value read before the write.
+//     Filed as #2492 — the fix is to Revive's evaluate-then-materialise call
+//     shape, not to this seam. It carries no security consequence (neither model
+//     nor effort is a privilege, and the posture is on neither path) and is
+//     self-correcting: the next read reports the live session's real value.
+//
+// No id validation and no logging, DormantSettingsFor's posture verbatim: the id
+// names no file and never leaves the map lookup, so a malformed id is a map miss
+// — already the correct answer — and both errors are returned bare rather than
+// wrapped with it, so a hostile id cannot be reflected into a log line or a wire
+// frame a consumer builds from the error.
+func (p *Pool) UpdateDormantSettings(id SessionID, update SettingsUpdate) error {
+	p.mu.Lock()
+	entry, ok := p.dormant[id]
+	if !ok {
+		p.mu.Unlock()
+		return ErrSessionNotFound
+	}
+	if update.YOLO != nil || update.PermissionMode != nil {
+		p.mu.Unlock()
+		return ErrDormantPostureUnsupported
+	}
+	model, effort := entry.Model, entry.Effort
+	if update.Model != nil {
+		model = *update.Model
+	}
+	if update.Effort != nil {
+		effort = *update.Effort
+	}
+	if model == entry.Model && effort == entry.Effort {
+		p.mu.Unlock()
+		return nil
+	}
+	prev := entry
+	entry.Model, entry.Effort = model, effort
+	p.dormant[id] = entry
+	if err := p.saveLocked(); err != nil {
+		p.dormant[id] = prev
+		p.mu.Unlock()
+		return err
+	}
+	p.mu.Unlock()
 	return nil
 }
 
