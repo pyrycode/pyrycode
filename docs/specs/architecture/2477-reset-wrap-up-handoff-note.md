@@ -76,6 +76,12 @@ a resetter is wired — hands `wrap-up → rotate` to a goroutine and returns at
 This is also what makes AC-4 meaningful: "a second `new_session` for a conversation
 whose reset is in progress" is only reachable because the first one returned early.
 
+> **SUPERSEDED — see § Revisions, 2026-09-16.** The paragraph below is left as
+> written because it is the reasoning the first implementation was built on and the
+> verifier's MUST FIX answers it directly. What shipped: the wrap-up arm returns
+> `nil`, and the workspace refusal is recorded below a rotation that actually
+> returned rather than replied at dispatch time.
+
 **What this costs and why it is acceptable.** `resolveSpawnDir` is evaluated
 synchronously as today, so `RotatedWithoutWorkspaceError` (#2443) is still returned
 from `StartNewSession` and the client still gets its one reply. What changes is the
@@ -204,11 +210,16 @@ if reset wired && the resolved runner has a live child:
         release, ok := reset.begin(convID)      // AC-4: a second frame is dropped here, with a record
         if !ok: return nil
         spawnDir, refused := resolveSpawnDir(…)  // still below every inert arm
-        go { defer release(); reset.wrapUp(convID); startFreshRunner(…) }
-        if refused: return &relay.RotatedWithoutWorkspaceError{…}
-        return nil
+        go { defer release(); reset.wrapUp(convID)
+             if startFreshRunner(…) != nil: Warn rotate_failed; return
+             if refused: Warn workspace_refused }   // revised 2026-09-16
+        return nil                                  // revised 2026-09-16: never #2443's reply
 … today's synchronous path, byte-for-byte …
 ```
+
+The two `revised` lines are the verifier's MUST FIX; § Revisions holds the
+argument. The first draft returned `&relay.RotatedWithoutWorkspaceError{…}` here,
+which asserts a rotation that has not happened yet and may not happen at all.
 
 The live-child test is `runner.State().ChildPID != 0`, the signal the named arm
 already uses. Applying it to the bare cursor frame as well is deliberate: a bare
@@ -280,6 +291,7 @@ the refusal tests against.
 | Reply empty, blank after trimming, or refused by `FencedHandoffNote` | Previous note stands (AC-2) |
 | `ErrHandoffNotesDisabled` or any store error | One content-free record, previous note stands (AC-2) |
 | `startFreshRunner` errors on the async path | Warn-logged by the goroutine — no return channel |
+| Recorded workspace refused on the async path (revised 2026-09-16) | Warn-logged by the goroutine, below a rotation that returned; no client reply — § Revisions |
 
 **No fragment of either note reaches a log line at any level** (AC-3). Every record
 in the new code carries an event key, the resolved conversation id, and at most a
@@ -348,8 +360,13 @@ fakes for each seam and an injected short deadline):
    named one? **Resolved in this plan:** yes, gated on a live child, which preserves
    #2099's bare-path behaviour exactly.
 2. Does `RotatedWithoutWorkspaceError` survive the move off the Run goroutine?
-   **Resolved in this plan:** yes, by evaluating `resolveSpawnDir` synchronously
-   before the hand-off. The semantic shift is recorded in § Design.
+   **Answered "yes" in this plan and RE-RESOLVED TO "no" — see § Revisions,
+   2026-09-16.** The original answer, kept here as the record of what was tried:
+   yes, by evaluating `resolveSpawnDir` synchronously before the hand-off, with the
+   semantic shift recorded in § Design. That shift was not a softening the type
+   permits — its doc states the completed rotation as a precondition and forbids the
+   value outright when the rotation failed — so the arm now withholds the reply and
+   records the refusal below a rotation that returned.
 3. Whether to export the admission predicate or a composer from `internal/sessions`.
    **Resolved in this plan:** a composer (`FencedHandoffNote`), so the fence
    constants are named once.
@@ -448,3 +465,78 @@ Pending for the documentation stage — not touched by this ticket:
 - `docs/protocol-mobile.md` § New session (v2): say that the frame runs the wrap-up
   turn first, and that the backlog is dropped rather than carried to the successor.
 - The same file's changelog gains a dated entry for both.
+
+## Revisions
+
+### 2026-09-16 — Open Question 2 re-resolved: the wrap-up arm withholds #2443's reply
+
+**Driven by:** the verifier's MUST FIX on PR #2482.
+
+**What was wrong.** The first implementation evaluated `resolveSpawnDir`
+synchronously and returned `*relay.RotatedWithoutWorkspaceError` from
+`StartNewSession`'s wrap-up arm, and § Design recorded the shift as a semantic
+softening — "the rotation has been *committed to* rather than *completed*". That
+reading was too generous to be true. `RotatedWithoutWorkspaceError`'s own doc does
+not state the completed rotation as a connotation but as a precondition with a
+tense — the pool re-keyed, the conversation rebound, the `session_transition`
+already broadcast "by the time this value exists" — and then forbids the value
+outright for a rotation that failed, as "a lie the client cannot check".
+`handleNewSession` repeats it: exactly one outcome replies, a rotation that
+*completed*.
+
+The plan's justification — the rendered outcome is identical — holds only when the
+rotation succeeds, and the prohibition is about the case where it does not. That
+case is not hypothetical here. `startFreshRunner`'s own doc calls losing the race
+to a concurrent `new_session` "the ORDINARY way to land here", this ticket
+*widens* that race window from milliseconds to ninety seconds (§ Security review,
+Concurrency, already said so), and the implementation ships the arm that logs it.
+So the arm was returning a claim that was unproven at the moment it sealed and
+routinely false thereafter.
+
+**What now happens.** The wrap-up arm returns `nil`. `resolveSpawnDir` is still
+evaluated synchronously — that placement is about containment, keeping it below
+every inert arm and below the in-progress guard so a repeated frame cannot drive
+`MkdirAll` — but its refusal now travels into `resetThenRotate` and is recorded
+there, *below a rotation that actually returned*, as
+`v2.new_session.workspace_refused`. The record inherits the reply's precondition
+rather than merely replacing it: a rotation that failed logs `rotate_failed` and
+says nothing about the workspace.
+
+**Why withholding rather than deferring.** Deferring is the better answer and this
+ticket cannot reach it. `SessionStarter.StartNewSession` is synchronous and
+`handleNewSession` seals its one reply from the return value, so a late reply needs
+a channel the async tail does not have. Minting one here would mean inventing a
+client-visible outcome for the reset, which is the sibling's subject — the
+`resetting` status frames that give the reset a lifecycle. Withholding is the
+honest option available today: the operator still learns of the refusal from the
+daemon log, and the client still learns the rotation happened from the
+`session_transition` broadcast. What it loses is the coded reply on the wrap-up
+path, and a shipped behaviour lost is strictly better than a shipped behaviour
+made false.
+
+**Pinned by** `TestActiveSessionStarter_WrapUpArmWithholdsTheWorkspaceReply` (the
+arm answers nil, and the refusal still reaches the log) and
+`TestActiveSessionStarter_RefusedWorkspaceIsNotRecordedWhenTheRotationFails` (a
+failed rotation reports the failure and makes no workspace claim).
+
+### 2026-09-16 — the idle wait and the mid-turn mark are pinned
+
+**Driven by:** the verifier's SHOULD FIX on PR #2482.
+
+Every fixture left `conversationReset.busy` nil, so `WaitIdle`, the
+`reset.wrapup.not_idle` arm, `openForDelivery` and its `undo` never ran under test
+— the two steps § Design calls load-bearing were the two with no coverage, and the
+happy path's asserted order was missing the idle wait § Testing strategy named.
+
+A **real** `turnBusyTracker` is now wired into `newResetFixture` on every row
+rather than opted into, and the capture's `next` forwards into its `observe`, so
+the fixture is production's chain in miniature: the wrap-up turn's own `TurnEnd`
+clears the mark `openForDelivery` placed. Four rows added —
+`WaitsForTheTurnToEnd` (the prompt follows the turn's end, asserted as call order
+with an asynchronous idle arriving from the interrupt),
+`AbandonsAConversationThatNeverGoesIdle` (the `not_idle` return: nothing written,
+previous note standing), `MarksTheConversationMidTurn` (the mark stands at the
+instant the payload moves, and does not outlive the turn), and
+`UndoesTheMarkWhenTheWriteFails`. `WithoutATrackerStillDelivers` pins the nil
+branch that was previously the only one reachable. All five were mutation-checked:
+removing the wait, the mark, or the undo reddens the row that names it.

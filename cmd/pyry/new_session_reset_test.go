@@ -24,6 +24,46 @@ import (
 // runs on a goroutine StartNewSession spawned, so the assertion and the write are
 // genuinely on different goroutines and -race says so.
 
+// safeLog is the log sink these tests read from. A strings.Builder cannot serve:
+// slog's handler serialises its OWN writes, never a reader's, so a test that reads
+// the log while the reset goroutine is still writing to it races — and on this arm
+// the interesting records are written after the last thing a test can synchronise
+// on, so polling is the only way to see them.
+type safeLog struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (l *safeLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *safeLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+// awaitRecord polls until the log contains event, which is how a record written
+// after the rotation — the one thing a test can wait on directly — is observed
+// without sleeping for a fixed guess at how long it will take.
+func (l *safeLog) awaitRecord(t *testing.T, event string) {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		if strings.Contains(l.String(), event) {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("no %q record arrived; logs are:\n%s", event, l.String())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
 // asyncRunner is restartFreshRunner's synchronised twin: RestartFresh lands on the
 // reset goroutine while the test reads it, and it signals so a test can wait for
 // the rotation instead of sleeping for it.
@@ -87,7 +127,7 @@ type resetProbe struct {
 // than by a real coordinator: this file's subject is the dispatch, and a real
 // coordinator would make the ordering assertion depend on a child that does not
 // exist here.
-func (p *resetProbe) starter(runner sessions.Runner, logs *strings.Builder) activeSessionStarter {
+func (p *resetProbe) starter(runner sessions.Runner, logs *safeLog) activeSessionStarter {
 	// ONE logger for both, not two over the same Builder: slog serialises writes
 	// per handler, so two handlers sharing a writer have two mutexes and no
 	// ordering between them — and here the two would be written from the dispatch
@@ -145,7 +185,7 @@ func TestActiveSessionStarter_LiveChildWrapsUpThenRotates(t *testing.T) {
 
 	runner := newAsyncRunner(starterLiveChildPID)
 	p := &resetProbe{gate: make(chan struct{})}
-	var logs strings.Builder
+	var logs safeLog
 	s := p.starter(runner, &logs)
 
 	returned := make(chan error, 1)
@@ -181,7 +221,7 @@ func TestActiveSessionStarter_SecondResetIsDropped(t *testing.T) {
 
 	runner := newAsyncRunner(starterLiveChildPID)
 	p := &resetProbe{gate: make(chan struct{})}
-	var logs strings.Builder
+	var logs safeLog
 	s := p.starter(runner, &logs)
 
 	if err := s.StartNewSession(starterConvB); err != nil {
@@ -216,7 +256,7 @@ func TestActiveSessionStarter_ResetReleasesForTheNextFrame(t *testing.T) {
 
 	runner := newAsyncRunner(starterLiveChildPID)
 	p := &resetProbe{}
-	var logs strings.Builder
+	var logs safeLog
 	s := p.starter(runner, &logs)
 
 	for i := 0; i < 2; i++ {
@@ -239,7 +279,7 @@ func TestActiveSessionStarter_NoLiveChildKeepsTheSynchronousPath(t *testing.T) {
 
 	runner := newAsyncRunner(0) // no child
 	p := &resetProbe{}
-	var logs strings.Builder
+	var logs safeLog
 	s := p.starter(runner, &logs)
 
 	if err := s.StartNewSession(""); err != nil {
@@ -254,15 +294,17 @@ func TestActiveSessionStarter_NoLiveChildKeepsTheSynchronousPath(t *testing.T) {
 	}
 }
 
-// TestActiveSessionStarter_WrapUpArmStillReportsARefusedWorkspace is #2443's reply
-// surviving the move off the caller's goroutine. resolveSpawnDir is evaluated
-// before the hand-off precisely so this answer is still available to return.
-func TestActiveSessionStarter_WrapUpArmStillReportsARefusedWorkspace(t *testing.T) {
+// TestActiveSessionStarter_WrapUpArmWithholdsTheWorkspaceReply pins the seam
+// contract on the async arm: #2443's value asserts a rotation that COMPLETED, and
+// at the moment this call returns the rotation is still ahead of the wrap-up and
+// may never happen — so the arm must answer nil rather than make a claim the client
+// cannot check. The refusal is not lost; it is recorded once the rotation lands.
+func TestActiveSessionStarter_WrapUpArmWithholdsTheWorkspaceReply(t *testing.T) {
 	t.Parallel()
 
 	runner := newAsyncRunner(starterLiveChildPID)
 	p := &resetProbe{}
-	var logs strings.Builder
+	var logs safeLog
 	s := p.starter(runner, &logs)
 	s.spawnDirFor = func(string) (string, error) { return "", errors.New("outside $HOME") }
 	s.resolveBound = func(convID string) (sessions.Runner, sessions.SessionID, string, bool) {
@@ -271,11 +313,47 @@ func TestActiveSessionStarter_WrapUpArmStillReportsARefusedWorkspace(t *testing.
 
 	err := s.StartNewSession(starterConvB)
 	var refused *relay.RotatedWithoutWorkspaceError
-	if !errors.As(err, &refused) {
-		t.Fatalf("StartNewSession = %v, want a *RotatedWithoutWorkspaceError", err)
+	if errors.As(err, &refused) {
+		t.Fatalf("StartNewSession replied %v before the rotation happened; "+
+			"RotatedWithoutWorkspaceError MUST NOT be returned for a rotation that has not completed", err)
 	}
-	if refused.ConversationID != starterConvB {
-		t.Errorf("the refusal names %q, want the resolved conversation", refused.ConversationID)
+	if err != nil {
+		t.Fatalf("StartNewSession = %v, want nil", err)
 	}
-	runner.awaitRotation(t) // and the rotation still happens, asynchronously
+	runner.awaitRotation(t) // the rotation still happens, asynchronously
+
+	// The refusal survives as a record, and only below a rotation that returned.
+	logs.awaitRecord(t, "v2.new_session.workspace_refused")
+}
+
+// TestActiveSessionStarter_RefusedWorkspaceIsNotRecordedWhenTheRotationFails is the
+// other half of the same contract. The record stands in for the reply, so it must
+// carry the reply's precondition: a rotation that failed reports the failure and
+// says nothing about the workspace, because "rotated without the workspace" for a
+// rotation that never happened is the claim the type's doc forbids.
+func TestActiveSessionStarter_RefusedWorkspaceIsNotRecordedWhenTheRotationFails(t *testing.T) {
+	t.Parallel()
+
+	runner := newAsyncRunner(starterLiveChildPID)
+	p := &resetProbe{}
+	var logs safeLog
+	s := p.starter(runner, &logs)
+	s.spawnDirFor = func(string) (string, error) { return "", errors.New("outside $HOME") }
+	s.resolveBound = func(convID string) (sessions.Runner, sessions.SessionID, string, bool) {
+		return runner, sessions.SessionID("session-of-" + convID), "/recorded/cwd", true
+	}
+	// The ORDINARY failure startFreshRunner's own doc names: a concurrent
+	// new_session won the race and the session has moved.
+	s.rotate = func(sessions.SessionID) (sessions.SessionID, error) {
+		return "", sessions.ErrSessionNotFound
+	}
+
+	if err := s.StartNewSession(starterConvB); err != nil {
+		t.Fatalf("StartNewSession = %v, want nil", err)
+	}
+
+	logs.awaitRecord(t, "v2.new_session.rotate_failed")
+	if got := logs.String(); strings.Contains(got, "v2.new_session.workspace_refused") {
+		t.Errorf("a rotation that failed reported the workspace refused anyway; logs are:\n%s", got)
+	}
 }

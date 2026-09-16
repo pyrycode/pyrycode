@@ -2338,25 +2338,37 @@ type activeSessionStarter struct {
 // handleNewSession calls StartNewSession inline on the V2SessionManager's single
 // Run dispatch goroutine, and a wrap-up is bounded at ninety seconds; blocking
 // there would freeze frame dispatch for every connection and every conversation
-// the daemon hosts while one background chat wrote a paragraph. Everything the
-// reply owes the client — the workspace refusal — is decided before the hand-off,
-// so the only thing that moves is work nobody is waiting on.
+// the daemon hosts while one background chat wrote a paragraph.
 //
 // It terminates unconditionally: the wrap-up is bounded by its own deadline and by
 // the daemon context, and the rotation below is two map operations and a restart.
 //
-// THE ROTATE ERROR HAS NO RETURN CHANNEL HERE, so it is recorded instead. It is the
-// pre-#2443 answer's only loss on this path, and the sentinels it carries
-// (RotateForNewSession's ErrSessionNotFound, chiefly — a concurrent rotation having
-// won) are daemon-authored and carry no conversation content.
+// NEITHER OUTCOME HAS A RETURN CHANNEL HERE, so both are recorded instead, and the
+// pair is what this path trades for not blocking Run.
+//
+// The ROTATE ERROR is the first. Its sentinels (RotateForNewSession's
+// ErrSessionNotFound, chiefly — a concurrent rotation having won) are
+// daemon-authored and carry no conversation content, so the value is logged.
+//
+// The WORKSPACE REFUSAL is the second, and it is recorded HERE, below a rotation
+// that actually returned, rather than replied from StartNewSession. #2443's reply
+// is not a status line but a claim with a tense: RotatedWithoutWorkspaceError's own
+// doc fixes the pool as re-keyed and the session_transition as already broadcast BY
+// THE TIME THE VALUE EXISTS, and then forbids it outright for a rotation that
+// failed — "a lie the client cannot check". At dispatch time, ninety seconds above
+// this line, that precondition is not merely unproven but routinely false:
+// startFreshRunner's own doc calls losing the race to a concurrent new_session "the
+// ORDINARY way to land here", and the arm just above logs it. So the refusal waits
+// for the fact it asserts, and on this path the operator learns it from the daemon
+// log rather than from a coded reply. Giving the async reset a client-visible
+// outcome of its own belongs with the sibling that gives it a lifecycle, not here.
 //
 // The runner and oldID are the ones resolved at DISPATCH time, which is a wider
 // window than the synchronous path's. That is handled where it already was: if a
 // rotation won in between, Pool.RotateForNewSession answers ErrSessionNotFound and
-// startFreshRunner disarms the #1330 gate and returns it — the case its own doc
-// calls "the ORDINARY way to land here".
+// startFreshRunner disarms the #1330 gate and returns it.
 func (a activeSessionStarter) resetThenRotate(release func(), runner sessions.Runner,
-	oldID sessions.SessionID, convID, spawnDir string) {
+	oldID sessions.SessionID, convID, spawnDir string, refused bool) {
 	defer release()
 	a.reset.wrapUp(convID)
 	if err := startFreshRunner(runner, oldID, spawnDir, a.rotate, a.log); err != nil {
@@ -2364,6 +2376,15 @@ func (a activeSessionStarter) resetThenRotate(release func(), runner sessions.Ru
 			"event", "v2.new_session.rotate_failed",
 			"conversation_id", convID,
 			"err", err)
+		return
+	}
+	if refused {
+		// Reached only with the rotation returned nil, which is the tense the reply
+		// would have claimed. No path: resolveSpawnDir's confinement error is not
+		// carried here, matching the posture that function keeps for its own record.
+		a.logger().Warn("relay: v2 new_session rotated without the conversation's recorded workspace",
+			"event", "v2.new_session.workspace_refused",
+			"conversation_id", convID)
 	}
 }
 
@@ -2507,21 +2528,19 @@ func (a activeSessionStarter) StartNewSession(conversationID string) error {
 				"conversation_id", convID)
 			return nil
 		}
-		// Resolved SYNCHRONOUSLY, which is what keeps #2443's one reply on this path:
-		// refused is known before this method returns, so the client still learns its
-		// recorded workspace was rejected. It also stays BELOW every inert arm AND
-		// below the guard above, so a repeated frame cannot drive MkdirAll — the
-		// containment resolveSpawnDir's own doc requires.
+		// Resolved SYNCHRONOUSLY so it stays BELOW every inert arm AND below the guard
+		// above, which is what keeps a repeated frame from driving MkdirAll — the
+		// containment resolveSpawnDir's own doc requires. The refusal it answers
+		// travels WITH the tail rather than back to the client; resetThenRotate holds
+		// the argument for why, and it is the one behaviour this arm gives up.
 		spawnDir, refused := a.resolveSpawnDir(convID, recordedCwd)
-		go a.resetThenRotate(release, runner, oldID, convID, spawnDir)
-		if refused {
-			// The rotation is COMMITTED TO rather than completed when this seals, which
-			// is the one thing the async tail changes about this reply. The outcome the
-			// client renders is identical — the successor comes up in the directory it
-			// was already in — and the alternative, withholding the reply on the
-			// wrap-up path, drops a shipped behaviour outright.
-			return &relay.RotatedWithoutWorkspaceError{ConversationID: convID}
-		}
+		go a.resetThenRotate(release, runner, oldID, convID, spawnDir, refused)
+		// NIL, AND DELIBERATELY SO: this frame owes the client no reply it can yet
+		// make true. The only reply this verb has is #2443's, and that value asserts a
+		// COMPLETED rotation — one that is ninety seconds away here and may not happen
+		// at all. Returning it now would be the "lie the client cannot check" its own
+		// doc forbids, so the wrap-up arm answers with the same silence every ordinary
+		// rotation answers with.
 		return nil
 	}
 	spawnDir, refused := a.resolveSpawnDir(convID, recordedCwd)

@@ -19,6 +19,11 @@ import (
 const (
 	resetConvA = "11111111-1111-4111-8111-111111111111"
 	resetConvB = "22222222-2222-4222-8222-222222222222"
+	// resetSessionA is the producing session the tracker resolves onto resetConvA.
+	// The tracker is keyed by SESSION on its event feeds and by CONVERSATION on its
+	// reads, and keeping the two distinct here is what keeps a resolve bug from
+	// passing as a match.
+	resetSessionA = "session-of-conv-a"
 	// resetPreviousNote and resetReplyText are the two strings the AC-3 log
 	// assertion scans for. Distinctive on purpose: a substring that could occur in
 	// an event key or a conversation id would make that assertion pass or fail for
@@ -41,13 +46,21 @@ type resetRunner struct {
 	interruptErr  error
 	refuseCapture bool // BeginWrapUp refuses, as it does when one is already live
 	steps         *resetSteps
+	// onInterrupt stands in for the child's reaction to the signal. Production's
+	// interrupt does not end the turn itself; it makes the end arrive sooner, and
+	// the end arrives asynchronously on the fan-in.
+	onInterrupt func()
 }
 
 func (r *resetRunner) Interrupt() error {
 	r.mu.Lock()
 	err := r.interruptErr
+	onInterrupt := r.onInterrupt
 	r.mu.Unlock()
 	r.steps.record("interrupt")
+	if onInterrupt != nil {
+		onInterrupt()
+	}
 	return err
 }
 
@@ -181,16 +194,45 @@ type resetFixture struct {
 	notes   *fakeNotes
 	steps   *resetSteps
 	logs    *bytes.Buffer
+	// busy is a REAL turnBusyTracker, not a double, and it is wired on every row
+	// rather than opted into. The two steps it carries — the idle wait before the
+	// turn and the mid-turn mark before the write — are the ones wrapUp's own doc
+	// argues for, so a fixture that left it nil would silently skip both and pin the
+	// nil branch instead of the production one.
+	busy *turnBusyTracker
 
 	mu       sync.Mutex
 	written  []string
 	writeErr error
+	// busyAtWrite records what the tracker said at the instant the payload was
+	// handed over, which is how openForDelivery's "the mark PRECEDES the write"
+	// ordering becomes an assertion rather than a comment.
+	busyAtWrite bool
 }
 
 func (f *resetFixture) prompts() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.written...)
+}
+
+// marked answers whether the conversation is currently held mid-turn. It owns the
+// nil check because turnBusyTracker.Busy deliberately does not: that type hands the
+// nil only to the methods PTY mode actually reaches, and a guard on the read would
+// be the first step toward a consumer silently reading false with no tracker wired.
+func (f *resetFixture) marked() bool {
+	if f.busy == nil {
+		return false
+	}
+	return f.busy.Busy(resetConvA)
+}
+
+// goIdle ends the mid-turn mark the way production does — a turn-closing event off
+// the fan-in — and records the moment, so "the prompt was delivered AFTER the
+// conversation went idle" is an order comparison rather than a timing guess.
+func (f *resetFixture) goIdle() {
+	f.steps.record("went-idle")
+	f.busy.observe(resetSessionA, turnevent.TurnEnd{})
 }
 
 // answer drives the child's side: it accumulates text into the live capture and
@@ -215,17 +257,40 @@ type resetOptions struct {
 	backlogItems  []msgqueue.QueuedMessage
 	deadline      time.Duration
 	answerOnWrite func(f *resetFixture)
+	// startBusy leaves the conversation mid-turn when wrapUp begins, which is the
+	// ordinary case the routine is written for: an operator resets a conversation
+	// that is in the middle of answering. Nothing clears it unless the test does.
+	startBusy bool
+	// noTracker drops the tracker entirely — the PTY posture, where none is ever
+	// constructed and wrapUp must still deliver rather than decline.
+	noTracker bool
 }
 
 func newResetFixture(t *testing.T, opt resetOptions) *resetFixture {
 	t.Helper()
 	steps := &resetSteps{}
-	capture := newWrapUpCapture(nil)
 	f := &resetFixture{
-		capture:  capture,
 		steps:    steps,
 		logs:     &bytes.Buffer{},
 		writeErr: opt.writeErr,
+	}
+	if !opt.noTracker {
+		f.busy = newTurnBusyTracker(func(sessionID string) (string, bool) {
+			if sessionID != resetSessionA {
+				return "", false
+			}
+			return resetConvA, true
+		}, slog.New(slog.NewTextHandler(f.logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	}
+	// The capture forwards into the tracker, which is the chain production has:
+	// every event the capture sees is one the fan-in also feeds to observe. That is
+	// what makes the wrap-up turn's own TurnEnd clear the mark openForDelivery
+	// placed, so a fixture row that completes a turn leaves no stale mark behind —
+	// the property turnMarkClose's "never dropped at the fan-in" rests on.
+	capture := newWrapUpCapture(func(ev turnevent.Event) { f.busy.observe(resetSessionA, ev) })
+	f.capture = capture
+	if opt.startBusy {
+		f.busy.observe(resetSessionA, turnevent.TextChunk{MessageID: "m-0", Text: "mid-turn"})
 	}
 	if opt.runner != nil {
 		f.runner = opt.runner(capture, steps)
@@ -248,8 +313,12 @@ func newResetFixture(t *testing.T, opt resetOptions) *resetFixture {
 			}
 			return resetTarget{runner: f.runner, write: func(_ context.Context, _ string, payload []byte) error {
 				steps.record("write-turn")
+				// Read BEFORE the payload is accepted: openForDelivery's contract is
+				// that the mark is already standing when the bytes move.
+				marked := f.marked()
 				f.mu.Lock()
 				f.written = append(f.written, string(payload))
+				f.busyAtWrite = marked
 				err := f.writeErr
 				f.mu.Unlock()
 				if err != nil {
@@ -261,6 +330,7 @@ func newResetFixture(t *testing.T, opt resetOptions) *resetFixture {
 				return nil
 			}}, true
 		},
+		busy:     f.busy,
 		backlog:  f.backlog,
 		notes:    f.notes,
 		deadline: deadline,
@@ -277,6 +347,138 @@ func answerWith(text string) func(*resetFixture) {
 }
 
 // --- tests --------------------------------------------------------------------
+
+// TestConversationReset_WrapUp_WaitsForTheTurnToEnd is AC 1's idle half, and the
+// ORDER is the assertion: the conversation is mid-turn when the reset begins, and
+// the prompt must not be delivered until the running turn has closed. Without the
+// wait the wrap-up prompt interleaves into somebody else's turn and the capture is
+// armed over a reply that is not its own.
+//
+// The interrupt is what ends the turn here, which is production's shape — the
+// interrupt makes idleness come sooner and the wait is what makes it certain.
+func TestConversationReset_WrapUp_WaitsForTheTurnToEnd(t *testing.T) {
+	t.Parallel()
+
+	var f *resetFixture
+	f = newResetFixture(t, resetOptions{
+		startBusy: true,
+		runner: func(capture *wrapUpCapture, steps *resetSteps) sessions.Runner {
+			return &resetRunner{capture: capture, steps: steps, onInterrupt: func() {
+				// Asynchronous, as the child's own turn end is: the wait must
+				// actually block rather than happen to find the turn already over.
+				go func() {
+					time.Sleep(20 * time.Millisecond)
+					f.goIdle()
+				}()
+			}}
+		},
+		answerOnWrite: answerWith(resetReplyText),
+	})
+	f.reset.wrapUp(resetConvA)
+
+	want := []string{"interrupt", "went-idle", "write-turn", "write-note"}
+	if got := f.steps.seen(); !equalSteps(got, want) {
+		t.Errorf("step order = %v, want %v — the prompt must follow the turn's end, not race it", got, want)
+	}
+}
+
+// TestConversationReset_WrapUp_AbandonsAConversationThatNeverGoesIdle is AC 2's
+// deadline row reached through the idle wait rather than through the reply. A turn
+// that will not end is a reason to get on with the reset: the wrap-up is abandoned,
+// nothing is written to the child, and the previous note stands.
+func TestConversationReset_WrapUp_AbandonsAConversationThatNeverGoesIdle(t *testing.T) {
+	t.Parallel()
+
+	f := newResetFixture(t, resetOptions{
+		previousNote: resetPreviousNote,
+		startBusy:    true, // and nothing ever clears it
+		deadline:     50 * time.Millisecond,
+	})
+	f.reset.wrapUp(resetConvA)
+
+	if got := f.prompts(); len(got) != 0 {
+		t.Errorf("delivered %d prompts into a running turn, want 0", len(got))
+	}
+	if got := f.notes.stored(conversations.ConversationID(resetConvA)); got != resetPreviousNote {
+		t.Errorf("stored note = %q, want the previous note left standing", got)
+	}
+	if !strings.Contains(f.logs.String(), "reset.wrapup.not_idle") {
+		t.Errorf("the abandoned wrap-up left no record; logs are:\n%s", f.logs.String())
+	}
+}
+
+// TestConversationReset_WrapUp_MarksTheConversationMidTurn pins newInboundDeliver's
+// ordering, adopted here verbatim: the mark is placed BEFORE the write, so a
+// send_message arriving during the wrap-up parks in the backlog instead of finding
+// the conversation idle and delivering into the wrap-up turn.
+//
+// The mark's release is asserted too, and by the production route rather than by
+// hand: the wrap-up turn's own TurnEnd travels through the capture into the tracker
+// and clears it. A mark that outlived the turn would wedge the conversation for
+// every later delivery.
+func TestConversationReset_WrapUp_MarksTheConversationMidTurn(t *testing.T) {
+	t.Parallel()
+
+	f := newResetFixture(t, resetOptions{answerOnWrite: answerWith(resetReplyText)})
+	f.reset.wrapUp(resetConvA)
+
+	f.mu.Lock()
+	marked := f.busyAtWrite
+	f.mu.Unlock()
+	if !marked {
+		t.Error("the conversation was idle at the moment the prompt was written; " +
+			"openForDelivery must mark it first, or a send_message lands in the wrap-up turn")
+	}
+	if f.marked() {
+		t.Error("the mark outlived the wrap-up turn; its own TurnEnd must clear it")
+	}
+}
+
+// TestConversationReset_WrapUp_WithoutATrackerStillDelivers pins the nil branch the
+// coordinator owns on this.busy's behalf. WaitIdle carries no nil-receiver guard, so
+// wrapUp checks first and — finding no tracker — proceeds rather than declining.
+//
+// Proceeding is the right direction rather than a shortcut: a daemon with no
+// tracker has no fan-in either, so there is no signal that could ever report the
+// conversation idle, and declining would mean never writing a note on that wiring at
+// all. Unreachable in production today, since selectInteractiveRunner rejects "pty"
+// outright (#1348), which is exactly why it is pinned here instead of trusted.
+func TestConversationReset_WrapUp_WithoutATrackerStillDelivers(t *testing.T) {
+	t.Parallel()
+
+	f := newResetFixture(t, resetOptions{
+		noTracker:     true,
+		answerOnWrite: answerWith(resetReplyText),
+	})
+	f.reset.wrapUp(resetConvA)
+
+	if got := f.notes.stored(conversations.ConversationID(resetConvA)); !strings.Contains(got, resetReplyText) {
+		t.Errorf("stored note = %q, want the reply — an unwired tracker must not block the wrap-up", got)
+	}
+}
+
+// TestConversationReset_WrapUp_UndoesTheMarkWhenTheWriteFails is the other half of
+// that ordering, and the one the mark's cost is paid for. A write that never
+// reached the child starts no turn, so the mark it placed has nothing left that
+// could ever clear it — left standing it would hold the conversation mid-turn for
+// the daemon's life and no message could be delivered to it again.
+func TestConversationReset_WrapUp_UndoesTheMarkWhenTheWriteFails(t *testing.T) {
+	t.Parallel()
+
+	f := newResetFixture(t, resetOptions{
+		previousNote: resetPreviousNote,
+		writeErr:     errors.New("write failed: " + resetPreviousNote),
+	})
+	f.reset.wrapUp(resetConvA)
+
+	if f.marked() {
+		t.Error("the mark survived a failed write; the undo must run, or the conversation " +
+			"is wedged mid-turn with no event left that could clear it")
+	}
+	if got := f.notes.stored(conversations.ConversationID(resetConvA)); got != resetPreviousNote {
+		t.Errorf("stored note = %q, want the previous note left standing", got)
+	}
+}
 
 // TestConversationReset_WrapUp_WritesTheReplyAsTheNote is AC 1 and AC 5 together,
 // and the ORDER is the assertion: the backlog is emptied before the prompt is
