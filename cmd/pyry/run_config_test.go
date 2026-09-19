@@ -29,8 +29,12 @@ import (
 // actually holds is never reported from a stale dormant entry (#2449). Two
 // independent counters cannot state that.
 type settingsReaderDouble struct {
-	settings map[sessions.SessionID]sessions.SessionSettings
-	dormant  map[sessions.SessionID]sessions.SessionSettings
+	settings  map[sessions.SessionID]sessions.SessionSettings
+	dormant   map[sessions.SessionID]sessions.SessionSettings
+	confirmed map[sessions.SessionID]struct {
+		mode string
+		ok   bool
+	}
 
 	mu    sync.Mutex
 	asked []string
@@ -42,6 +46,14 @@ func (d *settingsReaderDouble) SettingsFor(id sessions.SessionID) (sessions.Sess
 
 func (d *settingsReaderDouble) DormantSettingsFor(id sessions.SessionID) (sessions.SessionSettings, error) {
 	return d.answer("dormant", d.dormant, id)
+}
+
+func (d *settingsReaderDouble) ConfirmedPermissionModeFor(id sessions.SessionID) (string, bool) {
+	d.mu.Lock()
+	d.asked = append(d.asked, "mode:"+string(id))
+	d.mu.Unlock()
+	answer := d.confirmed[id]
+	return answer.mode, answer.ok
 }
 
 func (d *settingsReaderDouble) answer(half string, from map[sessions.SessionID]sessions.SessionSettings, id sessions.SessionID) (sessions.SessionSettings, error) {
@@ -93,19 +105,26 @@ func TestResolveBoundRunSettings(t *testing.T) {
 	// half, which is what an id the daemon has no record of at all looks like.
 	//
 	// sess-dormant is in the dormant half only — the shape every non-bootstrap
-	// session has after a daemon restart (#2449). Its settings carry the default
-	// posture the pool's own dormant read canonicalises to, so the row below also
-	// pins that this resolver COPIES what it is handed rather than re-deriving a
-	// posture of its own.
+	// session has after a daemon restart (#2449). Its settings carry non-empty
+	// model and effort plus a stored posture, so the row below pins that the
+	// resolver preserves the first two while refusing the stored posture as proof
+	// of a current child's mode.
 	newReader := func() *settingsReaderDouble {
 		return &settingsReaderDouble{
 			settings: map[sessions.SessionID]sessions.SessionSettings{
-				"sess-a":        {Model: "claude-opus-4-8", Effort: "high", YOLO: true, PermissionMode: "bypassPermissions"},
-				"sess-b":        {Model: "", Effort: "low", PermissionMode: "plan"},
-				"sess-defaults": {},
+				"sess-a":        {Model: "claude-opus-4-8", Effort: "high", PermissionMode: "default"},
+				"sess-b":        {Model: "", Effort: "low", YOLO: true, PermissionMode: "bypassPermissions"},
+				"sess-defaults": {Model: "claude-haiku-4-5", Effort: "medium", YOLO: true, PermissionMode: "bypassPermissions"},
 			},
 			dormant: map[sessions.SessionID]sessions.SessionSettings{
 				"sess-dormant": {Model: "claude-sonnet-4-5", Effort: "low", PermissionMode: "default"},
+			},
+			confirmed: map[sessions.SessionID]struct {
+				mode string
+				ok   bool
+			}{
+				"sess-a": {mode: "bypassPermissions", ok: true},
+				"sess-b": {mode: "default", ok: true},
 			},
 		}
 	}
@@ -138,30 +157,30 @@ func TestResolveBoundRunSettings(t *testing.T) {
 			wantAsked: []string{"live:sess-evicted", "dormant:sess-evicted"},
 		},
 		{
-			name:      "conversation A reports its own session and settings",
+			name:      "conversation A reports its own confirmed bypass instead of stored default",
 			convID:    "conv-a",
 			want:      boundRunSettings{sessionID: "sess-a", model: "claude-opus-4-8", effort: "high", yolo: true, permissionMode: "bypassPermissions", live: true},
 			wantOK:    true,
-			wantAsked: []string{"live:sess-a"},
+			wantAsked: []string{"live:sess-a", "mode:sess-a"},
 		},
 		{
-			name:      "conversation B reports its own session and settings",
+			name:      "conversation B reports its own confirmed default instead of stored bypass",
 			convID:    "conv-b",
-			want:      boundRunSettings{sessionID: "sess-b", model: "", effort: "low", yolo: false, permissionMode: "plan", live: true},
+			want:      boundRunSettings{sessionID: "sess-b", model: "", effort: "low", permissionMode: "default", live: true},
 			wantOK:    true,
-			wantAsked: []string{"live:sess-b"},
+			wantAsked: []string{"live:sess-b", "mode:sess-b"},
 		},
 		{
-			name:      "an all-defaults session resolves — zeros are a real answer",
+			name:      "a live session without confirmation preserves id model and effort but reports permission unavailable",
 			convID:    "conv-defaults",
-			want:      boundRunSettings{sessionID: "sess-defaults", live: true},
+			want:      boundRunSettings{sessionID: "sess-defaults", model: "claude-haiku-4-5", effort: "medium", live: true},
 			wantOK:    true,
-			wantAsked: []string{"live:sess-defaults"},
+			wantAsked: []string{"live:sess-defaults", "mode:sess-defaults"},
 		},
 		{
-			name:      "a dormant binding reports its id, model and effort, marked not live",
+			name:      "a dormant binding preserves id model and effort but reports permission unavailable",
 			convID:    "conv-dormant",
-			want:      boundRunSettings{sessionID: "sess-dormant", model: "claude-sonnet-4-5", effort: "low", permissionMode: "default"},
+			want:      boundRunSettings{sessionID: "sess-dormant", model: "claude-sonnet-4-5", effort: "low"},
 			wantOK:    true,
 			wantAsked: []string{"live:sess-dormant", "dormant:sess-dormant"},
 		},
@@ -212,7 +231,7 @@ func TestResolveBoundRunSettings_RealPool(t *testing.T) {
 
 	t.Run("a session the pool holds resolves", func(t *testing.T) {
 		t.Parallel()
-		got, ok := resolveBoundRunSettings(reg, pool, "conv-live")
+		got, ok := resolveBoundRunSettings(reg, runSettingsPool{Pool: pool}, "conv-live")
 		if !ok {
 			t.Fatalf("resolveBoundRunSettings(conv-live) ok = false, want true")
 		}
@@ -223,11 +242,50 @@ func TestResolveBoundRunSettings_RealPool(t *testing.T) {
 
 	t.Run("a session the pool never held is fail-closed", func(t *testing.T) {
 		t.Parallel()
-		got, ok := resolveBoundRunSettings(reg, pool, "conv-gone")
+		got, ok := resolveBoundRunSettings(reg, runSettingsPool{Pool: pool}, "conv-gone")
 		if ok || got != (boundRunSettings{}) {
 			t.Errorf("resolveBoundRunSettings(conv-gone) = (%+v, %v), want (zero, false)", got, ok)
 		}
 	})
+}
+
+type confirmedModeRunner struct {
+	stubRunner
+	mode string
+}
+
+func (r confirmedModeRunner) ConfirmedPermissionMode() (string, bool) {
+	return r.mode, r.mode != ""
+}
+
+// TestResolveBoundRunSettings_RealPoolConfirmedRunner pins the production pool
+// adapter rather than only the resolver double: the exact Session.Runner value
+// behind the resolved id supplies the permission pair, while stored settings do
+// not.
+func TestResolveBoundRunSettings_RealPoolConfirmedRunner(t *testing.T) {
+	t.Parallel()
+
+	pool, err := sessions.New(sessions.Config{
+		Bootstrap: sessions.SessionConfig{ClaudeBin: os.Args[0]},
+		RunnerFactory: func(sessions.RunnerConfig) (sessions.Runner, error) {
+			return confirmedModeRunner{mode: sessions.PermissionModeBypass}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("sessions.New: %v", err)
+	}
+
+	id := pool.Default().ID()
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{ID: "conv-confirmed", CurrentSessionID: string(id), LastUsedAt: time.Now().UTC()})
+
+	got, ok := resolveBoundRunSettings(reg, runSettingsPool{Pool: pool}, "conv-confirmed")
+	if !ok {
+		t.Fatal("resolveBoundRunSettings(conv-confirmed) ok = false, want true")
+	}
+	if got.sessionID != string(id) || got.permissionMode != sessions.PermissionModeBypass || !got.yolo {
+		t.Errorf("resolveBoundRunSettings(conv-confirmed) = %+v, want the resolved id with confirmed bypass/true", got)
+	}
 }
 
 // TestResolveBoundRunSettings_DormantRealPool is the restart case against a real
@@ -274,18 +332,17 @@ func TestResolveBoundRunSettings_DormantRealPool(t *testing.T) {
 	reg := &conversations.Registry{}
 	reg.Create(conversations.Conversation{ID: "conv-dormant", CurrentSessionID: dormantID, LastUsedAt: now})
 
-	got, ok := resolveBoundRunSettings(reg, pool, "conv-dormant")
+	got, ok := resolveBoundRunSettings(reg, runSettingsPool{Pool: pool}, "conv-dormant")
 	if !ok {
 		t.Fatalf("resolveBoundRunSettings(conv-dormant) ok = false, want true — a bound session the daemon has a persisted record of must resolve")
 	}
 	want := boundRunSettings{
-		sessionID:      dormantID,
-		model:          "claude-opus-4-8",
-		effort:         "high",
-		permissionMode: "default",
+		sessionID: dormantID,
+		model:     "claude-opus-4-8",
+		effort:    "high",
 	}
 	if got != want {
-		t.Errorf("resolveBoundRunSettings(conv-dormant) = %+v, want %+v — yolo and the mode must be the ones a revive materialises, never the ones the entry persisted (#1487)", got, want)
+		t.Errorf("resolveBoundRunSettings(conv-dormant) = %+v, want %+v — a dormant session has no current child whose permission posture could be confirmed", got, want)
 	}
 
 	// The read answered without materialising: still one live session, the

@@ -247,10 +247,10 @@ type relayWiring struct {
 	snapshotSettings func() (model, effort string, yolo bool)
 	// runSettings is the settings half of the conversation-keyed run-configuration
 	// seam (#1609): it resolves a NAMED conversation to its bound session id plus
-	// that session's model/effort/YOLO, under one pool acquisition
+	// that session's stored model/effort and current-child permission confirmation
 	// (resolveBoundRunSettings). Built at main.go over the conversations registry
-	// and *sessions.Pool.SettingsFor so the internal/sessions dependency stays at
-	// the composition root. runConfigFor below composes it with the by-id
+	// and the exact session's pool reads so the internal/sessions dependency stays
+	// at the composition root. runConfigFor below composes it with the by-id
 	// context-window reader into the primitive-typed seam that crosses into
 	// internal/relay; this cmd/pyry-typed value never does. nil in foreground/v1 ⇒
 	// no seam is built at all.
@@ -601,8 +601,8 @@ func boundSessionIDForActive(active *activeConversation, convReg *conversations.
 // run-configuration seam (#1609) into the primitive-typed value that crosses into
 // internal/relay as V2SessionConfig.RunConfigFor: the settings half (resolve —
 // main.go's resolveBoundRunSettings: registry → bound session id → that session's
-// model/effort/YOLO) and the context-window half (usage — the by-id reader
-// snapshotUsageFor returns). Same shape as boundSessionIDForActive and
+// stored model/effort plus current-child permission confirmation) and the
+// context-window half (usage — the by-id reader snapshotUsageFor returns). Same shape as boundSessionIDForActive and
 // bootstrapSnapshotUsage: a named, unit-testable resolver pulled out of otherwise
 // untestable wiring.
 //
@@ -960,7 +960,8 @@ func startRelayV2(
 	// Conversation-keyed run-configuration seam (#1609): composes the settings half
 	// (main.go's resolveBoundRunSettings, over the conversations registry and the
 	// pool) with the by-id context-window reader, so ONE call reports a named
-	// conversation's own session id, model/effort/YOLO and occupancy together.
+	// conversation's own session id, stored model/effort, confirmed permission pair,
+	// and occupancy together.
 	// snapshotUsageFor is called a second time rather than reusing the binding
 	// above: bootstrapSnapshotUsage supplies the BOOTSTRAP id, so a seam composed
 	// through it would report the bootstrap's occupancy for every conversation. The

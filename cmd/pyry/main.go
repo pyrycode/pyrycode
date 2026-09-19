@@ -1159,7 +1159,7 @@ func runSupervisor(args []string) error {
 		settings:         settingsUpdaterAdapter{pool, modelVocabulary},
 		snapshotSettings: snapshotSettings,
 		runSettings: func(convID string) (boundRunSettings, bool) {
-			return resolveBoundRunSettings(convReg, pool, convID)
+			return resolveBoundRunSettings(convReg, runSettingsPool{Pool: pool}, convID)
 		},
 		// The registry half and the live-session half of one conversation's
 		// system-prompt picture (#2152), resolved together over the same registry and
@@ -2015,9 +2015,9 @@ func resolveBoundSession(convReg *conversations.Registry, pool *sessions.Pool, c
 }
 
 // boundRunSettings is the settings half of one conversation's run configuration:
-// the pool session it is bound to, plus that session's persisted model / effort /
-// YOLO, decoded into primitives HERE so the value crossing into relay.go carries
-// no internal/sessions type — the same composition-root discipline
+// the pool session it is bound to, plus that session's persisted model / effort
+// and current-child permission confirmation, decoded into primitives HERE so the
+// value crossing into relay.go carries no internal/sessions type — the same composition-root discipline
 // snapshotSettings, settingsUpdaterAdapter and debugBundler keep.
 //
 // A struct rather than a four-value return: three adjacent same-typed strings in
@@ -2029,12 +2029,11 @@ type boundRunSettings struct {
 	model     string
 	effort    string
 	yolo      bool
-	// permissionMode is the posture the session runs under (#1687). It is read
-	// from the same SessionSettings value as the three above, so it can never
-	// describe a different session, and the pool normalises it at construction —
-	// a resolved session always names one of claude's six modes, never "".
+	// permissionMode is the last posture the exact current child confirmed. Empty
+	// means there is no current-child confirmation, including for a dormant session.
+	// yolo is derived from this value rather than from stored launch intent.
 	permissionMode string
-	// live says the four fields above came from a session the pool HOLDS, rather
+	// live says model and effort came from a session the pool HOLDS, rather
 	// than from the persisted entry of one it has not materialised (#2449). It
 	// carries no run configuration and never reaches the wire; its one consumer is
 	// runConfigFor, which reads a dormant session's context occupancy as zero
@@ -2051,15 +2050,16 @@ type boundRunSettings struct {
 	live bool
 }
 
-// sessionSettingsReader is the pair of pool reads resolveBoundRunSettings needs,
-// declared at the consumer per CODING-STYLE; *sessions.Pool satisfies it with no
-// adapter. It exists for a stated testing need rather than pre-emptively: "no
+// sessionSettingsReader is the three pool reads resolveBoundRunSettings needs,
+// declared at the consumer per CODING-STYLE. runSettingsPool supplies the
+// current-child read while promoting the two *sessions.Pool settings methods. It
+// exists for a stated testing need rather than pre-emptively: "no
 // pool read is performed for an unresolvable conversation" is a claim about
 // CALLS, and the returned values cannot carry it — a conversation bound to an
 // all-defaults session reports exactly the zeros a refusal reports — so the
 // double has to be able to count.
 //
-// It was one method until #2449, whose whole subject is the second one: after a
+// It was one method until #2449, whose whole subject is the dormant one: after a
 // daemon restart the pool has materialised only the bootstrap, so SettingsFor
 // alone answers "not addressable" for every other conversation the daemon holds a
 // persisted record of. Widening it here is that ticket's intended change, and the
@@ -2067,12 +2067,40 @@ type boundRunSettings struct {
 // records now also carries "a session the pool HOLDS is never read from the
 // dormant half", which no single-method double could state.
 //
-// Do not widen it past these two. Each further method is a pool capability this
-// resolver can reach for, and the seam's value is that a reviewer can see the
-// whole of what a conversation-keyed settings read may touch in three lines.
+// The third read is deliberately narrow: it returns only the confirmed permission
+// pair for one exact live id, not a Session or Runner a resolver could actuate.
 type sessionSettingsReader interface {
 	SettingsFor(id sessions.SessionID) (sessions.SessionSettings, error)
 	DormantSettingsFor(id sessions.SessionID) (sessions.SessionSettings, error)
+	ConfirmedPermissionModeFor(id sessions.SessionID) (string, bool)
+}
+
+// confirmedPermissionModeReader is the optional runner capability #2511 shipped.
+// It stays off sessions.Runner because its consumer lives in this package.
+type confirmedPermissionModeReader interface {
+	ConfirmedPermissionMode() (string, bool)
+}
+
+// runSettingsPool adds the exact-current-runner read to *sessions.Pool's stored
+// settings reads. It refuses the empty id before Pool.Lookup, whose empty-id
+// convention resolves to the bootstrap session.
+type runSettingsPool struct {
+	*sessions.Pool
+}
+
+func (p runSettingsPool) ConfirmedPermissionModeFor(id sessions.SessionID) (string, bool) {
+	if id == "" {
+		return "", false
+	}
+	sess, err := p.Lookup(id)
+	if err != nil {
+		return "", false
+	}
+	reader, ok := sess.Runner().(confirmedPermissionModeReader)
+	if !ok {
+		return "", false
+	}
+	return reader.ConfirmedPermissionMode()
 }
 
 // resolveBoundRunSettings is the run-configuration twin of resolveBoundSession:
@@ -2109,27 +2137,18 @@ type sessionSettingsReader interface {
 // collapsing an unknown id into empty settings (the reason Pool.revivedSettings,
 // which does collapse it, could not be reused).
 //
-// The posture is NOT re-derived here. Both reads answer a sessions.SessionSettings
-// whose YOLO and PermissionMode are already what that session runs (or would run)
-// under, and this function copies them; the dormant half's revocation of a
-// persisted bypass (#1487) is enforced where the value is built, in
-// Pool.DormantSettingsFor, so there is exactly one place that decides it.
+// Stored posture is never copied here. A live answer asks only the exact session's
+// runner for Claude's last current-child confirmation; a dormant answer has no
+// runner to ask and therefore keeps the permission pair at its zero value.
 //
 // Pool.SettingsFor, not Lookup-then-read, for two reasons load-bearing enough to
 // state so a later reader does not "simplify" them away:
 //
-//   - ONE acquisition PER ANSWER. SettingsFor answers both questions asked here —
-//     does the pool still hold this id, and what are its settings — under a single
-//     RLock, and DormantSettingsFor does the same for its half. A
-//     Lookup-then-SettingsFor shape opens a window (idle eviction is live, see
-//     Pool.IdleTimeout) in which the reported id names a session the reported
-//     settings no longer describe. Reporting the values together is the whole
-//     point of the seam, so the single acquisition is the design, not a
-//     micro-optimisation. The window BETWEEN the two reads carries no such hazard:
-//     a revive landing in it makes the dormant answer describe a session that is
-//     now live, whose model and effort are the values Revive just materialised
-//     from that same entry, and nothing can move an id the other way — p.dormant
-//     only ever shrinks.
+//   - ONE acquisition FOR STORED SETTINGS. SettingsFor answers whether the pool
+//     held the id and what model/effort it stored under a single RLock;
+//     DormantSettingsFor does the same for its half. The separate current-runner
+//     lookup is informational and may race a lifecycle transition only into an
+//     unavailable permission pair — never into another id's settings or runner.
 //   - No ""-is-bootstrap convention. SettingsFor deliberately does not
 //     special-case the empty id (its doc says why: read and write must agree), so
 //     "" is an ordinary map miss here. Building on it means fall-through-to-
@@ -2153,18 +2172,26 @@ func resolveBoundRunSettings(convReg *conversations.Registry, pool sessionSettin
 	if !ok || conv.CurrentSessionID == "" {
 		return boundRunSettings{}, false
 	}
-	if s, err := pool.SettingsFor(sessions.SessionID(conv.CurrentSessionID)); err == nil {
-		return settingsOf(conv.CurrentSessionID, s, true), true
+	id := sessions.SessionID(conv.CurrentSessionID)
+	if s, err := pool.SettingsFor(id); err == nil {
+		bound := settingsOf(conv.CurrentSessionID, s, true)
+		if mode, confirmed := pool.ConfirmedPermissionModeFor(id); confirmed {
+			bound.permissionMode = mode
+			bound.yolo = mode == sessions.PermissionModeBypass
+		}
+		return bound, true
 	}
-	s, err := pool.DormantSettingsFor(sessions.SessionID(conv.CurrentSessionID))
+	s, err := pool.DormantSettingsFor(id)
 	if err != nil {
 		return boundRunSettings{}, false
 	}
 	return settingsOf(conv.CurrentSessionID, s, false), true
 }
 
-// settingsOf decodes one pool answer into the primitive-typed value that crosses
-// into relay.go, tagged with which half of the pool answered.
+// settingsOf decodes the stored half of one pool answer into the primitive-typed
+// value that crosses into relay.go, tagged with which half of the pool answered.
+// The permission pair is intentionally absent: only the live runner read above
+// may populate it.
 //
 // It exists so the two return sites above cannot drift: a field added to
 // sessions.SessionSettings and wired into only one of two hand-written literals
@@ -2173,12 +2200,10 @@ func resolveBoundRunSettings(convReg *conversations.Registry, pool sessionSettin
 // records for transposed same-typed returns, in its other form.
 func settingsOf(sessionID string, s sessions.SessionSettings, live bool) boundRunSettings {
 	return boundRunSettings{
-		sessionID:      sessionID,
-		model:          s.Model,
-		effort:         s.Effort,
-		yolo:           s.YOLO,
-		permissionMode: s.PermissionMode,
-		live:           live,
+		sessionID: sessionID,
+		model:     s.Model,
+		effort:    s.Effort,
+		live:      live,
 	}
 }
 

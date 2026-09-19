@@ -175,8 +175,8 @@ func TestRelayV2_StreamRejectsModelAbsentFromPublishedMenu(t *testing.T) {
 	if err := json.Unmarshal(settingsReply.Payload, &settings); err != nil {
 		t.Fatalf("decode session settings: %v", err)
 	}
-	if settings.Model != "" || settings.Effort != "" || settings.PermissionMode != "default" {
-		t.Errorf("settings after rejected whole frame = %+v, want prior defaults", settings)
+	if settings.Model != "" || settings.Effort != "" || settings.PermissionMode != "" || settings.YOLO {
+		t.Errorf("settings after rejected whole frame = %+v, want prior model/effort and unavailable permission pair", settings)
 	}
 
 	seal(protocol.Envelope{ID: 102, Type: protocol.TypeSendMessage, TS: time.Now().UTC(),

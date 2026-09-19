@@ -1,4 +1,4 @@
-# Session settings read payloads (#491/#1214, `ConversationID` field #1586, conversation-keyed reply #1610, permission mode #1687)
+# Session settings read payloads (#491/#1214, `ConversationID` field #1586, conversation-keyed reply #1610, confirmed permission mode #2510)
 
 The READ half the #844 cluster shipped without: `set_session_settings`
 changes the values and `session_settings_updated` only echoes the id back, so
@@ -41,8 +41,11 @@ type SessionSettingsPayload struct {
   on the wire lets a fixture pin the full shape. On the reply, every field is
   always a real answer, not an absence: `SessionID ""` means "nothing to
   address", `Model`/`Effort` `""` mean "inherited default, no per-session
-  override", `YOLO false` means permissions are enforced, and `WindowTokens 0`
-  means the daemon has no trustworthy window reading — either the usage seam
+  override", and `WindowTokens 0` means the daemon has no trustworthy window
+  reading. `YOLO false` means only that the current child has not confirmed
+  bypass; paired with `PermissionMode ""`, it is an unavailable posture rather
+  than proof that permissions are enforced. The window can be unavailable
+  because the usage seam
   is unwired, or (#2100) the used count came out above the window the daemon
   believed, which disproves the belief; read it against `UsedTokens` to tell
   the two apart (`UsedTokens 0` against a non-zero `WindowTokens` is a genuine
@@ -52,26 +55,24 @@ type SessionSettingsPayload struct {
 - **The field gates *which* session the reply describes (#1610).** A
   `conversation_id` naming a conversation this daemon hosts, with a live
   bound session, is answered with **that conversation's own** values — never
-  the shared bootstrap session's. An absent/empty `conversation_id`, one
-  naming a conversation this daemon does not host, or one with no live bound
-  session is answered with a zero-valued `SessionSettingsPayload`, never an
-  error frame: `session_id: ""` is already the defined "no session to
-  address" answer, so the reply shape stays constant. The reported id and the
-  reported values always move together, because both come from the single
-  `RunConfig` `RunConfigFor` returns — a client can never read one session's
-  values and write to another. There is no bootstrap-scoped fallback for this
-  verb; that route was retired with `BootstrapSessionID` (#678 AC#4).
+  the shared bootstrap session's. A dormant binding is also resolved: it keeps
+  the persisted session id, model, and effort while the permission pair and
+  context figures are unavailable. An absent/empty `conversation_id`, one
+  naming a conversation this daemon does not host, or one bound to no live or
+  dormant session is answered with a zero-valued `SessionSettingsPayload`,
+  never an error frame. The reported id and values still arrive through one
+  `RunConfig`, so a client can never read one session's values and write to
+  another. There is no bootstrap-scoped fallback for this verb.
 - **`PermissionMode` (#1687) reports a sixth value the write half's
-  `permission_mode` field cannot accept: `bypassPermissions`.** A resolved
-  session's `PermissionMode` and `YOLO` always agree, because
-  `sessions.canonicalSettings` derives both together at every construction
-  and update site — a session in bypass reports `permission_mode:
-  "bypassPermissions"` and `yolo: true`. Deliberate, not a gap: the read
-  half exists so a client's menu label comes from the daemon's own state,
-  and suppressing the true posture would make that label lie. `""` on this
-  field means "nothing resolved", the same as `session_id: ""` — never an
-  unnamed mode, since `canonicalSettings` normalises every resolved session
-  to one of the six.
+  `permission_mode` field cannot accept: `bypassPermissions`.** Since #2510,
+  the pair comes only from `Runner.ConfirmedPermissionMode` for the exact
+  current child, never from stored settings or launch argv. Confirmed bypass
+  reports `permission_mode: "bypassPermissions"` and `yolo: true`; any live
+  child without a confirmation, and every dormant session with no child,
+  reports `permission_mode: ""` and `yolo: false` while preserving the
+  resolved id and stored model/effort. The empty mode therefore means
+  "confirmation unavailable", not necessarily "nothing resolved", and
+  `yolo: false` alone is not evidence that permissions are enforced.
 
 Golden round-trips in `settings_test.go`: `TestRequestSessionSettingsPayload_RoundTrip`
 against `testdata/request_session_settings.json` (non-empty fixture id — this

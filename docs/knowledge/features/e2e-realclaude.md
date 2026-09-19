@@ -93,6 +93,14 @@ finding in
 [interactive_stream_attachment_read_test.go](e2e-realclaude-interactive-stream-attachment-read-test-go.md#lessons-that-outlive-this-ticket),
 which read the opposite way only because it measured a bypassed child.
 
+An enforcement test must correlate a permission modal to the tool call it is
+meant to prove. The first `TestInteractiveStreamSessionSettingsReportsConfirmedPermissionMode`
+accepted a `Read` sighting and any modal from the same turn; it could therefore
+pass if `Read` ran ungated while another tool prompted. When a harness exposes
+only the turn's distinct tool names, require that set to be exactly `Read`
+before treating the modal as the outside-workspace Read gate. A prompt telling
+the model not to use another tool is guidance, not evidence of what ran.
+
 Live delegation turns have an extra, valid envelope before the forwarded child
 response: claude emits the delegated prompt as a `user` text block, which the
 stream parser intentionally surfaces as `unrecognized_message` with

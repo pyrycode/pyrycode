@@ -287,6 +287,10 @@ func startPermissionModalResolutionHarness(t *testing.T, model string, stdioPerm
 }
 
 func startObservedPermissionHarness(t *testing.T, model string, stdioPermissionPrompt bool, configure func(string) string) (*perConvHarness, string, func()) {
+	return startObservedPermissionHarnessWithOperatorBypass(t, model, stdioPermissionPrompt, configure, false)
+}
+
+func startObservedPermissionHarnessWithOperatorBypass(t *testing.T, model string, stdioPermissionPrompt bool, configure func(string) string, operatorBypass bool) (*perConvHarness, string, func()) {
 	t.Helper()
 	// No t.Parallel: WithWorktreeAuthenticated calls t.Setenv.
 	if _, err := exec.LookPath("claude"); err != nil {
@@ -348,7 +352,7 @@ func startObservedPermissionHarness(t *testing.T, model string, stdioPermissionP
 	if configure != nil {
 		claudeBin = configure(claudeBin)
 	}
-	d := spawnPermissionDaemon(t, home, workdir, claudeBin, relayURL, model)
+	d := spawnPermissionDaemon(t, home, workdir, claudeBin, relayURL, model, operatorBypass)
 	t.Cleanup(func() { d.stop(t) })
 
 	serverID := readPersistedServerID(t, home)

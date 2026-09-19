@@ -216,16 +216,17 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 // handleRequestSessionSettings answers an inbound request_session_settings
 // control frame with the run configuration of the conversation the client named
 // (#491, #1214, #1610): that conversation's bound session id to address changes
-// to, the model / effort / YOLO / permission mode in force on it, and its
-// context-window occupancy. It is the READ half of the #844 cluster, which
-// shipped write-only.
+// to, its stored model and effort, the current child's last confirmed permission
+// mode and derived YOLO bit when available, and its context-window occupancy. It
+// is the READ half of the #844 cluster, which shipped write-only.
 //
 // The reported permission mode (#1687) is what lets a client label its menu from
-// the daemon's state rather than from the request it last sent. It can name a
-// posture the WRITE half refuses to accept — a bypass session reports
-// "bypassPermissions" here while only the YOLO bit can set it — because the
-// daemon stores mode and YOLO so they cannot disagree, and reporting the posture
-// the session is actually in is the point of a read half.
+// Claude's last confirmation for this exact current child rather than from the
+// request it last sent, stored launch intent, or argv. It can name a posture the
+// WRITE half refuses to accept — a bypass child reports "bypassPermissions"
+// here while only the YOLO bit can request it. If no current-child confirmation
+// exists, both permission fields stay zero while the resolved id, model and
+// effort remain present.
 //
 // Intercepted in dispatchAppFrame before dispatch.Route, like
 // handleSetSessionSettings above, and runs on the manager's single Run dispatch
@@ -254,8 +255,9 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 //     into its error string.
 //  3. Resolve, or don't (#1610): one conversation-keyed read of RunConfigFor.
 //     A request that names no conversation, names one this daemon does not host,
-//     or names one bound to no live session resolves NOTHING and falls through
-//     with every value at zero.
+//     or names one bound to no known live or dormant session resolves NOTHING
+//     and falls through with every value at zero. A dormant session still
+//     resolves its id, model and effort with an unavailable permission pair.
 //  4. No nil-seam error branch: unlike the write path, the seam degrades to its
 //     zero value, which the wire contract defines as a real answer
 //     ("" ⇒ nothing to address, 0 window ⇒ usage unwired). A read that reports
@@ -317,9 +319,9 @@ func (m *V2SessionManager) handleRequestSessionSettings(ctx context.Context, s *
 	// All seven fields come from the one RunConfig, so the reported id and the
 	// reported values always describe the same session — including in the zero
 	// case, which the wire contract already defines as a real answer. That extends
-	// to the permission mode and the YOLO bit, which the daemon stores so they can
-	// never disagree (#1687), so no client can read a posture assembled from two
-	// different sessions.
+	// to the permission mode and the YOLO bit, which the producer derives together
+	// from one current-child confirmation, so no client can read a posture assembled
+	// from two different sessions.
 	payload, err := json.Marshal(protocol.SessionSettingsPayload{
 		SessionID:      cfg.SessionID,
 		Model:          cfg.Model,

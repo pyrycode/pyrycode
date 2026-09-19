@@ -278,6 +278,13 @@ func (a streamRunner) SetSpawnPermissionMode(mode string) { a.install.setSpawnPe
 // vocabulary to keep in step with the writer's.
 func (a streamRunner) SetPermissionMode(mode string) error { return a.r.SetPermissionMode(mode) }
 
+// ConfirmedPermissionMode forwards the current-child informational read added by
+// #2511. It stays off sessions.Runner because its only consumer is the
+// conversation-keyed settings resolver in this package.
+func (a streamRunner) ConfirmedPermissionMode() (string, bool) {
+	return a.r.ConfirmedPermissionMode()
+}
+
 // BeginTeardown forwards to (*streamsup.Runner).BeginTeardown (#1513), arming the
 // write-refusal gate for a deliberate kill so a racing turn is refused and retried
 // against the successor instead of being written into the dying child — where the
@@ -1142,3 +1149,4 @@ func stripSessionIDFlags(args []string) []string {
 // package declares no assertion of its own because the sole production
 // implementation lives here.
 var _ sessions.Runner = streamRunner{}
+var _ confirmedPermissionModeReader = streamRunner{}
