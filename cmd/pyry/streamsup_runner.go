@@ -509,6 +509,14 @@ func (a streamRunner) QueryContextUsage(ctx context.Context, detail string) (tur
 	return a.r.QueryContextUsage(ctx, detail)
 }
 
+// QueryAppliedSettings asks this runner's exact live child for the bounded model
+// and nullable effort Claude applied. It stays off sessions.Runner because #2505
+// adds no general session-lifecycle consumer; the client projection belongs to
+// #2507 and will assert this optional concrete capability.
+func (a streamRunner) QueryAppliedSettings(ctx context.Context) (streamsup.AppliedSettings, bool) {
+	return a.r.QueryAppliedSettings(ctx)
+}
+
 // ReconnectMCPServer and SetMCPServerEnabled forward the two MCP actuations #2418
 // landed on the concrete runner. They are the WRITE half of the pair whose read half is
 // QueryMCPStatus above and stay off sessions.Runner for its reason: their only consumer

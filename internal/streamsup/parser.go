@@ -2559,6 +2559,11 @@ type Parser struct {
 	// registration from callers while Write consumes stdout on another goroutine.
 	contextUsageQueries contextUsageQueries
 
+	// appliedSettingsQueries correlates requester-private get_settings reads. A
+	// claimed reply completes one waiter and reaches no shared event or record. Its
+	// own mutex covers registration from callers and claims from the stdout forwarder.
+	appliedSettingsQueries appliedSettingsQueries
+
 	// mcpStatusQueries correlates requester-private status reads. Unlike the
 	// automatic status path below, a claimed response completes one waiter and
 	// never reaches the shared event sink. Its own mutex covers registration from
@@ -2651,12 +2656,13 @@ func (p *Parser) beginMCPStatusChild(eligible bool, request func() error) {
 	p.permissionModes.beginChild()
 	// A child replacement terminates every query aimed at its predecessor. The
 	// request-id prefix keeps any already-buffered late reply private even after
-	// its pending entry is gone. Actuations and context-usage queries retire on the
-	// same boundary and for the same reason: a waiter must not outlive the exact
-	// child it targeted.
+	// its pending entry is gone. Actuations, context-usage queries and applied-settings
+	// queries retire on the same boundary and for the same reason: a waiter must not
+	// outlive the exact child it targeted.
 	p.mcpStatusQueries.failAll()
 	p.mcpActuations.failAll()
 	p.contextUsageQueries.failAll()
+	p.appliedSettingsQueries.failAll()
 	p.mcpStatusPolicy = mcpStatusChildPolicy{
 		installed: true,
 		eligible:  eligible,
@@ -2698,6 +2704,18 @@ func (p *Parser) removeContextUsageQuery(id string, pending *pendingContextUsage
 
 func (p *Parser) failContextUsageQueries() {
 	p.contextUsageQueries.failAll()
+}
+
+func (p *Parser) registerAppliedSettingsQuery(id string) *pendingAppliedSettingsQuery {
+	return p.appliedSettingsQueries.register(id)
+}
+
+func (p *Parser) removeAppliedSettingsQuery(id string, pending *pendingAppliedSettingsQuery) {
+	p.appliedSettingsQueries.remove(id, pending)
+}
+
+func (p *Parser) failAppliedSettingsQueries() {
+	p.appliedSettingsQueries.failAll()
 }
 
 func (p *Parser) registerMCPStatusQuery(id string) *pendingMCPStatusQuery {
@@ -3769,6 +3787,25 @@ type contextUsageResponseLine struct {
 	} `json:"response"`
 }
 
+// appliedSettingsResponseLine declares only the successful response discriminator
+// and the applied object. Effective settings, sources and all other get_settings
+// siblings are structurally unreachable from the decoder.
+type appliedSettingsResponseLine struct {
+	Response struct {
+		Subtype  string `json:"subtype"`
+		Response *struct {
+			Applied json.RawMessage `json:"applied"`
+		} `json:"response"`
+	} `json:"response"`
+}
+
+// appliedSettingsLine uses raw fields so missing effort remains distinguishable
+// from explicit null and wrong JSON types cannot collapse to zero strings.
+type appliedSettingsLine struct {
+	Model  json.RawMessage `json:"model"`
+	Effort json.RawMessage `json:"effort"`
+}
+
 type pendingContextUsageRequest struct {
 	done    chan struct{}
 	success bool
@@ -3924,6 +3961,97 @@ func (q *contextUsageQueries) failAll() {
 	q.mu.Unlock()
 	for _, query := range pending {
 		query.complete(turnevent.ContextUsage{}, false)
+	}
+}
+
+type appliedSettingsQueryResult struct {
+	settings AppliedSettings
+	ok       bool
+}
+
+// pendingAppliedSettingsQuery keeps the writer's verdict separate from the
+// response result. An early reply may be claimed while Write is still returning;
+// it cannot become available until that write is known to have succeeded.
+type pendingAppliedSettingsQuery struct {
+	writeDone  chan struct{}
+	writeOK    bool
+	writeOnce  sync.Once
+	result     chan appliedSettingsQueryResult
+	resultOnce sync.Once
+}
+
+func newPendingAppliedSettingsQuery() *pendingAppliedSettingsQuery {
+	return &pendingAppliedSettingsQuery{
+		writeDone: make(chan struct{}),
+		result:    make(chan appliedSettingsQueryResult, 1),
+	}
+}
+
+func (p *pendingAppliedSettingsQuery) resolveWrite(ok bool) {
+	p.writeOnce.Do(func() {
+		p.writeOK = ok
+		close(p.writeDone)
+	})
+}
+
+func (p *pendingAppliedSettingsQuery) written() bool {
+	<-p.writeDone
+	return p.writeOK
+}
+
+func (p *pendingAppliedSettingsQuery) complete(settings AppliedSettings, ok bool) {
+	p.resultOnce.Do(func() {
+		p.result <- appliedSettingsQueryResult{settings: settings, ok: ok}
+	})
+}
+
+type appliedSettingsQueries struct {
+	mu      sync.Mutex
+	pending map[string]*pendingAppliedSettingsQuery
+}
+
+func (q *appliedSettingsQueries) register(id string) *pendingAppliedSettingsQuery {
+	pending := newPendingAppliedSettingsQuery()
+	q.mu.Lock()
+	if q.pending == nil {
+		q.pending = make(map[string]*pendingAppliedSettingsQuery)
+	}
+	q.pending[id] = pending
+	q.mu.Unlock()
+	return pending
+}
+
+// claim consumes late ids in the private namespace even after their waiter was
+// canceled or retired. That keeps a predecessor's payload off every shared path.
+func (q *appliedSettingsQueries) claim(id string) (*pendingAppliedSettingsQuery, bool) {
+	q.mu.Lock()
+	pending := q.pending[id]
+	delete(q.pending, id)
+	q.mu.Unlock()
+	if pending != nil {
+		return pending, true
+	}
+	return nil, strings.HasPrefix(id, appliedSettingsQueryIDPrefix)
+}
+
+func (q *appliedSettingsQueries) remove(id string, pending *pendingAppliedSettingsQuery) {
+	q.mu.Lock()
+	if q.pending[id] == pending {
+		delete(q.pending, id)
+	}
+	q.mu.Unlock()
+}
+
+func (q *appliedSettingsQueries) failAll() {
+	q.mu.Lock()
+	pending := make([]*pendingAppliedSettingsQuery, 0, len(q.pending))
+	for id, query := range q.pending {
+		pending = append(pending, query)
+		delete(q.pending, id)
+	}
+	q.mu.Unlock()
+	for _, query := range pending {
+		query.complete(AppliedSettings{}, false)
 	}
 }
 
@@ -5386,13 +5514,19 @@ func (p *Parser) consumeLine(line []byte) {
 		if p.claimMCPActuation(line) {
 			return
 		}
-		// Third in the same family and for the same reason, but with one ordering
-		// constraint the other two do not carry: it must run ABOVE emitContextUsage
+		// This context-usage claim has one ordering
+		// constraint the other three do not carry: it must run ABOVE emitContextUsage
 		// (#2430). Both context-usage paths land in this arm, so a claim below the emit
 		// would publish a caller's private reading onto the shared sink as an
-		// unsolicited frame before handing it over. Order among the three claims is
+		// unsolicited frame before handing it over. Order among the private claims is
 		// free — their id namespaces are disjoint.
 		if p.claimContextUsageQuery(line) {
+			return
+		}
+		// get_settings is private too. Claim it before every shared consumer so
+		// effective settings and sources present beside applied cannot reach the
+		// control-response record or any event path.
+		if p.claimAppliedSettingsQuery(line) {
 			return
 		}
 		p.emitContextUsage(line)
@@ -8013,6 +8147,66 @@ func (p *Parser) claimContextUsageQuery(line []byte) bool {
 		return true
 	}
 	pending.complete(decodeContextUsage(line))
+	return true
+}
+
+// decodeAppliedSettings returns only bounded, independently owned model and effort
+// values. Raw messages preserve missing-versus-null for effort; every other sibling
+// in get_settings is absent from the decode types and therefore cannot escape.
+func decodeAppliedSettings(line []byte) (AppliedSettings, bool) {
+	var response appliedSettingsResponseLine
+	if err := json.Unmarshal(line, &response); err != nil ||
+		response.Response.Subtype != controlResponseSuccess ||
+		response.Response.Response == nil ||
+		len(response.Response.Response.Applied) == 0 {
+		return AppliedSettings{}, false
+	}
+
+	var applied appliedSettingsLine
+	if err := json.Unmarshal(response.Response.Response.Applied, &applied); err != nil ||
+		len(applied.Model) == 0 || len(applied.Effort) == 0 {
+		return AppliedSettings{}, false
+	}
+	var model string
+	if err := json.Unmarshal(applied.Model, &model); err != nil ||
+		model == "" || len(model) > maxModelResolved {
+		return AppliedSettings{}, false
+	}
+	settings := AppliedSettings{Model: strings.Clone(model)}
+	if bytes.Equal(bytes.TrimSpace(applied.Effort), []byte("null")) {
+		return settings, true
+	}
+	var effort string
+	if err := json.Unmarshal(applied.Effort, &effort); err != nil ||
+		len(effort) > maxModelEffortLevel {
+		return AppliedSettings{}, false
+	}
+	effort = strings.Clone(effort)
+	settings.Effort = &effort
+	return settings, true
+}
+
+// claimAppliedSettingsQuery consumes a requester-private get_settings reply before
+// any shared control-response consumer sees it. Matching the id is terminal even when
+// the subtype or payload is unusable; a later duplicate cannot revive the query.
+func (p *Parser) claimAppliedSettingsQuery(line []byte) bool {
+	var idLine contextUsageResponseIDLine
+	if err := json.Unmarshal(line, &idLine); err != nil || idLine.Response.RequestID == "" {
+		return false
+	}
+	pending, claimed := p.appliedSettingsQueries.claim(idLine.Response.RequestID)
+	if !claimed {
+		return false
+	}
+	if pending == nil {
+		return true
+	}
+	if !pending.written() {
+		pending.complete(AppliedSettings{}, false)
+		return true
+	}
+	settings, ok := decodeAppliedSettings(line)
+	pending.complete(settings, ok)
 	return true
 }
 

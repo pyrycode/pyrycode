@@ -1729,9 +1729,89 @@ func (r *Runner) QueryContextUsage(ctx context.Context, detail string) (turneven
 	}
 }
 
+// AppliedSettings is the bounded subset of Claude's get_settings reply a daemon
+// caller may use. Model and Effort are child-authored display data, not trusted
+// identifiers or authorization input. Effort nil preserves an explicit JSON null;
+// unavailable information is reported by QueryAppliedSettings's bool instead.
+//
+// No effective setting, source, environment value, path or credential is decoded
+// into this type. Callers must not log a value wholesale merely because it is small.
+type AppliedSettings struct {
+	Model  string
+	Effort *string
+}
+
+// appliedSettingsQueryIDPrefix namespaces requester-private get_settings replies.
+// It must remain disjoint from the other private prefixes and from the bare decimal
+// sequence: each correlator consumes late unregistered ids in its own namespace.
+const appliedSettingsQueryIDPrefix = "applied-settings-query-"
+
+// QueryAppliedSettings asks the exact live child for the settings Claude applied and
+// waits for the response carrying this request's locally minted id. It returns only
+// bounded model and nullable effort copies; every refusal or unavailable outcome is
+// the false arm.
+//
+// A caller deadline is mandatory. Child exit and replacement retire the query, but a
+// live child can stay silent indefinitely; refusing an unbounded context prevents one
+// such child from retaining a waiter forever. Cancellation is honored before the
+// write, while waiting, and after a raced result.
+//
+// The ordering matches QueryContextUsage: snapshot the binding under Runner.mu,
+// register outside that leaf lock, then recheck childGeneration before writing.
+func (r *Runner) QueryAppliedSettings(ctx context.Context) (AppliedSettings, bool) {
+	if ctx.Err() != nil || r.parser == nil {
+		return AppliedSettings{}, false
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		return AppliedSettings{}, false
+	}
+
+	r.mu.Lock()
+	if r.stdin == nil || r.rotating {
+		r.mu.Unlock()
+		return AppliedSettings{}, false
+	}
+	w := r.stdin
+	generation := r.childGeneration
+	r.mu.Unlock()
+
+	id := appliedSettingsQueryIDPrefix + r.nextControlID()
+	pending := r.parser.registerAppliedSettingsQuery(id)
+
+	r.mu.Lock()
+	current := r.stdin != nil && !r.rotating && r.childGeneration == generation
+	r.mu.Unlock()
+	if !current || ctx.Err() != nil {
+		r.parser.removeAppliedSettingsQuery(id, pending)
+		pending.resolveWrite(false)
+		pending.complete(AppliedSettings{}, false)
+		return AppliedSettings{}, false
+	}
+
+	err := WriteAppliedSettings(w, id)
+	pending.resolveWrite(err == nil)
+	if err != nil || ctx.Err() != nil {
+		r.parser.removeAppliedSettingsQuery(id, pending)
+		pending.complete(AppliedSettings{}, false)
+		return AppliedSettings{}, false
+	}
+
+	select {
+	case result := <-pending.result:
+		if ctx.Err() != nil {
+			return AppliedSettings{}, false
+		}
+		return result.settings, result.ok
+	case <-ctx.Done():
+		r.parser.removeAppliedSettingsQuery(id, pending)
+		return AppliedSettings{}, false
+	}
+}
+
 // nextControlID mints the next locally-unique control-request correlation id,
 // shared by Interrupt, SetModel, SetPermissionMode, RequestInitialize,
-// RequestMCPStatus, QueryMCPStatus, RequestContextUsage and QueryContextUsage
+// RequestMCPStatus, QueryMCPStatus, RequestContextUsage, QueryContextUsage and
+// QueryAppliedSettings
 // (RevokeBypass draws on it through SetPermissionMode,
 // minting exactly one id per call, not two). The atomic counter is
 // unique within the runner's lifetime — one sequence, not one per subtype, since
@@ -2602,6 +2682,9 @@ func (r *Runner) takeStdin() io.WriteCloser {
 		// each correlator carries its own mutex, so nesting them here would be the one
 		// arrangement this file's lock discipline forbids.
 		r.parser.failContextUsageQueries()
+		// Applied-settings queries target the same exact child and retire outside
+		// Runner.mu for the same lock-order reason.
+		r.parser.failAppliedSettingsQueries()
 	}
 	return w
 }

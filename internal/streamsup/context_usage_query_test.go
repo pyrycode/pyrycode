@@ -480,14 +480,15 @@ func TestRunner_QueryContextUsage_UnserviceableAskReturnsNotAnswered(t *testing.
 	})
 }
 
-// The three control-id namespaces sharing the control_response arm must stay pairwise
-// disjoint. A collision costs a hang rather than a miss, because each correlator claims
-// every unregistered id carrying its own prefix.
+// The four private control-id namespaces sharing the control_response arm must stay
+// pairwise disjoint. A collision costs a hang rather than a miss, because each
+// correlator claims every unregistered id carrying its own prefix.
 func TestContextUsageQueryIDPrefix_DisjointFromSiblingNamespaces(t *testing.T) {
 	prefixes := map[string]string{
-		"context usage query": contextUsageQueryIDPrefix,
-		"mcp status query":    mcpStatusQueryIDPrefix,
-		"mcp actuation":       mcpActuationIDPrefix,
+		"applied settings query": appliedSettingsQueryIDPrefix,
+		"context usage query":    contextUsageQueryIDPrefix,
+		"mcp status query":       mcpStatusQueryIDPrefix,
+		"mcp actuation":          mcpActuationIDPrefix,
 	}
 	for name, prefix := range prefixes {
 		if prefix == "" {

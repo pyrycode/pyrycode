@@ -528,6 +528,38 @@ func WriteContextUsage(w io.Writer, requestID, detail string) error {
 	return nil
 }
 
+// marshalAppliedSettingsEnvelope returns one newline-terminated get_settings
+// request. The request object carries no subtype-specific fields.
+func marshalAppliedSettingsEnvelope(requestID string) ([]byte, error) {
+	env := controlRequest{
+		Type:      "control_request",
+		RequestID: requestID,
+		Request:   controlRequestInner{Subtype: "get_settings"},
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
+// WriteAppliedSettings writes one get_settings request to the live child's
+// held-open stdin and returns without waiting for its reply. The request id is
+// locally minted; fixed error contexts keep it out of logs.
+func WriteAppliedSettings(w io.Writer, requestID string) error {
+	if w == nil {
+		return ErrNoLiveChild
+	}
+	env, err := marshalAppliedSettingsEnvelope(requestID)
+	if err != nil {
+		return fmt.Errorf("streamsup: marshal applied settings: %w", err)
+	}
+	if _, err := w.Write(env); err != nil {
+		return fmt.Errorf("streamsup: write applied settings: %w", err)
+	}
+	return nil
+}
+
 // marshalMCPStatusEnvelope returns one newline-terminated mcp_status request.
 // Its request object carries no subtype-specific fields.
 func marshalMCPStatusEnvelope(requestID string) ([]byte, error) {
