@@ -3973,10 +3973,11 @@ dormant channel a client re-asserts its footer state on.
 session**, whatever else the frame carries — a `model`/`effort` sent alongside
 is refused too, not persisted on its own. A revive does not restore a
 persisted posture (see the dormant row under
-[`request_session_settings`](#request_session_settings)): the daemon reports
-`false` / `"default"` regardless of what was ever stored, so accepting a
-posture write here would report success for a change the very next read
-contradicts, and a restart would stop being a revocation point for a
+[`request_session_settings`](#request_session_settings)): while there is no
+current child, the daemon reports the permission pair as unavailable (`false`
+/ `""`) rather than treating stored intent as a running posture. Accepting a
+posture write here would therefore report success for a runtime change with no
+runtime to apply it to, and a restart would stop being a revocation point for a
 phone-granted bypass (#1487). This refusal reuses `session.not_found` — see
 [Error codes](#error-codes).
 
@@ -3997,7 +3998,7 @@ Two rules a client must build against, both enforced at the wire boundary:
 - **The field joins `yolo`, it does not replace it.** `yolo` keeps its meaning and is not going away in this version; a client that only ever sends `yolo` keeps working unchanged.
 - **A frame carrying both `permission_mode` and `yolo` is rejected as malformed**, whatever the two say. They are two spellings of one posture — `yolo: true` is `bypassPermissions`, `yolo: false` is `default` — so a frame carrying both is redundant or contradictory. The daemon refuses rather than picking a winner, so there is no precedence rule to get wrong: letting the mode win would silently downgrade an escalation, and letting `yolo` win would grant one from a frame that said `false`. **Send one or the other, never both.**
 
-**`bypassPermissions` is rejected on this field.** The bypass posture stays reachable only through `yolo: true`, so it keeps exactly one spelling on the wire. Note the asymmetry with the read half below, which *does* report `bypassPermissions` when the session is in it — a client labels its menu from the reported value and sends `yolo` to change that particular posture.
+**`bypassPermissions` is rejected on this field.** The bypass posture stays reachable only through `yolo: true`, so it keeps exactly one spelling on the wire. Note the asymmetry with the read half below, which *does* report `bypassPermissions` when the current child has confirmed it — a client labels its menu from the reported value and sends `yolo` to change that particular posture.
 
 A rejected value produces the same `protocol.malformed` reply as any other malformed request, echoing no part of what was sent, and **nothing is persisted** — the check runs before the daemon touches its session registry.
 
@@ -4046,8 +4047,8 @@ Direction **phone → binary** (inbound v2 control). Intercepted by the v2 sessi
 
 Three answers, and all three are a `session_settings` reply — **never an error frame**:
 
-- A `conversation_id` naming a conversation this daemon hosts, with a live bound session, is answered with **that session's** run configuration.
-- A `conversation_id` naming a conversation this daemon hosts, bound to a session it holds only as a persisted **dormant** registry entry — every conversation but the bootstrap, immediately after a daemon restart and before that session's first message revives it — is answered with **that entry's** `session_id`, `model` and `effort` (#2449). `yolo` and `permission_mode` are **not** the entry's stored posture: they report `false` / `"default"`, the posture a revive actually materialises, so a restart stays a revocation point for a phone-granted bypass (#1487). `used_tokens` and `window_tokens` are both `0` — see the field table below.
+- A `conversation_id` naming a conversation this daemon hosts, with a live bound session, is answered with **that session's** stored model and effort, context usage, and the current child's last confirmed permission posture when one is available.
+- A `conversation_id` naming a conversation this daemon hosts, bound to a session it holds only as a persisted **dormant** registry entry — every conversation but the bootstrap, immediately after a daemon restart and before that session's first message revives it — is answered with **that entry's** `session_id`, stored `model` and stored `effort` (#2449). Because there is no current child, `permission_mode` is `""` and `yolo` is `false`; neither stored posture nor future revive intent is used as fallback evidence. `used_tokens` and `window_tokens` are both `0` — see the field table below.
 - A `conversation_id` naming a conversation it does **not** host — or one bound to no session and no persisted record of one — is answered with a `session_settings` whose every field is at its zero value. That is not an error dressed up as a reply: `session_id: ""` is already the defined "the daemon has no session to address" answer, so the reply shape stays constant and a client parses one thing rather than branching on two. Both unresolvable cases produce the identical reply, so it distinguishes neither from the other.
 - An **empty or absent** `conversation_id` is answered with that same all-zero reply. A request that names no conversation names no session, so there is nothing for the daemon to describe — and there is nothing the client could be configuring either: `send_message` already refuses an unknown conversation with `conversation.not_found` and an unbound one with a retryable `server.binary_offline`, and never falls through to a shared session. `pyrycode-desktop#491`'s actual case — a sheet opened on a conversation the user has never sent a message in — stays fixed, because `create_conversation` mints **and binds** a dedicated session before it replies, so a conversation is addressable from the instant the client learns its id.
 
@@ -4064,23 +4065,23 @@ Answered by `session_settings` below, correlated by `in_reply_to`.
 
 #### `session_settings`
 
-Direction **binary → phone** (outbound). The current run configuration: which session to address, what is in force on it, and how full its context window is. All fields are always present (no omitempty), so **every zero value is a real answer rather than an absence**.
+Direction **binary → phone** (outbound). The resolved session's stored model and effort, the current child's last confirmed permission posture when available, and the context-window reading. All fields are always present (no omitempty), so **every zero value is a real answer rather than an omitted field**.
 
 This is the **read half** the settings cluster shipped without. Before it, a client scraped these values off [`screen_snapshot`](#screen_snapshot), which still carries copies of them. Do not do that in new clients, and prefer this route in existing ones: `screen_snapshot` is a picture of the terminal, and a daemon running the stream-json interactive runner has no terminal, so it answers `server.binary_offline` and takes the settings — which have nothing to do with a terminal — down with it. This route is gated on nothing but the interactive capability and answers on both runners.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `session_id` | string | The session to address a `set_session_settings` to. **Empty string = the daemon has no session to address**; a client must treat the settings as read-only rather than sending an empty id, which would be rejected. |
-| `model` | string | Model override in force; **empty string = inherited daemon default** (no override). This is the **override**, not what claude announced for the turn — see [`model_announced`](#model_announced). |
-| `effort` | string | Reasoning-effort override in force; **empty string = inherited daemon default** (no override). |
-| `yolo` | bool | Bypass-permissions (`--dangerously-skip-permissions`) on/off; **`false` = permissions enforced** (the fail-safe default). |
-| `permission_mode` | string | The posture in force (#1687) — one of the five write-half modes, or `bypassPermissions`. **`""` means no session resolved**, not an unnamed mode: it occurs only in the all-zero reply, alongside `session_id: ""`. This is the value a client labels its permission menu from, rather than the request it last sent. |
+| `model` | string | Stored model override; **empty string = inherited daemon default** (no override). This is the **override**, not what claude announced for the turn — see [`model_announced`](#model_announced). |
+| `effort` | string | Stored reasoning-effort override; **empty string = inherited daemon default** (no override). |
+| `yolo` | bool | Derived from the current child's last confirmed permission mode: `true` only for confirmed `bypassPermissions`. **`false` alone is not proof that permissions are enforced**; it also accompanies an unavailable confirmation. |
+| `permission_mode` | string | The last permission posture Claude confirmed for the exact current child (#2510) — one of the five write-half modes, or `bypassPermissions`. **`""` means no current-child confirmation is available**, not necessarily that no session resolved. It can accompany a non-empty `session_id` for a live child that has not confirmed yet, or for a dormant session with no child. Stored settings and launch argv are never fallback proof. |
 | `used_tokens` | int | Context-window tokens consumed by the latest turn, read from the transcript under **the addressed session's own working directory** — not the daemon's (#2423). A conversation spawned in a workspace reports that workspace's own count; before #2423 every such conversation read against the daemon's directory instead and reported `0`. `0` against a non-zero `window_tokens` is a genuine fresh session. **A reply naming a session the daemon is not currently running** — a dormant registry entry, answered before its first revive — **carries `0` here too**, paired with `window_tokens: 0` below rather than the two read separately (#2449): there is no transcript to read until the session is revived. |
 | `window_tokens` | int | Context-window size. **`0` = the usage reader is unwired**, not an empty window — do not render a percentage from it. **A dormant session's reply also reports `0` here**, alongside `used_tokens: 0` above, rather than the usage reader's default window: reporting a genuine window beside a zero used count would claim a fresh session on a channel that may in fact be near full (#2449). |
 
-`permission_mode` and `yolo` always agree, because the daemon stores them so they cannot disagree: a session in bypass reports `permission_mode: "bypassPermissions"` **and** `yolo: true`. So this reply can name a posture the write half refuses to accept on its own `permission_mode` field — that is deliberate, and it is why the read half exists: the menu's label comes from the daemon's state, not from what the client last sent.
+`permission_mode` and `yolo` are derived from the same current-child confirmation. Confirmed bypass reports `permission_mode: "bypassPermissions"` **and** `yolo: true`; an unavailable confirmation reports `permission_mode: ""` and `yolo: false`. The reply can therefore name a posture the write half refuses to accept on its own `permission_mode` field, but `yolo: false` without a non-empty `permission_mode` must be rendered as unknown rather than enforced.
 
-Scope: the values describe the session bound to the **conversation the request named**, and `session_id` names that same session, so a client reads and writes the same place. The whole set is keyed by conversation and moves as one — the daemon resolves the id and reads that session's settings under a single acquisition, so no field can describe a session another field does not, even against a concurrent idle eviction. A request that resolves to no session gets every field at its zero value; it is never answered with some other session's.
+Scope: the values describe the session bound to the **conversation the request named**, and `session_id` names that same session, so a client reads and writes the same place. The daemon first resolves the registry-owned session id, then reads stored settings and any current-child permission confirmation only for that exact id. A lifecycle transition between those reads can make the permission pair unavailable; it cannot substitute another session's posture. A request that resolves to no session gets every field at its zero value; it is never answered with some other session's.
 
 Example:
 

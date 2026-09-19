@@ -63,16 +63,20 @@ Two decisions worth restating because both are easy to undo by accident:
   revive (an id with no record revives to claude's defaults) and wrong for a
   reader, which would then report an unknown bound id as an addressable
   session with empty settings. `DormantSettingsFor` has its own miss.
-- **The posture is built, not cleared.** The literal names `Model` and
+- **The posture returned by this pool primitive is built, not cleared.** The
+  literal names `Model` and
   `Effort` only and is then passed through `canonicalSettings` — the same
   function `buildSession` applies to what `Revive` hands it — so `YOLO` is
   false and `PermissionMode` is `"default"` structurally, never copied from
   the entry. A restart stays a revocation point for a phone-granted
   permission bypass (#1487): a persisted `yolo` or non-default
   `permission_mode` cannot reach this read however the entry was written,
-  and the reported posture is guaranteed to equal the one `Revive` will
-  actually materialise, because both go through the same `canonicalSettings`
-  call rather than two places spelling the same constant.
+  and this method's posture is guaranteed to equal the launch intent `Revive`
+  will materialise, because both go through the same `canonicalSettings` call
+  rather than two places spelling the same constant. That value is not evidence
+  of a running child: `resolveBoundRunSettings` consumes only this answer's
+  model and effort and publishes `permission_mode: ""` / `yolo: false` until a
+  revived current child supplies its own confirmation.
 
 Not folded into `SettingsFor` as a fallback: that would change what "not
 found" means for every other caller of the live read, several of which use

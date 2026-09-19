@@ -1,15 +1,16 @@
-# Inbound `request_session_settings` (#491/#1214, extended #1586, conversation-keyed #1610, permission mode #1687, dormant reply #2449) — the read half of the #844 cluster
+# Inbound `request_session_settings` (#491/#1214, extended #1586, conversation-keyed #1610, dormant reply #2449, confirmed permission mode #2510) — the read half of the #844 cluster
 
 `request_session_settings` is a v2 **control** envelope (phone → binary),
 intercepted in `dispatchAppFrame`'s discriminator switch **before**
 `dispatch.Route` — same boundary as `set_session_settings` / `request_snapshot`
 / `request_debug_bundle`, no `dispatch.Route` handler. It consumes
-[the read-side wire vocabulary](protocol-package.md#session-settings-read-payloads-4911214-conversationid-field-1586-conversation-keyed-reply-1610-permission-mode-1687)
+[the read-side wire vocabulary](protocol-package-types-session-settings-read-payloads.md)
 (`RequestSessionSettingsPayload` / `SessionSettingsPayload`) and answers with
 the current run configuration: the session id a client must address a
-`set_session_settings` to, the model / effort / YOLO / permission mode
-(#1687) in force, and the context-window occupancy — **all seven fields
-describing the one session bound to the conversation the client named**
+`set_session_settings` to, stored model / effort, the current child's last
+confirmed YOLO / permission mode when available, and the context-window
+occupancy — **all seven fields describing the one session bound to the
+conversation the client named**
 (#1610). Before #1610 the reported id
 and the reported values could describe different sessions: the id followed
 whichever conversation the request named, but the values were always the
@@ -76,24 +77,24 @@ outright; every branch produces the same reply shape:
      Honouring it makes the relay fail closed on its own contract rather than
      on the producer's good behaviour — pinned by a **poisoned** refusal
      double in the unit tests (§ Test design).
-4. **Marshal + reply.** Unchanged shape, sourcing all seven fields from `cfg`
-   (`PermissionMode` added by #1687, riding the same struct so it inherits
-   the single-acquisition guarantee below without a new read).
+4. **Marshal + reply.** Unchanged shape, sourcing all seven fields from `cfg`.
+   `PermissionMode` and `YOLO` may be their zero values even when the stored
+   fields and session id are present; that is the defined unavailable posture,
+   not a partial marshal.
    No new log call on any reject branch — this verb fires on every sheet
    open, so a per-reject line would log more than the write path, and the
    only thing it could add is the caller's untrusted conversation id.
 
 - **`RunConfigFor func(conversationID string) (RunConfig, bool)` — the sole
   seam this handler consults (#1609 built it, #1610 wires it in).** One call
-  resolves a *named* conversation to its own bound session id, model / effort
-  / YOLO / permission mode (#1687) and context-window figures together, with a comma-ok for "not
-  addressable". `cmd/pyry` composes it (`runConfigFor`, layering
-  `resolveBoundRunSettings` over the conversations registry and
-  `Pool.SettingsFor` with the by-id `snapshotUsageFor` context-window reader)
-  and confirms the pool still holds the resolved id under one `SettingsFor`
-  acquisition before reporting anything, so no reported field can describe a
-  session another field does not — even against a concurrent idle eviction.
-  This handler inherits that refusal rather than re-deriving a weaker one.
+  resolves a *named* conversation to its own bound session id, stored model /
+  effort, confirmed YOLO / permission mode when available, and context-window
+  figures together, with a comma-ok for "not addressable". `cmd/pyry` composes
+  it (`runConfigFor`, layering `resolveBoundRunSettings` over the conversations
+  registry and exact-id pool reads with the by-id `snapshotUsageFor`
+  context-window reader). On a live hit, only that exact session's runner can
+  supply `ConfirmedPermissionMode`; a lifecycle race degrades the pair to
+  unavailable rather than falling back to settings, argv, or another runner.
   **Since #2449, a resolved id that the pool does not hold live is not
   automatically a refusal.** `resolveBoundRunSettings` tries `Pool.SettingsFor`
   first and, on a miss, `Pool.DormantSettingsFor` — the dormant registry entry
@@ -133,8 +134,8 @@ outright; every branch produces the same reply shape:
   | Decode failure / no payload / empty `conversation_id` | Zero-valued `session_settings` |
   | `RunConfigFor` nil (foreground / v1 / unwired) | Zero-valued `session_settings` |
   | Named `conversation_id`, `RunConfigFor` returns `ok == false` (unhosted, or bound to no session and no persisted record of one) | Zero-valued `session_settings` |
-  | Named `conversation_id`, bound to a session the pool holds live | That session's own run configuration, including context usage |
-  | Named `conversation_id`, bound to a session the pool holds only as a dormant registry entry (#2449) | That entry's `session_id`, `model` and `effort`; `yolo` false and `permission_mode` `"default"` regardless of what the entry persisted (#1487); `used_tokens` and `window_tokens` both zero — no transcript exists to read until the session is revived |
+  | Named `conversation_id`, bound to a session the pool holds live | That session's id and stored model/effort, context usage, and its exact current child's confirmed permission pair; before confirmation, the pair is `permission_mode: ""` / `yolo: false` |
+  | Named `conversation_id`, bound to a session the pool holds only as a dormant registry entry (#2449) | That entry's `session_id`, stored `model` and stored `effort`; `permission_mode: ""` / `yolo: false` because there is no current child; `used_tokens` and `window_tokens` both zero |
 
   `session_id: ""` is already the wire contract's defined "no session to
   address" answer, so the zero rows above are a real answer, not an error
@@ -162,7 +163,8 @@ bootstrap's.
 **Security / log discipline.** `conversation_id` is untrusted network input,
 a lookup key only: it crosses to trusted only through `RunConfigFor`, whose
 `cmd/pyry` producer resolves it against the daemon's own registry and
-confirms the pool still holds the bound id before reporting anything.
+uses only the registry-owned bound id for the live settings, dormant settings,
+current-runner confirmation, and context reads.
 Nothing downstream of the seam ever holds the caller's string — it reaches no
 log line, no error string, no filesystem path, and not the reply. The
 handler's only logging is the pre-existing `Debug` (`conn_id` only) and the
@@ -196,8 +198,9 @@ reddens the unhosted row's payload via the poison; a re-added bootstrap read
 reddens every addressable-adjacent row on both counters and the payload.
 
 **Concurrency.** No new goroutine, channel, or lock — runs only on `Run`,
-same as `handleRequestSnapshot`. The seam call replaced three synchronous
-closure calls (`KnownConversation` + `SnapshotSettings` + `SnapshotUsage`)
-with one (`RunConfigFor`); the `cmd/pyry` producer takes the conversations
-registry mutex and one `Pool.SettingsFor` RLock, both already taken by the
-seams it replaces, so net lock acquisitions went down, not up.
+same as `handleRequestSnapshot`. The `cmd/pyry` producer takes its registry
+and pool read locks sequentially, never nested. A live answer adds an exact-id
+`Pool.Lookup` and the runner's concurrency-safe confirmation read after
+`Pool.SettingsFor`; a dormant answer uses `DormantSettingsFor` instead. A
+lifecycle transition between those snapshots can make the permission pair
+unavailable, but cannot make it describe another session.
