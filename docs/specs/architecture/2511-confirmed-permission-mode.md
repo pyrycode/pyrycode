@@ -121,4 +121,17 @@ Pending for the documentation stage: update `docs/knowledge/features/streamsup-p
 
 ## Revisions
 
-None.
+### 2026-09-20 — bind correlation to the writer's child generation
+
+Verifier review found that registering the permission-mode correlation before
+reading `Runner.stdin` allowed a call begun between children to drift onto a newly
+bound successor after `beginMCPStatusChild` had already retired the registration.
+`Runner.SetPermissionMode` now snapshots the non-nil writer and runner child
+generation under `Runner.mu`, registers outside that leaf lock, and rechecks the
+generation before writing. A changed binding retires the pending entry and returns
+the existing no-live-child refusal without writing. The regression forces the
+between-child-to-successor ordering and proves zero bytes reach the successor.
+
+This strengthens the security review's concurrency finding: the correlation is now
+bound to both the parser generation retained in `pendingPermissionMode` and the
+runner generation of the writer that may receive the request.

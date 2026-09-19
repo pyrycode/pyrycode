@@ -361,6 +361,65 @@ func TestRunner_SetPermissionMode_EarlyReplyLosesToFailedWrite(t *testing.T) {
 	assertConfirmedPermissionMode(t, r, "prior-mode", true)
 }
 
+// A call that starts between children must not acquire a successor merely because
+// that child binds while correlation registration is in flight. Holding the
+// correlator lock makes the old register-before-snapshot ordering wait until the
+// successor is installed; the correct snapshot-first ordering observes no child
+// and refuses before touching the correlator.
+func TestRunner_SetPermissionMode_BetweenChildrenDoesNotDriftToSuccessor(t *testing.T) {
+	p := NewParser(func(turnevent.Event) {}, discardLogger())
+	predecessor := newMCPStatusQueryWriter()
+	r := permissionModeTestRunner(t, p, predecessor)
+	if old := r.takeStdin(); old == nil {
+		t.Fatal("takeStdin returned nil for installed predecessor")
+	}
+
+	p.permissionModes.mu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			p.permissionModes.mu.Unlock()
+		}
+	}()
+
+	done := make(chan error, 1)
+	go func() { done <- r.SetPermissionMode(permissionModePlanForTest) }()
+
+	var callErr error
+	finished := false
+	select {
+	case callErr = <-done:
+		finished = true
+		// Snapshot-first code can return while registration remains blocked.
+	case <-time.After(3 * time.Second):
+		// Register-first code is now blocked on the correlator lock below.
+	}
+
+	// Install the successor exactly as beginMCPStatusChild followed by setStdin
+	// would, while retaining the barrier that distinguishes the two orderings.
+	p.permissionModes.generation++
+	p.permissionModes.active = true
+	successor := newMCPStatusQueryWriter()
+	r.setStdin(successor, 0, false)
+	p.permissionModes.mu.Unlock()
+	locked = false
+
+	if !finished {
+		select {
+		case callErr = <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("SetPermissionMode did not finish after successor setup")
+		}
+	}
+	if !errors.Is(callErr, ErrNoLiveChild) {
+		t.Fatalf("SetPermissionMode error = %v, want ErrNoLiveChild", callErr)
+	}
+	if got := successor.count(); got != 0 {
+		t.Fatalf("successor writes = %d, want 0", got)
+	}
+	assertConfirmedPermissionMode(t, r, "", false)
+}
+
 func TestRunner_ConfirmedPermissionMode_ChildBoundaryClearsStateAndPending(t *testing.T) {
 	p := NewParser(func(turnevent.Event) {}, discardLogger())
 	w := newMCPStatusQueryWriter()

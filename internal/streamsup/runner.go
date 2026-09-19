@@ -1258,10 +1258,13 @@ func (r *Runner) Interrupt() error {
 // caller gets when no child is live — Stdin() is nil then, so nothing is written
 // and nothing panics.
 //
-// A runner wired to its concrete Parser registers the request id and requested mode
-// before writing. ConfirmedPermissionMode changes only after the write succeeds and
-// a success response carries both that exact id and an equal echoed mode. The method
-// still returns after the write rather than waiting for that response.
+// A runner wired to its concrete Parser snapshots the live child's writer and
+// generation before registering the request id and requested mode, then rechecks
+// that generation before writing. A call begun between children therefore cannot
+// drift onto a successor. ConfirmedPermissionMode changes only after the write
+// succeeds and a success response carries both that exact id and an equal echoed
+// mode. The method still returns after the write rather than waiting for that
+// response.
 //
 // Like RevokeBypass and unlike Interrupt it IS on sessions.Runner, and the
 // contrast is the rule rather than an exception: Interrupt's dispatch lives in
@@ -1288,11 +1291,26 @@ func (r *Runner) Interrupt() error {
 // holds it. Safe from any goroutine.
 func (r *Runner) SetPermissionMode(mode string) error {
 	id := r.nextControlID()
+	r.mu.Lock()
+	w := r.stdin
+	generation := r.childGeneration
+	r.mu.Unlock()
+
 	var pending *pendingPermissionMode
-	if r.parser != nil {
+	if r.parser != nil && w != nil {
 		pending = r.parser.registerPermissionMode(id, mode)
+		r.mu.Lock()
+		current := r.stdin != nil && r.childGeneration == generation
+		r.mu.Unlock()
+		if !current {
+			r.parser.removePermissionMode(id, pending)
+			pending.resolveWrite(false)
+			pending = nil
+			w = nil
+		}
 	}
-	err := WritePermissionMode(r.Stdin(), id, mode)
+
+	err := WritePermissionMode(w, id, mode)
 	if pending != nil {
 		if err != nil {
 			r.parser.removePermissionMode(id, pending)
