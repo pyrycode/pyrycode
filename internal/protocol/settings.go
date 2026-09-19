@@ -110,10 +110,13 @@ type SessionSettingsUpdatedPayload struct {
 // Keeping the field always on the wire lets a fixture pin the full shape.
 //
 // Scope: naming a conversation the daemon does not host, naming one bound to no
-// live session, or naming none at all are all answered with a zero-valued
-// SessionSettingsPayload, never an error frame and never another session's
-// values. Naming a hosted, bound conversation reports THAT session's id and
-// values together (see SessionSettingsPayload below).
+// known live or dormant session, or naming none at all are answered with a
+// zero-valued SessionSettingsPayload, never an error frame and never another
+// session's values. Naming a hosted, bound conversation reports THAT session's
+// id, stored model and stored effort together (see SessionSettingsPayload below).
+// Its permission pair comes only from the current child's last confirmation;
+// when no confirmation or no current child exists, that pair remains zero while
+// the resolved stored fields remain present.
 type RequestSessionSettingsPayload struct {
 	ConversationID string `json:"conversation_id"`
 }

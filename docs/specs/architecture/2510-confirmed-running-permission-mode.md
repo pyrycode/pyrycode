@@ -121,3 +121,14 @@ behavior. `runConfigFor`'s composition comments are corrected for the same reaso
 This brings the implementation to five production files, two above the ticket's
 three-file forecast and exactly at the five-file ticket boundary; the ticket
 remains under every boundary.
+
+### 2026-09-20 — correlate the enforcement modal to the Read probe
+
+Verifier review found that the live regression accepted a `Read` tool sighting
+beside any permission modal in the turn, so a different tool's modal could make
+the enforcement proof pass. The regression now requires the observed distinct
+tool set to be exactly `Read` before accepting the modal. The unconfirmed-live
+resolver row also carries non-empty model and effort sentinels, distinguishing
+their required preservation from an implementation that clears stored fields
+when the permission confirmation is unavailable. Leading protocol and handler
+comments now state the same dormant and unavailable contract.

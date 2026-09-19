@@ -111,8 +111,8 @@ func TestInteractiveStreamSessionSettingsReportsConfirmedPermissionMode(t *testi
 	if modal == nil {
 		t.Fatal("the confirmed default child raised no permission modal for the outside-workspace Read")
 	}
-	if !slices.Contains(tools, postureProbeReadTool) {
-		t.Fatalf("outside-workspace turn called tools %q, want %q", tools, postureProbeReadTool)
+	if want := []string{postureProbeReadTool}; !slices.Equal(tools, want) {
+		t.Fatalf("outside-workspace turn called distinct tools %q, want exactly %q so the observed modal belongs to Read", tools, want)
 	}
 	if !strings.Contains(reply, token) {
 		t.Fatal("outside-workspace Read completed without returning the file's witness token")

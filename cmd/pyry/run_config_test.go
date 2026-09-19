@@ -105,16 +105,16 @@ func TestResolveBoundRunSettings(t *testing.T) {
 	// half, which is what an id the daemon has no record of at all looks like.
 	//
 	// sess-dormant is in the dormant half only — the shape every non-bootstrap
-	// session has after a daemon restart (#2449). Its settings carry the default
-	// posture the pool's own dormant read canonicalises to, so the row below also
-	// pins that this resolver COPIES what it is handed rather than re-deriving a
-	// posture of its own.
+	// session has after a daemon restart (#2449). Its settings carry non-empty
+	// model and effort plus a stored posture, so the row below pins that the
+	// resolver preserves the first two while refusing the stored posture as proof
+	// of a current child's mode.
 	newReader := func() *settingsReaderDouble {
 		return &settingsReaderDouble{
 			settings: map[sessions.SessionID]sessions.SessionSettings{
 				"sess-a":        {Model: "claude-opus-4-8", Effort: "high", PermissionMode: "default"},
 				"sess-b":        {Model: "", Effort: "low", YOLO: true, PermissionMode: "bypassPermissions"},
-				"sess-defaults": {YOLO: true, PermissionMode: "bypassPermissions"},
+				"sess-defaults": {Model: "claude-haiku-4-5", Effort: "medium", YOLO: true, PermissionMode: "bypassPermissions"},
 			},
 			dormant: map[sessions.SessionID]sessions.SessionSettings{
 				"sess-dormant": {Model: "claude-sonnet-4-5", Effort: "low", PermissionMode: "default"},
@@ -171,9 +171,9 @@ func TestResolveBoundRunSettings(t *testing.T) {
 			wantAsked: []string{"live:sess-b", "mode:sess-b"},
 		},
 		{
-			name:      "a live session without confirmation preserves identity but reports permission unavailable",
+			name:      "a live session without confirmation preserves id model and effort but reports permission unavailable",
 			convID:    "conv-defaults",
-			want:      boundRunSettings{sessionID: "sess-defaults", live: true},
+			want:      boundRunSettings{sessionID: "sess-defaults", model: "claude-haiku-4-5", effort: "medium", live: true},
 			wantOK:    true,
 			wantAsked: []string{"live:sess-defaults", "mode:sess-defaults"},
 		},
