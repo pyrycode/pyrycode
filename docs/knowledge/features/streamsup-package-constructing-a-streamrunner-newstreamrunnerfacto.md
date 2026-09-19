@@ -47,14 +47,13 @@ is the row that reddens on any tree that keeps keying on the bare presence of th
 `storedMode`/`operatorBypass` — #2065's code review measured a `go test -overlay` mutant restoring
 the old presence check specifically to confirm this row catches it.
 
-**Cosmetic, not a fail-safe: an operator-bypass daemon's argv can carry the escalation flag twice.**
-When `operatorBypass` is true, `args` already carries the flag from the pass-through *and*
-`sessions.claudeSettingsArgs` appended a second copy unconditionally before this function ever runs;
-`withApprovalArgs` returns `args` unchanged, so the duplicate reaches the spawn. `claude
---dangerously-skip-permissions --dangerously-skip-permissions --help` parses and exits 0 — reviewed
-and accepted at #2065's code review rather than de-duplicated, since nothing hermetic in this
-package's own tests exercises the shape (`namesPermissionMode`/`dropPermissionMode` only ever touch
-`--permission-mode`, never the escalation flag).
+**The sessions boundary supplies one escalation flag (#2506).** When `operatorBypass` is true,
+the settings-free base may already carry one or repeated pass-through copies while
+`sessions.claudeSettingsArgs` contributes its unconditional copy. Sessions' final
+`composeSpawnArgs` boundary preserves the first exact token and removes the rest before this
+function runs. `withApprovalArgs` still returns that argv unchanged; it does not own deduplication,
+and its `namesPermissionMode` / `dropPermissionMode` helpers continue to touch only
+`--permission-mode`.
 
 Runs inside the shared factory closure, so it covers **both** the bootstrap runner
 and per-conversation runners — a per-conversation stream session cannot silently bypass the approval

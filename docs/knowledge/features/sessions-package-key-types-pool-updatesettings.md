@@ -90,17 +90,19 @@ without waiting for the session's next spawn.
 args + any construction-time resume suffix), set alongside the full
 `ClaudeArgs` at both construction sites (`Pool.New`, `Pool.buildSession`).
 `Session.spawnArgs(settings SessionSettings) []string` —
-`append(slices.Clone(s.spawnBase), claudeSettingsArgs(settings)...)` — is the
-**single** argv-recompose path outside construction, reusing `claudeSettingsArgs`
-verbatim so the YOLO fail-safe has exactly one origin. `UpdateSettings` captures
-`newArgs := sess.spawnArgs(merged)` and `sup := sess.sup` under `Pool.mu`, then
-releases the lock before either live-apply branch runs — **outside** `Pool.mu`,
-never touching `Session.lcMu`.
+`composeSpawnArgs(s.spawnBase, settings)` — is the **single** argv-recompose
+path outside construction. The shared final composer combines the immutable
+base with `claudeSettingsArgs`, removes later exact copies of the bypass flag,
+and leaves the base untouched for operator-bypass provenance. `UpdateSettings`
+captures `newArgs := sess.spawnArgs(merged)` and `sup := sess.sup` under
+`Pool.mu`, then releases the lock before either live-apply branch runs —
+**outside** `Pool.mu`, never touching `Session.lcMu`.
 
 **`newArgs` is a base for the adapter to shape, not a finished argv (#2446).**
-This package composes only `spawnBase + claudeSettingsArgs` — deliberately: it
-knows nothing about `mcpServersPath`, the stdio-prompt bit, or claude's approval
-flags, and must not. Both branches below hand `newArgs` to `sup`, which is
+This package composes only the stored base and settings-derived arguments, with
+exact duplicate bypass tokens removed — deliberately: it knows nothing about
+`mcpServersPath`, the stdio-prompt bit, or claude's approval flags, and must not.
+Both branches below hand `newArgs` to `sup`, which is
 `cmd/pyry`'s `streamRunner` adapter, and before #2446 that adapter forwarded it
 to `streamsup.Runner` unchanged. That skipped the two shapings the construction
 path applies to every runner's argv — stripping the baked `--session-id` and
