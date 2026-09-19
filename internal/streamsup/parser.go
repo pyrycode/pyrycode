@@ -2583,6 +2583,12 @@ type Parser struct {
 	// another lock.
 	mcpStatusPolicy mcpStatusChildPolicy
 
+	// permissionModes retains the last posture claude confirmed for this parser's
+	// exact current child. Unlike mcpStatusPolicy it has its own mutex: Runner
+	// registers writes and reads the confirmed value from arbitrary goroutines while
+	// Parser.Write consumes acknowledgements on the stdout forwarder.
+	permissionModes confirmedPermissionModes
+
 	// canUseTool is the seam an answerer installs to receive claude's inbound
 	// permission asks (#2282). Nil until SetCanUseToolHandler is called, and nil is
 	// the production state today: nothing spawns with --permission-prompt-tool stdio,
@@ -2638,10 +2644,11 @@ type mcpStatusChildPolicy struct {
 	request   func() error
 }
 
-// beginMCPStatusChild installs the policy for one exact spawn. It is called before
+// beginMCPStatusChild installs parser state for one exact spawn. It is called before
 // cmd.Start, so no output from that child can be classified under its predecessor's
-// eligibility or once-only latch.
+// eligibility, once-only latch, confirmed permission mode, or pending mode writes.
 func (p *Parser) beginMCPStatusChild(eligible bool, request func() error) {
+	p.permissionModes.beginChild()
 	// A child replacement terminates every query aimed at its predecessor. The
 	// request-id prefix keeps any already-buffered late reply private even after
 	// its pending entry is gone. Actuations and context-usage queries retire on the
@@ -2655,6 +2662,22 @@ func (p *Parser) beginMCPStatusChild(eligible bool, request func() error) {
 		eligible:  eligible,
 		request:   request,
 	}
+}
+
+func (p *Parser) endPermissionModeChild() {
+	p.permissionModes.endChild()
+}
+
+func (p *Parser) registerPermissionMode(id, mode string) *pendingPermissionMode {
+	return p.permissionModes.register(id, mode)
+}
+
+func (p *Parser) removePermissionMode(id string, pending *pendingPermissionMode) {
+	p.permissionModes.remove(id, pending)
+}
+
+func (p *Parser) confirmedPermissionMode() (string, bool) {
+	return p.permissionModes.confirmed()
 }
 
 func (p *Parser) registerContextUsageRequest(id string) *pendingContextUsageRequest {
@@ -2771,6 +2794,30 @@ func (p *Parser) noteControlAck(line []byte) {
 		return
 	}
 	p.postureGate.release(ack.Response.RequestID)
+}
+
+// noteConfirmedPermissionModeAck updates the informational current-child hold only
+// for the exact successful SetPermissionMode response that echoes the requested
+// mode. It logs nothing: request ids, modes, payloads, and decoder errors are all
+// excluded from the daemon log.
+func (p *Parser) noteConfirmedPermissionModeAck(line []byte) {
+	var idLine permissionModeResponseIDLine
+	if err := json.Unmarshal(line, &idLine); err != nil || idLine.Response.RequestID == "" {
+		return
+	}
+	pending := p.permissionModes.take(idLine.Response.RequestID)
+	if pending == nil || !pending.written() {
+		return
+	}
+
+	var response permissionModeResponseLine
+	if err := json.Unmarshal(line, &response); err != nil ||
+		response.Response.Subtype != controlResponseSuccess ||
+		response.Response.Response == nil ||
+		response.Response.Response.Mode != pending.mode {
+		return
+	}
+	p.permissionModes.confirmPending(pending)
 }
 
 // Write appends b to the line buffer, consumes every complete '\n'-delimited
@@ -3519,13 +3566,12 @@ type mcpStatusServerLine struct {
 // separation makes structural.
 //
 // It declares `subtype` and `request_id` and NO PAYLOAD KEY AT ALL: not `mode`, which
-// the ack does carry and which would be a second confirmation, not `models`, not
-// `account`. Nothing from the payload can therefore reach the gate's decision, its
-// path, or a log — the strongest form of systemInitLine's argument, since here the
-// omission is total. `mode` is left unread on purpose: the id correlation already
-// answers WHICH REQUEST this answered, and the echoed mode is claude's claim about
-// its own posture, which the live rig reads through the next turn's
-// init.permissionMode instead.
+// the ack does carry, not `models`, not `account`. Nothing from the payload can
+// therefore reach the posture gate's decision, its path, or a log — the strongest
+// form of systemInitLine's argument, since here the omission is total. The echoed
+// mode is read separately by permissionModeResponseLine for the informational
+// current-child hold; keeping that target separate prevents an invalid mode from
+// changing this gate's established id/subtype decode.
 //
 // request_id sits on the INNER wrapper beside subtype, not top-level beside `type`.
 // That is claude's own shape, captured verbatim in
@@ -3541,6 +3587,145 @@ type controlAckLine struct {
 		Subtype   string `json:"subtype"`
 		RequestID string `json:"request_id"`
 	} `json:"response"`
+}
+
+// permissionModeResponseIDLine is the narrow first decode of a permission-mode
+// acknowledgement. Retiring an exact id before decoding the echoed mode makes a
+// matched malformed reply terminal instead of letting a later duplicate turn it
+// into confirmation.
+type permissionModeResponseIDLine struct {
+	Response struct {
+		RequestID string `json:"request_id"`
+	} `json:"response"`
+}
+
+// permissionModeResponseLine declares only the success discriminator and echoed
+// posture needed to confirm one pending SetPermissionMode write. Claude-authored
+// error text and every sibling response field are structurally absent.
+type permissionModeResponseLine struct {
+	Response struct {
+		Subtype  string `json:"subtype"`
+		Response *struct {
+			Mode string `json:"mode"`
+		} `json:"response"`
+	} `json:"response"`
+}
+
+type pendingPermissionMode struct {
+	mode       string
+	generation uint64
+	writeDone  chan struct{}
+	writeOK    bool
+	writeOnce  sync.Once
+}
+
+func newPendingPermissionMode(mode string, generation uint64) *pendingPermissionMode {
+	return &pendingPermissionMode{
+		mode:       strings.Clone(mode),
+		generation: generation,
+		writeDone:  make(chan struct{}),
+	}
+}
+
+func (p *pendingPermissionMode) resolveWrite(ok bool) {
+	p.writeOnce.Do(func() {
+		p.writeOK = ok
+		close(p.writeDone)
+	})
+}
+
+func (p *pendingPermissionMode) written() bool {
+	<-p.writeDone
+	return p.writeOK
+}
+
+// confirmedPermissionModes is one child-scoped informational hold. Its mutex is a
+// leaf: no method performs I/O, logging, channel operations, or another lock
+// acquisition while holding it.
+type confirmedPermissionModes struct {
+	mu         sync.Mutex
+	active     bool
+	generation uint64
+	mode       string
+	available  bool
+	pending    map[string]*pendingPermissionMode
+}
+
+func (m *confirmedPermissionModes) beginChild() {
+	m.mu.Lock()
+	m.generation++
+	m.active = true
+	m.mode = ""
+	m.available = false
+	clear(m.pending)
+	m.mu.Unlock()
+}
+
+func (m *confirmedPermissionModes) endChild() {
+	m.mu.Lock()
+	m.generation++
+	m.active = false
+	m.mode = ""
+	m.available = false
+	clear(m.pending)
+	m.mu.Unlock()
+}
+
+func (m *confirmedPermissionModes) confirmInit(mode string) {
+	if mode == "" {
+		return
+	}
+	m.mu.Lock()
+	if m.active {
+		m.mode = strings.Clone(mode)
+		m.available = true
+	}
+	m.mu.Unlock()
+}
+
+func (m *confirmedPermissionModes) register(id, mode string) *pendingPermissionMode {
+	m.mu.Lock()
+	pending := newPendingPermissionMode(mode, m.generation)
+	if m.pending == nil {
+		m.pending = make(map[string]*pendingPermissionMode)
+	}
+	m.pending[id] = pending
+	m.mu.Unlock()
+	return pending
+}
+
+func (m *confirmedPermissionModes) take(id string) *pendingPermissionMode {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pending := m.pending[id]
+	delete(m.pending, id)
+	return pending
+}
+
+func (m *confirmedPermissionModes) remove(id string, pending *pendingPermissionMode) {
+	m.mu.Lock()
+	if m.pending[id] == pending {
+		delete(m.pending, id)
+	}
+	m.mu.Unlock()
+}
+
+func (m *confirmedPermissionModes) confirmPending(pending *pendingPermissionMode) {
+	m.mu.Lock()
+	if m.active && pending.generation == m.generation {
+		m.mode = strings.Clone(pending.mode)
+		m.available = true
+	}
+	m.mu.Unlock()
+}
+
+func (m *confirmedPermissionModes) confirmed() (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.active || !m.available {
+		return "", false
+	}
+	return strings.Clone(m.mode), true
 }
 
 // contextUsageResponseIDLine is the narrow first decode of a context-usage reply.
@@ -5212,6 +5397,7 @@ func (p *Parser) consumeLine(line []byte) {
 		}
 		p.emitContextUsage(line)
 		p.noteControlAck(line)
+		p.noteConfirmedPermissionModeAck(line)
 		p.emitModelList(line)
 		if status, ok := decodeMCPStatus(line); ok {
 			p.emit(status)
@@ -7621,6 +7807,9 @@ func (p *Parser) emitSessionFacts(il systemInitLine) {
 	// payload publishes (#2253).
 	version := bound(il.ClaudeCodeVersion, "claude_code_version", maxClaudeVersionField)
 	mode := bound(il.PermissionMode, "permission_mode", maxPermissionModeField)
+	if il.PermissionMode != "" {
+		p.permissionModes.confirmInit(mode)
+	}
 
 	p.emit(turnevent.SessionFacts{
 		// claude's values VERBATIM: no lowercasing, no alias expansion, no version

@@ -392,7 +392,8 @@ type Config struct {
 
 // PostureGate holds a session's user turns until the child it is armed against has
 // CONFIRMED the permission posture the daemon wrote to it (#2064). It is the first
-// thing in this package to READ a control ack; the three writers all write and stop.
+// shipped control-ack reader in this package. Writers still return after their write;
+// the parser now also retains an exact echoed mode as separate informational state.
 //
 // Its state is one string and one bool. armedID == "" is the OPEN state, so a gate
 // nobody armed is open and an ungated runner behaves exactly as it did before this type
@@ -857,8 +858,8 @@ type Runner struct {
 	// controlSeq mints locally-unique correlation ids for every control line the
 	// runner writes — Interrupt and SetPermissionMode alike. ONE sequence, not one per
 	// subtype: request_id must be unique across all in-flight control requests on
-	// the stream, so two counters would both mint "1" and a future ack-correlator
-	// could not tell an interrupt ack from a revocation ack. atomic.Uint64 because
+	// the stream, so two counters would both mint "1" and an ack correlator could not
+	// tell an interrupt ack from a permission-mode ack. atomic.Uint64 because
 	// either method may be called from a goroutine other than Run; the zero value
 	// is ready, so New adds nothing.
 	controlSeq atomic.Uint64
@@ -934,6 +935,18 @@ func (r *Runner) Stdin() io.Writer {
 		return nil
 	}
 	return r.stdin
+}
+
+// ConfirmedPermissionMode reports the last permission mode claude confirmed for
+// this runner's exact current child. The bool is false before a non-empty
+// system/init report, after child exit, and when the runner is not wired to its
+// concrete Parser. It never falls back to spawn intent, argv, or stored settings,
+// and performs no control write or posture-gate transition.
+func (r *Runner) ConfirmedPermissionMode() (string, bool) {
+	if r.parser == nil {
+		return "", false
+	}
+	return r.parser.confirmedPermissionMode()
 }
 
 // BeginRotation arms the rotation gate: from this call until the next child binds
@@ -1245,6 +1258,14 @@ func (r *Runner) Interrupt() error {
 // caller gets when no child is live — Stdin() is nil then, so nothing is written
 // and nothing panics.
 //
+// A runner wired to its concrete Parser snapshots the live child's writer and
+// generation before registering the request id and requested mode, then rechecks
+// that generation before writing. A call begun between children therefore cannot
+// drift onto a successor. ConfirmedPermissionMode changes only after the write
+// succeeds and a success response carries both that exact id and an equal echoed
+// mode. The method still returns after the write rather than waiting for that
+// response.
+//
 // Like RevokeBypass and unlike Interrupt it IS on sessions.Runner, and the
 // contrast is the rule rather than an exception: Interrupt's dispatch lives in
 // cmd/pyry, which can type-assert, whereas this method's consumers sit inside
@@ -1270,7 +1291,33 @@ func (r *Runner) Interrupt() error {
 // holds it. Safe from any goroutine.
 func (r *Runner) SetPermissionMode(mode string) error {
 	id := r.nextControlID()
-	if err := WritePermissionMode(r.Stdin(), id, mode); err != nil {
+	r.mu.Lock()
+	w := r.stdin
+	generation := r.childGeneration
+	r.mu.Unlock()
+
+	var pending *pendingPermissionMode
+	if r.parser != nil && w != nil {
+		pending = r.parser.registerPermissionMode(id, mode)
+		r.mu.Lock()
+		current := r.stdin != nil && r.childGeneration == generation
+		r.mu.Unlock()
+		if !current {
+			r.parser.removePermissionMode(id, pending)
+			pending.resolveWrite(false)
+			pending = nil
+			w = nil
+		}
+	}
+
+	err := WritePermissionMode(w, id, mode)
+	if pending != nil {
+		if err != nil {
+			r.parser.removePermissionMode(id, pending)
+		}
+		pending.resolveWrite(err == nil)
+	}
+	if err != nil {
 		return err
 	}
 	r.postureGate.retarget(id)
@@ -2325,6 +2372,9 @@ func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, workDir s
 	// inversion from streamrunner, which closes stdin after one turn.
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		if r.parser != nil {
+			r.parser.endPermissionModeChild()
+		}
 		// A spawn-setup failure is treated as a crashed iteration by the loop
 		// (backoff + retry), so a transient failure never kills the daemon.
 		// started stays false: claude never launched.
@@ -2333,6 +2383,9 @@ func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, workDir s
 
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close() // best-effort: nothing consumed it, child never ran
+		if r.parser != nil {
+			r.parser.endPermissionModeChild()
+		}
 		return false, fmt.Errorf("streamsup: start: %w", err)
 	}
 
@@ -2541,6 +2594,7 @@ func (r *Runner) takeStdin() io.WriteCloser {
 	r.childGeneration++
 	r.mu.Unlock()
 	if r.parser != nil {
+		r.parser.endPermissionModeChild()
 		r.parser.failMCPStatusQueries()
 		r.parser.failMCPActuations()
 		// Context-usage waiters retire on this boundary too (#2430). The calls stay

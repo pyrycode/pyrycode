@@ -26,6 +26,7 @@ type Config struct {
 func New(cfg Config) (*Runner, error)
 func (r *Runner) Run(ctx context.Context) error // blocks until ctx cancel; supervise loop
 func (r *Runner) Stdin() io.Writer               // held-open stdin, or nil between spawns
+func (r *Runner) ConfirmedPermissionMode() (string, bool)
 
 // sessions.Runner seam (#1097) — see "Satisfying sessions.Runner" below
 func (r *Runner) State() State
@@ -130,6 +131,39 @@ type Parser struct { /* sink, byte buffer, maxBuf, logger */ }
 func NewParser(sink func(turnevent.Event), logger *slog.Logger) *Parser
 func (p *Parser) Write(b []byte) (int, error) // io.Writer; set as Config.Stdout
 ```
+
+`Runner.ConfirmedPermissionMode` is a concurrency-safe, informational read of
+the last permission mode Claude confirmed for the exact child running now. A
+non-empty `system/init.permissionMode` supplies one confirmation source and is
+retained through the same 256-byte `truncateField` bound used by the unchanged
+`SessionFacts` event. The other source is a successful `SetPermissionMode`
+write followed by the first response carrying that exact daemon-minted request
+id, a `success` subtype, and an echoed mode equal to the request. Failed writes,
+unknown ids, malformed or non-success replies, and missing or unequal echoes
+leave the prior value unchanged; an exact-id reply is retired before its payload
+is accepted, so a later duplicate cannot repair a rejected first reply. These
+paths log no mode, request id, response content, or decode error.
+
+Availability is child-scoped, not runner-scoped. Beginning a child clears the
+predecessor's value and pending correlations before stdout can arrive; child
+exit clears both again before backoff or successor setup. A runner without its
+concrete `Parser`, a child before its first confirmation, and a runner between
+children therefore all report `("", false)`. `SetPermissionMode` snapshots the
+live writer and runner child generation before registering, then rechecks the
+binding before writing. Registering first and looking up `Stdin` later would let
+a call begun between children drift onto a successor after its correlation had
+already been retired. An early reply also waits for the write verdict, so a
+write that ultimately fails cannot confirm a mode; the parser generation check
+keeps a predecessor reply from populating its successor.
+
+Keep three permission concepts separate: stored settings and
+`SetSpawnPermissionMode` express launch intent for a later child;
+[`PostureGate`](streamsup-package-posture-gate-spawn-permission-mode-ack.md)
+answers whether a turn may enter after the spawn-time acknowledgement and can
+remain open across an in-band change; `ConfirmedPermissionMode` is only Claude's
+latest bounded claim about the current child's running posture. The read never
+falls back to settings or argv, never sends a control request or changes the
+gate, and publishes no client frame.
 
 `Runner.RequestContextUsage` and the parser form one solicited-response boundary.
 When the runner's `Config.Stdout` is that concrete parser, the runner registers
