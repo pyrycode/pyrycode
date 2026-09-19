@@ -9,12 +9,19 @@ teaches fakeclaude that wire, so the stream path has a fake to drive it end-to-e
 the harness piece the sibling #1135 (blocked-by this ticket) rides for its first
 `send_message` e2e spec.
 
-When `PYRY_FAKE_CLAUDE_STREAM_JSON` is set, `main()`'s **very first** statement is:
+When `PYRY_FAKE_CLAUDE_STREAM_JSON` is set, `main()`'s **very first** branch is:
 
 ```go
 if os.Getenv(envStreamJSON) != "" {
-    runStreamJSON(stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "", os.Getenv(envStreamBogus) != "",
-        os.Getenv(envStreamRateLimit), os.Getenv(envStreamWithholdMode) != "")
+    replay, err := loadStreamReplay(os.Getenv(envStreamReplayFirst),
+        os.Getenv(envStreamReplaySecond), os.Getenv(envStreamReplaySignal))
+    if err != nil {
+        fatalf("load stream replay: %v", err)
+    }
+    // Other stream-only riders are loaded here too.
+    runStreamJSONConfigured(stdin, os.Stdout, streamRunConfig{
+        replay: replay, inputCloser: os.Stdin,
+    })
     return
 }
 ```
@@ -28,12 +35,13 @@ properties fall out structurally rather than by a validation branch:
 | Mutually exclusive with every PTY/TUI mode | The `return` fires before any other mode's env var is even read; if both are set, stream wins and the other is inert |
 | Binds no sessions dir / transcript | The `return` short-circuits before the three `mustEnv` calls and the JSONL open — stream mode never touches sessions-dir machinery |
 
-`runStreamJSON(r io.Reader, w io.Writer, honorInterrupt bool)` is the testable
-read→emit loop — the `io.Reader`/`io.Writer` seam (rather than hard-wiring
-`os.Stdin`/`os.Stdout`) is what lets the unit test drive it against in-memory
-buffers. `honorInterrupt` (default `false`, wired from `envStreamInterrupt`, #1136)
-selects the interrupt rider — see § Interrupt mode below; this table describes the
-default path:
+`runStreamJSON` remains the source-compatible test seam for direct callers: it
+packages the established rider arguments into `streamRunConfig` and delegates to
+`runStreamJSONConfigured`, which owns the read→emit loop. The `io.Reader`/`io.Writer`
+seam (rather than hard-wiring `os.Stdin`/`os.Stdout`) still lets unit tests drive it
+against in-memory buffers. `honorInterrupt` (default `false`, wired from
+`envStreamInterrupt`, #1136) selects the interrupt rider — see § Interrupt mode
+below; this table describes the default path:
 
 | Step | Effect |
 |---|---|
@@ -72,11 +80,11 @@ TurnEndReasonEndTurn}` — see [streamsup-package.md § Turn I/O](streamsup-pack
   `interruptEndTurnLine` (Esc-ends-turn mode, above) a hand-written literal. Only the
   **test** links `internal/streamsup`/`internal/turnevent`; `main.go` stays
   stdlib-only.
-- **Single goroutine, no raw mode.** `runStreamJSON` runs entirely on `main()`'s
-  goroutine — no stdin-reader goroutine, no poll loop, none of the other modes'
-  `atomic.Bool` signals are reached. Stream-json travels over a **pipe**, not a PTY,
-  so canonical line discipline / CR mapping don't apply — `enterRawMode()` is never
-  called in this mode.
+- **Synchronous by default, no raw mode.** Replay-absent and single-fragment replay
+  run entirely on `main()`'s goroutine. Only two-fragment replay adds the bounded,
+  closable stdin-reader handoff described below. Stream-json travels over a **pipe**,
+  not a PTY, so canonical line discipline / CR mapping don't apply —
+  `enterRawMode()` is never called in this mode.
 - **Default mode still ignores non-`"user"` lines unless a control-request arm
   recognizes them.** `initialize` (#1692), `get_context_usage` (#2289),
   `set_permission_mode` (#2067), and `set_model` each get a canned answer regardless
@@ -96,6 +104,52 @@ a non-user-lines-ignored test asserts zero output bytes for a `control_request` 
 blank / unparsable line; a distinct-message-ids test guards the per-turn counter; a
 direct `writeStreamResponse` shape test checks the two line shapes without going
 through the parser at all. See [codebase/1140.md](../codebase/1140.md).
+
+### Controlled raw-output replay (#2503)
+
+The replay rider lets a deterministic harness feed the production stream runner an
+exact child-stdout fixture instead of fakeclaude's canned echo/result pair. It is
+stream-only and default-off; the `PYRY_FAKE_CLAUDE_STREAM_JSON` gate still returns
+before every PTY, sessions-directory, transcript, and PTY JSONL-trigger path.
+
+| Variable | Contract |
+|---|---|
+| `PYRY_FAKE_CLAUDE_STREAM_REPLAY_FIRST` | Required to enable replay; path to the first raw stream-json fragment |
+| `PYRY_FAKE_CLAUDE_STREAM_REPLAY_SECOND` | Optional path to a second raw fragment; valid only with `..._RELEASE` |
+| `PYRY_FAKE_CLAUDE_STREAM_REPLAY_RELEASE` | Filesystem signal path paired with `..._SECOND` |
+
+`loadStreamReplay` reads both fragments before the input loop. Unreadable files fail
+startup, and a second fragment without a release path (or vice versa) is rejected.
+The release file carries no content; its existence is only a signal. Fakeclaude
+neither decodes nor line-splits the fragments, so missing trailing newlines,
+malformed JSON, and unknown variants reach stdout unchanged for negative tests.
+
+The first recognized user envelope starts one scripted turn and writes the first
+fragment once instead of a canned reply. With no second fragment, replay completes
+immediately. Otherwise later user envelopes are consumed without canned replies
+until the release path exists; recognized control requests still use the ordinary
+dispatch. The signal writes the second fragment once, after the first and without
+another user envelope, then is removed best-effort and disabled in memory. A
+`result` line there can finish the held turn. Later turns return to canned behavior,
+so replay emits at most two configured fragments, each once.
+
+A release poll after blocking `ReadString` would need another stdin envelope to make
+progress. In two-fragment mode `startAsyncStreamReader` instead hands reads to the
+main loop, which selects them against the release ticker and remains the sole stdout
+writer. The closer interrupts a blocked read and the stop channel releases a blocked
+handoff. Other modes start no reader goroutine.
+
+Mobile #613 should set `PYRY_FAKE_CLAUDE_STREAM_JSON=1` and
+`PYRY_FAKE_CLAUDE_STREAM_REPLAY_FIRST=<first-fragment-path>`. For a gated finish it
+must additionally set both `PYRY_FAKE_CLAUDE_STREAM_REPLAY_SECOND=<second-fragment-path>`
+and `PYRY_FAKE_CLAUDE_STREAM_REPLAY_RELEASE=<signal-path>`, then create the signal
+file only when the second fragment should be emitted. It must not set a PTY transcript
+or `PYRY_FAKE_CLAUDE_JSONL_TRIGGER` for this flow.
+
+Raw byte equality proves malformed and future lines were not normalized away;
+`streamsup.Parser` assertions prove valid lines exercise the production consumer.
+Keep both. Recreating the release signal proves only second-fragment one-shot
+behavior; a post-completion user envelope is what proves canned replies resume.
 
 ### Interrupt mode (`honorInterrupt`, #1136)
 
