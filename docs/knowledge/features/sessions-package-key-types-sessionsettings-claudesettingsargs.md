@@ -170,31 +170,34 @@ assembled argv. `PermissionModeBypass` is exported (an alias of
 without a second vocabulary. See [`withApprovalArgs`](streamsup-package-constructing-a-streamrunner-newstreamrunnerfacto.md)
 and [the posture gate](streamsup-package-posture-gate-spawn-permission-mode-ack.md).
 
-**Cosmetic edge case, not a fail-safe: an operator-bypass daemon composes the
-flag twice.** `spawnArgs` is `spawnBase + claudeSettingsArgs(...)`; when the
-operator's pass-through already put the flag in `spawnBase`, the unconditional
-append puts a second copy on every spawn from that daemon. `claude
---dangerously-skip-permissions --dangerously-skip-permissions --help` parses
-and exits 0, so nothing breaks — but nothing hermetic in this package's own
-tests covers the shape, because a duplicate is unreachable by construction from
-`claudeSettingsArgs`' own output alone; it only appears once `spawnBase` is
-concatenated in. Reviewed and accepted at #2065's code review as a documented
-cosmetic, not a correctness gap.
+**Exact-once belongs at the final composition boundary (#2506), not inside the
+settings suffix.** `composeSpawnArgs` first combines `spawnBase` with
+`claudeSettingsArgs(settings)`, then keeps the first exact
+`--dangerously-skip-permissions` token in its original position and drops later
+copies. Deduplicating `claudeSettingsArgs` alone cannot see an operator flag in
+the base; removing it from the base would destroy the provenance
+`operatorBypass(base)` needs. The helper therefore returns fresh storage and
+leaves `spawnBase` byte-unchanged, so a base with zero, one, or repeated flags
+still reports the operator's grant correctly while every assembled argv carries
+exactly one. Other arguments, including the requested `--permission-mode` pair,
+retain their order. The similarly named `skipDangerousModePermissionPrompt`
+settings-file key only suppresses claude's startup warning and is outside this
+exact-token argv rule.
 
-**Two spawn sites, both appending to a cloned slice:**
+**Both initial construction sites use the shared final composer:**
 
 - `Pool.New` (bootstrap): reads `entry.Model/Effort/YOLO` in the warm-start
-  branch (cold start → zero value), then
-  `ClaudeArgs: append(slices.Clone(cfg.Bootstrap.ClaudeArgs), claudeSettingsArgs(settings)...)`.
-  The clone is required because the pre-#833 code aliased
-  `cfg.Bootstrap.ClaudeArgs` directly; appending to an alias would mutate the
-  caller's slice.
+  branch (cold start → zero value), builds the settings-free base, then calls
+  `composeSpawnArgs(base, settings)`. The fresh result is required because the
+  pre-#833 code aliased `cfg.Bootstrap.ClaudeArgs` directly; composing into an
+  alias would mutate the caller's slice.
 - `Pool.buildSession` (minted): gains a `settings SessionSettings` parameter,
-  appends after `--session-id`. Since #1575 the two public mint entry points —
-  `CreateIn` and `GetOrCreateIn` — both pass the unexported `Pool.mintSettings`
-  rather than `SessionSettings{}`, so a newly-minted session starts at the
-  operator's configured model and effort instead of claude's own defaults.
-  `Pool.Revive` is now the only caller that passes the zero value.
+  builds the base through `--session-id` and the immutable settings/prompt-file
+  pairs, then calls the same composer. Since #1575 the two public mint entry
+  points — `CreateIn` and `GetOrCreateIn` — both pass the unexported
+  `Pool.mintSettings` rather than `SessionSettings{}`, so a newly-minted session
+  starts at the operator's configured model and effort instead of claude's own
+  defaults. `Pool.Revive` is now the only caller that passes the zero value.
 
   **`Pool.mintSettings` — inherit two fields, structurally.** It reads
   `DefaultSettings` (the bootstrap's persisted triple) and rebuilds a
@@ -220,6 +223,10 @@ cosmetic, not a correctness gap.
 
   Setting the model/effort of an *already-minted* session is a different
   concern, covered by `Pool.UpdateSettings` below.
+
+`Session.spawnArgs` also delegates to `composeSpawnArgs`, so live installation,
+restart, and initial construction cannot drift onto different deduplication
+rules.
 
 **Persistence.** `registryEntry` (`registry.go`) gains `Model string`,
 `Effort string`, `YOLO bool`, all `json:"...,omitempty"`, following the

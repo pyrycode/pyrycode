@@ -539,14 +539,13 @@ func New(cfg Config) (*Pool, error) {
 	}()
 
 	// base is the settings-free bootstrap argv (template plus the immutable
-	// --settings and --append-system-prompt-file pairs); bootstrapArgs appends the
-	// model/effort/YOLO suffix. Clone before appending: today's code aliases
-	// cfg.Bootstrap.ClaudeArgs directly, and we must not mutate the caller's
-	// slice. base is stored on the bootstrap Session so a live restart (#842) can
-	// recompose full argv from the persisted settings.
+	// --settings and --append-system-prompt-file pairs). base is stored on the
+	// bootstrap Session so a live restart (#842) can recompose full argv from the
+	// persisted settings. composeSpawnArgs returns a fresh final argv and leaves
+	// the base untouched for operator-bypass provenance.
 	base := append(slices.Clone(cfg.Bootstrap.ClaudeArgs), "--settings", settingsPath)
 	base = append(base, "--append-system-prompt-file", systemPromptPath)
-	bootstrapArgs := append(slices.Clone(base), claudeSettingsArgs(settings)...)
+	bootstrapArgs := composeSpawnArgs(base, settings)
 	// p is late-bound: the &Pool{} literal below assigns it, and the
 	// ResolveSessionID closure only reads it at spawn time (supervisor.Run),
 	// long after New returns — identical timing to the pidFn holder above.
@@ -2237,10 +2236,9 @@ func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings Sessi
 		}
 	}()
 	// base is the settings-free argv (template, resume suffix, and the immutable
-	// --settings pair); full appends the model/effort/YOLO suffix. Storing base on
-	// the Session lets a live restart recompose full argv from the persisted
-	// settings (#842). Clone before the second append so base and full never share
-	// a backing array.
+	// --settings pair). Storing base on the Session lets a live restart recompose
+	// full argv from the persisted settings (#842). composeSpawnArgs returns a
+	// fresh final argv, so base remains the provenance source.
 	base := append(slices.Clone(tpl.ClaudeArgs), "--session-id", string(id))
 	base = append(base, "--settings", settingsPath)
 	// This session's own appended system-prompt file (#2093's flag, #2150's file).
@@ -2248,7 +2246,7 @@ func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings Sessi
 	// recompose — a backoff restart, the #842 live settings-restart — each of
 	// which re-execs whatever bytes the file then holds.
 	base = append(base, "--append-system-prompt-file", promptPath)
-	args := append(slices.Clone(base), claudeSettingsArgs(settings)...)
+	args := composeSpawnArgs(base, settings)
 	workDir := tpl.WorkDir
 	if spawnDir != "" {
 		workDir = spawnDir

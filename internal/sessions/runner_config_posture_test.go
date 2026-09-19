@@ -34,6 +34,16 @@ func (c *configCapture) snapshot() []RunnerConfig {
 	return slices.Clone(c.cfgs)
 }
 
+func countExactArg(args []string, want string) int {
+	count := 0
+	for _, arg := range args {
+		if arg == want {
+			count++
+		}
+	}
+	return count
+}
+
 // newCapturePool builds a pool whose factory is the capture above, warm-starting
 // from a bootstrap entry carrying storedMode VERBATIM — no permissionModeForDisk
 // — so a junk value really does reach the registry read. That is the point of the
@@ -163,6 +173,7 @@ func TestRunnerConfigOperatorBypass(t *testing.T) {
 		// `pyry install-service -- --dangerously-skip-permissions`.
 		{"the operator's escalation pass-through", []string{"--dangerously-skip-permissions"}, true},
 		{"the escalation beside other pass-through flags", []string{"--verbose", "--dangerously-skip-permissions"}, true},
+		{"repeated escalation pass-through", []string{"--dangerously-skip-permissions", "--verbose", "--dangerously-skip-permissions"}, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -196,8 +207,8 @@ func TestRunnerConfigOperatorBypass(t *testing.T) {
 				// AC 1 at the seam: every child launches with the escalation,
 				// whatever the provenance answer is. This is what makes the false
 				// arm above a real discrimination rather than a reading of the argv.
-				if !slices.Contains(cfg.ClaudeArgs, "--dangerously-skip-permissions") {
-					t.Errorf("RunnerConfig[%d].ClaudeArgs = %v, want the escalation flag on every spawn (#2065)", i, cfg.ClaudeArgs)
+				if got := countExactArg(cfg.ClaudeArgs, bypassPermissionsArg); got != 1 {
+					t.Errorf("RunnerConfig[%d].ClaudeArgs = %v, want exactly one %s, got %d", i, cfg.ClaudeArgs, bypassPermissionsArg, got)
 				}
 			}
 		})
@@ -240,26 +251,46 @@ func TestRunnerConfigOperatorBypass_ReadsBaseNotAssembledArgv(t *testing.T) {
 // paths (Restart, SetSpawnArgs) both go through it.
 func TestSpawnArgsOperatorBypassSurvivesRecompose(t *testing.T) {
 	t.Parallel()
-	for _, base := range [][]string{
-		{"--settings", "/tmp/s.json"},
-		{"--dangerously-skip-permissions", "--settings", "/tmp/s.json"},
-	} {
-		want := operatorBypass(base)
-		sess := &Session{spawnBase: base}
-		for _, settings := range []SessionSettings{
-			{},
-			{PermissionMode: permissionModeDefault},
-			{PermissionMode: "plan"},
-			{YOLO: true, PermissionMode: permissionModeBypass},
-			{Model: "opus", Effort: "high", PermissionMode: "dontAsk"},
-		} {
-			got := sess.spawnArgs(settings)
-			if !reflect.DeepEqual(got[:len(base)], base) {
-				t.Fatalf("spawnArgs(%+v) = %v, want it to begin with the base %v", settings, got, base)
+	tests := []struct {
+		name string
+		base []string
+		want []string
+	}{
+		{
+			name: "daemon composed capability",
+			base: []string{"--settings", "/tmp/s.json"},
+			want: []string{"--settings", "/tmp/s.json", "--model", "opus", "--effort", "high", bypassPermissionsArg, "--permission-mode", "plan"},
+		},
+		{
+			name: "one operator capability",
+			base: []string{"--verbose", bypassPermissionsArg, "--settings", "/tmp/s.json"},
+			want: []string{"--verbose", bypassPermissionsArg, "--settings", "/tmp/s.json", "--model", "opus", "--effort", "high", "--permission-mode", "plan"},
+		},
+		{
+			name: "repeated operator capability",
+			base: []string{bypassPermissionsArg, "--verbose", bypassPermissionsArg, "--settings", "/tmp/s.json", bypassPermissionsArg},
+			want: []string{bypassPermissionsArg, "--verbose", "--settings", "/tmp/s.json", "--model", "opus", "--effort", "high", "--permission-mode", "plan"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			baseBefore := slices.Clone(tc.base)
+			wantOperatorBypass := operatorBypass(tc.base)
+			sess := &Session{spawnBase: tc.base}
+			got := sess.spawnArgs(SessionSettings{Model: "opus", Effort: "high", PermissionMode: "plan"})
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("spawnArgs() = %v, want %v", got, tc.want)
 			}
-			if operatorBypass(got[:len(base)]) != want {
-				t.Errorf("spawnArgs(%+v) changed the base's provenance answer: base %v, argv %v", settings, base, got)
+			if !reflect.DeepEqual(tc.base, baseBefore) {
+				t.Errorf("spawnArgs() mutated spawnBase: got %v, want %v", tc.base, baseBefore)
 			}
-		}
+			if got := operatorBypass(tc.base); got != wantOperatorBypass {
+				t.Errorf("operatorBypass(spawnBase) = %v after recomposition, want %v", got, wantOperatorBypass)
+			}
+			if got := countExactArg(got, bypassPermissionsArg); got != 1 {
+				t.Errorf("spawnArgs() = %v, want exactly one %s, got %d", got, bypassPermissionsArg, got)
+			}
+		})
 	}
 }
