@@ -202,6 +202,19 @@
 //	                               stream wins and the other is inert). Default off —
 //	                               when unset, fakeclaude is byte-identical to its
 //	                               prior behaviour.
+//	PYRY_FAKE_CLAUDE_STREAM_REPLAY_FIRST optional path to raw stream-json stdout
+//	                               bytes. When set in stream mode, the first user
+//	                               envelope writes these bytes once instead of the
+//	                               canned echo/result pair. The bytes are not parsed
+//	                               or normalized; stream mode still opens no PTY or
+//	                               transcript. Default off.
+//	PYRY_FAKE_CLAUDE_STREAM_REPLAY_SECOND optional path to a second raw fragment.
+//	                               Requires STREAM_REPLAY_RELEASE and is emitted
+//	                               once when that signal appears, after the first
+//	                               fragment and without another user envelope.
+//	PYRY_FAKE_CLAUDE_STREAM_REPLAY_RELEASE optional filesystem signal paired with
+//	                               STREAM_REPLAY_SECOND. Recognized control requests
+//	                               remain serviceable while the fake waits for it.
 //	PYRY_FAKE_CLAUDE_INITIALIZE_MODELS optional path to a JSON array used as the
 //	                               initialize response's model menu in stream-json
 //	                               mode. Unset uses the canned initializeModels.
@@ -405,6 +418,9 @@ const (
 	envStreamSessionFacts = "PYRY_FAKE_CLAUDE_STREAM_SESSION_FACTS"
 	envStreamMCPStatus    = "PYRY_FAKE_CLAUDE_MCP_STATUS"
 	envStreamCanUseTool   = "PYRY_FAKE_CLAUDE_STREAM_CAN_USE_TOOL"
+	envStreamReplayFirst  = "PYRY_FAKE_CLAUDE_STREAM_REPLAY_FIRST"
+	envStreamReplaySecond = "PYRY_FAKE_CLAUDE_STREAM_REPLAY_SECOND"
+	envStreamReplaySignal = "PYRY_FAKE_CLAUDE_STREAM_REPLAY_RELEASE"
 	envInitializeModels   = "PYRY_FAKE_CLAUDE_INITIALIZE_MODELS"
 	envApproveSocketFile  = "PYRY_FAKE_CLAUDE_APPROVE_SOCKET_FILE"
 	envRejectAbsentResume = "PYRY_FAKE_CLAUDE_REJECT_ABSENT_RESUME"
@@ -746,11 +762,24 @@ func main() {
 		// parsed, the envStreamModelWindows spelling and for its reason: the
 		// fixture is one canned line, with nothing to count and nothing to
 		// choose. Unset ⟹ off ⟹ byte-identical.
+		replay, err := loadStreamReplay(os.Getenv(envStreamReplayFirst), os.Getenv(envStreamReplaySecond),
+			os.Getenv(envStreamReplaySignal))
+		if err != nil {
+			fatalf("load stream replay: %v", err)
+		}
 		rosterTasks, _ := strconv.Atoi(os.Getenv(envStreamRoster))
-		runStreamJSON(stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "", os.Getenv(envStreamBogus) != "",
-			os.Getenv(envStreamRateLimit), os.Getenv(envStreamWithholdMode) != "", rosterTasks,
-			os.Getenv(envStreamModelWindows) != "", os.Getenv(envStreamResetTo),
-			os.Getenv(envStreamSessionFacts) != "")
+		runStreamJSONConfigured(stdin, os.Stdout, streamRunConfig{
+			honorInterrupt:  os.Getenv(envStreamInterrupt) != "",
+			emitBogus:       os.Getenv(envStreamBogus) != "",
+			rateLimitStatus: os.Getenv(envStreamRateLimit),
+			withholdModeAck: os.Getenv(envStreamWithholdMode) != "",
+			rosterTasks:     rosterTasks,
+			modelWindows:    os.Getenv(envStreamModelWindows) != "",
+			resetToID:       os.Getenv(envStreamResetTo),
+			emitInit:        os.Getenv(envStreamSessionFacts) != "",
+			replay:          replay,
+			inputCloser:     os.Stdin,
+		})
 		return
 	}
 
@@ -1900,10 +1929,149 @@ func permissionResponse(line []byte) (inPermissionResponse, bool) {
 // the fixture being one canned line.
 func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rateLimitStatus string,
 	withholdModeAck bool, rosterTasks int, modelWindows bool, resetToID string, emitInit bool) {
+	runStreamJSONConfigured(r, w, streamRunConfig{
+		honorInterrupt:  honorInterrupt,
+		emitBogus:       emitBogus,
+		rateLimitStatus: rateLimitStatus,
+		withholdModeAck: withholdModeAck,
+		rosterTasks:     rosterTasks,
+		modelWindows:    modelWindows,
+		resetToID:       resetToID,
+		emitInit:        emitInit,
+	})
+}
+
+type streamRunConfig struct {
+	honorInterrupt  bool
+	emitBogus       bool
+	rateLimitStatus string
+	withholdModeAck bool
+	rosterTasks     int
+	modelWindows    bool
+	resetToID       string
+	emitInit        bool
+	replay          *streamReplay
+	inputCloser     io.Closer
+}
+
+type streamReplay struct {
+	first       []byte
+	second      []byte
+	releasePath string
+}
+
+func loadStreamReplay(firstPath, secondPath, releasePath string) (*streamReplay, error) {
+	if firstPath == "" {
+		return nil, nil
+	}
+	if secondPath == "" && releasePath != "" {
+		return nil, errors.New("stream replay release requires a second fragment")
+	}
+	if secondPath != "" && releasePath == "" {
+		return nil, errors.New("stream replay second fragment requires a release path")
+	}
+
+	first, err := os.ReadFile(firstPath)
+	if err != nil {
+		return nil, fmt.Errorf("read first fragment: %w", err)
+	}
+	replay := &streamReplay{first: first, releasePath: releasePath}
+	if secondPath == "" {
+		return replay, nil
+	}
+	second, err := os.ReadFile(secondPath)
+	if err != nil {
+		return nil, fmt.Errorf("read second fragment: %w", err)
+	}
+	replay.second = second
+	return replay, nil
+}
+
+type streamReadResult struct {
+	line string
+	err  error
+}
+
+type asyncStreamReader struct {
+	results <-chan streamReadResult
+	stopCh  chan struct{}
+	done    <-chan struct{}
+	closer  io.Closer
+}
+
+func startAsyncStreamReader(r io.Reader, closer io.Closer) *asyncStreamReader {
+	results := make(chan streamReadResult)
+	stopCh := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer close(results)
+		br := bufio.NewReader(r)
+		for {
+			line, err := br.ReadString('\n')
+			result := streamReadResult{line: line, err: err}
+			select {
+			case results <- result:
+			case <-stopCh:
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return &asyncStreamReader{results: results, stopCh: stopCh, done: done, closer: closer}
+}
+
+func (r *asyncStreamReader) stop() {
+	close(r.stopCh)
+	_ = r.closer.Close()
+	<-r.done
+}
+
+func writeStreamFragment(w io.Writer, fragment []byte) error {
+	n, err := w.Write(fragment)
+	if err != nil {
+		return err
+	}
+	if n != len(fragment) {
+		return io.ErrShortWrite
+	}
+	return nil
+}
+
+func runStreamJSONConfigured(r io.Reader, w io.Writer, cfg streamRunConfig) {
+	honorInterrupt := cfg.honorInterrupt
+	emitBogus := cfg.emitBogus
+	rateLimitStatus := cfg.rateLimitStatus
+	withholdModeAck := cfg.withholdModeAck
+	rosterTasks := cfg.rosterTasks
+	modelWindows := cfg.modelWindows
+	resetToID := cfg.resetToID
+	emitInit := cfg.emitInit
+
 	// bufio.ReadString (not bufio.Scanner) so an arbitrarily long line — a
 	// stream-json envelope carries a whole prompt — is never truncated by a token
 	// cap, and the final non-newline-terminated bytes at EOF are still processed.
 	br := bufio.NewReader(r)
+	var input *asyncStreamReader
+	var releaseTicker *time.Ticker
+	var releaseC <-chan time.Time
+	if cfg.replay != nil && cfg.replay.releasePath != "" {
+		closer := cfg.inputCloser
+		if closer == nil {
+			closer, _ = r.(io.Closer)
+		}
+		if closer == nil {
+			return
+		}
+		input = startAsyncStreamReader(r, closer)
+		defer input.stop()
+		releaseTicker = time.NewTicker(pollInterval)
+		defer releaseTicker.Stop()
+	}
+	replayStarted := false
+	replayComplete := false
 	turn := 0
 	mcpStatusRequests := 0
 	// mcpActuated is STICKY: once this child has accepted any MCP actuation, every
@@ -1914,7 +2082,30 @@ func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rat
 	permissionRider := loadStdioPermissionRider(os.Getenv(envStreamCanUseTool))
 	var pendingPermission *pendingStdioPermission
 	for {
-		line, err := br.ReadString('\n')
+		var line string
+		var err error
+		if input == nil {
+			line, err = br.ReadString('\n')
+		} else {
+			select {
+			case result, ok := <-input.results:
+				if !ok {
+					return
+				}
+				line, err = result.line, result.err
+			case <-releaseC:
+				if _, statErr := os.Stat(cfg.replay.releasePath); statErr != nil {
+					continue
+				}
+				if werr := writeStreamFragment(w, cfg.replay.second); werr != nil {
+					return
+				}
+				_ = os.Remove(cfg.replay.releasePath)
+				replayComplete = true
+				releaseC = nil
+				continue
+			}
+		}
 		if len(line) > 0 {
 			b := []byte(line)
 			if pendingPermission != nil {
@@ -1942,6 +2133,23 @@ func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rat
 					}
 				}
 			} else if text, ok := userTurnText(b); ok {
+				if cfg.replay != nil {
+					if !replayStarted {
+						if werr := writeStreamFragment(w, cfg.replay.first); werr != nil {
+							return
+						}
+						replayStarted = true
+						if cfg.replay.releasePath == "" {
+							replayComplete = true
+						} else {
+							releaseC = releaseTicker.C
+						}
+						continue
+					}
+					if !replayComplete {
+						continue
+					}
+				}
 				turn++
 				msgID := fmt.Sprintf("m%d", turn)
 				if permissionRider != nil {
