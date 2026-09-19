@@ -317,9 +317,9 @@ func (m *V2SessionManager) handleRequestSessionSettings(ctx context.Context, s *
 	// All seven fields come from the one RunConfig, so the reported id and the
 	// reported values always describe the same session — including in the zero
 	// case, which the wire contract already defines as a real answer. That extends
-	// to the permission mode and the YOLO bit, which the daemon stores so they can
-	// never disagree (#1687), so no client can read a posture assembled from two
-	// different sessions.
+	// to the permission mode and the YOLO bit, which the producer derives together
+	// from one current-child confirmation, so no client can read a posture assembled
+	// from two different sessions.
 	payload, err := json.Marshal(protocol.SessionSettingsPayload{
 		SessionID:      cfg.SessionID,
 		Model:          cfg.Model,

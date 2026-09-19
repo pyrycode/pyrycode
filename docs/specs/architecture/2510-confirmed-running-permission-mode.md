@@ -108,3 +108,16 @@ Pending for the documentation stage: update `docs/protocol-mobile.md` under **Se
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-20
+
+## Revisions
+
+### 2026-09-20 — keep source comments aligned with unavailable confirmations
+
+Implementation review found that `SessionSettingsPayload` and
+`handleRequestSessionSettings` still documented the old stored-posture guarantee.
+Their comments are updated in `internal/protocol/settings.go` and
+`internal/relay/v2session_settings.go` without changing either payload or handler
+behavior. `runConfigFor`'s composition comments are corrected for the same reason.
+This brings the implementation to five production files, two above the ticket's
+three-file forecast and exactly at the five-file ticket boundary; the ticket
+remains under every boundary.

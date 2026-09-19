@@ -323,7 +323,7 @@ func TestInteractiveStreamDefaultPostureOutsideWorkspaceRead(t *testing.T) {
 	// child — which this ack confirms the child accepted rather than NAK'd.
 	awaitDefaultPostureAck(t, observations, deadline)
 
-	reply, tools, modal, answered := driveOutsideWorkspaceRead(t, h, convID, deadline)
+	reply, tools, modal, answered := driveOutsideWorkspaceRead(t, h, convID, deadline, postureProbeAnswerEnvID)
 
 	// ── AC 1 + AC 3 + AC 4: the finding, on whichever branch it fell ──
 	//
@@ -515,7 +515,7 @@ type postureProbeModal struct {
 // reads like a daemon bug.
 // The deadline is the run's, shared with awaitDefaultPostureAck rather than armed afresh
 // here — see outsideReadTurnBudget for why that matters to what its comment claims.
-func driveOutsideWorkspaceRead(t *testing.T, h *perConvHarness, convID string, deadline time.Time) (string, []string, *postureProbeModal, int) {
+func driveOutsideWorkspaceRead(t *testing.T, h *perConvHarness, convID string, deadline time.Time, answerEnvID uint64) (string, []string, *postureProbeModal, int) {
 	t.Helper()
 	var (
 		text     strings.Builder
@@ -525,7 +525,7 @@ func driveOutsideWorkspaceRead(t *testing.T, h *perConvHarness, convID string, d
 		first    *postureProbeModal
 		answered int
 	)
-	reqID := postureProbeAnswerEnvID
+	reqID := answerEnvID
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {

@@ -142,12 +142,13 @@ type RequestSessionSettingsPayload struct {
 //     set_session_settings with an empty id, which would be rejected.
 //   - Model / Effort "" mean "inherited default, no per-session override" —
 //     the same meaning they carry on screen_snapshot.
-//   - YOLO false means permissions are enforced.
-//   - PermissionMode "" means NO SESSION RESOLVED, and it is the one zero here
-//     that does not name a real posture (#1687). A resolved session always reports
-//     one of claude's six modes, because the daemon normalises the stored value at
-//     every construction site — so "" occurs only in the all-zero reply, beside
-//     SessionID "". Read the pair together.
+//   - YOLO false means the current child has not confirmed bypass. It is not, by
+//     itself, proof that permissions are enforced: PermissionMode "" means no
+//     current-child confirmation is available.
+//   - PermissionMode "" can therefore appear beside a non-empty SessionID when a
+//     live child has not confirmed a posture yet, or when the resolved session is
+//     dormant and has no child. Model and Effort still report stored intent in
+//     those cases.
 //   - WindowTokens 0 means the daemon has no trustworthy window reading, and
 //     covers two cases (#2100): the usage seam was not wired, and the used count
 //     came out ABOVE the window the daemon believed, which disproves the belief.
@@ -156,12 +157,13 @@ type RequestSessionSettingsPayload struct {
 //     way "X of Y" is unavailable. UsedTokens 0 against a NON-zero WindowTokens
 //     is a genuine fresh session.
 //
-// PermissionMode and YOLO always agree, because the daemon stores them so they
-// cannot disagree: a session in bypass reports "bypassPermissions" AND yolo true.
-// So this half can report a posture the WRITE half refuses to accept on its
-// permission_mode field — deliberate, and the whole point of the read half
-// existing. A client labels its menu from this value and keeps sending yolo to
-// change the bypass posture.
+// PermissionMode and YOLO always agree because the producer derives both from
+// the same current-child confirmation: confirmed bypass reports
+// "bypassPermissions" AND yolo true, while an unavailable confirmation reports
+// "" AND false. This half can report a posture the WRITE half refuses to accept
+// on its permission_mode field — deliberate, and the whole point of the read
+// half existing. A client labels its menu from this value and keeps sending yolo
+// to change the bypass posture.
 //
 // Scope: the values are those of the session bound to the conversation the
 // request named (RequestSessionSettingsPayload above, #1586/#1610), and SessionID

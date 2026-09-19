@@ -162,7 +162,7 @@ func startModalResolutionHarness(t *testing.T) (*perConvHarness, string) {
 	seedBootstrapRegistry(t, home, liveModalBootstrapUUID)
 	seedBoundConversation(t, home, liveModalConvID, liveModalBootstrapUUID, workdir)
 
-	d := spawnPermissionDaemon(t, home, workdir, claudeBin, relayURL, permissionDaemonModel)
+	d := spawnPermissionDaemon(t, home, workdir, claudeBin, relayURL, permissionDaemonModel, false)
 	t.Cleanup(func() { d.stop(t) })
 
 	serverID := readPersistedServerID(t, home)
@@ -185,10 +185,12 @@ func startModalResolutionHarness(t *testing.T) (*perConvHarness, string) {
 // made the model a parameter. Passing it preserves those gates byte for byte.
 const permissionDaemonModel = "haiku"
 
-// spawnPermissionDaemon forks real pyry exactly like spawnBootstrapDaemon EXCEPT
-// it drops the trailing --dangerously-skip-permissions flag, so real claude runs
-// in default permission mode and the first gated Bash call raises a real
-// permission modal. It reuses bootstrapDaemon / waitForReady / stop /
+// spawnPermissionDaemon forks real pyry exactly like spawnBootstrapDaemon. Its
+// default call shape drops the trailing --dangerously-skip-permissions flag, so
+// real claude runs in default permission mode and the first gated Bash call raises
+// a real permission modal. The operatorBypass arm appends the two fixed literals
+// needed to launch in bypass while retaining the stdio prompt surface after an
+// in-band downgrade. It reuses bootstrapDaemon / waitForReady / stop /
 // shortSocketPath / ensurePyryBuilt / lockedBuffer unchanged. Blocks until the
 // control socket is dialable.
 //
@@ -197,7 +199,7 @@ const permissionDaemonModel = "haiku"
 // runtime-derived string would put arbitrary text there. Today's callers pass
 // permissionDaemonModel or askQuestionCaptureModel, and which gate runs under
 // which is argued at the caller, not here.
-func spawnPermissionDaemon(t *testing.T, home, workdir, claudeBin, relayURL, model string) *bootstrapDaemon {
+func spawnPermissionDaemon(t *testing.T, home, workdir, claudeBin, relayURL, model string, operatorBypass bool) *bootstrapDaemon {
 	t.Helper()
 	bin := ensurePyryBuilt(t) // builds with real HOME (warm cache); runs with isolated HOME
 	socket := shortSocketPath(t)
@@ -212,9 +214,15 @@ func spawnPermissionDaemon(t *testing.T, home, workdir, claudeBin, relayURL, mod
 		"-pyry-relay=" + relayURL,
 		"--",
 		"--model", model,
-		// NOTE: NO --dangerously-skip-permissions — that flag suppresses the
-		// permission modals this gate exists to exercise. This is the single line
-		// that differs from spawnBootstrapDaemon.
+		// Default callers append nothing, so there is no
+		// --dangerously-skip-permissions. That is the shape the standing modal gates
+		// exercise and the single line that differs from spawnBootstrapDaemon.
+	}
+	if operatorBypass {
+		args = append(args,
+			"--dangerously-skip-permissions",
+			"--permission-prompt-tool", "stdio",
+		)
 	}
 	cmd := exec.Command(bin, args...)
 	// os.Environ() already carries the isolated HOME and the credential
