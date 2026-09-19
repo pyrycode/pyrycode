@@ -375,18 +375,32 @@ func claudeSettingsArgs(s SessionSettings) []string {
 	return args
 }
 
-// spawnArgs composes the full claude spawn argv for the given settings: the
-// settings-free base (spawnBase) plus claudeSettingsArgs(settings). It is the
-// only argv-recompose path outside session construction — the live-apply in
-// Pool.UpdateSettings, whether it installs the result with the kill (#842's
-// Restart) or without one (#1581's in-band branch) — and, like construction,
-// routes the settings
-// suffix through claudeSettingsArgs, so the YOLO fail-safe is enforced in
-// exactly one place. Returns a fresh slice that aliases neither spawnBase nor
-// the caller's state; a zero-value settings appends nothing (byte-identical to
-// the base).
+// composeSpawnArgs is the final composition boundary shared by initial launches
+// and live recomposition. It preserves the first bypass flag in argv order and
+// drops later exact copies without mutating base. Other arguments are untouched.
+func composeSpawnArgs(base []string, settings SessionSettings) []string {
+	args := append(slices.Clone(base), claudeSettingsArgs(settings)...)
+	seenBypass := false
+	result := args[:0]
+	for _, arg := range args {
+		if arg == bypassPermissionsArg {
+			if seenBypass {
+				continue
+			}
+			seenBypass = true
+		}
+		result = append(result, arg)
+	}
+	return result
+}
+
+// spawnArgs composes the full claude spawn argv for the given settings through
+// composeSpawnArgs. It is the only argv-recompose path outside session
+// construction — the live-apply in Pool.UpdateSettings, whether it installs the
+// result with the kill (#842's Restart) or without one (#1581's in-band branch).
+// The result is a fresh slice that aliases neither spawnBase nor caller state.
 func (s *Session) spawnArgs(settings SessionSettings) []string {
-	return append(slices.Clone(s.spawnBase), claudeSettingsArgs(settings)...)
+	return composeSpawnArgs(s.spawnBase, settings)
 }
 
 // Session is one supervised claude instance plus the bridge that mediates its
