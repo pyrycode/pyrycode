@@ -795,6 +795,24 @@ type V2SessionConfig struct {
 	// that only SettingsUpdater, the write path, can change.
 	RunConfigFor func(conversationID string) (RunConfig, bool)
 
+	// EffectiveEffortFor reports Claude's applied effort for the current child of
+	// the NAMED conversation. handleRequestSessionSettings calls it only after
+	// RunConfigFor accepts that same non-empty conversation, and never uses it as
+	// a source for the saved Effort or any other RunConfig field (#2516).
+	//
+	// The pointer is the nullable result: non-nil is a confirmed string, while nil
+	// with true is confirmed JSON null (Claude reported no effort parameter). The
+	// comma-ok is availability: false means no current reading, and the pointer
+	// MUST be ignored even when non-nil. Optional: nil has the same unavailable
+	// posture, omitting effective_effort while preserving every saved field.
+	//
+	// BOUNDED TIME, but NOT on Run: this seam runs on the addressed connection's
+	// appFrameWorker because a production implementation may wait on a child round
+	// trip. It MUST honor ctx so manager shutdown releases the worker. The relay
+	// adds no cache; every accepted request calls the provider once. The contract
+	// carries only one nullable scalar, never a full child settings response.
+	EffectiveEffortFor func(ctx context.Context, conversationID string) (*string, bool)
+
 	// ModelListFor reports the NAMED conversation's model menu, already shaped as a
 	// marshal-ready model_list payload, for an inbound request_model_list (#2125).
 	// handleRequestModelList is its sole reader.

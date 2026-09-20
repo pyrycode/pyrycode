@@ -213,160 +213,124 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 	}
 }
 
-// handleRequestSessionSettings answers an inbound request_session_settings
-// control frame with the run configuration of the conversation the client named
-// (#491, #1214, #1610): that conversation's bound session id to address changes
-// to, its stored model and effort, the current child's last confirmed permission
-// mode and derived YOLO bit when available, and its context-window occupancy. It
-// is the READ half of the #844 cluster, which shipped write-only.
+// handleRequestSessionSettings answers an inbound request_session_settings with
+// the named conversation's saved run configuration plus Claude's independently
+// observed effective effort when available (#2516). RunConfigFor remains the
+// sole source of session id, saved model/effort, permission posture and usage;
+// EffectiveEffortFor contributes only the optional nullable wire field.
 //
-// The reported permission mode (#1687) is what lets a client label its menu from
-// Claude's last confirmation for this exact current child rather than from the
-// request it last sent, stored launch intent, or argv. It can name a posture the
-// WRITE half refuses to accept — a bypass child reports "bypassPermissions"
-// here while only the YOLO bit can request it. If no current-child confirmation
-// exists, both permission fields stay zero while the resolved id, model and
-// effort remain present.
+// dispatchAppFrame applies the interactive-capability gate on Run, then hands
+// the immutable plaintext to this connection's appFrameWorker. The provider may
+// wait on a child round trip, so neither it nor the saved-settings resolution may
+// run on Run. Every reply returns unsealed through forwardToRun; this function
+// never touches s.send or any other Run-owned session state.
 //
-// Intercepted in dispatchAppFrame before dispatch.Route, like
-// handleSetSessionSettings above, and runs on the manager's single Run dispatch
-// goroutine.
+// Order is load-bearing:
+//  1. Re-decode the envelope already recognised by dispatchAppFrame. Failure is
+//     unreachable for the same immutable bytes and cannot be correlated safely.
+//  2. Tolerate a payload decode failure. It leaves ConversationID empty, which
+//     addresses nothing and therefore consults neither provider.
+//  3. Resolve the non-empty id through RunConfigFor, honouring comma-ok. A nil or
+//     refused resolver produces the existing all-zero reply and stops before the
+//     effective-effort provider.
+//  4. For an accepted RunConfig only, consult EffectiveEffortFor exactly once.
+//     true preserves a string or explicit null; nil or false omits the field.
+//  5. Compose one correlated reply. All original fields come from the accepted
+//     RunConfig, so an applied effort can never overwrite the saved choice.
 //
-// It deliberately does NOT consult m.cfg.Snapshotter, and that is the entire
-// point of the verb existing. A client used to read these values off
-// screen_snapshot's side-load (#848, #857), but that reply is gated on a live
-// terminal screen: on the stream-json runner Snapshotter is nil by construction
-// (#1077/#1101), so handleRequestSnapshot short-circuits to
-// server.binary_offline and takes the settings — which have nothing to do with a
-// terminal — down with it. On the runner now in production that left the
-// run-configuration UI with no values, no session id and no context figure at
-// all. This handler reads one conversation-keyed seam of primitives, so it
-// answers identically on both runners.
-//
-// Order mirrors the write handler, minus the steps a read cannot need:
-//  1. Capability gate (the authz boundary): a non-interactive conn is fully
-//     inert — no decode, no resolution, no seam call, NO reply, so it cannot
-//     even learn whether a session or a conversation exists. Same posture as the
-//     write path's AC #6, and it MUST stay ahead of both steps below.
-//  2. Decode, tolerated (#1586): the frame names the conversation the client is
-//     asking about. A decode failure leaves the id empty, so there is no
-//     malformed-payload branch and no error check on the Unmarshal return.
-//     NEVER echo or log the decode error; encoding/json quotes attacker bytes
-//     into its error string.
-//  3. Resolve, or don't (#1610): one conversation-keyed read of RunConfigFor.
-//     A request that names no conversation, names one this daemon does not host,
-//     or names one bound to no known live or dormant session resolves NOTHING
-//     and falls through with every value at zero. A dormant session still
-//     resolves its id, model and effort with an unavailable permission pair.
-//  4. No nil-seam error branch: unlike the write path, the seam degrades to its
-//     zero value, which the wire contract defines as a real answer
-//     ("" ⇒ nothing to address, 0 window ⇒ usage unwired). A read that reports
-//     "I have nothing" is more useful than an error, and it keeps the reply
-//     shape constant so a client parses one thing. Step 3's unresolvable case
-//     reuses that same shape rather than adding a failure branch to a verb
-//     documented as always answering.
-//
-// SCOPE: the reported session id and the reported values describe ONE session —
-// the one bound to the conversation the request named — because they arrive
-// together as one RunConfig, so a client can never read one session's values and
-// write its change to another. An unresolvable request addresses NOTHING: it is
-// answered with the zero reply, never the shared bootstrap session's id or
-// values, which is the route #678 AC #4 forbids any client-driven verb from
-// reaching.
-//
-// The reply NEVER carries a screen byte, a transcript byte, or a file path —
-// only the id, three short enum-ish strings, a bool and two aggregate integers.
-// The requested conversation_id reaches neither the reply, a log line, nor an
-// error string; it is a lookup key and nothing else.
-func (m *V2SessionManager) handleRequestSessionSettings(ctx context.Context, s *V2Session, env protocol.Envelope) {
-	if !s.interactive {
-		return // non-interactive conn: inert, no reply (mirrors the write path)
-	}
-
-	var p protocol.RequestSessionSettingsPayload
-	// A decode failure is tolerated: it leaves ConversationID == "", which names
-	// no conversation and so addresses nothing — the zero reply below. A bare
-	// frame from an un-updated client carries a nil Payload, which Unmarshal
-	// rejects while leaving p zeroed, and reaches exactly the same place. So
-	// there is no malformed-payload branch and no error check here. The error is
-	// never echoed and never logged (encoding/json quotes attacker bytes into
-	// it).
-	_ = json.Unmarshal(env.Payload, &p)
-
-	// Resolve the named conversation, or report nothing. Three properties, each
-	// deliberate:
-	//
-	// The empty-id guard keeps "an unnamed request addresses nothing" a property
-	// of this package alone, provable against any RunConfigFor double rather than
-	// inherited from whatever the cmd/pyry producer happens to do; it is also the
-	// relay-side half of the observed Pool.Lookup("") == bootstrap hazard the
-	// producer already guards (#678).
-	//
-	// The nil-seam guard is the foreground / v1 case: nothing resolves, so the
-	// request fails closed exactly as handleRequestSnapshot's nil seam does.
-	//
-	// The comma-ok is HONOURED, not discarded. RunConfigFor's doc says a caller
-	// MUST NOT read the fields on ok == false, so cfg is assigned only on true.
-	// Writing `cfg, _ = …` would happen to work today only because the producer
-	// zeroes its refusal return — a property of cmd/pyry, not of this contract.
-	var cfg RunConfig
-	if p.ConversationID != "" && m.cfg.RunConfigFor != nil {
-		if got, ok := m.cfg.RunConfigFor(p.ConversationID); ok {
-			cfg = got
-		}
-	}
-
-	// All seven fields come from the one RunConfig, so the reported id and the
-	// reported values always describe the same session — including in the zero
-	// case, which the wire contract already defines as a real answer. That extends
-	// to the permission mode and the YOLO bit, which the producer derives together
-	// from one current-child confirmation, so no client can read a posture assembled
-	// from two different sessions.
-	payload, err := json.Marshal(protocol.SessionSettingsPayload{
-		SessionID:      cfg.SessionID,
-		Model:          cfg.Model,
-		Effort:         cfg.Effort,
-		YOLO:           cfg.YOLO,
-		PermissionMode: cfg.PermissionMode,
-		UsedTokens:     cfg.UsedTokens,
-		WindowTokens:   cfg.WindowTokens,
-	})
-	if err != nil {
-		// A closed struct of two strings, a bool and two ints; marshal cannot fail
-		// in practice. Defensive — NEVER echo err; answer with the deterministic
-		// unavailable reply so the request is still answered, never silently
-		// dropped (same posture as the write path's marshal branch).
-		m.cfg.Logger.Warn("relay: v2 session_settings marshal failed",
-			"event", "v2.settings.read_marshal_err",
+// Neither the requested id nor any settings value reaches a log or error string.
+func (m *V2SessionManager) handleRequestSessionSettings(ctx context.Context, s *V2Session, plaintext []byte) {
+	var env protocol.Envelope
+	if err := json.Unmarshal(plaintext, &env); err != nil {
+		m.cfg.Logger.Warn("relay: v2 request_session_settings envelope did not decode",
+			"event", "v2.settings.read_envelope_err",
 			"conn_id", s.connID)
-		m.settingsReplyError(ctx, s, env.ID, protocol.CodeServerBinaryOffline, msgSettingsUnavailable, true)
 		return
 	}
 
-	inReplyTo := env.ID
+	var p protocol.RequestSessionSettingsPayload
+	// A bare or malformed payload leaves ConversationID empty. The error may
+	// quote remote-authored bytes, so it is deliberately neither logged nor sent.
+	_ = json.Unmarshal(env.Payload, &p)
+
+	var cfg RunConfig
+	var effectiveEffort protocol.NullableString
+	if p.ConversationID != "" && m.cfg.RunConfigFor != nil {
+		if got, ok := m.cfg.RunConfigFor(p.ConversationID); ok {
+			cfg = got
+			if m.cfg.EffectiveEffortFor != nil {
+				if applied, available := m.cfg.EffectiveEffortFor(ctx, p.ConversationID); available {
+					effectiveEffort = protocol.NewNullableString(applied)
+				}
+			}
+		}
+	}
+
+	payload, err := json.Marshal(protocol.SessionSettingsPayload{
+		SessionID:       cfg.SessionID,
+		Model:           cfg.Model,
+		Effort:          cfg.Effort,
+		EffectiveEffort: effectiveEffort,
+		YOLO:            cfg.YOLO,
+		PermissionMode:  cfg.PermissionMode,
+		UsedTokens:      cfg.UsedTokens,
+		WindowTokens:    cfg.WindowTokens,
+	})
+	if err != nil {
+		// Closed scalar fields; defensive only. NEVER echo err or any value.
+		m.cfg.Logger.Warn("relay: v2 session_settings marshal failed",
+			"event", "v2.settings.read_marshal_err",
+			"conn_id", s.connID)
+		m.settingsReadReplyError(ctx, s, env.ID)
+		return
+	}
+
+	m.cfg.Logger.Debug("relay: v2 session settings reported",
+		"event", "v2.settings.reported",
+		"conn_id", s.connID)
+	if !m.forwardSessionSettingsReadReply(ctx, s, env.ID, protocol.TypeSessionSettings, payload) {
+		m.cfg.Logger.Debug("relay: v2 session_settings reply dropped; session tearing down",
+			"event", "v2.settings.read_push_err",
+			"conn_id", s.connID)
+	}
+}
+
+func (m *V2SessionManager) settingsReadReplyError(ctx context.Context, s *V2Session, inReplyTo uint64) {
+	payload, err := json.Marshal(protocol.ErrorPayload{
+		Code:      protocol.CodeServerBinaryOffline,
+		Message:   msgSettingsUnavailable,
+		Retryable: true,
+	})
+	if err != nil {
+		m.cfg.Logger.Warn("relay: v2 settings read error reply marshal failed",
+			"event", "v2.settings.read_err_marshal",
+			"conn_id", s.connID)
+		return
+	}
+	if !m.forwardSessionSettingsReadReply(ctx, s, inReplyTo, protocol.TypeError, payload) {
+		m.cfg.Logger.Debug("relay: v2 settings read error reply dropped; session tearing down",
+			"event", "v2.settings.read_err_push",
+			"conn_id", s.connID)
+	}
+}
+
+func (m *V2SessionManager) forwardSessionSettingsReadReply(ctx context.Context, s *V2Session, inReplyTo uint64, typ string, payload json.RawMessage) bool {
 	reply := protocol.Envelope{
 		ID:        1, // non-load-bearing; the phone correlates on InReplyTo.
-		Type:      protocol.TypeSessionSettings,
+		Type:      typ,
 		TS:        time.Now().UTC(),
 		Payload:   payload,
 		InReplyTo: &inReplyTo,
 	}
-	// Content-free debug log: conn_id only. The model / effort / YOLO / permission
-	// mode values are NEVER logged at any level (#833 keeps them out of logs), and
-	// neither are the
-	// usage integers or the session id — this is a routine read that can fire on
-	// every sheet open, so it logs less than the write path, not more.
-	m.cfg.Logger.Debug("relay: v2 session settings reported",
-		"event", "v2.settings.reported",
-		"conn_id", s.connID)
-	if err := m.forwardEnvelope(ctx, s.connID, reply); err != nil {
-		// Unreachable in practice: s is V2StateOpen on the dispatch goroutine.
-		// Logged at debug and dropped — the package's outbound-drop posture.
-		m.cfg.Logger.Debug("relay: v2 session_settings push dropped",
-			"event", "v2.settings.read_push_err",
+	frame, err := json.Marshal(reply)
+	if err != nil {
+		m.cfg.Logger.Warn("relay: v2 session settings reply envelope marshal failed",
+			"event", "v2.settings.read_envelope_marshal",
 			"conn_id", s.connID,
-			"err", err)
+			"reply_type", typ)
+		return false
 	}
+	return m.forwardToRun(ctx, s, protocol.RoutingEnvelope{ConnID: s.connID, Frame: frame})
 }
 
 // settingsReplyError pushes a single TypeError reply to s, correlated to
