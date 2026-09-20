@@ -154,6 +154,7 @@ func runLiveAppliedSettingsArm(t *testing.T, claudeBin, home string, arm liveApp
 		SessionID:                arm.sessionID,
 		Args:                     args,
 		Stdout:                   io.MultiWriter(tap, parser),
+		ControlParser:            parser,
 		Stderr:                   io.Discard,
 		Logger:                   slog.New(slog.DiscardHandler),
 		RequestInitializeOnSpawn: arm.requestMenu,

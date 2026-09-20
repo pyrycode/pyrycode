@@ -278,3 +278,42 @@ section with `QueryAppliedSettings`, the nullable-effort contract and the live
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-20
+
+## Revisions
+
+### 2026-09-20 — verifier rework: wrapped parser binding and bounded writes
+
+The verifier found two gaps between the committed design and its implementation.
+First, the independent live raw tap wrapped the parser in `io.MultiWriter`, while
+`New` inferred private-query ownership only when `Config.Stdout` was directly a
+`*Parser`. `Config.ControlParser` now makes that dependency explicit for wrapped
+stdout paths, with direct-parser inference retained as the default. The live arm
+passes the same parser both through the multi-writer and through this binding, so
+raw observation and production correlation consume the same child bytes.
+
+Second, a caller context previously bounded only the response wait: a synchronous
+stdin write could remain parked after the deadline. `QueryAppliedSettings` now
+installs a `context.AfterFunc` for the write interval. If the caller context ends
+before the write returns, the callback generation-checks the captured binding,
+atomically clears it, retires every private waiter for that child and closes that
+child's stdin pipe. Closing the pipe is the cancellation mechanism for its blocked
+`Write`; a successor generation is never closed. The query waits for a callback
+that has started before resolving the write verdict, so no cancellation goroutine
+outlives the call. A normal write stops the callback without touching the child.
+
+This supersedes the original concurrency statement that production adds no
+goroutine. No standing goroutine is added: `context.AfterFunc` starts one only when
+the context fires during the write, and its shutdown path is the generation-scoped
+pipe close followed by callback completion. Focused tests use a close-aware blocked
+writer to prove both explicit cancellation and deadline expiry return unavailable,
+retire the captured binding and leave no blocked writer. A separate focused test
+proves a wrapped stdout path can correlate through its explicit parser binding.
+
+Security review delta: the original Network & I/O and Concurrency findings remain
+PASS with the corrected mechanism. A canceled blocked write deliberately sacrifices
+the unresponsive child rather than leaving a partial control envelope or an
+unbounded waiter; the normal supervisor lifecycle may replace it. Generation
+comparison under `Runner.mu` prevents the cancellation callback from closing a
+replacement. Parser-correlator locks remain outside `Runner.mu`, callback completion
+is joined before the query returns once it has started, and neither the callback nor
+the new configuration field expands the decoded or logged payload.

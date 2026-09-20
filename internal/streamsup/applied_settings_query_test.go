@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -354,6 +355,116 @@ func TestRunner_QueryAppliedSettings_UnserviceableAsksWriteNothing(t *testing.T)
 			}
 			if got := w.count(); got != 0 {
 				t.Fatalf("writes = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestRunner_QueryAppliedSettings_ExplicitControlParserSupportsWrappedStdout(t *testing.T) {
+	p := NewParser(func(turnevent.Event) {}, discardLogger())
+	w := newMCPStatusQueryWriter()
+	cfg := helperRunCfg(t, "echo_lines", &safeBuffer{}, &safeBuffer{})
+	cfg.Stdout = io.MultiWriter(io.Discard, p)
+	cfg.ControlParser = p
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	r.mu.Lock()
+	r.stdin = w
+	r.mu.Unlock()
+	t.Cleanup(func() {
+		if old := r.takeStdin(); old != nil {
+			_ = old.Close()
+		}
+	})
+
+	done := queryAppliedSettingsAsync(appliedSettingsQueryContext(t), r)
+	req, _ := awaitAppliedSettingsRequest(t, w)
+	_, _ = p.Write(appliedSettingsQueryResponse(t, req.RequestID, controlResponseSuccess,
+		appliedSettingsInner("wrapped-model", "wrapped-effort")))
+	got := awaitAppliedSettingsOutcome(t, done)
+	if !got.ok || got.settings.Model != "wrapped-model" ||
+		got.settings.Effort == nil || *got.settings.Effort != "wrapped-effort" {
+		t.Fatalf("wrapped stdout query = %+v, want correlated settings", got)
+	}
+}
+
+type blockingAppliedSettingsWriter struct {
+	started   chan struct{}
+	release   chan struct{}
+	closeOnce sync.Once
+}
+
+func newBlockingAppliedSettingsWriter() *blockingAppliedSettingsWriter {
+	return &blockingAppliedSettingsWriter{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (w *blockingAppliedSettingsWriter) Write([]byte) (int, error) {
+	close(w.started)
+	<-w.release
+	return 0, io.ErrClosedPipe
+}
+
+func (w *blockingAppliedSettingsWriter) Close() error {
+	w.closeOnce.Do(func() { close(w.release) })
+	return nil
+}
+
+func TestRunner_QueryAppliedSettings_ContextEndsBlockedWrite(t *testing.T) {
+	tests := []struct {
+		name string
+		ctx  func() (context.Context, context.CancelFunc)
+	}{
+		{name: "cancellation", ctx: func() (context.Context, context.CancelFunc) {
+			base, stop := context.WithTimeout(context.Background(), 3*time.Second)
+			ctx, cancel := context.WithCancel(base)
+			return ctx, func() {
+				cancel()
+				stop()
+			}
+		}},
+		{name: "deadline", ctx: func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 20*time.Millisecond)
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewParser(func(turnevent.Event) {}, discardLogger())
+			w := newBlockingAppliedSettingsWriter()
+			r := mcpStatusQueryRunner(t, p, w, false)
+			ctx, cancel := tc.ctx()
+			defer cancel()
+			done := queryAppliedSettingsAsync(ctx, r)
+			select {
+			case <-w.started:
+			case <-time.After(3 * time.Second):
+				t.Fatal("applied settings write did not start")
+			}
+			if tc.name == "cancellation" {
+				cancel()
+			}
+
+			select {
+			case got := <-done:
+				if got.ok {
+					t.Fatalf("blocked write returned success after %s: %+v", tc.name, got)
+				}
+			case <-time.After(500 * time.Millisecond):
+				_ = w.Close()
+				<-done
+				t.Fatalf("blocked write did not honor caller %s", tc.name)
+			}
+			select {
+			case <-w.release:
+			default:
+				t.Fatalf("blocked writer remained live after caller %s", tc.name)
+			}
+			if r.Stdin() != nil {
+				t.Fatalf("child binding remained live after caller %s interrupted its write", tc.name)
 			}
 		})
 	}

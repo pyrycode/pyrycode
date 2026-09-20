@@ -135,6 +135,13 @@ type Config struct {
 	// sink that plugs in here.
 	Stdout io.Writer
 
+	// ControlParser is the Parser in Stdout's writer path. It binds private
+	// control-response correlation when Stdout wraps the parser, for example in a
+	// live probe that also observes raw child output. Nil preserves the direct
+	// *Parser inference used by the daemon. A non-nil value must be the exact parser
+	// Stdout forwards every child byte to.
+	ControlParser *Parser
+
 	// Stderr receives the child's stderr. Optional; nil discards it.
 	Stderr io.Writer
 
@@ -906,7 +913,10 @@ func New(cfg Config) (*Runner, error) {
 		cfg.BackoffReset = defaultBackoffReset
 	}
 	cfg.Args = slices.Clone(cfg.Args)
-	parser, _ := cfg.Stdout.(*Parser)
+	parser := cfg.ControlParser
+	if parser == nil {
+		parser, _ = cfg.Stdout.(*Parser)
+	}
 	return &Runner{
 		cfg:               cfg,
 		log:               cfg.Logger,
@@ -1753,8 +1763,10 @@ const appliedSettingsQueryIDPrefix = "applied-settings-query-"
 //
 // A caller deadline is mandatory. Child exit and replacement retire the query, but a
 // live child can stay silent indefinitely; refusing an unbounded context prevents one
-// such child from retaining a waiter forever. Cancellation is honored before the
-// write, while waiting, and after a raced result.
+// such child from retaining a waiter forever. Cancellation is honored before and
+// during the write, while waiting, and after a raced result. Ending the context during
+// a blocked write retires and closes only the captured child generation, which is the
+// interrupt available for an os.Pipe write and keeps a successor untouched.
 //
 // The ordering matches QueryContextUsage: snapshot the binding under Runner.mu,
 // register outside that leaf lock, then recheck childGeneration before writing.
@@ -1788,8 +1800,16 @@ func (r *Runner) QueryAppliedSettings(ctx context.Context) (AppliedSettings, boo
 		return AppliedSettings{}, false
 	}
 
+	writeCancelDone := make(chan struct{})
+	stopWriteCancel := context.AfterFunc(ctx, func() {
+		r.retireStdinGeneration(generation)
+		close(writeCancelDone)
+	})
 	err := WriteAppliedSettings(w, id)
-	pending.resolveWrite(err == nil)
+	if !stopWriteCancel() {
+		<-writeCancelDone
+	}
+	pending.resolveWrite(err == nil && ctx.Err() == nil)
 	if err != nil || ctx.Err() != nil {
 		r.parser.removeAppliedSettingsQuery(id, pending)
 		pending.complete(AppliedSettings{}, false)
@@ -2673,20 +2693,41 @@ func (r *Runner) takeStdin() io.WriteCloser {
 	r.mcpStatusEligible = false
 	r.childGeneration++
 	r.mu.Unlock()
-	if r.parser != nil {
-		r.parser.endPermissionModeChild()
-		r.parser.failMCPStatusQueries()
-		r.parser.failMCPActuations()
-		// Context-usage waiters retire on this boundary too (#2430). The calls stay
-		// OUTSIDE the acquisition above, as the two beside them do: r.mu is a leaf and
-		// each correlator carries its own mutex, so nesting them here would be the one
-		// arrangement this file's lock discipline forbids.
-		r.parser.failContextUsageQueries()
-		// Applied-settings queries target the same exact child and retire outside
-		// Runner.mu for the same lock-order reason.
-		r.parser.failAppliedSettingsQueries()
-	}
+	r.retireParserChild()
 	return w
+}
+
+// retireStdinGeneration interrupts a write to one captured child without touching a
+// replacement. Clearing the binding precedes Close so no later caller can select the
+// handle being interrupted. The pipe close runs outside Runner.mu and unblocks the
+// synchronous writer whose caller context fired this method.
+func (r *Runner) retireStdinGeneration(generation uint64) {
+	r.mu.Lock()
+	if r.stdin == nil || r.childGeneration != generation {
+		r.mu.Unlock()
+		return
+	}
+	w := r.stdin
+	r.stdin = nil
+	r.mcpStatusEligible = false
+	r.childGeneration++
+	r.mu.Unlock()
+
+	r.retireParserChild()
+	_ = w.Close()
+}
+
+// retireParserChild fails every waiter owned by the departing child. It is called
+// only after Runner.mu is released because every correlator carries its own mutex.
+func (r *Runner) retireParserChild() {
+	if r.parser == nil {
+		return
+	}
+	r.parser.endPermissionModeChild()
+	r.parser.failMCPStatusQueries()
+	r.parser.failMCPActuations()
+	r.parser.failContextUsageQueries()
+	r.parser.failAppliedSettingsQueries()
 }
 
 // useCreateForm reports whether this spawn's id flag should be --session-id
