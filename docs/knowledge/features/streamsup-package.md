@@ -275,43 +275,51 @@ duplicates and late replies after cancellation or teardown without retaining a
 growing list of completed ids. Automatic numeric ids keep their existing path.
 No server text or request content is logged by the private path.
 
-`Runner.QueryContextUsage` (#2430) is a third instance of the same
-snapshot/register/recheck/write shape, this time correlating
-`RequestContextUsage`'s reading rather than MCP status. Its gate differs from
-`QueryMCPStatus`'s on purpose: `mcpStatusEligible` reports whether argv confines
-the child to the daemon's one MCP config, which has no bearing on whether a
-context reading can be asked for, so this gate checks only that the child is
-live and not rotating. `Parser.claimContextUsageQuery` sits beside
-`claimMCPStatusQuery` and `claimMCPActuation` ahead of `emitContextUsage`,
-under its own `context-usage-query-` prefix — disjoint from
-`mcpStatusQueryIDPrefix`, `mcpActuationIDPrefix`, and the bare sequence ids
-`RequestContextUsage` mints, since every one of these correlators claims any
-unregistered id in its own namespace and `mcpActuationIDPrefix`'s warning about
-a collision costing a hang rather than a miss applies unchanged to a fourth
-prefix on the same rule. `emitContextUsage`'s payload decode is split out as
-`decodeContextUsage` so the query and the shared sink read one decoder; a
-second decoder for the query path would have silently bypassed
-`maxContextUsageStringBytes` and `boundContextUsageEntries`'s per-entry caps
-while every existing bound test for the shared path stayed green, so sharing
-the decoder is what makes the bound structural rather than duplicated.
+`Runner.QueryContextUsage` (#2430) and `Runner.QueryAppliedSettings` (#2505)
+extend the same private snapshot/register/recheck/write pattern. They require a
+live, non-rotating child, use disjoint locally minted id prefixes, and claim the
+first match before shared control-response consumers. Their namespaces also
+consume retired ids, keeping late predecessor replies out of successor results,
+events and logs. An early reply waits for the writer's verdict, so a write that
+later returns an error cannot yield a false success.
 
-**`QueryContextUsage`'s first production caller is #2431's `cmd/pyry` collapsing
-resolver behind the `request_context_usage` verb.** It calls at `detail:"full"`
-only — the expensive, per-category count through claude's token-count API —
-never `"summary"`, which the automatic post-turn `turnEndContextUsageRequester`
-already covers on every completed turn. The resolver defers the call behind
-`turnBusyTracker.WaitIdle` so a mid-turn ask writes nothing to the child until
-that turn ends, and collapses closely-spaced asks for the same conversation into
-one call so two overlapping requests never both reach this method at once.
+The payload contracts stay separate. `QueryContextUsage` shares the automatic
+path's decoder and bounds, but not its unrelated MCP eligibility. Its `cmd/pyry`
+resolver waits for turn idle, collapses nearby asks, and owns `detail:"full"`;
+the post-turn path owns `"summary"`.
 
-Asserting that a claimed reading leaves no trace on the shared control-response
-record is easy to get vacuously: a query-minted id is never registered in
-`contextUsageRequests`, so `emitContextUsage` could not have published it
-regardless of where the claim sits in the arm, and a test that only checks "the
-sink saw nothing" proves nothing about ordering. The assertion that actually
-pins the claim above `emitModelList` needs a capturing logger checked for the
-absence of a control-response record — confirmed non-vacuous by moving the
-claim below `emitModelList` and watching that assertion fail first.
+`QueryAppliedSettings` requires a caller deadline. In its
+`(AppliedSettings, bool)` result, non-nil `Effort` preserves a bounded string,
+nil with `bool=true` preserves explicit JSON `null`, and `bool=false` means
+unavailable; a missing field never becomes `null`. `decodeAppliedSettings`
+retains independently owned, bounded copies of only `applied.model` and
+`applied.effort`, making effective settings, sources, paths, environment values
+and credentials unreachable. The values are child-authored display data, not
+authorization facts, and the private path does not log them. Its concrete
+`cmd/pyry` adapter stays off `sessions.Runner`; client publication is separate.
+
+A response-wait deadline alone does not bound a synchronous stdin write. If its
+context ends while `WriteAppliedSettings` is blocked, the query retires the
+captured generation, closes that child's stdin to release the write, and joins
+the callback before returning; a replacement is untouched. Child start and exit
+also drain pending reads. Sacrificing the unresponsive child avoids both an
+unbounded waiter and a partial control envelope.
+
+`New` infers correlation when `Config.Stdout` is directly the `*Parser`. When a
+wrapper such as `io.MultiWriter` also observes raw output, `Config.ControlParser`
+must name the exact parser receiving every child byte. Otherwise parsing works
+but the query returns unavailable without sending `get_settings` — a live test
+can appear wired while exercising nothing.
+
+The 2026-09-20 credentialed gate ran two clean children before any user turn
+with saved settings disabled. The inherited raw and production results agreed
+on `claude-opus-5` / `high`; the explicit arm selected and reported the menu's
+advertised `low`. `high` is an observation, never a daemon default: that arm
+compares only with its independent raw `applied` decode.
+
+An empty event sink cannot prove the private claim precedes logging, because its
+id never entered the automatic request map. The non-vacuous test uses a capturing
+logger and fails when the claim moves below `emitModelList`.
 
 `emitStreamEvent` maps Claude's nested partial-message wire without changing the
 downstream event contract. A valid `message_start` replaces the current message

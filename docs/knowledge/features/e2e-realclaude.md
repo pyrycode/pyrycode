@@ -79,6 +79,17 @@ practice: Claude 2.1.259 omitted both reason fields for an ordinary Bash write,
 while an outside-working-directory Write supplied `workingDir` plus non-empty
 reason text.
 
+A live proof of an effective default should derive its explicit comparison arm
+from the installed binary, not from the daemon's current vocabulary. The applied
+settings proof selects an untruncated effort level from that run's initialize
+menu, asks two clean children for `get_settings` before any user turn, and checks
+the production result against an independent raw-stdout decoder. Its inherited
+arm never asserts `high` or another literal: a hard-coded default would turn an
+upstream policy change into a false regression. When the raw observer wraps the
+production parser in `io.MultiWriter`, the runner must also receive that exact
+parser through `streamsup.Config.ControlParser`; relying on direct-writer type
+inference makes the query return unavailable without sending the request.
+
 The outside-directory gate applies to Read, not just Write, and only under the
 posture a daemon session actually runs in. `TestInteractiveStreamDefaultPostureOutsideWorkspaceRead`
 measured whether a live claude, walked back to the `default` permission mode
