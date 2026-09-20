@@ -122,4 +122,14 @@ Pending for the documentation stage: update `docs/knowledge/features/v2-session-
 
 ## Revisions
 
-None.
+### 2026-09-20 — complete the hermetic child control round trip
+
+The verifier's fake-daemon gate showed that three existing live-child settings reads
+timed out after production began sending `get_settings`: `runStreamJSONConfigured`
+silently ignored that control subtype, leaving the requesting connection's worker
+parked until its deadline. Extend fakeclaude's unconditional control responses with
+a minimal valid applied-settings reply, beside `writeContextUsageAck`, and add a
+focused response-shape test. The observed-window e2e also asserts the canned applied
+effort so removing production `relayWiring.effectiveEffortFor` cannot leave the
+regression tests vacuously green. The production resolver contract, deadline,
+concurrency model, security findings, and documentation handoff are unchanged.
