@@ -2920,6 +2920,17 @@ func (a activeSessionStarter) start(conversationID string, outcome func(error)) 
 	// three states it was over-reaching into. The guard is still fail-safe in the
 	// same direction: a nil seam, an unknown id, or a spawn racing its own pid all
 	// read "never ran" and refuse, and the frame is re-sendable.
+	//
+	// ONE CONSEQUENCE IS KEPT RATHER THAN CORRECTED: a REPEATED Reset now rotates
+	// every time. Pool.rekeyLocked stamps lastActiveAt while createdAt is immutable,
+	// so the successor of a rotation reads as previously used and a second frame
+	// arriving before any message re-keys again. Refusing it would need a signal
+	// these timestamps cannot carry — "has a child ever spawned under the CURRENT
+	// id" — because the Session survives the re-key; only the runner's rotatePending
+	// latch knows, and exposing it is a new API for a state no AC names. The cost is
+	// one extra separator for a session that has had no turn, it is operator-driven
+	// rather than client-replayable, and it is arguably what pressing the control
+	// twice asks for.
 	live := runner.State().ChildPID != 0
 	if named && !live && !used && !a.hasEverRun(oldID) {
 		a.logger().Debug("relay: v2 new_session inert; named conversation has no live child",
