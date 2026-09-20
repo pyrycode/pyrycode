@@ -17,6 +17,12 @@ import (
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
+type appliedSettingsQueryAdapter interface {
+	QueryAppliedSettings(context.Context) (streamsup.AppliedSettings, bool)
+}
+
+var _ appliedSettingsQueryAdapter = streamRunner{}
+
 func TestNewStreamRunnerFactory_WiresMCPStatusConfigPath(t *testing.T) {
 	workDir := t.TempDir()
 	claudePath := filepath.Join(workDir, "claude-mcp-policy")
