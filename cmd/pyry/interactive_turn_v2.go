@@ -880,6 +880,18 @@ func (e *interactiveTurnEmitterV2) endTurn() {
 	e.childLanes = nil
 }
 
+// closeForConversation returns an externally-abandoned active turn to idle
+// without inventing a turn_end result the child never emitted. The caller is the
+// stream drain, so lifecycle and delta fields retain their single-writer rule.
+func (e *interactiveTurnEmitterV2) closeForConversation(ctx context.Context, conversationID string) {
+	if !e.inTurn || e.turnConvID != conversationID {
+		return
+	}
+	e.flushDelta(ctx)
+	e.transitionTo(ctx, conversationID, turnbridge.StateIdle)
+	e.endTurn()
+}
+
 // splitDeltaText splits s into consecutive chunks of at most max bytes each,
 // never cutting through a multi-byte rune. Every chunk is a substring of s — no
 // copy, no re-encoding — so concatenating the result in order reproduces s

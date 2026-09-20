@@ -132,4 +132,23 @@ Pending for the documentation stage: update `docs/knowledge/features/streamsup-p
 
 ## Revisions
 
-None.
+### 2026-09-20 — verifier rework
+
+- The original closure argument incorrectly treated busy-tracker recovery as if
+  it also closed the scalar published emitter lifecycle. Child exit now clears
+  the accepted conversation inline on the stream drain, preserving the existing
+  stale-exit guard. Pool teardown records a non-dropping conversation close and
+  wakes that same drain; the drain applies pending closes before later child
+  events, so emitter mutation remains single-writer and successor ordering stays
+  intact. An external close publishes `turn_state: idle` without inventing a
+  `turn_end` result the child never emitted.
+- The focused live interruption proof now rejects `responding`, assistant
+  content, and tool activity for the addressed conversation between the observed
+  initial `thinking` state and its cancelled terminal event. Its prompt is a
+  deliberately multi-step, tool-free reasoning task rather than the existing
+  Bash-tool running-turn trigger.
+- Security-review delta: the pool-teardown hand-off retains only daemon-resolved
+  conversation IDs in a mutex-protected, coalescing set until the drain consumes
+  them. The set is bounded by conversations with pending teardown, never logged
+  or published, and is released before emitter I/O; the wake channel carries no
+  identifier or content. No goroutine or new trust boundary is introduced.

@@ -1454,6 +1454,114 @@ func TestStreamTurnDrainV2_ExitClearsOpenTurn(t *testing.T) {
 	}
 }
 
+// A close feed for the active conversation must clear both views of the turn:
+// delivery membership and the lifecycle already published to clients. The
+// background conversation proves that neither close path broadens into a global
+// idle signal.
+func TestStreamTurnDrainV2_ExternalCloseReturnsActiveThinkingTurnToIdle(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		close func(*streamTurnSink, *turnBusyTracker)
+	}{
+		{
+			name: "child exit",
+			close: func(sink *streamTurnSink, _ *turnBusyTracker) {
+				sink.exitFor("sess-a")()
+			},
+		},
+		{
+			name: "pool teardown",
+			close: func(_ *streamTurnSink, busy *turnBusyTracker) {
+				busy.clearForSession("sess-a")
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			cur := &stubCursor{}
+			cur.set(testConvID)
+			active := &stubActiveSession{}
+			active.set("sess-a")
+			bcast := newChanBcast("conn-a")
+			emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+			drops := make(chan string, 8)
+			sink := newStreamTurnSink(0, discardLogger())
+			busy := newTurnBusyTracker(stubBusyResolve(map[string]string{
+				"sess-a": testConvID,
+				"sess-b": testConvIDB,
+			}), discardLogger(), withExitEpoch(sink.exitEpoch), withLifecycleClose(sink.requestLifecycleClose))
+			cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, busy,
+				slog.New(dropWatcher{kinds: drops}))
+			defer func() { cancel(); cleanup() }()
+
+			sink.sinkFor("sess-a")(turnevent.ThinkingProgress{
+				EstimatedTokens:      64,
+				EstimatedTokensDelta: 64,
+			})
+			opened := collectEnvs(t, bcast.pushed, 2)
+			if got, want := envTypes(opened), []string{protocol.TypeTurnState, protocol.TypeThinkingProgress}; !slices.Equal(got, want) {
+				t.Fatalf("opening envelope types = %v, want %v", got, want)
+			}
+			var thinking protocol.TurnStatePayload
+			if err := json.Unmarshal(opened[0].Payload, &thinking); err != nil {
+				t.Fatalf("decode opening turn_state: %v", err)
+			}
+			if thinking.ConversationID != testConvID || thinking.State != "thinking" {
+				t.Fatalf("opening turn_state = %+v, want conversation %q thinking", thinking, testConvID)
+			}
+
+			sink.sinkFor("sess-b")(turnevent.ThinkingProgress{
+				EstimatedTokens:      64,
+				EstimatedTokensDelta: 64,
+			})
+			waitDropKind(t, drops, "thinking_progress")
+			if !busy.Busy(testConvIDB) {
+				t.Fatal("Busy(B) = false after B's thinking opener; isolation assertion would be vacuous")
+			}
+
+			tc.close(sink, busy)
+
+			closed := collectEnvs(t, bcast.pushed, 1)
+			if closed[0].Type != protocol.TypeTurnState {
+				t.Fatalf("close envelope type = %q, want %q", closed[0].Type, protocol.TypeTurnState)
+			}
+			var idle protocol.TurnStatePayload
+			if err := json.Unmarshal(closed[0].Payload, &idle); err != nil {
+				t.Fatalf("decode closing turn_state: %v", err)
+			}
+			if idle.ConversationID != testConvID || idle.State != "idle" {
+				t.Errorf("closing turn_state = %+v, want conversation %q idle", idle, testConvID)
+			}
+			// A later drain drop is the barrier that closeForConversation has
+			// returned after publishing idle, so emitter field reads below cannot
+			// race the drain goroutine.
+			sink.sinkFor("sess-b")(turnevent.ThinkingProgress{
+				EstimatedTokens:      128,
+				EstimatedTokensDelta: 64,
+			})
+			waitDropKind(t, drops, "thinking_progress")
+			if emitter.inTurn || emitter.currentState != "" {
+				t.Errorf("emitter lifecycle after close = {inTurn:%v state:%q}, want closed", emitter.inTurn, emitter.currentState)
+			}
+			if busy.Busy(testConvID) {
+				t.Error("Busy(A) = true after external close, want false")
+			}
+			if !busy.Busy(testConvIDB) {
+				t.Error("Busy(B) = false after closing A, want B unchanged")
+			}
+		})
+	}
+}
+
 // #1209 AC3: [exit for S, opener for S] pushed in that order leaves S busy — the
 // exit does not clear a turn opened after it. This is the criterion that forbids a
 // deferred or asynchronous clear: a clear handed to a goroutine would satisfy AC2

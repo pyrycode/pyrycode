@@ -160,6 +160,10 @@ type turnBusyTracker struct {
 	// not been observed; this comment is the deterrent, and the single production
 	// binding is review-verified.
 	exitEpoch func() uint64
+	// lifecycleClose hands a pool-teardown close to the stream drain, which owns
+	// the scalar published emitter lifecycle. It is construction-bound and called
+	// only after this tracker has released its mutex.
+	lifecycleClose func(conversationID string)
 
 	mu sync.Mutex
 	// busy maps a mid-turn conversation to the exit-lane position its mark is
@@ -186,13 +190,13 @@ type turnBusyTracker struct {
 	changed chan struct{}
 }
 
-// turnBusyOption is a construction-time binding on turnBusyTracker. There is
-// exactly one, and the variadic form is load-bearing rather than stylistic: a
-// required third parameter would touch 38 construction sites across eight test
-// files, which is over the one-ticket call-site boundary and is not made cheaper by
-// each edit being trivial. A post-construction setter would trade that for a "call
-// before publishing" contract the race detector cannot check, so the binding stays
-// inside the constructor where it is atomic by construction.
+// turnBusyOption is a construction-time binding on turnBusyTracker. The variadic
+// form is load-bearing rather than stylistic: required parameters would touch 38
+// construction sites across eight test files, which is over the one-ticket
+// call-site boundary and is not made cheaper by each edit being trivial. A
+// post-construction setter would trade that for a "call before publishing"
+// contract the race detector cannot check, so bindings stay inside the constructor
+// where they are atomic by construction.
 type turnBusyOption func(*turnBusyTracker)
 
 // withExitEpoch binds the fan-in's exit-lane position source, arming the stale-exit
@@ -204,6 +208,12 @@ type turnBusyOption func(*turnBusyTracker)
 // the exitEpoch field for why that direction was chosen and what it costs.
 func withExitEpoch(exitEpoch func() uint64) turnBusyOption {
 	return func(t *turnBusyTracker) { t.exitEpoch = exitEpoch }
+}
+
+// withLifecycleClose binds the non-blocking pool-teardown hand-off for the
+// published emitter lifecycle. Trackers outside the stream composition omit it.
+func withLifecycleClose(close func(conversationID string)) turnBusyOption {
+	return func(t *turnBusyTracker) { t.lifecycleClose = close }
 }
 
 // newTurnBusyTracker constructs the tracker. It panics if resolve is nil — a
@@ -481,6 +491,9 @@ func (t *turnBusyTracker) clearForSession(sessionID string) {
 	}
 
 	t.setBusy(convID, false, toolCallDelta{})
+	if t.lifecycleClose != nil {
+		t.lifecycleClose(convID)
+	}
 }
 
 // clearForExit is the drain exit arm's door onto the clear (#1483): it closes any
@@ -514,10 +527,12 @@ func (t *turnBusyTracker) clearForSession(sessionID string) {
 // t.mu for the lock-order reason observe documents, the same fail-closed
 // clear_unresolved skip, the same content-free record. It is reached only from the
 // drain goroutine, so it inherits that goroutine's single-reader serialisation
-// against observe by CONSTRUCTION rather than by t.mu.
-func (t *turnBusyTracker) clearForExit(sessionID string, exitEpoch uint64) {
+// against observe by CONSTRUCTION rather than by t.mu. The return names the
+// accepted conversation so that same drain can close the scalar published
+// lifecycle; a stale or unresolved exit returns false and must close neither view.
+func (t *turnBusyTracker) clearForExit(sessionID string, exitEpoch uint64) (conversationID string, cleared bool) {
 	if t == nil {
-		return
+		return "", false
 	}
 
 	// Resolved OUTSIDE t.mu — the identical lock-order reason observe documents, and
@@ -529,7 +544,7 @@ func (t *turnBusyTracker) clearForExit(sessionID string, exitEpoch uint64) {
 		t.logger.Debug("relay: stream-turn clear skip; session resolves to no conversation",
 			"event", "stream_turn.clear_unresolved",
 			"session_id", sessionID)
-		return
+		return "", false
 	}
 
 	if t.clearGuarded(convID, exitEpoch) {
@@ -550,7 +565,9 @@ func (t *turnBusyTracker) clearForExit(sessionID string, exitEpoch uint64) {
 		t.logger.Debug("relay: stream-turn clear declined; exit predates the delivery mark",
 			"event", "stream_turn.clear_stale_exit",
 			"session_id", sessionID)
+		return "", false
 	}
+	return convID, true
 }
 
 // clearGuarded applies the exit-lane guard and the membership delete under ONE

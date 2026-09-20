@@ -879,7 +879,8 @@ func runSupervisor(args []string) error {
 	if streamSink != nil {
 		turnBusy = newTurnBusyTracker(
 			func(sid string) (string, bool) { return conversationForSession(convReg, sid) }, logger,
-			withExitEpoch(streamSink.exitEpoch))
+			withExitEpoch(streamSink.exitEpoch),
+			withLifecycleClose(streamSink.requestLifecycleClose))
 	}
 	pool, err := sessions.New(sessions.Config{
 		Logger:                    logger,
