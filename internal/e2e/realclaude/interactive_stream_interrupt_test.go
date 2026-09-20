@@ -126,6 +126,90 @@ func TestInteractiveStreamInterruptStopsRunningTurn(t *testing.T) {
 	drainForCompletedTurn(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
 }
 
+// TestInteractiveStreamInterruptStopsInitialThinkingTurn waits for the server's
+// thinking phase before any assistant text or tool frame, then sends an interrupt
+// naming that conversation and requires the first terminal event to be cancelled.
+func TestInteractiveStreamInterruptStopsInitialThinkingTurn(t *testing.T) {
+	h, convID := startStreamRunningTurnHarness(t)
+
+	driveRunningTurn(t, h, 2, convID, runningTurnHold)
+	drainForInitialThinking(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
+
+	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
+		ID:      3,
+		Type:    protocol.TypeInterrupt,
+		TS:      time.Now().UTC(),
+		Payload: mustJSON(t, protocol.InterruptPayload{ConversationID: convID}),
+	})
+	drainForCancelledTurnEnd(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
+}
+
+// drainForInitialThinking returns only when thinking is published for convID. A
+// progress, response, tool, or terminal frame for that conversation first makes
+// the proof vacuous and therefore fails immediately.
+func drainForInitialThinking(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			t.Fatalf("no initial turn_state{thinking} for %q within %s", convID, timeout)
+		}
+		raw, err := phone.ReceiveBytes(remaining)
+		if err != nil {
+			if errors.Is(err, fakephone.ErrReceiveTimeout) {
+				continue
+			}
+			t.Fatalf("phone receive (awaiting initial thinking): %v", err)
+		}
+		var inner protocol.InnerFrameV2
+		if err := json.Unmarshal(raw, &inner); err != nil {
+			t.Fatalf("decode inner frame: %v", err)
+		}
+		if inner.Type != protocol.TypeNoiseMsg {
+			continue
+		}
+		cipher, err := base64.StdEncoding.DecodeString(inner.Data)
+		if err != nil {
+			t.Fatalf("decode inner data: %v", err)
+		}
+		plain, err := cs.Decrypt(cipher)
+		if err != nil {
+			t.Fatalf("phone decrypt (receive-nonce desync?): %v", err)
+		}
+		var env protocol.Envelope
+		if err := json.Unmarshal(plain, &env); err != nil {
+			t.Fatalf("decode envelope: %v", err)
+		}
+		if env.Type == protocol.TypeTurnState {
+			var state protocol.TurnStatePayload
+			if err := json.Unmarshal(env.Payload, &state); err != nil {
+				t.Fatalf("decode turn_state: %v", err)
+			}
+			if state.ConversationID != convID {
+				continue
+			}
+			if state.State == "thinking" {
+				t.Logf("initial turn_state{thinking} for %q observed", convID)
+				return
+			}
+			t.Fatalf("turn_state{%s} for %q arrived before initial thinking", state.State, convID)
+		}
+		switch env.Type {
+		case protocol.TypeThinkingProgress, protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeTurnEnd:
+			var addressed struct {
+				ConversationID string `json:"conversation_id"`
+			}
+			if err := json.Unmarshal(env.Payload, &addressed); err != nil {
+				t.Fatalf("decode %s conversation: %v", env.Type, err)
+			}
+			if addressed.ConversationID == convID {
+				t.Fatalf("%s for %q arrived before initial turn_state{thinking}", env.Type, convID)
+			}
+		}
+	}
+}
+
 // drainForCancelledTurnEnd reads binary→phone noise_msg frames in receive order — the
 // receive nonce is sequential, so every noise_msg MUST be decrypted in order to keep the
 // CipherState in sync — and returns once it observes the FIRST turn_end for convID,

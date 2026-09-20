@@ -280,7 +280,7 @@ const (
 // closers are the enumerated arm, not the fall-through.
 func turnMarkFor(ev turnevent.Event) turnMark {
 	switch ev.(type) {
-	case turnevent.ThoughtChunk, turnevent.TextChunk, turnevent.ToolStart, turnevent.ToolUpdate:
+	case turnevent.ThoughtChunk, turnevent.ThinkingProgress, turnevent.TextChunk, turnevent.ToolStart, turnevent.ToolUpdate:
 		return turnMarkOpen
 	case turnevent.TurnEnd:
 		// Both stop reasons close the turn; resultTurnEndReason (`maxTaskRosterDescription`)

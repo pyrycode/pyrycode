@@ -50,7 +50,7 @@ func requireWaitIdle(t *testing.T, tr *turnBusyTracker, convID string) {
 
 // --- unit tier: the tracker driven directly ---------------------------------
 
-// AC4: the opener set is a WHITELIST — exactly the four variants that open a turn
+// The opener set is a WHITELIST — exactly the five variants that open a turn
 // today, with everything else leaving the conversation idle.
 //
 // Stall, ApiRetry and Compacting are tui-driver signals that the stream-json
@@ -75,6 +75,7 @@ func TestTurnBusyTracker_OpenerWhitelist(t *testing.T) {
 		wantBusy bool
 	}{
 		{"thought_chunk opens", turnevent.ThoughtChunk{MessageID: "m1", Text: "thinking"}, true},
+		{"thinking_progress opens", turnevent.ThinkingProgress{EstimatedTokens: 64, EstimatedTokensDelta: 64}, true},
 		{"text_chunk opens", turnevent.TextChunk{MessageID: "m1", Text: "hello"}, true},
 		{"tool_start opens", turnevent.ToolStart{ToolCallID: "tu-1", Title: "Read"}, true},
 		{"tool_update opens", turnevent.ToolUpdate{ToolCallID: "tu-1"}, true},
@@ -557,8 +558,9 @@ func turnMarkName(m turnMark) string {
 // The recently-added variants are the rows that matter most. RateLimited pins the
 // #1404 DISCHARGED note — the whitelist absorbed a genuinely new variant with no
 // change to this switch — and the three background-task variants plus
-// ThinkingProgress pin the same property for #1380 / #1382 / #1385: a task or a
-// thinking reading is orthogonal to turn lifecycle, so neither may move the mark.
+// The background-task variants pin the lifecycle-neutral property for #1380 and
+// #1382. ThinkingProgress is deliberately an opener now: it is live evidence of
+// initial thinking and every result subtype supplies the matching close.
 //
 // ModelAnnounced (#1600) discharges the same note a SECOND time, and its row is
 // the totality half doing its job rather than a policy question: the production
@@ -611,7 +613,7 @@ func TestTurnMarkFor_TotalOverEveryVariant(t *testing.T) {
 		// orthogonal to the turn. The default already answers it, so this row asserts
 		// that answer rather than a new arm — turnMarkFor is unchanged by that ticket.
 		{turnevent.BackgroundTaskProgress{TaskID: "t-1", ToolUses: 2}, turnMarkNone},
-		{turnevent.ThinkingProgress{EstimatedTokens: 184}, turnMarkNone},
+		{turnevent.ThinkingProgress{EstimatedTokens: 184}, turnMarkOpen},
 		{turnevent.RateLimited{Status: "allowed", LimitType: "five_hour"}, turnMarkNone},
 		{turnevent.ModelAnnounced{Model: "claude-haiku-4-5-20251001"}, turnMarkNone},
 		// #2252. Neither an opener nor a closer, and its argument is the row above's

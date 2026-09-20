@@ -67,6 +67,7 @@ func TestParser_StreamEventCapture(t *testing.T) {
 	var got []turnevent.Event
 	p := NewParser(func(ev turnevent.Event) { got = append(got, ev) }, discardLogger())
 	var settledText strings.Builder
+	var currentMessageID string
 	for i, record := range capture.Lines {
 		var line streamLine
 		if err := json.Unmarshal([]byte(record.Payload), &line); err != nil {
@@ -91,7 +92,10 @@ func TestParser_StreamEventCapture(t *testing.T) {
 		}
 		var outer struct {
 			Event struct {
-				Type  string `json:"type"`
+				Type    string `json:"type"`
+				Message *struct {
+					ID string `json:"id"`
+				} `json:"message"`
 				Delta struct {
 					Type string `json:"type"`
 				} `json:"delta"`
@@ -100,16 +104,36 @@ func TestParser_StreamEventCapture(t *testing.T) {
 		if err := json.Unmarshal([]byte(record.Payload), &outer); err != nil {
 			t.Fatalf("line %d: decoding stream event: %v", i, err)
 		}
+		if outer.Event.Type == "message_start" && outer.Event.Message != nil {
+			currentMessageID = outer.Event.Message.ID
+		}
 		added := got[before:]
-		if outer.Event.Type == "content_block_delta" && outer.Event.Delta.Type == "text_delta" {
+		if outer.Event.Type != "content_block_delta" {
+			if len(added) != 0 {
+				t.Fatalf("line %d %s/%s emitted %#v, want no event", i, outer.Event.Type, outer.Event.Delta.Type, added)
+			}
+			continue
+		}
+		switch outer.Event.Delta.Type {
+		case "text_delta":
 			if len(added) != 1 {
 				t.Fatalf("line %d text_delta emitted %d events, want 1", i, len(added))
 			}
 			if _, ok := added[0].(turnevent.TextChunk); !ok {
 				t.Fatalf("line %d text_delta event = %T, want turnevent.TextChunk", i, added[0])
 			}
-		} else if len(added) != 0 {
-			t.Fatalf("line %d %s/%s emitted %#v, want no event", i, outer.Event.Type, outer.Event.Delta.Type, added)
+		case "thinking_delta":
+			if len(added) != 1 {
+				t.Fatalf("line %d thinking_delta emitted %d events, want 1", i, len(added))
+			}
+			thought, ok := added[0].(turnevent.ThoughtChunk)
+			if !ok || thought.MessageID != currentMessageID || thought.Text != "" {
+				t.Fatalf("line %d thinking_delta event = %#v, want content-free ThoughtChunk for %q", i, added[0], currentMessageID)
+			}
+		default:
+			if len(added) != 0 {
+				t.Fatalf("line %d %s/%s emitted %#v, want no event", i, outer.Event.Type, outer.Event.Delta.Type, added)
+			}
 		}
 	}
 
@@ -241,5 +265,98 @@ func TestParser_StreamEventTextIsNotLogged(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), secret) {
 		t.Fatalf("parser log contains model text: %q", logs.String())
+	}
+}
+
+func TestParser_StreamEventThinkingDeltaEmitsContentFreeThought(t *testing.T) {
+	t.Parallel()
+	const secret = "MODEL-THOUGHT-MUST-STAY-OFF-EVENTS-AND-LOGS-2522"
+	var events []turnevent.Event
+	var logs bytes.Buffer
+	p := NewParser(
+		func(ev turnevent.Event) { events = append(events, ev) },
+		slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	)
+	for _, line := range []string{
+		`{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg-thinking"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"` + secret + `"}}}`,
+	} {
+		if _, err := p.Write([]byte(line + "\n")); err != nil {
+			t.Fatalf("Write() error = %v", err)
+		}
+	}
+
+	want := []turnevent.Event{turnevent.ThoughtChunk{MessageID: "msg-thinking"}}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+	if strings.Contains(logs.String(), secret) {
+		t.Fatalf("parser log contains thinking text: %q", logs.String())
+	}
+}
+
+func TestParser_StreamEventUnattributedThinkingStaysContentFree(t *testing.T) {
+	t.Parallel()
+	const secret = "UNATTRIBUTED-THOUGHT-MUST-NOT-ENTER-RAW-DIAGNOSTICS-2522"
+	tests := []struct {
+		name   string
+		prefix []string
+		line   string
+	}{
+		{
+			name: "missing index",
+			line: `{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"` + secret + `"}}}`,
+		},
+		{
+			name: "negative index",
+			line: `{"type":"stream_event","event":{"type":"content_block_delta","index":-1,"delta":{"type":"thinking_delta","thinking":"` + secret + `"}}}`,
+		},
+		{
+			name: "no message",
+			prefix: []string{
+				`{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}}`,
+			},
+			line: `{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"` + secret + `"}}}`,
+		},
+		{
+			name: "wrong block type",
+			prefix: []string{
+				`{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg-thinking"}}}`,
+				`{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text"}}}`,
+			},
+			line: `{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"` + secret + `"}}}`,
+		},
+		{
+			name: "wrong block index",
+			prefix: []string{
+				`{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg-thinking"}}}`,
+				`{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}}`,
+			},
+			line: `{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"` + secret + `"}}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var events []turnevent.Event
+			var logs bytes.Buffer
+			p := NewParser(
+				func(ev turnevent.Event) { events = append(events, ev) },
+				slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+			)
+			for _, line := range append(tt.prefix, tt.line) {
+				if _, err := p.Write([]byte(line + "\n")); err != nil {
+					t.Fatalf("Write() error = %v", err)
+				}
+			}
+			if len(events) != 0 {
+				t.Fatalf("events = %#v, want none so thinking text cannot enter a raw diagnostic", events)
+			}
+			if strings.Contains(logs.String(), secret) {
+				t.Fatalf("parser log contains thinking text: %q", logs.String())
+			}
+		})
 	}
 }
