@@ -1121,6 +1121,31 @@ func runSupervisor(args []string) error {
 			// #1475: the same validator the mint and revive paths use, re-run at
 			// rotation time on the recorded workspace rather than trusting it.
 			spawnDirFor: resolveSpawnDir,
+			// #2521: the three seams that let a DORMANT conversation be reset without
+			// a preliminary message. everRan is the durable discriminator that keeps
+			// the #2085 never-used refusal intact while releasing the three states it
+			// was over-reaching into; resolveDormant reads the persisted binding the
+			// pool has not materialised; reviveBound is sessionRouter.revive's body —
+			// the same re-validated spawn dir and the same non-spawning Pool.Revive —
+			// so the reset path recovers a dropped session exactly as the message
+			// route already does.
+			everRan: pool.EverActivated,
+			resolveDormant: func(convID string) (sessions.SessionID, string, bool) {
+				return resolveDormantSession(convReg, convID)
+			},
+			reviveBound: func(convID string, oldID sessions.SessionID, recordedCwd string) (sessions.Runner, error) {
+				// The label is the conversation id, matching what create_conversation
+				// originally minted the session with — sessionRouter.revive's posture.
+				spawnDir, err := resolveSpawnDir(recordedCwd)
+				if err != nil {
+					return nil, err
+				}
+				sess, err := pool.Revive(oldID, convID, spawnDir)
+				if err != nil {
+					return nil, err
+				}
+				return sess.Runner(), nil
+			},
 			// #2477: the wrap-up turn that writes the outgoing session's handoff note
 			// before the rotation. Built over the SAME registry, pool, tracker and
 			// queue the rest of this literal's seams are built over, and under the
@@ -2554,6 +2579,52 @@ type activeSessionStarter struct {
 	// own nil, degrading rather than panicking on a remotely-driven path.
 	spawnDirFor func(recordedCwd string) (string, error)
 
+	// everRan reports whether the conversation's bound session has ever been
+	// activated — the durable answer to "has this conversation ever run?" that lets
+	// this type tell a conversation created but never messaged, which must stay
+	// inert, from a previously-used session that merely has no child right now,
+	// which must be resettable (#2521). Production wires Pool.EverActivated, whose
+	// doc carries why the reading is exact and where it is blind.
+	//
+	// Optional: nil answers false for every conversation, which is pre-#2521
+	// behaviour — every dormant reset inert. That is the fail-closed direction and
+	// it is what keeps every pre-#2521 literal in this package unchanged.
+	//
+	// IT MUST BE WIRED WHEREVER reviveBound IS. A literal offering the revive
+	// without this gate would materialise a never-used conversation's session on an
+	// inbound frame, which is the registry mutation AC-3 forbids. The nil default
+	// fails closed in the other direction (nothing revives), so the pairing is a
+	// wiring discipline rather than an exploitable state.
+	everRan func(oldID sessions.SessionID) bool
+
+	// resolveDormant answers a named conversation's PERSISTED binding when
+	// resolveBound could not (#2521). It reads the conversation registry and
+	// deliberately does not consult the pool: the state it exists for is the one
+	// where the pool's answer is "miss", because after a daemon restart
+	// sessions.New materialises only the bootstrap and every per-conversation
+	// session is a persisted entry with no *Session behind it (#1487).
+	//
+	// It repeats resolveBound's unknown/unbound refusal rather than inheriting it
+	// by proximity — that is the #678 isolation point, and without it the empty
+	// CurrentSessionID would reach a revive of the BOOTSTRAP session.
+	//
+	// Optional: nil leaves the after-restart case exactly as inert as it is today.
+	resolveDormant func(convID string) (oldID sessions.SessionID, recordedCwd string, ok bool)
+
+	// reviveBound re-materialises a dormant session into the pool and answers its
+	// runner, so the rotation below can proceed against a session Pool.Lookup was
+	// missing (#2521). Production wires resolveSpawnDir + Pool.Revive — the same
+	// pair sessionRouter.revive uses, so the reset path re-validates the recorded
+	// workspace at the spawn site on the same terms the message route already does,
+	// rather than trusting a confinement that was checked before the restart.
+	//
+	// It does NOT spawn claude: Pool.Revive registers the session evicted and the
+	// child comes up on the first message's Activate, which is precisely the
+	// identity the rotation below is about to install.
+	//
+	// Optional: nil leaves the after-restart case inert.
+	reviveBound func(convID string, oldID sessions.SessionID, recordedCwd string) (sessions.Runner, error)
+
 	// reset runs the outgoing session's wrap-up turn and writes its reply as the
 	// conversation's handoff note before the rotation (#2477). Optional: nil keeps
 	// the synchronous pre-#2477 rotation, which is the PTY posture and the shape
@@ -2787,11 +2858,24 @@ func (a activeSessionStarter) start(conversationID string, outcome func(error)) 
 	}
 
 	runner, oldID, recordedCwd, ok := a.resolveBound(convID)
+	// used carries the dormant arm's PROOF forward rather than re-deriving it: a
+	// revived session reached this line only because everRan already answered true
+	// for it, and the liveness guard below would otherwise ask the same question a
+	// second time for an answer it cannot have changed.
+	used := false
 	if !ok {
-		a.logger().Debug("relay: v2 new_session inert; conversation has no bound session",
-			"event", "v2.new_session.no_bound_session",
-			"conversation_id", convID)
-		return nil, false
+		// #2521: "the pool has no session for it" is not the same as "there is
+		// nothing to reset". After a daemon restart sessions.New materialises only
+		// the bootstrap, so a previously-used conversation's session is a persisted
+		// entry Pool.Lookup misses — the state the message route already recovers
+		// from through sessionRouter.revive and this verb did not. reviveDormantBound
+		// writes its own record on every refusal, including the unknown/unbound one
+		// this arm used to write here.
+		runner, oldID, recordedCwd, ok = a.reviveDormantBound(convID)
+		if !ok {
+			return nil, false
+		}
+		used = true
 	}
 	// The rotation capability is probed HERE as well as inside startFreshRunner,
 	// which is deliberate rather than an oversight: this is the arm AC-4 asks to be
@@ -2826,8 +2910,18 @@ func (a activeSessionStarter) start(conversationID string, outcome func(error)) 
 	// that has started but not yet published its pid reads 0 too and refuses; that is
 	// the same fail-safe direction the whole reject set takes, and the frame is
 	// re-sendable.
+	//
+	// SINCE #2521 THE ZERO PID IS NO LONGER THE WHOLE ANSWER. It covers an unstarted
+	// runner AND one whose child has stopped, backed off or been evicted, and only
+	// the first of those has nothing to reset — the rest are the channel an operator
+	// comes back to after lunch, whose Reset did nothing at all. everRan splits the
+	// two on the durable signal (Pool.EverActivated), so the refusal keeps its
+	// original subject — a conversation created but never messaged — and loses the
+	// three states it was over-reaching into. The guard is still fail-safe in the
+	// same direction: a nil seam, an unknown id, or a spawn racing its own pid all
+	// read "never ran" and refuse, and the frame is re-sendable.
 	live := runner.State().ChildPID != 0
-	if named && !live {
+	if named && !live && !used && !a.hasEverRun(oldID) {
 		a.logger().Debug("relay: v2 new_session inert; named conversation has no live child",
 			"event", "v2.new_session.no_live_child",
 			"conversation_id", convID)

@@ -1786,6 +1786,63 @@ func (p *Pool) DormantSettingsFor(id SessionID) (SessionSettings, error) {
 	}), nil
 }
 
+// EverActivated reports whether the session named by id has ever been activated
+// — the durable, restart-surviving answer to "has this conversation ever run?"
+// (#2521). It is what lets the named new_session path tell a conversation created
+// but never messaged, which must stay inert, from a previously-used session that
+// merely has no child at this instant, which must be resettable.
+//
+// It answers from ONE predicate over TWO sources, which is the whole point: the
+// live session's lastActiveAt against its createdAt when the pool holds it, and
+// the persisted entry's when it does not. That second arm is
+// DormantSettingsFor's shape and exists for the same reason (#2448/#2449) — after
+// a daemon restart New materialises only the bootstrap, so every
+// per-conversation session is a persisted entry with no *Session behind it, and a
+// reader that consulted p.sessions alone would answer "never run" for every
+// channel the daemon holds a record of.
+//
+// THE TIMESTAMP PAIR IS AN EXACT READING, not a tolerance. buildSession stamps
+// createdAt and lastActiveAt from one now value, so a never-activated session has
+// them equal to the nanosecond; and every writer of lastActiveAt afterwards —
+// Session.transitionTo, Session.touchLastActive, Session.beginEvict and
+// rekeyLocked — fires only on an activation, an eviction or a rotation, none of
+// which a minted-and-untouched session reaches. Both fields are already in
+// registryEntry, so nothing here is a schema change and no migration exists: a
+// channel that ran before this method did already carries the distinguishing
+// pair.
+//
+// ITS ONE BLIND SPOT, named rather than papered over: the bootstrap session
+// warm-starts in stateActive straight from its persisted row without a
+// transition, so a bootstrap whose timestamps still read equal answers false even
+// while its child is up. Every caller today asks only about a session with NO
+// LIVE CHILD, where that reading is the right one anyway; a caller that wants
+// "is it running" wants State().ChildPID, which is a different question.
+//
+// The empty id is refused BEFORE either map read. That is the #678 isolation
+// point resolveBoundSession documents: Pool.Lookup("") resolves to the BOOTSTRAP
+// session, and a reader that let the empty id through would answer a question
+// about the daemon's shared child instead of the caller's. No id validation
+// beyond that and no logging, SettingsFor's and DormantSettingsFor's posture
+// verbatim — a malformed id is a map miss, which is already the correct answer,
+// and nothing about it reaches a log line.
+//
+// Concurrency: safe from any goroutine. Lock order Pool.mu (read) → Session.lcMu,
+// the order List, saveLocked and pickLRUVictim already keep; no new edge.
+func (p *Pool) EverActivated(id SessionID) bool {
+	if id == "" {
+		return false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if sess, ok := p.sessions[id]; ok {
+		sess.lcMu.Lock()
+		defer sess.lcMu.Unlock()
+		return sess.lastActiveAt.After(sess.createdAt)
+	}
+	entry, ok := p.dormant[id]
+	return ok && entry.LastActiveAt.After(entry.CreatedAt)
+}
+
 // mintSettings returns the SessionSettings a freshly-minted session starts
 // with: the operator's configured model and effort level, sourced from the
 // bootstrap session's persisted settings so a new conversation does not fall
