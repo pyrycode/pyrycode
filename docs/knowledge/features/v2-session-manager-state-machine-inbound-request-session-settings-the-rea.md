@@ -1,4 +1,4 @@
-# Inbound `request_session_settings` (#491/#1214, extended #1586, conversation-keyed #1610, dormant reply #2449, confirmed permission mode #2510) — the read half of the #844 cluster
+# Inbound `request_session_settings` (#491/#1214, extended #1586, conversation-keyed #1610, dormant reply #2449, confirmed permission mode #2510, effective effort #2516) — the read half of the #844 cluster
 
 `request_session_settings` is a v2 **control** envelope (phone → binary),
 intercepted in `dispatchAppFrame`'s discriminator switch **before**
@@ -9,9 +9,11 @@ intercepted in `dispatchAppFrame`'s discriminator switch **before**
 the current run configuration: the session id a client must address a
 `set_session_settings` to, stored model / effort, the current child's last
 confirmed YOLO / permission mode when available, and the context-window
-occupancy — **all seven fields describing the one session bound to the
-conversation the client named**
-(#1610). Before #1610 the reported id
+occupancy — **all seven saved/run fields describing the one session bound to
+the conversation the client named** (#1610). An eighth, optional
+`effective_effort` field reports Claude's independently observed applied value
+without turning an inherited default into the stored `effort` choice (#2516).
+Before #1610 the reported id
 and the reported values could describe different sessions: the id followed
 whichever conversation the request named, but the values were always the
 shared **bootstrap** session's, so a client changing model/effort/YOLO for
@@ -25,27 +27,30 @@ render a screen.** A client used to get these values off `screen_snapshot`'s
 side-load, but that reply is gated on a live terminal: on the stream-json
 runner `Snapshotter` is nil by construction (#1077/#1101), so
 `handleRequestSnapshot` short-circuits to `server.binary_offline` and drags the
-settings — which have nothing to do with a terminal — down with it. This
-handler consults one conversation-keyed seam, so it answers identically on
-both runners.
+settings — which have nothing to do with a terminal — down with it. Saved
+fields still come through one conversation-keyed `RunConfigFor` read on both
+runners. The separate `EffectiveEffortFor` provider is optional; until its
+production exact-child implementation is wired by #2517, the existing reply is
+preserved with `effective_effort` omitted.
 
-Control flow, in load-bearing order — this verb never fails a request
-outright; every branch produces the same reply shape:
+Control flow, in load-bearing order:
 
-1. **Capability gate.** `if !s.interactive { return }` — a non-interactive
-   conn is fully inert: no decode, no resolution, no seam call, no reply.
-   It must precede the steps below, so such a conn cannot learn whether a
-   conversation or a session exists (`_NonInteractiveMakesNoLookup` is the
-   test that pins the ordering, not just the no-reply half `_ReportsRunConfig`
-   already covered — see § Test design below).
-2. **Decode, tolerated.** `json.Unmarshal(env.Payload, &protocol.RequestSessionSettingsPayload{})`,
-   tolerated on failure — a bare frame from an un-updated client carries a nil
-   `Payload`, which `Unmarshal` rejects while leaving the id at `""`. There is
-   no emptiness guard beyond what step 3 already needs, no error check on the
-   `Unmarshal` return, and no malformed-payload reply branch; the decode error
-   is never echoed or logged.
-3. **Resolve, or don't.** One conversation-keyed read replaces the pre-#1610
-   `addressable` boolean and the three bootstrap-scoped seam reads:
+1. **Capability gate and worker handoff.** `dispatchAppFrame` runs on `Run`.
+   `if !s.interactive { return }` keeps a non-interactive conn fully inert: no
+   queueing, decode, dependency call, or reply. An interactive frame is tagged
+   `appFrameSessionSettingsRequest` and enqueued on that connection's existing
+   `appFrameWorker`. `EffectiveEffortFor` may wait on a child round trip, so
+   provider availability is deliberately *not* a dispatch gate: a nil provider
+   still owes the complete saved-settings reply.
+2. **Decode on the worker, tolerated at the payload boundary.** The handler
+   re-decodes the immutable plaintext envelope to recover its correlation id.
+   Failure is unreachable after `dispatchAppFrame` decoded the same bytes; it
+   logs only `conn_id` and emits nothing because no id can be trusted. A bare or
+   malformed payload still leaves `ConversationID == ""` and produces the
+   historical zero-valued reply without consulting either dependency. The
+   payload decode error is never echoed or logged.
+3. **Resolve saved fields, or don't.** One conversation-keyed read replaces
+   the pre-#1610 `addressable` boolean and the three bootstrap-scoped seam reads:
 
    ```go
    var cfg RunConfig
@@ -77,16 +82,22 @@ outright; every branch produces the same reply shape:
      Honouring it makes the relay fail closed on its own contract rather than
      on the producer's good behaviour — pinned by a **poisoned** refusal
      double in the unit tests (§ Test design).
-4. **Marshal + reply.** Unchanged shape, sourcing all seven fields from `cfg`.
-   `PermissionMode` and `YOLO` may be their zero values even when the stored
-   fields and session id are present; that is the defined unavailable posture,
-   not a partial marshal.
-   No new log call on any reject branch — this verb fires on every sheet
-   open, so a per-reject line would log more than the write path, and the
-   only thing it could add is the caller's untrusted conversation id.
+4. **Read applied effort only after acceptance.** For an accepted `RunConfig`,
+   a non-nil `EffectiveEffortFor` is called exactly once with the worker context
+   and the same conversation id. `available == true` preserves either a string
+   or explicit null; `available == false` ignores even a poisoned non-nil value.
+   The relay adds no cache, so every fresh resolvable request performs a fresh
+   provider call.
+5. **Marshal + Run-owned reply.** All seven existing fields come only from
+   `cfg`; the provider can populate only `EffectiveEffort`. `PermissionMode`
+   and `YOLO` may be zero values even when stored fields and session id are
+   present; that is the defined unavailable posture, not a partial marshal.
+   The worker builds an unsealed correlated reply and passes it through
+   `forwardToRun`; `forwardAppReply` performs Noise sealing on `Run`. No reject
+   branch logs the caller's conversation id or any settings value.
 
 - **`RunConfigFor func(conversationID string) (RunConfig, bool)` — the sole
-  seam this handler consults (#1609 built it, #1610 wires it in).** One call
+  source of every saved/run field (#1609 built it, #1610 wires it in).** One call
   resolves a *named* conversation to its own bound session id, stored model /
   effort, confirmed YOLO / permission mode when available, and context-window
   figures together, with a comma-ok for "not addressable". `cmd/pyry` composes
@@ -109,6 +120,16 @@ outright; every branch produces the same reply shape:
   `RunConfig`/`RunConfigFor` doc comments, [codebase/1609.md](../codebase/1609.md)
   and [`Pool.SettingsFor`](sessions-package-key-types-pool-settingsfor.md) for
   `DormantSettingsFor`.
+- **`EffectiveEffortFor func(context.Context, string) (*string, bool)` — one
+  nullable applied scalar, not a second settings source.** A non-nil pointer
+  with `true` produces a JSON string. A nil pointer with `true` produces
+  explicit JSON null, meaning Claude confirmed that no effort parameter is
+  applied. `false` means unavailable and requires omission, regardless of the
+  pointer; a nil provider has the same omission posture. It receives only an id
+  already accepted by `RunConfigFor`, must honor the worker context so manager
+  shutdown releases it, and must not return a full Claude settings response
+  across the `internal/relay` boundary. #2516 defines and consumes this seam;
+  #2517 owns exact-current-child resolution and production wiring.
 - **`KnownConversation` and `BootstrapSessionID` are no longer read here.**
   `KnownConversation` (`func(conversationID string) bool`) is now consulted
   **only** by `handleRequestSnapshot` — this handler stopped calling it
@@ -124,9 +145,9 @@ outright; every branch produces the same reply shape:
   unchanged — `handleRequestSnapshot`'s `screen_snapshot` side-load is still
   their only reader, and that path is unreachable in production today
   (`Snapshotter` is hardcoded `nil`).
-- **The handler.** `handleRequestSessionSettings(ctx, s, env)` runs on the
-  single `Run` dispatch goroutine, like every other intercepted verb. Every
-  branch produces exactly one `session_settings` reply — never a `TypeError`:
+- **The handler.** `handleRequestSessionSettings(ctx, s, plaintext)` runs on
+  the addressed connection's `appFrameWorker`. Every ordinary decoded branch
+  produces exactly one `session_settings` reply — never a `TypeError`:
 
   | Condition | Reply |
   |---|---|
@@ -134,8 +155,11 @@ outright; every branch produces the same reply shape:
   | Decode failure / no payload / empty `conversation_id` | Zero-valued `session_settings` |
   | `RunConfigFor` nil (foreground / v1 / unwired) | Zero-valued `session_settings` |
   | Named `conversation_id`, `RunConfigFor` returns `ok == false` (unhosted, or bound to no session and no persisted record of one) | Zero-valued `session_settings` |
-  | Named `conversation_id`, bound to a session the pool holds live | That session's id and stored model/effort, context usage, and its exact current child's confirmed permission pair; before confirmation, the pair is `permission_mode: ""` / `yolo: false` |
-  | Named `conversation_id`, bound to a session the pool holds only as a dormant registry entry (#2449) | That entry's `session_id`, stored `model` and stored `effort`; `permission_mode: ""` / `yolo: false` because there is no current child; `used_tokens` and `window_tokens` both zero |
+  | Accepted `RunConfig`; provider nil or returns `available == false` | All seven fields from that `RunConfig`; `effective_effort` omitted |
+  | Accepted `RunConfig`; provider returns non-nil pointer with `available == true` | All seven fields from that `RunConfig`; `effective_effort` is the pointed-to string |
+  | Accepted `RunConfig`; provider returns nil pointer with `available == true` | All seven fields from that `RunConfig`; `effective_effort: null` is present |
+  | Named `conversation_id`, bound to a session the pool holds live | That session's id and stored model/effort, context usage, and its exact current child's confirmed permission pair; provider result follows the three rows above |
+  | Named `conversation_id`, bound to a session the pool holds only as a dormant registry entry (#2449) | That entry's `session_id`, stored `model` and stored `effort`; `permission_mode: ""` / `yolo: false` and usage zero; the provider is still consulted once and may report unavailable, causing omission |
 
   `session_id: ""` is already the wire contract's defined "no session to
   address" answer, so the zero rows above are a real answer, not an error
@@ -146,36 +170,38 @@ outright; every branch produces the same reply shape:
   that pure membership test distinguished the two *and* reported bootstrap
   values for the unbound case.
 
-**Scope, after #1610.** The reported id and the reported values always
-describe the same session, because both come from the one `RunConfig`
-`RunConfigFor` returns — a client can never read one session's values and
-write to another via `set_session_settings`. There is no bootstrap-scoped
-fallback on this verb for any unresolvable request; that route (the field
-gating *whether* the answer is populated rather than *which* session it
-describes) was the defect #1610 closed. `handleRequestSnapshot`'s
-`screen_snapshot` side-load is the one place in the manager that still
-reports bootstrap-scoped settings/usage, and it is out of scope by design
-(see the seam bullet above). #2449's dormant answer does not reopen that
-route: it still names only the one session the conversation is bound to,
-sourced from that session's own persisted registry entry, never the
-bootstrap's.
+**Scope, after #1610 and #2516.** The reported id and every saved/run value
+always describe the same session, because all seven come from the one
+`RunConfig` `RunConfigFor` returns — a client can never read one session's
+values and write to another via `set_session_settings`. `EffectiveEffortFor`
+cannot replace `Effort`, mutate settings, or send an ordinary user message; it
+adds only a display value observed from the same accepted conversation. There
+is no bootstrap-scoped fallback on this verb for any unresolvable request;
+that route (the field gating *whether* the answer is populated rather than
+*which* session it describes) was the defect #1610 closed.
+`handleRequestSnapshot`'s `screen_snapshot` side-load is the one place in the
+manager that still reports bootstrap-scoped settings/usage, and it is out of
+scope by design (see the seam bullet above). #2449's dormant answer does not
+reopen that route: it still names only the one session the conversation is
+bound to, sourced from that session's own persisted registry entry, never the
+bootstrap's. The relay deliberately has no live/dormant flag; provider
+unavailability is expressed only by omitting the optional field.
 
 **Security / log discipline.** `conversation_id` is untrusted network input,
-a lookup key only: it crosses to trusted only through `RunConfigFor`, whose
-`cmd/pyry` producer resolves it against the daemon's own registry and
-uses only the registry-owned bound id for the live settings, dormant settings,
-current-runner confirmation, and context reads.
-Nothing downstream of the seam ever holds the caller's string — it reaches no
-log line, no error string, no filesystem path, and not the reply. The
-handler's only logging is the pre-existing `Debug` (`conn_id` only) and the
-defensive marshal-error `Warn` (`conn_id` only) — no reject-branch log was
-added, matching the verb's existing "logs less than the write path" posture
-for something that fires on every sheet open. `TestV2Session_RequestSessionSettings_IgnoresAnyPayload`
-probes with a `"../../etc/passwd"`-shaped value under an unrelated key to pin
-that a non-`conversation_id` field can never select another session's data.
+a lookup key only: `RunConfigFor` must accept it before the same value can reach
+`EffectiveEffortFor`. The `cmd/pyry` run-config producer resolves it against
+the daemon's own registry and uses only the registry-owned bound id for live
+settings, dormant settings, current-runner confirmation, and context reads.
+The caller's string and both saved and applied values reach no log line, error
+string, filesystem path, or reply field other than the typed settings values
+the contract intentionally exposes. Handler logs carry only `conn_id`, a
+static event name, and for the envelope-marshal helper the static reply type.
+`TestV2Session_RequestSessionSettings_IgnoresAnyPayload` probes with a
+`"../../etc/passwd"`-shaped value under an unrelated key to pin that a
+non-`conversation_id` field can never select another session's data.
 
-**Test design — counting the seam the handler actually consults, and
-poisoning its refusal.** `countingReadSeams`
+**Test design — count the seam actually consulted, poison every refusal, and
+assert JSON presence separately from value.** `countingReadSeams`
 (`internal/relay/v2session_settings_read_test.go`) wires `RunConfigFor` to
 non-zero, conversation-keyed fixture values for a known bound conversation
 and, for **every other** id, to a **poisoned** refusal — a distinct marker
@@ -195,12 +221,39 @@ under exactly one mutation class: a re-introduced bootstrap-scoped read.
 seam: dropping the empty-id guard reddens the unnamed rows on `resolves`;
 dropping the nil-seam guard panics the nil-seam row; discarding the comma-ok
 reddens the unhosted row's payload via the poison; a re-added bootstrap read
-reddens every addressable-adjacent row on both counters and the payload.
+reddens every addressable-adjacent row on both counters and the payload. The
+effective-effort rows apply the same technique to the availability bit: a
+non-nil poisoned pointer with `available == false` must still leave the key
+absent. Two requests for one conversation return call-specific values and
+count two provider calls, so an accidental relay cache cannot stay green.
 
-**Concurrency.** No new goroutine, channel, or lock — runs only on `Run`,
-same as `handleRequestSnapshot`. The `cmd/pyry` producer takes its registry
-and pool read locks sequentially, never nested. A live answer adds an exact-id
-`Pool.Lookup` and the runner's concurrency-safe confirmation read after
-`Pool.SettingsFor`; a dormant answer uses `DormantSettingsFor` instead. A
-lifecycle transition between those snapshots can make the permission pair
-unavailable, but cannot make it describe another session.
+Wire assertions must inspect raw payload JSON for the `effective_effort` key:
+decoding alone collapses omission and explicit null to the same nullable Go
+value. Conversely, a decoded present `protocol.NullableString` contains a
+pointer, so direct struct equality against a separately constructed present
+value compares pointer identity and fails even when the strings match. Compare
+`Value()` semantics, then zero the field before comparing the remaining
+`SessionSettingsPayload`. Keep the saved `Effort` deliberately different from
+the applied value so a provider that overwrites the persisted choice cannot
+pass. The blocking two-connection test proves provider A cannot stall provider
+B or cross-correlate replies; cancellation waits on the provider's received
+context and proves that no late reply is sealed. Mutation and ordinary-message
+spies keep this read path read-only.
+
+**Concurrency.** No new goroutine, channel, lock, or shared cache was added.
+Each open connection already owns one FIFO `appFrameWorker`; both
+`RunConfigFor` and the possibly blocking `EffectiveEffortFor` run synchronously
+there. A blocked provider delays only later frames for that connection, while
+`Run` and every other connection worker remain serviceable. Moving
+`RunConfigFor` off `Run` means different connections may now call it
+concurrently; its production registry, pool, permission-confirmation, and
+usage readers synchronize their own state, and test doubles must do the same.
+
+The provider receives the manager's Run-derived context. A compliant provider
+returns on cancellation; `forwardToRun` also selects on that context and on
+`s.done`, so shutdown or connection teardown drops a pending unsealed reply.
+`forwardAppReply` remains the only step that touches the Noise send cipher, on
+the single-owner `Run` goroutine. The `cmd/pyry` producer takes its registry
+and pool read locks sequentially, never nested. A lifecycle transition between
+its snapshots can make permission or applied effort unavailable, but cannot
+make saved fields describe another session.
