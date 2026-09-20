@@ -50,7 +50,7 @@ func requireWaitIdle(t *testing.T, tr *turnBusyTracker, convID string) {
 
 // --- unit tier: the tracker driven directly ---------------------------------
 
-// AC4: the opener set is a WHITELIST — exactly the four variants that open a turn
+// The opener set is a WHITELIST — exactly the five variants that open a turn
 // today, with everything else leaving the conversation idle.
 //
 // Stall, ApiRetry and Compacting are tui-driver signals that the stream-json
@@ -75,6 +75,7 @@ func TestTurnBusyTracker_OpenerWhitelist(t *testing.T) {
 		wantBusy bool
 	}{
 		{"thought_chunk opens", turnevent.ThoughtChunk{MessageID: "m1", Text: "thinking"}, true},
+		{"thinking_progress opens", turnevent.ThinkingProgress{EstimatedTokens: 64, EstimatedTokensDelta: 64}, true},
 		{"text_chunk opens", turnevent.TextChunk{MessageID: "m1", Text: "hello"}, true},
 		{"tool_start opens", turnevent.ToolStart{ToolCallID: "tu-1", Title: "Read"}, true},
 		{"tool_update opens", turnevent.ToolUpdate{ToolCallID: "tu-1"}, true},
@@ -557,8 +558,9 @@ func turnMarkName(m turnMark) string {
 // The recently-added variants are the rows that matter most. RateLimited pins the
 // #1404 DISCHARGED note — the whitelist absorbed a genuinely new variant with no
 // change to this switch — and the three background-task variants plus
-// ThinkingProgress pin the same property for #1380 / #1382 / #1385: a task or a
-// thinking reading is orthogonal to turn lifecycle, so neither may move the mark.
+// The background-task variants pin the lifecycle-neutral property for #1380 and
+// #1382. ThinkingProgress is deliberately an opener now: it is live evidence of
+// initial thinking and every result subtype supplies the matching close.
 //
 // ModelAnnounced (#1600) discharges the same note a SECOND time, and its row is
 // the totality half doing its job rather than a policy question: the production
@@ -611,7 +613,7 @@ func TestTurnMarkFor_TotalOverEveryVariant(t *testing.T) {
 		// orthogonal to the turn. The default already answers it, so this row asserts
 		// that answer rather than a new arm — turnMarkFor is unchanged by that ticket.
 		{turnevent.BackgroundTaskProgress{TaskID: "t-1", ToolUses: 2}, turnMarkNone},
-		{turnevent.ThinkingProgress{EstimatedTokens: 184}, turnMarkNone},
+		{turnevent.ThinkingProgress{EstimatedTokens: 184}, turnMarkOpen},
 		{turnevent.RateLimited{Status: "allowed", LimitType: "five_hour"}, turnMarkNone},
 		{turnevent.ModelAnnounced{Model: "claude-haiku-4-5-20251001"}, turnMarkNone},
 		// #2252. Neither an opener nor a closer, and its argument is the row above's
@@ -1449,6 +1451,114 @@ func TestStreamTurnDrainV2_ExitClearsOpenTurn(t *testing.T) {
 	}
 	if busy.Busy(testConvID) {
 		t.Errorf("Busy(A) = true after the exit closed A's abandoned turn, want false")
+	}
+}
+
+// A close feed for the active conversation must clear both views of the turn:
+// delivery membership and the lifecycle already published to clients. The
+// background conversation proves that neither close path broadens into a global
+// idle signal.
+func TestStreamTurnDrainV2_ExternalCloseReturnsActiveThinkingTurnToIdle(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		close func(*streamTurnSink, *turnBusyTracker)
+	}{
+		{
+			name: "child exit",
+			close: func(sink *streamTurnSink, _ *turnBusyTracker) {
+				sink.exitFor("sess-a")()
+			},
+		},
+		{
+			name: "pool teardown",
+			close: func(_ *streamTurnSink, busy *turnBusyTracker) {
+				busy.clearForSession("sess-a")
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			cur := &stubCursor{}
+			cur.set(testConvID)
+			active := &stubActiveSession{}
+			active.set("sess-a")
+			bcast := newChanBcast("conn-a")
+			emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+			drops := make(chan string, 8)
+			sink := newStreamTurnSink(0, discardLogger())
+			busy := newTurnBusyTracker(stubBusyResolve(map[string]string{
+				"sess-a": testConvID,
+				"sess-b": testConvIDB,
+			}), discardLogger(), withExitEpoch(sink.exitEpoch), withLifecycleClose(sink.requestLifecycleClose))
+			cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, busy,
+				slog.New(dropWatcher{kinds: drops}))
+			defer func() { cancel(); cleanup() }()
+
+			sink.sinkFor("sess-a")(turnevent.ThinkingProgress{
+				EstimatedTokens:      64,
+				EstimatedTokensDelta: 64,
+			})
+			opened := collectEnvs(t, bcast.pushed, 2)
+			if got, want := envTypes(opened), []string{protocol.TypeTurnState, protocol.TypeThinkingProgress}; !slices.Equal(got, want) {
+				t.Fatalf("opening envelope types = %v, want %v", got, want)
+			}
+			var thinking protocol.TurnStatePayload
+			if err := json.Unmarshal(opened[0].Payload, &thinking); err != nil {
+				t.Fatalf("decode opening turn_state: %v", err)
+			}
+			if thinking.ConversationID != testConvID || thinking.State != "thinking" {
+				t.Fatalf("opening turn_state = %+v, want conversation %q thinking", thinking, testConvID)
+			}
+
+			sink.sinkFor("sess-b")(turnevent.ThinkingProgress{
+				EstimatedTokens:      64,
+				EstimatedTokensDelta: 64,
+			})
+			waitDropKind(t, drops, "thinking_progress")
+			if !busy.Busy(testConvIDB) {
+				t.Fatal("Busy(B) = false after B's thinking opener; isolation assertion would be vacuous")
+			}
+
+			tc.close(sink, busy)
+
+			closed := collectEnvs(t, bcast.pushed, 1)
+			if closed[0].Type != protocol.TypeTurnState {
+				t.Fatalf("close envelope type = %q, want %q", closed[0].Type, protocol.TypeTurnState)
+			}
+			var idle protocol.TurnStatePayload
+			if err := json.Unmarshal(closed[0].Payload, &idle); err != nil {
+				t.Fatalf("decode closing turn_state: %v", err)
+			}
+			if idle.ConversationID != testConvID || idle.State != "idle" {
+				t.Errorf("closing turn_state = %+v, want conversation %q idle", idle, testConvID)
+			}
+			// A later drain drop is the barrier that closeForConversation has
+			// returned after publishing idle, so emitter field reads below cannot
+			// race the drain goroutine.
+			sink.sinkFor("sess-b")(turnevent.ThinkingProgress{
+				EstimatedTokens:      128,
+				EstimatedTokensDelta: 64,
+			})
+			waitDropKind(t, drops, "thinking_progress")
+			if emitter.inTurn || emitter.currentState != "" {
+				t.Errorf("emitter lifecycle after close = {inTurn:%v state:%q}, want closed", emitter.inTurn, emitter.currentState)
+			}
+			if busy.Busy(testConvID) {
+				t.Error("Busy(A) = true after external close, want false")
+			}
+			if !busy.Busy(testConvIDB) {
+				t.Error("Busy(B) = false after closing A, want B unchanged")
+			}
+		})
 	}
 }
 

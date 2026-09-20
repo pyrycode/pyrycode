@@ -461,26 +461,27 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
 	case turnevent.ThinkingProgress:
-		// claude's mid-turn proof of life (#1386), taking the same shape as the
-		// status peers above: NO turn-lifecycle mutation (no startTurnIfNeeded /
-		// transitionTo / endTurn; inTurn, turnID, currentState untouched).
+		// Claude's live thinking reading is enough to open an interruptible turn,
+		// even before a partial ThoughtChunk, assistant text, or tool call arrives.
+		// The result line closes every subtype through the shared TurnEnd arm, while
+		// pool teardown and child exit cover a child that emits no result, so this
+		// opener has the same total closure as content-driven openers.
 		//
-		// The reason is specific to this variant. Thinking progress is a READING,
-		// not a state transition — the turn's thinking state is already reported
-		// by turn_state: thinking, driven by ThoughtChunk above. Opening a turn
-		// here would be worse than redundant: the parser emits these during an
-		// inference request that may not have produced any assistant content yet,
-		// so a turn opened on one has no guaranteed end and would wedge the
-		// conversation exactly as opening one on an unrecognized message would.
-		//
-		// Flush any pending delta first so buffered text keeps its wire position
-		// ahead of the reading. Like turn_state these flow through emit() and are
+		// Start before publishing so the state and progress share one daemon-minted
+		// turn identity with later content. Flush before the transition so buffered
+		// text from an earlier inference request keeps its wire position ahead of
+		// the new thinking phase. transitionTo de-duplicates repeated readings.
+		// Like turn_state these flow through emit() and are
 		// NOT droppable deltas (the droppable set is assistant_delta only, #610),
 		// so they hold queue slots; the producer's rate bound
 		// (streamsup.minThinkingTokensPerEvent, one per 64 tokens of accumulated
 		// delta) is what keeps the count to roughly 1–2 per typical turn, and no
 		// second cap is imposed here.
+		if !e.startTurnIfNeeded(convID) {
+			return
+		}
 		e.flushDelta(ctx)
+		e.transitionTo(ctx, convID, turnbridge.StateThinking)
 		e.emitMapped(ctx, convID, ev)
 	case turnevent.RateLimited:
 		// claude's usage-limit report (#1410), taking the same shape as the status
@@ -877,6 +878,18 @@ func (e *interactiveTurnEmitterV2) endTurn() {
 	e.seq = 0
 	e.currentState = ""
 	e.childLanes = nil
+}
+
+// closeForConversation returns an externally-abandoned active turn to idle
+// without inventing a turn_end result the child never emitted. The caller is the
+// stream drain, so lifecycle and delta fields retain their single-writer rule.
+func (e *interactiveTurnEmitterV2) closeForConversation(ctx context.Context, conversationID string) {
+	if !e.inTurn || e.turnConvID != conversationID {
+		return
+	}
+	e.flushDelta(ctx)
+	e.transitionTo(ctx, conversationID, turnbridge.StateIdle)
+	e.endTurn()
 }
 
 // splitDeltaText splits s into consecutive chunks of at most max bytes each,

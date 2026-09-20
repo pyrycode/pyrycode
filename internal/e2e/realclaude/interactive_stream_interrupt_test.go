@@ -114,7 +114,7 @@ func TestInteractiveStreamInterruptStopsRunningTurn(t *testing.T) {
 
 	// AC3: the running turn terminates as cancelled, not run-to-completion. Fails loud
 	// on the first non-cancelled turn_end (the spontaneous-end guard).
-	drainForCancelledTurnEnd(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
+	drainForCancelledTurnEnd(t, h.phone, h.initRecv, convID, perTurnReplyBudget, false)
 
 	// AC4: the session stays usable — a subsequent trivial turn on the same conversation
 	// runs to a terminal turn_state{idle}. NOT driveRunningTurn (that would launch
@@ -126,14 +126,112 @@ func TestInteractiveStreamInterruptStopsRunningTurn(t *testing.T) {
 	drainForCompletedTurn(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
 }
 
+// TestInteractiveStreamInterruptStopsInitialThinkingTurn waits for the server's
+// thinking phase before any assistant text or tool frame, then sends an interrupt
+// naming that conversation and requires the first terminal event to be cancelled.
+func TestInteractiveStreamInterruptStopsInitialThinkingTurn(t *testing.T) {
+	h, convID := startStreamRunningTurnHarness(t)
+
+	driveInitialThinkingTurn(t, h, 2, convID)
+	drainForInitialThinking(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
+
+	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
+		ID:      3,
+		Type:    protocol.TypeInterrupt,
+		TS:      time.Now().UTC(),
+		Payload: mustJSON(t, protocol.InterruptPayload{ConversationID: convID}),
+	})
+	drainForCancelledTurnEnd(t, h.phone, h.initRecv, convID, perTurnReplyBudget, true)
+}
+
+// driveInitialThinkingTurn asks for a deliberately multi-step, tool-free proof.
+// Unlike the running-turn trigger, it does not ask Claude to race from thinking
+// into a tool call; the only acceptable next observable after the interrupt is
+// the cancelled terminal event.
+func driveInitialThinkingTurn(t *testing.T, h *perConvHarness, reqID uint64, convID string) {
+	t.Helper()
+	nonce := time.Now().UnixNano()
+	sealSendMessage(t, h.phone, h.initSend, reqID, convID, fmt.Sprintf("m-%d", reqID),
+		fmt.Sprintf("Do not use tools. Carefully prove or disprove this claim, checking the base case, induction step, and at least two possible counterexamples before writing any final answer: every positive integer can be written as a sum of distinct Fibonacci numbers with no consecutive Fibonacci numbers used. Take time to reason through all cases. run=%d", nonce))
+}
+
+// drainForInitialThinking returns only when thinking is published for convID. A
+// progress, response, tool, or terminal frame for that conversation first makes
+// the proof vacuous and therefore fails immediately.
+func drainForInitialThinking(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			t.Fatalf("no initial turn_state{thinking} for %q within %s", convID, timeout)
+		}
+		raw, err := phone.ReceiveBytes(remaining)
+		if err != nil {
+			if errors.Is(err, fakephone.ErrReceiveTimeout) {
+				continue
+			}
+			t.Fatalf("phone receive (awaiting initial thinking): %v", err)
+		}
+		var inner protocol.InnerFrameV2
+		if err := json.Unmarshal(raw, &inner); err != nil {
+			t.Fatalf("decode inner frame: %v", err)
+		}
+		if inner.Type != protocol.TypeNoiseMsg {
+			continue
+		}
+		cipher, err := base64.StdEncoding.DecodeString(inner.Data)
+		if err != nil {
+			t.Fatalf("decode inner data: %v", err)
+		}
+		plain, err := cs.Decrypt(cipher)
+		if err != nil {
+			t.Fatalf("phone decrypt (receive-nonce desync?): %v", err)
+		}
+		var env protocol.Envelope
+		if err := json.Unmarshal(plain, &env); err != nil {
+			t.Fatalf("decode envelope: %v", err)
+		}
+		if env.Type == protocol.TypeTurnState {
+			var state protocol.TurnStatePayload
+			if err := json.Unmarshal(env.Payload, &state); err != nil {
+				t.Fatalf("decode turn_state: %v", err)
+			}
+			if state.ConversationID != convID {
+				continue
+			}
+			if state.State == "thinking" {
+				t.Logf("initial turn_state{thinking} for %q observed", convID)
+				return
+			}
+			t.Fatalf("turn_state{%s} for %q arrived before initial thinking", state.State, convID)
+		}
+		switch env.Type {
+		case protocol.TypeThinkingProgress, protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeTurnEnd:
+			var addressed struct {
+				ConversationID string `json:"conversation_id"`
+			}
+			if err := json.Unmarshal(env.Payload, &addressed); err != nil {
+				t.Fatalf("decode %s conversation: %v", env.Type, err)
+			}
+			if addressed.ConversationID == convID {
+				t.Fatalf("%s for %q arrived before initial turn_state{thinking}", env.Type, convID)
+			}
+		}
+	}
+}
+
 // drainForCancelledTurnEnd reads binary→phone noise_msg frames in receive order — the
 // receive nonce is sequential, so every noise_msg MUST be decrypted in order to keep the
 // CipherState in sync — and returns once it observes the FIRST turn_end for convID,
 // asserting its StopReason is "cancelled". It skips non-noise_msg inner frames WITHOUT
 // decrypting (they do not advance the nonce) and decrypts-and-skips every other envelope
-// type (ack, turn_state, assistant_delta, …) in order — with ONE exception since #1500:
-// an unrecognized_message is fatal, with no carve-out. Same in-order decrypt discipline
-// as drainForResponding, retargeted from turn_state{responding} to turn_end.
+// type in order. An unrecognized_message is always fatal. When
+// requireInitialThinking is true, responding, assistant content and tool activity for
+// convID are fatal too, so the same decoder proves the interrupt landed before initial
+// thinking ended instead of merely interrupting some later running phase. Same in-order
+// decrypt discipline as drainForResponding, retargeted from turn_state{responding} to
+// turn_end.
 //
 // The StopReason check is the vacuous-pass guard (mirrors the fakeclaude analog
 // `TestRelayV2_StreamInterruptStopsRunningTurn`): the FIRST terminal event of the running
@@ -143,7 +241,7 @@ func TestInteractiveStreamInterruptStopsRunningTurn(t *testing.T) {
 // t.Fatalf immediately (the interrupt did not cancel — the turn ran to completion). On
 // the deadline → t.Fatalf naming the likely cause. Reusable-shaped, but private to this
 // gate. Fail-loud only (this is a liveness gate, no recovery).
-func drainForCancelledTurnEnd(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration) {
+func drainForCancelledTurnEnd(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration, requireInitialThinking bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
@@ -233,6 +331,28 @@ func drainForCancelledTurnEnd(t *testing.T, phone *fakephone.Client, cs *noise.C
 				"streamsup.harnessInterruptNoticePrefix, so re-measure that matcher rather than "+
 				"re-adding a carve-out here.",
 				p.Site, p.MessageType, p.Truncated, p.Raw)
+		}
+		if requireInitialThinking {
+			switch env.Type {
+			case protocol.TypeTurnState:
+				var state protocol.TurnStatePayload
+				if err := json.Unmarshal(env.Payload, &state); err != nil {
+					t.Fatalf("decode turn_state while awaiting initial-thinking cancellation: %v", err)
+				}
+				if state.ConversationID == convID && state.State != "thinking" {
+					t.Fatalf("turn_state{%s} for %q arrived after initial thinking and before cancelled turn_end", state.State, convID)
+				}
+			case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult:
+				var addressed struct {
+					ConversationID string `json:"conversation_id"`
+				}
+				if err := json.Unmarshal(env.Payload, &addressed); err != nil {
+					t.Fatalf("decode %s conversation while awaiting initial-thinking cancellation: %v", env.Type, err)
+				}
+				if addressed.ConversationID == convID {
+					t.Fatalf("%s for %q arrived after initial thinking and before cancelled turn_end", env.Type, convID)
+				}
+			}
 		}
 		if env.Type != protocol.TypeTurnEnd {
 			continue // ack, turn_state, assistant_delta, tool_use, … — keep draining in order

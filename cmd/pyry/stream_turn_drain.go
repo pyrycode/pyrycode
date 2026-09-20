@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 
 	"github.com/pyrycode/pyrycode/internal/turnevent"
@@ -132,6 +133,14 @@ type streamTurnSink struct {
 	// security-relevant. Wraparound is not defended against: uint64 needs ~1.8e19
 	// child exits, ~5.8e8 years at a sustained 1000 crashes per second.
 	exits atomic.Uint64
+
+	// lifecycleClosePending is the non-dropping hand-off from pool teardown to
+	// the drain's single emitter goroutine. The wake channel is only a level
+	// trigger; the map owns the requests, so a full wake channel coalesces signals
+	// without losing a conversation close.
+	lifecycleCloseMu      sync.Mutex
+	lifecycleClosePending map[string]struct{}
+	lifecycleCloseWake    chan struct{}
 }
 
 // newStreamTurnSink constructs the fan-in. buf <= 0 falls back to
@@ -151,10 +160,45 @@ func newStreamTurnSink(buf int, logger *slog.Logger) *streamTurnSink {
 		logger = slog.Default()
 	}
 	return &streamTurnSink{
-		ch:           make(chan streamTurnEnvelope, buf),
-		droppableCap: buf - min(streamTurnSinkCloseReserve, buf/2),
-		logger:       logger,
+		ch:                    make(chan streamTurnEnvelope, buf),
+		droppableCap:          buf - min(streamTurnSinkCloseReserve, buf/2),
+		logger:                logger,
+		lifecycleClosePending: make(map[string]struct{}),
+		lifecycleCloseWake:    make(chan struct{}, 1),
 	}
+}
+
+// requestLifecycleClose records a conversation whose published turn lifecycle
+// must return to idle after pool teardown. It never blocks the pool transition
+// observer and never drops: the buffered wake may coalesce, while the protected
+// set remains until the drain consumes it.
+func (s *streamTurnSink) requestLifecycleClose(conversationID string) {
+	if conversationID == "" {
+		return
+	}
+	s.lifecycleCloseMu.Lock()
+	s.lifecycleClosePending[conversationID] = struct{}{}
+	s.lifecycleCloseMu.Unlock()
+	select {
+	case s.lifecycleCloseWake <- struct{}{}:
+	default:
+	}
+}
+
+// takeLifecycleCloses atomically removes every pending pool-teardown close. Only
+// the drain calls it, keeping emitter lifecycle mutation on that one goroutine.
+func (s *streamTurnSink) takeLifecycleCloses() []string {
+	s.lifecycleCloseMu.Lock()
+	defer s.lifecycleCloseMu.Unlock()
+	if len(s.lifecycleClosePending) == 0 {
+		return nil
+	}
+	conversationIDs := make([]string, 0, len(s.lifecycleClosePending))
+	for conversationID := range s.lifecycleClosePending {
+		conversationIDs = append(conversationIDs, conversationID)
+		delete(s.lifecycleClosePending, conversationID)
+	}
+	return conversationIDs
 }
 
 // streamSessionTag is the LIVE session tag one stream runner's two fan-in lanes
@@ -430,15 +474,20 @@ func (s *streamTurnSink) exitForTag(tag func() string) func() {
 // (startInteractiveTurnStreamV2), without turnbridge: the Parser already emits
 // turnevent.Event, so there is nothing to un-map back to a tuidriver.Event.
 //
-// The goroutine selects over three cases:
+// The goroutine selects over four cases:
 //   - sink.ch: an exit envelope (#1209) clears the producing session's turn and
-//     is done; otherwise feed the per-conversation turn-busy tracker, then resolve
+//     its matching published lifecycle; otherwise feed the per-conversation
+//     turn-busy tracker, then resolve
 //     activeSession() and forward the event to emitter.Handle only when the
 //     producing session is the active conversation's bound session (AC2). Any
 //     other session's event is dropped here, BEFORE Handle, so a background
 //     conversation's conn never receives it. Gating at Handle time (not in the
 //     sink) keeps the stamp consistent with the cursor the emitter reads inside
 //     Handle.
+//   - sink.lifecycleCloseWake: a pool teardown recorded one or more conversation
+//     lifecycle closes. The protected set, not the wake token, owns those requests,
+//     so coalescing cannot drop one; the drain applies them on this goroutine before
+//     handling a later child event.
 //   - emitter.flushC(): the ~250ms coalescing timer fired — route it back into
 //     flushDelta on THIS goroutine. The emitter arms the timer inside Handle and
 //     needs a driver to select it; the drain is that driver, so both Handle and
@@ -471,11 +520,23 @@ func startStreamTurnDrainV2(
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		closePendingLifecycles := func() {
+			for _, conversationID := range sink.takeLifecycleCloses() {
+				emitter.closeForConversation(ctx, conversationID)
+			}
+		}
 		for {
+			closePendingLifecycles()
 			select {
 			case <-ctx.Done():
 				return
+			case <-sink.lifecycleCloseWake:
+				closePendingLifecycles()
 			case env := <-sink.ch:
+				// A pool teardown records its close before returning to the pool.
+				// Apply it before any later child event selected in the same cycle,
+				// preserving teardown-before-successor ordering across the two lanes.
+				closePendingLifecycles()
 				if env.exit {
 					// FIRST statement of the arm, and each thing it precedes matters.
 					// Before observe: an exit carries no event, and routing a non-event
@@ -502,7 +563,9 @@ func startStreamTurnDrainV2(
 					// resolution, one copy of the membership-mutation protocol
 					// (`applyBusyLocked`), and a nil-receiver no-op so a drain with no
 					// tracker is unaffected.
-					busy.clearForExit(env.sessionID, env.exitEpoch)
+					if conversationID, cleared := busy.clearForExit(env.sessionID, env.exitEpoch); cleared {
+						emitter.closeForConversation(ctx, conversationID)
+					}
 					continue
 				}
 
@@ -523,6 +586,7 @@ func startStreamTurnDrainV2(
 				}
 				emitter.Handle(ctx, env.ev)
 			case <-emitter.flushC():
+				closePendingLifecycles()
 				emitter.flushDelta(ctx)
 			}
 		}

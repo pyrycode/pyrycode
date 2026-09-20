@@ -5760,12 +5760,18 @@ func (p *Parser) emitStreamEvent(line []byte) {
 		p.streamBlockOpen = true
 		p.streamBlockTextDelta = false
 	case "content_block_delta":
-		if event.Index == nil || *event.Index < 0 {
+		var delta streamEventDelta
+		if err := json.Unmarshal(event.Delta, &delta); err != nil || delta.Type == "" {
 			reject()
 			return
 		}
-		var delta streamEventDelta
-		if err := json.Unmarshal(event.Delta, &delta); err != nil || delta.Type == "" {
+		if event.Index == nil || *event.Index < 0 {
+			// A recognized thinking delta stays out of the raw Unrecognized lane:
+			// its body is model reasoning. It cannot open a turn without attribution,
+			// but it must remain content-free when refused.
+			if delta.Type == "thinking_delta" {
+				return
+			}
 			reject()
 			return
 		}
@@ -5778,7 +5784,16 @@ func (p *Parser) emitStreamEvent(line []byte) {
 			}
 			p.streamBlockTextDelta = true
 			p.emit(turnevent.TextChunk{MessageID: p.streamMessageID, Text: *delta.Text})
-		case "thinking_delta", "signature_delta", "input_json_delta":
+		case "thinking_delta":
+			// streamEventDelta deliberately has no field for the thinking bytes. A
+			// matching block therefore publishes lifecycle evidence without making
+			// reasoning reachable from this event, a mapper, or a log.
+			if p.streamMessageID == "" || !p.streamBlockOpen ||
+				p.streamBlockIndex != *event.Index || p.streamBlockType != "thinking" {
+				return
+			}
+			p.emit(turnevent.ThoughtChunk{MessageID: p.streamMessageID})
+		case "signature_delta", "input_json_delta":
 			return
 		default:
 			reject()

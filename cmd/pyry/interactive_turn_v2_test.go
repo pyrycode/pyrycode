@@ -1925,8 +1925,8 @@ func TestInteractiveTurnEmitterV2_BackgroundTasksEventKindNamesTheVariant(t *tes
 	}
 }
 
-// AC#1: a turnevent.ThinkingProgress reaches a mobile client as a
-// thinking_progress frame carrying conversation identity and both of the event's
+// A turnevent.ThinkingProgress reaches a mobile client after its opening
+// turn_state as a thinking_progress frame carrying conversation identity and both
 // integer readings — and only a phone that negotiated `interactive` receives it.
 // The two readings differ in the fixture so a handler that wired one field to
 // both wire keys goes red here.
@@ -1942,10 +1942,14 @@ func TestInteractiveTurnEmitterV2_ThinkingProgressFansOutToInteractiveOnly(t *te
 
 	e.Handle(context.Background(), turnevent.ThinkingProgress{EstimatedTokens: 184, EstimatedTokensDelta: 37})
 
-	if got := len(bcast.pushes); got != 1 {
-		t.Fatalf("pushed %d envelopes; want exactly 1 (interactive conn only)", got)
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, []string{protocol.TypeTurnState, protocol.TypeThinkingProgress}) {
+		t.Fatalf("envelope order = %v, want [turn_state thinking_progress]", got)
 	}
-	p := bcast.pushes[0]
+	progress := pushesOfType(bcast.pushes, protocol.TypeThinkingProgress)
+	if len(progress) != 1 {
+		t.Fatalf("thinking_progress count = %d, want 1", len(progress))
+	}
+	p := progress[0]
 	if p.connID != "a" {
 		t.Fatalf("pushed to conn %q; want interactive conn %q", p.connID, "a")
 	}
@@ -1981,11 +1985,10 @@ func TestInteractiveTurnEmitterV2_ThinkingProgressFansOutToInteractiveOnly(t *te
 	}
 }
 
-// AC#2: a thinking-progress frame opens and closes no turn. It is handled bare
-// before any turn and emits only its own frame — no turn_state, no turn_end —
-// and the tracker's inTurn/turnID/currentState are asserted directly, then a
-// following content event is driven through to prove a fresh turn still opens.
-func TestInteractiveTurnEmitterV2_ThinkingProgressNoLifecycleMutation(t *testing.T) {
+// A thinking-progress frame observed before assistant content opens the turn and
+// publishes thinking before the numeric reading. Its terminal result returns the
+// same lifecycle to idle.
+func TestInteractiveTurnEmitterV2_ThinkingProgressStartsTurn(t *testing.T) {
 	t.Parallel()
 	cur := &stubCursor{}
 	cur.set(testConvID)
@@ -1994,38 +1997,43 @@ func TestInteractiveTurnEmitterV2_ThinkingProgressNoLifecycleMutation(t *testing
 
 	e.Handle(context.Background(), turnevent.ThinkingProgress{EstimatedTokens: 5, EstimatedTokensDelta: 5})
 
-	// A turn_state anywhere in the sequence is the observable signature of a
-	// transitionTo call, so the exact single-frame sequence is the assertion.
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, []string{protocol.TypeThinkingProgress}) {
-		t.Fatalf("bare thinking_progress envelopes: got %v, want [%s]", got, protocol.TypeThinkingProgress)
+	wantOpenTypes := []string{protocol.TypeTurnState, protocol.TypeThinkingProgress}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantOpenTypes) {
+		t.Fatalf("bare thinking_progress envelopes: got %v, want %v", got, wantOpenTypes)
 	}
-	if e.inTurn {
-		t.Error("thinking_progress opened a turn; inTurn must stay false")
+	if !e.inTurn {
+		t.Fatal("thinking_progress left the emitter outside a turn")
 	}
-	if e.turnID != "" {
-		t.Errorf("thinking_progress minted a turn id: got %q, want empty", e.turnID)
+	if e.turnID == "" {
+		t.Error("thinking_progress did not mint a turn id")
 	}
-	if e.currentState != "" {
-		t.Errorf("thinking_progress set currentState: got %q, want empty", e.currentState)
+	if e.currentState != "thinking" {
+		t.Errorf("currentState = %q, want %q", e.currentState, "thinking")
+	}
+	if got := turnStateValues(t, bcast.pushes); !slices.Equal(got, []string{"thinking"}) {
+		t.Fatalf("turn_state after thinking_progress: got %v, want [thinking]", got)
 	}
 
-	e.Handle(context.Background(), turnevent.TextChunk{Text: "hello"})
-	e.flushDelta(context.Background())
+	e.Handle(context.Background(), turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
 	wantTypes := []string{
+		protocol.TypeTurnState, // thinking opens the turn
 		protocol.TypeThinkingProgress,
-		protocol.TypeTurnState,      // responding — a fresh turn opens afterwards
-		protocol.TypeAssistantDelta, // hello
+		protocol.TypeTurnEnd,
+		protocol.TypeTurnState, // idle closes it
 	}
 	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
-		t.Fatalf("post-thinking_progress envelopes:\n got %v\nwant %v", got, wantTypes)
+		t.Fatalf("thinking_progress lifecycle envelopes:\n got %v\nwant %v", got, wantTypes)
 	}
-	if got := turnStateValues(t, bcast.pushes); !slices.Equal(got, []string{"responding"}) {
-		t.Fatalf("turn_state after thinking_progress: got %v, want [responding]", got)
+	if got := turnStateValues(t, bcast.pushes); !slices.Equal(got, []string{"thinking", "idle"}) {
+		t.Fatalf("turn_state lifecycle: got %v, want [thinking idle]", got)
+	}
+	if e.inTurn || e.turnID != "" || e.currentState != "" {
+		t.Fatalf("terminal result left emitter open: inTurn=%v turnID=%q state=%q", e.inTurn, e.turnID, e.currentState)
 	}
 }
 
-// AC#2: mid-turn, buffered assistant text keeps its wire position AHEAD of the
-// frame, and the open turn survives the interleave untouched.
+// Mid-turn, buffered assistant text keeps its wire position ahead of the frame,
+// the phase moves responding→thinking→responding, and the turn identity survives.
 //
 // The load-bearing part is the event driven PAST the frame. A frame-local check
 // passes even if the handler called endTurn, because the damage only shows on
@@ -2039,7 +2047,7 @@ func TestInteractiveTurnEmitterV2_ThinkingProgressMidTurnDoesNotDisturbOpenTurn(
 	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
 
 	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "a1"}) // opens turn, buffers a1
-	beforeTurnID, beforeState := e.turnID, e.currentState
+	beforeTurnID := e.turnID
 	if !e.inTurn {
 		t.Fatal("precondition: a turn must be open before the interleave")
 	}
@@ -2052,8 +2060,8 @@ func TestInteractiveTurnEmitterV2_ThinkingProgressMidTurnDoesNotDisturbOpenTurn(
 	if e.turnID != beforeTurnID {
 		t.Errorf("thinking_progress changed turnID: got %q, want %q", e.turnID, beforeTurnID)
 	}
-	if e.currentState != beforeState {
-		t.Errorf("thinking_progress changed currentState: got %q, want %q", e.currentState, beforeState)
+	if e.currentState != "thinking" {
+		t.Errorf("thinking_progress state: got %q, want %q", e.currentState, "thinking")
 	}
 
 	// Drive one event past the frame: this is what catches an endTurn.
@@ -2061,12 +2069,14 @@ func TestInteractiveTurnEmitterV2_ThinkingProgressMidTurnDoesNotDisturbOpenTurn(
 	e.Handle(context.Background(), turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
 
 	wantTypes := []string{
-		protocol.TypeTurnState,        // responding
-		protocol.TypeAssistantDelta,   // a1, flushed AHEAD of the frame
-		protocol.TypeThinkingProgress, // no surrounding turn_state
-		protocol.TypeAssistantDelta,   // a2, flushed by turn_end
-		protocol.TypeTurnEnd,          //
-		protocol.TypeTurnState,        // idle
+		protocol.TypeTurnState,      // responding
+		protocol.TypeAssistantDelta, // a1, flushed AHEAD of the frame
+		protocol.TypeTurnState,      // thinking
+		protocol.TypeThinkingProgress,
+		protocol.TypeTurnState,      // responding again
+		protocol.TypeAssistantDelta, // a2, flushed by turn_end
+		protocol.TypeTurnEnd,        //
+		protocol.TypeTurnState,      // idle
 	}
 	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
 		t.Fatalf("mid-turn thinking_progress envelope order:\n got %v\nwant %v", got, wantTypes)
@@ -2081,6 +2091,9 @@ func TestInteractiveTurnEmitterV2_ThinkingProgressMidTurnDoesNotDisturbOpenTurn(
 	}
 	if deltas[0].Seq != 0 || deltas[1].Seq != 1 {
 		t.Fatalf("thinking_progress disrupted seq: got %d,%d want 0,1", deltas[0].Seq, deltas[1].Seq)
+	}
+	if got := turnStateValues(t, bcast.pushes); !slices.Equal(got, []string{"responding", "thinking", "responding", "idle"}) {
+		t.Fatalf("turn_state interleave: got %v, want [responding thinking responding idle]", got)
 	}
 }
 
