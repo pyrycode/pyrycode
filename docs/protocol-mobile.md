@@ -4065,7 +4065,7 @@ Answered by `session_settings` below, correlated by `in_reply_to`.
 
 #### `session_settings`
 
-Direction **binary → phone** (outbound). The resolved session's stored model and effort, the current child's last confirmed permission posture when available, and the context-window reading. All fields are always present (no omitempty), so **every zero value is a real answer rather than an omitted field**.
+Direction **binary → phone** (outbound). The resolved session's stored model and effort, Claude's confirmed applied effort when available, the current child's last confirmed permission posture when available, and the context-window reading. Every original field is always present (no omission tag), so **each original zero value is a real answer rather than an omitted field**. `effective_effort` is the one optional exception; producers that cannot yet report the applied value omit it.
 
 This is the **read half** the settings cluster shipped without. Before it, a client scraped these values off [`screen_snapshot`](#screen_snapshot), which still carries copies of them. Do not do that in new clients, and prefer this route in existing ones: `screen_snapshot` is a picture of the terminal, and a daemon running the stream-json interactive runner has no terminal, so it answers `server.binary_offline` and takes the settings — which have nothing to do with a terminal — down with it. This route is gated on nothing but the interactive capability and answers on both runners.
 
@@ -4073,7 +4073,8 @@ This is the **read half** the settings cluster shipped without. Before it, a cli
 |---|---|---|
 | `session_id` | string | The session to address a `set_session_settings` to. **Empty string = the daemon has no session to address**; a client must treat the settings as read-only rather than sending an empty id, which would be rejected. |
 | `model` | string | Stored model override; **empty string = inherited daemon default** (no override). This is the **override**, not what claude announced for the turn — see [`model_announced`](#model_announced). |
-| `effort` | string | Stored reasoning-effort override; **empty string = inherited daemon default** (no override). |
+| `effort` | string | The saved per-session reasoning-effort choice; **empty string = inherited daemon default** (no override). This field remains the saved choice and is never replaced by Claude's applied value. |
+| `effective_effort` | string or null (optional) | Claude-applied effort, independent of `effort`. A string is a confirmed applied level; explicit `null` means Claude reported no effort parameter; an omitted key means the applied value is unavailable or unsupported. Clients must preserve those three states rather than treating null and omission alike. |
 | `yolo` | bool | Derived from the current child's last confirmed permission mode: `true` only for confirmed `bypassPermissions`. **`false` alone is not proof that permissions are enforced**; it also accompanies an unavailable confirmation. |
 | `permission_mode` | string | The last permission posture Claude confirmed for the exact current child (#2510) — one of the five write-half modes, or `bypassPermissions`. **`""` means no current-child confirmation is available**, not necessarily that no session resolved. It can accompany a non-empty `session_id` for a live child that has not confirmed yet, or for a dormant session with no child. Stored settings and launch argv are never fallback proof. |
 | `used_tokens` | int | Context-window tokens consumed by the latest turn, read from the transcript under **the addressed session's own working directory** — not the daemon's (#2423). A conversation spawned in a workspace reports that workspace's own count; before #2423 every such conversation read against the daemon's directory instead and reported `0`. `0` against a non-zero `window_tokens` is a genuine fresh session. **A reply naming a session the daemon is not currently running** — a dormant registry entry, answered before its first revive — **carries `0` here too**, paired with `window_tokens: 0` below rather than the two read separately (#2449): there is no transcript to read until the session is revived. |
@@ -4081,7 +4082,7 @@ This is the **read half** the settings cluster shipped without. Before it, a cli
 
 `permission_mode` and `yolo` are derived from the same current-child confirmation. Confirmed bypass reports `permission_mode: "bypassPermissions"` **and** `yolo: true`; an unavailable confirmation reports `permission_mode: ""` and `yolo: false`. The reply can therefore name a posture the write half refuses to accept on its own `permission_mode` field, but `yolo: false` without a non-empty `permission_mode` must be rendered as unknown rather than enforced.
 
-Scope: the values describe the session bound to the **conversation the request named**, and `session_id` names that same session, so a client reads and writes the same place. The daemon first resolves the registry-owned session id, then reads stored settings and any current-child permission confirmation only for that exact id. A lifecycle transition between those reads can make the permission pair unavailable; it cannot substitute another session's posture. A request that resolves to no session gets every field at its zero value; it is never answered with some other session's.
+Scope: the values describe the session bound to the **conversation the request named**, and `session_id` names that same session, so a client reads and writes the same place. The daemon first resolves the registry-owned session id, then reads stored settings and any current-child confirmations only for that exact id. A lifecycle transition between those reads can make an applied reading unavailable; it cannot substitute another session's state. A request that resolves to no session gets every original field at its zero value and omits `effective_effort`; it is never answered with some other session's.
 
 Example:
 
@@ -4089,7 +4090,8 @@ Example:
 {
   "id": 45, "type": "session_settings", "ts": "...", "in_reply_to": 812,
   "payload": {
-    "session_id": "sess-a", "model": "opus", "effort": "high", "yolo": false,
+    "session_id": "sess-a", "model": "opus", "effort": "high",
+    "effective_effort": "medium", "yolo": false,
     "permission_mode": "default", "used_tokens": 12480, "window_tokens": 200000
   }
 }

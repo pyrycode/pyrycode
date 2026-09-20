@@ -260,6 +260,105 @@ func TestSessionSettingsPayload_RoundTrip(t *testing.T) {
 	roundTripEnvelope(t, env, payload, raw)
 }
 
+// TestSessionSettingsPayload_EffectiveEffortStatesRoundTrip pins all three
+// effective_effort wire states through marshal, decode, and re-marshal. The
+// saved effort deliberately differs from the effective effort so swapping the
+// two JSON fields cannot pass.
+func TestSessionSettingsPayload_EffectiveEffortStatesRoundTrip(t *testing.T) {
+	t.Parallel()
+	effective := "medium"
+	base := SessionSettingsPayload{
+		SessionID:      "sess-a",
+		Model:          "opus",
+		Effort:         "high",
+		YOLO:           false,
+		PermissionMode: "default",
+		UsedTokens:     12480,
+		WindowTokens:   200000,
+	}
+	cases := []struct {
+		name        string
+		effective   NullableString
+		wantPresent bool
+		wantValue   *string
+		wantJSON    string
+	}{
+		{
+			name:        "confirmed string",
+			effective:   NewNullableString(&effective),
+			wantPresent: true,
+			wantValue:   &effective,
+			wantJSON:    `{"session_id":"sess-a","model":"opus","effort":"high","effective_effort":"medium","yolo":false,"permission_mode":"default","used_tokens":12480,"window_tokens":200000}`,
+		},
+		{
+			name:        "reported no parameter",
+			effective:   NewNullableString(nil),
+			wantPresent: true,
+			wantJSON:    `{"session_id":"sess-a","model":"opus","effort":"high","effective_effort":null,"yolo":false,"permission_mode":"default","used_tokens":12480,"window_tokens":200000}`,
+		},
+		{
+			name:     "unavailable or unsupported",
+			wantJSON: `{"session_id":"sess-a","model":"opus","effort":"high","yolo":false,"permission_mode":"default","used_tokens":12480,"window_tokens":200000}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			payload := base
+			payload.EffectiveEffort = tc.effective
+			out, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal payload: %v", err)
+			}
+			if string(out) != tc.wantJSON {
+				t.Fatalf("marshal payload: got %s, want %s", out, tc.wantJSON)
+			}
+
+			var decoded SessionSettingsPayload
+			if err := json.Unmarshal(out, &decoded); err != nil {
+				t.Fatalf("decode payload: %v", err)
+			}
+			decodedEffective := decoded.EffectiveEffort
+			gotValue, gotPresent := decoded.EffectiveEffort.Value()
+			if gotPresent != tc.wantPresent {
+				t.Errorf("EffectiveEffort presence: got %v, want %v", gotPresent, tc.wantPresent)
+			}
+			switch {
+			case gotValue == nil && tc.wantValue != nil:
+				t.Errorf("EffectiveEffort value: got nil, want %q", *tc.wantValue)
+			case gotValue != nil && tc.wantValue == nil:
+				t.Errorf("EffectiveEffort value: got %q, want nil", *gotValue)
+			case gotValue != nil && *gotValue != *tc.wantValue:
+				t.Errorf("EffectiveEffort value: got %q, want %q", *gotValue, *tc.wantValue)
+			}
+
+			decoded.EffectiveEffort = NullableString{}
+			if decoded != base {
+				t.Errorf("existing fields changed: got %+v, want %+v", decoded, base)
+			}
+			decoded.EffectiveEffort = decodedEffective
+			roundTrip, err := json.Marshal(decoded)
+			if err != nil {
+				t.Fatalf("re-marshal payload: %v", err)
+			}
+			if string(roundTrip) != tc.wantJSON {
+				t.Errorf("re-marshal payload: got %s, want %s", roundTrip, tc.wantJSON)
+			}
+		})
+	}
+}
+
+func TestSessionSettingsPayload_EffectiveEffortRejectsNonString(t *testing.T) {
+	t.Parallel()
+	var payload SessionSettingsPayload
+	if err := json.Unmarshal([]byte(`{"effective_effort":false}`), &payload); err == nil {
+		t.Fatal("decode effective_effort boolean: got nil error, want a JSON type error")
+	}
+	if _, present := payload.EffectiveEffort.Value(); present {
+		t.Error("EffectiveEffort became present after a failed decode")
+	}
+}
+
 // TestSessionSettingsPayload_ZeroFieldsPresent pins the no-omitempty contract
 // that makes this payload a full report rather than a diff: every zero value
 // stays explicitly on the wire. Each one is a real answer a client acts on —
@@ -293,5 +392,8 @@ func TestSessionSettingsPayload_ZeroFieldsPresent(t *testing.T) {
 		if !strings.Contains(string(out), want) {
 			t.Errorf("zero-value field %s should stay on the wire; got %s", want, out)
 		}
+	}
+	if strings.Contains(string(out), `"effective_effort"`) {
+		t.Errorf("zero-value effective_effort should be omitted; got %s", out)
 	}
 }
