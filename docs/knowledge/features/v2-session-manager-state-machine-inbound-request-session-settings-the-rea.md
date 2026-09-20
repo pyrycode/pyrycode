@@ -1,4 +1,4 @@
-# Inbound `request_session_settings` (#491/#1214, extended #1586, conversation-keyed #1610, dormant reply #2449, confirmed permission mode #2510, effective effort #2516) — the read half of the #844 cluster
+# Inbound `request_session_settings` (#491/#1214, extended #1586, conversation-keyed #1610, dormant reply #2449, confirmed permission mode #2510, effective effort #2516/#2517) — the read half of the #844 cluster
 
 `request_session_settings` is a v2 **control** envelope (phone → binary),
 intercepted in `dispatchAppFrame`'s discriminator switch **before**
@@ -29,9 +29,10 @@ runner `Snapshotter` is nil by construction (#1077/#1101), so
 `handleRequestSnapshot` short-circuits to `server.binary_offline` and drags the
 settings — which have nothing to do with a terminal — down with it. Saved
 fields still come through one conversation-keyed `RunConfigFor` read on both
-runners. The separate `EffectiveEffortFor` provider is optional; until its
-production exact-child implementation is wired by #2517, the existing reply is
-preserved with `effective_effort` omitted.
+runners. The separate `EffectiveEffortFor` provider remains optional at the
+relay boundary. Production wires it only when both the conversation registry
+and session pool exist; otherwise the existing reply is preserved with
+`effective_effort` omitted.
 
 Control flow, in load-bearing order:
 
@@ -128,8 +129,21 @@ Control flow, in load-bearing order:
   pointer; a nil provider has the same omission posture. It receives only an id
   already accepted by `RunConfigFor`, must honor the worker context so manager
   shutdown releases it, and must not return a full Claude settings response
-  across the `internal/relay` boundary. #2516 defines and consumes this seam;
-  #2517 owns exact-current-child resolution and production wiring.
+  across the `internal/relay` boundary. #2516 defines and consumes this seam.
+  Production #2517 builds it only when both the conversation registry and
+  session pool are available. Every call resolves the conversation's current
+  registry binding and exact pool runner afresh through `resolveBoundRunner`,
+  whose empty-binding guard prevents `Pool.Lookup("")` from selecting the
+  bootstrap runner. The provider then asserts the narrow
+  `effectiveEffortQuerier` capability and calls `QueryAppliedSettings` under a
+  30-second timeout derived from the worker context; an earlier caller deadline
+  or cancellation still wins. Only `AppliedSettings.Effort` crosses this seam:
+  the applied model and every other child setting are discarded. Unknown,
+  unbound, dormant, pool-missing, not-yet-started, unsupported, failed,
+  cancelled, and timed-out reads all remain unavailable. The read starts,
+  replaces, and rebinds no child and retains no runner for a later call, so a
+  rebind is observed on the next request rather than leaking the predecessor's
+  value.
 - **`KnownConversation` and `BootstrapSessionID` are no longer read here.**
   `KnownConversation` (`func(conversationID string) bool`) is now consulted
   **only** by `handleRequestSnapshot` — this handler stopped calling it
@@ -159,7 +173,7 @@ Control flow, in load-bearing order:
   | Accepted `RunConfig`; provider returns non-nil pointer with `available == true` | All seven fields from that `RunConfig`; `effective_effort` is the pointed-to string |
   | Accepted `RunConfig`; provider returns nil pointer with `available == true` | All seven fields from that `RunConfig`; `effective_effort: null` is present |
   | Named `conversation_id`, bound to a session the pool holds live | That session's id and stored model/effort, context usage, and its exact current child's confirmed permission pair; provider result follows the three rows above |
-  | Named `conversation_id`, bound to a session the pool holds only as a dormant registry entry (#2449) | That entry's `session_id`, stored `model` and stored `effort`; `permission_mode: ""` / `yolo: false` and usage zero; the provider is still consulted once and may report unavailable, causing omission |
+  | Named `conversation_id`, bound to a session the pool holds only as a dormant registry entry (#2449) | That entry's `session_id`, stored `model` and stored `effort`; `permission_mode: ""` / `yolo: false` and usage zero; if the session remains absent from the live pool at the provider's fresh lookup, `effective_effort` is omitted |
 
   `session_id: ""` is already the wire contract's defined "no session to
   address" answer, so the zero rows above are a real answer, not an error
@@ -170,15 +184,18 @@ Control flow, in load-bearing order:
   that pure membership test distinguished the two *and* reported bootstrap
   values for the unbound case.
 
-**Scope, after #1610 and #2516.** The reported id and every saved/run value
+**Scope, after #1610, #2516, and #2517.** The reported id and every saved/run value
 always describe the same session, because all seven come from the one
 `RunConfig` `RunConfigFor` returns — a client can never read one session's
 values and write to another via `set_session_settings`. `EffectiveEffortFor`
-cannot replace `Effort`, mutate settings, or send an ordinary user message; it
-adds only a display value observed from the same accepted conversation. There
-is no bootstrap-scoped fallback on this verb for any unresolvable request;
-that route (the field gating *whether* the answer is populated rather than
-*which* session it describes) was the defect #1610 closed.
+cannot replace `Effort`, mutate settings, alter permissions, or send an ordinary
+user message; it adds only an effort display value observed from the exact live
+child reached by a fresh resolution of the accepted conversation. It neither
+persists an inherited level nor falls back to a retained reading. There is no
+bootstrap-scoped fallback on this verb for any unresolvable request, including
+an empty or stale binding; that route (the field gating *whether* the answer is
+populated rather than *which* session it describes) was the defect #1610
+closed.
 `handleRequestSnapshot`'s `screen_snapshot` side-load is the one place in the
 manager that still reports bootstrap-scoped settings/usage, and it is out of
 scope by design (see the seam bullet above). #2449's dormant answer does not

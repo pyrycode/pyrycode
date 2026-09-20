@@ -87,10 +87,12 @@ TurnEndReasonEndTurn}` — see [streamsup-package.md § Turn I/O](streamsup-pack
   `enterRawMode()` is never called in this mode.
 - **Default mode still ignores non-`"user"` lines unless a control-request arm
   recognizes them.** `initialize` (#1692), `get_context_usage` (#2289),
-  `set_permission_mode` (#2067), and `set_model` each get a canned answer regardless
-  of `honorInterrupt`; an `interrupt` request is still dropped in default mode and is
-  handled only by the rider below (#1136). Malformed and unknown controls, plus
-  new_session / queue / modal lines, remain out of scope for the fake.
+  `get_settings` (#2517), `set_permission_mode` (#2067), and `set_model` each get a
+  canned answer regardless of `honorInterrupt`; an `interrupt` request is still
+  dropped in default mode and is handled only by the rider below (#1136). A normal
+  production control query must be answered here: silently ignoring `get_settings`
+  parked the requesting connection's worker until its deadline. Malformed and unknown
+  controls, plus new_session / queue / modal lines, remain out of scope for the fake.
 - **No new glyph, no allowlist change.** Stream mode emits pure JSON — no TUI
   substrate glyphs — so `cmd/substrate-guard`'s allowlist for this file is
   unaffected.
