@@ -902,7 +902,16 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 			m.handleSetSessionSettings(ctx, s, probeEnv)
 			return
 		case protocol.TypeRequestSessionSettings:
-			m.handleRequestSessionSettings(ctx, s, probeEnv)
+			// EffectiveEffortFor may wait on a child round trip, so an accepted
+			// read runs on this conn's worker. The capability gate stays here on
+			// Run: a non-interactive peer never queues work, decodes the payload,
+			// or consults either settings dependency. A nil effective-effort
+			// provider is NOT an inert gate — the existing RunConfig reply is
+			// still owed, with only the optional field omitted.
+			if !s.interactive {
+				return
+			}
+			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameSessionSettingsRequest})
 			return
 		case protocol.TypeRequestModelList:
 			// Inline on Run (#2125), beside its shape twin above rather than with
@@ -1086,6 +1095,9 @@ const (
 	// appFrameMintPairing is the inbound pairing-mint request (#2127) — the first
 	// member of this set whose handler WRITES host state rather than reading it.
 	appFrameMintPairing
+	// appFrameSessionSettingsRequest is the effective-effort read (#2516), whose
+	// optional provider may wait on a child round trip.
+	appFrameSessionSettingsRequest
 	// appFrameMCPStatusRequest is the potentially blocking live-status read (#2381).
 	appFrameMCPStatusRequest
 	// appFrameMCPReconnect and appFrameMCPToggle are the two MCP actuations (#2419)
@@ -1162,6 +1174,12 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				// bounds a conn to one mint in flight, which is why no per-verb
 				// concurrency limit exists for a verb that writes.
 				m.handleMintPairing(ctx, s, job.plaintext)
+			case appFrameSessionSettingsRequest:
+				// The optional effective-effort provider may wait on a child round
+				// trip. Saved settings resolution and reply composition share this
+				// worker placement, and the unsealed reply returns through
+				// forwardToRun so the worker never touches s.send.
+				m.handleRequestSessionSettings(ctx, s, job.plaintext)
 			case appFrameMCPStatusRequest:
 				// The resolver may wait on a child round trip. Its reply and every
 				// reject return through forwardToRun, so the worker never seals under

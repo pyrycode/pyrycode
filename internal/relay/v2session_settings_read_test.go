@@ -1,12 +1,16 @@
 package relay
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/dispatch"
+	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -35,6 +39,8 @@ const (
 	bootstrapReadWindowTokens = 111000
 )
 
+var readEffectiveEffort = "medium"
+
 // fixtureRunConfig is what RunConfigFor reports for readKnownConvID: the id and
 // the five values describing ONE session, which is the whole point of the type
 // (#1609).
@@ -55,15 +61,17 @@ var fixtureRunConfig = RunConfig{
 }
 
 // fixtureReport is fixtureRunConfig as the reply a resolvable request must come
-// back with — the six fields cross the handler unchanged.
+// back with — every saved field crosses unchanged while the applied effort stays
+// deliberately different.
 var fixtureReport = protocol.SessionSettingsPayload{
-	SessionID:      fixtureRunConfig.SessionID,
-	Model:          fixtureRunConfig.Model,
-	Effort:         fixtureRunConfig.Effort,
-	YOLO:           fixtureRunConfig.YOLO,
-	PermissionMode: fixtureRunConfig.PermissionMode,
-	UsedTokens:     fixtureRunConfig.UsedTokens,
-	WindowTokens:   fixtureRunConfig.WindowTokens,
+	SessionID:       fixtureRunConfig.SessionID,
+	Model:           fixtureRunConfig.Model,
+	Effort:          fixtureRunConfig.Effort,
+	EffectiveEffort: protocol.NewNullableString(&readEffectiveEffort),
+	YOLO:            fixtureRunConfig.YOLO,
+	PermissionMode:  fixtureRunConfig.PermissionMode,
+	UsedTokens:      fixtureRunConfig.UsedTokens,
+	WindowTokens:    fixtureRunConfig.WindowTokens,
 }
 
 // poisonedRunConfig is the fixture's REFUSAL return: a non-zero RunConfig handed
@@ -94,17 +102,20 @@ func resolveFixtureConv(id string) (RunConfig, bool) {
 }
 
 // readSeams is the read seams a run-configuration test wires, grouped so it can
-// state one intent ("all wired", "none wired") instead of threading four closures
+// state one intent ("all wired", "none wired") instead of threading the closures
 // through every call. runConfig is the one this verb consults; settings and usage
 // are the bootstrap-scoped pair it must NOT (they serve handleRequestSnapshot,
 // and are wired here only as leak detectors), and knownConv is that handler's
 // membership gate.
 type readSeams struct {
-	runConfig   func(string) (RunConfig, bool)
-	settings    func() (string, string, bool)
-	usage       func() (int, int)
-	knownConv   func(string) bool
-	snapshotter ScreenSnapshotter
+	runConfig       func(string) (RunConfig, bool)
+	effectiveEffort func(context.Context, string) (*string, bool)
+	settings        func() (string, string, bool)
+	usage           func() (int, int)
+	knownConv       func(string) bool
+	snapshotter     ScreenSnapshotter
+	updater         SettingsUpdater
+	handlers        map[string]dispatch.Handler
 }
 
 // allReadSeams wires the conversation-keyed seam to the fixture RunConfig and the
@@ -113,6 +124,9 @@ type readSeams struct {
 func allReadSeams() readSeams {
 	return readSeams{
 		runConfig: resolveFixtureConv,
+		effectiveEffort: func(context.Context, string) (*string, bool) {
+			return &readEffectiveEffort, true
+		},
 		settings: func() (string, string, bool) {
 			return bootstrapReadModel, bootstrapReadEffort, false
 		},
@@ -125,13 +139,14 @@ func allReadSeams() readSeams {
 // say it — the difference between "the reply is zero" and "the reply is zero
 // because nothing was consulted" (#1586).
 //
-// Every field is atomic, not a plain int: the closures below run on the
-// manager's Run dispatch goroutine while the assertions run on the test
-// goroutine, so a plain counter is a data race under `go test -race`.
+// Every field is atomic, not a plain int: the closures below run on a
+// connection's app-frame worker while the assertions run on the test goroutine,
+// so a plain counter is a data race under `go test -race`.
 type readCounts struct {
-	resolves atomic.Int64 // conversation-keyed RunConfigFor resolutions
-	settings atomic.Int64
-	usage    atomic.Int64
+	resolves        atomic.Int64 // conversation-keyed RunConfigFor resolutions
+	effectiveEffort atomic.Int64
+	settings        atomic.Int64
+	usage           atomic.Int64
 }
 
 // bootstrapReads totals the two bootstrap-scoped seams this verb must never read
@@ -158,6 +173,10 @@ func countingReadSeams() (readSeams, *readCounts) {
 			c.resolves.Add(1)
 			return resolveFixtureConv(id)
 		},
+		effectiveEffort: func(context.Context, string) (*string, bool) {
+			c.effectiveEffort.Add(1)
+			return &readEffectiveEffort, true
+		},
 		settings: func() (string, string, bool) {
 			c.settings.Add(1)
 			return bootstrapReadModel, bootstrapReadEffort, false
@@ -182,17 +201,20 @@ func readManagerFor(t *testing.T, seams readSeams, logger *slog.Logger) (mgr *V2
 	rec = &v2Recorder{}
 	var stop func()
 	mgr, stop = startManager(t, V2SessionConfig{
-		Frames:            frames,
-		Outbound:          rec.outbound,
-		StaticPriv:        respPriv,
-		Devices:           v2PairedRegistry(t, v2TestToken),
-		ServerID:          v2TestServerID,
-		Logger:            logger,
-		RunConfigFor:      seams.runConfig,
-		SnapshotSettings:  seams.settings,
-		SnapshotUsage:     seams.usage,
-		KnownConversation: seams.knownConv,
-		Snapshotter:       seams.snapshotter,
+		Frames:             frames,
+		Outbound:           rec.outbound,
+		StaticPriv:         respPriv,
+		Devices:            v2PairedRegistry(t, v2TestToken),
+		ServerID:           v2TestServerID,
+		Logger:             logger,
+		RunConfigFor:       seams.runConfig,
+		EffectiveEffortFor: seams.effectiveEffort,
+		SnapshotSettings:   seams.settings,
+		SnapshotUsage:      seams.usage,
+		KnownConversation:  seams.knownConv,
+		Snapshotter:        seams.snapshotter,
+		SettingsUpdater:    seams.updater,
+		Handlers:           seams.handlers,
 	})
 	t.Cleanup(stop)
 	return mgr, frames, rec, respPub
@@ -245,9 +267,13 @@ func TestV2Session_RequestSessionSettings_ReportsRunConfig(t *testing.T) {
 				Payload: json.RawMessage(`{"conversation_id":"` + readKnownConvID + `"}`),
 			})
 
-			// Barrier: the request is enqueued before this conn's noise_init, so once
-			// the barrier conn is open the request has been fully handled.
-			openModalConn(t, mgr, frames, rec, respPub, "c-barrier", []string{protocol.CapabilityInteractive})
+			if tc.wantReply {
+				waitForConnNoiseMsg(t, rec, "c-int", 1)
+			} else {
+				// The capability gate stays on Run, so an opened barrier proves the
+				// inert request was consumed without entering the worker.
+				openModalConn(t, mgr, frames, rec, respPub, "c-barrier", []string{protocol.CapabilityInteractive})
+			}
 
 			msgs := noiseMsgsForConn(t, rec, "c-int")
 			if !tc.wantReply {
@@ -270,9 +296,7 @@ func TestV2Session_RequestSessionSettings_ReportsRunConfig(t *testing.T) {
 			if err := json.Unmarshal(reply.Payload, &got); err != nil {
 				t.Fatalf("decode session_settings payload: %v", err)
 			}
-			if got != tc.wantPayload {
-				t.Errorf("payload = %+v, want %+v", got, tc.wantPayload)
-			}
+			assertSessionSettingsPayload(t, got, tc.wantPayload)
 		})
 	}
 }
@@ -329,7 +353,7 @@ func TestV2Session_RequestSessionSettings_AnswersWithoutASnapshotter(t *testing.
 		Payload: json.RawMessage(`{"conversation_id":"` + readKnownConvID + `"}`),
 	})
 
-	openModalConn(t, mgr, frames, rec, respPub, "c-barrier", []string{protocol.CapabilityInteractive})
+	waitForConnNoiseMsg(t, rec, "c-int", 2)
 
 	msgs := noiseMsgsForConn(t, rec, "c-int")
 	if len(msgs) != 2 {
@@ -399,7 +423,7 @@ func TestV2Session_RequestSessionSettings_NilSeamsDegradeToZero(t *testing.T) {
 		TS:      time.Now().UTC(),
 		Payload: json.RawMessage(`{"conversation_id":"` + readKnownConvID + `"}`),
 	})
-	openModalConn(t, mgr, frames, rec, respPub, "c-barrier", []string{protocol.CapabilityInteractive})
+	waitForConnNoiseMsg(t, rec, "c-int", 1)
 
 	msgs := noiseMsgsForConn(t, rec, "c-int")
 	if len(msgs) != 1 {
@@ -442,7 +466,7 @@ func TestV2Session_RequestSessionSettings_IgnoresAnyPayload(t *testing.T) {
 		Payload: json.RawMessage(`{"conversation_id":"` + readKnownConvID +
 			`","session_id":"../../etc/passwd","not_a_field":true}`),
 	})
-	openModalConn(t, mgr, frames, rec, respPub, "c-barrier", []string{protocol.CapabilityInteractive})
+	waitForConnNoiseMsg(t, rec, "c-int", 1)
 
 	msgs := noiseMsgsForConn(t, rec, "c-int")
 	if len(msgs) != 1 {
@@ -478,11 +502,11 @@ func TestV2Session_RequestSessionSettings_IgnoresAnyPayload(t *testing.T) {
 // reported values were the bootstrap session's whichever conversation was named.
 //
 // Mutation coverage this table buys — do not prune a row as redundant:
-//   - dropping the empty-id guard reddens rows 4 and 5 on resolves;
+//   - dropping the empty-id guard reddens rows 4–6 on resolves;
 //   - dropping the nil-seam guard panics row 3;
 //   - discarding RunConfigFor's comma-ok reddens row 2 on the payload, via
 //     poisonedRunConfig;
-//   - re-introducing a bootstrap-scoped read reddens rows 2–5 on both the
+//   - re-introducing a bootstrap-scoped read reddens rows 2–6 on both the
 //     bootstrap-read assertion and the payload.
 //
 // An unresolvable conversation is answered with the zero payload, never a
@@ -492,17 +516,19 @@ func TestV2Session_RequestSessionSettings_ConversationGate(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		name         string
-		payload      json.RawMessage
-		nilRunConfig bool
-		wantPayload  protocol.SessionSettingsPayload
-		wantResolves int64 // conversation-keyed RunConfigFor calls
+		name          string
+		payload       json.RawMessage
+		nilRunConfig  bool
+		wantPayload   protocol.SessionSettingsPayload
+		wantResolves  int64 // conversation-keyed RunConfigFor calls
+		wantEffective int64 // EffectiveEffortFor calls after a successful resolution
 	}{
 		{
-			name:         "a hosted, bound conversation reports its own run configuration",
-			payload:      json.RawMessage(`{"conversation_id":"` + readKnownConvID + `"}`),
-			wantPayload:  fixtureReport,
-			wantResolves: 1,
+			name:          "a hosted, bound conversation reports its own run configuration",
+			payload:       json.RawMessage(`{"conversation_id":"` + readKnownConvID + `"}`),
+			wantPayload:   fixtureReport,
+			wantResolves:  1,
+			wantEffective: 1,
 		},
 		{
 			// The seam refuses with a POISONED non-zero RunConfig, so this row is also
@@ -541,6 +567,14 @@ func TestV2Session_RequestSessionSettings_ConversationGate(t *testing.T) {
 			wantPayload:  protocol.SessionSettingsPayload{},
 			wantResolves: 0,
 		},
+		{
+			// A malformed payload keeps the shipped tolerant-decode posture: the
+			// zeroed id addresses nothing, so neither resolver is consulted.
+			name:         "malformed payload addresses nothing, without a resolution",
+			payload:      json.RawMessage(`"malformed-shape"`),
+			wantPayload:  protocol.SessionSettingsPayload{},
+			wantResolves: 0,
+		},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -562,9 +596,7 @@ func TestV2Session_RequestSessionSettings_ConversationGate(t *testing.T) {
 				Payload: tc.payload,
 			})
 
-			// Barrier: the request is enqueued before this conn's noise_init, so once
-			// the barrier conn is open the request has been fully handled.
-			openModalConn(t, mgr, frames, rec, respPub, "c-barrier", []string{protocol.CapabilityInteractive})
+			waitForConnNoiseMsg(t, rec, "c-int", 1)
 
 			msgs := noiseMsgsForConn(t, rec, "c-int")
 			if len(msgs) != 1 {
@@ -581,13 +613,15 @@ func TestV2Session_RequestSessionSettings_ConversationGate(t *testing.T) {
 			if err := json.Unmarshal(reply.Payload, &got); err != nil {
 				t.Fatalf("decode session_settings payload: %v", err)
 			}
-			if got != tc.wantPayload {
-				t.Errorf("payload = %+v, want %+v", got, tc.wantPayload)
-			}
+			assertSessionSettingsPayload(t, got, tc.wantPayload)
 
 			if gotResolves := counts.resolves.Load(); gotResolves != tc.wantResolves {
 				t.Errorf("RunConfigFor resolutions = %d, want %d — a request naming no conversation must short-circuit ahead of the seam, and one naming a conversation must resolve exactly once",
 					gotResolves, tc.wantResolves)
+			}
+			if gotEffective := counts.effectiveEffort.Load(); gotEffective != tc.wantEffective {
+				t.Errorf("EffectiveEffortFor calls = %d, want %d — the provider must run exactly once and only after RunConfigFor accepts the conversation",
+					gotEffective, tc.wantEffective)
 			}
 			if gotBootstrap := counts.bootstrapReads(); gotBootstrap != 0 {
 				t.Errorf("bootstrap-scoped seam reads = %d, want 0 — this verb reports the NAMED conversation's session, so no bootstrap-scoped run-configuration source may be read for any request (#1610)",
@@ -635,7 +669,377 @@ func TestV2Session_RequestSessionSettings_NonInteractiveMakesNoLookup(t *testing
 	if got := counts.resolves.Load(); got != 0 {
 		t.Errorf("RunConfigFor resolutions = %d, want 0 — the capability gate must precede the resolution, or a non-interactive conn learns which conversations exist", got)
 	}
+	if got := counts.effectiveEffort.Load(); got != 0 {
+		t.Errorf("EffectiveEffortFor calls = %d, want 0 — a non-interactive conn must not reach the provider", got)
+	}
 	if got := counts.bootstrapReads(); got != 0 {
 		t.Errorf("bootstrap-scoped seam reads = %d, want 0 — a non-interactive conn is fully inert on this verb", got)
+	}
+}
+
+func sendSessionSettingsRequest(t *testing.T, frames chan protocol.RoutingEnvelope, send *noise.CipherState, connID string, id uint64, conversationID string) {
+	t.Helper()
+	frames <- sealAppFrameConn(t, send, connID, protocol.Envelope{
+		ID:      id,
+		Type:    protocol.TypeRequestSessionSettings,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(`{"conversation_id":"` + conversationID + `"}`),
+	})
+}
+
+func waitSessionSettingsReply(t *testing.T, rec *v2Recorder, connID string, recv *noise.CipherState, index int) (protocol.Envelope, protocol.SessionSettingsPayload, map[string]json.RawMessage) {
+	t.Helper()
+	waitForConnNoiseMsg(t, rec, connID, index+1)
+	reply := decryptAppFrame(t, noiseMsgsForConn(t, rec, connID)[index], recv)
+	if reply.Type != protocol.TypeSessionSettings {
+		t.Fatalf("reply Type = %q, want %q", reply.Type, protocol.TypeSessionSettings)
+	}
+	var payload protocol.SessionSettingsPayload
+	if err := json.Unmarshal(reply.Payload, &payload); err != nil {
+		t.Fatalf("decode session_settings payload: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(reply.Payload, &raw); err != nil {
+		t.Fatalf("decode raw session_settings payload: %v", err)
+	}
+	return reply, payload, raw
+}
+
+func assertSessionSettingsPayload(t *testing.T, got, want protocol.SessionSettingsPayload) {
+	t.Helper()
+	gotEffective, gotPresent := got.EffectiveEffort.Value()
+	wantEffective, wantPresent := want.EffectiveEffort.Value()
+	got.EffectiveEffort = protocol.NullableString{}
+	want.EffectiveEffort = protocol.NullableString{}
+	if got != want {
+		t.Errorf("existing payload fields = %+v, want %+v", got, want)
+	}
+	if gotPresent != wantPresent {
+		t.Errorf("effective effort presence = %v, want %v", gotPresent, wantPresent)
+		return
+	}
+	switch {
+	case gotEffective == nil && wantEffective != nil:
+		t.Errorf("effective effort = nil, want %q", *wantEffective)
+	case gotEffective != nil && wantEffective == nil:
+		t.Errorf("effective effort = %q, want nil", *gotEffective)
+	case gotEffective != nil && *gotEffective != *wantEffective:
+		t.Errorf("effective effort = %q, want %q", *gotEffective, *wantEffective)
+	}
+}
+
+func TestV2Session_RequestSessionSettings_EffectiveEffortStates(t *testing.T) {
+	t.Parallel()
+
+	const poisoned = "POISONED_EFFECTIVE_EFFORT_2516"
+	for _, tc := range []struct {
+		name        string
+		provider    string
+		wantPayload protocol.SessionSettingsPayload
+		wantRaw     string
+		wantCalls   int64
+	}{
+		{
+			name:        "confirmed string remains separate from saved effort",
+			provider:    "string",
+			wantPayload: fixtureReport,
+			wantRaw:     `"medium"`,
+			wantCalls:   1,
+		},
+		{
+			name:     "confirmed null is present",
+			provider: "null",
+			wantPayload: func() protocol.SessionSettingsPayload {
+				p := fixtureReport
+				p.EffectiveEffort = protocol.NewNullableString(nil)
+				return p
+			}(),
+			wantRaw:   `null`,
+			wantCalls: 1,
+		},
+		{
+			name:     "unavailable result is omitted",
+			provider: "unavailable",
+			wantPayload: func() protocol.SessionSettingsPayload {
+				p := fixtureReport
+				p.EffectiveEffort = protocol.NullableString{}
+				return p
+			}(),
+			wantCalls: 1,
+		},
+		{
+			name:     "poisoned unavailable result is omitted",
+			provider: "poisoned",
+			wantPayload: func() protocol.SessionSettingsPayload {
+				p := fixtureReport
+				p.EffectiveEffort = protocol.NullableString{}
+				return p
+			}(),
+			wantCalls: 1,
+		},
+		{
+			name:     "nil provider is omitted",
+			provider: "nil",
+			wantPayload: func() protocol.SessionSettingsPayload {
+				p := fixtureReport
+				p.EffectiveEffort = protocol.NullableString{}
+				return p
+			}(),
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			seams := allReadSeams()
+			var calls atomic.Int64
+			switch tc.provider {
+			case "string":
+				seams.effectiveEffort = func(context.Context, string) (*string, bool) {
+					calls.Add(1)
+					return &readEffectiveEffort, true
+				}
+			case "null":
+				seams.effectiveEffort = func(context.Context, string) (*string, bool) {
+					calls.Add(1)
+					return nil, true
+				}
+			case "unavailable":
+				seams.effectiveEffort = func(context.Context, string) (*string, bool) {
+					calls.Add(1)
+					return nil, false
+				}
+			case "poisoned":
+				seams.effectiveEffort = func(context.Context, string) (*string, bool) {
+					calls.Add(1)
+					value := poisoned
+					return &value, false
+				}
+			case "nil":
+				seams.effectiveEffort = nil
+			default:
+				t.Fatalf("unknown provider fixture %q", tc.provider)
+			}
+
+			mgr, frames, rec, respPub := readManagerFor(t, seams, silentLogger())
+			send, recv := openModalConn(t, mgr, frames, rec, respPub, "effective", []string{protocol.CapabilityInteractive})
+			sendSessionSettingsRequest(t, frames, send, "effective", 25160, readKnownConvID)
+			reply, got, raw := waitSessionSettingsReply(t, rec, "effective", recv, 0)
+			if reply.InReplyTo == nil || *reply.InReplyTo != 25160 {
+				t.Fatalf("InReplyTo = %v, want pointer to 25160", reply.InReplyTo)
+			}
+			assertSessionSettingsPayload(t, got, tc.wantPayload)
+			rawEffective, present := raw["effective_effort"]
+			if tc.wantRaw == "" {
+				if present {
+					t.Errorf("effective_effort = %s, want key omitted", rawEffective)
+				}
+			} else if !present || string(rawEffective) != tc.wantRaw {
+				t.Errorf("effective_effort = %s (present=%v), want %s", rawEffective, present, tc.wantRaw)
+			}
+			if gotCalls := calls.Load(); gotCalls != tc.wantCalls {
+				t.Errorf("EffectiveEffortFor calls = %d, want %d", gotCalls, tc.wantCalls)
+			}
+		})
+	}
+}
+
+func TestV2Session_RequestSessionSettings_EffectiveEffortIsFreshPerRequest(t *testing.T) {
+	t.Parallel()
+
+	values := []string{"first-effective", "second-effective"}
+	var calls atomic.Int64
+	seams := allReadSeams()
+	seams.effectiveEffort = func(context.Context, string) (*string, bool) {
+		i := int(calls.Add(1)) - 1
+		if i >= len(values) {
+			return nil, false
+		}
+		return &values[i], true
+	}
+	mgr, frames, rec, respPub := readManagerFor(t, seams, silentLogger())
+	send, recv := openModalConn(t, mgr, frames, rec, respPub, "fresh", []string{protocol.CapabilityInteractive})
+
+	for i, want := range values {
+		sendSessionSettingsRequest(t, frames, send, "fresh", uint64(25161+i), readKnownConvID)
+		_, got, _ := waitSessionSettingsReply(t, rec, "fresh", recv, i)
+		value, present := got.EffectiveEffort.Value()
+		if !present || value == nil || *value != want {
+			t.Errorf("request %d effective effort = %v (present=%v), want %q", i+1, value, present, want)
+		}
+	}
+	if got := calls.Load(); got != int64(len(values)) {
+		t.Errorf("EffectiveEffortFor calls = %d, want %d (one fresh call per request)", got, len(values))
+	}
+}
+
+func TestV2Session_RequestSessionSettings_BlockedProviderDoesNotStallOtherConnection(t *testing.T) {
+	const (
+		blockedConv = "conv-effective-blocked"
+		freeConv    = "conv-effective-free"
+	)
+	blockedRun := fixtureRunConfig
+	blockedRun.SessionID = "sess-effective-blocked"
+	blockedRun.Effort = "high"
+	freeRun := fixtureRunConfig
+	freeRun.SessionID = "sess-effective-free"
+	freeRun.Effort = "low"
+	blockedEffective := "max"
+	freeEffective := "medium"
+
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	var providerCalls atomic.Int64
+	seams := allReadSeams()
+	seams.runConfig = func(id string) (RunConfig, bool) {
+		switch id {
+		case blockedConv:
+			return blockedRun, true
+		case freeConv:
+			return freeRun, true
+		default:
+			return poisonedRunConfig, false
+		}
+	}
+	seams.effectiveEffort = func(ctx context.Context, id string) (*string, bool) {
+		providerCalls.Add(1)
+		if id == blockedConv {
+			select {
+			case entered <- struct{}{}:
+			case <-ctx.Done():
+				return nil, false
+			}
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return nil, false
+			}
+			return &blockedEffective, true
+		}
+		if id == freeConv {
+			return &freeEffective, true
+		}
+		return nil, false
+	}
+
+	mgr, frames, rec, respPub := readManagerFor(t, seams, silentLogger())
+	sendA, recvA := openModalConn(t, mgr, frames, rec, respPub, "effective-blocked", []string{protocol.CapabilityInteractive})
+	sendB, recvB := openModalConn(t, mgr, frames, rec, respPub, "effective-free", []string{protocol.CapabilityInteractive})
+	sendSessionSettingsRequest(t, frames, sendA, "effective-blocked", 25163, blockedConv)
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocked provider was not entered")
+	}
+
+	sendSessionSettingsRequest(t, frames, sendB, "effective-free", 25164, freeConv)
+	freeReply, gotFree, _ := waitSessionSettingsReply(t, rec, "effective-free", recvB, 0)
+	if freeReply.InReplyTo == nil || *freeReply.InReplyTo != 25164 {
+		t.Fatalf("free reply InReplyTo = %v, want pointer to 25164", freeReply.InReplyTo)
+	}
+	wantFree := protocol.SessionSettingsPayload{
+		SessionID:       freeRun.SessionID,
+		Model:           freeRun.Model,
+		Effort:          freeRun.Effort,
+		EffectiveEffort: protocol.NewNullableString(&freeEffective),
+		YOLO:            freeRun.YOLO,
+		PermissionMode:  freeRun.PermissionMode,
+		UsedTokens:      freeRun.UsedTokens,
+		WindowTokens:    freeRun.WindowTokens,
+	}
+	assertSessionSettingsPayload(t, gotFree, wantFree)
+	if got := noiseMsgsForConn(t, rec, "effective-blocked"); len(got) != 0 {
+		t.Fatalf("blocked connection replied before release: %d frames", len(got))
+	}
+
+	releaseOnce.Do(func() { close(release) })
+	blockedReply, gotBlocked, _ := waitSessionSettingsReply(t, rec, "effective-blocked", recvA, 0)
+	if blockedReply.InReplyTo == nil || *blockedReply.InReplyTo != 25163 {
+		t.Fatalf("blocked reply InReplyTo = %v, want pointer to 25163", blockedReply.InReplyTo)
+	}
+	wantBlocked := wantFree
+	wantBlocked.SessionID = blockedRun.SessionID
+	wantBlocked.Effort = blockedRun.Effort
+	wantBlocked.EffectiveEffort = protocol.NewNullableString(&blockedEffective)
+	assertSessionSettingsPayload(t, gotBlocked, wantBlocked)
+	if got := providerCalls.Load(); got != 2 {
+		t.Errorf("EffectiveEffortFor calls = %d, want 2 (one per conversation)", got)
+	}
+}
+
+func TestV2Session_RequestSessionSettings_ProviderHonorsManagerCancellation(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	cancelled := make(chan struct{})
+	provider := func(ctx context.Context, _ string) (*string, bool) {
+		entered <- struct{}{}
+		<-ctx.Done()
+		close(cancelled)
+		poisoned := "LATE_EFFECTIVE_EFFORT_2516"
+		return &poisoned, false
+	}
+	respPriv, respPub := genV2Keypair(t)
+	frames := make(chan protocol.RoutingEnvelope, 8)
+	rec := &v2Recorder{}
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:             frames,
+		Outbound:           rec.outbound,
+		StaticPriv:         respPriv,
+		Devices:            v2PairedRegistry(t, v2TestToken),
+		ServerID:           v2TestServerID,
+		Logger:             silentLogger(),
+		RunConfigFor:       resolveFixtureConv,
+		EffectiveEffortFor: provider,
+	})
+	t.Cleanup(stop)
+	send, _ := openModalConn(t, mgr, frames, rec, respPub, "effective-cancel", []string{protocol.CapabilityInteractive})
+	sendSessionSettingsRequest(t, frames, send, "effective-cancel", 25165, readKnownConvID)
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider was not entered")
+	}
+	stop()
+	select {
+	case <-cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider did not observe manager cancellation")
+	}
+	if got := noiseMsgsForConn(t, rec, "effective-cancel"); len(got) != 0 {
+		t.Fatalf("cancelled provider produced %d replies, want 0", len(got))
+	}
+}
+
+type readSettingsUpdaterSpy struct {
+	calls atomic.Int64
+}
+
+func (s *readSettingsUpdaterSpy) UpdateSettings(string, SettingsUpdate) error {
+	s.calls.Add(1)
+	return nil
+}
+
+func TestV2Session_RequestSessionSettings_ReadPathHasNoMutationOrOrdinaryDispatch(t *testing.T) {
+	t.Parallel()
+
+	updater := &readSettingsUpdaterSpy{}
+	var ordinaryRoutes atomic.Int64
+	seams := allReadSeams()
+	seams.updater = updater
+	seams.handlers = map[string]dispatch.Handler{
+		protocol.TypeRequestSessionSettings: func(context.Context, *dispatch.Conn, protocol.Envelope) error {
+			ordinaryRoutes.Add(1)
+			return nil
+		},
+	}
+	mgr, frames, rec, respPub := readManagerFor(t, seams, silentLogger())
+	send, recv := openModalConn(t, mgr, frames, rec, respPub, "effective-read-only", []string{protocol.CapabilityInteractive})
+	sendSessionSettingsRequest(t, frames, send, "effective-read-only", 25166, readKnownConvID)
+	_, _, _ = waitSessionSettingsReply(t, rec, "effective-read-only", recv, 0)
+	if got := updater.calls.Load(); got != 0 {
+		t.Errorf("SettingsUpdater calls = %d, want 0", got)
+	}
+	if got := ordinaryRoutes.Load(); got != 0 {
+		t.Errorf("ordinary dispatch calls = %d, want 0", got)
 	}
 }
