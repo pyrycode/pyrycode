@@ -26,6 +26,13 @@ package sessions
 // must never be logged (the #741 precedent for session ids and conversation
 // ids); nothing here logs, and nothing added here should.
 //
+// A revived session also carries its dropped entry's CREATED_AT and LAST_ACTIVE_AT,
+// through the same materialise critical section that retires the entry (#2521).
+// The pair is what Pool.EverActivated reads, so a revive that restamped it to now
+// would answer "never run" for a channel whose own record said otherwise — and the
+// entry holding the truth is gone by then. It also keeps a session's age stable
+// across a restart, which the pre-#2521 restamp silently reset.
+//
 // A revived session carries the MODEL AND EFFORT its own dropped entry persisted,
 // and NO POSTURE (#2448). Pool.revivedSettings reads the two fields off
 // p.dormant; a persisted yolo or permission_mode is not read at all, so it cannot

@@ -159,6 +159,94 @@ for the generalized rule this ticket pair settled: a guard copied from a sibling
 is warranted only when the sibling's actuation can leave damage behind with
 nothing to show for it, not merely because the sibling needed one.
 
+## Dormant reset: previously-used, no live child (#2521)
+
+Row 5's `no_live_child` guard conflated two states that both read
+`State().ChildPID == 0`: a conversation created but never messaged (#2085,
+the guard's original subject) and one that ran, then stopped, backed off, or
+was idle-evicted. The reported symptom — pressing **New session** on an
+existing channel did nothing until a message was sent first — was the second
+state, and a daemon restart added a third: after `sessions.New` materialises
+only the bootstrap, a previously-used conversation's session is a persisted
+`Pool.dormant` entry `resolveBound` (`resolveBoundSession`) simply misses,
+landing on row 3 (`no_bound_session`) instead of row 5. The message route
+never had this gap — `sessionRouter.resolve` already re-materialises through
+`sessionRouter.revive` on `ErrSessionNotFound` — which is why "send one
+message first, then Reset" was the workaround.
+
+**The discriminator is "has this conversation ever run?", answered by
+[`Pool.EverActivated`](sessions-package-key-types-reviving-a-dropped-session-pool-revive.md).**
+It reads a live session's `lastActiveAt` against its `createdAt` — equal to
+the nanosecond for a never-activated session, since `buildSession` stamps
+both from one `now` — or, when the pool holds no session, the identical pair
+off the `Pool.dormant` entry. Both fields are already persisted, so the
+reading survives a restart with no schema change. `activeSessionStarter`
+gates the row-5 refusal on it (`named && !live && !used && !hasEverRun(oldID)`)
+and gains two seams for the after-restart case: `resolveDormant` reads the
+conversation's persisted binding without consulting the pool (repeating
+`resolveBoundSession`'s empty-id / unbound refusal — the #678 isolation
+point — rather than falling through to the bootstrap session), and
+`reviveBound` materialises it via `resolveSpawnDir` + `Pool.Revive`, byte for
+byte `sessionRouter.revive`'s body. `everRan` sits strictly **between**
+`resolveDormant` and `reviveBound` (`reviveDormantBound`,
+`cmd/pyry/new_session_dormant.go`) because `Pool.Revive` registers and
+persists: a never-used conversation must stay inert **without** that
+mutation, not merely without a rotation.
+
+Three new records join the existing set, all still Debug except the failed
+revive:
+
+| Condition | Record |
+|---|---|
+| Bound, dormant, never activated | `v2.new_session.dormant_never_used` |
+| Bound, dormant, previously used, revive failed | `v2.new_session.revive_failed` (Warn) |
+| Bound, dormant, previously used, revived | `v2.new_session.revived_dormant` |
+
+A failed revive is **inert, not an error return** — the same confidentiality
+posture as the workspace-refusal channel below: `resolveSpawnDir`'s
+confinement error names the resolved path and the `$HOME` boundary, and
+`Pool.Revive`'s can name a settings path, while `handleNewSession` Warn-logs
+whatever `start` returns verbatim. The record carries the event and the
+conversation id and nothing else. The #2085 never-used refusal is otherwise
+**untouched**: `TestActiveSessionStarter_InertArms`'s existing rows stay
+green unedited, which is the proof the refusal was narrowed rather than
+removed.
+
+**The named-only asymmetry documented above still applies unchanged**: a
+bare (cursor) frame on a childless conversation rotates without ever
+consulting `everRan`, exactly as before #2521.
+
+**A discriminator read from two sources is only as durable as the move
+between them — the reading did not survive a *revive*, only a *restart*.**
+`materialise` (shared by `Pool.Revive` and `GetOrCreateIn`) stamps a fresh,
+equal `createdAt`/`lastActiveAt` pair and deletes the dormant entry in the
+same step, so a session that was revived but not yet activated answered
+`false` on both of `EverActivated`'s sources — the live arm because the pair
+was freshly equal, the dormant arm because the fallback had just been
+retired. That is exactly where `send_message`'s `/clear` intercept
+([§ A second caller](#a-second-caller-in-a-different-goroutine-position-2456))
+lands: `Route` revives a dormant session for binding validation before the
+intercept ever raises the reset, so the typed `/clear` reached this seam
+with a session `EverActivated` had just been made to lie about, and worked
+on the desktop button while doing nothing for the identical channel typed
+into. The fix carries the retired entry's timestamps onto the session
+`materialise` registers, described where the fix lives: [`Pool.Revive` §
+Reviving a dropped
+session](sessions-package-key-types-reviving-a-dropped-session-pool-revive.md).
+**Generalizes:** when a predicate reads a primary source with a persisted
+fallback, the operation that converts one into the other is the case to
+test first, not the restart that merely proves the fallback durable on its
+own.
+
+**A repeated named Reset now rotates every time, kept deliberately.**
+`rekeyLocked` stamps `lastActiveAt` while `createdAt` is immutable, so after
+one reset `EverActivated` is true for the successor and a second Reset with
+no message in between rotates again — before #2521 the second frame was
+inert. Making it inert again needs a signal no timestamp pair carries ("has
+a child ever spawned under the *current* id"), for a state no acceptance
+criterion names; the cost is one extra separator and one re-key for a
+session that has had no turn, operator-driven rather than client-replayable.
+
 ## Workspace re-read on rotation (#1475)
 
 `change_workspace` records a `$HOME`-confined realpath on the conversation, but through #1474 the only production reader was `sessionRouter.revive`, reached on a `Pool.Lookup` miss after a daemon restart — moving a conversation's workspace was a `conversation_updated` reply that changed nothing until the daemon happened to restart. #1475 makes `new_session` rotation the second fresh spawn: `resolveBound` (over `resolveBoundSession`) now also hands back the conversation's **raw, unvalidated** `Cwd` alongside the runner and the old id, and `StartNewSession` re-confines it — `activeSessionStarter.resolveSpawnDir`, wiring the struct's `spawnDirFor` seam to the same `resolveSpawnDir` the mint and revive paths use — before calling `startFreshRunner`.
@@ -380,6 +468,13 @@ it was.
 
 ## Related
 
+- [`sessions-package-key-types-reviving-a-dropped-session-pool-revive.md`](sessions-package-key-types-reviving-a-dropped-session-pool-revive.md)
+  — `Pool.EverActivated`, the dormant-reset discriminator, and the
+  `materialise` timestamp carry that keeps it durable across a revive, not
+  only a restart.
+- [`e2e-harness-stream-interactive-harness-pattern-startstreamin.md`](e2e-harness-stream-interactive-harness-pattern-startstreamin.md)
+  — `RestartStreamInteractiveWithRelay` and the two #2521 specs that drive
+  this section's dormant arms end to end.
 - [`sessions-package-key-types-handoffnote-store.md`](sessions-package-key-types-handoffnote-store.md)
   — the store the wrap-up turn's reply is written through, and the write-side
   admission #2477 added.

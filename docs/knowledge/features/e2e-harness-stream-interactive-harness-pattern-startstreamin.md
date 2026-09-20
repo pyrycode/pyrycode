@@ -261,6 +261,49 @@ that had grown a `cwd`. Generalizes past this ticket — any e2e proving "frame 
 fact Y and nothing else" needs the raw payload's key set asserted beside the decoded
 values, not the decoded struct alone.
 
+### `RestartStreamInteractiveWithRelay` and the dormant-reset specs (#2521)
+
+A restart-shaped spec needs a *second* daemon on the *same* `HOME`, and the
+plain constructor is wrong for that second call: `seedBootstrapRegistry`
+writes a fresh `sessions.json` holding only the bootstrap, so a restart
+driven through `StartStreamInteractiveWithRelay` silently deletes every
+per-conversation session the first daemon minted, while `conversations.json`
+is untouched by either constructor — the daemon comes up, the conversation
+resolves, and only its session is gone. The first run of
+`relay_v2_stream_new_session_dormant_test.go` failed on exactly that.
+`RestartStreamInteractiveWithRelay` is the same constructor with the seed
+skipped; `registrySeed` (`seedFreshRegistry` / `keepExistingRegistry`) is a
+named `bool` rather than a second bare one beside `stdioPermissionPrompt`,
+so a transposed call fails to compile instead of silently re-seeding the
+registry a restart spec exists to preserve.
+
+Two specs drive the [`new_session` dormant reset](v2-session-manager-state-machine-inbound-new-session-sessionstarter-seam.md#dormant-reset-previously-used-no-live-child-2521)
+end to end, sharing an `awaitConversationTransition` helper so the two routes
+required to behave identically (#2456) are asserted by one piece of code
+rather than two that can drift: `TestRelayV2_StreamNewSessionDormant...`
+restarts the daemon after one conversation has run, sends a **named**
+`new_session` before any message, and proves the first post-reset turn uses
+the fresh id; `TestRelayV2_StreamClearAfterDaemonRestartResetsDormantConversation`
+pins the same outcome for a typed `/clear`, restarting and clearing before
+any other message.
+
+**"The retired id appears nowhere in the spawn line" is the wrong assertion
+for "the rotation used the fresh identity."** The per-session `--settings`
+and `--append-system-prompt-file` paths are named for the id the session was
+*built* under, and a rotation does not re-key them — asserting their absence
+would report every correct spawn as a violation. Match the id flags instead
+(`--session-id`, `--resume`): the id reaching claude as an identity is what
+"cannot resume the retired transcript" actually forbids.
+
+**A transcript-existence probe looks like the natural "has this conversation
+ever run?" signal and is a trap in this harness specifically.** The stream
+path deliberately watches no `<uuid>.jsonl` (#2137), and stream-mode
+fakeclaude writes none at all — a transcript-based discriminator could only
+have been proven here against a file the test itself planted, which is why
+[`Pool.EverActivated`](sessions-package-key-types-reviving-a-dropped-session-pool-revive.md)
+reads persisted timestamps instead and needs no filesystem access to prove
+in this suite.
+
 ### `relay_v2_attachment_destination_test.go` — three attachment-destination flows (#2144)
 
 Proves the property #2143 shipped — the bytes land where the client named the

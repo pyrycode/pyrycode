@@ -78,6 +78,12 @@ func liveRunner() *restartFreshRunner { return &restartFreshRunner{childPID: sta
 type starterProbe struct {
 	resolvedWith []string
 	rotatedFrom  []sessions.SessionID
+	// The three #2521 seams, recorded on the same terms as the two above: which
+	// conversation was asked for a persisted binding, which session was asked
+	// whether it has ever run, and which conversation was revived.
+	dormantAsked []string
+	everRanAsked []sessions.SessionID
+	revivedWith  []string
 	logs         bytes.Buffer
 }
 
@@ -291,6 +297,22 @@ func TestActiveSessionStarter_InertArms(t *testing.T) {
 // message, so a consumer can drop it without parsing prose.
 func assertStarterRecord(t *testing.T, raw []byte, wantEvent, wantConvID string) {
 	t.Helper()
+	assertStarterRecordAt(t, raw, wantEvent, wantConvID, "DEBUG")
+}
+
+// assertStarterRecordAt is assertStarterRecord with the level named. It exists
+// because #2521's revive failure is deliberately at WARN and not DEBUG: that arm
+// reports the daemon's OWN stored state failing its own validator rather than a
+// string a client just sent, which is the split resolveSpawnDir already makes for
+// its spawn_dir_rejected record.
+//
+// It also pins the confidentiality property that arm turns on: the record carries
+// the event and the conversation id and NOTHING else that could name a path. The
+// underlying errors — resolveSpawnDir's confinement rejection and Pool.Revive's
+// build failure — both can name one, so a future edit that "helpfully" attached
+// the error would redden here rather than in production.
+func assertStarterRecordAt(t *testing.T, raw []byte, wantEvent, wantConvID, wantLevel string) {
+	t.Helper()
 
 	var found int
 	for _, line := range bytes.Split(bytes.TrimSpace(raw), []byte("\n")) {
@@ -305,8 +327,14 @@ func assertStarterRecord(t *testing.T, raw []byte, wantEvent, wantConvID string)
 			continue
 		}
 		found++
-		if rec["level"] != "DEBUG" {
-			t.Errorf("record %q level = %v, want DEBUG (the id is client-supplied)", wantEvent, rec["level"])
+		if rec["level"] != wantLevel {
+			t.Errorf("record %q level = %v, want %s", wantEvent, rec["level"], wantLevel)
+		}
+		for _, banned := range []string{"err", "error", "path", "cwd", "workspace", "spawn_dir"} {
+			if _, present := rec[banned]; present {
+				t.Errorf("record %q carries a %q field: a phone-influenced workspace path must "+
+					"never reach a log (#833, Pool.Revive's contract)", wantEvent, banned)
+			}
 		}
 		// The no-cursor arm has no id to carry: its information IS its existence.
 		if wantConvID == "" {
@@ -400,4 +428,231 @@ func TestBoundedConvID(t *testing.T) {
 				"marker, which also proves it is not a slice of the original", got)
 		}
 	})
+}
+
+// --- #2521 dormant reset ---
+//
+// Two states reach these arms, and the whole ticket is that they are NOT the same
+// state as "created but never messaged": a session the pool retains with no
+// running child, and one the pool has not materialised at all after a daemon
+// restart. The seams stay plain func fields, so the fakes are the seams.
+
+// dormantSeams configures the three #2521 seams for one row. The zero value is
+// the refusing shape — no persisted binding, never activated, nothing to revive —
+// so a test states only the answer it is about.
+type dormantSeams struct {
+	dormantID  sessions.SessionID // "" → resolveDormant refuses (unknown / unbound)
+	dormantCwd string
+	everRan    bool
+	revived    sessions.Runner
+	reviveErr  error
+}
+
+// newDormantStarter builds a starter whose resolveBound ALWAYS refuses — the
+// after-daemon-restart shape, where Pool.Lookup misses because New materialised
+// only the bootstrap — with the three #2521 seams wired over the probe.
+func (p *starterProbe) newDormantStarter(d dormantSeams) activeSessionStarter {
+	s := p.newStarter(starterConvA, starterConvB, nil, nil)
+	s.resolveDormant = func(convID string) (sessions.SessionID, string, bool) {
+		p.dormantAsked = append(p.dormantAsked, convID)
+		if d.dormantID == "" {
+			return "", "", false
+		}
+		return d.dormantID, d.dormantCwd, true
+	}
+	s.everRan = func(id sessions.SessionID) bool {
+		p.everRanAsked = append(p.everRanAsked, id)
+		return d.everRan
+	}
+	s.reviveBound = func(convID string, oldID sessions.SessionID, cwd string) (sessions.Runner, error) {
+		p.revivedWith = append(p.revivedWith, convID)
+		if d.reviveErr != nil {
+			return nil, d.reviveErr
+		}
+		return d.revived, nil
+	}
+	return s
+}
+
+// dormantBoundID is the session id the persisted binding points at — canonical,
+// because everything downstream of resolveDormant treats it as one.
+const dormantBoundID = sessions.SessionID("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+
+// TestActiveSessionStarter_InPoolDormantPreviouslyUsedRotates is AC-1's
+// retained-in-the-pool half: a NAMED frame on a conversation whose runner reports
+// no child but whose session has run before must rotate.
+//
+// The runner is the same &restartFreshRunner{} the no-live-child inert row uses,
+// and that is the point — the two rows differ ONLY in what everRan answers, so
+// this test and that one together state that the never-used refusal was
+// distinguished rather than removed.
+//
+// The wrap-up seam is deliberately left nil: a session with no live child has no
+// child to ask for a handoff note, so the rotation must take the synchronous path
+// and this must not defer.
+func TestActiveSessionStarter_InPoolDormantPreviouslyUsedRotates(t *testing.T) {
+	t.Parallel()
+
+	runner := &restartFreshRunner{}
+	p := &starterProbe{}
+	s := p.newStarter(starterConvA, starterConvB, runner, nil)
+	s.everRan = func(id sessions.SessionID) bool {
+		p.everRanAsked = append(p.everRanAsked, id)
+		return true
+	}
+
+	if err := s.StartNewSession(starterConvB); err != nil {
+		t.Fatalf("StartNewSession(%q) = %v, want nil", starterConvB, err)
+	}
+
+	wantOld := sessions.SessionID("session-of-" + starterConvB)
+	if got := p.everRanAsked; len(got) != 1 || got[0] != wantOld {
+		t.Fatalf("everRan asked about %q, want exactly [%q]: the question is about the session "+
+			"bound to the NAMED conversation", got, wantOld)
+	}
+	if got := p.rotatedFrom; len(got) != 1 || got[0] != wantOld {
+		t.Fatalf("rotate called with %q, want exactly [%q]", got, wantOld)
+	}
+	if got := runner.restarts; len(got) != 1 || got[0] != "fresh-"+string(wantOld) {
+		t.Fatalf("RestartFresh got %q, want the freshly minted id: a dormant reset must still "+
+			"reach the runner, or the next message resumes the retired transcript", got)
+	}
+}
+
+// TestActiveSessionStarter_AfterRestartDormantRevivesAndRotates is AC-1's other
+// half and the reported defect: resolveBound refuses because the pool never
+// materialised the session, and the frame must still rotate.
+//
+// revivedWith carries the CONVERSATION id rather than the session id because that
+// is what Pool.Revive takes as its label — matching what create_conversation
+// originally minted the session with, the posture sessionRouter.revive already
+// keeps.
+func TestActiveSessionStarter_AfterRestartDormantRevivesAndRotates(t *testing.T) {
+	t.Parallel()
+
+	runner := &restartFreshRunner{}
+	p := &starterProbe{}
+	s := p.newDormantStarter(dormantSeams{dormantID: dormantBoundID, everRan: true, revived: runner})
+
+	if err := s.StartNewSession(starterConvB); err != nil {
+		t.Fatalf("StartNewSession(%q) = %v, want nil", starterConvB, err)
+	}
+
+	if got := p.dormantAsked; len(got) != 1 || got[0] != starterConvB {
+		t.Fatalf("resolveDormant asked about %q, want exactly [%q]", got, starterConvB)
+	}
+	if got := p.revivedWith; len(got) != 1 || got[0] != starterConvB {
+		t.Fatalf("reviveBound called with %q, want exactly [%q]", got, starterConvB)
+	}
+	if got := p.rotatedFrom; len(got) != 1 || got[0] != dormantBoundID {
+		t.Fatalf("rotate called with %q, want exactly [%q] — the PERSISTED binding", got, dormantBoundID)
+	}
+	if got := runner.restarts; len(got) != 1 || got[0] != "fresh-"+string(dormantBoundID) {
+		t.Fatalf("RestartFresh got %q, want the freshly minted id", got)
+	}
+}
+
+// TestActiveSessionStarter_DormantInertArms walks the dormant path's three
+// refusals.
+//
+// wantRevive is the load-bearing column, and it is AC-3's "without registry
+// mutation" stated as a claim about CALLS — no return value can carry it, because
+// a frame refused before the revive and one refused after it look identical from
+// outside. The never-activated row wants ZERO: Pool.Revive registers the session
+// and persists sessions.json, so a gate that ran below it would mutate the
+// registry for a conversation that must stay inert. The revive-failure row wants
+// ONE, which is what keeps the zero above from being vacuously true of a seam
+// that was simply never wired.
+func TestActiveSessionStarter_DormantInertArms(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		seams      dormantSeams
+		wantRevive int
+		wantEvent  string
+		wantLevel  string
+	}{
+		{
+			// Unknown or unbound, resolved through the dormant path: it must land on
+			// the SAME record the live path uses, so the frame still cannot be used to
+			// ask "does this conversation exist?".
+			name:      "no persisted binding",
+			seams:     dormantSeams{},
+			wantEvent: "v2.new_session.no_bound_session",
+			wantLevel: "DEBUG",
+		},
+		{
+			// The after-restart twin of the no-live-child row: a conversation created
+			// but never messaged is a persisted entry too, and reviving and rotating it
+			// would draw a delimiter for a chat that has never had a turn.
+			name:      "persisted binding that has never been activated",
+			seams:     dormantSeams{dormantID: dormantBoundID},
+			wantEvent: "v2.new_session.dormant_never_used",
+			wantLevel: "DEBUG",
+		},
+		{
+			// The workspace the conversation recorded no longer passes confinement, or
+			// the pool refused the materialisation. Inert, and the record carries no
+			// error and no path.
+			name:       "revive fails",
+			seams:      dormantSeams{dormantID: dormantBoundID, everRan: true, reviveErr: errors.New("boom")},
+			wantRevive: 1,
+			wantEvent:  "v2.new_session.revive_failed",
+			wantLevel:  "WARN",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			p := &starterProbe{}
+			s := p.newDormantStarter(tc.seams)
+
+			if err := s.StartNewSession(starterConvB); err != nil {
+				t.Fatalf("StartNewSession(%q) = %v, want nil: an inert arm is success of a valid "+
+					"request, not an error the handler should Warn about", starterConvB, err)
+			}
+			if got := len(p.revivedWith); got != tc.wantRevive {
+				t.Errorf("reviveBound called %d times, want %d: a refused frame must mutate no registry",
+					got, tc.wantRevive)
+			}
+			if len(p.rotatedFrom) != 0 {
+				t.Errorf("rotate called %d times, want 0", len(p.rotatedFrom))
+			}
+			assertStarterRecordAt(t, p.logs.Bytes(), tc.wantEvent, starterConvB, tc.wantLevel)
+		})
+	}
+}
+
+// TestActiveSessionStarter_BareFrameNeverConsultsEverRan pins the asymmetry #2099
+// introduced and this ticket keeps: the liveness guard is NAMED-ONLY, so a bare
+// frame on a childless cursor conversation still rotates without the new gate
+// being asked at all.
+//
+// everRan answers FALSE here deliberately. If the gate were applied to the bare
+// path too, this frame would go inert — which is exactly the pre-#2099 behaviour
+// AC-3 of that ticket promised not to disturb, and it would redden here.
+func TestActiveSessionStarter_BareFrameNeverConsultsEverRan(t *testing.T) {
+	t.Parallel()
+
+	runner := &restartFreshRunner{}
+	p := &starterProbe{}
+	s := p.newStarter(starterConvA, starterConvA, runner, nil)
+	s.everRan = func(id sessions.SessionID) bool {
+		p.everRanAsked = append(p.everRanAsked, id)
+		return false
+	}
+
+	if err := s.StartNewSession(""); err != nil {
+		t.Fatalf("StartNewSession(\"\") = %v, want nil", err)
+	}
+	if len(p.everRanAsked) != 0 {
+		t.Errorf("everRan asked %q, want no calls: the bare frame's rotation is #2099's preserved "+
+			"path and must not acquire a new gate", p.everRanAsked)
+	}
+	if len(runner.restarts) != 1 {
+		t.Errorf("RestartFresh called %d times, want 1", len(runner.restarts))
+	}
 }
