@@ -70,6 +70,77 @@ func TestPool_EverActivated_DormantEntries(t *testing.T) {
 	}
 }
 
+// TestPool_EverActivated_SurvivesRevive is the pin for the defect the first pass
+// shipped: the discriminator was durable across a daemon RESTART but not across a
+// REVIVE, and one of the two routes to a reset revives first.
+//
+// /clear lands there deterministically. handleSendMessage calls Route for binding
+// validation and discards the writer, Route re-materialises a dormant session
+// through Pool.Revive WITHOUT activating it, and only then does the intercept
+// raise the named new_session. Before the carry in materialise, that sequence
+// restamped created_at and last_active_at to one fresh now and deleted the entry
+// holding the real pair — so the reset asked "has this ever run?" of a session
+// whose evidence its own caller had just destroyed, got false, and stayed inert.
+// The desktop Reset control worked on a dormant channel while typing /clear in
+// that same channel did nothing, which #2456 requires to be one behaviour.
+//
+// The never-used row is the other half and is not decoration: it proves the carry
+// preserves the entry's answer rather than manufacturing a "used" one, so the
+// #2085 refusal still survives a revive too.
+func TestPool_EverActivated_SurvivesRevive(t *testing.T) {
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "sessions.json")
+	when := time.Now().UTC()
+
+	never := helperDormantID(t)
+	used := helperDormantID(t)
+	p, _ := helperPoolWarmStart(t, regPath, dir,
+		registryEntry{ID: never, Label: "never", CreatedAt: when, LastActiveAt: when},
+		registryEntry{ID: used, Label: "used", CreatedAt: when, LastActiveAt: when.Add(time.Minute)},
+	)
+	runPoolInBackground(t, p)
+
+	// The dormant arm's answers, before anything materialises either id.
+	if !p.EverActivated(used) {
+		t.Fatalf("EverActivated(dormant used) = false before the revive, want true — the fixture " +
+			"does not state the case this test is about")
+	}
+
+	// Revive WITHOUT activating: the state Route leaves a dormant session in on its
+	// way through, and the state the reset then asks about.
+	for _, id := range []SessionID{used, never} {
+		if _, err := p.Revive(id, "conv-"+string(id), ""); err != nil {
+			t.Fatalf("Revive(%s): %v", id, err)
+		}
+	}
+
+	if !p.EverActivated(used) {
+		t.Errorf("EverActivated(used) = false after Revive with no Activate, want true: a revive must " +
+			"carry the retired entry's timestamps, or /clear on a dormant channel reads its own " +
+			"conversation as never-used and stays inert")
+	}
+	if p.EverActivated(never) {
+		t.Errorf("EverActivated(never) = true after Revive, want false: the carry must preserve the " +
+			"entry's answer, not manufacture one — the #2085 refusal survives a revive too")
+	}
+
+	// Independently correct, and the reason the carry is not merely a reader's
+	// convenience: saveLocked persists CreatedAt from s.createdAt, so before this a
+	// restart-plus-revive rewrote the session's creation time to now and lost the
+	// original permanently.
+	entry := entryByID(t, regPath, used)
+	if entry == nil {
+		t.Fatalf("revived entry %q missing from %q after Revive persisted it", used, regPath)
+	}
+	if !entry.CreatedAt.Equal(when) {
+		t.Errorf("persisted created_at = %s, want the original %s — a revive must not restamp a "+
+			"session's age", entry.CreatedAt, when)
+	}
+	if !entry.LastActiveAt.Equal(when.Add(time.Minute)) {
+		t.Errorf("persisted last_active_at = %s, want the original %s", entry.LastActiveAt, when.Add(time.Minute))
+	}
+}
+
 // TestPool_EverActivated_Refusals pins the two non-answers. The empty id is the
 // #678 isolation point resolveBoundSession documents: Pool.Lookup("") resolves to
 // the BOOTSTRAP session, so any id-keyed reader that did not refuse it first would

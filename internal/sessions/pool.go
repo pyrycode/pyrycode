@@ -1811,6 +1811,16 @@ func (p *Pool) DormantSettingsFor(id SessionID) (SessionSettings, error) {
 // channel that ran before this method did already carries the distinguishing
 // pair.
 //
+// THE READING SURVIVES A MATERIALISATION, and only because materialise carries a
+// retired dormant entry's created_at/last_active_at onto the session it registers.
+// That dependency is worth stating rather than leaving to be re-derived, because
+// buildSession stamps a FRESH equal pair: without the carry a revived-but-not-yet-
+// activated session answers false here while its own retired entry said true, and
+// the retirement has already taken the dormant arm's fallback with it. /clear
+// reaches this method in precisely that state — its route revives for binding
+// validation before the intercept raises the reset — so a future edit that drops
+// the carry does not merely lose an age field, it re-opens #2521 on that route.
+//
 // ITS ONE BLIND SPOT, named rather than papered over: the bootstrap session
 // warm-starts in stateActive straight from its persisted row without a
 // transition, so a bootstrap whose timestamps still read equal answers false even

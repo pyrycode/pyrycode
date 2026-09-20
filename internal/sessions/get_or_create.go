@@ -138,6 +138,12 @@ type settingsSource func() SessionSettings
 // source for it — see the delete below, which both rollbacks undo. The take path
 // returns before reaching it and correctly so: a live id is never dormant.
 //
+// Retiring the entry also CARRIES its created_at and last_active_at onto the
+// session being registered (#2521). A materialisation moves a record between two
+// representations, so restamping both to now would destroy the session's age and,
+// with it, the activation evidence Pool.EverActivated reads — see the carry below
+// for the route that lands in exactly that state.
+//
 // Returns:
 //   - (sess, true, nil) — id was already registered; sess is the EXISTING entry
 //     and the caller's label + spawnDir are silently dropped
@@ -181,6 +187,12 @@ func (p *Pool) materialise(id SessionID, label, spawnDir string, settings settin
 		return existing, true, nil
 	}
 
+	// The entry this call is about to retire, read HERE rather than at the delete
+	// below because the timestamp carry needs it while sess is still a local. Both
+	// rollbacks put it back, so moving the read changes nothing about that
+	// contract; the delete keeps its own reasoning where it is.
+	entry, wasDormant := p.dormant[id]
+
 	// The authoritative read (#2492), in the same critical section as the delete
 	// below, so nothing can change the source between the two. Reached only on the
 	// register path: the take path returns above without evaluating the source at
@@ -215,6 +227,41 @@ func (p *Pool) materialise(id SessionID, label, spawnDir string, settings settin
 		sess.sup.SetSpawnPermissionMode(applied.PermissionMode)
 	}
 
+	// A MATERIALISED SESSION INHERITS ITS ENTRY'S TIMESTAMPS rather than keeping the
+	// fresh pair buildSession stamped (#2521). Written here for the settings
+	// install's reason and safe for the same one: sess is a local no other goroutine
+	// can reach yet, and it is above the registration so nothing can observe the
+	// built pair.
+	//
+	// Pool.EverActivated reads last_active_at against created_at as the durable
+	// answer to "has this conversation ever run?", and buildSession's pair is EQUAL
+	// to the nanosecond — the exact reading of "never activated". Without this carry
+	// a materialisation DESTROYS the evidence it just read past: the live arm
+	// answers false because the two are equal, and the dormant arm cannot answer at
+	// all because the delete below retired the entry. That is where /clear lands,
+	// deterministically — handleSendMessage routes for binding validation before the
+	// intercept fires, Route revives a dormant session on the way through without
+	// activating it, and the named new_session the intercept then raises reads its
+	// own conversation as never-used and stays inert. It is the defect #2521 closed
+	// for the Reset control, surviving on the sibling route a client types.
+	//
+	// It is independently correct whatever reads the pair. saveLocked persists
+	// CreatedAt from s.createdAt, so a restart followed by a revive used to rewrite
+	// a session's creation time to now and lose the original permanently.
+	//
+	// It is Pool.New's warm-start branch applied to the other materialisation path —
+	// the bootstrap has carried its entry's pair onto its Session since the registry
+	// existed — and it covers GetOrCreateIn landing on a dormant id as well as
+	// Revive, which is the delete's own reason for living here rather than in Revive.
+	//
+	// An entry with no usable creation time keeps the built pair. Nothing saveLocked
+	// writes can reach that state, so it is a pre-timestamp or hand-edited file, and
+	// the carry is all-or-nothing rather than a zero created_at persisted back.
+	if wasDormant && !entry.CreatedAt.IsZero() {
+		sess.createdAt = entry.CreatedAt
+		sess.lastActiveAt = entry.LastActiveAt
+	}
+
 	p.sessions[id] = sess
 	// An id this call materialises is no longer dormant: the live session becomes
 	// the single writer of its on-disk entry, and leaving the entry behind would
@@ -223,7 +270,6 @@ func (p *Pool) materialise(id SessionID, label, spawnDir string, settings settin
 	// a dormant one. Both rollbacks below put it back, so a failed materialise
 	// leaves the file byte-identical — TestPool_Revive_PoolNotRunning_RestoresDormantEntry
 	// is that assertion, and it is only non-vacuous because of this delete.
-	entry, wasDormant := p.dormant[id]
 	delete(p.dormant, id)
 	if err := p.saveLocked(); err != nil {
 		delete(p.sessions, id)
