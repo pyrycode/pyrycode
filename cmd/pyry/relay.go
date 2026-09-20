@@ -291,6 +291,12 @@ type relayWiring struct {
 	// V2SessionConfig dispatches it on the requesting connection's worker.
 	// nil preserves the relay seam's inert-unwired contract.
 	mcpStatusFor func(context.Context, string) (protocol.MCPStatusPayload, bool)
+	// effectiveEffortFor queries the exact live child currently bound to a named
+	// conversation and projects only its nullable applied effort. Built at main.go
+	// over the conversations registry and session pool; nil when either dependency
+	// is absent, preserving saved session-settings replies without the optional
+	// effective_effort field.
+	effectiveEffortFor func(context.Context, string) (*string, bool)
 	// contextUsageResolve resolves a named conversation to its bound child as a
 	// context-usage querier, plus the registry's own id for it (#2431). Deliberately
 	// NOT the finished seam: it performs no wait and contacts no child, so the
@@ -1123,6 +1129,11 @@ func startRelayV2(
 		// conversation gets ok=false and addresses nothing. nil in foreground/v1 (no
 		// settings resolver wired).
 		RunConfigFor: runConfig,
+		// Current-child applied-effort source (#2517). It is built only when both
+		// registry and pool are available, resolves them afresh for every request,
+		// and projects one nullable scalar from the deadline-bounded child query.
+		// nil preserves the complete saved reply while omitting effective_effort.
+		EffectiveEffortFor: w.effectiveEffortFor,
 		// On-demand model-list source (#2125): resolves the NAMED conversation's model
 		// menu for an inbound request_model_list, so a client can ask at any time
 		// instead of waiting for the live turn lane (which drops every event whose

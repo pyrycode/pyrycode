@@ -1880,9 +1880,12 @@ func permissionResponse(line []byte) (inPermissionResponse, bool) {
 // rider — see writeInitializeAck. A `set_permission_mode` one (#2067) is answered on
 // the same terms — see writeSetPermissionModeAck. They are the control lines the fake
 // handles unconditionally, because once the daemon starts sending them every
-// fake-daemon run sees them regardless of rider. An `mcp_status` request is recognized
-// separately and answered only under envStreamMCPStatus; with that rider off it keeps
-// the prior no-answer behavior. Every other control_request remains unchanged.
+// fake-daemon run sees them regardless of rider. A `get_settings` request is likewise
+// answered unconditionally: the production session-settings provider sends it during
+// ordinary fake-daemon runs and waits for the correlated response. An `mcp_status`
+// request is recognized separately and answered only under envStreamMCPStatus; with
+// that rider off it keeps the prior no-answer behavior. Every other control_request
+// remains unchanged.
 //
 // rateLimitStatus selects the rate-limit rider (#1411, default-off): non-empty
 // prepends one top-level rate_limit_event line carrying that string as its
@@ -2291,6 +2294,13 @@ func runStreamJSONConfigured(r io.Reader, w io.Writer, cfg streamRunConfig) {
 				if werr := writeContextUsageAck(w, reqID); werr != nil {
 					return
 				}
+			} else if reqID, ok := controlRequestID(b, subtypeGetSettings); ok {
+				// Applied settings are requested by the production session-settings
+				// provider, so the fake must complete the same correlated control round
+				// trip instead of parking the requesting connection until its deadline.
+				if werr := writeAppliedSettingsAck(w, reqID); werr != nil {
+					return
+				}
 			} else if reqID, mode, ok := setPermissionModeRequest(b); ok {
 				// The daemon told this child which permission posture to adopt (#2067) —
 				// the request it will, from #2064 on, write at spawn time and hold every
@@ -2371,6 +2381,7 @@ const (
 	subtypeMCPReconnect      = "mcp_reconnect"
 	subtypeMCPToggle         = "mcp_toggle"
 	subtypeGetContextUsage   = "get_context_usage"
+	subtypeGetSettings       = "get_settings"
 	subtypeSetPermissionMode = "set_permission_mode"
 	subtypeSetModel          = "set_model"
 )
@@ -2988,6 +2999,32 @@ func writeContextUsageAck(w io.Writer, requestID string) error {
 			"subtype":    "success",
 			"request_id": requestID,
 			"response":   cannedContextUsage(),
+		},
+	})
+}
+
+const (
+	cannedAppliedModel  = "claude-fake-applied"
+	cannedAppliedEffort = "high"
+)
+
+// writeAppliedSettingsAck answers one get_settings query with the smallest valid
+// applied object consumed by streamsup's `decodeAppliedSettings`. The fixed model
+// and effort are intentionally independent of saved daemon configuration: the fake
+// represents the live child's observation, while the caller remains responsible for
+// resolving the addressed child and projecting only effort across the relay seam.
+func writeAppliedSettingsAck(w io.Writer, requestID string) error {
+	return writeJSONLine(w, map[string]any{
+		"type": "control_response",
+		"response": map[string]any{
+			"subtype":    "success",
+			"request_id": requestID,
+			"response": map[string]any{
+				"applied": map[string]any{
+					"model":  cannedAppliedModel,
+					"effort": cannedAppliedEffort,
+				},
+			},
 		},
 	})
 }

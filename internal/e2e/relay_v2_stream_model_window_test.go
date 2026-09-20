@@ -40,7 +40,7 @@ import (
 // the 1M one, so a daemon that answered "the first entry", "the only entry", "the
 // largest that fits" or "the session's configured model" would not produce 1000000
 // here. The unit tables in internal/contextwindow separate those readings row by
-// row; this spec proves the whole path is wired.
+// row; this spec proves the whole path is wired, so one window assertion suffices.
 //
 // screen_snapshot is deliberately NOT asserted here even though it reads the same
 // figures. In stream mode the daemon routes its typed-nil supervisor to a nil
@@ -238,6 +238,11 @@ func TestRelayV2_StreamSessionSettingsReportsTheObservedWindow(t *testing.T) {
 	}
 
 	got := readSettings(secondReqID, convID)
+	effectiveEffort, effectivePresent := got.EffectiveEffort.Value()
+	if !effectivePresent || effectiveEffort == nil || *effectiveEffort != "high" {
+		t.Errorf("effective_effort = (%v, present=%v), want the live child's %q reading — omission means production did not wire the exact-child provider",
+			effectiveEffort, effectivePresent, "high")
+	}
 	if got.UsedTokens != wantUsed {
 		t.Errorf("used_tokens = %d, want %d — the planted transcript's latest usage-bearing entry",
 			got.UsedTokens, wantUsed)

@@ -410,6 +410,16 @@ the two sides are seeded from two independently-chosen values, not two copies
 of one constant — pin the values the real channels are observed to disagree on,
 the way #2118's rider key and transcript id now do.
 
+**A silent fake control request is a timeout, not a no-op (#2517).** When the
+production session-settings path began sending `get_settings`, fakeclaude's
+unknown-control posture left the connection worker waiting until its 30-second
+deadline and three existing stream e2es timed out. A control request that becomes
+ordinary production traffic therefore needs an unconditional default fake answer,
+unless the test deliberately exercises refusal. The full-stack spec must also
+assert the value returned through that control round trip: unrelated saved-settings
+or context-window assertions can stay green when the provider is accidentally
+unwired and the optional field is merely omitted.
+
 **Checking that a small advertised subset belongs to a larger capture does not
 prove the capture traversed the system (#2281).** The first model-rejection e2e
 loaded #2279's six-row capture only as a comparison set while fake claude still
