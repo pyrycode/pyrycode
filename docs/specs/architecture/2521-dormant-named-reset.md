@@ -433,3 +433,86 @@ Both Open Questions resolved, and one thing the plan did not anticipate.
   a rotation does not re-key them, so that form reports every correct spawn as a
   violation. The test matches `--session-id <retired>` and `--resume <retired>` instead —
   the id reaching claude as an identity, which is what AC-1 actually forbids.
+
+### 2026-09-20 — Rework leg 1 (verifier FAIL on PR #2523)
+
+**The MUST FIX: the discriminator was durable across a restart but not across a revive.**
+
+The design read `EverActivated` as answering from one of two sources — the live session's
+timestamps or the persisted entry's — and treated the move between them as lossless. It
+was not. `Pool.Revive` → `materialise` → `buildSession` stamps a **fresh** `createdAt` and
+`lastActiveAt` from one `now`, and `materialise` then deletes the dormant entry. A session
+that was revived but not yet activated therefore answered **false** on both arms: the live
+arm because the pair is equal, the dormant arm because the fallback had just been retired.
+
+That is where `/clear` lands, deterministically. `handleSendMessage` calls `Route` for
+binding validation and discards the writer; `Route` → `sessionRouter.resolve` →
+`sessionRouter.revive` materialises the dormant session **without activating it**; only
+then does the intercept raise `reset.StartNewSession`. So the named frame arrived at
+`activeSessionStarter.start` with `resolveBound` succeeding, `ChildPID == 0`, `used` false,
+and `everRan` answering false — inert. The desktop Reset control worked on a dormant
+channel while typing `/clear` in that same channel did nothing, which #2456 requires to be
+one behaviour. The plan's own AC-1 "retained in the pool with no running child" clause was
+missed on a route the design did not think to trace.
+
+**Resolution — the carry lives in `materialise`, not in `Revive`.** A retired dormant
+entry's `CreatedAt`/`LastActiveAt` are carried onto the session being registered, inside
+the same critical section that deletes the entry and above the publication into
+`p.sessions`, so nothing can observe the built pair. Three reasons for that placement over
+a `Revive`-local fix:
+
+- It is **`Pool.New`'s warm-start branch applied to the other materialisation path**. The
+  bootstrap has carried its entry's pair onto its `Session` since the registry existed;
+  this is the same operation for the sessions `New` does not build, so the fix is an
+  existing idiom extended rather than a new mechanism.
+- It covers **`GetOrCreateIn` landing on a dormant id** as well as `Revive` — which is the
+  delete's own stated reason for living in `materialise` rather than in `Revive`.
+- It is **independently correct**: `saveLocked` persists `CreatedAt` from `s.createdAt`, so
+  a restart-plus-revive previously rewrote a session's creation time to `now` and lost the
+  original permanently. The verifier raised this and it holds on its own.
+
+An entry with a zero `CreatedAt` keeps the built pair — the carry is all-or-nothing rather
+than a zero creation time persisted back. Nothing `saveLocked` writes reaches that state,
+so it is only a pre-timestamp or hand-edited file.
+
+`EverActivated`'s "ITS ONE BLIND SPOT" paragraph now names the dependency: the reading
+survives a materialisation **only** because of this carry, so an edit that drops it
+re-opens #2521 on the `/clear` route rather than merely losing an age field.
+
+**Proof.** `TestPool_EverActivated_SurvivesRevive` revives without activating and asserts
+the discriminator still answers true, that a never-used entry still answers false (the
+carry preserves the entry's answer rather than manufacturing one, so the #2085 refusal
+survives a revive too), and that the persisted `created_at` is unchanged. Verified RED
+against the disabled carry, reproducing the verifier's `BEFORE true / AFTER false`.
+
+`TestRelayV2_StreamClearAfterDaemonRestartResetsDormantConversation` pins the **route**:
+restart, then a typed `/clear` before any other message. It was verified RED against the
+disabled carry **while the named-`new_session` spec in the same run stayed green** — which
+is the split the verifier described, reproduced end to end. The two specs now share
+`awaitConversationTransition`, because #2456 makes "the same thing happens" the contract
+and two hand-written assertion blocks are free to drift apart exactly there.
+
+**NIT — a repeated named Reset now rotates every time. Kept, deliberately.** `rekeyLocked`
+stamps `lastActiveAt` while `createdAt` is immutable, so after a reset `EverActivated` is
+true for the successor and a second Reset with no message in between rotates again; before
+this ticket the second frame was inert. Making it inert again would need a new signal —
+"has a child ever spawned under the CURRENT id" — since the session object survives the
+re-key and its timestamps cannot express it; `Runner`'s `rotatePending` latch is the only
+thing that knows, and exposing it is a new API for a state no acceptance criterion names.
+The observable cost is one extra separator and one re-key for a session that has had no
+turn, it is operator-driven rather than client-replayable, and it is at least arguably what
+pressing the control twice asks for. Recorded here rather than fixed.
+
+**NIT — adjacent same-typed bools in the e2e harness. Fixed.** The `seedRegistry`
+parameter this ticket added sat beside `stdioPermissionPrompt`, where a transposition
+compiles and silently re-seeds the registry a restart spec exists to preserve. It is now a
+named `registrySeed` type with `seedFreshRegistry` / `keepExistingRegistry` constants:
+neither is assignable to `bool` nor a `bool` to them, so a transposed call fails to compile.
+The same reasoning produced `transitionWant` for the new shared e2e helper, whose five
+string fields would have been a worse instance of the identical hazard.
+
+**Documentation handoff — unchanged in ownership, extended in content.** The `/clear`
+route now behaves identically to the Reset control on a dormant conversation; the
+documentation stage should say so in both documents already listed above, since "a dormant
+conversation that has run can be reset without a preliminary message" is now true of the
+typed verb as well as the pressed control.
