@@ -407,23 +407,44 @@ func StartRotationWithRelay(t *testing.T, home, sessionsDir, initialUUID, trigge
 // handler delegates Enabled to the stderr handler), shortening its history in
 // these specs; no test reads that either.
 func StartStreamInteractiveWithRelay(t *testing.T, home, initialUUID, relayURL string, extraEnv ...string) *Harness {
-	return startStreamInteractiveWithRelay(t, home, initialUUID, relayURL, false, extraEnv...)
+	return startStreamInteractiveWithRelay(t, home, initialUUID, relayURL, false, true, extraEnv...)
+}
+
+// RestartStreamInteractiveWithRelay is StartStreamInteractiveWithRelay for the
+// SECOND daemon of a restart-shaped spec: identical in every way except that it
+// leaves sessions.json exactly as the previous daemon left it.
+//
+// The distinction is the whole point of such a spec. seedBootstrapRegistry writes
+// a registry holding the bootstrap and nothing else, so a restart driven through
+// the plain constructor silently deletes every per-conversation session the first
+// daemon minted — and a test about what the second daemon does with a dormant
+// entry would then be a test about an entry that is not there. conversations.json
+// is untouched by either constructor, so the binding survives while its session
+// disappears, which is the shape that makes the loss hard to see: the daemon comes
+// up, the conversation resolves, and only the session is missing.
+func RestartStreamInteractiveWithRelay(t *testing.T, home, initialUUID, relayURL string, extraEnv ...string) *Harness {
+	return startStreamInteractiveWithRelay(t, home, initialUUID, relayURL, false, false, extraEnv...)
 }
 
 // StartStreamInteractiveWithRelayStdio is the opt-in permission-transport twin
 // of StartStreamInteractiveWithRelay. It changes only the persisted startup
 // toggle; the fake child, relay, phone, and daemon lifecycle are identical.
 func StartStreamInteractiveWithRelayStdio(t *testing.T, home, initialUUID, relayURL string, extraEnv ...string) *Harness {
-	return startStreamInteractiveWithRelay(t, home, initialUUID, relayURL, true, extraEnv...)
+	return startStreamInteractiveWithRelay(t, home, initialUUID, relayURL, true, true, extraEnv...)
 }
 
-func startStreamInteractiveWithRelay(t *testing.T, home, initialUUID, relayURL string, stdioPermissionPrompt bool, extraEnv ...string) *Harness {
+func startStreamInteractiveWithRelay(t *testing.T, home, initialUUID, relayURL string, stdioPermissionPrompt, seedRegistry bool, extraEnv ...string) *Harness {
 	t.Helper()
 
 	writeStreamInteractiveConfig(t, home, stdioPermissionPrompt)
 
 	fakeBin := ensureFakeClaudeBuilt(t)
-	seedBootstrapRegistry(t, home, initialUUID)
+	// seedRegistry is false only for the second daemon of a restart-shaped spec,
+	// which needs the first daemon's sessions.json intact — see
+	// RestartStreamInteractiveWithRelay.
+	if seedRegistry {
+		seedBootstrapRegistry(t, home, initialUUID)
+	}
 
 	envSet := []string{
 		"PYRY_ALLOW_INSECURE_RELAY=1",

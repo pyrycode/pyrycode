@@ -405,3 +405,31 @@ No shared doc is edited by this ticket.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-20
+
+## Revisions
+
+### 2026-09-20 — Phase B
+
+Both Open Questions resolved, and one thing the plan did not anticipate.
+
+- **Is B's session dormant after the restart?** Yes, and the integration test proves it
+  drives the after-restart arm rather than the in-pool one: the reset's
+  `session_transition` names the id B was bound to *before* the restart, which only the
+  persisted binding could supply.
+- **Does the seeded bootstrap's `last_active_at` move?** Not load-bearing — the test never
+  resets conversation A, which stays the isolation control.
+- **The harness re-seeded `sessions.json` on every start**, so a restart driven through
+  `StartStreamInteractiveWithRelay` silently deleted every per-conversation session the
+  first daemon minted while leaving `conversations.json` intact. The first run of the
+  integration test failed on exactly that, with B's entry absent from the registry it was
+  asserting against. `internal/e2e/harness.go` gains
+  `RestartStreamInteractiveWithRelay`, identical except that it skips
+  `seedBootstrapRegistry`; the existing constructors pass `seedRegistry: true` and are
+  behaviourally unchanged. This is a fourth touched file the plan did not name.
+- **The fresh-identity proof narrowed.** The plan said the spawn record proves the first
+  post-reset turn uses the new id. It does, but "the retired id appears nowhere in the
+  spawn line" is the wrong assertion: the per-session `--settings` and
+  `--append-system-prompt-file` paths are named for the id the session was BUILT under and
+  a rotation does not re-key them, so that form reports every correct spawn as a
+  violation. The test matches `--session-id <retired>` and `--resume <retired>` instead —
+  the id reaching claude as an identity, which is what AC-1 actually forbids.
