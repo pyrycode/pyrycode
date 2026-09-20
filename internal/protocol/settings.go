@@ -1,5 +1,10 @@
 package protocol
 
+import (
+	"encoding/json"
+	"fmt"
+)
+
 // Set-session-settings v2 wire payloads (#844, docs/protocol-mobile.md
 // § Session settings). These carry a client's request to change one session's
 // per-session model / reasoning effort / YOLO and the daemon's confirmation.
@@ -134,17 +139,21 @@ type RequestSessionSettingsPayload struct {
 // neither never learned an id at all and could not write. That is the defect
 // this payload closes.
 //
-// NO omitempty on any field, matching ScreenSnapshotPayload (snapshot.go) and
-// deliberately UNLIKE the sibling SetSessionSettingsPayload above, whose
-// per-field pointers encode a presence contract. Nothing here is optional: this
-// is a full report of current state, so every field is always on the wire and a
-// zero value is a real answer, not an absence. Specifically:
+// The original fields have no omitempty, matching ScreenSnapshotPayload
+// (snapshot.go) and deliberately UNLIKE the sibling SetSessionSettingsPayload
+// above. They form a full report of saved state, so every original field is
+// always on the wire and a zero value is a real answer, not an absence.
+// EffectiveEffort is the one additive exception: its zero value is omitted when
+// no applied reading is available. Specifically:
 //
 //   - SessionID "" means the daemon could not resolve a session to address.
 //     A client MUST treat the settings as read-only rather than sending a
 //     set_session_settings with an empty id, which would be rejected.
 //   - Model / Effort "" mean "inherited default, no per-session override" —
 //     the same meaning they carry on screen_snapshot.
+//   - EffectiveEffort is independent from Effort: a string is a confirmed
+//     applied level, null means claude reported no effort parameter, and an
+//     omitted key means the applied value is unavailable or unsupported.
 //   - YOLO false means the current child has not confirmed bypass. It is not, by
 //     itself, proof that permissions are enforced: PermissionMode "" means no
 //     current-child confirmation is available.
@@ -174,13 +183,61 @@ type RequestSessionSettingsPayload struct {
 // set is keyed by conversation and resolved as ONE value, so no field can describe
 // a session another field does not — which is why a client can never read one
 // session's values and write its change to another. A request that resolves to no
-// session gets every field at its zero value, never some other session's.
+// session gets every original field at its zero value and omits EffectiveEffort,
+// never reporting some other session's values.
 type SessionSettingsPayload struct {
-	SessionID      string `json:"session_id"`
-	Model          string `json:"model"`
-	Effort         string `json:"effort"`
-	YOLO           bool   `json:"yolo"`
-	PermissionMode string `json:"permission_mode"`
-	UsedTokens     int    `json:"used_tokens"`
-	WindowTokens   int    `json:"window_tokens"`
+	SessionID       string         `json:"session_id"`
+	Model           string         `json:"model"`
+	Effort          string         `json:"effort"`
+	EffectiveEffort NullableString `json:"effective_effort,omitzero"`
+	YOLO            bool           `json:"yolo"`
+	PermissionMode  string         `json:"permission_mode"`
+	UsedTokens      int            `json:"used_tokens"`
+	WindowTokens    int            `json:"window_tokens"`
+}
+
+// NullableString preserves an optional nullable JSON string's three states.
+// Its zero value is unavailable and can be omitted with the omitzero tag;
+// NewNullableString(nil) is present JSON null, and a non-nil value is a present
+// JSON string. The type stays comparable so payloads containing it remain
+// comparable.
+type NullableString struct {
+	value   *string
+	present bool
+}
+
+// NewNullableString returns a present nullable string. A nil value represents
+// explicit JSON null rather than omission.
+func NewNullableString(value *string) NullableString {
+	return NullableString{value: value, present: true}
+}
+
+// Value returns the nullable string and whether its key was present. A present
+// nil value represents explicit JSON null.
+func (s NullableString) Value() (*string, bool) {
+	return s.value, s.present
+}
+
+// IsZero reports whether the nullable string is unavailable and should be
+// omitted by encoding/json's omitzero handling.
+func (s NullableString) IsZero() bool {
+	return !s.present
+}
+
+// MarshalJSON preserves a present string or null. The containing field's
+// omitzero tag handles the unavailable state before this method is called.
+func (s NullableString) MarshalJSON() ([]byte, error) {
+	return json.Marshal(s.value)
+}
+
+// UnmarshalJSON records that the key was present and accepts only a JSON string
+// or null.
+func (s *NullableString) UnmarshalJSON(data []byte) error {
+	var value *string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return fmt.Errorf("decode nullable string: %w", err)
+	}
+	s.value = value
+	s.present = true
+	return nil
 }
