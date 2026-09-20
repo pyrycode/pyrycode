@@ -59,6 +59,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 	"github.com/pyrycode/pyrycode/internal/sessions"
+	"github.com/pyrycode/pyrycode/internal/streamsup"
 	"github.com/pyrycode/pyrycode/internal/turnbridge"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
@@ -1177,8 +1178,9 @@ func runSupervisor(args []string) error {
 		sessionTranscriptDir: sessionTranscriptDir(pool, claudeSessionsDir),
 		// The conversation-keyed half of the model-list pair (#2125), built beside its
 		// enumerating twin below over the same registry and pool.
-		modelListFor: modelListFor(convReg, pool, modelVocabulary),
-		mcpStatusFor: mcpStatusFor(convReg, pool),
+		modelListFor:       modelListFor(convReg, pool, modelVocabulary),
+		mcpStatusFor:       mcpStatusFor(convReg, pool),
+		effectiveEffortFor: effectiveEffortFor(convReg, pool),
 		// The resolution half of the on-demand context-usage read (#2431), built
 		// beside its MCP twin over the same registry and pool. The collapsing and
 		// mid-turn-deferral half is composed in startRelayV2, which holds the turn
@@ -1839,6 +1841,68 @@ func mcpStatusFor(
 	}
 	return func(ctx context.Context, convID string) (protocol.MCPStatusPayload, bool) {
 		return resolveBoundMCPStatus(ctx, convReg, pool, convID)
+	}
+}
+
+// effectiveEffortQueryTimeout bounds one child round trip. A live child can stay
+// silent forever, and this provider runs on the requesting connection's worker.
+const effectiveEffortQueryTimeout = 30 * time.Second
+
+type effectiveEffortQuerier interface {
+	QueryAppliedSettings(context.Context) (streamsup.AppliedSettings, bool)
+}
+
+// resolveBoundEffectiveEffort asks only the exact live child currently reached by
+// convID's registry binding. resolveBoundRunner owns the load-bearing empty-binding
+// guard: without it Pool.Lookup("") selects bootstrap, which would let an unbound
+// conversation read another conversation's applied effort.
+//
+// The child result stays narrow at this boundary. Model is deliberately discarded;
+// Effort alone crosses into the relay provider, where a nil pointer with true means
+// confirmed JSON null and false means unavailable. Every refusal is content-free,
+// and this function never starts a session, mutates settings, or falls back to a
+// retained reading.
+func resolveBoundEffectiveEffort(
+	ctx context.Context,
+	convReg *conversations.Registry,
+	pool *sessions.Pool,
+	convID string,
+) (*string, bool) {
+	if ctx.Err() != nil {
+		return nil, false
+	}
+	runner, _, ok := resolveBoundRunner(convReg, pool, convID)
+	if !ok {
+		return nil, false
+	}
+	querier, ok := runner.(effectiveEffortQuerier)
+	if !ok {
+		return nil, false
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, effectiveEffortQueryTimeout)
+	defer cancel()
+	settings, ok := querier.QueryAppliedSettings(queryCtx)
+	if !ok {
+		return nil, false
+	}
+	return settings.Effort, true
+}
+
+// effectiveEffortFor preserves the relay seam's nil-unwired contract. A closure is
+// built only when both halves of exact-child resolution exist; foreground and
+// isolated constructions therefore continue to return saved settings while omitting
+// effective_effort. The closure retains the registry and pool, not a resolved runner,
+// so every call observes a fresh binding.
+func effectiveEffortFor(
+	convReg *conversations.Registry,
+	pool *sessions.Pool,
+) func(context.Context, string) (*string, bool) {
+	if convReg == nil || pool == nil {
+		return nil
+	}
+	return func(ctx context.Context, convID string) (*string, bool) {
+		return resolveBoundEffectiveEffort(ctx, convReg, pool, convID)
 	}
 }
 
