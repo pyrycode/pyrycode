@@ -102,9 +102,10 @@ func TestE2E_PerConversation_IdleEvictsAndReactivates(t *testing.T) {
 	// active per-conversation session evicts ~8s after its last activation.
 	//
 	// 8s, not 2s, and the number is load-bearing. Session.runActive arms the idle
-	// timer ONCE on entering active and resets it only while attached > 0 — turn
-	// activity does not touch it. So a reactivated session has exactly idleTimeout
-	// from Activate to re-eviction, whatever the turn is doing. The stream path's
+	// timer ONCE on entering active and, on a fire, re-arms only while the
+	// conversation has a turn open (#1486) — a delivery still retrying has not
+	// opened one yet. So a reactivated session can be evicted idleTimeout after
+	// Activate, before the retried delivery lands its turn. The stream path's
 	// delivery chain spends most of that: streamRunner.WriteUserTurn returns the
 	// retryable ErrNoLiveChild while the respawned child is between spawn and
 	// stdin-ready, and the msgqueue drain retries every
@@ -398,6 +399,14 @@ func TestE2E_PerConversation_CapEvictsCrossDiscussion(t *testing.T) {
 // the same name that stream mode drops.
 func startPerConvHarness(t *testing.T, home, initialUUID, relayURL string, extraFlags ...string) *Harness {
 	t.Helper()
+	return startPerConvHarnessEnv(t, home, initialUUID, relayURL, nil, extraFlags...)
+}
+
+// startPerConvHarnessEnv is startPerConvHarness with extra child environment
+// appended after the stream-mode defaults — e.g. PYRY_FAKE_CLAUDE_STREAM_HOLD
+// for a spec that needs a turn held open (#1486).
+func startPerConvHarnessEnv(t *testing.T, home, initialUUID, relayURL string, extraEnv []string, extraFlags ...string) *Harness {
+	t.Helper()
 	fakeBin := ensureFakeClaudeBuilt(t)
 	writeStreamInteractiveConfig(t, home)
 	seedBootstrapRegistry(t, home, initialUUID)
@@ -412,11 +421,11 @@ func startPerConvHarness(t *testing.T, home, initialUUID, relayURL string, extra
 		claudeBin:  fakeBin,
 		claudeArgs: []string{},
 		extraFlags: flags,
-		extraEnv: []string{
+		extraEnv: append([]string{
 			"PYRY_ALLOW_INSECURE_RELAY=1",
 			"PYRY_MOBILE_V2=1",
 			"PYRY_FAKE_CLAUDE_STREAM_JSON=1",
-		},
+		}, extraEnv...),
 	})
 
 	h := &Harness{

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -109,8 +110,9 @@ func pollUntil(t *testing.T, timeout time.Duration, fn func() bool) bool {
 	return false
 }
 
-// TestSession_IdleEvictionFires: with no clients attached and a short idle
-// timeout, the lifecycle goroutine evicts the supervisor.
+// TestSession_IdleEvictionFires: with no turn-busy signal (nil TurnBusy, the
+// PTY path's shape) and a short idle timeout, the lifecycle goroutine evicts
+// the supervisor.
 func TestSession_IdleEvictionFires(t *testing.T) {
 	t.Parallel()
 	pool := helperPoolIdle(t, 100*time.Millisecond)
@@ -135,6 +137,80 @@ func TestSession_IdleEvictionFires(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after cancel")
+	}
+}
+
+// TestSession_IdleEviction_DefersWhileTurnBusy: while Config.TurnBusy reports
+// the session busy, each idle-timer fire re-arms instead of evicting; once it
+// reports idle, the next fire evicts with ReasonEviction (#1486).
+func TestSession_IdleEviction_DefersWhileTurnBusy(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("/bin/sh"); err != nil {
+		t.Skipf("benign binary not available: %v", err)
+	}
+	var busy atomic.Bool
+	busy.Store(true)
+	var calls atomic.Int32
+	var askedMu sync.Mutex
+	var asked []SessionID
+	pool, err := New(Config{
+		RunnerFactory: testRunnerFactory,
+		Bootstrap: SessionConfig{
+			ClaudeBin:      "/bin/sh",
+			ClaudeArgs:     []string{"-c", "exec sleep 3600", "--"},
+			IdleTimeout:    50 * time.Millisecond,
+			BackoffInitial: 10 * time.Millisecond,
+			BackoffMax:     10 * time.Millisecond,
+			BackoffReset:   1 * time.Second,
+		},
+		TurnBusy: func(id SessionID) bool {
+			calls.Add(1)
+			askedMu.Lock()
+			asked = append(asked, id)
+			askedMu.Unlock()
+			return busy.Load()
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("sessions.New: %v", err)
+	}
+	rec := &transitionRecorder{}
+	pool.SetTransitionObserver(rec.observe)
+	sess := pool.Default()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = sess.Run(ctx) }()
+
+	// Vacuity guard: the timer must have fired, and been deferred, more than
+	// once before the busy half says anything.
+	if !pollUntil(t, 2*time.Second, func() bool { return calls.Load() >= 3 }) {
+		t.Fatalf("TurnBusy consulted %d times within 2s, want >= 3", calls.Load())
+	}
+	if got := sess.LifecycleState(); got != stateActive {
+		t.Fatalf("session left active while a turn was open; state=%v", got)
+	}
+	if n := rec.len(); n != 0 {
+		t.Fatalf("observer fired %d times while busy, want 0", n)
+	}
+	askedMu.Lock()
+	for _, id := range asked {
+		if id != sess.ID() {
+			t.Errorf("TurnBusy asked about %q, want %q", id, sess.ID())
+		}
+	}
+	askedMu.Unlock()
+
+	busy.Store(false)
+	if !pollUntil(t, 2*time.Second, func() bool {
+		return sess.LifecycleState() == stateEvicted
+	}) {
+		t.Fatalf("session did not evict within 2s of the turn closing; state=%v", sess.LifecycleState())
+	}
+	got := rec.snapshot()
+	if len(got) != 1 || got[0].Reason != ReasonEviction {
+		t.Fatalf("transitions = %+v, want exactly one %q", got, ReasonEviction)
 	}
 }
 

@@ -61,10 +61,11 @@ lock-order + pre-persist-exposure lessons):
 - **Eviction** — `Session.runActive` now returns `(TransitionReason, error)`;
   `Session.Run` fires `ReasonEviction` (empty `NewID`) **after** `transitionTo(stateEvicted)`
   returns (post-persist, no `lcMu` held), behind a `reason != "" && s.pool != nil`
-  guard. The idle (`<-timerCh`, `attached==0`) and cap (`<-s.evictCh`) paths both
-  return `ReasonEviction`; the defensive spontaneous-exit (`<-runErr`) and
-  shutdown (`<-ctx.Done()`) paths return `""` / `ctx.Err()` and fire nothing — the
-  wire has no "crashed"/shutdown reason.
+  guard. The idle path (`<-timerCh`, firing only once `Config.TurnBusy` — nil or
+  reporting no open turn — no longer defers it, #1486) and the cap path
+  (`<-s.evictCh`) both return `ReasonEviction`; the defensive spontaneous-exit
+  (`<-runErr`) and shutdown (`<-ctx.Done()`) paths return `""` / `ctx.Err()` and
+  fire nothing — the wire has no "crashed"/shutdown reason.
 
 `Pool.notifyTransition` (unexported) is the nil-guarded leaf callback both sites
 call; it takes no lock and the observer runs with no `Pool.mu`/`Session.lcMu`/`capMu`

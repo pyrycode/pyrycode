@@ -875,18 +875,30 @@ func runSupervisor(args []string) error {
 	// clearing a mark opened on the respawned child — so it is not an optional knob
 	// on this call, only on the ~36 test constructions that want the incumbent
 	// semantics.
+	//
+	// sessionTurnBusy is the same tracker seen from the pool (#1486): an idle-timer
+	// fire on a session whose conversation has a turn open re-arms instead of
+	// killing the turn. It hands the pool one bool per session and keeps the
+	// conversation id on this side of the seam. It stays a nil func in PTY mode
+	// rather than a closure over the nil tracker, so the pool sees no signal at all.
 	var turnBusy *turnBusyTracker
+	var sessionTurnBusy func(sessions.SessionID) bool
 	if streamSink != nil {
 		turnBusy = newTurnBusyTracker(
 			func(sid string) (string, bool) { return conversationForSession(convReg, sid) }, logger,
 			withExitEpoch(streamSink.exitEpoch),
 			withLifecycleClose(streamSink.requestLifecycleClose))
+		sessionTurnBusy = func(id sessions.SessionID) bool {
+			convID, ok := conversationForSession(convReg, string(id))
+			return ok && turnBusy.Busy(convID)
+		}
 	}
 	pool, err := sessions.New(sessions.Config{
 		Logger:                    logger,
 		RegistryPath:              registryPath,
 		ClaudeSessionsDir:         claudeSessionsDir,
 		IdleTimeout:               *idleTimeout,
+		TurnBusy:                  sessionTurnBusy,
 		ActiveCap:                 *activeCap,
 		ConversationsRegistry:     convReg,
 		ConversationsRegistryPath: convRegistryPath,
