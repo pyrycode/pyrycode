@@ -29,3 +29,22 @@ Both in `internal/relay/v2session_replay_test.go`, written RED first.
 ## Documentation handoff
 
 None required by the ticket. The documentation stage may note the replay-drain hold beside the #874 hold in `docs/knowledge/features/relay-package.md` (pending, documentation stage).
+
+## Security review
+
+**Verdict:** PASS
+
+**Findings:**
+
+- [Trust boundaries] No findings — the change reads no new input. The held tail is the ring slice `replayMissed` already classified against the untrusted `last_event_id` (gap → resync, clamp via `min(afterID, newest)`); the hold only defers when it is sealed. `Connected` and `Reconnect` are daemon-side seams wired from the relay client in `cmd/pyry/relay.go` (`conn.Connected`, `conn.Reconnected()`); a phone cannot drive either.
+- [Tokens] No findings — no tokens, keys or credentials are created, stored or logged.
+- [File operations] N/A by design — no filesystem access.
+- [Subprocess] N/A by design — no command execution.
+- [Crypto] No findings, and the change is itself the nonce fix: the probe runs before the pop and before `forwardEnvelope` calls `s.send.Encrypt`, so a held event spends no send-nonce and no nonce is skipped or reused. Sealing stays on the single Run goroutine. A rekey cannot swap `s.send` while the leg is down (inbound `noise_init` needs the leg up; the emit side defers under #912), and one completed after recovery seals the remaining tail under the new state exactly as today. The up→down single-frame race stays accepted, as in #874/#1525/#1526.
+- [Network & I/O] No findings — the held tail's memory is bounded by ring retention (`MaxEventsPerConversation`) per conn and existed before the outage; live pushes queued behind it stay under the existing push cap and ceiling teardown (`handlePushOverflow`). The hold does not re-signal `replayCh`, so a down leg cannot busy-spin Run (self-DoS). The added `replayCh` wake on `Reconnect` is a non-blocking send on a cap-1 channel; a pass with no tail returns at the empty scan.
+- [Logs] No findings — the plan adds no log line; nothing payload-bearing is logged. If a hold log is added in Phase B it must carry only an event slug and conn-id, like `dropInlineReplyIfDown`.
+- [Concurrency] SHOULD FIX (test-only exposure) — with `Connected` wired and `Reconnect` nil, a held tail has no waker until the session ends. Production wires both together in `cmd/pyry/relay.go`, so this is reachable only in tests; state it in the `drainReplayOnce` comment. `replayQueue`/`replayThrough` remain Run-owned; `transportDown` is a lock-free seam read; no new goroutine or lock.
+- [Threat model] No findings — the fix removes an availability hole (a relay blip forcing AEAD failure, teardown and re-handshake, and permanent loss of ring-evicted events). A tail held for a conn the relay has since dropped goes to that dead conn id on recovery, sealed under that session's key, so no other phone can read it; this matches today's post-recovery behaviour for any queued frame.
+
+**Reviewer:** builder (self-review per the security-review checklist)
+**Date:** 2026-09-23
