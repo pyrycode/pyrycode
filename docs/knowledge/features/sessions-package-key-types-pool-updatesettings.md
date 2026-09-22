@@ -261,9 +261,16 @@ child without tearing it down is #1622, measured against claude 2.1.220 — see
 [`e2e-realclaude.md`](e2e-realclaude.md#interactive_stream_inband_bypass_revoke_test-go-1622).
 The question #1605 also implied but #1622 deliberately leaves open — whether
 the revoked posture is *behaviourally enforced*, not just echoed back — is a
-sibling ticket that consumes #1622's harness, not yet landed. See
-[codebase/1581.md](../codebase/1581.md) and
-[codebase/1604.md](../codebase/1604.md).
+sibling ticket that consumes #1622's harness, not yet landed. A narrower
+in-flight question is still open too: whether a revoke arriving while a tool
+call is already dispatched (as opposed to at a turn boundary) reaches the
+child the way #1622 measured is **not measured live** by any ticket — #1622
+and its sibling #1623 tested only the turn boundary. `deliverSettingsInBand`'s
+doc comment says so directly rather than naming a ticket that never had that
+scope (#1624). [codebase/1604.md](../codebase/1604.md)'s note that the live
+measurement was "handed to #1605" is superseded by this: #1605 closed without
+that scope, so no ticket picked it up. See also
+[codebase/1581.md](../codebase/1581.md).
 
 `Supervisor.Restart(args []string)` (`internal/supervisor`) swaps the live
 spawn args under a leaf `restartMu` and, if a child is currently running,
