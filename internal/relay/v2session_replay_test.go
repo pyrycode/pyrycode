@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1221,4 +1222,193 @@ func TestV2Session_Reconnect_PacedReplay_Race(t *testing.T) {
 	// waiting for the guaranteed floor keeps the interleave live long enough for
 	// -race to observe it, then t.Cleanup(stop) drains the Run goroutine.
 	waitForEnvelopes(t, rec, replayN+2)
+}
+
+// TestV2Session_Reconnect_ReplayHeldWhileTransportDown pins #1490's hold: while
+// the Connected seam reports the relay leg down, drainReplayOnce pops nothing,
+// seals nothing, leaves replayThrough alone and does not re-signal replayCh (a
+// down leg must not busy-spin Run). Once the leg is back the tail drains and the
+// phone's recv state opens every frame from its first nonce — proof that no
+// send-nonce was spent while down. Direct drive, Run not started, like
+// TestV2Session_Reconnect_Paced_OnePerRunPass.
+func TestV2Session_Reconnect_ReplayHeldWhileTransportDown(t *testing.T) {
+	t.Parallel()
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	respSend, initRecv := offlineHandshake(t, respPriv, respPub, initPriv)
+
+	rec := &v2Recorder{}
+	mgr := newInjectManager(t, respPriv, rec)
+	up := false
+	mgr.cfg.Connected = func() bool { return up }
+
+	const n, watermark = 3, 7
+	events := make([]eventring.Event, n)
+	for i := range events {
+		id := uint64(watermark + i + 1)
+		events[i] = eventring.Event{
+			ID:      id,
+			Type:    protocol.TypeTurnState,
+			Payload: json.RawMessage(fmt.Sprintf(`{"n":%d}`, id)),
+			TS:      time.Now().UTC(),
+		}
+	}
+	mgr.sessions[v2TestConnID] = &V2Session{
+		connID:        v2TestConnID,
+		state:         V2StateOpen,
+		send:          respSend,
+		replayQueue:   events,
+		replayThrough: watermark,
+	}
+	s := mgr.sessions[v2TestConnID]
+	ctx := context.Background()
+
+	for pass := 1; pass <= n+1; pass++ {
+		mgr.drainReplayOnce(ctx)
+		if got := len(rec.snapshot()); got != 0 {
+			t.Fatalf("pass %d while down: forwarded %d frames, want 0 (tail must be held)", pass, got)
+		}
+		if got := len(s.replayQueue); got != n {
+			t.Fatalf("pass %d while down: replayQueue len %d, want %d (nothing popped)", pass, got, n)
+		}
+		if s.replayThrough != watermark {
+			t.Fatalf("pass %d while down: replayThrough %d, want %d (no advance)", pass, s.replayThrough, watermark)
+		}
+		if got := len(mgr.replayCh); got != 0 {
+			t.Fatalf("pass %d while down: replayCh re-signalled (len %d); a down leg would busy-spin Run", pass, got)
+		}
+	}
+
+	up = true
+	for range n {
+		mgr.drainReplayOnce(ctx)
+	}
+	envs := rec.snapshot()
+	if len(envs) != n {
+		t.Fatalf("after recovery: forwarded %d frames, want %d", len(envs), n)
+	}
+	for i, env := range envs {
+		got := decryptAppFrame(t, env, initRecv) // fails on a nonce spent while down
+		wantID := uint64(watermark + i + 1)
+		if got.EventID == nil || *got.EventID != wantID {
+			t.Fatalf("frame %d EventID = %v, want %d", i, got.EventID, wantID)
+		}
+	}
+	if s.replayThrough != watermark+n {
+		t.Errorf("replayThrough after recovery = %d, want %d", s.replayThrough, watermark+n)
+	}
+}
+
+// TestV2Session_Reconnect_MidReplayDrop_ResumesOnReconnect is #1490 end-to-end:
+// the relay leg drops partway through a paced replay, a live event is pushed
+// during the outage, and the Reconnect signal alone (no further Push) resumes
+// the replay. The phone decrypts every replay frame exactly once in ascending
+// event-id order, then the live event — no teardown, no resync. The outbound
+// flips the leg down from inside itself after dropAfter replay frames, so the
+// drop lands mid-replay on the Run goroutine rather than on a timer.
+func TestV2Session_Reconnect_MidReplayDrop_ResumesOnReconnect(t *testing.T) {
+	t.Parallel()
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	const replayN, dropAfter = 10, 4
+
+	ring := eventring.New(eventring.MaxEventsPerConversation)
+	appendRingEvents(ring, v2TestConvID, protocol.TypeTurnState, replayN)
+
+	var up atomic.Bool
+	up.Store(true)
+	var downProbes atomic.Int64
+	rec := &v2Recorder{}
+	outbound := func(env protocol.RoutingEnvelope) error {
+		if !up.Load() {
+			return errTransportDown
+		}
+		if err := rec.outbound(env); err != nil {
+			return err
+		}
+		if len(rec.snapshot()) == 1+dropAfter { // noise_resp + dropAfter replay frames
+			up.Store(false)
+		}
+		return nil
+	}
+	connected := func() bool {
+		if up.Load() {
+			return true
+		}
+		downProbes.Add(1)
+		return false
+	}
+	reconnect := make(chan struct{}, 1)
+	frames := make(chan protocol.RoutingEnvelope, 1)
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   outbound,
+		Connected:  connected,
+		Reconnect:  reconnect,
+		StaticPriv: respPriv,
+		Devices:    v2PairedRegistry(t, v2TestToken),
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	})
+	t.Cleanup(stop)
+	mgr.SetReplaySource(ring, func() string { return v2TestConvID })
+
+	initiator, err := noise.NewInitiator(initPriv, respPub)
+	if err != nil {
+		t.Fatalf("NewInitiator: %v", err)
+	}
+	last := uint64(0) // replay the whole conversation (ids 1..replayN)
+	initMsg, err := initiator.WriteInit(buildHelloEarlyDataReplay(t, v2TestToken, &last))
+	if err != nil {
+		t.Fatalf("WriteInit: %v", err)
+	}
+	frames <- wrapInnerFrame(t, v2TestConnID, protocol.TypeNoiseInit, initMsg)
+
+	// Wait for Run to observe the down leg on a pass after the drop.
+	deadline := time.Now().Add(2 * time.Second)
+	for downProbes.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("Run never probed the down transport after %d replay frames", dropAfter)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	idLive := uint64(replayN + 1)
+	live := protocol.Envelope{
+		ID:      idLive,
+		Type:    protocol.TypeTurnState,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(fmt.Sprintf(`{"n":%d}`, idLive)),
+		EventID: &idLive,
+	}
+	if err := mgr.Push(context.Background(), v2TestConnID, live); err != nil {
+		t.Fatalf("live Push while down: %v", err)
+	}
+
+	up.Store(true)
+	reconnect <- struct{}{}
+
+	// noise_resp + replayN replay frames + 1 live frame.
+	envs := waitForEnvelopes(t, rec, replayN+2)
+	if len(envs) != replayN+2 {
+		t.Fatalf("frame count: got %d, want %d (no duplicate, no loss)", len(envs), replayN+2)
+	}
+	_, _, initRecv, err := initiator.ReadResp(decodeRespFrame(t, envs[0]))
+	if err != nil {
+		t.Fatalf("ReadResp: %v", err)
+	}
+	for i := 1; i <= replayN; i++ {
+		got := decryptAppFrame(t, envs[i], initRecv) // a nonce burned while down fails here
+		wantID := uint64(i)
+		if got.Type == protocol.TypeResync {
+			t.Fatalf("frame %d is a resync; the held replay must resume, not reload", i)
+		}
+		if got.EventID == nil || *got.EventID != wantID {
+			t.Fatalf("frame %d EventID = %v, want %d (contiguous ascending replay)", i, got.EventID, wantID)
+		}
+	}
+	gotLive := decryptAppFrame(t, envs[replayN+1], initRecv)
+	if gotLive.EventID == nil || *gotLive.EventID != idLive {
+		t.Fatalf("final frame EventID = %v, want %d (live must follow the held replay)", gotLive.EventID, idLive)
+	}
 }
