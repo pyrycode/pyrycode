@@ -473,3 +473,77 @@ reach `testdata/roster_after_finish_v*.json` that should not".
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-22
+
+## Revisions
+
+### 2026-09-22 — the omits branch is no longer the default of a boolean
+
+Driven by the verifier's MUST FIX on PR #2526, with its SHOULD FIX and two NITs closed in the same
+edit. The staging, the phase table, the promotion rule's central call and the security decision are
+unchanged; what changed is how the verdict is READ off the rosters the staging produced.
+
+**The defect.** `rafcapDecideVerdict`'s terminal branch was `if last.ListsFinishedTask { StillLists }
+else { Omits }`. `ListsFinishedTask` is a plain boolean, so it reads false both when the roster
+genuinely omitted the finished task and when nothing could tell — a `tasks` array that did not decode,
+or a run where claude's own `task_started` carried no `task_id` to join on. Either landed on
+`roster-omits-the-finished-task`: the one verdict that says the count comes down by itself, the branch
+that would change two client tickets' behaviour, read off a line no code parsed. `fixtureWorthy` had no
+arm on either shape and the streamsup reader decodes only `index`/`phase`/`offset_lines` from `rosters`,
+so it would have promoted, committed, been transcribed into `emitBackgroundTaskRoster`'s doc comment and
+cross-posted to desktop #1246 and #1558 as a measured fact. It also contradicted
+`rafcapRosterObs.TasksDecoded`'s own docblock, which calls a non-decoding array "a shape change worth
+recording rather than silently reporting as an empty roster".
+
+**The change.**
+
+- `rafcapRosterObs` gains `JoinedAgainstFinishedID` — this line's `tasks` decoded **and** the finished
+  task's id was known. Recorded per roster rather than derived from the record's two ends, because the
+  verdict is decided by one line and the reader checks the verdict against that same line. It is what
+  `FinishedTaskIDKnown` now feeds; previously that field was recorded and consulted by nothing.
+- `rafcapDecideVerdict` returns a third value, the reason the deciding roster could not be read, and
+  returns an **empty verdict** with it. The closed set stays at four: there is no member for "a roster
+  fired and could not be read", and minting a fifth would mean repinning the streamsup reader to
+  interpret something no client can be told. `StillLists` needed no guard — it is reached only through
+  `ListsFinishedTask`, which cannot be set without a successful join.
+- The record carries it as `verdict_unreadable` (omitted when empty, so a promoted fixture does not
+  carry a field implying something went wrong), and `fixtureWorthy` refuses to promote such a run. The
+  refusal sits apart from the staging refusals either side of it: the staging worked here and the
+  instrument failed, so the outcome is `instrument-broken` rather than `staging-failed`.
+- `finishedID` now passes through `red.str`, closing the asymmetry the verifier named: the roster ids it
+  is compared against come out of a payload `dropcapMakeEntry` has already redacted. No declared class
+  can match a claude task id today, so nothing changes now — and if one ever could, an unredacted key
+  would fail every join in silence and land on this same wrong branch.
+
+**Also closed in this edit.**
+
+- `rafcapCollect`'s `prevType` was updated only inside `if c.Decoded`, so a line the rig could not read
+  sitting between a `control_response` and a roster was transparent and the roster was recorded as
+  immediately following the control response. `after_control_response` is AC2's discriminator between
+  "the roster only ever answers a control request" and "claude sends it unprompted", which point the two
+  client tickets at different fixes, so the gap is now recorded as `rafcapUndecodedLineType` —
+  `dropcapCensusKey`'s own `<undecodable>` bucket, called rather than re-spelled so the two vocabularies
+  cannot drift. `TestRafcapCollectDoesNotSeeThroughAnUndecodedLine` is new and was confirmed to fail
+  against the old behaviour before the fix landed.
+- Phases 6 and 7 recorded their partial-staging failures by setting the outcome to `staging-failed`,
+  and the final classification was guarded against overwriting it — so an undeliverable mid-session ask
+  produced a record that promoted (correctly, by design) while its `outcome` said the staging had
+  failed. Those are now `staging_notes`, and the classification at the end is the single unconditional
+  authority on the outcome. Every earlier `instrument-broken` setter returns immediately, so none can be
+  clobbered by it. `stagingVerdict`'s success arm now reports `sent=` as well as `answered=`, since it
+  claimed an ask had been sent in the one case where it had not.
+- `rafcapTimeline`'s docblock claimed every phase is a poll loop and therefore no gap in coverage;
+  phase 1's rendezvous is a three-arm `select`. The docblock and `rafcapLimitations` now state that
+  window and that no offset in the record is measured across it.
+
+**Testing strategy delta.** `TestRafcapDecideVerdictReadsTheClosedSet` gains five arms — the two
+unreadable shapes, an unreadable roster arriving last, a readable one arriving after an unreadable one,
+and a pre-terminal unreadable roster that is not a refusal — plus an invariant that a verdict and an
+unreadable reason are exclusive and exhaustive, without which an implementation returning nothing at all
+would satisfy every row. `TestRafcapFixtureWorthyRefusesEveryBadCapture` gains the matching refusal arm,
+which is the only one in that table where the staging succeeded.
+`TestRafcapRigAuthoredProseCarriesNoDenyNeedle` gains a sub-test scanning both unreadable reasons,
+driven through `rafcapDecideVerdict` rather than pasted so a later edit to either string stays covered.
+`TestRafcapCollectDoesNotSeeThroughAnUndecodedLine` is new.
+
+**Open question 2 is unaffected** — which of `task_updated` and `task_notification` carries the terminal
+status is still measured rather than assumed. Open questions 1 and 3 are unchanged.

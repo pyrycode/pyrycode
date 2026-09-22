@@ -245,6 +245,13 @@ var rafcapTerminalTokens = []string{"completed", "failed", "stopped", "killed"}
 
 var rafcapArgs = []string{"--model", rafcapModel, "--dangerously-skip-permissions"}
 
+// rafcapUndecodedLineType is what a line the rig could not decode is recorded as when a
+// roster names the line before it. dropcapCensusKey already mints this bucket for the
+// same gap, so it is CALLED rather than re-spelled: the two must not drift, because a
+// reader comparing preceding_line_type against line_type_census would otherwise see two
+// vocabularies for one thing.
+var rafcapUndecodedLineType = dropcapCensusKey(dropcapEntry{Reason: dropcapReasonUndecodable})
+
 const rafcapSpawnShapeDelta = "The YOLO interactive shape, identical to #1260's, #2089's and #2247's — " +
 	"see dropcapSpawnShapeDelta for what production's non-yolo spawn adds and what that implies for " +
 	"system/init. ONE DELIBERATE ADDITION over those three: streamsup.Config.RequestInitializeOnSpawn is " +
@@ -260,7 +267,10 @@ const rafcapLimitations = "One turn plus one follow-on turn, one spawn shape, on
 	"attributed to whichever prompt followed, so read offset_seconds before concluding a line was " +
 	"prompted. OFFSETS IN SECONDS ARE POLL-GRANULAR — dropcapRecorder does not timestamp lines and " +
 	"teaching it to would fork a helper every probe here shares, so each line's time is when the poll " +
-	"loop FIRST SAW it, within one tick. offset_lines is exact. A roster absent from this record did not " +
+	"loop FIRST SAW it, within one tick. THE RENDEZVOUS WAIT IS A SELECT RATHER THAN A POLL, so a line " +
+	"arriving before the first background-task poll is stamped at that poll and reads as later than it " +
+	"was; no offset in this record is measured across that window. offset_lines is exact. " +
+	"A roster absent from this record did not " +
 	"appear in THESE turns, which is not the same as claude never emitting it: this family's firing rate " +
 	"is measured to vary per turn — dropped_lines_v2.1.220.json fired the roster at a task's start and " +
 	"task_notification_v2.1.259.json fired it neither at the start nor at the finish."
@@ -319,9 +329,19 @@ type rafcapRosterObs struct {
 	Tasks json.RawMessage `json:"tasks"`
 	// TasksDecoded is false when the payload held no readable `tasks` array — a shape
 	// change worth recording rather than silently reporting as an empty roster.
-	TasksDecoded      bool `json:"tasks_decoded"`
-	TaskCount         int  `json:"task_count"`
+	TasksDecoded bool `json:"tasks_decoded"`
+	TaskCount    int  `json:"task_count"`
+	// ListsFinishedTask is only a MEASUREMENT when JoinedAgainstFinishedID is true.
+	// False otherwise means "nothing could tell", not "the task is absent", and the
+	// closed verdict set has no member for "could not tell" — so the verdict refuses
+	// to be read off such a line at all rather than defaulting to the omits branch.
 	ListsFinishedTask bool `json:"lists_finished_task"`
+	// JoinedAgainstFinishedID is whether the join was possible at all: this line's
+	// `tasks` array decoded AND claude's own system/task_started carried the task_id to
+	// join on. Recorded per roster rather than read off the record's two halves,
+	// because the verdict is decided by ONE line and the reader checks the verdict
+	// against that same line.
+	JoinedAgainstFinishedID bool `json:"joined_against_finished_id"`
 	// OffsetLines is this line's index minus the terminal-status line's, so a strictly
 	// positive value is "after the completion". OffsetSeconds is poll-granular; see
 	// rafcapLimitations.
@@ -379,6 +399,13 @@ type rafcapRecord struct {
 	Outcome       string `json:"outcome"`
 	OutcomeDetail string `json:"outcome_detail"`
 	TerminatedOn  string `json:"terminated_on"`
+	// StagingNotes are facts about a phase that went partly wrong WITHOUT deciding the
+	// outcome — an undeliverable mid-session ask, a follow-on turn whose envelope never
+	// went out. They are notes rather than outcomes on purpose: an earlier version had
+	// phase 6 pin the outcome to staging-failed, which the promotion rule then
+	// contradicted in the same file, leaving a promoted fixture whose outcome said the
+	// staging had failed.
+	StagingNotes []string `json:"staging_notes"`
 
 	// The staging measurement. Without these an empty rosters array cannot separate
 	// "claude never ran the command" from "it ran but was never backgrounded" from "a
@@ -418,11 +445,17 @@ type rafcapRecord struct {
 	LinesCaptured int `json:"lines_captured"`
 
 	// AC2's answer.
-	Verdict          string             `json:"verdict"`
-	VerdictPrompt    string             `json:"verdict_prompt"`
-	Rosters          []rafcapRosterObs  `json:"rosters"`
-	ControlResponses []rafcapControlObs `json:"control_responses"`
-	Frames           []rafcapFrame      `json:"frames"`
+	Verdict       string `json:"verdict"`
+	VerdictPrompt string `json:"verdict_prompt"`
+	// VerdictUnreadable is set, and Verdict left EMPTY, when a roster fired after the
+	// terminal status and nothing could read what it listed. That is neither of the two
+	// roster-bearing verdicts and it is not an absence either, so it gets no member of
+	// the closed set; it refuses promotion instead. Present only when it happened, so a
+	// promoted fixture does not carry a field implying something went wrong.
+	VerdictUnreadable string             `json:"verdict_unreadable,omitempty"`
+	Rosters           []rafcapRosterObs  `json:"rosters"`
+	ControlResponses  []rafcapControlObs `json:"control_responses"`
+	Frames            []rafcapFrame      `json:"frames"`
 
 	UnredactedPathFields []string `json:"unredacted_path_fields"`
 
@@ -474,6 +507,7 @@ func rafcapSeedRecord() *rafcapRecord {
 		EnvDelta:              []string{dropcapBashTimeoutEnv + "=" + rafcapBashTimeoutMS},
 		SpawnShapeDelta:       rafcapSpawnShapeDelta,
 		Prompts:               []string{},
+		StagingNotes:          []string{},
 		Rosters:               []rafcapRosterObs{},
 		ControlResponses:      []rafcapControlObs{},
 		Frames:                []rafcapFrame{},
@@ -493,6 +527,13 @@ func rafcapSeedRecord() *rafcapRecord {
 func (rec *rafcapRecord) set(outcome, format string, args ...any) {
 	rec.Outcome = outcome
 	rec.OutcomeDetail = fmt.Sprintf(format, args...)
+}
+
+// note records a partial-staging fact WITHOUT touching the outcome. See StagingNotes:
+// a phase that went wrong and still left the run promotable must not pin an outcome the
+// promotion rule then contradicts.
+func (rec *rafcapRecord) note(format string, args ...any) {
+	rec.StagingNotes = append(rec.StagingNotes, fmt.Sprintf(format, args...))
 }
 
 // rafcapPhaseFor names the prompt a line at this index followed, from the marks
@@ -540,6 +581,16 @@ func (rec *rafcapRecord) fixtureWorthy() (string, bool) {
 	if !rec.TerminalStatusObserved || rec.Verdict == rafcapVerdictNoClaim {
 		return "the staged task never reached a terminal status, so this record makes no claim about " +
 			"the roster: " + rec.stagingVerdict(), false
+	}
+	// The instrument refusal, as against the staging refusals either side of it: the
+	// staging WORKED here — a task was backgrounded, completed, and a roster followed —
+	// and what failed is this rig's ability to read the line it captured. Promoting it
+	// would land a fixture whose one word is transcribed into emitBackgroundTaskRoster's
+	// doc and cross-posted to two client tickets as a measured fact. The frames are in
+	// the artifact-dir record either way, so the evidence survives the refusal.
+	if rec.VerdictUnreadable != "" {
+		return "a roster fired after the completion and this rig could not read it, so the record has no " +
+			"verdict to promote: " + rec.VerdictUnreadable, false
 	}
 	if rec.QuietWindowSeconds < rafcapQuietWindowFloor.Seconds() {
 		return fmt.Sprintf("the quiet window ran %.1fs, short of the %s floor — an absence nothing "+
@@ -601,11 +652,12 @@ func (rec *rafcapRecord) stagingVerdict() string {
 			rec.HeldSeconds, rafcapStatusCandidates, rafcapTerminalWait)
 	default:
 		return fmt.Sprintf("a background task completed (system/%s carried %q after a %.1fs hold), the "+
-			"quiet window ran %.1fs, a mid-session initialize was sent (answered=%v) and a further turn "+
-			"was read to its result. The staging WORKED, so the rosters array is a finding about claude's "+
-			"surface and is to be transcribed, not explained away",
+			"quiet window ran %.1fs, a mid-session initialize was sent=%v (answered=%v — read "+
+			"staging_notes when it was not sent) and a further turn was read to its result. The staging "+
+			"WORKED, so the rosters array is a finding about claude's surface and is to be transcribed, "+
+			"not explained away",
 			rec.TerminalStatusSubtype, rec.TerminalStatusToken, rec.HeldSeconds, rec.QuietWindowSeconds,
-			rec.MidSessionAskAnswered)
+			rec.MidSessionAskSent, rec.MidSessionAskAnswered)
 	}
 }
 
@@ -825,9 +877,23 @@ func rafcapStatusTable(frames []rafcapFrame) []rafcapStatusObs {
 // count did come down. The full ordered list is in the record either way, so nothing is
 // hidden by the choice — it only decides which one word the two desktop tickets are
 // told.
-func rafcapDecideVerdict(terminalObserved bool, rosters []rafcapRosterObs) (verdict, prompt string) {
+//
+// THE OMITS BRANCH IS REACHED ONLY FROM A LINE THAT WAS ACTUALLY READ, and that is the
+// asymmetry this function turns on. StillLists needs ListsFinishedTask, which cannot be
+// set without a successful join, so it is safe by construction; omits is the DEFAULT of
+// a boolean, so a roster whose tasks array did not decode — or one arriving in a run
+// where claude's task_started carried no task_id — would otherwise fall into it and
+// report that the roster clears itself, measured from a line nothing parsed. That is
+// the branch that would change two client tickets' behaviour, so it is the one branch
+// that must not be reachable by default. When it is not readable there is no verdict at
+// all: the closed set has no member for "a roster fired and could not be read", and
+// minting a fifth would mean repinning the streamsup reader to interpret something no
+// client can be told. The third return names why instead, the record carries it in
+// verdict_unreadable, and fixtureWorthy refuses to promote the run.
+func rafcapDecideVerdict(terminalObserved bool,
+	rosters []rafcapRosterObs) (verdict, prompt, unreadable string) {
 	if !terminalObserved {
-		return rafcapVerdictNoClaim, ""
+		return rafcapVerdictNoClaim, "", ""
 	}
 	var last *rafcapRosterObs
 	for i := range rosters {
@@ -836,12 +902,27 @@ func rafcapDecideVerdict(terminalObserved bool, rosters []rafcapRosterObs) (verd
 		}
 	}
 	if last == nil {
-		return rafcapVerdictNone, ""
+		return rafcapVerdictNone, "", ""
 	}
 	if last.ListsFinishedTask {
-		return rafcapVerdictStillLists, last.Phase
+		return rafcapVerdictStillLists, last.Phase, ""
 	}
-	return rafcapVerdictOmits, last.Phase
+	switch {
+	case !last.TasksDecoded:
+		return "", "", fmt.Sprintf("the roster at line %d fired %d line(s) after the terminal status, "+
+			"but its `tasks` array did not decode, so nothing here read what it listed. Reporting that "+
+			"as a roster which omits the finished task would state the count comes down, measured off a "+
+			"line no code parsed. Read that frame's payload: a `tasks` key that is absent, or an array "+
+			"of something other than objects, is a wire-shape change worth a ticket of its own",
+			last.Index, last.OffsetLines)
+	case !last.JoinedAgainstFinishedID:
+		return "", "", fmt.Sprintf("the roster at line %d fired %d line(s) after the terminal status and "+
+			"its `tasks` array decoded, but claude's own system/%s line carried no task_id, so there is "+
+			"no key to join its entries against and no line in this run could have been found to list "+
+			"the finished task. Read finished_task_id_known and the task_started frame",
+			last.Index, last.OffsetLines, rafcapStartedSubtype)
+	}
+	return rafcapVerdictOmits, last.Phase, ""
 }
 
 // --- waiting -----------------------------------------------------------------
@@ -849,9 +930,16 @@ func rafcapDecideVerdict(terminalObserved bool, rosters []rafcapRosterObs) (verd
 // rafcapTimeline records when the poll loop FIRST SAW each line index.
 //
 // dropcapRecorder does not timestamp lines, and teaching it to would fork a helper
-// every probe in this package shares. Every phase of this probe is a poll loop, so
-// there is no gap in coverage; the granularity is one rafcapPoll tick and
-// rafcapLimitations says so in the record.
+// every probe in this package shares. Phases 2 onward are poll loops, so every line
+// from the background-task wait through the follow-on turn's result is stamped within
+// one rafcapPoll tick.
+//
+// PHASE 1 IS THE ONE GAP, and it is stated rather than glossed: the rendezvous is a
+// three-arm select, not a poll, so a line arriving in that window is first stamped at
+// the first phase-2 poll and reads as later than it was. No measured value depends on
+// it — offset_seconds runs terminal-status → roster and both of those sit inside poll
+// loops — but a record whose whole value is honesty about its own instrument does not
+// get to overstate its coverage. rafcapLimitations says the same in the record.
 //
 // DELIBERATELY UNSYNCHRONISED, and touched only from the test goroutine. Stated here
 // because a helper that looks shareable and is not is how a race gets added later.
@@ -1182,10 +1270,12 @@ func TestRealClaude_RosterAfterFinishCapture(t *testing.T) {
 	// interactive_stream_inband_model_test.go's reason: the config field fires once per
 	// SPAWN and this ask has to land now, mid-session, after a completion.
 	if err := runner.RequestInitialize(); err != nil {
-		// Recorded, not fatal. The quiet window has already run and the follow-on turn
-		// still can, so two of the three prompts survive an undeliverable ask.
-		rec.set(rafcapOutcomeStagingFailed, "the mid-session initialize could not be delivered: %v",
-			red.str(err.Error()))
+		// Recorded, not fatal, and a NOTE rather than an outcome. The quiet window has
+		// already run and the follow-on turn still can, so two of the three prompts
+		// survive an undeliverable ask and the run stays promotable — which is only
+		// coherent if the outcome is left to the classification at the end.
+		rec.note("the mid-session initialize could not be delivered, so this record's rosters were read "+
+			"under two of the three prompts rather than three: %v", red.str(err.Error()))
 	} else {
 		rec.MidSessionAskSent = true
 		rec.MidSessionAskAnswered = rafcapAwait(recorder, timeline, rafcapInitializeWait,
@@ -1198,7 +1288,10 @@ func TestRealClaude_RosterAfterFinishCapture(t *testing.T) {
 	// status is an absence only WITHIN one turn. The wait STOPS as soon as the second
 	// result is read; nothing here burns a remaining budget.
 	if err := streamsup.WriteTurn(ctx, stdin, []byte(rafcapFollowOnPrompt)); err != nil {
-		rec.set(rafcapOutcomeStagingFailed, "writing the follow-on turn envelope failed: %v",
+		// A note too, though this one refuses promotion anyway: FollowOnTurnObserved
+		// stays false and fixtureWorthy has an arm on it. The note says WHY it is false,
+		// which that arm cannot.
+		rec.note("writing the follow-on turn envelope failed, so the third prompt never went out: %v",
 			red.str(err.Error()))
 	} else {
 		rec.FollowOnTurnObserved = rafcapAwait(recorder, timeline, rafcapFollowOnTurnWait,
@@ -1236,15 +1329,27 @@ func TestRealClaude_RosterAfterFinishCapture(t *testing.T) {
 	rec.LineTypeCensus, rec.ToolCalls, rec.ToolResultErrors, rec.UndecodedLines = tpcapCensus(lines, red)
 	rafcapCollect(t, rec, lines, timeline, red)
 
-	rec.Verdict, rec.VerdictPrompt = rafcapDecideVerdict(rec.TerminalStatusObserved, rec.Rosters)
+	rec.Verdict, rec.VerdictPrompt, rec.VerdictUnreadable = rafcapDecideVerdict(
+		rec.TerminalStatusObserved, rec.Rosters)
 	rec.UnredactedPathFields = rafcapUnredactedPathFields(rec.Frames)
-	if rec.Outcome != rafcapOutcomeStagingFailed {
-		if _, worthy := rec.fixtureWorthy(); worthy {
-			rec.set(rafcapOutcomeMeasured, "verdict=%s prompt=%q over %d roster line(s); %s",
-				rec.Verdict, rec.VerdictPrompt, len(rec.Rosters), rec.stagingVerdict())
-		} else {
-			rec.set(rafcapOutcomeStagingFailed, "%s", rec.stagingVerdict())
-		}
+	// THE SINGLE AUTHORITY ON THE OUTCOME, and unconditional on purpose. Every earlier
+	// instrument-broken setter returns immediately, so none of them can be clobbered
+	// here; the partial-staging facts phases 6 and 7 record are staging_notes rather
+	// than outcomes precisely so this classification is the only writer. An earlier
+	// version let an undeliverable mid-session ask pin the outcome to staging-failed and
+	// then guarded this block against overwriting it, which produced a PROMOTED fixture
+	// whose outcome said the staging had failed — correct under the promotion rule and
+	// unreadable beside it.
+	switch reason, worthy := rec.fixtureWorthy(); {
+	case rec.VerdictUnreadable != "":
+		// Not staging-failed: the staging did its job and the rig could not read the
+		// result, which is this record's own instrument at fault.
+		rec.set(rafcapOutcomeInstrumentBroke, "%s", reason)
+	case worthy:
+		rec.set(rafcapOutcomeMeasured, "verdict=%s prompt=%q over %d roster line(s); %s",
+			rec.Verdict, rec.VerdictPrompt, len(rec.Rosters), rec.stagingVerdict())
+	default:
+		rec.set(rafcapOutcomeStagingFailed, "%s", rec.stagingVerdict())
 	}
 
 	// --- AC4 ------------------------------------------------------------------
@@ -1306,7 +1411,12 @@ func rafcapCollect(t *testing.T, rec *rafcapRecord, lines []dropcapCaptured, tl 
 			var obj map[string]json.RawMessage
 			if json.Unmarshal(c.Raw, &obj) == nil {
 				if id, ok := rafcapStringField(obj, "task_id"); ok {
-					finishedID = id
+					// Through the redactor, because the roster ids it is compared
+					// against come out of a payload dropcapMakeEntry has already
+					// redacted. No declared class can match a claude task id today, so
+					// this changes nothing now — and if one ever could, an unredacted
+					// key would fail every join in silence and land on the omits branch.
+					finishedID = red.str(id)
 					rec.FinishedTaskIDKnown = true
 					break
 				}
@@ -1337,8 +1447,16 @@ func rafcapCollect(t *testing.T, rec *rafcapRecord, lines []dropcapCaptured, tl 
 			results++
 		}
 		if !c.Decoded || c.Type != "system" || !kept[c.Subtype] {
-			if c.Decoded {
-				prevType = c.Type
+			// An undecoded line is NOT transparent here. AfterControlResponse is AC2's
+			// discriminator between "the roster only ever answers a control request" and
+			// "claude sends it unprompted" — the distinction that points the two client
+			// tickets at different fixes — so a line the rig could not read sitting
+			// between a control_response and a roster must break that adjacency rather
+			// than pass through it. undecoded_lines is a whole-stream count and cannot
+			// be joined back to a position, which is why this is recorded per line.
+			prevType = c.Type
+			if !c.Decoded {
+				prevType = rafcapUndecodedLineType
 			}
 			continue
 		}
@@ -1365,16 +1483,21 @@ func rafcapCollect(t *testing.T, rec *rafcapRecord, lines []dropcapCaptured, tl 
 			// array the record carries is the array the record describes.
 			tasks, ids, ok := rafcapRosterTasks([]byte(entry.Payload))
 			obs := rafcapRosterObs{
-				Index:                c.Index,
-				Tasks:                tasks,
-				TasksDecoded:         ok,
-				TaskCount:            len(ids),
-				OffsetLines:          c.Index - rec.TerminalStatusIndex,
-				AfterControlResponse: prevType == "control_response",
-				PrecedingLineType:    prevType,
-				ResultsBefore:        results,
-				Phase:                rec.rafcapPhaseFor(c.Index),
-				Frame:                frame,
+				Index:        c.Index,
+				Tasks:        tasks,
+				TasksDecoded: ok,
+				TaskCount:    len(ids),
+				// Both halves of the join, so the verdict is decided by properties of
+				// the deciding LINE rather than by reading the record's two ends
+				// together. Without the id there was never a key, so no line in this run
+				// could have been found to list the finished task.
+				JoinedAgainstFinishedID: ok && finishedID != "",
+				OffsetLines:             c.Index - rec.TerminalStatusIndex,
+				AfterControlResponse:    prevType == "control_response",
+				PrecedingLineType:       prevType,
+				ResultsBefore:           results,
+				Phase:                   rec.rafcapPhaseFor(c.Index),
+				Frame:                   frame,
 			}
 			if !found {
 				// With no terminal status there is nothing to offset against, and a
@@ -1664,6 +1787,21 @@ func TestRafcapFixtureWorthyRefusesEveryBadCapture(t *testing.T) {
 			func(r *rafcapRecord) { r.UnredactedPathFields = []string{"output_file"} },
 			false,
 		},
+		{
+			// THE ONE THE STAGING ARMS CANNOT CATCH. Every refusal above is a staging
+			// that failed; here the staging worked and the INSTRUMENT failed, so
+			// foreground/background/terminal/quiet/follow-on all read true and the record
+			// looks green from outside. Promoting it would commit a fixture stating that
+			// the roster clears itself, read off a line nothing parsed, and that sentence
+			// goes into a production doc comment and two client tickets.
+			"a roster fired after the completion and could not be read",
+			func(r *rafcapRecord) {
+				r.Verdict, r.VerdictPrompt = "", ""
+				r.VerdictUnreadable = "the roster at line 61 fired 4 line(s) after the terminal status, " +
+					"but its `tasks` array did not decode"
+			},
+			false,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1689,8 +1827,22 @@ func TestRafcapFixtureWorthyRefusesEveryBadCapture(t *testing.T) {
 // produce.
 func TestRafcapDecideVerdictReadsTheClosedSet(t *testing.T) {
 	t.Parallel()
+	// A roster the rig could READ: its tasks array decoded and there was a task_id to
+	// join it against, so ListsFinishedTask is a measurement either way.
 	roster := func(offset int, lists bool, phase string) rafcapRosterObs {
-		return rafcapRosterObs{OffsetLines: offset, ListsFinishedTask: lists, Phase: phase}
+		return rafcapRosterObs{
+			OffsetLines: offset, ListsFinishedTask: lists, Phase: phase,
+			TasksDecoded: true, JoinedAgainstFinishedID: true,
+		}
+	}
+	// One the rig could not: either the array did not decode, or claude's own
+	// task_started carried no id to join on. ListsFinishedTask is false on both, and it
+	// means "nothing could tell" rather than "the task is absent".
+	undecodedRoster := func(offset int, phase string) rafcapRosterObs {
+		return rafcapRosterObs{OffsetLines: offset, Phase: phase}
+	}
+	unjoinableRoster := func(offset int, phase string) rafcapRosterObs {
+		return rafcapRosterObs{OffsetLines: offset, Phase: phase, TasksDecoded: true}
 	}
 	tests := []struct {
 		name       string
@@ -1736,13 +1888,64 @@ func TestRafcapDecideVerdictReadsTheClosedSet(t *testing.T) {
 			},
 			rafcapVerdictOmits, rafcapPhaseFollowOnTurn,
 		},
+
+		// THE TWO SHAPES THAT MUST NOT REACH THE OMITS BRANCH. Both are a roster that
+		// FIRED after the completion and that nothing could read — which is the branch
+		// that would change two client tickets' behaviour, read off a line whose task
+		// list no code parsed. An empty want marks "no verdict at all": the closed set
+		// has no member for this, so the run is refused as the fixture and kept as
+		// evidence. Defaulting either to omits would state that the count comes down.
+		{
+			"a roster whose tasks array did not decode yields no verdict",
+			true, []rafcapRosterObs{undecodedRoster(4, rafcapPhaseQuietWindow)}, "", "",
+		},
+		{
+			// claude's own task_started carried no task_id, so there is no join key and
+			// ListsFinishedTask could never have been set on any line.
+			"a roster that decoded but has no join key yields no verdict",
+			true, []rafcapRosterObs{unjoinableRoster(4, rafcapPhaseMidSessionAsk)}, "", "",
+		},
+		{
+			// The last-one-decides rule and the unreadable rule compose: an unreadable
+			// line arriving last leaves the record unable to say what a client holds.
+			"an unreadable roster arriving last decides, and decides nothing",
+			true, []rafcapRosterObs{
+				roster(4, false, rafcapPhaseQuietWindow),
+				undecodedRoster(61, rafcapPhaseFollowOnTurn),
+			}, "", "",
+		},
+		{
+			// The converse, so the refusal is not simply "any unreadable line anywhere".
+			// The deciding line is readable; an earlier unreadable one is in the record
+			// for a human and does not block the verdict.
+			"an unreadable roster followed by a readable one still decides",
+			true, []rafcapRosterObs{
+				undecodedRoster(4, rafcapPhaseQuietWindow),
+				roster(61, true, rafcapPhaseFollowOnTurn),
+			}, rafcapVerdictStillLists, rafcapPhaseFollowOnTurn,
+		},
+		{
+			// StillLists is reached only through ListsFinishedTask, which cannot be set
+			// without a successful join — so it needs no refusal arm of its own, and this
+			// pins that rather than leaving it to be re-derived.
+			"a pre-terminal unreadable roster is not a refusal",
+			true, []rafcapRosterObs{undecodedRoster(-9, rafcapPhasePreTerminal)},
+			rafcapVerdictNone, "",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, prompt := rafcapDecideVerdict(tc.terminal, tc.rosters)
+			got, prompt, unreadable := rafcapDecideVerdict(tc.terminal, tc.rosters)
 			if got != tc.want || prompt != tc.wantPrompt {
 				t.Errorf("rafcapDecideVerdict() = (%q, %q), want (%q, %q)", got, prompt, tc.want, tc.wantPrompt)
+			}
+			// The invariant that keeps the empty `want` rows honest: a run with no
+			// verdict MUST name why, and a run with one must name nothing. Without this
+			// an implementation returning ("", "", "") would satisfy every row above.
+			if (got == "") != (unreadable != "") {
+				t.Errorf("rafcapDecideVerdict() = (%q, %q, %q): a verdict and an unreadable reason are "+
+					"exclusive and exhaustive — exactly one of them is set", got, prompt, unreadable)
 			}
 		})
 	}
@@ -1918,6 +2121,76 @@ func TestRafcapControlResponsesKeepNoPayload(t *testing.T) {
 				"configuration inventory and this record keeps only the envelope — growing it a payload "+
 				"field reintroduces a class this ticket removed rather than filtered", leak)
 		}
+	}
+}
+
+// TestRafcapCollectDoesNotSeeThroughAnUndecodedLine runs offline and pins
+// after_control_response as a statement about the line IMMEDIATELY before the roster,
+// including when that line is one the rig could not read.
+//
+// The flag is AC2's discriminator between "the roster only ever answers a control
+// request" and "claude sends it unprompted", and those point desktop #1246 and #1558 at
+// different fixes. A line that failed to decode sitting between the two would otherwise
+// be transparent, and the record would claim an adjacency that was not there.
+// undecoded_lines is a whole-stream count and cannot be joined back to a position, so
+// nothing downstream could have recovered the difference.
+func TestRafcapCollectDoesNotSeeThroughAnUndecodedLine(t *testing.T) {
+	t.Parallel()
+	const rosterLine = `{"type":"system","subtype":"background_tasks_changed","tasks":[],` +
+		`"uuid":"u-1","session_id":"s-1"}`
+	const controlLine = `{"type":"control_response","response":{"subtype":"success","request_id":"1"}}`
+
+	control := dropcapCaptured{Index: 0, Raw: []byte(controlLine), Type: "control_response", Decoded: true}
+	roster := func(index int) dropcapCaptured {
+		return dropcapCaptured{Index: index, Raw: []byte(rosterLine), Type: "system",
+			Subtype: rafcapRosterSubtype, Decoded: true}
+	}
+
+	tests := []struct {
+		name         string
+		lines        []dropcapCaptured
+		wantAfter    bool
+		wantPreceded string
+	}{
+		{
+			"a control_response immediately before the roster",
+			[]dropcapCaptured{control, roster(1)},
+			true, "control_response",
+		},
+		{
+			// THE ARM THIS TEST EXISTS FOR.
+			"an undecoded line between them breaks the adjacency",
+			[]dropcapCaptured{control, {Index: 1, Raw: []byte("not json at all")}, roster(2)},
+			false, rafcapUndecodedLineType,
+		},
+		{
+			// A decoded line the record does not keep is equally not transparent; pinned
+			// so the undecoded arm above is not mistaken for the only gap.
+			"a decoded line the record does not keep also breaks it",
+			[]dropcapCaptured{control,
+				{Index: 1, Raw: []byte(`{"type":"assistant"}`), Type: "assistant", Decoded: true},
+				roster(2)},
+			false, "assistant",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := rafcapSeedRecord()
+			// Past every index here, so rafcapPhaseFor attributes uniformly and the
+			// phase plays no part in what this test measures.
+			rec.markTerminal, rec.markQuietEnd, rec.markMidSession = 0, 99, 99
+			rafcapCollect(t, rec, tc.lines, newRafcapTimeline(),
+				&dropcapRedactor{counts: map[string]int{}})
+			if len(rec.Rosters) != 1 {
+				t.Fatalf("collected %d roster observation(s), want exactly 1", len(rec.Rosters))
+			}
+			got := rec.Rosters[0]
+			if got.AfterControlResponse != tc.wantAfter || got.PrecedingLineType != tc.wantPreceded {
+				t.Errorf("after_control_response=%v preceding_line_type=%q, want %v and %q",
+					got.AfterControlResponse, got.PrecedingLineType, tc.wantAfter, tc.wantPreceded)
+			}
+		})
 	}
 }
 
@@ -2308,6 +2581,33 @@ func TestRafcapRigAuthoredProseCarriesNoDenyNeedle(t *testing.T) {
 		}
 		if hits, _ := scanner.scan([]byte(rafcapFollowOnPrompt)); len(hits) > 0 {
 			t.Errorf("the follow-on prompt carries deny class(es) %v", hits)
+		}
+	})
+
+	t.Run("both unreadable-verdict reasons", func(t *testing.T) {
+		t.Parallel()
+		// Same class as stagingVerdict: prose built at runtime that lands in a record
+		// written on a REFUSED path, where a scan hit would destroy the evidence the
+		// reason exists to give. Driven through rafcapDecideVerdict rather than pasted,
+		// so a later edit to either string is covered without a second copy here.
+		for _, tc := range []struct {
+			name   string
+			roster rafcapRosterObs
+		}{
+			{"tasks did not decode", rafcapRosterObs{
+				Index: 61, OffsetLines: 4, Phase: rafcapPhaseQuietWindow,
+			}},
+			{"no join key", rafcapRosterObs{
+				Index: 61, OffsetLines: 4, Phase: rafcapPhaseQuietWindow, TasksDecoded: true,
+			}},
+		} {
+			_, _, unreadable := rafcapDecideVerdict(true, []rafcapRosterObs{tc.roster})
+			if unreadable == "" {
+				t.Fatalf("the %q shape produced no unreadable reason, so this arm scans nothing", tc.name)
+			}
+			if hits, _ := scanner.scan([]byte(unreadable)); len(hits) > 0 {
+				t.Errorf("the %q reason carries deny class(es) %v", tc.name, hits)
+			}
 		}
 	})
 
