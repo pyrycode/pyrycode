@@ -100,8 +100,10 @@ field has a different name) through `stripSessionIDFlags`; `ClaudeSessionsDir` i
 `PYRY_SESSION_ID`, [pyry-mcp-files-command.md](pyry-mcp-files-command.md)); `Stdout`/`Stderr`/`Env` stay nil **inside the
 mapper** (`Stdout` is filled one layer up, in `newStreamRunnerFactory`'s closure — keeping the mapper's
 `Stdout == nil` assertion untouched; `Stderr`/`Env` have no `supervisor.Config` analogue). The
-seven PTY-only fields (`ResumeLast`, `ResolveSessionID`, `Bridge`, `ValidateConversation`,
-`ResolveTranscript`, `RecordDir`, `helperEnv`) are deliberately not mapped — `ResolveSessionID` stays off
+six PTY-only fields (`ResumeLast`, `ResolveSessionID`, `Bridge`, `ValidateConversation`,
+`ResolveTranscript`, `helperEnv`) are deliberately not mapped — streamsup has no PTY bridge, no
+transcript binding and no `.cast` recorder (`RecordDir` was in this list until #1514 deleted the
+field itself: nothing read it after #1348 removed the terminal recorder). `ResolveSessionID` stays off
 the list even now that a sessions *directory* crosses this seam: streamsup still owns its own id-flag
 inversion (`useCreateForm`) and decides the flag from the directory itself; no resolver callback crosses,
 and no directory scan happens on either side.
