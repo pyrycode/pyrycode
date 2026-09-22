@@ -254,11 +254,12 @@ func (w *watchdog) wait() { <-w.done }
 func (w *watchdog) hasFired() bool { return w.fired.Load() }
 
 // idleStallResult is the synthetic stream-json `result` trailer Run writes
-// when the watchdog killed claude before it could emit its own. Field names,
-// JSON tags, and order replicate the shape streamjson.Emitter produces (see
-// internal/agentrun/streamjson/emitter.go's trailer) so the dispatcher's
-// stream-json parser reads it identically — WITHOUT importing streamjson (the
-// package's dependency rule forbids cross-importing agentrun subpackages).
+// when the watchdog killed claude before it could emit its own. It is the only
+// trailer this path synthesises; every other one is claude's own bytes. Field
+// names, JSON tags, and order replicate the trailer the ptyrunner path's
+// emitter wrote (that emitter and its package were deleted after #1348 removed
+// ptyrunner), so the dispatcher's stream-json parser reads it the same way.
+// terminal_reason stays last: a byte-capped copy of the line loses it first.
 type idleStallResult struct {
 	Type           string         `json:"type"`
 	Subtype        string         `json:"subtype"`

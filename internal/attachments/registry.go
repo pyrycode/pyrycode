@@ -168,8 +168,7 @@ func NewRegistry() *Registry {
 // substituting time.Now for a nil one. That nil-tolerance is the whole reason
 // the clock is not a parameter of NewRegistry: production supplies nothing and
 // every existing construction site is left untouched, which is the shape
-// streamsup's newStallTracker and streamjson's emitter constructor already take
-// for the same seam.
+// streamsup's newStallTracker already takes for the same seam.
 //
 // Unexported because every site that would supply a clock is a test in this
 // package; count is the precedent for that. Exporting it would publish a seam

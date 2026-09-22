@@ -47,10 +47,11 @@ package realclaude
 //
 // # What this path's evidence cannot say
 //
-// NO TERMINAL REASON IS CERTIFIED HERE. terminal_reason is pyry's own invention —
-// wireFields in internal/agentrun/streamjson writes it, and so does the
-// streamrunner's idle-stall trailer — and claude's `result` line carries no such
-// key, so the gate reads trailGateAbsentOwesNone rather than certifying anything.
+// NO TERMINAL REASON IS CERTIFIED HERE. Claude writes terminal_reason only on an
+// error stop such as `--max-turns` (#1388), and pyry writes it only on the
+// streamrunner's idle-stall trailer; claude's `result` line on a healthy run
+// carries no such key, so the gate reads trailGateAbsentOwesNone rather than
+// certifying anything.
 // With nothing certified there is no declared-finished instant, so
 // trailOutcomeRunningAtTrailer is NOT REACHABLE from this composition and MUST NOT
 // BE APPROXIMATED IN PROSE. The strongest claim available here is about the

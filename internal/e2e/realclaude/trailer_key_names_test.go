@@ -16,10 +16,11 @@ package realclaude
 // resultTrailer is eight fixed fields, and
 // TerminalReason is a plain string with omitempty — so an ABSENT
 // terminal_reason and one emitted as "" both decode to "". That distinction is
-// not academic: terminal_reason is a pyry invention (streamjson's `wireFields`
-// and streamrunner's `idleStallResult`), so on the headless
-// PYRY_USE_STREAMJSON=1 path the trailer on a healthy run is claude's OWN result
-// line and carries no terminal_reason at all. Telling claude's line from pyry's
+// not academic: claude writes terminal_reason only on an error stop such as
+// `--max-turns` (#1388), and pyry synthesises one only on streamrunner's
+// `idleStallResult`, so on the headless PYRY_USE_STREAMJSON=1 path the trailer
+// on a healthy run is claude's OWN result line and carries no terminal_reason
+// at all. Telling claude's line from pyry's
 // synthesised one is therefore a question about WHICH KEYS the line carried, not
 // about any field's value — which is why the reading is a name set rather than a
 // widened decode.
