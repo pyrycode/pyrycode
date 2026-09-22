@@ -75,6 +75,7 @@ type Config struct {
                                     // rotation watcher; Pool.removeJSONL's archive/purge
                                     // path is why the field survives regardless.
     IdleTimeout       time.Duration // default per-session eviction window; 0 disables
+    TurnBusy          func(SessionID) bool // #1486; nil = no deferral signal, idle timer evicts on fire
     BootstrapEvicted  bool          // true → bootstrap parks evicted, spawns no claude (#761)
     RunnerFactory     RunnerFactory // MANDATORY since #1348 deleted internal/supervisor; nil is a
                                     // construction error ("sessions: Config.RunnerFactory is required")

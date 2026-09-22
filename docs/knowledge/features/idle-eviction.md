@@ -29,7 +29,7 @@ Transitions:
 
 | From | To | Trigger |
 |---|---|---|
-| `active` | `evicted` | Idle timer fires AND `attached == 0` |
+| `active` | `evicted` | Idle timer fires AND `Config.TurnBusy` is nil or reports no turn open |
 | `evicted` | `active` | `Session.Activate(ctx)` called |
 | any | (terminal) | Outer `ctx` cancelled (pyry shutdown) |
 
@@ -40,8 +40,9 @@ The supervisor's `*Bridge` and the underlying `*Supervisor` are reused across th
 ```go
 type Config struct {
     // ...
-    IdleTimeout time.Duration  // 0 disables idle eviction
-    ActiveCap   int            // <= 0 disables the concurrent active cap
+    IdleTimeout time.Duration           // 0 disables idle eviction
+    TurnBusy    func(SessionID) bool    // #1486; nil = no deferral signal
+    ActiveCap   int                     // <= 0 disables the concurrent active cap
 }
 
 // Per-session override.
@@ -50,6 +51,8 @@ type SessionConfig struct {
     IdleTimeout time.Duration  // 0 inherits Config.IdleTimeout
 }
 ```
+
+`TurnBusy` (#1486) has no CLI flag — it is wired programmatically, not by an operator. On the stream path `cmd/pyry/main.go` builds it from the daemon's `turnBusyTracker` (`cmd/pyry/stream_turn_busy.go`) composed with the session→conversation resolver, so only one bool per session crosses into this package; the PTY path leaves it nil. See [§ Idle timer mechanism](#idle-timer-mechanism).
 
 CLI flags (`cmd/pyry/main.go`):
 
@@ -62,14 +65,14 @@ CLI flags (`cmd/pyry/main.go`):
 func (s *Session) LifecycleState() lifecycleState
 func (s *Session) Activate(ctx context.Context) error
 func (s *Session) Evict(ctx context.Context) error
-func (s *Session) Attach(in io.Reader, out io.Writer) (done <-chan struct{}, err error)
 func (s *Session) Run(ctx context.Context) error
 ```
 
 - **`Activate`** — moves an evicted session to `active`, blocking until the supervisor has started AND the post-transition registry persist has completed AND the supervisor has bound its PTY (or `ctx` cancels). When already active, returns immediately (both the wake channel and the supervisor's `ptmxReadyCh` are already closed). Idempotent under concurrent calls; safe from any goroutine. After Activate returns nil, callers can safely invoke `WriteUserTurn`/`Resize` and reach the live claude — the PTY-readiness wait closes the ~hundreds-of-ms gap between `transitionTo` closing `activeCh` and `runOnce` binding the new PTY master ([ADR 023](../decisions/023-activate-waits-pty-readiness.md), #396). See [§ Persist seam](#persist-seam) for the disk-consistency guarantee.
-- **`Evict`** — moves an active session to `evicted`, blocking until the supervisor has stopped AND the post-transition persist has completed (or `ctx` cancels). When already evicted, returns immediately. Idempotent under concurrent calls; safe from any goroutine. **Force-eviction:** unlike the idle timer, `Evict` does *not* defer for `attached > 0`. Used by the cap policy at `Pool.Activate`'s spawn path; an attached caller will see EOF on its bridge.
-- **`Attach`** — unchanged signature. Now bumps an `attached` counter under `lcMu`; the wrapper goroutine decrements on bridge `done`. While `attached > 0`, idle eviction is deferred (cap eviction is not).
-- **`Run`** — rewritten as a loop over `runActive` / `runEvicted`, driving the state machine and persisting after every transition.
+- **`Evict`** — moves an active session to `evicted`, blocking until the supervisor has stopped AND the post-transition persist has completed (or `ctx` cancels). When already evicted, returns immediately. Idempotent under concurrent calls; safe from any goroutine. **Force-eviction:** unlike the idle timer, `Evict` does *not* consult `Config.TurnBusy`. Used by the cap policy at `Pool.Activate`'s spawn path; a running turn is killed with the child.
+- **`Run`** — a loop over `runActive` / `runEvicted`, driving the state machine and persisting after every transition.
+
+The interactive attach path this section used to describe here (`Session.Attach`, a per-attach `attached` counter deferring the idle timer while `attached > 0`) was deleted with the terminal runner in #1348 — nothing wrote `attached` after that, so the deferral had been dead code since, until #1486 deleted the field and replaced the deferral signal outright (see [§ Idle timer mechanism](#idle-timer-mechanism)).
 
 **Activate-before-Attach contract.** `bridge.Attach` on an evicted session would block on the pipe forever (no claude to drain it). Callers must Activate first. Two attach paths exist today and both Activate first with a 30s budget:
 
@@ -93,12 +96,13 @@ The single spawn-path entry. Resolves `id` and ensures the session is active, en
 
 ## Activity definition
 
-"Activity" = at least one client is currently attached (`attached > 0`). Tied to attach state, not per-byte counting through the bridge.
+"Activity" = the session's conversation has a turn open, per the optional `Config.TurnBusy(id SessionID) bool` hook (#1486). This replaced an attach-count definition (`attached > 0`) that was dead from #1348 onward — the interactive attach path that incremented it was deleted with the terminal runner, and nothing else ever wrote it, so idle eviction killed a session exactly `IdleTimeout` after activation even mid-turn until this fix.
 
-- While attached, the idle timer re-arms on fire (poll-with-grace) instead of evicting.
-- On detach, the timer runs out the configured window and evicts.
+- `TurnBusy` is nil on the PTY path (no signal — the timer evicts unconditionally, as before #1486). On the stream path `cmd/pyry` wires it to the daemon's `turnBusyTracker`, keyed by conversation and read via a session→conversation resolver, so only one bool per session crosses the `internal/sessions` boundary.
+- While `TurnBusy` reports the turn open, the idle timer re-arms on fire (poll-with-grace) instead of evicting.
+- Once the turn ends (or on a nil signal), the timer runs out the configured window and evicts.
 - Real eviction may overshoot the configured timeout by up to one window — documented in the user-facing latency story.
-- **The cap policy ignores `attached`.** Cap is a hard limit; a force-evicted attached session sees its bridge close. Phase 2.0 may add an attach-aware filter to the LRU candidate set.
+- **The cap policy ignores `TurnBusy`.** Cap is a hard limit; a force-evicted session's running turn is killed with the child.
 
 `last_active_at` is bumped on every state transition (active↔evicted). The cap policy also bumps it (in-memory only, not persisted) on an `Activate` against an already-active session via `Session.touchLastActive` — keeps in-memory LRU ordering reflective of the most recent touch.
 
@@ -115,10 +119,14 @@ for {
     case <-ctx.Done():        cancelSup(); drainSup(); return ctx.Err()
     case <-runErr:            // supervisor exited spontaneously → evict
     case <-timer.C:
-        if s.attached > 0 { timer.Reset(s.idleTimeout); continue }
+        // No lock held: the production TurnBusy closure reaches the
+        // conversations registry and the turn-busy tracker's own mutex.
+        if s.turnBusy != nil && s.turnBusy(s.currentID()) {
+            timer.Reset(s.idleTimeout); continue
+        }
         cancelSup(); drainSup(); return nil
     case <-s.evictCh:
-        // Cap-policy eviction: forced, regardless of attached count.
+        // Cap-policy eviction: forced, even mid-turn — TurnBusy is not consulted.
         cancelSup(); drainSup(); return nil
     }
 }
@@ -164,15 +172,14 @@ O(n) in total session count. For pyry's expected scale (≤ 100s) this is cheap;
 
 Goroutines per `Session`:
 
-1. **Lifecycle goroutine** (body of `Session.Run`) — owns state transitions, idle timer, supervisor lifecycle.
+1. **Lifecycle goroutine** (body of `Session.Run`) — owns state transitions, idle timer, supervisor lifecycle. Its idle-timer fire calls `Config.TurnBusy` synchronously (#1486) — no dedicated tracking goroutine on the `internal/sessions` side; the production closure it calls reaches `cmd/pyry`'s own `turnBusyTracker` instead.
 2. **Inner supervisor goroutine** (per active period) — wraps `s.sup.Run(subCtx)` and pipes the result to `runErr`. Drained at the end of each active period.
-3. **Attach detach-watcher goroutines** — one per active attach; decrement `attached` when the bridge's done channel fires.
 
 Mutexes:
 
 - `Pool.capMu` — outermost lock, taken only by `Pool.Activate` when `activeCap > 0`. Serialises the cap-check + victim eviction + new spawn so concurrent `Activate`s can't both observe `active < cap` and both proceed. Never re-acquired by callees.
 - `Pool.mu` — protects `pool.sessions`, `pool.bootstrap`, registry persistence.
-- `Session.lcMu` — protects `lcState`, `attached`, `activeCh`, `evictedCh`, `lastActiveAt` (when read for the registry snapshot).
+- `Session.lcMu` — protects `lcState`, `activeCh`, `evictedCh`, `lastActiveAt` (when read for the registry snapshot).
 - `Supervisor.mu` — unchanged.
 
 **Lock order: `Pool.capMu` → `Pool.mu` → `Session.lcMu`.** `transitionTo` releases `Session.lcMu` *before* calling `Pool.persist` (which then re-takes `lcMu` briefly inside `saveLocked` to read the snapshot), then re-acquires `lcMu` after persist returns to close the wake channel — sequential, not nested. `Session.Evict` is callable while `capMu` is held — its callback into `Pool.persist` takes `Pool.mu`, never `capMu`, so no re-entrancy. No reverse path; no deadlock.
@@ -354,7 +361,7 @@ Real eviction may also overshoot the configured `IdleTimeout` by up to one windo
 
 Reuses the `/bin/sleep` fake-claude pattern from `internal/sessions` — no new test infrastructure (see [lessons.md](../../lessons.md#test-helpers-across-packages)).
 
-`internal/sessions/session_test.go` covers idle eviction firing, eviction deferral while attached, respawn via `Activate`, no-op `Activate` on active sessions, ctx-cancellation paths, shutdown from both states.
+`internal/sessions/session_test.go` covers idle eviction firing, respawn via `Activate`, no-op `Activate` on active sessions, ctx-cancellation paths, shutdown from both states. `TestSession_IdleEvictionFires` covers the nil-`TurnBusy` case (no signal — the PTY path and every pre-#1486 test), and `TestSession_IdleEviction_DefersWhileTurnBusy` (#1486) drives a stub `Config.TurnBusy` backed by an atomic bool: it asserts the hook is consulted ≥3 times with the session's own id while it reports busy (the vacuity guard — the timer really did fire and defer, not just never fire), then flips the stub false and asserts eviction follows with exactly one `ReasonEviction` transition.
 
 `internal/sessions/session_persist_test.go` (#169) covers the persist-before-wake ordering: `TestSession_EvictBlocksUntilPersisted` asserts `loadRegistry` immediately after `sess.Evict(ctx)` returns shows `lifecycle_state == "evicted"` (no poll); `TestSession_ActivateBlocksUntilPersisted` asserts the symmetric guarantee on a session that warm-starts in `stateEvicted`; a stress wrapper loops 20 evict↔activate transitions asserting disk consistency at each step. Designed to pass deterministically under `go test -race -count=20 ./internal/sessions/...`.
 
@@ -384,6 +391,13 @@ Stream-mode fakeclaude opens no transcript (it short-circuits above its sessions
 
 `internal/e2e/realclaude/interactive_stream_resume_after_eviction_test.go` (build tag `e2e_realclaude`, ticket #1177) is that realclaude content-recall coverage for the **interactive stream** runner: `TestInteractiveStreamResumeAfterEviction` plants a per-run-unique token, forces idle eviction with the timer enabled (`-pyry-idle-timeout=30s` — every other stream realclaude spec disables it), gates the resume turn on observing the `session.idle_eviction` WARN (non-vacuity — a never-killed child would trivially retain context), and asserts the post-eviction reply recalls the planted token, distinguishing a true `--resume` from a forked fresh spawn. See [codebase/1177.md](../codebase/1177.md) and [e2e-realclaude.md § "What's there today"](e2e-realclaude.md#whats-there-today).
 
+`internal/e2e/idle_eviction_turn_busy_test.go` (build tag `e2e`, ticket #1486) proves at the binary boundary that `cmd/pyry` actually hands its stream-path `turnBusyTracker` to the pool, not just that `internal/sessions` honours `Config.TurnBusy` in isolation: `TestE2E_IdleEviction_DefersWhileStreamTurnOpen` runs a short `-pyry-idle-timeout`, opens a turn via the interrupt fixture (see below), holds it open across two full idle windows asserting the session is neither evicted nor the `session.idle_eviction` count grown, ends the turn with an interrupt, then asserts eviction follows within three windows. It was verified red with `TurnBusy` unwired in `main.go` (one eviction fired during the held-open turn) before landing green.
+
+Two fixture/oracle traps this test's design worked around, worth knowing before writing a sibling:
+
+- **The startup-hold fixture cannot hold a turn open.** `PYRY_FAKE_CLAUDE_STREAM_HOLD` (see [§ Stream-path startup hold](fakeclaude-binary-stream-json-mode.md#stream-path-startup-hold-pyry_fake_claude_stream_hold-1138)) blocks the fake child *before it reads any stdin at all* — so it never answers the permission-posture control request `streamsup` sends at spawn. `Runner.WriteUserTurn`'s posture gate then refuses the first turn with the retryable `ErrNoLiveChild`, and the message sits in the queue undelivered: no turn ever opens, so an eviction-deferral assertion built on this fixture would be vacuously true. Use `PYRY_FAKE_CLAUDE_STREAM_INTERRUPT` instead (see [fakeclaude-binary-stream-json-mode.md § Interrupt mode](fakeclaude-binary-stream-json-mode.md#interrupt-mode-honorinterrupt-1136)) — it answers the posture handshake and lets the turn start, then withholds the `result` until an interrupt closes it, which is exactly "turn open" for as long as the test needs.
+- **A registry poll is a weak oracle for "was not evicted" on the stream path.** A mid-turn kill clears the busy mark, and the next delivery attempt can respawn the session before a poll ever observes the evicted state — so "still active" a moment later proves nothing about whether a kill happened in between. The test instead snapshots the count of `session.idle_eviction` WARN lines once the turn is known open (via the echoed `assistant_delta` — the vacuity guard) and asserts that count does not grow across the hold window; it cannot miss a kill the way a point-in-time state poll can.
+
 ## Manual smoke
 
 ```bash
@@ -401,8 +415,8 @@ pyry stop
 
 ## References
 
-- Tickets: [#40](https://github.com/pyrycode/pyrycode/issues/40), [#41](https://github.com/pyrycode/pyrycode/issues/41), [#116](https://github.com/pyrycode/pyrycode/issues/116), [#169](https://github.com/pyrycode/pyrycode/issues/169), [#202](https://github.com/pyrycode/pyrycode/issues/202), [#395](https://github.com/pyrycode/pyrycode/issues/395), [#396](https://github.com/pyrycode/pyrycode/issues/396), [#680](https://github.com/pyrycode/pyrycode/issues/680) (Phase 2.0 per-conversation participation, e2e), [#1186](https://github.com/pyrycode/pyrycode/issues/1186) (two-phase eviction commit, fixes the Activate-races-teardown silent drop; unblocks [#1177](https://github.com/pyrycode/pyrycode/issues/1177)), [#1177](https://github.com/pyrycode/pyrycode/issues/1177) (stream-runner realclaude content-recall, closes the #680 deferral)
-- Specs: [`docs/specs/architecture/40-idle-eviction-lazy-respawn.md`](../../specs/architecture/40-idle-eviction-lazy-respawn.md), [`docs/specs/architecture/41-concurrent-active-cap-lru.md`](../../specs/architecture/41-concurrent-active-cap-lru.md), [`docs/specs/architecture/169-evict-activate-persist-ordering.md`](../../specs/architecture/169-evict-activate-persist-ordering.md), [`docs/specs/architecture/202-supervise-bootstrap-evicted-warm-start-hang.md`](../../specs/architecture/202-supervise-bootstrap-evicted-warm-start-hang.md), [`docs/specs/architecture/396-send-message-respawn.md`](../../specs/architecture/396-send-message-respawn.md)
+- Tickets: [#40](https://github.com/pyrycode/pyrycode/issues/40), [#41](https://github.com/pyrycode/pyrycode/issues/41), [#116](https://github.com/pyrycode/pyrycode/issues/116), [#169](https://github.com/pyrycode/pyrycode/issues/169), [#202](https://github.com/pyrycode/pyrycode/issues/202), [#395](https://github.com/pyrycode/pyrycode/issues/395), [#396](https://github.com/pyrycode/pyrycode/issues/396), [#680](https://github.com/pyrycode/pyrycode/issues/680) (Phase 2.0 per-conversation participation, e2e), [#1186](https://github.com/pyrycode/pyrycode/issues/1186) (two-phase eviction commit, fixes the Activate-races-teardown silent drop; unblocks [#1177](https://github.com/pyrycode/pyrycode/issues/1177)), [#1177](https://github.com/pyrycode/pyrycode/issues/1177) (stream-runner realclaude content-recall, closes the #680 deferral), [#1486](https://github.com/pyrycode/pyrycode/issues/1486) (deferral keys off `Config.TurnBusy` instead of the dead post-#1348 `attached` counter)
+- Specs: [`docs/specs/architecture/40-idle-eviction-lazy-respawn.md`](../../specs/architecture/40-idle-eviction-lazy-respawn.md), [`docs/specs/architecture/41-concurrent-active-cap-lru.md`](../../specs/architecture/41-concurrent-active-cap-lru.md), [`docs/specs/architecture/169-evict-activate-persist-ordering.md`](../../specs/architecture/169-evict-activate-persist-ordering.md), [`docs/specs/architecture/202-supervise-bootstrap-evicted-warm-start-hang.md`](../../specs/architecture/202-supervise-bootstrap-evicted-warm-start-hang.md), [`docs/specs/architecture/396-send-message-respawn.md`](../../specs/architecture/396-send-message-respawn.md), [`docs/specs/architecture/1486-idle-eviction-turn-busy.md`](../../specs/architecture/1486-idle-eviction-turn-busy.md)
 - ADRs: [`005-idle-eviction-state-machine.md`](../decisions/005-idle-eviction-state-machine.md), [`006-concurrent-active-cap-lru.md`](../decisions/006-concurrent-active-cap-lru.md), [`013-evict-activate-persist-ordering.md`](../decisions/013-evict-activate-persist-ordering.md), [`016-bootstrap-ignores-persisted-lifecycle-state.md`](../decisions/016-bootstrap-ignores-persisted-lifecycle-state.md), [`023-activate-waits-pty-readiness.md`](../decisions/023-activate-waits-pty-readiness.md), [`034-two-phase-eviction-commit-signal-before-teardown.md`](../decisions/034-two-phase-eviction-commit-signal-before-teardown.md)
 - Sibling docs: [`sessions-package.md`](sessions-package.md), [`sessions-registry.md`](sessions-registry.md), [`control-plane.md`](control-plane.md)
 - Locked phase design: [`docs/multi-session.md`](../../multi-session.md)
