@@ -116,10 +116,19 @@ type Config struct {
 
 	// IdleTimeout is the default per-session idle eviction window. A
 	// SessionConfig with IdleTimeout==0 inherits this value at New().
-	// Zero here means "never evict" — the test default. Production
-	// callers in cmd/pyry default this to 15 minutes via the
-	// -pyry-idle-timeout flag.
+	// Zero here means "never evict". cmd/pyry passes the -pyry-idle-timeout
+	// flag, which also defaults to 0, so idle eviction is off unless the
+	// operator sets the flag.
 	IdleTimeout time.Duration
+
+	// TurnBusy, when non-nil, reports whether the given session has a turn
+	// open. An idle-timer fire that finds its session busy re-arms instead of
+	// evicting, so a long turn is not killed mid-stream (#1486). It is called
+	// on the session's lifecycle goroutine with no pool or session lock held,
+	// and must not block. nil means no signal: the timer evicts on fire. One
+	// bool per session is all that crosses here — cmd/pyry resolves the
+	// session to its conversation on its own side of the seam.
+	TurnBusy func(SessionID) bool
 
 	// ActiveCap is the maximum number of concurrently active claude
 	// processes this Pool will run. Zero (the unset default) means
@@ -170,7 +179,8 @@ type SessionConfig struct {
 	BackoffReset   time.Duration
 
 	// IdleTimeout, when positive, causes the session's claude process to
-	// exit after the configured period with no attached clients. The
+	// exit after the configured period, deferred while Config.TurnBusy
+	// reports a turn open (re-checked once per period). The
 	// JSONL on disk is preserved; a subsequent Activate spawns a fresh
 	// claude that reads the prior conversation. Zero inherits
 	// Config.IdleTimeout; if both are zero, eviction is disabled.
@@ -302,6 +312,10 @@ type Pool struct {
 	// the same fallback New() applies to the bootstrap when the per-session
 	// IdleTimeout is zero. Read-only after New.
 	idleTimeoutDefault time.Duration
+
+	// turnBusy mirrors Config.TurnBusy; New hands it to the bootstrap and
+	// buildSession to every other session. Read-only after New.
+	turnBusy func(SessionID) bool
 
 	// newRunner is the normalized (never-nil) runner factory: cfg.RunnerFactory
 	// when supplied, else a wrapper over supervisor.New. Set once in New and
@@ -610,6 +624,7 @@ func New(cfg Config) (*Pool, error) {
 		spawnBase:    base,
 		settingsPath: settingsPath,
 		idleTimeout:  idleTimeout,
+		turnBusy:     cfg.TurnBusy,
 		removedCh:    make(chan struct{}), // never closed: bootstrap is ErrCannotRemoveBootstrap
 		lcState:      lcState,
 		activateCh:   make(chan struct{}, 1),
@@ -637,6 +652,7 @@ func New(cfg Config) (*Pool, error) {
 		activeCap:          cfg.ActiveCap,
 		sessionTpl:         cfg.Bootstrap,
 		idleTimeoutDefault: cfg.IdleTimeout,
+		turnBusy:           cfg.TurnBusy,
 		newRunner:          newRunner,
 	}
 	sess.pool = p
@@ -2371,6 +2387,7 @@ func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings Sessi
 		systemPrompt:     operatorPrompt,
 		pool:             p,
 		idleTimeout:      idleTimeout,
+		turnBusy:         p.turnBusy,
 		removedCh:        make(chan struct{}),
 		lcState:          stateEvicted,
 		activeCh:         make(chan struct{}),

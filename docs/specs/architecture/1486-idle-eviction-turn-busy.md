@@ -48,3 +48,9 @@ The signal cannot fail: an unresolvable session reports not-busy and the session
 ## Documentation handoff
 
 The ticket names no documentation criteria. Pending for the documentation stage: `docs/knowledge/features/sessions-package-key-types-session.md` (the `Attach` bullet still describes bumping `attached`) and `docs/knowledge/features/sessions-package-key-types-transition-observer.md` (the idle path described as `attached==0`) should say idle eviction now defers on `Config.TurnBusy`.
+
+## Revisions
+
+### 2026-09-23 — e2e fixture: interrupt rider, not the startup hold
+
+The plan's e2e held the turn open with `PYRY_FAKE_CLAUDE_STREAM_HOLD` and used "msg2 still queued" as the vacuity guard. In practice the held child never answers the permission-posture control request, so `streamsup`'s posture gate (`Runner.WriteUserTurn`) refuses msg1 with the retryable `ErrNoLiveChild` and no turn ever opens; the guard never fired. The test now uses `PYRY_FAKE_CLAUDE_STREAM_INTERRUPT` (the interrupt spec's fixture): fakeclaude echoes the prompt and withholds the result, so the turn stays open until a `TypeInterrupt` closes it. The vacuity guard is the echoed `assistant_delta`; the turn end is the following `turn_state{idle}`. Window 5s, hold 2 windows, eviction expected within 3 windows after the turn closes. Verified red with `TurnBusy` unwired in `main.go` (one `session.idle_eviction` during the hold) and green with it wired. No production-design change.

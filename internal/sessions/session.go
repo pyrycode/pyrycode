@@ -530,6 +530,11 @@ type Session struct {
 	// (test default and operator escape hatch).
 	idleTimeout time.Duration
 
+	// turnBusy is Config.TurnBusy: consulted on each idle-timer fire, and a
+	// true answer defers the eviction by one more window. nil evicts on fire.
+	// Set once at construction.
+	turnBusy func(SessionID) bool
+
 	// removedCh is closed exactly once by Pool.Remove, after the registry
 	// remove commits. A closed removedCh tells the lifecycle goroutine to
 	// exit its Run loop cleanly (return nil) instead of re-parking in
@@ -541,11 +546,10 @@ type Session struct {
 	// Session that hand-builds a literal.
 	removedCh chan struct{}
 
-	// Lifecycle state, attach bookkeeping, and Activate/Evict signalling.
+	// Lifecycle state and Activate/Evict signalling.
 	// lcMu protects all fields below it.
 	lcMu         sync.Mutex
 	lcState      lifecycleState
-	attached     int           // number of currently-bound bridge clients
 	activeCh     chan struct{} // closed when stateActive; replaced when stateEvicted
 	evictedCh    chan struct{} // closed when stateEvicted; replaced when stateActive
 	activateCh   chan struct{} // buffered(1); Activate sends, runEvicted reads
@@ -670,8 +674,8 @@ func (s *Session) Activate(ctx context.Context) error {
 // Used by the cap-policy spawn path (Phase 1.2c-B): when activating one more
 // session would exceed Pool.activeCap, the LRU peer is evicted via this
 // primitive before the new spawn proceeds. Force-eviction — unlike the idle
-// timer, it does not defer for attached>0. The cap is a hard limit; an
-// attached caller will see EOF on its bridge.
+// timer, it does not defer while a turn is open. The cap is a hard limit; a
+// running turn is killed with the child.
 func (s *Session) Evict(ctx context.Context) error {
 	s.lcMu.Lock()
 	ch := s.evictedCh
@@ -775,7 +779,7 @@ func (s *Session) isRemoved() bool {
 //   - outer ctx cancels → returns ctx.Err() (terminal; outer Run propagates)
 //   - supervisor exits spontaneously → beginEvict("") (silent), returns nil (loop
 //     will evict; the wire has no "crashed" reason, so nothing signals)
-//   - idle timer fires AND attached==0 → beginEvict(ReasonEviction), returns nil
+//   - idle timer fires AND no turn is open → beginEvict(ReasonEviction), returns nil
 //   - cap-policy evict signal → beginEvict(ReasonEviction), returns nil
 //
 // On every eviction path runActive both fires the transition signal and commits
@@ -783,9 +787,9 @@ func (s *Session) isRemoved() bool {
 // the reason into beginEvict orders the signal ahead of stateEvicted becoming
 // observable, so a consumer that reads LifecycleState()==stateEvicted is
 // guaranteed the eviction signal has already fired (#1186 rework). While
-// attached>0, idle eviction is deferred (poll-with-grace: re-arm on fire —
-// eviction may overshoot the configured timeout by up to one window). A zero
-// idleTimeout disables the timer entirely.
+// turnBusy reports a turn open, idle eviction is deferred (poll-with-grace:
+// re-arm on fire — eviction may come up to one window after the turn ends). A
+// nil turnBusy never defers. A zero idleTimeout disables the timer entirely.
 func (s *Session) runActive(ctx context.Context) error {
 	subCtx, cancelSup := context.WithCancel(ctx)
 	defer cancelSup()
@@ -829,10 +833,9 @@ func (s *Session) runActive(ctx context.Context) error {
 			s.endEvict()
 			return nil
 		case <-timerCh:
-			s.lcMu.Lock()
-			attached := s.attached
-			s.lcMu.Unlock()
-			if attached > 0 {
+			// No lock held: the production signal reaches the conversations
+			// registry and the turn-busy tracker's mutex (#1486).
+			if s.turnBusy != nil && s.turnBusy(s.currentID()) {
 				timer.Reset(s.idleTimeout)
 				continue
 			}
@@ -873,7 +876,7 @@ func (s *Session) runActive(ctx context.Context) error {
 			// own deliveries, so multi-conversation traffic reaches this window without
 			// any contrived interleaving.
 			s.sup.BeginTeardown()
-			// Cap-policy eviction: forced, regardless of attached count. Same
+			// Cap-policy eviction: forced, even mid-turn. Same
 			// two-phase commit as the idle path (#1186): signal, then flip to
 			// evicted before teardown so a racing Activate is never lost, close out
 			// after.
