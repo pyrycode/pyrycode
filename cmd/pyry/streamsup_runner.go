@@ -1007,7 +1007,7 @@ func dropPermissionMode(args []string) []string {
 // The PTY-only fields on supervisor.Config are deliberately NOT mapped —
 // streamsup owns its own id-flag inversion (buildArgs), has no PTY bridge, no
 // transcript binding, and no .cast recorder: ResumeLast, ResolveSessionID,
-// Bridge, ValidateConversation, ResolveTranscript, RecordDir, helperEnv.
+// Bridge, ValidateConversation, ResolveTranscript, helperEnv.
 // ResolveSessionID stays dropped even now that a sessions DIRECTORY crosses this
 // seam: the directory is all that crosses, and streamsup's own per-spawn by-id
 // existence probe (useCreateForm) decides the flag from it. No resolver callback

@@ -20,6 +20,14 @@ func Load(path string) (Config, error)
 
 Three exports total. No `Save`, no `Watch`, no `ErrConfigMissing` sentinel — read-only this slice. If a future ticket needs writes, it lands then (compare `internal/sessions/registry.go`, where `loadRegistry` shipped without `saveRegistry`).
 
+## `debug_capture` — rejected at startup since #1514
+
+`debug_capture` (#802) used to switch on a `.cast` recorder attached to the terminal spawn path. #1348 deleted that path and the recorder with it, but the config key and its plumbing (a `SessionConfig.RecordDir` field nothing read) survived as a silent no-op: an operator who set the flag, reproduced a bug and pulled a debug bundle got nothing recorded, with no error or log line.
+
+`Load` still decodes the field verbatim and does not validate it — `config` stays parse-only, and `internal/config/config_test.go`'s three `debug_capture` cases are unchanged. Validation moved to the composition root instead: `cmd/pyry/main.go`'s `checkDebugCapture` runs in `runSupervisor` immediately after `config.Load` succeeds, before the pool, the runner factory or the control socket exist. `true` returns an error naming `debug_capture`, saying #1348 removed the recorder, and telling the operator to remove the key or set it to `false`; the daemon exits non-zero before any session or socket is built. `false` and an absent key return `nil` and log nothing — startup is byte-identical to before this ticket. This is the same shape as the `"pty"` rejection arm below, one section down.
+
+The debug-bundle **read** path is untouched: `resolveRecordingsDir` and its independent feed into `debugbundle.Assemble` still resolve `~/.local/share/pyry-recordings`, so a `.cast` left over from before an operator upgraded still ships in a bundle. See [debugbundle-package.md](debugbundle-package.md).
+
 ## `interactive_runner` — PTY vs. stream-json selection (#1081)
 
 Selects which interactive runner the daemon builds. `Load` decodes it verbatim and does **not** validate it — same posture as `DebugCapture`, no `DefaultConfig` entry, so an absent field decodes to `""`. Enum validation happens at the composition root (`cmd/pyry/main.go`'s `selectInteractiveRunner`), not here, because the accepted set maps to runner factories the leaf `config` package cannot import (`internal/supervisor`/`cmd/pyry`'s `streamsup` wiring).

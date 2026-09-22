@@ -178,12 +178,13 @@ func resolveClaudeSessionsDir(workdir string) string {
 	return sessions.DefaultClaudeSessionsDir(abs)
 }
 
-// resolveRecordingsDir returns the fixed directory where debug_capture writes
-// the daemon's interactive-session .cast recordings: ~/.local/share/pyry-recordings
-// — the non-synced, non-backed-up location the ptyrunner SECURITY: comment
-// designates (sibling of ~/.local/share/pyry-artifacts/). Returns "" when $HOME
-// cannot be resolved, in which case capture silently no-ops — the same
-// degrade-to-empty contract as resolveClaudeSessionsDir. The directory is a
+// resolveRecordingsDir returns the fixed directory the debug bundle reads .cast
+// recordings from: ~/.local/share/pyry-recordings, a non-synced, non-backed-up
+// sibling of ~/.local/share/pyry-artifacts/. Nothing writes there any more: the
+// recorder went with the terminal runner in #1348, and checkDebugCapture rejects
+// the flag that switched it on. The read survives so a recording made before the
+// upgrade still ships in a bundle. Returns "" when $HOME cannot be resolved, the
+// same degrade-to-empty contract as resolveClaudeSessionsDir. The directory is a
 // compile-time-fixed location under $HOME; no untrusted input influences it.
 func resolveRecordingsDir() string {
 	home, err := os.UserHomeDir()
@@ -707,6 +708,20 @@ func selectInteractiveRunner(cfg config.Config, logger *slog.Logger, mcpServersP
 	}
 }
 
+// checkDebugCapture rejects debug_capture: true. The flag switched on a .cast
+// recorder attached to the terminal spawn path, and #1348 deleted that path with
+// the recorder in it, so an accepted opt-in would record nothing and the
+// operator would learn it only from an empty debug bundle. Like the "pty" arm
+// of selectInteractiveRunner, the error names the removal and the edit to make.
+// false and an absent key return nil and log nothing. config.Load stays
+// parse-only: this runs at the composition root, right after it.
+func checkDebugCapture(cfg config.Config) error {
+	if !cfg.DebugCapture {
+		return nil
+	}
+	return fmt.Errorf(`debug_capture was removed in #1348: the terminal session recorder no longer exists, so nothing would be captured. Remove the key or set it to false`)
+}
+
 // runSupervisor starts the supervisor and the control server together, blocks
 // until the context is cancelled by SIGINT/SIGTERM, then drains both.
 func runSupervisor(args []string) error {
@@ -802,13 +817,8 @@ func runSupervisor(args []string) error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
-	// Debug-capture gate (#802): resolve the recordings dir ONLY when the
-	// persisted flag is ON, so the bootstrap supervisor sees a non-empty
-	// RecordDir strictly when the operator opted in. OFF (or unset) leaves it
-	// "" → the interactive spawn is byte-identical to today.
-	var recordDir string
-	if cfg.DebugCapture {
-		recordDir = resolveRecordingsDir()
+	if err := checkDebugCapture(cfg); err != nil {
+		return err
 	}
 	// Approval-tool wiring (#1168): on the stream-json interactive path, write the
 	// per-daemon --mcp-config file that points claude's approval-prompt tool at
@@ -909,7 +919,6 @@ func runSupervisor(args []string) error {
 			WorkDir:    trustedWorkdir,
 			ResumeLast: *resume,
 			ClaudeArgs: claudeArgs,
-			RecordDir:  recordDir,
 		},
 	})
 	if err != nil {
@@ -1067,9 +1076,10 @@ func runSupervisor(args []string) error {
 	// assembles the daemon-global bundle — the recent log ring plus the newest
 	// terminal recording — as one in-memory archive and streams it back over the
 	// encrypted v2 channel. The recordings dir is resolved independent of the
-	// DebugCapture flag: recordings written while capture was on persist and stay
-	// readable after it is turned off, and Assemble marks the recording absent
-	// when the dir is empty. Assemble makes zero log calls and the archive bytes
+	// DebugCapture flag, which is now rejected at startup (#1514): no recorder has
+	// written there since #1348, but a recording left from before then stays
+	// readable, and Assemble marks the recording absent when the dir is empty or
+	// holds none. Assemble makes zero log calls and the archive bytes
 	// travel only over the sealed push path — no bundle content reaches any log.
 	bundleRecordingsDir := resolveRecordingsDir()
 	debugBundler := func() ([]byte, error) {
