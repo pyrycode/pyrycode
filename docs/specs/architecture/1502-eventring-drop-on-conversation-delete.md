@@ -49,3 +49,25 @@ The ticket has no Documentation handoff section. Pending for the documentation s
 ## Open questions
 
 - Is `w.convReg` ever nil in stream mode? The helper is nil-safe either way, so it doesn't matter.
+
+## Security review
+
+**Verdict:** PASS
+
+**Findings:**
+
+- [Trust boundaries] No findings. The only untrusted input is the phone's `conversation_id` in `DeleteConversation`. It reaches the ring only through `Registry.Delete`, which fires the observer only on an exact-match hit. A client can therefore drop the replay state of a conversation it is already allowed to hard-delete, and of nothing else. Malformed and not_found requests never reach the observer (tested at the handler seam). The observer receives the stored row's `ConversationID`, so no raw wire bytes reach the ring as a key.
+- [Trust boundaries] No findings on key agreement. The ring is keyed by `activeConversation.CurrentConversation()`, the same string as the registry's `ConversationID`. If they ever diverged, `Drop` would miss, leaving the pre-ticket leak and no wrong-conversation removal. `Drop` deletes one exact map key and can never touch another conversation (tested in `TestDrop`).
+- [Tokens / credentials] Not applicable. No tokens, keys or secrets are created, stored or compared.
+- [File operations] Not applicable. `Drop` and the observer are in-memory only. The registry `Save` after a delete is unchanged.
+- [Subprocess] Not applicable. Nothing is executed.
+- [Crypto] Not applicable. No crypto is used. The ring-wide id counter is deliberately not reset, so a phone's `last_event_id` / `replayThrough` watermark can never alias a reissued id (the #2022 property). `TestDrop` asserts that a re-`Append` after a drop gets a strictly higher id.
+- [Network & I/O] No findings. A reconnecting phone whose cursor names a removed conversation gets `After` → gap=true, meaning a resync. That is the documented outcome and replays nothing. No new wire surface, and no new resource a peer can grow: every drop requires a real delete of an existing row.
+- [Error messages / logs] Not applicable. No new log lines or error strings. The handler's existing no-echo rules are untouched.
+- [Concurrency] No findings. The observer is called after `Registry.Delete` releases `r.mu`, so no new lock-order edge is created (saveMu → mu stays the only ordering). An observer that calls back into the registry cannot deadlock, and a test proves it. `Drop` takes only `ring.mu`, and concurrent drops from the sweep goroutine and the handler goroutine are serialized by it. No goroutines are added. There is one accepted benign race: an emitter `Append` in flight for the just-deleted conversation can recreate a small entry. That entry is bounded by `MaxEventsPerConversation` like any other and is visible only under that deleted id. A tombstone set was rejected because it would itself grow without bound.
+- [Threat model] No findings. `docs/protocol-mobile.md` § Security model: the change narrows retained data, which shortens how long a deleted conversation's content stays in daemon memory. Out of scope: the durable history log (#2114) is a separate store, and the ticket excludes it.
+
+**Reviewer:** builder (self-review per the security-review checklist)
+**Date:** 2026-09-23
+
+Note: this section was appended in a second commit, after the plan commit. The label check was run after the first commit rather than before it. The design is unchanged by the review.
