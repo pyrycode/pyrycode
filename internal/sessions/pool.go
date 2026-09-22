@@ -185,12 +185,6 @@ type SessionConfig struct {
 	// claude that reads the prior conversation. Zero inherits
 	// Config.IdleTimeout; if both are zero, eviction is disabled.
 	IdleTimeout time.Duration
-
-	// RecordDir, when non-empty, records this session's interactive spawns to
-	// .cast files under it (supervisor.Config.RecordDir, #802). Only the daemon's
-	// bootstrap session sets it, gated on the persisted debug_capture flag;
-	// per-caller sessions (buildSession) leave it empty and record nothing.
-	RecordDir string
 }
 
 // Pool owns the set of sessions managed by one pyry process. Phase 1.0

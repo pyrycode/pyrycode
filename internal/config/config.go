@@ -15,11 +15,12 @@ import (
 type Config struct {
 	RelayURL string `json:"relay_url"`
 
-	// DebugCapture, when true, records the daemon's interactive session to a
-	// .cast file (see #802). Default OFF: the JSON zero value for an absent
-	// field is false, so a config that omits "debug_capture" behaves as OFF
-	// with no DefaultConfig entry. SECURITY: a recording holds every PTY byte
-	// — prompt, output, tool output — so this is strictly opt-in.
+	// DebugCapture once recorded the daemon's interactive session to a .cast
+	// file (#802). The recorder was removed with the terminal runner in #1348,
+	// and since #1514 the daemon refuses to start when this is true, so an
+	// operator's opt-in cannot be silently ignored. It is still decoded here
+	// because Load stays parse-only; the rejection lives at the composition
+	// root. An absent field decodes to false and starts normally.
 	DebugCapture bool `json:"debug_capture"`
 
 	// InteractiveRunner selects which interactive runner the daemon builds:
