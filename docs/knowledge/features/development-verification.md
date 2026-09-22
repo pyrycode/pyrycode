@@ -107,6 +107,12 @@ An aggregate envelope-fit test and a producer's single-field limit prove differe
 things. Reference the constant in the package that owns it. A second literal in
 another package can remain green after the real limit changes.
 
+Compare a decoded payload whole, with `reflect.DeepEqual` against a literal expected
+struct, rather than field by field. That also catches a nil-vs-`[]` difference in a
+slice field that field-by-field equality checks can miss. Print the mismatch with
+`%#v`: `%v` and `%+v` both render a nil slice and an empty one as `[]` and hide the
+distinction being tested.
+
 Check every field before widening a provenance or logging claim. Metadata derived
 by the daemon does not make an echoed client identifier daemon-authored. A queue's
 client-visible text can differ from the delivered prompt, which may contain a host
@@ -135,6 +141,11 @@ Do not equate a non-zero parser event count with reaching an unrecognized lane. 
 shortcut becomes false when a previously silent matched frame gains a legitimate event.
 State the expected event cardinality for each captured marker or subtype, and keep the
 unrecognized census tied to the discriminator that actually selects that lane.
+
+A ticket or plan can misstate which identifier a cited capture fixture actually
+carries — paraphrase drifts from the bytes it describes. Verify a fed value's
+identifier against the capture file itself before writing the assertion, and assert
+the value actually fed, not the prose's claim about it.
 
 Record enough redacted context to diagnose an empty capture. Count other line types,
 subtypes, tool outcomes and timing without retaining secret-bearing inputs. A witness
