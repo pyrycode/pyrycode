@@ -184,8 +184,8 @@ type Config struct {
 	// GiveUpAfter bounds how long the drain retries a persistently-failing head
 	// before abandoning it. <= 0 ⇒ defaultGiveUpAfter. Measured as elapsed
 	// wall-clock since the head's FIRST consecutive delivery failure; a
-	// successful delivery resets the clock for the next head (per-head, not
-	// per-session).
+	// successful delivery resets the clock for the next head, and so does a head
+	// removed between attempts (per-head, not per-session).
 	GiveUpAfter time.Duration
 	// OnGiveUp is the optional give-up-notification seam; nil ⇒ disabled.
 	OnGiveUp GiveUpFunc
@@ -657,9 +657,13 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 	// (zero ⇒ the head has not yet failed). It bounds persistent-failure retry
 	// per head: a successful delivery resets it, so each head gets a fresh
 	// give-up window and a transient failure that clears on a respawn never
-	// trips give-up. Drain-local: one goroutine per conversation owns it, so it
-	// needs no synchronization.
+	// trips give-up. streakID names the head the streak belongs to: a head removed
+	// between attempts (during the retry sleep) swaps the head without passing any
+	// reset below, so a failure on a different head starts a fresh streak (#1485).
+	// Drain-local: one goroutine per conversation owns both, so they need no
+	// synchronization.
 	var firstFailedAt time.Time
+	var streakID uint64
 	for {
 		q.mu.Lock()
 		c := q.convs[convID]
@@ -766,8 +770,9 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 		// Claude unavailable (child respawn / wedged turn / PTY write error).
 		// Retry the SAME head — lossless, and what makes a message survive a
 		// child respawn. NEVER log head.text: it is untrusted phone content.
-		if firstFailedAt.IsZero() {
+		if firstFailedAt.IsZero() || streakID != head.id {
 			firstFailedAt = time.Now()
+			streakID = head.id
 		}
 		q.log.Warn("msgqueue: delivery failed, will retry",
 			"conversation_id", convID,
