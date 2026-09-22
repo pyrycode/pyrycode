@@ -139,3 +139,34 @@ func TestSweep(t *testing.T) {
 		})
 	}
 }
+
+// TestSweep_FiresOnDeleteForRemovedOnly pins #1502's sweep half: every
+// conversation a sweep tick removes reaches the Registry's removal observer —
+// which is what frees its replay-ring entry — and no conversation the sweep
+// keeps does.
+func TestSweep_FiresOnDeleteForRemovedOnly(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	const (
+		idle     = ConversationID("00000001-2222-4333-8444-555555555555")
+		fresh    = ConversationID("00000002-2222-4333-8444-555555555555")
+		promoted = ConversationID("00000003-2222-4333-8444-555555555555")
+		archived = ConversationID("00000004-2222-4333-8444-555555555555")
+	)
+	reg := &Registry{}
+	longAgo := now.Add(-365 * 24 * time.Hour)
+	reg.Create(Conversation{ID: idle, Cwd: "/idle", LastUsedAt: longAgo})
+	reg.Create(Conversation{ID: fresh, Cwd: "/fresh", LastUsedAt: now})
+	reg.Create(Conversation{ID: promoted, Cwd: "/promoted", IsPromoted: true, LastUsedAt: longAgo})
+	reg.Create(Conversation{ID: archived, Cwd: "/archived", IsArchived: true, LastUsedAt: longAgo})
+
+	var removed []ConversationID
+	reg.SetOnDelete(func(id ConversationID) { removed = append(removed, id) })
+
+	if n := Sweep(reg, now); n != 1 {
+		t.Fatalf("Sweep = %d, want 1", n)
+	}
+	if !slices.Equal(removed, []ConversationID{idle}) {
+		t.Errorf("observer saw %v, want [%s]", removed, idle)
+	}
+}

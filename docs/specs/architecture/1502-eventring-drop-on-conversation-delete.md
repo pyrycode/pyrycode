@@ -71,3 +71,7 @@ The ticket has no Documentation handoff section. Pending for the documentation s
 **Date:** 2026-09-23
 
 Note: this section was appended in a second commit, after the plan commit. The label check was run after the first commit rather than before it. The design is unchanged by the review.
+
+## Revisions
+
+- 2026-09-23 (implementation): the design is unchanged. Open question resolved: the helper returns early on a nil registry (`TestDropRingOnConversationDelete_NilRegistry`), so whether `w.convReg` can be nil in stream mode no longer matters.

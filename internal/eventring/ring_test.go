@@ -515,3 +515,58 @@ func TestRing_ConcurrentAppendAfter(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+// TestDrop pins #1502's removal contract: a dropped conversation reads exactly
+// like an unknown one, every other conversation's retained events are
+// untouched, and the ring-wide id counter is not reset — the next Append,
+// including one for the dropped conversation, is issued an id above every id
+// issued before (#2022's watermark safety depends on ids never repeating).
+func TestDrop(t *testing.T) {
+	r := New(8)
+	appendControl(t, r, "gone", 3)
+	appendControl(t, r, "kept", 2)
+	appendControl(t, r, "gone", 1)
+
+	keptBefore, _ := r.After("kept", 0)
+	keptNewest := r.NewestID("kept")
+	goneNewest := r.NewestID("gone")
+	highest := max(keptNewest, goneNewest)
+
+	r.Drop("gone")
+
+	if got := r.NewestID("gone"); got != 0 {
+		t.Errorf("NewestID(dropped) = %d, want 0", got)
+	}
+	if evs, gap := r.After("gone", 0); evs != nil || gap {
+		t.Errorf("After(dropped, 0) = (%v, %v), want (nil, false)", eventIDs(evs), gap)
+	}
+	if evs, gap := r.After("gone", goneNewest); evs != nil || !gap {
+		t.Errorf("After(dropped, %d) = (%v, %v), want (nil, true): a cursor naming a removed conversation is a gap", goneNewest, eventIDs(evs), gap)
+	}
+
+	keptAfter, gap := r.After("kept", 0)
+	if gap || !equalU64(eventIDs(keptAfter), eventIDs(keptBefore)) {
+		t.Errorf("After(kept, 0) = (%v, %v), want (%v, false)", eventIDs(keptAfter), gap, eventIDs(keptBefore))
+	}
+	if got := r.NewestID("kept"); got != keptNewest {
+		t.Errorf("NewestID(kept) = %d, want %d", got, keptNewest)
+	}
+
+	// Unknown conversation: a no-op that leaves every retained event in place.
+	r.Drop("never-seen")
+	if evs, _ := r.After("kept", 0); !equalU64(eventIDs(evs), eventIDs(keptBefore)) {
+		t.Errorf("Drop(unknown) changed kept: got %v, want %v", eventIDs(evs), eventIDs(keptBefore))
+	}
+
+	// The counter survives the drop, for the dropped conversation too.
+	reID := r.Append("gone", protocol.TypeTurnState, nil, time.Unix(100, 0))
+	if reID <= highest {
+		t.Errorf("Append(dropped) after Drop = id %d, want > %d (ids must never repeat)", reID, highest)
+	}
+	if evs, gap := r.After("gone", 0); gap || !equalU64(eventIDs(evs), []uint64{reID}) {
+		t.Errorf("After(re-appended, 0) = (%v, %v), want ([%d], false): no pre-drop event may survive", eventIDs(evs), gap, reID)
+	}
+	if id := r.Append("kept", protocol.TypeTurnState, nil, time.Unix(101, 0)); id <= reID {
+		t.Errorf("Append(kept) = id %d, want > %d", id, reID)
+	}
+}
