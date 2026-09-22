@@ -4,8 +4,8 @@ Split out of [`conversations-registry.md`](conversations-registry.md) (2026-09-0
 50000-byte cap) — see that document for the envelope, atomic-write recipe, save-concurrency
 model, sort discipline, and load semantics all of these methods sit on top of.
 
-Covers `Create`, `Get`, `List`, `Update`, `Delete`, `RebindSession` (#739), `SetArchived` (#880),
-`SetSystemPrompt` (#2149), `WorkspaceLabel` / `SetWorkspaceLabel` (#2206),
+Covers `Create`, `Get`, `List`, `Update`, `Delete`, `SetOnDelete` (#1502), `RebindSession` (#739),
+`SetArchived` (#880), `SetSystemPrompt` (#2149), `WorkspaceLabel` / `SetWorkspaceLabel` (#2206),
 `SetLastContextUsage` (#2460),
 `AppendPendingChannelPost` / `PendingChannelPosts` / `ClearPendingChannelPosts` (#2499), and `Promote`.
 
@@ -53,6 +53,14 @@ Order-preserving: surrounding entries' relative order is unchanged. O(n) linear 
 `List` returns a copy, so a snapshot taken before `Delete` is unaffected by the deletion: a caller iterating the snapshot can call `Delete` mid-loop without disturbing the iteration. This contract is pinned by the `delete-snapshot-safety` test row.
 
 The byte-exact `==` comparison on `ID` matches `Get`'s contract; no normalization. Does not race a concurrent `Create` of the same id — both serialize through `r.mu`.
+
+## `SetOnDelete(fn func(id ConversationID))` (#1502)
+
+Installs `fn` as the registry's single removal observer, replacing any earlier one; `nil` clears it. On a hit, `Delete` calls `fn` once with the removed id **after releasing `r.mu`**; a miss never calls it. Because `Delete` is the one funnel both removal paths use — the `delete_conversation` handler and the idle `Sweep` — this one slot sees every removal regardless of which path caused it, with no change to either call site.
+
+Calling outside the lock, not from within `Delete`'s critical section, is the point: it lets `fn` call back into the registry (e.g. `Get`) without deadlocking on the non-reentrant `sync.Mutex`, and it adds no lock-order edge below `r.mu` — a `saveMu → mu`-shaped hazard (see § *Save concurrency* in [`conversations-registry.md`](conversations-registry.md)) would otherwise be easy to introduce here. The cost is a small window where `Delete` has already returned `true` and mutated the in-memory slice, but `fn` has not run yet — no production caller depends on synchronous delivery.
+
+The registry's own production caller (`cmd/pyry`) wires `fn` to `(*eventring.Ring).Drop`, so a removed conversation's retained replay events stop pinning daemon memory instead of surviving until a daemon restart — see [`features/eventring-package.md`](eventring-package.md) § *Ownership & wiring*. `fn` must not block for long: the deleting goroutine — the handler's or the sweep's — waits on it.
 
 ## `RebindSession(oldID, newID string) bool` (#739)
 

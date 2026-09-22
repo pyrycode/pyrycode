@@ -69,8 +69,21 @@ type Ring struct { /* sync.Mutex + ring-wide nextID counter + map[convID]*convRi
 func New(maxPerConversation int) *Ring                                  // panics if < 1
 func (r *Ring) Append(convID, typ string, payload json.RawMessage, ts time.Time) uint64
 func (r *Ring) After(convID string, afterID uint64) (events []Event, gap bool)
+func (r *Ring) Drop(convID string)                                      // frees one conversation's entry; unknown id is a no-op (#1502)
 func (r *Ring) NewestID(convID string) uint64                           // nextID-1, or 0 if unknown (#663)
 ```
+
+`Drop` (#1502) deletes `convID`'s entry outright — the only mutation this package
+exposes besides `Append`. It exists so daemon memory does not grow with every
+conversation that has ever streamed: without it, a removed conversation's up-to-
+1024 retained events (several MB with coalesced `assistant_delta` payloads) stay
+pinned until the daemon restarts. The ring-wide `nextID` counter (#2022) is left
+untouched, so a later `Append` for the same conversation id — the entry can be
+recreated, see Concurrency below — gets an id above every one issued before; no
+scalar cursor can alias a dropped id. After `Drop`, the conversation reads exactly
+like one the ring never saw: `NewestID` → 0, `After(convID, 0)` → caught up,
+`After(convID, n>0)` → gap. That gap is correct, not a defect: the conversation no
+longer exists, so a reconnecting phone should resync rather than replay.
 
 `NewestID` ([#663]) returns the highest id ever assigned to a known conversation
 (`convRing.latestID`), `0` for an unknown one — mutex-guarded like `After`. It
@@ -222,6 +235,19 @@ it to the v2 manager for the reconnect query — no change to the ring or the
 emitter's invariant. No accessor is added in #646 (the field is already reachable
 within `package main`).
 
+**Removal wiring (#1502):** the ring does not import `conversations` and has no
+way to learn a conversation was removed on its own — `cmd/pyry` connects the two
+through a small seam rather than a new ring-side dependency. `relay.go`'s
+`dropRingOnConversationDelete(reg *conversations.Registry, ring *eventring.Ring)`
+installs `func(id) { ring.Drop(string(id)) }` as `conversations.Registry`'s
+`SetOnDelete` observer (see [`conversations-registry-crud.md`](conversations-registry-crud.md)
+§ `SetOnDelete`), called once, in the same stream-mode branch as `SetReplaySource`
+and right after it — the one place both the freshly-built ring and the registry
+are in scope. `Registry.Delete` is the single funnel both removal paths
+(`delete_conversation` and the idle sweep) go through, so this one seam drops the
+ring entry for both. A nil registry leaves nothing wired, matching the postures
+where no conversations registry exists.
+
 ## Concurrency
 
 - **The ring is the only shared object on the structured path; it is internally
@@ -242,6 +268,13 @@ within `package main`).
   built, unit-tested (incl. a `-race` append-vs-query test), and the mutex is in
   place from day one so #647 can wire `After` from the manager's goroutine without
   touching this slice.
+- **Accepted benign race on `Drop` (#1502):** an emitter `Append` for the
+  just-dropped conversation can be in flight (a turn still streaming at the
+  moment of deletion) and land after `Drop` releases the lock, recreating a small
+  entry under the same id. That entry is bounded by `MaxEventsPerConversation`
+  like any other and is only reachable under the deleted conversation's id. A
+  tombstone set was considered and rejected: it would itself grow without bound,
+  trading one unbounded map for another.
 
 ## Error handling
 
@@ -258,10 +291,12 @@ within `package main`).
 
 ```
 internal/eventring/
-├── ring.go        Event, Ring, convRing; MaxEventsPerConversation; New / Append / After / NewestID; evictOldest
+├── ring.go        Event, Ring, convRing; MaxEventsPerConversation; New / Append / After / Drop / NewestID; evictOldest
 └── ring_test.go   id assignment, replay/caught-up/gap, isolation, unknown-conv,
                    delta-first + all-control eviction, no-fabricated-gap, cap-1, New(<1) panic,
-                   NewestID (unknown→0, last-assigned, advances-past-eviction, conv-isolation; #663), -race
+                   NewestID (unknown→0, last-assigned, advances-past-eviction, conv-isolation; #663),
+                   Drop (NewestID→0, After caught-up/gap, other conversations unaffected, id counter
+                   not reset, unknown-id no-op; #1502), -race
 ```
 
 ~130 LOC of production code (one new package), plus the ~+10 LOC emitter edit
@@ -293,5 +328,12 @@ integration tests live in `cmd/pyry/interactive_turn_v2_test.go` (additions only
   — #2022: moves the id counter from `convRing` onto `Ring`, closing the
   cross-conversation silent-drop defect described in
   [Reconnect replay](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md).
+- [`features/conversations-registry-crud.md`](conversations-registry-crud.md) §
+  `SetOnDelete` — the removal observer `cmd/pyry` wires to `Drop`, and
+  [`features/conversations-registry.md`](conversations-registry.md) — `Registry.Delete`,
+  the single funnel both removal paths go through.
+- [`specs/architecture/1502-eventring-drop-on-conversation-delete.md`](../../specs/architecture/1502-eventring-drop-on-conversation-delete.md)
+  — #1502: adds `Drop` and the removal-observer wiring so a removed
+  conversation's retained events stop pinning daemon memory.
 
 [#663]: https://github.com/pyrycode/pyrycode/issues/663
