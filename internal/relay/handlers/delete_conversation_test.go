@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -401,4 +402,54 @@ func findLogRecord(t *testing.T, logged, want string) map[string]any {
 	}
 	t.Fatalf("no log record with event %q in:\n%s", want, logged)
 	return nil
+}
+
+// TestDeleteConversation_OnDeleteObserver pins #1502's handler half: the
+// registry's removal observer — which frees the conversation's replay-ring
+// entry in the daemon — sees the id of a successful delete, and a not_found or
+// malformed request reaches it with nothing.
+func TestDeleteConversation_OnDeleteObserver(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		payload json.RawMessage
+		want    []conversations.ConversationID
+	}{
+		{
+			name:    "success",
+			payload: mustMarshal(t, protocol.DeleteConversationPayload{ConversationID: deleteConvTargetID}),
+			want:    []conversations.ConversationID{deleteConvTargetID},
+		},
+		{
+			name:    "not-found",
+			payload: mustMarshal(t, protocol.DeleteConversationPayload{ConversationID: "no-such-conversation"}),
+		},
+		{
+			name:    "malformed",
+			payload: json.RawMessage(`{"conversation_id":"` + deleteConvTargetID + `"`),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg, regPath := newDeleteConvReg(t)
+			var got []conversations.ConversationID
+			reg.SetOnDelete(func(id conversations.ConversationID) { got = append(got, id) })
+			c, recv := newDeleteConvConn(t)
+			req := protocol.Envelope{
+				ID:      deleteConvRequestID,
+				Type:    protocol.TypeDeleteConversation,
+				TS:      time.Now().UTC(),
+				Payload: tc.payload,
+			}
+
+			if err := DeleteConversation(reg, regPath, testLogger(t))(context.Background(), c, req); err != nil {
+				t.Fatalf("handler: %v", err)
+			}
+			recv()
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("observer saw %v, want %v", got, tc.want)
+			}
+		})
+	}
 }

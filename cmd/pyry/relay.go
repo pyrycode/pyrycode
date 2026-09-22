@@ -15,6 +15,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
+	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/identity"
 	"github.com/pyrycode/pyrycode/internal/keys"
@@ -574,6 +575,20 @@ func relay4409Threshold(logger *slog.Logger) int {
 	}
 	logger.Info("relay: PYRY_RELAY_4409_THRESHOLD override", "threshold", n)
 	return n
+}
+
+// dropRingOnConversationDelete joins the conversations registry's removal
+// observer to the emitter's replay ring (#1502): each conversation the registry
+// removes — by delete_conversation or by the idle sweep, both of which go
+// through Registry.Delete — has its ring entry dropped, so its retained events
+// stop pinning daemon memory. The ring is keyed by the same conversation id
+// string the registry stores. A nil registry (no conversations registry in this
+// posture) leaves nothing to observe.
+func dropRingOnConversationDelete(reg *conversations.Registry, ring *eventring.Ring) {
+	if reg == nil {
+		return
+	}
+	reg.SetOnDelete(func(id conversations.ConversationID) { ring.Drop(string(id)) })
 }
 
 // boundSessionIDForActive resolves the pool session id bound to the ACTIVE
@@ -1559,6 +1574,9 @@ func startRelayV2(
 		// most once, because this branch does.
 		emitter := newInteractiveTurnEmitterV2(w.active, mgr, logger)
 		mgr.SetReplaySource(emitter.ring, w.active.CurrentConversation)
+		// Free a removed conversation's replay events when the registry drops it
+		// (#1502); installed here because this is where the ring is born.
+		dropRingOnConversationDelete(w.convReg, emitter.ring)
 		// The durable conversation log (#2114), assigned the same way the ring is
 		// reached one line up: newInteractiveTurnEmitterV2 has 86 call sites and a
 		// positional parameter is not separable from them in Go. w.hist is minted

@@ -119,6 +119,11 @@ type Registry struct {
 	// appends write at indices past the snapshot's length, and maps have no such
 	// disjointness.
 	workspaceLabels map[string]string
+
+	// onDelete is the removal observer installed by SetOnDelete (#1502), guarded
+	// by mu for its reads and writes; nil means none. Delete calls it after
+	// releasing mu.
+	onDelete func(ConversationID)
 }
 
 // Load reads path. A missing file returns an empty *Registry with no error
@@ -337,16 +342,40 @@ func (r *Registry) RebindSession(oldID, newID string) bool {
 //
 // Delete does NOT call Save — disk persistence is the caller's concern,
 // matching the Create / Update / Promote convention.
+//
+// On a hit, the observer installed by SetOnDelete is called with id after r.mu
+// is released; a miss never calls it.
 func (r *Registry) Delete(id ConversationID) bool {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	for i := range r.conversations {
 		if r.conversations[i].ID == id {
 			r.conversations = append(r.conversations[:i], r.conversations[i+1:]...)
+			onDelete := r.onDelete
+			r.mu.Unlock()
+			if onDelete != nil {
+				onDelete(id)
+			}
 			return true
 		}
 	}
+	r.mu.Unlock()
 	return false
+}
+
+// SetOnDelete installs fn as the registry's removal observer, replacing any
+// earlier one; nil clears it. Delete calls fn once per removed conversation,
+// with that conversation's id, and never on a miss. Delete is the single path
+// both removals take — the delete_conversation handler and the idle Sweep — so
+// this one slot sees every removal (#1502). The daemon uses it to free the
+// removed conversation's replay-ring entry.
+//
+// fn runs on the deleting goroutine after r.mu is released, so it may call back
+// into the registry and takes no lock-order position beneath r.mu. It must not
+// block for long: the handler and the sweep both wait on it.
+func (r *Registry) SetOnDelete(fn func(id ConversationID)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onDelete = fn
 }
 
 // SetArchived flips the durable archived flag of the conversation whose ID

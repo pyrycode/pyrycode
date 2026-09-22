@@ -14,6 +14,7 @@ Lives in the same `internal/conversations` package as the `Conversation` type (#
 - **Bounded system-prompt primitive (#2149):** `(*Registry).SetSystemPrompt(id ConversationID, prompt *string) error` validates and sets `Conversation.SystemPrompt` under the registry lock; `MaxSystemPromptBytes = 8192` (inclusive) and two sentinels (`ErrSystemPromptTooLong`, `ErrSystemPromptInvalidUTF8`) join `ErrConversationNotFound` as the refusal set. #2150 reads the stored value at spawn (`Pool.refreshSystemPrompt`, called from `Pool.Activate`), #2151 wires `SetSystemPrompt` to the `set_system_prompt` wire verb (`handlers.SetSystemPrompt`, [`relay-package.md`](relay-package.md)), and #2152 reads it back over the wire (`request_system_prompt` / `system_prompt`, [v2-session-manager doc](v2-session-manager-state-machine-inbound-request-system-prompt-systempromptfor-seam.md)) — the full cluster is landed. `Registry.Update` remains the unvalidated escape hatch for the field, exactly as for every other field.
 - **Workspace-label storage primitive (#2206):** `(*Registry).WorkspaceLabel(cwd string) (string, bool)` / `(*Registry).SetWorkspaceLabel(cwd string, label *string)` persist an operator-chosen display name for a workspace, keyed by the exact `cwd` string (byte-exact, no normalization) rather than by conversation id — a workspace has no row of its own, so the label lives in its own top-level map instead of a per-conversation field. Storage only: no wire verb sets it yet (#2207) and no payload reads it onto the wire yet (#2208, #2210). See § *`WorkspaceLabel` / `SetWorkspaceLabel`* below.
 - **Last context-usage reading primitive (#2460):** `(*Registry).SetLastContextUsage(id ConversationID, reading ContextUsageReading) bool` records the summary of the last context-window reading claude reported for a conversation — `Model`, `TotalTokens`, `MaxTokens`, `Percentage`, `AsOf` — under the registry lock, structurally touching only `Conversation.LastContextUsage`. Takes a value rather than a pointer, unlike `SetSystemPrompt`'s tri-state door: no producer ever clears a reading, so "set it back to nil" is unreachable rather than merely unused. Two production callers write through the same recorder — the post-turn interactive-turn emitter arm and the on-demand `request_context_usage` flight — so the stored value is whichever reading claude produced last; last write wins by design (see § *`SetLastContextUsage`* in [`conversations-registry-crud.md`](conversations-registry-crud.md)). No wire verb reads it back yet — deferred as a named follow-up, see *Out of scope* below.
+- **Removal observer (#1502):** `(*Registry).SetOnDelete(fn func(id ConversationID))` installs a single removal callback, replacing any earlier one; `nil` clears it. `Delete` calls it once per hit, with that conversation's id, after releasing `r.mu` — never on a miss. Because `Delete` is the one funnel both removal paths use (the `delete_conversation` handler and the idle `Sweep`), this one slot sees every removal regardless of which path caused it. The daemon's only caller wires it to `(*eventring.Ring).Drop`, freeing the removed conversation's retained replay events (see [`features/eventring-package.md`](eventring-package.md) § *Ownership & wiring*). See § *`SetOnDelete`* in [`conversations-registry-crud.md`](conversations-registry-crud.md).
 
 ## Surface
 
@@ -48,6 +49,7 @@ func (r *Registry) Get(id ConversationID) (Conversation, bool)
 func (r *Registry) List(filter ...ListFilter) []Conversation
 func (r *Registry) Update(id ConversationID, fn func(*Conversation)) bool
 func (r *Registry) Delete(id ConversationID) bool
+func (r *Registry) SetOnDelete(fn func(id ConversationID))
 func (r *Registry) Promote(id ConversationID, name string) error
 func (r *Registry) RebindSession(oldID, newID string) bool
 func (r *Registry) SetArchived(id ConversationID, archived bool) bool
@@ -245,8 +247,8 @@ The returned `*Registry` is independent of the on-disk file — subsequent `Save
 
 Split into [`conversations-registry-crud.md`](conversations-registry-crud.md) (2026-09-07, this
 document was over the 50000-byte cap). Covers `Create`, `Get`, `List`, `Update`, `Delete`,
-`RebindSession` (#739), `SetArchived` (#880), `SetSystemPrompt` (#2149), `WorkspaceLabel` /
-`SetWorkspaceLabel` (#2206), `SetLastContextUsage` (#2460), and `Promote`.
+`SetOnDelete` (#1502), `RebindSession` (#739), `SetArchived` (#880), `SetSystemPrompt` (#2149),
+`WorkspaceLabel` / `SetWorkspaceLabel` (#2206), `SetLastContextUsage` (#2460), and `Promote`.
 
 ## Tests
 
@@ -319,7 +321,8 @@ New (no devices counterpart):
 
 ## Related
 
-- [`features/conversations-registry-crud.md`](conversations-registry-crud.md) — the CRUD method reference (`Create`/`Get`/`List`/`Update`/`Delete`/`RebindSession`/`SetArchived`/`SetSystemPrompt`/`WorkspaceLabel`+`SetWorkspaceLabel`/`SetLastContextUsage`/`Promote`), split out of this document.
+- [`features/conversations-registry-crud.md`](conversations-registry-crud.md) — the CRUD method reference (`Create`/`Get`/`List`/`Update`/`Delete`/`SetOnDelete`/`RebindSession`/`SetArchived`/`SetSystemPrompt`/`WorkspaceLabel`+`SetWorkspaceLabel`/`SetLastContextUsage`/`Promote`), split out of this document.
+- [`features/eventring-package.md`](eventring-package.md) — the sole production consumer of `SetOnDelete`: `cmd/pyry` wires the observer to `(*eventring.Ring).Drop` so a removed conversation's retained replay events don't pin daemon memory (#1502).
 - [`features/conversations-package.md`](conversations-package.md) — `Conversation` + `ConversationID` (#216), the on-disk record shape this registry persists.
 - [`features/devices-registry.md`](devices-registry.md) — the structural reference implementation (atomic write, envelope shape, snapshot-then-write Save).
 - [`features/sessions-registry.md`](sessions-registry.md) — the older atomic-rename recipe both registries trace to.

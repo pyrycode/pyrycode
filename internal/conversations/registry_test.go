@@ -2507,3 +2507,72 @@ func TestRegistry_Save_NoPendingChannelPostsOmitsKey(t *testing.T) {
 		t.Errorf("a row with nothing pending emitted the key:\n%s", raw)
 	}
 }
+
+// TestRegistry_OnDelete pins #1502's removal observer: it fires once with the
+// removed id on a Delete hit, never on a miss, is optional, and runs after
+// r.mu is released — so an observer that reads the registry cannot deadlock.
+func TestRegistry_OnDelete(t *testing.T) {
+	t.Parallel()
+	const aID ConversationID = "11111111-2222-4333-8444-555555555555"
+	const bID ConversationID = "22222222-2222-4333-8444-555555555555"
+	const absentID ConversationID = "ffffffff-2222-4333-8444-555555555555"
+
+	t.Run("fires-on-hit-only", func(t *testing.T) {
+		t.Parallel()
+		r := &Registry{}
+		r.Create(Conversation{ID: aID, Cwd: "/a"})
+		r.Create(Conversation{ID: bID, Cwd: "/b"})
+		var got []ConversationID
+		r.SetOnDelete(func(id ConversationID) { got = append(got, id) })
+
+		if r.Delete(absentID) {
+			t.Fatal("Delete(absent) = true, want false")
+		}
+		if len(got) != 0 {
+			t.Fatalf("observer fired on a miss: %v", got)
+		}
+		if !r.Delete(aID) {
+			t.Fatal("Delete(aID) = false, want true")
+		}
+		if r.Delete(aID) {
+			t.Fatal("second Delete(aID) = true, want false")
+		}
+		if !reflect.DeepEqual(got, []ConversationID{aID}) {
+			t.Errorf("observer saw %v, want [%s]", got, aID)
+		}
+	})
+
+	t.Run("nil-observer", func(t *testing.T) {
+		t.Parallel()
+		r := &Registry{}
+		r.Create(Conversation{ID: aID, Cwd: "/a"})
+		r.SetOnDelete(func(ConversationID) { t.Error("cleared observer fired") })
+		r.SetOnDelete(nil)
+		if !r.Delete(aID) {
+			t.Fatal("Delete(aID) = false, want true")
+		}
+	})
+
+	t.Run("runs-outside-lock", func(t *testing.T) {
+		t.Parallel()
+		r := &Registry{}
+		r.Create(Conversation{ID: aID, Cwd: "/a"})
+		r.Create(Conversation{ID: bID, Cwd: "/b"})
+		var sawB bool
+		r.SetOnDelete(func(ConversationID) { _, sawB = r.Get(bID) })
+
+		done := make(chan struct{})
+		go func() {
+			r.Delete(aID)
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("Delete deadlocked: the observer ran under r.mu")
+		}
+		if !sawB {
+			t.Error("observer's Get(bID) = !ok, want the surviving row")
+		}
+	})
+}

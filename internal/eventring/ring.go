@@ -237,6 +237,23 @@ func (r *Ring) After(convID string, afterID uint64) (events []Event, gap bool) {
 	return nil, false // unreachable: afterID < latestID guarantees a match
 }
 
+// Drop removes every retained event of convID, freeing its entry (#1502). The
+// daemon calls it when the conversation itself is removed — a delete_conversation
+// or an idle sweep — so a removed conversation's events stop pinning memory
+// until the next restart. Dropping an unknown conversation is a no-op.
+//
+// Afterwards convID reads exactly like a conversation the ring never saw:
+// NewestID reports 0, After(convID, 0) is caught up, and a cursor naming one of
+// its old ids is a gap — the right answer, since the conversation no longer
+// exists. The ring-wide counter is deliberately left alone: ids are never
+// reissued, so a later Append (for this conversation too) gets an id above
+// every one issued before, and no scalar cursor can alias a dropped id (#2022).
+func (r *Ring) Drop(convID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.convs, convID)
+}
+
 // NewestID returns the newest durable event id retained for convID — the id the
 // most recent Append for it assigned (convRing.latestID, the same boundary After
 // classifies against) — or 0 if the conversation is unknown / has had no events.
