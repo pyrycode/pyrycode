@@ -102,6 +102,38 @@ or emits a `resync` marker if the position aged out of the bounded ring.
   only *lower* the watermark. Both writers run on `Run`, so `replayThrough` keeps
   its single-owner-goroutine regime.
 - **The guard is sound by construction, not by scoping (#2022, following a gap found in #2010).** `replayThrough` is a single per-**connection** scalar with no conversation tag, and `forwardEnvelope` compares `*env.EventID <= s.replayThrough` with no conversation check either — the live emitter fans out to every interactive conn regardless of which conversation it currently addresses. Until #2022 that was unsound: `eventring.Ring.Append` assigned ids **per conversation**, each counter starting at 1, so a watermark taken for the one conversation `cursor()` resolved at handshake could sit at or above an id a *different* conversation's live event would later carry, and `forwardEnvelope` dropped that frame — no error, no resync, for the life of the connection. #2022 fixed the **id space**, not the guard: `Append` now draws from one ring-wide counter, so no future event in any conversation can ever carry an id already at or below a watermark taken from another. `forwardEnvelope` was deliberately left untouched — see [eventring-package.md](eventring-package.md) § `After` for why a conversation-aware guard was rejected in favour of fixing the ids. `docs/protocol-mobile.md` states the daemon-wide-unique guarantee.
+- **Transport-down hold on the replay drain (#1490), `drainOnce`/#874's twin.**
+  `drainReplayOnce` probes `transportDown()` as its first statement: while the
+  relay leg is down, a pass pops nothing, seals nothing, leaves `replayThrough`
+  untouched, and does **not** re-signal `replayCh` (a down leg must not
+  busy-spin `Run`). Before this, a leg that dropped mid-replay left every later
+  pass popping the next queued event anyway — `m.send` swallows the `Outbound`
+  error, so each pass spent a real Noise send-nonce on a frame that never left
+  the daemon, and the phone's next delivered frame failed AEAD, tearing the
+  session down for a full re-handshake and re-replay. The probe deliberately
+  sits in `drainReplayOnce`, not in `forwardEnvelope`: a transport-down error
+  surfacing there would take the existing abandon branch below (`on a forward
+  error the conn's remaining tail is abandoned`) and discard the held tail
+  outright, the same trap the inline-reply guard's placement note documents
+  (see [`dropInlineReplyIfDown`](v2-session-manager-state-machine-inline-reply-seals-gated-behind-transportdow.md)).
+  Recovery needs its own wake because the hold consumes the `replayCh` signal
+  without re-arming it — `Run`'s [`Reconnect` arm](v2-session-manager-state-machine-immediate-flush-on-reconnect-reconnect.md)
+  re-signals `replayCh` alongside `drainCh`, so a held tail resumes on the same
+  edge that flushes the push queue, still ahead of any live events `drainOnce`
+  gates behind a non-empty `replayQueue`. A `Connected` seam wired without a
+  `Reconnect` seam leaves a held tail with no waker until the session ends —
+  production always wires both (`cmd/pyry/relay.go`), so this is a test-fixture
+  trap, not a reachable production gap. Tests:
+  `TestV2Session_Reconnect_ReplayHeldWhileTransportDown` (direct drive: several
+  down passes leave the queue length, `replayThrough`, and `replayCh` all
+  unchanged, then every frame decrypts starting from the phone's first nonce
+  once the probe flips up — proof no nonce was spent while down) and
+  `TestV2Session_Reconnect_MidReplayDrop_ResumesOnReconnect` (`Run`-driven: the
+  `Outbound` seam itself flips the leg down after K of N replay frames so the
+  drop lands deterministically mid-replay with no timer, a live event is
+  pushed during the outage, and `Reconnect` alone — no further `Push` —
+  resumes all N replay frames in ascending order followed by the live one,
+  with no `resync`).
 - **Untrusted input.** `last_event_id` is range/shape-validated by the `*uint64`
   decode (a non-integer fails `HelloClientPayload` decode → existing 4421 close),
   bounded by `MaxEventsPerConversation`, and scoped to the daemon-resolved
