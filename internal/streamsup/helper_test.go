@@ -91,6 +91,12 @@ func helperSpawnID() string {
 //     answer mcp_status with an empty status report and record
 //     that request on stderr, and answer other input with a
 //     result barrier. Used to prove per-spawn status policy.
+//   - "partial_then_line": append this spawn's argv to GO_STREAMSUP_HELPER_ARGV_FILE.
+//     The first spawn writes an unterminated line fragment and
+//     exits 1, a child dying mid-write; every later spawn writes
+//     one complete result line, then blocks like "record_block".
+//     Used to prove a dead child's partial never splices onto its
+//     successor's first line.
 func helperChild() {
 	switch os.Getenv("GO_STREAMSUP_HELPER_MODE") {
 	case "echo_lines":
@@ -208,6 +214,28 @@ func helperChild() {
 			fmt.Fprintln(os.Stdout, `{"type":"result","subtype":"success","session_id":"S"}`)
 		}
 		os.Exit(0)
+	case "partial_then_line":
+		path := os.Getenv("GO_STREAMSUP_HELPER_ARGV_FILE")
+		prior, _ := os.ReadFile(path)
+		if f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+			fmt.Fprintln(f, strings.Join(os.Args, " "))
+			_ = f.Sync()
+			_ = f.Close()
+		}
+		if len(prior) == 0 {
+			_, _ = os.Stdout.WriteString(`{"type":"res`)
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stdout, `{"type":"result"}`)
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGTERM)
+		go func() { _, _ = io.Copy(io.Discard, os.Stdin) }()
+		select {
+		case <-sigCh:
+			os.Exit(0)
+		case <-time.After(30 * time.Second):
+			os.Exit(0)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown GO_STREAMSUP_HELPER_MODE: %q\n", os.Getenv("GO_STREAMSUP_HELPER_MODE"))
 		os.Exit(99)

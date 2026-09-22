@@ -2633,6 +2633,12 @@ func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, workDir s
 			r.log.Warn("streamsup: stdin close failed", "err", cerr)
 		}
 	}
+	// Here and not in retireParserChild: that also runs from retireStdinGeneration
+	// while the child may still be writing, and this is the one point where the
+	// stdout copy is known to be finished (#1503).
+	if r.parser != nil {
+		r.parser.dropPartialLine()
+	}
 
 	return true, waitErr
 }

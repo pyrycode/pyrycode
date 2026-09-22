@@ -2315,7 +2315,11 @@ const harnessInterruptNoticePrefix = "[Request interrupted by user"
 // serially from that one goroutine. There is no second reader of parser state,
 // so no mutex is needed. (Contrast streamrunner's streamParser, which locks
 // because its watchdog goroutine reads its state.) If a future slice adds a
-// concurrent reader, it adds the guard then.
+// concurrent reader, it adds the guard then. One Parser serves every child of a
+// runner, and the one other toucher of buf, dropPartialLine, runs on the Run
+// goroutine only after cmd.Wait has returned: Wait joins the stdout copy
+// goroutine, even past WaitDelay, so the dead child's last Write happens-before
+// the drop and the drop happens-before the next child's first Write (#1503).
 type Parser struct {
 	sink   func(turnevent.Event)
 	log    *slog.Logger
@@ -2862,6 +2866,15 @@ func (p *Parser) Write(b []byte) (int, error) {
 	// array of p.buf is released.
 	p.buf = append([]byte(nil), rest...)
 	return len(b), nil
+}
+
+// dropPartialLine discards the unterminated remainder a departed child left
+// behind, so the respawned child's first line is parsed on its own instead of
+// being spliced onto a dead child's mid-line bytes into one Unrecognized event.
+// Call it only once that child's stdout copy has finished — see the Parser's
+// single-writer invariant.
+func (p *Parser) dropPartialLine() {
+	p.buf = nil
 }
 
 // streamLine is the minimal decoded shape of one stdout stream-json line: only

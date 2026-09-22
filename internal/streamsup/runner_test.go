@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -14,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
 // testSessionID is the caller-minted session id threaded through the
@@ -509,6 +512,61 @@ func TestRunner_RestartsOnCrash(t *testing.T) {
 
 	if err := join(); !errors.Is(err, context.Canceled) {
 		t.Errorf("Run returned %v, want context.Canceled after teardown", err)
+	}
+}
+
+// --- Parser partial line dropped at child exit (#1503) ----------------------
+
+// TestRunner_DropsParserPartialLineAtChildExit: a child that dies mid-line must
+// not leave its fragment in the shared Parser for the respawned child's first
+// line to splice onto. Driven through Run rather than the Parser alone, so it
+// proves spawnAndWait makes the call, not just that the method exists.
+func TestRunner_DropsParserPartialLineAtChildExit(t *testing.T) {
+	t.Parallel()
+	var (
+		mu     sync.Mutex
+		events []turnevent.Event
+	)
+	parser := NewParser(func(ev turnevent.Event) {
+		mu.Lock()
+		events = append(events, ev)
+		mu.Unlock()
+	}, discardLogger())
+	snapshot := func() []turnevent.Event {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(events)
+	}
+
+	argvFile := filepath.Join(t.TempDir(), "argv")
+	cfg := helperRunCfg(t, "partial_then_line", nil, &safeBuffer{}, "GO_STREAMSUP_HELPER_ARGV_FILE="+argvFile)
+	cfg.Stdout = parser
+	cfg.BackoffInitial = time.Millisecond
+	cfg.BackoffMax = 5 * time.Millisecond
+
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+
+	// The respawned child's line is the only thing either outcome emits: a clean
+	// TurnEnd with the fix, one Unrecognized carrying the splice without it.
+	deadline := time.Now().Add(5 * time.Second)
+	for len(snapshot()) == 0 {
+		if time.Now().After(deadline) {
+			cancel()
+			join()
+			t.Fatal("no event within 5s of Run — the respawned child's line never parsed")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	join()
+
+	want := []turnevent.Event{turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}}
+	if got := snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %#v, want %#v — the dead child's partial spliced onto its successor's first line", got, want)
 	}
 }
 
