@@ -1266,7 +1266,8 @@ func inBandDeliverable(update SettingsUpdate) bool {
 //   - It changes the child's permission mode, not work already dispatched. A tool
 //     call in flight when the request arrives is not torn down — the old restart
 //     killed the child and so ended it. `interrupt` remains the verb for ending a
-//     running turn; #1605 measures the in-flight window live.
+//     running turn. The in-flight window itself — a revoke arriving while a tool
+//     call is already dispatched — is not measured live; only the turn boundary is.
 //
 // THE MODEL SENT IS THE FAMILY ALIAS, NOT THE FRAME'S VALUE (#2447). A mid-session
 // pick of a row claude publishes as an exact id — Fable's, or "Haiku 4.5" — would
