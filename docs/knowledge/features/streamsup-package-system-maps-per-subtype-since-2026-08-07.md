@@ -14,6 +14,17 @@ every task claude is tracking at that moment rather than reporting what happened
 and `system/init` → `turnevent.ModelAnnounced` (`Model`, `Truncated`) — the one variant naming what
 claude is actually running rather than something about a turn or a task, described below (#1600).
 
+**MEASURED 2026-09-22 (#2525):** whether claude ever sends a trailing `background_tasks_changed`
+after a backgrounded task completes was open since the roster's amnesia was first documented —
+desktop #1246 and desktop #1558 assumed opposite answers. On claude 2.1.280, for a task
+backgrounded on request, it does: an empty roster arrives unprompted at completion, one line
+*before* the `task_updated` carrying `status: completed`. `emitBackgroundTaskRoster`'s doc comment
+carries the full sentence; see
+[the capturing probe](e2e-realclaude-roster-after-finish-capture-test-go.md) for the staging
+defects a naive live attempt hits first (releasing on `task_started` rather than on
+`is_backgrounded:true`, and ordering rosters against the terminal-status line rather than against
+the release point).
+
 **CORRECTED 2026-09-10 (#2252): `system/init` now produces TWO variants, not one — the family's
 first line to do that, where every prior "first" here (`task_notification`, above) went the other
 way, two subtypes into one event.** `emitSystemSubtype`'s `"init"` case now calls `emitInitLine`,

@@ -7222,6 +7222,12 @@ func (p *Parser) emitBackgroundTaskProgress(line []byte) bool {
 // this doc can no longer say the parser forgets everything, only that it remembers
 // nothing a finish event could be computed from. A third retention owes that same
 // sentence about itself — the general claim is gone for good.
+//
+// MEASURED 2026-09-22 (#2525): on claude 2.1.280, for a task backgrounded on request,
+// internal/e2e/realclaude/testdata/roster_after_finish_v2.1.280.json records the verdict
+// roster-omits-the-finished-task, prompted by nothing — an empty roster arrived at the
+// completion, one line BEFORE the task_updated carrying status completed — so the count
+// comes down from claude's own line and nothing here needs to synthesize a finish.
 func (p *Parser) emitBackgroundTaskRoster(line []byte) bool {
 	var tl systemBackgroundTasksLine
 	if err := json.Unmarshal(line, &tl); err != nil {
