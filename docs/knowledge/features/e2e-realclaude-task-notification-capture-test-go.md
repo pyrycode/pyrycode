@@ -45,19 +45,25 @@ fixture file is written, not before: staging first fails with "pathspec did not 
 on precisely the run this family of probe exists to promote — a first capture, when the fixture is
 absent by design.
 
-### Fixture status as of this ticket
+### Fixture status
 
-The pin (`taskNotificationPinnedKeys` in `internal/streamsup/task_notification_capture_test.go`)
-is still empty and no `testdata/task_notification_v2.1.259.json` is committed — the live gate's
-last recorded run failed on the scanner defect above, not on claude's behaviour, so whether a
-released FIFO actually fires `task_notification` at 2.1.259 remains unmeasured. See
-[the compaction capture's history](e2e-realclaude-compaction-capture-test-go.md) for what can
+Landed: `testdata/task_notification_v2.1.259.json` is committed and
+`taskNotificationPinnedKeys` in `internal/streamsup/task_notification_capture_test.go` is filled.
+The committed run itself stalled — `turn_seconds: 360.0`, `terminated_on: "budget"` — because the
+FIFO it held was released under a still-**foreground** call, which never returns its tool result
+even after the write side closes; #2525's `roster_after_finish_capture_test.go` diagnosed that
+retroactively as the same defect a naive `task_started`-triggered release reproduces, not a
+property of this claude version. See
+[the roster-after-finish capture](e2e-realclaude-roster-after-finish-capture-test-go.md#a-foreground-held-fifo-never-returns-its-tool-result-even-after-the-command-exits)
+for the fix (stage the call as backgrounded, wait for `is_backgrounded:true` before releasing).
+See [the compaction capture's history](e2e-realclaude-compaction-capture-test-go.md) for what can
 happen even after a run does fire clean: a gate-only run in a throwaway worktree can still lose the
 fixture, and the recovery pattern used there (an opportunistic commit riding an unrelated ticket) is
-worth reusing rather than reinventing if this capture lands the same way.
+worth reusing rather than reinventing if a future capture lands the same way.
 
 ### Related
 
 - [`tool_progress_capture_test.go`](e2e-realclaude-tool-progress-capture-test-go.md) — `tpcapHoldFIFO`, reused here for the mid-test FIFO release.
 - [`compaction_capture_test.go`](e2e-realclaude-compaction-capture-test-go.md) — the fixture-lost-after-a-green-gate pattern and its recovery.
+- [`roster_after_finish_capture_test.go`](e2e-realclaude-roster-after-finish-capture-test-go.md) — diagnosed this capture's own 360s turn stall as a foreground-held-FIFO defect, not a claude property.
 - [streamsup's per-subtype map](streamsup-package-system-maps-per-subtype-since-2026-08-07.md) — the mapping this capture's bytes are for (#2245), not yet written.
