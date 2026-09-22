@@ -267,3 +267,19 @@ If a child dies without a result while retry is open, the state survives the
 respawn and the next assistant/user/result line publishes the observable clear
 before its own event. Resetting it on child exit would leave the client holding an
 active state with no matching falling edge.
+
+The unterminated-line remainder in `Parser.buf` is the opposite case: it does
+*not* survive a child (#1503). Before #1503, a child killed mid-write (`killGrace`
+SIGKILL, OOM, crash) left its fragment in `buf`, the respawned child's first line
+was appended to it, `consumeLine` failed to decode the spliced bytes, and the
+result was one `Unrecognized` event carrying both children's bytes with the real
+first line lost. `Runner.spawnAndWait` now calls `(*Parser).dropPartialLine()`
+once `cmd.Wait()` has returned, beside `takeStdin`. `Wait` joins the stdout copy
+goroutine even past `WaitDelay`, so the dead child's last `Write` happens-before
+the drop and the drop happens-before the next child's first `Write` — the
+single-writer invariant holds with no added lock. The drop deliberately does not
+live in `retireParserChild`: that helper also runs from `retireStdinGeneration`
+on a caller's context while the child may still be writing, where dropping the
+buffer would race `Write`. `stallTracker.childExited` (the watchdog's own copy of
+this splice) keeps its buffer on purpose — there a spliced line only counts as
+activity, so clearing it defends a failure mode never observed.

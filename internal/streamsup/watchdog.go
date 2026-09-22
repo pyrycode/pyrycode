@@ -201,7 +201,9 @@ func (t *stallTracker) turnSent() {
 // is one unparseable line, which consumeLine already treats as activity-only — it
 // cannot flip awaiting to a wrong value, and the first line after a spawn is
 // `system`/`init`, activity-only anyway. Dropping it would defend a failure mode
-// never observed, and the sibling question for the #1088 Parser is still open.
+// never observed. The #1088 Parser, where a splice becomes a spurious
+// Unrecognized event and swallows the successor's first line, drops its
+// remainder at child exit (#1503).
 func (t *stallTracker) childExited() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
