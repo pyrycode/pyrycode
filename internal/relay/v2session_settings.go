@@ -203,6 +203,10 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 		"event", "v2.settings.updated",
 		"conn_id", s.connID,
 		"session_id", p.SessionID)
+	// After the updated log: the change did persist, only the reply is dropped.
+	if m.dropInlineReplyIfDown(s, "v2.settings.updated_dropped_transport_down") {
+		return
+	}
 	if err := m.forwardEnvelope(ctx, s.connID, reply); err != nil {
 		// Unreachable in practice: s is V2StateOpen on the dispatch goroutine.
 		// Logged at debug and dropped — the package's outbound-drop posture.
@@ -359,6 +363,9 @@ func (m *V2SessionManager) settingsReplyError(ctx context.Context, s *V2Session,
 		TS:        time.Now().UTC(),
 		Payload:   errPayload,
 		InReplyTo: &inReplyTo,
+	}
+	if m.dropInlineReplyIfDown(s, "v2.settings.err_dropped_transport_down") {
+		return
 	}
 	if err := m.forwardEnvelope(ctx, s.connID, reply); err != nil {
 		m.cfg.Logger.Debug("relay: v2 settings error reply push dropped",

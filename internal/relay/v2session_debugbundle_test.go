@@ -520,10 +520,10 @@ func TestV2Session_DebugBundle_ErrorReplies(t *testing.T) {
 // seam plus an independent transport-down probe, so the #911 gate tests can hold
 // the push drain down to keep a bundle's chunks queued. Connected reads probeUp
 // (probeUp=false ⇒ drainOnce holds the head un-popped/unsealed, so the queued
-// bundle stays put); Outbound records UNCONDITIONALLY (independent of probeUp),
-// so a synchronous busy-reject reply — which forwardEnvelope seals even while the
-// drain is held (it does not consult the #874 transport-down hold) — is still
-// captured on the wire. This mirrors TestV2Session_Push_HoldGatedOnProbeNotSendError's
+// bundle stays put); Outbound records UNCONDITIONALLY (independent of probeUp).
+// While probeUp is false a busy-reject reply is dropped unsealed (#1526), so a
+// test observes it through waitBusyRejectDrops rather than on the wire. This
+// mirrors TestV2Session_Push_HoldGatedOnProbeNotSendError's
 // independent probe/send wiring; bundleManagerFor omits Connected entirely, which
 // would drain the queue instantly and make the busy window non-deterministic. The
 // returned reconnect channel re-signals the drain on recovery (AC #4).
@@ -622,6 +622,23 @@ func assertBusyReject(t *testing.T, msg protocol.RoutingEnvelope, recv *noise.Ci
 	}
 }
 
+// waitBusyRejectDrops polls until buf holds n transport-down drops of the
+// debug-bundle error reply (#1526). With the probe held down, that drop line is
+// the only observable edge of a busy reject: the reply is dropped unsealed, so
+// it never reaches the wire. The reply's shape with the leg up is pinned by
+// TestV2Session_DebugBundle_RejectsSecondWhileAssembling.
+func waitBusyRejectDrops(t *testing.T, buf *syncLogBuffer, n int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(dropLinesContaining(buf, "event=v2.bundle.err_dropped_transport_down")) >= n {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("busy-reject drops = %d, want >= %d", len(dropLinesContaining(buf, "event=v2.bundle.err_dropped_transport_down")), n)
+}
+
 func requestBundle(t *testing.T, frames chan protocol.RoutingEnvelope, send *noise.CipherState, connID string, reqID uint64) {
 	t.Helper()
 	frames <- sealAppFrameConn(t, send, connID, protocol.Envelope{
@@ -647,10 +664,11 @@ func TestV2Session_DebugBundle_RejectsSecondWhileQueued(t *testing.T) {
 	fake := &fakeBundler{archive: archive}
 	wantFrames := wantChunks(len(archive)) + 1 // N chunks + done
 
-	mgr, frames, rec, probeUp, _, respPub := bundleGatedManagerFor(t, fake.fn, silentLogger())
+	logger, logBuf := bufferLogger()
+	mgr, frames, rec, probeUp, _, respPub := bundleGatedManagerFor(t, fake.fn, logger)
 
 	const connID = "c-bundle-busy"
-	send, recv := openModalConn(t, mgr, frames, rec, respPub, connID, nil)
+	send, _ := openModalConn(t, mgr, frames, rec, respPub, connID, nil)
 
 	// Hold the drain down so the first bundle's frames stay queued (unsealed).
 	probeUp.Store(false)
@@ -665,16 +683,15 @@ func TestV2Session_DebugBundle_RejectsSecondWhileQueued(t *testing.T) {
 
 	// Requests #2 and #3 while the first bundle is still queued: each is rejected
 	// before StreamBundle. The queued count must not grow, the bundler must not be
-	// re-invoked, and each request gets exactly one deterministic reject reply
-	// (forwardEnvelope bypasses the drain hold, so Outbound records it even with
-	// the probe down).
+	// re-invoked, and each request takes the reject branch exactly once. With the
+	// probe down the reject reply is dropped unsealed (#1526), so the drop line is
+	// the observable edge and nothing reaches the wire for this conn.
 	for i, reqID := range []uint64{202, 303} {
 		requestBundle(t, frames, send, connID, reqID)
-
-		// The reject reply is the (i+1)-th noise_msg beyond the handshake (the held
-		// bundle frames are unsealed, so they emit nothing).
-		msgs := waitNoiseMsgs(t, rec, connID, i+1)
-		assertBusyReject(t, msgs[i], recv, reqID)
+		waitBusyRejectDrops(t, logBuf, i+1)
+		if got := len(noiseMsgsForConn(t, rec, connID)); got != 0 {
+			t.Fatalf("noise_msgs after reject #%d = %d, want 0 (nothing sealed while down)", i+1, got)
+		}
 
 		if got := queueLen(mgr, connID); got != wantFrames {
 			t.Fatalf("queue depth after reject #%d = %d, want %d (a rejected retry must not stack a second bundle)", i+1, got, wantFrames)
@@ -748,11 +765,12 @@ func TestV2Session_DebugBundle_PerConnIsolation(t *testing.T) {
 	fake := &fakeBundler{archive: archive}
 	wantFrames := wantChunks(len(archive)) + 1
 
-	mgr, frames, rec, probeUp, _, respPub := bundleGatedManagerFor(t, fake.fn, silentLogger())
+	logger, logBuf := bufferLogger()
+	mgr, frames, rec, probeUp, _, respPub := bundleGatedManagerFor(t, fake.fn, logger)
 
 	const connA = "c-bundle-A"
 	const connB = "c-bundle-B"
-	sendA, recvA := openModalConn(t, mgr, frames, rec, respPub, connA, nil)
+	sendA, _ := openModalConn(t, mgr, frames, rec, respPub, connA, nil)
 	sendB, _ := openModalConn(t, mgr, frames, rec, respPub, connB, nil)
 
 	// Hold the drain down for both conns.
@@ -774,11 +792,11 @@ func TestV2Session_DebugBundle_PerConnIsolation(t *testing.T) {
 		t.Fatalf("callCount after B's request = %d, want 2 (B must be served, not rejected, while A is busy)", got)
 	}
 
-	// A repeat request on A IS rejected (A still busy): a deterministic reject
-	// reply, no fresh assembly, no growth of A's queue. B's queue is untouched.
+	// A repeat request on A IS rejected (A still busy): the reject branch runs
+	// (its reply dropped unsealed while the probe is down, #1526), no fresh
+	// assembly, no growth of A's queue. B's queue is untouched.
 	requestBundle(t, frames, sendA, connA, 33)
-	msgs := waitNoiseMsgs(t, rec, connA, 1)
-	assertBusyReject(t, msgs[0], recvA, 33)
+	waitBusyRejectDrops(t, logBuf, 1)
 
 	if got := fake.callCount(); got != 2 {
 		t.Fatalf("callCount after A's repeat = %d, want 2 (A's repeat must be rejected, not assembled)", got)

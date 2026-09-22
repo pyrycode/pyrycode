@@ -124,6 +124,10 @@ func (m *V2SessionManager) handleRequestSnapshot(ctx context.Context, s *V2Sessi
 		Payload:   snapPayload,
 		InReplyTo: &inReplyTo,
 	}
+	// Before the served log, which would otherwise claim a delivery (#1526).
+	if m.dropInlineReplyIfDown(s, "v2.snapshot.dropped_transport_down") {
+		return
+	}
 	m.cfg.Logger.Info("relay: v2 screen snapshot served",
 		"event", "v2.snapshot.served",
 		"conn_id", s.connID,
@@ -164,6 +168,9 @@ func (m *V2SessionManager) snapshotReplyError(ctx context.Context, s *V2Session,
 		Payload:   errPayload,
 		InReplyTo: &inReplyTo,
 	}
+	if m.dropInlineReplyIfDown(s, "v2.snapshot.err_dropped_transport_down") {
+		return
+	}
 	if err := m.forwardEnvelope(ctx, s.connID, reply); err != nil {
 		m.cfg.Logger.Debug("relay: v2 snapshot error reply push dropped",
 			"event", "v2.snapshot.err_push",
@@ -171,6 +178,36 @@ func (m *V2SessionManager) snapshotReplyError(ctx context.Context, s *V2Session,
 			"code", code,
 			"err", err)
 	}
+}
+
+// dropInlineReplyIfDown reports whether an inline reply must be dropped
+// unsealed because the relay leg is down (#1526), logging the drop. The inline
+// replies (snapshot, settings, bundle-error, resync) call forwardEnvelope
+// directly on Run, outside the push drain, so each needs the pre-seal probe
+// drainOnce (#874), handleWake (#912) and forwardAppReply (#1525) already have:
+// m.send swallows its Outbound error, so a reply sealed while down spends a
+// send-nonce the phone never sees, and the next delivered frame fails AEAD and
+// kills the session. Reacting to the post-send error is too late.
+//
+// The probe sits at each call site, not inside forwardEnvelope: drainReplayOnce
+// would read a transport-down return from forwardEnvelope as a failed replay and
+// abandon the whole tail on a blip. The down path is a drop, not a park, like
+// #1525 — the reply was undeliverable anyway — so recovery needs no flush.
+//
+// event is a per-site constant slug. The line is Debug and content-free: slug,
+// conn-id and reason only, never payload, plaintext, ciphertext, key bytes or
+// settings values (#833). Runs on Run, the single owner of s.send; the probe
+// needs no lock, and the single-frame TOCTOU at the up→down instant carries over
+// from #874.
+func (m *V2SessionManager) dropInlineReplyIfDown(s *V2Session, event string) bool {
+	if !m.transportDown() {
+		return false
+	}
+	m.cfg.Logger.Debug("relay: v2 inline reply dropped; transport down",
+		"event", event,
+		"conn_id", s.connID,
+		"reason", "transport_down")
+	return true
 }
 
 // SetReplaySource publishes the mid-turn-reconnect replay source to the manager
@@ -315,6 +352,10 @@ func (m *V2SessionManager) emitResync(ctx context.Context, s *V2Session, convID 
 		Type:    protocol.TypeResync,
 		TS:      time.Now().UTC(),
 		Payload: payload,
+	}
+	// Before the resync log, which would otherwise claim a delivery (#1526).
+	if m.dropInlineReplyIfDown(s, "v2.replay.resync_dropped_transport_down") {
+		return
 	}
 	m.cfg.Logger.Info("relay: v2 reconnect resync",
 		"event", "v2.replay.resync",
