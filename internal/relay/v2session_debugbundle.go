@@ -247,6 +247,9 @@ func (m *V2SessionManager) debugBundleReplyError(ctx context.Context, s *V2Sessi
 		Payload:   errPayload,
 		InReplyTo: &inReplyTo,
 	}
+	if m.dropInlineReplyIfDown(s, "v2.bundle.err_dropped_transport_down") {
+		return
+	}
 	if err := m.forwardEnvelope(ctx, s.connID, reply); err != nil {
 		m.cfg.Logger.Debug("relay: v2 debug bundle error reply push dropped",
 			"event", "v2.bundle.err_push",

@@ -84,3 +84,13 @@ AC5 (up / nil seam unchanged): every existing `internal/relay` test runs unmodif
 ## Documentation handoff (pending — documentation stage)
 
 `docs/knowledge/features/v2-session-manager-out-of-scope-deferred.md`, bullet **"Extending the `transportDown()` guard beyond `drainOnce`"**: mark the inline reply seals (#1526) done, name them as six sites, and note that the settings-report path is covered by #1525 through `forwardToRun`.
+
+## Revisions
+
+### 2026-09-23 — two existing tests asserted the defect (AC5 "unmodified" not met)
+
+`TestV2Session_DebugBundle_RejectsSecondWhileQueued` and `TestV2Session_DebugBundle_PerConnIsolation` (both built on `bundleGatedManagerFor`) hold `Connected` false to keep a bundle's chunks queued, then expected the busy-reject `debugBundleReplyError` to be sealed and delivered anyway. Their helper's comment said so: forwardEnvelope "does not consult the #874 transport-down hold". That is exactly the burned nonce AC1 forbids, so AC1 and AC5's "every existing test passes unmodified" cannot both hold. AC5's own scope sentence covers the transport-up and nil-`Connected` cases, and both tests run with `Connected` reporting down, so AC1 wins.
+
+Change: both tests now log to a buffer and observe each busy reject through its `v2.bundle.err_dropped_transport_down` drop line, via a new `waitBusyRejectDrops` helper. `RejectsSecondWhileQueued` also asserts that no noise_msg reaches the wire for the conn. Their #911 assertions (queue depth does not grow, bundler not re-invoked, B served while A is busy) are unchanged. The busy reply's wire shape with the leg up (code, message, retryable, InReplyTo) remains pinned by `TestV2Session_DebugBundle_RejectsSecondWhileAssembling`. The `bundleGatedManagerFor` comment is updated to match.
+
+Phase B isolation evidence: removing one site's guard at a time (`if false && m.dropInlineReplyIfDown(...)`) failed exactly that site's row, six out of six. A helper that logs but returns `false` (log-then-seal) failed every row on `Outbound attempts = 2` and on the AEAD MAC check, so the nonce oracle is not vacuous.
