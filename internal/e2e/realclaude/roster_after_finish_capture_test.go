@@ -27,6 +27,37 @@ package realclaude
 //     The arm that asked BEFORE THE FIRST TURN shows no roster at all across two
 //     complete turns — and that is the ask position production runs.
 //
+// # Why the command is backgrounded ON REQUEST, and the release waits for it
+//
+// The first live laps staged the task the way #2247 did: a foreground `cat` of a held
+// FIFO under BASH_DEFAULT_TIMEOUT_MS, released as soon as system/task_started arrived.
+// Measured by hand on 2026-09-22 against 2.1.280, that staging cannot answer this
+// ticket, for two reasons.
+//
+//   - task_started is NOT the backgrounding. It fires about three seconds into the call
+//     carrying is_backgrounded:false, before the timeout has moved anything, so a
+//     release on it lets the command finish in the FOREGROUND. That task was never on a
+//     roster, and "the roster omits it" is then true of a line that could never have
+//     listed it.
+//   - A foreground `cat` of the FIFO never returns its tool result, not even after the
+//     command has exited, so the first turn never ends and the follow-on turn queues
+//     behind it until the budget fires. task_notification_v2.1.259.json records the
+//     same stall (turn_seconds 360.0, terminated_on "budget"); on the live gate it ran
+//     the whole suite into its 20-minute deadline.
+//
+// So the prompt asks for run_in_background, and the release waits both for claude to
+// report the task as backgrounded and for the first turn's `result`. A task that
+// finishes BETWEEN turns is also the shape desktop #1558's stuck pill was seen in.
+//
+// The same diagnostic showed the order at the completion instant: claude sends the
+// roster that drops the task ONE LINE BEFORE the task_updated and task_notification
+// lines carrying the terminal status. A verdict read only off lines after the terminal
+// status would discard the one line this ticket is about, so rosters are judged from
+// the RELEASE, the rig's own act that lets the task finish, and offset_lines still
+// records where each sat against the status line. claude also runs a turn of its own
+// after a background task finishes, to read the task's output, so the follow-on turn's
+// `result` is counted from when its prompt went out rather than by position.
+//
 // # Why the staging reads through three prompts, in this order
 //
 // streamsup.Runner's RequestInitializeOnSpawn writes one initialize control_request
@@ -50,9 +81,10 @@ package realclaude
 // # What is REUSED rather than forked, and why most of it carries another ticket's
 // prefix
 //
-// tpcapHoldFIFO, tpcapCensus, bgIdlePrompt, dropcapRecorder, dropcapRedactor,
-// dropcapScanner, dropcapMakeEntry, dropcapWaitForChild, newDropcapArgvHandler and
-// parseOne are CALLED here. The prefix marks the file an identifier was minted in, per
+// tpcapHoldFIFO, tpcapCensus, dropcapRecorder, dropcapRedactor, dropcapScanner,
+// dropcapMakeEntry, dropcapWaitForChild, newDropcapArgvHandler and parseOne are CALLED
+// here. rafcapPrompt is bgIdlePrompt's sentence with one clause added, and is spelled
+// out rather than derived because that clause is the whole staging change above. The prefix marks the file an identifier was minted in, per
 // this package's branch-hygiene rule; it is not private scope, and re-deriving any of
 // them would be the fork the ticket forbids. #2247's rig — the start-then-finish
 // staging this reuses — is a SIBLING of this file and is not edited by it.
@@ -113,7 +145,7 @@ const rafcapEnableEnv = "PYRY_PROBE_ROSTER_AFTER_FINISH_CAPTURE"
 // enforces the same version pin from the other end; the two are deliberately not
 // shared, because that reader takes no path parameter by design.
 const (
-	rafcapFixtureVersion = "2.1.272"
+	rafcapFixtureVersion = "2.1.280"
 	rafcapFixturePath    = "testdata/roster_after_finish_v" + rafcapFixtureVersion + ".json"
 )
 
@@ -169,7 +201,12 @@ const (
 	// its quarry in hand after 3.3 seconds, and it was one of five that pushed the live
 	// gate past its deadline.
 	rafcapFollowOnTurnWait = 120 * time.Second
-	rafcapRunExitWait      = 30 * time.Second
+	// How long to wait, once the task is backgrounded, for the first turn's own `result`
+	// before releasing. Recorded rather than required: a release inside the turn still
+	// stages a completion, and a run whose turns never close is refused by the
+	// follow-on arm anyway.
+	rafcapFirstTurnWait = 60 * time.Second
+	rafcapRunExitWait   = 30 * time.Second
 	// dropcapRecorder exposes only a `result` signal, so every wait above polls its
 	// snapshot. Teaching the recorder a second channel would fork a helper every probe
 	// in this package shares.
@@ -207,10 +244,12 @@ const (
 )
 
 // The three prompts a roster can have followed, plus the one position that is not a
-// prompt at all. A roster before the terminal status says nothing about a completion —
-// dropped_lines_v2.1.220.json records exactly such a line, at the task's START.
+// prompt at all. A roster before the release says nothing about a completion —
+// dropped_lines_v2.1.220.json records exactly such a line, at the task's START. The
+// quiet window runs FROM THE RELEASE: nothing is asked of claude from that moment until
+// the mid-session initialize, so a roster anywhere in it arrived unprompted.
 const (
-	rafcapPhasePreTerminal   = "before-terminal-status"
+	rafcapPhaseBeforeRelease = "before-release"
 	rafcapPhaseQuietWindow   = "quiet-window"
 	rafcapPhaseMidSessionAsk = "mid-session-initialize"
 	rafcapPhaseFollowOnTurn  = "follow-on-turn"
@@ -245,6 +284,22 @@ var rafcapTerminalTokens = []string{"completed", "failed", "stopped", "killed"}
 
 var rafcapArgs = []string{"--model", rafcapModel, "--dangerously-skip-permissions"}
 
+// rafcapClassTaskOutput is claude's own per-task output file, which a BACKGROUNDED
+// task's task_notification names in output_file. Its directory is claude's temp root
+// joined with a dash-mangled spelling of the working directory, so none of the path
+// classes the redactor's constructor installs matches it. The value is read off the
+// line and redacted whole, before any frame is made.
+const rafcapClassTaskOutput = "task_output_file"
+
+// rafcapPrompt is bgIdlePrompt's sentence with ONE clause added: it asks for
+// run_in_background. See this file's header for why a timeout-backgrounded call cannot
+// stage this probe.
+func rafcapPrompt(fifoPath string, nonce int64) string {
+	return fmt.Sprintf("Use the Bash tool exactly once with run_in_background set to true to run "+
+		"this command verbatim: cat %s. Do not chain it with && or ;, do not add any flags or "+
+		"redirections, do not comment on it, and do nothing else. run=%d", fifoPath, nonce)
+}
+
 // rafcapUndecodedLineType is what a line the rig could not decode is recorded as when a
 // roster names the line before it. dropcapCensusKey already mints this bucket for the
 // same gap, so it is CALLED rather than re-spelled: the two must not drift, because a
@@ -259,9 +314,15 @@ const rafcapSpawnShapeDelta = "The YOLO interactive shape, identical to #1260's,
 	"production and which no capture probe in this package had enabled before. That ask lands BEFORE the " +
 	"child's first turn, which is the one ask position in this repo never followed by a roster line."
 
-const rafcapLimitations = "One turn plus one follow-on turn, one spawn shape, one claude version, one " +
+const rafcapLimitations = "One turn, claude's own turn reading the finished task's output, and one " +
+	"follow-on turn; one spawn shape, one claude version, one " +
 	"model (" + rafcapModel + "), one tool (Bash), one terminal state. Cross-version, cross-model and " +
-	"cross-tool stability are UNMEASURED. The status observed is whatever a `cat` reaching EOF produces; " +
+	"cross-tool stability are UNMEASURED. The task is backgrounded ON REQUEST (run_in_background) and " +
+	"finishes between turns; a call backgrounded by its timeout is NOT staged, because a foreground " +
+	"`cat` of the held FIFO never returned its tool result on the releases tried. Rosters are judged " +
+	"from the release, since the one dropping the task arrived before the terminal-status line; " +
+	"after_release and offset_lines state both positions. " +
+	"The status observed is whatever a `cat` reaching EOF produces; " +
 	"the documented failed and stopped states are NOT staged and nothing here says what they carry. " +
 	"THE QUIET WINDOW IS A FLOOR, NOT A CLAIM ABOUT BATCHING: a roster arriving past its end would be " +
 	"attributed to whichever prompt followed, so read offset_seconds before concluding a line was " +
@@ -276,7 +337,8 @@ const rafcapLimitations = "One turn plus one follow-on turn, one spawn shape, on
 	"task_notification_v2.1.259.json fired it neither at the start nor at the finish."
 
 const rafcapRedactionRationale = "Inherited whole from #1260 (see dropcapRedactionRationale): a fresh " +
-	"empty non-git workdir, rig-authored prompts (bgIdlePrompt and a fixed follow-on line), a `cat " +
+	"empty non-git workdir, rig-authored prompts (a run_in_background variant of bgIdlePrompt and a " +
+	"fixed follow-on line), a `cat " +
 	"<fifo>` that produces no output, no os.Environ() read into the record, the declared dropcapRedactor " +
 	"substitution table over every string, and dropcapScanner as a fail-closed deny-scan over the " +
 	"marshalled record. " +
@@ -290,7 +352,9 @@ const rafcapRedactionRationale = "Inherited whole from #1260 (see dropcapRedacti
 	"A third mechanism, inherited from #2247: rafcapUnredactedPathFields refuses to PROMOTE a record " +
 	"whose kept frames still carry a value beginning with a path separator after redaction, and names " +
 	"the FIELD rather than the value. task_notification is documented to carry output_file, a path on " +
-	"the operator's host. A refusal costs one live turn; a promotion costs a public leak. The inherited " +
+	"the operator's host, and for a BACKGROUNDED task it does; that value is read off the line and " +
+	"redacted whole as its own class before any frame is made. A refusal costs one live turn; a " +
+	"promotion costs a public leak. The inherited " +
 	"prefix classes are named here BY SYMBOL (dropcapFixedNeedles) and deliberately not spelled out, " +
 	"because this string is itself written into the record and then deny-scanned: a rationale that " +
 	"quotes a needle fails the scan it describes. " +
@@ -342,8 +406,13 @@ type rafcapRosterObs struct {
 	// because the verdict is decided by ONE line and the reader checks the verdict
 	// against that same line.
 	JoinedAgainstFinishedID bool `json:"joined_against_finished_id"`
-	// OffsetLines is this line's index minus the terminal-status line's, so a strictly
-	// positive value is "after the completion". OffsetSeconds is poll-granular; see
+	// AfterRelease is whether the line arrived at or after the FIFO's release, the rig's
+	// own act that lets the task finish. It, and not offset_lines, is what the verdict
+	// reads: at 2.1.280 the roster dropping the task arrived one line BEFORE the
+	// terminal-status line, at offset -1.
+	AfterRelease bool `json:"after_release"`
+	// OffsetLines is this line's index minus the terminal-status line's: negative is
+	// before that line, positive after it. OffsetSeconds is poll-granular; see
 	// rafcapLimitations.
 	OffsetLines   int     `json:"offset_lines"`
 	OffsetSeconds float64 `json:"offset_seconds"`
@@ -416,11 +485,17 @@ type rafcapRecord struct {
 	FinishedTaskIDKnown    bool    `json:"finished_task_id_known"`
 	TerminalStatusObserved bool    `json:"terminal_status_observed"`
 	HeldSeconds            float64 `json:"fifo_held_seconds"`
-	QuietWindowSeconds     float64 `json:"quiet_window_seconds"`
-	MidSessionAskSent      bool    `json:"mid_session_ask_sent"`
-	MidSessionAskAnswered  bool    `json:"mid_session_ask_answered"`
-	FollowOnTurnObserved   bool    `json:"follow_on_turn_observed"`
-	TurnSeconds            float64 `json:"turn_seconds"`
+	// FirstTurnEnded is whether the first turn's `result` arrived before the release,
+	// so the task finished BETWEEN turns.
+	FirstTurnEnded bool `json:"first_turn_ended_before_release"`
+	// ReleaseLineIndex is the first line index at or after the release. A roster there
+	// or later is after_release.
+	ReleaseLineIndex      int     `json:"release_line_index"`
+	QuietWindowSeconds    float64 `json:"quiet_window_seconds"`
+	MidSessionAskSent     bool    `json:"mid_session_ask_sent"`
+	MidSessionAskAnswered bool    `json:"mid_session_ask_answered"`
+	FollowOnTurnObserved  bool    `json:"follow_on_turn_observed"`
+	TurnSeconds           float64 `json:"turn_seconds"`
 
 	// AC2's separate question: production's per-spawn ask is the one position in this
 	// repo never followed by a roster, and whether that held here is a fact of its own
@@ -479,7 +554,7 @@ type rafcapRecord struct {
 	// rafcapPhaseFor attributes a roster to a prompt by. Unexported: they are an
 	// instrument of this run rather than evidence about claude, and a reader given
 	// them would be tempted to re-derive the attribution the record already states.
-	markTerminal   int
+	markRelease    int
 	markQuietEnd   int
 	markMidSession int
 }
@@ -521,6 +596,7 @@ func rafcapSeedRecord() *rafcapRecord {
 		// the first line of the stream.
 		TerminalStatusIndex:          -1,
 		PerSpawnControlResponseIndex: -1,
+		ReleaseLineIndex:             -1,
 	}
 }
 
@@ -539,13 +615,14 @@ func (rec *rafcapRecord) note(format string, args ...any) {
 // rafcapPhaseFor names the prompt a line at this index followed, from the marks
 // recorded at each phase boundary.
 //
-// A line at or before the terminal-status line is pre-terminal and says nothing about
-// a completion — dropped_lines_v2.1.220.json holds exactly such a roster, emitted at
-// the task's START.
+// A line before the release says nothing about a completion —
+// dropped_lines_v2.1.220.json holds exactly such a roster, emitted at the task's START.
+// A line AT the release mark is after it: the mark is taken immediately before the
+// write end closes, so nothing claude sent because the task ended can precede it.
 func (rec *rafcapRecord) rafcapPhaseFor(index int) string {
 	switch {
-	case index <= rec.markTerminal:
-		return rafcapPhasePreTerminal
+	case index < rec.markRelease:
+		return rafcapPhaseBeforeRelease
 	case index < rec.markQuietEnd:
 		return rafcapPhaseQuietWindow
 	case index < rec.markMidSession:
@@ -641,10 +718,10 @@ func (rec *rafcapRecord) stagingVerdict() string {
 			"staging failed BEFORE any background task could exist — read tool_calls and "+
 			"line_type_census to see what claude did instead", rafcapRendezvousWait)
 	case !rec.BackgroundTaskObserved:
-		return fmt.Sprintf("a Bash call started but no system/%s line arrived within %s, so the call was "+
-			"never backgrounded and there was no background task to complete. BASH_DEFAULT_TIMEOUT_MS is "+
-			"%s ms: claude kept the call in the foreground or requested a timeout of its own. The staging "+
-			"failed, not the surface", rafcapStartedSubtype, rafcapBackgroundWait, rafcapBashTimeoutMS)
+		return fmt.Sprintf("a Bash call started but within %s no system/%s or system/%s line reported it "+
+			"backgrounded, so there was no background task to complete. The prompt asks for "+
+			"run_in_background: claude ran the call in the foreground instead. The staging failed, not "+
+			"the surface", rafcapBackgroundWait, rafcapStartedSubtype, rafcapUpdatedSubtype)
 	case !rec.TerminalStatusObserved:
 		return fmt.Sprintf("a background task was started and the FIFO was held %.1fs and then RELEASED, "+
 			"but no %v line carrying a terminal status arrived within %s. The task's own completion was "+
@@ -653,11 +730,11 @@ func (rec *rafcapRecord) stagingVerdict() string {
 	default:
 		return fmt.Sprintf("a background task completed (system/%s carried %q after a %.1fs hold), the "+
 			"quiet window ran %.1fs, a mid-session initialize was sent=%v (answered=%v — read "+
-			"staging_notes when it was not sent) and a further turn was read to its result. The staging "+
-			"WORKED, so the rosters array is a finding about claude's surface and is to be transcribed, "+
-			"not explained away",
+			"staging_notes when it was not sent) and the follow-on turn reached its result=%v. Where "+
+			"that last is true the staging WORKED, so the rosters array is a finding about claude's "+
+			"surface and is to be transcribed, not explained away",
 			rec.TerminalStatusSubtype, rec.TerminalStatusToken, rec.HeldSeconds, rec.QuietWindowSeconds,
-			rec.MidSessionAskSent, rec.MidSessionAskAnswered)
+			rec.MidSessionAskSent, rec.MidSessionAskAnswered, rec.FollowOnTurnObserved)
 	}
 }
 
@@ -741,9 +818,14 @@ func rafcapRosterTasks(payload []byte) (tasks json.RawMessage, ids []string, ok 
 	}
 	ids = make([]string, 0, len(entries))
 	for _, e := range entries {
-		if id, found := rafcapStringField(e, "task_id"); found {
-			ids = append(ids, id)
+		id, found := rafcapStringField(e, "task_id")
+		if !found {
+			// An entry with no readable id could BE the finished task, so no join over
+			// this line can say the task is absent. Reported as undecoded, which routes
+			// the line to the unreadable refusal rather than to the omits branch.
+			return raw, ids, false
 		}
+		ids = append(ids, id)
 	}
 	return raw, ids, true
 }
@@ -895,34 +977,51 @@ func rafcapDecideVerdict(terminalObserved bool,
 	if !terminalObserved {
 		return rafcapVerdictNoClaim, "", ""
 	}
-	var last *rafcapRosterObs
+	var after []*rafcapRosterObs
 	for i := range rosters {
-		if rosters[i].OffsetLines > 0 {
-			last = &rosters[i]
+		if rosters[i].AfterRelease {
+			after = append(after, &rosters[i])
 		}
 	}
-	if last == nil {
+	if len(after) == 0 {
 		return rafcapVerdictNone, "", ""
 	}
+	last := after[len(after)-1]
+	if !last.ListsFinishedTask {
+		switch {
+		case !last.TasksDecoded:
+			return "", "", fmt.Sprintf("the roster at line %d fired after the release (%d line(s) from the "+
+				"terminal status), but its `tasks` array did not decode or held an entry with no task_id, so "+
+				"nothing here read what it listed. Reporting that as a roster which omits the finished task "+
+				"would state the count comes down, measured off a line no code parsed. Read that frame's "+
+				"payload: a `tasks` key that is absent, or an array of something other than objects, is a "+
+				"wire-shape change worth a ticket of its own", last.Index, last.OffsetLines)
+		case !last.JoinedAgainstFinishedID:
+			return "", "", fmt.Sprintf("the roster at line %d fired after the release (%d line(s) from the "+
+				"terminal status) and its `tasks` array decoded, but claude's own system/%s line carried no "+
+				"task_id, so there is no key to join its entries against and no line in this run could have "+
+				"been found to list the finished task. Read finished_task_id_known and the task_started frame",
+				last.Index, last.OffsetLines, rafcapStartedSubtype)
+		}
+	}
+	verdict = rafcapVerdictOmits
 	if last.ListsFinishedTask {
-		return rafcapVerdictStillLists, last.Phase, ""
+		verdict = rafcapVerdictStillLists
 	}
-	switch {
-	case !last.TasksDecoded:
-		return "", "", fmt.Sprintf("the roster at line %d fired %d line(s) after the terminal status, "+
-			"but its `tasks` array did not decode, so nothing here read what it listed. Reporting that "+
-			"as a roster which omits the finished task would state the count comes down, measured off a "+
-			"line no code parsed. Read that frame's payload: a `tasks` key that is absent, or an array "+
-			"of something other than objects, is a wire-shape change worth a ticket of its own",
-			last.Index, last.OffsetLines)
-	case !last.JoinedAgainstFinishedID:
-		return "", "", fmt.Sprintf("the roster at line %d fired %d line(s) after the terminal status and "+
-			"its `tasks` array decoded, but claude's own system/%s line carried no task_id, so there is "+
-			"no key to join its entries against and no line in this run could have been found to list "+
-			"the finished task. Read finished_task_id_known and the task_started frame",
-			last.Index, last.OffsetLines, rafcapStartedSubtype)
+	// THE PROMPT IS WHERE THE STATE A CLIENT IS LEFT HOLDING BEGAN: the first line of the
+	// trailing run of readable rosters that agree with the last one. Naming the last
+	// line's own phase instead would report the mid-session ask whenever that ask is
+	// answered with the same empty roster claude had already sent unprompted, which is
+	// "the roster only answers a control request", the opposite finding.
+	first := last
+	for i := len(after) - 2; i >= 0; i-- {
+		r := after[i]
+		if !r.TasksDecoded || !r.JoinedAgainstFinishedID || r.ListsFinishedTask != last.ListsFinishedTask {
+			break
+		}
+		first = r
 	}
-	return rafcapVerdictOmits, last.Phase, ""
+	return verdict, first.Phase, ""
 }
 
 // --- waiting -----------------------------------------------------------------
@@ -1008,6 +1107,54 @@ func rafcapHasSubtype(subtype string) func([]dropcapCaptured) bool {
 	}
 }
 
+// rafcapHasBackgroundedTask is satisfied once claude has reported a task as
+// BACKGROUNDED: task_started carrying is_backgrounded:true, or task_updated whose patch
+// sets it.
+//
+// task_started ALONE is not enough, and releasing on it was this rig's first defect: at
+// 2.1.280 it fires about three seconds into a FOREGROUND call with is_backgrounded:false,
+// and at 2.1.220 it carried no such key at all.
+func rafcapHasBackgroundedTask(lines []dropcapCaptured) bool {
+	for _, c := range lines {
+		if !c.Decoded || c.Type != "system" {
+			continue
+		}
+		var line struct {
+			IsBackgrounded *bool           `json:"is_backgrounded"`
+			Patch          json.RawMessage `json:"patch"`
+		}
+		if json.Unmarshal(c.Raw, &line) != nil {
+			continue
+		}
+		switch c.Subtype {
+		case rafcapStartedSubtype:
+			if line.IsBackgrounded != nil && *line.IsBackgrounded {
+				return true
+			}
+		case rafcapUpdatedSubtype:
+			// A patch that is not an object is a shape change, not a backgrounding.
+			var patch struct {
+				IsBackgrounded *bool `json:"is_backgrounded"`
+			}
+			if json.Unmarshal(line.Patch, &patch) == nil && patch.IsBackgrounded != nil && *patch.IsBackgrounded {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// rafcapResultCount is how many `result` lines have been captured so far.
+func rafcapResultCount(lines []dropcapCaptured) int {
+	count := 0
+	for _, c := range lines {
+		if c.Decoded && c.Type == "result" {
+			count++
+		}
+	}
+	return count
+}
+
 // rafcapHasTerminalStatus is satisfied once EITHER candidate subtype has carried a
 // terminal status token. Which one it was is AC3's question and is read off the frames
 // afterwards; this predicate only decides when the quiet window may start.
@@ -1049,19 +1196,13 @@ func rafcapHasControlResponseAfter(mark int) func([]dropcapCaptured) bool {
 
 // rafcapHasResultCount is satisfied once n `result` lines have been captured.
 //
-// A COUNT rather than the recorder's resultSeen channel, because the follow-on turn's
-// result is the SECOND one and that channel closes on the first — it cannot tell the
-// two turns apart, and waiting on it would return instantly with the follow-on turn
-// still running.
+// A COUNT rather than the recorder's resultSeen channel, because that channel closes on
+// the first `result` and cannot tell turns apart. The caller passes the count seen when
+// the follow-on prompt went out, plus one: claude runs a turn of its own after a
+// background task finishes, so the follow-on turn's result has no fixed position.
 func rafcapHasResultCount(n int) func([]dropcapCaptured) bool {
 	return func(lines []dropcapCaptured) bool {
-		count := 0
-		for _, c := range lines {
-			if c.Decoded && c.Type == "result" {
-				count++
-			}
-		}
-		return count >= n
+		return rafcapResultCount(lines) >= n
 	}
 }
 
@@ -1214,7 +1355,7 @@ func TestRealClaude_RosterAfterFinishCapture(t *testing.T) {
 	turnBudget := time.NewTimer(rafcapTurnBudget)
 	defer turnBudget.Stop()
 
-	prompt := bgIdlePrompt(fifoPath, nonce)
+	prompt := rafcapPrompt(fifoPath, nonce)
 	rec.Prompts = red.strs([]string{prompt, rafcapFollowOnPrompt})
 	if err := streamsup.WriteTurn(ctx, stdin, []byte(prompt)); err != nil {
 		rec.set(rafcapOutcomeInstrumentBroke, "writing the first turn envelope failed, so no turn was "+
@@ -1233,15 +1374,24 @@ func TestRealClaude_RosterAfterFinishCapture(t *testing.T) {
 	case <-time.After(rafcapRendezvousWait):
 	}
 
-	// Phase 2 — wait for claude to background the timed-out call. This is the task that
+	// Phase 2 — wait for claude to REPORT the call as backgrounded. This is the task that
 	// has to EXIST before it can complete, and its absence is a staging failure rather
-	// than a finding.
+	// than a finding. task_started alone does not count; see rafcapHasBackgroundedTask.
 	if rec.ForegroundCallObserved {
 		rec.BackgroundTaskObserved = rafcapAwait(recorder, timeline, rafcapBackgroundWait,
-			rafcapHasSubtype(rafcapStartedSubtype))
+			rafcapHasBackgroundedTask)
 	}
 
-	// Phase 3 — RELEASE. `cat` sees EOF and the background task completes.
+	// Phase 2b — let the first turn end, so the task finishes BETWEEN turns. Recorded,
+	// not required; see rafcapFirstTurnWait.
+	if rec.BackgroundTaskObserved {
+		rec.FirstTurnEnded = rafcapAwait(recorder, timeline, rafcapFirstTurnWait, rafcapHasResultCount(1))
+	}
+
+	// Phase 3 — RELEASE. `cat` sees EOF and the background task completes. The mark is
+	// taken first, so every line claude sends because the task ended sits at or past it.
+	rec.markRelease = rafcapMark(recorder)
+	rec.ReleaseLineIndex = rec.markRelease
 	releaseFIFO()
 	// Left at zero when the rendezvous never fired: nothing was ever held open, and a
 	// duration measured from before the wait would read as a hold that happened.
@@ -1253,7 +1403,6 @@ func TestRealClaude_RosterAfterFinishCapture(t *testing.T) {
 	// was is AC3 and is read off the frames below.
 	rec.TerminalStatusObserved = rafcapAwait(recorder, timeline, rafcapTerminalWait,
 		rafcapHasTerminalStatus)
-	rec.markTerminal = rafcapMark(recorder)
 
 	// Phase 5 — THE QUIET WINDOW. A floor, not a deadline: the predicate never
 	// succeeds, so the wait runs its full duration with nothing asked of claude. That is
@@ -1285,8 +1434,10 @@ func TestRealClaude_RosterAfterFinishCapture(t *testing.T) {
 
 	// Phase 7 — one further ordinary turn, read through its own `result`. claude may
 	// batch roster changes to a turn boundary, so an absence that stops at the terminal
-	// status is an absence only WITHIN one turn. The wait STOPS as soon as the second
-	// result is read; nothing here burns a remaining budget.
+	// status is an absence only WITHIN one turn. The wait STOPS as soon as the follow-on
+	// turn's result is read; nothing here burns a remaining budget.
+	before, _ := recorder.snapshot()
+	resultsBefore := rafcapResultCount(before)
 	if err := streamsup.WriteTurn(ctx, stdin, []byte(rafcapFollowOnPrompt)); err != nil {
 		// A note too, though this one refuses promotion anyway: FollowOnTurnObserved
 		// stays false and fixtureWorthy has an arm on it. The note says WHY it is false,
@@ -1295,7 +1446,7 @@ func TestRealClaude_RosterAfterFinishCapture(t *testing.T) {
 			red.str(err.Error()))
 	} else {
 		rec.FollowOnTurnObserved = rafcapAwait(recorder, timeline, rafcapFollowOnTurnWait,
-			rafcapHasResultCount(2))
+			rafcapHasResultCount(resultsBefore+1))
 	}
 
 	// `result` may well have landed during the waits above, and by then the budget may
@@ -1392,6 +1543,21 @@ func rafcapCollect(t *testing.T, rec *rafcapRecord, lines []dropcapCaptured, tl 
 	kept := map[string]bool{}
 	for _, s := range rafcapKeptSubtypes {
 		kept[s] = true
+	}
+
+	// claude's per-task output file, read off the lines rather than known up front, and
+	// registered BEFORE any frame is made so every kept payload is redacted with it.
+	for _, c := range lines {
+		if !c.Decoded || c.Type != "system" || !kept[c.Subtype] {
+			continue
+		}
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(c.Raw, &obj) != nil {
+			continue
+		}
+		if p, ok := rafcapStringField(obj, "output_file"); ok && p != "" {
+			red.addPathClass(rafcapClassTaskOutput, "$TASK_OUTPUT_FILE", p)
+		}
 	}
 
 	terminalIndex, terminalSubtype, terminalToken, found := rafcapFindTerminal(lines)
@@ -1492,6 +1658,7 @@ func rafcapCollect(t *testing.T, rec *rafcapRecord, lines []dropcapCaptured, tl 
 				// together. Without the id there was never a key, so no line in this run
 				// could have been found to list the finished task.
 				JoinedAgainstFinishedID: ok && finishedID != "",
+				AfterRelease:            c.Index >= rec.markRelease,
 				OffsetLines:             c.Index - rec.TerminalStatusIndex,
 				AfterControlResponse:    prevType == "control_response",
 				PrecedingLineType:       prevType,
@@ -1514,7 +1681,7 @@ func rafcapCollect(t *testing.T, rec *rafcapRecord, lines []dropcapCaptured, tl 
 			rec.Rosters = append(rec.Rosters, obs)
 			if rec.PerSpawnControlResponseIndex >= 0 &&
 				c.Index > rec.PerSpawnControlResponseIndex && prevType == "control_response" &&
-				rec.rafcapPhaseFor(c.Index) == rafcapPhasePreTerminal {
+				rec.rafcapPhaseFor(c.Index) == rafcapPhaseBeforeRelease {
 				rec.PerSpawnAskFollowedByRoster = true
 			}
 		}
@@ -1829,20 +1996,20 @@ func TestRafcapDecideVerdictReadsTheClosedSet(t *testing.T) {
 	t.Parallel()
 	// A roster the rig could READ: its tasks array decoded and there was a task_id to
 	// join it against, so ListsFinishedTask is a measurement either way.
-	roster := func(offset int, lists bool, phase string) rafcapRosterObs {
+	roster := func(afterRelease, lists bool, phase string) rafcapRosterObs {
 		return rafcapRosterObs{
-			OffsetLines: offset, ListsFinishedTask: lists, Phase: phase,
+			AfterRelease: afterRelease, ListsFinishedTask: lists, Phase: phase,
 			TasksDecoded: true, JoinedAgainstFinishedID: true,
 		}
 	}
 	// One the rig could not: either the array did not decode, or claude's own
 	// task_started carried no id to join on. ListsFinishedTask is false on both, and it
 	// means "nothing could tell" rather than "the task is absent".
-	undecodedRoster := func(offset int, phase string) rafcapRosterObs {
-		return rafcapRosterObs{OffsetLines: offset, Phase: phase}
+	undecodedRoster := func(afterRelease bool, phase string) rafcapRosterObs {
+		return rafcapRosterObs{AfterRelease: afterRelease, Phase: phase}
 	}
-	unjoinableRoster := func(offset int, phase string) rafcapRosterObs {
-		return rafcapRosterObs{OffsetLines: offset, Phase: phase, TasksDecoded: true}
+	unjoinableRoster := func(afterRelease bool, phase string) rafcapRosterObs {
+		return rafcapRosterObs{AfterRelease: afterRelease, Phase: phase, TasksDecoded: true}
 	}
 	tests := []struct {
 		name       string
@@ -1854,37 +2021,74 @@ func TestRafcapDecideVerdictReadsTheClosedSet(t *testing.T) {
 		{"the task never completed", false, nil, rafcapVerdictNoClaim, ""},
 		{
 			"no terminal status but rosters anyway is still no claim",
-			false, []rafcapRosterObs{roster(4, false, rafcapPhaseQuietWindow)}, rafcapVerdictNoClaim, "",
+			false, []rafcapRosterObs{roster(true, false, rafcapPhaseQuietWindow)}, rafcapVerdictNoClaim, "",
 		},
-		{"nothing after the terminal status", true, nil, rafcapVerdictNone, ""},
+		{"nothing after the release", true, nil, rafcapVerdictNone, ""},
 		{
 			// The 2.1.220 shape: a roster at the task's START says nothing about a
 			// completion, and counting it would read a verdict off the wrong line.
-			"only a pre-terminal roster",
-			true, []rafcapRosterObs{roster(-9, true, rafcapPhasePreTerminal)}, rafcapVerdictNone, "",
+			"only a roster before the release",
+			true, []rafcapRosterObs{roster(false, true, rafcapPhaseBeforeRelease)}, rafcapVerdictNone, "",
 		},
 		{
-			"a roster on the terminal line itself is not after it",
-			true, []rafcapRosterObs{roster(0, true, rafcapPhasePreTerminal)}, rafcapVerdictNone, "",
+			// THE 2.1.280 SHAPE, and the reason the verdict reads after_release rather
+			// than offset_lines: the roster dropping the task arrived one line BEFORE the
+			// terminal-status line. A rule keyed on the status line discarded it.
+			"a roster between the release and the terminal-status line decides",
+			true, []rafcapRosterObs{{
+				AfterRelease: true, OffsetLines: -1, Phase: rafcapPhaseQuietWindow,
+				TasksDecoded: true, JoinedAgainstFinishedID: true,
+			}},
+			rafcapVerdictOmits, rafcapPhaseQuietWindow,
 		},
 		{
 			"one that still lists the finished task",
-			true, []rafcapRosterObs{roster(4, true, rafcapPhaseQuietWindow)},
+			true, []rafcapRosterObs{roster(true, true, rafcapPhaseQuietWindow)},
 			rafcapVerdictStillLists, rafcapPhaseQuietWindow,
 		},
 		{
 			"one that omits it",
-			true, []rafcapRosterObs{roster(4, false, rafcapPhaseMidSessionAsk)},
+			true, []rafcapRosterObs{roster(true, false, rafcapPhaseMidSessionAsk)},
 			rafcapVerdictOmits, rafcapPhaseMidSessionAsk,
 		},
 		{
-			// THE LAST POST-TERMINAL ROSTER DECIDES: a line that still listed the task
-			// followed by one that omits it means the count DID come down, which is the
-			// state a client is left holding.
+			// THE LAST ROSTER AFTER THE RELEASE DECIDES THE VERDICT: a line that still
+			// listed the task followed by one that omits it means the count DID come
+			// down, which is the state a client is left holding.
 			"the last one decides",
 			true, []rafcapRosterObs{
-				roster(4, true, rafcapPhaseQuietWindow),
-				roster(61, false, rafcapPhaseFollowOnTurn),
+				roster(true, true, rafcapPhaseQuietWindow),
+				roster(true, false, rafcapPhaseFollowOnTurn),
+			},
+			rafcapVerdictOmits, rafcapPhaseFollowOnTurn,
+		},
+		{
+			// THE PROMPT IS WHERE THAT STATE BEGAN. An unprompted empty roster followed by
+			// the mid-session ask's own empty answer is claude sending it unprompted;
+			// naming the ask would report the opposite finding to two client tickets.
+			"the prompt names where the trailing agreeing run began",
+			true, []rafcapRosterObs{
+				roster(true, false, rafcapPhaseQuietWindow),
+				roster(true, false, rafcapPhaseMidSessionAsk),
+			},
+			rafcapVerdictOmits, rafcapPhaseQuietWindow,
+		},
+		{
+			"a disagreeing line in between ends the run",
+			true, []rafcapRosterObs{
+				roster(true, false, rafcapPhaseQuietWindow),
+				roster(true, true, rafcapPhaseMidSessionAsk),
+				roster(true, false, rafcapPhaseFollowOnTurn),
+			},
+			rafcapVerdictOmits, rafcapPhaseFollowOnTurn,
+		},
+		{
+			// An unreadable line cannot be said to agree, so it ends the run too.
+			"an unreadable line in between ends the run",
+			true, []rafcapRosterObs{
+				roster(true, false, rafcapPhaseQuietWindow),
+				undecodedRoster(true, rafcapPhaseMidSessionAsk),
+				roster(true, false, rafcapPhaseFollowOnTurn),
 			},
 			rafcapVerdictOmits, rafcapPhaseFollowOnTurn,
 		},
@@ -1897,21 +2101,21 @@ func TestRafcapDecideVerdictReadsTheClosedSet(t *testing.T) {
 		// evidence. Defaulting either to omits would state that the count comes down.
 		{
 			"a roster whose tasks array did not decode yields no verdict",
-			true, []rafcapRosterObs{undecodedRoster(4, rafcapPhaseQuietWindow)}, "", "",
+			true, []rafcapRosterObs{undecodedRoster(true, rafcapPhaseQuietWindow)}, "", "",
 		},
 		{
 			// claude's own task_started carried no task_id, so there is no join key and
 			// ListsFinishedTask could never have been set on any line.
 			"a roster that decoded but has no join key yields no verdict",
-			true, []rafcapRosterObs{unjoinableRoster(4, rafcapPhaseMidSessionAsk)}, "", "",
+			true, []rafcapRosterObs{unjoinableRoster(true, rafcapPhaseMidSessionAsk)}, "", "",
 		},
 		{
 			// The last-one-decides rule and the unreadable rule compose: an unreadable
 			// line arriving last leaves the record unable to say what a client holds.
 			"an unreadable roster arriving last decides, and decides nothing",
 			true, []rafcapRosterObs{
-				roster(4, false, rafcapPhaseQuietWindow),
-				undecodedRoster(61, rafcapPhaseFollowOnTurn),
+				roster(true, false, rafcapPhaseQuietWindow),
+				undecodedRoster(true, rafcapPhaseFollowOnTurn),
 			}, "", "",
 		},
 		{
@@ -1920,16 +2124,16 @@ func TestRafcapDecideVerdictReadsTheClosedSet(t *testing.T) {
 			// for a human and does not block the verdict.
 			"an unreadable roster followed by a readable one still decides",
 			true, []rafcapRosterObs{
-				undecodedRoster(4, rafcapPhaseQuietWindow),
-				roster(61, true, rafcapPhaseFollowOnTurn),
+				undecodedRoster(true, rafcapPhaseQuietWindow),
+				roster(true, true, rafcapPhaseFollowOnTurn),
 			}, rafcapVerdictStillLists, rafcapPhaseFollowOnTurn,
 		},
 		{
 			// StillLists is reached only through ListsFinishedTask, which cannot be set
 			// without a successful join — so it needs no refusal arm of its own, and this
 			// pins that rather than leaving it to be re-derived.
-			"a pre-terminal unreadable roster is not a refusal",
-			true, []rafcapRosterObs{undecodedRoster(-9, rafcapPhasePreTerminal)},
+			"an unreadable roster before the release is not a refusal",
+			true, []rafcapRosterObs{undecodedRoster(false, rafcapPhaseBeforeRelease)},
 			rafcapVerdictNone, "",
 		},
 	}
@@ -1956,14 +2160,16 @@ func TestRafcapDecideVerdictReadsTheClosedSet(t *testing.T) {
 // sends it unprompted", and this arithmetic is the only thing that tells them apart.
 func TestRafcapPhaseForNamesThePromptThatPrecededIt(t *testing.T) {
 	t.Parallel()
-	rec := &rafcapRecord{markTerminal: 20, markQuietEnd: 30, markMidSession: 40}
+	rec := &rafcapRecord{markRelease: 20, markQuietEnd: 30, markMidSession: 40}
 	for _, tc := range []struct {
 		index int
 		want  string
 	}{
-		{0, rafcapPhasePreTerminal},
-		{19, rafcapPhasePreTerminal},
-		{20, rafcapPhasePreTerminal},
+		{0, rafcapPhaseBeforeRelease},
+		{19, rafcapPhaseBeforeRelease},
+		// AT the mark is after the release: the mark is taken just before the write end
+		// closes, and at 2.1.280 the roster dropping the task is the very next line.
+		{20, rafcapPhaseQuietWindow},
 		{21, rafcapPhaseQuietWindow},
 		{29, rafcapPhaseQuietWindow},
 		{30, rafcapPhaseMidSessionAsk},
@@ -2075,6 +2281,16 @@ func TestRafcapRosterTasksKeepsTheArrayVerbatim(t *testing.T) {
 		}
 	})
 
+	t.Run("an entry with no task_id makes the whole line unreadable", func(t *testing.T) {
+		t.Parallel()
+		// That entry could BE the finished task, so no join over the line can call it
+		// absent. The verifier's residual shape of the unreadable class, closed here.
+		if _, _, ok := rafcapRosterTasks([]byte(`{"tasks":[{"task_type":"local_bash"}]}`)); ok {
+			t.Error("an entry with no task_id reported tasks_decoded=true, which lets the line reach the " +
+				"omits branch with the entry uncounted")
+		}
+	})
+
 	t.Run("a missing or unreadable tasks key says so", func(t *testing.T) {
 		t.Parallel()
 		for _, payload := range []string{`{"type":"system"}`, `not json`, `{"tasks":"nope"}`} {
@@ -2179,7 +2395,7 @@ func TestRafcapCollectDoesNotSeeThroughAnUndecodedLine(t *testing.T) {
 			rec := rafcapSeedRecord()
 			// Past every index here, so rafcapPhaseFor attributes uniformly and the
 			// phase plays no part in what this test measures.
-			rec.markTerminal, rec.markQuietEnd, rec.markMidSession = 0, 99, 99
+			rec.markRelease, rec.markQuietEnd, rec.markMidSession = 0, 99, 99
 			rafcapCollect(t, rec, tc.lines, newRafcapTimeline(),
 				&dropcapRedactor{counts: map[string]int{}})
 			if len(rec.Rosters) != 1 {
@@ -2433,8 +2649,8 @@ func TestRafcapQuietWindowMeetsItsFloor(t *testing.T) {
 
 func TestRafcapBudgetOutlastsItsPhases(t *testing.T) {
 	t.Parallel()
-	phases := rafcapRendezvousWait + rafcapBackgroundWait + rafcapTerminalWait + rafcapQuietWindow +
-		2*rafcapInitializeWait + rafcapFollowOnTurnWait
+	phases := rafcapRendezvousWait + rafcapBackgroundWait + rafcapFirstTurnWait + rafcapTerminalWait +
+		rafcapQuietWindow + 2*rafcapInitializeWait + rafcapFollowOnTurnWait
 	if rafcapTurnBudget <= phases {
 		t.Errorf("rafcapTurnBudget = %s but the phase waits can spend %s before the budget is read: "+
 			"raise the budget or shorten a phase, and do it deliberately", rafcapTurnBudget, phases)
@@ -2595,10 +2811,11 @@ func TestRafcapRigAuthoredProseCarriesNoDenyNeedle(t *testing.T) {
 			roster rafcapRosterObs
 		}{
 			{"tasks did not decode", rafcapRosterObs{
-				Index: 61, OffsetLines: 4, Phase: rafcapPhaseQuietWindow,
+				Index: 61, AfterRelease: true, OffsetLines: 4, Phase: rafcapPhaseQuietWindow,
 			}},
 			{"no join key", rafcapRosterObs{
-				Index: 61, OffsetLines: 4, Phase: rafcapPhaseQuietWindow, TasksDecoded: true,
+				Index: 61, AfterRelease: true, OffsetLines: 4, Phase: rafcapPhaseQuietWindow,
+				TasksDecoded: true,
 			}},
 		} {
 			_, _, unreadable := rafcapDecideVerdict(true, []rafcapRosterObs{tc.roster})
@@ -2634,6 +2851,72 @@ func TestRafcapRigAuthoredProseCarriesNoDenyNeedle(t *testing.T) {
 // every other identifier here: siblings add files to this package concurrently and a
 // branch-overlap check does not catch a same-package identifier collision, which is
 // exactly the shape a generically-named helper would produce.
+// TestRafcapHasBackgroundedTaskIsNotTaskStartedAlone runs offline and pins this rig's
+// first defect. At 2.1.280 task_started fires about three seconds into a FOREGROUND
+// call with is_backgrounded:false; a release keyed on it let the command finish in the
+// foreground, off every roster, and read "the roster omits it" off a line that could
+// never have listed it.
+func TestRafcapHasBackgroundedTaskIsNotTaskStartedAlone(t *testing.T) {
+	t.Parallel()
+	line := func(subtype, payload string) dropcapCaptured {
+		return dropcapCaptured{Index: 0, Raw: []byte(payload), Type: "system", Subtype: subtype, Decoded: true}
+	}
+	tests := []struct {
+		name string
+		line dropcapCaptured
+		want bool
+	}{
+		{"the 2.1.280 foreground start", line(rafcapStartedSubtype,
+			`{"type":"system","subtype":"task_started","task_id":"x","is_backgrounded":false}`), false},
+		{"the 2.1.220 start, with no such key", line(rafcapStartedSubtype,
+			`{"type":"system","subtype":"task_started","task_id":"x"}`), false},
+		{"a start backgrounded on request", line(rafcapStartedSubtype,
+			`{"type":"system","subtype":"task_started","task_id":"x","is_backgrounded":true}`), true},
+		{"a timeout moving the call to the background", line(rafcapUpdatedSubtype,
+			`{"type":"system","subtype":"task_updated","task_id":"x","patch":{"is_backgrounded":true}}`), true},
+		{"a patch that clears it", line(rafcapUpdatedSubtype,
+			`{"type":"system","subtype":"task_updated","task_id":"x","patch":{"is_backgrounded":false}}`), false},
+		{"a patch that is not an object", line(rafcapUpdatedSubtype,
+			`{"type":"system","subtype":"task_updated","task_id":"x","patch":"is_backgrounded"}`), false},
+		{"another subtype carrying the key", line(rafcapNotificationSubtype,
+			`{"type":"system","subtype":"task_notification","is_backgrounded":true}`), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := rafcapHasBackgroundedTask([]dropcapCaptured{tc.line}); got != tc.want {
+				t.Errorf("rafcapHasBackgroundedTask() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRafcapCollectRedactsTheTaskOutputFile runs offline. A BACKGROUNDED task's
+// task_notification names claude's own output file, under claude's temp root and a
+// dash-mangled spelling of the working directory that no constructor class matches. It
+// has to leave the record as a placeholder, or the promotion gate refuses the run.
+func TestRafcapCollectRedactsTheTaskOutputFile(t *testing.T) {
+	t.Parallel()
+	const outputFile = "/tmp/claude-000/-tmp-home-rafcap-work/sess/tasks/abc.output"
+	lines := []dropcapCaptured{{
+		Index: 0, Type: "system", Subtype: rafcapNotificationSubtype, Decoded: true,
+		Raw: []byte(`{"type":"system","subtype":"task_notification","task_id":"abc",` +
+			`"status":"completed","output_file":"` + outputFile + `","summary":"cat"}`),
+	}}
+	rec := rafcapSeedRecord()
+	rafcapCollect(t, rec, lines, newRafcapTimeline(), &dropcapRedactor{counts: map[string]int{}})
+	if len(rec.Frames) != 1 {
+		t.Fatalf("kept %d frame(s), want 1", len(rec.Frames))
+	}
+	if strings.Contains(rec.Frames[0].Payload, "claude-000") || !strings.Contains(rec.Frames[0].Payload,
+		"$TASK_OUTPUT_FILE") {
+		t.Errorf("output_file was not redacted to its placeholder: %s", rec.Frames[0].Payload)
+	}
+	if got := rafcapUnredactedPathFields(rec.Frames); len(got) != 0 {
+		t.Errorf("rafcapUnredactedPathFields() = %v, want none once output_file is redacted", got)
+	}
+}
+
 func rafcapContains(xs []string, s string) bool {
 	for _, x := range xs {
 		if x == s {

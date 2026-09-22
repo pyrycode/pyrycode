@@ -40,7 +40,7 @@ const rosterAfterFinishCapturePath = "../e2e/realclaude/testdata/roster_after_fi
 // mismatched name (rafcapRecord.fixtureWorthy), so a claude upgrade is a loud
 // instruction to re-capture and repin rather than a fixture that quietly measures
 // another release.
-const rosterAfterFinishCaptureVersion = "2.1.272"
+const rosterAfterFinishCaptureVersion = "2.1.280"
 
 // The closed verdict set, spelled here as literals rather than imported from the
 // probe — which is behind a build tag this package never compiles, and which is the
@@ -89,7 +89,7 @@ const (
 // one sentence in emitBackgroundTaskRoster's doc comment naming the claude version
 // measured, and the same finding cross-posted on pyrycode/pyrycode-desktop#1246 and
 // #1558 so the two client tickets stop assuming opposite things.
-var rosterAfterFinishPinnedVerdict = ""
+var rosterAfterFinishPinnedVerdict = "roster-omits-the-finished-task"
 
 // The four states of (fixture, pin). Only the first is a skip, and only on the leg
 // before the live gate has ever run.
@@ -145,26 +145,32 @@ func rosterAfterFinishIsVerdict(s string) bool {
 // Nothing else of the record is decoded here — the probe's own censuses and staging
 // booleans are for a human reading the file, not for this gate.
 type rosterAfterFinishCaptureRecord struct {
-	IsCapture     bool   `json:"is_capture"`
-	ClaudeVersion string `json:"claude_version"`
-	Verdict       string `json:"verdict"`
-	VerdictPrompt string `json:"verdict_prompt"`
-	Rosters       []struct {
-		Index       int    `json:"index"`
-		Phase       string `json:"phase"`
-		OffsetLines int    `json:"offset_lines"`
-	} `json:"rosters"`
+	IsCapture     bool                         `json:"is_capture"`
+	ClaudeVersion string                       `json:"claude_version"`
+	Verdict       string                       `json:"verdict"`
+	VerdictPrompt string                       `json:"verdict_prompt"`
+	Rosters       []rosterAfterFinishRosterObs `json:"rosters"`
 }
 
-// rosterAfterFinishPostTerminal counts the roster observations that arrived AFTER the
-// terminal-status line — the only ones the verdict may be read from. offset_lines is
-// the roster's index minus the terminal-status line's, so a strictly positive offset
-// is exactly "after it"; a pre-terminal roster (the 2.1.220 shape, a roster at the
-// task's START) carries a negative one and says nothing about a completion.
-func rosterAfterFinishPostTerminal(rec rosterAfterFinishCaptureRecord) int {
+type rosterAfterFinishRosterObs struct {
+	Index        int    `json:"index"`
+	Phase        string `json:"phase"`
+	AfterRelease bool   `json:"after_release"`
+	OffsetLines  int    `json:"offset_lines"`
+}
+
+// rosterAfterFinishAfterRelease counts the roster observations that arrived at or after
+// the probe released the task — the only ones the verdict may be read from. A roster
+// before the release (the 2.1.220 shape, a roster at the task's START) says nothing
+// about a completion.
+//
+// after_release and NOT offset_lines: at 2.1.280 the roster dropping the finished task
+// arrived one line BEFORE the terminal-status line, at offset -1, so counting only
+// positive offsets would find no evidence under a verdict read off exactly that line.
+func rosterAfterFinishAfterRelease(rec rosterAfterFinishCaptureRecord) int {
 	n := 0
 	for _, r := range rec.Rosters {
-		if r.OffsetLines > 0 {
+		if r.AfterRelease {
 			n++
 		}
 	}
@@ -229,15 +235,15 @@ func TestRealClaudeRosterAfterFinishVerdictIsPinned(t *testing.T) {
 	// verdict is one word and the rosters array is the evidence it summarises; a
 	// summary that contradicts its own evidence would otherwise be transcribed into
 	// emitBackgroundTaskRoster's doc and quoted to two client tickets.
-	postTerminal := rosterAfterFinishPostTerminal(capture)
-	if capture.Verdict == rosterAfterFinishVerdictNone && postTerminal > 0 {
-		t.Fatalf("%s: verdict is %q but the record lists %d roster line(s) after the terminal-status "+
-			"line. The record disagrees with its own evidence and neither half can be trusted",
-			rosterAfterFinishCapturePath, capture.Verdict, postTerminal)
+	afterRelease := rosterAfterFinishAfterRelease(capture)
+	if capture.Verdict == rosterAfterFinishVerdictNone && afterRelease > 0 {
+		t.Fatalf("%s: verdict is %q but the record lists %d roster line(s) after the release. The "+
+			"record disagrees with its own evidence and neither half can be trusted",
+			rosterAfterFinishCapturePath, capture.Verdict, afterRelease)
 	}
-	if capture.Verdict != rosterAfterFinishVerdictNone && postTerminal == 0 {
+	if capture.Verdict != rosterAfterFinishVerdictNone && afterRelease == 0 {
 		t.Fatalf("%s: verdict is %q, which can only be read off a roster line, but the record lists "+
-			"none after the terminal-status line", rosterAfterFinishCapturePath, capture.Verdict)
+			"none after the release", rosterAfterFinishCapturePath, capture.Verdict)
 	}
 	// Where a roster was seen the verdict must name WHICH of the three prompts
 	// preceded it: "the roster answers a mid-session control request only" is a
@@ -338,25 +344,21 @@ func TestRosterAfterFinishVerdictSetIsClosed(t *testing.T) {
 	}
 }
 
-// TestRosterAfterFinishPostTerminalCountsOnlyWhatFollowedTheStatus pins the one
+// TestRosterAfterFinishAfterReleaseCountsOnlyWhatFollowedTheRelease pins the one
 // arithmetic the self-consistency check rests on.
 //
-// The pre-terminal case is real rather than hypothetical: dropped_lines_v2.1.220.json
-// records a roster at the task's START, in the turn that backgrounded the command.
-// Counting that one would let a "roster-omits" verdict be read off a line that
-// arrived before anything had finished.
-func TestRosterAfterFinishPostTerminalCountsOnlyWhatFollowedTheStatus(t *testing.T) {
+// Both edge rows are measured shapes. dropped_lines_v2.1.220.json records a roster at
+// the task's START, before any release; counting it would let a "roster-omits" verdict
+// be read off a line that arrived before anything had finished. And at 2.1.280 the
+// roster dropping the finished task sits one line before the terminal-status line, so
+// its offset is negative while it is the deciding line.
+func TestRosterAfterFinishAfterReleaseCountsOnlyWhatFollowedTheRelease(t *testing.T) {
 	t.Parallel()
-	rec := func(offsets ...int) rosterAfterFinishCaptureRecord {
-		var out rosterAfterFinishCaptureRecord
-		for i, o := range offsets {
-			out.Rosters = append(out.Rosters, struct {
-				Index       int    `json:"index"`
-				Phase       string `json:"phase"`
-				OffsetLines int    `json:"offset_lines"`
-			}{Index: i, OffsetLines: o})
-		}
-		return out
+	obs := func(after bool, offset int) rosterAfterFinishRosterObs {
+		return rosterAfterFinishRosterObs{AfterRelease: after, OffsetLines: offset}
+	}
+	rec := func(rosters ...rosterAfterFinishRosterObs) rosterAfterFinishCaptureRecord {
+		return rosterAfterFinishCaptureRecord{Rosters: rosters}
 	}
 	tests := []struct {
 		name string
@@ -364,16 +366,15 @@ func TestRosterAfterFinishPostTerminalCountsOnlyWhatFollowedTheStatus(t *testing
 		want int
 	}{
 		{"no rosters at all", rec(), 0},
-		{"the 2.1.220 shape: one roster BEFORE the terminal status", rec(-9), 0},
-		{"a roster on the terminal-status line itself is not after it", rec(0), 0},
-		{"one after", rec(4), 1},
-		{"one before and two after", rec(-9, 4, 61), 2},
+		{"the 2.1.220 shape: one roster before the release", rec(obs(false, -9)), 0},
+		{"the 2.1.280 shape: after the release, before the status line", rec(obs(true, -1)), 1},
+		{"one before and two after", rec(obs(false, -9), obs(true, -1), obs(true, 4)), 2},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := rosterAfterFinishPostTerminal(tc.in); got != tc.want {
-				t.Errorf("rosterAfterFinishPostTerminal() = %d, want %d", got, tc.want)
+			if got := rosterAfterFinishAfterRelease(tc.in); got != tc.want {
+				t.Errorf("rosterAfterFinishAfterRelease() = %d, want %d", got, tc.want)
 			}
 		})
 	}

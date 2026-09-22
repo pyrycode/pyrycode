@@ -1,0 +1,318 @@
+{
+  "ticket": "2525",
+  "claude_version": "2.1.280 (Claude Code)",
+  "captured_at": "2026-09-22T22:02:30+03:00",
+  "is_capture": true,
+  "model": "haiku",
+  "spawn_shape": [
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--forward-subagent-text",
+    "--model",
+    "haiku",
+    "--dangerously-skip-permissions",
+    "--session-id",
+    "$SESSION_ID"
+  ],
+  "spawn_shape_delta": "The YOLO interactive shape, identical to #1260's, #2089's and #2247's — see dropcapSpawnShapeDelta for what production's non-yolo spawn adds and what that implies for system/init. ONE DELIBERATE ADDITION over those three: streamsup.Config.RequestInitializeOnSpawn is set, which is the per-child initialize ask the interactive daemon's config mapping turns on in production and which no capture probe in this package had enabled before. That ask lands BEFORE the child's first turn, which is the one ask position in this repo never followed by a roster line.",
+  "env_delta": [
+    "BASH_DEFAULT_TIMEOUT_MS=5000"
+  ],
+  "workdir": "$WORKDIR",
+  "prompts": [
+    "Use the Bash tool exactly once with run_in_background set to true to run this command verbatim: cat $FIFO. Do not chain it with \u0026\u0026 or ;, do not add any flags or redirections, do not comment on it, and do nothing else. run=$NONCE",
+    "Reply with exactly the word: ok"
+  ],
+  "outcome": "measured",
+  "outcome_detail": "verdict=roster-omits-the-finished-task prompt=\"quiet-window\" over 3 roster line(s); a background task completed (system/task_updated carried \"completed\" after a 4.8s hold), the quiet window ran 35.1s, a mid-session initialize was sent=true (answered=true — read staging_notes when it was not sent) and the follow-on turn reached its result=true. Where that last is true the staging WORKED, so the rosters array is a finding about claude's surface and is to be transcribed, not explained away",
+  "terminated_on": "result",
+  "staging_notes": [],
+  "foreground_call_observed": true,
+  "background_task_observed": true,
+  "finished_task_id_known": true,
+  "terminal_status_observed": true,
+  "fifo_held_seconds": 4.768257125,
+  "first_turn_ended_before_release": true,
+  "release_line_index": 83,
+  "quiet_window_seconds": 35.136282,
+  "mid_session_ask_sent": true,
+  "mid_session_ask_answered": true,
+  "follow_on_turn_observed": true,
+  "turn_seconds": 45.352522625,
+  "per_spawn_ask_answered": true,
+  "per_spawn_ask_followed_by_roster": false,
+  "per_spawn_control_response_index": 0,
+  "terminal_status_subtype": "task_updated",
+  "terminal_status_token": "completed",
+  "terminal_status_location": "patch",
+  "terminal_status_line_index": 84,
+  "status_candidates": [
+    {
+      "subtype": "task_updated",
+      "fired": true,
+      "line_count": 1,
+      "carried_status": true,
+      "first_status_token": "completed",
+      "first_status_location": "patch",
+      "first_terminal_line_index": 84,
+      "note": "fired carrying the terminal status completed at patch"
+    },
+    {
+      "subtype": "task_notification",
+      "fired": true,
+      "line_count": 1,
+      "carried_status": true,
+      "first_status_token": "completed",
+      "first_status_location": "top-level",
+      "first_terminal_line_index": 85,
+      "note": "fired carrying the terminal status completed at top-level"
+    }
+  ],
+  "line_type_census": {
+    "assistant": 11,
+    "control_response": 2,
+    "rate_limit_event": 1,
+    "result/success": 3,
+    "stream_event": 125,
+    "system/background_tasks_changed": 3,
+    "system/init": 3,
+    "system/post_turn_summary": 3,
+    "system/status": 6,
+    "system/task_notification": 1,
+    "system/task_started": 1,
+    "system/task_summary": 4,
+    "system/task_updated": 1,
+    "system/thinking_tokens": 6,
+    "user": 3
+  },
+  "tool_calls": [
+    "Bash",
+    "Read"
+  ],
+  "tool_result_errors": 0,
+  "undecoded_lines": 0,
+  "lines_captured": 173,
+  "verdict": "roster-omits-the-finished-task",
+  "verdict_prompt": "quiet-window",
+  "rosters": [
+    {
+      "index": 39,
+      "tasks": [
+        {
+          "task_id": "b1t2d8z05",
+          "task_type": "local_bash",
+          "description": "cat $FIFO"
+        }
+      ],
+      "tasks_decoded": true,
+      "task_count": 1,
+      "lists_finished_task": true,
+      "joined_against_finished_id": true,
+      "after_release": false,
+      "offset_lines": -45,
+      "offset_seconds": -4.768110541,
+      "after_control_response": false,
+      "preceding_line_type": "system",
+      "results_before": 0,
+      "phase": "before-release",
+      "frame": {
+        "index": 39,
+        "type": "system",
+        "subtype": "background_tasks_changed",
+        "payload_len_bytes_captured": 358,
+        "payload_len_bytes": 212,
+        "payload_encoding": "json-string",
+        "payload": "{\"type\":\"system\",\"subtype\":\"background_tasks_changed\",\"tasks\":[{\"task_id\":\"b1t2d8z05\",\"task_type\":\"local_bash\",\"description\":\"cat $FIFO\"}],\"uuid\":\"175244c8-1911-4a46-a33e-f97ade07f53a\",\"session_id\":\"$SESSION_ID\"}",
+        "events_emitted": 1
+      }
+    },
+    {
+      "index": 83,
+      "tasks": [],
+      "tasks_decoded": true,
+      "task_count": 0,
+      "lists_finished_task": false,
+      "joined_against_finished_id": true,
+      "after_release": true,
+      "offset_lines": -1,
+      "offset_seconds": 0,
+      "after_control_response": false,
+      "preceding_line_type": "system",
+      "results_before": 1,
+      "phase": "quiet-window",
+      "frame": {
+        "index": 83,
+        "type": "system",
+        "subtype": "background_tasks_changed",
+        "payload_len_bytes_captured": 163,
+        "payload_len_bytes": 138,
+        "payload_encoding": "json-string",
+        "payload": "{\"type\":\"system\",\"subtype\":\"background_tasks_changed\",\"tasks\":[],\"uuid\":\"7b5be4ae-42a1-4024-8b8e-a2c6383bf83d\",\"session_id\":\"$SESSION_ID\"}",
+        "events_emitted": 1
+      }
+    },
+    {
+      "index": 156,
+      "tasks": [],
+      "tasks_decoded": true,
+      "task_count": 0,
+      "lists_finished_task": false,
+      "joined_against_finished_id": true,
+      "after_release": true,
+      "offset_lines": 72,
+      "offset_seconds": 35.387470667,
+      "after_control_response": true,
+      "preceding_line_type": "control_response",
+      "results_before": 2,
+      "phase": "mid-session-initialize",
+      "frame": {
+        "index": 156,
+        "type": "system",
+        "subtype": "background_tasks_changed",
+        "payload_len_bytes_captured": 163,
+        "payload_len_bytes": 138,
+        "payload_encoding": "json-string",
+        "payload": "{\"type\":\"system\",\"subtype\":\"background_tasks_changed\",\"tasks\":[],\"uuid\":\"e5efba51-2c48-4f5f-83d0-7393f3a71df6\",\"session_id\":\"$SESSION_ID\"}",
+        "events_emitted": 1
+      }
+    }
+  ],
+  "control_responses": [
+    {
+      "index": 0,
+      "request_id": "1",
+      "subtype": "success",
+      "phase": "before-release"
+    },
+    {
+      "index": 155,
+      "request_id": "2",
+      "subtype": "success",
+      "phase": "mid-session-initialize"
+    }
+  ],
+  "frames": [
+    {
+      "index": 39,
+      "type": "system",
+      "subtype": "background_tasks_changed",
+      "payload_len_bytes_captured": 358,
+      "payload_len_bytes": 212,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"background_tasks_changed\",\"tasks\":[{\"task_id\":\"b1t2d8z05\",\"task_type\":\"local_bash\",\"description\":\"cat $FIFO\"}],\"uuid\":\"175244c8-1911-4a46-a33e-f97ade07f53a\",\"session_id\":\"$SESSION_ID\"}",
+      "events_emitted": 1
+    },
+    {
+      "index": 40,
+      "type": "system",
+      "subtype": "task_started",
+      "payload_len_bytes_captured": 404,
+      "payload_len_bytes": 258,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"task_started\",\"task_id\":\"b1t2d8z05\",\"tool_use_id\":\"toolu_01CX7tQrqBqfeSv8Aik9zPtT\",\"description\":\"cat $FIFO\",\"is_backgrounded\":true,\"task_type\":\"local_bash\",\"uuid\":\"175949ed-2b7e-472a-aed3-d58924a0c727\",\"session_id\":\"$SESSION_ID\"}",
+      "events_emitted": 1
+    },
+    {
+      "index": 83,
+      "type": "system",
+      "subtype": "background_tasks_changed",
+      "payload_len_bytes_captured": 163,
+      "payload_len_bytes": 138,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"background_tasks_changed\",\"tasks\":[],\"uuid\":\"7b5be4ae-42a1-4024-8b8e-a2c6383bf83d\",\"session_id\":\"$SESSION_ID\"}",
+      "events_emitted": 1
+    },
+    {
+      "index": 84,
+      "type": "system",
+      "subtype": "task_updated",
+      "payload_len_bytes_captured": 218,
+      "payload_len_bytes": 193,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"task_updated\",\"task_id\":\"b1t2d8z05\",\"patch\":{\"status\":\"completed\",\"end_time\":1790103759445},\"uuid\":\"bb12f0a4-f651-44bb-a870-fdeecb61c090\",\"session_id\":\"$SESSION_ID\"}",
+      "events_emitted": 1
+    },
+    {
+      "index": 85,
+      "type": "system",
+      "subtype": "task_notification",
+      "payload_len_bytes_captured": 648,
+      "payload_len_bytes": 313,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"b1t2d8z05\",\"tool_use_id\":\"toolu_01CX7tQrqBqfeSv8Aik9zPtT\",\"status\":\"completed\",\"output_file\":\"$TASK_OUTPUT_FILE\",\"summary\":\"Background command \\\"cat $FIFO\\\" completed (exit code 0)\",\"uuid\":\"d0bfbb2d-af20-49fd-a877-952c3e119e9d\",\"session_id\":\"$SESSION_ID\"}",
+      "events_emitted": 1
+    },
+    {
+      "index": 156,
+      "type": "system",
+      "subtype": "background_tasks_changed",
+      "payload_len_bytes_captured": 163,
+      "payload_len_bytes": 138,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"background_tasks_changed\",\"tasks\":[],\"uuid\":\"e5efba51-2c48-4f5f-83d0-7393f3a71df6\",\"session_id\":\"$SESSION_ID\"}",
+      "events_emitted": 1
+    }
+  ],
+  "unredacted_path_fields": [],
+  "fixture_staged": false,
+  "fixture_stage_detail": "promoted; `git add` runs after this file is written, so its outcome is in fixture_staged/fixture_stage_detail of the artifact-dir record, not here",
+  "redaction": [
+    {
+      "class": "artifact_dir",
+      "replacement": "$ARTIFACT_DIR",
+      "count": 1
+    },
+    {
+      "class": "fifo_path",
+      "replacement": "$FIFO",
+      "count": 4
+    },
+    {
+      "class": "prompt_nonce",
+      "replacement": "$NONCE",
+      "count": 1
+    },
+    {
+      "class": "session_id",
+      "replacement": "$SESSION_ID",
+      "count": 7
+    },
+    {
+      "class": "task_output_file",
+      "replacement": "$TASK_OUTPUT_FILE",
+      "count": 1
+    },
+    {
+      "class": "workdir",
+      "replacement": "$WORKDIR",
+      "count": 1
+    }
+  ],
+  "redaction_rationale": "Inherited whole from #1260 (see dropcapRedactionRationale): a fresh empty non-git workdir, rig-authored prompts (a run_in_background variant of bgIdlePrompt and a fixed follow-on line), a `cat \u003cfifo\u003e` that produces no output, no os.Environ() read into the record, the declared dropcapRedactor substitution table over every string, and dropcapScanner as a fail-closed deny-scan over the marshalled record. WHAT THIS PROBE SPECIFICALLY COULD HAVE CARRIED AND DOES NOT: the initialize control_response's payload. This is the first capture in the family to send that request from inside a recording probe, and the reply is the operator's local claude configuration inventory — the model menu, the tool and MCP server names, the working directory, the api key source. AC2 needs the ORDERING of roster lines against control traffic and not the replies' contents, so this record keeps a control_response's index, request id and reply subtype and DISCARDS ITS PAYLOAD, which removes the class rather than filtering it. A third mechanism, inherited from #2247: rafcapUnredactedPathFields refuses to PROMOTE a record whose kept frames still carry a value beginning with a path separator after redaction, and names the FIELD rather than the value. task_notification is documented to carry output_file, a path on the operator's host, and for a BACKGROUNDED task it does; that value is read off the line and redacted whole as its own class before any frame is made. A refusal costs one live turn; a promotion costs a public leak. The inherited prefix classes are named here BY SYMBOL (dropcapFixedNeedles) and deliberately not spelled out, because this string is itself written into the record and then deny-scanned: a rationale that quotes a needle fails the scan it describes. DELIBERATELY KEPT, because removing them would defeat the ticket: the roster's tasks array verbatim (its description field is the rig's own `cat \u003cfifo\u003e` command line), claude's task and tool identifiers, status tokens, the task-lifecycle payload structure and the whole-turn line-type census.",
+  "credential_scan_applied": {
+    "ANTHROPIC_API_KEY": false,
+    "CLAUDE_CODE_OAUTH_TOKEN": true,
+    "anthropic-key-prefix": true,
+    "artifact_dir": true,
+    "home-path-prefix": true,
+    "operator_home": true,
+    "private-var-folders-prefix": true,
+    "temp_home": true,
+    "users-path-prefix": true,
+    "var-folders-prefix": true,
+    "workdir": true
+  },
+  "credential_scan_skipped": [
+    "ANTHROPIC_API_KEY"
+  ],
+  "limitations": "One turn, claude's own turn reading the finished task's output, and one follow-on turn; one spawn shape, one claude version, one model (haiku), one tool (Bash), one terminal state. Cross-version, cross-model and cross-tool stability are UNMEASURED. The task is backgrounded ON REQUEST (run_in_background) and finishes between turns; a call backgrounded by its timeout is NOT staged, because a foreground `cat` of the held FIFO never returned its tool result on the releases tried. Rosters are judged from the release, since the one dropping the task arrived before the terminal-status line; after_release and offset_lines state both positions. The status observed is whatever a `cat` reaching EOF produces; the documented failed and stopped states are NOT staged and nothing here says what they carry. THE QUIET WINDOW IS A FLOOR, NOT A CLAIM ABOUT BATCHING: a roster arriving past its end would be attributed to whichever prompt followed, so read offset_seconds before concluding a line was prompted. OFFSETS IN SECONDS ARE POLL-GRANULAR — dropcapRecorder does not timestamp lines and teaching it to would fork a helper every probe here shares, so each line's time is when the poll loop FIRST SAW it, within one tick. THE RENDEZVOUS WAIT IS A SELECT RATHER THAN A POLL, so a line arriving before the first background-task poll is stamped at that poll and reads as later than it was; no offset in this record is measured across that window. offset_lines is exact. A roster absent from this record did not appear in THESE turns, which is not the same as claude never emitting it: this family's firing rate is measured to vary per turn — dropped_lines_v2.1.220.json fired the roster at a task's start and task_notification_v2.1.259.json fired it neither at the start nor at the finish.",
+  "lines_dropped_over_cap": 0,
+  "bytes_dropped_over_cap": 0,
+  "partials_dropped": 0,
+  "blank_lines": 0,
+  "unterminated_partial_len": 0
+}
