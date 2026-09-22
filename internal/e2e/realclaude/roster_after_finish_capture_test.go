@@ -194,9 +194,11 @@ const (
 )
 
 // The four verdicts, a CLOSED SET. The streamsup reader spells the same four as its
-// own package constants and refuses anything outside them; the two are deliberately
-// not shared, and TestRafcapVerdictSetMatchesTheReader is what keeps them in step
-// without a shared helper.
+// own package constants and REFUSES ANYTHING OUTSIDE THEM, so a drift between the two
+// spellings reddens `make check` at the reader rather than passing as an
+// uninterpretable verdict. The two are deliberately not shared: a shared constant
+// would make the reader agree with the probe by construction, which is the thing the
+// five-standalone-readers rule exists to prevent.
 const (
 	rafcapVerdictNoClaim    = "task-did-not-complete"
 	rafcapVerdictNone       = "none-after-terminal-status"
@@ -1569,4 +1571,774 @@ func rafcapStageFixture(red *dropcapRedactor) (bool, string) {
 	}
 	return true, "staged with `git add`. A run in a worktree the dispatcher discards stages into an " +
 		"index that goes with it, so the artifact-dir record remains the copy that survives"
+}
+
+// --- offline self-checks -----------------------------------------------------
+
+// TestRafcapFixtureWorthyRefusesEveryBadCapture runs offline. fixtureWorthy is the only
+// thing standing between a live run and a committed fixture, and each refusing arm
+// below is a capture that would look green from outside — the record is written, the
+// deny-scan passed, the log is cheerful — while proving nothing, proving something
+// about the wrong claude, or carrying a host path into a public artefact.
+//
+// THE PROMOTING ARMS ARE THE POINT OF THIS TABLE. This probe's likeliest real answer is
+// an ABSENCE, so a promotion rule keyed on a roster having fired would refuse the
+// ticket's own expected result. The second arm is that case, and it must promote.
+func TestRafcapFixtureWorthyRefusesEveryBadCapture(t *testing.T) {
+	t.Parallel()
+	good := func() *rafcapRecord {
+		return &rafcapRecord{
+			ClaudeVersion:          rafcapFixtureVersion + " (Claude Code)",
+			ForegroundCallObserved: true,
+			BackgroundTaskObserved: true,
+			TerminalStatusObserved: true,
+			TerminalStatusSubtype:  rafcapNotificationSubtype,
+			TerminalStatusToken:    "completed",
+			QuietWindowSeconds:     rafcapQuietWindow.Seconds(),
+			MidSessionAskSent:      true,
+			MidSessionAskAnswered:  true,
+			FollowOnTurnObserved:   true,
+			Verdict:                rafcapVerdictNone,
+			Frames: []rafcapFrame{
+				{Index: 0, Subtype: rafcapStartedSubtype, PayloadEncoding: dropcapEncodingJSONString},
+				{Index: 1, Subtype: rafcapNotificationSubtype, PayloadEncoding: dropcapEncodingJSONString},
+			},
+		}
+	}
+	tests := []struct {
+		name   string
+		mutate func(*rafcapRecord)
+		want   bool
+	}{
+		{"a good capture is promoted", func(*rafcapRecord) {}, true},
+		{
+			// THE ARM THIS TICKET'S PROMOTION RULE TURNS ON.
+			"an absence after the terminal status is promoted, not refused as vacuous",
+			func(r *rafcapRecord) { r.Verdict = rafcapVerdictNone; r.Rosters = nil },
+			true,
+		},
+		{
+			// A roster-bearing verdict is equally promotable; the rule is keyed on the
+			// staging, not on which answer came back.
+			"a roster that still lists the finished task is promoted",
+			func(r *rafcapRecord) { r.Verdict = rafcapVerdictStillLists },
+			true,
+		},
+		{
+			// Recorded, not refused: two of the three prompts still ran, and discarding
+			// a live turn over the third would throw their evidence away.
+			"a mid-session ask that went unanswered is still promoted",
+			func(r *rafcapRecord) { r.MidSessionAskAnswered = false },
+			true,
+		},
+		{"bare version string, no suffix", func(r *rafcapRecord) { r.ClaudeVersion = rafcapFixtureVersion }, true},
+		{"the command never ran", func(r *rafcapRecord) { r.ForegroundCallObserved = false }, false},
+		{"it ran but was never backgrounded", func(r *rafcapRecord) { r.BackgroundTaskObserved = false }, false},
+		{"the task never reached a terminal status", func(r *rafcapRecord) { r.TerminalStatusObserved = false }, false},
+		{"no claim", func(r *rafcapRecord) { r.Verdict = rafcapVerdictNoClaim }, false},
+		{
+			"the quiet window was short of its floor",
+			func(r *rafcapRecord) { r.QuietWindowSeconds = rafcapQuietWindowFloor.Seconds() - 1 },
+			false,
+		},
+		{
+			// An absence that stopped at the terminal status is an absence only WITHIN
+			// one turn, and claude batching to a turn boundary is what that read rules out.
+			"the follow-on turn never ended",
+			func(r *rafcapRecord) { r.FollowOnTurnObserved = false },
+			false,
+		},
+		{"a different claude release", func(r *rafcapRecord) { r.ClaudeVersion = "2.1.300 (Claude Code)" }, false},
+		{"version unreadable", func(r *rafcapRecord) { r.ClaudeVersion = "<unavailable: exec failed>" }, false},
+		{"version absent", func(r *rafcapRecord) { r.ClaudeVersion = "" }, false},
+		{
+			// The one shape this side would otherwise promote and the reading side
+			// refuses: a frame that was not valid UTF-8 is recorded base64 with an empty
+			// payload.
+			"a base64 frame the consumer cannot read",
+			func(r *rafcapRecord) { r.Frames[1].PayloadEncoding = dropcapEncodingBase64 },
+			false,
+		},
+		{
+			"an unredacted host path in a kept payload",
+			func(r *rafcapRecord) { r.UnredactedPathFields = []string{"output_file"} },
+			false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := good()
+			tc.mutate(rec)
+			reason, ok := rec.fixtureWorthy()
+			if ok != tc.want {
+				t.Errorf("fixtureWorthy() ok = %v, want %v (reason %q)", ok, tc.want, reason)
+			}
+			if !ok && reason == "" {
+				t.Error("fixtureWorthy() refused without naming a reason; the log line would say nothing")
+			}
+			if ok && reason != "" {
+				t.Errorf("fixtureWorthy() promoted but named reason %q", reason)
+			}
+		})
+	}
+}
+
+// TestRafcapDecideVerdictReadsTheClosedSet runs offline. The verdict is the one word
+// two desktop tickets will be told, and every arm below is a shape a real capture can
+// produce.
+func TestRafcapDecideVerdictReadsTheClosedSet(t *testing.T) {
+	t.Parallel()
+	roster := func(offset int, lists bool, phase string) rafcapRosterObs {
+		return rafcapRosterObs{OffsetLines: offset, ListsFinishedTask: lists, Phase: phase}
+	}
+	tests := []struct {
+		name       string
+		terminal   bool
+		rosters    []rafcapRosterObs
+		want       string
+		wantPrompt string
+	}{
+		{"the task never completed", false, nil, rafcapVerdictNoClaim, ""},
+		{
+			"no terminal status but rosters anyway is still no claim",
+			false, []rafcapRosterObs{roster(4, false, rafcapPhaseQuietWindow)}, rafcapVerdictNoClaim, "",
+		},
+		{"nothing after the terminal status", true, nil, rafcapVerdictNone, ""},
+		{
+			// The 2.1.220 shape: a roster at the task's START says nothing about a
+			// completion, and counting it would read a verdict off the wrong line.
+			"only a pre-terminal roster",
+			true, []rafcapRosterObs{roster(-9, true, rafcapPhasePreTerminal)}, rafcapVerdictNone, "",
+		},
+		{
+			"a roster on the terminal line itself is not after it",
+			true, []rafcapRosterObs{roster(0, true, rafcapPhasePreTerminal)}, rafcapVerdictNone, "",
+		},
+		{
+			"one that still lists the finished task",
+			true, []rafcapRosterObs{roster(4, true, rafcapPhaseQuietWindow)},
+			rafcapVerdictStillLists, rafcapPhaseQuietWindow,
+		},
+		{
+			"one that omits it",
+			true, []rafcapRosterObs{roster(4, false, rafcapPhaseMidSessionAsk)},
+			rafcapVerdictOmits, rafcapPhaseMidSessionAsk,
+		},
+		{
+			// THE LAST POST-TERMINAL ROSTER DECIDES: a line that still listed the task
+			// followed by one that omits it means the count DID come down, which is the
+			// state a client is left holding.
+			"the last one decides",
+			true, []rafcapRosterObs{
+				roster(4, true, rafcapPhaseQuietWindow),
+				roster(61, false, rafcapPhaseFollowOnTurn),
+			},
+			rafcapVerdictOmits, rafcapPhaseFollowOnTurn,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, prompt := rafcapDecideVerdict(tc.terminal, tc.rosters)
+			if got != tc.want || prompt != tc.wantPrompt {
+				t.Errorf("rafcapDecideVerdict() = (%q, %q), want (%q, %q)", got, prompt, tc.want, tc.wantPrompt)
+			}
+		})
+	}
+}
+
+// TestRafcapPhaseForNamesThePromptThatPrecededIt runs offline. "The roster answers a
+// mid-session control request only" is a different instruction to a client than "claude
+// sends it unprompted", and this arithmetic is the only thing that tells them apart.
+func TestRafcapPhaseForNamesThePromptThatPrecededIt(t *testing.T) {
+	t.Parallel()
+	rec := &rafcapRecord{markTerminal: 20, markQuietEnd: 30, markMidSession: 40}
+	for _, tc := range []struct {
+		index int
+		want  string
+	}{
+		{0, rafcapPhasePreTerminal},
+		{19, rafcapPhasePreTerminal},
+		{20, rafcapPhasePreTerminal},
+		{21, rafcapPhaseQuietWindow},
+		{29, rafcapPhaseQuietWindow},
+		{30, rafcapPhaseMidSessionAsk},
+		{39, rafcapPhaseMidSessionAsk},
+		{40, rafcapPhaseFollowOnTurn},
+		{99, rafcapPhaseFollowOnTurn},
+	} {
+		if got := rec.rafcapPhaseFor(tc.index); got != tc.want {
+			t.Errorf("rafcapPhaseFor(%d) = %q, want %q", tc.index, got, tc.want)
+		}
+	}
+}
+
+// TestRafcapStatusOfFindsItInPatchAndAtTopLevel runs offline and is AC3's mechanism.
+//
+// Both locations are measured shapes, not defensive coding: 2.1.259's task_notification
+// carried a top-level status, and 2.1.220's task_updated carried its change inside
+// `patch`. A reader of only one would record a terminal status as absent on half the
+// shapes claude has been seen to send — and the quiet window would then start at the
+// wrong moment or not at all.
+func TestRafcapStatusOfFindsItInPatchAndAtTopLevel(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		payload        string
+		wantToken      string
+		wantLocation   string
+		wantIsTerminal bool
+	}{
+		{
+			name:           "the 2.1.259 task_notification shape",
+			payload:        `{"type":"system","subtype":"task_notification","status":"completed","output_file":""}`,
+			wantToken:      "completed",
+			wantLocation:   "top-level",
+			wantIsTerminal: true,
+		},
+		{
+			name:           "a status inside patch, the 2.1.220 task_updated shape",
+			payload:        `{"type":"system","subtype":"task_updated","task_id":"x","patch":{"status":"completed"}}`,
+			wantToken:      "completed",
+			wantLocation:   "patch",
+			wantIsTerminal: true,
+		},
+		{
+			// The literal 2.1.220 patch: a real update carrying no status at all.
+			name:    "the 2.1.220 patch carries no status",
+			payload: `{"type":"system","subtype":"task_updated","task_id":"x","patch":{"is_backgrounded":true}}`,
+		},
+		{
+			name:         "a non-terminal status is found but does not end the task",
+			payload:      `{"status":"running"}`,
+			wantToken:    "running",
+			wantLocation: "top-level",
+		},
+		{
+			// systemTaskUpdatedLine keeps patch as a raw value precisely because
+			// "whatever claude puts there" is the point; a string patch is a shape change
+			// to notice, not a decode to fail on.
+			name:    "a patch that is a string, not an object",
+			payload: `{"task_id":"x","patch":"is_backgrounded"}`,
+		},
+		{"no status anywhere", `{"task_id":"x"}`, "", "", false},
+		{"a non-string status is not a token", `{"status":7}`, "", "", false},
+		{"a line that does not decode reports nothing rather than guessing", `not json`, "", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			token, location := rafcapStatusOf([]byte(tc.payload))
+			if token != tc.wantToken || location != tc.wantLocation {
+				t.Errorf("rafcapStatusOf() = (%q, %q), want (%q, %q)", token, location,
+					tc.wantToken, tc.wantLocation)
+			}
+			if got := rafcapIsTerminal(token); got != tc.wantIsTerminal {
+				t.Errorf("rafcapIsTerminal(%q) = %v, want %v", token, got, tc.wantIsTerminal)
+			}
+		})
+	}
+}
+
+// TestRafcapRosterTasksKeepsTheArrayVerbatim runs offline. AC2 asks for the `tasks`
+// array verbatim, and "verbatim" is load-bearing: a typed decode would silently drop
+// every key this repo has not declared, which is the failure the family's
+// declare-only-what-you-captured rule exists to prevent downstream.
+func TestRafcapRosterTasksKeepsTheArrayVerbatim(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the 2.1.220 roster shape, with an undeclared key kept", func(t *testing.T) {
+		t.Parallel()
+		const payload = `{"type":"system","subtype":"background_tasks_changed","tasks":` +
+			`[{"task_id":"bybi8g8i8","task_type":"local_bash","description":"cat $FIFO","invented":1}]}`
+		tasks, ids, ok := rafcapRosterTasks([]byte(payload))
+		if !ok {
+			t.Fatal("a well-formed roster reported tasks_decoded=false")
+		}
+		if len(ids) != 1 || ids[0] != "bybi8g8i8" {
+			t.Errorf("ids = %v, want the one task_id claude sent", ids)
+		}
+		if !strings.Contains(string(tasks), `"invented":1`) {
+			t.Errorf("the kept array dropped a key claude sent: %s", tasks)
+		}
+	})
+
+	t.Run("an empty array is a roster, not an absence", func(t *testing.T) {
+		t.Parallel()
+		tasks, ids, ok := rafcapRosterTasks([]byte(`{"tasks":[]}`))
+		if !ok || len(ids) != 0 || string(tasks) != "[]" {
+			t.Errorf("rafcapRosterTasks() = (%s, %v, %v), want an empty but decoded array", tasks, ids, ok)
+		}
+	})
+
+	t.Run("a missing or unreadable tasks key says so", func(t *testing.T) {
+		t.Parallel()
+		for _, payload := range []string{`{"type":"system"}`, `not json`, `{"tasks":"nope"}`} {
+			if _, _, ok := rafcapRosterTasks([]byte(payload)); ok {
+				t.Errorf("payload %q reported tasks_decoded=true; a shape change must be recorded, not "+
+					"reported as an empty roster", payload)
+			}
+		}
+	})
+}
+
+// TestRafcapControlResponsesKeepNoPayload runs offline and pins this file's one
+// deliberate security decision as a PROPERTY OF THE RECORD rather than a habit of its
+// author.
+//
+// An initialize reply is the operator's local claude configuration inventory — the
+// model menu, the tool and MCP server names, cwd, apiKeySource. AC2 needs where that
+// reply sits in the stream and not what is in it, so the record keeps the envelope and
+// discards the payload. The last assertion is the one that matters: the marshalled
+// record must not contain the reply's bytes anywhere.
+func TestRafcapControlResponsesKeepNoPayload(t *testing.T) {
+	t.Parallel()
+	const secret = "my-private-mcp-server"
+	payload := `{"type":"control_response","response":{"subtype":"success","request_id":"2",` +
+		`"response":{"mcp_servers":[{"name":"` + secret + `"}],"cwd":"/somewhere/private"}}}`
+
+	requestID, subtype := rafcapControlOf([]byte(payload))
+	if requestID != "2" || subtype != "success" {
+		t.Fatalf("rafcapControlOf() = (%q, %q), want the doubly-nested request_id and subtype",
+			requestID, subtype)
+	}
+
+	rec := rafcapSeedRecord()
+	rec.ControlResponses = append(rec.ControlResponses, rafcapControlObs{
+		Index: 3, RequestID: requestID, Subtype: subtype, Phase: rafcapPhaseMidSessionAsk,
+	})
+	blob, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal the record: %v", err)
+	}
+	for _, leak := range []string{secret, "mcp_servers", "/somewhere/private"} {
+		if strings.Contains(string(blob), leak) {
+			t.Errorf("the record carries %q from an initialize reply. That reply is the operator's "+
+				"configuration inventory and this record keeps only the envelope — growing it a payload "+
+				"field reintroduces a class this ticket removed rather than filtered", leak)
+		}
+	}
+}
+
+// TestRafcapUnredactedPathFieldsNamesTheFieldNotTheValue runs offline. It is the third
+// redaction mechanism, inherited from #2247 because task_notification is documented to
+// carry output_file — a path on the operator's host.
+//
+// The last assertion is what makes it worth having rather than decorative: the returned
+// strings must never contain the path itself, because a refusal message printing the
+// value would be the exposure the refusal exists to prevent.
+func TestRafcapUnredactedPathFieldsNamesTheFieldNotTheValue(t *testing.T) {
+	t.Parallel()
+	frame := func(payload string) []rafcapFrame {
+		return []rafcapFrame{{Index: 3, Subtype: rafcapNotificationSubtype, Payload: payload}}
+	}
+	tests := []struct {
+		name  string
+		items []rafcapFrame
+		want  []string
+	}{
+		{"a redacted path is not a finding", frame(`{"output_file":"$TEMP_HOME/out.txt"}`), []string{}},
+		{"the 2.1.259 empty output_file is not a finding", frame(`{"output_file":"","status":"completed"}`), []string{}},
+		{"a bare host path names its field", frame(`{"output_file":"/var/x/out.txt"}`), []string{"output_file"}},
+		{"a path nested inside an object is caught at depth", frame(`{"usage":{"log":"/tmp/501/z"}}`), []string{"usage.log"}},
+		{
+			// The roster's own shape: its description is the rig's command line, and a
+			// path there that redaction did not know must still stop the promotion.
+			name: "a path inside the roster's tasks array is caught",
+			items: []rafcapFrame{{Index: 1, Subtype: rafcapRosterSubtype,
+				Payload: `{"tasks":[{"task_id":"a","description":"/bin/cat /elsewhere/fifo"}]}`}},
+			want: []string{"tasks[].description"},
+		},
+		{
+			name:  "a payload that cannot be decoded cannot be swept, and says so",
+			items: frame(`not json`),
+			want:  []string{"frame 3: payload does not decode, so it could not be swept"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := rafcapUnredactedPathFields(tc.items)
+			if strings.Join(got, "|") != strings.Join(tc.want, "|") {
+				t.Errorf("rafcapUnredactedPathFields() = %v, want %v", got, tc.want)
+			}
+			for _, f := range tc.items {
+				for _, v := range []string{"/var/x/out.txt", "/tmp/501/z", "/elsewhere/fifo"} {
+					if strings.Contains(f.Payload, v) && strings.Contains(strings.Join(got, "|"), v) {
+						t.Errorf("the result %v carries the VALUE %q; it must name the field only", got, v)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestRafcapStatusTableRecordsADidNotFire runs offline and is AC3's other half: a
+// candidate subtype that did not fire must be RECORDED as not having fired, not
+// omitted. An omitted subtype and one that fired carrying no status look identical to a
+// later reader, and only one of those is a measurement.
+func TestRafcapStatusTableRecordsADidNotFire(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an empty turn still answers for both candidates", func(t *testing.T) {
+		t.Parallel()
+		got := rafcapStatusTable(nil)
+		if len(got) != len(rafcapStatusCandidates) {
+			t.Fatalf("got %d entries, want %d — a candidate with no entry is a question AC3 asked and "+
+				"this record did not answer", len(got), len(rafcapStatusCandidates))
+		}
+		for _, obs := range got {
+			if obs.Fired || obs.CarriedStatus || !strings.Contains(obs.Note, "did not fire") {
+				t.Errorf("%s: %+v, want a recorded absence saying so", obs.Subtype, obs)
+			}
+		}
+	})
+
+	t.Run("the 2.1.259 split: notification carries it, updated never fired", func(t *testing.T) {
+		t.Parallel()
+		frames := []rafcapFrame{
+			{Index: 6, Subtype: rafcapStartedSubtype, Payload: `{"task_id":"x"}`},
+			{Index: 7, Subtype: rafcapNotificationSubtype, Payload: `{"task_id":"x","status":"completed"}`},
+		}
+		byName := map[string]rafcapStatusObs{}
+		for _, obs := range rafcapStatusTable(frames) {
+			byName[obs.Subtype] = obs
+		}
+		notif := byName[rafcapNotificationSubtype]
+		if !notif.Fired || !notif.CarriedStatus || notif.FirstToken != "completed" ||
+			notif.FirstLocation != "top-level" || notif.FirstTerminalAt != 7 {
+			t.Errorf("%s = %+v, want the terminal status found at the top level of line 7",
+				rafcapNotificationSubtype, notif)
+		}
+		if updated := byName[rafcapUpdatedSubtype]; updated.Fired {
+			t.Errorf("%s = %+v, want a recorded absence", rafcapUpdatedSubtype, updated)
+		}
+	})
+
+	t.Run("a subtype that fired without a status says exactly that", func(t *testing.T) {
+		t.Parallel()
+		frames := []rafcapFrame{{Index: 15, Subtype: rafcapUpdatedSubtype,
+			Payload: `{"task_id":"x","patch":{"is_backgrounded":true}}`}}
+		got := rafcapStatusTable(frames)[0]
+		if !got.Fired || got.CarriedStatus || got.FirstTerminalAt != -1 {
+			t.Errorf("%+v, want fired with no status and no terminal line", got)
+		}
+		if !strings.Contains(got.Note, "NO status") {
+			t.Errorf("note %q does not distinguish a fired-without-status from an absence", got.Note)
+		}
+	})
+}
+
+// TestRafcapAwaitOutlivesTheTurn runs offline against a recorder fed by hand, and it is
+// the deterministic net under the one assumption that decides whether this probe
+// catches anything at all.
+//
+// Every wait here is for something that can outlive the turn it belongs to. resultSeen
+// is closed via sync.Once, so a wait that took it as terminal would stay permanently
+// ready: the whole wait would collapse to one snapshot() and the unspent time would
+// then be reported as a finding about claude's surface. That is #2247's
+// tncapResultIsNotTheEnd defect, and this rig declines to offer the mode at all.
+func TestRafcapAwaitOutlivesTheTurn(t *testing.T) {
+	t.Parallel()
+
+	const resultLine = `{"type":"result","subtype":"success"}` + "\n"
+	rosterLine := fmt.Sprintf("{\"type\":\"system\",\"subtype\":%q,\"tasks\":[]}\n", rafcapRosterSubtype)
+	// Three poll ticks, so a wait that runs to its deadline is unmistakably longer than
+	// one that returns early.
+	const within = 3 * rafcapPoll
+
+	t.Run("a wait spends its deadline although the turn has ended", func(t *testing.T) {
+		t.Parallel()
+		r := newDropcapRecorder()
+		if _, err := r.Write([]byte(resultLine)); err != nil {
+			t.Fatalf("feed the result line: %v", err)
+		}
+		<-r.resultSeen // the turn is over before the wait even starts
+
+		start := time.Now()
+		if rafcapAwait(r, newRafcapTimeline(), within, rafcapHasSubtype(rafcapRosterSubtype)) {
+			t.Fatal("reported a roster present although no such line was ever fed")
+		}
+		if elapsed := time.Since(start); elapsed < within {
+			t.Errorf("the wait returned after %s, short of its %s deadline: `result` was treated as "+
+				"terminal, so a wait that has to outlive the turn was never spent and an absence nobody "+
+				"waited for would be recorded as a finding", elapsed, within)
+		}
+	})
+
+	t.Run("a wait finds a line that lands after the result", func(t *testing.T) {
+		t.Parallel()
+		r := newDropcapRecorder()
+		if _, err := r.Write([]byte(resultLine)); err != nil {
+			t.Fatalf("feed the result line: %v", err)
+		}
+		<-r.resultSeen
+		go func() {
+			time.Sleep(rafcapPoll)
+			_, _ = r.Write([]byte(rosterLine))
+		}()
+		if !rafcapAwait(r, newRafcapTimeline(), 40*rafcapPoll, rafcapHasSubtype(rafcapRosterSubtype)) {
+			t.Error("missed a roster line that arrived after the turn's result, which is the ONLY order " +
+				"this ticket's staging can produce one in")
+		}
+	})
+
+	t.Run("the follow-on turn's result is the SECOND one", func(t *testing.T) {
+		t.Parallel()
+		r := newDropcapRecorder()
+		if _, err := r.Write([]byte(resultLine)); err != nil {
+			t.Fatalf("feed the first result: %v", err)
+		}
+		<-r.resultSeen
+		if rafcapAwait(r, newRafcapTimeline(), within, rafcapHasResultCount(2)) {
+			t.Fatal("reported two results after one was fed: resultSeen cannot tell the two turns " +
+				"apart, which is why this predicate counts instead")
+		}
+		if _, err := r.Write([]byte(resultLine)); err != nil {
+			t.Fatalf("feed the second result: %v", err)
+		}
+		if !rafcapAwait(r, newRafcapTimeline(), within, rafcapHasResultCount(2)) {
+			t.Error("missed the follow-on turn's own result")
+		}
+	})
+
+	t.Run("a control_response is matched only at or past the mark", func(t *testing.T) {
+		t.Parallel()
+		r := newDropcapRecorder()
+		// Line index 0: the per-spawn ask's reply. A mid-session wait must not accept it.
+		if _, err := r.Write([]byte(`{"type":"control_response","response":{"subtype":"success"}}` + "\n")); err != nil {
+			t.Fatalf("feed the per-spawn reply: %v", err)
+		}
+		if rafcapAwait(r, newRafcapTimeline(), within, rafcapHasControlResponseAfter(5)) {
+			t.Error("the per-spawn ask's own reply satisfied a wait for the mid-session one; the two " +
+				"are indistinguishable by type and only the index separates them")
+		}
+		if !rafcapAwait(r, newRafcapTimeline(), within, rafcapHasControlResponseAfter(0)) {
+			t.Error("missed the per-spawn ask's reply at index 0")
+		}
+	})
+}
+
+// TestRafcapTimelineRecordsFirstSight runs offline. offset_seconds is what tells a
+// roster arriving immediately from one arriving thirty minutes later — desktop #1558's
+// whole report — so the timeline must record FIRST sight and never overwrite it on a
+// later poll.
+func TestRafcapTimelineRecordsFirstSight(t *testing.T) {
+	t.Parallel()
+	tl := newRafcapTimeline()
+	base := time.Now()
+	tl.note([]dropcapCaptured{{Index: 0}, {Index: 1}}, base)
+	// The same lines seen again, later: their first-sight times must not move.
+	tl.note([]dropcapCaptured{{Index: 0}, {Index: 1}, {Index: 2}}, base.Add(10*time.Second))
+
+	if secs, ok := tl.offset(0, 1); !ok || secs != 0 {
+		t.Errorf("offset(0,1) = (%v, %v), want two lines seen in the same tick", secs, ok)
+	}
+	if secs, ok := tl.offset(1, 2); !ok || secs != 10 {
+		t.Errorf("offset(1,2) = (%v, %v), want 10s — a re-noted line must keep its FIRST sight", secs, ok)
+	}
+	if _, ok := tl.offset(1, 99); ok {
+		t.Error("offset reported a duration for a line never seen; an invented offset is worse than none")
+	}
+}
+
+// TestRafcapQuietWindowMeetsItsFloor and TestRafcapBudgetOutlastsItsPhases pin the two
+// pieces of arithmetic this rig's correctness rests on, offline.
+//
+// The floor is AC1's: an absence recorded over a window shorter than 30 s is an absence
+// nothing waited for. The budget is the sibling failure — the phase waits run in
+// sequence before the budget is ever consulted, so a budget smaller than their sum
+// leaves the final select with BOTH arms ready and terminated_on picked at random, a
+// record misreporting how its own turn ended.
+func TestRafcapQuietWindowMeetsItsFloor(t *testing.T) {
+	t.Parallel()
+	if rafcapQuietWindow < rafcapQuietWindowFloor {
+		t.Errorf("rafcapQuietWindow = %s, below AC1's %s floor", rafcapQuietWindow, rafcapQuietWindowFloor)
+	}
+}
+
+func TestRafcapBudgetOutlastsItsPhases(t *testing.T) {
+	t.Parallel()
+	phases := rafcapRendezvousWait + rafcapBackgroundWait + rafcapTerminalWait + rafcapQuietWindow +
+		2*rafcapInitializeWait + rafcapFollowOnTurnWait
+	if rafcapTurnBudget <= phases {
+		t.Errorf("rafcapTurnBudget = %s but the phase waits can spend %s before the budget is read: "+
+			"raise the budget or shorten a phase, and do it deliberately", rafcapTurnBudget, phases)
+	}
+	t.Logf("turn budget %s, phases at most %s, margin %s", rafcapTurnBudget, phases, rafcapTurnBudget-phases)
+}
+
+// TestRafcapSealCatchesWhatEntersTheRecordAfterTheFirstScan runs offline.
+//
+// The record is marshalled more than once, and fields enter it BETWEEN the marshals:
+// fixture_stage_detail carries `git`'s combined output, and git prints repository paths
+// on failure. That path is in nobody's substitution table, so only the deny-scan can
+// catch it — and scanning once at the top then re-marshalling scanned a blob that did
+// not yet hold those bytes.
+func TestRafcapSealCatchesWhatEntersTheRecordAfterTheFirstScan(t *testing.T) {
+	t.Parallel()
+
+	// The fixed half of the net, which needs no knowledge of the run that produced a
+	// record — the same half that lets a committed capture be re-scanned forever.
+	scanner := newDropcapScanner("", "", "")
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*rafcapRecord)
+		want   string
+	}{
+		{name: "a clean record seals with no hit", mutate: func(*rafcapRecord) {}},
+		{
+			name: "git's index-lock error reaches the seal",
+			mutate: func(rec *rafcapRecord) {
+				rec.FixtureStageDetail = "git add failed (exit status 128): fatal: Unable to create " +
+					"'/Users/operator/src/pyrycode/.git/index.lock': File exists"
+			},
+			want: dropcapDenyUsers,
+		},
+		{
+			name: "a linux repository path reaches the seal",
+			mutate: func(rec *rafcapRecord) {
+				rec.FixtureStageDetail = "git add failed: /home/operator/src/pyrycode/.git/index.lock"
+			},
+			want: dropcapDenyHome,
+		},
+		{
+			// Frame payloads are scanned as DECODED bytes, because base64 hides them
+			// from a scan of the marshalled record.
+			name: "a base64 frame payload is scanned decoded",
+			mutate: func(rec *rafcapRecord) {
+				rec.Frames = []rafcapFrame{{
+					Index:      0,
+					Subtype:    rafcapNotificationSubtype,
+					PayloadB64: base64.StdEncoding.EncodeToString([]byte(`{"output_file":"/Users/x/o.txt"}`)),
+				}}
+			},
+			want: dropcapDenyUsers,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := rafcapSeedRecord()
+			tc.mutate(rec)
+			blob, hits, err := rafcapSeal(scanner, rec)
+			if err != nil {
+				t.Fatalf("seal: %v", err)
+			}
+			if tc.want == "" {
+				if len(hits) > 0 {
+					t.Fatalf("a clean record was refused, naming %v", hits)
+				}
+				return
+			}
+			if !rafcapContains(hits, tc.want) {
+				t.Fatalf("the seal returned %v and not %q: these bytes enter the record after the first "+
+					"marshal, so a scan that ran only at the top would carry them into a committed public "+
+					"fixture unscanned", hits, tc.want)
+			}
+			// The blob is returned for the caller to write, and the caller refuses to
+			// write it on a hit. What it must NOT do is be pre-sanitised here: the
+			// fail-closed response belongs to the caller, which knows what was about to land.
+			if len(blob) == 0 {
+				t.Error("the seal returned no bytes alongside its hits")
+			}
+		})
+	}
+}
+
+// TestRafcapRigAuthoredProseCarriesNoDenyNeedle is the net that would have saved
+// #2247's first live lap, and it is deliberately of different fabric from the rule it
+// enforces. "Do not quote a deny needle in prose the record carries" is advisory, it was
+// followed carefully, and it was broken anyway — because the rationale's whole SUBJECT
+// is the deny-scan, and the natural way to document a prefix list is to write the
+// prefixes down.
+//
+// What happened there: the rationale spelled out all four path prefixes
+// dropcapFixedNeedles searches for, the fail-closed scan hit four classes at once,
+// nothing was written, and the probe fatalled — after a 360 s live turn inside a 1400 s
+// gate lap that spent real tokens. The scan behaved exactly as designed; the bytes it
+// refused were the rig's own, and the diagnosis is a string comparison.
+//
+// Scope is the RIG-AUTHORED surface only. A needle in claude's bytes is the live scan's
+// to catch, after dropcapRedactor has had its turn.
+func TestRafcapRigAuthoredProseCarriesNoDenyNeedle(t *testing.T) {
+	t.Parallel()
+
+	// The fixed half only. The dynamic needles are the live run's own paths, which no
+	// offline test can know and which cannot appear in a compile-time constant.
+	scanner := dropcapScanner{needles: dropcapFixedNeedles()}
+
+	t.Run("the record's rig-authored seed", func(t *testing.T) {
+		t.Parallel()
+		blob, err := json.Marshal(rafcapSeedRecord())
+		if err != nil {
+			t.Fatalf("marshal the seed record: %v", err)
+		}
+		if hits, _ := scanner.scan(blob); len(hits) > 0 {
+			t.Errorf("rafcapSeedRecord carries deny class(es) %v in its OWN constants, so the live probe "+
+				"fails its write closed and produces nothing: name the prefixes by symbol "+
+				"(dropcapFixedNeedles) rather than spelling them out", hits)
+		}
+	})
+
+	t.Run("every stagingVerdict arm and the follow-on prompt", func(t *testing.T) {
+		t.Parallel()
+		// stagingVerdict is prose built at runtime and it lands in a record written on
+		// the refused path — the path where evidence matters most and where a scan hit
+		// would destroy the very evidence the arm exists to give.
+		for _, tc := range []struct {
+			name string
+			rec  rafcapRecord
+		}{
+			{"claude never opened the FIFO", rafcapRecord{}},
+			{"started but never backgrounded", rafcapRecord{ForegroundCallObserved: true}},
+			{"never reached a terminal status", rafcapRecord{
+				ForegroundCallObserved: true, BackgroundTaskObserved: true, HeldSeconds: 12.5,
+			}},
+			{"the staging worked", rafcapRecord{
+				ForegroundCallObserved: true, BackgroundTaskObserved: true, TerminalStatusObserved: true,
+				TerminalStatusSubtype: rafcapNotificationSubtype, TerminalStatusToken: "completed",
+				HeldSeconds: 12.5, QuietWindowSeconds: 35,
+			}},
+		} {
+			if hits, _ := scanner.scan([]byte(tc.rec.stagingVerdict())); len(hits) > 0 {
+				t.Errorf("stagingVerdict arm %q carries deny class(es) %v", tc.name, hits)
+			}
+		}
+		if hits, _ := scanner.scan([]byte(rafcapFollowOnPrompt)); len(hits) > 0 {
+			t.Errorf("the follow-on prompt carries deny class(es) %v", hits)
+		}
+	})
+
+	t.Run("the net reddens on a needle", func(t *testing.T) {
+		t.Parallel()
+		// Non-vacuity, established without mutating the file: append a needle to the one
+		// field the real defect was in. If this arm passes, the two above prove nothing —
+		// an empty needle list would make them green forever.
+		rec := rafcapSeedRecord()
+		rec.RedactionRationale += " and a stray /Users/ prefix spelled out in prose"
+		blob, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatalf("marshal the seeded record: %v", err)
+		}
+		hits, _ := scanner.scan(blob)
+		if !rafcapContains(hits, dropcapDenyUsers) {
+			t.Errorf("scanning a seed record whose rationale carries that prefix did not report %q; "+
+				"hits = %v, so the arms above are vacuous", dropcapDenyUsers, hits)
+		}
+	})
+}
+
+// rafcapContains is a local spelling of "is s in xs". It takes the file prefix like
+// every other identifier here: siblings add files to this package concurrently and a
+// branch-overlap check does not catch a same-package identifier collision, which is
+// exactly the shape a generically-named helper would produce.
+func rafcapContains(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
