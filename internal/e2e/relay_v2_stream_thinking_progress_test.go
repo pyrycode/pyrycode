@@ -262,6 +262,15 @@ func TestRelayV2_StreamThinkingProgressCrossingDeliversOneFrame(t *testing.T) {
 		t.Fatalf("thinking_progress frames: got %d, want 1 — the fed deltas reach the %d-token bound exactly "+
 			"on the last line", len(obs.progress), thinkingProgressBound)
 	}
+	// Decoding into the struct cannot see an extra key: a frame that started carrying the
+	// fed line's session_id or uuid would pass the value check below.
+	var keyed map[string]json.RawMessage
+	if err := json.Unmarshal(obs.progress[0], &keyed); err != nil {
+		t.Fatalf("decode thinking_progress payload as an object: %v", err)
+	}
+	assertExactKeys(t, "thinking_progress payload", keyed,
+		[]string{"conversation_id", "estimated_tokens", "estimated_tokens_delta"})
+
 	var got protocol.ThinkingProgressPayload
 	if err := json.Unmarshal(obs.progress[0], &got); err != nil {
 		t.Fatalf("decode thinking_progress payload: %v", err)

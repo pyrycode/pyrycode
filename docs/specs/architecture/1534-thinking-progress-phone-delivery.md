@@ -27,3 +27,27 @@ The file is the test; there is no production change to fail first. Sensitivity c
 ## Documentation handoff
 
 None — the ticket has no documentation-handoff section and no documentation acceptance criterion.
+
+## Security review
+
+**Verdict:** PASS
+
+**Findings:**
+
+- [Trust boundaries] No new boundary. The fed lines are claude-authored child stdout. The daemon's existing boundary is streamsup's top-level decode in `emitThinkingProgress`, which reads two ints and nothing else. The test adds evidence at that boundary: the crossing frame's values are asserted exactly at the client.
+- [Trust boundaries] SHOULD FIX, adopted in rework: decoding the frame into `protocol.ThinkingProgressPayload` cannot see an extra key. A frame that started carrying the fed line's `session_id` or `uuid` would pass. The crossing test now asserts the raw frame's key set is exactly `conversation_id`, `estimated_tokens` and `estimated_tokens_delta`, reusing the package's `assertExactKeys`. The silent test has no frame to check.
+- [Tokens] No findings. The pairing token from `paireddevice.Setup` goes only to `fakephone.Dial` and `driveHandshakeToOpenDaemonInteractive`. No failure message formats it. The fed payloads hold only the `$SESSION_ID` placeholder and capture UUIDs, with no credentials (checked against `dropped_lines_v2.1.220.json` indices 31, 32 and 36).
+- [File operations] No findings. The fragment path is test-owned under `t.TempDir()`, written once with mode `0o600` before the daemon starts. No user input reaches a path, and fakeclaude reads the file once at startup in `loadStreamReplay`.
+- [Subprocess] No findings. One extra env entry reaches the daemon and its fakeclaude child through `StartStreamInteractiveWithRelay`'s existing env set. There is no `sh -c` and no argv built from fed bytes.
+- [Crypto] No findings. The Noise handshake and CipherState pair come from the existing `driveHandshakeToOpenDaemonInteractive` and `sealedConnDriver`. One conn uses one state pair and decrypts in arrival order.
+- [Network & I/O] No findings. One 30s drain deadline bounds every receive (`sealedConnDriver`'s `nextEnv`). The frame carries two ints and no claude-authored text, so there is no truncation or size-cap dimension, unlike #1533.
+- [Error messages, logs] No findings. Failures print counts, the test's own literals and the decoded two-int payload. No raw fed line is printed on any path. The error-envelope print is daemon-authored error text, as in every sibling spec.
+- [Concurrency] No findings. The test runs in a single goroutine. The harness, phone and fake relay close via `t.Cleanup`. Ordering closes the count race, because every fed line precedes `result`. There is no sleep.
+- [Threat model] OUT OF SCOPE: the phone's handling of the frame is the mobile client's contract (docs/protocol-mobile.md § Interactive events, where `thinking_progress` is rate-bounded and its absence proves nothing). Forging a frame from nested tool-result text is refused by the parser's top-level decode and pinned by streamsup's unit tests. This ticket does not re-prove it.
+
+**Reviewer:** builder (self-review per the security-review checklist)
+**Date:** 2026-09-23
+
+## Revisions
+
+- 2026-09-23 (rework 1, verifier finding "missing `## Security review` section"): added the security-review pass above, which the `security-sensitive` label requires. The pass adopted one SHOULD FIX into the code: the crossing test asserts the frame's exact key set as well as its values.
