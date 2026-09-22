@@ -161,6 +161,18 @@ before asserting the decoded zero. Missing, null, wrong-typed, and explicit-zero
 can deliberately collapse to the same downstream zero value, so parser output alone
 cannot prove which source shape the fixture retained.
 
+A full-stack proof of a rate-bounded delivery path needs two runs on the identical
+drive helper, not one. A below-bound feed producing zero client-visible frames does
+not by itself show the feed arrived: a wrong env name, a malformed line, or a drop
+before the parser all read as the same zero. Pair it with a feed that crosses the
+bound by one unit and must produce exactly one frame carrying that crossing line's
+own values. The crossing run is what kills the false-pass causes the zero alone
+cannot rule out, and together the pair pins the bound from both sides — a lowered
+bound reds the silent run, a raised bound or an off-by-one comparison reds the
+crossing run. Compute both feeds' expected total from the fed lines themselves
+rather than restating it as a literal, so a feed that drifts off the edge of the
+bound fails as that, not as a wrong frame count.
+
 ## Test execution and artifact survival
 
 An exit code alone does not prove tests ran. Read named results, counts and skip reasons.
