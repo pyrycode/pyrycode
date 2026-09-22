@@ -388,6 +388,19 @@ func (m *V2SessionManager) emitResync(ctx context.Context, s *V2Session, convID 
 // the old inline loop's early return), but the re-signal scan still runs so a
 // different session's replay is never stranded.
 func (m *V2SessionManager) drainReplayOnce(ctx context.Context) {
+	// Transport-down HOLD (#1490), the replay twin of drainOnce's #874 hold: pop
+	// nothing, seal nothing, advance no replayThrough, re-signal nothing. m.send
+	// swallows the Outbound error, so a replay frame sealed while down spends a
+	// send-nonce the phone never sees and the next delivered frame fails AEAD —
+	// and every later pass would consume the rest of the tail the same way. Not
+	// re-signalling replayCh keeps a down leg from busy-spinning Run; Run's
+	// Reconnect arm re-signals it on recovery, so a held tail needs a wired
+	// Reconnect seam to resume (production wires it with Connected). The probe
+	// sits here, not in forwardEnvelope, whose error return takes the abandon
+	// branch below and would throw the tail away (see dropInlineReplyIfDown).
+	if m.transportDown() {
+		return
+	}
 	var s *V2Session
 	// Go randomises map-range order, giving rough cross-conn fairness across the
 	// realistically-tiny open-conn count (same as drainOnce).

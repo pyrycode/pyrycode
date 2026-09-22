@@ -670,9 +670,15 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 			// drainOnce here — so the existing drain arm owns the single pop path
 			// and its FIFO self-re-signal. A nil m.cfg.Reconnect makes this a
 			// nil-channel read, permanently not-ready, so the select behaves
-			// exactly as pre-#875.
+			// exactly as pre-#875. Re-signal replayCh too, so a replay tail
+			// held by drainReplayOnce's transport-down hold resumes (#1490);
+			// drainOnce keeps that conn's live events gated behind it.
 			select {
 			case m.drainCh <- struct{}{}:
+			default:
+			}
+			select {
+			case m.replayCh <- struct{}{}:
 			default:
 			}
 		case <-m.replayCh:
