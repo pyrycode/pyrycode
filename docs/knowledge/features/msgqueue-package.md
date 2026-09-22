@@ -317,7 +317,8 @@ to bridge.
   respawn/backoff cycle clears well inside the bound and never trips give-up.
 - **Per-head, not per-session.** A successful delivery resets `firstFailedAt` to
   zero for the next head, so a wedge that clears for one message doesn't poison
-  the bound for the next — each head gets a fresh give-up window.
+  the bound for the next — each head gets a fresh give-up window. A head swapped
+  mid-retry (a `Remove` during the sleep) restarts it too (#1485).
 - **Give-up drops one head and exits the drain, it does not skip to the next
   head — when there is still a head to abandon.** Because a startup wedge would
   fail every subsequent head identically, continuing would burn a full
