@@ -34,11 +34,12 @@ import (
 // SendEsc is abstracted as "claude's own interrupt" (#1121). SendEsc is safe to
 // call from any goroutine.
 //
-// The sole implementation is cmd/pyry's activeInterrupter. *supervisor.Supervisor
-// used to satisfy this seam and has not since #1121 replaced the Interrupter:
-// w.sup wiring that mis-delivered every interrupt to the bootstrap supervisor
-// regardless of which conversation's turn was running; cmd/pyry/relay.go's comment
-// at the wiring site already says so, and this block said otherwise until #2103.
+// The sole implementation is cmd/pyry's activeInterrupter. The bootstrap
+// supervisor used to satisfy this seam, until #1121 replaced that wiring because
+// it mis-delivered every interrupt to the bootstrap supervisor regardless of which
+// conversation's turn was running; #1348 then deleted the supervisor. The
+// activeInterrupter doc records the same history, and this block said otherwise
+// until #2103.
 //
 // conversationID names the conversation whose turn to stop, and the implementation
 // MUST treat it as UNTRUSTED: it arrives from a paired client, and this package
@@ -102,7 +103,7 @@ type SessionStarter interface {
 // the outgoing child is asked to write a handoff note first, bounded at ninety
 // seconds). handleNewSession asserts it on the configured SessionStarter and
 // falls back to the plain method when it is absent, so an implementation that
-// rotates inline — the PTY posture — needs no change and sees no new behaviour.
+// rotates inline needs no change and sees no new behaviour.
 //
 // IT EXISTS BECAUSE THE VERB'S ONE REPLY HAS A TENSE. StartNewSession's only
 // non-best-effort answer is *RotatedWithoutWorkspaceError, whose own doc fixes the

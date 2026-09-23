@@ -149,14 +149,11 @@ type Config struct {
 	// Values <= 0 are treated as unset.
 	ActiveCap int
 
-	// RunnerFactory is the injection seam for the supervised child. nil selects
-	// the default supervisor.New, keeping the PTY / interactive path
-	// byte-identical to today — that nil default is the rollback guarantee. A
-	// non-nil factory is invoked at every construction site (bootstrap in New
-	// and per-session in buildSession); it lets the Streamrunner Interactive work
-	// (T4/T7) swap in an alternative Runner behind the same lifecycle. This
-	// ticket wires the seam only — no consumer is migrated onto an alternative
-	// runner yet.
+	// RunnerFactory is the injection seam for the supervised child, invoked at
+	// every construction site (bootstrap in New and per-session in
+	// buildSession). It is required: New returns an error on a nil factory.
+	// Before #1348 nil selected the terminal supervisor, which no longer exists;
+	// the daemon passes the stream-json runner's factory.
 	RunnerFactory RunnerFactory
 }
 
@@ -311,8 +308,8 @@ type Pool struct {
 	// buildSession to every other session. Read-only after New.
 	turnBusy func(SessionID) bool
 
-	// newRunner is the normalized (never-nil) runner factory: cfg.RunnerFactory
-	// when supplied, else a wrapper over supervisor.New. Set once in New and
+	// newRunner is cfg.RunnerFactory, never nil because New refuses a nil
+	// factory. Set once in New and
 	// read by buildSession thereafter — read-only post-construction, same
 	// lifetime and lock-free discipline as log / convReg. See Config.RunnerFactory.
 	newRunner RunnerFactory
@@ -407,21 +404,19 @@ func (p *Pool) List() []SessionInfo {
 // New constructs a Pool. If a registry exists at cfg.RegistryPath, the
 // bootstrap session reuses the persisted UUID and metadata; otherwise a
 // fresh UUID is minted and the registry is written before New returns.
-// Returns an error if the rng, supervisor.New, registry load, or registry
-// save fails — all are fatal-at-startup conditions.
+// Returns an error if cfg.RunnerFactory is nil, or if the rng, the runner
+// factory, registry load, or registry save fails — all are fatal-at-startup
+// conditions.
 func New(cfg Config) (*Pool, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
 
-	// Normalize the runner factory once: a nil cfg.RunnerFactory selects the
-	// default supervisor.New (adapted to the Runner return), so the concrete
-	// supervisor flows through and the PTY path is byte-identical — the rollback
-	// guarantee. newRunner is threaded through both construction sites (bootstrap
-	// below, per-session via Pool.newRunner in buildSession).
-	// A factory is mandatory since #1348. It used to default to the terminal
-	// supervisor when nil, which meant an unconfigured caller silently got the
-	// runner that no longer exists.
+	// A factory is mandatory since #1348, and a nil one is an error here. It used
+	// to default to the terminal supervisor when nil, which meant an unconfigured
+	// caller silently got the runner that no longer exists. newRunner is threaded
+	// through both construction sites (bootstrap below, per-session via
+	// Pool.newRunner in buildSession).
 	newRunner := cfg.RunnerFactory
 	if newRunner == nil {
 		return nil, errors.New("sessions: Config.RunnerFactory is required")

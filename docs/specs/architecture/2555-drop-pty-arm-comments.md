@@ -23,3 +23,7 @@ No new logic, so no new test. `go build`, `go vet ./...` and `go test -race` ove
 ## Documentation handoff
 
 None — the ticket carries no documentation requirement.
+
+## Revisions
+
+- 2026-09-23, during the build: `New`'s own doc comment also listed `supervisor.New` among its failure sources. It now names the nil-factory refusal and the runner factory instead, the same dead claim fixed in the same file as `Pool.newRunner`. In `snapshot_usage.go` the deleted `resolveBootstrapJSONL` citation went with the `interactive_turn_stream_v2.go` one, since both sat in the same parenthetical.

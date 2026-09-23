@@ -51,16 +51,16 @@ import (
 // process probe was already the weaker resolver on the terminal path too. #989
 // introduced the pinned-by-id resolver precisely because real claude opens its
 // transcript, appends, and closes within milliseconds, so the probe practically
-// never observes an open descriptor (see resolveBootstrapJSONL's doc and
-// interactive_turn_stream_v2.go). The turn stream migrated to the pinned id; this
-// reader never did. Do NOT record #1214 as "usage regressed at the cutover"
+// never observes an open descriptor. The turn stream migrated to the pinned id
+// (in the terminal-path turn stream #1348 deleted); this reader never did. Do NOT record #1214 as "usage regressed at the cutover"
 // without evidence: it may only ever have been reliable against the e2e fake
 // claude, which holds its descriptor open.
 //
-// By-id resolution is deterministic on BOTH runners and needs no probing. The
-// pool hands the session id to the runner (internal/sessions/pool.go), the stream
-// runner spawns claude with that exact --session-id (internal/streamsup), and the
-// terminal path pins the same id (#839), so <dir>/<id>.jsonl IS the transcript.
+// By-id resolution is deterministic and needs no probing. The pool hands the
+// session id to the runner (internal/sessions/pool.go) and the stream runner
+// spawns claude with that exact --session-id (internal/streamsup), so
+// <dir>/<id>.jsonl IS the transcript. The deleted terminal path pinned the same
+// id (#839).
 // transcript.StatByID validates the stem before any path join, so a malformed or
 // hostile id is rejected with no filesystem access at all.
 //

@@ -831,8 +831,9 @@ func runSupervisor(args []string) error {
 	// --mcp-config. Written unconditionally in stream mode (not gated on
 	// bootstrap-yolo): a yolo daemon can still mint non-yolo per-conversation
 	// sessions, so the config must exist; it is harmless and unreferenced when
-	// every spawn is yolo. The "" / "pty" path never builds the factory, so
-	// mcpServersPath stays "".
+	// every spawn is yolo. Only a "pty" value skips the write, and that value fails
+	// startup in selectInteractiveRunner just below, so no factory is ever built
+	// over an empty mcpServersPath.
 	var mcpServersPath string
 	if selectsStreamRunner(cfg) {
 		mcpServersPath, err = writeMCPServersConfig(resolveExecutable(), socketPath)
@@ -843,11 +844,11 @@ func runSupervisor(args []string) error {
 	}
 	// Interactive-runner selection (#1081): pick the runner factory + its shared
 	// turn-event sink from config BEFORE the pool is built, so an invalid value
-	// fails fast (AC4, no silent PTY fallback). Both are nil on the "" / "pty"
-	// rollback path, leaving the sessions.Config and relayWiring literals below
-	// byte-identical to today. On "stream-json" the same sink instance is threaded
-	// two ways: RunnerFactory (below) and relayWiring.streamSink (the drain); the
-	// factory also carries mcpServersPath to inject the approval-tool flags (#1168).
+	// fails fast (AC4, no silent fallback). Every accepted value ("" and
+	// "stream-json") returns both, so past the error check neither is nil. The same
+	// sink instance is threaded two ways: RunnerFactory (below) and
+	// relayWiring.streamSink (the drain); the factory also carries mcpServersPath
+	// to inject the approval-tool flags (#1168).
 	// One registry and one window serve both Claude-facing transports. The stdio
 	// handler needs them when the runner factory is built; the MCP control server
 	// receives the same values after the relay leg has been composed.
@@ -874,8 +875,10 @@ func runSupervisor(args []string) error {
 	// The gate is streamSink != nil, NOT cfg.InteractiveRunner == "stream-json":
 	// that is selectInteractiveRunner's own post-validation answer, so an
 	// unrecognised config value has already failed fast one line above, and this
-	// stays byte-identical to the discriminant relayWiring.streamSink documents. In
-	// PTY mode the tracker is nil and every method reached from either consumer is a
+	// stays byte-identical to the condition relayWiring.streamSink documents. Since
+	// #1348 streamSink is always non-nil here, so the tracker is always built; the
+	// nil arm is unreachable from this composition root. The guard stays, and a nil
+	// tracker (a test wiring) makes every method reached from either consumer a
 	// nil-receiver no-op.
 	//
 	// withExitEpoch is what ARMS the stale-exit guard (#1483): it binds the very
@@ -889,8 +892,9 @@ func runSupervisor(args []string) error {
 	// sessionTurnBusy is the same tracker seen from the pool (#1486): an idle-timer
 	// fire on a session whose conversation has a turn open re-arms instead of
 	// killing the turn. It hands the pool one bool per session and keeps the
-	// conversation id on this side of the seam. It stays a nil func in PTY mode
-	// rather than a closure over the nil tracker, so the pool sees no signal at all.
+	// conversation id on this side of the seam. Built under the same guard: had the
+	// tracker been nil it would stay a nil func rather than a closure over the nil
+	// tracker, so the pool would see no signal at all.
 	var turnBusy *turnBusyTracker
 	var sessionTurnBusy func(sessions.SessionID) bool
 	if streamSink != nil {
@@ -972,9 +976,9 @@ func runSupervisor(args []string) error {
 	// the report is constructed inside startRelayV2, well after this queue. Unlike
 	// the two channels it cannot be a channel — the gate needs an answer, not a
 	// notification — so it is the one late-bound field here, threaded to its single
-	// setter through relayWiring.approvalParked. Left unset (PTY mode, or before the
-	// relay leg wires it) it reports negative for every conversation, which is the
-	// pre-#1911 behaviour exactly.
+	// setter through relayWiring.approvalParked. Left unset (before the relay leg
+	// wires it, or when it never does) it reports negative for every conversation,
+	// which is the pre-#1911 behaviour exactly.
 	approvalParked := &approvalParkedReport{}
 	// The daemon's ONE durable conversation log (#2112, first written by #2114).
 	// Exactly one Store may exist per instance directory: it caches each
@@ -2629,14 +2633,14 @@ type activeSessionStarter struct {
 
 	// reset runs the outgoing session's wrap-up turn and writes its reply as the
 	// conversation's handoff note before the rotation (#2477). Optional: nil keeps
-	// the synchronous pre-#2477 rotation, which is the PTY posture and the shape
-	// every test literal in this package still gets for free.
+	// the synchronous pre-#2477 rotation, which is the shape every test literal in
+	// this package still gets for free.
 	reset *conversationReset
 
 	// resetting reports the reset's two phases and its falling edge to interactive
 	// clients (#2478). Optional on the same terms as reset and every other field in
-	// this literal: a nil emitter emits nothing, which is the PTY posture and what
-	// keeps every pre-#2478 test literal in this package compiling unchanged.
+	// this literal: a nil emitter emits nothing, which is what keeps every
+	// pre-#2478 test literal in this package compiling unchanged.
 	//
 	// It is deliberately SEPARATE from reset rather than a field on it. The
 	// coordinator owns one phase of the two and would have to be told when the other
@@ -2834,7 +2838,7 @@ func (a activeSessionStarter) StartNewSessionLate(conversationID string, outcome
 // synchronous contract, which is what StartNewSession relies on.
 //
 // outcome is carried rather than consumed: only the wrap-up arm uses it, and a nil
-// one there is the PTY / unwired-caller posture, in which the rotation still runs
+// one there is the unwired-caller posture, in which the rotation still runs
 // asynchronously and only the client reply is absent.
 func (a activeSessionStarter) start(conversationID string, outcome func(error)) (err error, deferred bool) {
 	convID := conversationID
@@ -3080,22 +3084,21 @@ func boundedConvID(s string) string {
 }
 
 // inboundActivateTimeout caps the drain's per-attempt wait for an idle-evicted
-// session to respawn its supervisor and bind its PTY. It matches the CLI attach
-// budget (#396): a wedged respawn surfaces as a delivery error so the drain
+// session to respawn its child. It kept the budget of the CLI attach verb (#396,
+// removed in #1348): a wedged respawn surfaces as a delivery error so the drain
 // retries the FIFO head rather than blocking forever inside Activate. Unlike the
-// removed #594 deliver timeout, it does NOT bound the WriteUserTurn that follows
-// — that block is the drain's turn-end pacing and may run for a whole claude
-// turn. That remains exactly right on the PTY path, where the pacing block lives
-// INSIDE WriteUserTurn (supervisor's idle gate). On the stream path the pacing
-// block sits in FRONT of WriteUserTurn instead — the write there returns as soon
-// as the envelope is in the child's stdin pipe — and it is bounded, by
-// streamTurnHoldTimeout (#1199). A tuning knob, not a contract.
+// removed #594 deliver timeout, it does NOT bound the drain's turn-end pacing,
+// which may run for a whole claude turn. That pacing block sits in FRONT of
+// WriteUserTurn — the write returns as soon as the envelope is in the child's
+// stdin pipe — and it is bounded separately, by streamTurnHoldTimeout (#1199).
+// The terminal path #1348 deleted kept it INSIDE WriteUserTurn instead. A tuning
+// knob, not a contract.
 const inboundActivateTimeout = 30 * time.Second
 
 // streamTurnHoldTimeout bounds ONE delivery attempt's wait for the conversation's
 // running turn to end on the stream-json path (#1199). Unused when the turn-busy
-// tracker is nil (PTY mode), where the pacing block is inside WriteUserTurn and
-// unbounded, as inboundActivateTimeout's doc above records.
+// tracker is nil, which the composition root never passes since #1348; only a
+// test construction of newInboundDeliver reaches that arm.
 //
 // The arithmetic, against msgqueue's drain: a turn that never ends fails attempt 1
 // after this window, which starts the give-up streak (elapsed ≈ 0 <
@@ -3215,8 +3218,9 @@ func (r *approvalParkedReport) set(ask func(conversationID string) bool) {
 
 // parked reports whether a person is currently being asked about conversationID.
 // A nil receiver or an unset ask answers false for every conversation — which is
-// the behaviour before this exemption existed, and the right answer in PTY mode,
-// where ApprovalParked is negative anyway because no tracker is wired.
+// the behaviour before this exemption existed, and the right answer before the
+// relay leg sets ask, or in a wiring with no turn-busy tracker, where
+// ApprovalParked would be negative anyway.
 func (r *approvalParkedReport) parked(conversationID string) bool {
 	if r == nil || r.ask == nil {
 		return false
@@ -3310,8 +3314,9 @@ func approvalHoldPending(err error) bool { return errors.Is(err, errHeldForAppro
 // TurnEnd could otherwise clear before the mark landed; openForDelivery's doc
 // carries that argument, and returns the undo this body runs on a write error.
 //
-// A nil tracker (PTY mode) makes both calls no-ops, leaving this body semantically
-// identical to the pre-#1199 sequence.
+// A nil tracker makes both calls no-ops, leaving this body semantically identical
+// to the pre-#1199 sequence. The composition root always passes one since #1348,
+// so only test constructions reach that arm.
 //
 // It is built over router.resolve, NOT router.Route, so it never stamps the
 // active-conversation cursor: the cursor stays single-writer (the routing-path
@@ -3680,7 +3685,7 @@ func resolveSessionIDViaList(ctx context.Context, socketPath, arg string) (strin
 //	1 — runtime error (ambiguous prefix, unknown id, bootstrap
 //	    rejection, server-side error, or no-daemon dial failure).
 //	2 — usage error (parse failure, mutually-exclusive flags, or
-//	    wrong arity). Mirrors runAttach's exit-2 policy.
+//	    wrong arity).
 //
 // The three AC-prescribed messages (ambiguous, unknown, bootstrap) are
 // printed to stderr without the `pyry:` outer-error prefix; other
