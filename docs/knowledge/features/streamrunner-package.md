@@ -59,8 +59,8 @@ idle-stall watchdog's `cancelChild` (`childCtx` wraps the operator `ctx` via
 `exec.CommandContext(childCtx, ...)`; see `watchdog.go`) — so one hook covers both teardowns. Stdlib's
 ctx-watcher invokes `cmd.Cancel` (reap, then SIGTERM) → child exits or `killGrace` elapses → stdlib
 SIGKILLs + closes pipes → `cmd.Wait()` returns → `Run` returns nil. No package-owned goroutine, timer,
-or state machine beyond the watchdog's own. `killGrace` is hardcoded per AC ("no timing knobs") and
-mirrors `budget.GracePeriod` for symmetry. See [Teardown reap: descendant process groups](#teardown-reap-descendant-process-groups-reapgo-924) below for what the reap does and why it's safe to fire unconditionally on both teardown paths.
+or state machine beyond the watchdog's own. `killGrace` is hardcoded per AC ("no timing knobs"),
+matching the 5s grace period the now-deleted `internal/agentrun/budget` package used (#1519). See [Teardown reap: descendant process groups](#teardown-reap-descendant-process-groups-reapgo-924) below for what the reap does and why it's safe to fire unconditionally on both teardown paths.
 
 Return mapping at exit:
 
@@ -138,7 +138,7 @@ Pinned in the package doc-comment.
 
 ## Dependency direction
 
-Stdlib (`context`, `encoding/json`, `errors`, `fmt`, `io`, `log/slog`, `os`, `os/exec`, `syscall`, `time`) plus the shared parent `internal/agentrun` — imported for `ExitErrIsBenign` (#527) and, as of #924, `ReapDescendantGroups` (via the local `reapDescendantGroupsFn` seam in `reap.go`). Crucially, the package does **not** import `internal/supervisor` (the PTY helper) nor any **sibling** `internal/agentrun/*` subpackage (`ptyrunner`, `budget`, `jsonl`, `trust`, `settings`) — the parent-only import keeps it a leaf primitive relative to its siblings, which is exactly why #923 lifted the reaper up to the parent instead of leaving it inside `ptyrunner`. Verifiable by:
+Stdlib (`context`, `encoding/json`, `errors`, `fmt`, `io`, `log/slog`, `os`, `os/exec`, `syscall`, `time`) plus the shared parent `internal/agentrun` — imported for `ExitErrIsBenign` (#527) and, as of #924, `ReapDescendantGroups` (via the local `reapDescendantGroupsFn` seam in `reap.go`). Crucially, the package does **not** import `internal/supervisor` (the PTY helper) nor any **sibling** `internal/agentrun/*` subpackage (`jsonl`, `trust`, `settings`; `ptyrunner` and `budget` are both gone — deleted by #1348 and #1519 respectively) — the parent-only import keeps it a leaf primitive relative to its siblings, which is exactly why #923 lifted the reaper up to the parent instead of leaving it inside `ptyrunner`. Verifiable by:
 
 ```bash
 go list -deps ./internal/agentrun/streamrunner/... | grep pyrycode/internal/supervisor
@@ -150,7 +150,7 @@ Expected output: empty.
 
 - `agentrun.Drive` (PTY-driven, interactive bridge mode) and `streamrunner.Run` (subprocess, headless stream-json mode) are different mechanisms for different claude invocation shapes. The 2026-05-14 probe confirmed that `claude --input-format stream-json --output-format stream-json --dangerously-skip-permissions` runs cleanly without a PTY, without a trust dialog, and without a JSONL tail watcher — stdin in, event stream out, exit code at the end. None of `Drive`'s PTY plumbing, defensive trust-dialog dismissal, or background-drain goroutine is needed.
 - Keeping the two side-by-side (rather than overloading `Drive` with a no-PTY mode flag) preserves a clean test surface and a clean failure mode — readers of either function don't have to reason about both paths.
-- The existing `internal/agentrun/streamjson` package is upstream of this one's eventual caller: it parses JSONL `Event`s and re-emits stream-json. `streamrunner` owns the subprocess + stdio pipe; `streamjson` owns the event-shape transformation. The two never compose inside this package.
+- The `internal/agentrun/streamjson` package was once upstream of this one's eventual caller: it parsed JSONL `Event`s and re-emitted stream-json. The two never composed inside this package, and `streamjson` was deleted in #1519 — claude's own stream-json output is forwarded byte-for-byte on the shipping path today.
 
 ## Testing
 
@@ -171,7 +171,7 @@ Four test cases against the four observable behaviours: clean exit (stdout subst
 
 ## Out of scope
 
-- Parsing stream-json events on the way through — that's [`streamjson`](streamjson-package.md)'s concern, and this primitive's writers are opaque.
+- Parsing stream-json events on the way through — the historical [`streamjson`](streamjson-package.md) re-emitter (retired #1519) once owned that; this primitive's writers are opaque and claude's own output is forwarded unchanged.
 - Multi-turn drives — the AC pins single user-turn-then-close-stdin. Defer multi-turn until a consumer needs it.
 - Operator-tunable timing knobs (trust-dialog delay, prompt delay, grace window) — none apply; stream-json mode has no trust dialog and no TUI write timing, and the SIGTERM grace is fixed.
 
@@ -179,7 +179,7 @@ Four test cases against the four observable behaviours: clean exit (stdout subst
 
 - [agentrun-package.md](agentrun-package.md) — the PTY-driven sibling (`Drive`) this primitive parallels; shares the "ctx-cancel is success" return contract, the "log-and-continue on stdin write failure" pattern, and (post-#924) the `ReapDescendantGroups` consumer relationship.
 - [pyry-agent-run-command.md](pyry-agent-run-command.md) — the verb that consumes this primitive (cut over from `Drive` in #391).
-- [streamjson-package.md](streamjson-package.md) — the pre-#391 event-stream emitter; no longer composed with this primitive (claude itself emits the canonical stream-json events on its own stdout under stream-json mode). Package stays in tree pending the cleanup ticket.
+- [streamjson-package.md](streamjson-package.md) — the pre-#391 event-stream emitter; was already uncomposed with this primitive before its deletion (claude itself emits the canonical stream-json events on its own stdout under stream-json mode). Deleted in #1519; doc kept as historical reference.
 - [ptyrunner-package.md](ptyrunner-package.md#teardown-reap-descendant-process-groups-reapgo-565-864-923) — the parity reference for the #924 teardown reap; same seam shape, same guards, same "reap before signal" ordering.
 - [`codebase/924.md`](../codebase/924.md) — this ticket: wiring the descendant-group reap into the streamrunner teardown.
 - Spec [`docs/specs/architecture/390-streamrunner-primitive.md`](../../specs/architecture/390-streamrunner-primitive.md) — the build-time architect spec for this package. Spec [`docs/specs/architecture/924-streamrunner-reap-descendant-groups.md`](../../specs/architecture/924-streamrunner-reap-descendant-groups.md) — the #924 reap wiring. Spec [`docs/specs/architecture/1497-idle-stall-trailer-newline-guard.md`](../../specs/architecture/1497-idle-stall-trailer-newline-guard.md) — the #1497 newline-guard design.

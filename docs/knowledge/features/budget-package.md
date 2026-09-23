@@ -1,4 +1,6 @@
-# `internal/agentrun/budget` — pyry-side `--max-turns` enforcement
+# `internal/agentrun/budget` — pyry-side `--max-turns` enforcement (deleted 2026-09-23, #1519)
+
+**The package this document describes — `internal/agentrun/budget`, whose `Counter` pyry-side-enforced `--max-turns` against interactive claude — was deleted in #1519 on 2026-09-23. Its only production caller, `ptyrunner`, was deleted by #1348 on 2026-08-16, so `budget` shipped orphaned in between. `pyry agent-run` runs claude in stream-json subprocess mode today (`internal/agentrun/streamrunner`), where `claude -p`-equivalent `--max-turns` self-enforcement applies and pyry does not need a side-channel counter; `TestRealClaude_MaxTurnsHonored` (`internal/e2e/realclaude/budget_test.go`) is the live test that pins claude's own `--max-turns` stop. This document is historical reference only: everything below describes code that is no longer in the tree.**
 
 `Counter` enforces the per-agent turn budget for `pyry agent-run` by counting claude's **logical turns** (one per distinct consecutive assistant `message.id`, not per raw assistant JSONL entry) and signalling claude when the cap is hit. The leaf unit; [`internal/agentrun/ptyrunner`](ptyrunner-package.md) wires `OnEvent` into the loop that drains `tuidriver.TailJSONL`, calls `OnEndOfTurn` when `tuidriver.IsEndTurn(entry)` fires for that entry, and routes `Terminate` / `Kill` to `cmd.Process.Signal(SIGTERM)` / `SIGKILL` (#479 / #512).
 
