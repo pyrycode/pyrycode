@@ -369,7 +369,7 @@ type relayWiring struct {
 	// stream-approval bridge (#1080) constructed in startRelayV2 Lookups/Resolves
 	// parked completers against this SAME instance the control server parks into,
 	// and startRelayV2 returns the bridge's Surface for the control server to call.
-	// nil (foreground/v1) leaves the resolver's stream arm unwired ⇒ keystroke-only.
+	// nil (foreground/v1) leaves the resolver's stream arm unwired ⇒ it actuates nothing.
 	approvals *permbridge.Registry
 	// streamSink is the stream-json runner's turn-event fan-in (#1081). Non-nil
 	// selects stream mode — main.go sets it iff interactive_runner == "stream-json",
@@ -797,11 +797,11 @@ func startRelayV2(
 	// folder-not-trusted emit seams were removed deliberately (#1545): trust is
 	// settled by trustMark before every spawn, so no answer can be a trust deny.
 	//
-	// The terminal keystroker argument is gone with #1348: ResolveCancel used it
-	// to press escape at a terminal modal, and there is no terminal. A stream
+	// Its only actuation is the stream-approval verdict: the terminal keystroker
+	// went with #1348 and its inert seam with #1546. An unanswered stream
 	// approval denies fail-closed through the permission bridge's
 	// deny-on-timeout (#1103), which is the only deny-on-timeout left.
-	modalResolver := newModalResolverV2(modalReg, noopKeystroker{}, logger)
+	modalResolver := newModalResolverV2(modalReg, logger)
 
 	// Inbound question-control resolver (#1986): the per-device authorization gate
 	// for an inbound question_answer / question_refused, and the audit record of
@@ -1194,13 +1194,6 @@ func startRelayV2(
 		// signal a client needs. Both halves of that contract are the producer's and the
 		// reconcile's; nothing is decided at this assignment.
 		RetainedBackgroundTaskRosters: w.retainedBackgroundTaskRosters,
-		// Inbound modal-control resolver (#727): consumes the outstanding-modal
-		// registry, routes the resolving keystroke via the supervisor safe-answer
-		// seam, and audits. The keystroker is nil-safe-wrapped (#1131): PTY mode
-		// passes w.sup (*supervisor.Supervisor, satisfies modalKeystroker) straight
-		// through; the stream-json bootstrap path (typed-nil w.sup, #1077) gets a
-		// no-op keystroker whose ESC is moot — a stream-json approval has no PTY
-		// modal to dismiss and denies fail-closed via the permbridge timeout (#1103).
 		// The remote wire pairing minter, alongside the `pyry pair` CLI and local
 		// control provider. All three reach the same mintDevice, so a record
 		// created here is indistinguishable from one either host-operator path
@@ -1209,6 +1202,10 @@ func startRelayV2(
 		// hash and always creates an unprivileged device (#2127).
 		PairingMint: pairingMinter,
 
+		// Inbound modal-control resolver (#727): consumes the outstanding-modal
+		// registry, resolves the parked stream approval to a verdict, and audits.
+		// An unanswered stream approval denies fail-closed via the permbridge
+		// timeout (#1103).
 		ModalResolver: modalResolver,
 		// Inbound question-control resolver (#1986), discharging the seam's
 		// written ordering obligation: nothing may be wired here until the
@@ -1382,7 +1379,7 @@ func startRelayV2(
 	// modal_answer. Constructed AFTER mgr (its interactive broadcaster) and BEFORE
 	// mgr.Run starts below, so streamApprovals is set before any modal_answer can
 	// dispatch on the Run goroutine — no data race on the resolver field. nil
-	// approvals (foreground/v1) leaves streamApprovals nil ⇒ keystroke-only.
+	// approvals (foreground/v1) leaves streamApprovals nil ⇒ nothing is actuated.
 	if w.approvals != nil {
 		bridge := newStreamApprovalBridge(w.approvals, modalReg, mgr, w.active.CurrentConversation, ctx, logger)
 		// The question arm (#1973), assigned after construction rather than passed
