@@ -100,8 +100,8 @@ const (
 // mid-read (which would force a disruptive re-handshake on the next tap).
 // Exposed as a package var (lowercase) so tests can substitute a
 // sub-second value via a t.Cleanup save-and-restore idiom; not part of
-// the public API and not yet config-driven (a deferred concern, same
-// posture as modalDenyTimeout's #708 note).
+// the public API and not yet config-driven (a deferred concern, the same
+// posture as rekeyInterval).
 var idleTimeout = 15 * time.Minute
 
 // ErrConnNotFound is returned by (*V2SessionManager).Rekey when connID
@@ -510,9 +510,9 @@ type V2SessionManager struct {
 	// pushOverflow carries the connID of a session whose push queue latched
 	// pushQueue.overflowed from the off-Run producer goroutine inside Push to
 	// the Run goroutine, which tears the session down in handlePushOverflow
-	// (#1505). Mirrors modalTimeout's shape — a chan string, buffered
-	// (wakeBufferSize) — because enqueue runs off-Run under pushMu and closeWith
-	// is Run-owned, exactly the split modalTimeout bridges.
+	// (#1505). Mirrors wake's shape — buffered (wakeBufferSize), carrying the
+	// affected conn — because enqueue runs off-Run under pushMu and closeWith is
+	// Run-owned, exactly the split wake bridges for its timer callbacks.
 	//
 	// The send is NON-blocking (the drainCh idiom), unlike armIdleTimer's
 	// blocking send: armIdleTimer blocks a fresh time.AfterFunc goroutine, while
@@ -534,7 +534,7 @@ type V2SessionManager struct {
 	// defined beside the rest of the verb's machinery in v2session_debugbundle.go
 	// (the #1025 carve-out).
 	//
-	// Buffered (wakeBufferSize) like wake / modalTimeout / pushOverflow; it is
+	// Buffered (wakeBufferSize) like wake / pushOverflow; it is
 	// only pressured by more conns finishing assembly at once than the buffer
 	// holds while Run is busy, and assembleBundle's send BLOCKS rather than drops,
 	// so that case is correct rather than lossy. Not closed by the manager on Run
@@ -549,20 +549,11 @@ type V2SessionManager struct {
 	// answerNewSession → newSessionReplyWorkspaceRefused → forwardEnvelope — reads
 	// m.sessions and calls s.send.Encrypt, both single-owned by Run.
 	//
-	// Buffered (wakeBufferSize) like wake / modalTimeout / bundleReady, and the
+	// Buffered (wakeBufferSize) like wake / pushOverflow / bundleReady, and the
 	// producer's send BLOCKS with escapes rather than dropping (the assembleBundle
 	// hand-off), so a Run that is briefly busy delays a reply instead of losing it.
 	// Not closed on Run exit; an in-flight producer unblocks via its escapes.
 	newSessionDone chan newSessionResult
-
-	// modalTimeout carries a surfaced modal's id from its time.AfterFunc
-	// callback goroutine (armed off-Run by ArmModalTimeout) to the Run goroutine
-	// for the deny-on-timeout safe-deny (#725). Daemon-global (a modal is not
-	// bound to one conn), keyed by modal_id — unlike wake, which is keyed by
-	// *V2Session. Buffered (wakeBufferSize) so a timer callback almost never
-	// blocks; callbacks also honour the Run-derived ctx so they unblock cleanly
-	// on Run exit and leak no goroutine.
-	modalTimeout chan string
 
 	// replayRing + replayCursor are the mid-turn-reconnect replay source
 	// (#647), published once after the interactive emitter (which owns the
@@ -611,7 +602,6 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 		replayCh:     make(chan struct{}, 1),
 		snapshot:     make(chan snapshotReq),
 		appReply:     make(chan appReplyMsg),
-		modalTimeout: make(chan string, wakeBufferSize),
 		pushOverflow: make(chan string, wakeBufferSize),
 		bundleReady:  make(chan bundleResult, wakeBufferSize),
 
@@ -642,8 +632,6 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 			m.handleFrame(runCtx, env)
 		case w := <-m.wake:
 			m.handleWake(runCtx, w)
-		case modalID := <-m.modalTimeout:
-			m.handleModalTimeout(runCtx, modalID)
 		case connID := <-m.pushOverflow:
 			m.handlePushOverflow(runCtx, connID)
 		case res := <-m.bundleReady:

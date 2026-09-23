@@ -231,8 +231,8 @@ type relayWiring struct {
 	// starts no Run goroutine, so it takes no bcast parameter — startRelayV2 attaches
 	// the broadcaster into it instead.
 	resetting *resettingEmitterV2
-	// blockedNotify routes a folder-not-trusted session_error (a trust deny /
-	// deny-on-timeout) into the same give-up → session_error frame path the
+	// blockedNotify routes a folder-not-trusted session_error (a trust deny) into
+	// the same give-up → session_error frame path the
 	// msgqueue OnGiveUp seam uses (#1014). It is main.go's shared `blocked` closure
 	// (a non-blocking send into the giveUps channel). Set on the resolver's #1014
 	// emit seam below; nil in foreground/v1 leaves the resolver's emit inert.
@@ -800,7 +800,7 @@ func startRelayV2(
 	// Daemon-singleton outstanding-modal registry. Its sole live producer is the
 	// stream-json approval bridge's Surface (#1080, newStreamApprovalBridge below),
 	// which Records a raised approval here; the consumers are the inbound resolver
-	// newModalResolverV2 builds (ModalResolver seam, including deny-on-timeout) and
+	// newModalResolverV2 builds (the ModalResolver seam) and
 	// the connect-time replay source (the OutstandingModals field below, which is
 	// this registry's Snapshot). All three sit on this same instance.
 	modalReg := modalbridge.New()
@@ -814,18 +814,16 @@ func startRelayV2(
 	questionReg := questionbridge.New()
 
 	// Inbound modal-control resolver (#727). Constructed here (not inline in the
-	// config literal below) so its #1014 emit seams can be set: a trust deny /
-	// deny-on-timeout surfaces a folder-not-trusted session_error via the shared
+	// config literal below) so its #1014 emit seams can be set: a trust deny
+	// surfaces a folder-not-trusted session_error via the shared
 	// blockedNotify closure, stamped with the active conversation (the same
 	// follow-active cursor the modal producer resolves its target from). Both
 	// seams are nil in foreground/v1, leaving the pre-#1014 behaviour intact.
 	//
-	// The keystroker is nil-safe-wrapped (#1131): PTY mode passes w.sup straight
-	// through, but on the stream-json bootstrap path w.sup is a typed-nil
-	// The terminal keystroker argument is gone with #1348: ResolveCancel and
-	// ResolveTimeout used it to press escape at a terminal modal, and there is no
-	// terminal. A stream approval denies fail-closed through the permission
-	// bridge's deny-on-timeout (#1103), which is the only path left.
+	// The terminal keystroker argument is gone with #1348: ResolveCancel used it
+	// to press escape at a terminal modal, and there is no terminal. A stream
+	// approval denies fail-closed through the permission bridge's
+	// deny-on-timeout (#1103), which is the only deny-on-timeout left.
 	modalResolver := newModalResolverV2(modalReg, noopKeystroker{}, logger)
 	modalResolver.activeConv = w.active.CurrentConversation
 	modalResolver.notifyBlocked = w.blockedNotify

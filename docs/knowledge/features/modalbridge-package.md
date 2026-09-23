@@ -163,14 +163,18 @@ everything on it") removed `cmd/pyry/interactive_modal_stream_v2.go` and
 `interactiveModalEmitterV2` along with the rest of the PTY-driven interactive path;
 `tuidriver.EventKindPtyModalShown`/`EventKindPtyModalHidden` and this emitter no
 longer exist in production. This also silently removed the sole production caller of
-`(*relay.V2SessionManager).ArmModalTimeout` — nothing arms the relay-side
-`modalDenyTimeout` deny-on-timeout in production anymore (only three test files call
-it; see [the deny-on-timeout doc](v2-session-manager-state-machine-inbound-modal-control-deny-on-timeout.md)).
+`(*relay.V2SessionManager).ArmModalTimeout`. #1539 later deleted
+`ArmModalTimeout` itself, along with `modalDenyTimeout`, `handleModalTimeout`, the
+`modalTimeout` channel and `ModalResolver.ResolveTimeout` — none of it had a production
+caller left after #1348. The permission bridge's own timer (#1103, `time.AfterFunc` →
+`expire`) is the only deny-on-timeout left; see [the deny-on-timeout
+doc](v2-session-manager-state-machine-inbound-modal-control-deny-on-timeout.md).
 Found while investigating #1909 (unrelated ticket, different constant — it raises
 `mcpApprovalTimeout`, the stream-json path's own timeout, which this deletion does
 not touch). The design below is kept as a historical record of how the arming worked
 while it was live; treat every present-tense claim in this section and in § Live
-daemon wiring below as **pre-#1348**.
+daemon wiring below as **pre-#1348**, and `ArmModalTimeout` itself as **deleted by
+\#1539**.
 
 A **passive state machine** — spawns no goroutine, owns no queue (the `Registry` mutex
 is its only synchronisation), same posture as `interactiveTurnEmitterV2`. The single
@@ -199,7 +203,9 @@ cannot diverge.
 2. `reg.Record(req, class, convID)` mints the `modal_id`, stamps `conversation_id`,
    and records the `Outstanding` (with its `ConversationID`). RNG failure →
    drop (never push an id-less payload), `Warn` with no payload bytes.
-3. `armer.ArmModalTimeout(ctx, modalID)` arms the deny-on-timeout (#725), then **track
+3. `armer.ArmModalTimeout(ctx, modalID)` arms the deny-on-timeout (#725) — the method was
+   deleted by #1539; the permission bridge's own timer (#1103) is the only deny-on-timeout
+   today — then **track
    the just-surfaced modal** (`outstandingID = modalID; outstandingClass = ev.Modal`) so
    a later `Hidden` can correlate back to this id (#706, below). Set here — consistent
    with the registry entry + armed timeout — even on the defensive marshal-fail return.

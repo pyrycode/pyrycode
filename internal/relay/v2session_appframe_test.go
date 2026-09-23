@@ -331,71 +331,64 @@ func TestV2Session_OpenState_ProlificHandler_EmissionOrder(t *testing.T) {
 	}
 }
 
-// TestV2Session_SlowHandler_ModalTimeoutStillFires is AC-1(b): with an
-// application handler blocked on conn A's worker, the modal deny-on-timeout
-// timer must still fire on schedule — Run keeps servicing m.modalTimeout. The
-// safe-deny's ResolveTimeout call and the modal_dismissed to A both land while
-// A's handler is parked.
-func TestV2Session_SlowHandler_ModalTimeoutStillFires(t *testing.T) {
-	// Not t.Parallel: mutates the package-level modalDenyTimeout var.
-	prev := modalDenyTimeout
-	modalDenyTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { modalDenyTimeout = prev })
+// TestV2Session_SlowHandler_PushStillDrains is AC-1(b): with an application
+// handler blocked on conn A's worker, a Push to A must still be drained — Run
+// keeps servicing m.drainCh, so the pushed envelope is sealed and forwarded to A
+// while A's own handler is parked. Waiting on the handler's entered signal before
+// the Push is the sync point: from there on the handler is running, so a Run that
+// ran it inline could not drain.
+func TestV2Session_SlowHandler_PushStillDrains(t *testing.T) {
+	t.Parallel()
 
-	const (
-		connA      = "c-v2-A"
-		modalID    = "modal-during-block"
-		wantOutT   = "denied_timeout"
-		wantSource = "timeout"
-	)
+	const connA = "c-v2-A"
 
 	respPriv, respPub := genV2Keypair(t)
 	reg := v2PairedRegistry(t, v2TestToken)
-	fake := &fakeModalResolver{
-		timeoutOKFor:     modalID,
-		timeoutDismissal: ModalDismissal{Outcome: wantOutT, Source: wantSource},
-	}
 
+	entered := make(chan uint64, 1)
 	release := make(chan struct{})
 	handlers := map[string]dispatch.Handler{
-		protocol.TypeSendMessage: blockingHandler(nil, release),
+		protocol.TypeSendMessage: blockingHandler(entered, release),
 	}
 
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
 	mgr, stop := startManager(t, V2SessionConfig{
-		Frames:        frames,
-		Outbound:      rec.outbound,
-		StaticPriv:    respPriv,
-		Devices:       reg,
-		ServerID:      v2TestServerID,
-		Logger:        silentLogger(),
-		Handlers:      handlers,
-		ModalResolver: fake,
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+		Handlers:   handlers,
 	})
 	t.Cleanup(stop)
+	t.Cleanup(func() { close(release) }) // LIFO: unpark the handler before stop awaits Run.
 
-	aSend, aRecv := openModalConn(t, mgr, frames, rec, respPub, connA, []string{protocol.CapabilityInteractive})
+	aSend, aRecv := openModalConn(t, mgr, frames, rec, respPub, connA, nil)
 
-	// Block conn A's worker on a never-released handler.
+	// Block conn A's worker on a never-released handler, and wait until it runs.
 	frames <- sealAppFrameConn(t, aSend, connA, protocol.Envelope{
 		ID:      1,
 		Type:    protocol.TypeSendMessage,
 		TS:      time.Now().UTC(),
 		Payload: json.RawMessage(`{}`),
 	})
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocking handler was never entered")
+	}
 
-	// Arm the deny-on-timeout while A's handler is blocked. Run must still
-	// service m.modalTimeout — the safe-deny fires on schedule.
-	mgr.ArmModalTimeout(context.Background(), modalID)
-
-	// ResolveTimeout fires and the modal_dismissed reaches A, proving the timer
-	// was serviced despite A's blocked handler. Wait for the dismissal to be
-	// recorded (it is A's only noise_msg — the blocked handler hasn't replied).
-	waitForConnNoiseMsg(t, rec, connA, 1)
-	assertModalDismissed(t, rec, connA, aRecv, modalID, wantOutT, wantSource)
-
-	close(release)
+	// Push to A while its handler is parked. Run must still service m.drainCh:
+	// the message is A's only noise_msg, since the blocked handler has not replied.
+	if err := mgr.Push(context.Background(), connA, buildMessageEnvelope(t, 2, "during-block")); err != nil {
+		t.Fatalf("Push to %s: %v", connA, err)
+	}
+	msgs := waitForConnNoiseMsg(t, rec, connA, 1)
+	if inner := decryptAppFrame(t, msgs[0], aRecv); inner.Type != protocol.TypeMessage {
+		t.Errorf("conn A push Type = %q, want %q", inner.Type, protocol.TypeMessage)
+	}
 }
 
 // TestV2Session_SlowHandler_RekeyStillEmits is AC-1's rekey clause: with an

@@ -67,7 +67,7 @@ type modalResolverV2 struct {
 	logger *slog.Logger
 
 	// activeConv resolves the conversation id to stamp on a folder-not-trusted
-	// session_error when a trust modal is denied/timed out (#1014). It is the same
+	// session_error when a trust modal is denied (#1014). It is the same
 	// follow-active cursor the modal producer resolves its target from
 	// (activeConversation.CurrentConversation). nil ⇒ emit disabled.
 	activeConv func() string
@@ -122,7 +122,7 @@ func newModalResolverV2(reg *modalbridge.Registry, kb modalKeystroker, logger *s
 
 // Trust-modal wire class string (mirrors modalbridge's unexported classTrust,
 // duplicated because it is unexported there — like optProceed/optExit below).
-// Only a trust-class deny/timeout surfaces the folder-not-trusted session_error.
+// Only a trust-class deny surfaces the folder-not-trusted session_error.
 const classTrust = "trust"
 
 // reasonFolderNotTrusted is the static, content-free reason carried on the
@@ -132,7 +132,7 @@ const classTrust = "trust"
 const reasonFolderNotTrusted = "folder not trusted"
 
 // emitFolderNotTrusted surfaces a typed folder-not-trusted session_error for the
-// active conversation when trust is refused (a remote deny or the deny-on-timeout),
+// active conversation when trust is refused by a remote deny,
 // reusing the #1008 give-up → session_error frame path so the client sees a
 // terminal CodeSessionBlocked instead of a silent retry loop (#1014 AC-2/3). It is
 // a no-op when either seam is unset (the 18 test constructions and foreground/v1),
@@ -217,64 +217,6 @@ func (r *modalResolverV2) ResolveCancel(modalID string, dev *devices.Device) (re
 	}, true
 }
 
-// ResolveTimeout safe-denies an unanswered modal when its deny-on-timeout window
-// elapses (#725). It mirrors ResolveCancel — consume (the single idempotency
-// gate) → best-effort ESC → audit → return the dismissal — with two differences:
-// it takes NO device (a timeout has no answering device, so the audit
-// DeviceHash/DeviceLabel are empty, the documented no-device-timeout case), and
-// outcome/source are denied_timeout/timeout instead of cancelled/remote. An
-// unknown or already-consumed id (an answer/cancel won the race) returns
-// (zero, false) before any keystroke or audit — the AC #2 loser path, identical
-// to ResolveCancel's unknown-id no-op.
-//
-// ESC is the fail-closed deny for both modal classes (ADR 025 § Security model
-// "answered with the SAFE default (deny / ESC)"): for a permission modal ESC
-// dismisses the prompt (claude treats it as deny); for a trust modal ESC is the
-// "exit" = deny option (classifyAnswer maps exit → verbEsc). It is the same
-// keystroke cancel routes — only the audit classification differs.
-//
-// Runs on the manager's single Run dispatch goroutine (handleModalTimeout calls
-// it). SECURITY: no modal body/prompt/title and no payload bytes are ever logged.
-func (r *modalResolverV2) ResolveTimeout(modalID string) (relay.ModalDismissal, bool) {
-	out, ok := r.reg.Resolve(modalID)
-	if !ok {
-		return relay.ModalDismissal{}, false
-	}
-
-	if err := r.kb.SendEsc(); err != nil {
-		// Best-effort actuation: the modal is already consumed (idempotency
-		// committed above), so do NOT abort the audit/broadcast — that would
-		// orphan the consumed modal. err is a supervisor sentinel, never a secret.
-		r.logger.Warn("relay: modal timeout keystroke failed",
-			"event", "modal_timeout.keystroke_err",
-			"modal_id", modalID,
-			"err", err)
-	}
-
-	// No answering device on a timeout ⇒ the audit identity is empty by
-	// construction (the no-device-timeout case audit.Entry documents).
-	audit.Log(r.logger, audit.Entry{
-		ModalID:    modalID,
-		ModalClass: out.Class,
-		Outcome:    audit.OutcomeDeniedTimeout,
-		Source:     audit.SourceTimeout,
-	})
-
-	// A denied-on-timeout TRUST folder surfaces a typed session_error so the
-	// client learns trust was refused instead of watching a silent retry loop
-	// (#1014 AC-2/3). Strictly after the pre-built consume/ESC/audit; only the
-	// trust class emits (a permission-class timeout does not).
-	if out.Class == classTrust {
-		r.emitFolderNotTrusted()
-	}
-
-	// One source vocabulary feeds both the wire dismissal and the audit entry.
-	return relay.ModalDismissal{
-		Outcome: string(audit.OutcomeDeniedTimeout),
-		Source:  string(audit.SourceTimeout),
-	}, true
-}
-
 // ResolveAnswer is the security-critical gated answer arm: it routes an
 // internet-sourced modal_answer into claude's permission prompt ONLY from a
 // gated device. The hard invariant is that nothing but a fully-authorized, valid
@@ -311,7 +253,7 @@ func (r *modalResolverV2) ResolveAnswerWithAlwaysAllow(modalID, optionID, answer
 	// Step 2: fail-closed eligibility gate, BEFORE classification and BEFORE
 	// consume — the load-bearing ordering. A nil/unauthenticated device or an
 	// unset opt-in bit denies; the modal is left outstanding (Lookup only) for a
-	// legitimate local answer or the #725 deny-on-timeout. Audited
+	// legitimate local answer or the permission bridge's deny-on-timeout (#1103). Audited
 	// denied_unauthorized with the (possibly empty) non-secret identity.
 	if !dev.MayAnswerRemotePermission() {
 		r.auditAnswer(dev, modalID, out.Class, audit.OutcomeDeniedUnauthorized)
@@ -382,8 +324,8 @@ func (r *modalResolverV2) ResolveAnswerWithAlwaysAllow(modalID, optionID, answer
 	}
 	r.auditAnswer(dev, modalID, out.Class, decision)
 
-	// A remote DENY of the trust folder (exit → OutcomeDeny) surfaces the same
-	// typed session_error as the deny-on-timeout (#1014 AC-2/3). A trust proceed
+	// A remote DENY of the trust folder (exit → OutcomeDeny) surfaces a typed
+	// folder-not-trusted session_error (#1014 AC-2/3). A trust proceed
 	// (OutcomeAllow) does NOT emit — the held turn runs once trust clears — and
 	// permission answers never emit (scoped to the trust class).
 	if out.Class == classTrust && outcome == devices.OutcomeDeny {
@@ -1406,7 +1348,7 @@ func (b *streamApprovalBridge) retire(modalID string) {
 	}
 
 	// Timeout / disconnect / shutdown: no answering device, fail-closed deny — the
-	// no-device deny-on-timeout vocabulary ResolveTimeout uses. Audit identity is
+	// no-device denied_timeout/timeout audit vocabulary. Audit identity is
 	// empty by construction; the reason is the modal class, never the modal body.
 	audit.Log(b.logger, audit.Entry{
 		ModalID:    modalID,
