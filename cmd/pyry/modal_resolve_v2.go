@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"slices"
 	"strconv"
@@ -25,12 +24,10 @@ import (
 // modalKeystroker routes one abstract modal-resolution keystroke to the live
 // claude session. *supervisor.Supervisor satisfies all three (#726), so the
 // existing production wiring keeps compiling. Cancel needs only SendEsc; the
-// gated answer arm adds Answer (permission options) and AcceptTrust (trust
-// proceed).
+// gated answer arm adds Answer (permission options).
 type modalKeystroker interface {
 	SendEsc() error
 	Answer(choice string) error
-	AcceptTrust() error
 }
 
 // noopKeystroker is the stream-json bootstrap's modal keystroker: there is no PTY
@@ -45,7 +42,6 @@ type noopKeystroker struct{}
 
 func (noopKeystroker) SendEsc() error      { return nil }
 func (noopKeystroker) Answer(string) error { return nil }
-func (noopKeystroker) AcceptTrust() error  { return nil }
 
 // modalResolverV2 is the cmd/pyry implementation of relay.ModalResolver: it
 // consumes an outstanding modal from the daemon-singleton registry, routes the
@@ -66,26 +62,14 @@ type modalResolverV2 struct {
 	kb     modalKeystroker
 	logger *slog.Logger
 
-	// activeConv resolves the conversation id to stamp on a folder-not-trusted
-	// session_error when a trust modal is denied (#1014). It is the same
-	// follow-active cursor the modal producer resolves its target from
-	// (activeConversation.CurrentConversation). nil ⇒ emit disabled.
-	activeConv func() string
-	// notifyBlocked routes a folder-not-trusted session_error into the shared
-	// give-up → session_error frame path (#1008): it is main.go's `blocked`
-	// closure (a non-blocking, drop-on-full send into the giveUps channel the
-	// sessionErrorEmitterV2 drains). nil ⇒ emit disabled. Both fields are set only
-	// at the single production site (relay.go); the 18 test constructions leave
-	// them nil, keeping the pre-#1014 behaviour and foreground/v1 inert. #1014.
-	notifyBlocked func(convID, reason string)
-
 	// streamApprovals resolves a stream-json permission approval (a
 	// permbridge-parked completer, #1103) by modalID: the parallel VERDICT arm to
 	// the keystroke arm below. ResolveAnswer dispatches to it when the answered
 	// modalID is a stream approval, otherwise routes the tui keystroke. nil ⇒ no
 	// stream approvals wired (foreground / v1 / pre-#1080), so ResolveAnswer always
-	// routes the keystroke arm. Set at the production site (relay.go) like
-	// activeConv/notifyBlocked; the 18 test constructions leave it nil. #1080.
+	// routes the keystroke arm. Set after construction at the production site
+	// (relay.go), once the bridge exists; the test constructions leave it nil.
+	// #1080.
 	streamApprovals streamApprovalResolver
 }
 
@@ -107,41 +91,21 @@ type streamModalRegistry interface {
 // reasonRemoteDeny is the fixed, content-free deny message a remote reject answer
 // returns to claude on the stream-json path (#1080). A compile-time constant —
 // never host-derived — so it leaks nothing back to claude, mirroring
-// reasonFolderNotTrusted here and permbridge's own reasonTimeout.
+// permbridge's own reasonTimeout.
 const reasonRemoteDeny = "permission denied"
 
 // newModalResolverV2 wires the resolver to the daemon-singleton outstanding-modal
 // registry (the same instance #708 live-wires the producer/emitter into), the
-// supervisor keystroke seam, and the daemon logger. The #1014 emit seams
-// (activeConv/notifyBlocked) are nil-default fields set at the production site,
-// NOT constructor params — the constructor has 18 test call sites, and nil
-// disables the emit (the established "nil disables the optional seam" convention).
+// supervisor keystroke seam, and the daemon logger. streamApprovals is a
+// nil-default field set at the production site, NOT a constructor param — the
+// constructor has many test call sites, and nil disables the optional seam.
+//
+// The #1014 folder-not-trusted emit seams were removed deliberately (#1545): a
+// trust modal only ever reached the registry through the terminal producer
+// #1348 deleted, and trust is now settled by trustMark before every spawn, so
+// no answer here can be a trust deny.
 func newModalResolverV2(reg *modalbridge.Registry, kb modalKeystroker, logger *slog.Logger) *modalResolverV2 {
 	return &modalResolverV2{reg: reg, kb: kb, logger: logger}
-}
-
-// Trust-modal wire class string (mirrors modalbridge's unexported classTrust,
-// duplicated because it is unexported there — like optProceed/optExit below).
-// Only a trust-class deny surfaces the folder-not-trusted session_error.
-const classTrust = "trust"
-
-// reasonFolderNotTrusted is the static, content-free reason carried on the
-// folder-not-trusted session_error (#1014 AC-3). Being a compile-time constant it
-// can never carry queued phone text, the modal body/prompt/title, or any secret —
-// it rides the wire as SessionErrorPayload.Message on the #1008 emitter.
-const reasonFolderNotTrusted = "folder not trusted"
-
-// emitFolderNotTrusted surfaces a typed folder-not-trusted session_error for the
-// active conversation when trust is refused by a remote deny,
-// reusing the #1008 give-up → session_error frame path so the client sees a
-// terminal CodeSessionBlocked instead of a silent retry loop (#1014 AC-2/3). It is
-// a no-op when either seam is unset (the 18 test constructions and foreground/v1),
-// and never touches the modal body — the reason is the static constant.
-func (r *modalResolverV2) emitFolderNotTrusted() {
-	if r.notifyBlocked == nil || r.activeConv == nil {
-		return
-	}
-	r.notifyBlocked(r.activeConv(), reasonFolderNotTrusted)
 }
 
 // ResolveCancel consumes the named modal and routes the fail-safe dismiss. The
@@ -269,12 +233,12 @@ func (r *modalResolverV2) ResolveAnswerWithAlwaysAllow(modalID, optionID, answer
 		return relay.ModalDismissal{}, false
 	}
 
-	// Step 4: map option_id → (outcome, keystroke) against THIS modal's surfaced
+	// Step 4: map option_id → (outcome, answer digit) against THIS modal's surfaced
 	// options. A forged or wrong-class option_id is not a locatable option ⇒
 	// reject with no keystroke, no consume, no audit (no security decision was
 	// made; it is a malformed client frame). Warn-logged with a length-bounded
 	// option_id (it is attacker-controlled; slog JSON-escapes it).
-	outcome, verb, choice, ok := classifyAnswer(out, optionID)
+	outcome, choice, ok := classifyAnswer(out, optionID)
 	if !ok {
 		r.logger.Warn("relay: modal answer invalid option",
 			"event", "modal_answer.invalid_option",
@@ -310,7 +274,7 @@ func (r *modalResolverV2) ResolveAnswerWithAlwaysAllow(modalID, optionID, answer
 	//     safe-answer keystroke into the on-screen modal (unchanged pre-#1080 path).
 	handled := r.streamApprovals != nil && r.streamApprovals.ResolveStream(modalID, allow, alwaysAllow, reasonRemoteDeny)
 	if !handled {
-		if err := r.routeAnswerKeystroke(verb, choice); err != nil {
+		if err := r.kb.Answer(choice); err != nil {
 			r.logger.Warn("relay: modal answer keystroke failed",
 				"event", "modal_answer.keystroke_err",
 				"modal_id", modalID,
@@ -324,81 +288,35 @@ func (r *modalResolverV2) ResolveAnswerWithAlwaysAllow(modalID, optionID, answer
 	}
 	r.auditAnswer(dev, modalID, out.Class, decision)
 
-	// A remote DENY of the trust folder (exit → OutcomeDeny) surfaces a typed
-	// folder-not-trusted session_error (#1014 AC-2/3). A trust proceed
-	// (OutcomeAllow) does NOT emit — the held turn runs once trust clears — and
-	// permission answers never emit (scoped to the trust class).
-	if out.Class == classTrust && outcome == devices.OutcomeDeny {
-		r.emitFolderNotTrusted()
-	}
-
 	// The WIRE dismissal Outcome is the answered option_id (ModalDismissedPayload
 	// contract), NOT the audit classification. Source is remote.
 	return relay.ModalDismissal{Outcome: optionID, Source: string(audit.SourceRemote)}, true
 }
 
-// answerVerb is the safe-answer keystroke an option_id maps to, one level up
-// from the keystroker's verb methods (mirrors supervisor's unexported modalKey).
-type answerVerb int
-
-const (
-	verbAnswer      answerVerb = iota // → kb.Answer(choice) (permission options)
-	verbAcceptTrust                   // → kb.AcceptTrust()  (trust proceed)
-	verbEsc                           // → kb.SendEsc()      (trust exit / dismiss)
-)
-
-// Trust-modal option ids on the wire (mirrors modalbridge's unexported
-// optProceed/optExit, duplicated because they are unexported there): proceed →
-// accept (allow), exit → ESC dismiss (deny).
-const (
-	optProceed = "proceed"
-	optExit    = "exit"
-)
-
 // classifyAnswer locates optionID within o.Options and maps it to the grant
-// outcome + the keystroke verb to actuate. ok=false if optionID is not a
-// locatable option of THIS modal (forged / wrong-class / unknown id) — the
-// caller rejects with no keystroke, no consume, no audit.
+// outcome + the Answer digit to actuate. ok=false if optionID is not a
+// locatable option of THIS modal, or is not one of the four permission kinds
+// (forged / unknown id, including the trust class's proceed/exit, which #1545
+// removed: trust is settled before spawn) — the caller rejects with no
+// keystroke, no consume, no audit.
 //
 // Membership in the surfaced o.Options is the single source of truth: a
 // permission option's keystroke is its 1-based position in claude's display
 // order (the producer builds o.Options in that order, #716), so deriving the
 // digit from the index keeps one source of truth and gives free membership
-// validation. choice is unused for the trust verbs.
-func classifyAnswer(o modalbridge.Outstanding, optionID string) (outcome devices.RemotePermissionOutcome, verb answerVerb, choice string, ok bool) {
+// validation.
+func classifyAnswer(o modalbridge.Outstanding, optionID string) (outcome devices.RemotePermissionOutcome, choice string, ok bool) {
 	idx := slices.IndexFunc(o.Options, func(opt protocol.ModalOption) bool { return opt.ID == optionID })
 	if idx < 0 {
-		return 0, 0, "", false
+		return 0, "", false
 	}
 	switch optionID {
 	case string(turnevent.PermissionOptionKindAllowOnce), string(turnevent.PermissionOptionKindAllowAlways):
-		return devices.OutcomeAllow, verbAnswer, strconv.Itoa(idx + 1), true
+		return devices.OutcomeAllow, strconv.Itoa(idx + 1), true
 	case string(turnevent.PermissionOptionKindRejectOnce), string(turnevent.PermissionOptionKindRejectAlways):
-		return devices.OutcomeDeny, verbAnswer, strconv.Itoa(idx + 1), true
-	case optProceed:
-		return devices.OutcomeAllow, verbAcceptTrust, "", true
-	case optExit:
-		return devices.OutcomeDeny, verbEsc, "", true
+		return devices.OutcomeDeny, strconv.Itoa(idx + 1), true
 	default:
-		return 0, 0, "", false
-	}
-}
-
-// routeAnswerKeystroke actuates the classified verb on the keystroker. The
-// switch shape mirrors supervisor.sendModalKeystroke; choice is used only by
-// verbAnswer. The default is unreachable from classifyAnswer (which returns only
-// the three verbs with ok=true) — return loudly rather than panic per
-// CODING-STYLE.
-func (r *modalResolverV2) routeAnswerKeystroke(verb answerVerb, choice string) error {
-	switch verb {
-	case verbAnswer:
-		return r.kb.Answer(choice)
-	case verbAcceptTrust:
-		return r.kb.AcceptTrust()
-	case verbEsc:
-		return r.kb.SendEsc()
-	default:
-		return fmt.Errorf("unknown answer verb %d", int(verb))
+		return 0, "", false
 	}
 }
 
@@ -481,9 +399,8 @@ type streamApprovalBridge struct {
 	// conversation?" — which is the half of ApprovalParked the correlation below
 	// cannot supply. It is SET AFTER CONSTRUCTION at the one production site
 	// (relay.go), not taken as a seventh constructor parameter: the constructor has
-	// 14 call sites and the adjacent modalResolver.activeConv / notifyBlocked pair
-	// is the in-tree precedent for keeping an optional dependency's blast radius at
-	// one site.
+	// 14 call sites and the resolver's streamApprovals field is the in-tree
+	// precedent for keeping an optional dependency's blast radius at one site.
 	//
 	// nil ⇒ ApprovalParked reports negative for EVERY conversation, without calling
 	// out. The bridge and the tracker have different non-nil discriminants — the
@@ -507,7 +424,7 @@ type streamApprovalBridge struct {
 	// clarifying-question batches (#1975). Set AFTER CONSTRUCTION at the one
 	// production site (relay.go), for toolCallInFlight's reason: the constructor
 	// has fifteen call sites and this file's precedent for an optional dependency
-	// is the adjacent modalResolver.activeConv / notifyBlocked pair.
+	// is the resolver's streamApprovals field.
 	//
 	// nil ⇒ EVERY approval takes the permission path, question or not, which is
 	// exactly the pre-#1973 behaviour — so the fourteen test constructions, the

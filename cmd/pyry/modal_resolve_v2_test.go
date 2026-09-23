@@ -12,6 +12,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/modalbridge"
 	"github.com/pyrycode/pyrycode/internal/relay"
+	"github.com/pyrycode/pyrycode/internal/turnevent"
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 )
 
@@ -30,7 +31,6 @@ var errNoLiveSessionForTest = errors.New("no live session")
 type fakeKeystroker struct {
 	escCalls    int
 	answerCalls []string // one entry per Answer(choice), in call order
-	trustCalls  int
 	err         error
 }
 
@@ -44,14 +44,9 @@ func (f *fakeKeystroker) Answer(choice string) error {
 	return f.err
 }
 
-func (f *fakeKeystroker) AcceptTrust() error {
-	f.trustCalls++
-	return f.err
-}
-
 // routedNothing reports whether no safe-answer verb was actuated.
 func (f *fakeKeystroker) routedNothing() bool {
-	return f.escCalls == 0 && f.trustCalls == 0 && len(f.answerCalls) == 0
+	return f.escCalls == 0 && len(f.answerCalls) == 0
 }
 
 // recordPermissionModal scripts one outstanding permission modal carrying body
@@ -61,22 +56,6 @@ func recordPermissionModal(t *testing.T, reg *modalbridge.Registry, body string)
 	req, wireClass, ok := modalbridge.PermissionRequestForClass(tuidriver.ModalClassPermission, body)
 	if !ok {
 		t.Fatal("PermissionRequestForClass(permission) not ok")
-	}
-	payload, err := reg.Record(req, wireClass, "")
-	if err != nil {
-		t.Fatalf("Record: %v", err)
-	}
-	return payload.ModalID
-}
-
-// recordTrustModal scripts one outstanding trust-folder modal (options
-// proceed/exit) carrying body as its prompt and returns the minted modal_id.
-// The trust-class sibling of recordPermissionModal.
-func recordTrustModal(t *testing.T, reg *modalbridge.Registry, body string) string {
-	t.Helper()
-	req, wireClass, ok := modalbridge.PermissionRequestForClass(tuidriver.ModalClassTrustFolder, body)
-	if !ok {
-		t.Fatal("PermissionRequestForClass(trust) not ok")
 	}
 	payload, err := reg.Record(req, wireClass, "")
 	if err != nil {
@@ -279,16 +258,15 @@ func TestModalResolverV2_Cancel_KeystrokeError(t *testing.T) {
 	}
 }
 
-// TestModalResolverV2_Answer_Authorized drives the four authorized answer paths
-// (allow/deny × permission/trust) from a gated device and asserts each routes the
-// correct safe-answer verb, consumes the modal, audits the right outcome with the
+// TestModalResolverV2_Answer_Authorized drives the authorized allow and deny
+// answer paths from a gated device and asserts each routes the correct
+// Answer digit, consumes the modal, audits the right outcome with the
 // non-secret identity fields, and returns a {option_id, remote} dismissal. AC-1.
 func TestModalResolverV2_Answer_Authorized(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name      string
-		trust     bool // record a trust modal instead of a permission modal
 		optionID  string
 		wantAudit string
 		wantKey   func(t *testing.T, kb *fakeKeystroker)
@@ -301,8 +279,8 @@ func TestModalResolverV2_Answer_Authorized(t *testing.T) {
 				if len(kb.answerCalls) != 1 || kb.answerCalls[0] != "1" {
 					t.Errorf("answerCalls = %v, want [1]", kb.answerCalls)
 				}
-				if kb.escCalls != 0 || kb.trustCalls != 0 {
-					t.Errorf("unexpected esc=%d trust=%d", kb.escCalls, kb.trustCalls)
+				if kb.escCalls != 0 {
+					t.Errorf("unexpected esc=%d", kb.escCalls)
 				}
 			},
 		},
@@ -316,34 +294,6 @@ func TestModalResolverV2_Answer_Authorized(t *testing.T) {
 				}
 			},
 		},
-		{
-			name:      "proceed trust routes AcceptTrust",
-			trust:     true,
-			optionID:  "proceed",
-			wantAudit: "allowed",
-			wantKey: func(t *testing.T, kb *fakeKeystroker) {
-				if kb.trustCalls != 1 {
-					t.Errorf("trustCalls = %d, want 1", kb.trustCalls)
-				}
-				if len(kb.answerCalls) != 0 || kb.escCalls != 0 {
-					t.Errorf("unexpected answer=%v esc=%d", kb.answerCalls, kb.escCalls)
-				}
-			},
-		},
-		{
-			name:      "exit trust routes SendEsc",
-			trust:     true,
-			optionID:  "exit",
-			wantAudit: "denied",
-			wantKey: func(t *testing.T, kb *fakeKeystroker) {
-				if kb.escCalls != 1 {
-					t.Errorf("escCalls = %d, want 1", kb.escCalls)
-				}
-				if len(kb.answerCalls) != 0 || kb.trustCalls != 0 {
-					t.Errorf("unexpected answer=%v trust=%d", kb.answerCalls, kb.trustCalls)
-				}
-			},
-		},
 	}
 
 	for _, tt := range tests {
@@ -352,14 +302,7 @@ func TestModalResolverV2_Answer_Authorized(t *testing.T) {
 			t.Parallel()
 
 			reg := modalbridge.New()
-			var modalID, wantClass string
-			if tt.trust {
-				modalID = recordTrustModal(t, reg, secretModalBody)
-				wantClass = "trust"
-			} else {
-				modalID = recordPermissionModal(t, reg, secretModalBody)
-				wantClass = "permission"
-			}
+			modalID := recordPermissionModal(t, reg, secretModalBody)
 			kb := &fakeKeystroker{}
 			logger, logBuf := auditLogger()
 			dev := eligibleDevice(t)
@@ -390,7 +333,7 @@ func TestModalResolverV2_Answer_Authorized(t *testing.T) {
 				"outcome":      tt.wantAudit,
 				"source":       "remote",
 				"modal_id":     modalID,
-				"modal_class":  wantClass,
+				"modal_class":  "permission",
 				"device_hash":  dev.TokenHash,
 				"device_label": dev.Name,
 			}
@@ -430,7 +373,7 @@ func TestModalResolverV2_Answer_UngatedDevice(t *testing.T) {
 		t.Errorf("dismissal = %+v, want zero", d)
 	}
 	if !kb.routedNothing() {
-		t.Errorf("ungated device routed a keystroke: answer=%v esc=%d trust=%d", kb.answerCalls, kb.escCalls, kb.trustCalls)
+		t.Errorf("ungated device routed a keystroke: answer=%v esc=%d", kb.answerCalls, kb.escCalls)
 	}
 	// NOT consumed: still outstanding.
 	if _, ok := reg.Lookup(modalID); !ok {
@@ -547,19 +490,17 @@ func TestModalResolverV2_Answer_ReplayIdempotent(t *testing.T) {
 }
 
 // TestModalResolverV2_Answer_ForgedOption proves an option_id that is not a member
-// of THIS modal's options (unknown id, or a wrong-class option) is rejected with
+// of THIS modal's options (unknown id, or a foreign option id) is rejected with
 // no keystroke, no consume, no audit, and a Warn. AC-2 defense.
 func TestModalResolverV2_Answer_ForgedOption(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name     string
-		trust    bool
 		optionID string
 	}{
-		{"unknown option id on permission", false, "bogus"},
-		{"trust option on a permission modal", false, "proceed"},
-		{"permission option on a trust modal", true, "allow_once"},
+		{"unknown option id on permission", "bogus"},
+		{"trust option on a permission modal", "proceed"},
 	}
 	for _, tt := range tests {
 		tt := tt
@@ -567,12 +508,7 @@ func TestModalResolverV2_Answer_ForgedOption(t *testing.T) {
 			t.Parallel()
 
 			reg := modalbridge.New()
-			var modalID string
-			if tt.trust {
-				modalID = recordTrustModal(t, reg, secretModalBody)
-			} else {
-				modalID = recordPermissionModal(t, reg, secretModalBody)
-			}
+			modalID := recordPermissionModal(t, reg, secretModalBody)
 			kb := &fakeKeystroker{}
 			logger, logBuf := auditLogger()
 
@@ -598,6 +534,55 @@ func TestModalResolverV2_Answer_ForgedOption(t *testing.T) {
 			}
 			if !strings.Contains(logBuf.String(), "modal_answer.invalid_option") {
 				t.Errorf("expected an invalid_option warn; got:\n%s", logBuf.String())
+			}
+		})
+	}
+}
+
+// TestModalResolverV2_Answer_TrustOptionIDsRejected pins that the trust answer
+// arm is gone (#1545): proceed/exit are rejected as invalid options even when
+// the modal's OWN options carry them, so the membership scan finds the id and
+// only the option switch can refuse it. ForgedOption's "trust option on a
+// permission modal" row cannot pin this — its options omit the id, so the
+// membership scan rejects it before the switch is reached.
+func TestModalResolverV2_Answer_TrustOptionIDsRejected(t *testing.T) {
+	t.Parallel()
+
+	for _, optionID := range []string{"proceed", "exit"} {
+		optionID := optionID
+		t.Run(optionID, func(t *testing.T) {
+			t.Parallel()
+
+			reg := modalbridge.New()
+			req := turnevent.NewPermissionRequest("req-1", "tool-1", secretModalBody, []turnevent.PermissionOption{
+				{ID: "allow_once", Label: "Yes", Kind: turnevent.PermissionOptionKindAllowOnce},
+				{ID: optionID, Label: optionID},
+			})
+			payload, err := reg.Record(req, "permission", "")
+			if err != nil {
+				t.Fatalf("Record: %v", err)
+			}
+			modalID := payload.ModalID
+			kb := &fakeKeystroker{}
+			logger, logBuf := auditLogger()
+
+			r := newModalResolverV2(reg, kb, logger)
+			d, ok := r.ResolveAnswer(modalID, optionID, "tok-1", eligibleDevice(t))
+
+			if ok {
+				t.Errorf("ResolveAnswer(%q) ok = true, want false", optionID)
+			}
+			if d != (relay.ModalDismissal{}) {
+				t.Errorf("dismissal = %+v, want zero", d)
+			}
+			if !kb.routedNothing() {
+				t.Errorf("%q routed a keystroke: answer=%v esc=%d", optionID, kb.answerCalls, kb.escCalls)
+			}
+			if _, ok := reg.Lookup(modalID); !ok {
+				t.Errorf("%q consumed the modal; it must stay outstanding", optionID)
+			}
+			if recs := auditRecords(t, logBuf); len(recs) != 0 {
+				t.Errorf("audit records = %d, want 0", len(recs))
 			}
 		})
 	}
@@ -680,104 +665,4 @@ func TestModalResolverV2_Answer_NoBodyLeak(t *testing.T) {
 			}
 		})
 	}
-}
-
-// blockedCall records one folder-not-trusted emission.
-type blockedCall struct{ convID, reason string }
-
-// blockedSpy captures the resolver's folder-not-trusted emissions (the #1008
-// give-up → session_error seam #1014 routes a trust deny into). The
-// resolver is driven single-threaded in these tests, so no mutex is needed
-// (mirrors fakeKeystroker).
-type blockedSpy struct{ calls []blockedCall }
-
-func (s *blockedSpy) notify(convID, reason string) {
-	s.calls = append(s.calls, blockedCall{convID: convID, reason: reason})
-}
-
-// emittingResolver builds a resolver with the #1014 emit seams set: activeConv
-// returns knownConvID and notifyBlocked records into spy. This is the single
-// production construction (`startRelayV2`) — the 18 other test constructions leave
-// both fields nil (emit disabled).
-func emittingResolver(reg *modalbridge.Registry, kb modalKeystroker, logger *slog.Logger, knownConvID string) (*modalResolverV2, *blockedSpy) {
-	spy := &blockedSpy{}
-	r := newModalResolverV2(reg, kb, logger)
-	r.activeConv = func() string { return knownConvID }
-	r.notifyBlocked = spy.notify
-	return r, spy
-}
-
-// TestModalResolverV2_TrustAnswer_EmitPolicy drives the answer arm's emit policy:
-// a trust DENY (exit) from a gated device emits once; a trust ALLOW (proceed)
-// does NOT (the turn runs once trust clears); a permission DENY does NOT (scoped
-// to trust). #1014 AC-2/3.
-func TestModalResolverV2_TrustAnswer_EmitPolicy(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		trust    bool
-		optionID string
-		wantEmit bool
-	}{
-		{"trust exit (deny) emits", true, "exit", true},
-		{"trust proceed (allow) does not emit", true, "proceed", false},
-		{"permission reject (deny) does not emit", false, "reject_once", false},
-	}
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			reg := modalbridge.New()
-			var modalID string
-			if tt.trust {
-				modalID = recordTrustModal(t, reg, secretModalBody)
-			} else {
-				modalID = recordPermissionModal(t, reg, secretModalBody)
-			}
-			kb := &fakeKeystroker{}
-			logger, _ := auditLogger()
-
-			r, spy := emittingResolver(reg, kb, logger, "conv-xyz")
-			if _, ok := r.ResolveAnswer(modalID, tt.optionID, "tok-1", eligibleDevice(t)); !ok {
-				t.Fatal("ResolveAnswer ok = false, want true")
-			}
-
-			if tt.wantEmit {
-				if len(spy.calls) != 1 {
-					t.Fatalf("blocked emissions = %d, want 1", len(spy.calls))
-				}
-				if spy.calls[0].convID != "conv-xyz" || spy.calls[0].reason != "folder not trusted" {
-					t.Errorf("emission = %+v, want {conv-xyz folder not trusted}", spy.calls[0])
-				}
-			} else if len(spy.calls) != 0 {
-				t.Errorf("blocked emissions = %d, want 0", len(spy.calls))
-			}
-		})
-	}
-}
-
-// TestModalResolverV2_NilEmitSeams_Safe proves the emit seams are nil-default: a
-// resolver built the pre-#1014 way (the 18 existing test constructions and
-// foreground/v1) runs a trust deny with no panic and
-// no emit — the pre-built consume/ESC/audit path is unchanged. #1014 (nil-default).
-func TestModalResolverV2_NilEmitSeams_Safe(t *testing.T) {
-	t.Parallel()
-
-	t.Run("trust deny answer", func(t *testing.T) {
-		t.Parallel()
-		reg := modalbridge.New()
-		modalID := recordTrustModal(t, reg, secretModalBody)
-		kb := &fakeKeystroker{}
-		logger, _ := auditLogger()
-
-		r := newModalResolverV2(reg, kb, logger) // nil activeConv + notifyBlocked
-		if _, ok := r.ResolveAnswer(modalID, "exit", "tok-1", eligibleDevice(t)); !ok {
-			t.Fatal("ResolveAnswer ok = false, want true")
-		}
-		if kb.escCalls != 1 {
-			t.Errorf("SendEsc calls = %d, want 1 (pre-built path intact)", kb.escCalls)
-		}
-	})
 }

@@ -15,7 +15,7 @@ import (
 )
 
 // classPairingMint is this verb's audit class, the field modal_class carries.
-// Sits beside classTrust and classQuestion for the same reason those do: an audit
+// Sits beside classQuestion for the same reason that one does: an audit
 // record has to say which decision it is about, and audit.Entry's vocabulary is
 // modal-shaped, so each family names itself.
 const classPairingMint = "pairing_mint"
