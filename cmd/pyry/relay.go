@@ -220,12 +220,6 @@ type relayWiring struct {
 	// starts no Run goroutine, so it takes no bcast parameter — startRelayV2 attaches
 	// the broadcaster into it instead.
 	resetting *resettingEmitterV2
-	// blockedNotify routes a folder-not-trusted session_error (a trust deny) into
-	// the same give-up → session_error frame path the
-	// msgqueue OnGiveUp seam uses (#1014). It is main.go's shared `blocked` closure
-	// (a non-blocking send into the giveUps channel). Set on the resolver's #1014
-	// emit seam below; nil in foreground/v1 leaves the resolver's emit inert.
-	blockedNotify func(convID, reason string)
 	// debugBundler assembles the daemon-global debug bundle for the
 	// request_debug_bundle verb (#813). nil in foreground/v1 replies "unavailable".
 	debugBundler func() ([]byte, error)
@@ -798,19 +792,16 @@ func startRelayV2(
 	questionReg := questionbridge.New()
 
 	// Inbound modal-control resolver (#727). Constructed here (not inline in the
-	// config literal below) so its #1014 emit seams can be set: a trust deny
-	// surfaces a folder-not-trusted session_error via the shared
-	// blockedNotify closure, stamped with the active conversation (the same
-	// follow-active cursor the modal producer resolves its target from). Both
-	// seams are nil in foreground/v1, leaving the pre-#1014 behaviour intact.
+	// config literal below) so its streamApprovals field can be assigned once the
+	// stream approval bridge exists, after the manager. Its #1014
+	// folder-not-trusted emit seams were removed deliberately (#1545): trust is
+	// settled by trustMark before every spawn, so no answer can be a trust deny.
 	//
 	// The terminal keystroker argument is gone with #1348: ResolveCancel used it
 	// to press escape at a terminal modal, and there is no terminal. A stream
 	// approval denies fail-closed through the permission bridge's
 	// deny-on-timeout (#1103), which is the only deny-on-timeout left.
 	modalResolver := newModalResolverV2(modalReg, noopKeystroker{}, logger)
-	modalResolver.activeConv = w.active.CurrentConversation
-	modalResolver.notifyBlocked = w.blockedNotify
 
 	// Inbound question-control resolver (#1986): the per-device authorization gate
 	// for an inbound question_answer / question_refused, and the audit record of
@@ -893,7 +884,7 @@ func startRelayV2(
 	// config below needs it, and it must exist before the manager does.
 	//
 	// IT TAKES NO CONVERSATION RESOLVER since #2143. It held one over the
-	// follow-active cursor — the same one modalResolver.activeConv reads — and
+	// follow-active cursor — the same one the stream approval bridge reads — and
 	// that cursor is stamped only by a successful send_message route, so an
 	// attachment added before a conversation's first message could never be
 	// stored and one added after a switch was filed under the wrong conversation.
@@ -1210,7 +1201,6 @@ func startRelayV2(
 		// through; the stream-json bootstrap path (typed-nil w.sup, #1077) gets a
 		// no-op keystroker whose ESC is moot — a stream-json approval has no PTY
 		// modal to dismiss and denies fail-closed via the permbridge timeout (#1103).
-		// Constructed above so its #1014 folder-not-trusted emit seams are set first.
 		// The remote wire pairing minter, alongside the `pyry pair` CLI and local
 		// control provider. All three reach the same mintDevice, so a record
 		// created here is indistinguishable from one either host-operator path
@@ -1396,8 +1386,8 @@ func startRelayV2(
 	if w.approvals != nil {
 		bridge := newStreamApprovalBridge(w.approvals, modalReg, mgr, w.active.CurrentConversation, ctx, logger)
 		// The question arm (#1973), assigned after construction rather than passed
-		// in — the same shape toolCallInFlight and modalResolver.activeConv /
-		// notifyBlocked use, and the only way to keep the constructor's fifteen call
+		// in — the same shape toolCallInFlight and modalResolver.streamApprovals
+		// use, and the only way to keep the constructor's fifteen call
 		// sites untouched. NO NIL GUARD is needed or wanted: questionReg is minted
 		// unconditionally above. Leaving it unset is what every other construction in
 		// the tree does, and there a question surfaces as the permission modal it did
@@ -1405,8 +1395,8 @@ func startRelayV2(
 		// streamApprovals — no data race on the field.
 		bridge.questions = questionReg
 		// The #1919 report's membership half, assigned after construction rather
-		// than passed in — the same shape modalResolver.activeConv/notifyBlocked use
-		// above, and the only way to keep the constructor's 14 call sites untouched.
+		// than passed in — the same shape modalResolver.streamApprovals uses, and
+		// the only way to keep the constructor's 14 call sites untouched.
 		//
 		// THE GUARD IS MANDATORY, not defensive padding. A method value on a nil
 		// *turnBusyTracker is a NON-NIL func that panics on its first call:

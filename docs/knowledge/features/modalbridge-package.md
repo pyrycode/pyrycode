@@ -500,5 +500,9 @@ path is #791/#793 (EPIC #597 Phase 3).
   turn is held (never typed into the consent gate) until an authorized `proceed` answer runs it,
   and a `deny` yields the terminal `session_error{session.blocked, "folder not trusted"}` with the
   turn genuinely never delivered. Rides [#1013](../codebase/1013.md) and [#1014](../codebase/1014.md)
-  wholesale; introduces no production behaviour beyond the test-only `fakeclaude` simulation. See
+  wholesale; introduces no production behaviour beyond the test-only `fakeclaude` simulation. This
+  remains `modalbridge`'s documented wire contract for a trust `deny`, but `cmd/pyry` has had no
+  producer for it since #1545 deleted `modalResolverV2`'s trust-class arms as production-unreachable:
+  the only registry writer, `streamApprovalBridge.Surface`, records permission-class modals only, and
+  workspace trust is settled by `trustMark` before every spawn. See
   [codebase/993.md](../codebase/993.md).

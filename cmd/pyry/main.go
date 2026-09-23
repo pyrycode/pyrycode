@@ -959,11 +959,12 @@ func runSupervisor(args []string) error {
 	// nil (disabled) to live: a persistent-delivery give-up now surfaces as a
 	// typed, client-visible session_error frame instead of a silently dropped head.
 	giveUps := make(chan giveUpNotice, sessionErrorQueueSize)
-	// blocked is the shared session_error notify closure (a non-blocking,
-	// drop-on-full send into giveUps): the msgqueue give-up path uses it as
-	// OnGiveUp, and the modal resolver uses it (via relayWiring.blockedNotify) to
-	// surface a folder-not-trusted session_error on a trust deny/timeout (#1014).
-	// One closure, two senders into the same #1008 frame path.
+	// blocked is the session_error notify closure (a non-blocking, drop-on-full
+	// send into giveUps), and msgqueue's give-up path is its only sender, as
+	// OnGiveUp. #1014 gave it a second one, the modal resolver surfacing a
+	// folder-not-trusted session_error on a trust deny; that sender was removed
+	// deliberately (#1545), because trust is settled by trustMark before every
+	// spawn and no trust modal can reach the resolver since #1348.
 	blocked := sessionErrorNotify(giveUps, logger)
 	// approvalParked is the third value in this block built BEFORE msgqueue.New for
 	// the same chicken-and-egg reason as queueChanges and giveUps: it carries #1919's
@@ -1180,12 +1181,11 @@ func runSupervisor(args []string) error {
 				return out
 			})
 		},
-		qse:           qse,
-		sessionErr:    see,
-		resetting:     resetting,
-		blockedNotify: blocked,
-		debugBundler:  debugBundler,
-		settings:      settingsUpdaterAdapter{pool, modelVocabulary},
+		qse:          qse,
+		sessionErr:   see,
+		resetting:    resetting,
+		debugBundler: debugBundler,
+		settings:     settingsUpdaterAdapter{pool, modelVocabulary},
 		runSettings: func(convID string) (boundRunSettings, bool) {
 			return resolveBoundRunSettings(convReg, runSettingsPool{Pool: pool}, convID)
 		},

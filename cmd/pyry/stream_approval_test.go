@@ -429,7 +429,7 @@ func TestModalResolverV2_Answer_StreamAllow(t *testing.T) {
 		t.Errorf("dismissal = %+v, want {%s remote}", d, allowOpt)
 	}
 	if !kb.routedNothing() {
-		t.Errorf("keystroke routed on a stream answer: esc=%d trust=%d answers=%v", kb.escCalls, kb.trustCalls, kb.answerCalls)
+		t.Errorf("keystroke routed on a stream answer: esc=%d answers=%v", kb.escCalls, kb.answerCalls)
 	}
 
 	v := pending.Await()
@@ -2313,7 +2313,7 @@ func TestModalResolverV2_Cancel_StreamDeny(t *testing.T) {
 		t.Errorf("dismissal = %+v, want {cancelled remote}", d)
 	}
 	if !kb.routedNothing() {
-		t.Errorf("keystroke routed on a stream cancel: esc=%d trust=%d answers=%v", kb.escCalls, kb.trustCalls, kb.answerCalls)
+		t.Errorf("keystroke routed on a stream cancel: esc=%d answers=%v", kb.escCalls, kb.answerCalls)
 	}
 
 	verdicts := make(chan permbridge.Verdict, 1)

@@ -24,6 +24,15 @@ the caller, so no decode error or attacker-controlled byte is ever echoed back.
   `SendEsc`) → `audit.Log({cancelled, remote})`; `ResolveAnswer` is the gated answer
   arm (#717 — `Lookup` → fail-closed gate → `option_id` classification → `Resolve`
   consume → safe-answer keystroke → audit).
+  `classifyAnswer`'s own membership scan — is `option_id` one of the ids the modal's
+  `Outstanding.Options` actually surfaced — runs *before* the per-id switch that
+  decides the outcome, and rejects anything absent from that list regardless of
+  what the switch would otherwise do with it (#1545). A pin test aimed at the
+  switch (not the scan) has to put its target id inside the fixture's own
+  `Options`; giving it as a bare `option_id` on a modal that never surfaced it
+  exercises only the membership scan and passes whether or not the switch case
+  for that id still exists. #1545's `TestModalResolverV2_Answer_TrustOptionIDsRejected`
+  is built this way to pin `proceed`/`exit` rejection at the switch itself.
   Wired in `cmd/pyry/relay.go`'s `startRelayV2`
   over the **daemon-singleton** `modalbridge.New()` registry (the same instance
   [#798](../codebase/798.md) live-wires the producer into). The keystroker argument
