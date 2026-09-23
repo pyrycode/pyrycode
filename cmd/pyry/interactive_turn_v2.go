@@ -82,17 +82,16 @@ type assistantDeltaLane struct {
 // It is a passive state machine — it spawns no goroutine and owns no queue
 // (contrast assistantTurnEmitterV2, whose PTY-drain source could wedge claude).
 // All lifecycle fields are plain (no atomic, no mutex): Handle is designed to
-// run only on the producer's single Run goroutine, which invokes OnEvent
-// serially (turnbridge/producer.go). #633 wires that goroutine; here unit
-// tests call Handle directly with a scripted sequence.
+// run only on the single drain goroutine startStreamTurnDrainV2 spawns, which
+// calls it serially; here unit tests call Handle directly with a scripted
+// sequence.
 //
 // Delta coalescing (#609): consecutive TextChunks sharing a MessageID are
 // buffered and emitted as ONE assistant_delta — flushed at the next message
 // boundary, before any interleaved non-text envelope, at the turn boundary, or
 // on the ~250ms coalesceWindow timer, whichever comes first. The timer is owned
-// here but its channel is selected by the producer's drain loop and routed back
-// into flushDelta on that SAME single Run goroutine (Config.FlushSignal /
-// OnFlush, wired by startInteractiveTurnStreamV2). So the emitter still spawns
+// here but its channel (flushC) is selected by startStreamTurnDrainV2's loop and
+// routed back into flushDelta on that SAME single drain goroutine. So the emitter still spawns
 // no goroutine and the coalescing fields stay unguarded-but-race-free. Go 1.26
 // timer semantics (no stale fire after Stop/Reset) make the single-goroutine
 // arm/reset correct without a manual channel drain. A flush larger than
@@ -130,7 +129,7 @@ type interactiveTurnEmitterV2 struct {
 	// id that is unique daemon-wide (#2022) for the #647 reconnect-replay path,
 	// while retention stays per conversation. It is owned here
 	// (created in the constructor, daemon-resident since the emitter is built
-	// once in startInteractiveTurnStreamV2 — codebase/633.md), distinct from the
+	// once in startRelayV2), distinct from the
 	// per-conn envelope nextID above (NOT overloaded). The ring is self-
 	// synchronised: it is the one field a second goroutine (the future query
 	// path) may touch, so the emitter's other fields stay unguarded and
@@ -935,9 +934,9 @@ func splitDeltaText(s string, max int) []string {
 // advances seq once per EMITTED envelope, clears the buffer, and stops the
 // timer. It is a NO-OP on an empty buffer, which is what makes every flush
 // trigger — message boundary, interleaved non-text envelope, turn end, or the
-// timer firing on no pending text — harmless. Reached from Handle (inside the
-// producer's OnEvent) and from the producer's OnFlush, both on the single Run
-// goroutine; never concurrently (see the struct doc). seq NEVER advances once
+// timer firing on no pending text — harmless. Reached from Handle and from the
+// drain's flushC case, both on startStreamTurnDrainV2's single goroutine; never
+// concurrently (see the struct doc). seq NEVER advances once
 // per buffered TextChunk: a buffer that fits emits exactly one delta with one
 // seq, unchanged from #609.
 //

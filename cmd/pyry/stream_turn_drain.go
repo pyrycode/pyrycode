@@ -469,10 +469,8 @@ func (s *streamTurnSink) exitForTag(tag func() string) func() {
 }
 
 // startStreamTurnDrainV2 spawns the single drain goroutine that feeds the
-// unchanged interactiveTurnEmitterV2 from the fan-in sink — the stream-json
-// analogue of the PTY path's OnEvent / FlushSignal / OnFlush triple
-// (startInteractiveTurnStreamV2), without turnbridge: the Parser already emits
-// turnevent.Event, so there is nothing to un-map back to a tuidriver.Event.
+// interactiveTurnEmitterV2 from the fan-in sink. The Parser already emits
+// turnevent.Event, so the events reach Handle as they are, with no mapping step.
 //
 // The goroutine selects over four cases:
 //   - sink.ch: an exit envelope (#1209) clears the producing session's turn and
@@ -495,9 +493,9 @@ func (s *streamTurnSink) exitForTag(tag func() string) func() {
 //   - ctx.Done(): stop.
 //
 // Single-writer invariant: only this goroutine ever calls Handle / flushDelta, so
-// the emitter's unguarded lifecycle / coalescing fields stay race-free — the same
-// single-Run-goroutine assumption the PTY producer relies on. The returned
-// cleanup blocks until the goroutine exits, mirroring startInteractiveTurnStreamV2.
+// the emitter's unguarded lifecycle / coalescing fields stay race-free — the
+// single-goroutine assumption interactiveTurnEmitterV2 documents. The returned
+// cleanup blocks until the goroutine exits.
 //
 // The emitter is passed in (not built here) so the caller owns its construction
 // and replay wiring; #1081 composes activeSession from the active-conversation

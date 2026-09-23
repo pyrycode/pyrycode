@@ -1,15 +1,24 @@
 # Esc-ends-turn mode (#794)
 
-`PYRY_FAKE_CLAUDE_ESC_ENDS_TURN` makes the **remote interrupt keystroke itself**
-end the running turn — the harness piece behind the live interrupt capstone
-([codebase/794.md](../codebase/794.md)). The interrupt path routes a phone
+`PYRY_FAKE_CLAUDE_ESC_ENDS_TURN` made the **remote interrupt keystroke itself**
+end the running turn — the harness piece behind the PTY-path interrupt capstone
+([codebase/794.md](../codebase/794.md)). The interrupt path routed a phone
 `interrupt` frame → `handleInterrupt` → `supervisor.SendEsc()` → a **lone `0x1b`**
 into the supervised child's stdin. In this mode fakeclaude detects that bare ESC
-and appends claude's own interruption marker to the live session JSONL, so the
-daemon's structured-turn producer maps it to a `turn_end{cancelled}` — making the
-Esc the **cause** of the turn ending. (Reusing #792's *file*-driven busy→idle flip
-would instead let an "interrupt stopped the turn" assertion pass **vacuously** —
-the idle would come from a file, not the Esc.)
+and appends claude's own interruption marker to the live session JSONL. (Reusing
+\#792's *file*-driven busy→idle flip would instead let an "interrupt stopped the
+turn" assertion pass **vacuously** — the idle would come from a file, not the Esc.)
+
+> **Orphaned since #1543.** The daemon reader that mapped the appended marker to
+> a `turn_end{cancelled}` — the PTY path's `internal/turnbridge` producer and
+> mapper — was deleted with that path, and no in-tree test sets
+> `PYRY_FAKE_CLAUDE_ESC_ENDS_TURN` any more; #794's own test went with it. Live
+> interrupt coverage now lives on the stream-json path
+> ([streamsup-package.md](streamsup-package.md),
+> `internal/e2e/relay_v2_stream_interrupt_test.go`), which classifies the
+> interrupt in the parser rather than through a bare-ESC/session-JSONL detector.
+> The mechanics below (raw mode, `containsBareESC`, the write itself) are kept as
+> a record of a working harness piece, not a live one.
 
 > Through #1244 (2026-07-31), this appended an assistant `stop_reason:"end_turn"`
 > line (`interruptEndTurnLine`) — a shape that looked like a clean completion on
@@ -25,7 +34,7 @@ When `PYRY_FAKE_CLAUDE_ESC_ENDS_TURN` is set:
 |---|---|---|
 | startup | `enterRawMode()` (like modal mode) | a lone ESC with no line terminator reaches `read()` verbatim (canonical discipline would otherwise withhold it) |
 | stdin read containing a bare ESC | `containsBareESC(buf)` → set `escPending` (signal only) | stdin reader flags the interrupt without touching `f` |
-| main poll loop, `escPending.Swap(true)`, one-shot `escEnded` | `appendTurnEnd(f)`: write `interruptMarkerLine` + `f.Sync()` | producer tails it → `isInterruptMarker` (`turnbridge/mapper.go:95`) → `TurnEnd{Cancelled}` → `turn_end{cancelled}` to the phone |
+| main poll loop, `escPending.Swap(true)`, one-shot `escEnded` | `appendTurnEnd(f)`: write `interruptMarkerLine` + `f.Sync()` | before #1543: the PTY producer tailed it → `isInterruptMarker` → `TurnEnd{Cancelled}` → `turn_end{cancelled}` to the phone. Now: no reader |
 
 - **A bare ESC is unambiguously the interrupt.** The stdin stream carries exactly
   three ESC sources — bracketed-paste open (`ESC[200~`), close (`ESC[201~`), and
@@ -49,19 +58,20 @@ When `PYRY_FAKE_CLAUDE_ESC_ENDS_TURN` is set:
   (`escPending atomic.Bool`, exactly like `turnPending`); the `appendTurnEnd(f)`
   write runs on the main poll goroutine. No mutex on `f`, no new writer goroutine.
 - **`interruptMarkerLine` is a fixed literal, derived from a real capture** — the
-  claude-format `type:"user"` interruption entry `mapEntry`'s `case "user"` maps to
-  `turnevent.TurnEnd{Cancelled}` (`turnbridge/mapper.go:95`), byte-shaped after the
+  claude-format `type:"user"` interruption entry that the PTY path's mapper (now
+  deleted, #1543) mapped to `turnevent.TurnEnd{Cancelled}`, byte-shaped after the
   repo's one recorded interruption entry
   (`internal/agentrun/jsonl/testdata/no_end_turn.jsonl:53`, claude 2.1.128): the
   full 13-key top-level set and its order preserved verbatim, only the
   session-identity fields (`parentUuid`, `promptId`, `uuid`, `timestamp`, `cwd`,
   `sessionId`, `gitBranch`) substituted with shape-preserving canned values. Two
-  absences are load-bearing and silent if broken — no top-level `permissionMode`
-  key (`userAuthored`'s presence check, `mapper.go:163-166`) and no `tool_result`
-  block (`ParseToolResult` precedes the marker check and would intercept it,
-  `mapper.go:80-86`) — either one makes the mapper produce no `turn_end` at all. It
-  is inert JSONL data, **not** a TUI substrate glyph, so the `cmd/substrate-guard`
-  allowlist is unchanged.
+  absences were load-bearing and silent if broken — no top-level `permissionMode`
+  key (that mapper's human-authored-prompt presence check) and no `tool_result`
+  block (its tool-result branch ran before the marker check and would have
+  intercepted it) — either one would have made the mapper produce no `turn_end`
+  at all. Both absences are kept because they match the captured base line, even
+  though nothing reads them now. It is inert JSONL data, **not** a TUI substrate
+  glyph, so the `cmd/substrate-guard` allowlist is unchanged.
 - **One-shot.** The `escEnded` gate bounds the append to one end-of-turn line; a
   second ESC is inert — a re-interrupt of an already-ended turn is a no-op, matching
   claude.
@@ -70,14 +80,15 @@ When `PYRY_FAKE_CLAUDE_ESC_ENDS_TURN` is set:
   detector scans for the bare ESC. The #794 capstone runs both ON. **When unset,
   byte-identical to today** — every existing caller is unperturbed.
 
-The turn_end carries `StopReason == "cancelled"` (since #1244; through #1244 it was
-`"end_turn"`, because `EventKindJsonlEndOfTurn` was the mapper's only `turn_end`
-source and could not distinguish an interrupt-stop from a normal end). The
-bootstrap-tier consumer (`relay_v2_interrupt_test.go`, the #794 capstone) still does
-not assert the reason — it proves **causality** (the `turn_end` exists only because
-the Esc was received), by choice now rather than by impossibility, leaving the
-reason assertion to the minted-tier oracle one level up
-([codebase/1244.md](../codebase/1244.md)). See [codebase/794.md](../codebase/794.md)
-for the live interrupt capstone this mode feeds (the structural-causality guard, the
-two ordered `t.Fatal`s, the two-oracle belt-and-suspenders) — historical as of its
-own ticket, so its `end_turn`-not-`cancelled` framing there is not rewritten here.
+While it had a reader, the turn_end carried `StopReason == "cancelled"` (since
+\#1244; through \#1244 it was `"end_turn"`, because `EventKindJsonlEndOfTurn` was
+the mapper's only `turn_end` source and could not distinguish an interrupt-stop
+from a normal end). The PTY-tier consumer (`relay_v2_interrupt_test.go`, the #794
+capstone) did not assert the reason — it proved **causality** (the `turn_end`
+exists only because the Esc was received), leaving the reason assertion to the
+minted-tier oracle one level up ([codebase/1244.md](../codebase/1244.md)). See
+[codebase/794.md](../codebase/794.md) for the interrupt capstone this mode used
+to feed (the structural-causality guard, the two ordered `t.Fatal`s, the
+two-oracle belt-and-suspenders) — both the test and its `internal/turnbridge`
+consumer were deleted with the PTY path (#1543); the framing there is historical
+and not rewritten.

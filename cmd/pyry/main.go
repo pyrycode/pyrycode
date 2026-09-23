@@ -3355,15 +3355,15 @@ func newInboundDeliver(resolve func(string) (handlers.TurnWriter, error), busy *
 // activeConversation holds the id of the conversation the operator is currently
 // interacting with — the one most recently resolved by sessionRouter.Route. It
 // is the structured turn stream's cursor source (#687): the emitter
-// (`flushC`) and the #647 reconnect-replay source
-// (`startInteractiveTurnStreamV2`) read it instead of the bootstrap
+// (`flushC`) and the #647 reconnect-replay source (registered in
+// `startRelayV2` via SetReplaySource) read it instead of the bootstrap
 // supervisor's CurrentConversation(), which #678 emptied for routed turns —
 // those commit on bound-session supervisors and never touch the bootstrap cursor
 // (docs/knowledge/codebase/678.md). Before any route the zero value is "", the
 // well-defined "no conversation routed yet" state the emitter drops on.
 //
 // It is written on the routing-path goroutine (set, from Route) and read on the
-// producer's single Run goroutine (CurrentConversation — live emit + replay;
+// turn-stream drain goroutine (CurrentConversation — live emit + replay;
 // watch — follow-active subscription). The mutex makes that cross-goroutine
 // hand-off race-free; it is a leaf lock, never held across a call-out. This is
 // the one piece of new synchronisation — it absorbs the hand-off so the

@@ -7,13 +7,15 @@ skip. `Unrecognized.Raw` is truncated to `maxUnrecognizedRaw` (16 KiB) **at cons
 oversized payload never enters the event stream or any log; it is a `string` rather than
 `json.RawMessage` because a truncated blob is no longer valid JSON.
 
-Mapping logic mirrors (not imports — `mapper.go`'s helpers are unexported and keyed on tui-driver types)
-[`turnbridge/mapper.go`](turnbridge-package.md). Two deliberate divergences: (1) a stream-json
-`assistant` event carries a *whole message* that may hold several content blocks (`mapper.go` sees one
-block per JSONL line), so the parser iterates `message.content` and emits one event per block,
-preserving order; (2) `tool_use` input is carried through as claude's already-decoded
-`json.RawMessage` verbatim (`ToolStart.RawInput`) rather than `mapper.go`'s map-re-marshal — one fewer
-parse, and it preserves the original key order for what is an opaque pass-through field.
+These mapping helpers began as a copy of the PTY path's tui-driver-keyed mapping helpers in
+`internal/turnbridge/mapper.go`; that file was deleted with the PTY path (#1543), so this parser's
+helpers are now the only copy and mirror nothing. Two divergences survive from that lineage as this
+package's own design: (1) a stream-json `assistant` event carries a *whole message* that may hold
+several content blocks (the deleted mapper saw one block per JSONL line), so the parser iterates
+`message.content` and emits one event per block, preserving order; (2) `tool_use` input is carried
+through as claude's already-decoded `json.RawMessage` verbatim (`ToolStart.RawInput`) rather than a
+map-re-marshal — one fewer parse, and it preserves the original key order for what is an opaque
+pass-through field.
 
 **Turn-stateless in everything that describes claude's output; one token counter as of #1385.** The
 parser holds no turn counter, no `awaiting` flag, no transcript, and remembers nothing any line *said* —
