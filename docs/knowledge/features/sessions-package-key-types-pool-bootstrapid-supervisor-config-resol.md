@@ -49,8 +49,11 @@ there is nothing left to adopt-by-mtime at startup. See
 [codebase/839.md](../codebase/839.md), [codebase/1164.md](../codebase/1164.md),
 and [ADR 032](../decisions/032-bootstrap-resume-per-spawn-existence-probe.md).
 
-**Growth-confirm resolver re-sourced (#1164).** `newProbePreferredTranscriptResolver`'s
-4th argument (a `func() string` — the pinned id) used to be fed
-`supCfg.ResolveSessionID` directly; now that the field returns a 2-tuple, the
-growth-confirm resolver is re-sourced to the named `resolveID` closure
-instead (id-only, unchanged behaviour for that consumer).
+**Growth-confirm resolver re-sourced (#1164), now deleted (#1550).**
+`newProbePreferredTranscriptResolver`'s 4th argument (a `func() string` — the
+pinned id) used to be fed `supCfg.ResolveSessionID` directly; once the field
+returned a 2-tuple, the growth-confirm resolver was re-sourced to the named
+`resolveID` closure instead (id-only, unchanged behaviour for that consumer).
+\#1550 deleted `newProbePreferredTranscriptResolver` along with
+`newTranscriptResolver`, `probeUsable` and `availabilityReporter`; nothing in
+`cmd/` or `internal/` still calls `resolveID` for this purpose.

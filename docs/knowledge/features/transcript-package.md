@@ -1,6 +1,6 @@
 # `internal/transcript` — probe-preferred resolver core + shared UUID-stem constant
 
-**Status (2026-07-21): all three consumers migrated.** Family B (`cmd/pyry/interactive_turn_stream_v2.go`) migrated onto this package in #1150 (PR #1158) — its local `jsonlStreamExt` const and `jsonlStemPattern` regexp are gone, replaced by `transcript.Ext` / `transcript.ValidStem` / `transcript.Newest` / `transcript.CanonicalDir` / `transcript.GuardProbedPath` / `transcript.StatByID`. `internal/sessions/rotation/watcher.go` migrated in #1151 (PR #1159) — its local `uuidStemPattern` is gone, replaced by `transcript.ValidStem` alone (it sheds only `regexp`; unlike the other two families it keeps `strings` for an unrelated `.jsonl`-suffix check). Family A (`internal/sessions/reconcile.go`) migrated in #1149 (PR #1157) — its local `jsonlExt` const, `uuidStemPattern` regexp, and `mostRecentJSONL` scan are gone, replaced by `transcript.Ext` / `transcript.ValidStem` / `transcript.Newest` / `transcript.CanonicalDir` / `transcript.StatByID` / `transcript.Probed`. All three of the original triplicated UUID-stem regexps are now retired; `transcript.ValidStem` is the sole matcher. **#1152** (PR #1161) then dropped Family B's warm-offset *read* of `Result.Size` in favour of `tuidriver.TailFromEnd` — this package's `Result.Size` field and its production by `Newest`/`StatByID` are unchanged, Family B just stopped consuming it for the tail offset (see below).
+**Status (2026-09-23): none of the three original consumer families is live.** Family B (`cmd/pyry/interactive_turn_stream_v2.go`) migrated onto this package in #1150 (PR #1158) but the file itself is gone. `internal/sessions/rotation/watcher.go` migrated in #1151 (PR #1159); #2137 retired the rotation watcher. Family A (`internal/sessions/reconcile.go`) migrated in #1149 (PR #1157), then #1550 deleted both of its adapters (`newTranscriptResolver`, `newProbePreferredTranscriptResolver`) along with the `probeUsable`/`availabilityReporter` dispatch helper. The package itself is untouched by any of that churn — it's a leaf with no dependents to break. Its only production importers today are `snapshotUsageFor` in `cmd/pyry/snapshot_usage.go` and `internal/streamsup` (`runner.go`, `parser.go`).
 
 ## Why
 
@@ -60,8 +60,7 @@ The single untrusted→trusted crossing: `probe.OpenJSONL(pid)` returns a path d
 
 ## Not in scope here (as of #1148; superseded per-consumer as migrations land — see Status above)
 
-- **Wiring any consumer.** At #1148 ship time, Family A, Family B, and the rotation watcher were all untouched. All three have since migrated: Family B (#1150), the rotation watcher (#1151), and Family A (#1149).
-- **The `availabilityReporter`/`probeUsable` dispatch helper.** The no-lsof→mtime dispatch *decision* both families make locally is not extracted — it's part of each family's divergent dispatch order, not one of the core's owned mechanics. A later consolidation ticket may DRY it once both adapters sit on this core.
+- **Wiring any consumer.** At #1148 ship time, Family A, Family B, and the rotation watcher were all untouched. All three have since migrated: Family B (#1150), the rotation watcher (#1151), and Family A (#1149) — see Status above for what happened to each since.
 - **`context.Context`.** The core is context-free; the `func(ctx) (path, X, err)` closure shape belongs to the adapters (`supervisor.Config.ResolveTranscript`, the turn-stream resolver) that wrap these primitives.
 
 ## Testing
