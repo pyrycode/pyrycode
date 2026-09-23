@@ -12,11 +12,7 @@ internal/sessions/
   session.go    Session: wraps one supervisor + optional bridge
   pool.go       Pool: registry, lifecycle, Config, SessionConfig, RotateID
   registry.go   On-disk sessions.json (loadRegistry, saveRegistryLocked)
-  reconcile.go  encodeWorkdir; newTranscriptResolver (AC5 no-lsof fallback
-                source only — the startup adopt-by-mtime caller
-                reconcileBootstrapOnNew was removed in #839) and
-                newProbePreferredTranscriptResolver (#838) — both thin
-                adapters over internal/transcript as of #1149
+  reconcile.go  encodeWorkdir; DefaultClaudeSessionsDir
 ```
 
 ## Key Types
@@ -93,7 +89,6 @@ search can reach it.
 - [`SessionSettings` + `claudeSettingsArgs` (#833)](sessions-package-key-types-sessionsettings-claudesettingsargs.md) — The per-session model / reasoning-effort / YOLO (bypass-permissions) triple — the storage + spawn **primitive** the wire verb (#841) builds…
 - [`Pool.UpdateSettings` (#840)](sessions-package-key-types-pool-updatesettings.md) — The persistence seam the v2 settings verb (#841, split into wire vocabulary #844 + handler #845) calls to change an existing session's…
 - [`Pool.SettingsFor` (#1585) and `Pool.DormantSettingsFor` (#2449)](sessions-package-key-types-pool-settingsfor.md) — The read half `DefaultSettings` couldn't provide: it reads only the bootstrap, while `UpdateSettings` can already change *any* session's settings by id. `DormantSettingsFor` is its dormant-registry sibling, letting `request_session_settings` answer correctly after a restart.
-- [`newProbePreferredTranscriptResolver` (#838, migrated onto `internal/transcript` in #1149)](sessions-package-key-types-newprobepreferredtranscriptresolver.md) — func newProbePreferredTranscriptResolver( dir string, probe rotation.Probe, pidFn func() int, pinnedID func() string, ) func(ctx…
 - [`Pool.BootstrapID` + `supervisor.Config.ResolveSessionID` (#839, resume branch #1164)](sessions-package-key-types-pool-bootstrapid-supervisor-config-resol.md) — func (p *Pool) BootstrapID() SessionID
 - [`writeMCPSettings` + `Session.settingsPath` (#943, relocated #1518)](sessions-package-key-types-writemcpsettings-session-settingspath.md) — func writeMCPSettings(registryPath string, id SessionID) (string, error)
 - [`writeSystemPrompt` + `systemPromptText` (#2093, per-session since #2150)](sessions-package-key-types-writesystemprompt-systemprompttext.md) — the bootstrap keeps #2093's one daemon-scoped file; every conversation's session gets its own under `session-prompts/`, recomposed at `Pool.Activate` so a prompt set after mint still reaches the first spawn.

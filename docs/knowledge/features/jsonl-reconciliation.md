@@ -18,8 +18,9 @@ fsnotify watcher (`rotation-watcher.md`) calls when claude rotates its UUID
 on `/clear`; the difference is that `ResolveSessionID` reads the *current*
 `p.bootstrap` fresh at every spawn, so a rotation `RotateID` already
 persisted is picked up on the next restart automatically — no separate
-startup scan needed. `mostRecentJSONL` (below) also survives: it still backs
-`newTranscriptResolver`'s AC5 no-lsof fallback (#838).
+startup scan needed. `mostRecentJSONL` (below) was deleted in #1149, when
+`newTranscriptResolver`'s AC5 no-lsof fallback was rewritten onto
+`internal/transcript.Newest` instead.
 
 The rest of this document (path layout, `RotateID` seam, `mostRecentJSONL`
 semantics) is preserved as historical/reference material for the parts that
@@ -77,7 +78,7 @@ Pool.New(cfg)  [pre-#839]
         └── p.RotateID(bootstrap, mostRecent)   atomic in-memory swap + saveLocked
 ```
 
-`reconcileBootstrapOnNew` lived in `internal/sessions/reconcile.go` and was invoked unconditionally at the end of `Pool.New`, before the function returned. Failure of the directory scan was never fatal — startup proceeded with the existing bootstrap entry. Deleted in #839; `mostRecentJSONL` (below) remains, still backing `newTranscriptResolver`'s AC5 no-lsof fallback (#838).
+`reconcileBootstrapOnNew` lived in `internal/sessions/reconcile.go` and was invoked unconditionally at the end of `Pool.New`, before the function returned. Failure of the directory scan was never fatal — startup proceeded with the existing bootstrap entry. Deleted in #839; `mostRecentJSONL` (below) was deleted in #1149.
 
 ## `Pool.RotateID` — the seam
 

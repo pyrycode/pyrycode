@@ -325,10 +325,6 @@ it off the package.
 - [jsonl-reader.md](jsonl-reader.md) — `internal/agentrun/jsonl`, the decode
   this package reuses (`Event.Usage *UsageBlock`, and since #2107
   `Event.Model` — the join key).
-- [sessions-package.md](sessions-package.md) — `ResolveTranscript` /
-  `newProbePreferredTranscriptResolver` (#838), the probe-preferred resolver
-  precedent #857 followed via a *different*, cmd/pyry-local instance
-  (`resolveOwnBootstrapJSONL`) rather than this seam directly — see above.
 - [streamsup-package-retaining-the-decoded-model-list-for-the-session.md](streamsup-package-retaining-the-decoded-model-list-for-the-session.md) —
   #2106's `sessionModelWindowHold`, the retained report `Read`'s `windows`
   parameter is built from.
