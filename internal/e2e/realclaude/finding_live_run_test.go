@@ -348,41 +348,40 @@ type finLiveRunHandle struct {
 // Presenting the second as trap-pinned here would be the false-provenance failure
 // this family's discipline exists to prevent.
 //
-// SITE F — THE DELTA CHOOSES A PERMISSION POSTURE FOR THE STAGED RUN, and a
-// caller reading this doc should not have to discover that downstream. Under
-// finLiveStageStreamEnvDelta() the sole production caller of the stream path
-// passes yolo=true (`runAgentRunStreamRunner`), which emits
-// --dangerously-skip-permissions (`permissionArgs`). Under finLiveStageEnvDelta()
-// pyry instead trust-marks the workdir and writes a per-spawn deny-default
-// settings JSON (`runAgentRunPty`). On the tool surface the repo's own recorded
-// position is relayed rather than a fresh claim asserted:
-// `buildStreamRunnerClaudeArgs` records --allowed-tools as the authoritative tool gate
-// under YOLO, bounding the blast radius rather than the trust dialog, and this rig
-// passes --allowed-tools=Bash (spawnProbePyry,
-// `spawnProbePyry`). So the flip changes the gate's
-// MECHANISM; on the repo's position it does not change its WIDTH. That is not a
-// claim of equivalence and not a claim that the stream path is ungated. The same
-// paragraph sits on the delta itself, because that is where the choice is made.
+// SITE F — THE DELTA DOES NOT CHOOSE A PERMISSION POSTURE FOR THE STAGED RUN, and
+// a caller reading this doc should not have to discover that downstream. The two
+// deltas once chose between two postures. Since the terminal path was deleted
+// (#1348), `pyry agent-run` has ONE, under either delta: runAgentRunStreamRunner
+// writes a per-spawn deny-default settings file from --allowed-tools and passes
+// it as --settings, and it passes yolo=true to `buildStreamRunnerClaudeArgs`,
+// which leaves the permission slot to `streamrunner.BuildClaudeArgs`'s default
+// --permission-mode dontAsk. The settings file is the ONLY enforcement.
+// --allowed-tools on the command line is not the tool gate, a claim the repo once
+// made and retracted (#1387); `streamrunner.BuildClaudeArgs`'s doc records why,
+// and TestBuildStreamRunnerClaudeArgs_Shape pins the dontAsk argv. This rig
+// passes --allowed-tools=Bash (spawnProbePyry), and that bounds the tool surface
+// THROUGH THE SETTINGS FILE, not through the flag. The same paragraph sits on
+// finLiveStageStreamEnvDelta, because that is where a reader expects the choice.
 //
-// SITE G — THE SESSION ID'S PRODUCER CHANGES WITH THE DELTA, AND IT BECOMES A
-// PATH COMPONENT. probeWaitForSessionID polls pyry's stdout and parseInitSessionID
+// SITE G — THE SESSION ID IS CLAUDE'S, AND IT BECOMES A PATH COMPONENT.
+// probeWaitForSessionID polls pyry's stdout and parseInitSessionID
 // returns the session_id of the first system/init line with NO SHAPE VALIDATION —
 // any non-empty string is accepted. That string is then joined into a filename
 // by finLiveAssembleStaging's transcript read:
 // jsonlPathFor → tuidriver.SessionJSONLPath →
 // filepath.Join(home, ".claude", "projects", EncodeCwd(cwd), sessionID+".jsonl").
-// On ptyrunner pyry MINTS the id itself (newSessionID(), `runAgentRunPty`) and
-// `ptyrunner.buildArgs` passes it as --session-id, so the value is
-// pyry-controlled. On the stream path claude's argv carries no --session-id
-// (`buildStreamRunnerClaudeArgs`), so CLAUDE mints it and the rig reads claude's
-// bytes passed verbatim through the parser.
+// The argv pyry gives claude carries no --session-id
+// (`streamrunner.BuildClaudeArgs`), so CLAUDE mints the id under either delta
+// and the rig reads claude's bytes passed verbatim through the parser. (The
+// terminal path deleted in #1348 minted the id in pyry and passed it as
+// --session-id; nothing in agent-run does that any more.)
 //
 // NO VALIDATION, SANITISER OR GUARD IS ADDED, and that is a decision rather than
 // an omission: the producer is the real claude CLI, the read target is inside the
 // rig's own temp HOME, no such failure has been observed, and a defence for an
-// unobserved failure mode is the wrong trade at this tier. What changes is the
-// JUSTIFICATION, which cites the runner path — so it is recorded, and #1353, which
-// actually stages a turn under the stream delta, is where it first matters.
+// unobserved failure mode is the wrong trade at this tier. The justification
+// rests on claude being the producer, so it is recorded here rather than left
+// implicit.
 //
 // # What the delta does NOT change
 //
@@ -411,14 +410,13 @@ type finLiveRunHandle struct {
 //     re-derives that from the two argv builders), so the field is populated on
 //     both, and its empty case stays the ambiguity the field's own doc describes.
 //   - The transcript reads (finLiveAssembleStaging, probeWaitForBashToolUse): the
-//     rig computes the path from the workdir IT owns, on both paths. ONE
-//     ASYMMETRY, recorded because it points the safe way: pyry hands claude the
-//     trust-marked realpath on ptyrunner (`runAgentRunPty`) and the raw
-//     parsed.workdir on the stream path (streamrunner cmd.Dir). The rig's own
-//     derivation uses the raw workdir, so the stream path is the CLOSER match and
-//     the conclusion holds a fortiori. The ptyrunner side additionally carries
-//     empirical proof (the green live run of 2026-08-06). The FILENAME half of the
-//     same path is site G above and is NOT delta-independent.
+//     rig computes the path from the workdir IT owns, under either delta. pyry
+//     hands claude the raw parsed.workdir as its cwd (`runAgentRunStreamRunner`
+//     sets WorkDir, which `streamrunner.Run` assigns to cmd.Dir), and the rig's
+//     own derivation uses that same raw workdir, so the two match directly. The
+//     green live run of 2026-08-06 was a terminal-path run (deleted in #1348) and
+//     is not direct evidence for this path. The FILENAME half of the same path
+//     is site G above.
 //   - The cleanup ORDER, the ExitStatus-before-close(pyryExited) edge, and the
 //     h.PyryPID <= 0 guard: all three are process-lifecycle plumbing this rig owns
 //     end to end. One topology difference is benign and is recorded rather than
@@ -506,33 +504,29 @@ func finLiveRunStage(t *testing.T, envDelta []string) *finLiveRunHandle {
 	//
 	// SITE B — the goroutine exits when cmd.Wait returns, which happens when pyry
 	// exits AND both rig-created copiers see EOF. THE SHIPPED REASON FOR THAT WAS
-	// "claude runs on a PTY", AND THAT REASON IS WRONG — on its own path as well
-	// as on the stream one. It is replaced rather than annotated, and the two
-	// distinct Waits it conflated are separated, because the failure this covers
-	// has NO RED TEST: it lands as a manufactured negative in a downstream exit
+	// "claude runs on a PTY", AND THAT REASON IS WRONG — claude has no PTY since
+	// #1348 deleted the terminal path, and it was wrong there too. It is replaced
+	// rather than annotated, and the two distinct Waits it conflated are
+	// separated, because the failure this covers has NO RED TEST: it lands as a manufactured negative in a downstream exit
 	// reading, exactly like inverting the cleanup order above.
 	//
 	// LEG 1 — THE RIG'S cmd.Wait, which is what this goroutine is about. It
 	// returns once pyry has exited and every process-wide duplicate of the rig's
 	// two pipe write ends is closed (spawnProbePyry sets two probeSyncBuffers,
 	// which are not *os.File, and sets no WaitDelay — so one held write end blocks
-	// this forever). Claude's fd 1 is never the rig's stdout write end on either
-	// path: it is the PTY slave on ptyrunner and a PYRY-created pipe on the stream
-	// path, where `streamrunner.Run` points cmd.Stdout at its own parser. But
-	// claude's fd 2 IS pyry's fd 2 — the rig's stderr write end — ON BOTH PATHS,
-	// because cmd.Stderr is os.Stderr for both (`runAgentRunStreamRunner` on the
-	// stream path, `runAgentRunPty` on pty) and creack/pty's `pty.StartWithAttrs`
-	// fills stdin/stdout/stderr with the tty ONLY WHEN NIL, so the PTY never
-	// displaces the Stderr `ptyrunner.Run` already set on the command it builds.
-	// The PTY therefore covers the one fd claude never shares, and the fd it does
-	// share is shared IDENTICALLY on both paths.
+	// this forever). Claude's fd 1 is never the rig's stdout write end: it is a
+	// PYRY-created pipe, because `streamrunner.Run` points cmd.Stdout at its own
+	// parser. But claude's fd 2 IS pyry's fd 2 — the rig's stderr write end —
+	// because `runAgentRunStreamRunner` sets Stderr: os.Stderr. Stderr is
+	// therefore the one fd claude shares with the rig.
 	//
 	// What actually holds is claude's own behaviour: its Bash-tool child gets
-	// CLAUDE-CREATED pipes rather than inheriting claude's fds, which is
-	// path-independent. The 2026-08-06 green live run is direct evidence — the
-	// FIFO was still held when pyryExited closed, so the surviving `cat` did not
-	// hold the rig's stderr write end. THAT EVIDENCE TRANSFERS UNCHANGED, because
-	// it is the same fd on both paths. It is one live run, not a proof.
+	// CLAUDE-CREATED pipes rather than inheriting claude's fds. The 2026-08-06
+	// green live run is evidence for that — the FIFO was still held when
+	// pyryExited closed, so the surviving `cat` did not hold the rig's stderr
+	// write end. That was a TERMINAL-PATH run (the runner deleted in #1348), and
+	// it transfers because claude's fd 2 was pyry's stderr on that path too. It
+	// is one live run, not a proof.
 	//
 	// LEG 2 — PYRY'S OWN cmd.Wait ON CLAUDE, A HAZARD THE STREAM PATH HAS AND
 	// PTYRUNNER DOES NOT. On ptyrunner claude's stdin/stdout are the tty and its
