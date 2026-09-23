@@ -81,8 +81,8 @@ var (
 //
 // announce tells paired clients the file now exists (#2166), so a file claude
 // produced reaches a client as something rather than as nothing at all. A bare
-// func for the reason live is one, and for the reason snapshotSettings and
-// settingsUpdaterAdapter are: the value crossing out of the relay leg stays a
+// func for the reason live is one, and for the reason settingsUpdaterAdapter
+// is: the value crossing out of the relay leg stays a
 // primitive-shaped closure, so this seam takes on no relay type.
 //
 // IT MAY BE NIL, and the nil is not defensive padding — it is the

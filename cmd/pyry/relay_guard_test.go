@@ -654,9 +654,8 @@ func TestEveryInboundV2TypeHasHandler(t *testing.T) {
 // Structural guard: the connect-time question reconcile's daemon-side source
 // (#1980) must stay bound to the SAME questionbridge registry the stream-approval
 // bridge's surfacer records into, through the registry's non-retiring read. It
-// exists because startRelayV2 has no test and cannot cheaply get one
-// (TestBootstrapSnapshotUsage's doc comment records that), so without a gate that
-// reads the wiring instead of constructing it, deleting the assignment or
+// exists because startRelayV2 has no test and cannot cheaply get one, so without
+// a gate that reads the wiring instead of constructing it, deleting the assignment or
 // repointing it at a freshly-minted registry would ship a reconcile that
 // enumerates an empty store — silently, on every client, caught by no test.
 //
@@ -754,8 +753,7 @@ const (
 // V2SessionConfig literal, from the wiring struct the composition root fills.
 //
 // It exists for the reason #1980's neighbour above exists and no other: startRelayV2
-// has no test and cannot cheaply get one (TestBootstrapSnapshotUsage's doc comment
-// records that), so without a gate that READS the wiring rather than constructing
+// has no test and cannot cheaply get one, so without a gate that READS the wiring rather than constructing
 // it, deleting this one line ships a daemon that answers every request_model_list
 // with the retryable model_list.unavailable — silently, on every client, caught by
 // nothing. TestModelListFor_* in this package exercises the resolver directly and

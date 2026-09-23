@@ -401,7 +401,7 @@ func TestRunConfigFor_NilResolverBuildsNoSeam(t *testing.T) {
 // -directory row: snapshotUsageFor returns nil there, and an unwired usage half
 // must degrade the two context figures to zero rather than make a resolved
 // conversation unresolvable. It is the sole red for a builder that copies
-// bootstrapSnapshotUsage's either-half-nil rule.
+// snapshotUsageFor's nil-resolver-collapses rule onto the usage half.
 func TestRunConfigFor_NoSessionsDirectoryStillResolves(t *testing.T) {
 	t.Parallel()
 
