@@ -77,13 +77,18 @@ type ModalDismissal struct {
     Source  string // closed set {remote, local, timeout}; cancel ⇒ "remote"
 }
 
-// ModalResolver resolves an inbound modal control frame (or a deny-on-timeout)
-// against the daemon's outstanding-modal state (#727, extended #725). Declared in
-// the consumer (beside ScreenSnapshotter) so internal/relay imports neither
+// ModalResolver resolves an inbound modal control frame against the daemon's
+// outstanding-modal state (#727, extended #725). Declared in the consumer
+// (beside ScreenSnapshotter) so internal/relay imports neither
 // internal/supervisor, internal/modalbridge, internal/audit, nor cmd/pyry; the
 // cmd/pyry resolver satisfies it. *devices.Device crosses the seam (the per-conn
-// s.device) on the cancel/answer arms. All three methods run on the manager's
+// s.device) on the cancel/answer arms. Both methods run on the manager's
 // single Run dispatch goroutine.
+//
+// #1539 deleted the third method, ResolveTimeout, along with the relay-side
+// modalDenyTimeout machinery that called it — neither had a production caller
+// after the #1348 stream cutover. The permission bridge's own timer (#1103,
+// time.AfterFunc → expire) is the only deny-on-timeout left.
 type ModalResolver interface {
     // ResolveCancel consumes modalID (registry Resolve), routes a cancel/ESC
     // keystroke, audits outcome=cancelled, and returns the dismissal to
@@ -95,14 +100,6 @@ type ModalResolver interface {
     // returns the dismissal (Outcome=answered option_id) on ok=true. The manager
     // already broadcasts on ok=true, so #717 touched no manager code.
     ResolveAnswer(modalID, optionID, answerToken string, dev *devices.Device) (ModalDismissal, bool)
-    // ResolveTimeout safe-denies an unanswered modal whose deny-on-timeout window
-    // elapsed (#725): consume modalID (registry Resolve) → fail-closed ESC →
-    // audit outcome=denied_timeout/source=timeout with an EMPTY device (a timeout
-    // has no answering device) → return the dismissal with ok=true. Takes no
-    // device (the deny is unconditional, nothing to gate). An unknown/already-
-    // resolved id (an answer/cancel won the race) ⇒ (zero, false): no keystroke,
-    // no audit, no dismissal — the loser path.
-    ResolveTimeout(modalID string) (ModalDismissal, bool)
 }
 
 type V2SessionConfig struct {
@@ -121,7 +118,7 @@ type V2SessionConfig struct {
     SnapshotSettings  func() (model, effort string, yolo bool) // optional (#848); nil ⇒ screen_snapshot reports defaults (empty model/effort, yolo:false)
     SnapshotUsage     func() (usedTokens, windowTokens int) // optional (#857); nil ⇒ screen_snapshot reports used_tokens:0, window_tokens:0
     RunConfigFor      func(conversationID string) (RunConfig, bool) // optional (#1609); nil ⇒ request_session_settings answers the zero reply. Conversation-keyed replacement for BootstrapSessionID/SnapshotSettings/SnapshotUsage (deleted from this struct, #1610) — comma-ok, false means not addressable and every RunConfig field is zero. Consulted by request_session_settings (#1610).
-    ModalResolver     ModalResolver                    // optional (#727/#725); nil ⇒ modal_answer/modal_cancel + deny-on-timeout inert no-ops
+    ModalResolver     ModalResolver                    // optional (#727/#725); nil ⇒ modal_answer/modal_cancel inert no-ops. Deny-on-timeout is not gated by this seam — the permission bridge's own timer (#1103) fires unconditionally.
     OutstandingModals func() []protocol.ModalShownPayload // optional (#877); nil ⇒ no connect-time modal reconcile — byte-identical to pre-#877. Production wires modalbridge.Registry.Snapshot.
     OutstandingQueues func() []protocol.QueueStatePayload // optional (#878); nil ⇒ no connect-time queue reconcile — byte-identical to pre-#878. Production wires the cmd/pyry outstandingQueues adapter over *msgqueue.Queue.SnapshotAll.
     RetainedModelLists func() []protocol.ModelListPayload // optional (#1863); nil ⇒ no connect-time model-list reconcile — byte-identical to pre-#1863. Production wires the cmd/pyry retainedModelLists adapter (#1867) over resolveBoundModelList (#1857).

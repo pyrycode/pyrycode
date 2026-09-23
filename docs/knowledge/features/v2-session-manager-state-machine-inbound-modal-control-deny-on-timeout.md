@@ -30,15 +30,17 @@ the caller, so no decode error or attacker-controlled byte is ever echoed back.
   is nil-safe-wrapped via `modalKeystrokerOrNoop` (#1131, the fourth and final
   typed-nil `w.sup` guard): PTY mode passes `w.sup` straight through (it satisfies
   `modalKeystroker`), while the stream-json bootstrap path (typed-nil `w.sup`,
-  #1077) gets a non-nil `noopKeystroker` — `ResolveTimeout` still calls `SendEsc()`
-  **unconditionally** (#2416 gave `ResolveCancel` its own stream-deny arm, so it no
-  longer always reaches this keystroker), so (unlike `screenSnapshotterOrNil`'s
+  #1077) gets a non-nil `noopKeystroker` — `ResolveCancel`'s `!handled` fallback
+  still calls `SendEsc()` on whatever `r.kb` holds (#2416 gave `ResolveCancel` a
+  stream-deny arm that wins first for a stream approval, so the keystroke fires
+  only when `modalID` is not one), so (unlike `screenSnapshotterOrNil`'s
   genuine-nil return) the guard must return something callable, not nil. A
   stream-json approval has no PTY modal to dismiss; on timeout it denies fail-closed
-  via the permbridge completer's own deny-on-timeout (#1103) rather than through
-  this keystroker, and on cancel (#2416) it denies immediately through the same
-  stream-deny arm `ResolveAnswer` uses — also never through this keystroker. See
-  [codebase/1131.md](../codebase/1131.md).
+  via the permbridge completer's own deny-on-timeout (#1103) — the only
+  deny-on-timeout left since #1539 deleted `ResolveTimeout` and the relay-side
+  arm that called it, see § Deny-on-timeout below — and on cancel (#2416) it
+  denies immediately through the same stream-deny arm `ResolveAnswer` uses —
+  never through this keystroker. See [codebase/1131.md](../codebase/1131.md).
 - **`handleModalCancel`** — nil-resolver ⇒ debug-log + return (inert). Else decode
   `ModalCancelPayload` (a decode failure is tolerated → empty `modal_id` → the
   resolver's unknown-id no-op, never echoed), `ResolveCancel(modal_id, s.device)`;
@@ -77,12 +79,26 @@ accidental `ActiveConns` call would hang it, making the test a *structural*
 no-deadlock proof — and asserts the dismissal reaches both interactive heads and
 neither the non-interactive one.
 
-#### Deny-on-timeout (#725) — fail-closed safe-deny on an unanswered modal
+#### Deny-on-timeout (#725) — deleted by #1539; permbridge's timer is the only one left
+
+**This arm no longer exists.** `ModalResolver.ResolveTimeout`,
+`(*V2SessionManager).ArmModalTimeout`, `handleModalTimeout`, the `modalTimeout`
+channel/`Run` arm and the `modalDenyTimeout` package var were all deleted by
+\#1539. `ModalResolver` now has two methods (`ResolveCancel`, `ResolveAnswer`).
+The deletion changed no runtime behaviour: the arm had been production-dead
+since #1348 (see the note at the end of this section), so nothing that used to
+be denied on this window stopped being denied. The permission bridge's own
+timer (#1103, `time.AfterFunc` → `expire` in `internal/permbridge`) is the
+**only** deny-on-timeout left; see [permbridge-package.md](permbridge-package.md).
+
+What follows is kept as a historical record of how the mechanism worked while it
+was live (#798 through #1348) and reachable only by tests thereafter (#1348
+through #1539). Treat every present-tense claim below as **pre-#1539**.
 
 The fail-closed safety net: if **no** authorized device answers within a bounded
 window, the daemon **safe-denies** the modal rather than leave claude blocked
-forever or risk a silent grant. It reuses `broadcastModalDismissed` unchanged and
-adds a third `ModalResolver` arm (`ResolveTimeout`) plus a daemon-global timer
+forever or risk a silent grant. It reused `broadcastModalDismissed` unchanged and
+added a third `ModalResolver` arm (`ResolveTimeout`) plus a daemon-global timer
 funnelled onto `Run`. **`security-sensitive`** (a timer on the permission surface;
 spec-stage security review verdict PASS). See [`codebase/725.md`](../codebase/725.md).
 
@@ -131,7 +147,7 @@ race cannot double-deny, double-broadcast, or double-audit; the registry mutex s
 guards `Record` (surfacer goroutine) against `Resolve` (`Run`). The timeout leg **only
 ever drives the deny keystroke**, never a grant — fail-closed by construction (ADR 025
 § Security model: "answered with the SAFE default (deny / ESC) … Never auto-grant").
-**No longer armed in production.** This was live from [#798](../codebase/798.md) — which wired the PTY-side surfacer (`interactiveModalEmitterV2.Handle` in the now-deleted `cmd/pyry/interactive_modal_v2.go`) to call `ArmModalTimeout` on every surfaced permission/trust modal — until #1348 deleted the terminal-driving interactive path and, with it, that call site. As of #1348, `ArmModalTimeout`'s only callers are three test files (`v2session_appframe_test.go`, `v2session_debugbundle_test.go`, `v2session_modal_test.go`); nothing production-side arms this timer, so an unanswered PTY-modal fail-closed deny does not currently fire on this window. Found and confirmed independently by both the architect and code-review while investigating #1909 (`docs/specs/architecture/1909-approval-window-ten-minutes.md`, which raises `mcpApprovalTimeout`, a different constant, and touches this file's neighboring `reconcileModals` doc, not this mechanism) — a gap worth closing, not that ticket's to close. The stream-json approval path is unaffected: it never used this timer in the first place (see § Stream-json approval bridge below) and fails closed via `permbridge`'s own registry-owned timer (`mcpApprovalTimeout`) instead. `TestV2Session_ModalTimeout_FanOut` still proves the off-`Run`-arm → on-`Run`-fire crossing under `-race`; it is just not production-reachable right now.
+**Was never armed in production after #1348, then deleted entirely by #1539.** This was live from [#798](../codebase/798.md) — which wired the PTY-side surfacer (`interactiveModalEmitterV2.Handle` in the now-deleted `cmd/pyry/interactive_modal_v2.go`) to call `ArmModalTimeout` on every surfaced permission/trust modal — until #1348 deleted the terminal-driving interactive path and, with it, that call site. From #1348 to #1539, `ArmModalTimeout`'s only callers were three test files (`v2session_appframe_test.go`, `v2session_debugbundle_test.go`, `v2session_modal_test.go`); nothing production-side armed this timer, so an unanswered PTY-modal fail-closed deny never fired on this window during that window. Found and confirmed independently by both the architect and code-review while investigating #1909 (`docs/specs/architecture/1909-approval-window-ten-minutes.md`, which raises `mcpApprovalTimeout`, a different constant, and touches this file's neighboring `reconcileModals` doc, not this mechanism). #1539 then deleted `ArmModalTimeout`, `handleModalTimeout`, `modalDenyTimeout`, the `modalTimeout` field/`make`/`Run` arm and `ModalResolver.ResolveTimeout` outright, since nothing production-side would ever call them again — a #1539 spec-stage security review (verdict PASS) confirmed the only live producer of `modalbridge.Registry`, `(*streamApprovalBridge).Surface`, already runs behind permbridge's #1103 timer for every modal it records, so no recorded modal ever relied solely on this arm. The stream-json approval path was unaffected throughout: it never used this timer in the first place (see § Stream-json approval bridge below) and fails closed via `permbridge`'s own registry-owned timer (`mcpApprovalTimeout`) instead. The tests that proved the off-`Run`-arm → on-`Run`-fire crossing under `-race` (`TestV2Session_ModalTimeout_FanOut` and its siblings) were deleted along with the arm; the two off-`Run` proofs that borrowed this arm as a sync vehicle (`TestV2Session_SlowHandler_ModalTimeoutStillFires`, debugbundle arm (3)) were retargeted onto other arms — see [the test-surface doc](v2-session-manager-test-surface-same-package-unit-tests-internal-relay.md).
 
 #### Stream-json approval bridge — the verdict arm (#1080)
 
@@ -180,12 +196,12 @@ up through the gate → classify → modalbridge-consume steps in `ResolveAnswer
   the spec's own security review and fixed before code landed; a
   no-correlation-leak test on both the answer and timeout paths is the
   regression guard.
-- **No new timer.** The stream modal deliberately does **not** call
-  `ArmModalTimeout` — `permbridge`'s own registry-owned timer is the sole
-  timeout authority (two timers would drift), and `ResolveTimeout` routes an
-  Esc keystroke, which has no target on the stream-json path. `retire`
-  (invoked promptly on `Await`'s return) is the client-dismissal backstop
-  instead.
+- **No new timer.** The stream modal deliberately never called `ArmModalTimeout`
+  (deleted by #1539) — `permbridge`'s own registry-owned timer is the sole
+  timeout authority (two timers would drift), and `ResolveTimeout` (also
+  deleted) routed an Esc keystroke, which has no target on the stream-json
+  path. `retire` (invoked promptly on `Await`'s return) is the client-dismissal
+  backstop instead.
 - **`ResolveCancel` shares the same verdict arm (#2416).** A `modal_cancel` for a
   stream-json permission is no longer routed through the ESC fallback either:
   `ResolveCancel` computes `handled := r.streamApprovals != nil &&

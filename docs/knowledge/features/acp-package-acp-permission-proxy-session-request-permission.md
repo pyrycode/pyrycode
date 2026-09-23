@@ -91,8 +91,11 @@ changes.
 
 New file `cmd/pyry/acp_permission_streams.go` supplies three things: a package const
 `acpPermissionTimeout = 2 * time.Minute` (the outbound `Call` deadline — a
-never-answering host denies-and-unblocks after it; mirrors the daemon's
-`modalDenyTimeout`, `internal/relay/v2session.go:81`); `startPermissionProxy(host, sessionID)`,
+never-answering host denies-and-unblocks after it; the same deny-on-timeout posture
+as the permission bridge's own `mcpApprovalTimeout` (`cmd/pyry/main.go`, 10 minutes),
+which is the only deny-on-timeout the daemon has left — the relay-side
+`modalDenyTimeout` this used to mirror was deleted by #1539, having had no
+production caller since #1348); `startPermissionProxy(host, sessionID)`,
 the manager glue that constructs `newACPPermissionProxy(m.transport, host, sessionID, acpPermissionTimeout, m.logger)`
 (where `m.transport` is the `permissionCaller` and `host = sess.Supervisor()` is
 **both** the `modalKeystroker` and the `turnbridge.SessionHost`) over a fixed-target
