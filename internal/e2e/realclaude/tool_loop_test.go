@@ -182,8 +182,9 @@ func parseContentBlocks(raw json.RawMessage) ([]contentBlock, error) {
 	return envelope.Message.Content, nil
 }
 
-// resultTrailer mirrors the subset of streamjson/emitter.go's `trailer`
-// struct under assertion. PermissionDenials is pointer-typed so callers
+// resultTrailer mirrors the subset of the stream-json `result` trailer under
+// assertion: claude's own result line, or streamrunner's idleStallResult when
+// the watchdog synthesised one. PermissionDenials is pointer-typed so callers
 // can distinguish "field absent" (nil) from "field present, empty"
 // (non-nil, len 0). Today pyry's emitter never emits this field; the
 // pointer is a forward-compat guard per the AC.

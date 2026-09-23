@@ -185,8 +185,9 @@ const (
 	finGatherUndocumentedState = "fin-gather-verdict-nobody-defined"
 )
 
-// finGatherNeedleTrailer is an ORDINARY trailer in streamjson.trailer's pinned
-// wire order whose `result` field carries trailNeedle.
+// finGatherNeedleTrailer is an ORDINARY trailer in idleStallResult's field
+// order (terminal_reason last, so a capped line loses it first) whose `result`
+// field carries trailNeedle.
 //
 // Two properties are load-bearing:
 //

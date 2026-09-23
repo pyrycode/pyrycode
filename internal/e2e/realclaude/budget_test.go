@@ -12,10 +12,12 @@ package realclaude
 //     list churn) would silently multiply API spend.
 //
 //  2. `pyry agent-run --max-turns=N` actually caps a run at N turns against
-//     the real `claude` CLI. Pinned unit-side at
-//     internal/agentrun/streamjson/`TestEmit_AggregatesUsage` and
-//     internal/agentrun/budget/budget_test.go; this is the missing
-//     end-to-end pin against the real upstream.
+//     the real `claude` CLI. The unit-side pins lived in pyry's own
+//     turn-counting budget and trailer emitter, both deleted in #1519 once
+//     #1348 removed ptyrunner, their only production user. The cap is now
+//     claude's own `--max-turns`, so this end-to-end test is the pin. It also
+//     pins trailBudgetTerminalReason, the value the trailer gate matches to
+//     recognise a budget-fired run.
 //
 // Both tests compose existing fixtures (WithWorktreeAuthenticated,
 // RunPyryAgentRun, parseResultTrailer) — no edits to fixtures.go.
@@ -119,7 +121,7 @@ const maxTurnsSystemPrompt = "You are an e2e regression-guard test. When asked t
 // maxTurnsPrompt forces ≥5 distinct tool turns. If a future haiku revision
 // is smart enough to fire all five `echo`s in one tool_use block (or
 // otherwise complete in ≤2 turns naturally), the assertions
-// `Subtype == "error_max_turns"` and `TerminalReason == "max_turns"` will
+// `Subtype == "error_max_turns"` and `TerminalReason == trailBudgetTerminalReason` will
 // fail loudly — the mitigation is to bump this prompt to force more turns
 // (e.g. 8 sequential `read X.txt` calls with seeded file content the model
 // must enumerate by name), not to weaken the assertion.
@@ -171,8 +173,12 @@ func TestRealClaude_MaxTurnsHonored(t *testing.T) {
 	if trailer.Subtype != "error_max_turns" {
 		t.Fatalf("trailer.Subtype = %q, want %q", trailer.Subtype, "error_max_turns")
 	}
-	if trailer.TerminalReason != "max_turns" {
-		t.Fatalf("trailer.TerminalReason = %q, want %q", trailer.TerminalReason, "max_turns")
+	// Compared against the gate's constant rather than a literal of this test's
+	// own, so the constant cannot drift from claude's value while this stays green.
+	if trailer.TerminalReason != trailBudgetTerminalReason {
+		t.Fatalf("trailer.TerminalReason = %q, want trailBudgetTerminalReason (%q): "+
+			"the trailer gate would not recognise this budget-fired run",
+			trailer.TerminalReason, trailBudgetTerminalReason)
 	}
 	// The budget fires the stop signal when the assistant-message count
 	// reaches the cap, but claude has a message in flight when the signal

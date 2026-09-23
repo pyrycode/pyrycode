@@ -299,9 +299,10 @@ func trailWaitForTrailer(stdout *probeSyncBuffer, timeout time.Duration) trailOb
 
 // --- fixtures ----------------------------------------------------------------
 
-// trailFixtureTrailer is one ordinary trailer in streamjson.trailer's pinned
-// wire order, carrying the values wireFields renders for a
-// clean completion. Short enough to survive the cap intact, which is what lets
+// trailFixtureTrailer is one ordinary trailer in idleStallResult's field order
+// (streamrunner's synthesised trailer, the same order the emitter deleted in
+// #1519 after #1348 wrote), terminal_reason last so a capped line loses it
+// first, carrying the values that emitter rendered for a clean completion. Short enough to survive the cap intact, which is what lets
 // the seen rows assert Line verbatim.
 const trailFixtureTrailer = `{"type":"result","subtype":"success","is_error":false,` +
 	`"duration_ms":4210,"num_turns":3,"result":"done","stop_reason":"end_turn",` +

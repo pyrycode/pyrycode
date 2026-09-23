@@ -20,10 +20,12 @@ package realclaude
 // (`trailScanResult.KeyNames`) makes that separation, and it is still not enough
 // on its own, because ABSENCE MEANS OPPOSITE THINGS ON THE TWO RUNNER PATHS:
 //
-//   - ptyrunner constructs the emitter itself in its `Run`, and streamjson's
-//     `Close` is a chokepoint substituting the recorded detail or
-//     "unclassified" before marshalling. On that path the field is present and
-//     non-empty BY CONSTRUCTION, so absence is a departure.
+//   - ptyrunner constructed the emitter itself in its `Run`, and that
+//     emitter's `Close` was a chokepoint substituting the recorded detail or
+//     "unclassified" before marshalling. On that path the field was present and
+//     non-empty BY CONSTRUCTION, so absence was a departure. ptyrunner was
+//     deleted in #1348 and its emitter package in #1519; the categories below
+//     that read this path remain until they are retired separately.
 //   - streamrunner.Run tees claude's stdout for the watchdog and passes the
 //     bytes through UNCHANGED, synthesising a trailer of its own only when the
 //     idle-stall watchdog fired and claude emitted no result. So on every
@@ -111,9 +113,9 @@ const (
 	// path, which owes one by construction.
 	trailReasonAbsentOwesOne = "reason-absent-on-owes-one-path"
 	// trailReasonBlankOwesOne: terminal_reason is on a line from the ptyrunner
-	// path and decodes empty — the chokepoint in streamjson's `Close` substitutes
-	// the recorded detail or "unclassified" rather than marshal an empty one, so
-	// its guarantee is violated.
+	// path and decodes empty — the chokepoint in that path's emitter `Close`
+	// substituted the recorded detail or "unclassified" rather than marshal an
+	// empty one, so its guarantee is violated. That code was deleted in #1348.
 	trailReasonBlankOwesOne = "reason-blank-on-owes-one-path"
 	// trailReasonNamedOwesOne: terminal_reason is on a line from the ptyrunner
 	// path and names a reason. That path's documented healthy shape.

@@ -292,7 +292,7 @@ func TestResultTurnEndReason_UnchangedForEverySubtype(t *testing.T) {
 // It is a permission_mode_switch record rather than a capture of this ticket's
 // own, and that is the finding the ticket's Context 4 did not have: the arm ran
 // `claude --max-turns 4` DIRECTLY — its argv names the claude binary, there is no
-// `pyry agent-run` and no internal/agentrun/streamjson emitter anywhere on that
+// `pyry agent-run` and no pyry-synthesised trailer anywhere on that
 // path — so the trailer in it is claude's own bytes by the same test Context 5
 // states. It carries two result lines, a clean one and a budget-stopped one, which
 // is why one file pins both ends of the taxonomy.
