@@ -14,7 +14,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
-// inlineReplyRow is one of the six inline reply seals on Run (#1526). Each row
+// inlineReplyRow is one of the ten inline reply seals on Run (#1526, #2530). Each row
 // reaches exactly one site and waits for that site's own drop slug, so a row
 // fails only when its own site loses the guard.
 type inlineReplyRow struct {
@@ -32,10 +32,14 @@ type inlineReplyRow struct {
 	// trigger is sealed and sent with the leg down; nil when the site fires at
 	// the handshake tail.
 	trigger *protocol.Envelope
+	// late, when set, makes the trigger go out with the leg UP: the site's reply
+	// arrives on Run later, from off-Run work (#2477). The row flips the leg with
+	// down before releasing that work, so the leg drops mid-flight.
+	late func(t *testing.T, down func())
 }
 
-// TestV2Session_InlineReply_TransportDown_BurnsNoNonce is AC1–AC4 of #1526. With
-// Connected reporting down, each of the six inline reply seals must consume no
+// TestV2Session_InlineReply_TransportDown_BurnsNoNonce is AC1–AC4 of #1526 and
+// AC1–AC2 of #2530. With Connected reporting down, each inline reply seal must consume no
 // send-nonce and hand nothing to Outbound. The nonce oracle is decryptAppFrame
 // under the phone's untouched initRecv, as in
 // TestV2Session_AppReply_TransportDown_BurnsNoNonce: after recovery the next
@@ -59,6 +63,8 @@ func TestV2Session_InlineReply_TransportDown_BurnsNoNonce(t *testing.T) {
 		TS:      time.Now().UTC(),
 		Payload: json.RawMessage(`{"conversation_id":"conv-inline"}`),
 	}
+
+	lateStarter := newFakeLateSessionStarter()
 
 	rows := []struct {
 		inlineReplyRow
@@ -103,6 +109,61 @@ func TestV2Session_InlineReply_TransportDown_BurnsNoNonce(t *testing.T) {
 				c.DebugBundler = func() ([]byte, error) { return nil, errors.New("assemble boom") }
 			},
 			trigger: &protocol.Envelope{ID: 11, Type: protocol.TypeRequestDebugBundle, TS: time.Now().UTC()},
+		}},
+		{inlineReplyRow: inlineReplyRow{
+			name:  "new_session workspace refused (late)",
+			event: "v2.new_session.err_dropped_transport_down",
+			caps:  []string{protocol.CapabilityInteractive},
+			cfg: func(c *V2SessionConfig) {
+				c.SessionStarter = lateStarter
+			},
+			trigger: &protocol.Envelope{ID: 11, Type: protocol.TypeNewSession, TS: time.Now().UTC()},
+			// The rotation outlives the handler; the leg drops before it reports,
+			// so the refusal reaches Run through m.newSessionDone while down.
+			late: func(t *testing.T, down func()) {
+				outcome := lateStarter.awaitCallback(t)
+				down()
+				outcome(&RotatedWithoutWorkspaceError{ConversationID: "conv-inline-rotated"})
+			},
+		}},
+		{inlineReplyRow: inlineReplyRow{
+			name:  "system_prompt report",
+			event: "v2.systemprompt.request.dropped_transport_down",
+			caps:  []string{protocol.CapabilityInteractive},
+			// nil SystemPromptFor ⇒ the quiet reply, still a reply.
+			trigger: &protocol.Envelope{
+				ID:      11,
+				Type:    protocol.TypeRequestSystemPrompt,
+				TS:      time.Now().UTC(),
+				Payload: json.RawMessage(`{"conversation_id":"conv-inline"}`),
+			},
+		}},
+		{inlineReplyRow: inlineReplyRow{
+			name:  "model_list report",
+			event: "v2.modellist.request.reply_dropped_transport_down",
+			caps:  []string{protocol.CapabilityInteractive},
+			cfg: func(c *V2SessionConfig) {
+				c.KnownConversation = hostedConversations
+				c.ModelListFor = resolveFixtureModelList
+			},
+			trigger: &protocol.Envelope{
+				ID:      11,
+				Type:    protocol.TypeRequestModelList,
+				TS:      time.Now().UTC(),
+				Payload: json.RawMessage(`{"conversation_id":"` + modelReqBoundConvID + `"}`),
+			},
+		}},
+		{inlineReplyRow: inlineReplyRow{
+			name:  "model_list error",
+			event: "v2.modellist.request.err_dropped_transport_down",
+			caps:  []string{protocol.CapabilityInteractive},
+			// nil KnownConversation ⇒ not-found reject.
+			trigger: &protocol.Envelope{
+				ID:      11,
+				Type:    protocol.TypeRequestModelList,
+				TS:      time.Now().UTC(),
+				Payload: json.RawMessage(`{"conversation_id":"conv-inline"}`),
+			},
 		}},
 	}
 
@@ -167,7 +228,11 @@ func runInlineReplyDownRow(t *testing.T, row inlineReplyRow) {
 
 	initSend, initRecv := inlineReplyHandshake(t, frames, gated.rec, row, respPub, initPriv)
 
-	if row.trigger != nil {
+	switch {
+	case row.late != nil:
+		frames <- sealAppFrame(t, initSend, *row.trigger)
+		row.late(t, func() { gated.up.Store(false) })
+	case row.trigger != nil:
 		gated.up.Store(false)
 		frames <- sealAppFrame(t, initSend, *row.trigger)
 	}
@@ -184,9 +249,13 @@ func runInlineReplyDownRow(t *testing.T, row inlineReplyRow) {
 		}
 	}
 	// Content-free (AC4): slug, conn-id and reason only — no payload, settings
-	// value (#833), snapshot text, ciphertext or error text.
-	for _, forbidden := range []string{"payload", "in_reply_to", "type=", "sonnet", "model", "effort", "yolo", "permission", "inline-snap-sentinel", "ciphertext", "err=", "boom"} {
-		if strings.Contains(strings.ToLower(lines[0]), forbidden) {
+	// value (#833), snapshot text, prompt, model value, conversation id,
+	// ciphertext or error text. The slug is the daemon's own constant and is
+	// skipped, so a v2.modellist.… slug does not trip "model"; every other field
+	// is still scanned for every token (#2530).
+	unslugged := strings.ToLower(strings.Replace(lines[0], "event="+row.event, "", 1))
+	for _, forbidden := range []string{"payload", "in_reply_to", "type=", "sonnet", "model", "effort", "yolo", "permission", "inline-snap-sentinel", "ciphertext", "err=", "boom", "conv-"} {
+		if strings.Contains(unslugged, forbidden) {
 			t.Errorf("drop line carries %q: %s", forbidden, lines[0])
 		}
 	}

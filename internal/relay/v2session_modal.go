@@ -811,6 +811,11 @@ func (m *V2SessionManager) newSessionReplyWorkspaceRefused(ctx context.Context, 
 		Payload:   errPayload,
 		InReplyTo: &inReplyTo,
 	}
+	// On the late path this seals after the whole rotation, the widest window of
+	// any inline reply for the leg to have dropped (#2530).
+	if m.dropInlineReplyIfDown(s, "v2.new_session.err_dropped_transport_down") {
+		return
+	}
 	if err := m.forwardEnvelope(ctx, s.connID, reply); err != nil {
 		// Dropped, not retried: the rotation is already committed, so there is
 		// nothing to roll back — the package's outbound-drop posture.
