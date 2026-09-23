@@ -63,7 +63,7 @@ func runMCPApprove(args []string) error {
 
 	// stderr logger: stdout is exclusively the JSON-RPC frame stream claude
 	// reads; a stray stdout write corrupts the MCP stream. Diagnostics stay off
-	// stdout, mirroring runACP.
+	// stdout, as in runMCPFiles.
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	logger.Info("mcp-approve: serving MCP approve tool over stdio")
 

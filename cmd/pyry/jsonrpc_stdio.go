@@ -22,9 +22,9 @@ import (
 //
 // It was called serveACP and lived beside the ACP subcommand until #1348
 // deleted that surface. The name was never accurate to what it does: it is a
-// generic JSON-RPC-over-stdio server, and its one remaining caller is the
-// daemon's MCP approval server, which is the permission gate on the stream
-// path. Renamed on the way out, because a function named for a deleted feature
+// generic JSON-RPC-over-stdio server, and its callers are the MCP servers
+// claude spawns: runMCPApprove, the permission gate on the stream path, and
+// runMCPFiles. Renamed on the way out, because a function named for a deleted feature
 // is how the next reader concludes the feature is still here — the same trap
 // that made two files named "stream" turn out to be the terminal path.
 //
@@ -46,8 +46,9 @@ func serveJSONRPCStdio(ctx context.Context, stdin io.Reader, stdout io.Writer, l
 
 	// closer (AC#4): on shutdown, unblock a Read blocked inside Serve's scanner
 	// by closing the in-memory pipe. On the EOF path this goroutine stays parked
-	// on ctx.Done until runACP's defer cancel() fires, then no-ops on the
-	// already-closed pipe — so it never outlives the call.
+	// on ctx.Done until the caller's defer cancel() fires (runMCPApprove,
+	// runMCPFiles), then no-ops on the already-closed pipe — so it never
+	// outlives the call.
 	go func() {
 		<-ctx.Done()
 		_ = pr.CloseWithError(ctx.Err())
@@ -56,10 +57,11 @@ func serveJSONRPCStdio(ctx context.Context, stdin io.Reader, stdout io.Writer, l
 	// bridge: feed the pipe from real stdin; the host closing stdin surfaces as
 	// EOF, which closes the pipe and lets Serve return (AC#3). On the signal
 	// path this goroutine stays blocked on stdin.Read and is reaped by process
-	// exit — acceptable only because `pyry acp` is a one-shot subprocess that
-	// exits immediately after serveACP returns (exactly one goroutine dies with
-	// the process). serveACP must NOT join it: joining would force the EOF path
-	// to wait for a signal, and the bridge is unjoinable on the signal path.
+	// exit — acceptable only because `pyry mcp-approve` and `pyry mcp-files` are
+	// one-shot subprocesses that exit immediately after serveJSONRPCStdio
+	// returns (exactly one goroutine dies with the process). serveJSONRPCStdio
+	// must NOT join it: joining would force the EOF path to wait for a signal,
+	// and the bridge is unjoinable on the signal path.
 	go func() {
 		_, _ = io.Copy(pw, stdin)
 		_ = pw.Close()

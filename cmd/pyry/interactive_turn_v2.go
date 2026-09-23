@@ -1098,9 +1098,9 @@ func eventKind(ev turnevent.Event) string {
 		// reason field. The variant is claimed by a Handle case on this lane, so this
 		// file's `interactive_turn.unknown` Debug is not a live call site for it; the
 		// reachable one is the no-cursor drop, which returns before the type switch,
-		// plus the OTHER eventKind sites (acp_turn_stream.go, stream_turn_busy.go,
-		// stream_turn_drain.go), all of which would otherwise read kind=unknown for a
-		// variant the daemon does recognize.
+		// plus the OTHER eventKind sites (stream_turn_busy.go and stream_turn_drain.go),
+		// all of which would otherwise read kind=unknown for a variant the daemon does
+		// recognize.
 		return "tool_denied"
 	case turnevent.CompactionBoundary:
 		// The variant NAME only, for the arms below's reason, and the temptation here is
@@ -1109,9 +1109,8 @@ func eventKind(ev turnevent.Event) string {
 		// variant is claimed by a Handle case on this lane, so this file's
 		// `interactive_turn.unknown` Debug is not a live call site for it; the reachable
 		// one is the no-cursor drop, which returns before the type switch, plus the OTHER
-		// eventKind sites (acp_turn_stream.go, stream_turn_busy.go, stream_turn_drain.go),
-		// all of which would otherwise read kind=unknown for a variant the daemon does
-		// recognize.
+		// eventKind sites (stream_turn_busy.go and stream_turn_drain.go), all of which
+		// would otherwise read kind=unknown for a variant the daemon does recognize.
 		return "compaction_boundary"
 	case turnevent.Banner:
 		// The variant NAME only, and the temptation here is the widest on this switch —
@@ -1123,8 +1122,8 @@ func eventKind(ev turnevent.Event) string {
 		// Handle case on this lane, so this file's `interactive_turn.unknown` Debug is
 		// not a live call site for it; the reachable one is the no-cursor drop, which
 		// returns before the type switch, plus the OTHER eventKind sites
-		// (acp_turn_stream.go, stream_turn_busy.go, stream_turn_drain.go), all of which
-		// would otherwise read kind=unknown for a variant the daemon does recognize.
+		// (stream_turn_busy.go and stream_turn_drain.go), all of which would otherwise
+		// read kind=unknown for a variant the daemon does recognize.
 		return "banner"
 	case turnevent.Unrecognized:
 		// The variant NAME only. The event's Kind field holds claude's offending
@@ -1148,18 +1147,19 @@ func eventKind(ev turnevent.Event) string {
 		// readable account of what a subagent is doing and would make a genuinely
 		// useful-looking log field. It is claude's text and it names a file, so it stays
 		// out. The arm exists for the OTHER call sites, not for this file's default:
-		// the handler case above claims the variant on this lane, but the ACP surface
-		// drops it via acpbridge's own default and logs the kind, which would otherwise
-		// read "unknown" for a variant the daemon does recognize.
+		// the handler case above claims the variant on this lane, but the no-cursor
+		// drop, which returns before the type switch, and stream_turn_busy.go and
+		// stream_turn_drain.go all log the kind, which would otherwise read "unknown"
+		// for a variant the daemon does recognize.
 		return "background_task_progress"
 	case turnevent.ThinkingProgress:
 		// The variant NAME only, for the arms above's reason — though here there
 		// is nothing claude-derived to be tempted by in the first place: both
 		// fields are ints, and neither is returned. The arm exists for the OTHER
-		// call sites (acp_turn_stream.go, stream_turn_busy.go,
-		// stream_turn_drain.go), not for this file's default: the handler case
-		// above claims the variant on this lane, but the ACP surface drops it via
-		// acpbridge's own default and logs the kind, which would otherwise read
+		// call sites (stream_turn_busy.go and stream_turn_drain.go, plus the
+		// no-cursor drop, which returns before the type switch), not for this
+		// file's default: the handler case above claims the variant on this lane,
+		// and each of those sites logs the kind, which would otherwise read
 		// "unknown" for a variant the daemon does recognize.
 		return "thinking_progress"
 	case turnevent.RateLimited:
@@ -1167,9 +1167,9 @@ func eventKind(ev turnevent.Event) string {
 		// temptation is real again: Status and LimitType are claude-authored strings,
 		// and Status is precisely the field a log line wants to explain itself with.
 		// Neither is returned. The arm exists for the OTHER call sites
-		// (acp_turn_stream.go, stream_turn_busy.go, stream_turn_drain.go), which
-		// would otherwise log "unknown" for a variant the daemon does recognize —
-		// exactly the ThinkingProgress arm's reason.
+		// (stream_turn_busy.go and stream_turn_drain.go), which would otherwise log
+		// "unknown" for a variant the daemon does recognize — exactly the
+		// ThinkingProgress arm's reason.
 		return "rate_limited"
 	case turnevent.ModelAnnounced:
 		// The variant NAME only, for the arms above's reason — and Model is precisely
@@ -1214,9 +1214,8 @@ func eventKind(ev turnevent.Event) string {
 		//
 		// The reachable eventKind call site left on this lane for THIS variant is the
 		// no-cursor drop, which returns before the type switch. Without the arm every
-		// eventKind site — here, acp_turn_stream.go, stream_turn_busy.go,
-		// stream_turn_drain.go — would read kind=unknown for a variant the daemon does
-		// recognize.
+		// eventKind site — here, stream_turn_busy.go and stream_turn_drain.go — would
+		// read kind=unknown for a variant the daemon does recognize.
 		return "model_announced"
 	case turnevent.ModelRefusalFallback:
 		// Variant name only. Models, scope, category, banner, and report tokens are
@@ -1246,9 +1245,9 @@ func eventKind(ev turnevent.Event) string {
 		// it once per turn and read this name. That mapping arm landed, so the unmapped
 		// drop is no longer a site for this variant either. What remains is the reachable
 		// site the arms above name — the no-cursor drop, which returns before the type
-		// switch — plus acp_turn_stream.go, stream_turn_busy.go and stream_turn_drain.go,
-		// every one of which would read kind=unknown without this arm for a variant the
-		// daemon does recognize.
+		// switch — plus stream_turn_busy.go and stream_turn_drain.go, every one of which
+		// would read kind=unknown without this arm for a variant the daemon does
+		// recognize.
 		return "session_facts"
 	case turnevent.MCPStatus:
 		// Variant name only. Every server string is untrusted display content and none
@@ -1264,9 +1263,9 @@ func eventKind(ev turnevent.Event) string {
 		// Like the three arms above, this variant is now claimed by a Handle case on
 		// this lane (#1849), so this file's `interactive_turn.unknown` Debug is no
 		// longer a live call site for it. The arm exists for the OTHER eventKind call
-		// sites (acp_turn_stream.go, stream_turn_busy.go, stream_turn_drain.go) and
-		// for the no-cursor drop on this lane, which returns before the type switch
-		// and is therefore the reachable one here — all of which would otherwise read
+		// sites (stream_turn_busy.go and stream_turn_drain.go) and for the no-cursor
+		// drop on this lane, which returns before the type switch and is therefore
+		// the reachable one here — all of which would otherwise read
 		// kind=unknown for a variant the daemon does recognize.
 		return "model_list"
 	case turnevent.SlashCommandList:
@@ -1336,7 +1335,7 @@ func eventKind(ev turnevent.Event) string {
 		// longer a live call site for it, and neither is emitMapped's unmapped drop:
 		// turnbridge.MapEvent never refuses the variant, mapping even a zero-value
 		// ContextUsage. STILL LIVE AND REACHABLE: the no-cursor drop, which returns
-		// before the type switch, plus acp_turn_stream.go, stream_turn_busy.go and
+		// before the type switch, plus stream_turn_busy.go and
 		// stream_turn_drain.go — every one of which would read kind=unknown without
 		// this arm for a variant the daemon does recognize. stream_turn_drain.go's
 		// droppable drop is reachable for this variant specifically, because

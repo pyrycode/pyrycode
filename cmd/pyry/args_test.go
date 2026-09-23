@@ -70,7 +70,8 @@ func TestParseClientFlags(t *testing.T) {
 	})
 }
 
-// TestParseClientFlags_ReturnsRest pins the seam that runAttach relies on:
+// TestParseClientFlags_ReturnsRest pins the seam every client verb relies on
+// (runSessions dispatching its subcommand, runMCPApprove refusing extras):
 // positionals after the recognised -pyry-* flags must be surfaced verbatim
 // via the rest return so the caller can apply its own arity rules.
 func TestParseClientFlags_ReturnsRest(t *testing.T) {
