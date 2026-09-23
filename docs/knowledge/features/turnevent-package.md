@@ -135,8 +135,10 @@ type Inbound interface{ isInbound() }          // permission.go (#700) — inbou
   which drop sites are reachable for a new variant from its **turn mark** plus
   whether a `Handle` case claims it is the reliable method — copying a
   neighbouring arm's site-list prose is not: the `ModelList`/`ModelAnnounced`
-  arms' own lists still name `acp_turn_stream.go`, deleted with the
-  terminal-driving path in #1348.
+  arms' own lists named `acp_turn_stream.go`, deleted with the terminal-driving
+  path in #1348, until #2556's comment sweep retargeted every `eventKind` arm
+  (production and test) to the sites that actually exist —
+  `stream_turn_busy.go` and `stream_turn_drain.go`.
 
 The outbound `Event` variants themselves — the full field table,
 `TurnEnd`'s per-ticket growth history, `Stall`/`ApiRetry`/`Compacting`,
