@@ -11,6 +11,13 @@ verdict PASS) and code-review security goggles both cleared it. It is the ACP an
 `interactiveModalEmitterV2` but far thinner — one blocking `Call` in place of the broadcast + nonce
 registry.
 
+**This feature no longer exists.** #1348 ("refactor: delete the terminal-driving interactive
+path and everything on it") deleted `acp_permission.go`, `acp_permission_streams.go`, and the
+`*supervisor.Supervisor` the proxy drove — the whole PTY-typing path this seam depended on. What
+follows is kept as a historical record of how the ACP host answered a permission modal while this
+path was live (#752 through #1348, wired by #801). Treat every present-tense claim below as
+pre-#1348.
+
 ### Where permission surfaces — its own modal-event subscription
 
 A permission modal is a **tui-driver PTY-state event** (`tuidriver.EventKindPtyModalShown` / `…Hidden`
@@ -50,13 +57,17 @@ discipline over the neutral `[]turnevent.PermissionOption`). Every other outcome
 `optionId`, `outcome:"cancelled"`, unknown/empty outcome. A forged id is simply not locatable in the
 set, so it can never route an allow.
 
-### Routing seam — keystrokes, not `PermissionResponse`
+### Routing seam — keystrokes, not `PermissionResponse` (historical)
 
-The host's selection routes through the supervisor **keystroke seam** (`modalKeystroker`:
-`Answer`/`SendEsc`; `*supervisor.Supervisor` satisfies it, #726). There is **no** `turnevent.PermissionResponse`
-consumer — the neutral type stays unwired and the adapter does not construct one. This refines
-[ADR 027](../decisions/027-acp-mapping.md) divergence 2, whose prose sketched a `PermissionResponse`
-feed-back; the built adapter routes the keystroke directly.
+The host's selection routed through the supervisor **keystroke seam** (`modalKeystroker`:
+`Answer`/`SendEsc`; `*supervisor.Supervisor` satisfied it, #726). There was **no**
+`turnevent.PermissionResponse` consumer — the neutral type stayed unwired and the adapter never
+constructed one. This refined [ADR 027](../decisions/027-acp-mapping.md) divergence 2, whose prose
+sketched a `PermissionResponse` feed-back; the built adapter routed the keystroke directly. The
+`modalKeystroker` interface itself outlived this proxy by one more ticket, as an inert seam in
+`cmd/pyry`'s mobile modal resolver (`noopKeystroker`, every production caller since #1348) — #1546
+deleted that last use too. See
+[the modal-control doc](v2-session-manager-state-machine-inbound-modal-control-deny-on-timeout.md).
 
 ### Correlation — transport-owned, doubly guarded
 
@@ -97,8 +108,9 @@ which is the only deny-on-timeout the daemon has left — the relay-side
 `modalDenyTimeout` this used to mirror was deleted by #1539, having had no
 production caller since #1348); `startPermissionProxy(host, sessionID)`,
 the manager glue that constructs `newACPPermissionProxy(m.transport, host, sessionID, acpPermissionTimeout, m.logger)`
-(where `m.transport` is the `permissionCaller` and `host = sess.Supervisor()` is
-**both** the `modalKeystroker` and the `turnbridge.SessionHost`) over a fixed-target
+(where `m.transport` was the `permissionCaller` and `host = sess.Supervisor()` was
+**both** the `modalKeystroker` and the `turnbridge.SessionHost` — both gone with #1348)
+over a fixed-target
 subscriber **identical in shape** to the turn stream's — `resolveBoundSessionJSONL(m.dir, sessionID)`,
 `Switch: nil`, a **fresh** `Tracker` per session; and `runPermissionModalStream(ctx, sub, proxy)`,
 the drain. The drain is the ACP sibling of the mobile `runModalStream`
