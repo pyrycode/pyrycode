@@ -1735,10 +1735,9 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 // un-authenticated or torn-down peer), then seals env under s.send and forwards
 // a noise_msg — reusing emitRekeyRequest's marshal→Encrypt→wrap→send sequence
 // (minus the rekey bookkeeping). It is the single existing seal-and-forward
-// path, shared by the push-buffer drain (drainOnce) and the snapshot reply
-// handlers (handleRequestSnapshot / snapshotReplyError, which call it directly
-// because their replies are InReplyTo-correlated and not part of the ordered
-// push stream).
+// path, shared by the push-buffer drain (drainOnce) and the snapshot error-reply
+// helper (snapshotReplyError, which calls it directly because its replies are
+// InReplyTo-correlated and not part of the ordered push stream).
 //
 // Reads s.send at execution time on the dispatch goroutine, so it always
 // uses the current CipherState and composes with re-key swaps: a forward

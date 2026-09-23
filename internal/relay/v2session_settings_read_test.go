@@ -27,16 +27,6 @@ const (
 	// The one conversation the fixture RunConfigFor resolves (#1586, re-keyed by
 	// #1610). Any other id is a conversation this daemon does not host.
 	readKnownConvID = "conv-read-known"
-
-	// The bootstrap-scoped set, deliberately DISJOINT from the conversation-keyed
-	// values above. SnapshotSettings / SnapshotUsage stay wired in these fixtures
-	// as LEAK DETECTORS: handleRequestSessionSettings must never read them again
-	// (#1610), so a re-introduced bootstrap-scoped read shows up as a wrong value
-	// in the reply as well as in a counter.
-	bootstrapReadModel        = "claude-sonnet-4-0"
-	bootstrapReadEffort       = "low"
-	bootstrapReadUsedTokens   = 777
-	bootstrapReadWindowTokens = 111000
 )
 
 var readEffectiveEffort = "medium"
@@ -103,23 +93,17 @@ func resolveFixtureConv(id string) (RunConfig, bool) {
 
 // readSeams is the read seams a run-configuration test wires, grouped so it can
 // state one intent ("all wired", "none wired") instead of threading the closures
-// through every call. runConfig is the one this verb consults; settings and usage
-// are the bootstrap-scoped pair it must NOT (they serve handleRequestSnapshot,
-// and are wired here only as leak detectors), and knownConv is that handler's
-// membership gate.
+// through every call. runConfig is the one this verb consults, and knownConv is
+// handleRequestSnapshot's membership gate.
 type readSeams struct {
 	runConfig       func(string) (RunConfig, bool)
 	effectiveEffort func(context.Context, string) (*string, bool)
-	settings        func() (string, string, bool)
-	usage           func() (int, int)
 	knownConv       func(string) bool
-	snapshotter     ScreenSnapshotter
 	updater         SettingsUpdater
 	handlers        map[string]dispatch.Handler
 }
 
-// allReadSeams wires the conversation-keyed seam to the fixture RunConfig and the
-// two bootstrap-scoped seams to their own disjoint constants — the
+// allReadSeams wires the conversation-keyed seam to the fixture RunConfig — the
 // production-shaped case after #1610.
 func allReadSeams() readSeams {
 	return readSeams{
@@ -127,10 +111,6 @@ func allReadSeams() readSeams {
 		effectiveEffort: func(context.Context, string) (*string, bool) {
 			return &readEffectiveEffort, true
 		},
-		settings: func() (string, string, bool) {
-			return bootstrapReadModel, bootstrapReadEffort, false
-		},
-		usage: func() (int, int) { return bootstrapReadUsedTokens, bootstrapReadWindowTokens },
 	}
 }
 
@@ -145,16 +125,6 @@ func allReadSeams() readSeams {
 type readCounts struct {
 	resolves        atomic.Int64 // conversation-keyed RunConfigFor resolutions
 	effectiveEffort atomic.Int64
-	settings        atomic.Int64
-	usage           atomic.Int64
-}
-
-// bootstrapReads totals the two bootstrap-scoped seams this verb must never read
-// again (#1610). It is wanted at 0 unconditionally, and it goes red under exactly
-// ONE mutation class — a re-introduced bootstrap-scoped read. Do not lean on it
-// for any other property.
-func (c *readCounts) bootstrapReads() int64 {
-	return c.settings.Load() + c.usage.Load()
 }
 
 // countingReadSeams wires the same NON-ZERO fixture values allReadSeams does and
@@ -164,8 +134,7 @@ func (c *readCounts) bootstrapReads() int64 {
 // the zero reply is the same reply whether or not the conversation gate exists,
 // so a test built on nil seams would pass with the gate deleted and prove
 // nothing. Wiring them is what makes "an unresolvable conversation gets zeros"
-// discriminating — and wiring the bootstrap pair to DIFFERENT values is what
-// makes "and it got them from nowhere else" discriminating.
+// discriminating.
 func countingReadSeams() (readSeams, *readCounts) {
 	c := &readCounts{}
 	return readSeams{
@@ -176,14 +145,6 @@ func countingReadSeams() (readSeams, *readCounts) {
 		effectiveEffort: func(context.Context, string) (*string, bool) {
 			c.effectiveEffort.Add(1)
 			return &readEffectiveEffort, true
-		},
-		settings: func() (string, string, bool) {
-			c.settings.Add(1)
-			return bootstrapReadModel, bootstrapReadEffort, false
-		},
-		usage: func() (int, int) {
-			c.usage.Add(1)
-			return bootstrapReadUsedTokens, bootstrapReadWindowTokens
 		},
 	}, c
 }
@@ -209,10 +170,7 @@ func readManagerFor(t *testing.T, seams readSeams, logger *slog.Logger) (mgr *V2
 		Logger:             logger,
 		RunConfigFor:       seams.runConfig,
 		EffectiveEffortFor: seams.effectiveEffort,
-		SnapshotSettings:   seams.settings,
-		SnapshotUsage:      seams.usage,
 		KnownConversation:  seams.knownConv,
-		Snapshotter:        seams.snapshotter,
 		SettingsUpdater:    seams.updater,
 		Handlers:           seams.handlers,
 	})
@@ -227,9 +185,7 @@ func readManagerFor(t *testing.T, seams readSeams, logger *slog.Logger) (mgr *V2
 // fully inert: zero outbound frames, so it cannot even learn whether a session
 // exists — the same authz posture as the write path.
 //
-// The reply must carry the CONVERSATION-keyed fixture values, never the disjoint
-// bootstrap-scoped ones the same manager still wires for handleRequestSnapshot
-// (#1610).
+// The reply must carry the CONVERSATION-keyed fixture values (#1610).
 func TestV2Session_RequestSessionSettings_ReportsRunConfig(t *testing.T) {
 	t.Parallel()
 
@@ -301,13 +257,12 @@ func TestV2Session_RequestSessionSettings_ReportsRunConfig(t *testing.T) {
 	}
 }
 
-// TestV2Session_RequestSessionSettings_AnswersWithoutASnapshotter is the
-// anti-regression for the whole change, and it states the defect as a contrast.
+// TestV2Session_RequestSessionSettings_AnswersWhileSnapshotOffline is the
+// anti-regression for desktop#491, and it states the defect as a contrast.
 //
-// Both verbs run against ONE manager with a nil Snapshotter — the stream-json
-// runner's production shape, where Session.Supervisor() type-asserts to nil and
-// cmd/pyry routes that to a nil seam on purpose (#1077/#1101). Against that
-// manager:
+// Both verbs run against ONE manager. The daemon renders no screen — the
+// stream-json runner has none, and #2540 deleted the render seam altogether.
+// Against that manager:
 //
 //   - request_snapshot answers TypeError/server.binary_offline. Correct and
 //     unchanged: there is genuinely no terminal screen to photograph.
@@ -318,14 +273,14 @@ func TestV2Session_RequestSessionSettings_ReportsRunConfig(t *testing.T) {
 // them down with it and the run-configuration UI got nothing on the runner in
 // production. If this test ever fails by the second reply becoming an error, the
 // read path has been re-coupled to the terminal and desktop#491 is back.
-func TestV2Session_RequestSessionSettings_AnswersWithoutASnapshotter(t *testing.T) {
+func TestV2Session_RequestSessionSettings_AnswersWhileSnapshotOffline(t *testing.T) {
 	t.Parallel()
 
 	seams := allReadSeams()
-	// Snapshotter stays nil (the stream-mode shape). KnownConversation must be
-	// wired to true so request_snapshot reaches its offline branch rather than
-	// being turned away earlier as an unknown conversation — otherwise the
-	// contrast would prove nothing about the offline gate. It is that handler's
+	// KnownConversation must be wired to true so request_snapshot reaches its
+	// offline branch rather than being turned away earlier as an unknown
+	// conversation — otherwise the contrast would prove nothing about the offline
+	// gate. It is that handler's
 	// gate alone now; the read verb resolves through RunConfigFor (#1610), which
 	// is why the read frame below must NAME the conversation the fixture resolves.
 	seams.knownConv = func(string) bool { return true }
@@ -376,7 +331,7 @@ func TestV2Session_RequestSessionSettings_AnswersWithoutASnapshotter(t *testing.
 	// Reply 2: the run configuration is unaffected by the missing screen.
 	readReply := decryptAppFrame(t, msgs[1], recv)
 	if readReply.Type != protocol.TypeSessionSettings {
-		t.Fatalf("request_session_settings reply Type = %q, want %q — a nil Snapshotter must NOT suppress the run configuration (desktop#491)", readReply.Type, protocol.TypeSessionSettings)
+		t.Fatalf("request_session_settings reply Type = %q, want %q — an offline snapshot must NOT suppress the run configuration (desktop#491)", readReply.Type, protocol.TypeSessionSettings)
 	}
 	if readReply.InReplyTo == nil || *readReply.InReplyTo != readReqID {
 		t.Errorf("reply InReplyTo = %v, want pointer to %d", readReply.InReplyTo, readReqID)
@@ -494,20 +449,15 @@ func TestV2Session_RequestSessionSettings_IgnoresAnyPayload(t *testing.T) {
 // an unwired daemon answers too, so asserting the payload alone would pass with
 // the gate deleted; asserting that the conversation-keyed seam was not consulted
 // at all is what proves a request naming nothing short-circuits ahead of it.
-//
-// The bootstrap-read assertion is the other half, and it is wanted at ZERO on
-// every row — so it is asserted unconditionally rather than carried as a column
-// of constants. It goes red under exactly one mutation, a re-introduced
-// bootstrap-scoped read, which is the defect this ticket closes: before #1610 the
-// reported values were the bootstrap session's whichever conversation was named.
+// Before #1610 the reported values were the bootstrap session's whichever
+// conversation was named; since #2540 V2SessionConfig carries no
+// bootstrap-scoped run-configuration seam that could be read instead.
 //
 // Mutation coverage this table buys — do not prune a row as redundant:
 //   - dropping the empty-id guard reddens rows 4–6 on resolves;
 //   - dropping the nil-seam guard panics row 3;
 //   - discarding RunConfigFor's comma-ok reddens row 2 on the payload, via
-//     poisonedRunConfig;
-//   - re-introducing a bootstrap-scoped read reddens rows 2–6 on both the
-//     bootstrap-read assertion and the payload.
+//     poisonedRunConfig.
 //
 // An unresolvable conversation is answered with the zero payload, never a
 // TypeError: session_id "" is already the wire contract's "no session to
@@ -623,10 +573,6 @@ func TestV2Session_RequestSessionSettings_ConversationGate(t *testing.T) {
 				t.Errorf("EffectiveEffortFor calls = %d, want %d — the provider must run exactly once and only after RunConfigFor accepts the conversation",
 					gotEffective, tc.wantEffective)
 			}
-			if gotBootstrap := counts.bootstrapReads(); gotBootstrap != 0 {
-				t.Errorf("bootstrap-scoped seam reads = %d, want 0 — this verb reports the NAMED conversation's session, so no bootstrap-scoped run-configuration source may be read for any request (#1610)",
-					gotBootstrap)
-			}
 		})
 	}
 }
@@ -671,9 +617,6 @@ func TestV2Session_RequestSessionSettings_NonInteractiveMakesNoLookup(t *testing
 	}
 	if got := counts.effectiveEffort.Load(); got != 0 {
 		t.Errorf("EffectiveEffortFor calls = %d, want 0 — a non-interactive conn must not reach the provider", got)
-	}
-	if got := counts.bootstrapReads(); got != 0 {
-		t.Errorf("bootstrap-scoped seam reads = %d, want 0 — a non-interactive conn is fully inert on this verb", got)
 	}
 }
 

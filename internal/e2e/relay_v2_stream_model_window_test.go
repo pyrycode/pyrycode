@@ -42,9 +42,9 @@ import (
 // here. The unit tables in internal/contextwindow separate those readings row by
 // row; this spec proves the whole path is wired, so one window assertion suffices.
 //
-// screen_snapshot is deliberately NOT asserted here. The daemon wires no
-// Snapshotter, so handleRequestSnapshot short-circuits to server.binary_offline
-// and there is no reply to assert against — see
+// screen_snapshot is deliberately NOT asserted here. The daemon renders no
+// screen, so handleRequestSnapshot answers server.binary_offline and there is
+// no screen_snapshot reply to assert against — see
 // TestRelayV2_StreamRequestSessionSettings' own doc.
 func TestRelayV2_StreamSessionSettingsReportsTheObservedWindow(t *testing.T) {
 	const (

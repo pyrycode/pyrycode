@@ -3924,27 +3924,14 @@ func TestV2Session_ActiveConns_CtxCancelled_ReturnsNil(t *testing.T) {
 
 // --- v2 screen-snapshot handler tests (#618) ---
 
-const (
-	snapConvID     = "snap-conv-618"
-	snapScreenText = "SENTINEL-SCREEN-XYZ rendered screen text"
-)
-
-// fakeSnapshotter is a ScreenSnapshotter test double. Value receiver so the
-// zero value stored in an interface is a genuine non-nil interface, while an
-// unset (nil) ScreenSnapshotter field stays a genuine nil interface — letting
-// the table express the nil-seam scenarios. The sentinel text is deliberately
-// NOT a claude-screen literal (cmd/substrate-guard).
-type fakeSnapshotter struct {
-	text string
-	live bool
-}
-
-func (f fakeSnapshotter) ScreenSnapshot() (string, bool) { return f.text, f.live }
+const snapConvID = "snap-conv-618"
 
 // TestV2Session_OpenState_RequestSnapshot drives a paired-device handshake to
 // open, feeds an AEAD-sealed request_snapshot, and asserts the single sealed
-// reply: a screen_snapshot on the happy path, or a deterministic error on each
-// rejection branch (AC #1, #3, #4). Every branch produces exactly one reply.
+// error reply. The daemon renders no screen (#2540), so every branch answers
+// TypeError and the type alone distinguishes nothing: each row pins Code AND
+// Retryable, which is what keeps the KnownConversation gate ahead of the
+// offline reply (#1101). Every branch produces exactly one reply.
 func TestV2Session_OpenState_RequestSnapshot(t *testing.T) {
 	t.Parallel()
 
@@ -3952,184 +3939,45 @@ func TestV2Session_OpenState_RequestSnapshot(t *testing.T) {
 	knownNone := func(string) bool { return false }
 	convPayload := json.RawMessage(`{"conversation_id":"` + snapConvID + `"}`)
 
-	// SnapshotSettings read-seam doubles (#848). customSettings returns a
-	// non-default triple; defaultSettings returns the all-defaults triple (proves
-	// a seam yielding defaults is indistinguishable from a nil seam on the wire).
-	customSettings := func() (model, effort string, yolo bool) { return "opus", "high", true }
-	defaultSettings := func() (model, effort string, yolo bool) { return "", "", false }
-
-	// SnapshotUsage read-seam doubles (#857). injectedUsage returns a non-zero
-	// pair; freshUsage returns the wired-but-fresh pair (0 used, window default)
-	// that distinguishes a wired seam from a nil one on the wire.
-	injectedUsage := func() (usedTokens, windowTokens int) { return 12345, 200000 }
-	freshUsage := func() (usedTokens, windowTokens int) { return 0, 200000 }
-
 	tests := []struct {
 		name          string
 		knownConv     func(string) bool
-		snap          ScreenSnapshotter
-		settings      func() (model, effort string, yolo bool)
-		usage         func() (usedTokens, windowTokens int)
 		reqPayload    json.RawMessage
-		wantType      string
-		wantCode      string // TypeError rows only
-		wantRetryable bool   // TypeError rows only
-		wantText      string // TypeScreenSnapshot rows only
-		wantModel     string // TypeScreenSnapshot rows only
-		wantEffort    string // TypeScreenSnapshot rows only
-		wantYOLO      bool   // TypeScreenSnapshot rows only
-		wantUsed      int    // TypeScreenSnapshot rows only
-		wantWindow    int    // TypeScreenSnapshot rows only
+		wantCode      string
+		wantRetryable bool
 	}{
-		{
-			name:       "happy renders screen_snapshot",
-			knownConv:  knownOnly,
-			snap:       fakeSnapshotter{text: snapScreenText, live: true},
-			reqPayload: convPayload,
-			wantType:   protocol.TypeScreenSnapshot,
-			wantText:   snapScreenText,
-		},
-		{
-			name:       "empty screen renders empty screen_snapshot",
-			knownConv:  knownOnly,
-			snap:       fakeSnapshotter{text: "", live: true},
-			reqPayload: convPayload,
-			wantType:   protocol.TypeScreenSnapshot,
-			wantText:   "",
-		},
-		{
-			// AC #1/#4: injected non-default settings surface on the wire.
-			name:       "injected settings surface in screen_snapshot",
-			knownConv:  knownOnly,
-			snap:       fakeSnapshotter{text: snapScreenText, live: true},
-			settings:   customSettings,
-			reqPayload: convPayload,
-			wantType:   protocol.TypeScreenSnapshot,
-			wantText:   snapScreenText,
-			wantModel:  "opus",
-			wantEffort: "high",
-			wantYOLO:   true,
-		},
-		{
-			// AC #2: a nil seam reports the effective defaults — empty
-			// model/effort, yolo:false — all three present (byte-compatible with
-			// the pre-#848 zero-value reply).
-			name:       "nil settings seam reports all-defaults",
-			knownConv:  knownOnly,
-			snap:       fakeSnapshotter{text: snapScreenText, live: true},
-			settings:   nil,
-			reqPayload: convPayload,
-			wantType:   protocol.TypeScreenSnapshot,
-			wantText:   snapScreenText,
-			wantModel:  "",
-			wantEffort: "",
-			wantYOLO:   false,
-		},
-		{
-			// AC #2: a seam that returns defaults is indistinguishable on the wire
-			// from a nil seam (the no-bootstrap collapse in the cmd/pyry closure).
-			name:       "settings seam returning defaults matches nil seam",
-			knownConv:  knownOnly,
-			snap:       fakeSnapshotter{text: snapScreenText, live: true},
-			settings:   defaultSettings,
-			reqPayload: convPayload,
-			wantType:   protocol.TypeScreenSnapshot,
-			wantText:   snapScreenText,
-			wantModel:  "",
-			wantEffort: "",
-			wantYOLO:   false,
-		},
-		{
-			// AC #2 (#857): a wired usage seam's two ints surface on the reply.
-			name:       "injected usage surfaces in screen_snapshot",
-			knownConv:  knownOnly,
-			snap:       fakeSnapshotter{text: snapScreenText, live: true},
-			usage:      injectedUsage,
-			reqPayload: convPayload,
-			wantType:   protocol.TypeScreenSnapshot,
-			wantText:   snapScreenText,
-			wantUsed:   12345,
-			wantWindow: 200000,
-		},
-		{
-			// AC #3 (#857): a nil usage seam reports both at zero, present on the
-			// wire (byte-compatible with the pre-#857 shape apart from the two
-			// always-present zero fields). Note (0,0) is distinct from the wired-
-			// fresh (0, 200000) row below.
-			name:       "nil usage seam reports zeros",
-			knownConv:  knownOnly,
-			snap:       fakeSnapshotter{text: snapScreenText, live: true},
-			usage:      nil,
-			reqPayload: convPayload,
-			wantType:   protocol.TypeScreenSnapshot,
-			wantText:   snapScreenText,
-			wantUsed:   0,
-			wantWindow: 0,
-		},
-		{
-			// AC #5 (#857): a wired-but-fresh session (no usage entry yet) reports
-			// used 0 with the window default, distinguishing it from the nil seam.
-			name:       "fresh session via seam returns window default",
-			knownConv:  knownOnly,
-			snap:       fakeSnapshotter{text: snapScreenText, live: true},
-			usage:      freshUsage,
-			reqPayload: convPayload,
-			wantType:   protocol.TypeScreenSnapshot,
-			wantText:   snapScreenText,
-			wantUsed:   0,
-			wantWindow: 200000,
-		},
 		{
 			name:          "foreign conversation rejected",
 			knownConv:     knownNone,
-			snap:          fakeSnapshotter{text: snapScreenText, live: true},
 			reqPayload:    convPayload,
-			wantType:      protocol.TypeError,
 			wantCode:      protocol.CodeConversationNotFound,
 			wantRetryable: false,
 		},
 		{
 			name:          "nil KnownConversation rejects all",
 			knownConv:     nil,
-			snap:          fakeSnapshotter{text: snapScreenText, live: true},
 			reqPayload:    convPayload,
-			wantType:      protocol.TypeError,
 			wantCode:      protocol.CodeConversationNotFound,
 			wantRetryable: false,
 		},
 		{
 			name:          "empty conversation_id rejected",
 			knownConv:     knownOnly,
-			snap:          fakeSnapshotter{text: snapScreenText, live: true},
 			reqPayload:    json.RawMessage(`{}`),
-			wantType:      protocol.TypeError,
 			wantCode:      protocol.CodeConversationNotFound,
 			wantRetryable: false,
 		},
 		{
 			name:          "malformed payload rejected",
 			knownConv:     knownOnly,
-			snap:          fakeSnapshotter{text: snapScreenText, live: true},
 			reqPayload:    json.RawMessage(`[]`),
-			wantType:      protocol.TypeError,
 			wantCode:      protocol.CodeConversationNotFound,
 			wantRetryable: false,
 		},
 		{
-			name:          "no live session reports offline",
+			name:          "known conversation reports offline",
 			knownConv:     knownOnly,
-			snap:          fakeSnapshotter{text: "", live: false},
 			reqPayload:    convPayload,
-			wantType:      protocol.TypeError,
-			wantCode:      protocol.CodeServerBinaryOffline,
-			wantRetryable: true,
-		},
-		{
-			name:          "nil Snapshotter reports offline",
-			knownConv:     knownOnly,
-			snap:          nil,
-			reqPayload:    convPayload,
-			wantType:      protocol.TypeError,
 			wantCode:      protocol.CodeServerBinaryOffline,
 			wantRetryable: true,
 		},
@@ -4153,10 +4001,7 @@ func TestV2Session_OpenState_RequestSnapshot(t *testing.T) {
 				Devices:           reg,
 				ServerID:          v2TestServerID,
 				Logger:            silentLogger(),
-				Snapshotter:       tt.snap,
 				KnownConversation: tt.knownConv,
-				SnapshotSettings:  tt.settings,
-				SnapshotUsage:     tt.usage,
 			}, frames, rec, respPub, initPriv)
 			t.Cleanup(sess.stop)
 
@@ -4172,257 +4017,26 @@ func TestV2Session_OpenState_RequestSnapshot(t *testing.T) {
 			envs := waitForEnvelopes(t, rec, 2)
 			reply := decryptAppFrame(t, envs[1], sess.initRecv)
 
-			if reply.Type != tt.wantType {
-				t.Fatalf("reply Type = %q, want %q", reply.Type, tt.wantType)
+			if reply.Type != protocol.TypeError {
+				t.Fatalf("reply Type = %q, want %q", reply.Type, protocol.TypeError)
 			}
 			if reply.InReplyTo == nil || *reply.InReplyTo != reqID {
 				t.Errorf("InReplyTo = %v, want pointer to %d", reply.InReplyTo, reqID)
 			}
-
-			switch tt.wantType {
-			case protocol.TypeScreenSnapshot:
-				var p protocol.ScreenSnapshotPayload
-				if err := json.Unmarshal(reply.Payload, &p); err != nil {
-					t.Fatalf("decode screen_snapshot payload: %v", err)
-				}
-				if p.ConversationID != snapConvID {
-					t.Errorf("ConversationID = %q, want %q", p.ConversationID, snapConvID)
-				}
-				if p.Text != tt.wantText {
-					t.Errorf("Text = %q, want %q", p.Text, tt.wantText)
-				}
-				// #848: model / effort / YOLO reflect the injected read seam (or
-				// defaults for a nil seam). All three are always present on the
-				// wire (no omitempty), so an empty model/effort and yolo:false are
-				// asserted explicitly rather than as an omitted field.
-				if p.Model != tt.wantModel {
-					t.Errorf("Model = %q, want %q", p.Model, tt.wantModel)
-				}
-				if p.Effort != tt.wantEffort {
-					t.Errorf("Effort = %q, want %q", p.Effort, tt.wantEffort)
-				}
-				if p.YOLO != tt.wantYOLO {
-					t.Errorf("YOLO = %v, want %v", p.YOLO, tt.wantYOLO)
-				}
-				// #857: used_tokens / window_tokens reflect the injected usage seam
-				// (or zeros for a nil seam). Both are always present on the wire (no
-				// omitempty), so window_tokens 0 (nil seam) stays distinguishable
-				// from a wired-fresh window default.
-				if p.UsedTokens != tt.wantUsed {
-					t.Errorf("UsedTokens = %d, want %d", p.UsedTokens, tt.wantUsed)
-				}
-				if p.WindowTokens != tt.wantWindow {
-					t.Errorf("WindowTokens = %d, want %d", p.WindowTokens, tt.wantWindow)
-				}
-				// TS is freshly stamped; compare with IsZero/Since, never == (a
-				// JSON round-trip strips the monotonic reading).
-				if p.TS.IsZero() {
-					t.Error("TS is zero, want a render timestamp")
-				}
-				if d := time.Since(p.TS); d < 0 || d > time.Minute {
-					t.Errorf("TS = %v not within the last minute (since=%v)", p.TS, d)
-				}
-			case protocol.TypeError:
-				var p protocol.ErrorPayload
-				if err := json.Unmarshal(reply.Payload, &p); err != nil {
-					t.Fatalf("decode error payload: %v", err)
-				}
-				if p.Code != tt.wantCode {
-					t.Errorf("error Code = %q, want %q", p.Code, tt.wantCode)
-				}
-				if p.Retryable != tt.wantRetryable {
-					t.Errorf("error Retryable = %v, want %v", p.Retryable, tt.wantRetryable)
-				}
-				if p.Message == "" {
-					t.Error("error Message is empty, want a static message")
-				}
+			var p protocol.ErrorPayload
+			if err := json.Unmarshal(reply.Payload, &p); err != nil {
+				t.Fatalf("decode error payload: %v", err)
+			}
+			if p.Code != tt.wantCode {
+				t.Errorf("error Code = %q, want %q", p.Code, tt.wantCode)
+			}
+			if p.Retryable != tt.wantRetryable {
+				t.Errorf("error Retryable = %v, want %v", p.Retryable, tt.wantRetryable)
+			}
+			if p.Message == "" {
+				t.Error("error Message is empty, want a static message")
 			}
 		})
-	}
-}
-
-// TestV2Session_OpenState_RequestSnapshot_Repeat proves two request_snapshots
-// on one open session each yield their own freshly stamped screen_snapshot.
-func TestV2Session_OpenState_RequestSnapshot_Repeat(t *testing.T) {
-	t.Parallel()
-
-	respPriv, respPub := genV2Keypair(t)
-	initPriv, _ := genV2Keypair(t)
-	reg := v2PairedRegistry(t, v2TestToken)
-
-	frames := make(chan protocol.RoutingEnvelope, 3)
-	rec := &v2Recorder{}
-	sess := driveToOpen(t, V2SessionConfig{
-		Frames:            frames,
-		Outbound:          rec.outbound,
-		StaticPriv:        respPriv,
-		Devices:           reg,
-		ServerID:          v2TestServerID,
-		Logger:            silentLogger(),
-		Snapshotter:       fakeSnapshotter{text: snapScreenText, live: true},
-		KnownConversation: func(id string) bool { return id == snapConvID },
-	}, frames, rec, respPub, initPriv)
-	t.Cleanup(sess.stop)
-
-	convPayload := json.RawMessage(`{"conversation_id":"` + snapConvID + `"}`)
-	reqIDs := []uint64{61, 62}
-	for _, id := range reqIDs {
-		frames <- sealAppFrame(t, sess.initSend, protocol.Envelope{
-			ID:      id,
-			Type:    protocol.TypeRequestSnapshot,
-			TS:      time.Now().UTC(),
-			Payload: convPayload,
-		})
-	}
-
-	// noise_resp + two replies; decrypt in capture order (the receive nonce
-	// is sequential).
-	envs := waitForEnvelopes(t, rec, 3)
-	for i, id := range reqIDs {
-		reply := decryptAppFrame(t, envs[i+1], sess.initRecv)
-		if reply.Type != protocol.TypeScreenSnapshot {
-			t.Fatalf("reply %d Type = %q, want %q", i, reply.Type, protocol.TypeScreenSnapshot)
-		}
-		if reply.InReplyTo == nil || *reply.InReplyTo != id {
-			t.Errorf("reply %d InReplyTo = %v, want pointer to %d", i, reply.InReplyTo, id)
-		}
-		var p protocol.ScreenSnapshotPayload
-		if err := json.Unmarshal(reply.Payload, &p); err != nil {
-			t.Fatalf("decode screen_snapshot %d: %v", i, err)
-		}
-		if p.TS.IsZero() {
-			t.Errorf("reply %d TS is zero, want a fresh render timestamp", i)
-		}
-	}
-}
-
-// TestV2Session_OpenState_RequestSnapshot_UsageShrinks pins AC #4 (#857): when
-// the usage reader reports a smaller used-tokens figure on a later read (what a
-// compaction produces — contextwindow.Read is last-usage-wins with no running
-// total), a subsequent request_snapshot carries the smaller figure on the wire,
-// so a client can reflect the compaction. The reader's own post-compaction
-// shrink is unit-tested in #856; here a shrinking stub proves the wire relays a
-// changed report faithfully.
-func TestV2Session_OpenState_RequestSnapshot_UsageShrinks(t *testing.T) {
-	t.Parallel()
-
-	respPriv, respPub := genV2Keypair(t)
-	initPriv, _ := genV2Keypair(t)
-	reg := v2PairedRegistry(t, v2TestToken)
-
-	// Two successive reads: the second is smaller (a compaction reset). The
-	// counter closure returns each value once, in order, on the single manager
-	// Run goroutine that invokes the seam.
-	usedSeq := []int{50000, 3000}
-	var calls int
-	shrinkingUsage := func() (usedTokens, windowTokens int) {
-		used := usedSeq[calls]
-		if calls < len(usedSeq)-1 {
-			calls++
-		}
-		return used, 200000
-	}
-
-	frames := make(chan protocol.RoutingEnvelope, 3)
-	rec := &v2Recorder{}
-	sess := driveToOpen(t, V2SessionConfig{
-		Frames:            frames,
-		Outbound:          rec.outbound,
-		StaticPriv:        respPriv,
-		Devices:           reg,
-		ServerID:          v2TestServerID,
-		Logger:            silentLogger(),
-		Snapshotter:       fakeSnapshotter{text: snapScreenText, live: true},
-		KnownConversation: func(id string) bool { return id == snapConvID },
-		SnapshotUsage:     shrinkingUsage,
-	}, frames, rec, respPub, initPriv)
-	t.Cleanup(sess.stop)
-
-	convPayload := json.RawMessage(`{"conversation_id":"` + snapConvID + `"}`)
-	reqIDs := []uint64{81, 82}
-	for _, id := range reqIDs {
-		frames <- sealAppFrame(t, sess.initSend, protocol.Envelope{
-			ID:      id,
-			Type:    protocol.TypeRequestSnapshot,
-			TS:      time.Now().UTC(),
-			Payload: convPayload,
-		})
-	}
-
-	// noise_resp + two replies; decrypt in capture order (the receive nonce is
-	// sequential).
-	envs := waitForEnvelopes(t, rec, 3)
-	used := make([]int, len(reqIDs))
-	for i := range reqIDs {
-		reply := decryptAppFrame(t, envs[i+1], sess.initRecv)
-		if reply.Type != protocol.TypeScreenSnapshot {
-			t.Fatalf("reply %d Type = %q, want %q", i, reply.Type, protocol.TypeScreenSnapshot)
-		}
-		var p protocol.ScreenSnapshotPayload
-		if err := json.Unmarshal(reply.Payload, &p); err != nil {
-			t.Fatalf("decode screen_snapshot %d: %v", i, err)
-		}
-		used[i] = p.UsedTokens
-	}
-	if used[1] >= used[0] {
-		t.Errorf("post-compaction UsedTokens = %d, want smaller than pre-compaction %d", used[1], used[0])
-	}
-}
-
-// TestV2Session_OpenState_RequestSnapshot_NeverLogsScreenText pins the security
-// invariant: the rendered screen text reaches the sealed wire payload but never
-// any log line (mirrors assistant_turn_v2.go's chunk-bytes discipline).
-func TestV2Session_OpenState_RequestSnapshot_NeverLogsScreenText(t *testing.T) {
-	t.Parallel()
-
-	const sentinel = "SENTINEL-SCREEN-XYZ-do-not-log"
-
-	respPriv, respPub := genV2Keypair(t)
-	initPriv, _ := genV2Keypair(t)
-	reg := v2PairedRegistry(t, v2TestToken)
-
-	logger, logBuf := bufferLogger()
-	frames := make(chan protocol.RoutingEnvelope, 2)
-	rec := &v2Recorder{}
-	sess := driveToOpen(t, V2SessionConfig{
-		Frames:            frames,
-		Outbound:          rec.outbound,
-		StaticPriv:        respPriv,
-		Devices:           reg,
-		ServerID:          v2TestServerID,
-		Logger:            logger,
-		Snapshotter:       fakeSnapshotter{text: sentinel, live: true},
-		KnownConversation: func(id string) bool { return id == snapConvID },
-	}, frames, rec, respPub, initPriv)
-	t.Cleanup(sess.stop)
-
-	const reqID uint64 = 71
-	frames <- sealAppFrame(t, sess.initSend, protocol.Envelope{
-		ID:      reqID,
-		Type:    protocol.TypeRequestSnapshot,
-		TS:      time.Now().UTC(),
-		Payload: json.RawMessage(`{"conversation_id":"` + snapConvID + `"}`),
-	})
-
-	envs := waitForEnvelopes(t, rec, 2)
-	reply := decryptAppFrame(t, envs[1], sess.initRecv)
-	if reply.Type != protocol.TypeScreenSnapshot {
-		t.Fatalf("reply Type = %q, want %q", reply.Type, protocol.TypeScreenSnapshot)
-	}
-	// Sanity: the render path actually carried the sentinel onto the sealed
-	// payload — otherwise the no-log assertion below would pass vacuously.
-	var p protocol.ScreenSnapshotPayload
-	if err := json.Unmarshal(reply.Payload, &p); err != nil {
-		t.Fatalf("decode screen_snapshot payload: %v", err)
-	}
-	if p.Text != sentinel {
-		t.Fatalf("payload Text = %q, want the sentinel %q", p.Text, sentinel)
-	}
-
-	// Join Run so every log write has happened-before this read.
-	sess.stop()
-	if got := logBuf.String(); strings.Contains(got, sentinel) {
-		t.Errorf("rendered screen text leaked into logs:\n%s", got)
 	}
 }
 

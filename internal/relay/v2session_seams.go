@@ -13,8 +13,8 @@ import (
 
 // This file holds the V2SessionManager's dependency contracts and configuration,
 // carved out of v2session.go so they read in isolation from the manager core.
-// It collects the eight seam interfaces the manager depends on —
-// ScreenSnapshotter, Interrupter, SessionStarter, QueueRemover, SettingsUpdater,
+// It collects the seven seam interfaces the manager depends on —
+// Interrupter, SessionStarter, QueueRemover, SettingsUpdater,
 // ModalResolver, QuestionResolver, and AttachmentIntake — declared consumer-side per CODING-STYLE
 // ("define interfaces where they are consumed"), plus the SettingsUpdate and RunConfig value types, the
 // ErrSessionUnknown sentinel, and the ~260-line V2SessionConfig struct. Pure
@@ -24,20 +24,11 @@ import (
 // NewV2SessionManager, Run, handleWake, handleFrame, the app-frame router, the
 // outbound send/drain path, and the connection registry — stays in v2session.go.
 
-// ScreenSnapshotter renders the daemon's live claude screen to plain text:
-// text is the rendered screen, live is false (and text "") when no claude
-// child is attached. *supervisor.Supervisor satisfies it. Declared here, in
-// the consumer, so internal/relay depends on neither internal/supervisor nor
-// tui-driver (CODING-STYLE: define interfaces where they are consumed).
-type ScreenSnapshotter interface {
-	ScreenSnapshot() (text string, live bool)
-}
-
 // Interrupter stops the running turn in ONE conversation (#707, widened by #2103)
 // — the remote equivalent of a local Esc, claude's own interrupt. Declared here
-// (consumer side), beside ScreenSnapshotter, so internal/relay imports neither
-// internal/supervisor nor tui-driver. Named for its relay-domain role (matching
-// ScreenSnapshotter.ScreenSnapshot / ModalResolver.Resolve*), even though the
+// (consumer side), so internal/relay imports neither internal/supervisor nor
+// tui-driver (CODING-STYLE: define interfaces where they are consumed). Named for
+// its relay-domain role (matching ModalResolver.Resolve*), even though the
 // method keeps the sealed surface's name — renaming it to match the actuation
 // would churn the whole package for no behavioural gain, and this doc is where
 // SendEsc is abstracted as "claude's own interrupt" (#1121). SendEsc is safe to
@@ -52,8 +43,7 @@ type ScreenSnapshotter interface {
 // conversationID names the conversation whose turn to stop, and the implementation
 // MUST treat it as UNTRUSTED: it arrives from a paired client, and this package
 // deliberately validates nothing about it. internal/relay imports neither
-// internal/conversations nor internal/sessions (see the note above
-// ScreenSnapshotter on that boundary), so it can neither shape-check the id nor
+// internal/conversations nor internal/sessions, so it can neither shape-check the id nor
 // resolve it — the handler is a courier and every check lives in the composition
 // root. An implementation MUST shape-check before any use and MUST NOT let the
 // string become a path component. The obligation is stated here because Go's type
@@ -79,15 +69,15 @@ type Interrupter interface {
 // SessionStarter starts a fresh session in ONE conversation (#831, widened by
 // #2099). Declared here (consumer side), beside Interrupter, so internal/relay
 // imports neither internal/supervisor nor tui-driver. Named for its relay-domain
-// role (matching Interrupter / ScreenSnapshotter), even though the method keeps
+// role (matching Interrupter), even though the method keeps
 // the sealed surface's name, so the name is unambiguous against any pool/session
 // lifecycle "start". StartNewSession is safe to call from any goroutine.
 //
 // conversationID names the conversation to restart, and the implementation MUST
 // treat it as UNTRUSTED: it arrives from a paired client, and this package
 // deliberately validates nothing about it. internal/relay imports neither
-// internal/conversations nor internal/sessions (see the note above ScreenSnapshotter
-// on that boundary), so it can neither shape-check the id nor resolve it — the
+// internal/conversations nor internal/sessions, so it can neither shape-check the
+// id nor resolve it — the
 // handler is a courier and every check lives in the composition root. An
 // implementation MUST shape-check before any use and MUST NOT let the string
 // become a path component; cmd/pyry's activeSessionStarter is the production one.
@@ -248,13 +238,11 @@ type SettingsUpdater interface {
 // property of this type rather than a warning in a comment: the cmd/pyry producer
 // resolves the id and reads the settings under ONE pool acquisition, so no field
 // can describe a session another field does not, even against a concurrent idle
-// eviction. Contrast the bootstrap-scoped SnapshotSettings / SnapshotUsage pair
-// on V2SessionConfig, which name no session at all, so their agreement with any
-// separately-reported id could only be asserted in prose.
+// eviction.
 //
 // An empty Model or Effort is a REAL reported value — "inherited daemon default,
-// no per-session override" — and YOLO false means permissions are enforced, the
-// same meaning SnapshotSettings already carries. So the zero RunConfig is
+// no per-session override" — and YOLO false means permissions are enforced. So
+// the zero RunConfig is
 // indistinguishable from a genuine all-defaults session, which is exactly why
 // "this conversation is not addressable" is RunConfigFor's comma-ok and never a
 // field of this struct.
@@ -297,9 +285,9 @@ var ErrModelNotOffered = errors.New("relay: model not offered")
 var ErrModelVocabularyUnavailable = errors.New("relay: model vocabulary unavailable")
 
 // ModalResolver resolves an inbound modal control frame against the daemon's
-// outstanding-modal state. Declared here (consumer side), beside
-// ScreenSnapshotter, so internal/relay imports neither internal/supervisor nor
-// cmd/pyry; the cmd/pyry resolver satisfies it. *devices.Device crosses the
+// outstanding-modal state. Declared here (consumer side), so internal/relay
+// imports neither internal/supervisor nor cmd/pyry; the cmd/pyry resolver
+// satisfies it. *devices.Device crosses the
 // seam (the per-conn s.device); internal/relay already imports internal/devices,
 // so no new import. Both methods run on the manager's single Run dispatch
 // goroutine.
@@ -666,16 +654,10 @@ type V2SessionConfig struct {
 	// and reclaimed by GC).
 	Handlers map[string]dispatch.Handler
 
-	// Snapshotter renders the live claude screen for an inbound
-	// request_snapshot (ADR 025 § Safe degradation). Optional: when nil,
-	// request_snapshot yields a server.binary_offline error reply — the
-	// snapshot feature is simply unavailable, not a crash.
-	Snapshotter ScreenSnapshotter
-
 	// KnownConversation reports whether conversationID names a conversation
 	// this daemon hosts. handleRequestSnapshot and handleMCPStatusRequest use it
 	// to reject an unknown/foreign id with conversation.not_found before any
-	// render or resolver call.
+	// other reply or resolver call.
 	// request_session_settings consulted it between #1586 and #1610 and no longer
 	// does — a pure membership check reads a known but UNBOUND conversation as
 	// addressable, so that verb resolves through RunConfigFor instead, which
@@ -714,49 +696,15 @@ type V2SessionConfig struct {
 	// store whose work is bounded by the page rather than by the log.
 	HistoryPage HistoryPager
 
-	// SnapshotSettings reports the current model / effort / YOLO for the session
-	// whose screen the Snapshotter renders (the bootstrap), so
-	// handleRequestSnapshot can populate the screen_snapshot reply's settings
-	// fields (#848). Optional: nil ⇒ the handler reports the effective defaults
-	// (empty model/effort, yolo:false) — preserving the pre-#848 zero-value
-	// behaviour. Primitive-typed (three scalars) so internal/relay imports
-	// neither internal/sessions nor its SessionSettings type; production wires a
-	// closure over *sessions.Pool.DefaultSettings. Empty model/effort mean
-	// "inherited daemon default, no per-session override"; yolo:false means
-	// permissions enforced.
-	//
-	// Read-only reflection of an existing, non-secret control — no authz
-	// decision, no mutation, no input parsing (contrast SettingsUpdater below,
-	// the write path, which is security-sensitive because it mutates the YOLO
-	// control from untrusted input).
-	SnapshotSettings func() (model, effort string, yolo bool)
-
-	// SnapshotUsage reports the bootstrap session's current context-window
-	// occupancy — used tokens and window size — so handleRequestSnapshot can
-	// populate the screen_snapshot reply's used_tokens / window_tokens fields
-	// (#857). Optional: nil ⇒ the handler reports both at their zero values
-	// (used_tokens:0, window_tokens:0), preserving the pre-#857 wire shape (the
-	// foreground / unwired case). Primitive-typed (two ints) so internal/relay
-	// imports neither internal/contextwindow nor internal/sessions; the cmd/pyry
-	// closure resolves the bootstrap transcript path and calls
-	// contextwindow.Read, collapsing any open failure to the same zero /
-	// window-default report as a fresh session.
-	//
-	// Read-only reflection of two non-secret aggregate integers — no authz
-	// decision, no mutation, no input parsing (same posture as SnapshotSettings
-	// above; the transcript content itself never crosses the wire).
-	SnapshotUsage func() (usedTokens, windowTokens int)
-
 	// RunConfigFor reports the NAMED conversation's own run configuration — its
 	// bound session id, that session's model / effort / YOLO, and that session's
 	// context-window used / window figures — as one RunConfig describing one
 	// session (#1609). handleRequestSessionSettings is its reader, and since #1610
 	// its ONLY run-configuration source: a client is told about the conversation
 	// it is actually in rather than about the shared bootstrap session. It
-	// replaced a bootstrap-scoped session-id seam that reported which session the
-	// two seams above describe; the agreement a client depends on — that the
-	// reported id names the session the reported values came from — is a property
-	// of RunConfig now rather than a rule spanning separate fields.
+	// replaced a bootstrap-scoped session-id seam; the agreement a client depends
+	// on — that the reported id names the session the reported values came from —
+	// is a property of RunConfig now rather than a rule spanning separate fields.
 	//
 	// Comma-ok rather than a flag inside RunConfig: false means the conversation is
 	// not addressable — unknown to this daemon, bound to nothing, or bound to a
@@ -766,7 +714,7 @@ type V2SessionConfig struct {
 	// refusal cannot be expressed in the values.
 	//
 	// Optional: nil ⇒ no consumer can resolve any conversation (foreground / v1 /
-	// unwired), matching the seams above. Primitive-typed in both directions (a
+	// unwired). Primitive-typed in both directions (a
 	// string in, a RunConfig of scalars out) so internal/relay imports neither
 	// internal/sessions nor internal/contextwindow; production composes it at the
 	// cmd/pyry wiring point from a conversations-registry + pool resolver and the
@@ -1238,8 +1186,7 @@ type V2SessionConfig struct {
 	// A closure returning []protocol.ModalShownPayload, not a *modalbridge.Registry:
 	// internal/relay does not import internal/modalbridge, and protocol is already
 	// imported, so the payload crosses the boundary with no new import and no cycle
-	// (matching SnapshotSettings / SnapshotUsage — define the dependency where it is
-	// consumed).
+	// (define the dependency where it is consumed).
 	//
 	// Optional: nil ⇒ no reconcile — byte-identical to the pre-#877 / foreground /
 	// existing-test posture. Production wires modalbridge.Registry.Snapshot.

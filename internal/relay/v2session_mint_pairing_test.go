@@ -183,9 +183,9 @@ func TestMintPairing_UnwiredSeamIsInertButConsuming(t *testing.T) {
 		TS:   time.Now().UTC(),
 	})
 
-	// CORRELATION IS THE OBSERVABLE, not the reply's type: with no Snapshotter
-	// wired the snapshot itself answers a coded error, so "the first sealed frame
-	// is an error" proves nothing. What proves inertness is that the first frame
+	// CORRELATION IS THE OBSERVABLE, not the reply's type: the daemon renders no
+	// screen and the snapshot itself answers a coded error, so "the first sealed
+	// frame is an error" proves nothing. What proves inertness is that the first frame
 	// off this conn answers the SNAPSHOT's envelope id rather than the mint's.
 	reply := nextHistoryReply(t, sess, 0)
 	if reply.Type == protocol.TypePairingMinted {

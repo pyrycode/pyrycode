@@ -21,7 +21,7 @@ import (
 // TestRelayV2_ChangeWorkspace proves change_workspace at the daemon boundary: a
 // paired phone completes the Noise_IK handshake against a real spawned daemon
 // and drives change_workspace over the encrypted channel with the production
-// resolveWorkspaceDir resolver wired at cmd/pyry/`screenSnapshotterOrNil`. It closes the same
+// resolveWorkspaceDir resolver wired in cmd/pyry's `startRelayV2`. It closes the same
 // gap shape #949 (promote) and #974–#976 (rename/delete/archive) closed for their
 // verbs — a handler nothing exercised end-to-end — but with the security twist
 // unique to this verb: change_workspace stores an untrusted FILESYSTEM PATH from a
