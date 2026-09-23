@@ -41,11 +41,13 @@
 //	                               contents (claude-format JSONL lines) are
 //	                               appended verbatim to the live session
 //	                               JSONL, fsynced, then the trigger is
-//	                               removed. Used by the structured-receive
-//	                               e2e (#642) to feed real turn events into
-//	                               the daemon's structured-turn producer,
-//	                               which tails this file. Default off — when
-//	                               unset, no watch.
+//	                               removed. Built for the structured-receive
+//	                               e2e (#642), which fed turn events to a
+//	                               daemon reader of this file; that reader
+//	                               was deleted with the PTY path (#1543), so
+//	                               nothing in the daemon maps these lines any
+//	                               more and no in-tree test sets this.
+//	                               Default off — when unset, no watch.
 //	PYRY_FAKE_CLAUDE_TUI           optional; when set to any non-empty
 //	                               value, fakeclaude emits claude's idle-
 //	                               prompt glyph (U+276F) once at startup and
@@ -110,12 +112,11 @@
 //	                               (supervisor.SendEsc writes a lone 0x1b). On the
 //	                               first bare ESC fakeclaude appends claude's own
 //	                               interruption marker (interruptMarkerLine) to the
-//	                               live session JSONL and fsyncs, so the daemon's
-//	                               structured-turn producer maps it to a
-//	                               turn_end{cancelled} — making the Esc the CAUSE of
-//	                               the turn ending (the interrupt-live e2e #794
-//	                               asserts a turn_end whose only source is this
-//	                               handler; #1244 additionally asserts the reason).
+//	                               live session JSONL and fsyncs. The daemon reader
+//	                               that mapped it to a turn_end{cancelled} (for the
+//	                               interrupt-live e2e #794 and #1244) was deleted
+//	                               with the PTY path (#1543); the mode now has no
+//	                               driver and no consumer.
 //	                               One-shot: a second
 //	                               ESC is inert, matching claude's own re-interrupt
 //	                               no-op. Unlike the idle/modal triggers this
@@ -572,9 +573,10 @@ var trustAcceptPending atomic.Bool
 // interruptMarkerLine is the claude-format JSONL line appendTurnEnd writes when
 // Esc-ends-turn mode (envEscEndsTurn) detects the remote interrupt keystroke: the
 // interruption marker claude itself records when a turn is interrupted, which
-// turnbridge's mapper maps to turnevent.TurnEnd{cancelled} (#1243,
-// internal/turnbridge/`mapEntry`). It is inert JSONL data, not a TUI substrate
-// glyph, so the cmd/substrate-guard allowlist is unaffected.
+// the PTY path's session-JSONL mapper turned into turnevent.TurnEnd{cancelled}
+// (#1243) until that mapper was deleted with the PTY path (#1543). It is inert
+// JSONL data, not a TUI substrate glyph, so the cmd/substrate-guard allowlist is
+// unaffected.
 //
 // PROVENANCE: arm (b), DERIVED — not captured. The base line is
 // internal/agentrun/jsonl/testdata/no_end_turn.jsonl:53 (claude 2.1.128), the only
@@ -585,15 +587,17 @@ var trustAcceptPending atomic.Bool
 // gitBranch — nothing on this path reads any of them, and the base line's real
 // values name a developer worktree and a real session.
 //
-// Two absences are load-bearing, both silent if broken (the mapper simply produces
-// no turn_end, and the consuming e2e times out 15 s later):
+// Two absences were load-bearing, both silent if broken. The consumer that made
+// them so, the PTY path's session-JSONL mapper, was deleted with that path
+// (#1543), so nothing reads them now; they are kept because they match the
+// captured base line:
 //
-//   - NO top-level "permissionMode" key. isInterruptMarker requires
-//     !userAuthored(e), and `userAuthored` is the PRESENCE of that key. One
-//     extra key and the line reads as a human prompt.
-//   - NO tool_result content block. mapEntry's ParseToolResult branch precedes the
-//     marker check and returns, so any entry carrying one becomes
-//     a ToolUpdate and never reaches the prose matcher.
+//   - NO top-level "permissionMode" key. The mapper treated that key's PRESENCE
+//     as the mark of a human-authored prompt, so one extra key made the line
+//     read as a human prompt rather than an interruption.
+//   - NO tool_result content block. The mapper's tool_result branch ran before
+//     the marker check and returned, so any entry carrying one became a
+//     ToolUpdate and never reached the prose matcher.
 //
 // The full key set is deliberate rather than a minimal {"type":"user","message":…}:
 // tui-driver's parseEntry builds Raw from the WHOLE line, so a 2-key line would make
@@ -921,9 +925,9 @@ func main() {
 			appendTurnGrowth(f)
 		}
 		// Esc-ends-turn mode (envEscEndsTurn): the stdin reader signalled a bare
-		// ESC — the remote interrupt keystroke. Append one canned assistant
-		// end_turn line so the daemon's structured-turn producer maps it to a
-		// turn_end, making the Esc the CAUSE of the turn ending. One-shot,
+		// ESC — the remote interrupt keystroke. Append claude's interruption
+		// marker (interruptMarkerLine) to the session JSONL; no daemon reader maps
+		// it any more (deleted with the PTY path, #1543). One-shot,
 		// mirroring the rotation / idle / modal gates: a second ESC is inert (a
 		// re-interrupt of an already-ended turn is a no-op, matching claude).
 		if escEndsTurn && !escEnded && escPending.Swap(false) {
@@ -991,8 +995,8 @@ func emitAssistantIfTriggered(path string) {
 }
 
 // emitStructuredJSONLIfTriggered consumes the structured-JSONL trigger and
-// appends its contents verbatim to f — the live session JSONL the daemon's
-// structured-turn producer (cmd/pyry/interactive_turn_stream_v2.go) tails. The
+// appends its contents verbatim to f — the live session JSONL. The daemon reader
+// that tailed it was deleted with the PTY path (#1543). The
 // trigger file's contents ARE the claude-format JSONL lines to append (same
 // "contents are the payload" shape as emitAssistantIfTriggered).
 //
@@ -1209,9 +1213,8 @@ func enterRawMode() {
 // the same signal real claude produces when it commits a turn to its session
 // JSONL. Runs ONLY on the main goroutine, preserving the single-writer-of-f
 // invariant (see turnPending). The line is the inert "{}\n" openSession already
-// writes: the turnbridge mapper maps an empty/typeless line to (nil, false), so
-// it injects no structured event — invisible to every assertion except "the
-// file grew". Best-effort, mirroring emitStructuredJSONLIfTriggered; a
+// writes: a typeless line that carries no turn event — invisible to every
+// assertion except "the file grew". Best-effort, mirroring emitStructuredJSONLIfTriggered; a
 // persistently-failing write surfaces as the daemon's loud ErrTurnNotCommitted,
 // never a false ack.
 func appendTurnGrowth(f *os.File) {
@@ -1222,12 +1225,11 @@ func appendTurnGrowth(f *os.File) {
 }
 
 // appendTurnEnd grows the current session JSONL f by claude's interruption marker
-// (interruptMarkerLine) so the daemon's structured-turn producer maps it to
-// turnevent.TurnEnd{cancelled} -> a turn_end envelope: the daemon's "turn stopped"
-// signal after a remote interrupt. Runs ONLY on the main goroutine, preserving the
-// single-writer-of-f invariant (see escPending / turnPending). Best-effort + fsync,
-// mirroring emitStructuredJSONLIfTriggered; the e2e asserts downstream (the phone
-// receives turn_end), never on the write itself.
+// (interruptMarkerLine). The daemon reader that mapped it to a turn_end envelope
+// was deleted with the PTY path (#1543), so the write reaches no consumer. Runs
+// ONLY on the main goroutine, preserving the single-writer-of-f invariant (see
+// escPending / turnPending). Best-effort + fsync, mirroring
+// emitStructuredJSONLIfTriggered.
 func appendTurnEnd(f *os.File) {
 	if _, err := f.WriteString(interruptMarkerLine); err != nil {
 		return
@@ -1294,9 +1296,9 @@ func rotateSession(f *os.File, dir string) *os.File {
 // filepath.Join in openSession and in the per-child JSONL trigger path, so a
 // value carrying a separator or a dot could steer a write out of the sessions
 // dir. This is the fake-side mirror of internal/transcript.ValidStem, which the
-// daemon applies to the symmetric join (cmd/pyry/interactive_turn_stream_v2.go's
-// resolveBoundSessionJSONL) and documents as a defense-in-depth branch selector
-// for a value that is already trusted; a test fake that could be steered outside
+// daemon applied to the symmetric join on the PTY path (deleted, #1348) as a
+// defense-in-depth branch selector for a value that is already trusted, and
+// still applies to the ids it joins into paths; a test fake that could be steered outside
 // its sandbox is a worse place to skip it, not a better one. Inlined rather than
 // importing internal/transcript to keep this stand-in near-zero-dependency —
 // revisit if a second stem-validating site ever appears here. A rejected value

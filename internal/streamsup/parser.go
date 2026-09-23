@@ -9813,9 +9813,10 @@ func (p *Parser) emit(ev turnevent.Event) {
 	}
 }
 
-// The helpers below mirror internal/turnbridge/mapper.go: unexported and keyed
-// on tui-driver types there, so they cannot be imported; re-implemented here on
-// our already-decoded fields (no ParseToolUse/ParseToolResult re-parse).
+// The helpers below map this parser's already-decoded fields (no
+// ParseToolUse/ParseToolResult re-parse). They began as a copy of the PTY path's
+// tui-driver-keyed mapping helpers; those were deleted with that path (#1543),
+// so these are now the only copy and mirror nothing.
 
 // toolKind maps a claude tool name to its ACP kind, best-effort; unknown names
 // fall to ToolKindOther.

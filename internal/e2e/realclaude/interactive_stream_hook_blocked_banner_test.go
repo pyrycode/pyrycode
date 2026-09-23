@@ -12,7 +12,7 @@ package realclaude
 // the wire frame, #2319 gave it its first producer (emitInformationalBanner, over
 // claude's system/informational subtype) and replayed that against the committed
 // capture in testdata/operator_system_lines_v2.1.259.json, and the bridge arm in
-// internal/turnbridge (mapEvent's turnevent.Banner case) crosses all four values
+// internal/turnbridge (MapEvent's turnevent.Banner case) crosses all four values
 // verbatim. Every one of those is inside `make check`.
 //
 // What none of them touches is whether the frame reaches a CLIENT on a LIVE turn.

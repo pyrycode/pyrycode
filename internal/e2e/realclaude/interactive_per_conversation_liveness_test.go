@@ -34,9 +34,9 @@ package realclaude
 // OR without the fix — verified live 2026-07-15, all three cases green against both
 // main+#989 and the fixed producer. The live #528 emulator (slower / warmer
 // timing) is where #996 actually surfaced. The DETERMINISTIC RED->GREEN proof of
-// #996 lives in the hermetic producer unit test
-// (internal/turnbridge/producer_test.go, TestNewTargetSubscriber_SwitchDuring...),
-// which forces the mid-backoff precondition directly. This gate's value is
+// #996 was a hermetic producer unit test that forced the mid-backoff precondition
+// directly; it was deleted with the PTY producer the bug lived on (#1543), so
+// there is no current test to point at and nothing left for it to guard. This gate's value is
 // standing real-claude coverage of the per-conversation path in `make preship`,
 // per the real-claude-e2e-in-a-pre-ship-gate rule.
 //

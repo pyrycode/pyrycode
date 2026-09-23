@@ -941,9 +941,9 @@ type BackgroundTaskProgress struct {
 //
 // STALL DETECTION is untouched by this variant, in both directions, and the note
 // is here so a future wiring slice does not re-open the question. turnevent.Stall
-// has exactly one producer — internal/turnbridge/mapper.go, from
-// tuidriver.EventKindStallDetected — on the PTY surface, which never sees this
-// parser. streamsup.Watchdog consumes its own copy of raw stdout via
+// now has no producer in the repo: its only one, on the PTY surface, was deleted
+// with that surface (#1543), and it never saw this parser anyway.
+// streamsup.Watchdog consumes its own copy of raw stdout via
 // io.MultiWriter and never reads parser events; it already counts every complete
 // line as activity, thinking_tokens included. So this event neither masks nor
 // triggers a stall, and no suppression-avoidance mechanism is needed or wanted.
