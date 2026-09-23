@@ -1043,38 +1043,27 @@ func (b *blockingBundler) waitEntered(t *testing.T) {
 // bundle assembly is in flight, Run keeps servicing its other select arms. Three
 // are exercised with the assembly parked inside the seam — another conn's
 // application frame (m.cfg.Frames → the per-conn worker → m.appReply), the push
-// drain (m.drainCh), and a timer wake (m.modalTimeout) — and each completes
-// without waiting on the assembly. Released at the end, the bundle still streams
-// and round-trips, so the offload loses nothing.
+// drain (m.drainCh), and a manual rekey (m.manualRekey, which blocks on Run's
+// reply) — and each completes without waiting on the assembly. Released at the
+// end, the bundle still streams and round-trips, so the offload loses nothing.
 //
 // Against the pre-fix tree the seam runs inline on Run, so Run is parked inside
 // one select arm for the whole assembly: none of the three arms advance and every
 // wait below times out.
 func TestV2Session_DebugBundle_AssemblyDoesNotStallRun(t *testing.T) {
-	// Not t.Parallel: mutates the package-level modalDenyTimeout var, exactly
-	// like TestV2Session_SlowHandler_ModalTimeoutStillFires.
-	prev := modalDenyTimeout
-	modalDenyTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { modalDenyTimeout = prev })
+	t.Parallel()
 
 	const (
-		connA      = "c-bundle-stall-A" // its assembly blocks
-		connB      = "c-bundle-stall-B" // application frame — the Frames arm
-		connC      = "c-bundle-stall-C" // push target — the drain arm
-		connD      = "c-bundle-stall-D" // modal target — the timer arm
-		modalID    = "modal-during-assembly"
-		wantOutT   = "denied_timeout"
-		wantSource = "timeout"
+		connA = "c-bundle-stall-A" // its assembly blocks
+		connB = "c-bundle-stall-B" // application frame — the Frames arm
+		connC = "c-bundle-stall-C" // push target — the drain arm
+		connD = "c-bundle-stall-D" // rekey target — the manualRekey arm
 	)
 
 	archive, _ := assembleFixture(t, bundleRecordingSentinel, []string{"during-assembly"})
 	bundler := newBlockingBundler(archive, nil)
 
 	respPriv, respPub := genV2Keypair(t)
-	resolver := &fakeModalResolver{
-		timeoutOKFor:     modalID,
-		timeoutDismissal: ModalDismissal{Outcome: wantOutT, Source: wantSource},
-	}
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
 	mgr, stop := startManager(t, V2SessionConfig{
@@ -1087,8 +1076,7 @@ func TestV2Session_DebugBundle_AssemblyDoesNotStallRun(t *testing.T) {
 		Handlers: map[string]dispatch.Handler{
 			protocol.TypeListConversations: prolificHandler(),
 		},
-		ModalResolver: resolver,
-		DebugBundler:  bundler.fn,
+		DebugBundler: bundler.fn,
 	})
 	t.Cleanup(stop)
 	t.Cleanup(bundler.release) // LIFO: unpark the seam before stop awaits Run.
@@ -1096,7 +1084,7 @@ func TestV2Session_DebugBundle_AssemblyDoesNotStallRun(t *testing.T) {
 	sendA, recvA := openModalConn(t, mgr, frames, rec, respPub, connA, nil)
 	sendB, recvB := openModalConn(t, mgr, frames, rec, respPub, connB, nil)
 	_, recvC := openModalConn(t, mgr, frames, rec, respPub, connC, nil)
-	_, recvD := openModalConn(t, mgr, frames, rec, respPub, connD, []string{protocol.CapabilityInteractive})
+	_, recvD := openModalConn(t, mgr, frames, rec, respPub, connD, nil)
 
 	// A requests a bundle; the seam parks inside the assembly. Every assertion
 	// below runs with that assembly in flight.
@@ -1124,10 +1112,17 @@ func TestV2Session_DebugBundle_AssemblyDoesNotStallRun(t *testing.T) {
 		t.Errorf("conn C push Type = %q, want %q", inner.Type, protocol.TypeMessage)
 	}
 
-	// (3) The timer arm: the modal deny-on-timeout safe-deny fires on schedule.
-	mgr.ArmModalTimeout(context.Background(), modalID)
-	waitForConnNoiseMsg(t, rec, connD, 1)
-	assertModalDismissed(t, rec, connD, recvD, modalID, wantOutT, wantSource)
+	// (3) The manualRekey arm: Rekey blocks on Run's reply, which comes only
+	// after the rekey_request is sealed and sent to D.
+	rekeyCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := mgr.Rekey(rekeyCtx, connD); err != nil {
+		t.Fatalf("Rekey %s during assembly: %v", connD, err)
+	}
+	dMsgs := waitForConnNoiseMsg(t, rec, connD, 1)
+	if inner := decryptAppFrame(t, dMsgs[0], recvD); inner.Type != protocol.TypeRekeyRequest {
+		t.Errorf("conn D emit Type = %q, want %q", inner.Type, protocol.TypeRekeyRequest)
+	}
 
 	// Non-vacuity: all three completed while the assembly was still parked, so
 	// nothing has been sealed for A yet.
