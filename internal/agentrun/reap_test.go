@@ -63,9 +63,9 @@ func TestReapDescendantGroups(t *testing.T) {
 
 	// rootPid's own group is excluded: a grandchild left in the SAME group as
 	// rootPid (the parent is its group leader, so the grandchild's pgid ==
-	// rootPid) is spared by the pgid==rootPid guard. This is the guard that
-	// stops the reaper from killing claude's own group instead of leaving it
-	// to sess.Close.
+	// rootPid) is spared by the pgid==rootPid guard. Production claude shares
+	// pyry's group and is spared by the self guard; this pins the rootPid
+	// guard kept for any future spawn that makes claude a group leader.
 	t.Run("ExcludesRootOwnGroup", func(t *testing.T) {
 		parent := startReapHelper(t, reapHelperOpts{role: "parent_same", setpgid: true, wantReport: true})
 		grandchild := parent.report
@@ -80,11 +80,12 @@ func TestReapDescendantGroups(t *testing.T) {
 		}
 	})
 
-	// Faithful two-level mirror of production (pyry → claude → zsh+tail):
-	// rootPid is a "claude" with a grandchild in a fresh detached group. The
-	// reaper kills the grandchild's group but spares rootPid (its own group),
-	// exactly as the real reap leaves claude for sess.Close while killing the
-	// detached Bash group.
+	// Two-level mirror of production (pyry → claude → zsh+tail): rootPid is a
+	// "claude" with a grandchild in a fresh detached group. The reaper kills
+	// the grandchild's group but spares rootPid, as the real reap spares
+	// claude while killing the detached Bash group. One difference: this
+	// "claude" leads its own group (spared by the rootPid guard), whereas
+	// production claude shares pyry's group (spared by the self guard).
 	t.Run("ReapsGrandchildGroupSparesRoot", func(t *testing.T) {
 		parent := startReapHelper(t, reapHelperOpts{role: "parent_fresh", setpgid: true, wantReport: true})
 		grandchild := parent.report // group leader of the fresh group → pgid == pid

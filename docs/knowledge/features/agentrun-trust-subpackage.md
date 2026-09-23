@@ -2,7 +2,7 @@
 
 Pre-answers, on the same `projects[<realpath(workdir)>]` entry in `~/.claude.json`, the startup gates a headless `claude` child cannot answer for itself: `hasTrustDialogAccepted = true` skips the workspace-trust modal, and — widened by [#2451](https://github.com/pyrycode/pyrycode/issues/2451) — `hasClaudeMdExternalIncludesApproved = true` plus `hasClaudeMdExternalIncludesWarningShown = true` let a CLAUDE.md `@` import that resolves outside the session's working directory expand. The dispatcher's automated flow has no human present to answer any of these dialogs; pre-marking side-steps them entirely.
 
-Introduced [#475](https://github.com/pyrycode/pyrycode/issues/475) as a **slimmed resurrection** of the helper [#341](https://github.com/pyrycode/pyrycode/issues/341) shipped and [#392](https://github.com/pyrycode/pyrycode/issues/392) deleted. The 2026-05-19 pivot back to PTY drive ([`codebase/471.md`](../codebase/471.md)) made the modal a problem again. The slimming drops the cross-process flock the original required, because `ptyrunner`'s post-idle `HasTrustModal` detector is the runtime safety net.
+Introduced [#475](https://github.com/pyrycode/pyrycode/issues/475) as a **slimmed resurrection** of the helper [#341](https://github.com/pyrycode/pyrycode/issues/341) shipped and [#392](https://github.com/pyrycode/pyrycode/issues/392) deleted. The 2026-05-19 pivot back to PTY drive ([`codebase/471.md`](../codebase/471.md)) made the modal a problem again. The slimming dropped the cross-process flock the original required on the strength of `ptyrunner`'s post-idle `HasTrustModal` detector as a runtime safety net. `ptyrunner` was deleted in [#1348](https://github.com/pyrycode/pyrycode/issues/1348); every surviving spawn is headless stream-json, and nothing watches for or answers a startup dialog at runtime any more — see § "No lock" below for what a lost race costs on each spawn path today.
 
 ## Public API
 
@@ -48,11 +48,14 @@ The public wrapper is two lines: `os.UserHomeDir()` then delegate to unexported 
 
 Unlike #341, this helper holds no file-lock. Concurrent invocations against the same `~/.claude.json` (e.g. pyry pre-writing while the user's interactive claude rewrites its own config) can race. The worst case is a lost update — one writer's `projects` entry overwrites the other's — which means pyry's trust pre-mark may not be present when the supervised claude spawns.
 
-The safety net, per this package's own doc-comment, is [`tui-driver`](https://github.com/pyrycode/tui-driver)'s post-idle `HasTrustModal(snap)` detector: if the modal appears because pre-marking lost the race, it is dismissed at runtime rather than wedging the session. `ptyrunner`, the package that originally owned this detector, was deleted in #1348; the detector's current call site was not re-verified for this ticket and is worth confirming before citing a specific symbol here.
+**There is no runtime safety net.** Every surviving spawn path (`streamrunner`, `streamsup`) is headless stream-json; no pyry code watches for or answers a startup dialog if pre-marking lost the race. (The historical net was `ptyrunner`'s post-idle `HasTrustModal(snap)` detector, and even that only detected the modal and aborted — [`codebase/670.md`](../codebase/670.md) records it never dismissed one. `ptyrunner` was deleted in [#1348](https://github.com/pyrycode/pyrycode/issues/1348).) What a lost race costs, per gate:
+
+- **Workspace trust.** A 2026-05-14 probe ([streamrunner-package.md](streamrunner-package.md) § "Why a separate primitive") saw stream-json claude run without a trust dialog — but only with `--dangerously-skip-permissions`, the daemon serve path's flag shape. There is no captured evidence for the `--permission-mode dontAsk` shape `streamrunner.BuildClaudeArgs` uses for the self-check spawn, and `pyry agent-run` spawns that shape with no pre-mark at all (see § Consumers).
+- **External includes.** This gate does apply to stream-json children — proven live by [#2451](https://github.com/pyrycode/pyrycode/issues/2451)'s `internal/e2e/realclaude/claude_md_external_includes_test.go`. A lost race leaves the child's outside-the-cwd `@` imports unexpanded, and claude logs nothing about it.
 
 **The single-writer atomic-write property is preserved.** A SIGKILL'd pyry mid-write must not leave `~/.claude.json` torn for the user's own interactive claude sessions. Tempfile + `Sync` + `Close` + `os.Rename` guarantees that the rename point is either pre- or post-write; the file is never partial.
 
-If a future incident shows the racing-writers case is painful (e.g. `HasTrustModal`'s detection is too slow under some specific timing), the fix is a follow-up ticket that re-introduces flock — not retrofitting it here. *Evidence-Based Fix Selection*: defend an observed failure, don't pre-defend a hypothetical one.
+If a future incident shows the racing-writers case is painful, the fix is a follow-up ticket that re-introduces flock — not retrofitting it here. *Evidence-Based Fix Selection*: defend an observed failure, don't pre-defend a hypothetical one.
 
 ## Atomic write
 
@@ -138,7 +141,7 @@ Test cases:
 
 ## What this helper deliberately does NOT do
 
-- **No cross-process serialisation.** No flock. Concurrent writers may produce lost updates; the runtime safety net is `HasTrustModal` (see § "No lock" above).
+- **No cross-process serialisation.** No flock. Concurrent writers may produce lost updates, and nothing at runtime catches it (see § "No lock" above).
 - **No retries.** Caller decides.
 - **No logging.** Operator-visible diagnostics happen at the consumer.
 - **No size cap on `~/.claude.json`.** A hostile-sized file is the same-uid threat model as pyry; same trust boundary as the running user. Generic hardening, not specific to this helper.
@@ -177,7 +180,7 @@ In production the workspace root is a repository, so a child spawned in `<root>/
 ## Related
 
 - [agentrun-package.md](agentrun-package.md) — surrounding parent package; `ResolveWorkdir` (the realpath rule) lives there.
-- [ptyrunner-package.md](ptyrunner-package.md) — the original spawn primitive this trust state was written for; deleted in #1348. Historical only — its runtime `HasTrustModal` safety net has a live successor (see § "No lock" above) that this doc does not yet name precisely.
+- [ptyrunner-package.md](ptyrunner-package.md) — the original spawn primitive this trust state was written for; deleted in #1348. Historical only — its runtime `HasTrustModal` safety net has no successor on the surviving stream-json spawn paths (see § "No lock" above).
 - [devices-registry.md](devices-registry.md) — the canonical atomic-write recipe this package mirrors.
 - [rotation-watcher.md](rotation-watcher.md) — existing user of the same `EvalSymlinks`-via-`ResolveWorkdir` pattern.
 - [`codebase/475.md`](../codebase/475.md) — build notes (file inventory, patterns, lessons).

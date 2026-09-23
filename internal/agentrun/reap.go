@@ -43,9 +43,10 @@ func ReapDescendantGroups(rootPid int, logger *slog.Logger) {
 	}
 
 	// The self-group and pgid<=1 guards are load-bearing: getting them wrong
-	// SIGKILLs pyry's own group or init. rootPid's own group is claude's (it
-	// is its session/group leader, so pgid == pid) — sess.Close owns claude's
-	// teardown, so this never kills claude's own group.
+	// SIGKILLs pyry's own group or init. Neither spawn path (streamrunner,
+	// streamsup) sets Setsid or Setpgid, so claude shares pyry's process group
+	// and the self guard is what spares it. The rootPid guard is a defence for
+	// any future spawn that makes claude a group leader (pgid == pid).
 	self := syscall.Getpgrp()
 	var reaped []int
 	for pgid := range pgids {

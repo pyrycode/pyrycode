@@ -24,7 +24,7 @@
 //
 // Dependency direction: the package must not import
 // github.com/pyrycode/pyrycode/internal/supervisor (the PTY helper) nor any of
-// the internal/agentrun subpackages (streamrunner, ptyrunner, …). It imports
+// the internal/agentrun subpackages (streamrunner, trust, …). It imports
 // the internal/agentrun root package (ReapDescendantGroups, ResolveWorkdir,
 // ExitErrIsBenign) — the shared parent, not a sibling. Verify with:
 //
@@ -2459,7 +2459,7 @@ func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, workDir s
 	// below pyry and does not reap it on a graceful SIGTERM (#565), so pyry reaps
 	// it here — the streamsup analogue of streamrunner's teardown reap (#924). A
 	// spontaneous crash never invokes cmd.Cancel (os/exec fires it only on ctx
-	// cancel), matching the proven streamrunner/ptyrunner behaviour; no
+	// cancel), matching the proven streamrunner behaviour; no
 	// speculative crash-path reaping.
 	cmd.Cancel = func() error {
 		reapDescendantGroupsFn(cmd.Process.Pid, r.log)
