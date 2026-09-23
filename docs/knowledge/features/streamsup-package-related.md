@@ -4,7 +4,7 @@
 - [turnbridge-package.md](turnbridge-package.md) — `mapper.go`, the content-extraction logic the #1088 parser mirrors (not imports) for assistant text/thinking/tool_use and tool_result mapping.
 - [agentrun-package.md](agentrun-package.md) — the shared parent supplying `ResolveWorkdir`, `ExitErrIsBenign`, `ReapDescendantGroups`.
 - [ptyrunner-package.md](ptyrunner-package.md) — the PTY-path analogue this package's spawn/teardown shape and #1087's "ptyrunner-skeleton analogue" framing both reference.
-- `internal/supervisor`'s `backoffTimer`/`Run` (see [system-overview.md](../architecture/system-overview.md)) — the exponential-backoff-with-stability-reset ladder this package copies verbatim (cannot import across the PTY/stream-json boundary).
+- `backoffTimer` in `internal/streamsup/backoff.go` — the exponential-backoff-with-stability-reset ladder `Run` applies between crashes; see [system-overview.md § Backoff Strategy](../architecture/system-overview.md).
 - [`codebase/1087.md`](../codebase/1087.md) — the process-lifecycle slice.
 - [`codebase/1088.md`](../codebase/1088.md) — the turn I/O slice (this section).
 - [`codebase/1093.md`](../codebase/1093.md) — the send-side turncommit gate slice.
