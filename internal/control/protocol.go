@@ -345,8 +345,7 @@ type ChannelPostPayload struct {
 
 // SessionsPayload carries arguments shared across the sessions.* verb
 // family. Today Label is used by sessions.new; ID and JSONLPolicy are used
-// by sessions.rm; ID and NewLabel are used by sessions.rename. Phase 1.1e
-// (attach) will add further omitempty fields to the same struct.
+// by sessions.rm; ID and NewLabel are used by sessions.rename.
 //
 // Label is the human-friendly name supplied by the client. Empty maps to
 // a no-label session — Pool.Create accepts it verbatim and the registry

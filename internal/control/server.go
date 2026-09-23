@@ -45,8 +45,7 @@ type Session interface {
 	State() sessions.State
 	// Activate wakes an evicted session and blocks until the supervisor
 	// is running again (or ctx cancels). A no-op on an already-active
-	// session. handleAttach calls this before Attach so the bridge has a
-	// live claude on the other side.
+	// session.
 	Activate(ctx context.Context) error
 }
 
@@ -57,7 +56,7 @@ type SessionResolver interface {
 	Lookup(id sessions.SessionID) (Session, error)
 	// ResolveID maps a loose-input session selector (full UUID, unique
 	// prefix, or empty for bootstrap) to a concrete SessionID. Errors are
-	// returned verbatim — handleAttach wraps them as "attach: <err>".
+	// returned verbatim.
 	ResolveID(arg string) (sessions.SessionID, error)
 }
 
@@ -111,21 +110,6 @@ type Lister interface {
 	List() []sessions.SessionInfo
 }
 
-// GetOrCreator is the per-pool view the control server depends on for
-// take-or-create attaches (Phase 1.3b). *sessions.Pool satisfies it
-// structurally via Pool.GetOrCreate. Defined here, where it is consumed;
-// tests fake it directly.
-//
-// GetOrCreate returns the canonical SessionID for id, creating a new
-// session under that exact UUID if one is not already registered. Errors:
-// sessions.ErrInvalidSessionID for empty / non-UUIDv4 ids;
-// sessions.ErrPoolNotRunning when Pool.Run is not active. See
-// Pool.GetOrCreate for the full contract, including the atomic
-// register+persist+supervise critical section.
-type GetOrCreator interface {
-	GetOrCreate(ctx context.Context, id sessions.SessionID, label string) (sessions.SessionID, error)
-}
-
 // Rekeyer is the per-conn rekey-trigger view the control server depends
 // on for VerbRekey. Slice B's *relay.V2SessionManager satisfies it via
 // TriggerRekey; slice A (#459) ships no production implementer — until
@@ -159,10 +143,9 @@ type Rekeyer interface {
 // Sessioner aggregates the lifecycle methods the control server dispatches
 // to. Phase 1.1a-B1 added Create; Phase 1.1d-B1 added Remove via the
 // embedded Remover; Phase 1.1c-B1 added Rename via the embedded Renamer;
-// Phase 1.1b-B1 adds List via the embedded Lister. Phase 1.1e (attach
-// orchestration) will continue this pattern — one method (or named
-// sub-interface) per verb, embedded onto Sessioner so NewServer's
-// signature stays stable across the namespace's growth.
+// Phase 1.1b-B1 adds List via the embedded Lister. The pattern is one
+// method (or named sub-interface) per verb, embedded onto Sessioner so
+// NewServer's signature stays stable across the namespace's growth.
 //
 // *sessions.Pool satisfies Sessioner structurally — Pool.Create,
 // Pool.Remove, Pool.Rename and Pool.List match the embedded interfaces'
@@ -175,7 +158,6 @@ type Rekeyer interface {
 // verbatim through Response.Error.
 type Sessioner interface {
 	Create(ctx context.Context, label string) (sessions.SessionID, error)
-	GetOrCreator
 	Remover
 	Renamer
 	Lister
@@ -339,13 +321,6 @@ type Server struct {
 // of sessioner (consults SessionResolver instead) and answers
 // correctly even with sessioner == nil. The CLI ticket wires
 // *sessions.Pool here.
-//
-// Foreground vs service mode is no longer surfaced as a distinct
-// constructor parameter; it is a property of the resolved session's
-// bridge. A foreground-mode session's Attach returns
-// [sessions.ErrAttachUnavailable], which the attach handler maps back to
-// the existing "no attach provider configured (daemon may be in
-// foreground mode)" wire string for byte-identical client output.
 func NewServer(socketPath string, sessions SessionResolver, logs LogProvider, shutdown func(), log *slog.Logger, sessioner Sessioner) *Server {
 	if sessions == nil {
 		panic("control.NewServer: sessions is required, got nil")
@@ -788,9 +763,8 @@ func (s *Server) handleStop(enc *json.Encoder) {
 // generous sessionOpTimeout deadline (well past the documented 2-15s claude
 // spawn latency). Before the long call, the conn write deadline — set to the
 // handshake timeout in handle — is extended past that budget so the response
-// write does not fail after the handshake window elapses (mirrors
-// handleAttach, which clears the deadline for its indefinite stream; a
-// one-shot verb bounds it instead). See #865.
+// write does not fail after the handshake window elapses. A one-shot verb
+// bounds the deadline rather than clearing it. See #865.
 //
 // Errors from sessioner.Create flow to Response.Error verbatim — Pool's own
 // messages already carry package context (e.g. "sessions: create
@@ -809,9 +783,8 @@ func (s *Server) handleSessionsNew(conn net.Conn, enc *json.Encoder, payload *Se
 	defer cancel()
 	// Extend the conn write deadline past the op budget before the long call.
 	// ctx (sessionOpTimeout) stays the binding budget; this is a backstop so a
-	// genuinely stuck response write still has an upper bound. Best-effort like
-	// handleAttach — a SetDeadline error on a broken conn surfaces on the
-	// Encode below.
+	// genuinely stuck response write still has an upper bound. Best-effort: a
+	// SetDeadline error on a broken conn surfaces on the Encode below.
 	_ = conn.SetDeadline(time.Now().Add(sessionOpTimeout + sessionOpConnGrace))
 	id, err := s.sessioner.Create(ctx, label)
 	if err != nil {
@@ -1313,7 +1286,7 @@ func (s *Server) handleApprove(conn net.Conn, enc *json.Encoder, payload *Approv
 	}
 
 	// Clear the handshake deadline: the conn deliberately carries no bound of
-	// its own for the length of a human decision (mirrors handleAttach). Since
+	// its own for the length of a human decision. Since
 	// #1932 permbridge's registry-owned timer bounds the wait only once its
 	// liveness report reads unanswerable, so a conn deadline here would be the
 	// binding one — and #1929 removed the client's own per-call bound for the

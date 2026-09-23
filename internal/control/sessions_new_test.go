@@ -22,18 +22,12 @@ import (
 // sessions.rename tests; Phase 1.1b-B1 (#87) extended it with List +
 // listSnapshots / listCalls for sessions.list tests.
 type fakeSessioner struct {
-	mu               sync.Mutex
-	createCalls      []string // labels in invocation order
-	removeCalls      []removeCall
-	renameCalls      []renameCall
-	getOrCreateCalls []getOrCreateCall
-	returnID         sessions.SessionID
-	returnErr        error // shared across Create / Remove / Rename / GetOrCreate (each test owns its own fake)
-
-	// getOrCreateOverride, when set, replaces the default behaviour
-	// (return returnID/returnErr) for GetOrCreate. Used by tests that
-	// need per-call resolution (e.g. asserting input id is echoed).
-	getOrCreateOverride func(id sessions.SessionID, label string) (sessions.SessionID, error)
+	mu          sync.Mutex
+	createCalls []string // labels in invocation order
+	removeCalls []removeCall
+	renameCalls []renameCall
+	returnID    sessions.SessionID
+	returnErr   error // shared across Create / Remove / Rename (each test owns its own fake)
 
 	// opDelay, when > 0, makes Create/Remove sleep before recording and
 	// returning. #865's deadline tests use it to make the op outlast a
@@ -48,11 +42,6 @@ type fakeSessioner struct {
 	// nil entry yields an empty []sessions.SessionInfo.
 	listSnapshots [][]sessions.SessionInfo
 	listCalls     int
-}
-
-type getOrCreateCall struct {
-	ID    sessions.SessionID
-	Label string
 }
 
 type removeCall struct {
@@ -85,19 +74,6 @@ func (f *fakeSessioner) Remove(_ context.Context, id sessions.SessionID, opts se
 	err := f.returnErr
 	f.mu.Unlock()
 	return err
-}
-
-func (f *fakeSessioner) GetOrCreate(_ context.Context, id sessions.SessionID, label string) (sessions.SessionID, error) {
-	f.mu.Lock()
-	f.getOrCreateCalls = append(f.getOrCreateCalls, getOrCreateCall{ID: id, Label: label})
-	override := f.getOrCreateOverride
-	retID := f.returnID
-	retErr := f.returnErr
-	f.mu.Unlock()
-	if override != nil {
-		return override(id, label)
-	}
-	return retID, retErr
 }
 
 func (f *fakeSessioner) Rename(id sessions.SessionID, newLabel string) error {
@@ -199,7 +175,7 @@ func startServerWithSessionerHandshake(t *testing.T, resolver SessionResolver, s
 // guard for the omitempty tag on Request.Sessions. Adding the new
 // SessionsPayload field must not change the wire output for existing
 // verbs — v0.5.x clients (and captured fixtures) keep round-tripping
-// byte-identically. Mirrors TestAttach_WireBackCompat_EmptySessionID.
+// byte-identically.
 func TestProtocol_SessionsRoundTripBackCompat(t *testing.T) {
 	t.Parallel()
 
@@ -349,8 +325,7 @@ func TestServer_SessionsNew_NoSessionerConfigured(t *testing.T) {
 }
 
 // TestSessionsNew_PassesLabelOnWire pins the wire shape produced by the
-// client-side SessionsNew helper. Mirrors TestSendResize_RoundTrip /
-// TestAttach_ClientSendsSessionID — a hand-rolled net.Listen server
+// client-side SessionsNew helper. A hand-rolled net.Listen server
 // captures the raw bytes (after re-encoding the decoded Request to a
 // canonical form) and asserts both the verb and the SessionsPayload.
 func TestSessionsNew_PassesLabelOnWire(t *testing.T) {
