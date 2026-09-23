@@ -35,3 +35,26 @@ Nothing else moves: `cmd/pyry` sets none of the fields since #2539, and no other
 - `docs/protocol-mobile.md`: message-type table rows for `request_snapshot` and `screen_snapshot`, and the "Screen snapshot" section — the daemon no longer emits `screen_snapshot`; `request_snapshot` answers only `conversation.not_found` / `server.binary_offline`; clients read settings and usage from `request_session_settings`.
 - `docs/knowledge/features/v2-session-manager*.md`, chiefly the inbound screen-snapshot handler topic and `v2-session-manager-surface.md`: the seams were removed.
 - `docs/knowledge/features/protocol-package-screen-snapshot-payloads.md`: the payload type has no producer.
+
+## Security review
+
+**Verdict:** PASS
+
+(Run after the first plan commit — an ordering slip — but before any implementation code; appended here as its own spec commit.)
+
+**Findings:**
+
+- [Trust boundaries] No findings — the only untrusted input is `RequestSnapshotPayload.ConversationID`, and the boundary stays where it was: the `KnownConversation` gate in `handleRequestSnapshot`, applied before any other branch, with a nil seam rejecting everything. The id is never echoed (both replies carry only `msgSnapshotConvNotFound` / `msgSnapshotOffline`), never logged by the error path (`snapshotReplyError` logs `conn_id` and `code` only), and never used as a key into anything but the membership check. The deletion removes the two log lines (`v2.snapshot.served`, `v2.snapshot.marshal_err`) that did carry `conversation_id`, so the remaining path logs strictly less.
+- [Trust boundaries — ordering] SHOULD FIX (Phase B) — after the deletion both arms return `TypeError`, so a mutation that answers `server.binary_offline` before the gate would pass a type-only check and turn the handler into an existence-blind but gate-less path. Every surviving `TestV2Session_OpenState_RequestSnapshot` row must assert `Code` AND `Retryable` unconditionally (plan § Testing strategy); the verifier should check the switch on `wantType` is gone.
+- [Existence oracle] No new finding — a known id answers `server.binary_offline`, an unknown one `conversation.not_found`. That distinguishability is pre-existing (production has answered exactly this since #1101 with a nil `Snapshotter`) and is the documented contract other handlers cite (`handleRequestHistory`'s doc). The deletion changes no reply a production client could observe.
+- [Tokens, secrets] Not applicable — no token, key or credential is created, stored, compared or logged on this path; the Noise seal goes through the unchanged `forwardEnvelope`.
+- [File operations] Not applicable — the handler touches no filesystem path; the removed `SnapshotUsage` closure lived in `cmd/pyry` and was already unwired by #2539.
+- [Subprocess] Not applicable — no exec path involved.
+- [Crypto] Not applicable — sealing is `forwardEnvelope`'s, unchanged; no RNG or comparison on this path.
+- [Network & I/O] No findings — no new read; the payload is already bounded by the frame cap upstream of `dispatchAppFrame`. The transport-down drop (`dropInlineReplyIfDown`) still guards the error reply inside `snapshotReplyError`.
+- [Error messages, logs] No findings — rendered screen text was the only sensitive content on this path, and after the deletion none exists in the process to leak. `TestV2Session_OpenState_RequestSnapshot_NeverLogsScreenText` is deleted on that ground; the error replies carry only the two static constants, which the retained table asserts non-empty and the constants' own doc pins. Stated in the PR body.
+- [Concurrency] No findings — no goroutine, lock or shared state is added; the handler still runs wholly on the manager's Run goroutine.
+- [Threat model] No findings — the change shrinks the surface: the screen-text exfiltration channel (protocol-mobile § Security model, "rendered output reaches only an open, authenticated conn") loses its only producer. `protocol.TypeScreenSnapshot` remains declared; re-introducing a producer would be a new ticket with its own review.
+
+**Reviewer:** builder (self-review per the security-review checklist)
+**Date:** 2026-09-23
