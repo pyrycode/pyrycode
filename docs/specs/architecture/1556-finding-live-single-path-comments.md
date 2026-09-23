@@ -32,3 +32,26 @@ No new logic, no new test. Proof is the ticket's mechanical checks: the `runAgen
 ## Documentation handoff
 
 None — the ticket carries no documentation requirement.
+
+## Security review
+
+**Verdict:** PASS
+
+The change is comment-only, so no category can gain an exploitable code path. The risk is a comment that misstates the agent-run permission posture: a maintainer who trusts it believes the wrong thing about the tool gate. The review walks each category against that risk.
+
+**Findings:**
+
+- [Trust boundaries / posture] No findings. The rewritten posture twins, in the doc of `finLiveStageStreamEnvDelta` and in SITE F of `finLiveRunStage`, name `--permission-mode dontAsk` plus the per-spawn deny-default `--settings` file as the only enforcement. They do not call `--dangerously-skip-permissions` the posture or `--allowed-tools` the gate. Checked against the code: `buildStreamRunnerClaudeArgs` passes no `PermissionArgs` when yolo=true, `streamrunner.BuildClaudeArgs` then emits `--permission-mode dontAsk` followed by `--settings`, and `TestBuildStreamRunnerClaudeArgs_Shape` pins that argv. `runAgentRunStreamRunner` writes the settings file from `--allowed-tools` through `settingsWrite`. The rig's `--allowed-tools=Bash` in `spawnProbePyry` therefore bounds the tool surface through that file, which is what the comments say.
+- [File operations / session id] No findings. SITE G keeps the decision to add no guard on the claude-minted session id, which `parseInitSessionID` accepts without shape validation and `jsonlPathFor` joins into a path under the rig's temp HOME. That remains acceptable. The producer is the real claude CLI, so no attacker supplies the string. The read target sits inside the rig's own temp HOME. The rig reads the file and never writes it. No such failure has been observed, and the rule against guarding unobserved failure modes applies. Moving from a pyry-minted to a claude-minted id did not change the trust level: both producers are local processes the rig launched.
+- [Subprocess execution] No findings. No argv, environment or exec call changes. The delta funcs' return literals are unchanged, and `TestFinLiveStageEnvDeltaNamesTheRunner` and `TestFinLiveStageStreamEnvDeltaNamesTheRunner` pin them.
+- [Tokens, secrets, credentials] No findings. The passages name no credential and change no handling. The LEG 1 statement that claude's fd 2 is pyry's stderr describes existing plumbing (`Stderr: os.Stderr` in `runAgentRunStreamRunner`) and adds no new output route.
+- [Cryptographic primitives], [Network & I/O], [Concurrency]: not applicable. The change touches no code, so it adds no RNG use, socket, lock or goroutine.
+- [Error messages, logs] No findings. No log or error string changes.
+- [Threat model alignment] OUT OF SCOPE. The production doc on `buildStreamRunnerClaudeArgs` still claims that yolo=true emits `--dangerously-skip-permissions`. It is the one stale posture statement left, and open ticket #1515 already tracks it. This ticket does not edit production files.
+
+**Reviewer:** builder (self-review per the security-review checklist)
+**Date:** 2026-09-23
+
+## Revisions
+
+- 2026-09-23 (rework after verifier FAIL on PR #2547): added the `## Security review` section above, which the `security-sensitive` label requires and which the first build omitted. The design did not change. Also rewrapped one over-long comment line in SITE B of `finLiveRunStage` (verifier NIT).

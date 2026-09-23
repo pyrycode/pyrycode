@@ -507,8 +507,9 @@ func finLiveRunStage(t *testing.T, envDelta []string) *finLiveRunHandle {
 	// "claude runs on a PTY", AND THAT REASON IS WRONG — claude has no PTY since
 	// #1348 deleted the terminal path, and it was wrong there too. It is replaced
 	// rather than annotated, and the two distinct Waits it conflated are
-	// separated, because the failure this covers has NO RED TEST: it lands as a manufactured negative in a downstream exit
-	// reading, exactly like inverting the cleanup order above.
+	// separated, because the failure this covers has NO RED TEST: it lands as a
+	// manufactured negative in a downstream exit reading, exactly like inverting
+	// the cleanup order above.
 	//
 	// LEG 1 — THE RIG'S cmd.Wait, which is what this goroutine is about. It
 	// returns once pyry has exited and every process-wide duplicate of the rig's
