@@ -10,7 +10,7 @@ daemon resumed after a restart (a confused-deputy isolation gap). The
 bootstrap now spawns with an explicit, daemon-owned `--session-id
 <bootstrapID>` on every start and restart instead of `--continue` — see
 [sessions-package.md § `Pool.BootstrapID`](sessions-package.md) and
-[system-overview.md § `supervisor.Config`](../architecture/system-overview.md).
+[streamsup-package-buildargs-the-id-flag-inversion-that-keeps.md](streamsup-package-buildargs-the-id-flag-inversion-that-keeps.md).
 
 **`/clear` reconciliation still works, unchanged in mechanism** — it just no
 longer runs at startup. `Pool.RotateID` (below) is still the seam the live
