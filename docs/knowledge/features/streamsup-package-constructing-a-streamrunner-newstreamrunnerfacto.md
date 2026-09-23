@@ -58,9 +58,11 @@ and its `namesPermissionMode` / `dropPermissionMode` helpers continue to touch o
 Runs inside the shared factory closure, so it covers **both** the bootstrap runner
 and per-conversation runners — a per-conversation stream session cannot silently bypass the approval
 gate. `mcpServersPath` is the daemon-global `--mcp-config` file `runSupervisor` writes once at startup
-via `writeMCPServersConfig` (gated on `cfg.InteractiveRunner == "stream-json"`, fail-closed on write
-error, removed at shutdown); on the `""`/`"pty"` path the factory is never built, so the PTY interactive
-argv is untouched. See [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md),
+via `writeMCPServersConfig` (gated on `selectsStreamRunner(cfg)`, i.e. every accepted value except
+`"pty"` — `""` included — fail-closed on write error, removed at shutdown). Only `"pty"` skips the
+write, and that value fails startup in `selectInteractiveRunner` immediately after, so no factory is
+ever built over an empty `mcpServersPath`; since #1348 there is no PTY interactive argv left to leave
+untouched. See [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md),
 [codebase/1168.md](../codebase/1168.md) and
 [`SessionSettings` / `claudeSettingsArgs`](sessions-package-key-types-sessionsettings-claudesettingsargs.md)
 for the `OperatorBypass` provenance bit this function now consumes.

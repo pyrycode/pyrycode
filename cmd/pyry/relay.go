@@ -371,20 +371,19 @@ type relayWiring struct {
 	// and startRelayV2 returns the bridge's Surface for the control server to call.
 	// nil (foreground/v1) leaves the resolver's stream arm unwired ⇒ it actuates nothing.
 	approvals *permbridge.Registry
-	// streamSink is the stream-json runner's turn-event fan-in (#1081). Non-nil
-	// selects stream mode — main.go sets it iff interactive_runner == "stream-json",
-	// over the SAME newStreamTurnSink instance the runner factory feeds; nil keeps
-	// the PTY interactive path. Its presence IS the relay leg's stream-mode
-	// discriminant (equivalent to w.sup == nil, since bootstrap.Supervisor() returns
-	// a genuine nil *supervisor.Supervisor for a stream runner, #1077): it gates the
-	// three raw w.sup.State() readers off and feeds the stream turn drain in their
-	// place. See the branch at the interactive-streams gate below.
+	// streamSink is the stream-json runner's turn-event fan-in (#1081), the SAME
+	// newStreamTurnSink instance the runner factory feeds. main.go always sets it:
+	// since #1348 selectInteractiveRunner returns a sink for every value it accepts
+	// and fails startup on the rest, so no daemon that got this far has a nil one.
+	// It stays the gate on the stream turn drain at the interactive-streams branch
+	// below, and nil there is reached only by a wiring that leaves it unset — the
+	// test literals in this package.
 	streamSink *streamTurnSink
 	// busy is the #1201 per-conversation turn-busy tracker. Non-nil exactly when
 	// streamSink is non-nil — both are minted at the composition root (main.go) from
-	// the same streamSink != nil condition — so PTY mode leaves it nil and the #1202
-	// teardown clear composed onto the UNCONDITIONAL session-transition observer
-	// below stays a nil-receiver no-op.
+	// the same streamSink != nil condition — so the composition root never leaves it
+	// nil. In a wiring with no sink the #1202 teardown clear composed onto the
+	// UNCONDITIONAL session-transition observer below stays a nil-receiver no-op.
 	//
 	// It is a field rather than a local because it now has a consumer outside this
 	// file: the inbound-delivery seam (#1199, newInboundDeliver) holds a mid-turn
@@ -572,8 +571,8 @@ func dropRingOnConversationDelete(reg *conversations.Registry, ring *eventring.R
 }
 
 // boundSessionIDForActive resolves the pool session id bound to the ACTIVE
-// conversation, for the stream turn drain's AC2 scoping gate (#1081). It mirrors
-// the follow-active cursor the PTY emitter reads (active.CurrentConversation) and
+// conversation, for the stream turn drain's AC2 scoping gate (#1081). It follows
+// the active-conversation cursor (active.CurrentConversation) and mirrors
 // the conv.CurrentSessionID == "" isolation guard resolveBoundRunner /
 // resolveBoundSession enforce (#678): Pool.Lookup("") would return the BOOTSTRAP
 // session, so an unbound conversation must be rejected here, not fall through to a
@@ -817,7 +816,7 @@ func startRelayV2(
 	// the frame as inert. That is the typed-nil hazard bridge.toolCallInFlight's
 	// guard documents, arriving through an interface rather than a method value.
 	// Inertness therefore lives inside the resolver, where a nil actuator is a plain
-	// field compare: with no stream-approval bridge (foreground / PTY) both arms
+	// field compare: with no stream-approval bridge (foreground) both arms
 	// resolve nothing and nothing panics.
 	questionResolver := newQuestionResolverV2(questionReg, logger)
 
@@ -825,7 +824,7 @@ func startRelayV2(
 	// mcp_reconnect / mcp_toggle, the audit record of every decision it makes, and the
 	// reader of the post-acknowledgement status an accepted actuation answers with.
 	// Constructed over the two live-child seams built at the composition root, both of
-	// which may be nil (foreground / PTY).
+	// which may be nil (foreground).
 	//
 	// CONSTRUCTED AND ASSIGNED UNCONDITIONALLY, the shape questionResolver above uses
 	// and for a reason the MCPActuator field states even more sharply: building it only
@@ -858,7 +857,7 @@ func startRelayV2(
 	// why it is built here rather than at main.go, and it is the same registry and
 	// the same path every other registry-writing handler in this function saves to.
 	//
-	// w.convReg is nil in the foreground / PTY posture, which leaves the recorder
+	// w.convReg is nil in the foreground posture, which leaves the recorder
 	// inert rather than absent — so neither producer needs a wiring branch of its
 	// own. See contextUsageRecorder.record for where that nil is answered.
 	contextUsageRec := &contextUsageRecorder{
@@ -1399,10 +1398,11 @@ func startRelayV2(
 		// *turnBusyTracker is a NON-NIL func that panics on its first call:
 		// ToolCallInFlight takes the tracker's mutex immediately and carries no
 		// receiver guard, by #1917's explicit decision. Unguarded, this assignment
-		// would defeat ApprovalParked's nil short-circuit entirely and turn PTY mode
-		// — where w.busy is nil, the composition root minting it only alongside
-		// streamSink — from "reports negative" into "panics on the first consumer
-		// read". It is the typed-nil-in-an-interface hazard the tracker's observe
+		// would defeat ApprovalParked's nil short-circuit entirely and turn a wiring
+		// with no tracker — where w.busy is nil, which the composition root never
+		// produces since #1348 because it mints the tracker alongside the
+		// always-present streamSink — from "reports negative" into "panics on the
+		// first consumer read". It is the typed-nil-in-an-interface hazard the tracker's observe
 		// documents, arriving through a method value instead of an interface.
 		//
 		// Set before mgr.Run's goroutine starts below, like streamApprovals — no
@@ -1430,7 +1430,7 @@ func startRelayV2(
 		// *turnBusyTracker is a non-nil func that panics on first call.
 		// ApprovalAnswerable reads only the bridge's own modal correlation and the
 		// broadcaster — never the turn-busy tracker — so gating it on w.busy would
-		// silently disable the extension in PTY mode for no reason at all.
+		// silently disable the extension in a tracker-less wiring for no reason at all.
 		//
 		// NO NIL GUARD AND NO WRAPPER CLOSURE. AnswerableFunc assigns the
 		// no-panic duty to its injection site, and it is discharged STRUCTURALLY
@@ -1478,8 +1478,8 @@ func startRelayV2(
 	// mode with a turn producer at all.
 	//
 	// The cleanup is declared out here because it is assigned inside that branch
-	// and called from the returned drain closure. Every other mode leaves it nil,
-	// which is what the nil-guard at the call site is for.
+	// and called from the returned drain closure. A wiring with no sink (a test
+	// literal) leaves it nil, which is what the nil-guard at the call site is for.
 	var streamDrainCleanup func()
 	if w.streamSink != nil {
 		// STREAM MODE (#1081): the turn stream is fed from the stream-json runner's
@@ -1515,7 +1515,7 @@ func startRelayV2(
 		// for it.
 		emitter.usageRec = contextUsageRec
 		// The drain's AC2 scoping gate follows the ACTIVE conversation's bound
-		// session — the same follow-active cursor the PTY emitter reads, with the
+		// session — the follow-active cursor boundSessionIDForActive reads, with the
 		// #678 conv.CurrentSessionID == "" isolation guard resolveBoundSession
 		// enforces. An unmatched/empty id forwards nothing (fail-closed).
 		activeSession := func() (string, bool) { return boundSessionIDForActive(w.active, w.convReg) }
@@ -1543,10 +1543,9 @@ func startRelayV2(
 	// Wire the session-transition producer (#657): install #659's pool-side
 	// observer and fan a session_transition envelope to capability-gated
 	// interactive phones on each /clear rotation or idle/cap eviction. Unlike the
-	// coarse bridge and the structured turn stream above, this has NO PTY
-	// dependency — it consumes pool transitions, which fire in any mode — so it is
-	// wired unconditionally whenever the v2 manager exists (no bridge != nil
-	// gate). The capability filter (ActiveConns → Interactive) is the real
+	// structured turn stream above, this has NO w.streamSink dependency — it
+	// consumes pool transitions, which fire in any wiring — so it is wired
+	// unconditionally whenever the v2 manager exists (no streamSink != nil gate). The capability filter (ActiveConns → Interactive) is the real
 	// delivery gate: with no interactive phone connected, the fan-out reaches
 	// nobody.
 	// The resolver closure (#741) stamps the owning conversation_id onto each
@@ -1555,8 +1554,8 @@ func startRelayV2(
 	// purity discipline that keeps toWirePayload registry-free.
 	// The pool's observer slot is single-valued, so #1202's turn-busy clear is
 	// COMPOSED onto the emitter in there rather than installed separately. w.busy is
-	// nil in PTY mode (the composition root mints it only alongside streamSink) and
-	// the clear is nil-safe.
+	// nil only in a wiring with no streamSink (the composition root mints the two
+	// together, and always both) and the clear is nil-safe.
 	streamTransitionsCleanup := startSessionTransitionStreamV2(ctx, w.transitions, mgr,
 		func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }, w.busy, w.hist, logger)
 
@@ -1575,7 +1574,7 @@ func startRelayV2(
 	// goroutine over mgr, fanning a queue_state envelope to capability-gated
 	// interactive phones whenever a conversation's inbound backlog changes
 	// (enqueue, drain-advance, or remove). Like the session-transition producer it
-	// has NO PTY dependency — it consumes msgqueue changes — so it is wired
+	// has NO w.streamSink dependency — it consumes msgqueue changes — so it is wired
 	// unconditionally whenever the v2 manager exists. The capability filter
 	// (ActiveConns → Interactive) is the delivery gate: with no interactive phone
 	// connected, the fan-out reaches nobody.
@@ -1585,7 +1584,7 @@ func startRelayV2(
 	// goroutine over mgr, fanning a typed session_error frame to capability-gated
 	// interactive phones whenever the message queue gives up delivering a
 	// conversation's head (#1000's OnGiveUp seam). Like the queue_state producer it
-	// has NO PTY dependency — it consumes msgqueue give-ups — so it is wired
+	// has NO w.streamSink dependency — it consumes msgqueue give-ups — so it is wired
 	// unconditionally whenever the v2 manager exists.
 	streamSessionErrCleanup := startSessionErrorStreamV2(ctx, w.sessionErr, mgr)
 

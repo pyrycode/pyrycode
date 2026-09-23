@@ -33,9 +33,10 @@ ordering the way a `PreviousID`-keyed clear would.
 
 `startSessionTransitionStreamV2` gained a `busy *turnBusyTracker` parameter, always the concrete pointer
 (never an interface, same typed-nil hazard `observe`'s doc names). `cmd/pyry/relay.go` hoists the tracker's
-declaration above the `w.streamSink != nil` branch so PTY mode — where no tracker is ever constructed —
-still installs the composed observer, just with a nil `busy`; `clearForSession`'s nil-receiver guard is
-what makes that safe rather than a nil-pointer panic on the pool's lifecycle goroutine.
+declaration above the `w.streamSink != nil` branch so a wiring with no sink (unreachable from the
+composition root since #1348; only the test literals in this package leave one unset) still installs
+the composed observer, just with a nil `busy`; `clearForSession`'s nil-receiver guard is what makes that
+safe rather than a nil-pointer panic on the pool's lifecycle goroutine.
 
 **The clear runs synchronously**, on the goroutine that fired the transition (the pool's lifecycle
 goroutine for eviction, the rotation-watcher goroutine for `/clear`) — satisfying the observer contract's

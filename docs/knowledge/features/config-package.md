@@ -28,19 +28,19 @@ Three exports total. No `Save`, no `Watch`, no `ErrConfigMissing` sentinel — r
 
 The debug-bundle **read** path is untouched: `resolveRecordingsDir` and its independent feed into `debugbundle.Assemble` still resolve `~/.local/share/pyry-recordings`, so a `.cast` left over from before an operator upgraded still ships in a bundle. See [debugbundle-package.md](debugbundle-package.md).
 
-## `interactive_runner` — PTY vs. stream-json selection (#1081)
+## `interactive_runner` — stream-json selection, `"pty"` rejected (#1081, corrected #2555 for #1348 fallout)
 
-Selects which interactive runner the daemon builds. `Load` decodes it verbatim and does **not** validate it — same posture as `DebugCapture`, no `DefaultConfig` entry, so an absent field decodes to `""`. Enum validation happens at the composition root (`cmd/pyry/main.go`'s `selectInteractiveRunner`), not here, because the accepted set maps to runner factories the leaf `config` package cannot import (`internal/supervisor`/`cmd/pyry`'s `streamsup` wiring).
+Selects which interactive runner the daemon builds. `Load` decodes it verbatim and does **not** validate it — same posture as `DebugCapture`, no `DefaultConfig` entry, so an absent field decodes to `""`. Enum validation happens at the composition root (`cmd/pyry/main.go`'s `selectInteractiveRunner`), not here, because the accepted set maps to a runner factory the leaf `config` package cannot import (`cmd/pyry`'s `streamsup` wiring).
 
 | Value | Effect |
 |-------|--------|
-| absent / `"pty"` | The terminal-driven PTY supervisor (`supervisor.New`) — today's daemon startup, byte-identical (the `RunnerFactory` nil-default rollback guarantee, #1077). |
-| `"stream-json"` | The streamsup-backed runner (`internal/streamsup`), wired live end-to-end: `newStreamRunnerFactory` (#1109) selected as `sessions.Config.RunnerFactory`, and its turn events drained through the interactive turn stream (`startStreamTurnDrainV2`, #1098) so a relay client following the active conversation receives `turn_state`/`assistant_delta`/tool events. |
-| anything else | Daemon startup **aborts** with an error naming the offending value and the accepted set (`interactive_runner %q not recognized (accepted: "pty", "stream-json")`) — no silent fallback to PTY. |
+| absent / `"stream-json"` | The streamsup-backed runner (`internal/streamsup`), wired live end-to-end: `newStreamRunnerFactory` (#1109) selected as `sessions.Config.RunnerFactory`, and its turn events drained through the interactive turn stream (`startStreamTurnDrainV2`, #1098) so a relay client following the active conversation receives `turn_state`/`assistant_delta`/tool events. This has been the only reachable startup outcome since #1348 deleted the terminal-driven PTY supervisor. |
+| `"pty"` | Daemon startup **aborts** with an error naming the #1348 removal and telling the operator to remove the key or set it to `"stream-json"`. There is no PTY supervisor left to fall back to. |
+| anything else | Daemon startup **aborts** with an error naming the offending value and the accepted set (`interactive_runner %q not recognized (accepted: "", "stream-json")`) — no silent fallback. |
 
-**Rollback:** set `interactive_runner` back to `"pty"` (or remove the field) in `~/.pyry/config.json` and restart the daemon.
+There is no rollback: `internal/supervisor` and the terminal-driven runner it backed were deleted outright in #1348, so no value of this field can select them again.
 
-See [streamsup-package.md](streamsup-package.md) for the runner itself and [`codebase/1081.md`](../codebase/1081.md) for the composition-root and relay-leg wiring this field drives.
+See [streamsup-package.md](streamsup-package.md) for the runner itself and [`codebase/1081.md`](../codebase/1081.md) for the composition-root and relay-leg wiring this field drove before #1348 (superseded, but the stream-json half is unchanged).
 
 The `case "pty"` (rejected-value) arm here is the pattern later reused for the CLI verbs #1348 deleted outright (`attach`/`acp`) — see [cli-verb-dispatch.md](cli-verb-dispatch.md).
 
