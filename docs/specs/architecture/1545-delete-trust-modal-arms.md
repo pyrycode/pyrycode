@@ -38,3 +38,27 @@ Since #1348 the only production writer into the modal registry is `streamApprova
 ## Open questions
 
 None.
+
+## Revisions
+
+- **2026-09-23 (verifier finding, rework 2):** the ticket carries `security-sensitive`, and the plan committed before the code had no `## Security review` section. The pass below was run against the plan and the shipped diff; its verdict is PASS and it changes no design decision. The same rework fixes the verifier's NIT: `modalKeystroker`'s doc said `*supervisor.Supervisor` satisfies "all three" methods, but the interface now has two.
+
+## Security review
+
+**Verdict:** PASS
+
+**Findings:**
+
+- [Trust boundaries] No findings. The untrusted input is a relay `modal_answer` frame (`modal_id`, `option_id`, `answer_token`, `always_allow`) arriving at `modalResolverV2.ResolveAnswerWithAlwaysAllow`. The order of its gates does not change: `Registry.Lookup` (a miss is a no-op), then the fail-closed `Device.MayAnswerRemotePermission` check (audited `denied_unauthorized`, modal left outstanding), then `streamApprovalBridge.RemoteAnswerable`, then `classifyAnswer`, and only after that the consume in `Registry.Resolve`. `classifyAnswer` still requires the id to be in the modal's own surfaced `Options` and to be one of the four `turnevent.PermissionOptionKind*` ids. Everything else, `proceed` and `exit` included, goes to `default` and returns `ok=false`: no keystroke, no consume, no audit, modal still outstanding. The change narrows the accepted set from six ids to four and adds none. `TestModalResolverV2_Answer_TrustOptionIDsRejected` pins this with `proceed`/`exit` in the fixture's own `Options`, and so reaches the option switch rather than the membership scan.
+- [Trust boundaries — trust enforcement] No findings. Removing `emitFolderNotTrusted` does not weaken workspace trust. That emit only ran after a remote `exit` answer on a trust-class modal, and no production path records one. The only production writer into the modal registry is `streamApprovalBridge.Surface`, which calls `modalbridge.PermissionRequestForClass` with the literal `tuidriver.ModalClassPermission`. That returns wire class `permission` with the four permission options. The `tuidriver.ModalClassTrustFolder` arm of `PermissionRequestForClass` has no caller in `cmd/pyry`. `questionbridge` records into its own registry. Trust is settled before spawn by `trustMark` (`trust.MarkWorkdirTrusted`) in `main.go`'s spawn-directory paths, which this ticket does not touch. If a future change did record a trust-class modal, its `proceed`/`exit` answers would now fail closed: rejected, left outstanding, no keystroke. They would not auto-accept trust.
+- [Tokens, secrets, credentials] No findings. No token is generated, stored or compared. `answer_token` is still discarded unread (`_ = answerToken`) and never logged. The audit record still carries only `Device.TokenHash` and `Device.Name` through `auditAnswer`.
+- [File operations] Not applicable. The diff opens, writes and stats no file. `trustMark`'s file write is unchanged.
+- [Subprocess execution] Not applicable. No `exec.Command` and no environment change. The deleted `AcceptTrust`/`SendEsc` routing sent keystrokes to a PTY that #1348 already removed. `noopKeystroker` still routes nothing.
+- [Cryptographic primitives] Not applicable. No RNG, hashing or comparison against a secret is added or changed.
+- [Network & I/O] No findings. There is no new read path. The frame size is still capped by the transport AEAD frame, and the terminal `session_error` send that was removed (`relayWiring.blockedNotify`) only ever went outbound.
+- [Error messages, logs, telemetry] No findings. No log line is added. The `modal_answer.invalid_option` warning, which a rejected `proceed`/`exit` now reaches, still passes the attacker-controlled id through `truncateForLog(optionID, 64)`, and slog JSON-escapes it. That warning can already be triggered with any forged id, so the new rejection opens no new log-flood path. Removing the `folder not trusted` `session_error` takes away one outbound message a phone could see. It does not take one away from an operator, because the message could not be emitted in production.
+- [Concurrency] No findings. The deletion removes two seams that were read without locks (`modalResolverV2.activeConv`, `modalResolverV2.notifyBlocked`) and adds no goroutine, lock or channel. `blocked` in `main.go` keeps its one live sender, `msgqueue.Config.OnGiveUp`, and nothing about its concurrency changes. `streamApprovalBridge.activeConv` is untouched.
+- [Threat model alignment] OUT OF SCOPE. `internal/modalbridge` still defines the trust class and its `deny` → `session_error{session.blocked, "folder not trusted"}` wire contract (documented in `docs/knowledge/features/modalbridge-package.md`). Per the ticket it stays untouched. The Documentation handoff records that `cmd/pyry` no longer produces it. Removing the trust class from the wire contract would be a protocol change and needs its own ticket.
+
+**Reviewer:** builder (self-review per the security-review checklist)
+**Date:** 2026-09-23

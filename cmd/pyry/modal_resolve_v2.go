@@ -22,7 +22,7 @@ import (
 )
 
 // modalKeystroker routes one abstract modal-resolution keystroke to the live
-// claude session. *supervisor.Supervisor satisfies all three (#726), so the
+// claude session. *supervisor.Supervisor satisfies both (#726), so the
 // existing production wiring keeps compiling. Cancel needs only SendEsc; the
 // gated answer arm adds Answer (permission options).
 type modalKeystroker interface {
