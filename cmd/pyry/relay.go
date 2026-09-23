@@ -188,17 +188,6 @@ type relayWiring struct {
 	// isolation fix (the new_session twin of activeInterrupter). Wired to
 	// V2SessionConfig.SessionStarter below.
 	activeSessionStarter relay.SessionStarter
-	// claudeSessionsDir is the directory the rotation-following JSONL resolver
-	// scans to tail the daemon's own claude child's transcript (turn stream #633,
-	// snapshot-usage reader #857). Empty disables reconcile and the interactive
-	// turn/modal streams.
-	claudeSessionsDir string
-	// bootstrapIDFn returns the bootstrap session's pinned claude session id —
-	// the SAME id source the bootstrap spawn's --session-id uses (#839) — so the
-	// turn/modal stream resolvers tail the deterministic <id>.jsonl path instead
-	// of the fd probe real claude defeats (#989). Nil or empty-returning falls
-	// back to the probe (legacy unpinned spawns).
-	bootstrapIDFn func() string
 	// defaultCwd is the default workspace directory stamped onto conversations
 	// created without an explicit cwd (the CreateConversation handler).
 	defaultCwd string
@@ -243,9 +232,6 @@ type relayWiring struct {
 	// settings persists a per-session model/effort change for the
 	// set_session_settings verb (#845). nil in foreground/v1 replies "unavailable".
 	settings relay.SettingsUpdater
-	// snapshotSettings reports the bootstrap session's persisted model/effort/YOLO
-	// for the screen_snapshot reply (#848). nil reports defaults.
-	snapshotSettings func() (model, effort string, yolo bool)
 	// runSettings is the settings half of the conversation-keyed run-configuration
 	// seam (#1609): it resolves a NAMED conversation to its bound session id plus
 	// that session's stored model/effort and current-child permission confirmation
@@ -317,16 +303,16 @@ type relayWiring struct {
 	mcpActuatorFor func(convID string) (mcpChildActuator, bool)
 	// modelWindows answers the context windows a named SESSION's child has
 	// reported, keyed by claude's own model id, for the context-window half of
-	// both usage seams below (#2107). Built at main.go over *sessions.Pool for the
+	// the conversation-keyed usage seam (#2107). Built at main.go over *sessions.Pool for the
 	// SAME reason runSettings above is: the internal/sessions dependency stays at
 	// the composition root, and startRelayV2 holds no pool reference at all. It is
-	// keyed on the session id rather than the conversation id because both seams
-	// that consume it already hold one — snapshotUsageFor resolves a transcript by
+	// keyed on the session id rather than the conversation id because the seam
+	// that consumes it already holds one — snapshotUsageFor resolves a transcript by
 	// exactly that id, so the two halves are two readings of one child.
 	//
-	// nil in foreground/v1, which is NOT the either-half-unwired shape
-	// bootstrapIDFn has: a nil value leaves both usage seams working and reporting
-	// the default window, the pre-#2107 reading. See snapshotUsageFor.
+	// nil in foreground/v1, which is NOT sessionTranscriptDir's unwired shape
+	// below: a nil value leaves the usage seam working and reporting the default
+	// window, the pre-#2107 reading. See snapshotUsageFor.
 	modelWindows func(sessionID string) map[string]int
 	// sessionTranscriptDir answers the directory claude writes a named SESSION's
 	// <id>.jsonl into — that session's OWN spawn folder, not the daemon's (#2423).
@@ -337,11 +323,11 @@ type relayWiring struct {
 	// for the same id is what makes the folder and the windows two readings of one
 	// child.
 	//
-	// nil is the EITHER-HALF-UNWIRED shape bootstrapIDFn has, NOT modelWindows'
-	// degrade-one-integer shape, and the difference is deliberate: without a folder
+	// nil is the UNWIRED shape, NOT modelWindows' degrade-one-integer shape, and
+	// the difference is deliberate: without a folder
 	// there is no transcript to read at all, so snapshotUsageFor builds no reader
 	// and the conversation-keyed seam reports zeros. Foreground / v1, and a daemon
-	// whose own claudeSessionsDir is "" (sessionTranscriptDir's gate).
+	// that cannot name its own sessions directory (sessionTranscriptDir's gate).
 	sessionTranscriptDir func(sessionID string) string
 	// retainedModelLists enumerates the daemon's currently-retained model lists as
 	// marshal-ready model_list payloads — one per conversation whose bound session
@@ -623,9 +609,9 @@ func boundSessionIDForActive(active *activeConversation, convReg *conversations.
 // internal/relay as V2SessionConfig.RunConfigFor: the settings half (resolve —
 // main.go's resolveBoundRunSettings: registry → bound session id → that session's
 // stored model/effort plus current-child permission confirmation) and the
-// context-window half (usage — the by-id reader snapshotUsageFor returns). Same shape as boundSessionIDForActive and
-// bootstrapSnapshotUsage: a named, unit-testable resolver pulled out of otherwise
-// untestable wiring.
+// context-window half (usage — the by-id reader snapshotUsageFor returns). Same
+// shape as boundSessionIDForActive: a named, unit-testable resolver pulled out of
+// otherwise untestable wiring.
 //
 // The order is the security property, not a convenience. usage is consulted ONLY
 // after resolve says yes, and only with the session id resolve returned — never
@@ -650,13 +636,13 @@ func boundSessionIDForActive(active *activeConversation, convReg *conversations.
 // anything on disk to read.
 //
 // resolve == nil ⇒ nil, decided at BUILD time before any closure exists, so "no
-// path can invoke a nil resolver" is structural rather than a promise (the
-// bootstrapSnapshotUsage pattern). Foreground / v1.
+// path can invoke a nil resolver" is structural rather than a promise. Foreground
+// / v1.
 //
 // usage == nil is deliberately NOT the same, and this is the spot the neighbouring
-// shape is close enough to be pattern-matched wrong: bootstrapSnapshotUsage
-// collapses to nil when EITHER half is unwired, because both are required to
-// report anything at all, whereas here a nil usage half yields a WORKING seam
+// shape is close enough to be pattern-matched wrong: snapshotUsageFor collapses
+// to nil when its folder resolver is unwired, because without a folder there is
+// no transcript to read at all, whereas here a nil usage half yields a WORKING seam
 // whose resolved answers carry UsedTokens/WindowTokens at zero. A daemon with no
 // sessions directory still hosts conversations bound to real sessions with real
 // settings; an unwired usage half degrades two integers and must not make a
@@ -772,12 +758,10 @@ func systemPromptStatus(st conversationPromptState) string {
 // pinned at pairing. On error the leg fails fast at startup, mirroring the
 // identity.LoadOrCreate / devices.Load posture in startRelay's prologue.
 //
-// The structured interactive turn stream (#633) wires the #615 producer to the
-// #632 capability-gated emitter, fanning turn_state / assistant_delta / tool /
-// turn_end envelopes to interactive phones. It is gated on bridge != nil
-// (foreground has no PTY-output observer surface) plus a non-empty
-// claudeSessionsDir (the dir the rotation-following JSONL resolver scans; ""
-// already disables reconcile, so disabling the producer too is coherent).
+// The structured interactive turn stream (#633) fans turn_state /
+// assistant_delta / tool / turn_end envelopes to interactive phones. It is built
+// only in stream mode (w.streamSink != nil), fed from the stream-json runner's
+// parsed turn events rather than an on-disk transcript.
 //
 // SECURITY: StaticPriv is the binary's 32-byte X25519 static secret. It is
 // passed to the manager as an opaque slice and is never logged, wrapped into
@@ -970,32 +954,14 @@ func startRelayV2(
 		logger,
 	)
 
-	// Context-window usage reader (#857, rebuilt by #1214): reports the bootstrap
-	// session's current occupancy (used tokens + window size) for the
-	// screen_snapshot reply. session_settings read it too between #491 and #1610,
-	// and now sources all six of its fields from the conversation-keyed seam below.
-	snapshotUsage := bootstrapSnapshotUsage(w.claudeSessionsDir, w.bootstrapIDFn, w.modelWindows)
-
 	// Conversation-keyed run-configuration seam (#1609): composes the settings half
 	// (main.go's resolveBoundRunSettings, over the conversations registry and the
 	// pool) with the by-id context-window reader, so ONE call reports a named
 	// conversation's own session id, stored model/effort, confirmed permission pair,
-	// and occupancy together.
-	// snapshotUsageFor is called a second time rather than reusing the binding
-	// above: bootstrapSnapshotUsage supplies the BOOTSTRAP id, so a seam composed
-	// through it would report the bootstrap's occupancy for every conversation. The
-	// closure it builds is stateless, so a second one costs nothing and leaves the
-	// three existing seams byte-identical. BOTH readers are handed the same
-	// w.modelWindows, so the two surfaces report one window for one session; wiring
-	// only one would make them disagree (#2107 AC 1).
-	//
-	// The two readers no longer share a FOLDER, and that asymmetry is #2423's fix
-	// rather than an oversight. This one resolves the folder per session from that
-	// session's own working directory, because a conversation carrying a cwd spawns
-	// claude somewhere the daemon's directory does not name and reported 0% context
-	// forever. The bootstrap reader above keeps the daemon's fixed directory, which
-	// is its session's workdir — see bootstrapSnapshotUsage for why that reading is
-	// deliberately left alone.
+	// and occupancy together. The reader resolves the folder per session from that
+	// session's own working directory (#2423), because a conversation carrying a
+	// cwd spawns claude somewhere the daemon's directory does not name and
+	// reported 0% context forever.
 	runConfig := runConfigFor(w.runSettings, snapshotUsageFor(w.sessionTranscriptDir, w.modelWindows))
 	// The system-prompt read seam (#2152), composed the same way and for the same
 	// reason: the resolution half is cmd/pyry-typed and the seam is not, so the
@@ -1093,44 +1059,16 @@ func startRelayV2(
 				announceConversation(p)
 			}, w.activeSessionStarter, logger),
 		},
-		// Screen-snapshot seam (#618): the supervisor renders the live screen
-		// inside the tui-driver seal; KnownConversation gates request_snapshot
-		// on registry membership (AC #4), mirroring the established
-		// conversations-registry validation pattern but returning a bool so the
-		// relay needs no conversations import or errors.Is coupling.
-		// Screen snapshot answered by photographing claude's terminal, so it goes
-		// with the terminal (#1348). A nil Snapshotter lands the request in the
-		// handler's existing offline arm, AFTER the KnownConversation gate, so a
-		// foreign conversation id still returns not-found rather than leaking an
-		// existence oracle (#1101).
-		Snapshotter: nil,
+		// KnownConversation gates request_snapshot on registry membership (#618
+		// AC #4), mirroring the established conversations-registry validation
+		// pattern but returning a bool so the relay needs no conversations import
+		// or errors.Is coupling. The gate runs BEFORE the handler's offline arm,
+		// so a foreign conversation id still returns not-found rather than leaking
+		// an existence oracle (#1101).
 		KnownConversation: func(id string) bool {
 			_, ok := w.convReg.Get(conversations.ConversationID(id))
 			return ok
 		},
-		// Screen-snapshot settings reader (#848): populates the screen_snapshot
-		// reply's model / effort / YOLO fields from the bootstrap session's
-		// persisted settings so the phone can render the current model /
-		// reasoning-effort / permissions posture before offering to change it
-		// (desktop#156). The closure (built at main.go over
-		// *sessions.Pool.DefaultSettings) returns three primitives, so
-		// internal/relay imports neither internal/sessions nor its SessionSettings
-		// type. Read-only reflection — no secret, no authz (contrast
-		// SettingsUpdater below, the write path). nil in foreground / v1 makes the
-		// handler report defaults (empty model/effort, yolo:false).
-		SnapshotSettings: w.snapshotSettings,
-		// Context-window usage reader (#857, rebuilt by #1214): populates the
-		// used_tokens / window_tokens on the screen_snapshot reply from the
-		// bootstrap session's current occupancy, so a client can render an
-		// "N% used (X of Y)" gauge (desktop#182). The
-		// closure (bootstrapSnapshotUsage, built above: the by-id reader
-		// snapshotUsageFor returns — transcript.StatByID + contextwindow.Read —
-		// bound to the bootstrap id source) returns two primitives, so
-		// internal/relay imports neither internal/contextwindow nor
-		// internal/sessions. Read-only reflection — no secret, no authz. nil in
-		// foreground / unresolved sessions dir / no id source makes the handlers
-		// report zeros (used_tokens:0, window_tokens:0).
-		SnapshotUsage: snapshotUsage,
 		// Conversation-keyed run configuration (#1609, consulted since #1610): one
 		// seam reporting a NAMED conversation's own bound session id, model / effort
 		// / YOLO and context-window figures together, composed at runConfigFor. It
@@ -1562,9 +1500,9 @@ func startRelayV2(
 		// goroutine exits. The stream-mode counterpart of the modal stream #1348
 		// deleted — the #1080 approval bridge — is already wired unconditionally
 		// above (modalResolver.streamApprovals), so the turn stream is the only
-		// producer this branch builds. It does NOT gate on claudeSessionsDir: the
-		// drain consumes parsed turnevent.Events from the sink, not an on-disk
-		// transcript, so it runs whenever stream mode is selected.
+		// producer this branch builds. It reads no on-disk transcript: the drain
+		// consumes parsed turnevent.Events from the sink, so it runs whenever
+		// stream mode is selected.
 		//
 		// The emitter is constructed here rather than inside the drain so this leg
 		// owns the reconnect wiring: the active-conversation cursor it stamps with

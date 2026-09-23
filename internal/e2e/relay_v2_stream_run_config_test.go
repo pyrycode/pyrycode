@@ -25,8 +25,8 @@ import (
 //
 // Before, a client read the run configuration off screen_snapshot's side-load
 // (#848, #857). That reply is gated on a live terminal screen, and stream mode
-// has none: cmd/pyry routes the typed-nil supervisor to a nil Snapshotter on
-// purpose (#1077, #1101), so handleRequestSnapshot short-circuits to
+// has none: cmd/pyry wires no Snapshotter (#1077, #1101, #1348), so
+// handleRequestSnapshot short-circuits to
 // server.binary_offline. The settings, which have nothing to do with a terminal,
 // were refused along with it — leaving the desktop run-configuration sheet with
 // no values, no session id to address a change to, and no context figure.

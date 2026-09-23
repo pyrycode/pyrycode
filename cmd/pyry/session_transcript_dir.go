@@ -57,8 +57,8 @@ import (
 // snapshotUsageFor collapses a nil resolver into the nil seam that makes the
 // handlers report zeros, rather than a working reader reporting the default
 // window against a zero used count — a different wire shape. Deciding it on the
-// resolver's PRESENCE rather than on what it answers is bootstrapSnapshotUsage's
-// and runConfigFor's own structural rule. Reading the daemon's directory to
+// resolver's PRESENCE rather than on what it answers is runConfigFor's own
+// structural rule. Reading the daemon's directory to
 // answer a question about a session's is sound because the two are one question:
 // both bottom out in sessions.DefaultClaudeSessionsDir, which needs $HOME, so a
 // daemon that cannot name its own projects root cannot name a session's either.

@@ -42,13 +42,10 @@ import (
 // here. The unit tables in internal/contextwindow separate those readings row by
 // row; this spec proves the whole path is wired, so one window assertion suffices.
 //
-// screen_snapshot is deliberately NOT asserted here even though it reads the same
-// figures. In stream mode the daemon routes its typed-nil supervisor to a nil
-// Snapshotter on purpose, so handleRequestSnapshot short-circuits to
-// server.binary_offline and there is no reply to assert against — see
-// TestRelayV2_StreamRequestSessionSettings' own doc. That half is proven at its
-// seam by cmd/pyry's TestBootstrapSnapshotUsage_ReportsTheObservedWindow, and the
-// two seams are constructed side by side in startRelayV2 from one resolver.
+// screen_snapshot is deliberately NOT asserted here. The daemon wires no
+// Snapshotter, so handleRequestSnapshot short-circuits to server.binary_offline
+// and there is no reply to assert against — see
+// TestRelayV2_StreamRequestSessionSettings' own doc.
 func TestRelayV2_StreamSessionSettingsReportsTheObservedWindow(t *testing.T) {
 	const (
 		initialUUID = "11111111-1111-4111-8111-111111111111"

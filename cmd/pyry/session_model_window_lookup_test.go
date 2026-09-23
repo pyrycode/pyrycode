@@ -199,8 +199,7 @@ func TestSessionModelWindows_RefusesWithNil(t *testing.T) {
 		// empty id: whatever the bootstrap holds. It is recorded rather than
 		// guarded against here because every production caller supplies an id the
 		// daemon's own registry or pool produced — runConfigFor consults the usage
-		// half ONLY with the session id its resolver returned, and
-		// bootstrapSnapshotUsage supplies the pool's own bootstrap id.
+		// half ONLY with the session id its resolver returned.
 		got := sessionModelWindows(pool)("")
 		if got["bootstrap-only"] != 1_000_000 {
 			t.Errorf("windows for the empty id = %v; Pool.Lookup(\"\") answers the bootstrap session, "+

@@ -1094,24 +1094,6 @@ func runSupervisor(args []string) error {
 		debugBundler = fake
 	}
 
-	// The screen-snapshot settings reader (#848): reports the bootstrap session's
-	// persisted model / effort / YOLO so the screen_snapshot reply the phone
-	// already receives can render the current model / reasoning-effort /
-	// permissions posture before offering to change it (desktop#156). Built here,
-	// not in relay.go, so the internal/sessions dependency stays at the
-	// composition root — the closure decodes SessionSettings into three
-	// primitives, so the value crossing into relay.go is a bare
-	// func() (string, string, bool) (same discipline as debugBundler and
-	// settingsUpdaterAdapter). No bootstrap ⇒ defaults, which collapse to the same
-	// wire output as the all-defaults case (empty model/effort, yolo:false).
-	snapshotSettings := func() (model, effort string, yolo bool) {
-		s, ok := pool.DefaultSettings()
-		if !ok {
-			return "", "", false
-		}
-		return s.Model, s.Effort, s.YOLO
-	}
-
 	relayCleanup, approvalSurface, announceAttachment, announceConversation, announcePost, pairingProvider, err := startRelay(ctx, logger, relayWiring{
 		instanceName:  *name,
 		relayURL:      relayURL,
@@ -1182,10 +1164,8 @@ func runSupervisor(args []string) error {
 			resetting: resetting,
 			log:       logger,
 		},
-		claudeSessionsDir: claudeSessionsDir,
-		bootstrapIDFn:     func() string { return string(pool.BootstrapID()) },
-		defaultCwd:        defaultCwd,
-		transitions:       pool,
+		defaultCwd:  defaultCwd,
+		transitions: pool,
 		// #2148: the relay leg hands back its open-conn enumerator, and this closure
 		// — the only place that names both packages — maps it onto the pool's
 		// resolver. The two ActiveConn fields cross as untrusted text and are judged
@@ -1200,13 +1180,12 @@ func runSupervisor(args []string) error {
 				return out
 			})
 		},
-		qse:              qse,
-		sessionErr:       see,
-		resetting:        resetting,
-		blockedNotify:    blocked,
-		debugBundler:     debugBundler,
-		settings:         settingsUpdaterAdapter{pool, modelVocabulary},
-		snapshotSettings: snapshotSettings,
+		qse:           qse,
+		sessionErr:    see,
+		resetting:     resetting,
+		blockedNotify: blocked,
+		debugBundler:  debugBundler,
+		settings:      settingsUpdaterAdapter{pool, modelVocabulary},
 		runSettings: func(convID string) (boundRunSettings, bool) {
 			return resolveBoundRunSettings(convReg, runSettingsPool{Pool: pool}, convID)
 		},
@@ -2129,8 +2108,8 @@ func resolveBoundSession(convReg *conversations.Registry, pool *sessions.Pool, c
 // boundRunSettings is the settings half of one conversation's run configuration:
 // the pool session it is bound to, plus that session's persisted model / effort
 // and current-child permission confirmation, decoded into primitives HERE so the
-// value crossing into relay.go carries no internal/sessions type — the same composition-root discipline
-// snapshotSettings, settingsUpdaterAdapter and debugBundler keep.
+// value crossing into relay.go carries no internal/sessions type — the same
+// composition-root discipline settingsUpdaterAdapter and debugBundler keep.
 //
 // A struct rather than a four-value return: three adjacent same-typed strings in
 // a return list transpose silently, while a named-field construction makes the

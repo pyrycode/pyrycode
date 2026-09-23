@@ -148,7 +148,7 @@ func TestSessionTranscriptDir_RefusesWithEmpty(t *testing.T) {
 //
 // Asserting on the returned value rather than on a call is the point — the
 // nil-ness is structural, decided before any closure exists, which is
-// bootstrapSnapshotUsage's and runConfigFor's own rule. A builder that instead
+// runConfigFor's own rule. A builder that instead
 // returned a closure answering "" would make runConfigFor's usage half non-nil
 // and change the wire shape.
 func TestSessionTranscriptDir_NoDaemonDirectoryBuildsNoResolver(t *testing.T) {

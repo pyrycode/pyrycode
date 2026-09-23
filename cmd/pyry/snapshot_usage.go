@@ -5,8 +5,8 @@ import (
 	"github.com/pyrycode/pyrycode/internal/transcript"
 )
 
-// snapshotUsageFor builds the by-id context-window usage reader behind the
-// relay's SnapshotUsage seam: given a session id per CALL, it resolves that
+// snapshotUsageFor builds the by-id context-window usage reader behind the usage
+// half of runConfigFor's seam: given a session id per CALL, it resolves that
 // session's transcript BY ID and reports its occupancy (used tokens, window
 // size). The id is an argument rather than a construction-time closure so one
 // reader can answer for any resolved session, not only the bootstrap's (#1608).
@@ -19,12 +19,11 @@ import (
 // instead, so every session_settings reply for such a conversation reported zero
 // used tokens against the default window. The reader was never wrong; it was
 // handed the wrong folder. sessionTranscriptDir is the production answerer and
-// its doc carries the derivation; fixedTranscriptDir below is the one-folder
-// adapter for callers that genuinely have one.
+// its doc carries the derivation.
 //
-// Returns nil when there is NO RESOLVER (foreground / unwired), which is the
-// build-time decision bootstrapSnapshotUsage collapses into the nil seam that
-// makes the handlers report zeros — the pre-existing unwired contract, unchanged.
+// Returns nil when there is NO RESOLVER (foreground / unwired), a build-time
+// decision that leaves runConfigFor's usage half unwired, so resolved answers
+// report zeros — the pre-existing unwired contract, unchanged.
 // Deciding it on the resolver's PRESENCE and not on what it answers is what keeps
 // that reading: a per-call guard alone would turn an unwired daemon into a working
 // reader reporting the default window against a zero used count, a different wire
@@ -121,70 +120,5 @@ func snapshotUsageFor(dirFor func(sessionID string) string, windows func(session
 			u, _ = contextwindow.Read("", nil)
 		}
 		return u.UsedTokens, u.WindowTokens
-	}
-}
-
-// fixedTranscriptDir adapts ONE folder to snapshotUsageFor's per-session resolver
-// (#2423), answering it for every id. It is for callers that genuinely have one
-// folder and no session to ask — the bootstrap seam below, whose runner's working
-// directory IS the daemon's trusted workdir, and the reader's own unit tables.
-//
-// Returns nil for "", which is what carries the pre-#2423 build-time contract
-// across the signature change unchanged: a caller with no directory builds no
-// reader, so bootstrapSnapshotUsage still collapses to the nil seam that makes the
-// handlers report zeros. A constant "" answerer would be the WRONG translation —
-// non-nil, so the seam would exist and report a default window against a zero used
-// count.
-//
-// It is deliberately NOT the production answer for a conversation: a fixed folder
-// is exactly the defect #2423 fixes, so the only production caller is the one whose
-// session is the daemon's own. Anything conversation-keyed takes sessionTranscriptDir.
-func fixedTranscriptDir(dir string) func(sessionID string) string {
-	if dir == "" {
-		return nil
-	}
-	return func(string) string { return dir }
-}
-
-// bootstrapSnapshotUsage builds the seam startRelayV2 hands to the relay: the
-// by-id reader above, bound to the BOOTSTRAP session's id source, so every
-// consumer still reports the bootstrap session's figures and the wire stays
-// byte-identical to before #1608.
-//
-// Returns nil — the seam that makes the handlers report zeros — when either
-// half is unwired: no sessions directory (snapshotUsageFor's guard) or no id
-// source. bootstrapID is a func value whose zero is nil and which relayWiring
-// documents as legitimately nil, so the second half pins a documented
-// optional-field contract; relayWiring's single producer always sets it, so no
-// path reaches it today. Deciding it at BUILD time, before any closure exists,
-// is what makes "no path can invoke a nil id source" structural rather than a
-// promise.
-//
-// windows rides through to snapshotUsageFor unchanged and is deliberately NOT a
-// third half of the either-half-unwired rule above: a nil one degrades the window
-// to the default rather than making the seam unusable, for the reason
-// snapshotUsageFor states. Threading it here rather than only at the
-// conversation-keyed seam is what keeps screen_snapshot and session_settings
-// agreeing on one reading — the two are constructed side by side in startRelayV2,
-// and wiring one alone would make the two surfaces disagree for the same session
-// (#2107 AC 1).
-//
-// dir STAYS A FIXED FOLDER here while the conversation-keyed seam went per-session
-// (#2423 AC 3): this reader answers only for the BOOTSTRAP session, whose runner's
-// working directory is the daemon's own trusted workdir, so there is no workspace
-// for it to miss and its reading is left byte-identical. That leaves this the one
-// seam where the reader's folder and the runner's spawn probe can still differ —
-// the daemon derives this one with filepath.Abs and the probe with
-// agentrun.ResolveWorkdir, which also canonicalises case and resolves symlinks —
-// and #2423 chose an unchanged shipped reading over closing a divergence #1655
-// measured as absent in practice. Do not "finish the job" by routing this through
-// sessionTranscriptDir without a ticket that owns the reading it would change.
-func bootstrapSnapshotUsage(dir string, bootstrapID func() string, windows func(sessionID string) map[string]int) func() (usedTokens, windowTokens int) {
-	read := snapshotUsageFor(fixedTranscriptDir(dir), windows)
-	if read == nil || bootstrapID == nil {
-		return nil
-	}
-	return func() (int, int) {
-		return read(bootstrapID())
 	}
 }
