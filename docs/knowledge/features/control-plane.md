@@ -412,23 +412,15 @@ Two top-level goroutines, unchanged from Phase 0:
 1. **Main goroutine** — calls `pool.Run(ctx)`, blocks until ctx cancellation.
 2. **Control goroutine** — `go ctrl.Serve(ctx)`, accepts client connections, dispatches verbs.
 
-Shutdown: `SIGINT`/`SIGTERM` → `signal.NotifyContext` cancels the context → `pool.Run` returns `context.Canceled` → `ctrl.Close()` removes the socket file → in-flight handlers drain via `streamingWG`.
+Shutdown: `SIGINT`/`SIGTERM` → `signal.NotifyContext` cancels the context → `pool.Run` returns `context.Canceled` → `ctrl.Close()` removes the socket file → in-flight handlers drain via `handleWG.Wait()` in `Serve`'s accept-error path.
 
-Draining `streamingWG` requires every attached bridge's input pump to actually exit, which (pre-#863) never happened for an idle attached client — the pump only exited on a conn read error, and shutdown never produced one, so `Serve` hung until the service manager escalated to SIGKILL. #863 closes that gap with a three-layer abort, one per resource each layer owns:
-
-- `control.Server` tracks every streaming (attach) conn in a set guarded by `s.mu`; `Close` closes each **after** releasing the lock, erroring a read-parked pump's `in.Read`.
-- `supervisor.Bridge` gets a terminal `Shutdown()` that closes a `shutdownCh` the pump's `b.in <- chunk` send now selects on, releasing a pump parked on the buffered channel send (conn close alone can't unblock a channel send). Distinct from the per-iteration `iterCancel` — a routine restart never trips it.
-- `sessions.Session.Run` defers `Bridge.Shutdown()`, firing exactly once on permanent termination (ctx cancel or removal), never on eviction.
-
-See [`docs/knowledge/codebase/863.md`](codebase/863.md) for the full design and lock-order rationale.
+That single wait is sufficient because every verb is one-shot (see § above): a handler reads its request, writes its response, and returns, so there is no per-conn goroutine that can outlive the handler and no indefinite handoff to wait out. That was not always true — #863 built a three-layer abort (a `control.Server`-side streaming-conn set, a `supervisor.Bridge.Shutdown()`, and a `sessions.Session.Run`-deferred call into it) to unblock `VerbAttach`'s indefinite per-conn handoff, whose input pump could otherwise park forever on an idle client and hang `Serve` until the service manager escalated to SIGKILL. `VerbAttach`'s handler was deleted in #1348, `supervisor.Bridge` no longer exists in the tree, and #1536 deleted the now-writer-less `control.Server` side of that abort (`streamingWG`, `streamConns`) as dead bookkeeping — `Wait` on a zero `WaitGroup` had been returning immediately and the set had been empty since #1348. See [`docs/knowledge/codebase/863.md`](codebase/863.md) for that design as history; it no longer describes the live shutdown path.
 
 ## Testing
 
 `server_test.go`, `attach_test.go`, `attach_resolve_test.go`, `logs_test.go` exercise the full surface with `fakeResolver` + `fakeSession` test doubles satisfying `SessionResolver` + `Session`. `recordingResolver` records both `Lookup` and `ResolveID` arguments — pinning the resolve-then-lookup ordering visible at review time.
 
 `attach_resolve_test.go` covers the 1.1e-C surface: byte-identical wire output for empty-`SessionID` payloads against a v0.5.x baseline, full-UUID resolution, unique-prefix resolution, ambiguous-prefix error before bridge open, and unknown-id error before bridge open. The "before bridge open" assertion uses the fake session's attach-call counter, not just response-string matching.
-
-Tests that need a real bridge (`TestServer_StopWhileAttached`, `TestServer_BridgeAttach`, `TestServer_ConcurrentAttachRace`) wrap a real `*supervisor.Bridge` in a `fakeSession` whose `attachFn` delegates to `bridge.Attach`.
 
 `pairing_test.go` treats the bearer result as a boundary, not ordinary response data. `TestMintPairing_WireRoundTrip` compares exact raw JSON for both boolean values and the typed pairing reply, while `TestProtocol_SessionsRoundTripBackCompat` proves the new optional outer fields did not change older verb bytes. Provider tests assert exactly one call with both arguments and use distinct success-pairing and provider-error sentinels to prove that only the successful return value can contain the credential; neither sentinel may enter control logs, response errors, transport diagnostics, or any error-path result.
 

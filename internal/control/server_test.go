@@ -17,21 +17,12 @@ import (
 )
 
 // fakeSession satisfies control.Session for tests. Safe under concurrent use.
-// Set attachFn to drive the Attach behaviour; nil means "no attach configured"
-// (i.e. tests that exercise non-attach verbs).
 type fakeSession struct {
 	mu            sync.Mutex
 	state         sessions.State
-	attachFn      func(in io.Reader, out io.Writer) (<-chan struct{}, error)
 	activateCalls int
 	activateErr   error
-	resizeCalls   []resizeCall
-	resizeErr     error
 }
-
-// resizeCall records one Session.Resize invocation. Rows-then-cols matches
-// the seam's argument order (mirroring pty.Winsize).
-type resizeCall struct{ Rows, Cols uint16 }
 
 func (f *fakeSession) State() sessions.State {
 	f.mu.Lock()
@@ -39,28 +30,11 @@ func (f *fakeSession) State() sessions.State {
 	return f.state
 }
 
-func (f *fakeSession) Attach(in io.Reader, out io.Writer) (<-chan struct{}, error) {
-	f.mu.Lock()
-	fn := f.attachFn
-	f.mu.Unlock()
-	if fn == nil {
-		return nil, errors.New("fakeSession: no attach configured")
-	}
-	return fn(in, out)
-}
-
 func (f *fakeSession) Activate(ctx context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.activateCalls++
 	return f.activateErr
-}
-
-func (f *fakeSession) Resize(rows, cols uint16) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.resizeCalls = append(f.resizeCalls, resizeCall{Rows: rows, Cols: cols})
-	return f.resizeErr
 }
 
 // fakeResolver returns its single fakeSession for any id. Set lookupErr to
