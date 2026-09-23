@@ -352,8 +352,9 @@ retracted before the shipped one:
    }
    ```
    `handleNewSession` asserts it on the configured seam and falls back to the
-   plain method when absent, so the PTY posture and every pre-#2477 test
-   double keep taking the inline path unchanged. `outcome` is called exactly
+   plain method when absent, so an implementation that rotates inline —
+   every pre-#2477 test double — needs no change and sees no new behaviour.
+   `outcome` is called exactly
    once with what `StartNewSession` would have returned, **after** the
    rotation it may report — `resetThenRotate` mints
    `RotatedWithoutWorkspaceError` under the rotation that makes it true, so a

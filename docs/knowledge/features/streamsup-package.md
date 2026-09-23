@@ -85,27 +85,30 @@ See [Turn I/O — envelope write + stdout parser](streamsup-package-turn-io-enve
 
 See [Per-conversation turn-busy tracking](streamsup-package-per-conversation-turn-busy-tracking.md).
 
-## Production wiring — the `interactive_runner` toggle (#1081)
+## Production wiring — the `interactive_runner` toggle (#1081, corrected #2555 for #1348 fallout)
 
 `cmd/pyry/main.go`'s `selectInteractiveRunner(cfg, logger)` maps `cfg.InteractiveRunner` to
-`(sessions.RunnerFactory, *streamTurnSink, error)`: `""`/`"pty"` returns `(nil, nil, nil)` (the rollback
-path — nil `RunnerFactory` byte-identical to today); `"stream-json"` builds exactly one
+`(sessions.RunnerFactory, *streamTurnSink, error)`: `""`/`"stream-json"` builds exactly one
 `newStreamTurnSink`, feeds it to `newStreamRunnerFactory(sink)`, and returns both the factory and the
 sink so the caller can thread the **same instance** two ways: `RunnerFactory` in the `sessions.Config`
-literal, and `streamSink` in `relayWiring` for the relay leg's drain. Any other value aborts daemon
-startup before `sessions.New` runs (AC4 — no silent PTY fallback).
+literal, and `streamSink` in `relayWiring` for the relay leg's drain. `"pty"` returns an error naming
+the #1348 removal (there is no longer a terminal-driving runner to select); any other value returns an
+error naming the offending value and the accepted set. Both error arms abort daemon startup before
+`sessions.New` runs — no silent PTY fallback, and, since #1348 deleted the terminal runner outright,
+no rollback path either. A daemon that finishes startup therefore always has a non-nil
+`RunnerFactory` and a non-nil `streamSink`.
 
-At the relay leg (`cmd/pyry/relay.go`), a non-nil `w.streamSink` is the stream-mode discriminant. It
-gates off the three raw `w.sup.State()` readers that would nil-deref on the typed-nil bootstrap
-supervisor in stream mode (`snapshotUsage`, and both PTY interactive streams —
-`startInteractiveTurnStreamV2`/`startInteractiveModalStreamV2`), and in their place builds
-`newInteractiveTurnEmitterV2` + `mgr.SetReplaySource(...)` (byte-identical to the PTY path's
-construction) fed by `startStreamTurnDrainV2`, scoped to the active conversation's bound session via
+At the relay leg (`cmd/pyry/relay.go`), `w.streamSink` and the #1201 turn-busy tracker `w.busy` are
+non-nil in every daemon the composition root started; nil is reached only by a wiring that leaves them
+unset, which today means the test literals in this package, not a runtime "PTY mode". The terminal-mode
+arm that used to sit beside the stream turn drain — the raw `w.sup.State()` reads and the PTY
+interactive/modal streams — was deleted with #1348 along with `internal/supervisor`; the stream-json
+turn drain (`startStreamTurnDrainV2`) feeding `newInteractiveTurnEmitterV2` + `mgr.SetReplaySource(...)`
+is now the only turn producer. It is scoped to the active conversation's bound session via
 `boundSessionIDForActive(w.active, w.convReg)` — fail-closed on no active conversation / unknown
-conversation / unbound session (never falls through to the bootstrap session). The PTY modal stream's
-stream-mode analogue (the #1080 approval bridge) was already wired unconditionally, so only the turn
-stream needed a replacement. See [codebase/1081.md](../codebase/1081.md) for the full wiring and
-[config-package.md](config-package.md) for the operator-facing `interactive_runner` field and rollback.
+conversation / unbound session (never falls through to the bootstrap session). See
+[codebase/1081.md](../codebase/1081.md) for the original wiring (now superseded by #1348) and
+[config-package.md](config-package.md) for the operator-facing `interactive_runner` field.
 
 **Fixed (#1133): the sink tag now rotates with `RestartFresh`.** The sink used to tag each event with
 the runner's *construction-time* `SessionID`; a stream-mode `new_session` rebound `conv.CurrentSessionID`
