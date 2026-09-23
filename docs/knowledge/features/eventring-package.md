@@ -43,10 +43,12 @@ The ring is **in-memory and keyed to the `pyry` daemon lifetime**, not the child
 
 - **Survives** a supervised claude-**child** respawn and phone reconnects — the
   daemon process stays up across both. The ring is owned by the emitter, which is
-  built **once** in `startInteractiveTurnStreamV2` and persists across the
-  producer's re-subscriptions and child restarts ([codebase/633.md](../codebase/633.md)
-  § single-writer for emitter state). (In pyrycode "supervisor restart" respawns
-  the claude child — the daemon does not go down.)
+  built **once** in `startRelayV2` and persists across the drain goroutine's
+  re-subscriptions and child restarts ([codebase/633.md](../codebase/633.md)
+  § single-writer for emitter state, describing the now-deleted PTY-path
+  driver — the invariant it documents still holds under the stream-json drain).
+  (In pyrycode "supervisor restart" respawns the claude child — the daemon does
+  not go down.)
 - **Does not survive** a full daemon-process restart — purely in-memory, by
   design. That boundary is handled by #647's resync, triggered by the AC-5
   "you missed some" gap signal (see `After` below). **No disk persistence** — the
@@ -230,10 +232,11 @@ the **signature is unchanged**, the 26 call sites stay byte-identical. The emitt
 is the producer and the natural owner of "what I emitted, for replay".
 
 **#647's hook (seam ready, not built here):** `emitter.ring` is a `package main`
-field reachable from `startInteractiveTurnStreamV2`. #647 reads it there and hands
-it to the v2 manager for the reconnect query — no change to the ring or the
-emitter's invariant. No accessor is added in #646 (the field is already reachable
-within `package main`).
+field reachable from `startRelayV2`, which registers it as the replay source via
+`SetReplaySource(emitter.ring, ...)` right after construction. #647 reads it
+there and hands it to the v2 manager for the reconnect query — no change to the
+ring or the emitter's invariant. No accessor is added in #646 (the field is
+already reachable within `package main`).
 
 **Removal wiring (#1502):** the ring does not import `conversations` and has no
 way to learn a conversation was removed on its own — `cmd/pyry` connects the two
@@ -256,8 +259,8 @@ where no conversations registry exists.
   ops, never across a channel op or another lock, never nested.
 - **The emitter's single-`Run`-goroutine, unguarded-counter invariant is preserved
   unchanged** ([codebase/632.md](../codebase/632.md) / [codebase/633.md](../codebase/633.md)).
-  `Append` is called only from `emit()`, which runs only on the producer's single
-  `Run` goroutine; all the emitter's *other* fields stay unguarded and
+  `Append` is called only from `emit()`, which runs only on the single drain
+  goroutine `startStreamTurnDrainV2` spawns; all the emitter's *other* fields stay unguarded and
   single-goroutine. The cross-goroutine sharing the future query path needs lives
   **inside the ring's mutex**, not in the emitter — the Technical-Notes
   reconciliation. *Belt-and-suspenders, different fabric:* the emitter stays
