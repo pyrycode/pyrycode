@@ -22,7 +22,6 @@ internal/sessions/
 | Condition | Surface |
 |---|---|
 | `NewID` rng failure | `sessions.New` returns wrapped error. Fatal. |
-| `supervisor.New` failure | Wrapped: `sessions: bootstrap supervisor: %w`. Fatal. |
 | `Pool.Lookup` unknown id | `ErrSessionNotFound` (sentinel). |
 | `Pool.Rename` unknown id | `ErrSessionNotFound` (sentinel). On-disk + in-memory state byte-identical to before. |
 | `Pool.Rename` save failure | Wrapped error from `saveLocked` propagated verbatim; in-memory label rolled back to prior value. |
@@ -38,11 +37,9 @@ internal/sessions/
 | `Pool.GetOrCreate` save failure | Wrapped error from `saveLocked` propagated verbatim; in-memory insert rolled back. |
 | `Pool.GetOrCreate` Pool.Run not active | `ErrPoolNotRunning` (sentinel). In-memory insert rolled back; best-effort re-save of the rolled-back state. |
 | `Pool.supervise` before/after `Run` | `ErrPoolNotRunning` (sentinel). |
-| `Session.Attach` with nil bridge | `ErrAttachUnavailable` (sentinel). |
-| `Session.Attach` while bridge busy | `supervisor.ErrBridgeBusy` propagated **verbatim** — no wrap. |
 | `Session.Run` / `Pool.Run` ctx cancel | `context.Canceled` from the supervisor. |
 
-Sentinels (`ErrSessionNotFound`, `ErrAttachUnavailable`, `ErrPoolNotRunning`, `ErrCannotRemoveBootstrap`, `ErrAmbiguousSessionID`, `ErrInvalidSessionID`) live in `internal/sessions`. `supervisor.ErrBridgeBusy` stays in `internal/supervisor`.
+Sentinels (`ErrSessionNotFound`, `ErrPoolNotRunning`, `ErrCannotRemoveBootstrap`, `ErrAmbiguousSessionID`, `ErrInvalidSessionID`) live in `internal/sessions`.
 
 ## Dependency Direction
 

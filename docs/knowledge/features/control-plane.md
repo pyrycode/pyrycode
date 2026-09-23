@@ -58,26 +58,26 @@ The provider closure is synchronous and has no context, so these I/O deadlines c
 The control plane consumes session state through one interface pair, both defined in `internal/control` (the consumer side):
 
 ```go
-// Session is the per-session view the control plane needs.
+// Session is the per-session view the control server depends on.
 type Session interface {
-    State() supervisor.State
-    Attach(in io.Reader, out io.Writer) (done <-chan struct{}, err error)
-    Activate(ctx context.Context) error  // 1.2c-A
+    State() sessions.State
+    Activate(ctx context.Context) error
 }
 
-// SessionResolver maps a SessionID to a Session and resolves loose-input
-// selectors (full UUID / unique prefix / empty) to a canonical SessionID.
+// SessionResolver maps a SessionID to a Session. An empty id resolves to
+// the default (bootstrap) entry.
 type SessionResolver interface {
     Lookup(id sessions.SessionID) (Session, error)
-    // ResolveID maps a loose-input selector to a concrete SessionID.
-    // Errors flow verbatim — handleAttach wraps them as "attach: <err>".
+    // ResolveID maps a loose-input session selector (full UUID, unique
+    // prefix, or empty for bootstrap) to a concrete SessionID. Errors are
+    // returned verbatim.
     ResolveID(arg string) (sessions.SessionID, error)
 }
 ```
 
 `*sessions.Session` satisfies `Session` structurally. `*sessions.Pool` does **not** satisfy `SessionResolver` directly because `Pool.Lookup` returns the concrete `*sessions.Session` rather than the `control.Session` interface — Go does not do covariant return types on interface satisfaction. A small `poolResolver` adapter in `cmd/pyry/main.go` bridges the two; both `Lookup` and `ResolveID` are 1-line passthroughs.
 
-The empty-id-resolves-to-default convention is shared across both methods: `Lookup("")` and `ResolveID("")` both resolve to the bootstrap session (the latter via `Pool.ResolveID`'s empty-arg fast path). `handleAttach` (1.1e-C) takes loose input from `AttachPayload.SessionID` and routes it through `ResolveID` first, then `Lookup` — see [Attach: ResolveID-then-Lookup](#attach-resolveid-then-lookup-11e-c) below. Other verbs that don't yet take a selector (`status`, `logs`, `stop`) continue to call `Lookup("")` directly.
+The empty-id-resolves-to-default convention holds for every caller today: `Server.handle` calls `Lookup("")` for `status`, and `handleSessionsHasID` calls `Lookup` with the payload id. No handler in `internal/control` calls `ResolveID` or `Activate` since #1348 removed attach — both methods stay on the interface for the seam design below and for the day a verb needs loose-input session selection again.
 
 ### Why a single resolver instead of `StateProvider` + `AttachProvider`
 
@@ -86,148 +86,10 @@ Phase 0 wired the supervisor into control via two narrow interfaces (`StateProvi
 ```go
 sess, err := s.sessions.Lookup("")
 if err != nil { /* encode error */; return }
-// use sess.State() or sess.Attach(...)
+// use sess.State()
 ```
 
 `VerbLogs` and `VerbStop` are intentionally process-global today (logs come from the ring buffer; stop calls the supervisor-context cancel). They do **not** call the resolver. Phase 1.1 may revisit `VerbStop` if per-session stop becomes a verb.
-
-## Attach: ResolveID-then-Lookup (1.1e-C)
-
-`handleAttach` resolves the client's session selector through `Pool.ResolveID` before any bridge work, then re-fetches the session with `Pool.Lookup`. Two sequential calls, two sequential `Pool.mu` RLocks:
-
-```go
-id, err := s.sessions.ResolveID(sessionID) // sessionID = req.Attach.SessionID, or "" if Attach is nil
-if err != nil {
-    _ = enc.Encode(Response{Error: fmt.Sprintf("attach: %v", err)})
-    return false
-}
-sess, err := s.sessions.Lookup(id)
-if err != nil {
-    _ = enc.Encode(Response{Error: fmt.Sprintf("attach: %v", err)})
-    return false
-}
-// ... unchanged: clear deadline, Activate, Attach, hand off conn.
-```
-
-Why two calls instead of one `ResolveSession` API:
-
-- **`Pool.ResolveID` returns `SessionID`, not `*Session` (decision from #66).** Returning `*Session` would tempt callers to skip the second lookup, but the second `Lookup` is the lock-clean way to guard against a session being removed between resolve and use. Window is microseconds (one RLock release + one RLock acquire); race outcome is `ErrSessionNotFound` from `Lookup`, which encodes to the same `"attach: sessions: session not found"` wire string the resolver itself produces. Operator-visible diagnostic is identical either way.
-- **Each call takes its own `Pool.mu` RLock — no new locking required.** Concurrent attaches against different sessions remain fully parallel; the dispatcher spawns one goroutine per accept, and `Pool` is the only shared state.
-
-A `nil` `req.Attach` (no payload at all) is treated identically to an empty `SessionID` — both pass `""` into `ResolveID`, which returns the bootstrap id. Phase 0 / v0.5.x clients that omit the payload entirely keep working.
-
-Resolution errors encode as `"attach: <err>"` verbatim through `fmt.Sprintf("%v", err)`:
-
-| Failure | Wire `Response.Error` |
-|---|---|
-| `ErrSessionNotFound` (no match, or resolve-then-lookup race) | `"attach: sessions: session not found"` |
-| `ErrAmbiguousSessionID` (≥2 matches) | `"attach: sessions: ambiguous session id:\n<uuid> (<label>)\n<uuid> (<label>)"` |
-
-The bridge state is **untouched** on the error path — `ResolveID` and `Lookup` both return before `conn.SetDeadline(time.Time{})`, before `Activate`, before `Attach`. Tests assert this via the fake session's attach-call counter, not just by string-matching the response. The `errors.Is(err, sessions.ErrAmbiguousSessionID)` discriminator continues to work server-side; only the message reaches the wire.
-
-The 1.1e-C slice was wire + server only. The CLI surface (`pyry attach <id>` positional) is wired in 1.1e-D — see [§ Attach: CLI Surface](#attach-cli-surface-11e-d) below.
-
-## Attach: Foreground-mode Wire String
-
-A foreground-mode pyry has no `*supervisor.Bridge` — its supervised child is bound directly to the local terminal. Calling `pyry attach` against such a daemon must return Phase 0's exact error string:
-
-```
-attach: no attach provider configured (daemon may be in foreground mode)
-```
-
-Under the hood this is now `sessions.ErrAttachUnavailable` flowing out of `Session.Attach`. `handleAttach` maps it explicitly:
-
-```go
-if errors.Is(err, sessions.ErrAttachUnavailable) {
-    _ = enc.Encode(Response{Error: "attach: no attach provider configured (daemon may be in foreground mode)"})
-    return false
-}
-```
-
-A bare `fmt.Sprintf("attach: %v", err)` would surface `attach: sessions: attach unavailable (no bridge)` — observable client drift. The mapping is **load-bearing** for byte-identical output.
-
-`supervisor.ErrBridgeBusy` (second client tries to attach while another is connected) flows through the unchanged `fmt.Sprintf` path, preserving Phase 0's wire surface for that case.
-
-## Attach: Handshake Geometry (#136)
-
-Between `Activate` and `Attach`, `handleAttach` applies the client's terminal
-size to the supervised PTY through a typed seam:
-
-```go
-if payload != nil && payload.Cols > 0 && payload.Rows > 0 {
-    rows := clampUint16(payload.Rows)
-    cols := clampUint16(payload.Cols)
-    if err := sess.Resize(rows, cols); err != nil &&
-        !errors.Is(err, sessions.ErrAttachUnavailable) {
-        s.log.Warn("control: attach geometry resize failed", ...)
-    }
-}
-```
-
-Three boundary rules:
-
-- **Zero is the "don't touch" sentinel.** Either `Cols` or `Rows` being zero
-  (or `payload` being nil) issues no resize. Matches the `omitempty` tags on
-  `AttachPayload`.
-- **`int → uint16` clamps silently.** `clampUint16` returns `math.MaxUint16`
-  for out-of-range positives. A real terminal will never report dimensions
-  that large; a client that does is buggy or hostile. No log on clamp.
-- **Argument order swap at the boundary.** The wire is cols-then-rows
-  (`AttachPayload`); `Session.Resize` / `Bridge.Resize` are rows-then-cols
-  (matching `pty.Winsize`). `handleAttach` is the only site that deals with
-  both orders.
-
-The `Session` interface gains `Resize(rows, cols uint16) error`:
-
-```go
-type Session interface {
-    State() supervisor.State
-    Attach(in io.Reader, out io.Writer) (done <-chan struct{}, err error)
-    Activate(ctx context.Context) error
-    Resize(rows, cols uint16) error // #136
-}
-```
-
-`*sessions.Session.Resize` is a one-line delegator to `Bridge.Resize` (or
-returns `ErrAttachUnavailable` in foreground mode — swallowed by
-`handleAttach` since foreground mode has its own SIGWINCH watcher in
-`winsize.go`). No lifecycle locking; does not touch `lcMu`, does not bump
-`lastActiveAt`, does not interact with the active↔evicted state machine.
-
-`Bridge.Resize` is the supervisor-side seam — see [ADR 008](../decisions/008-bridge-resize-seam.md)
-for why it lives on `*Bridge` and not on `*Supervisor`. The bridge holds a
-leaf-only `ptyMu` mutex over the per-iteration `*os.File`; `runOnce` calls
-`SetPTY(ptmx)` after `pty.Start` and `SetPTY(nil)` **before** `EndIteration`
-so an in-flight `Resize` that races iteration teardown sees nil rather than
-a closed fd.
-
-**Resize errors never fail the attach.** A `pty.Setsize` error (e.g. `EBADF`
-on a closed fd in the narrow race window) is logged at Warn and the attach
-proceeds. Geometry is best-effort; a wrong window size is recoverable on the
-user's next keystroke.
-
-The handshake-geometry block is the first consumer of the seam; the
-live-resize wire message + server applier are #137 (see [§ Resize: Live
-Wire Message and Applier](#resize-live-wire-message-and-applier-137) below).
-The client-side SIGWINCH handler that emits the live message is #133.
-
-## Attach: Activate-before-bind (1.2c-A)
-
-`handleAttach` calls `Session.Activate(ctx)` before `Session.Attach(conn, conn)` so an evicted session is woken before the bridge is bound:
-
-```go
-activateCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-defer cancel()
-if err := sess.Activate(activateCtx); err != nil {
-    _ = enc.Encode(Response{Error: fmt.Sprintf("attach: activate: %v", err)})
-    return false
-}
-done, err := sess.Attach(conn, conn)
-```
-
-The 30s window caps the documented 2-15s respawn latency with safety margin. A busted respawn surfaces as a clean `attach: activate: <err>` rather than a hung attach. `bridge.Attach` on an evicted session would block on the pipe forever (no claude to drain it) — the Activate-first contract is load-bearing.
-
-`handleStatus` does **not** activate. Status on an evicted session reports the supervisor's `PhaseStopped` (faithful — the supervisor really isn't running) and avoids spurious wakeups from a poll. See [idle-eviction.md](idle-eviction.md).
 
 ## Sessions: removal seam (1.1d-B1)
 
@@ -244,7 +106,7 @@ type Sessioner interface {
 }
 ```
 
-`*sessions.Pool` satisfies `Remover` directly via `Pool.Remove` (#94/#95). Aggregating per-verb sub-interfaces into `Sessioner` (rather than threading a new constructor parameter per seam) keeps the 27-call-site `NewServer` signature unchanged — a deliberate response to the #75 cascade. Phase 1.1b/c/e (`list`, `rename`, `attach` orchestration) will continue this pattern.
+`*sessions.Pool` satisfies `Remover` directly via `Pool.Remove` (#94/#95). Aggregating per-verb sub-interfaces into `Sessioner` (rather than threading a new constructor parameter per seam) keeps the 27-call-site `NewServer` signature unchanged — a deliberate response to the #75 cascade. Phase 1.1b/c (`list`, `rename`) will continue this pattern.
 
 ### Wire shape
 
@@ -398,12 +260,10 @@ See `docs/specs/architecture/2499-carry-posted-channel-message.md` for the full 
 | Concern | Scope today | Source |
 |---|---|---|
 | `status` payload | per-session (one supervisor) | `sess.State()` |
-| `attach` stream | per-session (one bridge) | `sess.Attach(...)` |
-| `resize` (live) | per-session (one bridge) | `sess.Resize(...)` (#137) |
 | `logs` ring buffer | process-global | `LogProvider`, written by all loggers |
 | `stop` shutdown | process-global | `shutdown` cancel func |
 
-Phase 1.1's `pyry sessions new` (#76) and the upcoming `pyry sessions list` / `pyry attach <id>` extend the per-session column. Logs and stop stay process-global until a concrete need pushes them otherwise.
+`pyry sessions new` (#76) and `pyry sessions list` extend the per-session column. Logs and stop stay process-global until a concrete need pushes them otherwise.
 
 ## Lifecycle
 
@@ -418,9 +278,7 @@ That single wait is sufficient because every verb is one-shot (see § above): a 
 
 ## Testing
 
-`server_test.go`, `attach_test.go`, `attach_resolve_test.go`, `logs_test.go` exercise the full surface with `fakeResolver` + `fakeSession` test doubles satisfying `SessionResolver` + `Session`. `recordingResolver` records both `Lookup` and `ResolveID` arguments — pinning the resolve-then-lookup ordering visible at review time.
-
-`attach_resolve_test.go` covers the 1.1e-C surface: byte-identical wire output for empty-`SessionID` payloads against a v0.5.x baseline, full-UUID resolution, unique-prefix resolution, ambiguous-prefix error before bridge open, and unknown-id error before bridge open. The "before bridge open" assertion uses the fake session's attach-call counter, not just response-string matching.
+`server_test.go`, `logs_test.go` exercise the full surface with `fakeResolver` + `fakeSession` test doubles satisfying `SessionResolver` + `Session`. `recordingResolver` records both `Lookup` and `ResolveID` arguments.
 
 `pairing_test.go` treats the bearer result as a boundary, not ordinary response data. `TestMintPairing_WireRoundTrip` compares exact raw JSON for both boolean values and the typed pairing reply, while `TestProtocol_SessionsRoundTripBackCompat` proves the new optional outer fields did not change older verb bytes. Provider tests assert exactly one call with both arguments and use distinct success-pairing and provider-error sentinels to prove that only the successful return value can contain the credential; neither sentinel may enter control logs, response errors, transport diagnostics, or any error-path result.
 
@@ -451,17 +309,11 @@ The timeout tests cover both sides of the liveness contract: a silent peer must 
 This overview is split across the documents below. Each is kept small so
 search can reach it.
 
-- [Attach: CLI Surface (1.1e-D)](control-plane-attach-cli-surface-1-1e-d.md) — The Phase 1.1e end-to-end multi-session attach surface lands in `cmd/pyry/main.go` and `internal/control/attach_client.go`. 
-- [Attach: stdio mode (1.3a)](control-plane-attach-stdio-mode-1-3a.md) — `pyry attach --stdio [<id>]` is the no-PTY counterpart of the default attach mode, intended for SDK consumers (Claudian /…
-- [Attach: --create-if-missing (1.3b)](control-plane-attach-create-if-missing-1-3b.md) — `pyry attach --create-if-missing <uuid>` lets SDK consumers (Claudian / `@anthropic-ai/claude-agent-sdk`) issue one attach call instead of…
-- [Resize: Live Wire Message and Applier (#137)](control-plane-resize-live-wire-message-and-applier.md) — `VerbResize` carries a live window-size update for an already-attached session on a **separate, one-shot control connection** — independent…
-- [Resize: Live SIGWINCH Watcher (#133)](control-plane-resize-live-sigwinch-watcher.md) — The client-side producer for `VerbResize`. 
 - [Sessions: list seam (1.1b-B1)](control-plane-sessions-list-seam-1-1b-b1.md) — The fourth `sessions.*` verb is `sessions.list` — the first read-side member of the namespace. 
 - [Sessions: has-id seam (1.3c-1)](control-plane-sessions-has-id-seam-1-3c-1.md) — The fifth `sessions.*` verb is `sessions.has-id` — a one-bit existence query. 
 - [Rekey: V2 conn re-key trigger seam (1.3d-1, #459 + #462)](control-plane-rekey-v2-conn-re-key-trigger-seam-1-3d-1.md) — `VerbRekey` lets a local operator client trigger an immediate Noise re-key on a named v2 conn through the control socket. 
 - [Approve: mcp.approve verb — forward to permbridge, block, default-deny (#1104)](control-plane-approve-mcp-approve-verb-forward-to-permbridge.md) — `VerbMCPApprove` ("mcp.approve", dotted like `sessions.*`) forwards a claude tool-approval request from the `pyry mcp-approve` subcommand…
 - [Attachment.file: file a claude-named host file under the calling session's conversation (#2164)](control-plane-attachment-file-confine-and-store-a-claude-named-path.md) — `VerbAttachFile` confines a model-chosen filesystem path to the calling session's conversation workspace before reading it; ships live but inert (#2165 wires a caller).
-- [Foreground binary auto-attach (1.3c-2)](control-plane-foreground-binary-auto-attach-1-3c-2.md) — When `pyry` is invoked as a foreground binary (no `attach` / `status` / `stop` / `logs` / `sessions` / `install-service` / `version` /…
 - [Sessions: CLI Router (1.1a-B2)](control-plane-sessions-cli-router-1-1a-b2.md) — `pyry sessions <verb>` is the operator-facing surface for the `sessions.*` namespace. 
 - [Client dial: transient-startup retry (#198 + #199)](control-plane-client-dial-transient-startup-retry.md) — `internal/control/dial.go` houses the dial-side surface for the control client: the `dial()` primitive every client verb routes through,…
 - [Fanning `channel.post` out: `assistant_delta` live delivery (#2498)](control-plane-channel-post-live-delivery.md) — A successful `channel.post` fans the same content it appends to a channel's durable log to every interactive-capable client as one `assistant_delta` per chunk.
