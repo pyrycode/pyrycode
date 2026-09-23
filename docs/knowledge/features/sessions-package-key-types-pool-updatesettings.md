@@ -436,11 +436,14 @@ so a consumer falls back to daemon defaults — no error path.
 `SessionSettings` is a value type, so the return is a snapshot copy with no
 aliasing of the pool's live field.
 
-Shipped unwired in #847; wired by #848, which populates the `screen_snapshot`
+Shipped unwired in #847; wired by #848, which populated the `screen_snapshot`
 reply's `model`/`effort`/`yolo` fields via a closure over this accessor built
-in `cmd/pyry/main.go` and threaded through `V2SessionConfig.SnapshotSettings`
-(see [v2-session-manager.md § Inbound screen-snapshot handler](v2-session-manager.md)
-and [protocol-package.md § Screen-snapshot payloads](protocol-package.md)).
-Deliberately has no conversation-keyed variant: the snapshot source is always
-the bootstrap session, so settings-source == snapshot-source by construction.
+in `cmd/pyry/main.go` and threaded through `V2SessionConfig.SnapshotSettings`.
+\#2540 deleted that seam along with `handleRequestSnapshot`'s render arm — see
+[Inbound `request_snapshot` handler](v2-session-manager-state-machine-inbound-screen-snapshot-handler-handlere.md)
+and [protocol-package-screen-snapshot-payloads.md](protocol-package-screen-snapshot-payloads.md).
+This accessor has no conversation-keyed variant; the run-configuration read
+path is `RunConfigFor` (see
+[Inbound `request_session_settings`](v2-session-manager-state-machine-inbound-request-session-settings-the-rea.md)),
+which resolves per conversation rather than off the bootstrap session.
 See [codebase/847.md](../codebase/847.md) and [codebase/848.md](../codebase/848.md).

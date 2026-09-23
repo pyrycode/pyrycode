@@ -15,7 +15,7 @@ Modal control is **fire-and-broadcast, not request/reply** — there is no reply
 the caller, so no decode error or attacker-controlled byte is ever echoed back.
 
 - **`ModalResolver` consumer seam.** The relay declares the two-method interface
-  (beside `ScreenSnapshotter`) and reaches the daemon's outstanding-modal state
+  and reaches the daemon's outstanding-modal state
   through it, so `internal/relay` imports neither `internal/supervisor`,
   `internal/modalbridge`, `internal/audit`, nor `cmd/pyry`. The `cmd/pyry`
   `modalResolverV2` (`cmd/pyry/modal_resolve_v2.go`) implements it: `ResolveCancel`

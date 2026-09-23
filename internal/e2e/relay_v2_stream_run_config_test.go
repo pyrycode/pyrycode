@@ -24,10 +24,9 @@ import (
 // production wiring rather than a seam double.
 //
 // Before, a client read the run configuration off screen_snapshot's side-load
-// (#848, #857). That reply is gated on a live terminal screen, and stream mode
-// has none: cmd/pyry wires no Snapshotter (#1077, #1101, #1348), so
-// handleRequestSnapshot short-circuits to
-// server.binary_offline. The settings, which have nothing to do with a terminal,
+// (#848, #857). That reply was gated on a live terminal screen, and stream mode
+// has none (#1077, #1101, #1348; the render path was deleted in #2540), so
+// handleRequestSnapshot answers server.binary_offline. The settings, which have nothing to do with a terminal,
 // were refused along with it — leaving the desktop run-configuration sheet with
 // no values, no session id to address a change to, and no context figure.
 //

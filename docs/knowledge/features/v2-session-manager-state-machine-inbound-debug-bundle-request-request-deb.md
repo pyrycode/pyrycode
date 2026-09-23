@@ -21,7 +21,7 @@ session's data.
 
 - **`DebugBundler` consumer seam.** The relay declares the optional nil-safe field
   `V2SessionConfig.DebugBundler func() (archive []byte, err error)` (beside
-  `Snapshotter` / `QueueRemover`). The closure returns **only** `(archive, err)` —
+  `QueueRemover`). The closure returns **only** `(archive, err)` —
   never the `Manifest`, which travels inside the archive as `manifest.json` — so
   `internal/relay` imports neither `internal/debugbundle` nor `cmd/pyry`. It is
   wired in `cmd/pyry`: `main.go` builds `func() ([]byte, error) { archive, _, err :=

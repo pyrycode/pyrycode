@@ -673,8 +673,8 @@ func (m *V2SessionManager) handleNewSession(ctx context.Context, s *V2Session, e
 	// #2477: a starter whose rotation may outlive the call answers through a
 	// callback instead of a return value. The assertion is on the configured seam
 	// rather than a second config field, so wiring is unchanged and an
-	// implementation opts in by having the method — the ScreenSnapshotter-style
-	// optional-capability posture this package already takes at the consumer.
+	// implementation opts in by having the method — an optional capability
+	// discovered at the consumer.
 	if late, ok := m.cfg.SessionStarter.(LateSessionStarter); ok {
 		// env.ID and s are captured, NOT re-read later: the reply must correlate to
 		// THIS frame, and the callback may run long after this handler returned.

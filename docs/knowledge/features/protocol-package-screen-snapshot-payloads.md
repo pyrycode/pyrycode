@@ -1,12 +1,13 @@
 # Screen-snapshot payloads (#617)
 
+**`ScreenSnapshotPayload` has no producer (#2540).** `TypeScreenSnapshot` is never emitted on the wire: #2540 deleted `handleRequestSnapshot`'s render arm and the `ScreenSnapshotter` seam behind it, because #2539 had already left production unable to reach that reply. Both types stay declared below — a future producer would not need to re-mint the shape — but a reader should not expect either to cross the wire today. `RequestSnapshotPayload` is still live: `request_snapshot` is answered, just never with a render — see [v2-session-manager-state-machine-inbound-screen-snapshot-handler-handlere.md](v2-session-manager-state-machine-inbound-screen-snapshot-handler-handlere.md).
+
 The request/response pair behind ADR 025's always-available, parser-independent
 **screen snapshot** — the floor of the safe-degradation strategy (ADR 025 § Safe
-degradation). The phone may ask for a one-shot text picture of the current claude
-screen at any time; because the snapshot depends on no screen parser it survives any
-parser break and backs the stall fallback. Spec source: `docs/protocol-mobile.md`
+degradation) — was intended to let the phone ask for a one-shot text picture of the
+current claude screen at any time. Spec source: `docs/protocol-mobile.md`
 § Screen snapshot. The pair maps 1:1 to the `Type*` constants `TypeRequestSnapshot`
-(phone → binary control) and `TypeScreenSnapshot` (binary → phone event).
+(phone → binary control) and `TypeScreenSnapshot` (binary → phone event, unproduced).
 
 ```go
 type RequestSnapshotPayload struct {
@@ -29,8 +30,10 @@ type ScreenSnapshotPayload struct {
   Structurally like `TypeRekeyRequest`: the v2 session manager intercepts it at the
   dispatch boundary **before** `dispatch.Route`. There is **no `dispatch.Route`
   handler** for it — the doc comment says so explicitly so the next reader does not
-  look for a handler that isn't there. The interception, the render via tui-driver,
-  and the push of `screen_snapshot` back are the consumer ticket's job.
+  look for a handler that isn't there. #618 wired the interception, the tui-driver
+  render, and the `screen_snapshot` push; #2540 deleted the render arm, so the
+  interception now answers only `conversation.not_found` / `server.binary_offline`
+  and never renders or pushes anything.
 - **`ScreenSnapshotPayload.Text` is plain rendered text only, NEVER raw terminal
   control codes.** This is the load-bearing invariant: it preserves ADR 025's
   no-raw-bytes guarantee and the substrate seal — the snapshot is a literal-screen
@@ -60,9 +63,10 @@ type ScreenSnapshotPayload struct {
   payload key order must match struct declaration order exactly — `screen_snapshot.json`
   carries representative non-default values (`model:"opus"`, `effort:"high"`, `yolo:true`).
   Shipped unwired here (the handler serialized the three fields at their zero values);
-  wired by #848, which populates them from `Pool.DefaultSettings()` via the optional
-  `SnapshotSettings` seam on `V2SessionConfig`
-  ([v2-session-manager.md § Inbound screen-snapshot handler](v2-session-manager.md)).
+  wired by #848 via the `SnapshotSettings` seam on `V2SessionConfig`, populating them
+  from `Pool.DefaultSettings()`. #2540 deleted that seam along with the render arm
+  that read it — see
+  [Inbound `request_snapshot` handler](v2-session-manager-state-machine-inbound-screen-snapshot-handler-handlere.md).
   Not `security-sensitive` — read-only reflection of existing, non-secret session config.
   See [codebase/847.md](../codebase/847.md) and [codebase/848.md](../codebase/848.md).
 - **#857 adds `UsedTokens`/`WindowTokens`, always present (no `omitempty`),
@@ -85,9 +89,10 @@ type ScreenSnapshotPayload struct {
   for where the comparison lives. The two fields are sufficient for a client
   to compute "N% used (X of Y)" as `used_tokens / window_tokens`
   (pyrycode-desktop#182). Shipped unwired at #856 (the handler serialized both
-  fields at their zero values); wired by #857 via the optional `SnapshotUsage`
-  seam on `V2SessionConfig`
-  ([v2-session-manager.md § Inbound screen-snapshot handler](v2-session-manager.md)).
+  fields at their zero values); wired by #857 via the `SnapshotUsage` seam on
+  `V2SessionConfig`. #2540 deleted that seam along with the render arm that
+  read it — see
+  [Inbound `request_snapshot` handler](v2-session-manager-state-machine-inbound-screen-snapshot-handler-handlere.md).
   Not `security-sensitive` — read-only reflection of two non-secret aggregate
   integers; the transcript content itself never crosses the wire.
   See [codebase/856.md](../codebase/856.md) and [codebase/857.md](../codebase/857.md).

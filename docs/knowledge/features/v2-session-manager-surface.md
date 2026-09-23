@@ -26,19 +26,12 @@ type V2Session struct { /* unexported fields: connID, state, resp, send, recv, d
 
 func (s *V2Session) State() V2SessionState
 
-// ScreenSnapshotter renders the daemon's live claude screen to plain text
-// (#618). *supervisor.Supervisor satisfies it; declared in the consumer so
-// internal/relay depends on neither internal/supervisor nor tui-driver.
-type ScreenSnapshotter interface {
-    ScreenSnapshot() (text string, live bool) // live==false (text "") ⇒ no child attached
-}
-
 // Interrupter delivers a single Esc to a conversation's supervised claude — the
 // remote equivalent of a local Esc, claude's own interrupt (#707; widened with an
 // optional conversationID #2103). Since #1121 production wires cmd/pyry's
 // activeInterrupter, not *supervisor.Supervisor directly, which resolves the
 // named (or, if empty, the active) conversation's bound runner; declared in the
-// consumer (beside ScreenSnapshotter) so internal/relay imports neither
+// consumer so internal/relay imports neither
 // internal/supervisor, internal/streamsup, internal/conversations, nor
 // internal/sessions. Named for its relay-domain role even though the method
 // keeps the sealed surface's name. An empty conversationID is not an error — it
@@ -79,7 +72,7 @@ type ModalDismissal struct {
 
 // ModalResolver resolves an inbound modal control frame against the daemon's
 // outstanding-modal state (#727, extended #725). Declared in the consumer
-// (beside ScreenSnapshotter) so internal/relay imports neither
+// so internal/relay imports neither
 // internal/supervisor, internal/modalbridge, internal/audit, nor cmd/pyry; the
 // cmd/pyry resolver satisfies it. *devices.Device crosses the seam (the per-conn
 // s.device) on the cancel/answer arms. Both methods run on the manager's
@@ -113,10 +106,7 @@ type V2SessionConfig struct {
     ServerID   string                                  // required; surfaced into hello_ack
     Logger     *slog.Logger                            // required (panic if nil)
     Handlers   map[string]dispatch.Handler             // optional; open-state envelope-type → handler
-    Snapshotter       ScreenSnapshotter                // optional (#618); nil ⇒ request_snapshot → server.binary_offline
-    KnownConversation func(conversationID string) bool // optional (#618); nil ⇒ request_snapshot → conversation.not_found
-    SnapshotSettings  func() (model, effort string, yolo bool) // optional (#848); nil ⇒ screen_snapshot reports defaults (empty model/effort, yolo:false)
-    SnapshotUsage     func() (usedTokens, windowTokens int) // optional (#857); nil ⇒ screen_snapshot reports used_tokens:0, window_tokens:0
+    KnownConversation func(conversationID string) bool // optional (#618); nil ⇒ request_snapshot → conversation.not_found. Also consulted by handleMCPStatusRequest.
     RunConfigFor      func(conversationID string) (RunConfig, bool) // optional (#1609); nil ⇒ request_session_settings answers the zero reply. Conversation-keyed replacement for BootstrapSessionID/SnapshotSettings/SnapshotUsage (deleted from this struct, #1610) — comma-ok, false means not addressable and every RunConfig field is zero. Consulted by request_session_settings (#1610).
     ModalResolver     ModalResolver                    // optional (#727/#725); nil ⇒ modal_answer/modal_cancel inert no-ops. Deny-on-timeout is not gated by this seam — the permission bridge's own timer (#1103) fires unconditionally.
     OutstandingModals func() []protocol.ModalShownPayload // optional (#877); nil ⇒ no connect-time modal reconcile — byte-identical to pre-#877. Production wires modalbridge.Registry.Snapshot.
@@ -233,4 +223,4 @@ var (
 )
 ```
 
-`NewV2SessionManager` panics on missing `Frames` or `Logger` (programmer errors, same posture as `internal/dispatch.New`); returns a wrapped error on missing `Outbound` / `Devices` / `ServerID` or on wrong-length `StaticPriv` (caller-facing config bugs). `Handlers` is optional — nil or empty means every open-state envelope falls through to a sealed `protocol.unsupported` reply via [`dispatch.Route`](dispatch-package.md). `Snapshotter` and `KnownConversation` (#618), `SnapshotSettings` (#848), and `ModalResolver` (#727) are also **optional and unvalidated** — leaving them nil keeps the existing construction sites compiling unchanged; a nil `KnownConversation` rejects every `request_snapshot` as `conversation.not_found` and a nil `Snapshotter` reports `server.binary_offline`, so the snapshot feature is simply unavailable, never a crash; a nil `SnapshotSettings` leaves the `screen_snapshot` reply's `model`/`effort`/`yolo` fields at their defaults (empty model/effort, `yolo:false`) — never a rejected reply, since the settings read is downstream of the `live` check; a nil `SnapshotUsage` (#857) leaves the reply's `used_tokens`/`window_tokens` fields at `0`/`0`, same posture; a nil `ModalResolver` makes both modal-control frames **and** an armed deny-on-timeout (#725) inert debug-logged no-ops (the modal bridge unwired — the foreground case; the relay wires it live, and #798 wired the outbound producer that arms it); a nil `Interrupter` (#707) makes an inbound `interrupt` inert (no Esc — the foreground/unwired case); a nil `QueueRemover` (#723) makes an inbound `dequeue_message` inert (no `Remove` — foreground/unwired); a nil `Connected` (#874) makes `transportDown()` always `false`, so the push drain never holds — byte-identical to the pre-#874 drop-on-send posture (foreground/unwired/existing tests); a nil `Reconnect` (#875) makes `Run`'s reconnect arm a permanently-not-ready nil-channel read, so the drain wakes only on the pre-#875 Push-driven `drainCh` re-signal — byte-identical foreground/unwired/existing-test posture; a nil `OutstandingModals` (#877) makes `reconcileModals` a no-op on every `handleNoiseInit` success tail — byte-identical to the pre-#877 / foreground / existing-test posture; a nil `OutstandingQueues` (#878) makes `reconcileQueues` the same no-op, byte-identical to the pre-#878 / foreground / existing-test posture; a nil `RetainedModelLists` (#1863) makes `reconcileModelLists` the same no-op — the foreground/v1 and test posture; production wires a non-nil producer as of #1867; a nil `AttachmentResolve` (#2054) makes `request_attachment` inert the same way a nil `AttachmentIntake` makes `attachment_chunk` inert — consumed at the dispatch boundary so it no longer draws `dispatch.Route`'s unknown-type reply, but nothing decoded, resolved or replied. `Run` blocks until `Frames` closes (returns `nil`) or `ctx` is cancelled (returns `ctx.Err()`); every per-conn session is dropped on return.
+`NewV2SessionManager` panics on missing `Frames` or `Logger` (programmer errors, same posture as `internal/dispatch.New`); returns a wrapped error on missing `Outbound` / `Devices` / `ServerID` or on wrong-length `StaticPriv` (caller-facing config bugs). `Handlers` is optional — nil or empty means every open-state envelope falls through to a sealed `protocol.unsupported` reply via [`dispatch.Route`](dispatch-package.md). `KnownConversation` (#618) and `ModalResolver` (#727) are also **optional and unvalidated** — leaving them nil keeps the existing construction sites compiling unchanged; a nil `KnownConversation` rejects every `request_snapshot` as `conversation.not_found`, and a known `conversation_id` answers `server.binary_offline` unconditionally (#2540 deleted the render arm and the `Snapshotter` / `SnapshotSettings` / `SnapshotUsage` fields that used to gate and populate it — see [Inbound `request_snapshot` handler](v2-session-manager-state-machine-inbound-screen-snapshot-handler-handlere.md)); a nil `ModalResolver` makes both modal-control frames **and** an armed deny-on-timeout (#725) inert debug-logged no-ops (the modal bridge unwired — the foreground case; the relay wires it live, and #798 wired the outbound producer that arms it); a nil `Interrupter` (#707) makes an inbound `interrupt` inert (no Esc — the foreground/unwired case); a nil `QueueRemover` (#723) makes an inbound `dequeue_message` inert (no `Remove` — foreground/unwired); a nil `Connected` (#874) makes `transportDown()` always `false`, so the push drain never holds — byte-identical to the pre-#874 drop-on-send posture (foreground/unwired/existing tests); a nil `Reconnect` (#875) makes `Run`'s reconnect arm a permanently-not-ready nil-channel read, so the drain wakes only on the pre-#875 Push-driven `drainCh` re-signal — byte-identical foreground/unwired/existing-test posture; a nil `OutstandingModals` (#877) makes `reconcileModals` a no-op on every `handleNoiseInit` success tail — byte-identical to the pre-#877 / foreground / existing-test posture; a nil `OutstandingQueues` (#878) makes `reconcileQueues` the same no-op, byte-identical to the pre-#878 / foreground / existing-test posture; a nil `RetainedModelLists` (#1863) makes `reconcileModelLists` the same no-op — the foreground/v1 and test posture; production wires a non-nil producer as of #1867; a nil `AttachmentResolve` (#2054) makes `request_attachment` inert the same way a nil `AttachmentIntake` makes `attachment_chunk` inert — consumed at the dispatch boundary so it no longer draws `dispatch.Route`'s unknown-type reply, but nothing decoded, resolved or replied. `Run` blocks until `Frames` closes (returns `nil`) or `ctx` is cancelled (returns `ctx.Err()`); every per-conn session is dropped on return.

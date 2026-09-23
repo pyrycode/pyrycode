@@ -65,15 +65,6 @@ func TestV2Session_InlineReply_TransportDown_BurnsNoNonce(t *testing.T) {
 		triggerFn func(*testing.T) *protocol.Envelope
 	}{
 		{inlineReplyRow: inlineReplyRow{
-			name:  "screen snapshot",
-			event: "v2.snapshot.dropped_transport_down",
-			cfg: func(c *V2SessionConfig) {
-				c.KnownConversation = func(string) bool { return true }
-				c.Snapshotter = fakeSnapshotter{text: "inline-snap-sentinel", live: true}
-			},
-			trigger: snapshotTrigger,
-		}},
-		{inlineReplyRow: inlineReplyRow{
 			name:    "snapshot error",
 			event:   "v2.snapshot.err_dropped_transport_down",
 			trigger: snapshotTrigger, // nil KnownConversation ⇒ not-found error reply
