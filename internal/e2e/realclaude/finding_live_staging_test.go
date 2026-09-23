@@ -203,8 +203,10 @@ func finLiveStageEnvDelta() []string {
 //     unchanged and carried for the same reason: both runners hand claude pyry's
 //     own environment verbatim, so setting it on the parent is the whole plumbing
 //     story.
-//   - PYRY_USE_STREAMJSON=1 — the exact string runAgentRun dispatches
-//     runAgentRunStreamRunner on (cmd/pyry/`runAgentRun`). Named EXPLICITLY
+//   - PYRY_USE_STREAMJSON=1 — the value that selected runAgentRunStreamRunner
+//     before #1348 deleted the terminal path. Production no longer reads the
+//     variable (cmd/pyry/`runAgentRun` calls the stream runner unconditionally),
+//     so to pyry it is inert; the RIG still reads it. Named EXPLICITLY
 //     for exactly the reason its =0 sibling is, and that reason SURVIVES THE FLIP
 //     unchanged: reachRunnerPathFromEnv reads the ambient os.Getenv FIRST
 //     (`reachRunnerPathFromEnv`) and only then lets the delta override
@@ -221,27 +223,24 @@ func finLiveStageEnvDelta() []string {
 // A FUNC, not a var, for the reason the sibling's doc gives above: a package-level
 // []string is mutable by every test in the package.
 //
-// # Choosing this delta chooses a permission posture
+// # Choosing this delta does NOT choose a permission posture
 //
-// Recorded HERE because here is where the choice is made; finLiveRunStage carries
-// the same paragraph for the reader who arrives from the driver's side.
-// runAgentRunStreamRunner is the stream path's sole production caller and passes
-// yolo=true (`runAgentRunStreamRunner`), which emits
-// --dangerously-skip-permissions (`permissionArgs`). The ptyrunner default
-// instead trust-marks the workdir and writes a per-spawn deny-default settings
-// JSON (`runAgentRunPty`). A caller passing THIS delta stages its live turn
-// under the first posture.
+// Recorded HERE because here is where a reader expects the choice to be made;
+// finLiveRunStage carries the same paragraph for the reader who arrives from the
+// driver's side. The two deltas once chose between two postures. Since the
+// terminal path was deleted (#1348), `pyry agent-run` has ONE, under either delta:
+// runAgentRunStreamRunner writes a per-spawn deny-default settings file from
+// --allowed-tools and passes it as --settings, and it passes yolo=true to
+// `buildStreamRunnerClaudeArgs`, which leaves the permission slot to
+// `streamrunner.BuildClaudeArgs`'s default --permission-mode dontAsk. The
+// settings file is the ONLY enforcement. --allowed-tools on the command line is
+// not the tool gate, a claim the repo once made and retracted (#1387);
+// `streamrunner.BuildClaudeArgs`'s doc records why, and
+// TestBuildStreamRunnerClaudeArgs_Shape pins the dontAsk argv. This rig passes
+// --allowed-tools=Bash (spawnProbePyry), and that bounds the tool surface
+// THROUGH THE SETTINGS FILE, not through the flag.
 //
-// On the tool surface the repo's own recorded position is relayed rather than a
-// fresh claim asserted: `buildStreamRunnerClaudeArgs` records --allowed-tools as the
-// authoritative tool gate under YOLO, with the blast radius bounded by it rather
-// than by the trust dialog — and this rig passes --allowed-tools=Bash
-// (spawnProbePyry). So the flip changes the
-// gate's MECHANISM; on the repo's position it does not change its WIDTH. That is
-// not a claim of equivalence, and it is not a claim that the stream path is
-// ungated.
-//
-// NEITHER POSTURE IS EXERCISED BY ANYTHING SHIPPED HERE. This file stages no turn
+// THE POSTURE IS NOT EXERCISED BY ANYTHING SHIPPED HERE. This file stages no turn
 // and #1349 has no live caller; #1353 owns the first live spawn under this delta.
 func finLiveStageStreamEnvDelta() []string {
 	return []string{"BASH_DEFAULT_TIMEOUT_MS=5000", "PYRY_USE_STREAMJSON=1"}
