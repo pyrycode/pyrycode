@@ -208,48 +208,12 @@ const pushQueueCap = 256
 // is to cap the .cast member in debugbundle.Assemble, not to raise this.
 const pushQueueByteCeiling = 32 << 20 // 32 MiB
 
-// modalDenyTimeout is the bounded window between a surfaced modal and the
-// fail-closed safe-deny: if no modal_answer / modal_cancel resolves it first,
-// the daemon denies it (ESC) so a permission claude is waiting on can never
-// linger or be silently granted. ADR 025 § Security model specifies "a bounded
-// window" but no number; 2 minutes balances "long enough for a human to react to
-// a push notification and tap" against "short enough not to leave claude
-// blocked." Test-overridable (lowercase, save/restore in tests); not part of the
-// public API and not yet config-driven (a deferred #708 concern).
-var modalDenyTimeout = 2 * time.Minute
-
 // ModalDismissal is the wire outcome+source the manager broadcasts after a
 // resolver consumes an outstanding modal. The manager already holds modal_id
 // (from the inbound control payload), so it is not repeated here.
 type ModalDismissal struct {
 	Outcome string // e.g. "cancelled" (cancel); #717 uses the answered option_id
 	Source  string // closed set {remote, local, timeout}; cancel ⇒ "remote"
-}
-
-// ArmModalTimeout arms the daemon-side deny-on-timeout for a surfaced modal
-// (#725). The surfacer calls it (off the Run goroutine) immediately after
-// reg.Record; the time.AfterFunc callback runs on a fresh runtime goroutine and
-// funnels modalID onto m.modalTimeout so the Run goroutine fires the safe-deny
-// under the single-owner invariant (mirrors armRekeyTimer's callback shape). ctx
-// is the surfacer's ctx (the daemon ctx in production, since cmd/pyry runs the
-// surfacer and Run under the same ctx); its Done arm releases a fired-but-
-// undelivered callback on shutdown, so no goroutine outlives Run.
-//
-// The *time.Timer is deliberately discarded — never stored, never Stopped. The
-// registry's one-shot Resolve is the idempotency gate: a timer that fires after
-// an answer/cancel already consumed the modal simply runs handleModalTimeout →
-// ResolveTimeout → Resolve-miss → no-op. Tracking timers to Stop them on resolve
-// would need a map[modalID]*time.Timer mutated by both the surfacer (arm) and Run
-// (cancel) — new cross-goroutine state and a new lock — for zero correctness gain
-// (see § Concurrency in the spec). An un-fired AfterFunc holds only a heap entry,
-// not a parked goroutine, so leaving it un-Stopped leaks nothing.
-func (m *V2SessionManager) ArmModalTimeout(ctx context.Context, modalID string) {
-	time.AfterFunc(modalDenyTimeout, func() {
-		select {
-		case m.modalTimeout <- modalID:
-		case <-ctx.Done():
-		}
-	})
 }
 
 // handleModalCancel resolves an inbound modal_cancel control frame: it consumes
@@ -309,28 +273,6 @@ func (m *V2SessionManager) handleModalAnswer(ctx context.Context, s *V2Session, 
 		return // deferred no-op in this slice (AC #3); #717 fills the gated arm
 	}
 	m.broadcastModalDismissed(ctx, payload.ModalID, d)
-}
-
-// handleModalTimeout fires the fail-closed safe-deny for a modal whose
-// deny-on-timeout window elapsed with no answer/cancel (#725). Funneled onto the
-// Run goroutine via m.modalTimeout, so it shares the single-owner serialisation
-// with handleModalCancel / handleModalAnswer: the answer-vs-timeout race cannot
-// double-act — whichever the Run select services first consumes the modal via the
-// registry's one-shot Resolve; the loser's ResolveTimeout reports ok=false. A nil
-// ModalResolver (foreground / pre-#708) makes it inert (mirrors handleModalCancel's
-// nil guard). An already-resolved id ⇒ ok=false ⇒ no keystroke, no audit, no
-// broadcast (the AC-2 loser path); only a fresh consume broadcasts.
-func (m *V2SessionManager) handleModalTimeout(ctx context.Context, modalID string) {
-	if m.cfg.ModalResolver == nil {
-		m.cfg.Logger.Debug("relay: v2 modal timeout inert; no resolver wired",
-			"event", "v2.modal.timeout.inert")
-		return
-	}
-	d, ok := m.cfg.ModalResolver.ResolveTimeout(modalID)
-	if !ok {
-		return // already answered/cancelled: no keystroke, no audit, no broadcast (AC-2)
-	}
-	m.broadcastModalDismissed(ctx, modalID, d)
 }
 
 // broadcastModalDismissed fans a modal_dismissed envelope to every
@@ -404,8 +346,7 @@ func (m *V2SessionManager) broadcastModalDismissed(ctx context.Context, modalID 
 // parking for as long as that phone stays connected instead of denying at the
 // window. Reconciling is what turns the counted answerer into a real one. The
 // window meant here is cmd/pyry's mcpApprovalTimeout, the window permbridge parks
-// the approval for, NOT this file's modalDenyTimeout (nothing in production arms
-// that one).
+// the approval for; permbridge's timer is the only deny-on-timeout there is.
 //
 // Structural sibling of broadcastModalDismissed, minus the fan-out: it addresses
 // exactly s.connID rather than every open interactive conn, and sources the

@@ -314,17 +314,6 @@ type ModalResolver interface {
 	// is only a request to use daemon-retained rules; implementations must still
 	// authorize the device, classify an allow option, and consume the modal once.
 	ResolveAnswerWithAlwaysAllow(modalID, optionID, answerToken string, alwaysAllow bool, dev *devices.Device) (ModalDismissal, bool)
-
-	// ResolveTimeout safe-denies an unanswered modal whose deny-on-timeout
-	// window elapsed (#725): it consumes modalID (registry Resolve), routes the
-	// fail-closed deny keystroke (ESC), audits outcome=denied_timeout /
-	// source=timeout with an empty device (a timeout has no answering device),
-	// and returns the dismissal to broadcast with ok=true. An unknown or
-	// already-resolved id (an answer/cancel won the race) ⇒ (zero, false): no
-	// keystroke, no audit, no broadcast — the AC-2 loser path. Takes no device
-	// (unlike ResolveCancel/ResolveAnswer): the safe-deny is unconditional, so
-	// there is nothing to gate.
-	ResolveTimeout(modalID string) (ModalDismissal, bool)
 }
 
 // QuestionResolver resolves an inbound question-control frame — a question_answer
