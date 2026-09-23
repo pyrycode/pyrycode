@@ -2136,10 +2136,9 @@ func TestInteractiveTurnEmitterV2_OrdinaryTurnEmitsNoThinkingProgressFrames(t *t
 
 // eventKind's thinking-progress arm is live code and content-free. The arm is
 // NOT for this emitter's default (the handler case above claims the variant
-// first) but for eventKind's other call sites — acp_turn_stream.go,
-// stream_turn_busy.go, stream_turn_drain.go — where the ACP surface drops the
-// variant via acpbridge's own default and logs the kind. Without the arm those
-// logs read kind=unknown for a variant the daemon does recognize. The
+// first) but for eventKind's other call sites — stream_turn_busy.go and
+// stream_turn_drain.go — which drop the variant and log the kind. Without the
+// arm those logs read kind=unknown for a variant the daemon does recognize. The
 // empty-cursor drop is the reachable eventKind call site on this lane.
 func TestInteractiveTurnEmitterV2_ThinkingProgressEventKindNamesTheVariant(t *testing.T) {
 	t.Parallel()
@@ -2393,9 +2392,9 @@ func TestInteractiveTurnEmitterV2_RateLimitedMidTurnDoesNotDisturbOpenTurn(t *te
 
 // AC#3: eventKind's rate-limited arm is live code and content-free. The arm
 // (#1404) shipped untested; this is the test. It exists for eventKind's OTHER
-// call sites — acp_turn_stream.go, stream_turn_busy.go, stream_turn_drain.go —
-// where the variant is dropped and the kind logged; without the arm those logs
-// read kind=unknown for a variant the daemon does recognize. The empty-cursor
+// call sites — stream_turn_busy.go and stream_turn_drain.go — where the
+// variant is dropped and the kind logged; without the arm those logs read
+// kind=unknown for a variant the daemon does recognize. The empty-cursor
 // drop is the reachable eventKind call site on this lane.
 //
 // The negative is the half that discriminates. Status is precisely the field a
@@ -2485,8 +2484,8 @@ const modelAnnouncedFixture = "ZZMODELSENTINELZZ"
 // The arm exists for eventKind's call sites rather than for this lane's Handle
 // case: the variant now HAS a Handle arm (#1638), and this test reaches eventKind
 // only because its cursor is empty, so Handle returns at the no-cursor guard
-// before the type switch. acp_turn_stream.go, stream_turn_busy.go and
-// stream_turn_drain.go log the kind too. Without the arm every one of them reads
+// before the type switch. stream_turn_busy.go and stream_turn_drain.go log the
+// kind too. Without the arm every one of them reads
 // kind=unknown for a variant the daemon does recognize. The empty-cursor drop is
 // the reachable eventKind call site on this lane — more precisely so since #1638,
 // because with a LIVE cursor the event is claimed by the Handle arm and reaches no
@@ -2872,7 +2871,7 @@ const (
 // cursor it reaches eventKind through emitMapped's unmapped drop instead, and this
 // test's assertion would then be about a different call site. Both are reachable
 // today and both would read kind=unknown without the arm — as would
-// acp_turn_stream.go, stream_turn_busy.go and stream_turn_drain.go.
+// stream_turn_busy.go and stream_turn_drain.go.
 func TestInteractiveTurnEmitterV2_SessionFactsEventKindNamesTheVariant(t *testing.T) {
 	t.Parallel()
 
@@ -3398,8 +3397,8 @@ func TestInteractiveTurnEmitterV2_ModelListMidTurnDoesNotDisturbOpenTurn(t *test
 // model_announced test above: with a LIVE cursor the Handle arm claims the event
 // and it reaches no eventKind call site at all, so the no-cursor drop is what keeps
 // this assertion reachable on this lane. The arm exists for the OTHER call sites
-// too — acp_turn_stream.go, stream_turn_busy.go, stream_turn_drain.go — which would
-// otherwise read kind=unknown for a variant the daemon does recognize.
+// too — stream_turn_busy.go and stream_turn_drain.go — which would otherwise
+// read kind=unknown for a variant the daemon does recognize.
 //
 // The negatives are the half that discriminates, and this variant multiplies the
 // temptation rather than merely repeating it: every entry carries a Value, a
