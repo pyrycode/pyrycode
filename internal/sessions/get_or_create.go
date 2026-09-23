@@ -18,8 +18,7 @@ var ErrInvalidSessionID = errors.New("sessions: invalid session id")
 // id and malformed strings return ErrInvalidSessionID.
 //
 // The "exists" path is a constant-time map lookup that returns without
-// activating the session. Subsequent Activate is the caller's responsibility
-// (handleAttach already does this).
+// activating the session. Subsequent Activate is the caller's responsibility.
 //
 // The "create" path is byte-equivalent to Pool.Create except the caller's id
 // is used in place of NewID's output, and the register+persist+supervise
@@ -66,8 +65,8 @@ func (p *Pool) GetOrCreateIn(ctx context.Context, id SessionID, label, spawnDir 
 	if err != nil {
 		return "", err
 	}
-	// The take path returns WITHOUT activating — the caller owns that step
-	// (handleAttach already does it). Only the register path activates.
+	// The take path returns WITHOUT activating — the caller owns that step.
+	// Only the register path activates.
 	if took {
 		return id, nil
 	}

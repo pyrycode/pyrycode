@@ -9,12 +9,6 @@ import (
 	"time"
 )
 
-// ErrAttachUnavailable is returned by Session.Attach when the session has no
-// bridge (foreground mode). The control plane maps this back to the existing
-// "daemon may be in foreground mode" wire string for byte-identical client
-// output.
-var ErrAttachUnavailable = errors.New("sessions: attach unavailable (no bridge)")
-
 // lifecycleState is the per-session two-state machine introduced in 1.2c-A:
 // active (claude is, or should be, running) and evicted (no claude process;
 // JSONL on disk is frozen and can be reattached on demand).
