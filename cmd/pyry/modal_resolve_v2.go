@@ -102,8 +102,8 @@ func newModalResolverV2(reg *modalbridge.Registry, logger *slog.Logger) *modalRe
 // parked-for-ten-minutes state this arm removes. And no per-device privilege is
 // checked, as it never has been on this path: a cancel was a deny to claude on
 // the deleted terminal path too (its escape key), so the stream path was brought
-// level with it rather than granted anything new. reasonRemoteDeny is a compile-time constant,
-// so nothing a client or the host authored reaches claude.
+// level with it rather than granted anything new. reasonRemoteDeny is a
+// compile-time constant, so nothing a client or the host authored reaches claude.
 func (r *modalResolverV2) ResolveCancel(modalID string, dev *devices.Device) (relay.ModalDismissal, bool) {
 	out, ok := r.reg.Resolve(modalID)
 	if !ok {

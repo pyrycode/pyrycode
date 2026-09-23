@@ -181,8 +181,9 @@ func TestModalResolverV2_Cancel_AlreadyResolved(t *testing.T) {
 }
 
 // TestModalResolverV2_Answer_Authorized drives the authorized allow and deny
-// answer paths from a gated device and asserts each consumes the modal, audits the right outcome with the
-// non-secret identity fields, and returns a {option_id, remote} dismissal. AC-1.
+// answer paths from a gated device and asserts each consumes the modal, audits
+// the right outcome with the non-secret identity fields, and returns a
+// {option_id, remote} dismissal. AC-1.
 func TestModalResolverV2_Answer_Authorized(t *testing.T) {
 	t.Parallel()
 
