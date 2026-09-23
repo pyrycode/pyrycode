@@ -415,7 +415,7 @@ func TestStdioPermissionHandler_InteractionRequiredRefusesRemoteAnswers(t *testi
 				t.Fatal("interaction-required permission was not surfaced")
 			}
 			shown := lastModalShown(t, bcast.pushes)
-			resolver := newModalResolverV2(modal, &fakeKeystroker{}, discardLogger())
+			resolver := newModalResolverV2(modal, discardLogger())
 			resolver.streamApprovals = bridge
 
 			if dismissal, ok := resolver.ResolveAnswer(shown.ModalID, tc.optionID, "answer-token", eligibleDevice(t)); ok {

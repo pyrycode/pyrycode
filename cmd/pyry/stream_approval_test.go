@@ -265,7 +265,7 @@ func TestStreamApprovalBridge_ResolveStream_Deny(t *testing.T) {
 }
 
 // TestStreamApprovalBridge_ResolveStream_UnknownModalID proves an unknown modalID
-// is not a stream approval: handled=false (caller routes the keystroke arm) and no
+// is not a stream approval: handled=false (the caller Warn-logs the miss) and no
 // permbridge completer is mutated.
 func TestStreamApprovalBridge_ResolveStream_UnknownModalID(t *testing.T) {
 	t.Parallel()
@@ -381,7 +381,7 @@ func TestStreamApprovalBridge_InteractionRequiredRefusalSurvivesConcurrentRetire
 	}()
 	<-blocked.entered
 
-	resolver := newModalResolverV2(modalReg, &fakeKeystroker{}, discardLogger())
+	resolver := newModalResolverV2(modalReg, discardLogger())
 	resolver.streamApprovals = bridge
 	if dismissal, ok := resolver.ResolveAnswer(modalID, string(turnevent.PermissionOptionKindAllowOnce), "token", eligibleDevice(t)); ok {
 		t.Errorf("concurrent answer accepted during timeout retirement: %+v", dismissal)
@@ -400,7 +400,7 @@ func TestStreamApprovalBridge_InteractionRequiredRefusalSurvivesConcurrentRetire
 
 // TestModalResolverV2_Answer_StreamAllow proves the ResolveAnswer stream arm: an
 // eligible allow answer resolves the parked completer (Allow echoing the input),
-// routes NO keystroke, audits allowed, and — with the modalbridge consumed by
+// audits allowed, and — with the modalbridge consumed by
 // ResolveAnswer — leaves retire a no-op that adds no dismissal and leaks nothing.
 func TestModalResolverV2_Answer_StreamAllow(t *testing.T) {
 	t.Parallel()
@@ -415,9 +415,8 @@ func TestModalResolverV2_Answer_StreamAllow(t *testing.T) {
 	retire := bridge.Surface(req)
 	modalID := lastModalShown(t, bcast.pushes).ModalID
 
-	kb := &fakeKeystroker{}
 	logger, logBuf := auditLogger()
-	r := newModalResolverV2(modalReg, kb, logger)
+	r := newModalResolverV2(modalReg, logger)
 	r.streamApprovals = bridge
 
 	allowOpt := string(turnevent.PermissionOptionKindAllowOnce)
@@ -427,9 +426,6 @@ func TestModalResolverV2_Answer_StreamAllow(t *testing.T) {
 	}
 	if d.Outcome != allowOpt || d.Source != string(audit.SourceRemote) {
 		t.Errorf("dismissal = %+v, want {%s remote}", d, allowOpt)
-	}
-	if !kb.routedNothing() {
-		t.Errorf("keystroke routed on a stream answer: esc=%d answers=%v", kb.escCalls, kb.answerCalls)
 	}
 
 	v := pending.Await()
@@ -453,7 +449,7 @@ func TestModalResolverV2_Answer_StreamAllow(t *testing.T) {
 
 // TestModalResolverV2_Answer_StreamDeny proves the stream arm's deny path: an
 // eligible reject answer resolves the completer to Deny with the fixed reason,
-// routes no keystroke, and audits denied.
+// and audits denied.
 func TestModalResolverV2_Answer_StreamDeny(t *testing.T) {
 	t.Parallel()
 
@@ -466,17 +462,13 @@ func TestModalResolverV2_Answer_StreamDeny(t *testing.T) {
 	bridge.Surface(req)
 	modalID := lastModalShown(t, bcast.pushes).ModalID
 
-	kb := &fakeKeystroker{}
 	logger, logBuf := auditLogger()
-	r := newModalResolverV2(modalReg, kb, logger)
+	r := newModalResolverV2(modalReg, logger)
 	r.streamApprovals = bridge
 
 	rejectOpt := string(turnevent.PermissionOptionKindRejectOnce)
 	if _, ok := r.ResolveAnswer(modalID, rejectOpt, "tok", eligibleDevice(t)); !ok {
 		t.Fatal("ResolveAnswer ok = false, want true")
-	}
-	if !kb.routedNothing() {
-		t.Errorf("keystroke routed on a stream deny: esc=%d answers=%v", kb.escCalls, kb.answerCalls)
 	}
 
 	v := pending.Await()
@@ -488,38 +480,104 @@ func TestModalResolverV2_Answer_StreamDeny(t *testing.T) {
 	}
 }
 
-// TestModalResolverV2_Answer_NonStreamRoutesKeystroke proves the tui path is
-// preserved when a stream bridge is wired but the answered modal is NOT a stream
-// approval (absent from byModal): ResolveStream reports false, so the safe-answer
-// keystroke routes exactly as before #1080.
-func TestModalResolverV2_Answer_NonStreamRoutesKeystroke(t *testing.T) {
+// logEvents parses every JSON log line in buf and returns those whose event
+// field is event.
+func logEvents(t *testing.T, buf *bytes.Buffer, event string) []map[string]any {
+	t.Helper()
+	var recs []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("parse log line %q: %v", line, err)
+		}
+		if m["event"] == event {
+			recs = append(recs, m)
+		}
+	}
+	return recs
+}
+
+// assertOneUnroutedWarn asserts buf holds exactly one Warn with event carrying
+// modalID and nothing of the modal's content, in that record or anywhere else.
+func assertOneUnroutedWarn(t *testing.T, buf *bytes.Buffer, event, modalID string) {
+	t.Helper()
+	recs := logEvents(t, buf, event)
+	if len(recs) != 1 {
+		t.Fatalf("%s records = %d, want exactly 1; log:\n%s", event, len(recs), buf.String())
+	}
+	if recs[0]["level"] != "WARN" {
+		t.Errorf("%s level = %v, want WARN", event, recs[0]["level"])
+	}
+	if recs[0]["modal_id"] != modalID {
+		t.Errorf("%s modal_id = %v, want %q", event, recs[0]["modal_id"], modalID)
+	}
+	out := buf.String()
+	if strings.Contains(out, secretModalBody) || strings.Contains(out, "Permission required") {
+		t.Errorf("modal body or title leaked into the log:\n%s", out)
+	}
+}
+
+// unroutedArms are the two ways a resolution reaches handled == false: no
+// stream bridge wired at all, or a wired bridge whose ResolveStream declines a
+// modal it never correlated (recorded directly, NOT via Surface).
+func unroutedArms() []struct {
+	name string
+	wire func(r *modalResolverV2, modalReg *modalbridge.Registry)
+} {
+	return []struct {
+		name string
+		wire func(r *modalResolverV2, modalReg *modalbridge.Registry)
+	}{
+		{"nil stream approvals", func(*modalResolverV2, *modalbridge.Registry) {}},
+		{"stream bridge declines", func(r *modalResolverV2, modalReg *modalbridge.Registry) {
+			bcast := oneInteractiveConn("c1")
+			r.streamApprovals = newStreamApprovalBridge(permbridge.New(), modalReg, bcast, func() string { return "" }, context.Background(), discardLogger())
+		}},
+	}
+}
+
+// TestModalResolverV2_Answer_UnroutedWarns proves the handled == false branch
+// of an answer is observable and nothing more (#1546): with nothing left to
+// actuate, it emits one content-free Warn, while the consume, the audit record and
+// the returned dismissal are exactly those of a handled answer.
+func TestModalResolverV2_Answer_UnroutedWarns(t *testing.T) {
 	t.Parallel()
 
-	perm := permbridge.New()
-	modalReg := modalbridge.New()
-	bcast := oneInteractiveConn("c1")
-	bridge := newStreamApprovalBridge(perm, modalReg, bcast, func() string { return "" }, context.Background(), discardLogger())
+	for _, arm := range unroutedArms() {
+		t.Run(arm.name, func(t *testing.T) {
+			t.Parallel()
 
-	// A modal recorded directly (interactive PTY path), NOT via Surface.
-	modalID := recordPermissionModal(t, modalReg, secretModalBody)
+			modalReg := modalbridge.New()
+			modalID := recordPermissionModal(t, modalReg, secretModalBody)
+			logger, logBuf := auditLogger()
+			r := newModalResolverV2(modalReg, logger)
+			arm.wire(r, modalReg)
 
-	kb := &fakeKeystroker{}
-	r := newModalResolverV2(modalReg, kb, discardLogger())
-	r.streamApprovals = bridge
-
-	allowOpt := string(turnevent.PermissionOptionKindAllowOnce)
-	if _, ok := r.ResolveAnswer(modalID, allowOpt, "", eligibleDevice(t)); !ok {
-		t.Fatal("ResolveAnswer ok = false, want true")
-	}
-	// allow-once is index 0 → 1-based keystroke "1".
-	if len(kb.answerCalls) != 1 || kb.answerCalls[0] != "1" {
-		t.Errorf("answerCalls = %v, want [\"1\"] (keystroke routed)", kb.answerCalls)
+			allowOpt := string(turnevent.PermissionOptionKindAllowOnce)
+			d, ok := r.ResolveAnswer(modalID, allowOpt, "tok-1", eligibleDevice(t))
+			if !ok {
+				t.Fatal("ResolveAnswer ok = false, want true")
+			}
+			if d.Outcome != allowOpt || d.Source != string(audit.SourceRemote) {
+				t.Errorf("dismissal = %+v, want {%s remote}", d, allowOpt)
+			}
+			if _, stillThere := modalReg.Lookup(modalID); stillThere {
+				t.Error("modal still outstanding after an unrouted answer; it must be consumed")
+			}
+			if recs := auditRecords(t, logBuf); len(recs) != 1 || recs[0]["outcome"] != "allowed" {
+				t.Errorf("audit = %v, want one allowed record", recs)
+			}
+			assertOneUnroutedWarn(t, logBuf, "modal_answer.unrouted", modalID)
+		})
 	}
 }
 
 // TestModalResolverV2_Answer_StreamGateDeniesBeforePermbridge proves the
 // load-bearing security ordering: an ineligible (ungated or nil) device is denied
-// BEFORE any permbridge contact — no completer mutation, no keystroke, the modal
+// BEFORE any permbridge contact — no completer mutation, the modal
 // left outstanding for a legitimate local answer / deny-on-timeout, and the
 // correlation untouched. Audited denied_unauthorized.
 func TestModalResolverV2_Answer_StreamGateDeniesBeforePermbridge(t *testing.T) {
@@ -546,9 +604,8 @@ func TestModalResolverV2_Answer_StreamGateDeniesBeforePermbridge(t *testing.T) {
 			bridge.Surface(req)
 			modalID := lastModalShown(t, bcast.pushes).ModalID
 
-			kb := &fakeKeystroker{}
 			logger, logBuf := auditLogger()
-			r := newModalResolverV2(modalReg, kb, logger)
+			r := newModalResolverV2(modalReg, logger)
 			r.streamApprovals = bridge
 
 			allowOpt := string(turnevent.PermissionOptionKindAllowOnce)
@@ -558,9 +615,6 @@ func TestModalResolverV2_Answer_StreamGateDeniesBeforePermbridge(t *testing.T) {
 			}
 			if d != (relay.ModalDismissal{}) {
 				t.Errorf("dismissal = %+v, want zero", d)
-			}
-			if !kb.routedNothing() {
-				t.Error("keystroke routed for an ineligible device")
 			}
 			if _, stillParked := perm.Lookup("tu-1"); !stillParked {
 				t.Error("permbridge completer resolved by an ineligible answer (gate must precede permbridge)")
@@ -608,8 +662,7 @@ func TestStreamApproval_NoBodyLeakInLogs(t *testing.T) {
 	retire := bridge.Surface(req)
 	modalID := lastModalShown(t, bcast.pushes).ModalID
 
-	kb := &fakeKeystroker{}
-	r := newModalResolverV2(modalReg, kb, logger)
+	r := newModalResolverV2(modalReg, logger)
 	r.streamApprovals = bridge
 	if _, ok := r.ResolveAnswer(modalID, string(turnevent.PermissionOptionKindRejectOnce), "", eligibleDevice(t)); !ok {
 		t.Fatal("ResolveAnswer ok = false, want true")
@@ -694,8 +747,7 @@ func TestStreamApproval_RoundTrip(t *testing.T) {
 			}
 
 			// ANSWER → verdict
-			kb := &fakeKeystroker{}
-			r := newModalResolverV2(modalReg, kb, discardLogger())
+			r := newModalResolverV2(modalReg, discardLogger())
 			r.streamApprovals = bridge
 			d, ok := r.ResolveAnswerWithAlwaysAllow(shown.ModalID, tc.optionID, "tok", tc.alwaysAllow, eligibleDevice(t))
 			if !ok {
@@ -703,9 +755,6 @@ func TestStreamApproval_RoundTrip(t *testing.T) {
 			}
 			if d.Outcome != tc.optionID {
 				t.Errorf("dismissal outcome = %q, want the answered option %q", d.Outcome, tc.optionID)
-			}
-			if !kb.routedNothing() {
-				t.Error("keystroke routed on a stream round-trip answer")
 			}
 
 			v := pending.Await()
@@ -2281,7 +2330,7 @@ func TestStreamApproval_NoQuestionBodyLeakOnAnswer(t *testing.T) {
 
 // TestModalResolverV2_Cancel_StreamDeny proves the ResolveCancel stream arm
 // (#2416): cancelling a stream-json permission resolves claude's parked completer
-// to deny with the fixed reason IMMEDIATELY, routes no keystroke, and leaves the
+// to deny with the fixed reason IMMEDIATELY, and leaves the
 // cancelled audit outcome and the {cancelled, remote} dismissal exactly as they
 // were. Before this arm existed the completer stayed parked until permbridge's own
 // timer fired — mcpApprovalTimeout, ten minutes in production — so the select
@@ -2299,9 +2348,8 @@ func TestModalResolverV2_Cancel_StreamDeny(t *testing.T) {
 	retire := bridge.Surface(req)
 	modalID := lastModalShown(t, bcast.pushes).ModalID
 
-	kb := &fakeKeystroker{}
 	logger, logBuf := auditLogger()
-	r := newModalResolverV2(modalReg, kb, logger)
+	r := newModalResolverV2(modalReg, logger)
 	r.streamApprovals = bridge
 
 	dev := testDevice(t)
@@ -2311,9 +2359,6 @@ func TestModalResolverV2_Cancel_StreamDeny(t *testing.T) {
 	}
 	if d.Outcome != string(audit.OutcomeCancelled) || d.Source != string(audit.SourceRemote) {
 		t.Errorf("dismissal = %+v, want {cancelled remote}", d)
-	}
-	if !kb.routedNothing() {
-		t.Errorf("keystroke routed on a stream cancel: esc=%d answers=%v", kb.escCalls, kb.answerCalls)
 	}
 
 	verdicts := make(chan permbridge.Verdict, 1)
@@ -2342,30 +2387,37 @@ func TestModalResolverV2_Cancel_StreamDeny(t *testing.T) {
 	}
 }
 
-// TestModalResolverV2_Cancel_NonStreamRoutesEsc is the terminal-path half of
-// #2416 AC-1: with a stream bridge wired but the cancelled modal absent from its
-// correlation map (a PTY-path modal, recorded by the emitter rather than by
-// Surface), ResolveStream reports false and the fail-safe ESC routes exactly as it
-// did before the stream arm existed.
-func TestModalResolverV2_Cancel_NonStreamRoutesEsc(t *testing.T) {
+// TestModalResolverV2_Cancel_UnroutedWarns is the cancel half of
+// TestModalResolverV2_Answer_UnroutedWarns (#1546): a cancel that no stream
+// approval handles emits one content-free Warn, and still consumes the modal,
+// audits {cancelled, remote} and returns the {cancelled, remote} dismissal.
+func TestModalResolverV2_Cancel_UnroutedWarns(t *testing.T) {
 	t.Parallel()
 
-	perm := permbridge.New()
-	modalReg := modalbridge.New()
-	bcast := oneInteractiveConn("c1")
-	bridge := newStreamApprovalBridge(perm, modalReg, bcast, func() string { return "" }, context.Background(), discardLogger())
+	for _, arm := range unroutedArms() {
+		t.Run(arm.name, func(t *testing.T) {
+			t.Parallel()
 
-	// A modal recorded directly (interactive PTY path), NOT via Surface.
-	modalID := recordPermissionModal(t, modalReg, secretModalBody)
+			modalReg := modalbridge.New()
+			modalID := recordPermissionModal(t, modalReg, secretModalBody)
+			logger, logBuf := auditLogger()
+			r := newModalResolverV2(modalReg, logger)
+			arm.wire(r, modalReg)
 
-	kb := &fakeKeystroker{}
-	r := newModalResolverV2(modalReg, kb, discardLogger())
-	r.streamApprovals = bridge
-
-	if _, ok := r.ResolveCancel(modalID, testDevice(t)); !ok {
-		t.Fatal("ResolveCancel ok = false, want true")
-	}
-	if kb.escCalls != 1 {
-		t.Errorf("SendEsc calls = %d, want 1 (the terminal-path actuation must be unchanged)", kb.escCalls)
+			d, ok := r.ResolveCancel(modalID, testDevice(t))
+			if !ok {
+				t.Fatal("ResolveCancel ok = false, want true")
+			}
+			if d.Outcome != string(audit.OutcomeCancelled) || d.Source != string(audit.SourceRemote) {
+				t.Errorf("dismissal = %+v, want {cancelled remote}", d)
+			}
+			if _, stillThere := modalReg.Lookup(modalID); stillThere {
+				t.Error("modal still outstanding after an unrouted cancel; it must be consumed")
+			}
+			if recs := auditRecords(t, logBuf); len(recs) != 1 || recs[0]["outcome"] != "cancelled" {
+				t.Errorf("audit = %v, want one cancelled record", recs)
+			}
+			assertOneUnroutedWarn(t, logBuf, "modal_cancel.unrouted", modalID)
+		})
 	}
 }

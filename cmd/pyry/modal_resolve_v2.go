@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"slices"
-	"strconv"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -21,62 +20,37 @@ import (
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 )
 
-// modalKeystroker routes one abstract modal-resolution keystroke to the live
-// claude session. *supervisor.Supervisor satisfies both (#726), so the
-// existing production wiring keeps compiling. Cancel needs only SendEsc; the
-// gated answer arm adds Answer (permission options).
-type modalKeystroker interface {
-	SendEsc() error
-	Answer(choice string) error
-}
-
-// noopKeystroker is the stream-json bootstrap's modal keystroker: there is no PTY
-// to dismiss a modal on, so every actuation is a tolerated no-op. In stream mode a
-// permission approval is a permbridge-parked completer resolved through the verdict
-// arm (streamApprovalBridge.ResolveStream, #1080), not an on-screen PTY modal; its
-// fail-closed deny is the permbridge completer's own deny-on-timeout (#1103). This
-// type routes NO keystroke and NEVER touches the permbridge, so it cannot resolve
-// an approval to allow. It is modalKeystroker's second implementer, alongside
-// *supervisor.Supervisor (#726). #1131.
-type noopKeystroker struct{}
-
-func (noopKeystroker) SendEsc() error      { return nil }
-func (noopKeystroker) Answer(string) error { return nil }
-
 // modalResolverV2 is the cmd/pyry implementation of relay.ModalResolver: it
-// consumes an outstanding modal from the daemon-singleton registry, routes the
-// resolving keystroke through the supervisor safe-answer seam, and writes the
+// consumes an outstanding modal from the daemon-singleton registry, actuates the
+// resolution as a verdict on claude's parked stream-json approval, and writes the
 // forensic audit record. It is the composition-root binding that lets
-// internal/relay stay free of internal/{supervisor,modalbridge,audit} imports.
+// internal/relay stay free of internal/{modalbridge,permbridge,audit} imports.
 //
 // Both methods run on the v2 manager's single Run dispatch goroutine (the relay
 // calls them from dispatchAppFrame). The registry's own mutex is the only
-// synchronisation; the supervisor seam and audit sink are themselves safe to
-// call from any goroutine.
+// synchronisation; the stream-approval bridge and audit sink are themselves safe
+// to call from any goroutine.
 //
 // SECURITY: no modal body/prompt/title and no payload bytes are ever logged; the
 // audit entry carries only non-secret identity (device hash/label) + the opaque
 // modal_id + outcome/source.
 type modalResolverV2 struct {
 	reg    *modalbridge.Registry
-	kb     modalKeystroker
 	logger *slog.Logger
 
 	// streamApprovals resolves a stream-json permission approval (a
-	// permbridge-parked completer, #1103) by modalID: the parallel VERDICT arm to
-	// the keystroke arm below. ResolveAnswer dispatches to it when the answered
-	// modalID is a stream approval, otherwise routes the tui keystroke. nil ⇒ no
-	// stream approvals wired (foreground / v1 / pre-#1080), so ResolveAnswer always
-	// routes the keystroke arm. Set after construction at the production site
-	// (relay.go), once the bridge exists; the test constructions leave it nil.
-	// #1080.
+	// permbridge-parked completer, #1103) by modalID: the resolver's only
+	// actuation. A modalID it does not handle — or every modalID when it is nil —
+	// actuates nothing and is Warn-logged (#1546). Set after construction at the
+	// production site (relay.go), once the bridge exists; most test constructions
+	// leave it nil. #1080.
 	streamApprovals streamApprovalResolver
 }
 
 // streamApprovalResolver reports whether a stream-json approval may be answered
 // remotely, then resolves an eligible modalID to an allow/deny verdict on
 // claude's parked completer. handled=false means modalID is not a stream approval,
-// so ResolveAnswer routes the tui keystroke arm. *streamApprovalBridge is the
+// so the resolution actuates nothing. *streamApprovalBridge is the
 // production implementer; the interface is declared at its consumer.
 type streamApprovalResolver interface {
 	RemoteAnswerable(modalID string) bool
@@ -95,8 +69,8 @@ type streamModalRegistry interface {
 const reasonRemoteDeny = "permission denied"
 
 // newModalResolverV2 wires the resolver to the daemon-singleton outstanding-modal
-// registry (the same instance #708 live-wires the producer/emitter into), the
-// supervisor keystroke seam, and the daemon logger. streamApprovals is a
+// registry (the same instance #708 live-wires the producer/emitter into) and
+// the daemon logger. streamApprovals is a
 // nil-default field set at the production site, NOT a constructor param — the
 // constructor has many test call sites, and nil disables the optional seam.
 //
@@ -104,37 +78,32 @@ const reasonRemoteDeny = "permission denied"
 // trust modal only ever reached the registry through the terminal producer
 // #1348 deleted, and trust is now settled by trustMark before every spawn, so
 // no answer here can be a trust deny.
-func newModalResolverV2(reg *modalbridge.Registry, kb modalKeystroker, logger *slog.Logger) *modalResolverV2 {
-	return &modalResolverV2{reg: reg, kb: kb, logger: logger}
+func newModalResolverV2(reg *modalbridge.Registry, logger *slog.Logger) *modalResolverV2 {
+	return &modalResolverV2{reg: reg, logger: logger}
 }
 
-// ResolveCancel consumes the named modal and routes the fail-safe dismiss. The
-// registry Resolve is the single idempotency gate (AC #4): an unknown or
+// ResolveCancel consumes the named modal and denies its parked stream approval.
+// The registry Resolve is the single idempotency gate (AC #4): an unknown or
 // already-consumed id returns (zero, false) before any actuation or audit, so a
-// replayed/stale cancel never double-acts. Actuation is best-effort — an error
-// (no live session / teardown) is logged and tolerated: the modal is already
-// consumed and moot, so the phone must still learn the dismissal (broadcast) and
-// the forensic record must still exist (audit).
+// replayed/stale cancel never double-acts. A consumed modal that no stream
+// approval handles actuates nothing and is Warn-logged, but the phone must still
+// learn the dismissal (broadcast) and the forensic record must still exist
+// (audit).
 //
-// It has the SAME TWO ARMS as ResolveAnswerWithAlwaysAllow, for the same reason
-// (#2416). A stream-json permission is a permbridge-parked completer, not an
-// on-screen modal, and the stream bootstrap's keystroker is a no-op — so before
-// the verdict arm existed a cancelled stream permission left claude blocked until
-// permbridge's own timer fired, mcpApprovalTimeout at ten minutes. The deny is
-// dispatched exactly where the ESC was, so the cancelled audit outcome and the
-// {cancelled, remote} dismissal below are untouched, and a PTY-path modal — never
-// in the bridge's correlation map, because only Surface writes it — takes the
-// !handled arm and its ESC is what it always was.
+// The deny arm exists because a stream-json permission is a permbridge-parked
+// completer, not an on-screen modal (#2416): without it a cancelled stream
+// permission left claude blocked until permbridge's own timer fired,
+// mcpApprovalTimeout at ten minutes.
 //
 // TWO GATES THE ANSWER ARM APPLIES ARE DELIBERATELY ABSENT HERE, and both look
 // like omissions. RemoteAnswerable exists because an interaction-required
 // permission cannot be ALLOWED by a one-tap remote answer; a cancel is only ever a
 // deny, the fail-closed direction, so gating it would preserve exactly the
 // parked-for-ten-minutes state this arm removes. And no per-device privilege is
-// checked, as it never has been on this path: on the terminal path a cancel's ESC
-// is already a deny to claude, so the stream path is being brought level with it
-// rather than granted anything new. reasonRemoteDeny is a compile-time constant,
-// so nothing a client or the host authored reaches claude.
+// checked, as it never has been on this path: a cancel was a deny to claude on
+// the deleted terminal path too (its escape key), so the stream path was brought
+// level with it rather than granted anything new. reasonRemoteDeny is a
+// compile-time constant, so nothing a client or the host authored reaches claude.
 func (r *modalResolverV2) ResolveCancel(modalID string, dev *devices.Device) (relay.ModalDismissal, bool) {
 	out, ok := r.reg.Resolve(modalID)
 	if !ok {
@@ -142,21 +111,13 @@ func (r *modalResolverV2) ResolveCancel(modalID string, dev *devices.Device) (re
 	}
 
 	// STREAM (#2416): a permbridge-parked approval keyed by modalID resolves its
-	// completer to deny. handled=true only when modalID is a stream approval;
-	// every other modal — and every modal when no bridge is wired (foreground /
-	// v1) — falls through to the KEYSTROKE arm below, unchanged.
+	// completer to deny. handled=true only when modalID is a stream approval. The
+	// registry's only producer is the bridge's Surface, so a miss has never been
+	// observed; it is logged, not defended (#1546). The modal is already consumed,
+	// so the audit and dismissal below still happen — aborting would orphan it.
 	handled := r.streamApprovals != nil && r.streamApprovals.ResolveStream(modalID, false, false, reasonRemoteDeny)
 	if !handled {
-		if err := r.kb.SendEsc(); err != nil {
-			// Best-effort actuation: the modal is already consumed (idempotency
-			// committed above), so do NOT abort the audit/broadcast — that would
-			// orphan the consumed modal. err is a supervisor sentinel / transport
-			// error, never a secret.
-			r.logger.Warn("relay: modal cancel keystroke failed",
-				"event", "modal_cancel.keystroke_err",
-				"modal_id", modalID,
-				"err", err)
-		}
+		r.logUnrouted("relay: modal cancel reached no stream approval", "modal_cancel.unrouted", modalID)
 	}
 
 	var deviceHash, deviceLabel string
@@ -184,9 +145,9 @@ func (r *modalResolverV2) ResolveCancel(modalID string, dev *devices.Device) (re
 // ResolveAnswer is the security-critical gated answer arm: it routes an
 // internet-sourced modal_answer into claude's permission prompt ONLY from a
 // gated device. The hard invariant is that nothing but a fully-authorized, valid
-// answer may consume the modal or route a keystroke — so the order is Lookup →
-// fail-closed eligibility gate → option classification → consume → keystroke →
-// audit (gate before consume).
+// answer may consume the modal or reach the parked approval — so the order is
+// Lookup → fail-closed eligibility gate → option classification → consume →
+// verdict → audit (gate before consume).
 //
 // answerToken is the client's idempotency key (uniqueness matters, secrecy does
 // not — it is NOT authorization). The daemon's dedup is the modal_id one-shot
@@ -207,7 +168,7 @@ func (r *modalResolverV2) ResolveAnswerWithAlwaysAllow(modalID, optionID, answer
 
 	// Step 1: Lookup (read, no consume). Stale / unknown / already-resolved (a
 	// replay or reorder of an answer whose modal_id was already consumed) all
-	// miss here ⇒ no keystroke, no mutation, no audit. This is AC #2's
+	// miss here ⇒ no verdict, no mutation, no audit. This is AC #2's
 	// idempotency / first-answer-wins.
 	out, ok := r.reg.Lookup(modalID)
 	if !ok {
@@ -233,12 +194,12 @@ func (r *modalResolverV2) ResolveAnswerWithAlwaysAllow(modalID, optionID, answer
 		return relay.ModalDismissal{}, false
 	}
 
-	// Step 4: map option_id → (outcome, answer digit) against THIS modal's surfaced
-	// options. A forged or wrong-class option_id is not a locatable option ⇒
-	// reject with no keystroke, no consume, no audit (no security decision was
+	// Step 4: map option_id → outcome against THIS modal's surfaced options. A
+	// forged or wrong-class option_id is not a locatable option ⇒ reject with no
+	// verdict, no consume, no audit (no security decision was
 	// made; it is a malformed client frame). Warn-logged with a length-bounded
 	// option_id (it is attacker-controlled; slog JSON-escapes it).
-	outcome, choice, ok := classifyAnswer(out, optionID)
+	outcome, ok := classifyAnswer(out, optionID)
 	if !ok {
 		r.logger.Warn("relay: modal answer invalid option",
 			"event", "modal_answer.invalid_option",
@@ -247,7 +208,7 @@ func (r *modalResolverV2) ResolveAnswerWithAlwaysAllow(modalID, optionID, answer
 		return relay.ModalDismissal{}, false
 	}
 
-	// Step 5/6: consume FIRST (commit idempotency), then route best-effort. The
+	// Step 5/6: consume FIRST (commit idempotency), then actuate. The
 	// defensive Resolve-miss (modal vanished between Lookup and Resolve) is
 	// unreachable in practice — resolutions are serialized on the manager's Run
 	// goroutine and the producer only adds — but is handled as a row-1 no-op.
@@ -262,24 +223,15 @@ func (r *modalResolverV2) ResolveAnswerWithAlwaysAllow(modalID, optionID, answer
 	// drives BOTH the stream verdict dispatch and the audit classification below.
 	allow := devices.AuthorizeRemotePermission(dev, outcome)
 
-	// Actuate the answer, best-effort exactly like ResolveCancel: the modal is
-	// already consumed and moot, so an error is Warn-logged and tolerated — the
-	// dismissal must still broadcast and the audit must still be written; aborting
-	// would orphan a consumed modal. Two parallel arms:
-	//   - STREAM (#1080): a permbridge-parked approval keyed by modalID resolves
-	//     its completer to allow/deny (echoing the parked tool input on allow).
-	//     ResolveStream reports handled=true only when modalID is a stream approval.
-	//   - KEYSTROKE (tui): every other modalID — and every modal when no stream
-	//     bridge is wired (foreground/v1, streamApprovals==nil) — routes the
-	//     safe-answer keystroke into the on-screen modal (unchanged pre-#1080 path).
+	// Actuate the answer exactly like ResolveCancel (#1080): a permbridge-parked
+	// approval keyed by modalID resolves its completer to allow/deny (echoing the
+	// parked tool input on allow). ResolveStream reports handled=true only when
+	// modalID is a stream approval; a miss actuates nothing and is Warn-logged
+	// (#1546). The modal is already consumed, so the audit and dismissal still
+	// happen — aborting would orphan it.
 	handled := r.streamApprovals != nil && r.streamApprovals.ResolveStream(modalID, allow, alwaysAllow, reasonRemoteDeny)
 	if !handled {
-		if err := r.kb.Answer(choice); err != nil {
-			r.logger.Warn("relay: modal answer keystroke failed",
-				"event", "modal_answer.keystroke_err",
-				"modal_id", modalID,
-				"err", err)
-		}
+		r.logUnrouted("relay: modal answer reached no stream approval", "modal_answer.unrouted", modalID)
 	}
 
 	decision := audit.OutcomeDenied
@@ -294,30 +246,31 @@ func (r *modalResolverV2) ResolveAnswerWithAlwaysAllow(modalID, optionID, answer
 }
 
 // classifyAnswer locates optionID within o.Options and maps it to the grant
-// outcome + the Answer digit to actuate. ok=false if optionID is not a
-// locatable option of THIS modal, or is not one of the four permission kinds
-// (forged / unknown id, including the trust class's proceed/exit, which #1545
-// removed: trust is settled before spawn) — the caller rejects with no
-// keystroke, no consume, no audit.
-//
-// Membership in the surfaced o.Options is the single source of truth: a
-// permission option's keystroke is its 1-based position in claude's display
-// order (the producer builds o.Options in that order, #716), so deriving the
-// digit from the index keeps one source of truth and gives free membership
-// validation.
-func classifyAnswer(o modalbridge.Outstanding, optionID string) (outcome devices.RemotePermissionOutcome, choice string, ok bool) {
-	idx := slices.IndexFunc(o.Options, func(opt protocol.ModalOption) bool { return opt.ID == optionID })
-	if idx < 0 {
-		return 0, "", false
+// outcome. ok=false if optionID is not a locatable option of THIS modal, or is
+// not one of the four permission kinds (forged / unknown id, including the trust
+// class's proceed/exit, which #1545 removed: trust is settled before spawn) —
+// the caller rejects with no verdict, no consume, no audit. Membership in the
+// surfaced o.Options is the gate: an id the modal never offered is rejected even
+// when it names a valid kind.
+func classifyAnswer(o modalbridge.Outstanding, optionID string) (outcome devices.RemotePermissionOutcome, ok bool) {
+	if !slices.ContainsFunc(o.Options, func(opt protocol.ModalOption) bool { return opt.ID == optionID }) {
+		return 0, false
 	}
 	switch optionID {
 	case string(turnevent.PermissionOptionKindAllowOnce), string(turnevent.PermissionOptionKindAllowAlways):
-		return devices.OutcomeAllow, strconv.Itoa(idx + 1), true
+		return devices.OutcomeAllow, true
 	case string(turnevent.PermissionOptionKindRejectOnce), string(turnevent.PermissionOptionKindRejectAlways):
-		return devices.OutcomeDeny, strconv.Itoa(idx + 1), true
+		return devices.OutcomeDeny, true
 	default:
-		return 0, "", false
+		return 0, false
 	}
+}
+
+// logUnrouted records a consumed modal whose resolution no stream approval
+// handled. SECURITY: it carries only the opaque modal_id — no modal body,
+// prompt, title or option text.
+func (r *modalResolverV2) logUnrouted(msg, event, modalID string) {
+	r.logger.Warn(msg, "event", event, "modal_id", modalID)
 }
 
 // auditAnswer writes exactly one terminal-decision audit record for the answer
@@ -1019,7 +972,7 @@ func (b *streamApprovalBridge) parkedToolUseIDs() []string {
 
 // RemoteAnswerable reports whether modalID is eligible for the remote
 // permission-answer path. IDs outside the stream permission correlation are
-// answerable here so ResolveAnswer can preserve its non-stream keystroke arm.
+// answerable here: the gate withholds only an interaction-required approval.
 // A correlated interaction-required permission stays outstanding for the
 // registry's fail-closed timeout instead. The lookup emits no log or audit record.
 func (b *streamApprovalBridge) RemoteAnswerable(modalID string) bool {
@@ -1033,7 +986,7 @@ func (b *streamApprovalBridge) RemoteAnswerable(modalID string) bool {
 // (verdict) arm: resolve a
 // stream-json approval identified by modalID to allow/deny on claude's parked
 // completer (AC-2). handled=false ⇒ modalID is not a stream approval (absent from
-// byModal) → the caller routes the tui keystroke arm. An allow echoes the parked
+// byModal) → the caller actuates nothing and Warn-logs it. An allow echoes the parked
 // tool Input byte-verbatim and, when requested, derives session-only permission
 // updates from the parked offer. A perm.Lookup miss on allow means permbridge
 // already resolved (a raced timeout) — nothing to do, still fail-closed (claude denied).
@@ -1048,7 +1001,7 @@ func (b *streamApprovalBridge) ResolveStream(modalID string, allow, alwaysAllow 
 	correlation, ok := b.byModal[modalID]
 	b.mu.Unlock()
 	if !ok {
-		return false // not a stream approval — caller routes the keystroke arm
+		return false // not a stream approval — caller Warn-logs the miss
 	}
 
 	if allow {
