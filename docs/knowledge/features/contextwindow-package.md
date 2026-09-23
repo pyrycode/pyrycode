@@ -12,16 +12,18 @@ reader (`bootstrapSnapshotUsage`) and the conversation-keyed usage half of
 `runConfigFor` (`snapshotUsageFor`). Mirrors the #847→#848 settings-on-snapshot
 split.
 
-**#2539 deleted the first.** `handleRequestSnapshot`
-(`internal/relay/v2session_replay.go`) never actually reached it:
+**#2539 deleted the first, #2540 deleted what was left.** `handleRequestSnapshot`
+(`internal/relay/v2session_replay.go`) never actually reached the reader:
 `startRelayV2`'s `V2SessionConfig` literal left `Snapshotter` nil, so every
 `request_snapshot` returned `server.binary_offline` before the handler read
 `SnapshotSettings` or `SnapshotUsage`. With no live reader, #2539 deleted
 `bootstrapSnapshotUsage`, its dedicated fixed-folder resolver
-(`fixedTranscriptDir`), and the wiring that fed them, and dropped
+(`fixedTranscriptDir`), and the `cmd/pyry` wiring that fed them, dropping
 `Snapshotter`, `SnapshotSettings` and `SnapshotUsage` from the config literal.
-`internal/relay` still declares the three fields — deleting the declarations
-themselves is a follow-up ticket — but nothing in `cmd/pyry` sets them.
+\#2540 deleted the declarations themselves — the `ScreenSnapshotter` interface,
+the `(*supervisor.Supervisor).ScreenSnapshot` render seam, and the three
+`V2SessionConfig` fields — along with `handleRequestSnapshot`'s render arm;
+see [Inbound `request_snapshot` handler](v2-session-manager-state-machine-inbound-screen-snapshot-handler-handlere.md).
 
 **The one usage reader left is `snapshotUsageFor`, behind `runConfigFor`.**
 This package's `Read` has exactly one production caller now: the

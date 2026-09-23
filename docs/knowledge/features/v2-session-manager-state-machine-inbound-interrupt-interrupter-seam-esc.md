@@ -22,7 +22,7 @@ with no running turn is a no-op in claude.
 
 - **`Interrupter` consumer seam.** The relay declares the one-method interface,
   **since #2103** `Interrupter interface{ SendEsc(conversationID string) error }`
-  (beside `ScreenSnapshotter` / `ModalResolver`), and reaches the keystroke surface
+  (beside `ModalResolver`), and reaches the keystroke surface
   through it, so `internal/relay` imports neither `internal/supervisor` nor
   `internal/streamsup` nor tui-driver — and, because of the widened signature,
   neither `internal/conversations` nor `internal/sessions` either, so it cannot

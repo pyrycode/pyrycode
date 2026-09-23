@@ -22,14 +22,16 @@ at. See [codebase/1586.md](../codebase/1586.md) for the #1586 field addition
 (#491's own predecessor ticket has no per-ticket file — it landed before that
 convention).
 
-**It deliberately reads none of the same seams `handleRequestSnapshot` uses to
-render a screen.** A client used to get these values off `screen_snapshot`'s
-side-load, but that reply is gated on a live terminal: on the stream-json
-runner `Snapshotter` is nil by construction (#1077/#1101), so
-`handleRequestSnapshot` short-circuits to `server.binary_offline` and drags the
-settings — which have nothing to do with a terminal — down with it. Saved
-fields still come through one conversation-keyed `RunConfigFor` read on both
-runners. The separate `EffectiveEffortFor` provider remains optional at the
+**It deliberately shares no seam with `handleRequestSnapshot`.** A client used to
+get these values off `screen_snapshot`'s side-load, but that reply was gated on
+a live terminal: on the stream-json runner `Snapshotter` was nil by
+construction (#1077/#1101), so `handleRequestSnapshot` short-circuited to
+`server.binary_offline` and dragged the settings — which have nothing to do
+with a terminal — down with it. #2540 deleted that render arm and the
+`Snapshotter`/`SnapshotSettings`/`SnapshotUsage` seams entirely, so
+`handleRequestSnapshot` now answers only the two errors and has no reply left
+to drag anything down with. Saved fields still come through one
+conversation-keyed `RunConfigFor` read on both runners. The separate `EffectiveEffortFor` provider remains optional at the
 relay boundary. Production wires it only when both the conversation registry
 and session pool exist; otherwise the existing reply is preserved with
 `effective_effort` omitted.
@@ -146,19 +148,19 @@ Control flow, in load-bearing order:
   value.
 - **`KnownConversation` and `BootstrapSessionID` are no longer read here.**
   `KnownConversation` (`func(conversationID string) bool`) is now consulted
-  **only** by `handleRequestSnapshot` — this handler stopped calling it
-  because a known-but-**unbound** conversation reads as addressable through a
-  pure membership check, which would have leaked the bootstrap's values for
-  exactly the case this ticket closes. `BootstrapSessionID func() string` —
-  along with the two seams it used to accompany here,
-  `SnapshotSettings func() (model, effort string, yolo bool)` and
-  `SnapshotUsage func() (usedTokens, windowTokens int)` — is **deleted from
-  `V2SessionConfig` entirely** rather than left wired and unread, closing the
-  one remaining live route to a value AC #2 of #1610 forbids. `SnapshotSettings`
-  / `SnapshotUsage` themselves stay on `V2SessionConfig`, bootstrap-scoped,
-  unchanged — `handleRequestSnapshot`'s `screen_snapshot` side-load is still
-  their only reader, and that path is unreachable in production today
-  (`Snapshotter` is hardcoded `nil`).
+  by both `handleRequestSnapshot` and `handleMCPStatusRequest` — this handler
+  stopped calling it because a known-but-**unbound** conversation reads as
+  addressable through a pure membership check, which would have leaked the
+  bootstrap's values for exactly the case this ticket closes.
+  `BootstrapSessionID func() string` is **deleted from `V2SessionConfig`
+  entirely** rather than left wired and unread, closing the one remaining live
+  route to a value AC #2 of #1610 forbids. At the time (#1610), `SnapshotSettings`
+  / `SnapshotUsage` stayed on `V2SessionConfig`, bootstrap-scoped and unread by
+  this handler — `handleRequestSnapshot`'s `screen_snapshot` side-load was
+  still their only reader, and that path was already unreachable in production
+  (`Snapshotter` was hardcoded `nil`). #2540 later deleted `SnapshotSettings`,
+  `SnapshotUsage`, `Snapshotter` and the render arm that read them, closing the
+  declaration along with the unreachable path.
 - **The handler.** `handleRequestSessionSettings(ctx, s, plaintext)` runs on
   the addressed connection's `appFrameWorker`. Every ordinary decoded branch
   produces exactly one `session_settings` reply — never a `TypeError`:
@@ -196,9 +198,11 @@ bootstrap-scoped fallback on this verb for any unresolvable request, including
 an empty or stale binding; that route (the field gating *whether* the answer is
 populated rather than *which* session it describes) was the defect #1610
 closed.
-`handleRequestSnapshot`'s `screen_snapshot` side-load is the one place in the
-manager that still reports bootstrap-scoped settings/usage, and it is out of
-scope by design (see the seam bullet above). #2449's dormant answer does not
+`handleRequestSnapshot`'s `screen_snapshot` side-load used to be the one place
+in the manager that still reported bootstrap-scoped settings/usage, out of
+scope by design (see the seam bullet above); #2540 deleted that side-load
+along with the render arm, so this verb is now the only place in the manager
+that reports run configuration at all. #2449's dormant answer does not
 reopen that route: it still names only the one session the conversation is
 bound to, sourced from that session's own persisted registry entry, never the
 bootstrap's. The relay deliberately has no live/dormant flag; provider
@@ -231,14 +235,17 @@ replaces the pre-#1610 `KnownConversation` counter (`wantLookups`), which
 would read zero unconditionally once this handler stopped calling it — the
 exact vacuous-counter trap `TestV2Session_RequestSessionSettings_NonInteractiveMakesNoLookup`
 exists to close, now re-pointed at `RunConfigFor`. A second counter,
-`bootstrapReads` (the retired `settings` + `usage` fixture calls, kept in the
-harness purely as leak detectors), stays wanted **0 on every row** and is red
-under exactly one mutation class: a re-introduced bootstrap-scoped read.
-`_ConversationGate`'s five-row table is the mutation-coverage matrix for this
-seam: dropping the empty-id guard reddens the unnamed rows on `resolves`;
-dropping the nil-seam guard panics the nil-seam row; discarding the comma-ok
-reddens the unhosted row's payload via the poison; a re-added bootstrap read
-reddens every addressable-adjacent row on both counters and the payload. The
+`bootstrapReads` (the retired `settings` + `usage` fixture calls), used to be
+kept in the harness purely as a leak detector, wanted **0 on every row** and
+red under exactly one mutation class: a re-introduced bootstrap-scoped read.
+\#2540 deleted the `SnapshotSettings`/`SnapshotUsage` fields those fixtures
+existed to poison, so `bootstrapReads` and the `bootstrapRead*` constants are
+gone too — with the fields deleted, the compiler enforces what the counter
+guarded, and a zero-read assertion on a seam that cannot exist would be
+vacuous. `_ConversationGate`'s five-row table is the mutation-coverage matrix
+for this seam: dropping the empty-id guard reddens the unnamed rows on
+`resolves`; dropping the nil-seam guard panics the nil-seam row; discarding
+the comma-ok reddens the unhosted row's payload via the poison. The
 effective-effort rows apply the same technique to the availability bit: a
 non-nil poisoned pointer with `available == false` must still leave the key
 absent. Two requests for one conversation return call-specific values and
