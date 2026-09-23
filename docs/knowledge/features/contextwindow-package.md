@@ -1,33 +1,34 @@
 # `internal/contextwindow` — context-window usage reader
 
-Reports the active claude session's context-window occupancy from its
-resolved transcript, so a consumer (the `screen_snapshot` handler, and any
-future push path) can surface a "context window used" gauge (mobile Status
-sheet: "73% used (146K of 200K tokens)") without each consumer re-parsing the
-JSONL (#856).
+Reports a claude session's context-window occupancy from its resolved
+transcript, so a consumer can surface a "context window used" gauge (mobile
+Status sheet: "73% used (146K of 200K tokens)") without re-parsing the JSONL
+(#856).
 
 It is a pure leaf: one exported function, no dependency on `internal/sessions`.
-Shipped unwired at #856 (0 non-test callers, correct for a primitive); **wired
-by #857**, which carries `Read`'s output on `screen_snapshot` via a new
-optional `SnapshotUsage` seam on `internal/relay`'s `V2SessionConfig`. Mirrors
-the #847→#848 settings-on-snapshot split.
+Shipped unwired at #856 (0 non-test callers, correct for a primitive); wired
+at \#857 onto two `cmd/pyry` seams — the bootstrap-scoped `screen_snapshot`
+reader (`bootstrapSnapshotUsage`) and the conversation-keyed usage half of
+`runConfigFor` (`snapshotUsageFor`). Mirrors the #847→#848 settings-on-snapshot
+split.
 
-**Resolver used: `resolveOwnBootstrapJSONL`, not `ResolveTranscript`.** This
-package's own spec anticipated #857 would obtain the transcript path via
-`internal/sessions`' [probe-preferred `ResolveTranscript`
-seam](sessions-package.md) (`newProbePreferredTranscriptResolver` /
-`supervisor.Config.ResolveTranscript`, the growth-confirm consumer). #857's
-architect spec deliberately used a different resolver instead:
-`resolveOwnBootstrapJSONL` (`cmd/pyry/interactive_turn_stream_v2.go`), the
-turn-stream's own probe-preferred, cmd/pyry-local resolver, via a **second,
-dedicated instance**. Reasoning: `ResolveTranscript` is a `*sessions.Pool`
-seam and threading it into `relay.go` would re-import `internal/sessions`
-into a file that discipline keeps sessions-free (see
-[v2-session-manager.md § Inbound screen-snapshot handler](v2-session-manager.md)
-and [codebase/857.md](../codebase/857.md) for the full rationale). Both
-resolvers are probe-preferred and functionally equivalent for this purpose;
-the choice is about where the `internal/sessions` dependency lives, not
-about correctness.
+**#2539 deleted the first.** `handleRequestSnapshot`
+(`internal/relay/v2session_replay.go`) never actually reached it:
+`startRelayV2`'s `V2SessionConfig` literal left `Snapshotter` nil, so every
+`request_snapshot` returned `server.binary_offline` before the handler read
+`SnapshotSettings` or `SnapshotUsage`. With no live reader, #2539 deleted
+`bootstrapSnapshotUsage`, its dedicated fixed-folder resolver
+(`fixedTranscriptDir`), and the wiring that fed them, and dropped
+`Snapshotter`, `SnapshotSettings` and `SnapshotUsage` from the config literal.
+`internal/relay` still declares the three fields — deleting the declarations
+themselves is a follow-up ticket — but nothing in `cmd/pyry` sets them.
+
+**The one usage reader left is `snapshotUsageFor`, behind `runConfigFor`.**
+This package's `Read` has exactly one production caller now: the
+conversation-keyed path `runConfigFor(w.runSettings,
+snapshotUsageFor(w.sessionTranscriptDir, w.modelWindows))` composes in
+`startRelayV2`, answering `session_settings`. See the #2423 folder-resolution
+discussion below for how that reader gets its transcript directory.
 
 Not `security-sensitive` — read-only reflection of non-secret runtime state
 from an already-trusted, already-confined local transcript path (no new
@@ -183,10 +184,10 @@ precedent minus its conversation hop** (see
 [the model-list resolver](sessions-package-key-types-runner-interface-runnerfactory.md)):
 type-assert `Session.Runner()` to the `ModelWindows() (modelWindowReport, bool)`
 method #2106 added, comma-ok as the only filter, and build a fresh
-`map[string]int` per call so `Read`'s "never retained" contract holds. Both
-`cmd/pyry` seams that call `contextwindow.Read` — `bootstrapSnapshotUsage`
-(`screen_snapshot`) and the by-id closure in `snapshotUsageFor`
-(`session_settings`) — take the resolver as a parameter; a `nil` resolver
+`map[string]int` per call so `Read`'s "never retained" contract holds. The
+by-id closure in `snapshotUsageFor` (`session_settings`) — the only `cmd/pyry`
+seam left that calls `contextwindow.Read` since #2539 deleted the
+`screen_snapshot` one — takes the resolver as a parameter; a `nil` resolver
 degrades to today's default-window reading rather than collapsing the seam to
 nil, the same "degrading one integer must not make a resolvable session
 unresolvable" rule `runConfigFor` already applies to its `usage` half.
@@ -231,9 +232,11 @@ reader and the probe read one field of one struct and cannot name different
 folders for one session, including under case canonicalisation or a symlink
 (`agentrun.ResolveWorkdir` applies both and the confining validators upstream
 of it do not, so a second, independent derivation from a differently-spelled
-workdir is exactly the shape that drifts). `fixedTranscriptDir(dir)` adapts
-one folder into the same resolver shape for a caller that genuinely has only
-one.
+workdir is exactly the shape that drifts). `fixedTranscriptDir(dir)`, which
+adapted one folder into the same resolver shape for a caller that had only
+one, was deleted at #2539 along with that caller (`bootstrapSnapshotUsage`);
+`TestSnapshotUsageFor_*` now builds the same shape with a test-local
+`oneFolder(dir)` helper instead.
 
 **The `Pool.Lookup → ClaudeSessionsDir` TOCTOU widened at #1475.** Before, no
 rotation could change a session's working directory, so the two sequential,
@@ -263,16 +266,6 @@ can return `(nil, nil)` for the evicted-bootstrap or zero-value-map state
 resolvers are only ever called with the non-empty id `resolveBoundRunSettings`
 produces — so no defence was added; if either resolver is touched again, one
 shared nil-check closes it in both rather than one.
-
-**`bootstrapSnapshotUsage` (the `screen_snapshot` seam) deliberately keeps its
-fixed folder.** The bootstrap session's working directory *is* the daemon's
-own trusted workdir, so it has no workspace to miss, and it is the one place
-left where the reader's folder (`filepath.Abs`) and the spawn probe's
-(`agentrun.ResolveWorkdir`, which also canonicalises case and resolves
-symlinks) could in principle still disagree — a divergence #1655 measured as
-absent in practice. #2423 chose not to touch a shipped reading to close a gap
-with no observed instance; routing this seam through `sessionTranscriptDir`
-needs a ticket that owns the reading it would change.
 
 **No unit table over the reader can prove this class of fix.** The defect was
 *which folder crossed the seam*, not what the reader does with one — a fixed
@@ -343,5 +336,7 @@ it off the package.
   `sessionTranscriptDir` copies for the folder half.
 - [847](../codebase/847.md) / [848](../codebase/848.md) — the settings-leaf /
   settings-wire split this ticket mirrors.
-- [857](../codebase/857.md) — wires `Read` onto `screen_snapshot` via the
-  optional `SnapshotUsage` seam on `V2SessionConfig`.
+- [857](../codebase/857.md) — originally wired `Read` onto `screen_snapshot`
+  via the optional `SnapshotUsage` seam on `V2SessionConfig`; #2539 deleted
+  that `cmd/pyry`-side wiring as dead (`handleRequestSnapshot` never reached
+  it — `Snapshotter` was nil).
