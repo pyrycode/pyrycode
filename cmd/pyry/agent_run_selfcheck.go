@@ -24,15 +24,15 @@ var (
 // claude binary, and render PASS / FAIL / inconclusive for human + CI
 // consumption.
 //
-// Post-#473 the underlying selfcheck verifies the deny-default settings
-// file shape against the ptyrunner spawn path (the dispatcher's
-// production path after #470 cutover), not the legacy stream-json
-// subprocess shape.
+// The underlying selfcheck spawns claude headless over stream-json via
+// streamrunner.Run, with argv from streamrunner.BuildClaudeArgs — the same
+// function the dispatcher's agent-run spawn uses since #1348 — and verifies
+// the per-spawn deny-default settings file blocks a tool off the allowlist.
 //
 // Returns nil on PASS. Returns the wrapped sentinel
 // (selfcheck.ErrSentinelWritten / selfcheck.ErrTimeout) on FAIL or
 // inconclusive so main's top-level error printer surfaces a non-zero
-// exit. Infrastructure errors (mkdtemp, ptyrunner spawn) propagate
+// exit. Infrastructure errors (mkdtemp, streamrunner spawn) propagate
 // verbatim.
 func runAgentRunSelfCheck(stdout io.Writer) error {
 	workdir, err := os.MkdirTemp("", "pyry-self-check-*")
@@ -81,10 +81,10 @@ func runAgentRunSelfCheck(stdout io.Writer) error {
 // affordance to stdout. Pinned by TestRunAgentRunSelfCheck_FAIL —
 // any rewording must update that test in lockstep.
 //
-// Post-#473 the message describes the ptyrunner verification path
-// (interactive-TUI claude under PTY with a per-spawn deny-default
-// settings file). Post-#542 the evidence is the execution-layer
-// sentinel path on disk, not a re-emitted assistant event.
+// The message describes the headless stream-json spawn the self-check
+// performs (a per-spawn deny-default settings file, argv from
+// streamrunner.BuildClaudeArgs). Post-#542 the evidence is the
+// execution-layer sentinel path on disk, not a re-emitted assistant event.
 //
 // sentinelPath is a path pyry constructed inside the throwaway workdir —
 // never file contents or captured claude output (package SECURITY note).
@@ -92,8 +92,8 @@ func writeSelfCheckFailMessage(stdout io.Writer, sentinelPath string) {
 	fmt.Fprintln(stdout, "pyry agent-run --self-check: FAIL — deny-default whitelist did NOT enforce")
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "What was tested:")
-	fmt.Fprintln(stdout, "  claude launched under PTY-driven interactive-TUI mode with a per-spawn")
-	fmt.Fprintln(stdout, `  deny-default settings file (permissions.defaultMode: "dontAsk", allow: ["Read"])`)
+	fmt.Fprintln(stdout, "  claude launched headless over stream-json (the argv agent-run spawns) with a")
+	fmt.Fprintln(stdout, `  per-spawn deny-default settings file (permissions.defaultMode: "dontAsk", allow: ["Read"])`)
 	fmt.Fprintln(stdout, "  passed via --settings <path> --permission-mode dontAsk; the canned prompt")
 	fmt.Fprintln(stdout, "  instructs claude to Use Write to create a probe sentinel file inside the")
 	fmt.Fprintln(stdout, "  self-check's throwaway workdir.")
@@ -107,7 +107,7 @@ func writeSelfCheckFailMessage(stdout io.Writer, sentinelPath string) {
 	fmt.Fprintln(stdout, "What to check:")
 	fmt.Fprintln(stdout, "  The settings-file enforcement contract may have changed in claude.")
 	fmt.Fprintln(stdout, "  Compare the current claude --settings / --permission-mode behaviour to the")
-	fmt.Fprintln(stdout, "  argv pyry writes in internal/agentrun/ptyrunner/runner.go's buildArgs and")
+	fmt.Fprintln(stdout, "  argv pyry builds in internal/agentrun/streamrunner/args.go's BuildClaudeArgs and")
 	fmt.Fprintln(stdout, "  the JSON shape produced by internal/agentrun/settings/settings.go.")
 	fmt.Fprintln(stdout, "  The self-check now verifies RUNTIME-layer enforcement (the sentinel file on")
 	fmt.Fprintln(stdout, "  disk), not LLM-layer output: https://code.claude.com/docs/en/permissions")

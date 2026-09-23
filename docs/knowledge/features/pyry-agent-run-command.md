@@ -81,16 +81,16 @@ use through [`pyry mcp-approve`](pyry-mcp-approve-command.md)) instead of the `d
 `yolo=true`; the non-YOLO branch is exercised by unit tests here and wired to a live spawn in the
 `streamsup` interactive path, not by this verb.
 
-**Known stale residue, not fixed by this doc:** `agent_run.go`'s own doc comment on
-`buildStreamRunnerClaudeArgs` still describes the YOLO branch as emitting
-`--dangerously-skip-permissions`, which the code and `TestBuildStreamRunnerClaudeArgs_Shape` both
-contradict — the YOLO branch has emitted `--permission-mode dontAsk` since the #1387 fix, and the
-skip flag is now a banned negative pin. `agent_run_selfcheck.go`'s doc comments similarly still cite
-"the ptyrunner spawn path" and "#470 cutover" for behaviour the self-check now performs via
-`streamrunner.BuildClaudeArgs`. Both were flagged by code review on #1555 as pre-existing, unchanged
-by that ticket, and out of its scope (comment-only, one file); they want a sibling #1348-residue
-ticket. This overview describes the mechanism as verified against the current code and tests, not
-as those comments describe it.
+**#1555 → #2553: the stale-comment residue flagged here is fixed.** Code review on #1555 flagged
+two pieces of pre-existing residue as out of that ticket's scope (comment-only, one file): `agent_run.go`'s
+doc comment on `buildStreamRunnerClaudeArgs` describing the YOLO branch as emitting
+`--dangerously-skip-permissions` (contradicted by the code and `TestBuildStreamRunnerClaudeArgs_Shape`
+since the #1387 fix), and `agent_run_selfcheck.go`'s doc comments citing "the ptyrunner spawn path" and
+"#470 cutover" for behaviour the self-check performs via `streamrunner.BuildClaudeArgs`. #2553 corrected
+both, plus the parallel drift in `internal/agentrun/selfcheck/selfcheck.go`'s doc comments and the
+`--self-check` FAIL message's operator-facing text (which had pointed at the deleted
+`internal/agentrun/ptyrunner/runner.go`). See [agentrun-selfcheck-package.md](agentrun-selfcheck-package.md)
+for the self-check package's own history of this drift.
 
 ## History — PTY → stream-json → PTY → stream-json-only
 
@@ -118,6 +118,11 @@ as those comments describe it.
   `ptyrunner` path and a live `PYRY_USE_STREAMJSON` selector, two of them inside the #1387 evidence
   block. Reconciled to the single-path reality without losing the #1387 finding; see § Tool boundary
   above, which restates that finding in full.
+- **#2553 (self-check comment reconciliation).** The two pieces of residue #1555's code review flagged
+  as out of scope — `buildStreamRunnerClaudeArgs`'s stale skip-flag claim in `agent_run.go`, and
+  `agent_run_selfcheck.go` / `internal/agentrun/selfcheck/selfcheck.go`'s ptyrunner/interactive-TUI
+  wording, including the operator-facing `--self-check` FAIL message — were corrected. Comments and
+  strings only; the spawn, argv and detector are unchanged.
 
 `internal/agentrun/ptyrunner` no longer exists in the tree. `docs/knowledge/features/ptyrunner-package.md`
 still describes it as a live sibling package — that doc is stale in the same way this one was before #1555's documentation pass, and is not corrected here (out of scope for this ticket; a sibling #1348-residue ticket owns it).

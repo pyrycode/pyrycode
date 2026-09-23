@@ -152,7 +152,8 @@ const probeSentinelName = "probe-sentinel.txt"
 // emits the tool_use, the runtime denies execution *between* turns, and
 // turn 2 acknowledges with end_turn. MaxTurns: 1 fired SIGTERM right
 // after turn 1, *before* the execute-or-deny step — the original
-// no-behavioural-evidence bug. ptyrunner rejects MaxTurns <= 0, so
+// no-behavioural-evidence bug. streamrunner.BuildClaudeArgs always emits
+// `--max-turns` with this value (there is no omit-when-zero case), so
 // "remove it for the self-check" is not available.
 const selfCheckMaxTurns = 2
 
@@ -210,7 +211,7 @@ type Config struct {
 	OverallTimeout time.Duration
 
 	// Env is appended to os.Environ() in the spawned child via
-	// ptyrunner.Config.Env. Tests use this to thread fake-claude wiring
+	// streamrunner.Config.Env. Tests use this to thread fake-claude wiring
 	// through to the test binary; production leaves it nil.
 	Env []string
 }
@@ -238,9 +239,9 @@ type Result struct {
 }
 
 // SelfCheckDenyDefault composes trust.MarkWorkdirTrusted +
-// settings.WriteSettings + sessions.NewID + ptyrunner.Run to drive the
-// exhibit prompt against an interactive-TUI claude bound to a per-spawn
-// deny-default settings file (allow ["Read"]), then verifies the probe
+// settings.WriteSettings + streamrunner.BuildClaudeArgs + streamrunner.Run
+// to drive the exhibit prompt against a headless stream-json claude bound
+// to a per-spawn deny-default settings file (allow ["Read"]), then verifies the probe
 // sentinel did NOT appear on disk — claude's runtime refused to execute
 // the probe tool (canonicalProbeTool).
 //

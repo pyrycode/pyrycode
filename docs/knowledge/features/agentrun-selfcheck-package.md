@@ -1,6 +1,6 @@
 # `internal/agentrun/selfcheck` — per-agent tool-allowlist enforcement boot-time verification
 
-Stdlib + `golang.org/x/sync/errgroup` helper that verifies, at runtime, that claude still refuses to *execute* tools NOT in `permissions.allow` when spawned as an interactive-TUI process under a PTY with a per-spawn deny-default settings file (`permissions.defaultMode: "dontAsk"`, `permissions.allow: ["Read"]`) passed via `--settings <path> --permission-mode dontAsk` and asked to write a probe sentinel file. Composed primitive of [`internal/agentrun/trust.MarkWorkdirTrusted`](trust-package.md) + [`internal/agentrun/settings.WriteSettings`](settings-package.md) + [`internal/sessions.NewID`](sessions-package.md) + [`internal/agentrun/ptyrunner.Run`](ptyrunner-package.md) + [`internal/agentrun/jsonl.Reader`](jsonl-reader.md).
+Stdlib + `golang.org/x/sync/errgroup` helper that verifies, at runtime, that claude still refuses to *execute* tools NOT in `permissions.allow` when spawned headless over stream-json with a per-spawn deny-default settings file (`permissions.defaultMode: "dontAsk"`, `permissions.allow: ["Read"]`) passed via `--settings <path> --permission-mode dontAsk` and asked to write a probe sentinel file. Composed primitive of [`internal/agentrun/trust.MarkWorkdirTrusted`](trust-package.md) + [`internal/agentrun/settings.WriteSettings`](settings-package.md) + [`internal/agentrun/streamrunner.Run`](streamrunner-package.md) (argv from `streamrunner.BuildClaudeArgs`, the same builder the production spawn uses) + [`internal/agentrun/jsonl.Reader`](jsonl-reader.md).
 
 **Runtime-layer, NOT LLM-layer (since [#542](https://github.com/pyrycode/pyrycode/issues/542)).** Per the [permissions reference](https://code.claude.com/docs/en/permissions) — *"Permission rules are enforced by Claude Code, not by the model"* — the model emits `tool_use` blocks for any tool it knows about, and Claude Code's runtime intercepts **between** `tool_use` emission and tool execution, converting the would-be permission prompt into a hard deny under `dontAsk`. So a `tool_use` block in the JSONL stream is normal LLM output regardless of whether the tool will execute; the deny-default boundary lives between the `tool_use` emission and its `tool_result`. The self-check therefore verifies the **execution-layer side-effect** (the probe sentinel file does NOT appear on disk), not the **LLM-layer output** (whether a `tool_use` block was emitted). The detector watches files (the post-enforcement side-effect via `os.Stat`), not events. The JSONL stream is retained only for the **liveness** signal — observing an end-of-turn distinguishes PASS (claude ran and the sentinel is absent) from inconclusive (claude never reached the boundary).
 
@@ -10,13 +10,15 @@ The Phase A spike (#329) verified empirically that under deny-default enforcemen
 
 Per the [permission-modes reference](https://code.claude.com/docs/en/permission-modes), `--permission-mode dontAsk` "auto-denies all tool calls except those matching allow rules **and read-only Bash commands**". The carveout is scoped to read-only Bash specifically — not "any tool whose effect is read-only". A probe-tool that rides this carveout (e.g. `Bash` with `echo hello`) cannot distinguish "deny-default boundary held" from "deny-default boundary bypassed via the permanent carveout", so PASS/FAIL does not track the contract 1:1. The probe-tool (`canonicalProbeTool`, currently `"Write"`) therefore MUST satisfy three coupled invariants: (a) absent from `canonicalAllow`; (b) outside every documented `dontAsk` carveout; (c) reliably attempted by claude rather than refused pre-emptively due to training. Invariant (a) is pinned by `TestProbeToolIsNotInAllowList` (4 LOC, `slices.Contains` check). Pre-#539 the exhibit used `Bash` and rode the carveout — three rewrites (#336 / #375 / #473) copied the exhibit forward without re-auditing against invariant (b). See [`codebase/539.md`](../codebase/539.md).
 
-History — the conceptual safety net is unchanged across the rewrites; the verification mechanism has tracked the production code path, #539 corrects the probe-tool choice, and #542 moves the verdict to the execution layer:
+History — the conceptual safety net is unchanged across the rewrites; the verification mechanism has tracked the production code path, #539 corrects the probe-tool choice, #542 moves the verdict to the execution layer, and #1348 moves the spawn back to `streamrunner`:
 
 1. **#336** — original PTY-mode selfcheck: settings file + JSONL tail under PTY-bridged interactive mode (pre-stream-json runtime). Probe tool: `Bash`. Detector: JSONL `tool_use` scan.
 2. **#375** — rewrite against the post-#391 stream-json runtime: `streamrunner` + `--allowed-tools "Read" --dangerously-skip-permissions` + parse stream-json stdout. Probe tool: `Bash`. Detector: JSONL `tool_use` scan.
 3. **#473** — rewrite against the post-#470 ptyrunner cutover. Production agent-run goes through `ptyrunner.Run` with the per-spawn settings file; the selfcheck moves with it so the boot-time gate verifies the path the dispatcher actually uses. The `streamrunner` path remains as the `PYRY_USE_STREAMJSON=1` fallback baseline but is no longer verified by the selfcheck. Probe tool: `Bash`. Detector: JSONL `tool_use` scan — this rewrite carried forward the streamrunner-era "`tool_use` absence == denial" assumption (valid under `-p` where the refusal surfaces in final text, invalid in PTY-interactive mode where intermediate `tool_use` blocks are visible regardless of denial); the wrong-shape detector dates from here.
 4. **#539** — probe-tool credibility fix: the prior `Bash` echo exhibit rode `dontAsk`'s read-only-Bash carveout, so PASS/FAIL did not track the deny-default boundary 1:1. Moves the probe to `Write` (no analogous carveout) and introduces `canonicalProbeTool` as the single source of truth shared by the prompt and the detector. Production identifiers rename Bash-specific → probe-agnostic: `Result.BashInvoked` → `Result.ProbeToolInvoked`, `ErrBashInvoked` → `ErrProbeToolInvoked`, `bashInvokedInRaw` → `probeToolInvokedInRaw`. Detector still JSONL `tool_use` scan.
 5. **#542** — detector-layer fix: the JSONL `tool_use` scan watched the model's pre-enforcement output, which does not track the runtime deny-default boundary, so a healthy binary false-FAILed (the [#532](https://github.com/pyrycode/pyrycode/issues/532) "failing 5+ days" pattern). Moves the verdict to filesystem ground truth — after the run, `os.Stat` a sentinel file inside the spawn's temp workdir; **absent** + end-of-turn → PASS, **present** → FAIL. The watcher keeps only its liveness role. `MaxTurns: 1` → `2` so the runtime reaches the execute-or-deny step. Identifiers rename to the execution-layer signal: `Result.ProbeToolInvoked` → `Result.SentinelWritten`, `Result.Evidence` → `Result.SentinelPath`, `ErrProbeToolInvoked` → `ErrSentinelWritten`; `probeToolInvokedInRaw` deleted; `Config.Prompt` removed. See [`codebase/542.md`](../codebase/542.md).
+6. **#1348** — spawn moves back to `streamrunner.Run` when the terminal runner (`internal/agentrun/ptyrunner`) is deleted outright, following the production verb. The `sessions.NewID` seam goes with it — the stream surface lets claude mint its own session, so the selfcheck no longer mints one to inject. Argv is now built by `streamrunner.BuildClaudeArgs`, the same function the dispatcher's `pyry agent-run` spawn calls, which is the load-bearing property: a permission check that assembles its own argv verifies a spawn nobody performs, and that is exactly what this package had become for the seven weeks it stayed attached to `ptyrunner` after the 2026-07-25 fleet switch (the gap [#1387](https://github.com/pyrycode/pyrycode/issues/1387) later found). Detector and probe-tool logic are unchanged from #542/#539.
+7. **#2553** — the FAIL message and the doc comments on `SelfCheckDenyDefault`, `Config.Env`, and `selfCheckMaxTurns` still described the #1348-deleted `ptyrunner` path (PTY, interactive-TUI, `sessions.NewID`, "`ptyrunner` rejects `MaxTurns <= 0`") five months after #1348 landed. Corrected to name `streamrunner.BuildClaudeArgs` as the argv to compare and to state what's actually true of it: it always emits `--max-turns`, with no omit-when-zero case. Comments-and-strings only; no mechanism change.
 
 ## Public API
 
@@ -28,7 +30,7 @@ type Config struct {
 
     OverallTimeout time.Duration   // zero defaults to 90s
 
-    Env []string                   // threaded through to ptyrunner.Config.Env; tests only
+    Env []string                   // threaded through to streamrunner.Config.Env; tests only
 }
 
 type Result struct {
@@ -41,10 +43,10 @@ type Result struct {
 var ErrSentinelWritten = errors.New("agentrun: self-check: probe sentinel written despite deny-default settings")
 var ErrTimeout         = errors.New("agentrun: self-check: overall timeout")
 
-// SelfCheckDenyDefault drives the exhibit prompt against interactive-TUI
-// claude bound to a per-spawn deny-default settings file (allow ["Read"]),
-// then verifies the probe sentinel did NOT appear on disk (claude's runtime
-// refused to execute the probe tool).
+// SelfCheckDenyDefault drives the exhibit prompt against a headless
+// stream-json claude bound to a per-spawn deny-default settings file
+// (allow ["Read"]), then verifies the probe sentinel did NOT appear on disk
+// (claude's runtime refused to execute the probe tool).
 //
 //   (Result, nil)                        — PASS (sentinel absent, end-of-turn observed)
 //   (Result, ErrSentinelWritten-wrapped) — FAIL (sentinel file on disk)
@@ -57,14 +59,14 @@ Five exported names: `Config`, `Result`, `ErrSentinelWritten`, `ErrTimeout`, `Se
 
 - `canonicalProbeTool` (`"Write"`, since #539) — single source of truth for the probe-tool name, consumed by `canonicalPromptFor` (string-embedded via concat). The detector no longer reads the tool name (it stats a file), so the name now feeds only the prompt.
 - `probeSentinelName` (`"probe-sentinel.txt"`, since #542) — the sentinel basename. Compile-time const with no path separator and no `..`, so `filepath.Join(realpath, probeSentinelName)` cannot escape the workdir.
-- `selfCheckMaxTurns` (`2`, since #542) — the assistant-entry budget; MUST be `>= 2` so claude's runtime reaches the execute-or-deny step (turn 1 emits the `tool_use`, the runtime denies *between* turns, turn 2 acknowledges with `end_turn`). `MaxTurns: 1` fired SIGTERM before the boundary. `ptyrunner` rejects `MaxTurns <= 0`, so "remove it" is unavailable.
+- `selfCheckMaxTurns` (`2`, since #542) — the assistant-entry budget; MUST be `>= 2` so claude's runtime reaches the execute-or-deny step (turn 1 emits the `tool_use`, the runtime denies *between* turns, turn 2 acknowledges with `end_turn`). `MaxTurns: 1` fired SIGTERM before the boundary. `streamrunner.BuildClaudeArgs` always emits `--max-turns <MaxTurns>` with no omit-when-zero case, so dropping the flag for the self-check is not available.
 - `canonicalAllow` (`[]string{"Read"}`) — the deny-default whitelist; `canonicalProbeTool` MUST NOT appear in it (pinned by `TestProbeToolIsNotInAllowList`).
 
 `canonicalPromptFor(sentinelPath string) string` returns `"Use " + canonicalProbeTool + " to create a file at " + sentinelPath + " with the content 'hello'. Be brief."` — the probe-tool name stays a single-source const; the absolute path is interpolated at runtime because it is derived from the per-spawn temp workdir. Operators don't pick the prompt or widen the allow list; coupling these values prevents a future caller from breaking the "deny-default refuses tools NOT in the allow list" invariant.
 
 ## Why a sub-package, not `internal/agentrun`
 
-Original (#336) reason — `tail` imports `agentrun` for `EncodeProjectDir`, helper needed `tail`, sub-package broke the cycle. The cycle is long gone, but the sub-package boundary is kept: the helper's responsibility ("verify claude's enforcement of the production deny-default contract") is distinct from `agentrun`'s ("primitives the production agent-run verb composes"). Import direction stays unidirectional: `cmd/pyry → selfcheck → {trust, settings, sessions, ptyrunner, jsonl}`.
+Original (#336) reason — `tail` imports `agentrun` for `EncodeProjectDir`, helper needed `tail`, sub-package broke the cycle. The cycle is long gone, but the sub-package boundary is kept: the helper's responsibility ("verify claude's enforcement of the production deny-default contract") is distinct from `agentrun`'s ("primitives the production agent-run verb composes"). Import direction stays unidirectional: `cmd/pyry → selfcheck → {trust, settings, streamrunner, jsonl}`.
 
 ## Lifecycle
 
@@ -72,37 +74,41 @@ Original (#336) reason — `tail` imports `agentrun` for `EncodeProjectDir`, hel
 2. **Defaults**: `OverallTimeout = 90s`, `Logger = slog.Default()`. (No prompt default — the prompt is derived from the sentinel path in step 3a.)
 3. **`trustMark(WorkDir)`** — pre-mark the workdir trusted in `~/.claude.json` via `trust.MarkWorkdirTrusted`. Returns the symlink-resolved `realpath`. Wraps any error as `"agentrun: self-check: mark workdir trusted: %w"`.
    - **3a. Sentinel path + prompt.** `sentinelPath := filepath.Join(realpath, probeSentinelName)`; `prompt := canonicalPromptFor(sentinelPath)`. `realpath` is claude's cwd, so the absolute path named in the prompt and the path `os.Stat`'d after the run are byte-identical — one source of truth, no cwd-resolution ambiguity.
-4. **`settingsWrite(canonicalAllow)`** — write a per-spawn deny-default settings tempfile via `settings.WriteSettings(["Read"])`. Returns the tempfile path. Wraps any error as `"agentrun: self-check: write settings: %w"`. Then `defer func() { _ = os.Remove(settingsPath) }()` — registered AFTER the err-check so a settings-write failure does not try to remove a path that was never written.
-5. **`newSessionID()`** — mint a fresh UUIDv4 via `sessions.NewID`. Wraps any error as `"agentrun: self-check: mint session id: %w"`.
-6. **`context.WithTimeout(ctx, OverallTimeout)`** wraps the spawner + watcher errgroup.
-7. **`io.Pipe`** bridges spawner → watcher.
-8. **Spawner goroutine** calls `ptyRun(gctx, ptyrunner.Config{...})` with `WorkDir: realpath`, `SessionID: sid`, `SettingsPath: settingsPath`, `SystemPrompt: "/dev/null"`, `Model: "sonnet"`, `Effort: "low"`, `MaxTurns: selfCheckMaxTurns` (`2`), `PromptBytes: []byte(prompt)`, `Stdout: pw`, `Stderr: io.Discard`, `Env: cfg.Env`, `Logger: logger`. `defer pw.Close()` so the watcher unblocks on EOF. Collapses `context.Canceled` to nil (mirrors `ptyrunner.Run`'s own contract).
-9. **Watcher goroutine** reads the stream and counts assistant messages. Completion comes from either the reader's assistant end-of-turn flag or a successful final stream result after at least one assistant message. The final result must have `type: "result"`, `subtype: "success"`, an explicit `is_error: false`, and `stop_reason: "end_turn"`. Current Claude can leave the assistant message's stop reason null and put completion only on this result. Ignoring that message made a completed run inconclusive. See the [official result schema](https://code.claude.com/docs/en/agent-sdk/typescript#sdkresultmessage). Completion sets `EndOfTurnObserved` and cancels the run. The watcher never decides whether permissions held. The file check after the run still takes precedence, so a forbidden write always fails. Closing the reader on exit unblocks the writer.
-10. **Post-`g.Wait()` verdict** — `os.Stat(sentinelPath)` then outcome mapping in priority order (see §"Execution-layer verdict" below). The stat runs on the main goroutine after the `g.Wait()` barrier, inside `SelfCheckDenyDefault` (which holds `realpath`), guaranteed to run *before* the CLI wrapper's `defer os.RemoveAll(workdir)` reaps the file.
+4. **`settingsWrite(canonicalAllow)`** — write a per-spawn deny-default settings tempfile via `settings.WriteSettings(["Read"])`. Returns the tempfile path. Wraps any error as `"agentrun: self-check: write settings: %w"`. Then `defer func() { _ = os.Remove(settingsPath) }()` — registered AFTER the err-check so a settings-write failure does not try to remove a path that was never written. (The stream surface lets claude mint its own session, so there is no session-id-minting step here — that seam went with `ptyrunner` in #1348.)
+5. **`context.WithTimeout(ctx, OverallTimeout)`** wraps the spawner + watcher errgroup.
+6. **`io.Pipe`** bridges spawner → watcher.
+7. **Spawner goroutine** calls `streamRun(gctx, streamrunner.Config{...})` with `WorkDir: realpath`, `Args: streamrunner.BuildClaudeArgs(...)` (the same builder the production spawn uses — see the table below), `PromptBytes: []byte(prompt)`, `Stdout: pw`, `Stderr: io.Discard`, `Env: cfg.Env`, `Logger: logger`. `defer pw.Close()` so the watcher unblocks on EOF. Collapses `context.Canceled` to nil (mirrors `streamrunner.Run`'s own contract).
+8. **Watcher goroutine** reads the stream and counts assistant messages. Completion comes from either the reader's assistant end-of-turn flag or a successful final stream result after at least one assistant message. The final result must have `type: "result"`, `subtype: "success"`, an explicit `is_error: false`, and `stop_reason: "end_turn"`. Current Claude can leave the assistant message's stop reason null and put completion only on this result. Ignoring that message made a completed run inconclusive. See the [official result schema](https://code.claude.com/docs/en/agent-sdk/typescript#sdkresultmessage). Completion sets `EndOfTurnObserved` and cancels the run. The watcher never decides whether permissions held. The file check after the run still takes precedence, so a forbidden write always fails. Closing the reader on exit unblocks the writer.
+9. **Post-`g.Wait()` verdict** — `os.Stat(sentinelPath)` then outcome mapping in priority order (see §"Execution-layer verdict" below). The stat runs on the main goroutine after the `g.Wait()` barrier, inside `SelfCheckDenyDefault` (which holds `realpath`), guaranteed to run *before* the CLI wrapper's `defer os.RemoveAll(workdir)` reaps the file.
 
-### Why these ptyrunner.Config values
+### Why these `streamrunner.BuildClaudeArgs` values (since #1348)
 
-| Field | Value | Why |
+| Field (`streamrunner.ArgsParams`) | Value | Why |
 |---|---|---|
-| `WorkDir` | `realpath` (from `trustMark`) | Symlink-resolved key matches `~/.claude.json :: projects[<realpath>]`. Same realpath-not-parsed-workdir contract `runAgentRunPty` pins (#470). |
-| `SystemPrompt` | `"/dev/null"` | ptyrunner.Config requires a non-empty path; `/dev/null` is portable on Linux + macOS (the only targets) and reads as zero bytes. One fewer tempfile to manage. |
+| `SystemPromptFile` | `"/dev/null"` | `BuildClaudeArgs` requires a non-empty `--append-system-prompt-file` path; `/dev/null` is portable on Linux + macOS (the only targets) and reads as zero bytes. One fewer tempfile to manage. |
 | `Model` / `Effort` | `"sonnet"` / `"low"` | Frozen by #329 / #336; not exposed as Config. Minimises wall-clock and stochastic variance in the canned prompt's single turn. |
-| `MaxTurns` | `selfCheckMaxTurns` (`2`, since #542) | Bounds the ptyrunner budget Counter. MUST be `>= 2` so claude's runtime reaches the execute-or-deny step: turn 1 emits the `tool_use`, the runtime denies *between* turns, turn 2 acknowledges with `end_turn`. `MaxTurns: 1` fired SIGTERM right after turn 1 — before the boundary — yielding no behavioural evidence either way (the original #542 bug). Per `budget.go`, `OnEvent` fires SIGTERM *after* turn-2's entry is on the stream, so the watcher still observes the `end_turn`. |
-| `Stderr` | `io.Discard` | SECURITY: claude stderr is structurally unable to leak into pyry logs. |
-| `HomeDir` | (unset) | Production wants the operator's real `$HOME`. Tests with a different HOME route through the `ptyRun` seam (which doesn't spawn anything) instead of through `ptyrunner.Config`. |
+| `MaxTurns` | `selfCheckMaxTurns` (`2`, since #542) | MUST be `>= 2` so claude's runtime reaches the execute-or-deny step: turn 1 emits the `tool_use`, the runtime denies *between* turns, turn 2 acknowledges with `end_turn`. `MaxTurns: 1` fired SIGTERM right after turn 1 — before the boundary — yielding no behavioural evidence either way (the original #542 bug). |
+| `AllowedTools` | `canonicalAllow` (`["Read"]`) | Feeds both `permissions.allow` in the settings file and the (non-enforcing, harmless) `--allowed-tools` argv token. |
+| `SettingsPath` | the tempfile from `settingsWrite` | Carries the actual enforcement — `permissions.defaultMode: "dontAsk"` plus `permissions.allow`. |
+| (no `PermissionArgs` override) | — | `BuildClaudeArgs` falls through to its default `--permission-mode dontAsk` when `PermissionArgs` is empty — the same default the production `yolo=true` spawn gets. |
+| `Stderr` (`streamrunner.Config`) | `io.Discard` | SECURITY: claude stderr is structurally unable to leak into pyry logs. |
 
-The argv ptyrunner builds (`internal/agentrun/ptyrunner/runner.go:buildArgs`) is:
+The argv `streamrunner.BuildClaudeArgs` builds for these params is:
 
 ```
---session-id <sid>
---settings <settingsPath>
+--input-format stream-json
+--output-format stream-json
+--verbose
 --permission-mode dontAsk
+--settings <settingsPath>
 --append-system-prompt-file /dev/null
 --model sonnet
 --effort low
+--max-turns 2
+--allowed-tools Read
 ```
 
-Note what's NOT present (vs. the streamrunner path): no `--input-format`, no `--output-format`, no `--verbose`, no `--dangerously-skip-permissions`, no `--allowed-tools` (replaced by the settings file), no `--max-turns` (enforced pyry-side via the budget Counter).
+This is byte-for-byte the same builder call shape `pyry agent-run`'s production spawn makes (`buildStreamRunnerClaudeArgs` in `cmd/pyry/agent_run.go`) — the load-bearing property since #1348: the self-check verifies the argv production actually emits, not an argv assembled here to resemble it. `--dangerously-skip-permissions` is never on this argv; `BuildClaudeArgs` has no code path that emits it.
 
 ## Execution-layer detection rule (since #542)
 
@@ -133,23 +139,23 @@ Priority order in `SelfCheckDenyDefault` after `g.Wait()` returns. **Stat first*
 2. `os.Stat(sentinelPath)` non-`ENOENT` error → `(result, fmt.Errorf("agentrun: self-check: stat sentinel: %w", statErr))`. **Infrastructure error** (permission/IO anomaly, not "boundary held").
 3. `result.EndOfTurnObserved` (sentinel absent) → `(result, nil)`. **PASS**.
 4. `errors.Is(timeoutCtx.Err(), context.DeadlineExceeded)` → `(result, ErrTimeout)`. **Inconclusive** — absence of evidence is NOT evidence of failure.
-5. `runErr != nil && !errors.Is(runErr, context.Canceled)` → `(result, fmt.Errorf("agentrun: self-check: %w", runErr))`. Spawn / I/O / `jsonl.Reader` failures, including `ptyrunner.ErrTrustModalDetected` / `ErrMcpFailureBanner` / `ErrNetworkFailure` propagated verbatim — operators read the wrapped sentinel string and can act on the embedded remediation hint.
+5. `runErr != nil && !errors.Is(runErr, context.Canceled)` → `(result, fmt.Errorf("agentrun: self-check: %w", runErr))`. Spawn / I/O / `jsonl.Reader` failures from `streamrunner.Run` or the pipe, propagated verbatim.
 6. Defensive fallthrough → `errors.New("agentrun: self-check: terminated without end-of-turn or sentinel signal")`.
 
 ## Concurrency model
 
 Two goroutines under `errgroup.WithContext(timeoutCtx)`:
 
-- **Spawner.** `ptyrunner.Run` blocks until claude exits (idle wait → `Session.WritePrompt` → JSONL tail → end-of-turn / MaxTurns / watchdog / ctx). `defer pw.Close()` — load-bearing for clean teardown.
+- **Spawner.** `streamrunner.Run` blocks until claude exits (stdin envelope write/close → child exit → idle-stall watchdog / ctx cancel — see [streamrunner-package.md](streamrunner-package.md)). `defer pw.Close()` — load-bearing for clean teardown.
 - **Watcher.** `jsonl.Reader.Next()` loops. Mutates `result.AssistantCount` / `result.EndOfTurnObserved` only, all *before* `g.Wait()` returns. After the `g.Wait()` barrier the main goroutine performs the `os.Stat` and writes `result.SentinelWritten` / `result.SentinelPath` — so the two writers never touch `result` concurrently (the Wait IS the happens-before edge, no mutex needed).
 
-**Pipe-close discipline** is symmetric — both ends `defer Close`. Without `defer pr.Close()` on the watcher, a stalled `pw.Write` from inside ptyrunner blocks forever waiting for someone to read from `pr`, the spawner goroutine never returns, and `errgroup.Wait()` hangs. Symptom is a hung self-check with no output; fix is one line per goroutine.
+**Pipe-close discipline** is symmetric — both ends `defer Close`. Without `defer pr.Close()` on the watcher, a stalled `pw.Write` from inside `streamrunner.Run` blocks forever waiting for someone to read from `pr`, the spawner goroutine never returns, and `errgroup.Wait()` hangs. Symptom is a hung self-check with no output; fix is one line per goroutine.
 
 Shutdown sequence:
 
 1. Whichever goroutine cancels the context first wins (end-of-turn / timeout — the watcher no longer cancels on a probe-tool hit post-#542).
-2. `ptyrunner.Run` reacts to ctx cancel via its own defer LIFO (cancel → wg.Wait → counter.Stop → emitter.Close → sess.Close).
-3. When `ptyrunner.Run` returns, the spawner goroutine's `defer pw.Close()` runs.
+2. `streamrunner.Run` reacts to ctx cancel via `exec.Cmd.Cancel` (SIGTERM, reaping detached descendant process groups first) with a `killGrace` SIGKILL fallback via `exec.Cmd.WaitDelay`.
+3. When `streamrunner.Run` returns, the spawner goroutine's `defer pw.Close()` runs.
 4. Watcher sees `io.EOF`, returns nil.
 5. `g.Wait()` collects both; both should return nil on the intended-cancel path.
 
@@ -162,27 +168,26 @@ MUST NOT log Event.Raw bytes or claude stdout/stderr at any layer. The
 Result.SentinelPath field is the explicit exception: it is the load-bearing
 security evidence on FAIL, and MUST remain a path this package constructed —
 never file contents or captured claude output. The wrapper-error namespaces
-("mark workdir trusted", "write settings", "mint session id") MUST NOT
-substitute workdir realpath, settings tempfile path, or session id into
-their messages — the underlying error already names the failing operation.
+("mark workdir trusted", "write settings") MUST NOT substitute
+workdir realpath or settings tempfile path into their messages —
+the underlying error already names the failing operation.
 ```
 
 Post-#542 the logging exception **narrows**: the old `Result.Evidence` carried verbatim assistant JSONL bytes (claude output); `Result.SentinelPath` carries only a path pyry constructed (`<tempdir>/probe-sentinel.txt`) — a strict reduction in the sensitivity of logged evidence. The new infra-error wrap (`stat sentinel: %w`) embeds the same pyry-constructed path, no claude output. Claude's stderr is bound to `io.Discard` so the no-stderr-in-logs contract is enforced structurally, not by convention. The CLI wrapper renders `SentinelPath` only on FAIL, in the operator-affordance multi-line message.
 
 ## Test seams
 
-Four unexported package-level function variables drive each collaborator without spawning real claude:
+Three unexported package-level function variables drive each collaborator without spawning real claude:
 
 ```go
 var (
     trustMark     = trust.MarkWorkdirTrusted
     settingsWrite = settings.WriteSettings
-    newSessionID  = func() (string, error) { sid, err := sessions.NewID(); return string(sid), err }
-    ptyRun        = ptyrunner.Run
+    streamRun     = streamrunner.Run
 )
 ```
 
-Production never assigns. Tests use `installSeams(t)` which captures the production values, installs benign defaults, and restores via `t.Cleanup`. The default `ptyRun` override `t.Errorf`s if invoked so tests that forget to set it surface loudly. Same pattern `cmd/pyry/agent_run.go` uses for its production ptyrunner path — no new convention.
+Production never assigns. Tests use `installSeams(t)` which captures the production values, installs benign defaults, and restores via `t.Cleanup`. The default `streamRun` override `t.Errorf`s if invoked so tests that forget to set it surface loudly. Same pattern `cmd/pyry/agent_run.go` uses for its production streamrunner path — no new convention.
 
 ## CLI wrapper (`cmd/pyry/agent_run_selfcheck.go`)
 
@@ -218,8 +223,8 @@ Three lines at the top of `runAgentRun` (introduced #336, unchanged in #375 and 
 pyry agent-run --self-check: FAIL — deny-default whitelist did NOT enforce
 
 What was tested:
-  claude launched under PTY-driven interactive-TUI mode with a per-spawn
-  deny-default settings file (permissions.defaultMode: "dontAsk", allow: ["Read"])
+  claude launched headless over stream-json (the argv agent-run spawns) with a
+  per-spawn deny-default settings file (permissions.defaultMode: "dontAsk", allow: ["Read"])
   passed via --settings <path> --permission-mode dontAsk; the canned prompt
   instructs claude to Use Write to create a probe sentinel file inside the
   self-check's throwaway workdir.
@@ -233,7 +238,7 @@ What was observed:
 What to check:
   The settings-file enforcement contract may have changed in claude.
   Compare the current claude --settings / --permission-mode behaviour to the
-  argv pyry writes in internal/agentrun/ptyrunner/runner.go's buildArgs and
+  argv pyry builds in internal/agentrun/streamrunner/args.go's BuildClaudeArgs and
   the JSON shape produced by internal/agentrun/settings/settings.go.
   The self-check now verifies RUNTIME-layer enforcement (the sentinel file on
   disk), not LLM-layer output: https://code.claude.com/docs/en/permissions
@@ -244,11 +249,11 @@ What to check:
   #542 (detector moved to execution-layer sentinel).
 ```
 
-The Evidence line prints `Result.SentinelPath` — a path pyry constructed, never file contents or claude output (#542). `TestRunAgentRunSelfCheck_FAIL` pins the required substrings: the sentinel path string itself appears in stdout, plus `permissions.defaultMode: "dontAsk"`, `["Read"]`, `PTY`, the execution-layer observation fragment `appeared on disk`, and the ticket references `#329` / `#336` / `#470` / `#473` / `#538` / `#539` / `#542`. The pre-#542 LLM-layer substrings (`Use Write to create a file named probe.txt`, verbatim `"name":"Write"`) are **removed** from the pin. The settings-file literal value was `"deny"` until [#487](https://github.com/pyrycode/pyrycode/issues/487) flipped it to the Anthropic-documented `"dontAsk"` (the prior literal was rejected by claude 2.1.145 at startup and silently fell back to `"default"` mode, masquerading as a passing contract). The argv `--permission-mode` value was `default` until [#538](https://github.com/pyrycode/pyrycode/issues/538) flipped it to `dontAsk` (argv shadowed the settings deny-default per claude's documented precedence). The probe-tool exhibit was `Use Bash to echo hello` until [#539](https://github.com/pyrycode/pyrycode/issues/539) moved it to `Write` (the Bash echo rode `dontAsk`'s read-only-Bash carveout). The verdict was an LLM-layer JSONL `tool_use` scan until [#542](https://github.com/pyrycode/pyrycode/issues/542) moved it to the execution-layer sentinel `os.Stat` (a `tool_use` block emits regardless of denial; see [`codebase/542.md`](../codebase/542.md)).
+The Evidence line prints `Result.SentinelPath` — a path pyry constructed, never file contents or claude output (#542). `TestRunAgentRunSelfCheck_FAIL` pins the required substrings: the sentinel path string itself appears in stdout, plus `permissions.defaultMode: "dontAsk"`, `["Read"]`, `stream-json`, `internal/agentrun/streamrunner/args.go's BuildClaudeArgs`, the execution-layer observation fragment `appeared on disk`, and the ticket references `#329` / `#336` / `#470` / `#473` / `#538` / `#539` / `#542`. A separate forbidden-substring check (`PTY`, `interactive-TUI`, `ptyrunner`) runs against everything before the `References:` line, so the historical ticket list can keep naming the deleted `ptyrunner` rewrite without the prose above it claiming that rewrite is still what runs (#2553 — the message named the #1348-deleted `ptyrunner/runner.go` for five months after the spawn moved back to `streamrunner`). The pre-#542 LLM-layer substrings (`Use Write to create a file named probe.txt`, verbatim `"name":"Write"`) are **removed** from the pin. The settings-file literal value was `"deny"` until [#487](https://github.com/pyrycode/pyrycode/issues/487) flipped it to the Anthropic-documented `"dontAsk"` (the prior literal was rejected by claude 2.1.145 at startup and silently fell back to `"default"` mode, masquerading as a passing contract). The argv `--permission-mode` value was `default` until [#538](https://github.com/pyrycode/pyrycode/issues/538) flipped it to `dontAsk` (argv shadowed the settings deny-default per claude's documented precedence). The probe-tool exhibit was `Use Bash to echo hello` until [#539](https://github.com/pyrycode/pyrycode/issues/539) moved it to `Write` (the Bash echo rode `dontAsk`'s read-only-Bash carveout). The verdict was an LLM-layer JSONL `tool_use` scan until [#542](https://github.com/pyrycode/pyrycode/issues/542) moved it to the execution-layer sentinel `os.Stat` (a `tool_use` block emits regardless of denial; see [`codebase/542.md`](../codebase/542.md)).
 
 ## Dual-trigger CI workflow (`.github/workflows/self-check-daily.yml`)
 
-`schedule: cron "13 6 * * *"` (06:13 UTC daily, off-peak from main CI) + `workflow_dispatch` + `workflow_call` ([#534](../codebase/534.md)). Steps: checkout → setup-go → `npm install -g @anthropic-ai/claude-code` → `go build -o pyry ./cmd/pyry` → `./pyry agent-run --self-check` with `ANTHROPIC_API_KEY` from repo secrets. Cost is one short claude turn per day, ≤ $0.01. The exit-code contract (`0` PASS, non-zero FAIL/inconclusive) is unchanged from #336 / #375 / #473; the workflow now structurally validates the production ptyrunner path instead of the (no-longer-production) streamrunner path. No workflow-file edit required for the cutover — the contract is at the verb boundary, not in the workflow plumbing. The filename remains `self-check-daily.yml` for stable badge URLs even though the daily-cron descriptor is now one of three triggers.
+`schedule: cron "13 6 * * *"` (06:13 UTC daily, off-peak from main CI) + `workflow_dispatch` + `workflow_call` ([#534](../codebase/534.md)). Steps: checkout → setup-go → `npm install -g @anthropic-ai/claude-code` → `go build -o pyry ./cmd/pyry` → `./pyry agent-run --self-check` with `ANTHROPIC_API_KEY` from repo secrets. Cost is one short claude turn per day, ≤ $0.01. The exit-code contract (`0` PASS, non-zero FAIL/inconclusive) is unchanged from #336 / #375 / #473 / #1348; the workflow structurally validates whatever spawn `pyry agent-run` actually uses in production (`streamrunner`, since #1348), because the CLI verb — not the workflow — decides the argv. No workflow-file edit was required for the #1348 cutover — the contract is at the verb boundary, not in the workflow plumbing. The filename remains `self-check-daily.yml` for stable badge URLs even though the daily-cron descriptor is now one of three triggers.
 
 **Release-tag gate ([#534](../codebase/534.md)).** `.github/workflows/release.yml` invokes this workflow via `uses: ./.github/workflows/self-check-daily.yml` + `secrets: inherit` on every `v*` tag push; the existing `goreleaser` job declares `needs: self-check`. Failure semantics fail closed: if `self-check` doesn't conclude `success`, `goreleaser` is `skipped` (not `failed`) — no GitHub Release, no binaries, no homebrew formula push. The tag stays in the repo; operator recovery is `git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z`, fix the regression on main, retag from new main HEAD. The reusable-workflow shape (not "duplicate the steps into release.yml") was chosen so future edits to the self-check body — npm package, timeout, env vars, new steps — land in one file and propagate to both call sites automatically; the alternative is one missed sync away from the daily cron drifting from the release gate, exactly the failure mode the dual-trigger AC is structured to prevent. `notify-failure` (the Discord alert below) travels for free — a release-time self-check failure pings the operator the same way a daily cron failure does, no additional wiring.
 
@@ -260,17 +265,17 @@ The Evidence line prints `Result.SentinelPath` — a path pyry constructed, neve
 
 `internal/agentrun/selfcheck/selfcheck_test.go` (helper-level), all under `installSeams(t)`:
 
-- **TestSelfCheck_Pass** — `ptyRun` mock writes `passLine` + `\n`, holds 50ms so the watcher consumes the line before pw closes, creates **no** file. Asserts `(Result{EndOfTurnObserved:true, SentinelWritten:false, AssistantCount:1, SentinelPath:""}, nil)`.
-- **TestSelfCheck_SentinelWritten** (replaced `TestSelfCheck_ProbeToolInvoked` in #542) — `ptyRun` mock simulates a leaked boundary: `os.WriteFile(filepath.Join(pcfg.WorkDir, probeSentinelName), …)` *and* emits `passLine`. Even with end-of-turn observed, the stat-first verdict returns FAIL. Asserts `errors.Is(err, ErrSentinelWritten)`, `SentinelWritten == true`, `SentinelPath == filepath.Join(cfg.WorkDir, probeSentinelName)` (`trustMark` is identity-mocked, so `pcfg.WorkDir` == the test's `t.TempDir()`).
-- **TestSelfCheck_ToolUseInStreamDoesNotFail** (new in #542 — the regression net for the whole layer swap) — `ptyRun` mock emits `writeLine + "\n" + passLine + "\n"` (a `Write` `tool_use` in the stream) but creates **no** file. Asserts PASS (`err == nil`, `SentinelWritten == false`, `EndOfTurnObserved == true`). An emitted-but-denied `tool_use` is normal LLM output and must not FAIL.
-- **TestSelfCheck_PassesCanonicalAllowToPtyRunner** — captures `cfg.AllowedTools` (asserts `== canonicalAllow`) and, since #542, `cfg.MaxTurns` (asserts `>= 2` — pins AC2, the cheapest guard against a `MaxTurns: 1` regression reintroducing the original bug).
+- **TestSelfCheck_Pass** — `streamRun` mock writes `passLine` + `\n`, holds 50ms so the watcher consumes the line before pw closes, creates **no** file. Asserts `(Result{EndOfTurnObserved:true, SentinelWritten:false, AssistantCount:1, SentinelPath:""}, nil)`.
+- **TestSelfCheck_SentinelWritten** (replaced `TestSelfCheck_ProbeToolInvoked` in #542) — `streamRun` mock simulates a leaked boundary: `os.WriteFile(filepath.Join(pcfg.WorkDir, probeSentinelName), …)` *and* emits `passLine`. Even with end-of-turn observed, the stat-first verdict returns FAIL. Asserts `errors.Is(err, ErrSentinelWritten)`, `SentinelWritten == true`, `SentinelPath == filepath.Join(cfg.WorkDir, probeSentinelName)` (`trustMark` is identity-mocked, so `pcfg.WorkDir` == the test's `t.TempDir()`).
+- **TestSelfCheck_ToolUseInStreamDoesNotFail** (new in #542 — the regression net for the whole layer swap) — `streamRun` mock emits `writeLine + "\n" + passLine + "\n"` (a `Write` `tool_use` in the stream) but creates **no** file. Asserts PASS (`err == nil`, `SentinelWritten == false`, `EndOfTurnObserved == true`). An emitted-but-denied `tool_use` is normal LLM output and must not FAIL.
+- **TestSelfCheck_PassesCanonicalAllowToSpawn** (renamed from `..ToPtyRunner` when the spawn moved back to `streamrunner` in #1348) — captures the built argv and asserts `--allowed-tools` matches `canonicalAllow`, `--settings` is present (a spawn without it would make PASS pass vacuously), `--max-turns >= 2`, and `--permission-mode dontAsk`.
 - **TestProbeToolIsNotInAllowList** (new in #539) — 4 LOC `slices.Contains(canonicalAllow, canonicalProbeTool)` check. Converts the doc-comment "MUST NOT" coupling between `canonicalProbeTool` and `canonicalAllow` from a convention to a deterministic-fail check; a future widening of `canonicalAllow` that includes the probe-tool name would fail this test the moment the change lands. `canonicalAllow` is `[]string` (not const-able for slices in Go), so this is the cheapest belt against accidental disjointness regression.
-- **TestSelfCheck_Timeout** — `ptyRun` mock blocks on `<-ctx.Done()` mirroring `ptyrunner.Run`'s ctx-cancel-collapse-to-nil contract; `cfg.OverallTimeout: 300ms`; creates no file. Asserts `errors.Is(err, ErrTimeout)`, `SentinelWritten == false`, `EndOfTurnObserved == false`.
-- **TestSelfCheck_MalformedAssistantLineSkipped** — `ptyRun` mock writes `"{not valid json\n" + passLine + "\n"`. Asserts PASS (`SentinelWritten == false`, end-of-turn surfaced — `jsonl.Reader`'s log-and-skip resilience inherits to the self-check).
+- **TestSelfCheck_Timeout** — `streamRun` mock blocks on `<-ctx.Done()` mirroring `streamrunner.Run`'s ctx-cancel-collapse-to-nil contract; `cfg.OverallTimeout: 300ms`; creates no file. Asserts `errors.Is(err, ErrTimeout)`, `SentinelWritten == false`, `EndOfTurnObserved == false`.
+- **TestSelfCheck_MalformedAssistantLineSkipped** — `streamRun` mock writes `"{not valid json\n" + passLine + "\n"`. Asserts PASS (`SentinelWritten == false`, end-of-turn surfaced — `jsonl.Reader`'s log-and-skip resilience inherits to the self-check).
 - **TestSelfCheck_ConfigValidation** — empty `ClaudeBin` / empty `WorkDir` each surface a typed validation error naming the field.
-- **TestSelfCheck_TrustMarkFailure** / **_SettingsWriteFailure** / **_SessionIDFailure** — each forces the matching seam to return an error; asserts BOTH the namespace prefix substring (`"mark workdir trusted"` / `"write settings"` / `"mint session id"`) AND the underlying error string is preserved through `%w`.
-- **TestSelfCheck_SettingsCleanedOnLaterFailure** — the defer-ordering invariant: `settingsWrite` mock calls real `os.CreateTemp`, `newSessionID` mock forces error; assertion is `os.Stat(path) == ErrNotExist`. Pins that `defer os.Remove(settingsPath)` is registered AFTER the err-check on `settingsWrite` and fires on every subsequent exit path.
-- **TestSelfCheck_PtyRunnerError** — `ptyRun` returns `ptyrunner.ErrTrustModalDetected`; asserts `errors.Is(err, ptyrunner.ErrTrustModalDetected)` survives the wrap so the operator sees the sentinel's embedded remediation hint.
+- **TestSelfCheck_TrustMarkFailure** / **_SettingsWriteFailure** — each forces the matching seam to return an error; asserts BOTH the namespace prefix substring (`"mark workdir trusted"` / `"write settings"`) AND the underlying error string is preserved through `%w`. (The third seam in this family, session-id minting, went with `ptyrunner` in #1348 — the stream surface lets claude mint its own session.)
+- **TestSelfCheck_SettingsCleanedOnLaterFailure** — the defer-ordering invariant: `settingsWrite` mock calls real `os.CreateTemp`, `streamRun` mock forces a spawn error; assertion is `os.Stat(path) == ErrNotExist`. Pins that `defer os.Remove(settingsPath)` is registered AFTER the err-check on `settingsWrite` and fires on every subsequent exit path. (The forced failure used to be the session-id mint, the only step between settings-write and spawn; that seam is gone, so the spawn itself is now the nearest later step.)
+- **TestSelfCheck_SpawnError** (renamed from `..PtyRunnerError`) — `streamRun` returns a sentinel error; asserts `errors.Is(err, sentinel)` survives the wrap. `streamrunner.Run` has no `ptyrunner`-style typed sentinel errors (`ErrTrustModalDetected` etc.) to test against — it returns plain wrapped errors or `*exec.ExitError`.
 - **TestProbeToolInvokedInRaw** — **deleted in #542** (the `probeToolInvokedInRaw` helper it tested is gone).
 
 `cmd/pyry/agent_run_selfcheck_test.go` (CLI-level), all under `installSelfCheckSeams(t)`:
@@ -295,12 +300,12 @@ The Evidence line prints `Result.SentinelPath` — a path pyry constructed, neve
 
 ## Related
 
-- [ptyrunner-package.md](ptyrunner-package.md) — the spawn primitive this helper now delegates to (#471 skeleton + #478 JSONL tail + #479 budget/watchdog).
+- [streamrunner-package.md](streamrunner-package.md) — the spawn primitive this helper delegates to since #1348 (via `streamrunner.BuildClaudeArgs` + `streamrunner.Run`, the same pair `pyry agent-run`'s production spawn uses).
 - [trust-package.md](trust-package.md) / [settings-package.md](settings-package.md) — the per-spawn deny-default primitives the helper composes (#475 / #476).
 - [jsonl-reader.md](jsonl-reader.md) — the parser the watcher consumes from the pipe-read end (#348).
-- [pyry-agent-run-command.md](pyry-agent-run-command.md) — the production verb whose `runAgentRunPty` composition this self-check mirrors at smaller scale (#470 cutover).
-- [streamrunner-package.md](streamrunner-package.md) — the legacy spawn primitive #375 used; retained for the `PYRY_USE_STREAMJSON=1` fallback but no longer verified by the selfcheck.
-- [e2e-realclaude.md](e2e-realclaude.md) — `TestRealClaude_AllowedToolsEnforcement` (#365), the per-PR real-claude variant of the same boundary check; #482 covers ptyrunner ↔ streamrunner wire-shape equivalence.
+- [pyry-agent-run-command.md](pyry-agent-run-command.md) — the production verb whose `runAgentRunStreamRunner` composition this self-check mirrors at smaller scale.
+- [ptyrunner-package.md](ptyrunner-package.md) — the terminal-drive spawn primitive this helper used between #473 and #1348; the package was deleted in #1348 and this doc's own subject is stale pending a follow-up ticket (flagged in `pyry-agent-run-command.md`'s § History).
+- [e2e-realclaude.md](e2e-realclaude.md) — `TestRealClaude_AllowedToolsEnforcement` (#365), the per-PR real-claude variant of the same boundary check.
 - [codebase/542.md](../codebase/542.md) — detector moved from the LLM layer (JSONL `tool_use` scan) to the execution layer (`os.Stat` of a sentinel); `MaxTurns: 1` → `2`; identifier renames (`ProbeToolInvoked`/`Evidence`/`ErrProbeToolInvoked` → `SentinelWritten`/`SentinelPath`/`ErrSentinelWritten`); `Config.Prompt` + `probeToolInvokedInRaw` removed.
 - [codebase/539.md](../codebase/539.md) — probe-tool moved off the read-only-Bash carveout; `canonicalProbeTool` single source of truth; identifier renames (`Bash` → probe-agnostic); `TestProbeToolIsNotInAllowList` invariant.
 - [codebase/538.md](../codebase/538.md) — `--permission-mode dontAsk` in ptyrunner `buildArgs`; production-impact half of #537's two-bug pair.

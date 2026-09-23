@@ -79,7 +79,8 @@ func TestRunAgentRunSelfCheck_FAIL(t *testing.T) {
 	required := []string{
 		`permissions.defaultMode: "dontAsk"`,
 		`["Read"]`,
-		"PTY",
+		"stream-json",
+		"internal/agentrun/streamrunner/args.go's BuildClaudeArgs",
 		"appeared on disk",
 		"#329",
 		"#336",
@@ -92,6 +93,15 @@ func TestRunAgentRunSelfCheck_FAIL(t *testing.T) {
 	for _, sub := range required {
 		if !strings.Contains(got, sub) {
 			t.Errorf("FAIL message missing required substring %q:\n%s", sub, got)
+		}
+	}
+	// The terminal-driving runner was deleted in #1348; outside the
+	// historical References: lines the message must not describe it as the
+	// spawn under test.
+	body, _, _ := strings.Cut(got, "References:")
+	for _, sub := range []string{"PTY", "interactive-TUI", "ptyrunner"} {
+		if strings.Contains(body, sub) {
+			t.Errorf("FAIL message names deleted spawn path %q before References:\n%s", sub, got)
 		}
 	}
 }

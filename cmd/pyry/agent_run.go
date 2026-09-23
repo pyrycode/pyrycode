@@ -284,9 +284,11 @@ func runAgentRun(stdout io.Writer, args []string) error {
 // terminal-driving runner it once shared the verb with was deleted in #1348.
 func runAgentRunStreamRunner(ctx context.Context, stdout io.Writer, parsed agentRunArgs, claudeBin string, promptBytes []byte) error {
 	// Write the per-spawn deny-default settings file that carries this
-	// command's whole tool boundary. Without it there is NO tool boundary at
-	// all: `--dangerously-skip-permissions` defeats `--allowed-tools`,
-	// measured 2026-08-08 (pyrycode#1387). Every agent dispatched between the
+	// command's whole tool boundary; `--allowed-tools` on the argv is not the
+	// enforcement. That lesson cost a fleet-wide hole: the argv used to carry
+	// `--dangerously-skip-permissions`, which defeated `--allowed-tools`,
+	// measured 2026-08-08 (pyrycode#1387), and `--permission-mode dontAsk`
+	// replaced it. Every agent dispatched between the
 	// 2026-07-25 fleet switch and that fix ran unrestricted, which silently
 	// returned architect-only web search and subagent spawning, the
 	// deliberately-excluded Figma write tools, and the three human-only
@@ -316,14 +318,15 @@ func runAgentRunStreamRunner(ctx context.Context, stdout io.Writer, parsed agent
 // TestBuildStreamRunnerClaudeArgs_Shape; change the argv and update that test.
 //
 // The permission slot (after `--verbose`, before `--append-system-prompt-file`)
-// is the YOLO toggle, filled by permissionArgs(yolo, mcpConfigPath): yolo=true
-// emits `--dangerously-skip-permissions`; yolo=false emits the
+// is the YOLO toggle: yolo=true passes no permission args, so BuildClaudeArgs
+// emits its default `--permission-mode dontAsk` and the per-spawn settings file
+// is the boundary; yolo=false emits permissionArgs(false, mcpConfigPath), the
 // permission-prompt-tool + mcp-config pair that routes every tool use through
 // the daemon approval registry (see mcp_config.go). The sole production caller
-// (runAgentRunStreamRunner) passes yolo=true — agent-run always runs YOLO — so
-// the emitted argv is byte-for-byte unchanged from the pre-toggle form. The
-// non-YOLO branch is exercised by unit tests here and wired to a live spawn
-// downstream.
+// (runAgentRunStreamRunner) passes yolo=true. Neither branch emits
+// `--dangerously-skip-permissions`, which TestBuildStreamRunnerClaudeArgs_Shape
+// asserts. The non-YOLO branch is exercised by unit tests here and wired to a
+// live spawn downstream.
 //
 // Notes on individual flags:
 //
@@ -332,21 +335,21 @@ func runAgentRunStreamRunner(ctx context.Context, stdout io.Writer, parsed agent
 //   - `--output-format stream-json --verbose` is the required pair to get
 //     assistant message events on stdout under stream-json mode (without
 //     `--verbose`, only the final `result` is emitted).
-//   - `--dangerously-skip-permissions` (YOLO branch) removes the
-//     workspace-trust dialog. It ALSO defeats `--allowed-tools`, which this
-//     comment previously claimed was "the authoritative tool gate" on this
-//     path. That was assumed and never measured, and it is false. Measured
-//     2026-08-08 against claude directly, two cells, same model and prompt:
-//     with `--dangerously-skip-permissions --allowed-tools Read` the agent
-//     wrote the file; with `--allowed-tools Read` alone it refused. So for
-//     two weeks after the 2026-07-25 fleet switch to this path, the
-//     allowlist did nothing (pyrycode#1387).
+//   - `--permission-mode dontAsk` (YOLO branch) replaced
+//     `--dangerously-skip-permissions`, which this argv carried until
+//     pyrycode#1387. The skip flag removed the workspace-trust dialog and
+//     ALSO defeated `--allowed-tools`, which this comment then claimed was
+//     "the authoritative tool gate" on this path. That was assumed and never
+//     measured, and it was false. Measured 2026-08-08 against claude
+//     directly, two cells, same model and prompt: with
+//     `--dangerously-skip-permissions --allowed-tools Read` the agent wrote
+//     the file; with `--allowed-tools Read` alone it refused. So for two
+//     weeks after the 2026-07-25 fleet switch to this path, the allowlist
+//     did nothing.
 //   - `--settings` carries the per-spawn deny-default permissions file and
 //     IS the enforcement — the only enforcement agent-run has.
-//     It survives `--dangerously-skip-permissions` where the command-line
-//     allowlist does not. `--allowed-tools` is still passed, because it is
-//     harmless and remains meaningful if the skip flag is ever dropped, but
-//     it must not be relied on as the boundary.
+//     `--allowed-tools` is still passed, because it is harmless, but it must
+//     not be relied on as the boundary.
 //   - `--max-turns` is honoured in stream-json mode (interactive mode
 //     ignored it) and bounds runaway-agent turn budget.
 //   - `--allowed-tools` is comma-joined; `splitAllowedTools` already
