@@ -1,15 +1,28 @@
 // Package trust pre-answers, in ~/.claude.json, the startup gates a headless
-// claude child cannot answer for itself: the workspace-trust modal that
-// interactive claude (spawned via PTY drive) would render, and the approval
-// that lets a CLAUDE.md `@` import resolving outside the session's working
-// directory expand.
+// claude child cannot answer for itself: the workspace-trust gate, which
+// interactive claude renders as a modal, and the approval that lets a
+// CLAUDE.md `@` import resolving outside the session's working directory
+// expand.
 //
-// Best-effort: no file lock. A concurrent writer may produce a lost update;
-// tui-driver's HasTrustModal(snap) provides the runtime safety net that
-// dismisses the modal if pre-marking lost the race. The helper is still
-// atomic on the single-writer axis (tempfile + rename) so a crashed pyry
-// mid-write does not leave ~/.claude.json in a broken state for the user's
-// own interactive claude sessions.
+// Best-effort: no file lock. A concurrent writer may produce a lost update,
+// so the entry can be missing when the child spawns. Nothing catches that at
+// runtime: every surviving spawn is headless stream-json, and no pyry code
+// watches for or answers a startup dialog. What a lost race costs, per gate:
+//
+//   - Workspace trust. A 2026-05-14 probe (recorded in the streamrunner
+//     package overview) saw stream-json claude run without a trust dialog, but
+//     only with --dangerously-skip-permissions, the daemon's flag shape. There
+//     is no captured evidence for the --permission-mode dontAsk shape the
+//     self-check spawns; `pyry agent-run` spawns that shape without
+//     pre-marking at all.
+//   - External includes. This gate does apply to stream-json children (#2451,
+//     proven by the live claude_md_external_includes test): a lost race means
+//     the child starts with its outside-the-cwd `@` imports unexpanded, and
+//     claude logs nothing about it.
+//
+// The helper is still atomic on the single-writer axis (tempfile + rename) so
+// a crashed pyry mid-write does not leave ~/.claude.json in a broken state for
+// the user's own interactive claude sessions.
 //
 // MUST NOT log file contents at any layer. ~/.claude.json may contain
 // tokens or claude-internal state pyry does not own; the helper takes a
