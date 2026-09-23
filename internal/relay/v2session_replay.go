@@ -98,7 +98,8 @@ func (m *V2SessionManager) snapshotReplyError(ctx context.Context, s *V2Session,
 
 // dropInlineReplyIfDown reports whether an inline reply must be dropped
 // unsealed because the relay leg is down (#1526), logging the drop. The inline
-// replies (snapshot, settings, bundle-error, resync) call forwardEnvelope
+// replies (snapshot, settings, bundle-error, resync; and since #2530 the
+// new_session refusal, system_prompt and model_list) call forwardEnvelope
 // directly on Run, outside the push drain, so each needs the pre-seal probe
 // drainOnce (#874), handleWake (#912) and forwardAppReply (#1525) already have:
 // m.send swallows its Outbound error, so a reply sealed while down spends a

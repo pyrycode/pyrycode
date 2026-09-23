@@ -177,6 +177,10 @@ func (m *V2SessionManager) emitSystemPromptReply(ctx context.Context, s *V2Sessi
 		Payload:   body,
 		InReplyTo: &inReplyTo,
 	}
+	// Probed before the served line, so "reported" still means handed to the seal.
+	if m.dropInlineReplyIfDown(s, "v2.systemprompt.request.dropped_transport_down") {
+		return
+	}
 	// Content-free: conn_id and nothing else. Not the prompt, not its length, not
 	// the conversation id, and NOT the verdict — it is derived from the operator's
 	// text, and "which of three states" is not a question an operator reading a

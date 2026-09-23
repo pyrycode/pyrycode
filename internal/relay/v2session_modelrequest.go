@@ -194,6 +194,10 @@ func (m *V2SessionManager) emitModelListReply(ctx context.Context, s *V2Session,
 		Payload:   body,
 		InReplyTo: &inReplyTo,
 	}
+	// Probed before the served line, so "served" still means handed to the seal.
+	if m.dropInlineReplyIfDown(s, "v2.modellist.request.reply_dropped_transport_down") {
+		return
+	}
 	// Content-free but for the routing id: conn_id and the registry-canonical
 	// conversation_id. The model values are NEVER logged at any level, and neither
 	// is the entry count — a menu's size is derived from its content. Debug, not
@@ -265,6 +269,9 @@ func (m *V2SessionManager) modelListReplyError(ctx context.Context, s *V2Session
 		TS:        time.Now().UTC(),
 		Payload:   body,
 		InReplyTo: &inReplyTo,
+	}
+	if m.dropInlineReplyIfDown(s, "v2.modellist.request.err_dropped_transport_down") {
+		return
 	}
 	if err := m.forwardEnvelope(ctx, s.connID, reply); err != nil {
 		m.cfg.Logger.Debug("relay: v2 model_list reject dropped; session tearing down",
