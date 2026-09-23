@@ -52,3 +52,30 @@ After this ticket each must say the relay arm / `ResolveTimeout` was removed and
 - `docs/knowledge/features/v2-session-manager-state-machine-inbound-modal-control-deny-on-timeout.md`: the mechanism walkthrough.
 - `docs/knowledge/features/v2-session-manager-test-surface-same-package-unit-tests-internal-relay.md`: the deny-on-timeout test entry (and the renamed appframe test / retargeted debugbundle arm).
 - `docs/knowledge/features/acp-package-acp-permission-proxy-session-request-permission.md`: the `modalDenyTimeout` citation.
+
+## Security review
+
+**Verdict:** PASS
+
+The ticket deletes a fail-closed path, so the question is whether anything that path was guarding is now unguarded. The base fact is that `ArmModalTimeout` has no production caller, so the relay arm was never armed in a running daemon. Deleting it cannot change the runtime behaviour of a production build. The findings below check that this is true for every modal the registry can hold, not only that the call graph is empty.
+
+**Findings:**
+
+- [Trust boundaries / fail-closed coverage] No findings. The only production writers of `modalbridge.Registry` are in `(*streamApprovalBridge).Surface`: `modal.RecordWithContext` for a permission modal, and its question arm `surfaceQuestion`, which writes a separate question registry. `Surface` runs only for an approval that is already parked in `permbridge.Registry`. Both production `Register` sites, the approve handler in `internal/control/server.go` and the stdio permission handler in `cmd/pyry/streamsup_runner.go`, arm `time.AfterFunc` → `expire` in `(*permbridge.Registry).Register` before any modal exists. So every recorded modal already has permbridge's deny (#1103), and no recorded modal relied only on the relay arm. On the RNG-failure degrade, `Surface` records nothing and permbridge's timer still denies.
+- [Trust boundaries / trust-class emit] No findings. `Surface` builds every modal from `modalbridge.PermissionRequestForClass(tuidriver.ModalClassPermission, …)`, so no production path records a `trust`-class modal. Deleting the timeout-path `emitFolderNotTrusted` call therefore removes an emit that could not fire. A remote trust deny still emits through the `classTrust` check in `ResolveAnswerWithAlwaysAllow`, and `TestModalResolverV2_TrustAnswer_EmitPolicy` and the kept "trust deny answer" subtest of `TestModalResolverV2_NilEmitSeams_Safe` still cover it.
+- [Concurrency / unbounded park] No findings for this ticket. `ResolveAnswerWithAlwaysAllow` step 2 leaves an ungated device's answer outstanding. The wait is bounded by permbridge's window (`mcpApprovalTimeout` for the approve path, the runner's `timeout` for stdio). `expire` denies when no `AnswerableFunc` is installed, when the window is non-positive, or when `(*streamApprovalBridge).ApprovalAnswerable` reports false. `ApprovalAnswerable` extends the window only while the approval is parked, eligible and at least one interactive conn is connected, and it re-checks at each window. That extension already exists and does not depend on the relay arm. Since the relay arm was never armed, it never shortened a wait. This ticket leaves the bound unchanged. A disconnect also still denies through `watchApproveConn`.
+- [Error messages, logs, telemetry / audit] No findings. `(*streamApprovalBridge).retire` still writes `audit.OutcomeDeniedTimeout` / `audit.SourceTimeout` and broadcasts the matching `modal_dismissed` on every timeout, disconnect or shutdown return. `TestRelayV2_StreamModalPermissionRoundTrip`'s `timeout` and `stdio_timeout` cases and the `denied_timeout`/`timeout` assertion in `cmd/pyry/stream_approval_test.go` cover it, and none of them are edited. The deleted `ResolveTimeout` wrote the same vocabulary, so the audit loses no outcome class. `ModalDismissal.Source`'s closed set `{remote, local, timeout}` is still correct, because `timeout` now comes only from `retire`.
+- [Tokens, secrets, credentials] Not applicable. No token is created, stored, compared or logged. The deleted code handled only modal ids.
+- [File operations] Not applicable. No file is opened, created or renamed.
+- [Subprocess execution] Not applicable. No `exec` path is touched. The deleted `ResolveTimeout` sent a keystroke through `modalKeystroker`, and that seam's remaining callers are unchanged.
+- [Cryptographic primitives] Not applicable. Modal id minting (`newModalID`, crypto/rand) is untouched.
+- [Network & I/O] No findings. One arm leaves `Run`'s select. No reader, size cap or deadline changes. The surviving arms keep their off-Run proofs through the retargeted `TestV2Session_SlowHandler_PushStillDrains` and debugbundle arm (3), each checked against its regression by mutation.
+- [Concurrency / goroutines] No findings. The deleted arm spawned no goroutine of its own. Its `time.AfterFunc` sender lived only in `ArmModalTimeout`, which had no production caller, so no timer is left with nobody to receive it. Removing the `modalTimeout` channel removes a buffered send site and no receiver is left orphaned.
+- [Threat model alignment] No findings. `docs/protocol-mobile.md` § Security model requires that an unanswered approval denies. Permbridge's timer meets that requirement on its own. This ticket does not change the wire vocabulary.
+
+**Reviewer:** builder (self-review per the security-review checklist)
+**Date:** 2026-09-23
+
+## Revisions
+
+- **2026-09-23, verifier FAIL on the missing security review.** The ticket is `security-sensitive`, and the plan was committed without the § Security review pass. That section is added above, and it answers the verifier's four points: fail-closed coverage per registry producer, the trust-class emit, the bound on an ungated answer's wait, and the surviving audit vocabulary. The verdict is PASS, and the design and code are unchanged.
