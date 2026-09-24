@@ -1,4 +1,4 @@
-# `Runner` interface + `RunnerFactory` (#1077, corrected #1580 for #1348 fallout, widened #2042, `RevokeBypass` retired #2043, widened #2064/#2280/#1513)
+# `Runner` interface + `RunnerFactory` (#1077, corrected #1580 for #1348 fallout, widened #2042, `RevokeBypass` retired #2043, widened #2064/#2280/#1513/#2592)
 
 `Session.sup` is typed `Runner` (`internal/sessions/runner.go`):
 
@@ -14,19 +14,49 @@ type Runner interface {
     SetPermissionMode(mode string) error // #2042 — switches the LIVE child to a caller-named mode, no kill
     SetSpawnPermissionMode(mode string) // #2064 — installs the NEXT spawn's posture write, no kill, no live effect
     BeginTeardown() // #1513 — arms the write-refusal gate ahead of a deliberate kill; released by any successor child's bind
+    Interrupt() error // #2592 — ends the live child's running turn without killing it
+    RestartFresh(newID string) // #2592 — rotates the persistent session id and respawns under it
+    BeginRotation() func() // #2592 — arms the rotation write-refusal gate ahead of a new_session rotation; disarm is never nil
 }
 
 type RunnerFactory func(cfg RunnerConfig) (Runner, error)
 ```
+
+**`Interrupt`, `RestartFresh` and `BeginRotation` moved onto this interface in #2592, closing the last fail-open
+capability assertions cmd/pyry reached off `Session.Runner()`.** With exactly one production implementation
+(`streamRunner`, which already had all three) the assertions were speculative-surface avoidance; a second
+runner implementation (Codex, #2585) turns that into a real hazard, because an assertion that doesn't match is
+a silent no-op — a Codex runner missing `Interrupt` would drop the keystroke while `v2.interrupt.dispatched`
+still logged a dispatch. The widening deletes the inert arms outright rather than leaving them reachable:
+`armNone` and the `v2.interrupt.no_actuator` record (`cmd/pyry/main.go`'s `activeInterrupter.SendEsc`), the
+`v2.new_session.no_restart` record (`activeSessionStarter.StartNewSession`), and `beginRotationOrNoop` itself.
+`interruptRunner` and `startFreshRunner` still exist as named call sites — `interruptRunner` because the arm
+string it returns feeds the `arm` field of `v2.interrupt.dispatched` — but neither asserts any more; both call
+the interface directly. See [Rotation-delivery gate (#1330) §
+BeginRotation](streamsup-package-per-conversation-turn-busy-track-rotation-delivery-gate.md) and
+[Interrupt seam](v2-session-manager-state-machine-inbound-interrupt-interrupter-seam-esc.md) for the record
+contracts that survived the cut.
+
+A doc comment that counts its own siblings goes stale the moment the set changes: `streamRunner`'s later
+forwards (`ModelList` through `SetSpawnWorkDir`, in `cmd/pyry/streamsup_runner.go`) used to number themselves
+"the Nth method OFF `sessions.Runner`, after `Interrupt`, `RestartFresh`, `BeginRotation`" and justify their own
+assertion "the way `interruptRunner` reaches `Interrupt`" — both false once those three moved onto the
+interface. State the placement *rule* in each doc instead of counting or naming a sibling: a capability whose
+absence is harmless, with its consumer confined to `cmd/pyry`, stays an optional assertion; a capability whose
+absence would fail open across an `internal/sessions` seam goes on the interface. When you move a method
+between the two, grep for both spellings — "OFF `sessions.Runner`" adapter/consumer docs *and* the concrete
+implementing type's own "deliberately NOT on `sessions.Runner`" claims (`(*streamsup.Runner)`'s own doc
+comments carried one for `Interrupt` and `RequestInitialize` that #2592's sweep missed; flagged in PR #2594's
+review, left for a follow-up comment sweep alongside the four `cmd/pyry` files below).
 
 **`BeginTeardown` is on this interface for the same reason `SetSpawnPermissionMode` is (#1513).**
 Its three callers — both eviction arms of `Session.runActive` and `Pool.UpdateSettings`' restart
 branch — live inside `internal/sessions`, which must not import `internal/streamsup`, so a
 capability type-assertion at those call sites would fail **open**: a runner double missing the
 method would silently leave the teardown ungated while every layer reported success. It is a
-sibling of the `new_session` rotation gate (`BeginRotation`, off this interface, reached only via
-`beginRotationOrNoop`'s capability assertion in `cmd/pyry/main.go`) rather than a call into it —
-the two gates refuse identically but release on different, incompatible thresholds. See
+sibling of the `new_session` rotation gate (`BeginRotation`, on this interface since #2592) rather
+than a call into it — the two gates refuse identically but release on different, incompatible
+thresholds. See
 [Rotation-delivery gate (#1330) §
 teardown](streamsup-package-per-conversation-turn-busy-track-rotation-delivery-gate.md) for why
 reusing the rotation gate here would wedge a session.
@@ -54,12 +84,11 @@ their own doubles. The "nil selects a wrapper over `supervisor.New`" rollback st
 tell was true for the #1077 Strangler-Fig slice and stopped being true when #1348 removed the thing being
 rolled back to.
 
-There is no `Session.Supervisor()` accessor. Consumers that need methods off the concrete runner
-(`cmd/pyry`'s interrupt / new_session wiring) reach `*streamsup.Runner` via `Session.Runner()` — which
-keeps returning the `Runner` interface — and a **capability type-assertion** on an anonymous method-set
-interface, e.g. `interface{ Interrupt() error }` (`interruptRunner`),
-`interface{ RestartFresh(string) }` (`startFreshRunner`), `interface{ BeginRotation() func() }`
-(`beginRotationOrNoop`) — all in `cmd/pyry/main.go` — and, since #1857,
+There is no `Session.Supervisor()` accessor. `cmd/pyry`'s interrupt / new_session / reset wiring reaches
+`Interrupt`, `RestartFresh` and `BeginRotation` directly through `Session.Runner()`'s `sessions.Runner`
+value since #2592 — no assertion, because all three are on the interface now. Other consumers that need a
+method the interface doesn't carry still reach it through a **capability type-assertion** on an anonymous
+method-set interface, e.g., since #1857,
 `interface{ ModelList() (turnevent.ModelList, bool) }` (`resolveBoundModelList`), which lives in its own
 `cmd/pyry/session_model_list.go` rather than `main.go`: a fourth twin in the conversation-keyed resolver
 family (alongside `resolveBoundRunner` / `resolveBoundSession` / `resolveBoundRunSettings`), placed in a
@@ -86,18 +115,20 @@ its first run. **The check for the next capability assertion in this family:** g
 method name against `cmd/pyry/streamsup_runner.go` before assuming a concrete runner method
 reaches the interface — a working sibling assertion is evidence the adapter was widened for
 *that* method, not that the adapter is transparent to every method the concrete type has.
-`Interrupt`/`RestartFresh`/
-`BeginRotation`/`ModelList` stay off `sessions.Runner` deliberately (adding any would be speculative
-surface, or in `ModelList`'s case would drag every test double in both packages into the diff for no
-compile-time guarantee since its consumer sits in `cmd/pyry`, not `internal/sessions`); `SetSpawnArgs`,
-`SetModel`, `SetPermissionMode` and `SetSpawnPermissionMode` are on it instead, because — per their own docs — widening is
+`ModelList`/`SlashCommandList` stay off `sessions.Runner` deliberately: widening for either would drag
+every test double in both packages into the diff for no compile-time guarantee, since both consumers sit
+in `cmd/pyry`, not `internal/sessions`. `SetSpawnArgs`, `SetModel`, `SetPermissionMode` and
+`SetSpawnPermissionMode` are on it instead, because — per their own docs — widening is
 compile-checked across the whole one-production/five-double set, whereas a type assertion at a future
 call site would fail silently at runtime and either fall back to `Restart` or leave a posture stuck
 while the caller reports success — the exact outcomes these swap/posture-changing methods exist to
 avoid. `SetModel` follows the same rule: `Pool.deliverSettingsInBand` must either have the live control
 capability or fail compilation, because an optional assertion could persist the setting while silently
 leaving the running child unchanged. All four share the same placement rule: their consumers are inside `internal/sessions`, so there
-is no `cmd/pyry` dispatch site to type-assert at. `SetSpawnPermissionMode` closes a staleness
+is no `cmd/pyry` dispatch site to type-assert at. `Interrupt`, `RestartFresh` and `BeginRotation` are on the
+interface for a different reason even though their own consumers sit in `cmd/pyry` (see above,
+\#2592) — the risk widening closes for them is a second runner implementation lacking the method, not the
+absence of a `cmd/pyry` dispatch site. `SetSpawnPermissionMode` closes a staleness
 gap the other three don't have to: `Pool.UpdateSettings` never reconstructs a runner, so without an
 interface method a construction-time-only spawn posture would silently outlive the operator's own
 change and get re-asserted on the next crash-respawn. See [streamsup-package's Posture
@@ -137,11 +168,16 @@ a visibly wrong (leaked) answer instead of an empty one that could pass unnotice
 method, because a method reachable only from its own test still counts as "used", and the
 assertion (not an interface implementation) is the only thing that made it reachable at all.
 Deleting the resolver that held the assertion (#1550) is what stranded it, and finding that
-required a by-hand repo-wide grep, not a gate failure. The six capability interfaces above
-share the same structural blind spot: removing `interruptRunner`, `startFreshRunner`,
-`beginRotationOrNoop`, `resolveBoundModelList`, or `resolveBoundSlashCommandList` would not, by
-itself, surface any strandable method on `*streamsup.Runner` via a build or vet failure — that has
-to be checked by hand at deletion time, the same way #1550's spec did. `resolveBoundModelList`
+required a by-hand repo-wide grep, not a gate failure. The remaining capability interfaces above
+share the same structural blind spot: removing `resolveBoundModelList` or
+`resolveBoundSlashCommandList` (or, in `internal/relay`, `mcpChildActuator`/`mcpStatusQuerier`)
+would not, by itself, surface any strandable method on `*streamsup.Runner` via a build or vet
+failure — that has to be checked by hand at deletion time, the same way #1550's spec did.
+`interruptRunner`, `startFreshRunner` and `beginRotationOrNoop` no longer belong to this family:
+\#2592 moved `Interrupt`/`RestartFresh`/`BeginRotation` onto `sessions.Runner`, so the first two
+now call the interface directly and the third is deleted — none can strand a method silently any
+more, because removing the call site would be a build failure, not a silent unused-method drop.
+`resolveBoundModelList`
 (#1857) shipped with **no production caller at all**, and stayed reported as "used" purely
 because a `_test.go` reference counts — verified empirically against the `staticcheck` version
 `make check` installs before relying on it, rather than assumed. It gained its first production

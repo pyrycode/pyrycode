@@ -73,8 +73,7 @@ that didn't exist, never a fall-through to the bootstrap session):
    never falling through to `Pool.Lookup("")`'s bootstrap session (the #678
    isolation point). The non-distinction is deliberate, not an oversight — it
    is also what denies a hostile paired client an existence oracle.
-4. bound runner exposes no `RestartFresh` → inert (`v2.new_session.no_restart`).
-5. **named** conversation whose runner reports `State().ChildPID == 0` → inert
+4. **named** conversation whose runner reports `State().ChildPID == 0` → inert
    (`v2.new_session.no_live_child`). Named-only: see below.
 
 Every refusal logs at **debug**, because the id is client-supplied — matching
@@ -84,43 +83,56 @@ daemon-authored arm identity, not a client string).
 
 ### A capability probe answers "could", not "is" — the arm that shipped broken
 
-Row 4 and row 5 look like one guard and are not, and conflating them is exactly
-how AC-4's fourth case ("named conversation with no live child") shipped unmet
-in the first PR (#2157) despite the plan reasoning it was free. `interface{
-RestartFresh(string) }` is a **type** assertion — it asks what the runner
-*can* do, and production's only implementation, `streamRunner`, answers yes
-**unconditionally**: `RestartFresh` is exposed regardless of whether a child
-has ever spawned, and `Pool.buildSession` assigns it at mint time. Since
-\#2085, `create_conversation` binds a conversation's `CurrentSessionID` without
-spawning a child — the spawn waits for the conversation's first message — so a
-created-but-unmessaged conversation sailed through rows 1–4 with a real,
-capable runner and reached `Pool.RotateForNewSession`, which checks only pool
-membership. The result was observable damage with nothing to show for it: the
+**What follows is history: the capability probe this section is about no longer
+exists.** AC-4's fourth case ("named conversation with no live child") shipped
+unmet in the first PR (#2157) despite the plan reasoning it was free, because a
+**capability** guard was standing in for a **runtime-state** one. At the time,
+`interface{ RestartFresh(string) }` was a **type** assertion — it asked what the
+runner *can* do, and production's only implementation, `streamRunner`, answered
+yes **unconditionally**: `RestartFresh` was exposed regardless of whether a child
+had ever spawned, and `Pool.buildSession` assigns it at mint time. Since \#2085,
+`create_conversation` binds a conversation's `CurrentSessionID` without spawning a
+child — the spawn waits for the conversation's first message — so a
+created-but-unmessaged conversation sailed through the capability probe with a
+real, capable runner and reached `Pool.RotateForNewSession`, which checks only
+pool membership. The result was observable damage with nothing to show for it: the
 pool rekeyed, `sessions.json` persisted, the conversation rebound, and a
 `session_transition` broadcast telling every client to render a delimiter for
 a chat that had never had a turn, while `RestartFresh` itself spawned nothing.
 
-The fix is a second, **runtime-state** guard below the capability probe:
-`State().ChildPID == 0` (unstarted, backing off, evicted, and stopped all read
-0 — every state with nothing to restart fresh; a spawn that started but has
+The fix at the time was a second, **runtime-state** guard below the capability
+probe: `State().ChildPID == 0` (unstarted, backing off, evicted, and stopped all
+read 0 — every state with nothing to restart fresh; a spawn that started but has
 not yet published its pid also reads 0 and is refused, which is the same
 fail-safe direction the whole reject set takes, and the frame is re-sendable).
-**Generalizes:** a "can this be done" interface assertion and a "has this
-already happened" state read are different questions, and a reject set that
-needs the second will pass every test that only drives the first.
+**#2592 removed the capability probe outright** rather than leaving it beside the
+state guard: `RestartFresh` moved onto `sessions.Runner`, so every runner —
+production and test double alike — offers it unconditionally by construction, and
+"what the runner can do" stopped being a question this seam could get a useful
+answer to (the answer is always yes). The `no_restart` row and its
+`v2.new_session.no_restart` record are gone; the `ChildPID == 0` guard is the only
+row left in this family, renumbered to row 4 above. **Generalizes, and outlives
+this specific probe:** a "can this be done" interface assertion and a "has this
+already happened" state read are different questions. When every implementation
+answers the capability question the same way, the assertion is not testing
+anything — collapse it to a build-time interface requirement (#2592's fix) rather
+than leaving a probe whose only measured value is "does this fake happen to omit
+the method."
 
-**The test double is what let the wrong conclusion stand, so it changed too.**
-The original `TestActiveSessionStarter_InertArms` row for "no live child"
-injected a fake lacking `RestartFresh` entirely — a shape production never
-produces for a bound conversation — so it exercised row 4, not row 5, and
-greened on a fiction. `restartFreshRunner` (the test double) now offers
-`RestartFresh` **always** and carries liveness in `State()`, exactly as
-`streamRunner` does, splitting what had been one table row into two: a
-capability row (`baseRunner{}` → `no_restart`) and the actual liveness row (a
-capable runner with `childPID == 0` → `no_live_child`). **Generalizes:** a test
-double that omits a method the production type always provides doesn't just
-under-test — it can make the wrong arm look green. When a reject set has two
-adjacent refusals, the double must be able to reach both.
+**The test double is what let the wrong conclusion stand at the time.** The
+original `TestActiveSessionStarter_InertArms` row for "no live child" injected a
+fake lacking `RestartFresh` entirely — a shape production never produced for a
+bound conversation — so it exercised the capability row, not the liveness row,
+and greened on a fiction. `restartFreshRunner` (the test double) was changed to
+offer `RestartFresh` **always** and carry liveness in `State()`, exactly as
+`streamRunner` does, splitting what had been one table row into two — until
+\#2592 deleted the capability row's test entirely, leaving `restartFreshRunner`
+with the same always-on `RestartFresh` it already had (now simply satisfying the
+interface, not a deliberately-generous fake). **Generalizes:** a test double that
+omits a method the production type always provides doesn't just under-test — it
+can make the wrong arm look green. When a reject set has two adjacent refusals
+and only one is still reachable, delete the double's ability to reach the dead
+one rather than leaving it to rot as an untested branch.
 
 ### The no-live-child guard is named-only — a known, accepted asymmetry
 
@@ -161,7 +173,8 @@ nothing to show for it, not merely because the sibling needed one.
 
 ## Dormant reset: previously-used, no live child (#2521)
 
-Row 5's `no_live_child` guard conflated two states that both read
+The `no_live_child` guard (row 4 above; row 5 before #2592 removed the
+`no_restart` capability row ahead of it) conflated two states that both read
 `State().ChildPID == 0`: a conversation created but never messaged (#2085,
 the guard's original subject) and one that ran, then stopped, backed off, or
 was idle-evicted. The reported symptom — pressing **New session** on an
@@ -169,7 +182,7 @@ existing channel did nothing until a message was sent first — was the second
 state, and a daemon restart added a third: after `sessions.New` materialises
 only the bootstrap, a previously-used conversation's session is a persisted
 `Pool.dormant` entry `resolveBound` (`resolveBoundSession`) simply misses,
-landing on row 3 (`no_bound_session`) instead of row 5. The message route
+landing on row 3 (`no_bound_session`) instead of the liveness row. The message route
 never had this gap — `sessionRouter.resolve` already re-materialises through
 `sessionRouter.revive` on `ErrSessionNotFound` — which is why "send one
 message first, then Reset" was the workaround.
