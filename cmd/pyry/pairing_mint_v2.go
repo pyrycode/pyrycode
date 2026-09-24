@@ -135,8 +135,9 @@ func (m *pairingMinterV2) MintLocalPairing(deviceName string, allowRemotePermiss
 //  2. THE MINT, with allowRemotePermissions a LITERAL false. A minted device is
 //     always unprivileged: protocol.MintPairingPayload has no field for the flag
 //     by declaration, and this line is the second half of that guarantee. A stolen
-//     privileged pairing can mint devices that watch and send, and can never mint
-//     one that approves.
+//     privileged pairing can mint devices that watch, send and answer prompts
+//     (every device may, since #2605), and can never mint one that mints further
+//     devices or actuates MCP servers.
 //  3. THE ENCODE, over four daemon-authored values, and one record of the mint.
 //
 // STEP 1 IS RE-ASKED INSIDE THE LOCK, which is the one thing here that is not a

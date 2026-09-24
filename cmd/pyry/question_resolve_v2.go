@@ -110,11 +110,12 @@ func newQuestionResolverV2(reg *questionbridge.Registry, logger *slog.Logger) *q
 //     empty batch id a `null` payload decodes to, which the relay handler
 //     deliberately forwards rather than judging itself. The payload is discarded.
 //  3. FAIL-CLOSED ELIGIBILITY GATE. A nil device (no authenticated device on the
-//     connection), an unauthenticated one and one whose opt-in bit is unset all
-//     deny. The denial is audited denied_unauthorized with the (possibly empty)
-//     non-secret identity, and the batch is LEFT OUTSTANDING — still answerable by
-//     a legitimate device, and still covered by the no-answer backstop.
-//  4. THE ALLOW CONJUNCTION, defence in depth. AuthorizeRemotePermission re-checks
+//     connection) denies; any authenticated device may answer since #2605,
+//     whatever its AllowRemotePermissions bit. The denial is audited
+//     denied_unauthorized with the (empty) non-secret identity, and the batch is
+//     LEFT OUTSTANDING — still answerable by a legitimate device, and still
+//     covered by the no-answer backstop.
+//  4. THE ALLOW CONJUNCTION, defence in depth. AuthorizePromptAnswer re-checks
 //     eligibility alongside the outcome, which keeps the fail-closed conjunction in
 //     its single unit-tested place; for a device that passed step 3 it reduces to
 //     true, and it is the call that would keep denying correctly if that step were
@@ -153,7 +154,7 @@ func (r *questionResolverV2) ResolveAnswer(p protocol.QuestionAnswerPayload, dev
 	// fail-closed predicate for an allow outcome — and kept because the primitive
 	// is where that conjunction is unit-tested, so a later edit to the gate cannot
 	// silently turn this into an ungated allow.
-	if !devices.AuthorizeRemotePermission(dev, devices.OutcomeAllow) {
+	if !devices.AuthorizePromptAnswer(dev, devices.OutcomeAllow) {
 		r.auditQuestion(dev, p.QuestionBatchID, audit.OutcomeDeniedUnauthorized)
 		return false
 	}
@@ -173,7 +174,7 @@ func (r *questionResolverV2) ResolveAnswer(p protocol.QuestionAnswerPayload, dev
 // block for the full argument; only the differences are stated here.
 //
 // IT HAS NO ALLOW CONJUNCTION, and that absence is deliberate rather than an
-// omission. AuthorizeRemotePermission reads as "allow the tool call", so it is
+// omission. AuthorizePromptAnswer reads as "allow the tool call", so it is
 // false for an ELIGIBLE device refusing — the intended outcome, not a gate failure
 // — which makes it useless as a check on this arm. The eligibility gate inside
 // admit is the same fail-closed predicate on both arms; only the conjunction, which
@@ -218,7 +219,7 @@ func (r *questionResolverV2) admit(batchID string, dev *devices.Device) bool {
 	if _, ok := r.reg.Lookup(batchID); !ok {
 		return false // unknown or already-resolved — no security decision, no record
 	}
-	if !dev.MayAnswerRemotePermission() {
+	if !dev.MayAnswerPrompt() {
 		r.auditQuestion(dev, batchID, audit.OutcomeDeniedUnauthorized)
 		return false
 	}

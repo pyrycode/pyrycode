@@ -1639,8 +1639,9 @@ const (
 //   - THE MINTED DEVICE IS ALWAYS UNPRIVILEGED. MintPairingPayload has no field for
 //     devices.Device.AllowRemotePermissions by declaration, and an implementation
 //     MUST pass false as a literal rather than threading a value from anywhere. A
-//     stolen privileged pairing can mint devices that watch and send; it must never
-//     be able to mint one that approves.
+//     stolen privileged pairing can mint devices that watch, send and answer
+//     prompts (every device may, since #2605); it must never be able to mint one
+//     that can itself mint or actuate MCP servers.
 //   - requester IS THE AUTHENTICATED DEVICE AND THE ONLY IDENTITY THERE IS. It is
 //     the per-conn s.device, bound at handshake after the presented token validated,
 //     and no field of the request names a device. A nil requester is a conn with no

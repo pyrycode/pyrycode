@@ -93,18 +93,36 @@ func (r *Registry) Validate(plain string) (Device, ValidateResult) {
 	return Device{}, ValidateUnknownToken
 }
 
-// MayAnswerRemotePermission reports whether this device is authorized to answer
-// a remote permission / trust / destructive modal. Fail-closed: returns true
-// ONLY when the per-device opt-in bit is set. A nil receiver (no authenticated
-// device on the connection) and a bit-OFF device both return false = denied.
-// The nil-guard makes the safe default structural, so the predicate is total:
-// the modal control loop (#703) calls it off dispatch.Conn.Auth() — typed
-// *Device, nil before the first-frame gate accepts — to reject a non-permitted
-// phone's modal answer with an error envelope BEFORE resolving any answer
-// (ADR 025 § "Security model").
+// MayAnswerPrompt reports whether this device may answer a remote permission /
+// trust / destructive modal or answer or refuse a question batch. Since #2605
+// (operator decision 2026-09-24: no view-only clients) that is every
+// authenticated device; AllowRemotePermissions plays no part. A nil receiver —
+// no authenticated device on the connection, dispatch.Conn.Auth() before the
+// first-frame gate accepts — returns false = denied, so the fail-closed reading
+// is structural rather than a branch at each call site.
 //
 // Pure predicate: no side effects (no logging, no I/O, no token handling).
-// Audit-writing on a decision is #712's primitive; it is not invoked here.
+func (d *Device) MayAnswerPrompt() bool {
+	return d != nil
+}
+
+// AuthorizePromptAnswer is the answering paths' fail-closed grant decision.
+// Returns true (ALLOW) ONLY when the device may answer AND the outcome is an
+// explicit allow; every other (device, outcome) returns false (DENY). It is the
+// answer-side twin of AuthorizeRemotePermission, which keeps the privileged bit
+// for MCP actuation.
+func AuthorizePromptAnswer(d *Device, outcome RemotePermissionOutcome) bool {
+	return d.MayAnswerPrompt() && outcome == OutcomeAllow
+}
+
+// MayAnswerRemotePermission reports whether this device holds the privileged
+// AllowRemotePermissions bit. Despite its name it no longer gates answering —
+// MayAnswerPrompt does, since #2605. It gates the two privileged verbs: minting
+// a pairing for another device (pairingMinterV2.MintPairing) and actuating an
+// MCP server (mcpActuatorV2.actuate). Fail-closed: a nil receiver (no
+// authenticated device) and a bit-OFF device both return false = denied.
+//
+// Pure predicate: no side effects (no logging, no I/O, no token handling).
 func (d *Device) MayAnswerRemotePermission() bool {
 	return d != nil && d.AllowRemotePermissions
 }
@@ -122,14 +140,14 @@ const (
 	OutcomeCancel                                  // phone cancelled / dismissed (ESC)
 )
 
-// AuthorizeRemotePermission resolves the final grant decision, fail-closed.
-// Returns true (ALLOW) ONLY when the device is eligible AND the outcome is an
-// explicit allow. Every other (device, outcome) — ineligible / nil device, no
-// answer, timeout, cancel, explicit deny — returns false (DENY). #703 applies
-// this on timeout (OutcomeTimeout -> false).
+// AuthorizeRemotePermission resolves a privileged grant decision, fail-closed.
+// Returns true (ALLOW) ONLY when the device holds the privileged bit AND the
+// outcome is an explicit allow. Every other (device, outcome) — unprivileged /
+// nil device, no answer, timeout, cancel, explicit deny — returns false (DENY).
+// Since #2605 its caller is MCP actuation; answering uses AuthorizePromptAnswer.
 //
 // It re-checks MayAnswerRemotePermission (defense in depth) so it denies
-// correctly even if a caller skips the upfront eligibility gate. The single
+// correctly even if a caller skips the upfront privilege gate. The single
 // ALLOW conjunction keeps the safe default in one unit-tested place: any future
 // outcome added to the enum defaults to DENY unless explicitly mapped here.
 //
