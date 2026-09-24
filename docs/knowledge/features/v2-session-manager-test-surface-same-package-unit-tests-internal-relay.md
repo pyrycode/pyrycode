@@ -157,6 +157,36 @@ zero of these every time and misreads as a regression rather than as the
 producer ordering `turnEndContextUsageRequester` guarantees; the fix drains
 past `turn_end` through a settle window, exactly as #2371's own leg documents.
 
+Moving the seam wait off `appFrameWorker` onto a per-ask goroutine (#2563, same
+file) added three tests and two fixture traps worth knowing before touching
+this suite again. `TestV2Session_RequestContextUsage_WaitDoesNotBlockLaterFrames`
+blocks a fake `ContextUsageFor` on a channel, sends the ask, then sends a
+v1-routed `send_message` on the same conn and asserts its reply arrives while
+the seam is still blocked — proof of AC-1 that fails on the pre-fix inline
+tree, since the `send_message` would queue behind the parked worker.
+`TestV2Session_RequestContextUsage_WaitingAsksAreBounded` holds four asks
+blocked in the seam, sends a fifth, and asserts it is refused at once
+(retryable, correlated to its own `in_reply_to`) without touching the seam,
+then releases the four and asserts each is answered exactly once — pinning
+`maxContextUsageAsksPerConn` without a timing race, since the refusal is
+synchronous on the worker. `TestV2Session_RequestContextUsage_TeardownEndsTheWait`
+has the fake seam return a *successful* reading only after its `ctx` is
+cancelled, then tears the conn down (or stops the manager) and asserts no
+`context_usage` is ever sealed for it — pinning that a late reply is dropped by
+`connCtx`, not merely delayed. First fixture trap: the harness's
+`noiseMsgsForConn` helper (used to collect a conn's replies for counting)
+calls `t.Fatalf` on a close envelope, because a close carries no inner frame to
+decode — a test that tears a conn down and then counts its replies has to
+filter the close envelope out itself before handing the slice to that helper,
+or the count assertion never runs. Second: the manager-stop half of the
+teardown test was already green on the pre-fix tree, because stopping the
+manager cancels `runCtx`, which the seam was already waiting on before this
+ticket; only cancelling a single conn's wait via `s.done` is new, so the
+conn-teardown subtest specifically — not the manager-stop one — is the half
+that reproduces red without the fix. A teardown test that covers only the
+manager-stop path would pass on both trees and prove nothing about this
+ticket.
+
 Two fixture traps surfaced building the above, worth knowing before touching this file again. `blockingBundler.release` must be closed from a `t.Cleanup` **registered after** the manager's `stop` cleanup — `t.Cleanup` runs LIFO, and release-before-stop unparks the seam before `stop` waits for `Run` to exit; registered the other way round, a pre-fix tree *hangs* in cleanup instead of failing, turning the RED proof AC #1 demands into a timeout with no diagnostic. And a pre-fix failure and a mutation-kill can redden the same test for unrelated reasons: `…_RejectsSecondWhileAssembling` also fails pre-fix, but only because `Run` is parked and never reaches the second request at all — that says nothing about the marker specifically. Only a mutant that drops `s.bundleAssembling` from the gate while leaving assembly off `Run` isolates the accept-side half, and it reddens as a missing-reply count rather than an obviously-wrong value — the absent reply *is* the two-concurrent-assemblies bug, read backwards.
 
 ### E2E (`internal/e2e/relay_v2_handshake_test.go`, build tag `e2e`)

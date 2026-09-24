@@ -2740,7 +2740,14 @@ child until that turn ends, and is answered after it.** The daemon defers on
 the conversation's turn state before asking claude anything, so a mid-turn ask
 never competes with the running turn for the child's control channel. This
 wait has no timeout of its own — it ends when the turn does, however long that
-takes.
+takes. **That wait does not delay the connection's other frames** (#2563): a
+`send_message` or `interrupt` sent on the same connection while the ask is
+still deferred is handled as it arrives, not queued behind the ask. The cost
+is ordering — this verb's `context_usage` reply (or the matching `error`
+reject) may arrive after replies to frames sent later on the same connection,
+so match it by `in_reply_to` rather than by arrival order. A connection holds
+at most 4 such deferred asks at once; a fifth is refused immediately with a
+retryable `context_usage.unavailable`.
 
 **Two requests for the same conversation close together produce one round
 trip to claude, and both are answered from its result** — whether the second
