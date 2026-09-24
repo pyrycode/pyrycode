@@ -276,6 +276,45 @@ func (c *Connection) CloseConn(connID string, code uint16) error {
 	return c.client.Send(raw)
 }
 
+// pushWakeEnvelope is the relay-addressed push_wake routing envelope
+// (docs/protocol-mobile.md § push_wake). It is its own type rather than a
+// RoutingEnvelope field because RoutingEnvelope always emits conn_id and frame,
+// and this shape carries neither: it addresses the relay, not a phone conn.
+type pushWakeEnvelope struct {
+	PushWake pushWakeRequest `json:"push_wake"`
+}
+
+type pushWakeRequest struct {
+	Platform string `json:"platform"`
+	Token    string `json:"token"`
+}
+
+// errMarshalPushWake is fixed text on purpose: the encoder's own error would be
+// the only way a caller's error could carry the push token.
+var errMarshalPushWake = errors.New("relay: marshal push_wake envelope")
+
+// marshalPushWake returns the push_wake wire bytes for platform and token.
+func marshalPushWake(platform, token string) ([]byte, error) {
+	raw, err := json.Marshal(pushWakeEnvelope{PushWake: pushWakeRequest{Platform: platform, Token: token}})
+	if err != nil {
+		return nil, errMarshalPushWake
+	}
+	return raw, nil
+}
+
+// SendPushWake asks the relay to send a platform push to token (#2564). The
+// envelope is relay-addressed and never sealed in a Noise session; the relay is
+// its only reader. Returns the transport sentinels unchanged (ErrNotConnected,
+// ErrDisconnected, ErrClosed) — no error from this method carries the token, and
+// the caller MUST NOT log the token either.
+func (c *Connection) SendPushWake(platform, token string) error {
+	raw, err := marshalPushWake(platform, token)
+	if err != nil {
+		return err
+	}
+	return c.client.Send(raw)
+}
+
 // Wait blocks until the lifecycle terminates and returns the terminal
 // classification: ErrServerIDConflict (fatal), ctx.Err (graceful
 // shutdown), or a wrapped transport error.

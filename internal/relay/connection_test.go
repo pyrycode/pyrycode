@@ -688,6 +688,41 @@ func TestCloseConn_PropagatesNotConnected(t *testing.T) {
 	close(c.done)
 }
 
+// TestMarshalPushWake_WireShape pins the bytes SendPushWake puts on the leg
+// (#2564): exactly docs/protocol-mobile.md § push_wake — a relay-addressed
+// envelope with no conn_id and no frame key, which RoutingEnvelope cannot
+// produce because neither of its fields is omitempty.
+func TestMarshalPushWake_WireShape(t *testing.T) {
+	t.Parallel()
+	raw, err := marshalPushWake("fcm", "tok-123")
+	if err != nil {
+		t.Fatalf("marshalPushWake: %v", err)
+	}
+	const want = `{"push_wake":{"platform":"fcm","token":"tok-123"}}`
+	if string(raw) != want {
+		t.Errorf("marshalPushWake = %s, want %s", raw, want)
+	}
+}
+
+// TestSendPushWake_PropagatesNotConnected pins that SendPushWake surfaces the
+// transport sentinel unchanged when the leg is down, like CloseConn.
+func TestSendPushWake_PropagatesNotConnected(t *testing.T) {
+	t.Parallel()
+	tc := transport.New(transport.Config{
+		URL:          "ws://example.invalid/v1/server",
+		WriteTimeout: time.Second,
+		Logger:       testLogger(t),
+	})
+	c := &Connection{client: tc}
+	err := c.SendPushWake("fcm", "tok-123")
+	if !errors.Is(err, transport.ErrNotConnected) {
+		t.Errorf("SendPushWake before connect: got %v, want ErrNotConnected", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "tok-123") {
+		t.Errorf("SendPushWake error text carries the token: %v", err)
+	}
+}
+
 // TestConfig_AllowInsecureScheme covers the test-only seam that lets
 // ws:// pass Connect's scheme check. We don't run the lifecycle here —
 // just enough of Connect to prove the validator branch. A dial against

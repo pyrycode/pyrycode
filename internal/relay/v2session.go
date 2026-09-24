@@ -1854,11 +1854,17 @@ func retainedClientField(v string, maxBytes int) string {
 // struct wholesale — "%+v", slog.Any — which would emit them into the daemon log
 // by accident. Both are "" for a client that reported nothing and for one whose
 // value exceeded maxRetainedClientNameBytes.
+//
+// DeviceTokenHash is the TokenHash of the device the handshake AUTHENTICATED
+// (s.device), which is what "this conn belongs to that device" must be decided on
+// — never DeviceName, which any phone may set to another device's name (#2564). It
+// is daemon-authored but credential-derived, so it too MUST NOT be logged.
 type ActiveConn struct {
-	ConnID        string
-	Interactive   bool
-	DeviceName    string
-	ClientVersion string
+	ConnID          string
+	Interactive     bool
+	DeviceName      string
+	ClientVersion   string
+	DeviceTokenHash string
 }
 
 // ActiveConns returns a snapshot of every session currently in V2StateOpen —
@@ -1925,12 +1931,18 @@ func (m *V2SessionManager) handleActiveConns() []ActiveConn {
 	out := make([]ActiveConn, 0, len(m.sessions))
 	for connID, s := range m.sessions {
 		if s.state == V2StateOpen {
-			out = append(out, ActiveConn{
+			ac := ActiveConn{
 				ConnID:        connID,
 				Interactive:   s.interactive,
 				DeviceName:    s.clientName,
 				ClientVersion: s.clientVersion,
-			})
+			}
+			// s.device is bound before V2StateOpen on the accept path; the guard
+			// only keeps a hand-built session from panicking the snapshot.
+			if s.device != nil {
+				ac.DeviceTokenHash = s.device.TokenHash
+			}
+			out = append(out, ac)
 		}
 	}
 	return out

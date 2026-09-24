@@ -167,6 +167,11 @@ type interactiveTurnEmitterV2 struct {
 	// contextUsageRecorder.record, beside the rest of that seam's inertness.
 	usageRec *contextUsageRecorder
 
+	// waker asks the relay to wake absent phones when a turn ends (#2564). nil
+	// means no wake; assigned after construction for hist's call-site reason.
+	// Trigger is nil-safe and never blocks this goroutine.
+	waker *pushWaker
+
 	// Delta-coalescing state (#609) — read/written only on the single Handle/
 	// flush goroutine, same contract as the lifecycle fields above. The invariant
 	// the timer relies on: flushTimer is armed iff deltaBuf is non-empty.
@@ -329,6 +334,9 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		e.emitMapped(ctx, convID, ev)
 		e.transitionTo(ctx, convID, turnbridge.StateIdle)
 		e.endTurn()
+		// After the fan-out: connected phones already have the turn_end; the
+		// waker reaches the ones that do not.
+		e.waker.Trigger()
 	case turnevent.Stall:
 		// Onset-only control/state signal — a peer of turn_state. Emit with NO
 		// turn-lifecycle mutation: a stall is orthogonal to thinking/responding/

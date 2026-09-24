@@ -390,6 +390,12 @@ type streamApprovalBridge struct {
 	// wiring time before the manager's Run goroutine starts.
 	questions *questionbridge.Registry
 
+	// waker asks the relay to wake absent phones when a permission modal_shown
+	// goes live (#2564). Set after construction at the one production site, for
+	// questions' reason; nil ⇒ no wake. Read without mu, written before the
+	// control server can call Surface.
+	waker *pushWaker
+
 	// mu is a leaf lock guarding byModal + byQuestion + nextID ONLY: held around
 	// O(1) map ops and the counter bump, never across modal.Record,
 	// perm.Lookup/perm.Resolve, modal.Resolve, questions.Record/questions.Resolve,
@@ -861,6 +867,9 @@ func (b *streamApprovalBridge) Surface(req permbridge.Request) (retire func()) {
 	b.mu.Unlock()
 
 	b.broadcast(protocol.TypeModalShown, payload, "stream_approval.push_err")
+	// After the fan-out, and only on this live path: the reconnect replay
+	// (reconcileModals) never passes through here, so it cannot wake anyone.
+	b.waker.Trigger()
 
 	return func() { b.retire(modalID) }
 }

@@ -1369,6 +1369,14 @@ func startRelayV2(
 	// is read only by the handler already built above.
 	announceWorkspace = newWorkspaceUpdateEmitterV2(mgr, ctx, logger).announce
 
+	// The push-wake trigger (#2564): asks the relay to wake each FCM phone with no
+	// open session when a turn ends or a permission prompt goes live. Its own
+	// goroutine, so the two fan-outs that trigger it never wait on it; it exits
+	// with the daemon ctx. Handed to the bridge and the emitter below, each before
+	// the goroutine that reads the field starts.
+	waker := newPushWaker(mgr, registry, conn.SendPushWake, logger)
+	go waker.run(ctx)
+
 	// Stream-json approval bridge (#1080): joins the daemon-singleton permbridge
 	// parked-approval store (claude-facing completers, keyed by tool_use_id) to
 	// modalReg (client-facing modal_shown, keyed by modal_id), owning the
@@ -1390,6 +1398,7 @@ func startRelayV2(
 		// before this slice. Set before mgr.Run's goroutine starts below, like
 		// streamApprovals — no data race on the field.
 		bridge.questions = questionReg
+		bridge.waker = waker
 		// The #1919 report's membership half, assigned after construction rather
 		// than passed in — the same shape modalResolver.streamApprovals uses, and
 		// the only way to keep the constructor's 14 call sites untouched.
@@ -1514,6 +1523,7 @@ func startRelayV2(
 		// conversation's one memory, and two recorders would merely be two names
 		// for it.
 		emitter.usageRec = contextUsageRec
+		emitter.waker = waker
 		// The drain's AC2 scoping gate follows the ACTIVE conversation's bound
 		// session — the follow-active cursor boundSessionIDForActive reads, with the
 		// #678 conv.CurrentSessionID == "" isolation guard resolveBoundSession
