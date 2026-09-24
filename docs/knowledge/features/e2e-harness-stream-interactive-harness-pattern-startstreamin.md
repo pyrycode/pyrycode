@@ -332,3 +332,38 @@ non-zero, so "found nothing" stays a claim about a directory that was actually
 walked rather than one the sweep never reached. Any e2e negative shaped as
 "this specific subtree is empty" should restate as "the whole tree's one hit
 is elsewhere" or "N files visited, 0 matched" instead.
+
+### `relay_v2_stream_modal_test.go` — an ack-await loop can discard the frame a later loop waits for (#2612)
+
+`TestRelayV2_StreamModalPermissionRoundTrip` (#1139) awaits the `send_message`
+ack first, skipping every non-ack envelope, then awaits `modal_shown` /
+`question_shown` in a second loop. The comment above the ack wait claimed the
+ack precedes delivery, reasoning from the fake's own dial timing. It was
+wrong about the daemon: `SendMessage`'s handler enqueues the turn into
+`msgqueue` *before* it replies the ack (see
+[relay-package.md](relay-package.md) § `SendMessage`, "enqueues... and acks
+on acceptance"), and `streamApprovalBridge.Surface` broadcasts `modal_shown`
+from the control-server goroutine that parked the approval — a third
+goroutine nothing orders against the handler's ack write. With a diagnostic
+counting skipped envelope types, 4 of 10 racy runs showed `modal_shown`
+arriving during the ack wait, discarded there, leaving the modal loop to
+time out 20s later waiting for a frame that had already been consumed.
+
+Fix, not a longer deadline: record `modal_shown` / `question_shown` at the
+single decrypt point (`nextEnv`) the moment either is seen, first-occurrence
+only — the same treatment `sawToolUse` already got. The modal loop then just
+pumps `nextEnv` until one is recorded, so it can never miss a surface that
+arrived early. **Any wait loop in this family that skips-and-discards
+envelopes it doesn't currently care about is exposed to this same trap for
+every frame type a later loop in the same case will wait for** — the
+`send_message` ack is accept-into-backlog only (§ "Cursor-stamping only
+needs the ack, not the drain" above), never a delivery barrier, so nothing
+downstream of enqueue can be assumed to follow it.
+`relay_v2_stream_new_session_test.go` (M1/M4) and
+`relay_v2_stream_interrupt_test.go` have the identical inline ack-loop shape
+and were confirmed to drop non-ack frames the same way; they were left
+unchanged (different wait target — an `assistant_delta`, not a broadcast —
+and no shared helper to fix once) and flagged for a follow-up rather than
+fixed here. A new test in this family that adds a second post-ack wait
+should record that frame in `nextEnv` from the start rather than decode it
+only inside its own loop.
