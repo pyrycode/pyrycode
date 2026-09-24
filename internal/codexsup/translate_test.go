@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
@@ -160,12 +161,71 @@ func TestTranslateCapturedCommandTurnUsesTotalDelta(t *testing.T) {
 	if end.OutputTokens != 67 || end.CacheReadTokens != 25088 || end.InputTokens != 30395-25088 {
 		t.Errorf("counts in=%d cacheRead=%d out=%d, want the whole turn's", end.InputTokens, end.CacheReadTokens, end.OutputTokens)
 	}
-	u := only[turnevent.Unrecognized](events)
-	if len(u) != 1 || u[0].Site != turnevent.UnrecognizedCodexItem || u[0].Kind != "commandExecution" {
-		t.Errorf("unrecognized %#v, want one commandExecution item row", u)
+	if u := only[turnevent.Unrecognized](events); len(u) != 0 {
+		t.Errorf("unrecognized %#v, want none", u)
 	}
 	if len(only[turnevent.TextChunk](events)) == 0 {
 		t.Error("no text")
+	}
+}
+
+// TestTranslateCapturedCommands: each captured command becomes exactly one
+// ToolStart and one ToolUpdate, and no Unrecognized row.
+func TestTranslateCapturedCommands(t *testing.T) {
+	for _, tc := range []struct {
+		name, id, command string
+		status            turnevent.ToolStatus
+		detail            string
+	}{
+		{"command_accepted", "exec-d45bec69-92c6-4436-a954-971ded8168f3", "/bin/zsh -lc 'touch accepted.txt'", turnevent.ToolStatusCompleted, "exit 0"},
+		{"command_declined", "exec-db653cd5-1994-43f3-ab7c-45295a15bd9a", "/bin/zsh -lc 'touch declined.txt'", turnevent.ToolStatusFailed, "declined"},
+		{"file_edit", "exec-d53bde26-74c5-48b4-9a78-55b0d889dd91", "/bin/zsh -lc 'pwd && ls -la'", turnevent.ToolStatusFailed, "declined"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			events := replay(t, filepath.Join("testdata", "capture", tc.name+".jsonl"), captureModel)
+			input, _ := json.Marshal(map[string]string{"command": tc.command, "cwd": "/capture/cwd"})
+			wantStart := []turnevent.ToolStart{{ToolCallID: tc.id, Title: tc.command, Kind: turnevent.ToolKindExecute, RawInput: input}}
+			if got := only[turnevent.ToolStart](events); !reflect.DeepEqual(got, wantStart) {
+				t.Errorf("ToolStart %#v\nwant %#v", got, wantStart)
+			}
+			wantUpdate := []turnevent.ToolUpdate{{ToolCallID: tc.id, Status: tc.status, ResultDetail: tc.detail}}
+			if got := only[turnevent.ToolUpdate](events); !reflect.DeepEqual(got, wantUpdate) {
+				t.Errorf("ToolUpdate %#v\nwant %#v", got, wantUpdate)
+			}
+			if u := only[turnevent.Unrecognized](events); len(u) != 0 {
+				t.Errorf("unrecognized %#v", u)
+			}
+		})
+	}
+}
+
+// TestTranslateToolItemEdges: the ResultDetail, title and content rules at
+// their edges.
+func TestTranslateToolItemEdges(t *testing.T) {
+	completed := func(item string) []turnevent.Event {
+		return NewTranslator("").Translate("item/completed", json.RawMessage(`{"item":{"type":"commandExecution","id":"c",`+item+`}}`))
+	}
+	if got := completed(`"command":"x","cwd":"/","status":"failed","exitCode":-1,"aggregatedOutput":""`); !reflect.DeepEqual(got,
+		[]turnevent.Event{turnevent.ToolUpdate{ToolCallID: "c", Status: turnevent.ToolStatusFailed, ResultDetail: "exit −1"}}) {
+		t.Errorf("negative exit, empty output: %#v", got)
+	}
+	if got := completed(`"status":"inProgress"`); !reflect.DeepEqual(got,
+		[]turnevent.Event{turnevent.ToolUpdate{ToolCallID: "c", Status: turnevent.ToolStatusFailed}}) {
+		t.Errorf("completed without success: %#v", got)
+	}
+	got := completed(`"status":"completed","exitCode":"0"`)
+	if len(got) != 1 || got[0].(turnevent.Unrecognized).Site != turnevent.UnrecognizedUndecodable {
+		t.Errorf("string exit code: %#v", got)
+	}
+	long, _ := json.Marshal(strings.Repeat("é", maxToolTitle))
+	start := NewTranslator("").Translate("item/started", json.RawMessage(`{"item":{"type":"commandExecution","id":"c","cwd":"/","status":"inProgress","command":`+string(long)+`}}`))
+	if title := start[0].(turnevent.ToolStart).Title; len(title) > maxToolTitle || !utf8.ValidString(title) {
+		t.Errorf("title len %d valid %v", len(title), utf8.ValidString(title))
+	}
+	for _, m := range []string{"item/commandExecution/outputDelta", "item/fileChange/outputDelta"} {
+		if got := NewTranslator("").Translate(m, json.RawMessage(`{"itemId":"c","delta":"x"}`)); got != nil {
+			t.Errorf("%s produced %#v", m, got)
+		}
 	}
 }
 
@@ -242,6 +302,26 @@ func TestTranslateHandBuilt(t *testing.T) {
 		}},
 		{name: "compaction", want: []turnevent.Event{
 			turnevent.Compacting{Active: true}, turnevent.Compacting{Active: false},
+		}},
+		{name: "command_failed", want: []turnevent.Event{
+			turnevent.ToolStart{ToolCallID: "exec-1", Title: "/bin/zsh -lc 'ls missing'", Kind: turnevent.ToolKindExecute,
+				RawInput: json.RawMessage(`{"command":"/bin/zsh -lc 'ls missing'","cwd":"/capture/cwd"}`)},
+			turnevent.ToolUpdate{ToolCallID: "exec-1", Status: turnevent.ToolStatusFailed,
+				Content: turnevent.TextContent{Text: "ls: missing: No such file or directory\n"}, ResultDetail: "exit 2"},
+		}},
+		{name: "file_change", want: []turnevent.Event{
+			turnevent.ToolStart{ToolCallID: "patch-1", Title: "apply_patch", Kind: turnevent.ToolKindEdit,
+				Locations: []turnevent.Location{{Path: "/capture/cwd/notes.txt"}, {Path: "/capture/cwd/added.txt"}}},
+			turnevent.ToolUpdate{ToolCallID: "patch-1", Status: turnevent.ToolStatusCompleted, Content: turnevent.TextContent{
+				Text: "/capture/cwd/notes.txt\n@@ -1 +1 @@\n-old\n+new\n\n/capture/cwd/added.txt\n@@ -0,0 +1 @@\n+hello\n"}},
+			turnevent.ToolStart{ToolCallID: "patch-2", Title: "apply_patch", Kind: turnevent.ToolKindEdit,
+				Locations: []turnevent.Location{{Path: "/capture/cwd/gone.txt"}}},
+			turnevent.ToolUpdate{ToolCallID: "patch-2", Status: turnevent.ToolStatusFailed,
+				Content: turnevent.TextContent{Text: "/capture/cwd/gone.txt\n@@ -1 +0,0 @@\n-bye\n"}},
+			turnevent.ToolStart{ToolCallID: "patch-3", Title: "apply_patch", Kind: turnevent.ToolKindEdit,
+				Locations: []turnevent.Location{{Path: "/capture/cwd/notes.txt"}}},
+			turnevent.ToolUpdate{ToolCallID: "patch-3", Status: turnevent.ToolStatusFailed,
+				Content: turnevent.TextContent{Text: "/capture/cwd/notes.txt\n@@ -1 +1 @@\n-new\n+newer\n"}, ResultDetail: "declined"},
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

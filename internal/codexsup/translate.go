@@ -2,6 +2,7 @@ package codexsup
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	"github.com/pyrycode/pyrycode/internal/turnevent"
@@ -15,6 +16,9 @@ const (
 	maxBannerText      = 4 << 10
 	maxStopField       = 256
 	maxModelID         = 256
+	// maxToolTitle bounds a command's ToolStart title, which reaches the wire
+	// as the tool's name.
+	maxToolTitle = 4 << 10
 	// maxPendingTurns caps the per-turn state keyed by Codex's turnId. Codex
 	// runs one turn per thread at a time, so a peer past this is not one.
 	maxPendingTurns = 8
@@ -43,6 +47,10 @@ var (
 		// Fires on every turn. Mapping it onto RateLimited is a later
 		// rate-limit ticket.
 		"account/rateLimits/updated",
+		// The completed item carries the whole output or diff as the call's one
+		// ToolUpdate; turnbridge makes every ToolUpdate a tool_result frame, so a
+		// delta each would give one row several results.
+		"item/commandExecution/outputDelta", "item/fileChange/outputDelta",
 	}
 	// unrecognizedMethods become Unrecognized on the codex_method lane: seen,
 	// but with no mapping yet. model/verification is here so it is never
@@ -56,8 +64,8 @@ var (
 		"turn/diff/updated", "turn/plan/updated", "item/autoApprovalReview/started",
 		"item/autoApprovalReview/completed", "autoApprovalReview/strictReviewRequired",
 		"item/plan/delta", "command/exec/outputDelta", "process/outputDelta", "process/exited",
-		"item/commandExecution/outputDelta", "item/commandExecution/terminalInteraction",
-		"item/fileChange/outputDelta", "item/fileChange/patchUpdated", "item/mcpToolCall/progress",
+		"item/commandExecution/terminalInteraction", "item/fileChange/patchUpdated",
+		"item/mcpToolCall/progress",
 		"mcpServer/oauthLogin/completed", "mcpServer/event/stream/notification",
 		"externalAgentConfig/import/progress", "externalAgentConfig/import/completed",
 		"fs/changed", "model/verification",
@@ -77,17 +85,16 @@ var (
 // Item-type lanes, the same three-way classification over ThreadItem types;
 // TestItemTypesClassified checks them against the schema.
 var (
-	mappedItemTypes = []string{"contextCompaction"}
+	mappedItemTypes = []string{"contextCompaction", "commandExecution", "fileChange"}
 	// ignoredItemTypes carry no new turn meaning: a user message echoes the
 	// prompt, and agentMessage and reasoning text already arrived as deltas.
 	ignoredItemTypes = []string{"userMessage", "agentMessage", "reasoning"}
 	// unrecognizedItemTypes become Unrecognized on the codex_item lane, once
-	// per item, on item/started. The tool items are #2609's.
+	// per item, on item/started.
 	unrecognizedItemTypes = []string{
-		"hookPrompt", "functionCallOutput", "plan", "commandExecution", "fileChange",
-		"mcpToolCall", "dynamicToolCall", "collabAgentToolCall", "subAgentActivity",
-		"webSearch", "imageView", "sleep", "imageGeneration", "enteredReviewMode",
-		"exitedReviewMode",
+		"hookPrompt", "functionCallOutput", "plan", "mcpToolCall", "dynamicToolCall",
+		"collabAgentToolCall", "subAgentActivity", "webSearch", "imageView", "sleep",
+		"imageGeneration", "enteredReviewMode", "exitedReviewMode",
 	}
 )
 
@@ -142,7 +149,10 @@ type turnUsage struct {
 // one goroutine.
 //
 // Params are untrusted. Text is carried, never interpreted; every string the
-// translator builds from them other than text deltas is bounded here.
+// translator builds from them other than text deltas is bounded here. A tool
+// call's input, output, paths and diffs are carried as streamsup carries
+// tool input and tool_result text, bounded by acp's line cap and capped by
+// turnbridge on the way to the wire.
 type Translator struct {
 	model    string
 	usage    map[string]*turnUsage
@@ -320,6 +330,10 @@ func (t *Translator) item(method string, params json.RawMessage) []turnevent.Eve
 	switch {
 	case typ == "contextCompaction":
 		return []turnevent.Event{turnevent.Compacting{Active: method == "item/started"}}
+	case typ == "commandExecution":
+		return commandItem(method, params)
+	case typ == "fileChange":
+		return fileChangeItem(method, params)
 	case ignoredItemSet[typ], mappedItemSet[typ]:
 		return nil
 	case method == "item/completed":
@@ -327,6 +341,114 @@ func (t *Translator) item(method string, params json.RawMessage) []turnevent.Eve
 		return nil
 	}
 	return []turnevent.Event{unrecognized(turnevent.UnrecognizedCodexItem, typ, params)}
+}
+
+// commandItem maps a commandExecution item: its item/started to a ToolStart,
+// its item/completed to the call's one ToolUpdate.
+func commandItem(method string, params json.RawMessage) []turnevent.Event {
+	var p struct {
+		Item struct {
+			ID               string  `json:"id"`
+			Command          string  `json:"command"`
+			Cwd              string  `json:"cwd"`
+			Status           string  `json:"status"`
+			AggregatedOutput *string `json:"aggregatedOutput"`
+			ExitCode         *int32  `json:"exitCode"`
+		} `json:"item"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return undecodable(params)
+	}
+	it := p.Item
+	if method == "item/started" {
+		input, err := json.Marshal(struct {
+			Command string `json:"command"`
+			Cwd     string `json:"cwd"`
+		}{it.Command, it.Cwd})
+		if err != nil {
+			return undecodable(params)
+		}
+		return []turnevent.Event{turnevent.ToolStart{
+			ToolCallID: it.ID, Title: cut(it.Command, maxToolTitle),
+			Kind: turnevent.ToolKindExecute, RawInput: input,
+		}}
+	}
+	update := turnevent.ToolUpdate{ToolCallID: it.ID, Status: toolStatus(it.Status)}
+	if it.AggregatedOutput != nil && *it.AggregatedOutput != "" {
+		update.Content = turnevent.TextContent{Text: *it.AggregatedOutput}
+	}
+	switch {
+	case it.Status == "declined":
+		update.ResultDetail = "declined"
+	case it.ExitCode != nil:
+		update.ResultDetail = "exit " + exitCode(*it.ExitCode)
+	}
+	return []turnevent.Event{update}
+}
+
+// fileChangeItem maps a fileChange item: its item/started to a ToolStart with
+// one Location per changed path, its item/completed to the call's one
+// ToolUpdate, whose text is each change's path and then its unified diff as
+// Codex sent it.
+func fileChangeItem(method string, params json.RawMessage) []turnevent.Event {
+	var p struct {
+		Item struct {
+			ID      string `json:"id"`
+			Status  string `json:"status"`
+			Changes []struct {
+				Path string `json:"path"`
+				Diff string `json:"diff"`
+			} `json:"changes"`
+		} `json:"item"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return undecodable(params)
+	}
+	it := p.Item
+	if method == "item/started" {
+		var locs []turnevent.Location
+		for _, c := range it.Changes {
+			locs = append(locs, turnevent.Location{Path: c.Path})
+		}
+		// apply_patch is the Codex tool that makes this item; the title is the
+		// wire's tool name, as Claude's Edit is.
+		return []turnevent.Event{turnevent.ToolStart{
+			ToolCallID: it.ID, Title: "apply_patch", Kind: turnevent.ToolKindEdit, Locations: locs,
+		}}
+	}
+	update := turnevent.ToolUpdate{ToolCallID: it.ID, Status: toolStatus(it.Status)}
+	if len(it.Changes) > 0 {
+		var b strings.Builder
+		for i, c := range it.Changes {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString(c.Path + "\n" + c.Diff)
+		}
+		update.Content = turnevent.TextContent{Text: b.String()}
+	}
+	if it.Status == "declined" {
+		update.ResultDetail = "declined"
+	}
+	return []turnevent.Event{update}
+}
+
+// toolStatus is a completed item's terminal status: only "completed" succeeded.
+// failed, declined, and an out-of-contract status on item/completed did not.
+func toolStatus(status string) turnevent.ToolStatus {
+	if status == "completed" {
+		return turnevent.ToolStatusCompleted
+	}
+	return turnevent.ToolStatusFailed
+}
+
+// exitCode formats a decoded exit code for ResultDetail, whose alphabet has
+// U+2212 MINUS SIGN and not the ASCII hyphen.
+func exitCode(code int32) string {
+	if code < 0 {
+		return "\u2212" + strconv.FormatInt(-int64(code), 10)
+	}
+	return strconv.FormatInt(int64(code), 10)
 }
 
 // reroute makes a model reroute visible and keys the turn's ModelWindows by
