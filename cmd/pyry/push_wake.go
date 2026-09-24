@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/devices"
@@ -120,7 +121,14 @@ func (w *pushWaker) wakeAbsent(ctx context.Context) {
 		}
 	}
 
-	for _, d := range w.devs.List() {
+	// Newest pairing first (#2602): the relay drops wakes past its per-server-id
+	// burst, and dead tokens from older pairings are never pruned, so walking
+	// oldest first let them spend the burst before the live phone.
+	devs := w.devs.List()
+	slices.SortStableFunc(devs, func(a, b devices.Device) int {
+		return b.PairedAt.Compare(a.PairedAt)
+	})
+	for _, d := range devs {
 		if d.Platform != pushWakePlatform || d.PushToken == "" || open[d.TokenHash] {
 			continue
 		}
