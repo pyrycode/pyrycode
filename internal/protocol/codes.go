@@ -292,6 +292,26 @@ const (
 	// never-echo obligation. The message is a compile-time constant in
 	// internal/relay and the confinement error's text reaches neither it nor a log.
 	CodeNewSessionWorkspaceRefused = "new_session.workspace_refused" // the rotation completed; the recorded workspace was refused, so the successor stayed put
+
+	// Client errors (#2576; docs/protocol-mobile.md § Compatibility). The
+	// app-too-old rejection: the hello's client_version names an app build older
+	// than the minimum this host holds for that app, or — once any minimum is
+	// set — cannot be parsed at all. RESERVED AHEAD OF ITS SENDER, deliberately
+	// unlike the MINTED-WITH-THE-HANDLER groups above: the compatibility policy
+	// has to be published before the app releases that obey it, and nothing
+	// enforces it until a later ticket adds the minimum.
+	//
+	// A NEW CATEGORY, not protocol.unsupported (which is about protocol
+	// versions) and not auth (the device is authenticated): the fault is the
+	// client build. It is sent sealed, after the Noise handshake and AFTER the
+	// token check, so an unauthenticated peer learns nothing about the host's
+	// version policy; the relay's StatusClientUpdateRequired close follows it.
+	//
+	// NON-RETRYABLE: the same build fails identically, and only an app update
+	// repairs it. Terminal for THIS host only — a client keeps its other hosts.
+	// The message is static; the minimum travels in
+	// ErrorPayload.MinClientVersion.
+	CodeClientUpdateRequired = "client.update_required" // the app build is older than this host's minimum; never retryable
 )
 
 // Envelope-type constants — wire values for Envelope.Type

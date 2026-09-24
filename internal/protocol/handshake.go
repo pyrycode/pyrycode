@@ -173,12 +173,21 @@ type HelloAckPayload struct {
 // ModelListFor already state for their own reported ids. A producer sets it from
 // the daemon's own registry or cursor, never from the request it is answering;
 // echoing would make an error reply a mirror for arbitrary remote bytes.
+//
+// MinClientVersion is the three-part minimum (e.g. "1.4.0") the host holds for
+// the requesting app, carried by CodeClientUpdateRequired alone (#2576) so the
+// message can stay static. Omitted when unset, which keeps every other error
+// reply byte-identical, and omitted on that code too when the hello's
+// client_version could not be parsed, since the daemon then cannot tell which
+// app's minimum applies. Daemon-authored from the configured minimum, never an
+// echo of the client's client_version.
 type ErrorPayload struct {
-	Code           string `json:"code"`
-	Message        string `json:"message"`
-	Retryable      bool   `json:"retryable"`
-	RetryAfterS    *int   `json:"retry_after_s,omitempty"`
-	ConversationID string `json:"conversation_id,omitempty"`
+	Code             string `json:"code"`
+	Message          string `json:"message"`
+	Retryable        bool   `json:"retryable"`
+	RetryAfterS      *int   `json:"retry_after_s,omitempty"`
+	ConversationID   string `json:"conversation_id,omitempty"`
+	MinClientVersion string `json:"min_client_version,omitempty"`
 }
 
 // AckPayload is the body of a generic "ack" envelope; empty by spec

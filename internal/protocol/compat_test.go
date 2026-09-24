@@ -567,6 +567,7 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeMCPStatusUnavailable":        CodeMCPStatusUnavailable,
 		"CodeMCPActuationRefused":         CodeMCPActuationRefused,
 		"CodeWorkspaceNotFound":           CodeWorkspaceNotFound,
+		"CodeClientUpdateRequired":        CodeClientUpdateRequired,
 	}
 	want := map[string]string{
 		"CodeProtocolUnknownType":         "protocol.unknown_type",
@@ -594,6 +595,7 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeMCPStatusUnavailable":        "mcp_status.unavailable",
 		"CodeMCPActuationRefused":         "mcp_actuation.refused",
 		"CodeWorkspaceNotFound":           "workspace.not_found",
+		"CodeClientUpdateRequired":        "client.update_required",
 	}
 	if len(cases) != len(want) {
 		t.Fatalf("case-count drift: got %d, want %d", len(cases), len(want))
