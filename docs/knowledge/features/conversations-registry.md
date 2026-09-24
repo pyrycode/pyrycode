@@ -15,6 +15,7 @@ Lives in the same `internal/conversations` package as the `Conversation` type (#
 - **Workspace-label storage primitive (#2206):** `(*Registry).WorkspaceLabel(cwd string) (string, bool)` / `(*Registry).SetWorkspaceLabel(cwd string, label *string)` persist an operator-chosen display name for a workspace, keyed by the exact `cwd` string (byte-exact, no normalization) rather than by conversation id — a workspace has no row of its own, so the label lives in its own top-level map instead of a per-conversation field. Storage only: no wire verb sets it yet (#2207) and no payload reads it onto the wire yet (#2208, #2210). See § *`WorkspaceLabel` / `SetWorkspaceLabel`* below.
 - **Last context-usage reading primitive (#2460):** `(*Registry).SetLastContextUsage(id ConversationID, reading ContextUsageReading) bool` records the summary of the last context-window reading claude reported for a conversation — `Model`, `TotalTokens`, `MaxTokens`, `Percentage`, `AsOf` — under the registry lock, structurally touching only `Conversation.LastContextUsage`. Takes a value rather than a pointer, unlike `SetSystemPrompt`'s tri-state door: no producer ever clears a reading, so "set it back to nil" is unreachable rather than merely unused. Two production callers write through the same recorder — the post-turn interactive-turn emitter arm and the on-demand `request_context_usage` flight — so the stored value is whichever reading claude produced last; last write wins by design (see § *`SetLastContextUsage`* in [`conversations-registry-crud.md`](conversations-registry-crud.md)). No wire verb reads it back yet — deferred as a named follow-up, see *Out of scope* below.
 - **Removal observer (#1502):** `(*Registry).SetOnDelete(fn func(id ConversationID))` installs a single removal callback, replacing any earlier one; `nil` clears it. `Delete` calls it once per hit, with that conversation's id, after releasing `r.mu` — never on a miss. Because `Delete` is the one funnel both removal paths use (the `delete_conversation` handler and the idle `Sweep`), this one slot sees every removal regardless of which path caused it. The daemon's only caller wires it to `(*eventring.Ring).Drop`, freeing the removed conversation's retained replay events (see [`features/eventring-package.md`](eventring-package.md) § *Ownership & wiring*). See § *`SetOnDelete`* in [`conversations-registry-crud.md`](conversations-registry-crud.md).
+- **One-time seed marker (#2569):** `(*Registry).Seeded() bool` / `(*Registry).MarkSeeded()` back a single top-level `seeded` flag, `omitempty` like `WorkspaceLabels` so an older file still loads unchanged and an unseeded save stays byte-identical. `MarkSeeded` follows the package's no-implicit-save convention — the caller's own `Save` persists it. Not a per-conversation or per-cwd key: it gates a startup-only action, not a stored fact about any row. The sole reader is `seedDefaultWorkspace` in `cmd/pyry/workspace_seed.go`, which on first boot with an empty, unmarked registry creates one promoted `General` channel under `$HOME/pyry-workspace/default` (folder path built from the exported `relay.WorkspaceRoot`, not a second literal) and labels that cwd `Default workspace` via `SetWorkspaceLabel` — keyed on the row's own read-back `Cwd`, never a path rebuilt by the seed, per the byte-equality rule below. A registry that already holds conversations gets only the marker, never a channel: existing hosts are left alone. The seed must wait for `sessions.Pool.Ready()` (or daemon shutdown) before calling `channelCreator` — minting before `Pool.Run` persists a session and then returns `ErrPoolNotRunning`, which reads as a create failure and would leave an orphan session on every restart. See `docs/specs/architecture/2569-seed-default-workspace.md`.
 
 ## Surface
 
@@ -57,6 +58,8 @@ func (r *Registry) SetSystemPrompt(id ConversationID, prompt *string) error
 func (r *Registry) WorkspaceLabel(cwd string) (string, bool)
 func (r *Registry) SetWorkspaceLabel(cwd string, label *string)
 func (r *Registry) SetLastContextUsage(id ConversationID, reading ContextUsageReading) bool
+func (r *Registry) Seeded() bool
+func (r *Registry) MarkSeeded()
 
 type ContextUsageReading struct {
     Model       string
@@ -125,6 +128,12 @@ example above because no label is set; when present it looks like:
 ```
 
 See § *`WorkspaceLabel` / `SetWorkspaceLabel`* below.
+
+`seeded` (#2569) is a **top-level** `bool`, `omitempty`, so it is absent from every example
+above and from any file predating this ticket — those still load as unseeded, no migration.
+Unlike `workspace_labels`, it carries no per-cwd or per-conversation data; it only gates whether
+`cmd/pyry`'s startup pass has already run (or does not need to) its one-time `General` channel
+seed. Once `true` it never reverts.
 
 `last_context_usage` (#2460) is likewise omitted here — this row has never had a reading recorded.
 When present it looks like:
@@ -299,6 +308,11 @@ New (no devices counterpart):
   `last_context_usage` substring — the `IsArchived`/`SystemPrompt`-shaped byte-stability pair) and a
   `Save` → `Load` round trip using `time.Date` fixtures, never `time.Now`, so no monotonic component
   survives to break `DeepEqual`.
+- `TestRegistry_Seeded_RoundTrip` / `_AbsentKeyDecodesUnseeded` (#2569) — round trip: `MarkSeeded` →
+  `Save` → `Load` reports `Seeded() == true` and the file carries `"seeded": true`; absent-key: a
+  hand-written registry with no `seeded` key loads as `Seeded() == false`, no migration invoked, and
+  its own `Save` omits the key again (byte-compat), the same pair-of-tests shape as
+  `IsArchived`/`SystemPrompt`/labels above.
 
 `internal/conversations/id_test.go` mirrors `internal/sessions/id_test.go`:
 
@@ -343,3 +357,5 @@ New (no devices counterpart):
 - `docs/specs/architecture/2206-workspace-label-registry-storage.md` — architect's spec for `WorkspaceLabel` + `SetWorkspaceLabel`.
 - [`features/v2-session-manager-concurrency.md`](v2-session-manager-concurrency.md) § `request_context_usage` — the on-demand producer's resolver/flight machinery `SetLastContextUsage`'s second caller (`contextUsageResolver.fly`) writes into.
 - `docs/specs/architecture/2460-conversation-last-context-usage.md` — architect's spec for `ContextUsageReading` + `SetLastContextUsage` + the two-producer `contextUsageRecorder`.
+- `docs/specs/architecture/2569-seed-default-workspace.md` — architect's spec for the `seeded` marker and `cmd/pyry/workspace_seed.go`'s startup pass, including the `Pool.Ready()` timing hazard.
+- [`features/e2e-harness.md`](e2e-harness.md) — the fake-daemon harness pre-marks every fresh test host as seeded so #2569 doesn't shift session/conversation counts in unrelated e2e tests.

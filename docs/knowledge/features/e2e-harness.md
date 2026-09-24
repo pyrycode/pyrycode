@@ -469,6 +469,24 @@ daemon-side value that reads `$HOME`, as #1631's own AC 2 test does) — the
 ordinary `Harness.Run`/`StartIn` path never hits it, since it redirects `HOME` for
 the **spawned daemon's** environment via `childEnv`, not the test process's own.
 
+**A production change to what a fresh host contains at startup reaches every
+e2e test, not just the ones about that feature (#2569).** When `cmd/pyry`
+started seeding a promoted `General` channel and its bound session on a
+registry that is both empty and unmarked, six unrelated tests that counted
+sessions or conversations on a fresh `$HOME` broke, because every fake-daemon
+test starts from exactly that state. The fix lives in the harness, not in the
+individual tests: `spawnWith` calls `premarkWorkspaceSeeded`, which writes
+`{"conversations":[],"seeded":true}` for the `test` instance unless a
+`conversations.json` already exists, so a daemon spawned through the harness
+opts out of the seed by default. A test that specifically wants to observe the
+seed (`TestWorkspaceSeed_E2E_FreshHostGetsGeneral`) writes a zero-byte
+`conversations.json` first — the harness leaves an already-present file alone,
+and the daemon loads zero bytes as empty and unseeded. Any future startup
+behavior gated on "does a fresh registry/session file exist" needs the same
+treatment: either give the harness a matching pre-mark default, or accept that
+every existing count-based assertion across the suite is now testing the new
+behavior too, whether or not that was the ticket's intent.
+
 ## Known Limitations
 
 - **Race detector.** When `go test -tags=e2e -race` is invoked, the parent
