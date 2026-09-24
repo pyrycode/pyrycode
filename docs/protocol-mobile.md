@@ -45,7 +45,7 @@ Out of scope (v2):
 - **Voice / WebRTC.** Phase 6 concern; signalling channel will be added later as new envelope types inside the AEAD channel.
 - **Multi-device key sharing.** Each paired phone has its own Noise session and its own device-static keypair. No cross-device key sync.
 - **Per-message-counter rotation.** Noise's 2⁶⁴ transport-message counter is not a practical limit; time-based + explicit-rekey is sufficient.
-- **Push notification payload format.** Out-of-band channel; APNs/FCM payloads remain plaintext.
+- **Push notification payload format.** The relay sends the push itself, triggered by the binary's [`push_wake`](#push_wake) routing envelope; the push it sends carries no payload and travels outside the Noise channel — the relay never sees session, turn, or prompt content.
 - **v1↔v2 fallback / migration tooling.** Hard cutover; pre-flight check is `pyry pair list` empty before flipping the v2 release flag.
 - **Permission scoping.** Mobile-originated messages still execute with the same authority as the desktop; tiered scopes are a v3 concern.
 
@@ -310,7 +310,7 @@ There is no `rekey_ack` envelope. The next successful AEAD round-trip under the 
 
 ### Wire shapes
 
-The relay's outer routing envelope is **unchanged from v1**. The relay still wraps every binary↔relay leg in `{conn_id, frame, token?, close_code?}` and forwards `frame` opaquely. v2 only changes what `frame` looks like.
+The relay's outer routing envelope is **unchanged from v1**. The relay still wraps every binary↔relay leg in `{conn_id, frame, token?, close_code?, push_wake?}` and forwards `frame` opaquely. v2 only changes what `frame` looks like. `push_wake` is a relay-interpreted request rather than a connection-carrying field; see [`push_wake`](#push_wake).
 
 **Inner frame discriminator (`frame.type`):**
 
@@ -441,6 +441,30 @@ Unchanged shape from v1:
 The `close_code` field on the binary→relay direction is unchanged.
 
 Implementations MUST tolerate unknown fields on the routing envelope for forward compatibility.
+
+#### `push_wake`
+
+A second binary→relay routing-envelope shape, used to ask the relay to send a platform push. Unlike the `{conn_id, frame, ...}` shape above, this envelope carries **no `conn_id` and no `frame`** — it addresses the relay itself, not a phone connection, and is never sealed in a Noise session:
+
+```json
+{
+  "push_wake": {
+    "platform": "fcm",
+    "token": "<opaque FCM registration token>"
+  }
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `push_wake.platform` | string | `fcm` is the only value sent today. An `apns` token is skipped — no iOS client exists yet to receive it. |
+| `push_wake.token` | string | The opaque token the phone reported in [`register_push_token`](#application-message-types), passed through verbatim. Never logged. |
+
+The relay is this envelope's **only reader**. On receipt it sends one **data-only, high-priority FCM message** to `token`, with **no payload fields** — the push carries no content, it only wakes the app, which reconnects over its own Noise session and learns what happened there from that channel. The relay learns nothing about the session, turn, or prompt that triggered the wake — only a token to wake.
+
+An **older relay** that does not recognise `push_wake` logs and drops the envelope, per the unknown-field tolerance rule above; the binary↔relay leg stays open, so a daemon degrading to "no push" never breaks the connection.
+
+See pyrycode-relay#130 (relay-side send) and #2564 (daemon-side trigger).
 
 ## Connection lifecycle
 
