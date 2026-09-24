@@ -1101,7 +1101,8 @@ const (
 	appFrameMCPToggle
 	// appFrameContextUsageRequest is the on-demand context-window read (#2431) —
 	// the longest-waiting member of this set, since it defers a mid-turn request
-	// until the turn ends before it asks the child anything.
+	// until the turn ends before it asks the child anything. The only member whose
+	// wait runs off the worker (#2563), so the only one whose reply is not FIFO.
 	appFrameContextUsageRequest
 )
 
@@ -1115,11 +1116,21 @@ const (
 // in closeWith) or ctx (runCtx) is cancelled (Run exit) — leaving no
 // goroutine behind under conn churn or shutdown.
 //
+// ONE EXCEPTION to that ordering (#2563): a request_context_usage is checked
+// here but its seam wait and reply run on a goroutine of their own, so that
+// reply can emit after replies to frames that arrived later. Clients
+// correlate it on in_reply_to. connCtx is what ends those goroutines: it is
+// cancelled when this worker returns, which is exactly on s.done or ctx, and
+// asks bounds how many one conn can hold (maxContextUsageAsksPerConn).
+//
 // The worker NEVER touches s.send / s.recv / keys / session state: it only
 // runs Route → handler → c.Send (a marshal + channel push, no AEAD) and
 // posts replies to m.appReply for Run to seal. That is the load-bearing
 // single-owner-cipher invariant (AC-3).
 func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
+	connCtx, cancelConn := context.WithCancel(ctx)
+	defer cancelConn()
+	asks := make(chan struct{}, maxContextUsageAsksPerConn)
 	for {
 		select {
 		case <-ctx.Done():
@@ -1189,10 +1200,12 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				m.handleMCPToggle(ctx, s, job.plaintext)
 			case appFrameContextUsageRequest:
 				// The resolver may wait for an open turn to end and then for a child
-				// round trip, so this stalls only the addressed conn's later frames.
-				// Its reply and every reject return through forwardToRun, so the
-				// worker seals nothing under s.send.
-				m.handleRequestContextUsage(ctx, s, job.plaintext)
+				// round trip. Unlike the arms above, that wait does NOT stall this
+				// conn's later frames (#2563): the handler checks membership here and
+				// hands the wait to a goroutine of its own, so its reply may emit
+				// after later frames' replies. Its reply and every reject return
+				// through forwardToRun, so nothing seals under s.send off Run.
+				m.handleRequestContextUsage(connCtx, s, asks, job.plaintext)
 			case appFrameRoute:
 				// The v1 application dispatch chain, unchanged: build the outbound
 				// channel, call dispatch.Route, forward its replies to Run.

@@ -31,13 +31,22 @@ import (
 // to end, then for a round trip to claude. Either is unbounded in the way Run cannot
 // tolerate — Run services every connection and every wake channel.
 //
+// AND THE WAIT ITSELF IS OFF THE WORKER TOO (#2563). The worker decodes and checks
+// membership, then hands the seam call to a goroutine of the ask's own and moves on,
+// because the turn being waited for may only end when a LATER frame on the same conn
+// — its next send_message — is handled. Inline on the worker, that frame queued
+// behind the ask and the conn deadlocked until teardown. The cost is ordering: this
+// verb's reply can arrive after replies to frames sent later, and clients correlate
+// on in_reply_to. maxContextUsageAsksPerConn bounds how many such goroutines one conn
+// can hold, and the conn-scoped ctx the worker derives ends them on teardown.
+//
 // THAT PLACEMENT IS A CONSTRAINT ON FUTURE EDITS, not just a description. The reply
-// is sealed by Run under the single-owner send CipherState, so emitting from this
-// worker would be a concurrent Encrypt — a NONCE REUSE, a real break rather than a
-// race annoyance. Every emission below therefore goes through forwardToRun, and any
-// future arm must too. The inverse also holds: if this verb were ever made cheap
-// enough to move back onto Run, the emits must switch to forwardEnvelope in the SAME
-// change.
+// is sealed by Run under the single-owner send CipherState, so emitting from the
+// worker or the ask goroutine would be a concurrent Encrypt — a NONCE REUSE, a real
+// break rather than a race annoyance. Every emission below therefore goes through
+// forwardToRun, and any future arm must too. The inverse also holds: if this verb
+// were ever made cheap enough to move back onto Run, the emits must switch to
+// forwardEnvelope in the SAME change.
 //
 // IT ADDS A PATH AND REMOVES NONE. The automatic post-turn context_usage publication
 // is untouched; a conversation that already receives one receives exactly what it
@@ -51,6 +60,17 @@ const (
 	msgContextUsageConversationNotFound = "conversation not found"
 	msgContextUsageUnavailable          = "context usage is unavailable"
 )
+
+// maxContextUsageAsksPerConn caps how many asks one conn may have waiting in the seam
+// at once (#2563). An ask that finds every slot taken is refused on the spot with the
+// retryable context_usage.unavailable rather than queued, since queuing it on the
+// worker would park the worker again — the very stall the cap exists alongside.
+//
+// Why four: the request is untrusted network input, and a waiting ask costs one
+// goroutine plus its plaintext. Below the seam, joiners on one conversation already
+// share one flight, so four is cheap; a phone normally watches one conversation, and
+// four leaves room for a few open at once. The daemon-wide total is conns × 4.
+const maxContextUsageAsksPerConn = 4
 
 // The two answers, spelled once, reusing attachmentReject's shape so a code cannot be
 // paired with the wrong retryable flag — the field a client actually branches on.
@@ -68,9 +88,10 @@ var (
 )
 
 // handleRequestContextUsage answers one inbound request_context_usage with the named
-// conversation's current context breakdown or with one coded reject. It runs on the
-// addressed conn's appFrameWorker (see the file header); dispatchAppFrame has already
-// enforced the nil-seam and interactive gates on Run.
+// conversation's current context breakdown or with one coded reject. Steps 1–4 run on
+// the addressed conn's appFrameWorker and steps 5–6 on the ask's own goroutine (see
+// the file header); dispatchAppFrame has already enforced the nil-seam and
+// interactive gates on Run.
 //
 // It takes the plaintext rather than an already-probed Envelope, because it runs off
 // Run: the worker receives bytes, so the frame is decoded once by the discriminator
@@ -126,7 +147,10 @@ var (
 // registry-canonical and so cannot carry the control bytes a log injection needs; on
 // step 4's own arm it is NOT logged, because membership answering false is precisely
 // the case where it may be an arbitrary client string.
-func (m *V2SessionManager) handleRequestContextUsage(ctx context.Context, s *V2Session, plaintext []byte) {
+//
+// ctx is the conn-scoped context appFrameWorker derives, and asks is that worker's
+// semaphore of waiting-ask slots; see step 5.
+func (m *V2SessionManager) handleRequestContextUsage(ctx context.Context, s *V2Session, asks chan struct{}, plaintext []byte) {
 	var env protocol.Envelope
 	if err := json.Unmarshal(plaintext, &env); err != nil {
 		// Step 2. Unreachable; content-free record, no reply.
@@ -149,17 +173,47 @@ func (m *V2SessionManager) handleRequestContextUsage(ctx context.Context, s *V2S
 		return
 	}
 
-	// Step 5. The id is loggable from here on. This call may wait for an open turn to
-	// end and then for a child round trip; both bounds belong to the implementation,
-	// and ctx is the worker's, so manager shutdown terminates them.
-	payload, ok := m.cfg.ContextUsageFor(ctx, p.ConversationID)
-	if !ok {
+	// Step 5. The id is loggable from here on. The seam may wait for an open turn to
+	// end, however long it runs, so it runs on a goroutine of its own and the worker
+	// moves on to this conn's next frame (#2563) — which may be the very send_message
+	// that ends the turn. A slot is taken first, non-blocking, so one conn holds at
+	// most maxContextUsageAsksPerConn waiting asks.
+	select {
+	case asks <- struct{}{}:
+	default:
 		m.rejectContextUsageRequest(ctx, s, env.ID, rejectContextUsageUnavailable,
-			"no current reading is available for this conversation", p.ConversationID)
+			"too many context usage requests waiting on this connection", p.ConversationID)
+		return
+	}
+	go func() {
+		defer func() { <-asks }()
+		m.resolveContextUsageRequest(ctx, s, env.ID, p.ConversationID)
+	}()
+}
+
+// resolveContextUsageRequest is steps 5 and 6 on the ask's own goroutine. ctx is the
+// conn's, ended by the worker's return, so both conn teardown and manager shutdown
+// end the seam's wait. Its emissions leave through forwardToRun like every other on
+// this path; nothing here touches s.send.
+//
+// A seam that returns after ctx ended is answered with NOTHING, whatever it returned:
+// the conn is gone, and a refusal logged for it would misreport a teardown as an
+// unavailable reading.
+func (m *V2SessionManager) resolveContextUsageRequest(ctx context.Context, s *V2Session, inReplyTo uint64, conversationID string) {
+	payload, ok := m.cfg.ContextUsageFor(ctx, conversationID)
+	if ctx.Err() != nil {
+		m.cfg.Logger.Debug("relay: v2 context_usage request abandoned; session tearing down",
+			"event", "v2.context_usage.request.abandoned",
+			"conn_id", s.connID)
+		return
+	}
+	if !ok {
+		m.rejectContextUsageRequest(ctx, s, inReplyTo, rejectContextUsageUnavailable,
+			"no current reading is available for this conversation", conversationID)
 		return
 	}
 
-	m.emitContextUsageReply(ctx, s, env.ID, payload)
+	m.emitContextUsageReply(ctx, s, inReplyTo, payload)
 }
 
 // emitContextUsageReply sends one resolved reading as a context_usage correlated to

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/dispatch"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -66,21 +67,37 @@ func ctxUsageManagerFor(
 	logger *slog.Logger,
 ) (mgr *V2SessionManager, frames chan protocol.RoutingEnvelope, rec *v2Recorder, respPub []byte) {
 	t.Helper()
+	mgr, frames, rec, respPub, _ = ctxUsageManagerWith(t, known, resolve, nil, logger)
+	return mgr, frames, rec, respPub
+}
+
+// ctxUsageManagerWith is ctxUsageManagerFor plus a v1 handler table and the
+// manager's stop func, for the #2563 tests that send a frame behind a waiting ask
+// or stop the manager under one. stop is idempotent and also runs at cleanup.
+func ctxUsageManagerWith(
+	t *testing.T,
+	known func(string) bool,
+	resolve func(context.Context, string) (protocol.ContextUsagePayload, bool),
+	handlers map[string]dispatch.Handler,
+	logger *slog.Logger,
+) (mgr *V2SessionManager, frames chan protocol.RoutingEnvelope, rec *v2Recorder, respPub []byte, stop func()) {
+	t.Helper()
 	respPriv, respPub := genV2Keypair(t)
 	frames = make(chan protocol.RoutingEnvelope, 16)
 	rec = &v2Recorder{}
-	mgr, stop := startManager(t, V2SessionConfig{
+	mgr, stop = startManager(t, V2SessionConfig{
 		Frames:            frames,
 		Outbound:          rec.outbound,
 		StaticPriv:        respPriv,
 		Devices:           v2PairedRegistry(t, v2TestToken),
 		ServerID:          v2TestServerID,
 		Logger:            logger,
+		Handlers:          handlers,
 		KnownConversation: known,
 		ContextUsageFor:   resolve,
 	})
 	t.Cleanup(stop)
-	return mgr, frames, rec, respPub
+	return mgr, frames, rec, respPub, stop
 }
 
 func sendContextUsageRequest(t *testing.T, frames chan protocol.RoutingEnvelope, send *noise.CipherState, connID string, id uint64, payload string) {
@@ -330,6 +347,178 @@ func TestV2Session_RequestContextUsage_MalformedPayloadMintsNoThirdCode(t *testi
 			}
 			if got := counts.resolves.Load(); got != 0 {
 				t.Errorf("resolver consulted %d times, want 0: membership must precede it", got)
+			}
+		})
+	}
+}
+
+// blockingContextUsage is a seam that announces each call on entered, then waits
+// for release or for its ctx to end. On release it answers the fixture. On ctx it
+// closes cancelled (when non-nil) and STILL answers the fixture, true: a successful
+// reading arriving after teardown is exactly the reply that must not be sealed, so a
+// refusal here would let a handler that sealed anything pass by accident.
+func blockingContextUsage(entered chan<- struct{}, release <-chan struct{}, cancelled chan<- struct{}) func(context.Context, string) (protocol.ContextUsagePayload, bool) {
+	return func(ctx context.Context, _ string) (protocol.ContextUsagePayload, bool) {
+		entered <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			if cancelled != nil {
+				close(cancelled)
+			}
+		}
+		return ctxUsageFixture, true
+	}
+}
+
+func waitSignal(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+// TestV2Session_RequestContextUsage_WaitDoesNotBlockLaterFrames is #2563 AC-1 and
+// AC-2: while the seam is still waiting (a mid-turn ask), a v1 send_message sent
+// after it on the SAME conn — the frame that would end the held turn in mobile's
+// reconnect scenario — is handled and answered. Once the seam returns, the ask gets
+// exactly one context_usage correlated to its own id. Against a worker that runs the
+// seam inline, the send_message queues behind the ask and its reply never arrives.
+func TestV2Session_RequestContextUsage_WaitDoesNotBlockLaterFrames(t *testing.T) {
+	t.Parallel()
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	mgr, frames, rec, respPub, _ := ctxUsageManagerWith(t, func(string) bool { return true },
+		blockingContextUsage(entered, release, nil),
+		map[string]dispatch.Handler{protocol.TypeSendMessage: prolificHandler()},
+		silentLogger())
+	const conn = "ctxu-nonblocking"
+	send, recv := openModalConn(t, mgr, frames, rec, respPub, conn, []string{protocol.CapabilityInteractive})
+
+	sendContextUsageRequest(t, frames, send, conn, 25630, `{"conversation_id":"`+ctxUsageKnownConv+`"}`)
+	waitSignal(t, entered, "the seam to be entered")
+	frames <- sealAppFrameConn(t, send, conn, protocol.Envelope{
+		ID:      25631,
+		Type:    protocol.TypeSendMessage,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(`{"count":1}`),
+	})
+
+	// The seam is never released before this assertion.
+	first := waitContextUsageReply(t, rec, conn, recv, 0)
+	if first.Type != protocol.TypeConversations || first.InReplyTo == nil || *first.InReplyTo != 25631 {
+		t.Fatalf("first reply = (%q, in_reply_to %v), want the send_message's reply to 25631 while the ask waits", first.Type, first.InReplyTo)
+	}
+
+	close(release)
+	second := waitContextUsageReply(t, rec, conn, recv, 1)
+	if second.Type != protocol.TypeContextUsage {
+		t.Fatalf("second reply type = %q, want %q", second.Type, protocol.TypeContextUsage)
+	}
+	if second.InReplyTo == nil || *second.InReplyTo != 25630 {
+		t.Fatalf("context_usage in_reply_to = %v, want pointer to 25630", second.InReplyTo)
+	}
+	var got protocol.ContextUsagePayload
+	if err := json.Unmarshal(second.Payload, &got); err != nil {
+		t.Fatalf("decode context_usage payload: %v", err)
+	}
+	if !reflect.DeepEqual(got, ctxUsageFixture) {
+		t.Errorf("payload = %+v, want %+v", got, ctxUsageFixture)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := len(noiseMsgsForConn(t, rec, conn)); got != 2 {
+		t.Fatalf("produced %d replies, want exactly 2 — one per request", got)
+	}
+}
+
+// TestV2Session_RequestContextUsage_WaitingAsksAreBounded pins the per-conn cap on
+// waiting asks: the network is untrusted, so moving the wait off the worker must not
+// let one conn park goroutines without limit. With every slot held, the next ask is
+// refused at once with the retryable code, correlated to its own id; releasing the
+// held ones answers each exactly once.
+func TestV2Session_RequestContextUsage_WaitingAsksAreBounded(t *testing.T) {
+	t.Parallel()
+	entered := make(chan struct{}, maxContextUsageAsksPerConn)
+	release := make(chan struct{})
+	mgr, frames, rec, respPub, _ := ctxUsageManagerWith(t, func(string) bool { return true },
+		blockingContextUsage(entered, release, nil), nil, silentLogger())
+	const conn = "ctxu-bounded"
+	send, recv := openModalConn(t, mgr, frames, rec, respPub, conn, []string{protocol.CapabilityInteractive})
+
+	req := `{"conversation_id":"` + ctxUsageKnownConv + `"}`
+	for i := 0; i < maxContextUsageAsksPerConn; i++ {
+		sendContextUsageRequest(t, frames, send, conn, uint64(25640+i), req)
+		waitSignal(t, entered, "a held ask to reach the seam")
+	}
+	const overflowID = 25649
+	sendContextUsageRequest(t, frames, send, conn, overflowID, req)
+	refused := waitContextUsageReply(t, rec, conn, recv, 0)
+	assertContextUsageError(t, refused, overflowID, protocol.CodeContextUsageUnavailable, true)
+
+	close(release)
+	answered := map[uint64]int{}
+	for i := 1; i <= maxContextUsageAsksPerConn; i++ {
+		reply := waitContextUsageReply(t, rec, conn, recv, i)
+		if reply.Type != protocol.TypeContextUsage || reply.InReplyTo == nil {
+			t.Fatalf("reply %d = (%q, in_reply_to %v), want a correlated context_usage", i, reply.Type, reply.InReplyTo)
+		}
+		answered[*reply.InReplyTo]++
+	}
+	for i := 0; i < maxContextUsageAsksPerConn; i++ {
+		if got := answered[uint64(25640+i)]; got != 1 {
+			t.Errorf("ask %d answered %d times, want exactly once", 25640+i, got)
+		}
+	}
+}
+
+// TestV2Session_RequestContextUsage_TeardownEndsTheWait is #2563 AC-3: tearing the
+// conn down, or stopping the manager, while an ask waits cancels the seam's ctx so
+// the wait ends, and no reply is sealed for the torn-down conn — even though the seam
+// answers a successful reading after the cancellation.
+func TestV2Session_RequestContextUsage_TeardownEndsTheWait(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		teardown func(t *testing.T, frames chan protocol.RoutingEnvelope, rec *v2Recorder, conn string, stop func())
+	}{
+		{"conn torn down", func(t *testing.T, frames chan protocol.RoutingEnvelope, rec *v2Recorder, conn string, _ func()) {
+			// A malformed inner frame is a protocol violation, which closes the conn.
+			frames <- protocol.RoutingEnvelope{ConnID: conn, Frame: json.RawMessage(`{`)}
+			waitForCloseCode(t, rec, conn, uint16(StatusProtocolMismatch))
+		}},
+		{"manager stopped", func(_ *testing.T, _ chan protocol.RoutingEnvelope, _ *v2Recorder, _ string, stop func()) {
+			stop()
+		}},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			entered := make(chan struct{}, 1)
+			cancelled := make(chan struct{})
+			mgr, frames, rec, respPub, stop := ctxUsageManagerWith(t, func(string) bool { return true },
+				blockingContextUsage(entered, nil, cancelled), nil, silentLogger())
+			const conn = "ctxu-teardown"
+			send, _ := openModalConn(t, mgr, frames, rec, respPub, conn, []string{protocol.CapabilityInteractive})
+
+			sendContextUsageRequest(t, frames, send, conn, 25650, `{"conversation_id":"`+ctxUsageKnownConv+`"}`)
+			waitSignal(t, entered, "the seam to be entered")
+			tc.teardown(t, frames, rec, conn, stop)
+			waitSignal(t, cancelled, "the waiting seam's ctx to be cancelled")
+
+			// Counted by hand rather than with noiseMsgsForConn: the close envelope
+			// carries no inner frame, which that helper refuses to decode.
+			time.Sleep(50 * time.Millisecond)
+			sealed := 0
+			for _, env := range rec.snapshot() {
+				var inner protocol.InnerFrameV2
+				if env.ConnID == conn && len(env.Frame) > 0 && json.Unmarshal(env.Frame, &inner) == nil && inner.Type == protocol.TypeNoiseMsg {
+					sealed++
+				}
+			}
+			if sealed != 0 {
+				t.Fatalf("sealed %d replies for a torn-down conn, want none", sealed)
 			}
 		})
 	}
