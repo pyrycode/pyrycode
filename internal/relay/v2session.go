@@ -100,10 +100,40 @@ const (
 	// docs/protocol-mobile.md § Error codes, close-code row 4412.
 	//
 	// Terminal for THIS host only: a client stops re-dialling this daemon and
-	// keeps its other hosts. Reserved, not yet sent — no daemon holds a
-	// minimum until the enforcement ticket lands.
+	// keeps its other hosts. Sent only while a minimum is set (#2578); see
+	// MinMobileClientVersion.
 	StatusClientUpdateRequired websocket.StatusCode = 4412
 )
+
+// The minimum app version this daemon release accepts, per app, as
+// MAJOR.MINOR.PATCH (#2578). Build constants, not operator configuration: each
+// daemon release carries its own, so during a staged rollout different hosts
+// may enforce different minimums. Empty means no minimum for that app, and
+// while both are empty no hello is ever refused for its version.
+//
+// Set the first one only after that app has shipped a release sending
+// client_version as <app>/<MAJOR>.<MINOR>.<PATCH>: once any minimum is set,
+// every build sending the older free text is refused (docs/protocol-mobile.md
+// § Compatibility). A value that does not parse fails NewV2SessionManager and
+// TestNewV2SessionManager_MinClientVersions, never reading as "no minimum".
+const (
+	MinMobileClientVersion  = ""
+	MinDesktopClientVersion = ""
+)
+
+// MsgClientUpdateRequired is the static message of the
+// protocol.CodeClientUpdateRequired error. The minimum travels in
+// ErrorPayload.MinClientVersion, never in the message.
+const MsgClientUpdateRequired = "this app version is no longer supported by this host; update the app"
+
+// ShippedMinClientVersions returns this build's minimums keyed by app name, the
+// shape V2SessionConfig.MinClientVersions takes.
+func ShippedMinClientVersions() map[string]string {
+	return map[string]string{
+		protocol.AppMobile:  MinMobileClientVersion,
+		protocol.AppDesktop: MinDesktopClientVersion,
+	}
+}
 
 // idleTimeout is the bounded window a v2 session may go without any
 // inbound frame before the manager tears it down through the in-repo
@@ -447,6 +477,12 @@ type V2SessionManager struct {
 	cfg      V2SessionConfig
 	sessions map[string]*V2Session
 
+	// minClientVersions is cfg.MinClientVersions parsed once by
+	// NewV2SessionManager, keyed by app name, holding only the apps with a
+	// minimum; nil when none is set. Never mutated afterwards, so every
+	// handshake compares against one snapshot.
+	minClientVersions map[string]protocol.Version
+
 	// wake is the wake-up signal channel for per-session timers. Both
 	// the 1-hour rekey-emit timer and the 30s rekey-reply-timeout
 	// timer use time.AfterFunc callbacks (which run on fresh runtime
@@ -608,6 +644,23 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 		return nil, fmt.Errorf("relay: V2SessionManager StaticPriv must be %d bytes, got %d",
 			noise.KeyLen, len(cfg.StaticPriv))
 	}
+	// A malformed minimum fails here rather than reading as "no minimum", which
+	// would fail open. The app key and the version go through the same grammar
+	// a hello's client_version does.
+	var minClientVersions map[string]protocol.Version
+	for app, v := range cfg.MinClientVersions {
+		if v == "" {
+			continue
+		}
+		parsedApp, parsed, ok := protocol.ParseClientVersion(app + "/" + v)
+		if !ok || parsedApp != app {
+			return nil, fmt.Errorf("relay: V2SessionManager MinClientVersions[%q] = %q is not <app> and MAJOR.MINOR.PATCH", app, v)
+		}
+		if minClientVersions == nil {
+			minClientVersions = make(map[string]protocol.Version)
+		}
+		minClientVersions[app] = parsed
+	}
 	return &V2SessionManager{
 		cfg:          cfg,
 		sessions:     make(map[string]*V2Session),
@@ -622,6 +675,8 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 		bundleReady:  make(chan bundleResult, wakeBufferSize),
 
 		newSessionDone: make(chan newSessionResult, wakeBufferSize),
+
+		minClientVersions: minClientVersions,
 	}, nil
 }
 
@@ -1389,11 +1444,17 @@ func (m *V2SessionManager) forwardAppReply(s *V2Session, reply protocol.RoutingE
 // AEAD seal itself failed; JSON marshal failures of static
 // well-typed values are wrapped but practically unreachable.
 func (m *V2SessionManager) sealError(s *V2Session, code, message string, inReplyTo uint64) (json.RawMessage, error) {
-	errPayload, err := json.Marshal(protocol.ErrorPayload{
+	return m.sealErrorPayload(s, protocol.ErrorPayload{
 		Code:      code,
 		Message:   message,
 		Retryable: false,
-	})
+	}, inReplyTo)
+}
+
+// sealErrorPayload is sealError for a caller that sets an optional payload
+// field, such as the client.update_required reply's MinClientVersion (#2578).
+func (m *V2SessionManager) sealErrorPayload(s *V2Session, payload protocol.ErrorPayload, inReplyTo uint64) (json.RawMessage, error) {
+	errPayload, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal error payload: %w", err)
 	}

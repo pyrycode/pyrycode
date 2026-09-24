@@ -599,6 +599,19 @@ type V2SessionConfig struct {
 	// and security posture as RekeyInterval.
 	RekeyReplyTimeout time.Duration
 
+	// MinClientVersions holds the minimum app version, as MAJOR.MINOR.PATCH,
+	// keyed by the app name a hello's client_version carries (#2578). Once any
+	// entry is non-empty, a hello whose token is accepted but whose
+	// client_version is unparsable, or below its app's minimum, is refused with
+	// client.update_required and close 4412. Optional: nil or an empty value ⇒
+	// no minimum for that app, and with none set no hello is refused for its
+	// version. NewV2SessionManager errors on a value that does not parse.
+	//
+	// Production (cmd/pyry) passes ShippedMinClientVersions(), the build
+	// constants; tests pass their own map so the shipped constants never change
+	// for a test. Never sourced from the wire or operator input.
+	MinClientVersions map[string]string
+
 	// RekeyRetryInterval overrides the short re-arm cadence used when a
 	// scheduled re-key wake fires while the relay leg is down and the emit is
 	// deferred (#912). Optional: zero ⇒ the rekeyRetryInterval package default

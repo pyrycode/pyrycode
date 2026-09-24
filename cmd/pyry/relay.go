@@ -1000,6 +1000,8 @@ func startRelayV2(
 		DevicesPath: resolveDevicesPath(w.instanceName),
 		ServerID:    string(serverID),
 		Logger:      logger,
+		// This release's minimum app versions, both unset today (#2578).
+		MinClientVersions: relay.ShippedMinClientVersions(),
 		Handlers: map[string]dispatch.Handler{
 			protocol.TypeListConversations:  handlers.ListConversations(w.convReg),
 			protocol.TypeCreateConversation: handlers.CreateConversation(w.convReg, w.creator, resolveConversationsRegistryPath(w.instanceName), w.defaultCwd, logger),
