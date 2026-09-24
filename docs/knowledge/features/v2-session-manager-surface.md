@@ -193,11 +193,20 @@ func (m *V2SessionManager) SetReplaySource(ring *eventring.Ring, currentConv fun
 // internal/sessions' admitClient is the gate the one consumer that renders them
 // uses. Both are "" for a client that reported nothing and for one whose value
 // exceeded maxRetainedClientNameBytes/maxRetainedClientVersionBytes.
+//
+// DeviceTokenHash (#2564) is the TokenHash of the device the handshake
+// AUTHENTICATED (s.device), filled in handleActiveConns. It is daemon-authored,
+// not remote-authored like DeviceName — but it is credential-derived, so the
+// same MUST-NOT-log obligation applies. It is what "this conn belongs to that
+// device" must be decided on; DeviceName is remote-claimed and unvalidated, so a
+// phone could set it to another device's name. See relay-package.md's push-wake
+// surface for the one consumer that reads this field today.
 type ActiveConn struct {
-    ConnID        string
-    Interactive   bool
-    DeviceName    string
-    ClientVersion string
+    ConnID          string
+    Interactive     bool
+    DeviceName      string
+    ClientVersion   string
+    DeviceTokenHash string
 }
 
 // Concurrency-safe snapshot of every session currently in V2StateOpen (#588,
