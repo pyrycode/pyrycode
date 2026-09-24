@@ -46,6 +46,32 @@ type registryEntry struct {
 	// contradicts yolo. A missing key is the pre-#2043 shape and decodes to the
 	// posture yolo already implies.
 	PermissionMode string `json:"permission_mode,omitempty"`
+
+	// Harness is the coding agent the session runs (#2593). Empty means claude,
+	// which is also what harnessForDisk writes for claude, so every entry written
+	// before the key existed — and every claude session written since — keeps its
+	// byte shape. A dormant entry carries it verbatim through dormantEntries and
+	// saveLocked, whatever its value.
+	Harness string `json:"harness,omitempty"`
+}
+
+// canonicalHarness reads a persisted harness: the empty value is claude, anything
+// else is carried verbatim for the runner factory to accept or refuse.
+func canonicalHarness(h string) string {
+	if h == "" {
+		return HarnessClaude
+	}
+	return h
+}
+
+// harnessForDisk is canonicalHarness's inverse for the write: claude serialises
+// as no key at all, keeping the default session's on-disk shape byte-stable the
+// way permissionModeForDisk does for the default posture.
+func harnessForDisk(h string) string {
+	if h == HarnessClaude {
+		return ""
+	}
+	return h
 }
 
 // permissionModeForDisk returns the permission_mode value s serialises to. The

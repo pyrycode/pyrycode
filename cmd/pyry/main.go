@@ -700,11 +700,28 @@ func selectInteractiveRunner(cfg config.Config, logger *slog.Logger, mcpServersP
 	switch cfg.InteractiveRunner {
 	case "", "stream-json":
 		sink := newStreamTurnSink(0, logger)
-		return newStreamRunnerFactory(sink, mcpServersPath, vocab, approval), sink, nil
+		return harnessRunnerFactory(newStreamRunnerFactory(sink, mcpServersPath, vocab, approval)), sink, nil
 	case "pty":
 		return nil, nil, fmt.Errorf(`interactive_runner "pty" was removed in #1348: the terminal-driving interactive runner no longer exists. Remove the key or set it to "stream-json"`)
 	default:
 		return nil, nil, fmt.Errorf("interactive_runner %q not recognized (accepted: \"\", \"stream-json\")", cfg.InteractiveRunner)
+	}
+}
+
+// harnessRunnerFactory is the factory the daemon wires into the pool: it selects
+// each session's runner by RunnerConfig.Harness (#2593). claude, and the empty
+// value a RunnerConfig built outside the pool carries, get the claude factory.
+// Any other harness is refused as a construction error without calling it, so no
+// claude runner is ever built for a session recorded as another agent's: the
+// pool leaves that session dormant and the daemon keeps running.
+func harnessRunnerFactory(claude sessions.RunnerFactory) sessions.RunnerFactory {
+	return func(cfg sessions.RunnerConfig) (sessions.Runner, error) {
+		switch cfg.Harness {
+		case "", sessions.HarnessClaude:
+			return claude(cfg)
+		default:
+			return nil, fmt.Errorf("no runner for harness %q", cfg.Harness)
+		}
 	}
 }
 

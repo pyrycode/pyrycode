@@ -157,8 +157,17 @@ func (p *Pool) materialise(id SessionID, label, spawnDir string, settings settin
 	// The provisional read (see the docstring): what the runner is CONSTRUCTED
 	// with, and on every path where no dormant write races, what it spawns with.
 	// The RLock is this function's because the source cannot take one itself.
+	//
+	// The harness rides the same read (#2593), because the factory call below is
+	// the one that needs it and the dormant entry is otherwise looked up only after
+	// it. It is the entry's own, for either caller: the harness is what the session
+	// IS, not a setting a mint or a revive chooses, and a map miss is claude. It
+	// needs no authoritative re-read: nothing writes a dormant entry's harness, and
+	// p.dormant never gains an id it did not hold at New, so under the write lock
+	// the entry is the one read here or gone.
 	p.mu.RLock()
 	provisional := settings()
+	harness := canonicalHarness(p.dormant[id].Harness)
 	p.mu.RUnlock()
 
 	// buildSession touches no Pool state and is non-blocking
@@ -168,7 +177,7 @@ func (p *Pool) materialise(id SessionID, label, spawnDir string, settings settin
 	// cheaply. It also keeps two file writes and the injected RunnerFactory
 	// call-out out of the pool's write lock, which is why the settings are
 	// carried onto the built session below rather than the build moved down.
-	sess, err := p.buildSession(id, label, spawnDir, provisional)
+	sess, err := p.buildSessionAs(id, label, spawnDir, provisional, harness)
 	if err != nil {
 		return nil, false, err
 	}
