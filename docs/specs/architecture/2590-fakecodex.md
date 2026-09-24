@@ -103,3 +103,7 @@ None required by the ticket. The documentation stage may add a `fakecodex` packa
 ## Open questions
 
 - Does the real server reply to `turn/interrupt` before emitting `turn/completed interrupted`? The fake replies first; consumers should not depend on the order. Resolve by recording what the implementation does.
+
+## Revisions
+
+- **2026-09-24, open question resolved (no design change):** the fake writes the `turn/interrupt` response `{}` before the interrupted turn's `turn/completed`, because `handleRequest` sends the response and only then runs the handler's continuation that closes the turn's interrupt channel. `TestTurnInterrupt` asserts that order; consumers should still not depend on it, since the real server's order was not observed.
