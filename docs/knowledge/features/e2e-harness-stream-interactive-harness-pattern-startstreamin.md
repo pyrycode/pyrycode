@@ -35,11 +35,20 @@ tag equals `activeSession()`:
   set by `seedBoundConversation(t, home, knownConvID, initialUUID)`.
 
 Both must be seeded with the *same* `initialUUID` before
-`StartStreamInteractiveWithRelay` is called. A mismatch drops every event at
-the gate: the drain hangs, and the first observable symptom is a timeout
-waiting for `assistant_delta` — not a clean failure at the seed call. This is
-the single most likely mistake for a new caller (the rider specs #1136–#1139
-and the real-claude capstone #1083 all repeat this pairing).
+`StartStreamInteractiveWithRelay` is called — the rider specs #1136–#1139 and
+the real-claude capstone #1083 all repeat this pairing, and it remains the
+right way to seed a new caller.
+
+**The "a mismatch hangs the drain" half of this claim did not hold up under
+test (#2610).** Re-seeding either `seedBootstrapRegistry` or
+`seedBoundConversation` with a different UUID was observed to still drain
+green in `TestRelayV2_StreamSendMessageDrainsTurn`. So a timeout waiting for
+`assistant_delta` is not good evidence of a seed mismatch by itself. The
+gate's own record is: it logs `stream_turn.not_active` (Debug, under
+`-pyry-verbose`, which every harness daemon runs) for every event it drops as
+not the active session. Treat that log line, not a hung drain, as the
+mismatch signal — check for it before naming a mismatch as the cause of a
+stuck test.
 
 ### `relay_v2_stream_send_test.go` — `TestRelayV2_StreamSendMessageDrainsTurn`
 
@@ -47,13 +56,39 @@ The first live, integrated proof of the stream-interactive path: every leg
 (config toggle, runner factory, turn drain, fakeclaude stream mode) had been
 proven in isolation, but never run together against a real spawned
 fakeclaude. The spec pairs, handshakes an interactive phone, drives one
-`send_message`, awaits the sealed ack (accept-into-backlog — not delivery:
+`send_message`, and awaits the sealed ack (accept-into-backlog — not delivery:
 `streamRunner.WriteUserTurn` can return the retryable `ErrNoLiveChild` while
-the child is between spawn and stdin-ready), then drains two ordered
-milestones mirroring `relay_v2_interrupt_test.go`'s shape: `assistant_delta`
-carrying the **echoed** prompt (the non-vacuity guard — proves the full
-round-trip, not just "some text"), then a terminal `turn_state{idle}`. Details
-and the full wire diagram: [codebase/1141.md](../codebase/1141.md).
+the child is between spawn and stdin-ready) together with two ordered
+milestones: `assistant_delta` carrying the **echoed** prompt (the non-vacuity
+guard — proves the full round-trip, not just "some text"), then a terminal
+`turn_state{idle}`. Details and the full wire diagram:
+[codebase/1141.md](../codebase/1141.md).
+
+**Ack and drain are awaited in one loop, not two (#2610).** Until #2610 the
+test awaited the ack in its own loop that skipped every non-ack envelope,
+then drained the two milestones in a second loop — the same ack-await
+frame-drop trap recorded below for the modal test
+(`relay_v2_stream_modal_test.go`, #2612). The handler enqueues the turn before it
+acks, so the ack is not ordered ahead of the delta; measured over 45 runs
+under `-race`, the delta trailed the ack by only 2–5ms alone, and under the
+full-suite load of `make e2e` that gap can invert, so the ack loop discards
+the delta and the drain then waits out its whole deadline for a frame that is
+already gone. That shape produced a one-off timeout in the v0.26.0 release
+run — a lost frame, not a slow drain: the run failed at 20.73s against a 20s
+drain deadline, leaving only ~0.73s for everything before the drain to have
+run (against ~0.13s alone), which is consistent with a fast miss, not with a
+drain running thousands of times slower. The fix is one loop, bounded by a
+single 60s `streamWait`, that records the ack, the delta and the idle state
+whenever each arrives; a turn that is never delivered still fails, at
+`streamWait` instead of the old fixed 20s. Each timeout names which milestone
+is still pending and how long it waited.
+
+**A deadline miss with a short pre-milestone prefix is a lost frame, not a
+slow machine.** Subtract the milestone's own deadline from the failing run's
+total elapsed time; if what's left is close to (or shorter than) a lone run's
+setup time, the milestone itself did not run slowly — something upstream of
+it was dropped or never sent. A deadline bump hides that kind of failure
+without fixing it.
 
 ### Cursor-stamping only needs the ack, not the drain (#1898)
 
@@ -367,3 +402,10 @@ and no shared helper to fix once) and flagged for a follow-up rather than
 fixed here. A new test in this family that adds a second post-ack wait
 should record that frame in `nextEnv` from the start rather than decode it
 only inside its own loop.
+
+**The trap struck a second, independent time in `relay_v2_stream_send_test.go`
+(#2610)** — see above — and that fix is the reference for the two tests still
+flagged: one loop recording every awaited milestone the instant it arrives,
+under a single wait, rather than an ack-first loop that discards whatever it
+doesn't currently want. `relay_v2_stream_interrupt_test.go` and
+`relay_v2_stream_new_session_test.go` remain unfixed and exposed.
