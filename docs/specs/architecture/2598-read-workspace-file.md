@@ -112,7 +112,7 @@ Guards: add `TypeReadWorkspaceFile` to `compat_test.go`'s rejection rows / known
 
 ## Open questions
 
-- Does any existing test enumerate `appFrameKind` members or `V2SessionConfig` fields exhaustively? Resolve by grep in Phase B.
+- Does any existing test enumerate `appFrameKind` members or `V2SessionConfig` fields exhaustively? **Resolved in Phase B:** no. The only exhaustive enumerations are the type guards already listed (`compat_test.go`, `relay_guard_test.go`), and both are updated. No design change.
 
 ## Documentation handoff
 

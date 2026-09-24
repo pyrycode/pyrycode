@@ -1259,6 +1259,13 @@ func startRelayV2(
 		// attachments.ResolvePath, whose stated precondition is that the caller
 		// already validated the conversation id.
 		AttachmentResolve: attachmentResolve,
+		// Live workspace markdown read (#2598): a client-named path, confined to
+		// the named conversation's recorded workspace by the attach_file verb's
+		// confineFile and readChecked, markdown only, read fresh on every request
+		// and stored nowhere. The conversation id reaches it only after the
+		// KnownConversation gate above. The size bound is the attach_file verb's
+		// unpublished receiver policy.
+		WorkspaceFileRead: workspaceFileReader(w.convReg, maxAttachFileBytes),
 		// Inbound conversation-HISTORY seam (#2116): the read half of the durable
 		// log #2114 and #2115 append to, over w.hist — the daemon's ONE store,
 		// minted at the composition root, so a served page and a just-appended

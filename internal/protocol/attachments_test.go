@@ -735,3 +735,39 @@ func TestAttachmentOfferedPayload_ZeroValue_KeysPresent(t *testing.T) {
 		}
 	}
 }
+
+// TestReadWorkspaceFilePayload_WireKeys pins the payload's complete key set in
+// both directions, and that both keys survive at the zero value (no omitempty).
+// A request-id key, a nonce or a token added later reddens here: correlation
+// rides the envelope's in_reply_to.
+func TestReadWorkspaceFilePayload_WireKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		p    ReadWorkspaceFilePayload
+	}{
+		{"populated", ReadWorkspaceFilePayload{ConversationID: "9d4e7a21-8c05-4f3b-b6e2-1a7c9e30d5f4", Path: "notes/plan.md"}},
+		{"zero", ReadWorkspaceFilePayload{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(tc.p)
+			if err != nil {
+				t.Fatalf("marshal payload: %v", err)
+			}
+			var got map[string]json.RawMessage
+			if err := json.Unmarshal(b, &got); err != nil {
+				t.Fatalf("unmarshal payload into key set: %v", err)
+			}
+			want := map[string]bool{"conversation_id": true, "path": true}
+			for k := range got {
+				if !want[k] {
+					t.Errorf("unexpected wire key %q, want exactly %v", k, want)
+				}
+			}
+			for k := range want {
+				if _, ok := got[k]; !ok {
+					t.Errorf("missing wire key %q, got: %s", k, b)
+				}
+			}
+		})
+	}
+}
