@@ -453,3 +453,57 @@ func TestPendingCallFailsOnExit(t *testing.T) {
 		t.Errorf("Err() = %v", c.Err())
 	}
 }
+
+// TestSignedIn: only a null or absent account with requiresOpenaiAuth true
+// reads as signed out.
+func TestSignedIn(t *testing.T) {
+	for _, tc := range []struct {
+		name, result string
+		want         bool
+	}{
+		{"chatgpt account", `{"account":{"type":"chatgpt","email":"a@example.invalid","planType":"plus"},"requiresOpenaiAuth":true}`, true},
+		{"api key account", `{"account":{"type":"apiKey"},"requiresOpenaiAuth":true}`, true},
+		{"null account, auth required", `{"account":null,"requiresOpenaiAuth":true}`, false},
+		{"absent account, auth required", `{"requiresOpenaiAuth":true}`, false},
+		{"null account, no auth required", `{"account":null,"requiresOpenaiAuth":false}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, p := startPeer(t, "codex_cli_rs/0.156.1", Config{})
+			type answer struct {
+				ok  bool
+				err error
+			}
+			got := make(chan answer, 1)
+			go func() {
+				ok, err := c.SignedIn(ctx5(t))
+				got <- answer{ok, err}
+			}()
+			f := p.next(methodAccountRead)
+			if string(f["params"]) != "{}" {
+				t.Errorf("account/read params = %s, want {}", f["params"])
+			}
+			p.send(fmt.Sprintf(`{"id":%s,"result":%s}`, f["id"], tc.result))
+			a := <-got
+			if a.err != nil || a.ok != tc.want {
+				t.Fatalf("SignedIn = %v, %v; want %v", a.ok, a.err, tc.want)
+			}
+		})
+	}
+}
+
+// TestSignedInAgainstFake: the fake is signed in by default and signed out
+// under FAKECODEX_SIGNED_OUT.
+func TestSignedInAgainstFake(t *testing.T) {
+	if ok, err := startFake(t, Config{}).SignedIn(ctx5(t)); err != nil || !ok {
+		t.Fatalf("default fake: SignedIn = %v, %v; want true", ok, err)
+	}
+	t.Setenv("FAKECODEX_SIGNED_OUT", "1")
+	t.Setenv("FAKECODEX_VERSION", "0.155.0-alpha.3")
+	c := startFake(t, Config{})
+	if ok, err := c.SignedIn(ctx5(t)); err != nil || ok {
+		t.Fatalf("signed-out fake: SignedIn = %v, %v; want false", ok, err)
+	}
+	if c.Version() != "0.155.0-alpha.3" {
+		t.Fatalf("Version() = %q, want 0.155.0-alpha.3", c.Version())
+	}
+}

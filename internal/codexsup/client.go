@@ -405,6 +405,22 @@ func (c *Client) StartTurn(ctx context.Context, in TurnInput) (string, error) {
 	return res.Turn.ID, nil
 }
 
+// SignedIn reports whether the Codex home can run a turn, from account/read.
+// It is false only when Codex answers no account and requiresOpenaiAuth true;
+// a provider needing no OpenAI sign-in is signed in without an account. The
+// account's fields (an email address among them) are never decoded.
+func (c *Client) SignedIn(ctx context.Context) (bool, error) {
+	var res struct {
+		Account            json.RawMessage `json:"account"`
+		RequiresOpenaiAuth bool            `json:"requiresOpenaiAuth"`
+	}
+	if err := c.call(ctx, methodAccountRead, struct{}{}, &res); err != nil {
+		return false, err
+	}
+	noAccount := len(res.Account) == 0 || string(res.Account) == "null"
+	return !(noAccount && res.RequiresOpenaiAuth), nil
+}
+
 // Interrupt asks Codex to stop the running turn turnID on the client's
 // thread. The turn ends with a turn/completed notification.
 func (c *Client) Interrupt(ctx context.Context, turnID string) error {

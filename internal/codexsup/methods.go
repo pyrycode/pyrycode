@@ -9,10 +9,12 @@ const (
 	methodThreadResume  = "thread/resume"
 	methodTurnStart     = "turn/start"
 	methodTurnInterrupt = "turn/interrupt"
+	methodAccountRead   = "account/read"
 )
 
 var clientRequests = []string{
 	methodInitialize, methodThreadStart, methodThreadResume, methodTurnStart, methodTurnInterrupt,
+	methodAccountRead,
 }
 
 var clientNotifications = []string{methodInitialized}

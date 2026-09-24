@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +19,10 @@ import (
 	"github.com/pyrycode/pyrycode/internal/turncommit"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
+
+// codexMinVersion is the oldest Codex the runner drives: the version
+// codexsup's wire contract was captured from.
+const codexMinVersion = "0.156.1"
 
 // harnessCodex is RunnerConfig.Harness for a Codex session. The sessions
 // package carries the value without naming it; the factory decides.
@@ -52,6 +58,10 @@ type codexHarness struct {
 // and the exit lane from it, so a Codex turn and a Codex exit reach the drain
 // under the same session id. The Codex home's config is rewritten on every
 // construction, so the read-only posture is restored even if it was edited.
+//
+// Before returning a runner it probes Codex once (#2621): a Codex below
+// codexMinVersion or a daemon home with no sign-in refuses the session here,
+// because Run would only back off and retry the same failure.
 func newCodexRunnerFactory(h codexHarness) sessions.RunnerFactory {
 	return func(cfg sessions.RunnerConfig) (sessions.Runner, error) {
 		if h.sink == nil || h.home == "" {
@@ -72,6 +82,9 @@ func newCodexRunnerFactory(h codexHarness) sessions.RunnerFactory {
 		if bin == "" {
 			bin = "codex"
 		}
+		if err := probeCodex(bin, h.home, dir); err != nil {
+			return nil, fmt.Errorf("cmd/pyry: codex runner: %w", err)
+		}
 		tag := newStreamSessionTag(cfg.SessionID)
 		model, effort := codexTurnSettings(cfg.ClaudeArgs)
 		return newCodexRunner(codexRunnerConfig{
@@ -87,6 +100,66 @@ func newCodexRunnerFactory(h codexHarness) sessions.RunnerFactory {
 			Log:     cfg.Logger,
 		}), nil
 	}
+}
+
+// probeCodex starts the app-server against the daemon home, checks its
+// version and its sign-in, and stops it. It opens no thread. The account's
+// details are never read, so none reach the error or the log.
+func probeCodex(bin, home, dir string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), codexStartTimeout)
+	defer cancel()
+	client, err := codexsup.Start(ctx, codexsup.Config{
+		Binary: bin, Dir: dir, CodexHome: home, ClientVersion: Version,
+	})
+	if err != nil {
+		return fmt.Errorf("probe codex: %w", err)
+	}
+	defer stopCodexClient(client)
+	if err := checkCodexVersion(client.Version()); err != nil {
+		return err
+	}
+	signedIn, err := client.SignedIn(ctx)
+	if err != nil {
+		return fmt.Errorf("probe codex: %w", err)
+	}
+	if !signedIn {
+		return fmt.Errorf("the daemon's Codex home is not signed in; sign in with CODEX_HOME=%s codex login", home)
+	}
+	return nil
+}
+
+// checkCodexVersion refuses a version below codexMinVersion or one that is
+// not MAJOR.MINOR.PATCH with an optional -prerelease or +build suffix. A
+// prerelease sorts below its release, as in semver.
+func checkCodexVersion(v string) error {
+	have, havePre, ok := parseCodexVersion(v)
+	if !ok {
+		return fmt.Errorf("cannot parse Codex version %q; Codex %s or later is required", v, codexMinVersion)
+	}
+	want, _, _ := parseCodexVersion(codexMinVersion)
+	if c := slices.Compare(have[:], want[:]); c > 0 || (c == 0 && !havePre) {
+		return nil
+	}
+	return fmt.Errorf("found Codex %q, below the required %s; upgrade Codex", v, codexMinVersion)
+}
+
+// parseCodexVersion splits v into its three numeric components and whether it
+// carries a prerelease.
+func parseCodexVersion(v string) (core [3]int, pre, ok bool) {
+	v, _, _ = strings.Cut(v, "+")
+	v, prerelease, pre := strings.Cut(v, "-")
+	parts := strings.Split(v, ".")
+	if len(parts) != len(core) || (pre && prerelease == "") {
+		return core, false, false
+	}
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return core, false, false
+		}
+		core[i] = n
+	}
+	return core, pre, true
 }
 
 // codexTurnSettings reads the session's model and effort out of the

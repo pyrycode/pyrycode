@@ -13,6 +13,8 @@
 //	                  turn/completed with status "completed"
 //	turn/interrupt    {}, and the named running turn ends with
 //	                  turn/completed status "interrupted"
+//	account/read      a signed-in ChatGPT account, or {account: null,
+//	                  requiresOpenaiAuth: true} when signed out
 //
 // Any request other than initialize before initialize is refused, as the
 // real server does. The fake exits 0 on stdin EOF. Field shapes follow the
@@ -20,8 +22,11 @@
 //
 // Configuration is env-only:
 //
-//	CODEX_HOME  echoed as initialize's codexHome. Default $HOME/.codex,
-//	            the real server's default.
+//	CODEX_HOME            echoed as initialize's codexHome. Default
+//	                      $HOME/.codex, the real server's default.
+//	FAKECODEX_VERSION     the version reported in initialize's userAgent
+//	                      and each thread's cliVersion. Default 0.156.1.
+//	FAKECODEX_SIGNED_OUT  non-empty: account/read reports no sign-in.
 //
 // Per-turn behaviour is selected by a marker anywhere in the text of a
 // turn's input, so one process serves every kind of turn:
@@ -81,6 +86,7 @@ var requestHandlers = map[string]handler{
 	"thread/resume":  (*server).threadResume,
 	"turn/start":     (*server).turnStart,
 	"turn/interrupt": (*server).turnInterrupt,
+	"account/read":   (*server).accountRead,
 }
 
 // acceptedNotifications are the client notifications the fake takes.
@@ -123,6 +129,8 @@ type incoming struct {
 
 type server struct {
 	codexHome   string
+	version     string
+	signedOut   bool
 	initialized bool // main goroutine only
 
 	writeMu sync.Mutex
@@ -142,13 +150,19 @@ func main() {
 			home = filepath.Join(h, ".codex")
 		}
 	}
-	os.Exit(run(os.Stdin, os.Stdout, home))
+	version := os.Getenv("FAKECODEX_VERSION")
+	if version == "" {
+		version = codexVersion
+	}
+	os.Exit(run(os.Stdin, os.Stdout, home, version, os.Getenv("FAKECODEX_SIGNED_OUT") != ""))
 }
 
 // run serves frames from in until EOF, returning the process exit code.
-func run(in io.Reader, out io.Writer, codexHome string) int {
+func run(in io.Reader, out io.Writer, codexHome, version string, signedOut bool) int {
 	s := &server{
 		codexHome: codexHome,
+		version:   version,
+		signedOut: signedOut,
 		out:       out,
 		turns:     map[string]chan struct{}{},
 		pending:   map[string]chan json.RawMessage{},
@@ -246,7 +260,7 @@ func (s *server) initialize(json.RawMessage) (any, func(), *rpcError) {
 		"codexHome":      s.codexHome,
 		"platformFamily": "unix",
 		"platformOs":     platformOS,
-		"userAgent":      "pyry_fakecodex/" + codexVersion,
+		"userAgent":      "pyry_fakecodex/" + s.version,
 	}, nil, nil
 }
 
@@ -262,7 +276,7 @@ func (s *server) threadStart(raw json.RawMessage) (any, func(), *rpcError) {
 	if err := decodeParams(raw, &p); err != nil {
 		return nil, nil, err
 	}
-	return threadResponse(newID(), p), nil, nil
+	return threadResponse(newID(), s.version, p), nil, nil
 }
 
 func (s *server) threadResume(raw json.RawMessage) (any, func(), *rpcError) {
@@ -273,12 +287,22 @@ func (s *server) threadResume(raw json.RawMessage) (any, func(), *rpcError) {
 	if p.ThreadID == "" {
 		return nil, nil, &rpcError{codeInvalidParams, "threadId is required"}
 	}
-	return threadResponse(p.ThreadID, p), nil, nil
+	return threadResponse(p.ThreadID, s.version, p), nil, nil
+}
+
+// accountRead is the GetAccountResponse shape: a ChatGPT account, or none
+// with an OpenAI sign-in required.
+func (s *server) accountRead(json.RawMessage) (any, func(), *rpcError) {
+	var account any = map[string]any{"type": "chatgpt", "email": "fakecodex@example.invalid", "planType": "plus"}
+	if s.signedOut {
+		account = nil
+	}
+	return map[string]any{"account": account, "requiresOpenaiAuth": true}, nil, nil
 }
 
 // threadResponse is the ThreadStartResponse / ThreadResumeResponse shape,
 // every required field filled.
-func threadResponse(id string, p threadParams) map[string]any {
+func threadResponse(id, version string, p threadParams) map[string]any {
 	cwd := p.Cwd
 	if !filepath.IsAbs(cwd) {
 		cwd, _ = os.Getwd()
@@ -298,7 +322,7 @@ func threadResponse(id string, p threadParams) map[string]any {
 		"thread": map[string]any{
 			"id":            id,
 			"sessionId":     id,
-			"cliVersion":    codexVersion,
+			"cliVersion":    version,
 			"createdAt":     now,
 			"updatedAt":     now,
 			"cwd":           cwd,
