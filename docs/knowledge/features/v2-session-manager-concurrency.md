@@ -62,34 +62,43 @@ hosted-but-unaskable ask) rather than the reply, because the reply looks
 identical whether or not a flight was installed and then panicked on a
 goroutine.
 
-**This is the first handler on `appFrameWorker` that can park for an entire
-turn, and that turns `appFrameQueueDepth` overflow from a flood protection into
-an ordinary-use teardown — found on code review, not in production.** Every
-earlier occupant (`mcp_status_request`, `mcp_reconnect`/`mcp_toggle`,
-`request_attachment`, `attachment_chunk`) waits only on a child round trip, so
-the worst case is one slow response. While this handler is parked on
-`WaitIdle`, later frames from the **same conn** queue behind it in
-`s.appFrames` (depth 16) rather than being serviced, and `enqueueAppFrame`
-answers overflow by tearing the conn down at 4421 — the guard that exists to
-stop a flood instead fires on a well-behaved client. The concrete trigger: one
+**This was the first handler on `appFrameWorker` that could park for an
+entire turn, and until #2563 that turned `appFrameQueueDepth` overflow from a
+flood protection into an ordinary-use teardown — found on code review, not in
+production.** While parked inline on `WaitIdle`, later frames from the same
+conn queued behind the ask in `s.appFrames` (depth 16), and `enqueueAppFrame`
+answered overflow by tearing the conn down at 4421 — the guard meant to stop a
+flood instead fired on a well-behaved client. The concrete trigger: one
 admitted attachment transfer may span up to 373 chunks (`protocol.
 MaxAttachmentChunkBytes` is 45000; `internal/attachments/accumulator.go`'s
-per-upload byte bound divided by it), each its own app frame through this same
-queue, so a ~1 MB photo alone is ~23 frames — nearly 1.5× the queue depth.
-Asking for a reading mid-turn (the ticket's own headline use case) and then
-attaching a photo before the turn ends is enough to hit the ceiling and drop
-the connection. **Record the trigger this way, not as added latency**: the
-first-cut phrasing described the cost as "stalls that conn's later frames" and
-filed queue overflow separately as a protection against flooding, without
-noticing the two compose into a teardown of a client that did nothing wrong.
-Deliberately not fixed here (Evidence-Based Fix Selection — nothing reaches
-this path until a client adopts the verb); the follow-up this residual should
-trigger is a disconnect, not a latency complaint. Related and sharing the same
-root cause: `appFrameWorker` checks `s.done` only between jobs and is handed
-`runCtx` rather than a per-session context, so a parked worker is not released
-by its own conn's teardown either — bounded by the same two waits rather than a
-leak, and worth the same sentence wherever the bounded-hold fix for the queue
-lands.
+per-upload byte bound divided by it), so a ~1 MB photo alone is ~23 frames —
+nearly 1.5× the queue depth. Asking for a reading mid-turn and then attaching
+a photo before the turn ends was enough to hit the ceiling and drop the
+connection, and the same head-of-line block was what let a genuinely stuck
+conn deadlock until teardown when the frame parked behind the ask was itself
+the `send_message` that would have ended the turn (pyrycode-mobile #946: 91s
+to teardown in the `reconnect` scenario). #2563 fixed both by moving the wait
+itself off the worker: `handleRequestContextUsage` still runs steps 1–4
+(decode, tolerated-payload decode, membership) on the worker, but past
+membership it hands the `WaitIdle` + child-round-trip wait to a per-ask
+goroutine (`resolveContextUsageRequest`) and the worker moves straight to the
+conn's next queued frame — so this verb no longer occupies `s.appFrames` while
+it waits, and no other arm currently parks the worker for anything longer than
+one child round trip. The cost is ordering, not latency: this verb's reply can
+now arrive after replies to frames sent later on the same conn, so clients
+correlate on `in_reply_to` (`appFrameContextUsageRequest`'s worker-arm comment
+and the `appFrameWorker` doc both say so). The per-ask goroutine is bounded at
+`maxContextUsageAsksPerConn = 4` waiting asks per conn — a non-blocking
+semaphore acquire on the worker, so a full one refuses the ask at once with
+the existing retryable `context_usage.unavailable` rather than re-parking the
+worker — and is ended by a `connCtx` the worker derives from its own `ctx` and
+cancels on return (`s.done` or `runCtx`), so conn teardown or manager
+shutdown ends every waiting ask for that conn and no reply is built, let alone
+sealed, for a conn that is gone. Other bounded-wait arms
+(`mcp_status_request`, `mcp_reconnect`/`mcp_toggle`, `request_attachment`,
+`attachment_chunk`) still run under the worker's plain `ctx` rather than a
+per-conn context — untouched by this fix, and lower-severity since each waits
+only on one child round trip rather than an entire turn.
 
 **Moving shared work off the caller's context is only half a fix for a
 collapsing seam; it has to come off the caller's goroutine too — the security
