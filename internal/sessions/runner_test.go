@@ -42,6 +42,12 @@ func (fakeRunner) SetPermissionMode(mode string) error { return nil }
 
 func (fakeRunner) BeginTeardown() {}
 
+func (fakeRunner) Interrupt() error { return nil }
+
+func (fakeRunner) RestartFresh(newID string) {}
+
+func (fakeRunner) BeginRotation() func() { return func() {} }
+
 // TestRunnerFactory_InvokedAtEveryConstructionSite covers AC-4: a non-nil
 // Config.RunnerFactory is invoked in place of the default runner at BOTH construction
 // sites — the bootstrap (Pool.New) and the per-session create (Pool.buildSession,
@@ -295,6 +301,12 @@ func (r *lifecycleRunner) SetSpawnPermissionMode(mode string) {
 // teardown_gate_test.go carries the one shared ordered log that can, and it is the
 // double the three arm-ordering rows use.
 func (r *lifecycleRunner) BeginTeardown() {}
+
+func (r *lifecycleRunner) Interrupt() error { return nil }
+
+func (r *lifecycleRunner) RestartFresh(newID string) {}
+
+func (r *lifecycleRunner) BeginRotation() func() { return func() {} }
 
 // spawnPermissionModes is the read side of the record above, deep-copied under r.mu
 // like its three siblings.

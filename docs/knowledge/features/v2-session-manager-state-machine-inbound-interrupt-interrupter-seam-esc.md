@@ -136,27 +136,32 @@ change, which is why they were split into their own ticket. At the time,
 `interruptRunner` dispatched to `streamRunner.Interrupt()` or
 `*supervisor.Supervisor.SendEsc()`; `#1348` deleted `internal/supervisor`
 outright, leaving the `SendEsc` arm type-dead, and `#1548` deleted it along with
-the `armSendEsc` constant — `interruptRunner` is now an optional
-`if`-assertion with a single surviving actuation, `streamRunner.Interrupt()`.
-`interruptRunner` still returns the `interruptArm` it dispatched to
-(`armInterrupt` / `armNone`) alongside the chosen method's error, and
-`activeInterrupter.SendEsc()` — the only scope holding the conversation id —
-emits from it: `v2.interrupt.dispatched` (`conversation_id`, `arm`) on a
-successful dispatch, unconditionally including when the dispatched arm's own
-call returned an error (it records *which arm ran*, not that the child
-quiesced — the actuation failure itself is `handleInterrupt`'s
-`v2.interrupt.keystroke_err` `Warn`, which carries the error but not the arm);
-`v2.interrupt.no_actuator` (`conversation_id`) when the resolved runner exposes
-neither method. Every path through the route now emits, so **an empty
-`v2.interrupt.*` log on a wired daemon means the frame never arrived** — no
-separate "frame arrived" record was needed to get that. Two doc comments that
-carried this as an explicit interim caveat (`activeInterrupter.SendEsc`,
-`cmd/pyry/main.go`; `handleInterrupt`, `internal/relay/v2session_modal.go`) were
-flipped from caveat to invariant. "Wired" is load-bearing: `handleInterrupt`'s
-step-2 nil-`Interrupter` arm still records at `Debug` (invisible at the
-daemon's default `LevelInfo`, raised only by `-pyry-verbose`), but production
-always wires the `Interrupter`. See [`codebase/1192.md`](../codebase/1192.md),
-[`codebase/1193.md`](../codebase/1193.md).
+the `armSendEsc` constant — `interruptRunner` became an optional
+`if`-assertion with a single surviving actuation, `streamRunner.Interrupt()`, and
+returned the `interruptArm` it dispatched to (`armInterrupt` / `armNone`)
+alongside the chosen method's error. `activeInterrupter.SendEsc()` — the only
+scope holding the conversation id — emitted from it: `v2.interrupt.dispatched`
+(`conversation_id`, `arm`) on a successful dispatch, unconditionally including
+when the dispatched arm's own call returned an error (it records *which arm
+ran*, not that the child quiesced — the actuation failure itself is
+`handleInterrupt`'s `v2.interrupt.keystroke_err` `Warn`, which carries the error
+but not the arm); `v2.interrupt.no_actuator` (`conversation_id`) when the
+resolved runner exposed neither method. **#2592 put `Interrupt` on
+`sessions.Runner`, deleting the assertion, `armNone` and `v2.interrupt.no_actuator`
+along with it** — a second runner implementation would have made the assertion's
+silent-drop failure mode reachable, so it became a build-time requirement
+instead, and `interruptRunner` now unconditionally returns `armInterrupt,
+r.Interrupt()`. The invariant this paragraph is about survives the cut
+unchanged: `activeInterrupter.SendEsc()` still emits `v2.interrupt.dispatched`
+on every dispatch, so **an empty `v2.interrupt.*` log on a wired daemon means the
+frame never arrived** — there is simply one fewer record it could have emitted
+instead. "Wired" is load-bearing: `handleInterrupt`'s step-2 nil-`Interrupter`
+arm still records at `Debug` (invisible at the daemon's default `LevelInfo`,
+raised only by `-pyry-verbose`), but production always wires the `Interrupter`.
+See [`codebase/1192.md`](../codebase/1192.md), [`codebase/1193.md`](../codebase/1193.md),
+and [sessions-package's `Runner`
+interface](sessions-package-key-types-runner-interface-runnerfactory.md) for
+\#2592's placement rule.
 
 ## `activeInterrupter.SendEsc` — resolution order (#2103)
 
@@ -180,7 +185,9 @@ Named id resolution slots in before the existing arms, in an order that mirrors
    is preserved by not touching that function rather than by rebuilding it. The
    non-distinction also denies a paired client an existence oracle over
    conversation ids.
-4. dispatch as before — `v2.interrupt.no_actuator` / `v2.interrupt.dispatched`.
+4. dispatch as before — `v2.interrupt.dispatched` (the `no_actuator` arm was
+   removed in #2592 along with the capability assertion it guarded; see
+   above, "#1193 closes the invariant").
 
 ## No liveness guard — a blocker's late fix is not automatically the twin's requirement
 

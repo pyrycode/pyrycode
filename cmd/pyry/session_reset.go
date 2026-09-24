@@ -137,8 +137,8 @@ type handoffNoteStore interface {
 // The WRITE is a func rather than the *sessions.Session it comes from, the
 // division contextUsageResolveFunc keeps: the seam crossing into this type carries
 // no internal/sessions value the coordinator would otherwise have to construct in
-// a test. The RUNNER is the interface, because two separate optional capabilities
-// are asserted off it and naming both here would make them look mandatory.
+// a test. The RUNNER is the interface: Interrupt is on it (#2592), and the one
+// optional capability, wrapUpCapturer, is asserted off it.
 type resetTarget struct {
 	write  func(ctx context.Context, conversationID string, payload []byte) error
 	runner sessions.Runner
@@ -336,7 +336,7 @@ func (r *conversationReset) release(convID string) {
 //     is what keeps a queued message out of the wrap-up turn (AC 5).
 //  2. The conversation is resolved on THIS goroutine; see the resolve field.
 //  3. The interrupt, then the idle wait. The wait is the real gate — the interrupt
-//     only makes it come sooner — which is why an inert or failing interrupt is
+//     only makes it come sooner — which is why a failing interrupt is
 //     tolerated rather than aborting.
 //  4. The capture is armed BEFORE the write, so no chunk of the reply can precede
 //     it. This is the ordering the whole decorator exists to make possible.
@@ -375,15 +375,12 @@ func (r *conversationReset) wrapUp(convID string) (wrote bool) {
 		return false
 	}
 
-	// Tolerated on both arms. arm is logged as a plain string, never the named type:
-	// slog renders a named string type through the Any path and this binary's
-	// JSONHandler and relay's TextHandler do not agree on how that renders — the
-	// reason activeInterrupter.SendEsc gives for the same cast.
-	if arm, err := interruptRunner(target.runner); err != nil || arm == armNone {
-		r.logger().Debug("relay: reset wrap-up interrupt was inert or failed; waiting for idle anyway",
+	// A failed interrupt is tolerated: the idle wait below is the real gate, and the
+	// interrupt only makes the idle arrive sooner.
+	if err := target.runner.Interrupt(); err != nil {
+		r.logger().Debug("relay: reset wrap-up interrupt failed; waiting for idle anyway",
 			"event", "reset.wrapup.interrupt_inert",
 			"conversation_id", convID,
-			"arm", string(arm),
 			"err", err)
 	}
 	if r.busy != nil {

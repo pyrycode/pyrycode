@@ -302,26 +302,20 @@ func (a streamRunner) ConfirmedPermissionMode() (string, bool) {
 func (a streamRunner) BeginTeardown() { a.r.BeginTeardown() }
 
 // Interrupt forwards to (*streamsup.Runner).Interrupt (#1120), ending the running
-// turn via a control_request line. It is OFF the sessions.Runner interface (which
-// stays un-widened, #1077) — a concrete method the #1121 interrupt dispatch
-// (interruptRunner in main.go) reaches by type assertion.
+// turn via a control_request line. It satisfies sessions.Runner.Interrupt, which
+// the #1121 interrupt dispatch (interruptRunner in main.go) calls (#2592).
 func (a streamRunner) Interrupt() error { return a.r.Interrupt() }
 
 // RestartFresh forwards to (*streamsup.Runner).RestartFresh (#1124), rotating the
 // runner's persistent id to newID so the next spawn uses --session-id <newID> (a
-// fresh transcript, no fork). Like Interrupt it is OFF the sessions.Runner
-// interface (un-widened, #1077) — a concrete method the #1125 new_session dispatch
-// (startFreshRunner in main.go) reaches by type assertion.
+// fresh transcript, no fork). It satisfies sessions.Runner.RestartFresh, which the
+// #1125 new_session dispatch (startFreshRunner in main.go) calls (#2592).
 func (a streamRunner) RestartFresh(newID string) { a.r.RestartFresh(newID) }
 
 // BeginRotation forwards to (*streamsup.Runner).BeginRotation (#1330), arming the
 // rotation gate so no turn accepted once the rotation has begun is written into
 // the outgoing child, and returning the disarm for startFreshRunner's rotate-error
-// path. It is the THIRD concrete method reached by type assertion off the
-// un-widened sessions.Runner (#1077), after Interrupt (#1120) and RestartFresh
-// (#1124) — but the only OPTIONAL one: startFreshRunner asserts for it separately
-// (beginRotationOrNoop) rather than widening the RestartFresh case, so a runner
-// that exposes RestartFresh without a gate keeps today's dispatch exactly.
+// path. It satisfies sessions.Runner.BeginRotation (#2592).
 func (a streamRunner) BeginRotation() func() { return a.r.BeginRotation() }
 
 // ModelList reports the model list this session's child last named in its
@@ -329,15 +323,13 @@ func (a streamRunner) BeginRotation() func() { return a.r.BeginRotation() }
 // reads the hold the factory bound to this runner's parser, so it answers outside
 // a turn, on any goroutine, with no turn in flight.
 //
-// It is the FOURTH concrete method OFF the sessions.Runner interface (un-widened,
-// #1077), after Interrupt (#1120), RestartFresh (#1124) and BeginRotation (#1330),
-// and it is off for Interrupt's reason exactly: the rule those docs state is that
-// the interface carries a method when its consumer sits INSIDE internal/sessions,
-// where a structural assertion would fail open. This one's consumer is #1837's
-// publisher in cmd/pyry, which reaches it by type assertion off Session.Runner the
-// way interruptRunner already does — so widening the interface would buy no
-// compile-time guarantee and would drag every fake runner under internal/sessions
-// and cmd/pyry into the diff.
+// It is a concrete method OFF the sessions.Runner interface. The rule is that the
+// interface carries a method when a runner lacking it would fail open, silently
+// dropping an operation (see the Runner doc). This one's consumer is #1837's
+// publisher in cmd/pyry, which reaches it by type assertion off Session.Runner, and a
+// runner without it merely reports no model list — so widening the interface would
+// buy no compile-time guarantee and would drag every fake runner under
+// internal/sessions and cmd/pyry into the diff.
 func (a streamRunner) ModelList() (turnevent.ModelList, bool) { return a.models.ModelList() }
 
 // SlashCommandList reports the slash-command inventory this session's child last named
@@ -347,14 +339,10 @@ func (a streamRunner) ModelList() (turnevent.ModelList, bool) { return a.models.
 // never minted answers the unreported state rather than panicking, the read being
 // nil-receiver-safe.
 //
-// It is the FIFTH concrete method OFF the sessions.Runner interface (un-widened,
-// #1077), after Interrupt (#1120), RestartFresh (#1124), BeginRotation (#1330) and
-// ModelList (#1840), and it is off for ModelList's reason exactly rather than by
-// resemblance to it: the rule those docs state is that the interface carries a method
-// when its consumer sits INSIDE internal/sessions, where a structural assertion would
-// fail open. This one's consumer is #2005's resolver in cmd/pyry, which reaches it by
-// type assertion off Session.Runner the way interruptRunner already does — so widening
-// the interface would buy no compile-time guarantee and would drag every fake runner
+// It is a concrete method OFF the sessions.Runner interface, for ModelList's reason
+// exactly rather than by resemblance to it. This one's consumer is #2005's resolver in
+// cmd/pyry, which reaches it by type assertion off Session.Runner — so widening the
+// interface would buy no compile-time guarantee and would drag every fake runner
 // under internal/sessions and cmd/pyry into the diff.
 func (a streamRunner) SlashCommandList() (turnevent.SlashCommandList, bool) {
 	return a.commands.SlashCommandList()
@@ -373,16 +361,11 @@ func (a streamRunner) SlashCommandList() (turnevent.SlashCommandList, bool) {
 // alive. sessionBackgroundTaskHold.BackgroundTaskRoster's doc gives the derivation; a
 // caller that collapses the two reconciles a live session as a silent one.
 //
-// It is the SIXTH concrete method OFF the sessions.Runner interface (un-widened,
-// #1077), after Interrupt (#1120), RestartFresh (#1124), BeginRotation (#1330),
-// ModelList (#1840) and SlashCommandList (#2004), and it is off for their reason
-// exactly rather than by resemblance to them: the rule those docs state is that the
-// interface carries a method when its consumer sits INSIDE internal/sessions, where a
-// structural assertion would fail open. This one's consumer is #2079's resolver in
-// cmd/pyry, which reaches it by type assertion off Session.Runner the way
-// interruptRunner already does — so widening the interface would buy no compile-time
-// guarantee and would drag every fake runner under internal/sessions and cmd/pyry into
-// the diff.
+// It is a concrete method OFF the sessions.Runner interface, for ModelList's and
+// SlashCommandList's reason exactly rather than by resemblance to them. This one's
+// consumer is #2079's resolver in cmd/pyry, which reaches it by type assertion off
+// Session.Runner — so widening the interface would buy no compile-time guarantee and
+// would drag every fake runner under internal/sessions and cmd/pyry into the diff.
 func (a streamRunner) BackgroundTaskRoster() (turnevent.BackgroundTaskRoster, bool) {
 	return a.tasks.BackgroundTaskRoster()
 }
@@ -402,15 +385,11 @@ func (a streamRunner) BackgroundTaskRoster() (turnevent.BackgroundTaskRoster, bo
 // model id is not an argv token — are stated on sessionModelWindowHold.ModelWindows and are
 // not repeated here; this forward adds no judgement of its own.
 //
-// It is the SEVENTH concrete method OFF the sessions.Runner interface (un-widened, #1077),
-// after Interrupt (#1120), RestartFresh (#1124), BeginRotation (#1330), ModelList (#1840),
-// SlashCommandList (#2004) and BackgroundTaskRoster (#2077), and it is off for their reason
-// exactly rather than by resemblance to them: the rule those docs state is that the
-// interface carries a method when its consumer sits INSIDE internal/sessions, where a
-// structural assertion would fail open. This one's consumer is #2107, in cmd/pyry, which
-// reaches it by type assertion off Session.Runner the way interruptRunner already does — so
-// widening the interface would buy no compile-time guarantee and would drag every fake
-// runner under internal/sessions and cmd/pyry into the diff.
+// It is a concrete method OFF the sessions.Runner interface, for the reason the three
+// read forwards above share rather than by resemblance to them. This one's consumer is
+// #2107, in cmd/pyry, which reaches it by type assertion off Session.Runner — so widening
+// the interface would buy no compile-time guarantee and would drag every fake runner
+// under internal/sessions and cmd/pyry into the diff.
 //
 // Returning a package-private type is what that placement makes possible and costs nothing:
 // every consumer is in this package. Should a later ticket need the value outside it, the
@@ -439,15 +418,9 @@ func (a streamRunner) ModelWindows() (modelWindowReport, bool) { return a.window
 // runner about — but still nothing to ask a live CHILD about, so the forward stays
 // a plain field read and no turn boundary is involved.
 //
-// It is the EIGHTH concrete method OFF the sessions.Runner interface (un-widened,
-// #1077), after Interrupt (#1120), RestartFresh (#1124), BeginRotation (#1330),
-// ModelList (#1840), SlashCommandList (#2004), BackgroundTaskRoster (#2077) and
-// ModelWindows (#2106), and it is off for their reason exactly rather than by
-// resemblance to them: the rule those docs state is that the interface carries a
-// method when its consumer sits INSIDE internal/sessions, where a structural
-// assertion would fail open. This one's consumer is #2423's resolver in cmd/pyry,
-// which reaches it by type assertion off Session.Runner the way interruptRunner
-// already does.
+// It is a concrete method OFF the sessions.Runner interface, for the reason the read
+// forwards above share rather than by resemblance to them. This one's consumer is
+// #2423's resolver in cmd/pyry, which reaches it by type assertion off Session.Runner.
 //
 // SECURITY: the value derives from a directory a paired client can choose
 // (resolveSpawnDir's confined, symlink-resolved output). It is a folder the daemon
@@ -477,9 +450,9 @@ func (a streamRunner) ClaudeSessionsDir() string { return a.r.ClaudeSessionsDir(
 // path. A degraded derivation answers "" — the inert probe state — rather than a
 // wrong folder, which is streamClaudeSessionsDir's documented contract.
 //
-// It is the NINTH concrete method OFF the sessions.Runner interface, for the
-// reason ClaudeSessionsDir above states: its consumer is startFreshRunner in this
-// package, reaching it by type assertion off Session.Runner.
+// It is a concrete method OFF the sessions.Runner interface: its consumer is
+// installSpawnDir in this package, reaching it by type assertion off
+// Session.Runner, and a runner without it still rotates, just in place.
 //
 // SECURITY: workDir is resolveSpawnDir's confined, symlink-resolved output and
 // nothing else — the caller re-runs that validator on the recorded value at

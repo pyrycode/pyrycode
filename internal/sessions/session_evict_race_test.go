@@ -64,6 +64,12 @@ func (r *raceRunner) SetPermissionMode(mode string) error { return nil }
 
 func (r *raceRunner) BeginTeardown() {}
 
+func (r *raceRunner) Interrupt() error { return nil }
+
+func (r *raceRunner) RestartFresh(newID string) {}
+
+func (r *raceRunner) BeginRotation() func() { return func() {} }
+
 // TestSession_IdleEviction_ActivateRacingTeardownRespawns is the hermetic,
 // fake-tier sibling to internal/e2e's TestE2E_IdleEviction_RespawnsOnSendMessage
 // (#396): it pins the drain-respawn-after-eviction contract on the same lifecycle
