@@ -3,14 +3,15 @@
 `internal/e2e/internal/fakecodex` (#2590) is a test-only `package main` that
 stands in for `codex app-server` at Codex **0.156.1**, the version pyrycode
 targets. It exists so Codex support (#2583 family — the `internal/codexsup`
-client #2591, the notification mapping #2584, the pool runner #2585) can run
+client #2591, the notification mapping #2584, the pool runner #2620) can run
 its tests with no Codex account. It is a sibling of
 [fakeclaude](fakeclaude-binary.md), same layout convention: env-only
 configuration, documented in the package comment.
 
-It is not wired into `internal/e2e/harness.go` yet — that is each consumer
-ticket's job, mirroring how `ensureFakeClaudeBuilt` builds fakeclaude by
-import path.
+It is not wired into `internal/e2e/harness.go` — each consumer ticket builds
+it by import path instead, mirroring how `ensureFakeClaudeBuilt` builds
+fakeclaude. `cmd/pyry/codex_runner_test.go` (#2620, the pool runner) does
+this the same way `internal/codexsup`'s own tests (#2591) do.
 
 ## Wire
 

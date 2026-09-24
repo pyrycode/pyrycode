@@ -3,14 +3,16 @@
 Standalone client for `codex app-server` (#2591, target Codex **0.156.1**), the
 first slice of Codex support (#2583 family). It spawns the process, drives the
 `initialize`/`initialized` handshake over stdio, and starts, resumes and
-interrupts turns on one Codex thread. Nothing in `cmd/pyry` imports it yet —
-crash backoff, respawn and pooling multiple clients is #2585.
+interrupts turns on one Codex thread. `cmd/pyry`'s Codex runner (#2620, below)
+is its only production consumer: it supervises one `Client` at a time and
+supplies the crash backoff, respawn and pool wiring this package itself does
+not provide.
 
 `translate.go`'s `Translator` (#2608) is the Codex twin of
 [`streamsup`'s parser](streamsup-package.md): it maps server notifications
 into [`turnevent.Event`](turnevent-package.md) values so a Codex turn renders
-like a Claude turn with no client change. Also not wired into `cmd/pyry` —
-\#2585 does that.
+like a Claude turn with no client change. It reaches production through the
+same #2620 runner, one `Translator` per spawn.
 
 ## The translator's three-list partition
 
@@ -168,10 +170,11 @@ reach this table at all: `acp.Transport` answers an unregistered request
 method-not-found on its own. The decline table can only get narrower or wider
 deliberately, at a version bump, never by omission.
 
-**Who answers approvals is still open.** The runner that owns posture
-(#2585) will decide whether it wires `OnServerRequest` to a real operator
-prompt or leaves the default decline in place for some deployment shapes.
-The deny-by-default posture may be worth an ADR once that lands.
+**Who answers approvals is still open.** The #2620 runner that owns posture
+leaves `OnServerRequest` nil, so every request still takes this package's
+default decline — see [ADR 038](../decisions/038-codex-daemon-owned-home-read-only-default-decline.md)
+for why that is deliberate rather than a placeholder. Wiring a real operator
+prompt is #2587's job.
 
 ### The ticket's own literal for the legacy approvals was schema-invalid
 
@@ -234,6 +237,71 @@ block forever if the transport has already stopped reading; `cmd.WaitDelay`
 (5s) bounds the SIGTERM-to-SIGKILL escalation the same way, in case a
 descendant process is still holding stdout open.
 
+## Production wiring — the `cmd/pyry` Codex runner (#2620)
+
+`cmd/pyry/codex_runner.go`'s `codexRunner` implements `sessions.Runner` and
+supervises one `Client` at a time, the way `streamsup_runner.go`'s
+`streamRunner` supervises one Claude child. `harnessRunnerFactory` routes a
+session whose harness is `codex` to `newCodexRunnerFactory`; every other
+factory case is unchanged. Turn events and the app-server's exit reach the
+same `streamTurnSink` a Claude session feeds, through `sinkForTag`/
+`exitForTag` on one live tag, so a Codex turn appears on a client exactly
+like a Claude one.
+
+**The thread id has to live on the runner, not on `Run`'s stack.** Idle
+eviction cancels `Run`'s context and returns; a later activation calls `Run`
+again on that **same** `codexRunner` instance (`Session.runActive`). Anything
+that must survive an eviction — here, the Codex thread id `runOnce` resumes
+— has to be state on the runner (`threadID`, guarded by `mu`), not a local
+in `Run`'s or `runOnce`'s frame. The same runner instance also survives a
+crash and a `Restart`, so `threadID` carries across all three without a
+special case for any of them; only `RestartFresh` clears it and starts a new
+thread.
+
+**The running turn id comes from `turn/started`, never from `StartTurn`'s
+return.** `notify` records `turnID` when the `turn/started` notification
+arrives and clears it on `turn/completed`; `WriteUserTurn` discards the id
+`StartTurn` itself returns. `codexsup`'s read loop delivers notifications in
+order, so a turn that completes fast can have its `turn/completed` processed
+before `StartTurn`'s call returns — seeding `turnID` from the return value
+would then have `turn/completed`'s clear race against it. Reading only the
+notification sidesteps that race, at the cost of a narrow window where
+`Interrupt` arrives after `WriteUserTurn` returns but before the read loop
+has processed `turn/started`: `turnID` is still empty, and `Interrupt`
+returns nil without interrupting anything. The window is sub-millisecond
+against human reaction time, so it wasn't worth closing here; revisit if
+interrupt or approval work touches this path (PR #2623 review).
+
+**The app-server's `CODEX_HOME` is a daemon-owned directory the daemon keeps
+rewriting, not one it writes once.** `codexHomePath` is `<instance
+dir>/codex-home`; `prepareCodexHome` runs on every `codexRunner`
+construction (crash respawn included, since `newCodexRunnerFactory` is
+called once per session, not once per spawn) and unconditionally overwrites
+`config.toml` — `approval_policy = "on-request"`, `sandbox_mode =
+"read-only"`, `approvals_reviewer = "user"` — through a temp file and
+rename, after chmod'ing the directory to `0700`. It touches no other file:
+`auth.json`, from an out-of-band `CODEX_HOME=<dir> codex login`, is never
+read, copied or moved. Nothing in this directory is the operator's personal
+`~/.codex`, which the spike found loads a different default model at the
+highest effort plus every personal MCP server, plugin and notify hook. See
+[ADR 038](../decisions/038-codex-daemon-owned-home-read-only-default-decline.md).
+
+**Unconfirmed, flagged for the first live run (#2621/#2622).** A thread that
+was started and then evicted before any turn ran might not have a rollout
+for `thread/resume` to find, if Codex creates it lazily on first turn rather
+than on `thread/start`. The fake always resumes successfully, so this has
+not been observed; a permanent `thread/resume` failure would retry under
+backoff forever, refusing every turn on that session as `ErrNoLiveChild`
+until a `RestartFresh`. No defense is built for it without a live
+observation (PR #2623 review).
+
+Model and effort reach a turn as `TurnInput.Model`/`Effort`, read from
+`RunnerConfig.ClaudeArgs`'s trailing `--model`/`--effort` pair
+(`codexTurnSettings`) and refreshed by `SetSpawnArgs`/`Restart`/`SetModel`;
+`SetPermissionMode` always errors and `SetSpawnPermissionMode` is a no-op,
+since the read-only posture lives only in the config file above, never in a
+runner call.
+
 ## Testing
 
 `client_test.go` builds `fakecodex` by import path, the same `TestMain`
@@ -269,3 +337,14 @@ set, so `make check` still never touches Codex.
   pitfall for anything assembling a JSON-RPC frame by hand.
 - `internal/codexsup/SCHEMA.md` — how the pinned 0.156.1 schema bundle is
   regenerated.
+- [sessions-package.md](sessions-package.md) — `sessions.Runner`, the
+  interface `cmd/pyry/codex_runner.go`'s `codexRunner` satisfies, and the
+  eviction/activation cycle (`Session.runActive`) behind the thread-id lesson
+  above.
+- [streamsup-package.md](streamsup-package.md) § Production wiring — the
+  Claude analog (`streamsup_runner.go`'s `streamRunner`) the Codex runner's
+  shape mirrors: one child at a time, teardown/rotation write gates, one
+  shared turn sink.
+- [ADR 038](../decisions/038-codex-daemon-owned-home-read-only-default-decline.md)
+  — why `CODEX_HOME` is daemon-owned and every server request stays declined
+  until #2587.
