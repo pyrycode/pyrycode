@@ -170,11 +170,21 @@ func (p *SendMessagePayload) UnmarshalJSON(b []byte) error {
 // reply. Role is one of "user", "assistant", "system" per the spec's field
 // table; the type stays string (not a named Role enum) because the binary
 // already treats role-strings as string-typed elsewhere.
+//
+// AttachmentIDs is set only on the STORED user entry the history log holds
+// (#2596): the ids a send_message named, as the handler resolved them —
+// deduplicated on first occurrence, each past the resolver's canonical-shape
+// check. Same key and element shape as SendMessagePayload.AttachmentIDs. It is
+// omitted when empty, so an assistant emission and an attachment-less user entry
+// marshal exactly as they did before the field existed, and an older decoder
+// ignores the key. It carries ids only, never the on-host path the delivery
+// prompt names.
 type MessagePayload struct {
-	ConversationID string `json:"conversation_id"`
-	MessageID      string `json:"message_id"`
-	Role           string `json:"role"`
-	Text           string `json:"text"`
+	ConversationID string   `json:"conversation_id"`
+	MessageID      string   `json:"message_id"`
+	Role           string   `json:"role"`
+	Text           string   `json:"text"`
+	AttachmentIDs  []string `json:"attachment_ids,omitempty"`
 }
 
 // SessionTransitionPayload is the body of an Envelope whose Type ==
