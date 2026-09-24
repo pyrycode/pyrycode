@@ -286,6 +286,26 @@ read, copied or moved. Nothing in this directory is the operator's personal
 highest effort plus every personal MCP server, plugin and notify hook. See
 [ADR 038](../decisions/038-codex-daemon-owned-home-read-only-default-decline.md).
 
+**The version and sign-in refusal has to come out of the factory, not
+`Run` (#2621).** `newCodexRunnerFactory` spends one short-lived `codex
+app-server` probe — start against the daemon home, handshake, `checkCodexVersion`
+on `Client.Version()`, then `Client.SignedIn` — before it ever builds a
+runner, and stops that process (`stopCodexClient`, deferred) on every exit
+path without opening a thread. The check cannot live inside `Run`: `Run`'s
+crash-backoff loop retries any start failure forever, so a version or
+sign-in check placed there would just retry the same failure silently
+instead of refusing the session. The version check runs before the sign-in
+call, so a Codex too old to implement `account/read` at all is reported as
+too old rather than as a failed request. The compare treats a prerelease of
+the pinned version as older than the release itself
+(`checkCodexVersion`/`parseCodexVersion`: `0.156.1-alpha.1` is refused
+against the `0.156.1` pin) — comparing only the three numeric components
+would have let a prerelease with the right core numbers through.
+`Client.SignedIn` decodes only `account` as `json.RawMessage`, to test for
+null/absence, and the `requiresOpenaiAuth` bool; the account's own fields,
+including an email address, are never decoded into a typed value, so they
+cannot reach a log or an error even by accident.
+
 **Unconfirmed, flagged for the first live run (#2621/#2622).** A thread that
 was started and then evicted before any turn ran might not have a rollout
 for `thread/resume` to find, if Codex creates it lazily on first turn rather
