@@ -360,6 +360,16 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			var toolUse protocol.ToolUsePayload
 			sawToolUse := false
 
+			// The permission surface (modal_shown, or question_shown for the question
+			// case), recorded at the same single decrypt point for the same reason
+			// (#2612). The send_message handler enqueues BEFORE it acks, and the surface
+			// is broadcast from the goroutine that parked the approval, so modal_shown
+			// can reach the phone ahead of the ack. An ack loop that skipped it would
+			// leave the modal loop below waiting for a frame already consumed — 4 of 10
+			// runs failed exactly that way. First occurrence only.
+			var shown protocol.ModalShownPayload
+			var questionShown protocol.QuestionShownPayload
+
 			// nextEnv decrypts the next binary→phone application envelope, skipping
 			// non-noise_msg frames in capture order so the receive nonce stays in sequence.
 			// One recvCS for the whole case (the single reader). ok=false on deadline.
@@ -391,14 +401,24 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 						}
 						sawToolUse = true
 					}
+					if tc.question && questionShown.QuestionBatchID == "" && env.Type == protocol.TypeQuestionShown {
+						if err := json.Unmarshal(env.Payload, &questionShown); err != nil {
+							t.Fatalf("decode question_shown payload: %v", err)
+						}
+					}
+					if !tc.question && shown.ModalID == "" && env.Type == protocol.TypeModalShown {
+						if err := json.Unmarshal(env.Payload, &shown); err != nil {
+							t.Fatalf("decode modal_shown payload: %v", err)
+						}
+					}
 					return env, true
 				}
 			}
 
 			// --- Drive one send_message and await its sealed ack. The ack proves the turn
-			// was accepted and the active cursor stamped to knownConvID; it precedes
-			// delivery (the fake dials control.Approve only after the child is stdin-ready),
-			// so it also precedes the modal_shown surfaced when the daemon parks the dial.
+			// was accepted and the active cursor stamped to knownConvID. It does NOT
+			// precede the permission surface: the handler enqueues before it acks, so the
+			// modal_shown can overtake it. nextEnv records the surface wherever it lands.
 			sealSend(protocol.Envelope{
 				ID:   sendReqID,
 				Type: protocol.TypeSendMessage,
@@ -409,7 +429,6 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 					Text:           userText,
 				}),
 			})
-			var diagSkipped, diagModal []string
 			ackDeadline := time.Now().Add(15 * time.Second)
 			gotAck := false
 			for !gotAck {
@@ -422,8 +441,6 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 				}
 				if env.Type == protocol.TypeAck && env.InReplyTo != nil && *env.InReplyTo == sendReqID {
 					gotAck = true
-				} else {
-					diagSkipped = append(diagSkipped, string(env.Type))
 				}
 			}
 
@@ -432,27 +449,16 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			// fixed 4 option IDs, a non-empty ModalID nonce, and the conversation scoping.
 			// The ~20s deadline absorbs spawn + stdin-ready + first-turn latency (the fake
 			// only dials once the child is live). This precedes the answer, so a later
-			// assertion cannot pass vacuously over a modal that never surfaced.
-			var shown protocol.ModalShownPayload
-			var questionShown protocol.QuestionShownPayload
+			// assertion cannot pass vacuously over a modal that never surfaced. It may
+			// already be recorded — nextEnv caught it during the ack wait.
 			modalDeadline := time.Now().Add(20 * time.Second)
 			for shown.ModalID == "" && questionShown.QuestionBatchID == "" {
 				env, ok := nextEnv(modalDeadline)
 				if !ok {
-					t.Fatalf("DIAG skipped-in-ack=%v skipped-in-modal=%v\nstderr=\n%s\ndid not observe the permission surface before deadline; the fake request never parked or surfaced", diagSkipped, diagModal, h.Stderr.String())
+					t.Fatal("did not observe the permission surface before deadline; the fake request never parked or surfaced")
 				}
-				diagModal = append(diagModal, string(env.Type))
 				if env.Type == protocol.TypeError {
 					t.Fatalf("unexpected error envelope while awaiting permission surface: %s", string(env.Payload))
-				}
-				if tc.question && env.Type == protocol.TypeQuestionShown {
-					if err := json.Unmarshal(env.Payload, &questionShown); err != nil {
-						t.Fatalf("decode question_shown payload: %v", err)
-					}
-				} else if !tc.question && env.Type == protocol.TypeModalShown {
-					if err := json.Unmarshal(env.Payload, &shown); err != nil {
-						t.Fatalf("decode modal_shown payload: %v", err)
-					}
 				}
 			}
 			if tc.question {
