@@ -22,12 +22,14 @@ import "context"
 // construction error out of New (see RunnerFactory). There is no implicit
 // implementation to fall back to.
 //
-// Consumers that need methods off the concrete runner (cmd/pyry's interrupt /
-// new_session wiring: Interrupt, RestartFresh, BeginRotation) reach
-// *streamsup.Runner by type assertion off Session.Runner(), which deliberately
-// keeps returning this interface. Those methods stay off Runner — adding them
-// would be speculative surface; see the delegate docs in cmd/pyry's
-// streamsup_runner.go for each one's dispatch.
+// Interrupt, RestartFresh and BeginRotation are on this interface although their
+// consumers (cmd/pyry's interrupt, new_session and reset wiring) sit outside this
+// package (#2592). With one implementation they were reached by type assertion, and
+// an unmatched assertion was a silent inert arm. A second runner (Codex) makes that
+// arm reachable: a runner lacking the method would drop an interrupt or a fresh
+// restart while every layer reported success. The interface makes it a build failure
+// instead. Capabilities whose absence is harmless (ModelList, SetSpawnWorkDir and
+// the other cmd/pyry-only reads) stay optional assertions off Session.Runner().
 type Runner interface {
 	State() State
 	WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error
@@ -170,6 +172,24 @@ type Runner interface {
 	// is precisely the silent loss this method exists to close. The interface method
 	// makes a runner that cannot arm a build failure instead.
 	BeginTeardown()
+	// Interrupt ends the live child's running turn without killing the child. It
+	// returns the runner's retryable no-live-child error when nothing is bound, and
+	// callers tolerate its errors: the v2.interrupt route logs and drops them, and
+	// the reset wrap-up logs and waits for idle anyway. Safe from any goroutine.
+	Interrupt() error
+	// RestartFresh rotates the runner's persistent session id to newID and
+	// respawns, so the successor starts a fresh transcript under newID rather
+	// than resuming or forking the old one. The caller mints newID through the
+	// pool's rotation first; this method never chooses an id of its own.
+	RestartFresh(newID string)
+	// BeginRotation arms the runner's rotation write-refusal gate ahead of a
+	// new_session rotation (#1330) and returns the disarm, which is never nil.
+	// While armed, WriteUserTurn returns the retryable no-live-child error instead
+	// of writing into the outgoing child. The caller disarms only when the
+	// rotation fails; a successful rotation's successor child releases the gate.
+	// Unlike BeginTeardown's arm, this one must survive the respawn RestartFresh
+	// triggers until the successor binds; the implementation owns that rule.
+	BeginRotation() func()
 }
 
 // RunnerFactory constructs a Runner from a RunnerConfig. It is the injection seam

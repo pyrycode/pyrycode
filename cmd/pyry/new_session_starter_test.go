@@ -236,17 +236,6 @@ func TestActiveSessionStarter_InertArms(t *testing.T) {
 			wantEvent:    "v2.new_session.no_bound_session",
 		},
 		{
-			// The CAPABILITY arm: a runner that does not expose RestartFresh at all.
-			// Production has no such runner behind a bound conversation — streamRunner
-			// exposes it unconditionally — so this row guards startFreshRunner's own
-			// inert return rather than AC-4's fourth case. It is NOT the no-live-child
-			// row, and conflating the two is precisely how that case shipped broken.
-			name:   "bound runner does not expose RestartFresh",
-			cursor: starterConvA, named: starterConvB, boundConv: starterConvB, runner: baseRunner{},
-			wantResolved: 1,
-			wantEvent:    "v2.new_session.no_restart",
-		},
-		{
 			// AC-4's fourth row, in the shape production actually produces: a real
 			// runner — RestartFresh and all — whose child has never spawned, which since
 			// #2085 is the natural state of a conversation created but never messaged.

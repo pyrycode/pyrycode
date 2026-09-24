@@ -294,29 +294,6 @@ func TestActiveInterrupter_InertArms(t *testing.T) {
 	}
 }
 
-// TestActiveInterrupter_BoundRunnerWithNoInterruptMethod is the fourth reject row,
-// separated from the table because it needs a runner shape the others do not: a
-// bound, resolvable runner that exposes no Interrupt method at all, so
-// interruptRunner returns armNone. No actuation beats wrong actuation — the only
-// other runner to try would be the bootstrap session's, which is the #678 isolation
-// break resolveBoundRunner's guard exists to prevent.
-func TestActiveInterrupter_BoundRunnerWithNoInterruptMethod(t *testing.T) {
-	t.Parallel()
-
-	p := &interrupterProbe{}
-	a := p.newInterrupter(interrupterConvA, map[string]sessions.Runner{
-		interrupterConvB: baseRunner{},
-	})
-
-	if err := a.SendEsc(interrupterConvB); err != nil {
-		t.Fatalf("SendEsc = %v, want nil (armNone always pairs with a nil error)", err)
-	}
-	rec := requireOneRecord(t, p, "v2.interrupt.no_actuator")
-	if got := rec["conversation_id"]; got != interrupterConvB {
-		t.Errorf("record conversation_id = %v, want %q", got, interrupterConvB)
-	}
-}
-
 // TestActiveInterrupter_NoLiveChildIsAttemptedNotGuarded is the pin that keeps
 // #2099's liveness probe OUT of this seam, and it is the one row a later reader is
 // most likely to "fix" by copying the twin.
