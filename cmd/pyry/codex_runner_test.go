@@ -414,3 +414,62 @@ func TestCodexRunnerFactory_DaemonHome(t *testing.T) {
 		t.Fatalf("CODEX_HOME = %q, want %q", got, home)
 	}
 }
+
+func TestCheckCodexVersion(t *testing.T) {
+	for _, v := range []string{"0.156.1", "0.156.2", "0.157.0", "1.0.0", "0.156.1+build.7"} {
+		if err := checkCodexVersion(v); err != nil {
+			t.Errorf("checkCodexVersion(%q) = %v, want nil", v, err)
+		}
+	}
+	for _, v := range []string{"0.155.0", "0.155.0-alpha.3", "0.156.1-alpha.1", "0.156.0", "", "garbage", "0.156", "0.156.x", "0.156.1.2"} {
+		err := checkCodexVersion(v)
+		if err == nil {
+			t.Errorf("checkCodexVersion(%q) = nil, want a refusal", v)
+			continue
+		}
+		if !strings.Contains(err.Error(), fmt.Sprintf("%q", v)) || !strings.Contains(err.Error(), codexMinVersion) {
+			t.Errorf("checkCodexVersion(%q) = %q; want it to name %q and %s", v, err, v, codexMinVersion)
+		}
+	}
+}
+
+// TestCodexRunnerFactory_Refusals: a Codex below the pinned version, one whose
+// version cannot be parsed, and a signed-out daemon home each refuse the
+// session with no runner. The probe never opens a thread.
+func TestCodexRunnerFactory_Refusals(t *testing.T) {
+	for _, tc := range []struct {
+		name, version string
+		signedOut     bool
+		want          func(home string) []string
+	}{
+		{"old version", "0.155.0-alpha.3", false, func(string) []string { return []string{`"0.155.0-alpha.3"`, "0.156.1"} }},
+		{"unparseable version", "banana", false, func(string) []string { return []string{`"banana"`, "0.156.1"} }},
+		{"signed out", "", true, func(home string) []string { return []string{"CODEX_HOME=" + home, "sign in"} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.version != "" {
+				t.Setenv("FAKECODEX_VERSION", tc.version)
+			}
+			if tc.signedOut {
+				t.Setenv("FAKECODEX_SIGNED_OUT", "1")
+			}
+			home := filepath.Join(t.TempDir(), "codex-home")
+			factory := newCodexRunnerFactory(codexHarness{bin: fakeCodexBin(t), home: home, sink: newStreamTurnSink(0, nil)})
+			runner, err := factory(sessions.RunnerConfig{SessionID: "s-1", Harness: harnessCodex, WorkDir: t.TempDir()})
+			if err == nil {
+				t.Fatal("factory = nil error, want a refusal")
+			}
+			if runner != nil {
+				t.Errorf("factory returned a runner alongside %v", err)
+			}
+			for _, s := range tc.want(home) {
+				if !strings.Contains(err.Error(), s) {
+					t.Errorf("error %q does not name %q", err, s)
+				}
+			}
+			if strings.Contains(err.Error(), "@") {
+				t.Errorf("error %q carries account details", err)
+			}
+		})
+	}
+}
