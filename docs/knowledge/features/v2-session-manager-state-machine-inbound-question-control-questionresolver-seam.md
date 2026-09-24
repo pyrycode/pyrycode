@@ -41,8 +41,10 @@ here it must not.
   `questionResolverV2` (#1986) is now that implementation: `admit` runs the
   Lookup → fail-closed-gate steps both arms share, gating strictly before the
   delegate consumes the batch — burning the batch on an ineligible device's
-  frame first would leave claude blocked until the approval window elapsed —
-  and `AuthorizeRemotePermission` re-checks the same eligibility as defence in
+  frame first would leave claude blocked until the approval window elapsed.
+  Since #2605 that gate is `dev.MayAnswerPrompt()` — any authenticated device,
+  not the privileged `AllowRemotePermissions` bit — and
+  `devices.AuthorizePromptAnswer` re-checks the same eligibility as defence in
   depth on the answer arm only, since it reads as "allow the tool call" and is
   therefore false, correctly, for an eligible device's refusal. `relay.go`
   constructs and assigns it **unconditionally** rather than leaving it nil

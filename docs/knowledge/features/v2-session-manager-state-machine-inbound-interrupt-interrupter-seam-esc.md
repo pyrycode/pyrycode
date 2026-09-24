@@ -67,7 +67,9 @@ with no running turn is a no-op in claude.
   1. **`if !s.interactive` → return** (no Esc). The new inbound capability gate
      (AC-2 negative path). A **one-line check, NOT a reusable inbound-gate
      abstraction** — `interrupt` is its only consumer (dequeue is ungated,
-     `modal_answer` uses the per-device gate #702, `modal_cancel` a nonce), so a
+     `modal_answer` uses the answering gate #2605 (any authenticated device;
+     #702's privileged bit now gates only minting/MCP actuation), `modal_cancel`
+     a nonce), so a
      shared gate would be a one-consumer abstraction (YAGNI). The `s.interactive`
      flag is server-authoritative (#626) — set fail-closed from the daemon's
      `negotiateCapabilities`, never from the phone's raw advertisement, so a spoofed

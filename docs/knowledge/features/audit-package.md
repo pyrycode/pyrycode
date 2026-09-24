@@ -12,9 +12,11 @@ This slice is the **writer primitive only** — it ships with **no caller**. The
 package does **not** own any calling loop, timer, nonce, or decision logic; it
 only records an already-decided `Entry`. Four callers construct one today:
 the modal control loop (#703), `cmd/pyry`'s `questionResolverV2` since #1986
-— the per-device gate for an inbound `question_answer` / `question_refused` —
+— which resolves an inbound `question_answer` / `question_refused` behind the
+answering gate (`devices.MayAnswerPrompt`/`AuthorizePromptAnswer`, any
+authenticated device since #2605, not the privileged per-device bit) —
 `cmd/pyry`'s `pairingMinterV2.MintPairing` since #2127, and `cmd/pyry`'s
-`mcpActuatorV2` since #2420 — the per-device gate for an inbound
+`mcpActuatorV2` since #2420 — the privileged per-device gate for an inbound
 `mcp_reconnect` / `mcp_toggle`. The first two reuse the same
 `ModalID`/`ModalClass` pair rather than the package growing a
 question-specific field: the batch id rides `ModalID` and the compile-time
@@ -184,7 +186,7 @@ does **not** perform it (it records the already-classified `Outcome`):
 | gate input (`devices.RemotePermissionOutcome`) + eligibility | audit `Outcome` | audit `Source` |
 |---|---|---|
 | eligible device + `OutcomeAllow` | `OutcomeAllowed` | `SourceRemote` |
-| ineligible / nil device + `OutcomeAllow` (no bit) | `OutcomeDeniedUnauthorized` | `SourceRemote` |
+| ineligible / nil device + `OutcomeAllow` — nil for modal/question answering since #2605 (any authenticated device is eligible); nil or bit-off for mint/MCP actuation | `OutcomeDeniedUnauthorized` | `SourceRemote` |
 | eligible + `OutcomeDeny` (explicit deny option) | `OutcomeDenied` | `SourceRemote` |
 | eligible + `OutcomeCancel` (ESC) | `OutcomeCancelled` | `SourceRemote` |
 | `OutcomeTimeout` (deny-on-timeout fired; `OutcomeNoAnswer` resolves here) | `OutcomeDeniedTimeout` | `SourceTimeout` |
@@ -207,7 +209,7 @@ and no verdict reached claude, so there is no decision to record.
 ## Data flow
 
 ``` #703 modal control loop (the ONLY caller; owns the modal, the timer, the decision)
-  resolves a decision ─┬─ inbound modal_answer → gate predicates (#702) → Outcome + SourceRemote
+  resolves a decision ─┬─ inbound modal_answer → answering gate predicates (#2605) → Outcome + SourceRemote
                        └─ deny-on-timeout fires → safe-deny          → OutcomeDeniedTimeout + SourceTimeout
         │ builds audit.Entry{DeviceHash: dev.TokenHash, DeviceLabel: dev.Name, ModalID, ModalClass, Outcome, Source}
         ▼
@@ -271,7 +273,8 @@ internal/audit/
 - **Consumer (deferred — none wired in #712):** #703 — the modal control loop
   that constructs the `Entry` and calls `Log` on every resolved decision branch.
 - **Second consumer — #1986** (landed): `cmd/pyry/question_resolve_v2.go`'s
-  `questionResolverV2` is the per-device gate for an inbound question batch —
+  `questionResolverV2` resolves an inbound question batch behind the answering
+  gate (any authenticated device since #2605) —
   a second, independent caller of `audit.Log`, distinguished from #703's
   modal records purely by `ModalClass: classQuestion` on the shared `Entry`
   shape. See [features/v2-session-manager-state-machine-inbound-question-control-questionresolver-seam.md](v2-session-manager-state-machine-inbound-question-control-questionresolver-seam.md).

@@ -141,8 +141,11 @@ default must fail safe, so a careless confirm **denies rather than allows**. The
 highlighted default are deliberately **decoupled**, which keeps both AC-valid
 (`default_option_id ∈ options[].id`, true by construction since the deny option is
 always in the set). This is **UI pre-selection only**, not an auto-answer: the human
-still confirms, [#702](../codebase/702.md) gates answering (per-device, default OFF),
-and [#725](../codebase/725.md) owns deny-on-timeout (safe-deny ESC on a bounded window).
+still confirms, answering requires only an authenticated device
+([#2605](../decisions/025-mobile-remote-head-interactive-session.md), narrowing
+[#702](../codebase/702.md)'s per-device bit to minting a pairing and MCP
+actuation only), and [#725](../codebase/725.md) owns deny-on-timeout (safe-deny
+ESC on a bounded window).
 
 ## `modal_id` nonce — the single-writer security primitive
 
@@ -448,8 +451,11 @@ path is #791/#793 (EPIC #597 Phase 3).
   scoping stamp (§ Security above); the `#1062`-shaped fix applied to this payload.
 - [turnevent-package.md](turnevent-package.md) — the internal `PermissionRequest` /
   `PermissionOption` / `PermissionOptionKind` this maps a modal class *into*.
-- [codebase/702.md](../codebase/702.md) — the per-device remote-permission **answer gate**
-  (the separate authorization #717 enforces; viewing here is ungated beyond `interactive`).
+- [codebase/702.md](../codebase/702.md) — the per-device remote-permission bit's original
+  design (narrowed by [#2605](../decisions/025-mobile-remote-head-interactive-session.md)
+  to gate minting/MCP actuation only; answering — the separate authorization #717
+  enforces — now requires just an authenticated device). Viewing here is ungated
+  beyond `interactive`.
 - [turnbridge-package.md](turnbridge-package.md) — the follow-active `resolveTarget` +
   `NewTargetSubscriber` (raw `tuidriver.Event`s) that #798's modal stream reuses wholesale.
 - [v2-session-manager.md](v2-session-manager.md) — `Push` / `ActiveConns` / `forwardEnvelope`

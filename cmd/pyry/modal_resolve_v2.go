@@ -143,8 +143,8 @@ func (r *modalResolverV2) ResolveCancel(modalID string, dev *devices.Device) (re
 }
 
 // ResolveAnswer is the security-critical gated answer arm: it routes an
-// internet-sourced modal_answer into claude's permission prompt ONLY from a
-// gated device. The hard invariant is that nothing but a fully-authorized, valid
+// internet-sourced modal_answer into claude's permission prompt ONLY from an
+// authenticated device (any paired device since #2605). The hard invariant is that nothing but a fully-authorized, valid
 // answer may consume the modal or reach the parked approval — so the order is
 // Lookup → fail-closed eligibility gate → option classification → consume →
 // verdict → audit (gate before consume).
@@ -176,11 +176,12 @@ func (r *modalResolverV2) ResolveAnswerWithAlwaysAllow(modalID, optionID, answer
 	}
 
 	// Step 2: fail-closed eligibility gate, BEFORE classification and BEFORE
-	// consume — the load-bearing ordering. A nil/unauthenticated device or an
-	// unset opt-in bit denies; the modal is left outstanding (Lookup only) for a
-	// legitimate local answer or the permission bridge's deny-on-timeout (#1103). Audited
-	// denied_unauthorized with the (possibly empty) non-secret identity.
-	if !dev.MayAnswerRemotePermission() {
+	// consume — the load-bearing ordering. A nil/unauthenticated device denies
+	// (any authenticated device may answer since #2605); the modal is left
+	// outstanding (Lookup only) for a legitimate answer or the permission
+	// bridge's deny-on-timeout (#1103). Audited denied_unauthorized with the
+	// (empty) non-secret identity.
+	if !dev.MayAnswerPrompt() {
 		r.auditAnswer(dev, modalID, out.Class, audit.OutcomeDeniedUnauthorized)
 		return relay.ModalDismissal{}, false
 	}
@@ -216,12 +217,12 @@ func (r *modalResolverV2) ResolveAnswerWithAlwaysAllow(modalID, optionID, answer
 		return relay.ModalDismissal{}, false
 	}
 
-	// AuthorizeRemotePermission (#702) splits allowed (true) from denied (false).
-	// For an eligible device this reduces to outcome==OutcomeAllow, but calling
-	// the primitive keeps the fail-closed conjunction in its single unit-tested
+	// AuthorizePromptAnswer splits allowed (true) from denied (false). For an
+	// eligible device this reduces to outcome==OutcomeAllow, but calling the
+	// primitive keeps the fail-closed conjunction in its single unit-tested
 	// place (it re-checks eligibility — defense in depth). Computed once here: it
 	// drives BOTH the stream verdict dispatch and the audit classification below.
-	allow := devices.AuthorizeRemotePermission(dev, outcome)
+	allow := devices.AuthorizePromptAnswer(dev, outcome)
 
 	// Actuate the answer exactly like ResolveCancel (#1080): a permbridge-parked
 	// approval keyed by modalID resolves its completer to allow/deny (echoing the

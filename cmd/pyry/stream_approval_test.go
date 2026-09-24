@@ -575,8 +575,42 @@ func TestModalResolverV2_Answer_UnroutedWarns(t *testing.T) {
 	}
 }
 
+// TestModalResolverV2_Answer_StreamUnprivilegedAllows proves #2605 on the stream
+// arm: a device with the AllowRemotePermissions bit OFF resolves the parked
+// completer to allow (echoing the input) and audits allowed, exactly as a
+// privileged device does.
+func TestModalResolverV2_Answer_StreamUnprivilegedAllows(t *testing.T) {
+	t.Parallel()
+
+	perm := permbridge.New()
+	modalReg := modalbridge.New()
+	bcast := oneInteractiveConn("c1")
+	bridge := newStreamApprovalBridge(perm, modalReg, bcast, func() string { return "" }, context.Background(), discardLogger())
+
+	input := json.RawMessage(`{"cmd":"ls"}`)
+	req, pending := parkApproval(t, perm, "tu-1", "Bash", input)
+	bridge.Surface(req)
+	modalID := lastModalShown(t, bcast.pushes).ModalID
+
+	logger, logBuf := auditLogger()
+	r := newModalResolverV2(modalReg, logger)
+	r.streamApprovals = bridge
+
+	allowOpt := string(turnevent.PermissionOptionKindAllowOnce)
+	if _, ok := r.ResolveAnswer(modalID, allowOpt, "tok", testDevice(t)); !ok {
+		t.Fatal("ResolveAnswer ok = false for an unprivileged device, want true")
+	}
+	v := pending.Await()
+	if v.Behavior != permbridge.BehaviorAllow || !bytes.Equal(v.UpdatedInput, input) {
+		t.Errorf("verdict = %+v, want allow echoing %s", v, input)
+	}
+	if recs := auditRecords(t, logBuf); len(recs) != 1 || recs[0]["outcome"] != "allowed" {
+		t.Errorf("audit = %v, want one allowed record", recs)
+	}
+}
+
 // TestModalResolverV2_Answer_StreamGateDeniesBeforePermbridge proves the
-// load-bearing security ordering: an ineligible (ungated or nil) device is denied
+// load-bearing security ordering: an unauthenticated (nil) device is denied
 // BEFORE any permbridge contact — no completer mutation, the modal
 // left outstanding for a legitimate local answer / deny-on-timeout, and the
 // correlation untouched. Audited denied_unauthorized.
@@ -587,7 +621,6 @@ func TestModalResolverV2_Answer_StreamGateDeniesBeforePermbridge(t *testing.T) {
 		name string
 		dev  func(*testing.T) *devices.Device
 	}{
-		{"ungated", func(t *testing.T) *devices.Device { return testDevice(t) }},
 		{"nil", func(*testing.T) *devices.Device { return nil }},
 	}
 	for _, tc := range cases {

@@ -67,10 +67,11 @@ const MaxDeviceNameBytes = 128
 //
 // THERE IS NO FIELD FOR THE REMOTE-PERMISSIONS FLAG, and its absence is a security
 // property rather than an omission. devices.Device.AllowRemotePermissions is
-// documented as never set or carried over the wire, and it is the one gate ADR 025
-// § "Security model" places on answering a permission, trust or destructive modal
-// from a remote surface. A field here would let an already-paired client mint a
-// device MORE privileged than an operator granted at the CLI. A MINTED DEVICE IS
+// documented as never set or carried over the wire, and since #2605 it gates the
+// privileged verbs only — minting a pairing like this one and actuating an MCP
+// server; every authenticated device may answer modals and questions. A field here
+// would let an already-paired client mint a device MORE privileged than an
+// operator granted at the CLI, one that could mint further devices. A MINTED DEVICE IS
 // ALWAYS UNPRIVILEGED; an operator who wants otherwise runs `pyry pair
 // --allow-remote-permissions` with a shell on the host.
 //
