@@ -51,3 +51,30 @@ None.
 ## Documentation handoff (pending — documentation stage)
 
 `docs/protocol-mobile.md` § Conversation history (v2): document the optional `attachment_ids` on a stored user `message` entry — omitted when the message named none, never carries a path — and add a changelog line.
+
+## Revisions
+
+### 2026-09-24 — security review added (verifier finding on PR #2597)
+
+The verifier failed the first pass because this `security-sensitive` plan had no `## Security review` section. The section below is that pass, run against the committed design and the diff that implements it. It raises nothing that changes the design, so the code is unchanged by this revision.
+
+## Security review
+
+**Verdict:** PASS
+
+**Findings:**
+
+- [Trust boundaries] No findings. The ids are client-authored, and they cross into trusted state at one point: `resolveAttachments` in `internal/relay/handlers/send_message.go`. That function enforces the count bound (`protocol.MaxAttachmentIDsPerMessage`) before resolving. It then deduplicates, and it keeps only ids the resolver accepted. The resolver checks the canonical shape (`conversations.ValidID`, lowercase UUIDv4, `[0-9a-f-]` only) and confines each id to the message's own conversation, which comes from session context rather than the wire. Only the `resolved` list it returns reaches `EnqueueAttached`. `p.AttachmentIDs` never reaches the queue raw, and a message with any refused id is rejected before enqueue. Every stored id therefore names an attachment that existed in that conversation, and it cannot carry injection text into claude, the log or a peer's UI.
+- [Host-path non-exposure] No findings. The stored entry is built in `newOperatorMessageHistory` from `msgqueue.QueuedMessage` alone. `QueuedMessage` still has no field for `queued.delivery`, the only place the on-host path lives, and `notifyDelivered` projects `attachmentIDs`, never `delivery`. The ids are a separate argument to `EnqueueAttached`, taken from `resolveAttachments`, and are never derived from the composed prompt. The seam test's raw-bytes check asserts that neither the host path nor the delivery prompt header appears in the stored entry.
+- [Other clients reading the ids] No findings: returning them is the point of the change. `request_history` serves a conversation only to a session admitted to it by the relay's membership gate. Every such session belongs to a device paired to the same operator, the trust domain that authored the ids. The ids are not a capability, per the stance in `SendMessagePayload`'s doc: fetching the bytes is confined to the requester's own conversation, as naming them is, so a peer learns an id it could already reach and nothing it could not. A peer that did not send the message sees only a file of its own conversation.
+- [Tokens, secrets, credentials] Not applicable. Nothing in the design generates, stores or compares a secret. Per the protocol stance, attachment ids are explicitly not secrets.
+- [File operations] No findings. No new path is built from the ids here; they are written as JSON strings inside the existing history log, through `history.Store.Append`, which keeps its own file modes and its segment-bound check. The only filesystem use of the ids is the existing `resolveAttachments` call, which this ticket does not change.
+- [Subprocess execution] Not applicable. No command is run. The ids reach claude only through the pre-existing composed prompt, and only as paths the resolver produced.
+- [Cryptographic primitives] Not applicable.
+- [Network & I/O / resource bounds] No findings. At most 32 ids of 36 bytes each (about 1.2 KB) are added to one entry. They are the same bytes the inbound `send_message` frame already carried inside the envelope cap, and deduplication only shrinks them. `serveHistoryPage` budgets each page in bytes against the application-envelope cap, so a larger entry yields fewer entries per page, never an oversized frame. `Store.Append` still refuses a line over the segment bound.
+- [Error messages, logs] No findings. The queue logs no id: `EnqueueAttached` logs nothing new, and the queue's rule of never logging a record's strings covers the new field. On refusal the handler logs `attachment_count` only, as before. The producer's marshal-failure branch logs neither the payload nor `err.Error()`.
+- [Concurrency / aliasing] No findings. `EnqueueAttached` clones the ids with `slices.Clone` before taking `q.mu`, so the record never aliases the handler's slice. A test mutates the caller's slice after enqueue and asserts that the delivered projection is unchanged. `notifyDelivered` reads the ids from the drain's value copy, off-lock, as it reads `text`. `Snapshot` and `SnapshotAll` do not project the field, so their promise that a snapshot cannot mutate engine state still holds.
+- [Threat model alignment] § Security model threat 1 (prompt injection) is covered by the shape check above: a stored id draws from `[0-9a-f-]` only. The threat of exposing host paths to the phone is covered by the non-exposure finding. No threat is deferred.
+
+**Reviewer:** builder (self-review per the security-review checklist)
+**Date:** 2026-09-24
