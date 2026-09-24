@@ -1431,7 +1431,7 @@ against a published shape.
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation whose stream carried the unmappable output. |
-| `site` | string | Where the parser met it. Closed set: `line_type`, `assistant_block`, `user_block`, `undecodable`. |
+| `site` | string | Where the parser met it. Closed set: `line_type`, `assistant_block`, `user_block`, `undecodable`, `codex_method`, `codex_item`. The last two (#2608) are `codexsup.Translator`'s lanes for an unmapped Codex app-server notification method and an unmapped `ThreadItem` type; nothing reaches the wire yet — #2585 wires the translator into the daemon and is what makes a client actually see them. |
 | `message_type` | string | The offending message or content-block `type`. **Empty** when `site` is `undecodable` — nothing decoded, so no type was ever read. |
 | `raw` | string | The offending JSON, verbatim, truncated by the daemon to a fixed byte cap. A **string**, not nested JSON: a truncated blob is no longer valid JSON. |
 | `truncated` | bool | Whether the daemon cut `raw` to fit the cap. |
