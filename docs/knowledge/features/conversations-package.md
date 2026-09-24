@@ -43,6 +43,7 @@ Canonical shape (#217): UUIDv4, 36 chars, lowercase hex, dashes at positions 8/1
 | `SessionHistory` | `[]string` | `session_history,omitempty` | no — empty/nil omitted |
 | `IsPromoted` | `bool` | `is_promoted` | yes — `false` = discussion, `true` = channel |
 | `IsArchived` | `bool` | `is_archived,omitempty` | no — absent key decodes as active (#880) |
+| `IsMuted` | `bool` | `is_muted,omitempty` | no — absent key decodes as not muted (#2571) |
 | `SystemPrompt` | `*string` | `system_prompt,omitempty` | no — pointer distinguishes nil ("no prompt", the default) from `""` ("explicitly empty"); operator-set text is the third state (#2149) |
 | `LastContextUsage` | `*ContextUsageReading` | `last_context_usage,omitempty` | no — pointer distinguishes nil ("claude has never reported for this conversation") from a recorded reading (#2460) |
 | `LastUsedAt` | `time.Time` | `last_used_at` | yes — bumped on user activity |
@@ -58,6 +59,8 @@ pre-#880 form. Don't "fix" this to drop `omitempty` for consistency with `IsProm
 fields' product contracts are opposite by design. See
 [`features/conversations-registry.md`](conversations-registry.md) § `SetArchived` for the mutator
 that flips it, and [codebase/880.md](../codebase/880.md).
+
+**`IsMuted` (#2571) is `IsArchived`'s field-for-field twin: same `omitempty`, same absent-key-decodes-false contract, placed directly after it.** Unlike `IsArchived`, this ticket shipped no mutator — no `Registry.SetMute`-shaped method exists yet, so the flag is always `false` in production; tests set it directly on a registry conversation (`conv.IsMuted = true` before `Save`). The two wire projections (`ConversationSummary`, `ConversationUpdatedPayload` — see [`protocol-package-types-conversations-write-payloads.md`](protocol-package-types-conversations-write-payloads.md)) read it the same way they read `IsArchived`, but serialize it **without** `omitempty`: a client folding a `conversation_updated` push into its list in place needs `false` written explicitly, or a record that dropped the key would read as "not muted" and silently un-mute the row. The sibling ticket that adds the write verb is expected to model it on `SetArchived`.
 
 **`SystemPrompt` (#2149) reuses `Name`'s tri-state mechanism, not just its shape.** The
 mechanism is that `omitempty` on a `*string` tests the pointer, not the pointee: a nil

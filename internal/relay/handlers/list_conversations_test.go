@@ -187,6 +187,30 @@ func TestListConversations_SurfacesArchivedFlag(t *testing.T) {
 	}
 }
 
+// #2571 AC2: each row reports the stored muted flag.
+func TestListConversations_SurfacesMutedFlag(t *testing.T) {
+	t.Parallel()
+	reg := &conversations.Registry{}
+	ts := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+	reg.Create(conversations.Conversation{ID: "conv-loud", Cwd: "/a", LastUsedAt: ts})
+	reg.Create(conversations.Conversation{ID: "conv-muted", Cwd: "/b", IsMuted: true, LastUsedAt: ts.Add(time.Hour)})
+
+	c, recv := newListConvConn(t)
+	h := ListConversations(reg)
+	if err := h(context.Background(), c, makeListConversationsRequest(t, 23)); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	_, payload := decodeConversationsResponse(t, recv())
+	byID := summariesByID(payload.Conversations)
+	if got, ok := byID["conv-loud"]; !ok || got.IsMuted {
+		t.Errorf("conv-loud: got %+v, want present with IsMuted=false", got)
+	}
+	if got, ok := byID["conv-muted"]; !ok || !got.IsMuted {
+		t.Errorf("conv-muted: got %+v, want present with IsMuted=true", got)
+	}
+}
+
 // summariesByID indexes a decoded reply so a test can assert on one row without
 // depending on the reply's sort order.
 func summariesByID(rows []protocol.ConversationSummary) map[string]protocol.ConversationSummary {

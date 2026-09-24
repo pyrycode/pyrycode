@@ -121,6 +121,7 @@ func ArchiveConversation(reg ConversationArchiver, registryPath string, logger *
 			ID:             string(cv.ID),
 			IsPromoted:     cv.IsPromoted,
 			IsArchived:     cv.IsArchived,
+			IsMuted:        cv.IsMuted,
 			Name:           cv.Name,
 			Cwd:            cv.Cwd,
 			WorkspaceLabel: workspaceLabelFor(reg, cv.Cwd),
