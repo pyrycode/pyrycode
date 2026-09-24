@@ -264,8 +264,17 @@ func admitClient(c ClientIdentity) (ClientIdentity, bool) {
 	if !ok {
 		return ClientIdentity{}, false
 	}
-	version, _ := admissibleClientField(c.Version, maxClientVersionBytes)
-	return ClientIdentity{Name: name, Version: version}, true
+	return ClientIdentity{Name: name, Version: AdmitClientVersion(c.Version)}, true
+}
+
+// AdmitClientVersion returns v verbatim when admissibleClientField admits it as
+// a client version (maxClientVersionBytes), and "" otherwise. It is admitClient's
+// version rule, exported so the device registry's persisted version (#2577)
+// passes the one copy of the filter rather than a second one. A refusal is
+// silent, as in admitClient.
+func AdmitClientVersion(v string) string {
+	version, _ := admissibleClientField(v, maxClientVersionBytes)
+	return version
 }
 
 // admittedClients returns the identities that may appear in a composed prompt —

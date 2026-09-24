@@ -255,9 +255,9 @@ No paired devices.\n
 Non-empty — `text/tabwriter` aligned columns (2-space padding, no minimum width), header row plus one data row per device:
 
 ```
-NAME   PAIRED                LAST SEEN             TOKEN-PREFIX
-alpha  2026-01-01T00:00:00Z  2026-01-02T00:00:00Z  aaaaaaaa
-bravo  2026-01-03T00:00:00Z  2026-01-04T00:00:00Z  bbbbbbbb
+NAME   PAIRED                LAST SEEN             VERSION             TOKEN-PREFIX
+alpha  2026-01-01T00:00:00Z  2026-01-02T00:00:00Z                      aaaaaaaa
+bravo  2026-01-03T00:00:00Z  2026-01-04T00:00:00Z  pyrycode-ios/1.4.0  bbbbbbbb
 ```
 
 Column rules:
@@ -265,6 +265,7 @@ Column rules:
 - `NAME` — `Device.Name` verbatim.
 - `PAIRED` — `Device.PairedAt` formatted as `time.RFC3339`.
 - `LAST SEEN` — `Device.LastSeenAt` formatted as `time.RFC3339`; the literal string `never` when the value is the zero time.
+- `VERSION` (#2577) — `Device.ClientVersion` verbatim; empty when the device has never reported an admissible version (including every device paired before this column existed). The value is the raw client-reported `client_version` string from that device's most recent accepted hello, not parsed into app/version parts — see [`features/devices-registry.md`](devices-registry.md) § `SetClientVersion`.
 - `TOKEN-PREFIX` — first 8 lowercase hex chars of `Device.TokenHash` (visual identification only; never the plaintext token).
 
 ### Defensive sort, even though `Save` already sorts

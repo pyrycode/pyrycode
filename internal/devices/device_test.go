@@ -118,6 +118,9 @@ func TestDevice_LegacyOmitsPushFields(t *testing.T) {
 	if bytes.Contains(b, []byte(`"push_token"`)) {
 		t.Errorf("encoded form leaked empty push_token key: %s", b)
 	}
+	if bytes.Contains(b, []byte(`"client_version"`)) {
+		t.Errorf("encoded form leaked empty client_version key: %s", b)
+	}
 	var out Device
 	if err := json.Unmarshal(b, &out); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
@@ -137,6 +140,8 @@ func TestDevice_PopulatedRoundTrip(t *testing.T) {
 		LastSeenAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
 		Platform:   "apns",
 		PushToken:  "f0r-test-fixture-not-a-real-token",
+
+		ClientVersion: "pyrycode-android/1.4.0",
 	}
 	b, err := json.Marshal(in)
 	if err != nil {
@@ -169,6 +174,9 @@ func TestDevice_DecodeLegacyDiskShape(t *testing.T) {
 	}
 	if d.PushToken != "" {
 		t.Errorf("PushToken = %q, want \"\"", d.PushToken)
+	}
+	if d.ClientVersion != "" {
+		t.Errorf("ClientVersion = %q, want \"\"", d.ClientVersion)
 	}
 }
 
