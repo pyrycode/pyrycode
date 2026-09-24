@@ -851,6 +851,13 @@ func (m *V2SessionManager) handleFrame(ctx context.Context, env protocol.Routing
 		// reaches us is unexpected and silently dropped.
 		return
 	}
+	if env.CloseCode != 0 {
+		// The relay's close notice (#2601): that phone's WebSocket has ended.
+		// Handled ahead of the lazy create and the activity stamp so a notice
+		// for an unknown conn creates nothing, and Frame is never decoded.
+		m.handlePeerClose(env)
+		return
+	}
 	s, ok := m.sessions[env.ConnID]
 	if !ok {
 		s = &V2Session{connID: env.ConnID, state: V2StateAwaitingInit}
@@ -1503,15 +1510,55 @@ func marshalInnerFrameV2(frameType string, rawBytes []byte) (json.RawMessage, er
 	return out, nil
 }
 
-// closeWith transitions s to V2StateClosed, deletes the session from
-// the manager, and emits a single routing envelope carrying Frame (when
-// non-nil) and CloseCode. The atomic Frame+CloseCode is what guarantees
-// the spec's ordering MUST: phone observes the error frame before the
-// WS close (spec § Error handling, line 436). Honors ctx by checking
-// before the send; the Outbound call itself is synchronous.
-func (m *V2SessionManager) closeWith(ctx context.Context, s *V2Session, code websocket.StatusCode, frame json.RawMessage) {
-	if s.state == V2StateClosed {
+// handlePeerClose tears down the session for a phone the relay reports gone
+// (#2601): a relay→binary routing envelope with a non-zero CloseCode. Unlike
+// closeWith it publishes nothing — the phone's WebSocket has already ended, so
+// there is nothing for the relay to close. A notice for a conn with no session
+// is dropped. A relay that never sends the notice leaves the idle sweep as the
+// only reaper, exactly as before.
+func (m *V2SessionManager) handlePeerClose(env protocol.RoutingEnvelope) {
+	s, ok := m.sessions[env.ConnID]
+	if !ok {
+		m.cfg.Logger.Debug("relay: v2 peer close for unknown conn",
+			"event", "v2.peer_close.unknown",
+			"conn_id", env.ConnID,
+			"close_code", int(env.CloseCode))
 		return
+	}
+	m.cfg.Logger.Info("relay: v2 peer close teardown",
+		"event", "v2.peer_close.teardown",
+		"conn_id", env.ConnID,
+		"close_code", int(env.CloseCode))
+	m.teardown(s)
+}
+
+// closeWith tears s down (teardown) and emits a single routing envelope
+// carrying Frame (when non-nil) and CloseCode. The atomic Frame+CloseCode is
+// what guarantees the spec's ordering MUST: phone observes the error frame
+// before the WS close (spec § Error handling, line 436). Honors ctx by
+// checking before the send; the Outbound call itself is synchronous.
+func (m *V2SessionManager) closeWith(ctx context.Context, s *V2Session, code websocket.StatusCode, frame json.RawMessage) {
+	if !m.teardown(s) {
+		return
+	}
+	env := protocol.RoutingEnvelope{
+		ConnID:    s.connID,
+		Frame:     frame,
+		CloseCode: uint16(code),
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	m.send(env)
+}
+
+// teardown transitions s to V2StateClosed and releases everything the session
+// holds — timers, app-frame worker, uploads, replay tail — then deletes it and
+// its push queue from the manager. It publishes nothing; closeWith adds the
+// close envelope. Returns false, doing nothing, when s is already closed.
+func (m *V2SessionManager) teardown(s *V2Session) bool {
+	if s.state == V2StateClosed {
+		return false
 	}
 	s.state = V2StateClosed
 	// Stop per-session timers to free runtime timer-heap entries and
@@ -1565,20 +1612,12 @@ func (m *V2SessionManager) closeWith(ctx context.Context, s *V2Session, code web
 	// Symmetric with the create in handleNoiseInit: drop the per-session push
 	// buffer. Any buffered-but-undrained envelopes are discarded — the conn is
 	// terminal (#611 reconnect replay, not this ticket, reconciles a returning
-	// phone). The close envelope itself is sent synchronously below, bypassing
-	// the buffer (it is terminal, not part of the ordered push stream).
+	// phone). closeWith's close envelope is sent synchronously after this,
+	// bypassing the buffer (it is terminal, not part of the ordered push stream).
 	m.pushMu.Lock()
 	delete(m.queues, s.connID)
 	m.pushMu.Unlock()
-	env := protocol.RoutingEnvelope{
-		ConnID:    s.connID,
-		Frame:     frame,
-		CloseCode: uint16(code),
-	}
-	if ctx.Err() != nil {
-		return
-	}
-	m.send(env)
+	return true
 }
 
 // send forwards env via cfg.Outbound and logs any transport error at
