@@ -542,6 +542,44 @@ type RequestAttachmentPayload struct {
 	AttachmentID string `json:"attachment_id"`
 }
 
+// ReadWorkspaceFilePayload is the body of an Envelope whose Type ==
+// TypeReadWorkspaceFile (#2598). The frame a client sends to read one markdown
+// file LIVE from a conversation's recorded workspace — no stored copy is made
+// and none is served, so an edit between two requests shows in the second
+// answer. The answer is RequestAttachmentPayload's: an attachment_chunk stream
+// correlated by in_reply_to, whose attachment_id the daemon mints per transfer.
+//
+// ONE DIRECTION ONLY, phone → binary, and EVERY FIELD IS AN UNVERIFIED CLAIM,
+// exactly as on RequestAttachmentPayload. That block's rules carry over whole:
+// the conversation id is a lookup key validated against the daemon's registry
+// before anything resolves, and naming a conversation is not authorization.
+//
+// THE PATH IS THE FIRST FILESYSTEM PATH A CLIENT NAMES ON THIS WIRE. It is
+// confined to the conversation's recorded workspace — resolved, symlinks
+// included, and refused when it lands outside — and it is served only when the
+// final component of both the requested and the resolved path ends in .md or
+// .markdown, in any case. What bounds a paired but hostile client is that
+// confinement, not the path's shape.
+//
+// NEVER LOG OR ECHO THE PATH. It names host layout and its leaf is a filename,
+// which docs/protocol-mobile.md § Attachments bans from logs for a privacy
+// reason; every refusal is the one static CodeAttachmentNotFound, which does not
+// say why.
+//
+// NO omitempty AND NO MarshalJSON, for RequestAttachmentPayload's reason: both
+// keys are always present. A hostile or truncated payload decodes to two empty
+// strings, and an empty conversation id names nothing.
+type ReadWorkspaceFilePayload struct {
+	// ConversationID names the conversation whose workspace is read. A lookup
+	// key validated against the daemon's registry, not authorization.
+	ConversationID string `json:"conversation_id"`
+
+	// Path names the file, relative to the conversation's workspace or
+	// absolute. A relative path resolves against the workspace, never the
+	// daemon's own directory.
+	Path string `json:"path"`
+}
+
 // AttachmentOfferedPayload is the body of an Envelope whose Type ==
 // TypeAttachmentOffered (docs/protocol-mobile.md § Attachments, published by
 // #2082). The frame that tells a client a file exists on the host for a

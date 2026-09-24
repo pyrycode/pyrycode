@@ -1059,6 +1059,12 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 			// handleRequestAttachment.
 			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameAttachmentRequest})
 			return
+		case protocol.TypeReadWorkspaceFile:
+			// Off Run for the retrieval arm's reason (#2598): answering reads a
+			// file of up to the size bound off disk, hashes it and marshals one
+			// envelope per chunk. The worker routes it to handleReadWorkspaceFile.
+			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameWorkspaceFileRead})
+			return
 		case protocol.TypeRequestHistory:
 			// The third arm to run off Run (#2116), for the same reason as the two
 			// above rather than a new one: answering this frame opens log segments
@@ -1175,6 +1181,9 @@ const (
 	// until the turn ends before it asks the child anything. The only member whose
 	// wait runs off the worker (#2563), so the only one whose reply is not FIFO.
 	appFrameContextUsageRequest
+	// appFrameWorkspaceFileRead is the live workspace markdown read (#2598) —
+	// the retrieval arm's shape, over a file read live rather than a stored copy.
+	appFrameWorkspaceFileRead
 )
 
 // appFrameWorker is the per-conn sub-actor that runs application handlers
@@ -1235,6 +1244,10 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				// (safe from any goroutine) and its rejects through
 				// forwardToRun, so like the arm above it never touches s.send.
 				m.handleRequestAttachment(ctx, s, job.plaintext)
+			case appFrameWorkspaceFileRead:
+				// The live workspace read (#2598), the retrieval arm's twin:
+				// chunks through Push, rejects through forwardToRun.
+				m.handleReadWorkspaceFile(ctx, s, job.plaintext)
 			case appFrameHistoryRequest:
 				// The conversation-history path (#2116), here because it reads log
 				// segments off disk. UNLIKE the two arms above it has only ONE

@@ -163,6 +163,10 @@ var inboundTypes = map[string]string{
 	// guard reads case SELECTORS rather than case bodies. Unlike that one it is
 	// inbound and nothing else — the chunk type also rides the outbound leg.
 	"TypeRequestAttachment": "switch-intercepted",
+	// The live workspace read verb (#2598). Declared and wired in one slice, so it
+	// never sat in excludedTypes; filed here for the reason the retrieval verb
+	// above is — its case tags the frame and hands it to the conn's appFrameWorker.
+	"TypeReadWorkspaceFile": "switch-intercepted",
 	// The conversation-history request verb (#2116), moved up from excludedTypes'
 	// "pending handler (#2116)" when dispatchAppFrame gained its case — the move
 	// that entry named in advance, and mandatory rather than tidy-up: Assertion #2

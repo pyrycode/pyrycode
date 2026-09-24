@@ -590,6 +590,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`attachment_chunk`** | either | no | **New in v2.** One slice of one attachment's bytes, carrying the whole transfer's metadata on every chunk (#1752). The table's first genuinely bidirectional **payload** frame — `ack`/`error`/`rekey_request` above are also `either` but carry no application payload: upload rides this one phone → binary and retrieval rides it binary → phone, and declaring exactly one type is what stops the two legs drifting. It names the conversation the bytes belong to (#2142) — **meaningful on the upload leg only**, a **lookup key validated against the daemon's registry** before it becomes a path component and never a value trusted as sent, with **naming a conversation not authorization**; the daemon files an upload under it since #2143. See [Attachments](#attachments). |
 | **`attachment_stored`** | binary → phone | no | **New in v2.** The upload leg's **success reply** — the transfer completed, its claims were checked, and the bytes are stored under the `attachment_id` the client chose (#1895). Correlated by `in_reply_to`, which names the chunk **whose arrival completed the transfer** rather than the last one sent. Carries that one id and nothing else: no host path, no directory component, no stored filename. Nothing emits it yet (#1897). See [Attachments](#attachments). |
 | **`request_attachment`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for a stored attachment, naming the conversation and the attachment and nothing else (#2052). The `conversation_id` is a **lookup key validated against the daemon's registry**, not a value trusted as sent, and naming a conversation is **not authorization**. Correlation rides `in_reply_to`, so the payload carries **no request-id key**; the answer is a stream of [`attachment_chunk`](#attachment_chunk) frames, or `attachment.not_found` / `attachment.stream_aborted`. **Nothing answers it yet** — the handler is #2054 and the stream #2053. See [Attachments](#attachments). |
+| `read_workspace_file` | phone → binary | no | **New in v2.** Inbound control — a paired client asks to read one markdown file **live** from a conversation's recorded workspace, naming the conversation and a path and nothing else (#2598). Not a retrieval of a stored attachment: nothing is ever written to the attachment store, and the daemon reads the disk again on every request, so an edit made between two requests shows in the second answer. The `conversation_id` is a **lookup key validated against the daemon's registry**, not authorization; the path is confined to that conversation's workspace and refused unless its final component, and the resolved file's, both end in `.md` or `.markdown`. Correlation rides `in_reply_to`; the answer is a stream of [`attachment_chunk`](#attachment_chunk) frames under a daemon-minted `attachment_id`, or the single `attachment.not_found` that names no cause. See [Attachments](#attachments). |
 | **`attachment_offered`** | binary → phone | no | **New in v2.** Outbound push — a file exists on the host for this conversation, naming it with an `attachment_id` **the client did not mint** (#2082). It closes the one gap the rest of this family leaves: every other attachment frame needs an id the client already holds, so a file `claude` produced reached a client as nothing at all. **No bytes ride it** — it announces, and a client fetches with [`request_attachment`](#request_attachment), which is what *offered* rather than *sent* carries. Correlation is `conversation_id` and nothing else (no `in_reply_to`, no `turn_id`), and it is **delivered to every attached client rather than routed to one**, scoped at the consumer exactly as [`modal_shown`](#modal_shown) is. Receiving it is **not a capability**: #2054 re-validates the id against the daemon's registry regardless. Its `filename` is **`claude`-authored** — the section's first such string, so [§ Security model](#security-model)'s threat 1 lands, flowing *out of* `claude` rather than into it. **Emitted since #2166**, when the daemon stores a file `claude` produced; the offer is **live-only** — no registry, no list verb, no replay, so one missed while disconnected is not re-sent. See [Attachments](#attachments). |
 | **`request_model_list`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for a conversation's model menu at any time, naming the conversation and nothing else (#2125). It closes the window the frame's two unsolicited paths leave open: a conversation created **after** the client connected misses both the live lane and the connect-time reconcile, so its model and effort controls stay blank with nothing to wait for. The `conversation_id` is a **lookup key validated against the daemon's registry**, not a value trusted as sent. Correlation rides `in_reply_to`, so there is **no request-id key**; the answer is one [`model_list`](#model_list) — the same frame, the same payload source, **no `event_id`** — or `conversation.not_found` / the retryable `model_list.unavailable`. Interactive-capability-gated: a conn without it gets nothing at all. See [Asking for a model list on demand](#asking-for-a-model-list-on-demand). |
 | **`request_history`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for entries older than the ones it has, naming the conversation, an opaque `cursor` and a `limit` (#2113). Scroll-back over the **daemon-owned on-disk log** (#2112), which is **not** the [Mode A](#reconnect--backfill-semantics) event-ring replay: that one is catch-up across a dropped connection and is empty after a restart. The `conversation_id` is a **lookup key validated against the daemon's registry**, not a value trusted as sent. Correlation rides `in_reply_to`, so there is **no request-id key**; the answer is one [`history_page`](#history_page). Answered by the daemon since **#2116**, on the addressed conn's app-frame worker rather than inline, so a page read off disk never stalls another conn's frames. See [Conversation history](#conversation-history-v2). |
@@ -3980,6 +3981,76 @@ figure ahead of the code that enforces it.
 }
 ```
 
+#### `read_workspace_file`
+
+Direction **phone → binary** (inbound v2 control). Declared and served in one
+slice, **#2598**. Reads one markdown file **as it is on the host right now**
+from the recorded workspace of the conversation it names — a different guarantee
+from every other frame in this section, all of which move a **stored** copy.
+Nothing here is ever written to the attachment store, and the daemon reads the
+file again on every request: two requests for the same path can answer with
+different bytes, and that is the point.
+
+**It names a conversation and a path, and nothing else.**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | The conversation whose workspace is read. A **lookup key validated against the daemon's registry**, never a value trusted as sent, and **naming a conversation here is not authorization** — the same rule [`request_attachment`](#request_attachment) publishes for its own `conversation_id`. |
+| `path` | string | The file to read, relative to that conversation's workspace or absolute. A relative path resolves against the workspace, **never** against the daemon's own process directory. An escaping path answers the same undistinguished refusal as a missing one. |
+
+**Both fields are always present** (no `omitempty`), so a decoder may rely on
+both. A truncated or hostile payload decodes to two empty strings, which names
+no conversation and confines to nothing.
+
+**Markdown only, checked on both the name given and the name resolved to.** A
+path whose final component does not end in `.md` or `.markdown` — in any case —
+is refused before the daemon opens the registry or touches a filesystem. The
+same check runs again on the **resolved** file, after the path is confined:
+confinement follows a symlink, so a link named `notes.md` pointing at `.env`
+inside the same workspace passes containment and is still refused, because its
+target's own leaf fails the rule. Widening past markdown is out of scope for
+this frame; it would be a different verb; a paired client already reads any
+`.md` file in any conversation's workspace it names, which is the accepted
+residual — pairing is the authorization, as for every verb here, and `claude`
+can already read these files and print them.
+
+**The workspace is read at request time, not cached.** A `change_workspace`
+moved between two requests changes what the second one reads. An empty or
+unresolvable workspace is refused, the same as a missing file.
+
+**Correlation rides `in_reply_to`, so there is no request-id key** — the same
+decision [`request_attachment`](#request_attachment) and
+[`attachment_stored`](#attachment_stored) already took. The answer is a stream
+of [`attachment_chunk`](#attachment_chunk) frames whose `attachment_id` is
+**minted by the daemon for this transfer only**: a lowercase UUIDv4 that keys
+this one chunk stream and nothing else — it is never stored, never accepted
+back on any other frame, and two reads of the same file mint two different ids.
+
+**One refusal, [`attachment.not_found`](#error-codes), for every cause**: an
+unknown conversation, an empty workspace, the wrong extension on either the
+requested or the resolved leaf, a missing file, a path outside the workspace, a
+non-regular file, a file over the daemon's size bound, or an undecodable
+payload — all answer the identical static message, non-retryable, naming
+neither the path nor the reason. A failure after the stream has begun answers
+[`attachment.stream_aborted`](#error-codes) instead, exactly as
+[`request_attachment`](#request_attachment)'s does.
+
+**Sending this frame is not a capability, and neither is receiving an answer.**
+Authorization is pairing, enforced at the Noise IK handshake; there is no
+per-verb gate. The path is never logged and never echoed on any refusal — the
+same filename discipline this section already states for `filename` — and
+neither is the conversation id.
+
+```json
+{
+  "id": 214, "type": "read_workspace_file", "ts": "...",
+  "payload": {
+    "conversation_id": "9d4e7a21-8c05-4f3b-b6e2-1a7c9e30d5f4",
+    "path": "notes/todo.md"
+  }
+}
+```
+
 ### Session settings (v2)
 
 A paired client sends `set_session_settings` to change one session's **per-session settings** — its model, reasoning effort, permission mode, and YOLO (bypass-permissions) — and the daemon confirms with `session_settings_updated` (#597 Phase 3, #844, permission mode #1687). This section defines only the wire vocabulary; the handler that intercepts the request — gating on the negotiated `interactive` capability, validating, and persisting the change via `sessions.Pool.UpdateSettings` (#840) — is sibling #845.
@@ -4338,6 +4409,22 @@ and `payload` are **replayed content**: operator-authored for a stored
 client applies exactly the sanitisation it applies on the live lane. This is the
 opposite of [`request_attachment`](#request_attachment), which carries no
 content-bearing bytes at all; that section's reasoning does not transfer here.
+
+**A stored `role: "user"` entry's `payload` carries `attachment_ids` when the
+turn named any (#2596).** Same optional field, same key and element shape as
+[`send_message`](#send_message)'s own `attachment_ids` — the daemon carries
+forward the ids it already resolved for that turn, deduplicated to first
+occurrence, so a second client (or one that dropped its upload from cache)
+learns from history alone that a file exists and can fetch it with
+[`request_attachment`](#request_attachment). **Omitted, not `null` or `[]`,
+when the message named none** — every entry stored before this ticket, and
+every attachment-less turn after it, decodes byte-identical to today, and an
+older client simply ignores the unknown key. **It never carries a path.** The
+daemon composes a separate, on-host-path-bearing prompt for `claude` from the
+same resolved ids, but the stored entry is built only from the queued
+message's client-facing fields — there is no field on that record a future
+change could widen into a path leak here, the same structural argument
+[`attachment_stored`](#attachment_stored) makes for the upload leg.
 
 ##### Joining a page to the live stream
 
@@ -4839,6 +4926,7 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 
 ## Changelog
 
+- `2026-09-24`: **A stored `send_message` history entry keeps its attachment ids** (#2596) — a [history entry](#a-history-entry) whose `payload` is a `role: "user"` message now carries `attachment_ids` when the turn named any, deduplicated to first occurrence, in the same key and element shape as [`send_message`](#send_message)'s own field. **The gap was that a second client — or the one that sent the message, after its own upload cache dropped the file — never learned an attachment existed** once the turn scrolled into history: `request_history` served the entry with no attachment reference at all, since `internal/msgqueue.QueuedMessage` (the record the producer reads) had nowhere to carry one, and the v2 interactive lane streams no live `message` event for the operator's own turn either. **Omitted, not `null` or `[]`, when the message named none** — every entry stored before this ticket decodes byte-identical to today, and an older client ignores the unknown key. **It never carries a path**: the ids are the same ones `internal/relay/handlers`' `resolveAttachments` already resolved and passed separately from the on-host-path-bearing prompt `claude` receives, and the producer (`newOperatorMessageHistory`) still reads only the queued record's client-facing fields — there is no field on that record a future change could widen into a path leak here, matching [`attachment_stored`](#attachment_stored)'s structural argument for the upload leg. Found by a mobile live test exercising a peer client opening and saving an attachment after a history reload.
 - `2026-09-24`: **The "app too old" rejection is now enforced** (#2578) — `internal/protocol.ParseClientVersion` parses `hello.client_version`, and `handleNoiseInit` checks it, once the device token is already accepted, against this daemon release's per-app minimum (`relay.MinMobileClientVersion` / `relay.MinDesktopClientVersion`, both empty in this build). A version below its app's minimum, or unparsable once any minimum is set, gets the sealed `client.update_required` error and close `4412` described above; a version-rejected `hello` never opens a session, and its ack carries no `workspace_root`. See [Compatibility](#compatibility) § The app-too-old rejection.
 - `2026-09-24`: **A new [Compatibility](#compatibility) section states the policy for older apps, and reserves the "app too old" rejection** (#2576) — five additive-change rules, and a sealed `client.update_required` error (carrying the daemon's configured minimum in the new optional `ErrorPayload.min_client_version`) followed by WS close `4412`, for an app build below a per-app minimum version the operator configures. Retires the no-old-app-install-base premise ADR 025's 2026-06-22 amendment and ADR 037 assumed, now that the apps are installed separately from the daemons that host them. The [`hello`](#hello-v2-specific-note) note defines `client_version`'s new `<app>/<MAJOR>.<MINOR>.<PATCH>` format, replacing the free text every build sent before this ticket (`"1.0"`, `"0.1.0"`, and this spec's own prior example, all now unparsable on purpose). **Nothing was enforced yet as of this entry** — `CodeClientUpdateRequired` and `StatusClientUpdateRequired` were reserved constants with no sender, no parser and no configured minimum; #2578, above, wired the check.
 - `2026-09-24`: **[`create_conversation`](#create_conversation) now records the folder its session actually spawns in, not the string the client sent** (#2568) — a non-null `cwd` is tilde-expanded, confined to `$HOME` and symlink-resolved to its realpath before it is stored or spawned in, using the same resolver the spawn itself uses, so `default`, `~/pyry-workspace/default` and the absolute form all bind to one workspace instead of three. [`conversation_created`](#conversation_created)'s `cwd` and every later `list_conversations` row for it carry that resolved path. A `cwd` the daemon cannot confine is refused with `protocol.malformed`, non-retryable, and no row is created — unchanged from before. A `null` `cwd` is unaffected. **Existing rows are rewritten once, at startup, not on read**: a stored `cwd` that is relative or `~`-prefixed is resolved the same way and rekeyed, moving its `rename_workspace` label with it; where two such rows resolve to one already-labelled path, the label already stored under the resolved path wins and the other is dropped. A row that cannot be resolved (its folder is gone, or it now escapes `$HOME`) is left exactly as stored. **This changes what two clients' "default" affordances match against.** Desktop's workspace-picker "default" pill sends back the group's `cwd` unchanged, so it still matches after the rewrite. Mobile's Settings default-workspace row keeps sending the literal `~/.pyrycode/scratch` and now gets an absolute row back from both `create_conversation` and the startup rewrite, so exact-string matching against it breaks; a client-side fix is a follow-up, not part of this change.
