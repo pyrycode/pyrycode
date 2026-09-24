@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/sessions"
 )
 
 // This file holds the inbound Noise session-establishment path — the
@@ -364,6 +366,10 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// transition — the edge every enumeration and every test synchronises on —
 	// also orders the write.
 	m.recordRedemption(s.connID, device)
+	// Persist the app version this device just reported (#2577), for `pyry
+	// pair list`. Same placement and same best-effort contract as the
+	// redemption write above; a no-op when the stored value already matches.
+	m.recordClientVersion(s.connID, device, helloPayload.ClientVersion)
 	// s.device deliberately keeps the pre-clear snapshot: it records what
 	// authentication observed, and no reader consults RedeemBy off the session
 	// (#1529 enforces the deadline at the registry).
@@ -588,5 +594,51 @@ func (m *V2SessionManager) handleNoiseMsg(ctx context.Context, s *V2Session, inn
 		}
 		m.dispatchAppFrame(ctx, s, plaintext)
 		return
+	}
+}
+
+// errClientVersionReloadFailed replaces the in-region Reload's own error before
+// it can reach recordClientVersion's log line, for errRedemptionReloadFailed's
+// reason: a decode failure can echo devices.json bytes, token_hash included.
+var errClientVersionReloadFailed = errors.New("relay: devices reload failed inside the client-version lock")
+
+// recordClientVersion durably records the client_version dev reported in the
+// hello just accepted, so `pyry pair list` — a separate process reading the
+// devices file — can show which app version each device last connected with
+// (#2577). reported is admitted through sessions.AdmitClientVersion, the one
+// copy of the filter the session prompt applies; a refused value is stored as
+// "".
+//
+// It mirrors recordRedemption: best effort, every failure logged and swallowed,
+// because the handshake has already succeeded. The fast path compares against
+// the snapshot Validate returned and skips the lock entirely when nothing
+// changed, so an ordinary reconnect costs no file lock and no fsync on the Run
+// goroutine. Inside the region, Reload keeps disk authoritative for membership:
+// a device revoked since Validate is dropped, SetClientVersion then reports no
+// change, and no Save resurrects it. The lock wait is redemptionLockWait, whose
+// bound is this same Run-goroutine stall.
+//
+// SECURITY: the version is client-authored text (see ActiveConn); the log line
+// carries neither it nor the reload error.
+func (m *V2SessionManager) recordClientVersion(connID string, dev devices.Device, reported string) {
+	version := sessions.AdmitClientVersion(reported)
+	if m.cfg.DevicesPath == "" || version == dev.ClientVersion {
+		return
+	}
+	err := devices.WithLock(m.cfg.DevicesPath, redemptionLockWait, func() error {
+		if err := m.cfg.Devices.Reload(m.cfg.DevicesPath); err != nil {
+			return errClientVersionReloadFailed
+		}
+		if !m.cfg.Devices.SetClientVersion(dev.TokenHash, version) {
+			return nil
+		}
+		return m.cfg.Devices.Save(m.cfg.DevicesPath)
+	})
+	if err != nil {
+		m.cfg.Logger.Warn("relay: v2 client version persist failed",
+			"event", "v2.devices.client_version_persist_failed",
+			"conn_id", connID,
+			"path", m.cfg.DevicesPath,
+			"err", err)
 	}
 }

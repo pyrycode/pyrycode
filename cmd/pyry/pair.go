@@ -461,7 +461,7 @@ func renderPairList(list []devices.Device, w io.Writer) error {
 		return sorted[i].Name < sorted[j].Name
 	})
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tPAIRED\tLAST SEEN\tTOKEN-PREFIX")
+	fmt.Fprintln(tw, "NAME\tPAIRED\tLAST SEEN\tVERSION\tTOKEN-PREFIX")
 	for _, d := range sorted {
 		lastSeen := "never"
 		if !d.LastSeenAt.IsZero() {
@@ -471,8 +471,11 @@ func renderPairList(list []devices.Device, w io.Writer) error {
 		if len(prefix) >= 8 {
 			prefix = prefix[:8]
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
-			d.Name, d.PairedAt.Format(time.RFC3339), lastSeen, prefix)
+		// VERSION is the client_version the device's last accepted hello
+		// reported (#2577), already admitted by the handshake; empty for a
+		// device that has not connected since, or reported nothing usable.
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			d.Name, d.PairedAt.Format(time.RFC3339), lastSeen, d.ClientVersion, prefix)
 	}
 	return tw.Flush()
 }

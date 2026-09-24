@@ -81,6 +81,16 @@ type Device struct {
 	// code: swapping the operator's own binary needs local write access,
 	// at which point this deadline is not the weakest link.
 	RedeemBy time.Time `json:"redeem_by,omitzero"`
+
+	// ClientVersion is the client_version this device reported in its most
+	// recent accepted hello (#2577), stored raw so the operator can see in
+	// `pyry pair list` whether any device still runs an old app. Written only
+	// by the v2 handshake, and only after internal/sessions'
+	// AdmitClientVersion has passed it: a value that gate refuses is stored as
+	// "". It is still client-authored text — do not log it. omitempty keeps a
+	// record with no version, including every record predating the field, free
+	// of the key.
+	ClientVersion string `json:"client_version,omitempty"`
 }
 
 // RedemptionWindow is how long a freshly minted pairing token stays

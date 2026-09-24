@@ -170,11 +170,14 @@ func TestRenderPairList_TwoDevices(t *testing.T) {
 			PairedAt:   time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC),
 			LastSeenAt: time.Date(2026, 1, 4, 0, 0, 0, 0, time.UTC),
 			TokenHash:  "bbbbbbbb22222222222222222222222222222222222222222222222222222222",
+
+			ClientVersion: "pyrycode-ios/1.4.0",
 		},
 	}
-	want := "NAME   PAIRED                LAST SEEN             TOKEN-PREFIX\n" +
-		"alpha  2026-01-01T00:00:00Z  2026-01-02T00:00:00Z  aaaaaaaa\n" +
-		"bravo  2026-01-03T00:00:00Z  2026-01-04T00:00:00Z  bbbbbbbb\n"
+	// alpha predates #2577 and has no recorded version: its cell is empty.
+	want := "NAME   PAIRED                LAST SEEN             VERSION             TOKEN-PREFIX\n" +
+		"alpha  2026-01-01T00:00:00Z  2026-01-02T00:00:00Z                      aaaaaaaa\n" +
+		"bravo  2026-01-03T00:00:00Z  2026-01-04T00:00:00Z  pyrycode-ios/1.4.0  bbbbbbbb\n"
 
 	var buf bytes.Buffer
 	if err := renderPairList(list, &buf); err != nil {
