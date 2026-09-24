@@ -105,3 +105,7 @@ Desktop's workspace-row plus sends the group's cwd back unchanged, so after the 
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-24
+
+## Revisions
+
+- 2026-09-24 (implementation) — Open question resolved: the AC2 test drives the real `handlers.CreateConversation` through a test creator that calls `resolveSpawnDir` and returns its answer, rather than the real `sessionMinter`. `Pool.Mint` needs a running pool to succeed, and `sessionMinter.Create` adds nothing to that value but the pass-through. No design change.

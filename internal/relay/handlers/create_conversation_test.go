@@ -14,31 +14,38 @@ import (
 )
 
 // stubSessionCreator records each Create(ctx, label, spawnDir) call and returns
-// a configurable id + error. With err == nil and id == "" it returns a fresh
-// distinct id per call ("sess-1", "sess-2", …) so per-conversation distinctness
-// is observable without per-test wiring; a fixed id pins the binding assertion.
-// The stub IS the cmd-layer seam: it records the raw spawnDir the handler
-// forwards (no validation happens handler-side). Mirrors stubTurnWriter in
-// send_message_test.go.
+// a configurable id + dir + error. With err == nil and id == "" it returns a
+// fresh distinct id per call ("sess-1", "sess-2", …) so per-conversation
+// distinctness is observable without per-test wiring; a fixed id pins the
+// binding assertion. The stub IS the cmd-layer seam: it records the raw spawnDir
+// the handler forwards (no validation happens handler-side) and answers with the
+// dir the session would spawn in — spawnDir itself unless dir is set, so a test
+// can make the resolved dir differ from the request (#2568). Mirrors
+// stubTurnWriter in send_message_test.go.
 type stubSessionCreator struct {
-	err       error  // when non-nil, every Create returns ("", err)
+	err       error  // when non-nil, every Create returns ("", "", err)
 	id        string // when non-empty, every Create returns this fixed id
+	dir       string // when non-empty, every Create returns this as the spawn dir
 	calls     int
 	labels    []string
 	spawnDirs []string // the spawnDir arg recorded per call
 }
 
-func (s *stubSessionCreator) Create(ctx context.Context, label, spawnDir string) (string, error) {
+func (s *stubSessionCreator) Create(ctx context.Context, label, spawnDir string) (string, string, error) {
 	s.calls++
 	s.labels = append(s.labels, label)
 	s.spawnDirs = append(s.spawnDirs, spawnDir)
 	if s.err != nil {
-		return "", s.err
+		return "", "", s.err
+	}
+	dir := spawnDir
+	if s.dir != "" {
+		dir = s.dir
 	}
 	if s.id != "" {
-		return s.id, nil
+		return s.id, dir, nil
 	}
-	return fmt.Sprintf("sess-%d", s.calls), nil
+	return fmt.Sprintf("sess-%d", s.calls), dir, nil
 }
 
 const (
@@ -414,7 +421,8 @@ func TestCreateConversation_SetCwd_ThreadsRawSpawnDir(t *testing.T) {
 	if creator.labels[0] != payload.ID || !conversations.ValidID(creator.labels[0]) {
 		t.Errorf("mint label = %q, want the conversation id %q (a canonical UUIDv4)", creator.labels[0], payload.ID)
 	}
-	// The row + reply record the raw requested Cwd.
+	// The stub answers with the spawnDir it was given, so the row + reply
+	// carry that same string here; ResolvedCwdRecorded pins the difference.
 	if payload.Cwd != cwd {
 		t.Errorf("reply Cwd = %q, want %q", payload.Cwd, cwd)
 	}
@@ -527,5 +535,66 @@ func TestCreateConversation_MintFailure_NoRowAndBinaryOffline(t *testing.T) {
 	}
 	if got := reg.List(); len(got) != 0 {
 		t.Errorf("registry has %d rows after a mint failure, want 0 (no half-bound orphan)", len(got))
+	}
+}
+
+// TestCreateConversation_SetCwd_RecordsResolvedDir covers #2568 AC1: a set Cwd
+// is recorded as the dir the session spawns in — the creator's answer — not the
+// string the client sent. The row, the conversation_created reply, its
+// workspace_label lookup and a following list_conversations all carry it.
+func TestCreateConversation_SetCwd_RecordsResolvedDir(t *testing.T) {
+	t.Parallel()
+	reg, regPath := newCreateConvReg(t)
+	const resolved = "/home/pyry/pyry-workspace/default"
+	reg.Create(conversations.Conversation{ID: "existing", Cwd: resolved})
+	reg.SetWorkspaceLabel(resolved, strptr("Default"))
+	c, recv := newCreateConvConn(t)
+
+	requested := "~/pyry-workspace/default"
+	req := createConvRequest(t, protocol.CreateConversationPayload{Cwd: &requested})
+	creator := &stubSessionCreator{dir: resolved}
+	h := CreateConversation(reg, creator, regPath, createConvDefault, testLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	env := assertCreateConvEnvelopeShape(t, recv(), protocol.TypeConversationCreated)
+	var payload protocol.ConversationCreatedPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+
+	if creator.spawnDirs[0] != requested {
+		t.Errorf("mint spawnDir = %q, want the raw request %q", creator.spawnDirs[0], requested)
+	}
+	if payload.Cwd != resolved {
+		t.Errorf("reply Cwd = %q, want the resolved dir %q", payload.Cwd, resolved)
+	}
+	if payload.WorkspaceLabel == nil || *payload.WorkspaceLabel != "Default" {
+		t.Errorf("reply workspace_label = %v, want the label stored under the resolved dir", payload.WorkspaceLabel)
+	}
+	stored, _ := reg.Get(conversations.ConversationID(payload.ID))
+	if stored.Cwd != resolved {
+		t.Errorf("stored Cwd = %q, want %q", stored.Cwd, resolved)
+	}
+
+	lc, lrecv := newCreateConvConn(t)
+	if err := ListConversations(reg)(context.Background(), lc, protocol.Envelope{ID: createConvRequestID, Type: protocol.TypeListConversations}); err != nil {
+		t.Fatalf("list handler: %v", err)
+	}
+	var lenv protocol.Envelope
+	if err := json.Unmarshal(lrecv().Frame, &lenv); err != nil {
+		t.Fatalf("unmarshal list envelope: %v", err)
+	}
+	var list protocol.ConversationsPayload
+	if err := json.Unmarshal(lenv.Payload, &list); err != nil {
+		t.Fatalf("unmarshal list payload: %v", err)
+	}
+	for _, row := range list.Conversations {
+		if row.ID == payload.ID && row.Cwd != resolved {
+			t.Errorf("list_conversations row Cwd = %q, want %q", row.Cwd, resolved)
+		}
+	}
+	if len(list.Conversations) != 2 {
+		t.Errorf("list_conversations returned %d rows, want 2", len(list.Conversations))
 	}
 }

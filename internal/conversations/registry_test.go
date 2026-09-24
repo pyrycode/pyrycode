@@ -2576,3 +2576,151 @@ func TestRegistry_OnDelete(t *testing.T) {
 		}
 	})
 }
+
+// #2568: RekeyCwds rewrites every row whose Cwd is a key of the map, counts
+// them, and leaves every other row — absolute ones included — byte-identical.
+func TestRegistry_RekeyCwds_RewritesMatchingRows(t *testing.T) {
+	t.Parallel()
+	r := &Registry{}
+	r.Create(Conversation{ID: "a", Cwd: "default"})
+	r.Create(Conversation{ID: "b", Cwd: "~/ws/default"})
+	r.Create(Conversation{ID: "c", Cwd: "/home/u/ws/default"})
+	r.Create(Conversation{ID: "d", Cwd: "/home/u/other"})
+	r.Create(Conversation{ID: "e", Cwd: "default"})
+
+	n := r.RekeyCwds(map[string]string{
+		"default":      "/home/u/ws/default",
+		"~/ws/default": "/home/u/ws/default",
+	})
+	if n != 3 {
+		t.Errorf("RekeyCwds rewrote %d rows, want 3", n)
+	}
+	want := map[ConversationID]string{
+		"a": "/home/u/ws/default",
+		"b": "/home/u/ws/default",
+		"c": "/home/u/ws/default",
+		"d": "/home/u/other",
+		"e": "/home/u/ws/default",
+	}
+	for _, c := range r.List() {
+		if c.Cwd != want[c.ID] {
+			t.Errorf("row %s Cwd = %q, want %q", c.ID, c.Cwd, want[c.ID])
+		}
+	}
+}
+
+// #2568: an entry mapping a key to itself, and an empty map, change nothing.
+func TestRegistry_RekeyCwds_NoOpEntries(t *testing.T) {
+	t.Parallel()
+	r := &Registry{}
+	r.Create(Conversation{ID: "a", Cwd: "/home/u/x"})
+	r.SetWorkspaceLabel("/home/u/x", ptrTo("X"))
+	if n := r.RekeyCwds(nil); n != 0 {
+		t.Errorf("RekeyCwds(nil) = %d, want 0", n)
+	}
+	if n := r.RekeyCwds(map[string]string{"/home/u/x": "/home/u/x"}); n != 0 {
+		t.Errorf("RekeyCwds(identity) = %d, want 0", n)
+	}
+	if got, ok := r.WorkspaceLabel("/home/u/x"); !ok || got != "X" {
+		t.Errorf("label after no-op rekey = (%q, %v), want (\"X\", true)", got, ok)
+	}
+}
+
+// #2568 AC3: a label moves with its key, a label already stored under the new
+// key wins over a legacy one, and between two legacy keys collapsing into one
+// unlabelled key the lexicographically first old key wins. Every old key is
+// gone afterwards, so no label is left keyed by a Cwd no row carries.
+func TestRegistry_RekeyCwds_Labels(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		labels    map[string]string
+		rekey     map[string]string
+		wantKey   string
+		wantLabel string
+	}{
+		{
+			name:      "moves to an unlabelled new key",
+			labels:    map[string]string{"default": "Legacy"},
+			rekey:     map[string]string{"default": "/h/ws/default"},
+			wantKey:   "/h/ws/default",
+			wantLabel: "Legacy",
+		},
+		{
+			name:      "absolute key's label wins",
+			labels:    map[string]string{"default": "Legacy", "/h/ws/default": "Absolute"},
+			rekey:     map[string]string{"default": "/h/ws/default"},
+			wantKey:   "/h/ws/default",
+			wantLabel: "Absolute",
+		},
+		{
+			name:      "sorted-first legacy key wins",
+			labels:    map[string]string{"~/ws/default": "Tilde", "default": "Relative"},
+			rekey:     map[string]string{"~/ws/default": "/h/ws/default", "default": "/h/ws/default"},
+			wantKey:   "/h/ws/default",
+			wantLabel: "Relative",
+		},
+		{
+			name:      "explicitly empty label moves as present",
+			labels:    map[string]string{"default": ""},
+			rekey:     map[string]string{"default": "/h/ws/default"},
+			wantKey:   "/h/ws/default",
+			wantLabel: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := &Registry{}
+			for old := range tt.rekey {
+				r.Create(Conversation{ID: ConversationID(old), Cwd: old})
+			}
+			for k, v := range tt.labels {
+				r.SetWorkspaceLabel(k, ptrTo(v))
+			}
+			r.RekeyCwds(tt.rekey)
+			got, ok := r.WorkspaceLabel(tt.wantKey)
+			if !ok || got != tt.wantLabel {
+				t.Errorf("WorkspaceLabel(%q) = (%q, %v), want (%q, true)", tt.wantKey, got, ok, tt.wantLabel)
+			}
+			for old := range tt.rekey {
+				if got, ok := r.WorkspaceLabel(old); ok {
+					t.Errorf("old key %q still labelled %q after rekey", old, got)
+				}
+			}
+		})
+	}
+}
+
+// #2568 AC3: the rekeyed rows and labels survive Save/Load, and a label on a
+// key outside the map is untouched.
+func TestRegistry_RekeyCwds_RoundTrip(t *testing.T) {
+	t.Parallel()
+	r := &Registry{}
+	r.Create(Conversation{ID: "a", Cwd: "default"})
+	r.Create(Conversation{ID: "b", Cwd: "/h/other"})
+	r.SetWorkspaceLabel("default", ptrTo("Default"))
+	r.SetWorkspaceLabel("/h/other", ptrTo("Other"))
+	r.RekeyCwds(map[string]string{"default": "/h/ws/default"})
+
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c, _ := back.Get("a"); c.Cwd != "/h/ws/default" {
+		t.Errorf("row a Cwd after reload = %q, want /h/ws/default", c.Cwd)
+	}
+	if got, _ := back.WorkspaceLabel("/h/ws/default"); got != "Default" {
+		t.Errorf("rekeyed label after reload = %q, want Default", got)
+	}
+	if got, _ := back.WorkspaceLabel("/h/other"); got != "Other" {
+		t.Errorf("untouched label after reload = %q, want Other", got)
+	}
+	if _, ok := back.WorkspaceLabel("default"); ok {
+		t.Error("legacy label key survived the reload")
+	}
+}
