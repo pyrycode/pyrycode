@@ -237,8 +237,16 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 		}
 	}
 	device, tokenResult := m.cfg.Devices.Validate(helloPayload.Token)
-	root := ""
+	// The app version is judged only once the token is accepted (#2578): a peer
+	// without a valid token takes the 4401 arm below, whose bytes and timing never
+	// depend on client_version, so it learns nothing about this host's minimums.
+	// A refused version gets the ack a refused token gets — no workspace_root.
+	var versionReject clientVersionReject
 	if tokenResult == devices.ValidateAccepted {
+		versionReject = m.checkClientVersion(helloPayload.ClientVersion)
+	}
+	root := ""
+	if tokenResult == devices.ValidateAccepted && versionReject.reason == "" {
 		root = workspaceRoot()
 	}
 
@@ -346,6 +354,42 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 			return
 		}
 		m.closeWith(ctx, s, StatusUnauthorized, errFrame)
+		return
+	}
+
+	if versionReject.reason != "" {
+		// App-too-old path (#2578): the token arm's shape with its own code and
+		// close — noise_resp, then ONE routing envelope carrying the sealed
+		// client.update_required error and the 4412 close. Returning here keeps
+		// the session short of V2StateOpen: no redemption or client version is
+		// recorded, and s.device, s.clientName and s.clientVersion stay unset.
+		errFrame, sealErr := m.sealErrorPayload(s, protocol.ErrorPayload{
+			Code:             protocol.CodeClientUpdateRequired,
+			Message:          MsgClientUpdateRequired,
+			Retryable:        false,
+			MinClientVersion: versionReject.min,
+		}, helloID)
+		// SECURITY: never the raw client_version (remote-authored), the token or
+		// helloPayload. The app and minimum are logged on below_minimum only: the
+		// app then matched the grammar and the minimum is daemon-authored.
+		attrs := []any{
+			"event", "v2.handshake.reject.client_update_required",
+			"conn_id", s.connID,
+			"close_code", int(StatusClientUpdateRequired),
+			"reason", versionReject.reason,
+		}
+		if versionReject.app != "" {
+			attrs = append(attrs, "app", versionReject.app, "min_client_version", versionReject.min)
+		}
+		m.cfg.Logger.Warn("relay: v2 handshake reject", attrs...)
+		m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: respFrame})
+		if sealErr != nil {
+			m.cfg.Logger.Warn("relay: v2 seal error failed; close-only",
+				"conn_id", s.connID, "err", sealErr)
+			m.closeWith(ctx, s, StatusClientUpdateRequired, nil)
+			return
+		}
+		m.closeWith(ctx, s, StatusClientUpdateRequired, errFrame)
 		return
 	}
 
@@ -505,6 +549,38 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	if helloPayload.LastEventID != nil {
 		m.replayMissed(ctx, s, *helloPayload.LastEventID)
 	}
+}
+
+// clientVersionReject says why a hello's client_version is refused. The zero
+// value accepts. reason is closed-set: "unparsable" or "below_minimum". app and
+// min are set on below_minimum only — app is the parsed, grammar-checked name
+// and min the daemon's own minimum for it — so a caller may log both and put
+// min on the wire without echoing a single client byte.
+type clientVersionReject struct {
+	reason string
+	app    string
+	min    string
+}
+
+// checkClientVersion judges a hello's client_version against the configured
+// minimums (#2578, docs/protocol-mobile.md § Compatibility). With no minimum set
+// it accepts everything, as every daemon did before. Once any is set, an
+// unparsable version is refused, a well-formed one below its own app's minimum
+// is refused, and a well-formed version of an app with no minimum is accepted.
+// Only the parsed value is compared; the raw string is never re-read.
+func (m *V2SessionManager) checkClientVersion(reported string) clientVersionReject {
+	if len(m.minClientVersions) == 0 {
+		return clientVersionReject{}
+	}
+	app, v, ok := protocol.ParseClientVersion(reported)
+	if !ok {
+		return clientVersionReject{reason: "unparsable"}
+	}
+	min, held := m.minClientVersions[app]
+	if !held || v.Compare(min) >= 0 {
+		return clientVersionReject{}
+	}
+	return clientVersionReject{reason: "below_minimum", app: app, min: min.String()}
 }
 
 // handleNoiseMsg processes an inbound noise_msg frame. The awaitingInit
