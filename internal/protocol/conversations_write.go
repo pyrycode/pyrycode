@@ -98,6 +98,23 @@ type ArchiveConversationPayload struct {
 	ConversationID string `json:"conversation_id"`
 }
 
+// SetConversationMutedPayload is the body of a set_conversation_muted frame
+// (#2572). Phone → binary. It names a target conversation and the muted value to
+// store for it: true mutes, false unmutes, through one verb.
+//
+// Muted is a pointer because the key is required: an absent key (or JSON null)
+// decodes to nil and the handler rejects it as protocol.malformed. A plain bool
+// would read a missing key as false and silently unmute. No omitempty, for the
+// round-trip reason given on CreateConversationPayload.
+//
+// Deliberately NOT a reuse of ArchiveConversationPayload, per the
+// semantic-coupling rationale the sibling payloads document. The reply reuses
+// ConversationUpdatedPayload verbatim.
+type SetConversationMutedPayload struct {
+	ConversationID string `json:"conversation_id"`
+	Muted          *bool  `json:"muted"`
+}
+
 // ChangeWorkspacePayload is the body of a change_workspace frame
 // (docs/protocol-mobile.md § change_workspace). Phone → binary. Both fields are
 // spec-required: a change_workspace must name a target conversation and a target

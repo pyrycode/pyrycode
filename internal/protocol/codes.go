@@ -349,6 +349,14 @@ const (
 	// It is a inboundAppTypeSet member, not a v2 control frame — see the v1/v2 partition
 	// in envelope.go / compat_test.go.
 	TypeUnarchiveConversation = "unarchive_conversation"
+	// TypeSetConversationMuted is a phone → binary dispatch.Route write verb
+	// (#2572) that sets or clears an existing conversation's durable muted flag
+	// (IsMuted) from the payload's required muted bool, and replies with the
+	// reused conversation_updated record. Unlike archive, the same record is also
+	// pushed to every interactive conn, so other clients stop alerting without
+	// re-listing. It is a inboundAppTypeSet member, not a v2 control frame — see
+	// the v1/v2 partition in envelope.go / compat_test.go.
+	TypeSetConversationMuted = "set_conversation_muted"
 	// TypeChangeWorkspace is a phone → binary dispatch.Route write verb (like
 	// rename_conversation / delete_conversation): it moves an existing
 	// conversation to a client-chosen workspace folder by updating its recorded

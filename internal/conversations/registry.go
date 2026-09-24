@@ -409,6 +409,27 @@ func (r *Registry) SetArchived(id ConversationID, archived bool) bool {
 	return false
 }
 
+// SetMuted sets the durable mute-notifications flag of the conversation whose
+// ID equals id (#2572): muted=true mutes it, muted=false unmutes it. Returns true
+// on hit, false on miss; on miss no field of any record is modified.
+//
+// It sets exactly one field — IsMuted — with the same guarantees SetArchived
+// gives for its own: the scan and mutation happen atomically under r.mu, and
+// setting the value the row already has is a hit that changes nothing.
+//
+// SetMuted does NOT call Save — disk persistence is the caller's concern.
+func (r *Registry) SetMuted(id ConversationID, muted bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.conversations {
+		if r.conversations[i].ID == id {
+			r.conversations[i].IsMuted = muted
+			return true
+		}
+	}
+	return false
+}
+
 // SetSystemPrompt sets the operator-set system prompt of the conversation whose
 // ID equals id. It sets exactly one field — SystemPrompt — so id, cwd, name,
 // promoted/archived state, and session binding are structurally untouched, the

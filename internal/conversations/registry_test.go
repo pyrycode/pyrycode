@@ -2795,3 +2795,86 @@ func TestRegistry_RekeyCwds_RoundTrip(t *testing.T) {
 		t.Error("legacy label key survived the reload")
 	}
 }
+
+func TestRegistry_SetMuted_HitSetsAndClears(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	when := mustParseTime(t, "2026-05-09T12:34:56.789Z")
+
+	r := &Registry{}
+	r.Create(Conversation{
+		ID:               id,
+		Name:             strPtr("general"),
+		Cwd:              "/home/user/project",
+		CurrentSessionID: "sess-current",
+		SessionHistory:   []string{"sess-old"},
+		IsPromoted:       true,
+		IsArchived:       true,
+		LastUsedAt:       when,
+	})
+
+	// Mute → true, and every other field is left untouched.
+	if ok := r.SetMuted(id, true); !ok {
+		t.Fatal("SetMuted(true) = false, want true")
+	}
+	got, found := r.Get(id)
+	if !found {
+		t.Fatal("Get after SetMuted: not found")
+	}
+	if !got.IsMuted {
+		t.Error("IsMuted = false, want true after SetMuted(true)")
+	}
+	if got.Name == nil || *got.Name != "general" {
+		t.Errorf("Name = %v, want pointer to %q (untouched)", got.Name, "general")
+	}
+	if got.Cwd != "/home/user/project" {
+		t.Errorf("Cwd = %q, want unchanged", got.Cwd)
+	}
+	if got.CurrentSessionID != "sess-current" {
+		t.Errorf("CurrentSessionID = %q, want unchanged", got.CurrentSessionID)
+	}
+	if len(got.SessionHistory) != 1 || got.SessionHistory[0] != "sess-old" {
+		t.Errorf("SessionHistory = %v, want [sess-old] (untouched)", got.SessionHistory)
+	}
+	if !got.IsPromoted || !got.IsArchived {
+		t.Errorf("IsPromoted = %v, IsArchived = %v, want both true (untouched)", got.IsPromoted, got.IsArchived)
+	}
+	if !got.LastUsedAt.Equal(when) {
+		t.Errorf("LastUsedAt = %v, want %v (untouched)", got.LastUsedAt, when)
+	}
+
+	// Setting the value it already has is still a hit and changes nothing.
+	if ok := r.SetMuted(id, true); !ok {
+		t.Fatal("repeated SetMuted(true) = false, want true")
+	}
+	if got, _ = r.Get(id); !got.IsMuted {
+		t.Error("IsMuted = false, want true after repeated SetMuted(true)")
+	}
+
+	// Clear → false via the same method.
+	if ok := r.SetMuted(id, false); !ok {
+		t.Fatal("SetMuted(false) = false, want true")
+	}
+	if got, _ = r.Get(id); got.IsMuted {
+		t.Error("IsMuted = true, want false after SetMuted(false)")
+	}
+}
+
+func TestRegistry_SetMuted_Miss(t *testing.T) {
+	t.Parallel()
+	const present ConversationID = "11111111-2222-4333-8444-555555555555"
+	const absent ConversationID = "22222222-2222-4333-8444-555555555555"
+
+	r := &Registry{}
+	r.Create(Conversation{ID: present, Cwd: "/x"})
+
+	if ok := r.SetMuted(absent, true); ok {
+		t.Errorf("SetMuted(absent) = true, want false")
+	}
+	if n := len(r.List()); n != 1 {
+		t.Errorf("len(List) = %d, want 1 (unchanged on miss)", n)
+	}
+	if got, _ := r.Get(present); got.IsMuted {
+		t.Error("present row IsMuted = true, want false (miss must not mutate)")
+	}
+}
