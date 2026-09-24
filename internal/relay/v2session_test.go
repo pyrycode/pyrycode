@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+
 	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
@@ -453,6 +455,48 @@ func TestV2Session_BadToken_AEADErrorThen4401(t *testing.T) {
 	}
 	if ep.Code != protocol.CodeAuthInvalidToken {
 		t.Errorf("error code = %q, want %q", ep.Code, protocol.CodeAuthInvalidToken)
+	}
+}
+
+// TestV2CloseCodes_MatchSpec pins every close code the daemon sends to its wire
+// value (docs/protocol-mobile.md § Error codes, close-code table). The constants
+// are compared against literals outside this module — the apps' close handlers —
+// so a fat-fingered value would be self-consistent in every test that uses the
+// constant symbolically. It also asserts the daemon's codes are pairwise distinct
+// and disjoint from the other codes in use (1000, 1011, and the relay-sent 4404,
+// 4409, 4429), which is what StatusClientUpdateRequired's "a value not in use"
+// means as a check (#2576).
+func TestV2CloseCodes_MatchSpec(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		got  websocket.StatusCode
+		want websocket.StatusCode
+	}{
+		{"StatusUnauthorized", StatusUnauthorized, 4401},
+		{"StatusIdleTimeout", StatusIdleTimeout, 4408},
+		{"StatusSessionGone", StatusSessionGone, 4410},
+		{"StatusClientUpdateRequired", StatusClientUpdateRequired, 4412},
+		{"StatusQueueOverflow", StatusQueueOverflow, 4413},
+		{"StatusProtocolMismatch", StatusProtocolMismatch, 4421},
+		{"StatusHandshakeFailure", StatusHandshakeFailure, 4426},
+	}
+	seen := map[websocket.StatusCode]string{
+		websocket.StatusNormalClosure: "1000 normal closure",
+		websocket.StatusInternalError: "1011 server error",
+		4404:                          "4404 relay: no server",
+		statusServerIDConflict:        "4409 relay: server-id conflict",
+		4429:                          "4429 relay: rate limited",
+	}
+	for _, c := range cases {
+		if c.got != c.want {
+			t.Errorf("%s = %d, want %d", c.name, c.got, c.want)
+		}
+		if other, dup := seen[c.got]; dup {
+			t.Errorf("%s = %d collides with %s", c.name, c.got, other)
+		}
+		seen[c.got] = c.name
 	}
 }
 

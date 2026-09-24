@@ -87,6 +87,22 @@ const (
 	// idled out", and a restart or an overflow is not that — the same mislabel
 	// StatusQueueOverflow's comment already records rejecting.
 	StatusSessionGone websocket.StatusCode = 4410
+
+	// StatusClientUpdateRequired is the WS close code the binary asks the
+	// relay to apply when it refuses an app build older than the host's
+	// minimum for that app (#2576). It follows the sealed
+	// protocol.CodeClientUpdateRequired error in the same routing envelope,
+	// after the Noise handshake and the token check, so the client reads the
+	// error before the close — the token-failure arm's shape. Echoes HTTP 412
+	// (Precondition Failed), consistent with the 44xx←HTTP convention: the
+	// minimum app version is a precondition the hello failed. 426 would be
+	// the literal match but 4426 is StatusHandshakeFailure. Wire spec:
+	// docs/protocol-mobile.md § Error codes, close-code row 4412.
+	//
+	// Terminal for THIS host only: a client stops re-dialling this daemon and
+	// keeps its other hosts. Reserved, not yet sent — no daemon holds a
+	// minimum until the enforcement ticket lands.
+	StatusClientUpdateRequired websocket.StatusCode = 4412
 )
 
 // idleTimeout is the bounded window a v2 session may go without any

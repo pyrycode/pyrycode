@@ -13,7 +13,7 @@ type HelloServerPayload struct {
 type HelloClientPayload struct {
     Role             string     `json:"role"` // always "client"
     DeviceName       string     `json:"device_name"`
-    ClientVersion    string     `json:"client_version"`
+    ClientVersion    string     `json:"client_version"` // free text on the wire; #2576 defines the <app>/<MAJOR>.<MINOR>.<PATCH> format a future minimum-version check parses this against — not enforced by this struct
     ProtocolVersions []string   `json:"protocol_versions"`
     LastSeenTS       *time.Time `json:"last_seen_ts,omitempty"` // decoded, no consumer (#2090)
     Token            string     `json:"token,omitempty"`        // #308; in-band device-pairing token under v2 (plaintext — MUST NOT be logged)
@@ -30,11 +30,12 @@ type HelloAckPayload struct {
 }
 
 type ErrorPayload struct {
-    Code           string `json:"code"`
-    Message        string `json:"message"`
-    Retryable      bool   `json:"retryable"`
-    RetryAfterS    *int   `json:"retry_after_s,omitempty"`
-    ConversationID string `json:"conversation_id,omitempty"` // #2443
+    Code             string `json:"code"`
+    Message          string `json:"message"`
+    Retryable        bool   `json:"retryable"`
+    RetryAfterS      *int   `json:"retry_after_s,omitempty"`
+    ConversationID   string `json:"conversation_id,omitempty"`   // #2443
+    MinClientVersion string `json:"min_client_version,omitempty"` // #2576
 }
 
 type AckPayload struct{}
@@ -59,6 +60,7 @@ Conventions:
   phone that wants the tail it missed sends `LastEventID` instead. Whether real
   history should exist, and what would source it, is #2091's decision.
 - **`ErrorPayload.ConversationID` is additive + `omitempty` (#2443), and it names the conversation an error is ABOUT rather than the request it answers.** Every existing error reply already lets the client infer its subject from `in_reply_to` (the client sent the request, so it knows what it named) and omits the field, keeping their wire shape byte-identical to the pre-#2443 one. It exists for the one reply that can't: `new_session`'s bare (unnamed) form rotates the daemon's own cursor conversation, so only the daemon — which resolved that cursor — knows which conversation a refusal reply is about. **SECURITY, stated in the field's own doc comment: the value is DAEMON-AUTHORED and MUST NOT be an echo of a client-supplied id** — the same discipline `V2SessionConfig.RunConfigFor` / `ModelListFor` already state for their own reported ids. A future producer that reaches for this field to save itself a lookup, rather than to name a subject `in_reply_to` genuinely cannot, would be misusing it.
+- **`ErrorPayload.MinClientVersion` is additive + `omitempty` (#2576), and carries `CodeClientUpdateRequired`'s minimum version alone — never any other error's.** `omitempty` keeps every existing error reply byte-identical. Same never-echo discipline as `ConversationID` above: it is the daemon's configured minimum for the requesting app, not a reflection of the client's own `client_version`. It is omitted on the same reject when the `hello`'s `client_version` could not be parsed at all, because the daemon then has no app name to look a minimum up by — see [protocol-package-constants-codes-go-error-codes-21.md](protocol-package-constants-codes-go-error-codes-21.md) and `docs/protocol-mobile.md` § Compatibility. No sender exists yet; a later ticket wires the check that populates this field.
 - **`LastEventID *uint64` is additive + `omitempty` (#647).** The phone's inbound reconnect-replay cursor: the durable `event_id` (the `Envelope.EventID` #649 surfaces outbound) it last saw, advertised on mid-turn reconnect so the daemon replays the missed tail from the `internal/eventring` ring or emits a `resync` marker. **Pointer + `omitempty` is load-bearing** — ring ids are always ≥ 1, so a non-nil pointer never encodes `0` and a nil pointer is omitted; a phone advertising none keeps the v1 hello byte-identical (key absent, not `null`). Same shape as `LastSeenTS`. This wire-type layer does **no enforcement** — `LastEventID` is **untrusted remote input**, and the consumer (`internal/relay`, #647, `security-sensitive`) range/shape-validates it and bounds replay by the ring. `TestHelloClientPayload_LastEventIDRoundTrip` pins the omit/round-trip shape. **Implementation caveat:** the #647 daemon consumer carries an unresolved code-review MUST FIX and is not yet merged — see [codebase/647.md](../codebase/647.md). The wire field itself is stable.
 
 Five fixture files under `testdata/` (one per type, each a complete `Envelope` with the payload inlined) drive five per-type `*_RoundTrip` tests in `handshake_test.go`. The tests reuse `readFixture` and `canonical` helpers from `envelope_test.go`. The byte-equivalence check (`canonical(out) == canonical(raw)`) is the load-bearing assertion; per-type field asserts exist to localise failure messages. The `hello_client.json` fixture's `last_seen_ts: "2026-05-08T08:14:02Z"` (no fractional seconds) pins the `time.RFC3339Nano` no-fractional round-trip behaviour.
