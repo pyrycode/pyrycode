@@ -1288,6 +1288,77 @@ func TestRegistry_Save_ActiveOmitsArchivedKey(t *testing.T) {
 	}
 }
 
+// #2571 AC1: the muted flag survives a registry save and reload, in both states.
+func TestRegistry_Muted_RoundTrip(t *testing.T) {
+	t.Parallel()
+	const mutedID ConversationID = "11111111-2222-4333-8444-555555555555"
+	const loudID ConversationID = "22222222-2222-4333-8444-555555555555"
+	when := mustParseTime(t, "2026-09-24T12:34:56.789Z")
+
+	r := &Registry{}
+	r.Create(Conversation{ID: mutedID, Cwd: "/a", IsMuted: true, LastUsedAt: when})
+	r.Create(Conversation{ID: loudID, Cwd: "/b", LastUsedAt: when.Add(time.Second)})
+
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if got, ok := back.Get(mutedID); !ok || !got.IsMuted {
+		t.Errorf("muted conversation after reload: got %+v (present=%v), want IsMuted=true", got, ok)
+	}
+	if got, ok := back.Get(loudID); !ok || got.IsMuted {
+		t.Errorf("unmuted conversation after reload: got %+v (present=%v), want IsMuted=false", got, ok)
+	}
+}
+
+// #2571 AC1: a conversations file written before the flag existed has no
+// is_muted key, and every row loads as not muted with no migration step.
+func TestRegistry_Load_AbsentMutedKeyDecodesUnmuted(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	raw := `{"conversations":[{"id":"11111111-2222-4333-8444-555555555555","cwd":"/legacy","is_promoted":true,"last_used_at":"2026-05-09T12:34:56.789Z"}]}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	r, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, ok := r.Get("11111111-2222-4333-8444-555555555555")
+	if !ok {
+		t.Fatal("legacy row missing after Load")
+	}
+	if got.IsMuted {
+		t.Error("absent is_muted key decoded as muted, want not muted (false)")
+	}
+}
+
+// #2571: the on-disk key is omitempty, like is_archived, so a registry with no
+// muted rows is byte-identical to its pre-#2571 form.
+func TestRegistry_Save_UnmutedOmitsMutedKey(t *testing.T) {
+	t.Parallel()
+	r := &Registry{}
+	r.Create(Conversation{ID: "11111111-2222-4333-8444-555555555555", Cwd: "/a", LastUsedAt: mustParseTime(t, "2026-09-24T12:34:56.789Z")})
+
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read after save: %v", err)
+	}
+	if strings.Contains(string(got), "is_muted") {
+		t.Errorf("unmuted registry serialized an is_muted key:\n%s", got)
+	}
+}
+
 // #2149 AC2/AC5: the setter stores a valid prompt verbatim, touches exactly one
 // field, and does not alias the caller's pointer.
 func TestRegistry_SetSystemPrompt_HitStoresVerbatim(t *testing.T) {
