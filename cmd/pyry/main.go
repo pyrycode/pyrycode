@@ -800,6 +800,12 @@ func runSupervisor(args []string) error {
 		slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}),
 		logRing,
 	))
+	// Rows recorded before #2568 carry the client's spelling of their folder —
+	// relative or "~"-prefixed — beside rows holding its realpath, so one folder
+	// shows as several workspaces. Rewrite them once, before anything else reads
+	// the registry, with the strict resolver: it neither creates a folder nor
+	// trust-marks one, and a row it cannot resolve is left as it was.
+	normaliseLegacyCwds(convReg, convRegistryPath, resolveWorkspaceDir, logger)
 
 	// Two-layer shutdown context so a shutdown's ORIGIN survives to the exit
 	// classification below. The signal layer handles SIGTERM/SIGINT (operator
@@ -1466,13 +1472,17 @@ type sessionMinter struct{ p *sessions.Pool }
 // — a wedged filesystem blocks in a syscall regardless of any deadline. See
 // handlers.createConversationMintTimeout, which records the same thing rather
 // than claiming a protection it no longer provides.
-func (m sessionMinter) Create(_ context.Context, label, spawnDir string) (string, error) {
+//
+// It answers with resolved alongside the id so the handler records exactly the
+// folder the session spawns in (#2568) — one resolver on the create path, no
+// second one to drift from it.
+func (m sessionMinter) Create(_ context.Context, label, spawnDir string) (string, string, error) {
 	resolved, err := resolveSpawnDir(spawnDir)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	id, err := m.p.Mint(label, resolved)
-	return string(id), err
+	return string(id), resolved, err
 }
 
 // settingsUpdaterAdapter adapts *sessions.Pool to relay.SettingsUpdater (#845,

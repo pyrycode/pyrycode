@@ -2,7 +2,7 @@
 
 How each phone-created discussion gets its own dedicated, isolated claude session. Two halves tie `internal/conversations` (the `Conversation.CurrentSessionID` binding field) to `internal/sessions` (the `Pool` that mints and supervises sessions):
 
-- **Create path (#677, workdir #685, scratch creation #696, deferred spawn #2085)** — `create_conversation` eagerly mints + binds a session, recording it on `CurrentSessionID`, in the conversation's own validated, trust-marked `Cwd` (#685) so discussions targeting different projects are isolated on disk. #696 lets the phone's default `~/.pyrycode/scratch` resolve under `$HOME` and be created before spawn (expand leading `~`, `MkdirAll` after the `$HOME` check). Since #2085 the mint registers, persists and supervises the session but does **not** spawn claude — the child comes up on the conversation's first message, on exactly the lazy-respawn path an idle-evicted session already takes. See [§ Spawn deferred to the first message](#spawn-deferred-to-the-first-message-2085).
+- **Create path (#677, workdir #685, scratch creation #696, deferred spawn #2085, recorded-cwd drift #2568)** — `create_conversation` eagerly mints + binds a session, recording it on `CurrentSessionID`, in the conversation's own validated, trust-marked `Cwd` (#685) so discussions targeting different projects are isolated on disk. #696 lets the phone's default `~/.pyrycode/scratch` resolve under `$HOME` and be created before spawn (expand leading `~`, `MkdirAll` after the `$HOME` check). Since #2085 the mint registers, persists and supervises the session but does **not** spawn claude — the child comes up on the conversation's first message, on exactly the lazy-respawn path an idle-evicted session already takes. #2568 records the resolved realpath the session actually spawns in, not the client's spelling of it, and rewrites rows recorded before that fix once at startup. See [§ Spawn deferred to the first message](#spawn-deferred-to-the-first-message-2085), [§ One-time startup normalisation](#one-time-startup-normalisation-of-rows-recorded-before-2568).
 - **Routing path (#678)** — `send_message` resolves that bound session and delivers the inbound turn there instead of to the bootstrap.
 - **Rotation maintenance (#739)** — when a bound session is re-keyed by a `/clear` rotation (old id → new id), the owning conversation's `CurrentSessionID` is re-pointed at the new id and the retired id is appended to `SessionHistory`, so the binding stays current beyond the session's first rotation. Eviction is binding-neutral. See [§ Maintaining the binding across rotation](#maintaining-the-binding-across-rotation-739).
 - **Stamping the boundary's routing key (#741)** — the `session_transition` producer reads that maintained binding (session id → owning conversation) and stamps `conversation_id` onto every emitted envelope, so the phone (`pyrycode-mobile#336`) folds the session-boundary marker into the correct thread; an unresolvable binding drops the whole event fail-closed rather than emit a guessed key. See [§ Reading the binding to stamp `conversation_id`](#reading-the-binding-to-stamp-conversation_id-741).
@@ -19,10 +19,10 @@ Before #677 there was exactly one supervised claude — the bootstrap session �
 
 When the daemon handles a `create_conversation` frame, the handler mints a session **before** recording the registry row:
 
-1. Decode payload, resolve `cwd` / `name` / `promoted` (server defaults for null fields).
+1. Decode payload, resolve `name` / `promoted` (server defaults for null fields). `cwd` — what gets **recorded** — is not settled yet; it depends on the mint's answer (step 3).
 2. `id, err := conversations.NewID()` — server-minted conversation id (crypto/rand UUIDv4).
-3. **Mint the session:** `creator.Create(ctx, string(id), spawnDir)` where `spawnDir` is the conversation's validated spawn workdir — empty for a default `Cwd`, the trust-marked realpath for a set `Cwd` (#685; see [§ `Cwd` is the validated, trust-marked spawn workdir](#cwd-is-the-validated-trust-marked-spawn-workdir-685)). `Pool.Mint` mints a session UUID → registers + persists it in the sessions registry → supervises. Since [#2085](#spawn-deferred-to-the-first-message-2085) it does **not** activate — no claude spawns here. Returns the new `SessionID`.
-4. `reg.Create(Conversation{ID, Name, Cwd, CurrentSessionID: sessionID, IsPromoted, LastUsedAt})` — the bound session id is populated on the row.
+3. **Mint the session:** `creator.Create(ctx, string(id), spawnDir)` where `spawnDir` is the *raw* phone-requested `p.Cwd` (empty for a null `Cwd`). `Pool.Mint` mints a session UUID → registers + persists it in the sessions registry → supervises. Since [#2085](#spawn-deferred-to-the-first-message-2085) it does **not** activate — no claude spawns here. Returns `(sessionID, dir, err)`: `dir` is the validator's answer — empty for a default `Cwd`, the confined, trust-marked realpath for a set one (#685; see [§ `Cwd` is the validated, trust-marked spawn workdir](#cwd-is-the-validated-trust-marked-spawn-workdir-685)) — and is what step 4 records, not the raw `spawnDir` (#2568).
+4. `cwd := defaultCwd; if p.Cwd != nil { cwd = dir }` — a null request still records the daemon's default; a set one records `creator.Create`'s resolved answer, never the client's spelling, so `default`, `~/x/default` and its absolute form all record the one folder they spawn in rather than three sidebar workspaces for it (#2568). `reg.Create(Conversation{ID, Name, Cwd: cwd, CurrentSessionID: sessionID, IsPromoted, LastUsedAt})` — the bound session id is populated on the row.
 5. `reg.Save(registryPath)` — eager persist (the field round-trips through the registry's atomic Save/Load, so the binding survives a daemon restart).
 6. Reply `conversation_created`. The wire reply is **unchanged** — it carries no session field; the binding is internal state surfaced only in the registry row.
 
@@ -52,8 +52,12 @@ type SessionCreator interface {
     // A non-empty spawnDir is the phone's raw requested Cwd, validated +
     // trust-marked by the impl before the mint (#685); an escape wraps
     // ErrSpawnDirRejected. Mints and binds only — the child comes up on the
-    // conversation's first message, not here (#2085).
-    Create(ctx context.Context, label, spawnDir string) (string, error)
+    // conversation's first message, not here (#2085). dir is the impl's
+    // resolved answer — "" for an empty spawnDir, the confined, trust-marked
+    // realpath otherwise — and is what the handler records as the
+    // conversation's Cwd for a set request (#2568): one resolver on the
+    // create path, so the recorded path and the spawn dir cannot disagree.
+    Create(ctx context.Context, label, spawnDir string) (sessionID, dir string, err error)
 }
 ```
 
@@ -64,13 +68,13 @@ type SessionCreator interface {
 type sessionMinter struct{ p *sessions.Pool }
 // ctx is unused since #2085: Pool.Mint is ctx-free — it spawns nothing, so
 // there is nothing left here to cancel or time out.
-func (m sessionMinter) Create(_ context.Context, label, spawnDir string) (string, error) {
+func (m sessionMinter) Create(_ context.Context, label, spawnDir string) (string, string, error) {
     resolved, err := resolveSpawnDir(spawnDir)   // confine to $HOME + trust-mark (#685)
     if err != nil {
-        return "", err
+        return "", "", err
     }
     id, err := m.p.Mint(label, resolved)
-    return string(id), err
+    return string(id), resolved, err   // resolved is what #2568 records, not spawnDir
 }
 ```
 
@@ -95,6 +99,15 @@ Because `Cwd` is phone-influenced, it is an **untrusted spawn input** — valida
 `internal/relay/handlers` still does **no** path handling — it forwards the raw value through the typed `SessionCreator` seam and maps the sentinel; the canonicalise + confine + trust all live at the cmd layer. `Pool.CreateIn` ([#684](sessions-package.md#per-session-spawn-workdir-createin--getorcreatein-684)) uses the resolved realpath verbatim (it does not re-validate — by contract the caller hands it a pre-resolved realpath). See [codebase/685.md](../codebase/685.md).
 
 > **Residual TOCTOU window (accepted).** Between the confine-time `EvalSymlinks` and claude's eventual `chdir`, a path that resolved inside `$HOME` could be swapped to an escaping symlink — the *same* window the daemon's own bootstrap workdir already accepts, requiring control of the operator's home to win. Neither #685 nor #696 widens it: #696's `MkdirAll` runs only after the pre-creation containment check passes, and the created realpath is re-confined before trust+spawn. Closing it fully (`openat2`/`RESOLVE_BENEATH`) is out of scope and unobserved.
+
+### One-time startup normalisation of rows recorded before #2568
+
+Before #2568, `create_conversation` recorded the client's raw `Cwd` string, not the realpath it spawned in — so a row created as `default`, one as `~/pyry-workspace/default` and one as the absolute form were three sidebar workspaces for one folder, and `pyry channel new` / `change_workspace` (which already recorded the realpath) disagreed with create's own rows. `normaliseLegacyCwds` (`cmd/pyry/conversation_cwd_normalise.go`), called from `runSupervisor` right after `conversations.Load` and the logger are both available, rewrites the drift once per startup, before anything else reads the registry:
+
+- Collects every distinct stored `Cwd` that is **non-empty and not `filepath.IsAbs`** — relative or `~`-prefixed. An absolute row is never touched, resolvable or not; an empty `Cwd` names no folder anyone requested.
+- Resolves each through `resolveWorkspaceDir` — the **strict** confiner (tilde expansion + `confineWorkdirToHome`, no `MkdirAll`, no `trustMark`) already used by the `change_workspace` path, not the create-aware, folder-creating `confineWorkdirToHomeCreating`: startup must not create a folder or auto-trust one just because a stale row named it. A relative value resolves against the daemon's process cwd, the same base create resolved it against.
+- Applies the successes in one call to `Registry.RekeyCwds(rekey map[string]string) int`, which under one `mu` critical section rewrites every row's `Cwd` and moves each rekeyed `workspace_labels` entry to its new key — **a label already stored under the resolved (usually absolute) key wins**; where two legacy keys collapse into the same unlabelled key, the lexicographically first (sorted) old key's label wins. `RekeyCwds` is the registry's first primitive that touches rows and label keys together in one lock; nothing before #2568 needed to.
+- A `Cwd` that fails to resolve (the folder is gone, or it now escapes `$HOME`) is **left exactly as stored** — every later spawn from it re-validates through `resolveSpawnDir` anyway — and logged at `Warn` with the static event `conversations.legacy_cwd_unresolved` plus a `rows` count, **never the path and never the error** (the confine error names the path). If anything was rewritten, `reg.Save` persists it; a save failure logs `conversations.legacy_cwd_save_failed` and the daemon continues on the in-memory rewrite, which the next `Save` picks up. The daemon always starts — this function returns nothing to fail on.
 
 ### Mint-failure and timeout behaviour
 

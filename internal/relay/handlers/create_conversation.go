@@ -89,7 +89,8 @@ type ConversationCreator interface {
 
 // SessionCreator is the minimal session-mint surface this handler consumes from
 // the sessions pool: mint and supervise one dedicated claude session that will
-// spawn in spawnDir, returning the session id. It does NOT start the child
+// spawn in spawnDir, returning the session id and the directory it will spawn
+// in. It does NOT start the child
 // (#2085) — that happens on the conversation's first message, so that every
 // per-session setting chosen before it is simply what the child launches with.
 // It is adapted at the cmd/pyry boundary (sessionMinter) rather than satisfying
@@ -102,8 +103,15 @@ type ConversationCreator interface {
 // $HOME, symlink-resolve both sides) and trust-marks it before spawning. A
 // requested dir that escapes $HOME is rejected with an error wrapping
 // ErrSpawnDirRejected; the handler maps that to a non-retryable reply.
+//
+// The returned dir is the validator's output — "" for an empty spawnDir, the
+// confined, trust-marked realpath otherwise — and it is what the handler records
+// as the conversation's Cwd for a set request (#2568). Returning it from the one
+// place that resolves is what keeps the recorded path and the spawn dir from
+// disagreeing: "default", "~/x/default" and "/home/u/x/default" all spawn in one
+// folder and must be stored as one workspace.
 type SessionCreator interface {
-	Create(ctx context.Context, label, spawnDir string) (string, error)
+	Create(ctx context.Context, label, spawnDir string) (sessionID, dir string, err error)
 }
 
 // CreateConversation returns a dispatch.Handler that processes a
@@ -127,7 +135,8 @@ type SessionCreator interface {
 // mint time, and the accepted consequence of the wider validated-then-spawn
 // window is recorded on sessionMinter.
 // The phone's raw requested Cwd is forwarded verbatim as
-// creator.Create's spawnDir; this handler does NO path handling and stays free of
+// creator.Create's spawnDir, and the row records the dir creator.Create answers
+// with, never the raw string (#2568); this handler does NO path handling and stays free of
 // internal/sessions / cmd-layer imports. The cmd-layer adapter (sessionMinter →
 // resolveSpawnDir) is the sole validator: it canonicalises + confines the Cwd to
 // $HOME (rejecting any path that escapes after symlink resolution) and
@@ -150,14 +159,11 @@ func CreateConversation(reg ConversationCreator, creator SessionCreator, registr
 			return replyError(ctx, c, env, protocol.CodeProtocolMalformed, msgCreateConversationMalformed, false)
 		}
 
-		// Resolve the three nullable fields to effective values. cwd falls back
-		// to the daemon's default workdir; name is a pointer passthrough (nil
-		// stays nil — an unnamed scratch discussion); promoted defaults false.
+		// Resolve the nullable fields to effective values. name is a pointer
+		// passthrough (nil stays nil — an unnamed scratch discussion); promoted
+		// defaults false. cwd is settled after the mint below: the daemon's
+		// default workdir for a null Cwd, the resolved spawn dir for a set one.
 		promoted := p.IsPromoted != nil && *p.IsPromoted
-		cwd := defaultCwd
-		if p.Cwd != nil {
-			cwd = *p.Cwd
-		}
 		name := p.Name
 
 		// spawnDir is the *raw* phone-requested working directory, read from the
@@ -194,7 +200,7 @@ func CreateConversation(reg ConversationCreator, creator SessionCreator, registr
 		// SessionCreator that honours a ctx, which the production one no longer
 		// does — see createConversationMintTimeout for why it is inert here.
 		mintCtx, cancel := context.WithTimeout(ctx, createConversationMintTimeout)
-		sessionID, err := creator.Create(mintCtx, string(id), spawnDir)
+		sessionID, spawnedIn, err := creator.Create(mintCtx, string(id), spawnDir)
 		cancel()
 		if err != nil {
 			// A rejected Cwd (escapes $HOME / unresolvable) is deterministic:
@@ -222,6 +228,15 @@ func CreateConversation(reg ConversationCreator, creator SessionCreator, registr
 				"conversation_id", string(id),
 				"err", err)
 			return replyError(ctx, c, env, protocol.CodeServerBinaryOffline, msgCreateConversationMintFailed, true)
+		}
+
+		// Record where the session will actually run, not how the client spelled
+		// it (#2568): the sidebar groups by the exact string, so recording the
+		// request would split one folder into as many workspaces as it has
+		// spellings. A null Cwd spawns in the shared workdir and records defaultCwd.
+		cwd := defaultCwd
+		if p.Cwd != nil {
+			cwd = spawnedIn
 		}
 
 		now := time.Now().UTC()

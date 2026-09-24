@@ -788,3 +788,50 @@ func (r *Registry) SetWorkspaceLabel(cwd string, label *string) {
 	}
 	r.workspaceLabels[cwd] = *label
 }
+
+// RekeyCwds rewrites a workspace's cwd across the whole registry in one step
+// (#2568): every conversation whose Cwd is a key of rekey gets the mapped value,
+// and the workspace label stored under that key moves with it, so a label key
+// keeps byte-equalling a stored Cwd (the invariant rename_workspace's
+// workspace.not_found refusal is built on). It returns the number of rows
+// rewritten.
+//
+// Where keys collapse, the label already stored under the new key wins and the
+// old key's label is dropped. Between two old keys collapsing into one unlabelled
+// new key, the old keys are visited in sorted order and the first label to land
+// wins, so the outcome does not depend on map iteration order. Every old key is
+// deleted either way. An entry mapping a key to itself is ignored.
+//
+// Rows and labels change under one hold of mu, so no reader sees a row moved
+// without its label. The caller resolves the new values before calling — no
+// filesystem work happens under the lock. Like every mutator here it does NOT
+// call Save and does not log.
+func (r *Registry) RekeyCwds(rekey map[string]string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for i := range r.conversations {
+		if to, ok := rekey[r.conversations[i].Cwd]; ok && to != r.conversations[i].Cwd {
+			r.conversations[i].Cwd = to
+			n++
+		}
+	}
+	olds := make([]string, 0, len(rekey))
+	for old, to := range rekey {
+		if old != to {
+			olds = append(olds, old)
+		}
+	}
+	sort.Strings(olds)
+	for _, old := range olds {
+		label, ok := r.workspaceLabels[old]
+		if !ok {
+			continue
+		}
+		delete(r.workspaceLabels, old)
+		if _, taken := r.workspaceLabels[rekey[old]]; !taken {
+			r.workspaceLabels[rekey[old]] = label
+		}
+	}
+	return n
+}
