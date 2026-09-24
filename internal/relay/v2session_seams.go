@@ -1143,6 +1143,26 @@ type V2SessionConfig struct {
 	// so it must never be logged, and no reply derived from it ever reaches the wire.
 	AttachmentResolve func(conversationID, attachmentID string) (path string, ok bool)
 
+	// WorkspaceFileRead reads one markdown file LIVE from the recorded workspace
+	// of a conversation (#2598) — the path a client names, not a stored copy.
+	// handleReadWorkspaceFile is its sole reader. Optional: nil makes the
+	// read_workspace_file frame consumed and inert, as a nil AttachmentResolve
+	// does for request_attachment.
+	//
+	// COMMA-OK FOR AttachmentResolve's REASON. Every refusal — wrong extension,
+	// no recorded workspace, missing file, out-of-tree path, non-regular file,
+	// over the size bound — collapses into false inside cmd/pyry's
+	// workspaceFileReader, so the handler cannot branch on what the one
+	// attachment.not_found answer must not distinguish, and never holds a
+	// filesystem error that prints a host path.
+	//
+	// IT DISCHARGES NO REGISTRY CHECK. The handler consults KnownConversation
+	// before the conversation id reaches this seam. Confinement to the
+	// workspace, the markdown-only rule and the checked read are the
+	// implementation's, and the only sanctioned one is workspaceFileReader,
+	// which reuses the attach_file verb's confineFile and readChecked.
+	WorkspaceFileRead func(conversationID, path string) (WorkspaceFile, bool)
+
 	// Interrupter stops the running turn in the conversation an inbound
 	// interactive `interrupt` control frame names (#707, #2103) — or, when the
 	// frame names none, in the one the daemon's cursor points at. Optional: nil ⇒
@@ -1695,3 +1715,16 @@ const (
 	// cause can clear without the client changing its request.
 	PairingMintFailed
 )
+
+// WorkspaceFile is one live read answered by the WorkspaceFileRead seam (#2598).
+//
+// AttachmentID is daemon-minted per transfer — a lowercase UUIDv4 that keys this
+// one chunk stream and addresses nothing afterwards: nothing is stored under it.
+// Filename is the base name of the RESOLVED file, which after symlink
+// resolution may differ from the leaf the client named. Neither Filename nor
+// Data may be logged.
+type WorkspaceFile struct {
+	AttachmentID string
+	Filename     string
+	Data         []byte
+}

@@ -205,6 +205,10 @@ func TestIsKnownAppType(t *testing.T) {
 		// inbound one — this leg really is inbound, so this is the structural bar
 		// against a v1 client sending a request_attachment into dispatch.Route.
 		{"request_attachment-rejected", TypeRequestAttachment, false, ErrUnknownType},
+		// the v2-only live workspace read (#2598): inbound only, so as on the row
+		// above the rejection is the structural bar against a v1 client sending a
+		// read_workspace_file into dispatch.Route.
+		{"read_workspace_file-rejected", TypeReadWorkspaceFile, false, ErrUnknownType},
 		// the v2-only conversation-history pair. The request is an inbound control
 		// type an old phone never sends, so as on the request_attachment row above
 		// the rejection's load-bearing half is the inbound one — it is the
@@ -367,6 +371,8 @@ var v2OnlyTypes = map[string]bool{
 	TypeQuestionRefused: true,
 	// v2 attachment retrieval request verb (inbound control).
 	TypeRequestAttachment: true,
+	// v2 live workspace read verb (inbound control).
+	TypeReadWorkspaceFile: true,
 	// v2 conversation-history vocabulary: the request verb (inbound control) and
 	// the page it is answered with (outbound reply).
 	TypeRequestHistory: true,
@@ -497,6 +503,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeQuestionRefused,
 		// v2 attachment retrieval request verb (inbound control).
 		TypeRequestAttachment,
+		// v2 live workspace read verb (inbound control).
+		TypeReadWorkspaceFile,
 		// v2 conversation-history vocabulary.
 		TypeRequestHistory, TypeHistoryPage,
 		// v2 on-demand model-list request verb (inbound control).

@@ -1559,6 +1559,20 @@ const (
 	TypeRequestAttachment = "request_attachment" // phone → binary, inbound v2 control (switch-intercepted — #2054)
 )
 
+// Mobile Protocol v2 LIVE WORKSPACE READ (#2598). The frame a client sends to
+// read one markdown file as it is on the host NOW, from the recorded workspace of
+// the conversation it names. Its payload is ReadWorkspaceFilePayload
+// (attachments.go), and it is answered exactly as TypeRequestAttachment is: an
+// attachment_chunk stream correlated by in_reply_to, or one
+// CodeAttachmentNotFound / CodeAttachmentStreamAborted TypeError.
+//
+// Declared and served in one slice, unlike #2052→#2054: the handler is the
+// declaration's only consumer, so there is no pending-handler interval to file
+// in excludedTypes.
+const (
+	TypeReadWorkspaceFile = "read_workspace_file" // phone → binary, inbound v2 control (switch-intercepted — #2598)
+)
+
 // Mobile Protocol v2 ATTACHMENT ANNOUNCEMENT (#2082; docs/protocol-mobile.md
 // § Attachments publishes it). The frame that tells a client a file exists on the
 // host for a conversation. Its payload is AttachmentOfferedPayload

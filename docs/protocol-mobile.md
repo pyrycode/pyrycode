@@ -590,6 +590,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`attachment_chunk`** | either | no | **New in v2.** One slice of one attachment's bytes, carrying the whole transfer's metadata on every chunk (#1752). The table's first genuinely bidirectional **payload** frame — `ack`/`error`/`rekey_request` above are also `either` but carry no application payload: upload rides this one phone → binary and retrieval rides it binary → phone, and declaring exactly one type is what stops the two legs drifting. It names the conversation the bytes belong to (#2142) — **meaningful on the upload leg only**, a **lookup key validated against the daemon's registry** before it becomes a path component and never a value trusted as sent, with **naming a conversation not authorization**; the daemon files an upload under it since #2143. See [Attachments](#attachments). |
 | **`attachment_stored`** | binary → phone | no | **New in v2.** The upload leg's **success reply** — the transfer completed, its claims were checked, and the bytes are stored under the `attachment_id` the client chose (#1895). Correlated by `in_reply_to`, which names the chunk **whose arrival completed the transfer** rather than the last one sent. Carries that one id and nothing else: no host path, no directory component, no stored filename. Nothing emits it yet (#1897). See [Attachments](#attachments). |
 | **`request_attachment`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for a stored attachment, naming the conversation and the attachment and nothing else (#2052). The `conversation_id` is a **lookup key validated against the daemon's registry**, not a value trusted as sent, and naming a conversation is **not authorization**. Correlation rides `in_reply_to`, so the payload carries **no request-id key**; the answer is a stream of [`attachment_chunk`](#attachment_chunk) frames, or `attachment.not_found` / `attachment.stream_aborted`. **Nothing answers it yet** — the handler is #2054 and the stream #2053. See [Attachments](#attachments). |
+| `read_workspace_file` | phone → binary | no | **New in v2.** Inbound control — a paired client asks to read one markdown file **live** from a conversation's recorded workspace, naming the conversation and a path and nothing else (#2598). Not a retrieval of a stored attachment: nothing is ever written to the attachment store, and the daemon reads the disk again on every request, so an edit made between two requests shows in the second answer. The `conversation_id` is a **lookup key validated against the daemon's registry**, not authorization; the path is confined to that conversation's workspace and refused unless its final component, and the resolved file's, both end in `.md` or `.markdown`. Correlation rides `in_reply_to`; the answer is a stream of [`attachment_chunk`](#attachment_chunk) frames under a daemon-minted `attachment_id`, or the single `attachment.not_found` that names no cause. See [Attachments](#attachments). |
 | **`attachment_offered`** | binary → phone | no | **New in v2.** Outbound push — a file exists on the host for this conversation, naming it with an `attachment_id` **the client did not mint** (#2082). It closes the one gap the rest of this family leaves: every other attachment frame needs an id the client already holds, so a file `claude` produced reached a client as nothing at all. **No bytes ride it** — it announces, and a client fetches with [`request_attachment`](#request_attachment), which is what *offered* rather than *sent* carries. Correlation is `conversation_id` and nothing else (no `in_reply_to`, no `turn_id`), and it is **delivered to every attached client rather than routed to one**, scoped at the consumer exactly as [`modal_shown`](#modal_shown) is. Receiving it is **not a capability**: #2054 re-validates the id against the daemon's registry regardless. Its `filename` is **`claude`-authored** — the section's first such string, so [§ Security model](#security-model)'s threat 1 lands, flowing *out of* `claude` rather than into it. **Emitted since #2166**, when the daemon stores a file `claude` produced; the offer is **live-only** — no registry, no list verb, no replay, so one missed while disconnected is not re-sent. See [Attachments](#attachments). |
 | **`request_model_list`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for a conversation's model menu at any time, naming the conversation and nothing else (#2125). It closes the window the frame's two unsolicited paths leave open: a conversation created **after** the client connected misses both the live lane and the connect-time reconcile, so its model and effort controls stay blank with nothing to wait for. The `conversation_id` is a **lookup key validated against the daemon's registry**, not a value trusted as sent. Correlation rides `in_reply_to`, so there is **no request-id key**; the answer is one [`model_list`](#model_list) — the same frame, the same payload source, **no `event_id`** — or `conversation.not_found` / the retryable `model_list.unavailable`. Interactive-capability-gated: a conn without it gets nothing at all. See [Asking for a model list on demand](#asking-for-a-model-list-on-demand). |
 | **`request_history`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for entries older than the ones it has, naming the conversation, an opaque `cursor` and a `limit` (#2113). Scroll-back over the **daemon-owned on-disk log** (#2112), which is **not** the [Mode A](#reconnect--backfill-semantics) event-ring replay: that one is catch-up across a dropped connection and is empty after a restart. The `conversation_id` is a **lookup key validated against the daemon's registry**, not a value trusted as sent. Correlation rides `in_reply_to`, so there is **no request-id key**; the answer is one [`history_page`](#history_page). Answered by the daemon since **#2116**, on the addressed conn's app-frame worker rather than inline, so a page read off disk never stalls another conn's frames. See [Conversation history](#conversation-history-v2). |
@@ -3976,6 +3977,76 @@ figure ahead of the code that enforces it.
     "conversation_id": "9d4e7a21-8c05-4f3b-b6e2-1a7c9e30d5f4",
     "attachment_id": "b8e0c374-2f61-4a95-8d0e-5c37a91b6e28",
     "filename": "quarterly-summary.png"
+  }
+}
+```
+
+#### `read_workspace_file`
+
+Direction **phone → binary** (inbound v2 control). Declared and served in one
+slice, **#2598**. Reads one markdown file **as it is on the host right now**
+from the recorded workspace of the conversation it names — a different guarantee
+from every other frame in this section, all of which move a **stored** copy.
+Nothing here is ever written to the attachment store, and the daemon reads the
+file again on every request: two requests for the same path can answer with
+different bytes, and that is the point.
+
+**It names a conversation and a path, and nothing else.**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | The conversation whose workspace is read. A **lookup key validated against the daemon's registry**, never a value trusted as sent, and **naming a conversation here is not authorization** — the same rule [`request_attachment`](#request_attachment) publishes for its own `conversation_id`. |
+| `path` | string | The file to read, relative to that conversation's workspace or absolute. A relative path resolves against the workspace, **never** against the daemon's own process directory. An escaping path answers the same undistinguished refusal as a missing one. |
+
+**Both fields are always present** (no `omitempty`), so a decoder may rely on
+both. A truncated or hostile payload decodes to two empty strings, which names
+no conversation and confines to nothing.
+
+**Markdown only, checked on both the name given and the name resolved to.** A
+path whose final component does not end in `.md` or `.markdown` — in any case —
+is refused before the daemon opens the registry or touches a filesystem. The
+same check runs again on the **resolved** file, after the path is confined:
+confinement follows a symlink, so a link named `notes.md` pointing at `.env`
+inside the same workspace passes containment and is still refused, because its
+target's own leaf fails the rule. Widening past markdown is out of scope for
+this frame; it would be a different verb; a paired client already reads any
+`.md` file in any conversation's workspace it names, which is the accepted
+residual — pairing is the authorization, as for every verb here, and `claude`
+can already read these files and print them.
+
+**The workspace is read at request time, not cached.** A `change_workspace`
+moved between two requests changes what the second one reads. An empty or
+unresolvable workspace is refused, the same as a missing file.
+
+**Correlation rides `in_reply_to`, so there is no request-id key** — the same
+decision [`request_attachment`](#request_attachment) and
+[`attachment_stored`](#attachment_stored) already took. The answer is a stream
+of [`attachment_chunk`](#attachment_chunk) frames whose `attachment_id` is
+**minted by the daemon for this transfer only**: a lowercase UUIDv4 that keys
+this one chunk stream and nothing else — it is never stored, never accepted
+back on any other frame, and two reads of the same file mint two different ids.
+
+**One refusal, [`attachment.not_found`](#error-codes), for every cause**: an
+unknown conversation, an empty workspace, the wrong extension on either the
+requested or the resolved leaf, a missing file, a path outside the workspace, a
+non-regular file, a file over the daemon's size bound, or an undecodable
+payload — all answer the identical static message, non-retryable, naming
+neither the path nor the reason. A failure after the stream has begun answers
+[`attachment.stream_aborted`](#error-codes) instead, exactly as
+[`request_attachment`](#request_attachment)'s does.
+
+**Sending this frame is not a capability, and neither is receiving an answer.**
+Authorization is pairing, enforced at the Noise IK handshake; there is no
+per-verb gate. The path is never logged and never echoed on any refusal — the
+same filename discipline this section already states for `filename` — and
+neither is the conversation id.
+
+```json
+{
+  "id": 214, "type": "read_workspace_file", "ts": "...",
+  "payload": {
+    "conversation_id": "9d4e7a21-8c05-4f3b-b6e2-1a7c9e30d5f4",
+    "path": "notes/todo.md"
   }
 }
 ```
