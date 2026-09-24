@@ -36,6 +36,15 @@ type registryFile struct {
 	// to the Save-side sort applied to Conversations: output stays byte-identical
 	// for the same logical content regardless of insertion order.
 	WorkspaceLabels map[string]string `json:"workspace_labels,omitempty"`
+
+	// Seeded records that the host has made its one-time starting point — a
+	// General channel in a Default workspace — or decided it needs none because
+	// it already held conversations (#2569). It is never cleared, so a General
+	// the operator renamed, archived or deleted is not recreated. omitempty for
+	// WorkspaceLabels' reason: an absent key decodes as unseeded with no
+	// migration step, and an unseeded registry saves byte-identical to its
+	// pre-#2569 form.
+	Seeded bool `json:"seeded,omitempty"`
 }
 
 // MaxSystemPromptBytes bounds Conversation.SystemPrompt, inclusive: a value of
@@ -120,6 +129,11 @@ type Registry struct {
 	// disjointness.
 	workspaceLabels map[string]string
 
+	// seeded mirrors registryFile.Seeded, guarded by mu and snapshotted by Save in
+	// the same critical section as the conversations and labels, so a seed's row,
+	// label and marker reach disk in one Save.
+	seeded bool
+
 	// onDelete is the removal observer installed by SetOnDelete (#1502), guarded
 	// by mu for its reads and writes; nil means none. Delete calls it after
 	// releasing mu.
@@ -148,7 +162,7 @@ func Load(path string) (*Registry, error) {
 	if err := json.Unmarshal(data, &rf); err != nil {
 		return nil, fmt.Errorf("registry: parse %s: %w", path, err)
 	}
-	return &Registry{conversations: rf.Conversations, workspaceLabels: rf.WorkspaceLabels}, nil
+	return &Registry{conversations: rf.Conversations, workspaceLabels: rf.WorkspaceLabels, seeded: rf.Seeded}, nil
 }
 
 // Save writes the registry atomically: temp file in filepath.Dir(path) at
@@ -178,6 +192,7 @@ func (r *Registry) Save(path string) error {
 	for cwd, label := range r.workspaceLabels {
 		labels[cwd] = label
 	}
+	seeded := r.seeded
 	r.mu.Unlock()
 
 	sort.SliceStable(snapshot, func(i, j int) bool {
@@ -203,7 +218,7 @@ func (r *Registry) Save(path string) error {
 	}
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(&registryFile{Conversations: snapshot, WorkspaceLabels: labels}); err != nil {
+	if err := enc.Encode(&registryFile{Conversations: snapshot, WorkspaceLabels: labels, Seeded: seeded}); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("registry: encode: %w", err)
 	}
@@ -218,6 +233,23 @@ func (r *Registry) Save(path string) error {
 		return fmt.Errorf("registry: rename: %w", err)
 	}
 	return nil
+}
+
+// Seeded reports whether the host's one-time starting point has been settled
+// (#2569): seeded, or skipped because conversations already existed.
+func (r *Registry) Seeded() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.seeded
+}
+
+// MarkSeeded sets the seed marker. There is no way to clear it. It does NOT
+// call Save — persistence is the caller's concern, as for every other mutator
+// here.
+func (r *Registry) MarkSeeded() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.seeded = true
 }
 
 // Create appends c to the in-memory list. Caller owns uniqueness — Create

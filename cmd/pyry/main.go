@@ -1323,6 +1323,14 @@ func runSupervisor(args []string) error {
 		return string(id), err
 	}, convRegistryPath, announceConversation, logger)
 	ctrl.SetChannelCreator(createChannel)
+	// Give a new host its starting point (#2569) through that same creator, so
+	// the General channel is confined, trust-marked and bound exactly as
+	// `pyry channel new` would make it. It waits for pool.Ready: pool.Run blocks
+	// below, and a Mint before it runs persists a session and then fails, which
+	// would orphan one session per start. Joined after pool.Run returns.
+	seedDone := seedWhenReady(ctx, pool.Ready(), func() {
+		seedDefaultWorkspace(convReg, convRegistryPath, relay.WorkspaceRoot(), createChannel, logger)
+	})
 	// Install the channel.post poster (#2497) over that creator and the SAME
 	// conversation registry and durable log every other conversation-keyed seam
 	// above resolves against, so a posted message and a served history page
@@ -1381,6 +1389,7 @@ func runSupervisor(args []string) error {
 	// has observed ctx.Done and is winding down its drains. Waiting here keeps the
 	// daemon from exiting while a drain goroutine is still in flight.
 	<-qDone
+	<-seedDone
 
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		return fmt.Errorf("supervisor: %w", runErr)

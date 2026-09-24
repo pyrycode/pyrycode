@@ -110,7 +110,12 @@ func negotiateCapabilities(advertised []string) []string {
 	return out
 }
 
-func workspaceRoot() string {
+// WorkspaceRoot is the folder new workspaces live under, $HOME/pyry-workspace,
+// sent to an accepted client as hello_ack's workspace_root. Exported so the
+// daemon's first-start seed (#2569) roots the Default workspace here rather than
+// spelling the folder a second time. Empty when $HOME is unknown or not
+// absolute.
+func WorkspaceRoot() string {
 	home, err := os.UserHomeDir()
 	if err != nil || !filepath.IsAbs(home) {
 		return ""
@@ -237,7 +242,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	device, tokenResult := m.cfg.Devices.Validate(helloPayload.Token)
 	root := ""
 	if tokenResult == devices.ValidateAccepted {
-		root = workspaceRoot()
+		root = WorkspaceRoot()
 	}
 
 	// Build and AEAD-seal hello_ack via WriteResp's early-data slot. The

@@ -94,3 +94,13 @@ Seed (`cmd/pyry/workspace_seed_test.go`), real `channelCreator` with a fake mint
 ## Documentation handoff
 
 None required by the ticket. Pending for the documentation stage: the `seeded` registry key and the startup seed may deserve a line in the conversations package overview (`docs/knowledge/features/`).
+
+## Revisions
+
+### 2026-09-24 — fake-daemon e2e harness pre-marks the registry
+
+The plan's testing strategy missed that every fake-daemon e2e test starts a fresh host. With the seed live, six tests that count sessions or conversations on a fresh home failed (`TestChannelNew_E2E_RefusesDirOutsideHome`, three `TestE2E_Restart_*`, `TestSessionsList_E2E_BootstrapOnly`, `TestSessionsRename_E2E_UnknownUUID`): each saw General's row and its bound session.
+
+Fix, in test code only: `spawnWith` in `internal/e2e/harness.go` calls a new `premarkWorkspaceSeeded`, which writes `{"conversations":[],"seeded":true}` for the `test` instance unless a `conversations.json` already exists. A test that wants the seed writes a zero-byte file first; the daemon loads it as empty and unseeded.
+
+Added `TestWorkspaceSeed_E2E_FreshHostGetsGeneral` (`internal/e2e/workspace_seed_test.go`). It is the only test that can prove the timing half of AC1 against a real pool: exactly two sessions (the bootstrap and General's bound one), and General's session not active. Mutation-checked: seeding before `pool.Run` fails it with three sessions, one of them orphaned.

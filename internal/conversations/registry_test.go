@@ -2724,3 +2724,63 @@ func TestRegistry_RekeyCwds_RoundTrip(t *testing.T) {
 		t.Error("legacy label key survived the reload")
 	}
 }
+
+// #2569: the seed marker survives Save→Load, and a marked file carries the key.
+func TestRegistry_Seeded_RoundTrip(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	r := &Registry{}
+	if r.Seeded() {
+		t.Fatal("zero registry reports Seeded")
+	}
+	r.MarkSeeded()
+	if !r.Seeded() {
+		t.Fatal("MarkSeeded did not set the marker in memory")
+	}
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read after save: %v", err)
+	}
+	if !strings.Contains(string(raw), `"seeded": true`) {
+		t.Errorf("marked registry saved without the seeded key:\n%s", raw)
+	}
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !back.Seeded() {
+		t.Error("marker lost across Save→Load")
+	}
+}
+
+// #2569: a file written before the marker existed loads as unseeded with no
+// migration step, and an unseeded registry saves without the key, so its bytes
+// match today's file.
+func TestRegistry_Seeded_AbsentKeyDecodesUnseeded(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	raw := `{"conversations":[{"id":"11111111-2222-4333-8444-555555555555","cwd":"/legacy","is_promoted":false,"last_used_at":"2026-09-07T12:34:56.789Z"}]}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	r, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if r.Seeded() {
+		t.Error("file without a seeded key loaded as seeded")
+	}
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read after save: %v", err)
+	}
+	if strings.Contains(string(saved), "seeded") {
+		t.Errorf("unseeded registry serialized a seeded key:\n%s", saved)
+	}
+}
