@@ -880,10 +880,12 @@ type BannerPayload struct {
 // conversation-level signal, not turn-scoped, so there is no turn_id — an
 // unrecognized message has no turn we can honestly attribute it to.
 //
-// Site is where the parser dropped the payload ("line_type", "assistant_block",
-// "user_block", "undecodable"). MessageType is the offending message or block
-// `type`, empty when Site is "undecodable" (nothing decoded, so no type was
-// read). Raw is the offending JSON, truncated by the producer to a fixed byte
+// Site is where the parser dropped the payload: "line_type", "assistant_block",
+// "user_block" and "undecodable" from claude's stream-json, and "codex_method"
+// and "codex_item" from codexsup's Codex translator. MessageType is the
+// offending message or block `type` (the Codex method or item type on the
+// Codex sites), empty when Site is "undecodable" (nothing decoded, so no type
+// was read). Raw is the offending JSON, truncated by the producer to a fixed byte
 // cap; Truncated says whether that happened.
 //
 // SECURITY: Raw is the ONLY interactive payload field carrying unbounded

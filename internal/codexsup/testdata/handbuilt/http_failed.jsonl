@@ -1,0 +1,1 @@
+{"kind":"notification","method":"turn/completed","params":{"threadId":"019a0000-0000-7000-8000-000000000001","turn":{"id":"019a0000-0000-7000-8000-000000000002","items":[],"status":"failed","error":{"message":"stream error","codexErrorInfo":{"httpConnectionFailed":{"httpStatusCode":502}}}}}}

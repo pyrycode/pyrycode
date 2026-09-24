@@ -1,0 +1,2 @@
+{"kind":"notification","method":"item/started","params":{"threadId":"019a0000-0000-7000-8000-000000000001","turnId":"019a0000-0000-7000-8000-000000000002","startedAtMs":1,"item":{"type":"webSearch","id":"ws_1","query":"codex"}}}
+{"kind":"notification","method":"item/completed","params":{"threadId":"019a0000-0000-7000-8000-000000000001","turnId":"019a0000-0000-7000-8000-000000000002","completedAtMs":2,"item":{"type":"webSearch","id":"ws_1","query":"codex"}}}

@@ -4,8 +4,119 @@ Standalone client for `codex app-server` (#2591, target Codex **0.156.1**), the
 first slice of Codex support (#2583 family). It spawns the process, drives the
 `initialize`/`initialized` handshake over stdio, and starts, resumes and
 interrupts turns on one Codex thread. Nothing in `cmd/pyry` imports it yet —
-mapping server notifications into [`turnevent`](turnevent-package.md) is #2584,
-and crash backoff, respawn and pooling multiple clients is #2585.
+crash backoff, respawn and pooling multiple clients is #2585.
+
+`translate.go`'s `Translator` (#2608) is the Codex twin of
+[`streamsup`'s parser](streamsup-package.md): it maps server notifications
+into [`turnevent.Event`](turnevent-package.md) values so a Codex turn renders
+like a Claude turn with no client change. Also not wired into `cmd/pyry` —
+\#2585 does that.
+
+## The translator's three-list partition
+
+`Translate(method, params)` runs on the caller's goroutine (`OnNotification`),
+holds per-turn state (pending usage, reroute target), and is not safe for
+concurrent use. Every method in `methods.go`'s `serverNotifications`, and
+every schema `ThreadItem` type, sits on exactly one of three package-level
+lists — `mappedMethods`, `ignoredMethods`, `unrecognizedMethods` (and the item
+twins `mappedItemTypes`/`ignoredItemTypes`/`unrecognizedItemTypes`) — never on
+none or on two. `TestMethodListsPartitionServerNotifications` and
+`TestItemTypesClassified` fail otherwise, so a schema bump that adds a method
+or item type forces a decision instead of dropping it silently. An unmapped
+method becomes `turnevent.Unrecognized{Site: UnrecognizedCodexMethod}`; an
+unmapped item type becomes `Unrecognized{Site: UnrecognizedCodexItem}`, once
+per item on `item/started` only (its `item/completed` stays silent — one row
+per item, not two). `model/rerouted` and `model/verification` are on this
+partition too, deliberately, so a model reroute is never silent: see below.
+
+Text and reasoning deltas (`item/agentMessage/delta`,
+`item/reasoning/summaryTextDelta`, `item/reasoning/textDelta`) become
+`TextChunk`/`ThoughtChunk` keyed by the Codex item id. A `contextCompaction`
+item's `item/started`/`item/completed` become `Compacting{Active: true/false}`.
+`turn/completed` becomes exactly one `TurnEnd`; a `usageLimitExceeded` failure
+emits `RateLimited{Status: "rejected"}` first. `model/rerouted` becomes a
+warning `Banner` and keys that turn's `ModelWindows` by the model it moved
+to — a silent downgrade would otherwise pass for the requested model.
+
+**Why `thread/tokenUsage/updated` is on the ignored-for-emission-but-still-read
+list.** It carries a `turnId` and is held (not emitted) until that turn's
+`turn/completed`, at which point the turn's own counts and window ride the
+`TurnEnd` in the same fields Claude's `result` line fills.
+
+## Per-turn usage: `last` is a trap, and the arrival order matters
+
+Live-captured against Codex 0.156.1 (Luna, effort low):
+
+- `thread/tokenUsage/updated` arrives **before** `turn/completed`, once per
+  model call — the accepted-command turn made two calls and two updates.
+- `ThreadTokenUsage.last` covers only the **latest model call**, not the
+  turn: on that two-call turn, `last.outputTokens` read 5 against 67 for the
+  whole turn. A test that only exercises a single-call turn cannot catch
+  this — `last` and "the turn's total" agree exactly when there is only one
+  call. The turn's counts instead come from the **change in `total`**
+  (the thread's running total), with the base taken as `total − last` at the
+  turn's first update — which equals the thread's total before the turn
+  started, on both a fresh and a resumed thread, so the translator needs no
+  separate per-thread baseline.
+- `inputTokens` **includes** `cachedInputTokens` (cached ≤ input on every
+  observed update), so `TurnEnd.InputTokens` subtracts it:
+  `inputTokens − cachedInputTokens`. `cacheWriteInputTokens` was 0
+  throughout the capture, so whether `inputTokens` also includes it is
+  unmeasured and it is *not* subtracted — a discrepancy to watch for if a
+  future capture shows a nonzero cache write.
+- Because the counts are differences of peer-supplied totals, they are
+  clamped at zero before reaching `TurnEnd` (`tokenBreakdown.clamped`):
+  malformed or out-of-order usage from the peer must not produce a negative
+  count on the wire.
+- Per-turn state (pending usage, reroute target) is keyed by the peer-chosen
+  `turnId` and capped at `maxPendingTurns` (8), clearing the map on overflow
+  rather than growing unbounded — Codex runs one turn per thread at a time,
+  so a legitimate peer never approaches the cap.
+
+**No live-reachable notification carries the turn's model.** `NewTranslator`
+takes the model as a constructor argument (`TurnInput.Model`, the caller's
+own knowledge) plus `SetModel` between turns. `thread/settings/updated`'s
+`ThreadSettings.model` is thread-scoped and schema-required, but was not
+observed live and sits on `ignoredMethods`; #2585 may prefer reading it over
+threading the model through the caller.
+
+## The capture's live gaps, and what they mean for a recapture
+
+`TestCaptureLive` (env-gated: `PYRY_CODEX_CAPTURE_BIN` +
+`PYRY_CODEX_CAPTURE_HOME`, so `make check` never runs Codex) captures plain
+text, an accepted command, a declined command, an interrupted turn and a
+file-edit attempt against real Codex 0.156.1. Two frame types could not be
+produced on demand and are hand-built instead, each schema-validated by the
+package's `jsonSchema.validate`:
+
+- **Reasoning deltas** — Luna at effort `low` emitted no reasoning item in
+  the capture.
+- **A `fileChange` item** — the file-edit turn ran a `pwd && ls -la`
+  pre-check first, which the capture's approval predicate declined (it
+  accepts only the exact command it expects), and Codex gave up without
+  ever proposing the edit. **#2609 needs its own recapture to get a real
+  `fileChange` item** — this package's fixtures don't have one.
+- The granular approval policy needs the `experimentalApi` capability at
+  `initialize`, which this package's handshake does not declare
+  (`askForApproval.granular requires experimentalApi capability`); the
+  capture uses `untrusted` with the `read-only` sandbox instead, which still
+  yields command approval requests.
+
+**Fixture scrub is enforced in code, not just by a manual grep.** The first
+cut of `writeCapture` replaced `cwd` and `os.UserHomeDir()` but not the
+isolated `CODEX_HOME` path itself (nor its symlink-resolved form), which
+leaked the capturing machine's scratchpad path and OS username through
+`thread.path`, and it didn't redact `remoteControl/status/changed`'s
+`serverName` (hostname) / `installationId`. Both slipped past a "scrubbed of
+local paths" claim in the plan and PR body that no test checked — a grep for
+`/Users/` alone misses the dash-encoded worktree-path form. Fixed by passing
+the `CODEX_HOME` path into `writeCapture` for replacement alongside `cwd`,
+adding `serverName`/`installationId` to `scrub`'s redacted keys, and adding
+`TestCaptureFixturesScrubbed`, which fails the build on any `/private/`,
+`/Users/`, `-Users-`, `/home/`, `/var/folders/`, unredacted email, or
+unredacted machine-key fragment under `testdata/capture/`. Any future capture
+addition (#2609's included) inherits this check for free; a new leak shape
+would still need a new pattern added to the test.
 
 It reuses [`internal/acp`](acp-package.md)'s `Transport` unchanged for framing
 and dispatch, and is tested against
@@ -117,9 +228,11 @@ pattern `fakecodex` itself uses to build against its own dependencies (see
   methods table-driven, and a pending call across a peer close proving it
   returns an `ErrExited`-wrapped error instead of hanging.
 
-No test makes a live Codex call — the whole point of building against the
-committed schema and the fake is that this package's tests run with no
-Codex account.
+No test in this file makes a live Codex call — the whole point of building
+against the committed schema and the fake is that `client_test.go` runs with
+no Codex account. `capture_test.go`'s `TestCaptureLive` (above) is the one
+exception in the package, and it is skipped unless both capture env vars are
+set, so `make check` still never touches Codex.
 
 ## Related
 

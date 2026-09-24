@@ -2767,6 +2767,12 @@ const (
 	// UnrecognizedUndecodable is a line or block that failed to JSON-decode at
 	// all. Kind is empty for this site — there is no type to report.
 	UnrecognizedUndecodable UnrecognizedSite = "undecodable"
+	// UnrecognizedCodexMethod is a Codex app-server notification whose method
+	// codexsup's translator neither maps nor ignores. Kind is the method.
+	UnrecognizedCodexMethod UnrecognizedSite = "codex_method"
+	// UnrecognizedCodexItem is a Codex thread item whose type the translator
+	// neither maps nor ignores. Kind is the item type.
+	UnrecognizedCodexItem UnrecognizedSite = "codex_item"
 )
 
 // Unrecognized is a diagnostic marker: the stream-json parser met a payload it
