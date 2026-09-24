@@ -972,6 +972,24 @@ func startRelayV2(
 	// startRelayV2's nor startRelay's signature changes.
 	var announceWorkspace func(protocol.WorkspaceUpdatedPayload, string)
 
+	// The conversation_updated fan-out hook shared by send_message's auto-naming
+	// (#2159) and set_conversation_muted (#2572). It is a nil-guarded closure over
+	// announceConversation — THIS FUNCTION'S OWN NAMED RETURN, which #2156 fills
+	// from its emitter below, after mgr exists and before mgr.Run starts — so it
+	// reads the variable at call time, not here. One closure over one emitter:
+	// neither verb adds a fan-out loop of its own.
+	//
+	// The nil guard covers the window between this line and that assignment:
+	// unreachable in practice, since no frame can dispatch until mgr.Run starts,
+	// but a hook read from a dispatch goroutine is not a place to rely on an
+	// argument.
+	announceConversationHook := func(p protocol.ConversationUpdatedPayload) {
+		if announceConversation == nil {
+			return
+		}
+		announceConversation(p)
+	}
+
 	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
 		Frames:      conn.Frames(),
 		Outbound:    conn.Send,
@@ -1006,7 +1024,11 @@ func startRelayV2(
 			protocol.TypeDeleteConversation:    handlers.DeleteConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger),
 			protocol.TypeArchiveConversation:   handlers.ArchiveConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger, true),
 			protocol.TypeUnarchiveConversation: handlers.ArchiveConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger, false),
-			protocol.TypeChangeWorkspace:       handlers.ChangeWorkspace(w.convReg, resolveWorkspaceDir, resolveConversationsRegistryPath(w.instanceName), logger),
+			// set_conversation_muted (#2572) takes no session surface: muting only
+			// changes what clients do with alerts. Unlike archive it fans its record
+			// out, through the same hook send_message's auto-naming uses.
+			protocol.TypeSetConversationMuted: handlers.SetConversationMuted(w.convReg, resolveConversationsRegistryPath(w.instanceName), announceConversationHook, logger),
+			protocol.TypeChangeWorkspace:      handlers.ChangeWorkspace(w.convReg, resolveWorkspaceDir, resolveConversationsRegistryPath(w.instanceName), logger),
 			// set_system_prompt takes no session surface (#2151): the value's route
 			// to a running child is the registry, re-read at the pool's own spawn
 			// funnel by #2150's refreshSystemPrompt. Wiring a pool or runner in here
@@ -1019,19 +1041,12 @@ func startRelayV2(
 			// for a conversation whose stored Name is still nil names that chat after
 			// itself, so a desktop-started chat stops rendering as `Untitled`.
 			//
-			// The announcer is a nil-guarded closure over announceConversation —
-			// THIS FUNCTION'S OWN NAMED RETURN, which #2156 fills from its emitter
-			// below, after mgr exists and before mgr.Run starts. So this needs no
-			// hook variable of its own the way #2209's rename_workspace fan-out did:
-			// the variable that solves the same ordering problem is already in scope
-			// at this line. Reusing that emitter is also why this ticket adds no
-			// second fan-out loop — the interactive gate, the envelope counter and
-			// the torn-down-conn tolerance are all written.
-			//
-			// The nil guard covers the window between this literal and that
-			// assignment: unreachable in practice, since no frame can dispatch until
-			// mgr.Run starts, but a hook read from a dispatch goroutine is not a
-			// place to rely on an argument.
+			// The announcer is announceConversationHook, declared above the manager
+			// and shared with set_conversation_muted: a nil-guarded closure over the
+			// named return announceConversation, which #2156 fills from its emitter
+			// below. Reusing that emitter is why this adds no second fan-out loop —
+			// the interactive gate, the envelope counter and the torn-down-conn
+			// tolerance are all written.
 			//
 			// The reset seam is the SAME activeSessionStarter the SessionStarter
 			// field below is given (#2456), which is what makes "a client's /clear
@@ -1042,12 +1057,7 @@ func startRelayV2(
 			// send_message must not be answered with it. An unwired starter
 			// (foreground / v1) leaves a nil seam, which still DROPS the /clear
 			// rather than delivering it — see the intercept's fail-closed note.
-			protocol.TypeSendMessage: handlers.SendMessage(w.router, w.queue, attachmentResolve, w.convReg, resolveConversationsRegistryPath(w.instanceName), func(p protocol.ConversationUpdatedPayload) {
-				if announceConversation == nil {
-					return
-				}
-				announceConversation(p)
-			}, w.activeSessionStarter, logger),
+			protocol.TypeSendMessage: handlers.SendMessage(w.router, w.queue, attachmentResolve, w.convReg, resolveConversationsRegistryPath(w.instanceName), announceConversationHook, w.activeSessionStarter, logger),
 		},
 		// KnownConversation gates request_snapshot on registry membership (#618
 		// AC #4), mirroring the established conversations-registry validation

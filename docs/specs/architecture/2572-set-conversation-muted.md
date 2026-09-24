@@ -135,3 +135,8 @@ Verification: `go test -race ./internal/conversations/... ./internal/relay/handl
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-24
+
+## Revisions
+
+- **2026-09-24, Phase B — not_found no longer logs `conversation_id`.** The Design (step 2) and the security review's log finding followed archive's precedent of logging the unknown id as a structured field. AC 3 says no byte of the payload reaches the log on any reject, and an unknown id is client-supplied bytes. Both not_found branches now log `conn_id` only, like the malformed branch; only the success branch (and the Save-failure log, reached only for a proven-real id) logs `conversation_id`. `TestSetConversationMuted_Rejects` asserts a payload marker is absent from the log on the unknown-id case.
+- **Open question resolved:** reply first, then push; the push runs even if the reply errors, and the reply error is returned after it.
