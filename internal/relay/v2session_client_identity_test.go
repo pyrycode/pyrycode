@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -140,5 +141,25 @@ func TestV2Session_ActiveConns_RejectedTokenLeavesNoIdentity(t *testing.T) {
 	defer cancel()
 	if conns := mgr.ActiveConns(ctx); len(conns) != 0 {
 		t.Fatalf("ActiveConns() = %v, want none: a rejected token must not enumerate", conns)
+	}
+}
+
+// TestV2Session_ActiveConns_DeviceTokenHashIsAuthenticatedDevice (#2564) pins
+// that the snapshot identifies a conn by the device the handshake AUTHENTICATED,
+// not by the name its hello claimed. The push-wake trigger suppresses a device's
+// wake on this field; were it derived from the hello name, a phone could silence
+// another device's wakes by claiming that device's name.
+func TestV2Session_ActiveConns_DeviceTokenHashIsAuthenticatedDevice(t *testing.T) {
+	t.Parallel()
+	mgr := openWithIdentity(t, v2TestToken, "Someone-Elses-Phone", "0.4.1")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conns := mgr.ActiveConns(ctx)
+	if len(conns) != 1 {
+		t.Fatalf("ActiveConns() = %d conns, want 1 open", len(conns))
+	}
+	if got, want := conns[0].DeviceTokenHash, devices.HashToken(v2TestToken); got != want {
+		t.Errorf("ActiveConn.DeviceTokenHash = %q, want the authenticated device's hash %q", got, want)
 	}
 }

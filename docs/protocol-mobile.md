@@ -464,7 +464,7 @@ The relay is this envelope's **only reader**. On receipt it sends one **data-onl
 
 An **older relay** that does not recognise `push_wake` logs and drops the envelope, per the unknown-field tolerance rule above; the binary↔relay leg stays open, so a daemon degrading to "no push" never breaks the connection.
 
-See pyrycode-relay#130 (relay-side send) and #2564 (daemon-side trigger).
+See pyrycode-relay#132, #133 (relay-side send) and #2564 (daemon-side trigger).
 
 ## Connection lifecycle
 
