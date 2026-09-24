@@ -418,6 +418,12 @@ type Session struct {
 	createdAt time.Time
 	bootstrap bool
 
+	// harness is the coding agent this session runs, canonical (never empty) and
+	// construction-fixed: set in Pool.New (always claude) or Pool.buildSessionAs,
+	// with no mutator, so saveLocked reads it under Pool.mu with no further
+	// discipline (#2593).
+	harness string
+
 	// settings holds the per-session model / effort / YOLO applied to the
 	// claude spawn argv (#833). Set in Pool.New (bootstrap) or
 	// Pool.buildSession (minted) and mutated by Pool.UpdateSettings (#840)

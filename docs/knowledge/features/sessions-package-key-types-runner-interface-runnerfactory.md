@@ -22,6 +22,8 @@ type Runner interface {
 type RunnerFactory func(cfg RunnerConfig) (Runner, error)
 ```
 
+**`RunnerConfig.Harness` (#2593) is what a second `RunnerFactory` implementation is selected by.** Every `RunnerConfig` the pool builds carries a canonical (never-empty) harness — `HarnessClaude` for the bootstrap and every minted session, a dormant entry's own persisted value for a revive (see [sessions-registry.md § `harness`](sessions-registry.md)). `internal/sessions` does not validate it; it only carries it, construction-fixed, through to whichever `RunnerFactory` the daemon wired in. The daemon's own factory, `harnessRunnerFactory` (`cmd/pyry/main.go`), wraps `newStreamRunnerFactory` and is the actual decision point: `""`/`HarnessClaude` reach the stream runner, anything else is refused as an ordinary construction error without calling it — so reviving a dormant non-`claude` session fails before a claude runner is ever built, and the entry stays dormant with its harness intact. A `RunnerConfig` built outside the pool (a test double) accepts `""` the same way, so existing fixtures that never set the field keep working. Today `claude` is the only harness any path mints; the seam exists for Codex (#2585) to plug in a second factory without touching this one.
+
 **`Interrupt`, `RestartFresh` and `BeginRotation` moved onto this interface in #2592, closing the last fail-open
 capability assertions cmd/pyry reached off `Session.Runner()`.** With exactly one production implementation
 (`streamRunner`, which already had all three) the assertions were speculative-surface avoidance; a second
