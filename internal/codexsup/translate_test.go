@@ -187,6 +187,25 @@ func TestTurnUsageBaseOnLaterTurn(t *testing.T) {
 	}
 }
 
+// TestTurnUsageClampsNegativeCounts: a running total that shrinks, or cached
+// input above input, is malformed peer data and yields zero, never negative.
+func TestTurnUsageClampsNegativeCounts(t *testing.T) {
+	tr := NewTranslator("m")
+	for _, total := range []tokenBreakdown{
+		{InputTokens: 100, CachedInputTokens: 10, OutputTokens: 50},
+		{InputTokens: 20, CachedInputTokens: 90, OutputTokens: 5},
+	} {
+		p, _ := json.Marshal(map[string]any{"threadId": "th", "turnId": "t", "tokenUsage": map[string]any{
+			"total": total, "last": tokenBreakdown{}, "modelContextWindow": 1000}})
+		tr.Translate("thread/tokenUsage/updated", p)
+	}
+	end := singleEnd(t, tr.Translate("turn/completed", json.RawMessage(`{"threadId":"th","turn":{"id":"t","items":[],"status":"completed"}}`)))
+	if end.InputTokens != 0 || end.CacheReadTokens != 80 || end.OutputTokens != 0 || end.CacheCreationTokens != 0 {
+		t.Errorf("counts in=%d cacheRead=%d cacheWrite=%d out=%d, want no negatives",
+			end.InputTokens, end.CacheReadTokens, end.CacheCreationTokens, end.OutputTokens)
+	}
+}
+
 func TestTranslateCapturedInterruptedTurn(t *testing.T) {
 	end := singleEnd(t, replay(t, "testdata/capture/interrupted.jsonl", captureModel))
 	if end.Reason != turnevent.TurnEndReasonCancelled || end.IsError {

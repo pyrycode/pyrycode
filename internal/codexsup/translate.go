@@ -37,6 +37,9 @@ var (
 		"item/reasoning/summaryPartAdded", "mcpServer/startupStatus/updated",
 		"account/updated", "remoteControl/status/changed", "thread/name/updated",
 		"thread/settings/updated", "skills/changed", "app/list/updated",
+		// Deprecated in favour of the contextCompaction item, which already
+		// yields Compacting; a second signal adds no turn meaning.
+		"thread/compacted",
 		// Fires on every turn. Mapping it onto RateLimited is a later
 		// rate-limit ticket.
 		"account/rateLimits/updated",
@@ -57,7 +60,7 @@ var (
 		"item/fileChange/outputDelta", "item/fileChange/patchUpdated", "item/mcpToolCall/progress",
 		"mcpServer/oauthLogin/completed", "mcpServer/event/stream/notification",
 		"externalAgentConfig/import/progress", "externalAgentConfig/import/completed",
-		"fs/changed", "thread/compacted", "model/verification",
+		"fs/changed", "model/verification",
 		"modelProvider/authRecoveryStarted", "modelProvider/authRecoveryCompleted",
 		"turn/moderationMetadata", "model/safetyBuffering/updated", "warning",
 		"guardianWarning", "deprecationNotice", "configWarning",
@@ -114,6 +117,15 @@ func (a tokenBreakdown) minus(b tokenBreakdown) tokenBreakdown {
 	return tokenBreakdown{
 		a.InputTokens - b.InputTokens, a.CachedInputTokens - b.CachedInputTokens,
 		a.CacheWriteInputTokens - b.CacheWriteInputTokens, a.OutputTokens - b.OutputTokens,
+	}
+}
+
+// clamped raises every negative count to zero. The counts are differences of
+// peer-supplied totals, so malformed usage must not reach a TurnEnd negative.
+func (a tokenBreakdown) clamped() tokenBreakdown {
+	return tokenBreakdown{
+		max(a.InputTokens, 0), max(a.CachedInputTokens, 0),
+		max(a.CacheWriteInputTokens, 0), max(a.OutputTokens, 0),
 	}
 }
 
@@ -249,12 +261,12 @@ func (t *Translator) turnCompleted(params json.RawMessage) []turnevent.Event {
 	}
 	if u, ok := t.usage[p.Turn.ID]; ok {
 		delete(t.usage, p.Turn.ID)
-		c := u.latest.minus(u.base)
+		c := u.latest.minus(u.base).clamped()
 		// Codex's inputTokens includes the cached input (observed: cached ≤
 		// input on every captured update); TurnEnd.InputTokens is uncached only.
 		// cacheWriteInputTokens was 0 throughout the capture, so whether input
 		// includes it is unmeasured and it is not subtracted.
-		end.InputTokens = c.InputTokens - c.CachedInputTokens
+		end.InputTokens = max(c.InputTokens-c.CachedInputTokens, 0)
 		end.CacheReadTokens = c.CachedInputTokens
 		end.CacheCreationTokens = c.CacheWriteInputTokens
 		end.OutputTokens = c.OutputTokens
