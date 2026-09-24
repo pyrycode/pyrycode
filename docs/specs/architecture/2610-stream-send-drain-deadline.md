@@ -32,3 +32,35 @@ The change is to a test's waits and messages; no new logic under test. Proof: th
 ## Documentation handoff
 
 None. The ticket has no documentation requirements.
+
+## Revisions
+
+### 2026-09-25 — root cause is a discarded frame, not slowness
+
+Found during Phase B, driven by the #2612 lesson ("ack-await frame-drop trap"). The
+send test awaited the ack in its own loop that skipped every non-ack envelope, then
+drained M1/M2 in a second loop. The ack is not ordered before the turn's frames
+(the handler enqueues, then acks). Measured with a temporary diagnostic over 45
+runs of the test alone (15 at default, 30 with `GOMAXPROCS=1`, all `-race`): the
+`assistant_delta` trailed the ack by 2–5 ms every time. If it overtakes the ack,
+the ack loop discards it and the drain waits out its whole deadline for a frame
+already consumed. The v0.26.0 failure fits that shape: 20.73 s total against a
+20 s drain deadline puts the pre-drain prefix at about 0.73 s, where a lone run
+takes about 0.13 s. So setup was about five times slower under load, and the
+drain would have had to be thousands of times slower to miss 20 s.
+
+**New contract:** one loop awaits the ack, M1 and M2 and records each milestone
+whenever it arrives. It ends when the ack and the terminal idle have both been
+seen, with the idle only counted after the delta. `streamWait` (60 s) now bounds
+that whole send→idle exchange. The two separate waits are gone. The timeout names
+whichever milestone is still pending: ack, M1 or M2. The ack timeout also lists
+the envelope types seen before it.
+
+**Also observed:** re-seeding either `seedBootstrapRegistry` or
+`seedBoundConversation` with a different UUID still drains green. The header
+comment's "a mismatched UUID hangs the drain" claim is stale, so it now says the
+M1 failure checks the gate-drop record instead of assuming a mismatch.
+
+**Not reproduced:** a full `go test -tags e2e -race -count=1 ./internal/e2e/...`
+run on the unchanged test passed. The package took 142 s there, against 224 s in
+the failing run.
