@@ -148,6 +148,7 @@ offer is live-only (no registry, no replay).
 
 ## See also
 
+- [Inbound `read_workspace_file` (#2598)](v2-session-manager-state-machine-inbound-read-workspace-file-workspacefileread.md) — the first wire path whose filesystem path a **paired client**, rather than the model, names. It reuses `confineFile`/`readChecked` unmodified and adds a markdown-only allowlist this verb does not need, since this verb's caller is already the model.
 - [pyry-mcp-files-command.md](pyry-mcp-files-command.md) — `pyry mcp-files`, the `send_file`
   MCP tool (#2168) that calls this verb, registered on the interactive spawn by #2169. A `/clear`
   rotation still makes this verb refuse for a live child (see that document's identity section) —
