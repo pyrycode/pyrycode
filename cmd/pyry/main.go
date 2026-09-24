@@ -344,6 +344,7 @@ var pyryFlagBools = map[string]bool{
 // be glued (`-pyry-claude=/path`) or in the next arg (`-pyry-claude /path`).
 var pyryFlagValues = map[string]bool{
 	"pyry-claude":              true,
+	"pyry-codex":               true,
 	"pyry-workdir":             true,
 	"pyry-socket":              true,
 	"pyry-name":                true,
@@ -696,11 +697,15 @@ func selectsStreamRunner(cfg config.Config) bool {
 // Validation lives here, not in config.Load, because the accepted set is defined
 // by the factory mapping — which the leaf config package cannot import
 // (streamsup). config.Load stays parse-only, matching DebugCapture.
-func selectInteractiveRunner(cfg config.Config, logger *slog.Logger, mcpServersPath string, vocab *modelVocabularyStore, approval streamApprovalConfig) (sessions.RunnerFactory, *streamTurnSink, error) {
+//
+// codex carries the Codex binary and home; its sink is set here to the same
+// fan-in the Claude factory feeds (#2620).
+func selectInteractiveRunner(cfg config.Config, logger *slog.Logger, mcpServersPath string, vocab *modelVocabularyStore, approval streamApprovalConfig, codex codexHarness) (sessions.RunnerFactory, *streamTurnSink, error) {
 	switch cfg.InteractiveRunner {
 	case "", "stream-json":
 		sink := newStreamTurnSink(0, logger)
-		return harnessRunnerFactory(newStreamRunnerFactory(sink, mcpServersPath, vocab, approval)), sink, nil
+		codex.sink = sink
+		return harnessRunnerFactory(newStreamRunnerFactory(sink, mcpServersPath, vocab, approval), newCodexRunnerFactory(codex)), sink, nil
 	case "pty":
 		return nil, nil, fmt.Errorf(`interactive_runner "pty" was removed in #1348: the terminal-driving interactive runner no longer exists. Remove the key or set it to "stream-json"`)
 	default:
@@ -710,15 +715,18 @@ func selectInteractiveRunner(cfg config.Config, logger *slog.Logger, mcpServersP
 
 // harnessRunnerFactory is the factory the daemon wires into the pool: it selects
 // each session's runner by RunnerConfig.Harness (#2593). claude, and the empty
-// value a RunnerConfig built outside the pool carries, get the claude factory.
-// Any other harness is refused as a construction error without calling it, so no
-// claude runner is ever built for a session recorded as another agent's: the
-// pool leaves that session dormant and the daemon keeps running.
-func harnessRunnerFactory(claude sessions.RunnerFactory) sessions.RunnerFactory {
+// value a RunnerConfig built outside the pool carries, get the claude factory;
+// codex gets the codex factory (#2620). Any other harness is refused as a
+// construction error without calling either, so no runner is ever built for a
+// session recorded as an agent it cannot drive: the pool leaves that session
+// dormant and the daemon keeps running.
+func harnessRunnerFactory(claude, codex sessions.RunnerFactory) sessions.RunnerFactory {
 	return func(cfg sessions.RunnerConfig) (sessions.Runner, error) {
 		switch cfg.Harness {
 		case "", sessions.HarnessClaude:
 			return claude(cfg)
+		case harnessCodex:
+			return codex(cfg)
 		default:
 			return nil, fmt.Errorf("no runner for harness %q", cfg.Harness)
 		}
@@ -746,6 +754,7 @@ func runSupervisor(args []string) error {
 
 	fs := flag.NewFlagSet("pyry", flag.ContinueOnError)
 	claudeBin := fs.String("pyry-claude", "claude", "path to the claude binary")
+	codexBin := fs.String("pyry-codex", "codex", "path to the codex binary")
 	workdir := fs.String("pyry-workdir", "", "working directory for claude (default: current)")
 	resume := fs.Bool("pyry-resume", true, "resume the most recent session on restart")
 	verbose := fs.Bool("pyry-verbose", false, "verbose pyry logging")
@@ -883,7 +892,7 @@ func runSupervisor(args []string) error {
 		registry: approvals,
 		timeout:  approvalWindow,
 		surface:  approvalSurfaces,
-	})
+	}, codexHarness{bin: *codexBin, home: codexHomePath(resolveInstanceDirPath(*name))})
 	if err != nil {
 		return fmt.Errorf("interactive runner: %w", err)
 	}
@@ -4077,6 +4086,7 @@ Usage:
 
 Pyry flags (must come before claude args, or after a -- separator):
   -pyry-claude string   path to the claude binary (default "claude")
+  -pyry-codex string    path to the codex binary (default "codex")
   -pyry-workdir string  working directory for claude (default: current)
   -pyry-resume          --continue most recent session on restart (default true)
   -pyry-verbose         verbose pyry logging

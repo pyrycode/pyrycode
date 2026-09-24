@@ -133,3 +133,8 @@ Pending for the documentation stage: fold the Codex runner (supervise loop, gate
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-25
+
+## Revisions
+
+- 2026-09-25, implementation. The state has no separate `fresh` flag: an empty held `threadID` already means "start a thread", and `RestartFresh` clears it and bumps `freshSeq`. A spawn records the id it opened only if `freshSeq` is unchanged. `harnessCodex` is a `cmd/pyry` constant, because `internal/sessions` names only `HarnessClaude` and this ticket does not touch that package. The rest of the plan is unchanged.
+- Open question 1 stays open for #2587. Open question 2 stays open for #2586. Neither changed the design.
