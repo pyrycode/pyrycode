@@ -65,3 +65,29 @@ None.
 ## Documentation handoff
 
 None required by the ticket.
+
+## Security review
+
+**Verdict:** PASS
+
+Walked against the implementation committed with this plan, since the section was added in rework (see Revisions).
+
+**Findings:**
+
+- [Trust boundaries] No findings. Two boundaries, each crossed in one function. The `account/read` result enters in `Client.SignedIn`, which decodes `account` only as `json.RawMessage` and returns a single bool, so no caller ever holds account data. The version enters in `Client.handshake` through `parseVersion` and leaves `codexsup` only as the string `Client.Version` returns, which `checkCodexVersion` then parses as untrusted input: anything but three integer components with an optional non-empty suffix is refused as unparseable, never allowed.
+- [Tokens / secrets] No findings. `SignedIn` sends `{}` with no `refreshToken`, so the probe never asks Codex to refresh a credential. The account object (email, plan type) is never decoded into typed fields, logged or returned. It sits in memory as raw bytes only until `SignedIn` returns. The transport never logs a frame payload: every log line in `internal/acp` carries a method, an id or an error, never a result. The probe passes no `Stderr` in its `codexsup.Config`, so os/exec discards the probe's stderr and nothing Codex prints about the account reaches the daemon log. The fake's signed-in account uses the reserved `example.invalid` domain.
+- [File operations] No findings. The probe creates and opens no file. The home it points `CODEX_HOME` at is the daemon-owned path from `codexHomePath`, already prepared by `prepareCodexHome` before the probe runs. No request input enters that path.
+- [Subprocess] No findings. The binary is the operator's `-pyry-codex` flag, defaulting to `codex` on the daemon's PATH, the same binary the runner from #2620 spawns. It runs as `exec.CommandContext(bin, "app-server")`, with no shell and no request input in argv. Its environment is the daemon's own plus `CODEX_HOME`. os/exec keeps the last value of a duplicated key, so an inherited `CODEX_HOME` cannot redirect the probe. The runner already passes that same environment to Codex, so the probe exposes nothing new. The process never outlives `probeCodex`. A handshake failure or a timeout under `codexStartTimeout` makes `codexsup.Start` kill and reap the process before it returns. Every later return passes through the deferred `stopCodexClient`, which closes stdin, waits up to `codexCallTimeout`, then sends SIGTERM and SIGKILL after `killGrace` (`cmd.Cancel` plus `cmd.WaitDelay`), and waits on `Done`. The probe opens no thread and starts no turn, so it creates no tool subprocess that could escape through a double fork.
+- [Cryptography] Not applicable: the change adds no randomness, key, hash or comparison against a secret.
+- [Network & I/O] No findings. Frames from the probe are read through `internal/acp`, capped at `maxLineBytes`, and every call is bounded by `codexStartTimeout`. Resource use per attempt went down. A phone can trigger a create only through a paired, authenticated relay connection that revives a dormant Codex conversation. Each attempt costs at most one short-lived probe, killed on return. Before this change the same attempt returned a runner whose `Run` restarted a failing app-server with backoff for as long as the session lived.
+- [Errors & logs] No findings. The version is formatted with `%q` in both refusal messages, so control characters and an empty value come out escaped. Its length is bounded only by the transport's line cap. It is not truncated further, because it comes from the binary the operator chose, which already runs with the daemon's full privileges and is inside the trust boundary. The signed-out refusal names the daemon's Codex home path. That path is not a secret: it sits under the operator's own instance directory, and the operator needs it in order to sign in. It does not reach a remote peer. A relay-driven create that fails surfaces to the phone only as the fixed `CodeServerBinaryOffline` message from the `send_message` handler, or as a generic revive failure in `new_session`. The full error goes to the local daemon log and to the local control-socket caller, which is the same user. An `account/read` RPC failure is wrapped with the server's error text. That text comes from the same trusted binary and carries no account fields that pyry decodes.
+- [Concurrency] No findings. The probe runs synchronously inside the factory, which the pool calls outside its lock. Concurrent creates for the same id each run their own probe, and each probe is independent and reaped before it returns. The probe starts no goroutine of its own. The goroutines `codexsup.Start` starts end when the process exits, and the probe waits on `Done` before returning.
+- [Test-only knobs] No findings. `FAKECODEX_VERSION` and `FAKECODEX_SIGNED_OUT` are read only in the `main` of `internal/e2e/internal/fakecodex`, a test-only binary under an `internal/e2e/internal` path that no production package can import. No production code reads either variable. Outside the fake, only `_test.go` files mention them, through `t.Setenv`.
+- [Threat model] No relay threat is changed. The probe adds no wire message and no new peer input. The one new operator-facing surface is the refusal text, covered above.
+
+**Reviewer:** builder (self-review per the security-review checklist)
+**Date:** 2026-09-25
+
+## Revisions
+
+- 2026-09-25, rework after verifier FAIL on PR #2624: the ticket carries `security-sensitive`, and the plan committed before the implementation had no `## Security review` section. That section is added above, after the implementation, and it audits the committed code as well as the design. It found no MUST FIX or SHOULD FIX items, so the design and the code are unchanged.
