@@ -38,6 +38,25 @@ emits `RateLimited{Status: "rejected"}` first. `model/rerouted` becomes a
 warning `Banner` and keys that turn's `ModelWindows` by the model it moved
 to — a silent downgrade would otherwise pass for the requested model.
 
+`commandExecution` and `fileChange` items (#2609) become tool events instead
+of `Unrecognized`, so a Codex tool row renders like a Claude one with no
+client change: `item/started` is one `ToolStart` (`Kind` execute or edit,
+`RawInput` `{command, cwd}` for a command, one `Location` per changed path
+and the literal title `"apply_patch"` for a file change — Codex reports no
+tool name for a file change, so the translator names the tool that produces
+the item, the same way it would for a Claude `Edit`), and `item/completed` is
+exactly **one** `ToolUpdate` — never a stream of them. That constraint is why
+`item/commandExecution/outputDelta` and `item/fileChange/outputDelta` moved
+to `ignoredMethods` rather than `mappedMethods`: turnbridge turns every
+`ToolUpdate` into a `tool_result` frame, so forwarding the deltas too would
+give one tool row several results. `ResultDetail` is built only from the
+translator's own literals and the decoded exit code — `"declined"`, or
+`"exit "` followed by `strconv` digits with U+2212 (not the ASCII hyphen) for
+a negative code — never from the peer's status string, so no Codex byte
+reaches that field. A file change's `ToolUpdate` content is each changed
+path followed by that change's diff exactly as Codex sent it, joined by
+blank lines; nothing is read from disk to reconstruct it.
+
 **Why `thread/tokenUsage/updated` is on the ignored-for-emission-but-still-read
 list.** It carries a `turnId` and is held (not emitted) until that turn's
 `turn/completed`, at which point the turn's own counts and window ride the
@@ -94,8 +113,14 @@ package's `jsonSchema.validate`:
 - **A `fileChange` item** — the file-edit turn ran a `pwd && ls -la`
   pre-check first, which the capture's approval predicate declined (it
   accepts only the exact command it expects), and Codex gave up without
-  ever proposing the edit. **#2609 needs its own recapture to get a real
-  `fileChange` item** — this package's fixtures don't have one.
+  ever proposing the edit. #2609 mapped `fileChange` to tool events anyway,
+  proven only against the schema with hand-built frames
+  (`testdata/handbuilt/file_change.jsonl`) rather than a real capture — this
+  package's fixtures still don't have one. The mapping assumes `item/started`
+  already carries the item's `changes` (the source of `ToolStart`'s
+  `Locations`), since the schema requires the field on every `ThreadItem` but
+  no capture confirms Codex populates it that early. **Still open**: a real
+  `fileChange` capture would confirm or revise that assumption.
 - The granular approval policy needs the `experimentalApi` capability at
   `initialize`, which this package's handshake does not declare
   (`askForApproval.granular requires experimentalApi capability`); the
