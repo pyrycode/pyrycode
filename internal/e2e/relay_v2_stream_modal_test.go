@@ -409,6 +409,7 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 					Text:           userText,
 				}),
 			})
+			var diagSkipped, diagModal []string
 			ackDeadline := time.Now().Add(15 * time.Second)
 			gotAck := false
 			for !gotAck {
@@ -421,6 +422,8 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 				}
 				if env.Type == protocol.TypeAck && env.InReplyTo != nil && *env.InReplyTo == sendReqID {
 					gotAck = true
+				} else {
+					diagSkipped = append(diagSkipped, string(env.Type))
 				}
 			}
 
@@ -436,8 +439,9 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			for shown.ModalID == "" && questionShown.QuestionBatchID == "" {
 				env, ok := nextEnv(modalDeadline)
 				if !ok {
-					t.Fatal("did not observe the permission surface before deadline; the fake request never parked or surfaced")
+					t.Fatalf("DIAG skipped-in-ack=%v skipped-in-modal=%v\nstderr=\n%s\ndid not observe the permission surface before deadline; the fake request never parked or surfaced", diagSkipped, diagModal, h.Stderr.String())
 				}
+				diagModal = append(diagModal, string(env.Type))
 				if env.Type == protocol.TypeError {
 					t.Fatalf("unexpected error envelope while awaiting permission surface: %s", string(env.Payload))
 				}
