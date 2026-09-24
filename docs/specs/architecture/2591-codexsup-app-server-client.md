@@ -108,7 +108,7 @@ Default decline (`declineFor(method)`):
 |---|---|
 | `item/commandExecution/requestApproval`, `item/fileChange/requestApproval` | `{"decision":"decline"}` |
 | `item/permissions/requestApproval` | `{"permissions":{}}` |
-| `applyPatchApproval`, `execCommandApproval` | `{"decision":"denied"}` |
+| `applyPatchApproval`, `execCommandApproval` | `{"decision":"denied"}` — superseded, schema-invalid; see Revisions |
 | any other server request | JSON-RPC error `-32601` "unsupported server request" |
 
 No default path produces an acceptance.
@@ -165,7 +165,7 @@ None required by the ticket. Pending for the documentation stage: a `docs/knowle
 **Findings:**
 
 - [Trust boundaries] The app-server's stdout is untrusted input. It crosses at `acp.Transport.handleLine` (framing, 16 MiB line cap); `Client` decodes only the fields it needs (`userAgent`, `thread.id`, `turn.id`) into typed structs. Notification and server-request params pass to callers raw as `json.RawMessage` — documented on `Config.OnNotification` and `ServerRequest.Params` as untrusted. No finding.
-- [Approvals / posture] The central property: no default path answers a server request with an acceptance. Enforced by `declineFor` returning only decline/denied/empty-grant/error, tested for all ten `ServerRequest` methods. An unknown future server request cannot reach the default table (unregistered → acp method-not-found). `cancel`/`abort` deliberately not used. No finding.
+- [Approvals / posture] The central property: no default path answers a server request with an acceptance. Enforced by `declineFor` returning only decline/denied/empty-grant/error, tested for all ten `ServerRequest` methods. An unknown future server request cannot reach the default table (unregistered → acp method-not-found). `cancel`/`abort` deliberately not used. No finding. **Revised in rework 1 (see Revisions):** the original review did not check the literal shapes against the schema, and the `applyPatchApproval`/`execCommandApproval` default `{"decision":"denied"}` was schema-invalid (`ReviewDecision` has no plain `denied` string; its deny arm is the object `DeniedReviewDecision`). Corrected to `{"decision":{"denied":{"rejection":"…"}}}`; every default result is now validated against its method's `*Response` definition by `TestDefaultDeclinesMatchSchema`, so the property rests on a deterministic check rather than a hand-written literal.
 - [Tokens, secrets] The package handles none. `CODEX_HOME` points at Codex's own auth store; the path is passed, never read. No finding.
 - [File operations] None — the package opens no files. `Dir` and `CodexHome` are handed to the child untouched.
 - [Subprocess] `exec.CommandContext(binary, "app-server")` with fixed argv, no shell; `Binary` is caller configuration, not remote input. OUT OF SCOPE — environment scrubbing (the child inherits the daemon's environment, including any credentials in it) and the approval/sandbox posture sent on `thread/start`: both belong to the runner that decides posture, #2585. OUT OF SCOPE — reaping descendant process groups on stop (the claude runners' `reapDescendantGroupsFn`) is #2585's respawn/teardown work; here `WaitDelay` bounds a descendant holding stdout so `Done` still closes.
@@ -177,3 +177,11 @@ None required by the ticket. Pending for the documentation stage: a `docs/knowle
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-24
+
+## Revisions
+
+### 2026-09-24 — rework 1 (verifier MUST FIX on PR #2606)
+
+- **Legacy approval decline shape.** The ticket and the Design table wrote the `applyPatchApproval`/`execCommandApproval` default as `{"decision":"denied"}`. At 0.156.1 both responses take a `ReviewDecision`, whose string arms are `approved`, `approved_for_session`, `approved_mcp_policy_amendment`, `timed_out` and `abort`; a denial is the object arm `DeniedReviewDecision` (`additionalProperties: false`, `rejection` required). New contract: `declineFor` answers these two with `{"decision":{"denied":{"rejection":"declined by pyrycode: no approval was given"}}}`. This departs from the ticket's literal, which contradicts its own "as the schema defines it". `abort` stays out: it also stops the turn.
+- **Schema-validated defaults.** `serverrequest_test.go` adds `TestDefaultDeclinesMatchSchema`: for each method with a default result it finds the response definition from the `ServerRequest` arm's params ref (`XParams` → `XResponse`) and validates the wire value with a small draft-07-subset validator (`$ref`, `allOf`/`anyOf`/`oneOf`, `enum`, `type`, `properties`, `required`, `additionalProperties:false`, `items`). `TestSchemaValidatorRejectsBareDenied` is the negative control proving the validator rejects the old shape. `TestDefaultDeclines` pins the corrected bytes.
+- **Doc note on `call`** (verifier NIT): a response racing the exit may be reported as `ErrExited`, since `acp.Transport.Call`'s select can pick the cancelled ctx; recorded for #2585's respawn. The double-wrapped `ErrExited` in a forced stop's `Err()` (NIT) is left as is — cosmetic, `errors.Is` holds.

@@ -288,7 +288,10 @@ func (c *Client) exitError() error {
 }
 
 // call sends one request and decodes its result into out (skipped when nil).
-// It fails with ErrExited when the process exits before answering.
+// It fails with ErrExited when the process exits before answering. A response
+// that lands just as the exit is observed may still be reported as ErrExited:
+// acp.Transport.Call's select can pick the cancelled ctx over the result, so a
+// caller retrying on a respawned process must tolerate a request that ran.
 func (c *Client) call(ctx context.Context, method string, params, out any) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

@@ -410,8 +410,8 @@ func TestDefaultDeclines(t *testing.T) {
 		methodCommandApproval:     `{"decision":"decline"}`,
 		methodFileChangeApproval:  `{"decision":"decline"}`,
 		methodPermissionsApproval: `{"permissions":{}}`,
-		methodApplyPatchApproval:  `{"decision":"denied"}`,
-		methodExecCommandApproval: `{"decision":"denied"}`,
+		methodApplyPatchApproval:  `{"decision":{"denied":{"rejection":"` + declineRejection + `"}}}`,
+		methodExecCommandApproval: `{"decision":{"denied":{"rejection":"` + declineRejection + `"}}}`,
 	}
 	methods := append([]string(nil), serverRequests...)
 	sort.Strings(methods)

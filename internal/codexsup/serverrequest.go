@@ -36,10 +36,15 @@ func (r *ServerRequest) Decline() error {
 	return r.resp.Reply(result)
 }
 
+// declineRejection is the reason carried by a ReviewDecision denial.
+const declineRejection = "declined by pyrycode: no approval was given"
+
 // declineFor is the default answer to a server request, shaped by the 0.156.1
-// schema's response definitions. PermissionsRequestApprovalResponse has no
-// decision field, so its decline is an empty grant. cancel/abort are not used:
-// they also interrupt the turn.
+// schema's response definitions; TestDefaultDeclinesMatchSchema validates each
+// one against them. PermissionsRequestApprovalResponse has no decision field,
+// so its decline is an empty grant. ReviewDecision (the legacy approvals) has
+// no plain-string denial: its deny arm is the object DeniedReviewDecision.
+// cancel/abort are not used: they also interrupt the turn.
 func declineFor(method string) (result any, rpcErr *acp.Error) {
 	switch method {
 	case methodCommandApproval, methodFileChangeApproval:
@@ -47,7 +52,9 @@ func declineFor(method string) (result any, rpcErr *acp.Error) {
 	case methodPermissionsApproval:
 		return map[string]any{"permissions": map[string]any{}}, nil
 	case methodApplyPatchApproval, methodExecCommandApproval:
-		return map[string]string{"decision": "denied"}, nil
+		return map[string]any{"decision": map[string]any{
+			"denied": map[string]string{"rejection": declineRejection},
+		}}, nil
 	default:
 		return nil, acp.NewError(acp.CodeMethodNotFound, "unsupported server request")
 	}
