@@ -71,8 +71,10 @@ type RoutingEnvelope struct {
 	// CloseCode, when non-zero on a binary→relay routing envelope, asks
 	// the relay to forward Frame (if non-empty) to the phone and then
 	// close that phone's WS with this WS close code. Zero on every
-	// phone→binary frame; the dispatcher ignores CloseCode on inbound
-	// (phone→binary) frames. Wire spec: docs/protocol-mobile.md
+	// phone→binary frame. Non-zero on a relay→binary envelope, it is the
+	// relay's close notice: that phone's WS has ended with this close code,
+	// Frame is absent, and the binary tears down the ConnID's session
+	// without replying (#2601). Wire spec: docs/protocol-mobile.md
 	// § Routing envelope, § Error codes (close-code row 4401).
 	CloseCode uint16 `json:"close_code,omitempty"`
 }
