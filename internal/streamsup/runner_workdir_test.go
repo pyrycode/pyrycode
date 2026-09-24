@@ -138,7 +138,9 @@ func TestSetSpawnWorkDir_DoesNotMoveLiveChild(t *testing.T) {
 	defer func() { cancel(); _ = join() }()
 
 	waitForMarker(t, dirA, testSessionID, 5*time.Second)
-	pidBefore := r.State().ChildPID
+	// The child writes its marker as soon as it starts, but spawnAndWait publishes
+	// ChildPID only later; reading it straight after the marker can see 0.
+	pidBefore := waitForState(t, r, func(st State) bool { return st.ChildPID != 0 }, 5*time.Second).ChildPID
 
 	if err := r.SetSpawnWorkDir(dirB, filepath.Join(dirB, "sessions")); err != nil {
 		t.Fatalf("SetSpawnWorkDir(%q): %v", dirB, err)
