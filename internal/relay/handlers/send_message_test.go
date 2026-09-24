@@ -9,6 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -88,10 +90,11 @@ func routeTo(w TurnWriter) SessionRouter {
 // queued record so a client can merge the queued row with its optimistic echo
 // (#2092); the handler neither validates nor mints it.
 type enqueueCall struct {
-	convID    string
-	messageID string
-	text      string
-	delivery  string
+	convID        string
+	messageID     string
+	text          string
+	delivery      string
+	attachmentIDs []string
 }
 
 // fakeEnqueuer is the test double for Enqueuer. It records every (convID, text)
@@ -106,8 +109,8 @@ type fakeEnqueuer struct {
 	reject bool
 }
 
-func (f *fakeEnqueuer) EnqueueDelivery(convID, messageID, text, delivery string) uint64 {
-	f.calls = append(f.calls, enqueueCall{convID: convID, messageID: messageID, text: text, delivery: delivery})
+func (f *fakeEnqueuer) EnqueueAttached(convID, messageID, text, delivery string, attachmentIDs []string) uint64 {
+	f.calls = append(f.calls, enqueueCall{convID: convID, messageID: messageID, text: text, delivery: delivery, attachmentIDs: attachmentIDs})
 	if f.reject {
 		return 0
 	}
@@ -283,7 +286,7 @@ func TestSendMessage_TwoConversations_EachEnqueuesIndependently(t *testing.T) {
 		t.Fatalf("Enqueue calls = %d, want %d", len(q.calls), len(want))
 	}
 	for i, w := range want {
-		if q.calls[i] != w {
+		if !reflect.DeepEqual(q.calls[i], w) {
 			t.Errorf("Enqueue[%d] = %+v, want %+v", i, q.calls[i], w)
 		}
 	}
@@ -588,6 +591,10 @@ func TestSendMessage_NoAttachments_DeliveredVerbatim(t *testing.T) {
 			if len(res.calls) != 0 {
 				t.Errorf("resolver called %d times for a message naming nothing, want 0", len(res.calls))
 			}
+			// #2596: no ids reach the queued record, so the stored entry omits the key.
+			if len(q.calls[0].attachmentIDs) != 0 {
+				t.Errorf("queued attachment ids = %q, want none", q.calls[0].attachmentIDs)
+			}
 		})
 	}
 }
@@ -670,6 +677,11 @@ func TestSendMessage_ComposesPromptFromAttachments(t *testing.T) {
 			}
 			if want := wantPrompt(tt.text, tt.wantPaths...); q.calls[0].delivery != want {
 				t.Errorf("delivery =\n%q\nwant\n%q", q.calls[0].delivery, want)
+			}
+			// #2596: the ids stored beside the text are the resolved ones, once each
+			// in first-occurrence order — exactly the ids the resolver checked.
+			if !slices.Equal(q.calls[0].attachmentIDs, tt.wantResolve) {
+				t.Errorf("queued attachment ids = %q, want %q", q.calls[0].attachmentIDs, tt.wantResolve)
 			}
 
 			if len(res.calls) != len(tt.wantResolve) {
