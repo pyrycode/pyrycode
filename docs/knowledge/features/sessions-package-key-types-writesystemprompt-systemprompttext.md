@@ -176,6 +176,8 @@ an allocation multiplier. See
 [the relay enumeration doc](v2-session-manager-state-machine-concurrency-safe-open-session-enumeratio.md)
 for the retention side.
 
+**`maxClientVersionBytes` (32) constrained a wire-format decision made two layers away (#2576).** The compatibility-policy ticket that defined `client_version`'s `<app>/<MAJOR>.<MINOR>.<PATCH>` shape almost missed this bound: its first pass capped the format at 64 bytes, matching `internal/relay`'s separate `maxRetainedClientVersionBytes` retention ceiling above, and only a security-review pass caught that a 33–64-byte well-formed version would retain into the session but then be silently dropped here at the *display* door, never reaching the prompt. The format is now capped at 32 bytes for that reason — the longest plausible value, `pyrycode-desktop/100.100.100`, is 28 bytes — so no well-formed `client_version` can pass `internal/relay`'s retention gate and then fail this package's admission gate. A wire-format ticket that adds a new bounded field should check both this package's admission constants and `internal/relay`'s retention ones before picking a length, not just one of the two.
+
 See [docs/specs/architecture/2148-client-identity-system-prompt.md](../../specs/architecture/2148-client-identity-system-prompt.md)
 for the full design, the trust-boundary walk, and the security review.
 
