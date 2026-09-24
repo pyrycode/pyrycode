@@ -100,3 +100,19 @@ Undecodable params → `Unrecognized` (undecodable lane), never a panic or a sil
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-24
+
+## Revisions
+
+### 2026-09-24 — open questions resolved by the live capture
+
+1. **Usage order.** `thread/tokenUsage/updated` arrives *before* `turn/completed`, once per model call (two on the accepted-command turn), each followed by `account/rateLimits/updated`.
+2. **`last` vs `total`.** `last` covers only the latest model call (accepted-command turn: `last.outputTokens` 5, turn total 67). The turn's counts are the change in `total`. The base is taken at the turn's first update as `total − last`, which equals the thread's total before the turn on a fresh or a resumed thread, so no per-thread state is needed.
+3. **Cached input.** `inputTokens` includes `cachedInputTokens` (cached ≤ input on every update), so `InputTokens = inputTokens − cachedInputTokens`. `cacheWriteInputTokens` was 0 throughout, so whether input includes it is unmeasured; it is not subtracted.
+4. **Model source.** No turn-scoped notification carries the model (the observed `thread.model` on `thread/started` is outside the v2 `Thread` schema). Kept `NewTranslator(model)` + `SetModel`.
+
+### 2026-09-24 — capture deviations
+
+- **Approval policy.** The granular policy is refused (`askForApproval.granular requires experimentalApi capability`), and `codexsup`'s handshake does not declare that capability. The capture uses `untrusted` with the `read-only` sandbox, which still yields command approval requests.
+- **Not produced live:** Luna at effort `low` emitted no reasoning item, and the file-edit turn ran a `pwd && ls -la` pre-check, which the capture declined, and then gave up without a `fileChange`. Reasoning deltas are hand-built (schema-validated). The file-edit capture is committed as observed; #2609 needs a recapture for a `fileChange` item.
+- **Unknown item type.** A type outside the schema cannot validate, so the hand-built frame uses the schema's unmapped `webSearch`; a type absent from the schema is covered inline in `TestTranslateUnrecognizedLanes`.
+- **Method lists** are slices in `translate.go` (`mappedMethods`, `ignoredMethods`, `unrecognizedMethods`) plus item-type slices; there is no separate `turnevent` edit beyond the two sites.
