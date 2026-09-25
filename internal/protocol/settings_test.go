@@ -397,3 +397,33 @@ func TestSessionSettingsPayload_ZeroFieldsPresent(t *testing.T) {
 		t.Errorf("zero-value effective_effort should be omitted; got %s", out)
 	}
 }
+
+// #2646: a nil Capabilities leaves no key, so the reply keeps today's exact
+// shape; a present object always carries all six keys, with empty lists as [].
+func TestSessionSettingsPayload_CapabilitiesPresence(t *testing.T) {
+	t.Parallel()
+
+	const today = `{"session_id":"s","model":"","effort":"","yolo":false,"permission_mode":"","used_tokens":0,"window_tokens":0}`
+	b, err := json.Marshal(SessionSettingsPayload{SessionID: "s"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(b) != today {
+		t.Errorf("without capabilities = %s, want %s", b, today)
+	}
+
+	b, err = json.Marshal(SessionSettingsPayload{SessionID: "s", Capabilities: &SessionCapabilities{
+		Interrupt:       true,
+		EffortLevels:    []string{},
+		PermissionModes: []string{"default"},
+		AttachmentTypes: []string{"*/*"},
+		Models:          []string{},
+	}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `"capabilities":{"interrupt":true,"mid_turn_input":false,"effort_levels":[],"permission_modes":["default"],"attachment_types":["*/*"],"models":[]}`
+	if !strings.Contains(string(b), want) {
+		t.Errorf("with capabilities = %s, want it to contain %s", b, want)
+	}
+}

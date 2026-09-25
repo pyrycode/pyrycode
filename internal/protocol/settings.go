@@ -194,6 +194,39 @@ type SessionSettingsPayload struct {
 	PermissionMode  string         `json:"permission_mode"`
 	UsedTokens      int            `json:"used_tokens"`
 	WindowTokens    int            `json:"window_tokens"`
+	// Capabilities is what the resolved session supports (#2646). Present only
+	// for a conn that negotiated CapabilityMultiAgent and a reply that resolved a
+	// session; nil omits the key, so every other reply is byte-identical to the
+	// shape before it. A pointer so the payload stays comparable.
+	Capabilities *SessionCapabilities `json:"capabilities,omitempty"`
+}
+
+// SessionCapabilities is one session's capability list (#2646): what its agent
+// and current model support, each list naming exactly the options the daemon's
+// set_session_settings checks accept for that session. Support is not
+// permission, and the list is not the enforcement: the daemon re-checks every
+// request whatever a client shows.
+//
+// No omitempty: a present object carries all six keys, and each list is [] rather
+// than null when it holds nothing.
+//
+//   - MidTurnInput is true only if a message sent during a running turn reaches
+//     that turn; false means it is held until the turn ends.
+//   - EffortLevels are the levels accepted for the session's current model.
+//   - PermissionModes are the values the permission_mode field accepts. The
+//     bypass posture is not among them: it stays reachable only through yolo.
+//   - AttachmentTypes is ["*/*"]: attachments reach either agent as file paths,
+//     and the daemon keeps no type allowlist.
+//   - Models are the values of the session's own agent's entries, empty when that
+//     vocabulary is unavailable. "" (the agent's default) is accepted but never
+//     listed, as for EffortLevels.
+type SessionCapabilities struct {
+	Interrupt       bool     `json:"interrupt"`
+	MidTurnInput    bool     `json:"mid_turn_input"`
+	EffortLevels    []string `json:"effort_levels"`
+	PermissionModes []string `json:"permission_modes"`
+	AttachmentTypes []string `json:"attachment_types"`
+	Models          []string `json:"models"`
 }
 
 // NullableString preserves an optional nullable JSON string's three states.

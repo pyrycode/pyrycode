@@ -248,11 +248,17 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 //     effective-effort provider.
 //  4. For an accepted RunConfig only, consult EffectiveEffortFor exactly once.
 //     true preserves a string or explicit null; nil or false omits the field.
-//  5. Compose one correlated reply. All original fields come from the accepted
+//  5. For an accepted RunConfig and a multi_agent conn only (#2646), consult
+//     CapabilitiesFor once with that RunConfig's session id and model. true
+//     attaches the capability object; nil, false or an old client omits it, so
+//     such a reply is byte-identical to the one before #2646. multiAgent arrives
+//     as an argument, copied on Run into the job, because V2Session.multiAgent is
+//     Run-owned.
+//  6. Compose one correlated reply. All original fields come from the accepted
 //     RunConfig, so an applied effort can never overwrite the saved choice.
 //
 // Neither the requested id nor any settings value reaches a log or error string.
-func (m *V2SessionManager) handleRequestSessionSettings(ctx context.Context, s *V2Session, plaintext []byte) {
+func (m *V2SessionManager) handleRequestSessionSettings(ctx context.Context, s *V2Session, plaintext []byte, multiAgent bool) {
 	var env protocol.Envelope
 	if err := json.Unmarshal(plaintext, &env); err != nil {
 		m.cfg.Logger.Warn("relay: v2 request_session_settings envelope did not decode",
@@ -268,12 +274,21 @@ func (m *V2SessionManager) handleRequestSessionSettings(ctx context.Context, s *
 
 	var cfg RunConfig
 	var effectiveEffort protocol.NullableString
+	var capabilities *protocol.SessionCapabilities
 	if p.ConversationID != "" && m.cfg.RunConfigFor != nil {
 		if got, ok := m.cfg.RunConfigFor(p.ConversationID); ok {
 			cfg = got
 			if m.cfg.EffectiveEffortFor != nil {
 				if applied, available := m.cfg.EffectiveEffortFor(ctx, p.ConversationID); available {
 					effectiveEffort = protocol.NewNullableString(applied)
+				}
+			}
+			// Keyed by the resolved session and its stored model, never the
+			// caller's conversation id; an old client never consults it.
+			if multiAgent && m.cfg.CapabilitiesFor != nil {
+				if agent, known := m.cfg.CapabilitiesFor(cfg.SessionID, cfg.Model); known {
+					c := sessionCapabilities(agent)
+					capabilities = &c
 				}
 			}
 		}
@@ -288,6 +303,7 @@ func (m *V2SessionManager) handleRequestSessionSettings(ctx context.Context, s *
 		PermissionMode:  cfg.PermissionMode,
 		UsedTokens:      cfg.UsedTokens,
 		WindowTokens:    cfg.WindowTokens,
+		Capabilities:    capabilities,
 	})
 	if err != nil {
 		// Closed scalar fields; defensive only. NEVER echo err or any value.
@@ -582,5 +598,49 @@ func validPermissionMode(mode string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// permissionModeOptions is validPermissionMode's vocabulary as a list, for a
+// session's capability list (#2646). The switch above stays the authority and
+// TestPermissionModeOptions_AgreeWithValidPermissionMode pins the two together.
+// A fresh slice literal per call rather than a package-level variable, for the
+// reason validPermissionMode records: nothing may append the escalation onto a
+// shared copy.
+func permissionModeOptions() []string {
+	return []string{"default", "acceptEdits", "plan", "auto", "dontAsk"}
+}
+
+// sessionCapabilities composes a session's capability list (#2646) from its
+// agent's half and the two parts the relay owns: the permission modes
+// validPermissionMode accepts and the one attachment type, "*/*" — attachments
+// reach either agent as file paths, and a MIME type is a display hint the daemon
+// never dispatches on, so there is no allowlist to report.
+//
+// Effort levels and models are filtered through validEffort and validModel, and
+// "" is dropped (it is the agent's default, accepted but never an option). That
+// makes "every listed option passes the wire's shape checks" a property of this
+// function rather than of the producer. Every list is non-nil, so it marshals
+// as [] rather than null.
+func sessionCapabilities(agent AgentCapabilities) protocol.SessionCapabilities {
+	effort := make([]string, 0, len(agent.EffortLevels))
+	for _, e := range agent.EffortLevels {
+		if e != "" && validEffort(e) {
+			effort = append(effort, e)
+		}
+	}
+	models := make([]string, 0, len(agent.Models))
+	for _, m := range agent.Models {
+		if m != "" && validModel(m) {
+			models = append(models, m)
+		}
+	}
+	return protocol.SessionCapabilities{
+		Interrupt:       agent.Interrupt,
+		MidTurnInput:    agent.MidTurnInput,
+		EffortLevels:    effort,
+		PermissionModes: permissionModeOptions(),
+		AttachmentTypes: []string{"*/*"},
+		Models:          models,
 	}
 }

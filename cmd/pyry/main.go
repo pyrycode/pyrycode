@@ -1225,6 +1225,9 @@ func runSupervisor(args []string) error {
 		resetting:    resetting,
 		debugBundler: debugBundler,
 		settings:     settingsUpdaterAdapter{pool, modelVocabulary},
+		// #2646: the capability list is read off an adapter over the same pool and
+		// store as settings above, so it reports exactly what that one checks.
+		capabilities: settingsUpdaterAdapter{pool, modelVocabulary}.Capabilities,
 		runSettings: func(convID string) (boundRunSettings, bool) {
 			return resolveBoundRunSettings(convReg, runSettingsPool{Pool: pool}, convID)
 		},
@@ -1723,43 +1726,79 @@ func validateModelVocabulary(list turnevent.ModelList, have bool, model string) 
 	return relay.ErrModelNotOffered
 }
 
-// fallbackEffort reports whether effort is in the set a model with no entry for
-// its agent accepts (#2629): the five levels relay's closed set held before, so a
-// session whose model is unlisted, empty or not yet reported keeps what it had.
-func fallbackEffort(effort string) bool {
-	switch effort {
-	case "low", "medium", "high", "xhigh", "max":
-		return true
-	default:
-		return false
-	}
+// fallbackEffortLevels is the set a model with no entry for its agent accepts
+// (#2629): the five levels relay's closed set held before, so a session whose
+// model is unlisted, empty or not yet reported keeps what it had. A fresh slice
+// per call, so a caller holding the capability list cannot widen the check.
+func fallbackEffortLevels() []string {
+	return []string{"low", "medium", "high", "xhigh", "max"}
 }
 
-// validateEffortVocabulary classifies one non-empty client effort against the
-// entry list advertises for model (#2629). An entry is an exact, uncut Value match:
-// a cut value is not the model's name, and cut levels cannot prove a level absent,
-// so either falls through to the fallback set rather than refusing on partial
-// evidence. A found entry accepts exactly its EffortLevels, none when it
-// advertises none. Neither the effort nor any level is in the returned sentinel.
-func validateEffortVocabulary(list turnevent.ModelList, have bool, model, effort string) error {
-	if effort == "" {
-		return nil
-	}
+// effortLevelsFor answers the levels a non-empty effort is accepted from for
+// model (#2629, #2646): the EffortLevels of the entry list advertises for it, none
+// when it advertises none, else the fallback set. An entry is an exact, uncut Value
+// match: a cut value is not the model's name, and cut levels cannot prove a level
+// absent, so either falls through to the fallback set rather than refusing on
+// partial evidence. It is both the check and the reported list, which is what
+// keeps a session's effort_levels from drifting from what is accepted.
+func effortLevelsFor(list turnevent.ModelList, have bool, model string) []string {
 	if have && model != "" {
 		for _, option := range list.Models {
 			if option.Value != model || slices.Contains(option.TruncatedFields, "value") || slices.Contains(option.TruncatedFields, "effort_levels") {
 				continue
 			}
-			if slices.Contains(option.EffortLevels, effort) {
-				return nil
-			}
-			return relay.ErrEffortNotOffered
+			return option.EffortLevels
 		}
 	}
-	if fallbackEffort(effort) {
+	return fallbackEffortLevels()
+}
+
+// validateEffortVocabulary classifies one non-empty client effort against the
+// levels effortLevelsFor answers for model. Neither the effort nor any level is in
+// the returned sentinel.
+func validateEffortVocabulary(list turnevent.ModelList, have bool, model, effort string) error {
+	if effort == "" || slices.Contains(effortLevelsFor(list, have, model), effort) {
 		return nil
 	}
 	return relay.ErrEffortNotOffered
+}
+
+// Capabilities answers the agent-and-model half of sessionID's capability list
+// for relay.V2SessionConfig.CapabilitiesFor (#2646), from the SAME reads
+// UpdateSettings checks against: the session's agent from HarnessFor, that
+// agent's entries from agentModelVocabulary, and the effort set from
+// effortLevelsFor for model, the session's stored model. Models are the Values
+// validateModelVocabulary's exact-match loop accepts (a row whose value was cut is
+// not listed), empty but non-nil when the vocabulary is unavailable. false for an
+// id with no record or an agent this daemon does not know.
+//
+// Interrupt and MidTurnInput report what the daemon does today. Both agents
+// interrupt (sessions.Runner.Interrupt, codexRunner.Interrupt). Neither takes
+// input mid-turn: newInboundDeliver holds every message until the conversation's
+// turn is idle, and Codex's WriteUserTurn then starts a new turn.
+func (a settingsUpdaterAdapter) Capabilities(sessionID, model string) (relay.AgentCapabilities, bool) {
+	if sessionID == "" {
+		return relay.AgentCapabilities{}, false
+	}
+	harness, err := a.p.HarnessFor(sessions.SessionID(sessionID))
+	if err != nil || (harness != sessions.HarnessClaude && harness != harnessCodex) {
+		return relay.AgentCapabilities{}, false
+	}
+	list, have := agentModelVocabulary(a.p, a.saved, harness, sessionID)
+	models := []string{}
+	if have {
+		for _, option := range list.Models {
+			if !slices.Contains(option.TruncatedFields, "value") {
+				models = append(models, option.Value)
+			}
+		}
+	}
+	return relay.AgentCapabilities{
+		Interrupt:    true,
+		MidTurnInput: false,
+		EffortLevels: slices.Clone(effortLevelsFor(list, have, model)),
+		Models:       models,
+	}, true
 }
 
 // errNoBoundSession is the sentinel sessionRouter.Route returns when a
