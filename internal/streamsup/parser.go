@@ -9681,12 +9681,13 @@ func (p *Parser) emitUser(msg *streamMessage, line []byte) {
 		}
 		if block.Type == "text" && (ul.IsSynthetic ||
 			block.Text == harnessNoOutputNudge ||
-			strings.HasPrefix(block.Text, harnessInterruptNoticePrefix)) {
+			strings.HasPrefix(block.Text, harnessInterruptNoticePrefix) ||
+			parentToolUseID(ul.ParentToolUseID) != "") {
 			// Harness-authored prose, dropped in silence — see harnessNoOutputNudge
 			// for the captures, the census, and why the author being neither the
 			// person nor the model makes this a suppression rather than a mapping.
 			//
-			// THREE INDEPENDENT TRIGGERS, deliberately OR'd rather than any one
+			// FOUR INDEPENDENT TRIGGERS, deliberately OR'd rather than any one
 			// subsuming the others. The line-level flag (#2087) covers the whole
 			// class, skill invocations included, and is the only shape that can: a
 			// skill body varies per skill and ran to 87244 chars in one observed
@@ -9701,11 +9702,25 @@ func (p *Parser) emitUser(msg *streamMessage, line []byte) {
 			// harnessInterruptNoticePrefix for both, for why no trim/fold/substring,
 			// and for why the two string triggers are not a table.
 			//
+			// The fourth (#2657) is NOT harness prose: it is a subagent's delegated
+			// prompt. Under --forward-subagent-text claude 2.1.280 opens each
+			// subagent with a user line holding the prompt as one text block,
+			// stamped with the spawning Agent call's parent_tool_use_id and no flag.
+			// The same text already reaches clients as that Agent tool_use's
+			// `prompt` input, so it is dropped as a duplicate rather than mapped;
+			// surfacing it put one Unrecognized row, and the whole prompt as Raw, on
+			// every client per spawn. Keyed on the parent id because nothing else
+			// marks the line — see subagent_prompt_v2.1.280.json and its reader,
+			// TestRealClaudeSubagentPromptCaptureDropsTheDelegatedPrompt. A
+			// main-conversation line reads "" here (null, absent, non-string or
+			// over-cap all do, via parentToolUseID), so its text still surfaces
+			// unless one of the first three triggers takes it.
+			//
 			// `continue`, not `return`: the suppression is scoped to this BLOCK, so
 			// a tool_result sharing the message still maps, with its sidecar detail
-			// intact. Requiring type "text" is what keeps BOTH triggers unreachable
+			// intact. Requiring type "text" is what keeps EVERY trigger unreachable
 			// from tool output — a tool_result's payload decodes into Content, never
-			// into Text — so tripping either takes control of the block's type, not
+			// into Text — so tripping any takes control of the block's type, not
 			// just of a string; and it is what keeps a genuinely new BLOCK TYPE
 			// surfacing even on a flagged line, which is the alarm worth raising.
 			// Logged content-free: site and type only, exactly like the
@@ -9728,7 +9743,9 @@ func (p *Parser) emitUser(msg *streamMessage, line []byte) {
 			// above's first version: every block of an UNKNOWN type, flagged line or
 			// not — a new block shape is the alarm this arm exists to raise and the
 			// flag must not blanket it — plus every user/TEXT block on an UNFLAGGED
-			// line that is not byte-exactly the nudge. What no longer reaches here is
+			// MAIN-CONVERSATION line (#2657: a subagent line's text is its delegated
+			// prompt, taken above) that is not byte-exactly the nudge or an interrupt
+			// notice. What no longer reaches here is
 			// the whole harness-authored text class, which the guard above now takes
 			// as one; before #2087 that was the single nudge string.
 			p.emitUnrecognized(turnevent.UnrecognizedUserBlock, block.Type, raw)
