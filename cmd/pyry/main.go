@@ -707,6 +707,7 @@ func selectInteractiveRunner(cfg config.Config, logger *slog.Logger, mcpServersP
 		sink := newStreamTurnSink(0, logger)
 		codex.sink = sink
 		codex.approval = approval
+		codex.vocab = vocab
 		return harnessRunnerFactory(newStreamRunnerFactory(sink, mcpServersPath, vocab, approval), newCodexRunnerFactory(codex)), sink, nil
 	case "pty":
 		return nil, nil, fmt.Errorf(`interactive_runner "pty" was removed in #1348: the terminal-driving interactive runner no longer exists. Remove the key or set it to "stream-json"`)

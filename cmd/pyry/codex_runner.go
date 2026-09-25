@@ -51,11 +51,13 @@ const (
 // fan-in Claude sessions also feed, and the approval registry, window and
 // modal surface Claude sessions also use. Only the registry, timeout and
 // surface of approval are read: Codex approvals are in-band, whatever
-// transport Claude's take.
+// transport Claude's take. vocab is the daemon's model vocabulary store, which
+// holds the Codex model families every spawn reads (#2627); nil holds none.
 type codexHarness struct {
 	bin, home string
 	sink      *streamTurnSink
 	approval  streamApprovalConfig
+	vocab     *modelVocabularyStore
 }
 
 // newCodexRunnerFactory builds a Codex runner per session (#2620). Like
@@ -108,6 +110,7 @@ func newCodexRunnerFactory(h codexHarness) sessions.RunnerFactory {
 			ThreadID:       cfg.ThreadID,
 			OnThread:       recordCodexThread(cfg.RecordThread, cfg.Logger),
 			Approvals:      newCodexApprovals(h.approval.registry, h.approval.timeout, h.approval.surface),
+			Models:         h.vocab.RetainCodex,
 		}), nil
 	}
 }
@@ -222,7 +225,9 @@ func codexTurnSettings(args []string) (model, effort string) {
 // is the stored thread the first spawn resumes, empty to start one; OnThread,
 // when set, is told the live pool id and the id of every thread the runner
 // starts, so the pool can persist it (#2622). Approvals routes approval
-// requests to the permission modal; nil declines every one (#2587).
+// requests to the permission modal; nil declines every one (#2587). Models is
+// handed the newest version per model family each spawn reads (#2627); nil
+// skips the read.
 type codexRunnerConfig struct {
 	Binary, Home, Dir string
 	Tag               *streamSessionTag
@@ -235,6 +240,7 @@ type codexRunnerConfig struct {
 	ThreadID          string
 	OnThread          func(sessionID, threadID string)
 	Approvals         *codexApprovals
+	Models            func([]turnevent.ModelOption)
 }
 
 // codexRunner is the Codex implementation of sessions.Runner: it supervises
@@ -466,6 +472,7 @@ func (r *codexRunner) runOnce(ctx context.Context, threadID string, seq uint64) 
 	if reportTo != "" && r.cfg.OnThread != nil {
 		r.cfg.OnThread(reportTo, threadID)
 	}
+	r.readModels(ctx, client)
 
 	select {
 	case <-client.Done():
@@ -483,6 +490,26 @@ func (r *codexRunner) runOnce(ctx context.Context, threadID string, seq uint64) 
 		return nil
 	}
 	return exitErr
+}
+
+// readModels reads client's model families and hands them to cfg.Models. It
+// runs after the client is bound, so a turn never waits on it. A failure is
+// logged and leaves the entries already held; it never fails the spawn. No
+// model value is logged.
+func (r *codexRunner) readModels(ctx context.Context, client *codexsup.Client) {
+	if r.cfg.Models == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, codexStartTimeout)
+	defer cancel()
+	models, err := client.LatestModels(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			r.log.Warn("codex: model list not read", "session", r.cfg.Tag.ID(), "err", err)
+		}
+		return
+	}
+	r.cfg.Models(models)
 }
 
 // stopCodexClient stops c within codexCallTimeout and returns its exit error.
