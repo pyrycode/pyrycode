@@ -1,0 +1,18 @@
+[
+  {"id": "gpt-5.6-sol", "model": "gpt-5.6-sol", "displayName": "GPT-5.6 Sol", "description": "Previous Sol.", "hidden": false, "isDefault": false, "defaultReasoningEffort": "medium",
+   "supportedReasoningEfforts": [{"reasoningEffort": "low", "description": "Fast."}, {"reasoningEffort": "medium", "description": "Balanced."}, {"reasoningEffort": "high", "description": "Thorough."}]},
+  {"id": "gpt-6-sol", "model": "gpt-6-sol", "displayName": "GPT-6 Sol", "description": "Newest Sol.", "hidden": false, "isDefault": true, "defaultReasoningEffort": "medium",
+   "supportedReasoningEfforts": [{"reasoningEffort": "low", "description": "Fast."}, {"reasoningEffort": "medium", "description": "Balanced."}, {"reasoningEffort": "high", "description": "Thorough."}, {"reasoningEffort": "xhigh", "description": "Deepest."}]},
+  {"id": "gpt-6-luna", "model": "gpt-6-luna", "displayName": "GPT-6 Luna", "description": "Newest Luna.", "hidden": false, "isDefault": false, "defaultReasoningEffort": "low",
+   "supportedReasoningEfforts": [{"reasoningEffort": "minimal", "description": "Least."}, {"reasoningEffort": "low", "description": "Fast."}, {"reasoningEffort": "medium", "description": "Balanced."}]},
+  {"id": "gpt-reserve", "model": "gpt-reserve", "displayName": "Reserve", "description": "Reserve capacity.", "hidden": false, "isDefault": false, "defaultReasoningEffort": "medium",
+   "supportedReasoningEfforts": [{"reasoningEffort": "medium", "description": "Balanced."}]},
+  {"id": "gpt-5.5-luna", "model": "gpt-5.5-luna", "displayName": "GPT-5.5 Luna", "description": "Previous Luna.", "hidden": false, "isDefault": false, "defaultReasoningEffort": "low",
+   "supportedReasoningEfforts": [{"reasoningEffort": "low", "description": "Fast."}]},
+  {"id": "gpt-5.6-terra", "model": "gpt-5.6-terra", "displayName": "GPT-5.6 Terra", "description": "Newest Terra.", "hidden": false, "isDefault": false, "defaultReasoningEffort": "medium",
+   "supportedReasoningEfforts": [{"reasoningEffort": "low", "description": "Fast."}, {"reasoningEffort": "medium", "description": "Balanced."}]},
+  {"id": "gpt-5.1-terra", "model": "gpt-5.1-terra", "displayName": "GPT-5.1 Terra", "description": "Older Terra.", "hidden": false, "isDefault": false, "defaultReasoningEffort": "medium",
+   "supportedReasoningEfforts": [{"reasoningEffort": "medium", "description": "Balanced."}]},
+  {"id": "gpt-6-astra", "model": "gpt-6-astra", "displayName": "GPT-6 Astra", "description": "Newest Astra.", "hidden": false, "isDefault": false, "defaultReasoningEffort": "high",
+   "supportedReasoningEfforts": [{"reasoningEffort": "medium", "description": "Balanced."}, {"reasoningEffort": "high", "description": "Thorough."}]}
+]
