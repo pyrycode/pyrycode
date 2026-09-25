@@ -46,7 +46,9 @@ import (
 // nothing derived from it may reach a message a client reads.
 const (
 	msgModelListConversationNotFound = "conversation not found"
-	msgModelListUnavailable          = "model list is unavailable"
+	// MsgModelListUnavailable is exported for create_conversation (#2665), which
+	// answers an unprovable model with the same reply set_session_settings does.
+	MsgModelListUnavailable = "model list is unavailable"
 )
 
 // The two answers, spelled once, reusing attachmentReject's shape so a code cannot
@@ -61,7 +63,7 @@ const (
 // clear without the client changing anything.
 var (
 	rejectModelListConversationNotFound = attachmentReject{protocol.CodeConversationNotFound, msgModelListConversationNotFound, false}
-	rejectModelListUnavailable          = attachmentReject{protocol.CodeModelListUnavailable, msgModelListUnavailable, true}
+	rejectModelListUnavailable          = attachmentReject{protocol.CodeModelListUnavailable, MsgModelListUnavailable, true}
 )
 
 // handleRequestModelList answers one inbound request_model_list with the named

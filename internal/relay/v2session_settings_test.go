@@ -245,11 +245,11 @@ func TestV2Session_SetSessionSettings_ErrorReplies(t *testing.T) {
 	}{
 		{name: "nil seam replies unavailable", nilSeam: true, wantCode: protocol.CodeServerBinaryOffline, wantMsg: msgSettingsUnavailable, wantRetry: true},
 		{name: "unknown session id", seamErr: ErrSessionUnknown, wantCode: protocol.CodeSessionNotFound, wantMsg: msgSettingsNotFound, wantRetry: false},
-		{name: "model not offered", seamErr: ErrModelNotOffered, wantCode: protocol.CodeProtocolMalformed, wantMsg: msgSettingsModelNotOffered, wantRetry: false, wantEvent: "v2.settings.model_not_offered"},
+		{name: "model not offered", seamErr: ErrModelNotOffered, wantCode: protocol.CodeProtocolMalformed, wantMsg: MsgSettingsModelNotOffered, wantRetry: false, wantEvent: "v2.settings.model_not_offered"},
 		// An effort the session's model does not advertise (#2629) gets the reply the
 		// closed set gave an unknown level, byte for byte, and no log line.
 		{name: "effort not offered", seamErr: ErrEffortNotOffered, wantCode: protocol.CodeProtocolMalformed, wantMsg: msgSettingsMalformed, wantRetry: false},
-		{name: "model vocabulary unavailable", seamErr: ErrModelVocabularyUnavailable, wantCode: protocol.CodeModelListUnavailable, wantMsg: msgModelListUnavailable, wantRetry: true, wantEvent: "v2.settings.model_vocabulary_unavailable"},
+		{name: "model vocabulary unavailable", seamErr: ErrModelVocabularyUnavailable, wantCode: protocol.CodeModelListUnavailable, wantMsg: MsgModelListUnavailable, wantRetry: true, wantEvent: "v2.settings.model_vocabulary_unavailable"},
 		{name: "persist failure replies unavailable", seamErr: errors.New(persistErrSentinel), wantCode: protocol.CodeServerBinaryOffline, wantMsg: msgSettingsUnavailable, wantRetry: true, wantEvent: "v2.settings.persist_err"},
 	}
 	for _, tc := range cases {

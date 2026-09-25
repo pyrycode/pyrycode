@@ -1148,7 +1148,7 @@ func runSupervisor(args []string) error {
 		allowInsecure: allowInsecure,
 		shutdown:      cancelCause,
 		convReg:       convReg,
-		creator:       sessionMinter{pool},
+		creator:       sessionMinter{pool, modelVocabulary},
 		router:        router,
 		queue:         queue,
 		active:        active,
@@ -1512,7 +1512,13 @@ func (r poolResolver) ResolveID(arg string) (sessions.SessionID, error) {
 // re-run resolveSpawnDir at its own spawn site — because that path re-reads a
 // raw, persisted conv.Cwd from a mutable file across a daemon restart, so its
 // stored value is unvalidated bytes from a previous process lifetime.
-type sessionMinter struct{ p *sessions.Pool }
+type sessionMinter struct {
+	p *sessions.Pool
+	// saved is the daemon's persisted model vocabulary, the same third source
+	// settingsUpdaterAdapter checks against (#2665), so a create and a later
+	// set_session_settings accept exactly the same values. nil is two sources.
+	saved savedModelVocabulary
+}
 
 // Create satisfies handlers.SessionCreator. The ctx is discarded because neither
 // half of this can observe one: resolveSpawnDir takes no context.Context, and
@@ -1532,12 +1538,46 @@ type sessionMinter struct{ p *sessions.Pool }
 // (#2647), passed to the pool as the harness: the wire's agent names are the
 // harness names (sessions.HarnessClaude, harnessCodex), the equality
 // handlers.AgentOf already reads the other way.
-func (m sessionMinter) Create(_ context.Context, label, spawnDir, agent string) (string, string, error) {
+//
+// settings (#2665) replace what the mint would give, field by field, and are
+// checked first — before resolveSpawnDir trust-marks anything and before the
+// mint — by the membership checks settingsUpdaterAdapter.UpdateSettings runs,
+// against agent's own entries (ADR 039). There is no bound session yet, so the
+// vocabulary is read unbound. An effort is checked against the model the
+// session will start on: the requested one, else the mint's. That model and the
+// minted one are the same snapshot of Pool.MintDefaults, so an operator change
+// racing the create cannot validate against one model and mint on another.
+func (m sessionMinter) Create(_ context.Context, label, spawnDir, agent string, settings handlers.CreateSettings) (string, string, error) {
+	// Only model and effort are ever copied, so no create can mint a posture.
+	base := m.p.MintDefaults(agent)
+	start := sessions.SessionSettings{Model: base.Model, Effort: base.Effort}
+	if settings.Model != nil {
+		start.Model = *settings.Model
+	}
+	if settings.Effort != nil {
+		start.Effort = *settings.Effort
+	}
+	checkModel := settings.Model != nil && *settings.Model != ""
+	checkEffort := settings.Effort != nil && *settings.Effort != ""
+	if checkModel || checkEffort {
+		list, have := agentModelVocabulary(m.p, m.saved, agent, "")
+		if checkModel {
+			if err := validateModelVocabulary(list, have, start.Model); err != nil {
+				return "", "", err
+			}
+		}
+		if checkEffort {
+			if err := validateEffortVocabulary(agent, list, have, start.Model, start.Effort); err != nil {
+				return "", "", err
+			}
+		}
+	}
+
 	resolved, err := resolveSpawnDir(spawnDir)
 	if err != nil {
 		return "", "", err
 	}
-	id, err := m.p.MintAs(label, resolved, agent)
+	id, err := m.p.MintWith(label, resolved, agent, start)
 	return string(id), resolved, err
 }
 

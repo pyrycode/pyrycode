@@ -24,7 +24,7 @@ func labelPtr(s string) *string { return &s }
 // sessionMinter adds to Pool.Mint's id.
 type spawnDirCreator struct{}
 
-func (spawnDirCreator) Create(_ context.Context, _, spawnDir, _ string) (string, string, error) {
+func (spawnDirCreator) Create(_ context.Context, _, spawnDir, _ string, _ handlers.CreateSettings) (string, string, error) {
 	dir, err := resolveSpawnDir(spawnDir)
 	if err != nil {
 		return "", "", err
