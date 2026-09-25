@@ -688,6 +688,17 @@ type V2SessionConfig struct {
 	// and linear-scans its slice; it is not a map lookup.
 	KnownConversation func(conversationID string) bool
 
+	// CodexConversation reports whether conversationID's bound session runs
+	// Codex (#2644). forwardEnvelope consults it, through withheldFromConn, to
+	// keep every pushed frame about such a conversation from a conn that did not
+	// negotiate protocol.CapabilityMultiAgent. Called on the Run goroutine, per
+	// frame to such a conn; production wires a conversations-registry lookup plus
+	// sessions.Pool.HarnessFor, the two locks RetainedModelLists already takes on
+	// Run. An unknown conversation, one with no bound session and a harness miss
+	// all report false. Optional: when nil no conversation is Codex and every
+	// frame is delivered as before #2644.
+	CodexConversation func(conversationID string) bool
+
 	// HistoryPage serves one backward step of a conversation-history walk for an
 	// inbound request_history (#2116), over the daemon's durable on-disk log
 	// (#2112). handleRequestHistory is its sole reader. Optional: when nil the

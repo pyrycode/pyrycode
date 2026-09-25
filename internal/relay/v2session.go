@@ -1907,6 +1907,13 @@ func (m *V2SessionManager) forwardEnvelope(_ context.Context, connID string, env
 	if s.state != V2StateOpen {
 		return ErrSessionNotOpen
 	}
+	// A frame about a Codex conversation, for a conn without multi_agent (#2644).
+	// Nil, not an error: drainReplayOnce abandons a conn's replay tail on an error
+	// and must instead advance past a withheld event to the ones behind it. Before
+	// the seal, so a withheld frame spends no send-nonce.
+	if m.withheldFromConn(s, env) {
+		return nil
+	}
 	// Reconnect-replay dedup (#647): drop a live structured envelope this conn
 	// already received via replay. Envelopes with EventID == nil (snapshot,
 	// error, rekey, resync) are never structured events and are never dropped;
