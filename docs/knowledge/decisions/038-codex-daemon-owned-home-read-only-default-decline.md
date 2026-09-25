@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted (#2620)
+Accepted (#2620). Partially superseded — see [Superseded in part
+(2026-09-25, #2586)](#superseded-in-part-2026-09-25-2586) below.
 
 ## Context
 
@@ -45,11 +46,15 @@ out-of-band, with `CODEX_HOME=<dir> codex login`; the resulting `auth.json`
 is never read, copied, linked or moved by the daemon.
 
 Every server request keeps `codexsup`'s existing default decline —
-`OnServerRequest` is left nil. `SetPermissionMode` on the runner always
+`OnServerRequest` is left nil. ~~`SetPermissionMode` on the runner always
 returns an error rather than changing anything live, `SetSpawnPermissionMode`
-is a no-op, and neither `Restart` nor `SetSpawnArgs` touches the config file.
-No runner call can loosen the posture; only rewriting `config.toml` can, and
-only the daemon does that.
+is a no-op, and neither `Restart` nor `SetSpawnArgs` touches the config
+file. No runner call can loosen the posture; only rewriting `config.toml`
+can, and only the daemon does that.~~ **Superseded — see [Superseded in
+part (2026-09-25, #2586)](#superseded-in-part-2026-09-25-2586) below:**
+`SetPermissionMode`/`SetSpawnPermissionMode` now store the posture and
+every `turn/start` asserts it, so a runner call can loosen the posture —
+on the next turn, not live on the running one.
 
 ## Rationale
 
@@ -93,6 +98,36 @@ only the daemon does that.
   in the registry; persisting the thread id across a daemon restart is
   #2622's job.
 
+## Superseded in part (2026-09-25, #2586)
+
+Codex takes model, effort, approval policy, sandbox and approvals reviewer
+as overrides on each `turn/start`, so a posture change needs no respawn.
+`codexTurnOverrides` (`cmd/pyry/codex_settings.go`) maps the session's
+stored `PermissionMode`/`YOLO` to those three fields on every turn, and
+`SetPermissionMode`/`SetSpawnPermissionMode` now store the mode instead of
+refusing or no-opping. The posture is no longer fixed read-only for a
+session's lifetime — an operator's posture pick now actually applies, on
+the session's next turn.
+
+What this decision got right and what still stands unchanged:
+
+- The daemon-owned `CODEX_HOME`, its `0700` permissions, and
+  `prepareCodexHome`'s unconditional `config.toml` rewrite on every
+  construction. That rewrite is now the posture's *baseline before the
+  first turn* rather than its permanent value — every turn since #2586
+  re-asserts the session's actual posture on top of it.
+- The default decline on every server request (`OnServerRequest` left
+  nil). A looser sandbox or approval policy only changes what Codex is
+  *permitted* to attempt without asking; #2587 still owns whether anything
+  answers an approval request with anything but codexsup's decline.
+- `auth.json` is still never read, copied, linked or moved by the daemon.
+
+See [codexsup-package.md § Production
+wiring](../features/codexsup-package.md#production-wiring--the-cmdpyry-codex-runner-2620)
+for the full posture table and the sticky-override reasoning (an omitted
+field keeps the thread's previous, possibly looser, override — which is
+why every turn asserts all three rather than only the ones that changed).
+
 ## Related
 
 - [features/codexsup-package.md](../features/codexsup-package.md) §
@@ -100,6 +135,7 @@ only the daemon does that.
   this decision sits on top of.
 - `docs/specs/architecture/2620-codex-pool-runner.md` — the full plan,
   including the Security review this decision matches.
+- #2586 — applies the stored posture per turn instead of fixing it read-only; see "Superseded in part" above.
 - #2587 — the approvals ticket this posture defers to.
 - #2621 — construction-time sign-in/version checks, the natural place to
   also detect a looser effective posture from outside `CODEX_HOME`.

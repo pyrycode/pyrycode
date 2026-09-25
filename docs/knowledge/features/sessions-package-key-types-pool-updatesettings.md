@@ -170,6 +170,17 @@ place is what keeps them safe.):
   There is exactly one posture send for an update naming either
   posture field.
 
+  **Since #2586, the effort clause is a type switch, not always a command
+  turn.** A runner that implements the unexported `effortSetter` interface
+  (`SetEffort(effort string) error`) — the Codex runner, where the
+  `/effort <v>` text would start a real model turn instead of being read as
+  a command — gets `SetEffort` called directly, with no turn sent at all.
+  Claude's `streamRunner` does not implement it, so its delivery is the
+  `send("effort", …)` default branch unchanged: a future runner that forgets
+  the method degrades to a visible `/effort` turn, never a silently skipped
+  change. See [codexsup-package.md § Production
+  wiring](codexsup-package.md#production-wiring--the-cmdpyry-codex-runner-2620).
+
   **Since #2447, that `set_model` request carries `familyAlias(*update.Model)`,
   not `*update.Model` verbatim** — the same rewrite `claudeSettingsArgs`
   applies to the spawn argv (above), so the live child and the next-spawn

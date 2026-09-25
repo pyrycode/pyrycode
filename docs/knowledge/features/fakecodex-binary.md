@@ -26,10 +26,14 @@ the notification/response path.
 
 - `CODEX_HOME` — echoed back as `initialize`'s `codexHome`. Defaults to
   `$HOME/.codex`, matching the real server.
+- `FAKECODEX_TURN_LOG` (#2586) — a file path. Each `turn/start`'s raw params
+  are appended to it as one line, before the response, so a test can read
+  the model/effort/posture overrides a turn actually carried — the fake had
+  no way to observe those before this. Written at `0600`; unset by default,
+  so a test that doesn't need it pays nothing.
 
-No other env knob. Per-turn behaviour is selected by markers in the turn's
-input text instead, so one process serves every scenario a consumer's test
-needs.
+Per-turn behaviour is otherwise selected by markers in the turn's input text,
+so one process serves every scenario a consumer's test needs.
 
 ## Markers
 

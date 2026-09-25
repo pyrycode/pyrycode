@@ -342,10 +342,53 @@ observation (PR #2623 review).
 
 Model and effort reach a turn as `TurnInput.Model`/`Effort`, read from
 `RunnerConfig.ClaudeArgs`'s trailing `--model`/`--effort` pair
-(`codexTurnSettings`) and refreshed by `SetSpawnArgs`/`Restart`/`SetModel`;
-`SetPermissionMode` always errors and `SetSpawnPermissionMode` is a no-op,
-since the read-only posture lives only in the config file above, never in a
-runner call.
+(`codexTurnSettings`) and refreshed by `SetSpawnArgs`/`Restart`/`SetModel`.
+
+**Every turn also asserts the session's full posture (#2586), not just
+model and effort.** `codexTurnOverrides` (`cmd/pyry/codex_settings.go`) is
+`claudeSettingsArgs`' Codex counterpart: it turns the stored
+`PermissionMode`/`YOLO` into the turn's `ApprovalPolicy`, `Sandbox` and
+`ApprovalsReviewer` overrides.
+
+| Stored posture | Approval policy | Sandbox | Reviewer |
+|---|---|---|---|
+| `default`, `acceptEdits` | granular | workspaceWrite | user |
+| `plan` | granular | readOnly | user |
+| `auto` | on-request | workspaceWrite | auto_review |
+| `dontAsk` | never | workspaceWrite | user |
+| `bypassPermissions` / YOLO | never | dangerFullAccess | user |
+| anything else, including empty | granular | readOnly | user |
+
+The YOLO bit is read before the mode, mirroring `claudeSettingsArgs`. The
+posture is never empty: Codex keeps a `turn/start` override for the
+thread's *later* turns too, so an omitted field would let a previous,
+possibly looser, override survive past the turn that set it — asserting
+all three every turn is what makes a tightening actually stick. A
+tightening still only lands on the *next* turn: a turn already running
+keeps the sandbox it started with, and `Interrupt` is the verb for ending
+one early.
+
+`SetPermissionMode` and `SetSpawnPermissionMode` now store the mode on the
+runner (guarded by `mu`, read as one snapshot in `WriteUserTurn` alongside
+model and effort) instead of erroring or doing nothing. A live posture,
+model or effort change therefore sends nothing to Codex and respawns
+nothing — it reaches Codex on the session's next turn. The pool's in-band
+effort delivery hands a runner implementing `SetEffort` the value directly,
+in place of the `/effort <level>` command turn Claude's runner still needs
+(Codex would run that text as a prompt, not a command); see [`effortSetter`
+in `Pool.UpdateSettings`](sessions-package-key-types-pool-updatesettings.md).
+
+This supersedes [ADR 038](../decisions/038-codex-daemon-owned-home-read-only-default-decline.md)'s
+fixed read-only posture — see that ADR's "Superseded in part" note for what
+still stands (the daemon-owned home, the default decline, and
+`config.toml` as the baseline before the first turn).
+
+The `approvalPolicy`/`sandboxPolicy`/`approvalsReviewer` field spellings
+came from the committed `codex_app_server_protocol.schemas.json`'s
+`v2.TurnStartParams` — which the bundle already had at the time (#2586), a
+correction of an assumption that it held only server-request types. Check
+the committed bundle before assuming a `v2` request type is missing from
+it and needs regenerating.
 
 ## Testing
 
