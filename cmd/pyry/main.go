@@ -1535,11 +1535,13 @@ func (m sessionMinter) Create(_ context.Context, label, spawnDir string) (string
 // means "leave unchanged" and a nil YOLO can never enable bypass. The precedent
 // for this type-narrowing seam is sessionMinter / poolResolver above.
 //
-// A non-empty model is checked before Pool.UpdateSettings against the same
-// retainedModelVocabulary used for client publication. This adapter is the one
-// layer that can see both cmd-side retention and the sessions primitive without
-// inverting either package dependency. Empty retains its restart-to-default
-// meaning and skips membership.
+// A non-empty model is checked before Pool.UpdateSettings against the entries of
+// the session's own agent (#2629): Claude's through the same
+// retainedModelVocabulary used for client publication, Codex's families from the
+// store. A non-empty effort is checked against the levels the model the session
+// will run advertises. This adapter is the one layer that can see both cmd-side
+// retention and the sessions primitive without inverting either package
+// dependency. Empty retains its restart-to-default meaning and skips membership.
 //
 // The mirror is maintained BY HAND, so a field added on one side and forgotten
 // here compiles and ships as a silent no-op. That is what
@@ -1560,11 +1562,13 @@ type settingsUpdaterAdapter struct {
 
 func (a settingsUpdaterAdapter) UpdateSettings(id string, u relay.SettingsUpdate) error {
 	sessionID := sessions.SessionID(id)
-	if u.Model != nil && *u.Model != "" {
+	checkModel := u.Model != nil && *u.Model != ""
+	checkEffort := u.Effort != nil && *u.Effort != ""
+	if checkModel || checkEffort {
 		// Check membership only for a session the daemon actually has a record of.
 		// Apart from preserving session.not_found precedence, this prevents an
-		// unknown id from probing whether the bootstrap vocabulary is complete —
-		// which is why requireKnownSession must stay AHEAD of the vocabulary read
+		// unknown id from probing whether a vocabulary is complete or which agent
+		// runs it — which is why HarnessFor must stay AHEAD of the vocabulary read
 		// below rather than being folded into the write.
 		// Pool.Lookup("") deliberately resolves the bootstrap session for legacy
 		// internal callers, while neither pool write accepts anything but an exact
@@ -1573,12 +1577,32 @@ func (a settingsUpdaterAdapter) UpdateSettings(id string, u relay.SettingsUpdate
 		if sessionID == "" {
 			return relay.ErrSessionUnknown
 		}
-		if err := a.requireKnownSession(sessionID); err != nil {
-			return err
+		// The session's agent, live or dormant (#2629): a model and an effort are
+		// checked against that agent's entries, since a capability belongs to the
+		// agent and the model together.
+		harness, err := a.p.HarnessFor(sessionID)
+		if err != nil {
+			return relay.ErrSessionUnknown
 		}
-		list, have := retainedModelVocabulary(a.p, a.saved, id)
-		if err := validateModelVocabulary(list, have, *u.Model); err != nil {
-			return err
+		list, have := agentModelVocabulary(a.p, a.saved, harness, id)
+		if checkModel {
+			if err := validateModelVocabulary(list, have, *u.Model); err != nil {
+				return err
+			}
+		}
+		if checkEffort {
+			// The model the session will run after this update: the frame's own
+			// when it names one (an empty one included, which has no entry), else
+			// the stored one.
+			var model string
+			if u.Model != nil {
+				model = *u.Model
+			} else if model, err = a.storedModel(sessionID); err != nil {
+				return err
+			}
+			if err := validateEffortVocabulary(list, have, model, *u.Effort); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -1634,33 +1658,19 @@ func (a settingsUpdaterAdapter) UpdateSettings(id string, u relay.SettingsUpdate
 	return err
 }
 
-// requireKnownSession reports whether this daemon has any record of id — live or
-// dormant — mapping an absence to relay.ErrSessionUnknown. It is the gate's
-// existence probe, hoisted out of UpdateSettings because it now asks two
-// questions and the ordering constraint above is easier to see with one call.
-//
-// Pool.DormantSettingsFor is reused as the dormant probe and its value discarded:
-// it already answers exactly "does this pool hold a dormant entry for id", with a
-// miss of its own, so no new pool surface is needed for a question the read half
-// already exposes.
-//
-// Both probes are advisory by the time the write runs — a revive can retire an
-// entry in between — and that is sound rather than tolerated: the id can only move
-// dormant→live, the live write is attempted first, and an id that moved is written
-// by the half that now holds it. The probe's job is to refuse an id the daemon has
-// NO record of before the vocabulary is consulted, and an unknown id stays unknown.
-func (a settingsUpdaterAdapter) requireKnownSession(id sessions.SessionID) error {
-	_, err := a.p.Lookup(id)
-	if err == nil {
-		return nil
+// storedModel is the model id is stored with, live or dormant, mapping a miss in
+// both halves to relay.ErrSessionUnknown. Live first, the write's order: an id
+// that a revive moves between the two reads misses both, and session.not_found
+// is then the write path's answer for the same race too.
+func (a settingsUpdaterAdapter) storedModel(id sessions.SessionID) (string, error) {
+	if s, err := a.p.SettingsFor(id); err == nil {
+		return s.Model, nil
 	}
-	if !errors.Is(err, sessions.ErrSessionNotFound) {
-		return err
+	s, err := a.p.DormantSettingsFor(id)
+	if err != nil {
+		return "", relay.ErrSessionUnknown
 	}
-	if _, err := a.p.DormantSettingsFor(id); err != nil {
-		return relay.ErrSessionUnknown
-	}
-	return nil
+	return s.Model, nil
 }
 
 // validateModelVocabulary classifies one non-empty client model against the same
@@ -1693,6 +1703,45 @@ func validateModelVocabulary(list turnevent.ModelList, have bool, model string) 
 		}
 	}
 	return relay.ErrModelNotOffered
+}
+
+// fallbackEffort reports whether effort is in the set a model with no entry for
+// its agent accepts (#2629): the five levels relay's closed set held before, so a
+// session whose model is unlisted, empty or not yet reported keeps what it had.
+func fallbackEffort(effort string) bool {
+	switch effort {
+	case "low", "medium", "high", "xhigh", "max":
+		return true
+	default:
+		return false
+	}
+}
+
+// validateEffortVocabulary classifies one non-empty client effort against the
+// entry list advertises for model (#2629). An entry is an exact, uncut Value match:
+// a cut value is not the model's name, and cut levels cannot prove a level absent,
+// so either falls through to the fallback set rather than refusing on partial
+// evidence. A found entry accepts exactly its EffortLevels, none when it
+// advertises none. Neither the effort nor any level is in the returned sentinel.
+func validateEffortVocabulary(list turnevent.ModelList, have bool, model, effort string) error {
+	if effort == "" {
+		return nil
+	}
+	if have && model != "" {
+		for _, option := range list.Models {
+			if option.Value != model || slices.Contains(option.TruncatedFields, "value") || slices.Contains(option.TruncatedFields, "effort_levels") {
+				continue
+			}
+			if slices.Contains(option.EffortLevels, effort) {
+				return nil
+			}
+			return relay.ErrEffortNotOffered
+		}
+	}
+	if fallbackEffort(effort) {
+		return nil
+	}
+	return relay.ErrEffortNotOffered
 }
 
 // errNoBoundSession is the sentinel sessionRouter.Route returns when a

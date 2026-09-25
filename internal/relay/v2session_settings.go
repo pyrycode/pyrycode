@@ -72,7 +72,10 @@ const (
 //  5. Validate availability + persist: the injected adapter checks a non-empty
 //     model against the retained published vocabulary before Pool.UpdateSettings.
 //     A complete-menu absence becomes a fixed non-retryable malformed reply; an
-//     incomplete vocabulary becomes retryable model_list.unavailable. Otherwise
+//     incomplete vocabulary becomes retryable model_list.unavailable. Since #2629
+//     both checks use the session's own agent's entries, and a non-empty effort
+//     the session's model does not advertise returns ErrEffortNotOffered, replied
+//     exactly as step 3 replies to a malformed effort. Otherwise
 //     UpdateSettings merges all fields under one atomic save (rollback on failure),
 //     so a partial write is impossible. ErrSessionUnknown becomes session.not_found;
 //     any remaining error becomes server-unavailable; nil becomes success.
@@ -144,6 +147,12 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 			"conn_id", s.connID,
 			"session_id", p.SessionID)
 		m.settingsReplyError(ctx, s, env.ID, protocol.CodeProtocolMalformed, msgSettingsModelNotOffered, false)
+		return
+	}
+	if errors.Is(err, ErrEffortNotOffered) {
+		// The reply an unknown level got from the closed set before #2629, byte for
+		// byte, and like it unlogged.
+		m.settingsReplyError(ctx, s, env.ID, protocol.CodeProtocolMalformed, msgSettingsMalformed, false)
 		return
 	}
 	if errors.Is(err, ErrModelVocabularyUnavailable) {
@@ -486,28 +495,51 @@ func modelWordByte(c byte) bool {
 }
 
 // validEffort reports whether e is an acceptable reasoning-effort value from an
-// untrusted set_session_settings frame (#845). "" is accepted (clear to the
-// template — claudeSettingsArgs emits no --effort for it); otherwise e is one of
-// the closed enum {low, medium, high, xhigh, max}. The set matches
-// cmd/pyry/agent_run.go's validEfforts (the established --effort enum) but is
-// defined relay-local because internal/relay cannot import cmd/pyry.
+// untrusted set_session_settings frame (#845). It is a SHAPE check, and since
+// #2629 a grammar rather than a closed enum: which levels a model offers is the
+// agent's to say (Claude's {low … max}, Codex's ultra), so membership is checked
+// per model by cmd/pyry's settings adapter, and this check only bounds what may
+// reach that check at all:
+//
+//	effort := "" | lead tail{0,31}
+//	lead   := [a-z0-9]
+//	tail   := [a-z0-9_-]
+//
+// "" is accepted (clear to the template — claudeSettingsArgs emits no --effort
+// for it). The lead byte keeps a value from posing as a flag on claude's argv,
+// where it is the element after --effort; the closed alphabet keeps whitespace,
+// newlines, control bytes and bytes >= 0x80 out of that argv, the in-band
+// /effort turn and a Codex turn; and 32 bytes is both Codex's level bound and
+// streamsup's maxModelEffortLevel. TestValidEffort_ByteSetIsClosed walks every
+// byte value through both positions.
 func validEffort(e string) bool {
-	switch e {
-	case "", "low", "medium", "high", "xhigh", "max":
+	if e == "" {
 		return true
-	default:
+	}
+	if len(e) > 32 {
 		return false
 	}
+	for i := 0; i < len(e); i++ {
+		c := e[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		if i > 0 && (c == '_' || c == '-') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // validPermissionMode reports whether mode is an acceptable permission posture
-// from an untrusted set_session_settings frame (#1687). Like validEffort it is a
-// CLOSED ENUM and not validModel's byte-class grammar, because a posture is a
+// from an untrusted set_session_settings frame (#1687). It is a CLOSED ENUM and
+// not a byte-class grammar like validModel's and validEffort's, because a posture is a
 // fixed vocabulary while a model identifier is not: claude's modes are named in
 // its own source, a client picks from a menu of them, and a grammar would admit
-// values nobody enumerated. It carries validEffort's direction hazard too — a
-// closed enum refuses inbound anything claude adds later, and widening it is a
-// code edit here plus one in internal/sessions.
+// values nobody enumerated. It carries the direction hazard validEffort had until
+// #2629 — a closed enum refuses inbound anything claude adds later, and widening it
+// is a code edit here plus one in internal/sessions.
 //
 // A switch and not a package-level slice or map, matching the same decision
 // internal/sessions records for its own copy: a mutable package-level collection
@@ -517,7 +549,7 @@ func validEffort(e string) bool {
 // The set is claude's five NON-ESCALATING modes, measured live at 2.1.239 by #2041
 // and mirrored from internal/sessions' permissionModeInBand — defined relay-local
 // because internal/relay cannot import internal/sessions, the same reason
-// validEffort duplicates cmd/pyry's --effort enum. Five is not a claim about what
+// validEffort duplicated cmd/pyry's --effort enum until #2629. Five is not a claim about what
 // claude accepts in band: the daemon has delivered all SIX storable postures on the
 // held-open stream since #2066, and permissionModeInBand stayed at five precisely
 // so its three non-routing readers keep seeing the non-escalating set. This is a

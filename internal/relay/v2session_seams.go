@@ -285,6 +285,13 @@ var ErrModelNotOffered = errors.New("relay: model not offered")
 // retryable model_list.unavailable used by the model-list request path.
 var ErrModelVocabularyUnavailable = errors.New("relay: model vocabulary unavailable")
 
+// ErrEffortNotOffered means a well-formed non-empty effort is not offered by the
+// model the session will run: absent from that model's advertised levels, or,
+// when the model has no entry for its agent, outside the fallback set (#2629).
+// The settings handler replies exactly as it does to an effort validEffort
+// refuses — the fixed, non-retryable protocol.malformed — and carries no value.
+var ErrEffortNotOffered = errors.New("relay: effort not offered")
+
 // ModalResolver resolves an inbound modal control frame against the daemon's
 // outstanding-modal state. Declared here (consumer side), so internal/relay
 // imports neither internal/supervisor nor cmd/pyry; the cmd/pyry resolver

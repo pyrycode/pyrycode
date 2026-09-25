@@ -168,14 +168,36 @@ func resolveBoundModelList(convReg *conversations.Registry, pool *sessions.Pool,
 // daemon saw in any previous process, restored once at start (#2450).
 // *modelVocabularyStore is the only production implementation.
 //
-// It is the SAME ONE-METHOD SHAPE sessionRetainedModelList asserts for off a
+// Its ModelList is the SAME METHOD sessionRetainedModelList asserts for off a
 // Runner, and deliberately so: the third source then answers the same comma-ok
 // contract as the first two, the bool stays the only spelling of "no list", and no
 // arm of retainedModelVocabulary has to learn a second vocabulary-shaped protocol.
+// CodexModels is the store's Codex half (#2627), read only by
+// agentModelVocabulary for a Codex session; retainedModelVocabulary never calls it.
 // Defined at the CONSUMER, per CODING-STYLE, which is also what keeps this file
 // free of any dependency on how the store persists anything.
 type savedModelVocabulary interface {
 	ModelList() (turnevent.ModelList, bool)
+	CodexModels() []turnevent.ModelOption
+}
+
+// agentModelVocabulary answers the model entries of the agent harness names, for
+// the settings gate (#2629): Claude's through retainedModelVocabulary's three
+// sources, Codex's families from the store, its only source. The bool is false
+// when that agent has no entries held, and for a harness with neither.
+func agentModelVocabulary(pool *sessions.Pool, saved savedModelVocabulary, harness, boundSessionID string) (turnevent.ModelList, bool) {
+	switch harness {
+	case sessions.HarnessClaude:
+		return retainedModelVocabulary(pool, saved, boundSessionID)
+	case harnessCodex:
+		if saved == nil {
+			return turnevent.ModelList{}, false
+		}
+		models := saved.CodexModels()
+		return turnevent.ModelList{Models: models}, len(models) > 0
+	default:
+		return turnevent.ModelList{}, false
+	}
 }
 
 // retainedModelVocabulary answers the model vocabulary to stamp with a

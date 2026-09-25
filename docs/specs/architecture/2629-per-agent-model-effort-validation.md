@@ -125,3 +125,9 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-25
+
+## Revisions
+
+**2026-09-25, during implementation.**
+- Open question resolved: four existing adapter tests armed Claude entries with no `EffortLevels` and then set an effort, which the per-model check now refuses. Their fixtures now advertise claude's five levels (`claudeLevels`): `TestSettingsUpdaterAdapter_RejectsBeforeWholeFrameMutation`, `TestSettingsUpdaterAdapter_DormantWriteLands`, `TestSettingsUpdaterAdapter_DormantModelMembership`, `TestSettingsUpdaterAdapter_DormantPostureRefused`. This is the intended change the ticket names.
+- The adapter's live-session case runs against the live bootstrap (claude). A live *Codex* adapter case was dropped: `Pool.Revive` needs a running pool and a UUIDv4 id, which the dormant fixture lacks. The live half of the harness read is `TestPool_HarnessFor`'s bootstrap row; a live Codex session takes the same `Session.harness` read.
