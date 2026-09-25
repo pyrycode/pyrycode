@@ -233,7 +233,10 @@ var ErrDuplicateID = errors.New("permbridge: duplicate or empty approval id")
 // optional fields are copied only from the corresponding can_use_tool ask fields;
 // they are never derived from Input. RequiresUserInteraction is daemon-internal
 // answer eligibility rather than display data and is therefore excluded from
-// JSON. None of these fields changes the registry's verdict arbitration.
+// JSON. SessionID is the pool session of the runner that parked the request, set
+// by that runner's handler and excluded from JSON for the same reason; empty
+// means no session is known. None of these fields changes the registry's
+// verdict arbitration.
 type Request struct {
 	ToolName                string          `json:"tool_name"`
 	Input                   json.RawMessage `json:"input"`
@@ -245,6 +248,7 @@ type Request struct {
 	DefaultToNo             bool            `json:"default_to_no,omitempty"`
 	RequiresUserInteraction bool            `json:"-"`
 	AlwaysAllow             AlwaysAllow     `json:"-"`
+	SessionID               string          `json:"-"`
 }
 
 // Verdict is the allow/deny decision claude accepts. The omitempty tags give the

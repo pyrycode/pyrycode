@@ -1459,6 +1459,10 @@ func startRelayV2(
 		// streamApprovals — no data race on the field.
 		bridge.questions = questionReg
 		bridge.waker = waker
+		// Stamp each prompt with the conversation of the session that parked it,
+		// not the cursor (#2675). The same resolver the session-transition
+		// producer below uses; an unbound session falls back to the cursor.
+		bridge.sessionConv = func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }
 		// The #1919 report's membership half, assigned after construction rather
 		// than passed in — the same shape modalResolver.streamApprovals uses, and
 		// the only way to keep the constructor's 14 call sites untouched.

@@ -116,7 +116,7 @@ func TestStdioPermissionHandler_AllowAndDeny(t *testing.T) {
 				}
 				return func() { close(retired) }
 			})
-			h := newStdioPermissionHandler(reg, time.Minute, surface)
+			h := newStdioPermissionHandler(reg, time.Minute, surface, nil)
 			var out lockedBuffer
 			h.handle(streamsup.CanUseToolRequest{
 				RequestID: "request-1",
@@ -155,7 +155,7 @@ func TestStdioPermissionHandler_CarriesAskContextFromCorrespondingFields(t *test
 		reg.Resolve(req.ToolUseID, permbridge.Deny("done"))
 		return func() { close(retired) }
 	})
-	h := newStdioPermissionHandler(reg, time.Minute, surface)
+	h := newStdioPermissionHandler(reg, time.Minute, surface, nil)
 	var out lockedBuffer
 	reason := json.RawMessage(`{"source":"ask-field"}`)
 	suggestions := json.RawMessage(`[{"type":"addRules","behavior":"allow","rules":[{"toolName":"Bash","ruleContent":"echo:*"}]}]`)
@@ -203,7 +203,7 @@ func TestStdioPermissionHandler_ChildExitRetiresWithoutReplacementWrite(t *testi
 		surfaced <- req
 		return func() { close(retired) }
 	})
-	h := newStdioPermissionHandler(reg, time.Minute, surface)
+	h := newStdioPermissionHandler(reg, time.Minute, surface, nil)
 	var origin, replacement lockedBuffer
 	h.handle(streamsup.CanUseToolRequest{
 		RequestID: "request-old",
@@ -252,7 +252,7 @@ func TestStdioPermissionHandler_ReusedIDRemainsTrackedForChildExit(t *testing.T)
 		}
 		return func() { close(retired[index]) }
 	})
-	h := newStdioPermissionHandler(reg, time.Minute, surface)
+	h := newStdioPermissionHandler(reg, time.Minute, surface, nil)
 	var firstOut, secondOut lockedBuffer
 	request := streamsup.CanUseToolRequest{
 		RequestID: "request-first",
@@ -306,7 +306,7 @@ func TestStdioPermissionHandler_AskUserQuestionUsesExistingSurface(t *testing.T)
 			close(retired)
 		}
 	})
-	h := newStdioPermissionHandler(f.perm, time.Minute, surface)
+	h := newStdioPermissionHandler(f.perm, time.Minute, surface, nil)
 	var out lockedBuffer
 	h.handle(streamsup.CanUseToolRequest{
 		RequestID:               "request-question",
@@ -353,7 +353,7 @@ func TestStdioPermissionHandler_UnansweredDenies(t *testing.T) {
 	retired := make(chan struct{})
 	surface := &approvalSurfaceReport{}
 	surface.set(func(permbridge.Request) func() { return func() { close(retired) } })
-	h := newStdioPermissionHandler(reg, 10*time.Millisecond, surface)
+	h := newStdioPermissionHandler(reg, 10*time.Millisecond, surface, nil)
 	var out lockedBuffer
 	h.handle(streamsup.CanUseToolRequest{
 		RequestID: "request-timeout",
@@ -399,7 +399,7 @@ func TestStdioPermissionHandler_InteractionRequiredRefusesRemoteAnswers(t *testi
 					close(retired)
 				}
 			})
-			h := newStdioPermissionHandler(reg, 250*time.Millisecond, surface)
+			h := newStdioPermissionHandler(reg, 250*time.Millisecond, surface, nil)
 			var out lockedBuffer
 			h.handle(streamsup.CanUseToolRequest{
 				RequestID:               "request-interaction",

@@ -30,6 +30,32 @@ This package shipped the registry **primitive only**, unwired and unit-tested in
   `Description` reach the modal unescaped (§ Domain types). See
   [codexsup-package.md § Approvals reach the permission modal
   (#2587)](codexsup-package.md#approvals-reach-the-permission-modal-2587).
+- **#2675 (landed)** — `Request` gains `SessionID string \`json:"-"\``, set by
+  `stdioPermissionHandler.handle`/`codexApprovals.handle` from their own
+  runner's `streamSessionTag` at park time (read at park, not construction, so
+  a rotated session reports its current id). `streamApprovalBridge.conversationFor`
+  resolves it through `conversationForSession` — see
+  [conversation-session-binding.md](conversation-session-binding.md) for the
+  same resolver's other caller (the #741 `session_transition` producer) — and
+  stamps that conversation on `modal_shown`/`question_shown`, falling back to
+  the router's `activeConv()` cursor only when nothing resolves (no session —
+  the control-socket path — or a session bound to no conversation, e.g. the
+  bootstrap). Before this fix both frame types were stamped with the cursor
+  unconditionally: the conversation the session router last routed a
+  *message* to, not the conversation whose session parked the *request*.
+  Since [`multi_agent`'s push-choke gate
+  (#2644)](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md)
+  that stamp also gates delivery to conns without `multi_agent`, so a Codex approval
+  parked while the cursor sat on a Claude conversation reached an old client
+  (which could answer it, per #2605), and a Claude approval could be withheld
+  from one. `ApprovalParked` (§ above) is already conversation-keyed off its
+  own membership maps and needed no change. Two test traps: a fixture that
+  sets the cursor to the *same* conversation under test can't catch this bug
+  — that half already reads correct on main, so only a mismatched-cursor case
+  (or the other agent's request) goes red; and a fake broadcaster fed from an
+  `Await`ing goroutine needs to be the channel-based `chanBcast`
+  (`stream_turn_drain_test.go`), not `fakeInteractiveBcast`, which isn't
+  goroutine-safe.
 
 Spec: [`specs/architecture/1103-permbridge-registry.md`](../../specs/architecture/1103-permbridge-registry.md). Ticket record: [codebase/1103.md](../codebase/1103.md).
 
