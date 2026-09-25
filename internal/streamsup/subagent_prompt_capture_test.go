@@ -36,11 +36,10 @@ const subagentPromptCaptureVersion = "2.1.280"
 // subagentPromptPinnedAgentID is the tool_use_id of the Agent call the captured
 // turn made, and the parent_tool_use_id its delegated-prompt line carries.
 //
-// EMPTY ON PURPOSE UNTIL THE LIVE GATE HAS RUN, for parentPinnedAgentID's reason:
-// the fixture is written by `make e2e-realclaude`, after verification, and filling
-// this constant is the commit that lands it. subagentPromptReaderGate makes a
-// fixture landing without it fatal.
-const subagentPromptPinnedAgentID = ""
+// Filled by the commit that landed the fixture from the live gate's run on
+// 2026-09-25, for parentPinnedAgentID's reason. subagentPromptReaderGate makes a
+// fixture without it, or a pin without the fixture, fatal.
+const subagentPromptPinnedAgentID = "toolu_01HZqXbu1AwvR9CX4BLYN9nn"
 
 // subagentPromptReaderGate is parentReaderGate's state machine over (fixture,
 // pin), with this capture's repair instructions. Same actions, one legal skip.

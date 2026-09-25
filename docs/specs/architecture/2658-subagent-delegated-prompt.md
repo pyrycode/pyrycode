@@ -110,3 +110,11 @@ The ticket has no Documentation handoff section. Pending for the documentation s
 - **Census row.** #2658's technical notes ask for the harness-text census in `harnessNoOutputNudge`'s docblock to gain the new trigger. #2659 only extended the guard comment in `emitUser`. This branch adds a dated amendment entry and a delegated-prompt row to that census. The row says the line is **not** harness-authored: it is the subagent's input, dropped as a duplicate of the Agent call's `prompt` input and keyed on `parent_tool_use_id`.
 - **Security review.** #2658 does not carry the `security-sensitive` label, although #2657 did. The review above stays in the plan because it still applies to the same guard.
 - **In-flight overlap.** `feature/2657` (PR #2659) touches the same files because it is the source of these commits. Once this lands, #2659 is superseded and should be closed without merging.
+
+### 2026-09-25 — live capture landed
+
+The dispatcher's real-claude gate ran `TestRealClaude_SubagentPromptCapture` on `47cd6f50` merged with main, and the rig wrote a fixture-worthy record. This commit lands that record byte for byte as `internal/e2e/realclaude/testdata/subagent_prompt_v2.1.280.json`, and fills `subagentPromptPinnedAgentID` with the Agent call id it names (`toolu_01HZqXbu1AwvR9CX4BLYN9nn`).
+
+- **Open question 1 (a flag?) — resolved: no flag.** The delegated-prompt line is frame 25. Its top-level keys are `message`, `parent_tool_use_id`, `session_id`, `subagent_type`, `task_description`, `timestamp`, `type` and `uuid`, and its only block is `text`. None of `isSynthetic`, `isReplay`, `isMeta` or `isCompactSummary` is present, so the parent-id trigger stands. The `subagent_type` and `task_description` keys would also identify the line, but they are not needed: the parent id is already decoded and is enough on its own. The design is unchanged.
+- **Open question 2 (one line?) — resolved: yes.** The record has exactly one delegated-prompt line, and it names the turn's single Agent call.
+- **No other subagent line surfaces as `Unrecognized`.** Replaying all 52 frames through one parser emits 21 events, and none of them is `Unrecognized`.
