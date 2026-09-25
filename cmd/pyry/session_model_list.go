@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/sessions"
@@ -230,8 +232,10 @@ func claudeModelOptions(models []protocol.ModelOption) []protocol.ModelOption {
 }
 
 // codexModelOptions is the other tagging half: the store's Codex families (#2627)
-// as wire entries, agent codex, with the family standing in for the display name
-// the store does not carry. nil for a nil store or one holding no Codex entry.
+// as wire entries, agent codex, each named by codexDisplayName (#2667) since the
+// store carries no display name, and each offering Auto, which the daemon accepts
+// for Codex (validPermissionMode, codexTurnOverrides). nil for a nil store or one
+// holding no Codex entry.
 func codexModelOptions(saved savedModelVocabulary) []protocol.ModelOption {
 	if saved == nil {
 		return nil
@@ -242,10 +246,34 @@ func codexModelOptions(saved savedModelVocabulary) []protocol.ModelOption {
 	}
 	out := make([]protocol.ModelOption, 0, len(p.Models))
 	for _, m := range p.Models {
-		m.Agent, m.Family, m.DisplayName = protocol.AgentCodex, m.Value, m.Value
+		m.Agent, m.Family, m.DisplayName = protocol.AgentCodex, m.Value, codexDisplayName(m.ResolvedModel, m.Value)
+		m.SupportsAutoMode = true
 		out = append(out, m)
 	}
 	return out
+}
+
+// codexDisplayName names a Codex row from its resolved model (#2667): gpt- becomes
+// GPT-, the version stays, and each hyphen part of the family is capitalised, so
+// gpt-5.6-terra shows as "GPT-5.6 Terra". An id not shaped gpt-<version>-<family>
+// keeps the family, the name the row carried before; codexsup's parseFamilyID admits
+// only that shape, so the fallback is for a hand-edited store file.
+func codexDisplayName(resolved, family string) string {
+	rest, ok := strings.CutPrefix(resolved, "gpt-")
+	if !ok {
+		return family
+	}
+	version, fam, ok := strings.Cut(rest, "-")
+	if !ok || version == "" || fam == "" {
+		return family
+	}
+	parts := strings.Split(fam, "-")
+	for i, p := range parts {
+		if p != "" {
+			parts[i] = strings.ToUpper(p[:1]) + p[1:]
+		}
+	}
+	return "GPT-" + version + " " + strings.Join(parts, " ")
 }
 
 // pushedModelOptions builds V2SessionConfig.MergedModelOptions (#2652): the list a

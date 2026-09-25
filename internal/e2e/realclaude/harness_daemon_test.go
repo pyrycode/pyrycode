@@ -155,6 +155,14 @@ func drainForAssistantReply(t *testing.T, phone *fakephone.Client, cs *noise.Cip
 // CipherStates (initSend encrypts phone→binary, initRecv decrypts binary→phone).
 func driveHandshakeInteractive(t *testing.T, phone *fakephone.Client, pubKey []byte, token string) (*noise.CipherState, *noise.CipherState) {
 	t.Helper()
+	return driveHandshake(t, phone, pubKey, token, protocol.CapabilityInteractive)
+}
+
+// driveHandshake is driveHandshakeInteractive advertising caps instead, and it
+// fails unless the daemon grants every one of them (#2660, whose Codex test is
+// the first client here to advertise multi_agent).
+func driveHandshake(t *testing.T, phone *fakephone.Client, pubKey []byte, token string, caps ...string) (*noise.CipherState, *noise.CipherState) {
+	t.Helper()
 	initPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("phone keygen: %v", err)
@@ -163,7 +171,7 @@ func driveHandshakeInteractive(t *testing.T, phone *fakephone.Client, pubKey []b
 	if err != nil {
 		t.Fatalf("NewInitiator: %v", err)
 	}
-	initMsg, err := initiator.WriteInit(buildHelloEarlyInteractive(t, token))
+	initMsg, err := initiator.WriteInit(buildHelloEarly(t, token, caps))
 	if err != nil {
 		t.Fatalf("WriteInit: %v", err)
 	}
@@ -192,13 +200,15 @@ func driveHandshakeInteractive(t *testing.T, phone *fakephone.Client, pubKey []b
 	if err := json.Unmarshal(ackEnv.Payload, &ack); err != nil {
 		t.Fatalf("decode hello_ack payload: %v", err)
 	}
-	if !slices.Contains(ack.Capabilities, protocol.CapabilityInteractive) {
-		t.Fatalf("daemon did not grant interactive (hello_ack capabilities=%v); the turn stream would not reach this conn", ack.Capabilities)
+	for _, c := range caps {
+		if !slices.Contains(ack.Capabilities, c) {
+			t.Fatalf("daemon did not grant %s (hello_ack capabilities=%v); the turn stream would not reach this conn", c, ack.Capabilities)
+		}
 	}
 	return initSend, initRecv
 }
 
-func buildHelloEarlyInteractive(t *testing.T, token string) []byte {
+func buildHelloEarly(t *testing.T, token string, caps []string) []byte {
 	t.Helper()
 	payload, err := json.Marshal(protocol.HelloClientPayload{
 		Role:             "client",
@@ -206,7 +216,7 @@ func buildHelloEarlyInteractive(t *testing.T, token string) []byte {
 		ClientVersion:    "0.0.1-test",
 		ProtocolVersions: []string{"v2"},
 		Token:            token,
-		Capabilities:     []string{protocol.CapabilityInteractive},
+		Capabilities:     caps,
 	})
 	if err != nil {
 		t.Fatalf("marshal interactive hello payload: %v", err)

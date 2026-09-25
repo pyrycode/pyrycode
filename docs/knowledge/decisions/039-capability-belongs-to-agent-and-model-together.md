@@ -34,16 +34,22 @@ first resolve which agent the target session runs, then check only that
 agent's own entries. Effort-level membership is checked per model within
 that agent's list, not against a shared enum: an entry's own
 `EffortLevels` is the authority for what that model accepts, and a model
-with no entry for its agent falls back to a conservative fixed set rather
-than being treated as offering everything or nothing.
+with no entry for its agent falls back to a conservative set scoped to
+that agent — Claude's fixed five, or, since #2666, Codex's own held-family
+intersection — rather than being treated as offering everything or
+nothing.
 
 Concretely, in #2629: `(*sessions.Pool).HarnessFor(id)` resolves a
 session's agent (live-then-dormant, canonical, construction-fixed) before
 any vocabulary read runs. The adapter then selects that agent's own list —
 Claude's retained menu or Codex's `CodexModels()` — and checks `model`
 against it, and `effort` against the specific model-row's advertised
-levels within that same list, falling back to `{low, medium, high, xhigh,
-max}` only when the target model has no entry at all.
+levels within that same list. When the target model has no entry at all,
+`effortLevelsFor` falls back by agent, not to one shared set: Claude's
+fixed `{low, medium, high, xhigh, max}`, or, since #2666, Codex's
+`codexCommonEffortLevels` — the levels every *held* family advertises, in
+the first family's order, none when no family is held. See
+[`effortLevelsFor`](../features/v2-session-manager-state-machine-inbound-set-session-settings-settingsupd.md).
 
 ## Rationale
 
@@ -60,11 +66,25 @@ session (wrong) or refuse a Codex level a Claude session never needed
 Codex adding `ultra` needs no change to what a Claude session accepts, and
 a future third agent needs no change to either.
 
-The fallback set for an unmatched model is deliberately still shared and
-fixed, not agent-scoped, because a model with no entry has told the daemon
-nothing about what it supports — the fallback is a floor for the case
-"we don't know," not a per-agent default. Making it agent-specific with no
-evidence per model would be a guess, not a capability read.
+The fallback set for an unmatched model was originally one shared, fixed
+set for both agents, because a model with no entry has told the daemon
+nothing about what *that model* supports — the fallback was meant as a
+floor for "we don't know," not a per-agent default.
+
+**#2666 supersedes that for Codex.** The shared five includes `max`, which
+not every Codex family advertises; a Codex session on an unlisted or empty
+model reported `max` in its capabilities and accepted it, and
+`codexTurnOverrides` forwarded it unfiltered on the next `turn/start` —
+the shared floor was conservative for Claude, the agent it was measured
+against, but not for the second agent it was later applied to unchanged.
+Codex's fallback is now `codexCommonEffortLevels`: the levels every
+*held* family advertises, in the first family's order, none when no
+family is held. This is still not a guess — it reads the vocabulary the
+daemon already holds for the session's own agent, the same evidence
+`effortLevelsFor`'s matched-entry path uses, intersected across families
+instead of keyed to one model row. Claude keeps the original shared
+fallback unchanged; nothing about this failure mode applies to it, since
+Claude's own five is exactly what Claude's models advertise.
 
 ## Consequences
 

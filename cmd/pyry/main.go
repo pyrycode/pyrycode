@@ -1621,7 +1621,7 @@ func (a settingsUpdaterAdapter) UpdateSettings(id string, u relay.SettingsUpdate
 			} else if model, err = a.storedModel(sessionID); err != nil {
 				return err
 			}
-			if err := validateEffortVocabulary(list, have, model, *u.Effort); err != nil {
+			if err := validateEffortVocabulary(harness, list, have, model, *u.Effort); err != nil {
 				return err
 			}
 		}
@@ -1726,22 +1726,41 @@ func validateModelVocabulary(list turnevent.ModelList, have bool, model string) 
 	return relay.ErrModelNotOffered
 }
 
-// fallbackEffortLevels is the set a model with no entry for its agent accepts
-// (#2629): the five levels relay's closed set held before, so a session whose
-// model is unlisted, empty or not yet reported keeps what it had. A fresh slice
-// per call, so a caller holding the capability list cannot widen the check.
+// fallbackEffortLevels is the set a Claude model with no entry accepts (#2629):
+// the five levels relay's closed set held before, so a session whose model is
+// unlisted, empty or not yet reported keeps what it had. A fresh slice per call,
+// so a caller holding the capability list cannot widen the check.
 func fallbackEffortLevels() []string {
 	return []string{"low", "medium", "high", "xhigh", "max"}
 }
 
+// codexCommonEffortLevels is the set a Codex model with no entry accepts
+// (#2666): the levels every held family advertises, in the first family's order,
+// none when no family is held. Claude's five would let max reach turn/start on a
+// model that refuses it. A cut level list can only shrink the intersection, so
+// truncation never widens it.
+func codexCommonEffortLevels(families []turnevent.ModelOption) []string {
+	if len(families) == 0 {
+		return nil
+	}
+	var common []string
+	for _, level := range families[0].EffortLevels {
+		if !slices.ContainsFunc(families[1:], func(f turnevent.ModelOption) bool { return !slices.Contains(f.EffortLevels, level) }) {
+			common = append(common, level)
+		}
+	}
+	return common
+}
+
 // effortLevelsFor answers the levels a non-empty effort is accepted from for
-// model (#2629, #2646): the EffortLevels of the entry list advertises for it, none
-// when it advertises none, else the fallback set. An entry is an exact, uncut Value
-// match: a cut value is not the model's name, and cut levels cannot prove a level
-// absent, so either falls through to the fallback set rather than refusing on
-// partial evidence. It is both the check and the reported list, which is what
-// keeps a session's effort_levels from drifting from what is accepted.
-func effortLevelsFor(list turnevent.ModelList, have bool, model string) []string {
+// model on harness (#2629, #2646): the EffortLevels of the entry list advertises
+// for it, none when it advertises none, else that agent's fallback set. An entry
+// is an exact, uncut Value match: a cut value is not the model's name, and cut
+// levels cannot prove a level absent, so either falls through to the fallback set
+// rather than refusing on partial evidence. It is both the check and the reported
+// list, which is what keeps a session's effort_levels from drifting from what is
+// accepted.
+func effortLevelsFor(harness string, list turnevent.ModelList, have bool, model string) []string {
 	if have && model != "" {
 		for _, option := range list.Models {
 			if option.Value != model || slices.Contains(option.TruncatedFields, "value") || slices.Contains(option.TruncatedFields, "effort_levels") {
@@ -1750,14 +1769,20 @@ func effortLevelsFor(list turnevent.ModelList, have bool, model string) []string
 			return option.EffortLevels
 		}
 	}
+	if harness == harnessCodex {
+		if !have {
+			return nil
+		}
+		return codexCommonEffortLevels(list.Models)
+	}
 	return fallbackEffortLevels()
 }
 
 // validateEffortVocabulary classifies one non-empty client effort against the
 // levels effortLevelsFor answers for model. Neither the effort nor any level is in
 // the returned sentinel.
-func validateEffortVocabulary(list turnevent.ModelList, have bool, model, effort string) error {
-	if effort == "" || slices.Contains(effortLevelsFor(list, have, model), effort) {
+func validateEffortVocabulary(harness string, list turnevent.ModelList, have bool, model, effort string) error {
+	if effort == "" || slices.Contains(effortLevelsFor(harness, list, have, model), effort) {
 		return nil
 	}
 	return relay.ErrEffortNotOffered
@@ -1776,6 +1801,12 @@ func validateEffortVocabulary(list turnevent.ModelList, have bool, model, effort
 // interrupt (sessions.Runner.Interrupt, codexRunner.Interrupt). Neither takes
 // input mid-turn: newInboundDeliver holds every message until the conversation's
 // turn is idle, and Codex's WriteUserTurn then starts a new turn.
+//
+// SlashCommands, MCPServers and ContextUsageDetail (#2670) are true only for
+// Claude: codexRunner implements none of slashCommandLister, mcpStatusQuerier
+// or contextUsageQuerier, so those resolvers refuse every Codex session.
+// TestSettingsUpdaterAdapter_CapabilityFlagsMatchResolvers pins each flag to
+// its resolver's assertion.
 func (a settingsUpdaterAdapter) Capabilities(sessionID, model string) (relay.AgentCapabilities, bool) {
 	if sessionID == "" {
 		return relay.AgentCapabilities{}, false
@@ -1793,11 +1824,15 @@ func (a settingsUpdaterAdapter) Capabilities(sessionID, model string) (relay.Age
 			}
 		}
 	}
+	claude := harness == sessions.HarnessClaude
 	return relay.AgentCapabilities{
-		Interrupt:    true,
-		MidTurnInput: false,
-		EffortLevels: slices.Clone(effortLevelsFor(list, have, model)),
-		Models:       models,
+		Interrupt:          true,
+		MidTurnInput:       false,
+		SlashCommands:      claude,
+		MCPServers:         claude,
+		ContextUsageDetail: claude,
+		EffortLevels:       slices.Clone(effortLevelsFor(harness, list, have, model)),
+		Models:             models,
 	}, true
 }
 

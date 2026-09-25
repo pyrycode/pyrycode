@@ -42,14 +42,21 @@ to — a silent downgrade would otherwise pass for the requested model.
 
 `commandExecution` and `fileChange` items (#2609) become tool events instead
 of `Unrecognized`, so a Codex tool row renders like a Claude one with no
-client change: `item/started` is one `ToolStart` (`Kind` execute or edit,
-`RawInput` `{command, cwd}` for a command, one `Location` per changed path
-and the literal title `"apply_patch"` for a file change — Codex reports no
-tool name for a file change, so the translator names the tool that produces
-the item, the same way it would for a Claude `Edit`), and `item/completed` is
-exactly **one** `ToolUpdate` — never a stream of them. That constraint is why
-`item/commandExecution/outputDelta` and `item/fileChange/outputDelta` moved
-to `ignoredMethods` rather than `mappedMethods`: turnbridge turns every
+client change: `item/started` is one `ToolStart` whose `Title` is always the
+literal tool name — `"shell"` for a command, `"apply_patch"` for a file
+change — never the command text itself. turnbridge copies `Title` straight
+to `tool_use.name` and `RawInput` to `tool_use.input`/`input_summary`; a
+title built from the command (#2668 found this the hard way) put the same
+command in both fields, so a client showed it twice with no subject of its
+own. Codex reports no tool name for either item, so the translator supplies
+one for both, the same way it would for a Claude `Edit`. `RawInput` is
+`{command, cwd}` for a command and `{paths}` — every changed path joined by
+`", "` — for a file change; a file change also keeps one `Location` per
+changed path for clients that read Locations instead of input.
+`item/completed` is exactly **one** `ToolUpdate` — never a stream of them.
+That constraint is why `item/commandExecution/outputDelta` and
+`item/fileChange/outputDelta` moved to `ignoredMethods` rather than
+`mappedMethods`: turnbridge turns every
 `ToolUpdate` into a `tool_result` frame, so forwarding the deltas too would
 give one tool row several results. `ResultDetail` is built only from the
 translator's own literals and the decoded exit code — `"declined"`, or
@@ -256,6 +263,29 @@ same `streamTurnSink` a Claude session feeds, through `sinkForTag`/
 `exitForTag` on one live tag, so a Codex turn appears on a client exactly
 like a Claude one.
 
+**`codexRunner.State().ChildPID` now reports the app-server's pid while a
+client is bound, not always 0 (#2663).** `codexsup.Client.PID()` returns the
+app-server process's pid (0 for the in-memory test peer, since its `cmd` is
+nil); `runOnce` sets `r.state.ChildPID` in the same `r.mu` section that binds
+`r.client` and sets `PhaseRunning`, and clears it back to 0 in the section
+that unbinds the client after `Done`/ctx. This is what lets
+`activeSessionStarter.start`'s live-wrap-up gate ([Inbound new_session § The
+wrap-up turn](v2-session-manager-state-machine-inbound-new-session-sessionstarter-seam.md#the-wrap-up-turn-and-the-replys-tense-2477))
+actually reach Codex: before this ticket the runner always reported 0, so a
+Codex reset silently took the synchronous rotation path instead — no
+`resetting` frames, no handoff note, and nothing that read as an error.
+`newCodexRunnerFactory` chains a `wrapUpCapture` into the Codex sink at the
+same position `newStreamRunnerFactory` gives it (parser side of the fan-in
+channel — see [the placement
+rule](streamsup-package-announced-reset-follower.md#a-second-instance-of-the-placement-rule-wrapupcapture-2477)),
+and `codexRunner.BeginWrapUp` arms it, mirroring `streamRunner`.
+
+**A reset test that stubs `ChildPID` cannot catch this class of bug.** The
+gap surfaced only in a test that read the pid off a runner built through the
+real `newCodexRunnerFactory` against the fake Codex, not a hand-built double
+with `ChildPID` set directly — a stubbed value exercises the wrap-up gate
+without ever proving the production runner reports one.
+
 **The thread id has to live on the runner, not on `Run`'s stack.** Idle
 eviction cancels `Run`'s context and returns; a later activation calls `Run`
 again on that **same** `codexRunner` instance (`Session.runActive`). Anything
@@ -387,6 +417,18 @@ model and effort.** `codexTurnOverrides` (`cmd/pyry/codex_settings.go`) is
 | `dontAsk` | never | workspaceWrite | user |
 | `bypassPermissions` / YOLO | never | dangerFullAccess | user |
 | anything else, including empty | granular | readOnly | user |
+
+**The last row is unreachable through the pool.** `internal/sessions`'
+`canonicalSettings` runs at both session-construction sites
+(`Pool.mintSettings` and `Pool.revivedSettings`) and turns an empty
+`PermissionMode` into `default` before a Codex runner ever sees it — a
+pool-held session's mode is never `""`. So a session that never had its
+mode explicitly set gets the `default`/`acceptEdits` row (`workspaceWrite`,
+no modal for an in-workspace write), not the read-only row this table's last
+line describes; that row only fires for a mode hand-constructed outside
+`canonicalSettings`. #2660's daemon-level live test assumed the opposite —
+that leaving a conversation's mode unset yields read-only — and found this
+by reading `canonicalPermissionMode` rather than the table alone.
 
 The YOLO bit is read before the mode, mirroring `claudeSettingsArgs`. The
 posture is never empty: Codex keeps a `turn/start` override for the

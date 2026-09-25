@@ -157,6 +157,24 @@ func TestCodexRunner_TurnReachesSink(t *testing.T) {
 	}
 }
 
+// TestCodexRunner_ChildPIDWhileRunning: State reports the app-server's pid while
+// a client is bound, and 0 before the first spawn and after Run returns (#2663).
+func TestCodexRunner_ChildPIDWhileRunning(t *testing.T) {
+	h := newTestCodexRunner(t)
+	if pid := h.r.State().ChildPID; pid != 0 {
+		t.Fatalf("ChildPID before Run = %d, want 0", pid)
+	}
+	stop := h.run(t)
+	c, _ := h.bound(t, nil)
+	if got, want := h.r.State().ChildPID, c.PID(); got != want || got == 0 {
+		t.Fatalf("ChildPID while bound = %d, want the app-server's pid %d", got, want)
+	}
+	stop()
+	if pid := h.r.State().ChildPID; pid != 0 {
+		t.Fatalf("ChildPID after Run returned = %d, want 0", pid)
+	}
+}
+
 func TestCodexRunner_InterruptEndsRunningTurn(t *testing.T) {
 	h := newTestCodexRunner(t)
 	h.run(t)

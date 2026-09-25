@@ -8,6 +8,13 @@ import (
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
+// slashCommandLister is the optional per-runner capability resolveBoundSlashCommandList
+// asserts. Named (#2670) so the capability list's SlashCommands flag can be pinned
+// to the same assertion; codexRunner does not implement it.
+type slashCommandLister interface {
+	SlashCommandList() (turnevent.SlashCommandList, bool)
+}
+
 // resolveBoundSlashCommandList answers the slash-command inventory the named
 // conversation's bound session currently holds (#2004), already shaped as a
 // marshal-ready protocol.SlashCommandListPayload, so a delivery path (#2007) can
@@ -133,9 +140,7 @@ func resolveBoundSlashCommandList(convReg *conversations.Registry, pool *session
 	if err != nil {
 		return protocol.SlashCommandListPayload{}, false
 	}
-	lister, ok := sess.Runner().(interface {
-		SlashCommandList() (turnevent.SlashCommandList, bool)
-	})
+	lister, ok := sess.Runner().(slashCommandLister)
 	if !ok {
 		return protocol.SlashCommandListPayload{}, false
 	}
