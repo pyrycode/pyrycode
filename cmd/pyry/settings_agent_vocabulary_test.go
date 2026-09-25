@@ -68,34 +68,44 @@ func TestValidateEffortVocabulary(t *testing.T) {
 		{Value: "opu", EffortLevels: []string{"low"}, TruncatedFields: []string{"value"}},
 	}}
 	codex := turnevent.ModelList{Models: codexEntries}
+	claude := sessions.HarnessClaude
 	tests := []struct {
-		name   string
-		list   turnevent.ModelList
-		have   bool
-		model  string
-		effort string
-		want   error
+		name    string
+		harness string
+		list    turnevent.ModelList
+		have    bool
+		model   string
+		effort  string
+		want    error
 	}{
-		{name: "empty effort clears", list: claudeEntries, have: true, model: "haiku", effort: ""},
-		{name: "advertised level", list: claudeEntries, have: true, model: "sonnet", effort: "max"},
-		{name: "level the entry does not advertise", list: claudeEntries, have: true, model: "opus", effort: "max", want: relay.ErrEffortNotOffered},
-		{name: "entry advertising no levels accepts none", list: claudeEntries, have: true, model: "haiku", effort: "low", want: relay.ErrEffortNotOffered},
-		{name: "codex ultra advertised", list: codex, have: true, model: "luna", effort: "ultra"},
-		{name: "codex ultra not advertised", list: codex, have: true, model: "sol", effort: "ultra", want: relay.ErrEffortNotOffered},
-		{name: "unlisted model falls back, in set", list: codex, have: true, model: "gpt-5.6-sol", effort: "xhigh"},
-		{name: "unlisted model falls back, ultra refused", list: codex, have: true, model: "gpt-5.6-sol", effort: "ultra", want: relay.ErrEffortNotOffered},
-		{name: "empty model falls back", list: claudeEntries, have: true, model: "", effort: "max"},
-		{name: "empty model falls back, unknown refused", list: claudeEntries, have: true, model: "", effort: "ultra", want: relay.ErrEffortNotOffered},
-		{name: "no vocabulary falls back", model: "sonnet", effort: "medium"},
-		{name: "no vocabulary refuses outside set", model: "sonnet", effort: "ultra", want: relay.ErrEffortNotOffered},
-		{name: "cut levels fall back", list: cut, have: true, model: "opus", effort: "max"},
-		{name: "cut value is not the entry", list: cut, have: true, model: "opu", effort: "high"},
+		{name: "empty effort clears", harness: claude, list: claudeEntries, have: true, model: "haiku", effort: ""},
+		{name: "advertised level", harness: claude, list: claudeEntries, have: true, model: "sonnet", effort: "max"},
+		{name: "level the entry does not advertise", harness: claude, list: claudeEntries, have: true, model: "opus", effort: "max", want: relay.ErrEffortNotOffered},
+		{name: "entry advertising no levels accepts none", harness: claude, list: claudeEntries, have: true, model: "haiku", effort: "low", want: relay.ErrEffortNotOffered},
+		{name: "codex ultra advertised", harness: harnessCodex, list: codex, have: true, model: "luna", effort: "ultra"},
+		{name: "codex ultra not advertised", harness: harnessCodex, list: codex, have: true, model: "sol", effort: "ultra", want: relay.ErrEffortNotOffered},
+		{name: "empty model falls back", harness: claude, list: claudeEntries, have: true, model: "", effort: "max"},
+		{name: "empty model falls back, unknown refused", harness: claude, list: claudeEntries, have: true, model: "", effort: "ultra", want: relay.ErrEffortNotOffered},
+		{name: "no vocabulary falls back", harness: claude, model: "sonnet", effort: "medium"},
+		{name: "no vocabulary refuses outside set", harness: claude, model: "sonnet", effort: "ultra", want: relay.ErrEffortNotOffered},
+		{name: "cut levels fall back", harness: claude, list: cut, have: true, model: "opus", effort: "max"},
+		{name: "cut value is not the entry", harness: claude, list: cut, have: true, model: "opu", effort: "high"},
+		// #2666: a Codex model with no entry accepts only what every held
+		// family advertises (luna and sol share low and medium), never
+		// Claude's five, and nothing while no family is held.
+		{name: "codex unlisted model, common level", harness: harnessCodex, list: codex, have: true, model: "gpt-5.6-sol", effort: "medium"},
+		{name: "codex unlisted model, one family's level refused", harness: harnessCodex, list: codex, have: true, model: "gpt-5.6-sol", effort: "xhigh", want: relay.ErrEffortNotOffered},
+		{name: "codex unlisted model, max refused", harness: harnessCodex, list: codex, have: true, model: "gpt-5.6-sol", effort: "max", want: relay.ErrEffortNotOffered},
+		{name: "codex empty model, common level", harness: harnessCodex, list: codex, have: true, model: "", effort: "low"},
+		{name: "codex empty model, max refused", harness: harnessCodex, list: codex, have: true, model: "", effort: "max", want: relay.ErrEffortNotOffered},
+		{name: "codex no families refuses every level", harness: harnessCodex, model: "luna", effort: "low", want: relay.ErrEffortNotOffered},
+		{name: "codex no families still clears", harness: harnessCodex, model: "luna", effort: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if err := validateEffortVocabulary(tt.list, tt.have, tt.model, tt.effort); !errors.Is(err, tt.want) {
-				t.Errorf("validateEffortVocabulary(%q, %q) = %v, want %v", tt.model, tt.effort, err, tt.want)
+			if err := validateEffortVocabulary(tt.harness, tt.list, tt.have, tt.model, tt.effort); !errors.Is(err, tt.want) {
+				t.Errorf("validateEffortVocabulary(%q, %q, %q) = %v, want %v", tt.harness, tt.model, tt.effort, err, tt.want)
 			}
 		})
 	}
@@ -172,13 +182,16 @@ func TestSettingsUpdaterAdapter_EffortFollowsModel(t *testing.T) {
 			t.Errorf("after refusal = %q/%q, want luna/ultra unchanged", got.Model, got.Effort)
 		}
 
-		// An empty model in the update has no entry, so effort falls back.
-		empty, high := "", "high"
-		if err := adapter.UpdateSettings(dormantWriteTargetID, relay.SettingsUpdate{Model: &empty, Effort: &ultra}); !errors.Is(err, relay.ErrEffortNotOffered) {
-			t.Errorf("empty model + ultra = %v, want ErrEffortNotOffered", err)
+		// An empty model in the update has no entry, so effort falls back to
+		// the levels every held family advertises (#2666).
+		empty, maxLevel, medium := "", "max", "medium"
+		for _, e := range []*string{&ultra, &maxLevel} {
+			if err := adapter.UpdateSettings(dormantWriteTargetID, relay.SettingsUpdate{Model: &empty, Effort: e}); !errors.Is(err, relay.ErrEffortNotOffered) {
+				t.Errorf("empty model + %s = %v, want ErrEffortNotOffered", *e, err)
+			}
 		}
-		if err := adapter.UpdateSettings(dormantWriteTargetID, relay.SettingsUpdate{Model: &empty, Effort: &high}); err != nil {
-			t.Errorf("empty model + high: %v", err)
+		if err := adapter.UpdateSettings(dormantWriteTargetID, relay.SettingsUpdate{Model: &empty, Effort: &medium}); err != nil {
+			t.Errorf("empty model + medium: %v", err)
 		}
 
 		// An empty effort still clears.
@@ -194,24 +207,32 @@ func TestSettingsUpdaterAdapter_EffortFollowsModel(t *testing.T) {
 	t.Run("codex stored version no longer listed", func(t *testing.T) {
 		t.Parallel()
 		adapter, _ := newAgentVocabularyAdapter(t, `"harness":"codex","model":"gpt-5.6-sol",`, &agentVocabularyDouble{codex: codexEntries})
-		ultra, xhigh := "ultra", "xhigh"
-		if err := adapter.UpdateSettings(dormantWriteTargetID, relay.SettingsUpdate{Effort: &ultra}); !errors.Is(err, relay.ErrEffortNotOffered) {
-			t.Errorf("unlisted version + ultra = %v, want ErrEffortNotOffered", err)
+		for _, effort := range []string{"ultra", "max", "xhigh"} {
+			e := effort
+			if err := adapter.UpdateSettings(dormantWriteTargetID, relay.SettingsUpdate{Effort: &e}); !errors.Is(err, relay.ErrEffortNotOffered) {
+				t.Errorf("unlisted version + %s = %v, want ErrEffortNotOffered", effort, err)
+			}
 		}
-		if err := adapter.UpdateSettings(dormantWriteTargetID, relay.SettingsUpdate{Effort: &xhigh}); err != nil {
-			t.Errorf("unlisted version + xhigh: %v", err)
+		medium := "medium"
+		if err := adapter.UpdateSettings(dormantWriteTargetID, relay.SettingsUpdate{Effort: &medium}); err != nil {
+			t.Errorf("unlisted version + medium: %v", err)
 		}
 	})
 
+	// #2666: no family held proves no level, so none is accepted; clearing
+	// still is.
 	t.Run("codex no vocabulary yet", func(t *testing.T) {
 		t.Parallel()
-		adapter, _ := newAgentVocabularyAdapter(t, `"harness":"codex","model":"luna",`, &agentVocabularyDouble{})
-		ultra, maxLevel := "ultra", "max"
-		if err := adapter.UpdateSettings(dormantWriteTargetID, relay.SettingsUpdate{Effort: &ultra}); !errors.Is(err, relay.ErrEffortNotOffered) {
-			t.Errorf("no vocabulary + ultra = %v, want ErrEffortNotOffered", err)
+		adapter, _ := newAgentVocabularyAdapter(t, `"harness":"codex","model":"luna","effort":"low",`, &agentVocabularyDouble{})
+		for _, effort := range []string{"ultra", "max", "low"} {
+			e := effort
+			if err := adapter.UpdateSettings(dormantWriteTargetID, relay.SettingsUpdate{Effort: &e}); !errors.Is(err, relay.ErrEffortNotOffered) {
+				t.Errorf("no vocabulary + %s = %v, want ErrEffortNotOffered", effort, err)
+			}
 		}
-		if err := adapter.UpdateSettings(dormantWriteTargetID, relay.SettingsUpdate{Effort: &maxLevel}); err != nil {
-			t.Errorf("no vocabulary + max: %v", err)
+		clear := ""
+		if err := adapter.UpdateSettings(dormantWriteTargetID, relay.SettingsUpdate{Effort: &clear}); err != nil {
+			t.Errorf("no vocabulary, clear effort: %v", err)
 		}
 	})
 
