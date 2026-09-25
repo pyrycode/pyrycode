@@ -120,7 +120,7 @@ two of its own requests.
 
 ## The seam
 
-**`ModelListFor func(conversationID string) (protocol.ModelListPayload, bool)`**
+**`ModelListFor func(conversationID string, multiAgent bool) (protocol.ModelListPayload, bool)`**
 on `V2SessionConfig`, conversation-keyed rather than enumerate-all — the
 `RunConfigFor` shape, not `RetainedModelLists`'s, because the request carries
 an id and `RetainedModelLists` only enumerates *because* a `V2Session` does
@@ -136,6 +136,18 @@ inside `cmd/pyry`'s `resolveBoundModelList`
 (see [Connect-time model-list reconcile](v2-session-manager-state-machine-connect-time-model-list-reconcile-retain.md)
 for the daemon-wide fallback it applies since #2124), and `KnownConversation`
 answers only membership. Neither is a second opinion on the other's question.
+
+**`multiAgent` (#2651) is the second argument, not a second seam.** The
+handler passes `s.multiAgent` — the conn's negotiated capability (#2643),
+Run-owned and set in the handshake — and `modelListFor` forwards it straight
+into `modelListResolver(multiAgent)`, the one function that chooses
+`resolveBoundMergedModelList` (Claude's rows then Codex's, each tagged
+`agent`/`family`) over the unmerged `resolveBoundModelList` for that request.
+`RetainedModelLists` makes the identical choice through the same helper, so a
+conn's on-demand answer and its connect-time reconcile can never disagree.
+See [Model-list payload](protocol-package-model-list-payload.md) for what the
+merged rows carry and [`docs/protocol-mobile.md`](../../protocol-mobile.md) §
+`model_list` for the client contract.
 
 `cmd/pyry/relay.go`'s wiring struct gains `modelListFor` and assigns it
 straight through (`ModelListFor: w.modelListFor`, never wrapped — a wrapper
