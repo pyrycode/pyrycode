@@ -86,7 +86,7 @@ func TestModelVocabularyStore_LastRetentionWins(t *testing.T) {
 // empty, so a list with no models is not a value any reader may be handed.
 func TestModelVocabularyStore_LoadRefusesAndStarts(t *testing.T) {
 	t.Parallel()
-	oversized := `{"models":[{"resolved_model":"` + strings.Repeat("a", 70*1024) + `"}]}`
+	oversized := `{"models":[{"resolved_model":"` + strings.Repeat("a", maxModelVocabularyFile) + `"}]}`
 	for _, tc := range []struct {
 		name    string
 		write   string

@@ -63,6 +63,11 @@ type modelVocabularyStore struct {
 	// outside it.
 	list turnevent.ModelList
 	have bool
+	// codex is Codex's newest version per model family (#2627), held beside Claude's
+	// list and tagged by the field it sits in: list is Claude's, codex is Codex's. It
+	// is replaced by assignment exactly as list is, and neither retention touches the
+	// other's field. ModelList never reads it, so the model_list frame stays Claude's.
+	codex []turnevent.ModelOption
 	// dirty says list has not yet reached the file; writing says a writer goroutine
 	// is draining. The pair is read and written inside ONE critical section, so there
 	// is no check-then-mutate gap.
@@ -96,9 +101,11 @@ type modelVocabularyStore struct {
 // The number: the producer's worst case is maxModelListEntries (10) entries of
 // maxModelResolved + maxModelValue + maxModelDisplayName + maxModelEffortLevelCount ×
 // maxModelEffortLevel = 256 + 256 + 256 + 8 × 32 = 1024 bytes of claude-derived text,
-// so about 10 KiB. 64 KiB is roughly six times that, covers JSON structure and key
-// names, and keeps a restored frame the same order of magnitude as a live one.
-const maxModelVocabularyFile = 64 << 10
+// so about 10 KiB, and up to six times that once json escapes it as \u sequences.
+// Codex's entries add at most 8 families × (32 + 64 + 8 × 32) bytes, about 3 KiB, from
+// a closed ASCII alphabet that needs no escaping (codexsup.Client.LatestModels). 128 KiB
+// covers both worst cases with their JSON structure and key names.
+const maxModelVocabularyFile = 128 << 10
 
 // modelVocabularyFile is the on-disk shape: the daemon-wide list and NOTHING else —
 // no conversation id, no session id, no timestamp, no provenance.
@@ -114,6 +121,18 @@ type modelVocabularyFile struct {
 	// complete one. `resolveBoundModelList` forbids recomputing it from len(Models);
 	// this is the same rule at the other end of the round trip.
 	DroppedModels int `json:"dropped_models,omitempty"`
+	// CodexModels is Codex's list under a key of its own, omitted when none is held so
+	// a file with no Codex entries is byte-identical to one written before them. A
+	// separate key rather than a per-entry agent field: a daemon from before #2627
+	// ignores it, so it can never serve a Codex entry as a Claude one.
+	CodexModels []codexVocabularyOption `json:"codex_models,omitempty"`
+}
+
+// codexVocabularyOption is one Codex family: the three fields a Codex entry carries.
+type codexVocabularyOption struct {
+	Value         string   `json:"value"`
+	ResolvedModel string   `json:"resolved_model"`
+	EffortLevels  []string `json:"effort_levels,omitempty"`
 }
 
 // modelVocabularyOption is turnevent.ModelOption's six fields, all of them. The five
@@ -144,7 +163,9 @@ func newModelVocabularyStore(path string) *modelVocabularyStore {
 // turnevent.ModelList.Models is documented "Never empty", so a list with no models is
 // not a value any reader may be handed and cannot stand in for the unreported state.
 // os.IsNotExist is deliberately not special-cased: a cold daemon and a corrupt file are
-// the same amount of vocabulary.
+// the same amount of vocabulary. The Codex entries (#2627) load independently: a file
+// holding only them restores them and no Claude list, and a bad Codex section drops only
+// itself (decodeCodexVocabulary).
 //
 // Nil-receiver-safe, so a daemon built without a store needs no guard at the call site.
 func (s *modelVocabularyStore) Load() {
@@ -166,7 +187,15 @@ func (s *modelVocabularyStore) Load() {
 	if err := json.Unmarshal(body, &file); err != nil {
 		return
 	}
+	codex := decodeCodexVocabulary(file.CodexModels)
 	if len(file.Models) == 0 {
+		if codex == nil {
+			return
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.codex = codex
+		s.lastWritten = body
 		return
 	}
 	list := turnevent.ModelList{
@@ -187,6 +216,7 @@ func (s *modelVocabularyStore) Load() {
 	defer s.mu.Unlock()
 	s.list = list
 	s.have = true
+	s.codex = codex
 	// Seed the write-skip comparison with what was just read, so a child re-reporting
 	// the menu this daemon restored writes nothing.
 	s.lastWritten = body
@@ -214,6 +244,48 @@ func (s *modelVocabularyStore) ModelList() (turnevent.ModelList, bool) {
 		return turnevent.ModelList{}, false
 	}
 	return cloneModelList(s.list), true
+}
+
+// decodeCodexVocabulary restores the file's Codex entries, nil when there are none. An
+// entry with no value or no resolved model breaks the contract LatestModels produces,
+// so it drops the whole Codex section; Claude's list loads regardless.
+func decodeCodexVocabulary(entries []codexVocabularyOption) []turnevent.ModelOption {
+	var out []turnevent.ModelOption
+	for _, e := range entries {
+		if e.Value == "" || e.ResolvedModel == "" {
+			return nil
+		}
+		out = append(out, turnevent.ModelOption{
+			Value:         e.Value,
+			ResolvedModel: e.ResolvedModel,
+			EffortLevels:  nilIfEmpty(e.EffortLevels),
+		})
+	}
+	return out
+}
+
+// CodexModels returns Codex's newest version per family as last read, a deep copy the
+// caller owns, or nil when none is held. Nil-receiver-safe.
+func (s *modelVocabularyStore) CodexModels() []turnevent.ModelOption {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneModelList(turnevent.ModelList{Models: s.codex}).Models
+}
+
+// RetainCodex records the Codex entries a Codex spawn just read and schedules them
+// for the file, keeping Claude's list as it is. An empty list is a no-op: a read that
+// found no family keeps what is held, as a failed read does. It shares Retain's
+// writer, so it never blocks on I/O. Nil-receiver-safe.
+func (s *modelVocabularyStore) RetainCodex(models []turnevent.ModelOption) {
+	if s == nil || len(models) == 0 {
+		return
+	}
+	s.mu.Lock()
+	s.codex = cloneModelList(turnevent.ModelList{Models: models}).Models
+	s.schedule()
 }
 
 // Retain records a vocabulary a child just reported and schedules it for the file.
@@ -246,6 +318,12 @@ func (s *modelVocabularyStore) Retain(list turnevent.ModelList) {
 	s.mu.Lock()
 	s.list = cloneModelList(list)
 	s.have = true
+	s.schedule()
+}
+
+// schedule marks the value dirty and starts the writer unless one is draining or the
+// store is closed. Called with s.mu held; it releases it before starting the writer.
+func (s *modelVocabularyStore) schedule() {
 	s.dirty = true
 	if s.closed || s.writing {
 		s.mu.Unlock()
@@ -299,11 +377,11 @@ func (s *modelVocabularyStore) drain() {
 			return
 		}
 		s.dirty = false
-		snapshot := s.list
+		snapshot, codex := s.list, s.codex
 		previous := s.lastWritten
 		s.mu.Unlock()
 
-		body, err := encodeModelVocabulary(snapshot)
+		body, err := encodeModelVocabulary(snapshot, codex)
 		if err != nil {
 			continue
 		}
@@ -349,8 +427,9 @@ func (s *modelVocabularyStore) sinkFor(next func(turnevent.Event)) func(turneven
 // encodeModelVocabulary renders a list as the file's body. Separated from the write so
 // the write-skip comparison above can be made on the ENCODED BYTES, which is the one
 // comparison that is exact without a deep-equal walk and is computed on the way to the
-// write regardless.
-func encodeModelVocabulary(list turnevent.ModelList) ([]byte, error) {
+// write regardless. With only Codex's entries held, models is written empty, which Load
+// reads as no Claude list.
+func encodeModelVocabulary(list turnevent.ModelList, codex []turnevent.ModelOption) ([]byte, error) {
 	file := modelVocabularyFile{
 		Models:        make([]modelVocabularyOption, 0, len(list.Models)),
 		DroppedModels: list.DroppedModels,
@@ -363,6 +442,13 @@ func encodeModelVocabulary(list turnevent.ModelList) ([]byte, error) {
 			EffortLevels:     m.EffortLevels,
 			SupportsAutoMode: m.SupportsAutoMode,
 			TruncatedFields:  m.TruncatedFields,
+		})
+	}
+	for _, m := range codex {
+		file.CodexModels = append(file.CodexModels, codexVocabularyOption{
+			Value:         m.Value,
+			ResolvedModel: m.ResolvedModel,
+			EffortLevels:  m.EffortLevels,
 		})
 	}
 	body, err := json.MarshalIndent(file, "", "  ")

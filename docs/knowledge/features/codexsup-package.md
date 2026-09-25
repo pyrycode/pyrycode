@@ -510,6 +510,45 @@ run, an accepted one does. It is not reached by any dispatcher gate —
 `PYRY_CODEX_CAPTURE_BIN`/`PYRY_CODEX_CAPTURE_HOME` set, the same env pair
 `TestCaptureLive` (above) uses.
 
+### Reading the newest model per family on every spawn (#2627)
+
+`Client.LatestModels` (`internal/codexsup/models.go`) reads `model/list` page by
+page and folds each page into a table of at most `maxModelFamilies` before
+asking for the next, so a family seen only on a later page is never dropped by
+a page-cap failure elsewhere in the read. Grouping is on `id`, shaped
+`gpt-<version>-<family>`; `slices.Compare` on the dot-separated numeric
+components picks the newest (`gpt-6-sol` over `gpt-5.6-sol`), and an id with no
+family, such as the reserve model, is left out. `codexRunner.readModels`
+(`cmd/pyry/codex_runner.go`) calls it once per spawn, after the client is
+bound so a turn is never delayed by it, and hands a successful read to
+`modelVocabularyStore.RetainCodex` — see
+[the store's Codex section](streamsup-package-retaining-the-decoded-model-list-for-the-session.md#holding-codexs-model-families-beside-claudes-2627)
+for what happens to the result. A failed read is not retried or surfaced to
+the caller; the runner logs and keeps whatever the store already holds.
+
+**`parseFamilyID` takes everything after the version's first `-` as the
+family, so a suffixed id takes its own slot.** `gpt-6-sol-2026-09-01` or
+`gpt-6-sol-mini` would each consume a `maxModelFamilies` slot next to `sol`
+rather than being recognised as a version of it. Nothing in today's catalog is
+shaped this way, and code review flagged it as a non-blocking NIT rather than
+a defect — the parse matches the id shape the ticket and plan both specify.
+Revisit only if Codex starts shipping suffixed ids, which #2589 (the wire
+exposure) is positioned to notice first.
+
+**`readModels`'s own read timeout is the one failure its Warn cannot report,
+and code review's SHOULD FIX for it shipped uncorrected.** The function
+shadows its parameter — `ctx, cancel := context.WithTimeout(ctx, ...)` — so
+`if ctx.Err() == nil` before the Warn tests the *read's* deadline, not the
+runner's. That guard exists to suppress the Warn on an ordinary shutdown (the
+runner context cancelled from outside); shadowing means a Codex server that
+simply stalls `model/list` past `codexStartTimeout` is silently dropped with
+no log line, contradicting the plan's own "timeout → error returned, runner
+logs." The fix is to give the timeout context its own name and keep testing
+the outer one. Non-blocking because the outcome — entries not refreshed this
+spawn, previous ones kept — is unaffected either way; only the operator's
+visibility into *why* is lost. Anyone debugging a Codex install whose model
+menu never updates should check this before assuming the read never ran.
+
 ## Testing
 
 `client_test.go` builds `fakecodex` by import path, the same `TestMain`
@@ -549,6 +588,9 @@ set, so `make check` still never touches Codex.
   interface `cmd/pyry/codex_runner.go`'s `codexRunner` satisfies, and the
   eviction/activation cycle (`Session.runActive`) behind the thread-id lesson
   above.
+- [streamsup-package-retaining-the-decoded-model-list-for-the-session.md § Holding
+  Codex's model families beside Claude's (#2627)](streamsup-package-retaining-the-decoded-model-list-for-the-session.md#holding-codexs-model-families-beside-claudes-2627) —
+  where `LatestModels`'s result is held daemon-wide, beside Claude's list.
 - [sessions-registry.md](sessions-registry.md) — the `thread_id` schema field
   (#2622) this runner writes and reads on rebuild, and the rest of the
   on-disk registry format.

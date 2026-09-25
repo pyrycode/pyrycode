@@ -15,6 +15,9 @@
 //	                  turn/completed status "interrupted"
 //	account/read      a signed-in ChatGPT account, or {account: null,
 //	                  requiresOpenaiAuth: true} when signed out
+//	model/list        the models in models.json, modelListPage per page
+//	                  (or the request's limit), the cursor the decimal
+//	                  offset of the next page
 //
 // Any request other than initialize before initialize is refused, as the
 // real server does. The fake exits 0 on stdin EOF. Field shapes follow the
@@ -27,6 +30,7 @@
 //	FAKECODEX_VERSION     the version reported in initialize's userAgent
 //	                      and each thread's cliVersion. Default 0.156.1.
 //	FAKECODEX_SIGNED_OUT  non-empty: account/read reports no sign-in.
+//	FAKECODEX_MODEL_LIST_FAIL  non-empty: model/list answers an error.
 //	FAKECODEX_TURN_LOG    a file path: each turn/start's params are
 //	                      appended to it as one line, before the response,
 //	                      so a test can read the overrides a turn carried.
@@ -58,6 +62,7 @@ package main
 import (
 	"bufio"
 	"crypto/rand"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,6 +70,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -98,7 +104,18 @@ var requestHandlers = map[string]handler{
 	"turn/start":     (*server).turnStart,
 	"turn/interrupt": (*server).turnInterrupt,
 	"account/read":   (*server).accountRead,
+	"model/list":     (*server).modelList,
 }
+
+// modelsJSON is model/list's catalog: every version of each family, as the
+// real server lists them, plus one entry whose id names no family.
+//
+//go:embed models.json
+var modelsJSON []byte
+
+// modelListPage is model/list's page size when the request names no limit,
+// small enough that the catalog spans several pages.
+const modelListPage = 3
 
 // acceptedNotifications are the client notifications the fake takes.
 var acceptedNotifications = []string{"initialized"}
@@ -318,6 +335,42 @@ func (s *server) accountRead(json.RawMessage) (any, func(), *rpcError) {
 		account = nil
 	}
 	return map[string]any{"account": account, "requiresOpenaiAuth": true}, nil, nil
+}
+
+// modelList is the ModelListResponse shape: one page of modelsJSON and the
+// cursor of the next, null after the last.
+func (s *server) modelList(raw json.RawMessage) (any, func(), *rpcError) {
+	if os.Getenv("FAKECODEX_MODEL_LIST_FAIL") != "" {
+		return nil, nil, &rpcError{-32603, "model catalog unavailable"}
+	}
+	var p struct {
+		Cursor *string `json:"cursor"`
+		Limit  *int    `json:"limit"`
+	}
+	if err := decodeParams(raw, &p); err != nil {
+		return nil, nil, err
+	}
+	var models []json.RawMessage
+	if err := json.Unmarshal(modelsJSON, &models); err != nil {
+		return nil, nil, &rpcError{-32603, err.Error()}
+	}
+	start, size := 0, modelListPage
+	if p.Cursor != nil {
+		n, err := strconv.Atoi(*p.Cursor)
+		if err != nil || n < 0 || n > len(models) {
+			return nil, nil, &rpcError{codeInvalidParams, "bad cursor"}
+		}
+		start = n
+	}
+	if p.Limit != nil && *p.Limit > 0 {
+		size = *p.Limit
+	}
+	end := min(start+size, len(models))
+	var next any
+	if end < len(models) {
+		next = strconv.Itoa(end)
+	}
+	return map[string]any{"data": models[start:end], "nextCursor": next}, nil, nil
 }
 
 // threadResponse is the ThreadStartResponse / ThreadResumeResponse shape,

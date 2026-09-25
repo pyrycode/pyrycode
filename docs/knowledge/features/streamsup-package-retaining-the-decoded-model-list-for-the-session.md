@@ -206,6 +206,53 @@ test would go red, since a round-trip test built from a pre-sorted fixture can't
 "preserved order" from "sorted order." Worth a one-line comment on any encoder that copies this
 package's persistence recipe for producer-ordered data rather than registry data.
 
+## Holding Codex's model families beside Claude's (#2627)
+
+`modelVocabularyStore` gained a second, independent field, `codex
+[]turnevent.ModelOption`, fed by `RetainCodex` from
+[`codexsup.Client.LatestModels`](codexsup-package.md#reading-the-newest-model-per-family-on-every-spawn-2627)
+rather than by any sink on the parser chain — Codex has no stream-json
+`initialize` reply to decorate. On disk the two lists are siblings under
+separate top-level keys, `models` and `codex_models` (the latter
+`omitempty`), each with its own record type. **The agent tag is which field
+or key an entry sits in, not a field on the entry itself** — a per-entry
+`agent` string was the alternative on the table and was rejected: an older
+daemon reading a file this version wrote already ignores an unknown top-level
+key, so it can never resurrect a Codex entry as a Claude one by decoding an
+`agent` field it doesn't recognise. A per-entry field would have needed that
+older daemon to *understand* the field to stay safe; the separate-key design
+needs it only to ignore what it doesn't recognise, which JSON decoding does
+for free. `RetainCodex` and `Retain` each replace only their own field by
+assignment and never touch the other's, so a Claude retention cannot clobber
+held Codex entries and vice versa — the same "replace, never merge" shape
+`modelVocabularyFile`'s two keys mirror on disk. `ModelList()` is unchanged
+and still reads only `list`, so `retainedModelVocabulary`, `validateModelVocabulary`
+and the `model_list` frame stay exactly as blind to Codex as before this
+ticket; #2589 is the ticket that gives them a second read.
+
+`maxModelVocabularyFile` moved from 64 KiB to 128 KiB for this — not because
+Codex's own worst case is large (about 3 KiB, since every retained Codex
+string passes a closed-alphabet check with no JSON-escape blowup, unlike
+Claude's `\u`-escaped worst case), but because the 64 KiB cap no longer had
+margin once Claude's escaped worst case (≤ 60 KiB) was added to anything else
+at all. A cap sized to exactly cover one producer's worst case has no room
+for a second producer, however small — check the existing margin, not just
+the new contribution, before reusing a load-time cap for a second source.
+
+**A test asserting an "oversized file is rejected" boundary has to derive the
+size from the cap constant, not restate it as a literal.** The store's own
+oversized-file test builds its fixture from `maxModelVocabularyFile` directly
+(`strings.Repeat("a", maxModelVocabularyFile)`), so raising the cap for this
+ticket moved the test's boundary with it automatically; a version hardcoding
+some number believed to be "bigger than the cap" (the shape the first draft
+used) would have kept passing for the wrong reason after the 64→128 KiB
+change, or silently stopped testing the boundary at all. The general rule this
+confirms: any test whose premise is "past constant X" must compute its fixture
+from X, the same way [a dropped-count fixture must differ from the retained
+list's own length](development-verification.md#prove-that-tests-distinguish-the-change)
+rather than merely from a sibling count — both are the same trap, a fixture
+built from a belief about a bound instead of from the bound itself.
+
 ## Retaining the per-model context windows, the fourth application (#2106)
 
 `sessionModelWindowHold` applies the identical placement to `turnevent.TurnEnd`'s `ModelWindows` /
