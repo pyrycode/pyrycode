@@ -72,14 +72,25 @@ success or failure, never a silent drop. Control flow, in load-bearing order:
    when the frame sets one (including `""`, which has no entry and falls
    straight to the fallback below), otherwise the session's currently stored
    model (read live-then-dormant, the same order the model check's existence
-   probe uses). The check is `validateEffortVocabulary(list, have, model,
-   effort)` in `cmd/pyry`: an exact `EffortLevels` membership match on the
-   model's own entry passes; an entry that advertises no levels accepts none;
-   and when the model has **no** entry for its agent — a version no longer
-   listed, an empty model, or no vocabulary retained yet — the daemon falls
-   back to the old closed set `{low, medium, high, xhigh, max}`. **Since #2646,
+   probe uses). The check is `validateEffortVocabulary(harness, list, have,
+   model, effort)` in `cmd/pyry`: an exact `EffortLevels` membership match on
+   the model's own entry passes; an entry that advertises no levels accepts
+   none; and when the model has **no** entry for its agent — a version no
+   longer listed, an empty model, or no vocabulary retained yet — the daemon
+   falls back to a set scoped to that agent. A Claude session still gets the
+   old closed set `{low, medium, high, xhigh, max}`; a Codex session, since
+   \#2666, gets `codexCommonEffortLevels(list.Models)` — the levels every
+   *held* Codex family advertises, in the first family's order, none when no
+   family is held. **Before #2666, an unmatched Codex model fell back to
+   Claude's five too, so its capability list named `max` and accepted it,
+   and `codexTurnOverrides` (`cmd/pyry/codex_settings.go`) sent it on
+   `turn/start` unfiltered even when the session's own families refused
+   it.** **Since #2646,
    `validateEffortVocabulary` is a behaviour-identical rewrite: it is now
-   membership in `effortLevelsFor(list, have, model)`, the same function
+   membership in `effortLevelsFor(harness, list, have, model)` — since #2666
+   both take the session's harness as a leading parameter, resolved once via
+   `HarnessFor` at the same call sites that already resolve it for the model
+   check — the same function
    `settingsUpdaterAdapter.Capabilities` calls to build the `effort_levels`
    entry of the [per-session capability list](protocol-package-types-session-settings-read-payloads.md)
    a `multi_agent` client reads.** The reported list and this check are
