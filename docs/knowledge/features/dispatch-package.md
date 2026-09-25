@@ -33,6 +33,8 @@ type Conn struct { /* opaque */ }
 func (c *Conn) ConnID() string
 func (c *Conn) NextID() uint64
 func (c *Conn) Auth() *devices.Device // set once at construction; nil if constructed without one
+func (c *Conn) MultiAgent() bool // negotiated protocol.CapabilityMultiAgent decision; see below
+func (c *Conn) SetMultiAgent(v bool)
 func (c *Conn) Send(ctx context.Context, env protocol.Envelope) error
 func (c *Conn) Reply(ctx context.Context, req protocol.Envelope,
                     respType string, payload json.RawMessage) error
@@ -62,6 +64,18 @@ the handshake-matched `*devices.Device` directly
 (`v2session.go:1051` → `dispatch.NewConn(s.connID, outbound, s.device)`);
 the live production reader is `internal/relay/handlers/register_push_token.go`'s
 `c.Auth()` call.
+
+**`Conn.multiAgent` (#2643) is write-once too, but through a setter rather than
+a constructor argument** — `NewConn`/`NewTestConn` don't change shape because
+17 test call sites already depend on their signature. `routeAppFrame` calls
+`conn.SetMultiAgent(s.multiAgent)` right after `NewConn`, before the per-conn
+`Route` goroutine starts; the goroutine start is the happens-before edge, so
+`MultiAgent()` needs no lock even though the field isn't `const`-after-`New`
+the way `auth` is. A `Conn` built by a test and never given `SetMultiAgent`
+reads `false`, same as an unauthenticated `Conn.Auth() == nil`. This is the
+precedent for widening `Conn` again behind a capability without touching
+either constructor: add the field, a getter, and a setter called once before
+the conn is handed to `Route`.
 
 ## Per-frame routing (`Route`)
 
