@@ -35,7 +35,7 @@ forge a turn boundary:
 | Line `type` | Emits |
 |---|---|
 | `assistant` | one event per content block, in order: `text`→`TextChunk`, `thinking`→`ThoughtChunk`, `tool_use`→`ToolStart` |
-| `user` | one `ToolUpdate` per `tool_result` block (status from `is_error`, content from the string/array union); every other `text` block surfaces as `Unrecognized{Site: user_block}` **except** one on a line carrying claude's harness-synthetic flag, one byte-exact match to `harnessNoOutputNudge`, or one prefix match to `harnessInterruptNoticePrefix` (#1247, #2087, #1611, below) — all three dropped in silence; a block of any other type still surfaces regardless of the flag |
+| `user` | one `ToolUpdate` per `tool_result` block (status from `is_error`, content from the string/array union); every other `text` block surfaces as `Unrecognized{Site: user_block}` **except** one on a line carrying claude's harness-synthetic flag, one byte-exact match to `harnessNoOutputNudge`, one prefix match to `harnessInterruptNoticePrefix`, or one on a line whose `parent_tool_use_id` is non-empty (#1247, #2087, #1611, #2658, below) — all four dropped in silence; a block of any other type still surfaces regardless of the flag or parent id |
 | `result` | exactly one `TurnEnd` — **the turn boundary**; `Reason` is `resultTurnEndReason(subtype)` (#1120): `error_during_execution` → `TurnEndReasonCancelled`, everything else (including no/unknown `subtype`) → `TurnEndReasonEndTurn` |
 | `system` (unmapped subtypes) | nothing — the **known-ignored** tier, Debug-logged by type only, never content |
 | `system/task_started` | one `BackgroundTaskStarted` (#1380, below) |
@@ -210,6 +210,33 @@ against. Revisit only if a third *string* trigger arrives.
 No user-authored text can reach this lane at all: a message sent mid-turn parks in msgqueue until the
 turn ends (#1199), and the CLI stores its own mid-turn messages as an `attachment` line, never a `user`
 line.
+
+**AMENDED 2026-09-25 (#2658): a fourth block-level trigger, and the first that drops a payload which is
+not harness-authored at all.** Since #2192 the daemon spawns claude with `--forward-subagent-text`
+(`buildArgs`, above); under it, claude 2.1.280 opens each foreground subagent with a `user`/`text` line
+carrying the **delegated prompt** — the exact text the main model wrote into the spawning Agent call's
+`prompt` input — stamped with that Agent call's `parent_tool_use_id` and no flag at all. It sits beside
+the table above rather than in it, because the reason to drop it is different in kind: the other five
+rows are harness self-talk the person never wrote and gains nothing from seeing; this one is the
+subagent's real input, and it is dropped only because the same text is already on the wire as the
+Agent `tool_use`'s own `prompt` field. Surfacing it added exactly one `Unrecognized` row *and* put the
+whole prompt into `Raw` a second time — removing it is a disclosure fix, not just noise reduction.
+
+The open question the plan carried into the live gate — does this line carry a flag the way every other
+member of the table does? — resolved to **no** on the committed capture
+(`internal/e2e/realclaude/testdata/subagent_prompt_v2.1.280.json`): the line's only distinguishing key is
+`parent_tool_use_id`, none of `isSynthetic`/`isReplay`/`isMeta`/`isCompactSummary` is present, and the
+capture found exactly one such line, naming the turn's one Agent call. That makes this the **second**
+harness-adjacent trigger with no flag to lean on (`harnessInterruptNoticePrefix`, #1611, above, is the
+first), but the shape is different again: that one matches the block's *text*, this one matches a
+*sibling field on the line* — `parentToolUseID(ul.ParentToolUseID) != ""` — so it costs nothing against
+a long payload and needs no wording pin at all. The failure direction stays safe: a null, absent,
+non-string, or over-cap parent id decodes to `""` (`parentToolUseID`), so a malformed value surfaces the
+block rather than swallowing it. This also means the paragraph above the table still holds unchanged for
+the **main conversation**: a `user`/`text` block with no parent id surfaces unless one of the first three
+triggers takes it; only a *subagent* line's text is taken by this fourth one. See
+[`internal/e2e/realclaude`'s capture](e2e-realclaude-subagent-prompt-capture-test-go.md) and
+[the parent-id capture family](e2e-realclaude-parent-tool-use-capture-test-go.md) it reuses.
 
 **Out of scope, on purpose (evidence-based fix selection):** a future payload shaped
 `[Request interrupted by user] <text the operator needs>` would be dropped whole by the prefix match. Not
