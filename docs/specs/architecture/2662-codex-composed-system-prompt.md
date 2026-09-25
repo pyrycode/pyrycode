@@ -42,7 +42,7 @@ Empty string → key omitted → params byte-identical to today.
 - `codexPromptFile(args []string) string` — the last `--append-system-prompt-file` value, spaced or `=` form, beside `codexTurnSettings` and in its style. Empty when absent.
 - `codexRunnerConfig.PromptFile string` — set by the factory from `cfg.ClaudeArgs`. Fixed for the runner's life: `Restart(args)`/`SetSpawnArgs` do not touch it (the pool's path is on the base argv and never changes).
 - `codexMaxPrompt = 256 << 10`.
-- `(*codexRunner).readPrompt() string` — empty `PromptFile` → `""` silently. Otherwise opens the file and reads at most `codexMaxPrompt+1` bytes. On an open/read error, or a file over the bound, it logs one Warn (`"codex: system prompt not read"`, `session`, and `err` or a size-only reason) and returns `""`. Never logs content. A missing file is logged too: the pool writes the file before building the runner, so absence is a fault worth one line. An empty file returns `""` silently.
+- `(*codexRunner).readPrompt() string` — empty `PromptFile` → `""` silently. Otherwise opens the file non-blocking (`O_RDONLY|O_NONBLOCK`), refuses anything `Stat` on the open file does not report as a regular file, and reads at most `codexMaxPrompt+1` bytes. On an open/read error, or a file over the bound, it logs one Warn (`"codex: system prompt not read"`, `session`, and `err` or a size-only reason) and returns `""`. Never logs content. A missing file is logged too: the pool writes the file before building the runner, so absence is a fault worth one line. An empty file returns `""` silently.
 - `runOnce` calls `readPrompt()` before `codexsup.Start` and sets `Config.DeveloperInstructions`. It never fails the spawn on a read problem.
 
 Over-bound is treated as a read failure (send nothing) rather than truncating: a cut could split the fenced handoff-note section and leave an unterminated fence in the instructions.
@@ -70,6 +70,7 @@ No new goroutines. `readPrompt` runs on the `Run` goroutine inside `runOnce`, be
 | No `--append-system-prompt-file` in argv | no read, no log, no key |
 | File missing / unreadable | Warn without content, no key, spawn proceeds |
 | File > 256 KiB | Warn with the bound, no key, spawn proceeds |
+| Not a regular file (FIFO, directory, device) | Warn, no key, spawn proceeds; the non-blocking open means a FIFO cannot hang the spawn |
 | File empty | no key, no log |
 
 The error string from `os.Open` names the path; the path is already public (it is in the argv record, as `writeComposedPrompt`'s doc says). No prompt or note bytes reach any log line.
@@ -96,3 +97,22 @@ The error string from `os.Open` names the path; the path is already public (it i
 Pending for the documentation stage:
 - `docs/knowledge/features/codexsup-package.md` § Production wiring: the Codex runner sends the composed prompt as `developerInstructions` on every thread open.
 - `docs/protocol-mobile.md` § Setting a conversation's system prompt, and the `set_system_prompt` table row: applies to Codex conversations too, from the next session start or resume.
+
+## Security review
+
+**Verdict:** PASS
+
+**Findings:**
+
+- [Trust boundaries] No new boundary. The bytes sent are the file `Pool.writeComposedPrompt` composes for a Claude child: the operator prompt (validated and capped at 8 KiB by `conversations.Registry.SetSystemPrompt`), admitted client names (`admittedClients`), and the handoff note framed by the fenced section. Codex gets them at the same authority Claude does (developer instructions ≈ appended system prompt). The runner never parses them; it passes an opaque string to `json.Marshal`, which escapes it, over the app-server's stdin. No argv or shell sees it.
+- [Tokens, secrets] No findings — no credentials are read, created or sent. The composed prompt holds no secret.
+- [File operations] SHOULD FIX, taken into the design: the path comes only from the pool's own argv (`buildSession`, `Pool.New`), never from a remote frame, so traversal does not apply. A FIFO planted at the path would block a plain `open(2)` forever on the `Run` goroutine, outside any context; `readPrompt` opens `O_NONBLOCK` and refuses a non-regular file via `Stat` on the open descriptor (no Lstat-then-open window). A symlink at the path is followed; planting one needs the daemon's uid, which can already rewrite the file outright, the same argument `Pool.handoffNoteFor` makes. Size is bounded by a `LimitReader` at `codexMaxPrompt` + 1; over the bound sends nothing rather than a truncated fence.
+- [Subprocess] No findings — the Codex argv and environment are unchanged; instructions travel as a JSON-RPC param.
+- [Crypto] N/A — no randomness or primitives involved.
+- [Network & I/O] Input bounded at 256 KiB (above); the file is local and read once per spawn.
+- [Logs] MUST-NOT-log: prompt text, note text, client names. `readPrompt` logs only the session id and the error (which names the path, already public in the argv record) or a size reason. The pool-level test captures the daemon logger and asserts no prompt or note string appears; the runner-level test does the same for the runner's logger. The fake's `FAKECODEX_THREAD_LOG` writes content, test-only, at 0600.
+- [Concurrency] No findings — no new goroutine or lock; `PromptFile` is immutable after construction; the pool's writes are renames, so a read sees a whole composition.
+- [Threat model] `docs/protocol-mobile.md` § Security model: `set_system_prompt` from a paired device now also shapes Codex conversations, which is the feature; the per-prompt cap and UTF-8 check already bound it. OUT OF SCOPE / accepted: Codex may persist thread instructions in its rollout files under the daemon-owned `CODEX_HOME`, which `prepareCodexHome` keeps at 0700; no new exposure beyond the daemon's uid.
+
+**Reviewer:** builder (self-review per the security-review checklist)
+**Date:** 2026-09-25
