@@ -121,6 +121,16 @@ then keep strict assertions for malformed payloads and unexpected parent lanes.
 Treating every non-target envelope as a lane failure rejects valid turns; skipping
 its decryption desynchronizes the receive nonce.
 
+Since #2569, a fresh-home daemon now seeds a promoted `General` channel and a
+bound-but-never-spawned session on first boot (see
+[`conversations-registry.md`](conversations-registry.md)). `spawnBootstrapDaemon`
+in `harness_daemon_test.go` has no counterpart to the fake-daemon harness's
+`premarkWorkspaceSeeded` (see [`e2e-harness.md`](e2e-harness.md)), so every live
+daemon this suite spawns on a fresh home will seed too. No test here asserts a
+session or conversation count today, so nothing is known to be broken — but a
+live-suite failure that looks like a stray extra session or conversation should
+start here, not be chased as a daemon regression.
+
 ## Make target
 
 ```make

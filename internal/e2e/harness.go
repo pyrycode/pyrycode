@@ -528,6 +528,27 @@ func writeStreamInteractiveConfig(t *testing.T, home string, stdioPermissionProm
 	}
 }
 
+// premarkWorkspaceSeeded writes an empty conversations.json carrying the #2569
+// seed marker for the "test" instance, unless the file already exists, so a
+// fresh daemon does not create its General channel and every test keeps the
+// session and conversation counts it was written against. A test that wants the
+// seed writes a zero-byte conversations.json first: the harness then leaves it
+// alone, and the daemon loads it as an empty, unseeded registry.
+func premarkWorkspaceSeeded(t *testing.T, home string) {
+	t.Helper()
+	dir := filepath.Join(home, ".pyry", "test")
+	path := filepath.Join(dir, "conversations.json")
+	if _, err := os.Stat(path); err == nil {
+		return
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("e2e: mkdir instance dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(`{"conversations":[],"seeded":true}`), 0o600); err != nil {
+		t.Fatalf("e2e: premark conversations.json: %v", err)
+	}
+}
+
 // seedBoundConversation writes conversations.json for the "test" instance with a
 // single conversation row bound to boundSessionID. Binding is load-bearing under
 // #678: sessionRouter.Route rejects an empty current_session_id before any pool
@@ -713,6 +734,8 @@ func spawnWith(t *testing.T, home string, o spawnOpts) (string, *exec.Cmd, *safe
 	if o.claudeArgs == nil {
 		o.claudeArgs = []string{"99999"}
 	}
+
+	premarkWorkspaceSeeded(t, home)
 
 	bin := ensurePyryBuilt(t)
 	// Decouple the control socket from HOME (which may be a long t.TempDir()).
