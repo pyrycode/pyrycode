@@ -14,3 +14,9 @@ cp <dir>/codex_app_server_protocol.schemas.json internal/codexsup/
 
 Only the single-file bundle is committed. The rest of the generated directory
 repeats the same definitions split per type.
+
+After regenerating for a new pin, `make check` is the wire-shape check:
+`TestRequestParamsMatchSchema` (`schema_params_test.go`) validates the params
+every `clientRequests` method actually sends against that method's definition
+in the new schema. A failure there names the method and field that moved, and
+means pyry's encoding has to change along with the pin, not just the constant.

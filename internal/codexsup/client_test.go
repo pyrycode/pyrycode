@@ -365,7 +365,6 @@ func (p *peer) read(userAgent string) {
 		}
 		if method == methodInitialize {
 			p.send(fmt.Sprintf(`{"id":%s,"result":{"codexHome":"/h","platformFamily":"unix","platformOs":"macos","userAgent":%q}}`, f["id"], userAgent))
-			continue
 		}
 		p.frames <- f
 	}

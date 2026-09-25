@@ -607,6 +607,35 @@ pattern `fakecodex` itself uses to build against its own dependencies (see
   methods table-driven, and a pending call across a peer close proving it
   returns an `ErrExited`-wrapped error instead of hanging.
 
+**Method names checked against the schema said nothing about the params
+inside them (#2631).** A golden string for `turn/start` or `thread/resume`
+pins what the encoder emits, not what Codex accepts — a regenerated schema
+that drops a `SandboxPolicy` arm or adds a required field to it would still
+pass every golden-string test unchanged. `schema_params_test.go`'s
+`TestRequestParamsMatchSchema` closes that gap: it drives every
+`clientRequests` method through the real encoders (`turn/start` once per
+combination of the `Approval*`/`Sandbox*`/`Reviewer*` constants, covering
+every posture `codexTurnOverrides` can emit) and validates the captured
+`params` bytes against that method's definition in the committed schema,
+found through the same `ClientRequest.oneOf` walk `TestMethodNamesInSchema`
+uses. The validator (`schemaCheck`) treats an undeclared `additionalProperties`
+as `false` rather than JSON Schema's default of "anything goes" — deliberately
+stricter, so a renamed field fails instead of passing silently — and fails
+naming any keyword outside its handled subset (`$ref`, `type`, `enum`,
+`properties`/`required`, `items`, `anyOf`/`oneOf`/`allOf`, `minimum`,
+`minLength`) rather than ignoring it.
+
+**`peer.read` forwarding a frame twice stalls the client with no clue why.**
+Making the handshake's `initialize` params observable meant having `peer.read`
+also send that frame to `p.frames` — but the existing `initialize` branch
+already fell through to the function's own unconditional `p.frames <- f` at
+the bottom via `continue`. Adding a second, explicit send instead of removing
+that `continue` delivered every frame twice: `peer.next` then answers each
+request twice, and the *next* call's response goes to the wrong reader,
+surfacing as a deadline error far from the actual double-send. Any change to
+a shared frame-dispatch loop like this one needs a check for an existing
+fallthrough path before adding a parallel one.
+
 No test in this file makes a live Codex call — the whole point of building
 against the committed schema and the fake is that `client_test.go` runs with
 no Codex account. `capture_test.go`'s `TestCaptureLive` (above) is the one
