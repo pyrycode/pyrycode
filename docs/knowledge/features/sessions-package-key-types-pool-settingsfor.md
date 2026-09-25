@@ -89,3 +89,38 @@ Since #2463 this read has a write counterpart on the same partition:
 merges a `set_session_settings`' model/effort into the same `p.dormant` entry
 this method reads, also used as `settingsUpdaterAdapter`'s existence probe for
 a dormant id.
+
+## `Pool.HarnessFor` (#2629)
+
+```go
+func (p *Pool) HarnessFor(id SessionID) (string, error)
+```
+
+The third member of this live/dormant-read family, and the narrowest: not a
+session's settings, just **which agent** runs it — the live session's
+`Session.harness` (construction-fixed, carried across a revive so it cannot
+change under a concurrent read), else the dormant entry's `canonicalHarness`
+(empty meaning claude), else `ErrSessionNotFound`. One `p.mu.RLock()`, two map
+reads, live first, called with `p.mu` unheld; the empty id misses both maps
+naturally rather than falling back to the bootstrap the way `Lookup("")` does.
+No logging; the error is returned bare, the same posture `SettingsFor` and
+`DormantSettingsFor` take.
+
+It exists because nothing exported answered "which agent" for a dormant
+session (or, cheaply, for a live one) before #2629 needed it: a model or
+effort sent on `set_session_settings` must be checked against the **target
+session's own agent's** advertised vocabulary — Claude's retained list or
+Codex's families — not against Claude's unconditionally. `cmd/pyry`'s
+`settingsUpdaterAdapter.UpdateSettings` calls this **before** any vocabulary
+read, replacing the old `requireKnownSession` existence probe, so an unknown
+id still answers `session.not_found` first and cannot use vocabulary
+completeness (or which agent a session runs) as a side channel. See [Inbound
+`set_session_settings`](v2-session-manager-state-machine-inbound-set-session-settings-settingsupd.md).
+
+**Deliberately not folded into `SettingsFor`/`DormantSettingsFor`**, the same
+reason those two stay independent of each other: a third exported accessor
+taking `p.mu.RLock()` in the same call chain as either would self-deadlock
+the moment a writer queues between acquisitions, and a harness read has a
+different contract (agent name, not settings) from both. The ticket that
+added it flagged #2589 as needing the identical read — a second caller was
+foreseeable at the time this was written, not a hypothetical generalisation.

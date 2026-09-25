@@ -75,11 +75,13 @@ record of now merges into that entry instead of surfacing `session.not_found`.
 
 Validating untrusted model/effort values is explicitly **not** this method's
 job — it operates on operator-trusted input. The relay handler owns the
-charset/length shape check for `Model` and closed enum for `Effort`; for a
-non-empty model, `cmd/pyry`'s `settingsUpdaterAdapter.UpdateSettings` then owns
-the exact membership check against the retained published vocabulary before
-this method can mutate or deliver anything. See [Inbound
-`set_session_settings`](v2-session-manager-state-machine-inbound-set-session-settings-settingsupd.md).
+charset/length shape check for both `Model` and, since #2629, `Effort` too
+(a bounded grammar, no longer a closed enum); for a non-empty model or
+effort, `cmd/pyry`'s `settingsUpdaterAdapter.UpdateSettings` then owns the
+exact membership check against the **session's own agent's** retained
+published vocabulary — Claude's list or Codex's families, resolved via
+`Pool.HarnessFor` — before this method can mutate or deliver anything. See
+[Inbound `set_session_settings`](v2-session-manager-state-machine-inbound-set-session-settings-settingsupd.md).
 
 **Live-apply on a real change (#842, #1581).** After a successful persist of a
 real change (not a no-op, not a failed save), `UpdateSettings` recomposes the
@@ -416,11 +418,16 @@ become a revived child's `--model`.
 live-first**, the way `resolveBoundRunSettings` composes the two reads (#2449):
 `Pool.UpdateSettings` runs first, and only its `ErrSessionNotFound` falls
 through to `Pool.UpdateDormantSettings` — any other error (an unsupported
-mode, a failed save) is that session's answer as it always was. The membership
-gate's existence probe, `requireKnownSession`, learned to check
-`Pool.DormantSettingsFor` on a live miss before the vocabulary read runs — the
-ordering is load-bearing, not incidental: reversed, an unknown id could infer
-whether the bootstrap vocabulary is complete. See [Inbound
+mode, a failed save) is that session's answer as it always was. The
+membership gate's existence probe used to be `requireKnownSession`, which
+checked `Pool.DormantSettingsFor` on a live miss before the vocabulary read
+ran; **since #2629 it is [`Pool.HarnessFor`](sessions-package-key-types-pool-settingsfor.md#poolharnessfor-2629)**,
+which answers the same existence question *and* which agent the session
+runs — needed because a model/effort check now runs against the session's
+own agent's vocabulary (Claude's retained list or Codex's families) rather
+than Claude's unconditionally. The ordering is still load-bearing, not
+incidental: reversed, an unknown id could infer whether the bootstrap
+vocabulary is complete, or which agent a session runs. See [Inbound
 `set_session_settings`](v2-session-manager-state-machine-inbound-set-session-settings-settingsupd.md)
 and `docs/protocol-mobile.md`'s `set_session_settings` section for the wire
 picture. No ADR: this is the write-side application of a boundary ADR 035 and
