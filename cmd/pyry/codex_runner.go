@@ -96,12 +96,16 @@ func newCodexRunnerFactory(h codexHarness) sessions.RunnerFactory {
 		}
 		tag := newStreamSessionTag(cfg.SessionID)
 		model, effort := codexTurnSettings(cfg.ClaudeArgs)
+		// #2663 chains the wrap-up reply capture where newStreamRunnerFactory
+		// does, on the producer's side of the fan-in send; see wrapUpCapture.
+		wrapUp := newWrapUpCapture(h.sink.sinkForTag(tag.ID))
 		return newCodexRunner(codexRunnerConfig{
 			Binary:         bin,
 			Home:           h.home,
 			Dir:            dir,
 			Tag:            tag,
-			Sink:           h.sink.sinkForTag(tag.ID),
+			Sink:           wrapUp.Sink,
+			WrapUp:         wrapUp,
 			OnExit:         h.sink.exitForTag(tag.ID),
 			Model:          model,
 			Effort:         effort,
@@ -230,7 +234,8 @@ func codexTurnSettings(args []string) (model, effort string) {
 // requests to the permission modal; nil declines every one (#2587). Models is
 // handed the newest version per model family each spawn reads (#2627); nil
 // skips the read. Families returns the model families held now, which every
-// turn resolves its stored model against (#2628); nil holds none.
+// turn resolves its stored model against (#2628); nil holds none. WrapUp is the
+// reply capture chained into Sink, which BeginWrapUp arms (#2663); nil refuses.
 type codexRunnerConfig struct {
 	Binary, Home, Dir string
 	Tag               *streamSessionTag
@@ -245,6 +250,7 @@ type codexRunnerConfig struct {
 	Approvals         *codexApprovals
 	Models            func([]turnevent.ModelOption)
 	Families          func() []turnevent.ModelOption
+	WrapUp            *wrapUpCapture
 }
 
 // codexRunner is the Codex implementation of sessions.Runner: it supervises
@@ -329,13 +335,17 @@ func (r *codexRunner) updateState(fn func(*sessions.State)) {
 	r.mu.Unlock()
 }
 
-// State reports the supervise loop's phase. ChildPID stays 0: codexsup does
-// not expose the app-server's pid.
+// State reports the supervise loop's phase. ChildPID is the app-server's pid
+// while a client is bound, and 0 otherwise.
 func (r *codexRunner) State() sessions.State {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.state
 }
+
+// BeginWrapUp arms the wrap-up reply capture, as streamRunner.BeginWrapUp does
+// (#2663).
+func (r *codexRunner) BeginWrapUp() (*wrapUpReply, func(), bool) { return r.cfg.WrapUp.begin() }
 
 // WaitForPTY has nothing to wait for: there is no terminal.
 func (r *codexRunner) WaitForPTY(context.Context) error { return nil }
@@ -472,6 +482,7 @@ func (r *codexRunner) runOnce(ctx context.Context, threadID string, seq uint64) 
 	}
 	r.state.Phase = sessions.PhaseRunning
 	r.state.NextBackoff = 0
+	r.state.ChildPID = client.PID()
 	r.mu.Unlock()
 	if reportTo != "" && r.cfg.OnThread != nil {
 		r.cfg.OnThread(reportTo, threadID)
@@ -484,6 +495,7 @@ func (r *codexRunner) runOnce(ctx context.Context, threadID string, seq uint64) 
 	}
 	r.mu.Lock()
 	r.client = nil
+	r.state.ChildPID = 0
 	r.mu.Unlock()
 	exitErr := stopCodexClient(client)
 	r.cfg.Approvals.declineAll(reasonCodexExit)
