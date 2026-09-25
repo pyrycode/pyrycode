@@ -612,6 +612,31 @@ spawn, previous ones kept — is unaffected either way; only the operator's
 visibility into *why* is lost. Anyone debugging a Codex install whose model
 menu never updates should check this before assuming the read never ran.
 
+### Reading model families once at daemon start, before any spawn (#2664)
+
+The Codex model menu used to stay empty until a Codex session actually
+spawned. `startCodexModelRead` (`cmd/pyry/codex_runner.go`) now runs once per
+daemon start, off the startup path: a goroutine bounded by
+`codexStartTimeout` calls `readCodexModelsAtStart`, sharing
+`startCheckedCodex` — the start/version/sign-in checks factored out of
+`probeCodex` — then reads `model/list` into `RetainCodex`, as a spawn's own
+read does (see above). Opens no thread, runs no turn. `runSupervisor` defers
+the goroutine's `wait` (cancel + join) ahead of
+`defer modelVocabularyStore.Close()`, so the goroutine always joins before the
+store closes. A client connected before the read finishes sees the new
+entries only on its next `request_model_list` — no push. Any failure leaves
+the held entries unchanged and logs one Info line with no account or model
+value.
+
+**A `wait` that cancels before it joins can't also be the test's "read
+finished" signal.** The first version ran the read inside the `go func`
+itself, so a test driving it through `startCodexModelRead` and then calling
+`wait` cancelled its own read (`initialize: context canceled`). The fix
+splits the synchronous `readCodexModelsAtStart`, which tests call directly,
+from the `go func` wrapper, which only adds the timeout and `wait`. Every
+hermetic e2e daemon now spawns the configured Codex binary once at start —
+a quiet-startup-log assertion must allow for the Info line above.
+
 ### Resolving the family to a version on every turn (#2628)
 
 A session's stored Codex model is a family (`luna`), not a version. `cmd/pyry/codex_settings.go`'s

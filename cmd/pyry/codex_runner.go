@@ -151,23 +151,84 @@ func recordCodexThread(record func(sessionID, threadID string) error, log *slog.
 func probeCodex(bin, home, dir string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), codexStartTimeout)
 	defer cancel()
+	client, err := startCheckedCodex(ctx, bin, home, dir)
+	if err != nil {
+		return err
+	}
+	_ = stopCodexClient(client)
+	return nil
+}
+
+// startCheckedCodex starts the app-server against home and returns it once its
+// version and its sign-in pass; on any refusal it stops the process first. It
+// is the start probeCodex and the read at daemon start share.
+func startCheckedCodex(ctx context.Context, bin, home, dir string) (*codexsup.Client, error) {
 	client, err := codexsup.Start(ctx, codexsup.Config{
 		Binary: bin, Dir: dir, CodexHome: home, ClientVersion: Version,
 	})
 	if err != nil {
-		return fmt.Errorf("probe codex: %w", err)
+		return nil, fmt.Errorf("probe codex: %w", err)
 	}
-	defer stopCodexClient(client)
 	if err := checkCodexVersion(client.Version()); err != nil {
-		return err
+		_ = stopCodexClient(client)
+		return nil, err
 	}
 	signedIn, err := client.SignedIn(ctx)
 	if err != nil {
-		return fmt.Errorf("probe codex: %w", err)
+		_ = stopCodexClient(client)
+		return nil, fmt.Errorf("probe codex: %w", err)
 	}
 	if !signedIn {
-		return fmt.Errorf("the daemon's Codex home is not signed in; sign in with CODEX_HOME=%s codex login", home)
+		_ = stopCodexClient(client)
+		return nil, fmt.Errorf("the daemon's Codex home is not signed in; sign in with CODEX_HOME=%s codex login", home)
 	}
+	return client, nil
+}
+
+// startCodexModelRead runs readCodexModelsAtStart once on its own goroutine, so
+// the daemon's start never waits on Codex (#2664). The read is bounded by
+// codexStartTimeout and by parent. wait cancels the read and joins it; call it
+// before the store is closed.
+func startCodexModelRead(parent context.Context, h codexHarness, dir string, log *slog.Logger) (wait func()) {
+	ctx, cancel := context.WithTimeout(parent, codexStartTimeout)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		readCodexModelsAtStart(ctx, h, dir, log)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+// readCodexModelsAtStart reads Codex's model families into h.vocab, so a daemon
+// on which no Codex session has spawned still offers Codex models. A failure
+// leaves the held entries and logs one Info line with the error, which carries
+// no account detail and no model value.
+func readCodexModelsAtStart(ctx context.Context, h codexHarness, dir string, log *slog.Logger) {
+	if err := readCodexModels(ctx, h, dir); err != nil {
+		log.Info("codex: model list not read at start", "err", err)
+	}
+}
+
+// readCodexModels prepares the daemon's Codex home, starts Codex as probeCodex
+// does, reads model/list into h.vocab and stops it. It opens no thread and runs
+// no turn.
+func readCodexModels(ctx context.Context, h codexHarness, dir string) error {
+	if err := prepareCodexHome(h.home); err != nil {
+		return err
+	}
+	client, err := startCheckedCodex(ctx, h.bin, h.home, dir)
+	if err != nil {
+		return err
+	}
+	defer stopCodexClient(client)
+	models, err := client.LatestModels(ctx)
+	if err != nil {
+		return fmt.Errorf("read codex model list: %w", err)
+	}
+	h.vocab.RetainCodex(models)
 	return nil
 }
 
