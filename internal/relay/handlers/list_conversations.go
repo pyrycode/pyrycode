@@ -63,11 +63,12 @@ func workspaceLabelFor(r workspaceLabelReader, cwd string) *string {
 // internal/sessions dependency out of this package.
 type SessionHarnessFunc func(sessionID string) (harness string, ok bool)
 
-// agentOf is the wire agent of conv: its bound session's, and AgentClaude when
+// AgentOf is the wire agent of conv: its bound session's, and AgentClaude when
 // there is no bound session, no harness read, or a session the pool does not
 // hold. The mapping is closed, so the wire only ever carries the two values a
-// client codes against.
-func agentOf(conv conversations.Conversation, harnessFor SessionHarnessFunc) string {
+// client codes against. Exported so the daemon's pushed-frame gate (#2644)
+// resolves a conversation's agent by this same rule.
+func AgentOf(conv conversations.Conversation, harnessFor SessionHarnessFunc) string {
 	if conv.CurrentSessionID == "" || harnessFor == nil {
 		return protocol.AgentClaude
 	}
@@ -108,7 +109,7 @@ func ListConversationsWithAgents(reg ConversationLister, harnessFor SessionHarne
 
 		out := make([]protocol.ConversationSummary, 0, len(list))
 		for _, conv := range list {
-			agent := agentOf(conv, harnessFor)
+			agent := AgentOf(conv, harnessFor)
 			if !multiAgent {
 				if agent == protocol.AgentCodex {
 					continue
