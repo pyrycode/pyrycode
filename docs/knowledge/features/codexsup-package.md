@@ -648,6 +648,38 @@ turn's normal completion and changes no existing `TurnEnd` assertion. Any
 future test that needs to observe a turn's reported model needs this marker
 on that turn.
 
+### The composed system prompt reaches Codex threads too (#2662)
+
+Codex used to ignore the pool's composed-prompt file entirely: `Pool.SystemPromptFor`
+reported the prompt as applied to a session while the Codex thread never saw it.
+`codexRunner.runOnce` now reads that same file (`--append-system-prompt-file`,
+recorded on `codexRunnerConfig.PromptFile` at factory time, fixed for the runner's
+life) fresh on every spawn and sends its bytes as `developerInstructions` on
+`thread/start` and `thread/resume` — the field rides `codexsup.Config`, so the
+thread-open call signatures don't change. There is still exactly one compose
+path: `Pool.writeComposedPrompt`/`refreshSystemPrompt`/`refreshSystemPromptForRotation`
+write the file (operator prompt, attached clients, fenced handoff note); this
+runner only reads it, the same rule a Claude child's `--append-system-prompt-file`
+follows.
+
+A missing, empty, oversize (> 256 KiB) or non-regular file sends no key rather
+than failing the spawn — `readPrompt` opens the file `O_RDONLY|O_NONBLOCK` and
+refuses anything `Stat` on the open descriptor doesn't report as a regular file,
+so a FIFO planted at the path can't hang the spawn on the `Run` goroutine. An
+oversize file is treated as a read failure (nothing sent), not truncated: a cut
+could split the fenced handoff-note section and leave a dangling fence in the
+instructions. Every failure logs the session id and the error (or a size-only
+reason) and never the file's content.
+
+**Telling a Codex thread open's own instructions apart from an unrelated one in
+a pool-level test needs a stronger key than the instruction text.** The
+pool-plus-factory test for this (`TestCodexRunner_ConversationPromptReachesThread`)
+identifies which logged `thread/start`/`thread/resume` belongs to the session
+under test by the `cwd` the client sends — read from the runner's own `cfg.Dir`
+— rather than by matching on prompt content: filtering by instruction text would
+silently hide a thread open that carried the *wrong* instructions instead of
+failing the test.
+
 ## Testing
 
 `client_test.go` builds `fakecodex` by import path, the same `TestMain`
