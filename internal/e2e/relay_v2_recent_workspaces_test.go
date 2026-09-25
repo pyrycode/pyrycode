@@ -229,9 +229,12 @@ func testV2DaemonRecentWorkspacesEmptyRegistry(t *testing.T) {
 	}
 
 	// Seed an explicitly empty registry (deterministic): no conversations, so no
-	// workspace folders. Load treats this as a valid, empty registry.
+	// workspace folders. Load treats this as a valid, empty registry. The
+	// "seeded" marker is load-bearing: an unmarked empty registry is a fresh host,
+	// so seedDefaultWorkspace would create a default workspace that races the
+	// phone's request. premarkWorkspaceSeeded skips because this file exists.
 	convPath := filepath.Join(home, ".pyry", "test", "conversations.json")
-	if err := os.WriteFile(convPath, []byte(`{"conversations":[]}`), 0o600); err != nil {
+	if err := os.WriteFile(convPath, []byte(`{"conversations":[],"seeded":true}`), 0o600); err != nil {
 		t.Fatalf("seed conversations.json: %v", err)
 	}
 
