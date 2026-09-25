@@ -769,11 +769,33 @@ func (p *Pool) rekeyLocked(oldID, newID SessionID) {
 	sess.id = newID
 	sess.lastActiveAt = time.Now().UTC()
 	sess.lcMu.Unlock()
+	// A new pool id is a new conversation, so the rotated entry never inherits
+	// the old harness thread (#2622); the runner reports the one it starts next.
+	sess.threadID = ""
 	delete(p.sessions, oldID)
 	p.sessions[newID] = sess
 	if p.bootstrap == oldID {
 		p.bootstrap = newID
 	}
+}
+
+// recordThread persists threadID as the harness thread of the live session id
+// (#2622): the target of RunnerConfig.RecordThread. ErrSessionNotFound when id is
+// not live — a report racing a rotation that already moved the session — with
+// nothing written; an unchanged thread skips the save. Takes Pool.mu (write) and
+// holds it across the registry write, like Rename.
+func (p *Pool) recordThread(id SessionID, threadID string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	sess, ok := p.sessions[id]
+	if !ok {
+		return ErrSessionNotFound
+	}
+	if sess.threadID == threadID {
+		return nil
+	}
+	sess.threadID = threadID
+	return p.saveLocked()
 }
 
 // Rename updates the named session's label and persists the change to the
@@ -2270,14 +2292,17 @@ func (p *Pool) Mint(label, spawnDir string) (SessionID, error) {
 // exposes a harness to clients yet (#2593). materialise, whose id may name a
 // dormant entry of another harness, calls buildSessionAs.
 func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings SessionSettings) (*Session, error) {
-	return p.buildSessionAs(id, label, spawnDir, settings, HarnessClaude)
+	return p.buildSessionAs(id, label, spawnDir, settings, HarnessClaude, "")
 }
 
 // buildSessionAs is buildSession for a given harness, which it canonicalises and
 // carries onto both the RunnerConfig and the Session (#2593). A harness the
 // injected factory has no runner for fails here as an ordinary runner-construction
 // error, with the session's two files removed and nothing registered.
-func (p *Pool) buildSessionAs(id SessionID, label, spawnDir string, settings SessionSettings, harness string) (*Session, error) {
+//
+// threadID is the harness thread the session resumes (#2622), carried onto both
+// the RunnerConfig and the Session; empty for a fresh thread and for claude.
+func (p *Pool) buildSessionAs(id SessionID, label, spawnDir string, settings SessionSettings, harness, threadID string) (*Session, error) {
 	harness = canonicalHarness(harness)
 	tpl := p.sessionTpl
 	// Normalise the posture before it reaches either the argv or the stored
@@ -2356,6 +2381,11 @@ func (p *Pool) buildSessionAs(id SessionID, label, spawnDir string, settings Ses
 		},
 		ClaudeArgs: args,
 		Harness:    harness,
+		ThreadID:   threadID,
+		// The runner reports a thread it started with the live id, as above.
+		RecordThread: func(sessionID, threadID string) error {
+			return p.recordThread(SessionID(sessionID), threadID)
+		},
 		// Same seed as Pool.New's, and canonicalSettings runs above this site too
 		// (#2064).
 		PermissionMode: settings.PermissionMode,
@@ -2389,6 +2419,7 @@ func (p *Pool) buildSessionAs(id SessionID, label, spawnDir string, settings Ses
 		lastActiveAt:     now,
 		bootstrap:        false,
 		harness:          harness,
+		threadID:         threadID,
 		settings:         settings,
 		spawnBase:        base,
 		settingsPath:     settingsPath,
@@ -2466,6 +2497,8 @@ func (p *Pool) saveLocked() error {
 			// claude writes no key, so a claude session's entry keeps its
 			// pre-#2593 shape.
 			Harness: harnessForDisk(s.harness),
+			// Empty for claude, so omitempty keeps its entry's shape (#2622).
+			ThreadID: s.threadID,
 		}
 		// omitempty on the JSON tag keeps the stable on-disk shape for
 		// the dominant active case — important for the existing
