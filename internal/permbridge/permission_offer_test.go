@@ -66,3 +66,45 @@ func TestAlwaysAllow_MixedOfferValidation(t *testing.T) {
 		t.Fatal("suppressed mixed suggestions were offered")
 	}
 }
+
+func TestSessionGrant(t *testing.T) {
+	t.Parallel()
+	offer := SessionGrant("touch witness")
+	if !offer.Offered() {
+		t.Fatal("session grant not offered")
+	}
+	if got, want := offer.Rules(), []string{"touch witness"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("rules = %v, want %v", got, want)
+	}
+	if offer.Updates() != nil {
+		t.Fatalf("session grant carries Claude updates: %v", offer.Updates())
+	}
+	for _, label := range []string{"", string(make([]byte, maxRenderedRuleBytes+1))} {
+		if SessionGrant(label).Offered() {
+			t.Errorf("label of %d bytes offered a grant whose scope cannot be shown", len(label))
+		}
+	}
+}
+
+// TestAllowAlways_SessionGrantKeepsAllowBytes: a session grant marks the
+// verdict for the harness without changing the bytes Claude would receive.
+func TestAllowAlways_SessionGrantKeepsAllowBytes(t *testing.T) {
+	t.Parallel()
+	input := json.RawMessage(`{"command":"ls"}`)
+	v := AllowAlways(input, SessionGrant("ls"))
+	if !v.ForSession || v.Behavior != BehaviorAllow {
+		t.Fatalf("verdict = %+v, want a session allow", v)
+	}
+	got, _ := json.Marshal(v)
+	want, _ := json.Marshal(Allow(input))
+	if string(got) != string(want) {
+		t.Fatalf("session allow bytes = %s, want %s", got, want)
+	}
+	if AllowAlways(input, AlwaysAllow{}).ForSession || Allow(input).ForSession {
+		t.Fatal("a plain allow is marked for the session")
+	}
+	claude := ParseAlwaysAllow(json.RawMessage(`[{"type":"addRules","behavior":"allow","rules":[{"toolName":"Bash"}]}]`), false)
+	if AllowAlways(input, claude).ForSession {
+		t.Fatal("a Claude rule grant is marked as a harness session grant")
+	}
+}

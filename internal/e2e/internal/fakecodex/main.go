@@ -42,6 +42,12 @@
 //	                      "accept" or "acceptForSession" completes it as run
 //	                      (status "completed", exitCode 0), any other
 //	                      decision as "declined".
+//	[fakecodex:withdraw]  like approval, but the fake sends
+//	                      serverRequest/resolved at once, before any
+//	                      answer, and completes the item as "declined". A
+//	                      response the client sends later for that request
+//	                      is appended to FAKECODEX_TURN_LOG as
+//	                      {"lateResponse":<id>}.
 //	[fakecodex:hold]      after turn/started the turn waits until
 //	                      turn/interrupt names it, so a test has a running
 //	                      turn to interrupt.
@@ -67,6 +73,7 @@ import (
 const (
 	codexVersion   = "0.156.1"
 	markerApproval = "[fakecodex:approval]"
+	markerWithdraw = "[fakecodex:withdraw]"
 	markerHold     = "[fakecodex:hold]"
 
 	// fakeCommand is the command an approval turn asks to run.
@@ -142,10 +149,12 @@ type server struct {
 	out     io.Writer
 	werr    error
 
-	mu       sync.Mutex
-	turns    map[string]chan struct{}        // running turn id → closed on interrupt
-	pending  map[string]chan json.RawMessage // server request id → the client's result
-	requests int
+	mu      sync.Mutex
+	turns   map[string]chan struct{}        // running turn id → closed on interrupt
+	pending map[string]chan json.RawMessage // server request id → the client's result
+	// withdrawn holds the ids of server requests resolved before any answer.
+	withdrawn map[string]bool
+	requests  int
 }
 
 func main() {
@@ -172,6 +181,7 @@ func run(in io.Reader, out io.Writer, codexHome, version string, signedOut bool,
 		out:       out,
 		turns:     map[string]chan struct{}{},
 		pending:   map[string]chan json.RawMessage{},
+		withdrawn: map[string]bool{},
 	}
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
@@ -205,9 +215,13 @@ func (s *server) handle(f incoming) {
 		s.mu.Lock()
 		ch, ok := s.pending[string(f.ID)]
 		delete(s.pending, string(f.ID))
+		late := s.withdrawn[string(f.ID)]
 		s.mu.Unlock()
 		if ok {
 			ch <- f.Result
+		}
+		if late {
+			_ = s.logTurn(json.RawMessage(`{"lateResponse":` + string(f.ID) + `}`))
 		}
 	}
 }
@@ -422,6 +436,9 @@ func (t *turn) run(text string) {
 		t.complete("interrupted")
 		return
 	}
+	if strings.Contains(text, markerWithdraw) {
+		t.withdrawnApproval()
+	}
 	if strings.Contains(text, markerApproval) && !t.approval() {
 		t.complete("interrupted")
 		return
@@ -484,6 +501,29 @@ func (t *turn) approval() bool {
 	}
 	t.s.notify("item/completed", t.itemParams("completedAtMs", done))
 	return true
+}
+
+// withdrawnApproval sends a command approval request and withdraws it with
+// serverRequest/resolved before any answer, completing the item declined.
+func (t *turn) withdrawnApproval() {
+	item := t.itemID("cmd")
+	cwd, _ := os.Getwd()
+	t.s.notify("item/started", t.itemParams("startedAtMs", commandItem(item, cwd, "inProgress", nil)))
+	t.s.mu.Lock()
+	t.s.requests++
+	reqID := json.RawMessage(fmt.Sprintf(`"fakecodex-approval-%d"`, t.s.requests))
+	t.s.withdrawn[string(reqID)] = true
+	t.s.mu.Unlock()
+	t.s.send(message{ID: reqID, Method: "item/commandExecution/requestApproval", Params: map[string]any{
+		"threadId":    t.threadID,
+		"turnId":      t.id,
+		"itemId":      item,
+		"startedAtMs": time.Now().UnixMilli(),
+		"command":     fakeCommand,
+		"cwd":         cwd,
+	}})
+	t.s.notify("serverRequest/resolved", map[string]any{"threadId": t.threadID, "requestId": reqID})
+	t.s.notify("item/completed", t.itemParams("completedAtMs", commandItem(item, cwd, "declined", nil)))
 }
 
 func (t *turn) complete(status string) {

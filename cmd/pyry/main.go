@@ -699,12 +699,14 @@ func selectsStreamRunner(cfg config.Config) bool {
 // (streamsup). config.Load stays parse-only, matching DebugCapture.
 //
 // codex carries the Codex binary and home; its sink is set here to the same
-// fan-in the Claude factory feeds (#2620).
+// fan-in the Claude factory feeds (#2620), and its approval to the same
+// registry, window and modal surface (#2587).
 func selectInteractiveRunner(cfg config.Config, logger *slog.Logger, mcpServersPath string, vocab *modelVocabularyStore, approval streamApprovalConfig, codex codexHarness) (sessions.RunnerFactory, *streamTurnSink, error) {
 	switch cfg.InteractiveRunner {
 	case "", "stream-json":
 		sink := newStreamTurnSink(0, logger)
 		codex.sink = sink
+		codex.approval = approval
 		return harnessRunnerFactory(newStreamRunnerFactory(sink, mcpServersPath, vocab, approval), newCodexRunnerFactory(codex)), sink, nil
 	case "pty":
 		return nil, nil, fmt.Errorf(`interactive_runner "pty" was removed in #1348: the terminal-driving interactive runner no longer exists. Remove the key or set it to "stream-json"`)

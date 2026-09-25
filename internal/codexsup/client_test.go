@@ -275,6 +275,33 @@ func TestApprovalAnsweredLater(t *testing.T) {
 	}
 }
 
+// TestServerRequestIDNamedByResolved: the id a server request carries is the
+// one serverRequest/resolved later names, so a withdrawal can be correlated.
+func TestServerRequestIDNamedByResolved(t *testing.T) {
+	n := make(notes, 64)
+	ids := make(chan json.RawMessage, 1)
+	c := startFake(t, Config{OnNotification: n.on, OnServerRequest: func(r *ServerRequest) {
+		ids <- r.ID
+		_ = r.Decline()
+	}})
+	if _, err := c.StartThread(ctx5(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.StartTurn(ctx5(t), TurnInput{Text: "[fakecodex:approval]"}); err != nil {
+		t.Fatal(err)
+	}
+	_, params := n.until(t, "serverRequest/resolved")
+	var p struct {
+		RequestID json.RawMessage `json:"requestId"`
+	}
+	if err := json.Unmarshal([]byte(params), &p); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-ids; len(got) == 0 || string(got) != string(p.RequestID) {
+		t.Errorf("ServerRequest.ID = %s, want the resolved requestId %s", got, p.RequestID)
+	}
+}
+
 func TestProcessDiesOnItsOwn(t *testing.T) {
 	c := startFake(t, Config{})
 	if err := c.cmd.Process.Kill(); err != nil {

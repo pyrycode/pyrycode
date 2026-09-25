@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,9 +14,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/pyrycode/pyrycode/internal/codexsup"
+	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
 	"github.com/pyrycode/pyrycode/internal/turncommit"
@@ -41,11 +47,15 @@ const (
 )
 
 // codexHarness is the daemon-wide input to the Codex runner factory: the
-// binary (-pyry-codex), the daemon-owned CODEX_HOME, and the one turn-event
-// fan-in Claude sessions also feed.
+// binary (-pyry-codex), the daemon-owned CODEX_HOME, the one turn-event
+// fan-in Claude sessions also feed, and the approval registry, window and
+// modal surface Claude sessions also use. Only the registry, timeout and
+// surface of approval are read: Codex approvals are in-band, whatever
+// transport Claude's take.
 type codexHarness struct {
 	bin, home string
 	sink      *streamTurnSink
+	approval  streamApprovalConfig
 }
 
 // newCodexRunnerFactory builds a Codex runner per session (#2620). Like
@@ -97,6 +107,7 @@ func newCodexRunnerFactory(h codexHarness) sessions.RunnerFactory {
 			Log:            cfg.Logger,
 			ThreadID:       cfg.ThreadID,
 			OnThread:       recordCodexThread(cfg.RecordThread, cfg.Logger),
+			Approvals:      newCodexApprovals(h.approval.registry, h.approval.timeout, h.approval.surface),
 		}), nil
 	}
 }
@@ -210,7 +221,8 @@ func codexTurnSettings(args []string) (model, effort string) {
 // must not block; Tag is the live pool session id both are bound to. ThreadID
 // is the stored thread the first spawn resumes, empty to start one; OnThread,
 // when set, is told the live pool id and the id of every thread the runner
-// starts, so the pool can persist it (#2622).
+// starts, so the pool can persist it (#2622). Approvals routes approval
+// requests to the permission modal; nil declines every one (#2587).
 type codexRunnerConfig struct {
 	Binary, Home, Dir string
 	Tag               *streamSessionTag
@@ -222,6 +234,7 @@ type codexRunnerConfig struct {
 	Log               *slog.Logger
 	ThreadID          string
 	OnThread          func(sessionID, threadID string)
+	Approvals         *codexApprovals
 }
 
 // codexRunner is the Codex implementation of sessions.Runner: it supervises
@@ -236,8 +249,9 @@ type codexRunnerConfig struct {
 // Model, effort and posture are per-turn overrides: every turn/start carries
 // all of them from the stored settings (codexTurnOverrides), so a settings
 // change sends nothing and respawns nothing, and applies from the next turn.
-// Every server request takes codexsup's default decline (OnServerRequest is
-// left nil), so no approval is ever accepted until the approvals ticket.
+// Command and file-change approvals go to the permission modal through
+// cfg.Approvals (#2587); every other server request takes codexsup's default
+// decline, and nothing accepts unless the operator allows it.
 type codexRunner struct {
 	cfg       codexRunnerConfig
 	log       *slog.Logger
@@ -399,7 +413,8 @@ func (r *codexRunner) runOnce(ctx context.Context, threadID string, seq uint64) 
 		OnNotification: func(method string, params json.RawMessage) {
 			r.notify(tr, method, params)
 		},
-		Log: r.log,
+		OnServerRequest: r.cfg.Approvals.handle,
+		Log:             r.log,
 	})
 	if err != nil {
 		if ctx.Err() != nil {
@@ -460,6 +475,7 @@ func (r *codexRunner) runOnce(ctx context.Context, threadID string, seq uint64) 
 	r.client = nil
 	r.mu.Unlock()
 	exitErr := stopCodexClient(client)
+	r.cfg.Approvals.declineAll(reasonCodexExit)
 	r.mu.Lock()
 	r.turnID = ""
 	r.mu.Unlock()
@@ -497,6 +513,7 @@ func (r *codexRunner) notify(tr *codexsup.Translator, method string, params json
 		r.turnID = ""
 		r.mu.Unlock()
 	}
+	r.cfg.Approvals.observe(method, params)
 	r.trMu.Lock()
 	events := tr.Translate(method, params)
 	r.trMu.Unlock()
@@ -542,10 +559,11 @@ func (r *codexRunner) WriteUserTurn(ctx context.Context, _ string, payload []byt
 	return nil
 }
 
-// Interrupt ends the running turn, which then completes as interrupted. With
-// no client bound it is the retryable ErrNoLiveChild; with no turn running
-// there is nothing to end.
+// Interrupt declines the approvals the turn is waiting on and ends the running
+// turn, which then completes as interrupted. With no client bound it is the
+// retryable ErrNoLiveChild; with no turn running there is nothing to end.
 func (r *codexRunner) Interrupt() error {
+	r.cfg.Approvals.declineAll(reasonCodexInterrupt)
 	r.mu.Lock()
 	client, turnID := r.client, r.turnID
 	r.mu.Unlock()
@@ -638,11 +656,13 @@ func (r *codexRunner) SetPermissionMode(mode string) error {
 	return nil
 }
 
-// BeginTeardown refuses turns until the next client binds.
+// BeginTeardown refuses turns until the next client binds and declines every
+// parked approval.
 func (r *codexRunner) BeginTeardown() {
 	r.mu.Lock()
 	r.tearingDown = true
 	r.mu.Unlock()
+	r.cfg.Approvals.declineAll(reasonCodexTeardown)
 }
 
 // BeginRotation refuses turns until a client binds from a spawn that follows
@@ -680,3 +700,279 @@ func (r *codexRunner) RestartFresh(newID string) {
 }
 
 var _ sessions.Runner = (*codexRunner)(nil)
+
+// Content-free deny reasons for the paths the operator did not choose. They
+// never reach Codex, which is only ever told "decline".
+const (
+	reasonCodexWithdrawn = "approval request withdrawn by Codex"
+	reasonCodexInterrupt = "approval request ended by an interrupt"
+	reasonCodexTeardown  = "approval request ended with its session"
+	reasonCodexExit      = "approval request ended with its Codex process"
+)
+
+const (
+	// codexMaxDescription caps the modal description built from a request.
+	codexMaxDescription = 4096
+	// codexMaxTrackedChanges caps the file-change items whose paths are held
+	// for a later approval request.
+	codexMaxTrackedChanges = 256
+)
+
+// codexApprovals routes one runner's Codex approval requests onto the
+// daemon-wide approval registry and the permission modal, as
+// stdioPermissionHandler does for a Claude session. live holds only this
+// runner's parked requests, so its decline paths leave other sessions alone.
+// mu is a leaf, never held across a registry, surface or Codex call.
+type codexApprovals struct {
+	registry *permbridge.Registry
+	timeout  time.Duration
+	surface  *approvalSurfaceReport
+
+	mu      sync.Mutex
+	live    map[string]*codexApproval // registry id → parked request
+	changes map[string][]string       // fileChange item id → its paths
+}
+
+// codexApproval is one parked request. withdrawn is set when Codex resolved it
+// on its own, before the registry entry is resolved, so its await writes
+// nothing to Codex.
+type codexApproval struct {
+	req       *codexsup.ServerRequest
+	withdrawn atomic.Bool
+}
+
+// newCodexApprovals returns nil without a registry: every request then takes
+// codexsup's default decline.
+func newCodexApprovals(registry *permbridge.Registry, timeout time.Duration, surface *approvalSurfaceReport) *codexApprovals {
+	if registry == nil {
+		return nil
+	}
+	return &codexApprovals{
+		registry: registry,
+		timeout:  timeout,
+		surface:  surface,
+		live:     make(map[string]*codexApproval),
+		changes:  make(map[string][]string),
+	}
+}
+
+// handle is codexsup.Config.OnServerRequest. It runs on the read loop, so it
+// only parks the request; surfacing, waiting and the answer run on await's
+// goroutine. Everything it cannot park is declined.
+func (a *codexApprovals) handle(req *codexsup.ServerRequest) {
+	if a == nil {
+		_ = req.Decline()
+		return
+	}
+	var item struct {
+		ItemID string `json:"itemId"`
+	}
+	_ = json.Unmarshal(req.Params, &item)
+	a.mu.Lock()
+	paths := a.changes[item.ItemID]
+	a.mu.Unlock()
+	parked, ok := codexApprovalRequest(req.Method, req.Params, paths)
+	if !ok {
+		_ = req.Decline()
+		return
+	}
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		_ = req.Decline()
+		return
+	}
+	id := "codex-" + hex.EncodeToString(nonce[:])
+	parked.ToolUseID = id
+	pending, err := a.registry.Register(id, parked, a.timeout)
+	if err != nil {
+		_ = req.Decline()
+		return
+	}
+	ap := &codexApproval{req: req}
+	a.mu.Lock()
+	a.live[id] = ap
+	a.mu.Unlock()
+	go a.await(id, ap, parked, pending)
+}
+
+// await is the sole writer of the request's answer, and writes it only when
+// Codex is still waiting for it.
+func (a *codexApprovals) await(id string, ap *codexApproval, parked permbridge.Request, pending *permbridge.Pending) {
+	retire := a.surface.surface(parked)
+	verdict := pending.Await()
+	a.mu.Lock()
+	if a.live[id] == ap {
+		delete(a.live, id)
+	}
+	a.mu.Unlock()
+	if !ap.withdrawn.Load() {
+		_ = ap.req.Respond(map[string]string{"decision": codexDecision(verdict)})
+	}
+	retire()
+}
+
+// codexDecision maps a registry verdict onto Codex's approval vocabulary. Only
+// an explicit allow accepts; cancel, which also interrupts the turn, is never
+// produced.
+func codexDecision(v permbridge.Verdict) string {
+	switch {
+	case v.Behavior == permbridge.BehaviorAllow && v.ForSession:
+		return "acceptForSession"
+	case v.Behavior == permbridge.BehaviorAllow:
+		return "accept"
+	default:
+		return "decline"
+	}
+}
+
+// observe runs on the read loop for every notification. It holds each
+// file-change item's paths, which its approval request does not carry, and
+// retires a parked request that Codex resolved on its own.
+func (a *codexApprovals) observe(method string, params json.RawMessage) {
+	if a == nil {
+		return
+	}
+	switch method {
+	case "item/started", "item/completed":
+		var p struct {
+			Item struct {
+				Type    string `json:"type"`
+				ID      string `json:"id"`
+				Changes []struct {
+					Path string `json:"path"`
+				} `json:"changes"`
+			} `json:"item"`
+		}
+		if json.Unmarshal(params, &p) != nil || p.Item.Type != "fileChange" {
+			return
+		}
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if method == "item/completed" {
+			delete(a.changes, p.Item.ID)
+			return
+		}
+		if len(a.changes) >= codexMaxTrackedChanges {
+			return
+		}
+		paths := make([]string, 0, len(p.Item.Changes))
+		for _, c := range p.Item.Changes {
+			paths = append(paths, c.Path)
+		}
+		a.changes[p.Item.ID] = paths
+	case "serverRequest/resolved":
+		var p struct {
+			RequestID json.RawMessage `json:"requestId"`
+		}
+		if json.Unmarshal(params, &p) != nil || len(p.RequestID) == 0 {
+			return
+		}
+		want := bytes.TrimSpace(p.RequestID)
+		// Every match: Codex numbers requests per process, and an entry from a
+		// dead process may linger until its await deletes it. Resolving that
+		// one again is a registry no-op.
+		var ids []string
+		a.mu.Lock()
+		for id, ap := range a.live {
+			if bytes.Equal(bytes.TrimSpace(ap.req.ID), want) {
+				ap.withdrawn.Store(true)
+				ids = append(ids, id)
+			}
+		}
+		a.mu.Unlock()
+		for _, id := range ids {
+			a.registry.Resolve(id, permbridge.Deny(reasonCodexWithdrawn))
+		}
+	}
+}
+
+// declineAll resolves every request this runner has parked to a decline and
+// forgets the held file-change paths. The registry one-shot arbitrates a
+// racing answer or window; await stays the sole writer.
+func (a *codexApprovals) declineAll(reason string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	ids := make([]string, 0, len(a.live))
+	for id := range a.live {
+		ids = append(ids, id)
+	}
+	clear(a.changes)
+	a.mu.Unlock()
+	for _, id := range ids {
+		a.registry.Resolve(id, permbridge.Deny(reason))
+	}
+}
+
+// codexApprovalRequest builds the modal's request from a command or
+// file-change approval. params are untrusted: every string shown passes
+// through codexDisplay. paths are the file-change item's, held by observe.
+// Any other method, or params that do not parse, is not parked.
+func codexApprovalRequest(method string, params json.RawMessage, paths []string) (permbridge.Request, bool) {
+	var p struct {
+		Command            string            `json:"command"`
+		Cwd                string            `json:"cwd"`
+		Reason             string            `json:"reason"`
+		AvailableDecisions []json.RawMessage `json:"availableDecisions"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return permbridge.Request{}, false
+	}
+	req := permbridge.Request{Input: params}
+	var label string
+	switch method {
+	case "item/commandExecution/requestApproval":
+		label = codexDisplay(p.Command)
+		req.ToolName = "Codex command"
+		req.Description = "command: " + label + "\ncwd: " + codexDisplay(p.Cwd)
+	case "item/fileChange/requestApproval":
+		shown := make([]string, len(paths))
+		for i, path := range paths {
+			shown[i] = codexDisplay(path)
+		}
+		label = strings.Join(shown, ", ")
+		req.ToolName = "Codex file change"
+		req.Description = strings.Join(append([]string{"paths:"}, shown...), "\n")
+	default:
+		return permbridge.Request{}, false
+	}
+	req.Description = truncateUTF8(req.Description, codexMaxDescription)
+	if p.Reason != "" {
+		req.DecisionReason, _ = json.Marshal(p.Reason)
+	}
+	for _, d := range p.AvailableDecisions {
+		var s string
+		if json.Unmarshal(d, &s) == nil && s == "acceptForSession" {
+			req.AlwaysAllow = permbridge.SessionGrant(label)
+			break
+		}
+	}
+	return req, true
+}
+
+// codexDisplay escapes every non-printable rune, so a newline, control or
+// bidi-format character in a Codex-supplied string cannot forge another line
+// of the modal.
+func codexDisplay(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if strconv.IsPrint(r) {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteString(strings.Trim(strconv.QuoteRune(r), "'"))
+	}
+	return b.String()
+}
+
+// truncateUTF8 cuts s to at most n bytes on a rune boundary.
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}

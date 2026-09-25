@@ -49,6 +49,12 @@ type Responder struct {
 	done atomic.Bool
 }
 
+// ID returns a copy of the request id this Responder answers, as the peer
+// sent it.
+func (r *Responder) ID() json.RawMessage {
+	return append(json.RawMessage(nil), r.id...)
+}
+
 // Reply resolves the request with a success result. The first call writes one
 // success frame through the serialized write path and returns nil; any later
 // call writes nothing and returns ErrAlreadyResolved. A result that fails to
