@@ -699,6 +699,16 @@ type V2SessionConfig struct {
 	// frame is delivered as before #2644.
 	CodexConversation func(conversationID string) bool
 
+	// MergedModelOptions answers, for a pushed model_list's Claude entries, the
+	// list a conn that negotiated protocol.CapabilityMultiAgent is sent instead
+	// (#2652): those entries tagged as Claude's, then the Codex entries the daemon
+	// holds, tagged as #2651's replies tag them. forwardEnvelope consults it,
+	// through mergedForConn, per pushed model_list to such a conn — live or
+	// replayed — on the Run goroutine. It must return a slice it owns and never
+	// write through its argument. Optional: when nil every pushed model_list is
+	// delivered unchanged to every conn, as before #2652.
+	MergedModelOptions func(claude []protocol.ModelOption) []protocol.ModelOption
+
 	// HistoryPage serves one backward step of a conversation-history walk for an
 	// inbound request_history (#2116), over the daemon's durable on-disk log
 	// (#2112). handleRequestHistory is its sole reader. Optional: when nil the

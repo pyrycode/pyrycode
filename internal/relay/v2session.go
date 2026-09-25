@@ -1934,6 +1934,7 @@ func (m *V2SessionManager) forwardEnvelope(_ context.Context, connID string, env
 	if env.EventID != nil && *env.EventID <= s.replayThrough {
 		return nil
 	}
+	env = m.mergedForConn(s, env)
 	envJSON, err := json.Marshal(env)
 	if err != nil {
 		// Defensive: a well-typed envelope (e.g. a message envelope, a
@@ -1951,6 +1952,36 @@ func (m *V2SessionManager) forwardEnvelope(_ context.Context, connID string, env
 	}
 	m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: frame})
 	return nil
+}
+
+// mergedForConn returns env as s is to be sent it: for a conn that negotiated
+// protocol.CapabilityMultiAgent, a pushed model_list whose Claude entries are
+// replaced by MergedModelOptions' merged, tagged list (#2652); every other frame,
+// and every frame to any other conn, unchanged. Replies are left alone because
+// #2651 already merged them. conversation_id and dropped_models are the pushed
+// frame's.
+//
+// The pushed envelope is shared by every conn and the replay ring, so this builds
+// the capable conn's copy per call and never writes through env.Payload: env is a
+// by-value copy and only its Payload field is reassigned to fresh bytes. A payload
+// that does not decode, or a merged one that does not marshal, is delivered
+// unchanged. Nothing is logged: the payload is claude-authored (#833).
+// Run-goroutine only, like its caller: s.multiAgent is Run-owned.
+func (m *V2SessionManager) mergedForConn(s *V2Session, env protocol.Envelope) protocol.Envelope {
+	if !s.multiAgent || m.cfg.MergedModelOptions == nil || env.Type != protocol.TypeModelList || env.InReplyTo != nil {
+		return env
+	}
+	var p protocol.ModelListPayload
+	if err := json.Unmarshal(env.Payload, &p); err != nil {
+		return env
+	}
+	p.Models = m.cfg.MergedModelOptions(p.Models)
+	payload, err := json.Marshal(p)
+	if err != nil {
+		return env
+	}
+	env.Payload = payload
+	return env
 }
 
 // maxRetainedClientNameBytes and maxRetainedClientVersionBytes bound what one

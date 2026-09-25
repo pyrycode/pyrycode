@@ -263,3 +263,182 @@ func TestV2Session_CodexReplay_WithheldFromOldConn(t *testing.T) {
 		})
 	}
 }
+
+// gatePushedModelList is a pushed model_list as turnbridge encodes a Claude
+// child's initialize reply: untagged Claude entries, a conversation, a cut count.
+func gatePushedModelList(t *testing.T) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(protocol.ModelListPayload{
+		ConversationID: gateClaudeConv,
+		Models: []protocol.ModelOption{
+			{Value: "default", ResolvedModel: "claude-sonnet-5", DisplayName: "Default", EffortLevels: []string{"low"}},
+			{Value: "haiku", ResolvedModel: "claude-haiku-4-5", DisplayName: "Haiku"},
+		},
+		DroppedModels: 2,
+	})
+	if err != nil {
+		t.Fatalf("marshal model_list: %v", err)
+	}
+	return raw
+}
+
+// gateMergeSeam stands in for the daemon's MergedModelOptions: the Claude entries
+// tagged into a fresh slice, then one Codex entry.
+func gateMergeSeam(claude []protocol.ModelOption) []protocol.ModelOption {
+	out := make([]protocol.ModelOption, 0, len(claude)+1)
+	for _, m := range claude {
+		m.Agent, m.Family = protocol.AgentClaude, m.Value
+		out = append(out, m)
+	}
+	return append(out, protocol.ModelOption{Value: "gpt-5-codex", ResolvedModel: "gpt-5-codex", DisplayName: "gpt-5-codex", Agent: protocol.AgentCodex, Family: "gpt-5-codex"})
+}
+
+// assertMergedModelList checks that got is pushed's model_list with its Claude
+// entries replaced by gateMergeSeam's merge, conversation_id and dropped_models
+// kept.
+func assertMergedModelList(t *testing.T, got protocol.Envelope, pushed json.RawMessage) {
+	t.Helper()
+	var in, out protocol.ModelListPayload
+	if err := json.Unmarshal(pushed, &in); err != nil {
+		t.Fatalf("decode pushed: %v", err)
+	}
+	if err := json.Unmarshal(got.Payload, &out); err != nil {
+		t.Fatalf("decode delivered: %v", err)
+	}
+	want := in
+	want.Models = gateMergeSeam(in.Models)
+	wantJSON, _ := json.Marshal(want)
+	gotJSON, _ := json.Marshal(out)
+	if string(gotJSON) != string(wantJSON) {
+		t.Errorf("capable conn's model_list = %s, want %s", gotJSON, wantJSON)
+	}
+}
+
+// TestV2Session_PushedModelList_MergedForMultiAgentConn pins #2652 on one daemon
+// with a capable and an old conn open: one pushed model_list reaches the capable
+// conn with Codex's entries merged in and the old conn byte-identical; a
+// model_list reply reaches both unchanged; with the seam unwired the capable conn
+// gets the pushed bytes too.
+func TestV2Session_PushedModelList_MergedForMultiAgentConn(t *testing.T) {
+	t.Parallel()
+	for _, wired := range []bool{true, false} {
+		name := "wired"
+		if !wired {
+			name = "unwired"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			respPriv, respPub := genV2Keypair(t)
+			initPrivA, _ := genV2Keypair(t)
+			initPrivB, _ := genV2Keypair(t)
+			const capable, old = "c-merge-capable", "c-merge-old"
+
+			frames := make(chan protocol.RoutingEnvelope, 2)
+			rec := &v2Recorder{}
+			cfg := V2SessionConfig{
+				Frames:     frames,
+				Outbound:   rec.outbound,
+				StaticPriv: respPriv,
+				Devices:    v2PairedRegistry(t, v2TestToken),
+				ServerID:   v2TestServerID,
+				Logger:     silentLogger(),
+			}
+			if wired {
+				cfg.MergedModelOptions = gateMergeSeam
+			}
+			mgr, stop := startManager(t, cfg)
+			t.Cleanup(stop)
+
+			recvA := openGateConn(t, frames, rec, capable, respPub, initPrivA, gateCapableCaps, nil)
+			recvB := openGateConn(t, frames, rec, old, respPub, initPrivB, gateOldCaps, nil)
+
+			pushed := gatePushedModelList(t)
+			ts := time.Now().UTC()
+			reply := uint64(3)
+			envs := []protocol.Envelope{
+				{ID: 1, Type: protocol.TypeModelList, TS: ts, Payload: pushed},
+				{ID: 2, Type: protocol.TypeModelList, TS: ts, Payload: pushed, InReplyTo: &reply},
+				{ID: 3, Type: protocol.TypeWorkspaceUpdated, TS: ts, Payload: json.RawMessage(`{"path":"/w","label":"w"}`)},
+			}
+			for _, conn := range []string{capable, old} {
+				for _, env := range envs {
+					if err := mgr.Push(t.Context(), conn, env); err != nil {
+						t.Fatalf("Push(%s, %s): %v", conn, env.Type, err)
+					}
+				}
+			}
+
+			gotA := gateFramesUntil(t, rec, capable, recvA, protocol.TypeWorkspaceUpdated)
+			gotB := gateFramesUntil(t, rec, old, recvB, protocol.TypeWorkspaceUpdated)
+			want := []string{"model_list/" + gateClaudeConv, "model_list/" + gateClaudeConv + "/reply", "workspace_updated/"}
+			gateEqual(t, capable, gotA, want)
+			gateEqual(t, old, gotB, want)
+
+			if wired {
+				assertMergedModelList(t, gotA[0], pushed)
+			} else if string(gotA[0].Payload) != string(pushed) {
+				t.Errorf("unwired capable conn's model_list = %s, want the pushed %s", gotA[0].Payload, pushed)
+			}
+			for _, got := range []protocol.Envelope{gotA[1], gotB[0], gotB[1]} {
+				if string(got.Payload) != string(pushed) {
+					t.Errorf("model_list = %s, want the pushed bytes %s", got.Payload, pushed)
+				}
+			}
+		})
+	}
+}
+
+// TestV2Session_ReplayedModelList_MergedForMultiAgentConn pins the replay path: a
+// ring model_list replayed to a reconnecting capable conn arrives merged, and the
+// same ring entry replayed to an old conn afterwards arrives byte-identical, so
+// the capable conn's copy never wrote through the stored one. The replay dedup
+// still applies: the event at the advertised last_event_id is not replayed.
+func TestV2Session_ReplayedModelList_MergedForMultiAgentConn(t *testing.T) {
+	t.Parallel()
+	respPriv, respPub := genV2Keypair(t)
+	initPrivA, _ := genV2Keypair(t)
+	initPrivB, _ := genV2Keypair(t)
+	const capable, old = "c-merge-replay-capable", "c-merge-replay-old"
+
+	pushed := gatePushedModelList(t)
+	ring := eventring.New(eventring.MaxEventsPerConversation)
+	for range 2 {
+		ring.Append(gateClaudeConv, protocol.TypeModelList, pushed, time.Now().UTC())
+	}
+
+	frames := make(chan protocol.RoutingEnvelope, 1)
+	rec := &v2Recorder{}
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:             frames,
+		Outbound:           rec.outbound,
+		StaticPriv:         respPriv,
+		Devices:            v2PairedRegistry(t, v2TestToken),
+		ServerID:           v2TestServerID,
+		Logger:             silentLogger(),
+		MergedModelOptions: gateMergeSeam,
+	})
+	t.Cleanup(stop)
+	mgr.SetReplaySource(ring, func() string { return gateClaudeConv })
+
+	sentinel := protocol.Envelope{ID: 9, Type: protocol.TypeWorkspaceUpdated, TS: time.Now().UTC(), Payload: json.RawMessage(`{"path":"/w","label":"w"}`)}
+	last := uint64(1)
+	want := []string{"model_list/" + gateClaudeConv, "workspace_updated/"}
+
+	recvA := openGateConn(t, frames, rec, capable, respPub, initPrivA, gateCapableCaps, &last)
+	if err := mgr.Push(t.Context(), capable, sentinel); err != nil {
+		t.Fatalf("Push sentinel: %v", err)
+	}
+	gotA := gateFramesUntil(t, rec, capable, recvA, protocol.TypeWorkspaceUpdated)
+	gateEqual(t, capable, gotA, want)
+	assertMergedModelList(t, gotA[0], pushed)
+
+	recvB := openGateConn(t, frames, rec, old, respPub, initPrivB, gateOldCaps, &last)
+	if err := mgr.Push(t.Context(), old, sentinel); err != nil {
+		t.Fatalf("Push sentinel: %v", err)
+	}
+	gotB := gateFramesUntil(t, rec, old, recvB, protocol.TypeWorkspaceUpdated)
+	gateEqual(t, old, gotB, want)
+	if string(gotB[0].Payload) != string(pushed) {
+		t.Errorf("old conn's replayed model_list = %s, want the stored bytes %s", gotB[0].Payload, pushed)
+	}
+}
