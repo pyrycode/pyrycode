@@ -70,3 +70,7 @@ The tests are the deliverable. The AC3 proof (drop `workspaceWrite` from `Sandbo
 ## Documentation handoff (pending — documentation stage)
 
 - `internal/codexsup/SCHEMA.md`: after regenerating the schema for a new pin, `make check` is the wire-shape check (`TestRequestParamsMatchSchema`). A failure there means pyry's encoding has to change along with the pin.
+
+## Revisions
+
+- 2026-09-25, implementation: the open question is resolved with no design change. At the committed 0.156.1 schema, every keyword the seven senders reach is in the handled subset; `TestRequestParamsMatchSchema` records no unsupported keyword.
