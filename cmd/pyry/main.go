@@ -890,15 +890,22 @@ func runSupervisor(args []string) error {
 	approvals := permbridge.New()
 	approvalWindow := approvalTimeout()
 	approvalSurfaces := &approvalSurfaceReport{}
+	codex := codexHarness{bin: *codexBin, home: codexHomePath(resolveInstanceDirPath(*name))}
 	runnerFactory, streamSink, err := selectInteractiveRunner(cfg, logger, mcpServersPath, modelVocabulary, streamApprovalConfig{
 		stdio:    cfg.StdioPermissionPrompt,
 		registry: approvals,
 		timeout:  approvalWindow,
 		surface:  approvalSurfaces,
-	}, codexHarness{bin: *codexBin, home: codexHomePath(resolveInstanceDirPath(*name))})
+	}, codex)
 	if err != nil {
 		return fmt.Errorf("interactive runner: %w", err)
 	}
+	// Codex's model families are read once here, off the startup path (#2664), so
+	// the model menu offers Codex before any Codex session has spawned. ctx is
+	// sigCtx's child that `pyry stop` also cancels. The deferred wait runs before
+	// modelVocabulary.Close, so no retention lands on a closed store.
+	codex.vocab = modelVocabulary
+	defer startCodexModelRead(ctx, codex, trustedWorkdir, logger)()
 	// The #1201 per-conversation turn-busy tracker, constructed HERE — at the
 	// composition root — because it now has two consumers in different subtrees: the
 	// inbound-delivery seam below (#1199, via msgqueue.Config.Deliver) and the relay

@@ -79,3 +79,7 @@ None required by the ticket. Pending for the documentation stage: the Codex mode
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-25
+
+## Revisions
+
+**2026-09-25, during Phase B.** `wait` cancels before it joins, so a test that drives the read through `startCodexModelRead` and then calls `wait` cancels its own read. The read-and-log step is now synchronous and separate from the goroutine: `readCodexModels(ctx, h, dir) error` is the body the Design called `readCodexModelsAtStart`; `readCodexModelsAtStart(ctx, h, dir, log)` runs it and logs the one Info line; `startCodexModelRead` only adds the goroutine, the timeout and `wait`. The success, failure and AC3 tests drive `readCodexModelsAtStart` directly; `TestStartCodexModelRead_DoesNotBlockStart` covers the goroutine and `wait`. Contract otherwise unchanged.
