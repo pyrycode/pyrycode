@@ -309,6 +309,15 @@ func (c *Client) Version() string { return c.version }
 // UserAgent is the initialize response's userAgent, unparsed.
 func (c *Client) UserAgent() string { return c.userAgent }
 
+// PID is the app-server's process id, or 0 for a connection with no process.
+// It stays set after the process exits; Done says whether it still runs.
+func (c *Client) PID() int {
+	if c.cmd == nil || c.cmd.Process == nil {
+		return 0
+	}
+	return c.cmd.Process.Pid
+}
+
 // Done is closed once the process has exited and its output has been read.
 func (c *Client) Done() <-chan struct{} { return c.done }
 

@@ -256,6 +256,29 @@ same `streamTurnSink` a Claude session feeds, through `sinkForTag`/
 `exitForTag` on one live tag, so a Codex turn appears on a client exactly
 like a Claude one.
 
+**`codexRunner.State().ChildPID` now reports the app-server's pid while a
+client is bound, not always 0 (#2663).** `codexsup.Client.PID()` returns the
+app-server process's pid (0 for the in-memory test peer, since its `cmd` is
+nil); `runOnce` sets `r.state.ChildPID` in the same `r.mu` section that binds
+`r.client` and sets `PhaseRunning`, and clears it back to 0 in the section
+that unbinds the client after `Done`/ctx. This is what lets
+`activeSessionStarter.start`'s live-wrap-up gate ([Inbound new_session § The
+wrap-up turn](v2-session-manager-state-machine-inbound-new-session-sessionstarter-seam.md#the-wrap-up-turn-and-the-replys-tense-2477))
+actually reach Codex: before this ticket the runner always reported 0, so a
+Codex reset silently took the synchronous rotation path instead — no
+`resetting` frames, no handoff note, and nothing that read as an error.
+`newCodexRunnerFactory` chains a `wrapUpCapture` into the Codex sink at the
+same position `newStreamRunnerFactory` gives it (parser side of the fan-in
+channel — see [the placement
+rule](streamsup-package-announced-reset-follower.md#a-second-instance-of-the-placement-rule-wrapupcapture-2477)),
+and `codexRunner.BeginWrapUp` arms it, mirroring `streamRunner`.
+
+**A reset test that stubs `ChildPID` cannot catch this class of bug.** The
+gap surfaced only in a test that read the pid off a runner built through the
+real `newCodexRunnerFactory` against the fake Codex, not a hand-built double
+with `ChildPID` set directly — a stubbed value exercises the wrap-up gate
+without ever proving the production runner reports one.
+
 **The thread id has to live on the runner, not on `Run`'s stack.** Idle
 eviction cancels `Run`'s context and returns; a later activation calls `Run`
 again on that **same** `codexRunner` instance (`Session.runActive`). Anything

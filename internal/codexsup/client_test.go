@@ -167,6 +167,17 @@ func TestHandshakeAndStop(t *testing.T) {
 	}
 }
 
+// TestClientPID: a started app-server reports its process id; the in-memory
+// peer has no process and reports 0.
+func TestClientPID(t *testing.T) {
+	if pid := startFake(t, Config{}).PID(); pid <= 0 {
+		t.Errorf("started PID() = %d, want > 0", pid)
+	}
+	if c, _ := startPeer(t, "pyrycode/0.156.1", Config{}); c.PID() != 0 {
+		t.Errorf("in-memory peer PID() = %d, want 0", c.PID())
+	}
+}
+
 func TestStartValidatesConfig(t *testing.T) {
 	if _, err := Start(ctx5(t), Config{Binary: fakeBin, Dir: t.TempDir()}); err == nil {
 		t.Error("Start without CodexHome succeeded")
