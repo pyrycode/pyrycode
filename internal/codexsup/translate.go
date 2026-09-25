@@ -16,9 +16,6 @@ const (
 	maxBannerText      = 4 << 10
 	maxStopField       = 256
 	maxModelID         = 256
-	// maxToolTitle bounds a command's ToolStart title, which reaches the wire
-	// as the tool's name.
-	maxToolTitle = 4 << 10
 	// maxPendingTurns caps the per-turn state keyed by Codex's turnId. Codex
 	// runs one turn per thread at a time, so a peer past this is not one.
 	maxPendingTurns = 8
@@ -343,8 +340,10 @@ func (t *Translator) item(method string, params json.RawMessage) []turnevent.Eve
 	return []turnevent.Event{unrecognized(turnevent.UnrecognizedCodexItem, typ, params)}
 }
 
-// commandItem maps a commandExecution item: its item/started to a ToolStart,
-// its item/completed to the call's one ToolUpdate.
+// commandItem maps a commandExecution item: its item/started to a ToolStart
+// titled shell, the Codex tool that runs it, whose input holds the command and
+// cwd; its item/completed to the call's one ToolUpdate. The title is not the
+// command, which clients would otherwise show twice.
 func commandItem(method string, params json.RawMessage) []turnevent.Event {
 	var p struct {
 		Item struct {
@@ -369,7 +368,7 @@ func commandItem(method string, params json.RawMessage) []turnevent.Event {
 			return undecodable(params)
 		}
 		return []turnevent.Event{turnevent.ToolStart{
-			ToolCallID: it.ID, Title: cut(it.Command, maxToolTitle),
+			ToolCallID: it.ID, Title: "shell",
 			Kind: turnevent.ToolKindExecute, RawInput: input,
 		}}
 	}
@@ -387,7 +386,9 @@ func commandItem(method string, params json.RawMessage) []turnevent.Event {
 }
 
 // fileChangeItem maps a fileChange item: its item/started to a ToolStart with
-// one Location per changed path, its item/completed to the call's one
+// one Location per changed path and an input whose paths field joins them all,
+// since the wire carries the input and not the Locations; its item/completed to
+// the call's one
 // ToolUpdate, whose text is each change's path and then its unified diff as
 // Codex sent it.
 func fileChangeItem(method string, params json.RawMessage) []turnevent.Event {
@@ -407,13 +408,21 @@ func fileChangeItem(method string, params json.RawMessage) []turnevent.Event {
 	it := p.Item
 	if method == "item/started" {
 		var locs []turnevent.Location
+		paths := make([]string, 0, len(it.Changes))
 		for _, c := range it.Changes {
 			locs = append(locs, turnevent.Location{Path: c.Path})
+			paths = append(paths, c.Path)
+		}
+		input, err := json.Marshal(struct {
+			Paths string `json:"paths"`
+		}{strings.Join(paths, ", ")})
+		if err != nil {
+			return undecodable(params)
 		}
 		// apply_patch is the Codex tool that makes this item; the title is the
 		// wire's tool name, as Claude's Edit is.
 		return []turnevent.Event{turnevent.ToolStart{
-			ToolCallID: it.ID, Title: "apply_patch", Kind: turnevent.ToolKindEdit, Locations: locs,
+			ToolCallID: it.ID, Title: "apply_patch", Kind: turnevent.ToolKindEdit, Locations: locs, RawInput: input,
 		}}
 	}
 	update := turnevent.ToolUpdate{ToolCallID: it.ID, Status: toolStatus(it.Status)}
