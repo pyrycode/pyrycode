@@ -350,7 +350,10 @@ observation (PR #2623 review).
 
 Model and effort reach a turn as `TurnInput.Model`/`Effort`, read from
 `RunnerConfig.ClaudeArgs`'s trailing `--model`/`--effort` pair
-(`codexTurnSettings`) and refreshed by `SetSpawnArgs`/`Restart`/`SetModel`.
+(`codexTurnSettings`) and refreshed by `SetSpawnArgs`/`Restart`/`SetModel`. That
+stored model is a family, not a version, and `WriteUserTurn` resolves it to a
+version on every turn — see [§ Resolving the family to a version on every
+turn](#resolving-the-family-to-a-version-on-every-turn-2628) below.
 
 **Every turn also asserts the session's full posture (#2586), not just
 model and effort.** `codexTurnOverrides` (`cmd/pyry/codex_settings.go`) is
@@ -548,6 +551,42 @@ the outer one. Non-blocking because the outcome — entries not refreshed this
 spawn, previous ones kept — is unaffected either way; only the operator's
 visibility into *why* is lost. Anyone debugging a Codex install whose model
 menu never updates should check this before assuming the read never ran.
+
+### Resolving the family to a version on every turn (#2628)
+
+A session's stored Codex model is a family (`luna`), not a version. `cmd/pyry/codex_settings.go`'s
+`resolveCodexModel(model string, families []turnevent.ModelOption) string` is
+the pure lookup: it returns the first held entry's `ResolvedModel` whose
+`Value` exactly equals `model`, provided that `ResolvedModel` is non-empty;
+otherwise it returns `model` unchanged. An empty model returns at once. So an
+unlisted version, a family with no entries held (nil or empty store), and an
+entry whose `ResolvedModel` is itself empty all pass through untouched — a
+model is never replaced by anything but its own family's resolution.
+
+`codexRunnerConfig` carries this as `Families func() []turnevent.ModelOption`,
+wired to `h.vocab.CodexModels` (nil-receiver-safe, the same pattern as
+`Models: h.vocab.RetainCodex` above). `WriteUserTurn` calls
+`resolveCodexModel(in.Model, r.cfg.Families())` on every turn, not once at
+construction — resolving per call, rather than caching the resolution on the
+runner, is what lets a `RetainCodex` that moves the family mid-session reach
+the *next* turn with no respawn. The resolved value is what both `StartTurn`
+sends and the translator's `SetModel` records, so the turn always reports the
+model it actually ran on. `r.model` — the stored session setting — is never
+written by this path, so the session keeps the family, not the version it
+last resolved to.
+
+**The fake Codex could not observe a reported model at all until this ticket
+gave it a reason to send usage.** Before #2628, no fake turn sent
+`thread/tokenUsage/updated`, so no turn's `TurnEnd` ever carried
+`ModelWindows` (`Translator.holdUsage`/`turnCompleted` only populate that
+field when a usage notification arrived for the turn — see § Per-turn usage
+above). A test asserting "the turn reported model X" had no signal to read,
+which is what this ticket needed to prove resolution actually happened. The
+fix is the `[fakecodex:usage]` marker (documented in the fake's own header
+comment): opt-in, so it sends one token-usage update before an existing
+turn's normal completion and changes no existing `TurnEnd` assertion. Any
+future test that needs to observe a turn's reported model needs this marker
+on that turn.
 
 ## Testing
 

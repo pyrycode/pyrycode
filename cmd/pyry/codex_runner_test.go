@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -570,5 +571,91 @@ func TestCodexRunner_LiveSettingsReachNextTurn(t *testing.T) {
 	h.r.mu.Unlock()
 	if !same || h.r.State().RestartCount != 0 {
 		t.Errorf("settings change respawned the app-server (same client %v, restarts %d)", same, h.r.State().RestartCount)
+	}
+}
+
+// TestCodexRunner_ModelFamilyFollowsNewestVersion (#2628): through the
+// production factory and the daemon's store, a session stored on a family
+// sends and reports the family's newest held version on every turn, picks up
+// a newer one between turns with no respawn, and keeps the family as its
+// setting; a version no family names is sent and reported unchanged.
+func TestCodexRunner_ModelFamilyFollowsNewestVersion(t *testing.T) {
+	turnLog := filepath.Join(t.TempDir(), "turns.jsonl")
+	t.Setenv("FAKECODEX_TURN_LOG", turnLog)
+	store := newModelVocabularyStore(storePath(t))
+	t.Cleanup(store.Close)
+	factory := newCodexRunnerFactory(codexHarness{
+		bin: fakeCodexBin(t), home: t.TempDir(), sink: newStreamTurnSink(0, nil), vocab: store,
+	})
+	runner, err := factory(sessions.RunnerConfig{
+		SessionID: "s-1", Harness: harnessCodex, WorkDir: t.TempDir(), ClaudeArgs: []string{"--model", "luna"},
+	})
+	if err != nil {
+		t.Fatalf("factory = %v", err)
+	}
+	h := &codexHarnessT{r: runner.(*codexRunner), events: make(chan turnevent.Event, 256)}
+	h.r.cfg.Sink = func(ev turnevent.Event) { h.events <- ev }
+	h.run(t)
+	client, _ := h.bound(t, nil)
+	// Let the spawn's own model/list read land, so it cannot overwrite the
+	// entries this test retains below.
+	deadline := time.Now().Add(10 * time.Second)
+	for store.CodexModels() == nil && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	reported := func(text string) string {
+		t.Helper()
+		h.turn(t, "[fakecodex:usage] "+text)
+		end := h.await(t, "turn end", isTurnEnd).(turnevent.TurnEnd)
+		if len(end.ModelWindows) != 1 {
+			t.Fatalf("turn %q ModelWindows = %#v, want one", text, end.ModelWindows)
+		}
+		return end.ModelWindows[0].ModelID
+	}
+	var want []string
+
+	if got := reported("one"); got != "gpt-6-luna" {
+		t.Errorf("turn one reported %q, want gpt-6-luna", got)
+	}
+	want = append(want, "gpt-6-luna")
+
+	newer := slices.Clone(fakeCodexFamilies)
+	for i := range newer {
+		if newer[i].Value == "luna" {
+			newer[i].ResolvedModel = "gpt-6.1-luna"
+		}
+	}
+	store.RetainCodex(newer)
+	if got := reported("two"); got != "gpt-6.1-luna" {
+		t.Errorf("turn two reported %q, want gpt-6.1-luna", got)
+	}
+	want = append(want, "gpt-6.1-luna")
+	h.r.mu.Lock()
+	stored, same := h.r.model, h.r.client == client
+	h.r.mu.Unlock()
+	if stored != "luna" {
+		t.Errorf("stored model = %q, want the family luna", stored)
+	}
+	if !same || h.r.State().RestartCount != 0 {
+		t.Errorf("a newer version respawned the app-server (same client %v, restarts %d)", same, h.r.State().RestartCount)
+	}
+
+	if err := h.r.SetModel("gpt-5.6-sol"); err != nil {
+		t.Fatalf("SetModel = %v", err)
+	}
+	if got := reported("three"); got != "gpt-5.6-sol" {
+		t.Errorf("turn three reported %q, want gpt-5.6-sol", got)
+	}
+	want = append(want, "gpt-5.6-sol")
+
+	turns := readTurnLog(t, turnLog)
+	if len(turns) != len(want) {
+		t.Fatalf("turn/start count = %d, want %d", len(turns), len(want))
+	}
+	for i, p := range turns {
+		if p["model"] != want[i] {
+			t.Errorf("turn %d model = %v, want %s", i+1, p["model"], want[i])
+		}
 	}
 }

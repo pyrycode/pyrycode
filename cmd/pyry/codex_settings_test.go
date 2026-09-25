@@ -5,6 +5,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/codexsup"
 	"github.com/pyrycode/pyrycode/internal/sessions"
+	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
 // TestCodexTurnOverrides pins every row of the posture table, and that model
@@ -42,5 +43,37 @@ func TestCodexTurnOverrides(t *testing.T) {
 	got := codexTurnOverrides(sessions.SessionSettings{Model: "gpt-6-luna", Effort: "low", PermissionMode: "plan"})
 	if got.Model != "gpt-6-luna" || got.Effort != "low" || got.Text != "" {
 		t.Errorf("model, effort, text = %q, %q, %q; want gpt-6-luna, low, empty", got.Model, got.Effort, got.Text)
+	}
+}
+
+// TestResolveCodexModel: a stored model that is a held family's value becomes
+// that family's newest version; anything else, including a family with no
+// entries held, is sent as stored.
+func TestResolveCodexModel(t *testing.T) {
+	families := []turnevent.ModelOption{
+		{Value: "sol", ResolvedModel: "gpt-6-sol"},
+		{Value: "luna", ResolvedModel: "gpt-6-luna"},
+		{Value: "terra"},
+	}
+	tests := []struct {
+		name, model string
+		families    []turnevent.ModelOption
+		want        string
+	}{
+		{"family resolves", "luna", families, "gpt-6-luna"},
+		{"unlisted version passes through", "gpt-5.6-sol", families, "gpt-5.6-sol"},
+		{"resolved version passes through", "gpt-6-luna", families, "gpt-6-luna"},
+		{"match is exact", "Luna", families, "Luna"},
+		{"family with no entries held", "luna", nil, "luna"},
+		{"family with an empty list", "luna", []turnevent.ModelOption{}, "luna"},
+		{"entry with no version keeps the family", "terra", families, "terra"},
+		{"empty model stays empty", "", families, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveCodexModel(tc.model, tc.families); got != tc.want {
+				t.Errorf("resolveCodexModel(%q) = %q, want %q", tc.model, got, tc.want)
+			}
+		})
 	}
 }
