@@ -84,6 +84,10 @@ type InnerFrameV2Decoded struct {
 // below. Like the two before it, it gates nothing: request_context_usage gates on
 // s.interactive alone, so a client advertising only this string is negotiated
 // non-interactive and reaches none of the verb.
+// protocol.CapabilityMultiAgent (#2643) is the fifth, and the first that changes
+// what the daemon sends rather than detecting a verb: it is recorded on its own
+// flag, s.multiAgent, by the same value-specific reduction, and grants nothing
+// s.interactive gates.
 //
 // New members are APPENDED, never inserted. negotiateCapabilities emits in this
 // slice's order and both of its test tables compare with slices.Equal, so the
@@ -93,7 +97,7 @@ type InnerFrameV2Decoded struct {
 // Read-only after package init and read on the manager's Run goroutine; it is a
 // var only because a slice cannot be const. Nothing may assign to it or to its
 // backing array at runtime.
-var supportedV2Capabilities = []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage}
+var supportedV2Capabilities = []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage, protocol.CapabilityMultiAgent}
 
 // negotiateCapabilities returns the phone's advertised set ∩
 // supportedV2Capabilities, in supported-set order. It iterates the supported
@@ -428,6 +432,9 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// A spoofed/unsupported advertisement never appears in negotiated, so it
 	// can never flag the session.
 	s.interactive = slices.Contains(negotiated, protocol.CapabilityInteractive)
+	// The multi_agent decision (#2643), recorded from the same slice for the same
+	// reasons and, like s.interactive, left untouched by a re-key.
+	s.multiAgent = slices.Contains(negotiated, protocol.CapabilityMultiAgent)
 	// Retain what the client reported about ITSELF, for the session's appended
 	// system prompt (#2148). Recorded here, on the accept path and before the
 	// session becomes enumerable, for s.interactive's reason: an unauthenticated

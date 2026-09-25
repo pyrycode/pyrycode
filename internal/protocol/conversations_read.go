@@ -54,4 +54,17 @@ type ConversationSummary struct {
 	WorkspaceLabel *string   `json:"workspace_label"`
 	LastMessageTS  time.Time `json:"last_message_ts"`
 	LastUsedAt     time.Time `json:"last_used_at"`
+	// Agent is the agent that runs this conversation's bound session, AgentClaude
+	// or AgentCodex (#2643). Set only for a client that negotiated
+	// CapabilityMultiAgent, which always reads a value. omitempty is load-bearing:
+	// a client without the capability gets the empty value, so its row carries no
+	// agent key and stays byte-identical to the row it read before the field
+	// existed.
+	Agent string `json:"agent,omitempty"`
 }
+
+// The closed wire vocabulary of ConversationSummary.Agent.
+const (
+	AgentClaude = "claude"
+	AgentCodex  = "codex"
+)

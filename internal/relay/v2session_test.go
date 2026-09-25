@@ -4127,6 +4127,10 @@ func TestNegotiateCapabilities(t *testing.T) {
 		{"context usage granted", []string{protocol.CapabilityContextUsage}, []string{protocol.CapabilityContextUsage}},
 		{"all four granted", []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage}, []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage}},
 		{"all four granted, advertised in reverse", []string{protocol.CapabilityContextUsage, protocol.CapabilityModelList, protocol.CapabilityQuestion, protocol.CapabilityInteractive}, []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage}},
+		// #2643's fifth supported member, APPENDED after CapabilityContextUsage, for
+		// the reason the rows above give.
+		{"multi agent granted", []string{protocol.CapabilityMultiAgent}, []string{protocol.CapabilityMultiAgent}},
+		{"all five granted, advertised in reverse", []string{protocol.CapabilityMultiAgent, protocol.CapabilityContextUsage, protocol.CapabilityModelList, protocol.CapabilityQuestion, protocol.CapabilityInteractive}, []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage, protocol.CapabilityMultiAgent}},
 	}
 
 	for _, tc := range tests {
@@ -4195,6 +4199,9 @@ func TestV2Session_Handshake_CapabilityNegotiation(t *testing.T) {
 		// advertises interactive and nothing else, able to use the verb — the
 		// handler gates on this flag alone and never on the capability.
 		{"interactive without context usage still interactive", []string{protocol.CapabilityInteractive}, []string{protocol.CapabilityInteractive}, true},
+		// #2643 AC-1: multi_agent is echoed and grants nothing interactive.
+		{"multi agent alone grants no interactive", []string{protocol.CapabilityMultiAgent}, []string{protocol.CapabilityMultiAgent}, false},
+		{"advertise all five", []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage, protocol.CapabilityMultiAgent}, []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage, protocol.CapabilityMultiAgent}, true},
 	}
 
 	for _, tc := range tests {

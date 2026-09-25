@@ -62,6 +62,12 @@ type Conn struct {
 	// passes the handshake-matched device. Written once at construction and
 	// never mutated, so reads via Auth() need no synchronisation.
 	auth *devices.Device
+
+	// multiAgent is the conn's negotiated protocol.CapabilityMultiAgent
+	// decision, set through SetMultiAgent before the Conn reaches Route and
+	// never mutated after, so MultiAgent() needs no synchronisation. The zero
+	// value is the fail-closed answer: a client told nothing about agents.
+	multiAgent bool
 }
 
 // ConnID returns the relay-assigned conn_id this Conn dispatches for.
@@ -72,6 +78,17 @@ func (c *Conn) ConnID() string { return c.id }
 // test fixture that passes nil). Verb handlers MUST nil-check the result
 // before dereferencing.
 func (c *Conn) Auth() *devices.Device { return c.auth }
+
+// MultiAgent reports whether this conn's client negotiated
+// protocol.CapabilityMultiAgent. Handlers that send agent-aware content gate
+// on it; false for a conn constructed without SetMultiAgent.
+func (c *Conn) MultiAgent() bool { return c.multiAgent }
+
+// SetMultiAgent records the conn's negotiated multi_agent decision. It is a
+// setter rather than a constructor argument so NewConn and NewTestConn keep
+// their signatures. Call it before the Conn is handed to Route or a handler:
+// the write is unsynchronised and relies on that hand-off to publish it.
+func (c *Conn) SetMultiAgent(v bool) { c.multiAgent = v }
 
 // NewTestConn constructs a *Conn for verb-handler test fixtures. Test
 // fixtures only — do not call from production code; production callers use

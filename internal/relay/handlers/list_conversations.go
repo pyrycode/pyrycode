@@ -57,13 +57,47 @@ func workspaceLabelFor(r workspaceLabelReader, cwd string) *string {
 	return nil
 }
 
-// ListConversations returns a dispatch.Handler that answers a
+// SessionHarnessFunc answers the agent that runs the pool session sessionID, for
+// a session the pool holds live or dormant; ok is false for any other id. Built
+// over sessions.Pool.HarnessFor at the composition root, which keeps the
+// internal/sessions dependency out of this package.
+type SessionHarnessFunc func(sessionID string) (harness string, ok bool)
+
+// agentOf is the wire agent of conv: its bound session's, and AgentClaude when
+// there is no bound session, no harness read, or a session the pool does not
+// hold. The mapping is closed, so the wire only ever carries the two values a
+// client codes against.
+func agentOf(conv conversations.Conversation, harnessFor SessionHarnessFunc) string {
+	if conv.CurrentSessionID == "" || harnessFor == nil {
+		return protocol.AgentClaude
+	}
+	if harness, ok := harnessFor(conv.CurrentSessionID); ok && harness == protocol.AgentCodex {
+		return protocol.AgentCodex
+	}
+	return protocol.AgentClaude
+}
+
+// ListConversations is ListConversationsWithAgents with no harness read: every
+// conversation reads as Claude's, so the reply is the pre-#2643 list for every
+// client. The daemon wires the agent-aware form; this one serves callers that
+// hold no pool.
+func ListConversations(reg ConversationLister) dispatch.Handler {
+	return ListConversationsWithAgents(reg, nil)
+}
+
+// ListConversationsWithAgents returns a dispatch.Handler that answers a
 // list_conversations request with a conversations envelope. The handler
 // reads the registry, projects each row to a protocol.ConversationSummary,
 // sorts by LastUsedAt asc / ID asc (mirroring Registry.Save), and replies
 // via Conn.Reply (which stamps id, ts, and in_reply_to).
-func ListConversations(reg ConversationLister) dispatch.Handler {
+//
+// The reply depends on the conn's negotiated multi_agent decision (#2643). A
+// client that negotiated it reads every row with its agent. A client that did
+// not is never sent a Codex conversation, and each row it is sent carries no
+// agent key, byte-identical to the row it read before agents existed.
+func ListConversationsWithAgents(reg ConversationLister, harnessFor SessionHarnessFunc) dispatch.Handler {
 	return func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error {
+		multiAgent := c.MultiAgent()
 		list := reg.List()
 		sort.SliceStable(list, func(i, j int) bool {
 			if !list[i].LastUsedAt.Equal(list[j].LastUsedAt) {
@@ -74,6 +108,13 @@ func ListConversations(reg ConversationLister) dispatch.Handler {
 
 		out := make([]protocol.ConversationSummary, 0, len(list))
 		for _, conv := range list {
+			agent := agentOf(conv, harnessFor)
+			if !multiAgent {
+				if agent == protocol.AgentCodex {
+					continue
+				}
+				agent = ""
+			}
 			// Resolved from this row's own Cwd, passed verbatim: the registry
 			// matches the key byte-exactly and normalizes nothing, so
 			// canonicalizing here would look up a key rename_workspace never
@@ -99,6 +140,7 @@ func ListConversations(reg ConversationLister) dispatch.Handler {
 				// this projection only.
 				LastMessageTS: conv.LastUsedAt,
 				LastUsedAt:    conv.LastUsedAt,
+				Agent:         agent,
 			})
 		}
 

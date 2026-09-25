@@ -1242,6 +1242,7 @@ func runSupervisor(args []string) error {
 		// over the same pool and gated on the daemon's own sessions directory: with
 		// none, the conversation-keyed usage seam stays unwired exactly as before.
 		sessionTranscriptDir: sessionTranscriptDir(pool, claudeSessionsDir),
+		sessionHarness:       sessionHarness(pool),
 		// The conversation-keyed half of the model-list pair (#2125), built beside its
 		// enumerating twin below over the same registry and pool.
 		modelListFor:       modelListFor(convReg, pool, modelVocabulary),
@@ -1521,6 +1522,16 @@ func (m sessionMinter) Create(_ context.Context, label, spawnDir string) (string
 	}
 	id, err := m.p.Mint(label, resolved)
 	return string(id), resolved, err
+}
+
+// sessionHarness answers the agent a pool session runs, live or dormant, for the
+// list_conversations reply (#2643). A session the pool does not hold is a miss,
+// which the handler reads as claude.
+func sessionHarness(pool *sessions.Pool) handlers.SessionHarnessFunc {
+	return func(sessionID string) (string, bool) {
+		harness, err := pool.HarnessFor(sessions.SessionID(sessionID))
+		return harness, err == nil
+	}
 }
 
 // settingsUpdaterAdapter adapts *sessions.Pool to relay.SettingsUpdater (#845,

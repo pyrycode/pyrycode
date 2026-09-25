@@ -79,6 +79,22 @@ const CapabilityModelList = "model_list"
 // consumer, internal/relay, not here.
 const CapabilityContextUsage = "context_usage"
 
+// CapabilityMultiAgent is the wire vocabulary string a client advertises in its
+// hello.payload.capabilities to say it understands conversations run by more than
+// one agent, and that the daemon echoes in hello_ack.payload.capabilities when it
+// supports them (docs/protocol-mobile.md § Capability negotiation). The desktop
+// and mobile grouped-menu work codes against this exact string.
+//
+// UNLIKE its detection-only neighbours, this one changes what the daemon sends.
+// A client that negotiated it reads an agent on every conversations row
+// (ConversationSummary.Agent); a client that did not is never sent a Codex
+// conversation at all, so an app that only knows Claude sees exactly the list it
+// saw before Codex existed. It grants no interactive access: every interactive
+// gate reads CapabilityInteractive alone.
+// Like its neighbours this is pure vocabulary; the trust decision lives in the
+// consumer, internal/relay, not here.
+const CapabilityMultiAgent = "multi_agent"
+
 // HelloServerPayload is the body of a "hello" envelope sent by the binary
 // after WS upgrade (docs/protocol-mobile.md § Message types). Role is
 // always "server".
