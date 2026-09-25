@@ -1245,7 +1245,9 @@ func runSupervisor(args []string) error {
 		sessionHarness:       sessionHarness(pool),
 		// The conversation-keyed half of the model-list pair (#2125), built beside its
 		// enumerating twin below over the same registry and pool.
-		modelListFor:       modelListFor(convReg, pool, modelVocabulary),
+		modelListFor: modelListFor(convReg, pool, modelVocabulary),
+		// The pushed-frame half of the merged list (#2652), over the same store.
+		pushedModelOptions: pushedModelOptions(modelVocabulary),
 		mcpStatusFor:       mcpStatusFor(convReg, pool),
 		effectiveEffortFor: effectiveEffortFor(convReg, pool),
 		// The resolution half of the on-demand context-usage read (#2431), built

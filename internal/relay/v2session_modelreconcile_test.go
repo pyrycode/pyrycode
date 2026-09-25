@@ -351,7 +351,9 @@ func TestV2Session_ModelListReconcile_ContentFreeLogging(t *testing.T) {
 
 // #2651: the opening conn's multi_agent decision reaches RetainedModelLists, so a
 // conn with the capability is reconciled with the merged, tagged lists and one
-// without it with today's, on the same daemon.
+// without it with today's, on the same daemon. #2652's MergedModelOptions is wired
+// too, as production wires both: the reconcile snapshot is already merged, so it
+// must reach the capable conn as RetainedModelLists built it, not merged again.
 func TestV2Session_ModelListReconcile_PassesTheConnsMultiAgentDecision(t *testing.T) {
 	t.Parallel()
 
@@ -376,12 +378,13 @@ func TestV2Session_ModelListReconcile_PassesTheConnsMultiAgentDecision(t *testin
 			frames := make(chan protocol.RoutingEnvelope, 8)
 			rec := &v2Recorder{}
 			mgr, stop := startManager(t, V2SessionConfig{
-				Frames:     frames,
-				Outbound:   rec.outbound,
-				StaticPriv: respPriv,
-				Devices:    v2PairedRegistry(t, v2TestToken),
-				ServerID:   v2TestServerID,
-				Logger:     silentLogger(),
+				Frames:             frames,
+				Outbound:           rec.outbound,
+				StaticPriv:         respPriv,
+				Devices:            v2PairedRegistry(t, v2TestToken),
+				ServerID:           v2TestServerID,
+				Logger:             silentLogger(),
+				MergedModelOptions: gateMergeSeam,
 				RetainedModelLists: func(multiAgent bool) []protocol.ModelListPayload {
 					if multiAgent {
 						return []protocol.ModelListPayload{merged}

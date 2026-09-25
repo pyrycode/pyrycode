@@ -267,6 +267,11 @@ type relayWiring struct {
 	// sides), so it crosses into V2SessionConfig unwrapped. nil in foreground/v1 ⇒
 	// the verb refuses every request as model_list.unavailable.
 	modelListFor func(convID string, multiAgent bool) (protocol.ModelListPayload, bool)
+	// pushedModelOptions merges a pushed model_list's Claude entries with the
+	// daemon's Codex entries for a multi_agent conn (#2652 fills
+	// V2SessionConfig.MergedModelOptions), through the tagging modelListFor's merged
+	// replies use. nil in foreground/v1 ⇒ pushed model_list frames go out unchanged.
+	pushedModelOptions func(claude []protocol.ModelOption) []protocol.ModelOption
 	// mcpStatusFor queries the exact live child bound to a named conversation and
 	// returns the existing wire payload. It may block on that child, so
 	// V2SessionConfig dispatches it on the requesting connection's worker.
@@ -1128,6 +1133,10 @@ func startRelayV2(
 		// silently defeat the seam's nil ⇒ refuse contract. A pure read: it mints no
 		// id and mutates no daemon state.
 		ModelListFor: w.modelListFor,
+		// Pushed model-list merge (#2652): a multi_agent conn's copy of a pushed
+		// model_list carries Codex's entries beside Claude's, tagged as ModelListFor's
+		// merged replies are. Assigned straight through for ModelListFor's reason.
+		MergedModelOptions: w.pushedModelOptions,
 		// Current-child MCP status source (#2382): unlike ModelListFor above this
 		// never reads retained inventory. The resolver waits for an exact child
 		// request id and returns through the worker's requester-only reply lane.

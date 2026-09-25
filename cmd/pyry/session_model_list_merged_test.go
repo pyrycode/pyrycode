@@ -190,3 +190,55 @@ func TestMergedModelOptions_ClaudeHalfFollowsTheBoundSession(t *testing.T) {
 		t.Errorf("dropped = %d, want the bound list's %d", dropped, own.DroppedModels)
 	}
 }
+
+// #2652: a pushed model_list's Claude entries, merged for a multi_agent conn, are
+// tagged exactly as #2651's merged reply tags the same list, then carry the Codex
+// entries the daemon holds — or nothing more when it holds none, or has no store.
+// The pushed entries themselves are left untagged: the envelope they came from is
+// shared by every conn and the replay ring.
+func TestPushedModelOptions_TagsAsTheMergedReply(t *testing.T) {
+	claude := sentinelModelList("PUSHED")
+	tests := []struct {
+		name      string
+		saved     savedModelVocabulary
+		wantCodex bool
+	}{
+		{name: "Codex entries held", saved: twoAgentVocabularyDouble{claude: claude, haveClaude: true, codex: sentinelCodexModels()}, wantCodex: true},
+		{name: "no Codex entries held", saved: twoAgentVocabularyDouble{claude: claude, haveClaude: true}},
+		{name: "no store", saved: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wire, ok := mapModelList(claude, "conv-push")
+			if !ok {
+				t.Fatal("mapModelList refused the sentinel list")
+			}
+			pushed := append([]protocol.ModelOption(nil), wire.Models...)
+
+			got := pushedModelOptions(tt.saved)(pushed)
+
+			if !reflect.DeepEqual(pushed, wire.Models) {
+				t.Errorf("pushed entries were written through: %+v", pushed)
+			}
+			assertTaggedRows(t, got[:len(claude.Models)], claude.Models, protocol.AgentClaude)
+			if tt.wantCodex {
+				assertTaggedRows(t, got[len(claude.Models):], sentinelCodexModels(), protocol.AgentCodex)
+			} else if len(got) != len(claude.Models) {
+				t.Errorf("got %d rows, want the pushed Claude entries alone: %+v", len(got), got)
+			}
+
+			if tt.saved == nil {
+				return
+			}
+			// Same rows the reply path builds from the same holdings (#2651).
+			pool, _ := newModelListTestPool(t)
+			reply, _, ok := mergedModelOptions(pool, tt.saved, "")
+			if !ok {
+				t.Fatal("mergedModelOptions refused")
+			}
+			if !reflect.DeepEqual(got, reply) {
+				t.Errorf("pushed merge = %+v, want the reply's %+v", got, reply)
+			}
+		})
+	}
+}

@@ -207,22 +207,56 @@ func resolveBoundMergedModelList(convReg *conversations.Registry, pool *sessions
 func mergedModelOptions(pool *sessions.Pool, saved savedModelVocabulary, boundSessionID string) (models []protocol.ModelOption, dropped int, ok bool) {
 	if list, ok := retainedModelVocabulary(pool, saved, boundSessionID); ok {
 		if p, ok := mapModelList(list, ""); ok {
-			for _, m := range p.Models {
-				m.Agent, m.Family = protocol.AgentClaude, m.Value
-				models = append(models, m)
-			}
+			models = claudeModelOptions(p.Models)
 			dropped = p.DroppedModels
 		}
 	}
-	if saved != nil {
-		if p, ok := mapModelList(turnevent.ModelList{Models: saved.CodexModels()}, ""); ok {
-			for _, m := range p.Models {
-				m.Agent, m.Family, m.DisplayName = protocol.AgentCodex, m.Value, m.Value
-				models = append(models, m)
-			}
-		}
-	}
+	models = append(models, codexModelOptions(saved)...)
 	return models, dropped, len(models) > 0
+}
+
+// claudeModelOptions tags Claude's wire entries for a multi_agent client: agent
+// claude, family its own Value. It returns a fresh slice and never writes through
+// models, so a caller holding a shared payload keeps it intact. One of the two
+// tagging halves mergedModelOptions and pushedModelOptions share (#2652), so a
+// reply and a push cannot tag the same entry differently.
+func claudeModelOptions(models []protocol.ModelOption) []protocol.ModelOption {
+	out := make([]protocol.ModelOption, 0, len(models))
+	for _, m := range models {
+		m.Agent, m.Family = protocol.AgentClaude, m.Value
+		out = append(out, m)
+	}
+	return out
+}
+
+// codexModelOptions is the other tagging half: the store's Codex families (#2627)
+// as wire entries, agent codex, with the family standing in for the display name
+// the store does not carry. nil for a nil store or one holding no Codex entry.
+func codexModelOptions(saved savedModelVocabulary) []protocol.ModelOption {
+	if saved == nil {
+		return nil
+	}
+	p, ok := mapModelList(turnevent.ModelList{Models: saved.CodexModels()}, "")
+	if !ok {
+		return nil
+	}
+	out := make([]protocol.ModelOption, 0, len(p.Models))
+	for _, m := range p.Models {
+		m.Agent, m.Family, m.DisplayName = protocol.AgentCodex, m.Value, m.Value
+		out = append(out, m)
+	}
+	return out
+}
+
+// pushedModelOptions builds V2SessionConfig.MergedModelOptions (#2652): the list a
+// multi_agent conn is sent in place of a pushed model_list's Claude entries —
+// those entries tagged, then the Codex entries the daemon holds, through the same
+// two halves #2651's replies use. With no Codex entry held it is the tagged Claude
+// entries alone. Like every resolver in this file it takes no logger.
+func pushedModelOptions(saved savedModelVocabulary) func(claude []protocol.ModelOption) []protocol.ModelOption {
+	return func(claude []protocol.ModelOption) []protocol.ModelOption {
+		return append(claudeModelOptions(claude), codexModelOptions(saved)...)
+	}
 }
 
 // modelListResolver picks the resolver a conn's list comes from: the merged, tagged
