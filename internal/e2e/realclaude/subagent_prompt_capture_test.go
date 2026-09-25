@@ -2,7 +2,7 @@
 
 package realclaude
 
-// Evidence capture for #2657 — one live turn that spawns one foreground
+// Evidence capture for #2658 — one live turn that spawns one foreground
 // general-purpose subagent under the daemon's OWN spawn flags, so the line claude
 // opens the subagent with can be pinned against bytes it actually sent.
 //
@@ -65,10 +65,10 @@ const (
 )
 
 const (
-	spcTicket         = "2657"
+	spcTicket         = "2658"
 	spcWorkdirName    = "spc-work"
 	spcRecordName     = "spc-record.json"
-	spcArtifactPrefix = "pyry-2657-capture-*"
+	spcArtifactPrefix = "pyry-2658-capture-*"
 	// sonnet for ptucModel's reason: a model that inlines two trivial reads
 	// produces a green run with no subagent in it.
 	spcModel = "sonnet"
@@ -206,7 +206,7 @@ func spcPrompt(nonce int64) string {
 func TestRealClaude_SubagentPromptCapture(t *testing.T) {
 	force := os.Getenv(spcEnableEnv) == "1"
 	if _, err := os.Stat(spcFixturePath); err == nil && !force {
-		t.Skipf("#2657 subagent prompt capture: the fixture %s already exists. Force a re-capture with "+
+		t.Skipf("#2658 subagent prompt capture: the fixture %s already exists. Force a re-capture with "+
 			"%s=1 go test -tags e2e_realclaude -timeout 20m -v -run '^TestRealClaude_SubagentPromptCapture$' "+
 			"./internal/e2e/realclaude/", spcFixturePath, spcEnableEnv)
 	}
@@ -217,22 +217,22 @@ func TestRealClaude_SubagentPromptCapture(t *testing.T) {
 	// Not t.TempDir(): the record must outlive the gate's worktree.
 	artifactDir, err := os.MkdirTemp("", spcArtifactPrefix)
 	if err != nil {
-		t.Fatalf("#2657: create artifact dir: %v", err)
+		t.Fatalf("#2658: create artifact dir: %v", err)
 	}
 	workdir := filepath.Join(home, spcWorkdirName)
 	if err := os.MkdirAll(workdir, 0o700); err != nil {
-		t.Fatalf("#2657: create workdir: %v", err)
+		t.Fatalf("#2658: create workdir: %v", err)
 	}
 	for name, body := range ptucFiles {
 		if err := os.WriteFile(filepath.Join(workdir, name), []byte(body), 0o600); err != nil {
-			t.Fatalf("#2657: write %s: %v", name, err)
+			t.Fatalf("#2658: write %s: %v", name, err)
 		}
 	}
 	nonce := time.Now().UnixNano()
 
 	red := newDropcapRedactor(home, artifactDir, workdir, "", spcSessionID, nonce)
 	scanner := newDropcapScanner(home, artifactDir, workdir)
-	t.Logf("#2657 capture artifacts: %s", red.str(artifactDir))
+	t.Logf("#2658 capture artifacts: %s", red.str(artifactDir))
 
 	prompt := spcPrompt(nonce)
 	rec := &spcRecord{
@@ -264,7 +264,7 @@ func TestRealClaude_SubagentPromptCapture(t *testing.T) {
 	t.Cleanup(func() {
 		spcWriteRecord(t, artifactDir, red, scanner, rec)
 		if reason, ok := rec.fixtureWorthy(); !ok {
-			t.Errorf("#2657: no usable capture — %s. The record in the artifact dir is the evidence",
+			t.Errorf("#2658: no usable capture — %s. The record in the artifact dir is the evidence",
 				red.str(reason))
 		}
 	})
@@ -295,7 +295,7 @@ func TestRealClaude_SubagentPromptCapture(t *testing.T) {
 		select {
 		case <-runDone:
 		case <-time.After(ptucRunExitWait):
-			t.Errorf("#2657: streamsup.Run did not return within %s of cancel", ptucRunExitWait)
+			t.Errorf("#2658: streamsup.Run did not return within %s of cancel", ptucRunExitWait)
 		}
 	})
 
@@ -345,7 +345,7 @@ func spcWriteRecord(t *testing.T, dir string, red *dropcapRedactor, scanner drop
 	rec.Redaction = red.substitutions()
 	blob, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
-		t.Errorf("#2657: marshal record: %v", err)
+		t.Errorf("#2658: marshal record: %v", err)
 		return
 	}
 	hits, notApplied := scanner.scan(blob)
@@ -355,7 +355,7 @@ func spcWriteRecord(t *testing.T, dir string, red *dropcapRedactor, scanner drop
 		}
 		decoded, derr := base64.StdEncoding.DecodeString(f.PayloadB64)
 		if derr != nil {
-			t.Errorf("#2657: frame %d: decode base64 payload for the scan: %v", i, derr)
+			t.Errorf("#2658: frame %d: decode base64 payload for the scan: %v", i, derr)
 			return
 		}
 		if h, _ := scanner.scan(decoded); len(h) > 0 {
@@ -363,39 +363,39 @@ func spcWriteRecord(t *testing.T, dir string, red *dropcapRedactor, scanner drop
 		}
 	}
 	if len(hits) > 0 {
-		t.Fatalf("#2657: deny-scan found %d denied class(es) in the record: %v. NOTHING was written. "+
+		t.Fatalf("#2658: deny-scan found %d denied class(es) in the record: %v. NOTHING was written. "+
 			"Extend dropcapRedactor's table and re-run; the value is deliberately not printed", len(hits), hits)
 	}
 	rec.CredentialScanSkipped = notApplied
 	blob, err = json.MarshalIndent(rec, "", "  ")
 	if err != nil {
-		t.Errorf("#2657: re-marshal record: %v", err)
+		t.Errorf("#2658: re-marshal record: %v", err)
 		return
 	}
 
 	path := filepath.Join(dir, spcRecordName)
 	if err := os.WriteFile(path, append(blob, '\n'), 0o600); err != nil {
-		t.Errorf("#2657: write record %s: %v", red.str(path), err)
+		t.Errorf("#2658: write record %s: %v", red.str(path), err)
 		return
 	}
-	t.Logf("#2657 outcome=%s terminated_on=%s turn=%.1fs captured=%d agent_calls=%d agent_id=%q "+
+	t.Logf("#2658 outcome=%s terminated_on=%s turn=%.1fs captured=%d agent_calls=%d agent_id=%q "+
 		"attributed=%d delegated_prompts=%d types=%v scan_not_applied=%v\n  record: %s",
 		rec.Outcome, rec.TerminatedOn, rec.TurnSeconds, rec.LinesCaptured, rec.AgentCallCount,
 		rec.AgentToolUseID, rec.AttributedFrames, len(rec.DelegatedPrompts), rec.LineTypeCensus,
 		notApplied, red.str(path))
 	for _, pl := range rec.DelegatedPrompts {
-		t.Logf("#2657 delegated prompt: frame %d keys %v blocks %v", pl.Index, pl.LineKeys, pl.BlockTypes)
+		t.Logf("#2658 delegated prompt: frame %d keys %v blocks %v", pl.Index, pl.LineKeys, pl.BlockTypes)
 	}
 
 	if reason, ok := rec.fixtureWorthy(); !ok {
-		t.Logf("#2657: NOT promoted to %s — %s", spcFixturePath, red.str(reason))
+		t.Logf("#2658: NOT promoted to %s — %s", spcFixturePath, red.str(reason))
 		return
 	}
 	if err := os.WriteFile(spcFixturePath, append(blob, '\n'), 0o600); err != nil {
-		t.Errorf("#2657: write fixture %s: %v", spcFixturePath, red.str(err.Error()))
+		t.Errorf("#2658: write fixture %s: %v", spcFixturePath, red.str(err.Error()))
 		return
 	}
-	t.Logf("#2657: FIXTURE WRITTEN to %s. COMMIT IT — `git add %s` — and in the SAME commit set "+
+	t.Logf("#2658: FIXTURE WRITTEN to %s. COMMIT IT — `git add %s` — and in the SAME commit set "+
 		"subagentPromptPinnedAgentID in internal/streamsup/subagent_prompt_capture_test.go to %q. "+
 		"An uncommitted capture is a capture that did not happen (#1763).",
 		spcFixturePath, spcFixturePath, rec.AgentToolUseID)

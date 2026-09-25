@@ -2112,6 +2112,23 @@ var ignoredLineTypes = map[string]bool{
 // tolerable at all here: a message sent mid-turn parks in msgqueue until the turn
 // ends (#1199), and the CLI stores its own mid-turn messages as an `attachment`
 // line rather than a `user` line.
+//
+// AMENDED 2026-09-25 (#2658): emitUser's guard gains a FOURTH trigger, and its
+// payload is not harness-authored, so it sits beside the table above rather than
+// in it. Since #2192 the daemon spawns claude with --forward-subagent-text, and
+// under it claude 2.1.280 opens each subagent with a `user` line holding the
+// DELEGATED PROMPT, the text the main model wrote into the Agent call, as one
+// `text` block. That line carries the Agent call's parent_tool_use_id and no flag:
+//
+//	KIND                                  ON STDOUT  FLAG              HANDLED BY
+//	subagent delegated prompt             yes        none              the parent-id trigger in emitUser (#2658)
+//
+// It is dropped as a DUPLICATE rather than as harness self-talk: the same text
+// already reaches clients as the Agent tool_use's `prompt` input. The key is the
+// parent id because nothing else marks the line. So the paragraph above still
+// holds for the MAIN conversation, where a user/text block with no parent id
+// surfaces unless one of the three triggers above takes it. The capture pinning
+// the line's shape is subagent_prompt_v2.1.280.json.
 const harnessNoOutputNudge = "[Your previous response had no visible output. Please continue and produce a user-visible response.]"
 
 // harnessInterruptNoticePrefix is the head of claude's interrupt notice, and the
@@ -9702,7 +9719,7 @@ func (p *Parser) emitUser(msg *streamMessage, line []byte) {
 			// harnessInterruptNoticePrefix for both, for why no trim/fold/substring,
 			// and for why the two string triggers are not a table.
 			//
-			// The fourth (#2657) is NOT harness prose: it is a subagent's delegated
+			// The fourth (#2658) is NOT harness prose: it is a subagent's delegated
 			// prompt. Under --forward-subagent-text claude 2.1.280 opens each
 			// subagent with a user line holding the prompt as one text block,
 			// stamped with the spawning Agent call's parent_tool_use_id and no flag.
@@ -9743,7 +9760,7 @@ func (p *Parser) emitUser(msg *streamMessage, line []byte) {
 			// above's first version: every block of an UNKNOWN type, flagged line or
 			// not — a new block shape is the alarm this arm exists to raise and the
 			// flag must not blanket it — plus every user/TEXT block on an UNFLAGGED
-			// MAIN-CONVERSATION line (#2657: a subagent line's text is its delegated
+			// MAIN-CONVERSATION line (#2658: a subagent line's text is its delegated
 			// prompt, taken above) that is not byte-exactly the nudge or an interrupt
 			// notice. What no longer reaches here is
 			// the whole harness-authored text class, which the guard above now takes

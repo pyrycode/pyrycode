@@ -16,7 +16,7 @@ import (
 
 // subagentPromptCapturePath is the committed real-claude capture of one turn that
 // spawned one foreground general-purpose subagent under the daemon's OWN spawn
-// flags, --forward-subagent-text included (#2657), produced by
+// flags, --forward-subagent-text included (#2658), produced by
 // internal/e2e/realclaude's TestRealClaude_SubagentPromptCapture.
 //
 // A FIFTH READER, NOT parentCapturePath's. That capture was taken without the flag
@@ -85,10 +85,10 @@ func readSubagentPromptCapture(t *testing.T) (subagentPromptCapture, bool) {
 	}
 	switch action, reason := subagentPromptReaderGate(readErr == nil, subagentPromptPinnedAgentID != ""); action {
 	case parentGateSkip:
-		t.Skipf("#2657: %s", reason)
+		t.Skipf("#2658: %s", reason)
 		return subagentPromptCapture{}, false
 	case parentGateFatal:
-		t.Fatalf("#2657: %s", reason)
+		t.Fatalf("#2658: %s", reason)
 		return subagentPromptCapture{}, false
 	}
 
@@ -255,7 +255,7 @@ func TestSubagentPromptReaderGateHasExactlyOneLegalSkip(t *testing.T) {
 // delegatedPromptProbe stands in for a delegated prompt: distinctive, so the
 // content-free sweep cannot match it by accident, and not any harness string, so
 // a row that drops it can only have dropped it via the parent id.
-const delegatedPromptProbe = "pyry-2657 delegated prompt probe: read alpha.txt then beta.txt"
+const delegatedPromptProbe = "pyry-2658 delegated prompt probe: read alpha.txt then beta.txt"
 
 // subagentUserLine builds a user line with parent as a raw JSON fragment ("" omits
 // the key), so a row can supply a string, null, a non-string, or nothing.
@@ -301,9 +301,9 @@ func TestParser_SubagentDelegatedPromptIsDropped(t *testing.T) {
 				Raw:  `{"type":"image","text":"ignored"}`,
 			}}},
 		{"subagent line's tool_result still maps with its parent",
-			subagentUserLine(`"toolu_agent"`, textBlock(delegatedPromptProbe)+","+toolResultBlock("tu-2657")),
+			subagentUserLine(`"toolu_agent"`, textBlock(delegatedPromptProbe)+","+toolResultBlock("tu-2658")),
 			[]turnevent.Event{turnevent.ToolUpdate{
-				ToolCallID:       "tu-2657",
+				ToolCallID:       "tu-2658",
 				ParentToolCallID: "toolu_agent",
 				Status:           turnevent.ToolStatusCompleted,
 				Content:          turnevent.TextContent{Text: "x"},

@@ -106,6 +106,7 @@ The ticket has no Documentation handoff section. Pending for the documentation s
 
 #2657 was closed as a duplicate of #2658 at 13:45Z. Its builder had already written this plan and PR #2659, which targets the closed ticket. This branch takes #2659's three commits and makes these changes on top. The design is otherwise unchanged.
 
-- **Ticket references now point at #2658.** Code comments, `t.Skipf`/`t.Fatalf` prefixes, the rig's `spcTicket`, its artifact-dir prefix (`pyry-2658-capture-*`) and the reader's probe constant now name #2658. The closed duplicate stays mentioned once, where the guard comment records the trigger's origin.
+- **Ticket references now point at #2658.** Code comments, `t.Skipf`/`t.Fatalf` prefixes, the rig's `spcTicket`, its artifact-dir prefix (`pyry-2658-capture-*`) and the reader's probe constant now name #2658. The earlier commits' messages still say #2657. That is history, and it is left alone.
 - **Census row.** #2658's technical notes ask for the harness-text census in `harnessNoOutputNudge`'s docblock to gain the new trigger. #2659 only extended the guard comment in `emitUser`. This branch adds a dated amendment entry and a delegated-prompt row to that census. The row says the line is **not** harness-authored: it is the subagent's input, dropped as a duplicate of the Agent call's `prompt` input and keyed on `parent_tool_use_id`.
 - **Security review.** #2658 does not carry the `security-sensitive` label, although #2657 did. The review above stays in the plan because it still applies to the same guard.
+- **In-flight overlap.** `feature/2657` (PR #2659) touches the same files because it is the source of these commits. Once this lands, #2659 is superseded and should be closed without merging.
