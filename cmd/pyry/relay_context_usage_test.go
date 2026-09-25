@@ -881,7 +881,7 @@ func TestContextUsageResolver_BothRefusalsSurvive(t *testing.T) {
 func TestContextUsageResolver_MemoryNeverShadowsLive(t *testing.T) {
 	t.Parallel()
 	q := newFakeContextUsageQuerier(false)
-	r, _, clock, _ := ctxUsageFallbackFor(t, q, true)
+	r, path, clock, _ := ctxUsageFallbackFor(t, q, true)
 
 	got, ok := r.Get(context.Background(), string(ctxUsageRecordedConv))
 	if !ok {
@@ -908,6 +908,22 @@ func TestContextUsageResolver_MemoryNeverShadowsLive(t *testing.T) {
 	if calls := q.calls.Load(); calls != 2 {
 		t.Errorf("querier called %d times, want 2 — the ask past the window must reach the child", calls)
 	}
+
+	// The live flight records its reading inside the settle defer, after close(done),
+	// so the save into the temp dir can outlive the Get above. Returning before it
+	// lands fails TempDir cleanup with "directory not empty". Poll the file, not the
+	// in-memory row: record sets the row before it saves.
+	for range 200 {
+		back, err := conversations.Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if row, ok := back.Get(ctxUsageRecordedConv); ok && row.LastContextUsage != nil && row.LastContextUsage.Model == "MODEL_2431" {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("the live reading never reached the registry file")
 }
 
 // TestContextUsageResolver_MemoryDoesNotAgeItself is AC-4's second half, and the
