@@ -210,6 +210,20 @@ Each handler re-checks `s.closed` under `s.mu` AFTER `websocket.Accept`
 so a handler racing `Close` aborts cleanly instead of installing a
 doomed conn.
 
+**`Close` has no unbounded path, but its fast path is scheduler-dependent
+(#2617).** Step 2's `cancel()` per conn relies on that conn's recv pump
+being scheduled to observe `ctx.Done()`/the read failing and return, which
+normally happens in microseconds; each `conn.Close` itself is capped by
+`coder/websocket`'s 5s close-handshake wait regardless. Under a full
+`go test -tags e2e -race ./internal/e2e/...` run, scheduler contention
+pushed that normally-microsecond fast path past 1s, flaking
+`TestServerClose_NoGoroutineLeaks`'s `time.After` wait. The fix was a
+10s wait in the test, not a harness change — 10s sits under the worst
+case of one real handshake timeout (~10s) while leaving headroom for
+scheduler delay. A caller needing a firm upper bound on `Close` should
+budget for the 5s-per-conn handshake wait, not the microsecond common
+case.
+
 ## What's NOT modeled (deliberate)
 
 - **TLS termination.** Harness binds plain `ws://`.
