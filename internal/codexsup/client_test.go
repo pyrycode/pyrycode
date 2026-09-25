@@ -404,6 +404,52 @@ func TestRequestParamShapes(t *testing.T) {
 	}
 }
 
+// TestTurnPostureShapes: the granular policy is the object form, any other
+// policy its string, and the sandbox a tagged object.
+func TestTurnPostureShapes(t *testing.T) {
+	tests := []struct {
+		in   TurnInput
+		want string
+	}{
+		{
+			TurnInput{Text: "a", ApprovalPolicy: ApprovalGranular, Sandbox: SandboxReadOnly, ApprovalsReviewer: ReviewerUser},
+			`{"threadId":"th-1","input":[{"type":"text","text":"a"}],` +
+				`"approvalPolicy":{"granular":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}},` +
+				`"sandboxPolicy":{"type":"readOnly"},"approvalsReviewer":"user"}`,
+		},
+		{
+			TurnInput{Text: "b", ApprovalPolicy: ApprovalNever, Sandbox: SandboxDangerFullAccess, ApprovalsReviewer: ReviewerUser},
+			`{"threadId":"th-1","input":[{"type":"text","text":"b"}],` +
+				`"approvalPolicy":"never","sandboxPolicy":{"type":"dangerFullAccess"},"approvalsReviewer":"user"}`,
+		},
+		{
+			TurnInput{Text: "c", ApprovalPolicy: ApprovalOnRequest, Sandbox: SandboxWorkspaceWrite, ApprovalsReviewer: ReviewerAutoReview},
+			`{"threadId":"th-1","input":[{"type":"text","text":"c"}],` +
+				`"approvalPolicy":"on-request","sandboxPolicy":{"type":"workspaceWrite"},"approvalsReviewer":"auto_review"}`,
+		},
+	}
+	c, p := startPeer(t, "codex/0.156.1", Config{})
+	go func() {
+		f := p.next(methodThreadResume)
+		p.send(fmt.Sprintf(`{"id":%s,"result":{"thread":{"id":"th-1"}}}`, f["id"]))
+		for _, tc := range tests {
+			f = p.next(methodTurnStart)
+			p.send(fmt.Sprintf(`{"id":%s,"result":{"turn":{"id":"tu-1"}}}`, f["id"]))
+			if got := string(f["params"]); got != tc.want {
+				t.Errorf("turn/start params = %s, want %s", got, tc.want)
+			}
+		}
+	}()
+	if err := c.ResumeThread(ctx5(t), "th-1"); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range tests {
+		if _, err := c.StartTurn(ctx5(t), tc.in); err != nil {
+			t.Fatalf("StartTurn(%q) = %v", tc.in.Text, err)
+		}
+	}
+}
+
 func TestDefaultDeclines(t *testing.T) {
 	_, p := startPeer(t, "codex/0.156.1", Config{})
 	want := map[string]string{

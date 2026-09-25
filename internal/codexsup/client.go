@@ -69,12 +69,71 @@ type Config struct {
 	Log *slog.Logger
 }
 
-// TurnInput is one turn's text input and its per-turn overrides. Empty Model
-// or Effort leaves the thread's setting unchanged.
+// TurnInput.ApprovalPolicy values. Granular is sent as the object that turns
+// every sandbox block, rule prompt and MCP elicitation into an approval
+// request; the others as their string.
+const (
+	ApprovalGranular  = "granular"
+	ApprovalOnRequest = "on-request"
+	ApprovalNever     = "never"
+)
+
+// TurnInput.Sandbox values: the type tag of turn/start's sandboxPolicy.
+const (
+	SandboxReadOnly         = "readOnly"
+	SandboxWorkspaceWrite   = "workspaceWrite"
+	SandboxDangerFullAccess = "dangerFullAccess"
+)
+
+// TurnInput.ApprovalsReviewer values.
+const (
+	ReviewerUser       = "user"
+	ReviewerAutoReview = "auto_review"
+)
+
+// TurnInput is one turn's text input and its per-turn overrides. Codex keeps
+// each override for the thread's later turns, so an empty field leaves the
+// thread's setting unchanged rather than resetting it.
 type TurnInput struct {
-	Text   string
-	Model  string
-	Effort string
+	Text              string
+	Model             string
+	Effort            string
+	ApprovalPolicy    string
+	Sandbox           string
+	ApprovalsReviewer string
+}
+
+// granularApproval is ApprovalGranular's wire form.
+type granularApproval struct {
+	Granular struct {
+		SandboxApproval bool `json:"sandbox_approval"`
+		Rules           bool `json:"rules"`
+		MCPElicitations bool `json:"mcp_elicitations"`
+	} `json:"granular"`
+}
+
+// approvalPolicyParam encodes policy for turn/start; nil omits it.
+func approvalPolicyParam(policy string) any {
+	switch policy {
+	case "":
+		return nil
+	case ApprovalGranular:
+		var g granularApproval
+		g.Granular.SandboxApproval, g.Granular.Rules, g.Granular.MCPElicitations = true, true, true
+		return g
+	default:
+		return policy
+	}
+}
+
+// sandboxPolicyParam encodes sandbox for turn/start; nil omits it.
+func sandboxPolicyParam(sandbox string) any {
+	if sandbox == "" {
+		return nil
+	}
+	return struct {
+		Type string `json:"type"`
+	}{sandbox}
 }
 
 // Client is a connection to one running app-server process.
@@ -386,11 +445,17 @@ func (c *Client) StartTurn(ctx context.Context, in TurnInput) (string, error) {
 		Text string `json:"text"`
 	}
 	params := struct {
-		ThreadID string      `json:"threadId"`
-		Input    []textInput `json:"input"`
-		Model    string      `json:"model,omitempty"`
-		Effort   string      `json:"effort,omitempty"`
-	}{threadID, []textInput{{"text", in.Text}}, in.Model, in.Effort}
+		ThreadID          string      `json:"threadId"`
+		Input             []textInput `json:"input"`
+		Model             string      `json:"model,omitempty"`
+		Effort            string      `json:"effort,omitempty"`
+		ApprovalPolicy    any         `json:"approvalPolicy,omitempty"`
+		SandboxPolicy     any         `json:"sandboxPolicy,omitempty"`
+		ApprovalsReviewer string      `json:"approvalsReviewer,omitempty"`
+	}{
+		threadID, []textInput{{"text", in.Text}}, in.Model, in.Effort,
+		approvalPolicyParam(in.ApprovalPolicy), sandboxPolicyParam(in.Sandbox), in.ApprovalsReviewer,
+	}
 	var res struct {
 		Turn struct {
 			ID string `json:"id"`

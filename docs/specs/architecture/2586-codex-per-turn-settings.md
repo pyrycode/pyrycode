@@ -128,3 +128,7 @@ No new goroutines. `mode`, `model`, `effort` are read as one snapshot under `r.m
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-25
+
+## Revisions
+
+- 2026-09-25 (Phase B): the runner helper the Design calls `settings()` is named `turnSettings()` (it returns the settings every turn asserts; `settings` read as a field). The codexsup posture test is the sibling `TestTurnPostureShapes`, not an extension of `TestRequestParamShapes`, whose exact literal stays as the "empty fields omitted" pin. No contract changed.

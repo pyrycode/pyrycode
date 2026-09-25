@@ -27,6 +27,9 @@
 //	FAKECODEX_VERSION     the version reported in initialize's userAgent
 //	                      and each thread's cliVersion. Default 0.156.1.
 //	FAKECODEX_SIGNED_OUT  non-empty: account/read reports no sign-in.
+//	FAKECODEX_TURN_LOG    a file path: each turn/start's params are
+//	                      appended to it as one line, before the response,
+//	                      so a test can read the overrides a turn carried.
 //
 // Per-turn behaviour is selected by a marker anywhere in the text of a
 // turn's input, so one process serves every kind of turn:
@@ -50,6 +53,7 @@ import (
 	"bufio"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -131,6 +135,7 @@ type server struct {
 	codexHome   string
 	version     string
 	signedOut   bool
+	turnLog     string
 	initialized bool // main goroutine only
 
 	writeMu sync.Mutex
@@ -154,15 +159,16 @@ func main() {
 	if version == "" {
 		version = codexVersion
 	}
-	os.Exit(run(os.Stdin, os.Stdout, home, version, os.Getenv("FAKECODEX_SIGNED_OUT") != ""))
+	os.Exit(run(os.Stdin, os.Stdout, home, version, os.Getenv("FAKECODEX_SIGNED_OUT") != "", os.Getenv("FAKECODEX_TURN_LOG")))
 }
 
 // run serves frames from in until EOF, returning the process exit code.
-func run(in io.Reader, out io.Writer, codexHome, version string, signedOut bool) int {
+func run(in io.Reader, out io.Writer, codexHome, version string, signedOut bool, turnLog string) int {
 	s := &server{
 		codexHome: codexHome,
 		version:   version,
 		signedOut: signedOut,
+		turnLog:   turnLog,
 		out:       out,
 		turns:     map[string]chan struct{}{},
 		pending:   map[string]chan json.RawMessage{},
@@ -350,6 +356,9 @@ func (s *server) turnStart(raw json.RawMessage) (any, func(), *rpcError) {
 	if err := decodeParams(raw, &p); err != nil {
 		return nil, nil, err
 	}
+	if err := s.logTurn(raw); err != nil {
+		return nil, nil, &rpcError{-32603, "turn log: " + err.Error()}
+	}
 	var text strings.Builder
 	for _, in := range p.Input {
 		if in.Type == "text" {
@@ -364,6 +373,19 @@ func (s *server) turnStart(raw json.RawMessage) (any, func(), *rpcError) {
 	t := &turn{s: s, threadID: p.ThreadID, id: turnID, interrupt: interrupt}
 	return map[string]any{"turn": turnObject(turnID, "inProgress")},
 		func() { go t.run(text.String()) }, nil
+}
+
+// logTurn appends raw to the turn log, when one is configured.
+func (s *server) logTurn(raw json.RawMessage) error {
+	if s.turnLog == "" {
+		return nil
+	}
+	f, err := os.OpenFile(s.turnLog, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(append(append([]byte{}, raw...), '\n'))
+	return errors.Join(err, f.Close())
 }
 
 func (s *server) turnInterrupt(raw json.RawMessage) (any, func(), *rpcError) {

@@ -165,6 +165,38 @@ func TestPool_DeliverSettingsInBand_EnableWritesTheEscalation(t *testing.T) {
 	}
 }
 
+// effortSetterRunner is a double for a runner that takes effort as a per-turn
+// setting (Codex) rather than as a command turn.
+type effortSetterRunner struct {
+	*lifecycleRunner
+	efforts []string
+}
+
+func (r *effortSetterRunner) SetEffort(effort string) error {
+	r.efforts = append(r.efforts, effort)
+	return nil
+}
+
+// TestPool_DeliverSettingsInBand_EffortSetterSkipsTheTurn (#2586): a runner
+// that implements SetEffort receives the effort there and no /effort user
+// turn, which on Codex would start a model turn. A runner without the method
+// keeps the /effort turn — TestPool_UpdateSettings_InBand_ModelAndEffort.
+func TestPool_DeliverSettingsInBand_EffortSetterSkipsTheTurn(t *testing.T) {
+	t.Parallel()
+	pool := helperRestartPool(t, filepath.Join(t.TempDir(), "sessions.json"), t.TempDir(), SessionSettings{})
+	id := pool.Default().ID()
+	runner := &effortSetterRunner{lifecycleRunner: runnerDouble(t, pool, id)}
+
+	pool.deliverSettingsInBand(id, runner, SettingsUpdate{Effort: ptr("high")}, SessionSettings{Effort: "high"})
+
+	if got, want := runner.efforts, []string{"high"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("SetEffort calls = %q, want %q", got, want)
+	}
+	if got := runner.userTurns(); len(got) != 0 {
+		t.Errorf("effort reached an effort-setting runner as user turns %q, want none", got)
+	}
+}
+
 // TestPool_UpdateSettings_InBand_Escalation_NoRespawn is #2066 AC 1: enabling
 // bypass on a running session no longer respawns it, proven by a spawn count that
 // does not move, for BOTH spellings the daemon accepts.

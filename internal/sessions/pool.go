@@ -1216,9 +1216,20 @@ func inBandDeliverable(update SettingsUpdate) bool {
 	return true
 }
 
+// effortSetter is a runner that takes effort as a setting of its next turn
+// rather than as a command turn (#2586): the Codex runner, where the text
+// "/effort <level>" would start a model turn. deliverSettingsInBand hands such
+// a runner the effort instead of sending the command. Claude's runner does not
+// implement it, so the /effort turn stays the default: a runner that lacks the
+// method gets the visible command, never a silently skipped change.
+type effortSetter interface {
+	SetEffort(effort string) error
+}
+
 // deliverSettingsInBand writes the settings changes implied by update onto id's
 // live child stdin as the non-restarting live-apply (#1581): model as a set_model
-// control request, effort as an ordinary /effort user turn, and the resulting permission POSTURE
+// control request, effort as an ordinary /effort user turn (SetEffort on an
+// effortSetter instead), and the resulting permission POSTURE
 // as a set_permission_mode control request via SetPermissionMode (#1604 built the
 // revoke-only form; #2043 generalised it). Caller must have released p.mu and must
 // have installed the recomposed argv already, so a failed delivery still reaches
@@ -1330,7 +1341,13 @@ func (p *Pool) deliverSettingsInBand(id SessionID, sup Runner, update SettingsUp
 		}
 	}
 	if update.Effort != nil {
-		send("effort", "/effort "+*update.Effort)
+		if es, ok := sup.(effortSetter); ok {
+			if err := es.SetEffort(*update.Effort); err != nil {
+				notDelivered("effort", err)
+			}
+		} else {
+			send("effort", "/effort "+*update.Effort)
+		}
 	}
 	if update.PermissionMode == nil && update.YOLO == nil {
 		return
