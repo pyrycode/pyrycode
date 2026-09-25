@@ -704,7 +704,8 @@ type V2SessionConfig struct {
 	// (#2652): those entries tagged as Claude's, then the Codex entries the daemon
 	// holds, tagged as #2651's replies tag them. forwardEnvelope consults it,
 	// through mergedForConn, per pushed model_list to such a conn — live or
-	// replayed — on the Run goroutine. It must return a slice it owns and never
+	// replayed, the frames carrying an EventID — on the Run goroutine; #2651's
+	// reply and connect-time reconcile, already merged, never reach it. It must return a slice it owns and never
 	// write through its argument. Optional: when nil every pushed model_list is
 	// delivered unchanged to every conn, as before #2652.
 	MergedModelOptions func(claude []protocol.ModelOption) []protocol.ModelOption

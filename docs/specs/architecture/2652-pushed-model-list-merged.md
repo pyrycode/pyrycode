@@ -74,3 +74,36 @@ Pending for the documentation stage: `docs/protocol-mobile.md` § model_list —
 ## Open questions
 
 - None blocking. Whether a Codex child can ever push `model_list` (it cannot today; only a Claude `initialize` reply maps to one) — if one did, its entries would be tagged Claude. Out of scope.
+
+## Revisions
+
+### 2026-09-25 — gate on `EventID`, not `InReplyTo` (verifier rework, PR #2655)
+
+Finding: `InReplyTo == nil` does not mean "pushed frame". `reconcileModelLists` sends #2651's connect-time snapshot with `InReplyTo` nil too, and it reaches `forwardEnvelope` through `drainOnce` already merged. `mergedForConn` then passed the merged rows through the seam again: Codex rows re-tagged `agent: claude` and the Codex rows appended a second time, on every capable connect.
+
+New contract: `mergedForConn` rewrites only a `model_list` whose `EventID` is set. Every live push (`interactiveTurnEmitterV2`'s per-conn envelope) and every ring replay (`drainReplayOnce`) carries one; the `request_model_list` reply and the reconcile snapshot leave it nil, so both #2651 paths pass through untouched. The seam doc on `V2SessionConfig.MergedModelOptions` says so.
+
+Tests: `TestV2Session_ModelListReconcile_PassesTheConnsMultiAgentDecision` now wires `MergedModelOptions` beside `RetainedModelLists`, as production does, and requires the merged snapshot unchanged (red before the gate change). The push test's live envelope carries an `EventID` as the emitter's does; its reply case (no `EventID`, `InReplyTo` set) still pins replies unchanged.
+
+Also added the `## Security review` below, missing from the first commit although the ticket carried `security-sensitive`.
+
+## Security review
+
+**Verdict:** PASS
+
+**Findings:**
+
+- [Trust boundaries] No findings. The rewritten payload is the pushed `model_list`, which is claude-authored and was already bounded and truncated by `turnbridge.MapEvent` before encoding; `mergedForConn` decodes it into the fixed `protocol.ModelListPayload` struct and only replaces `Models`. The appended Codex entries come from the daemon's own vocabulary store (`CodexModels`), not from the peer. Nothing inbound from a client reaches this path: the only client-controlled input is the `multi_agent` capability bit, which selects which of two daemon-built views that client receives — it cannot inject entries.
+- [Trust boundaries / correctness] Fixed in Revisions: a frame that is already merged (the #2651 reconcile snapshot) must not be merged again, or a Codex model is filed under Claude and a pick routes it to a Claude child. Gating on `EventID` in `mergedForConn` excludes both #2651 paths; the reconcile test with both seams wired pins it.
+- [Cross-client disclosure] No findings. The merge is per conn at seal time and never writes to the shared envelope or the replay ring (`env` is by value; `Payload` is reassigned to fresh bytes). An old conn replayed after a capable one receives the stored bytes, pinned by `TestV2Session_ReplayedModelList_MergedForMultiAgentConn`. #2644's `withheldFromConn` and the replay dedup run before the rewrite, so a withheld or already-delivered frame is never merged and sent.
+- [Tokens, secrets] No findings — no tokens or credentials touched. The Codex vocabulary is model names only.
+- [File operations] No findings — no file I/O added; `CodexModels` reads in-memory state.
+- [Subprocess] No findings — no process spawned.
+- [Crypto] No findings — the rewritten envelope is sealed by the conn's existing Noise `send` cipher exactly as before.
+- [Network & I/O] No findings. The capable conn's frame grows by at most the Codex vocabulary the store holds, which is bounded at save time (`mapModelList`'s caps apply in `codexModelOptions`); the per-frame size budget is unchanged in kind. A decode or marshal failure delivers the frame unchanged rather than dropping or erroring the conn.
+- [Logs] No findings — `mergedForConn` and `pushedModelOptions` log nothing, so no model payload reaches a log (#833).
+- [Concurrency] No findings — runs on the Run goroutine only; `CodexModels` takes the store's leaf mutex once per capable-conn push, never nested with another lock; no new goroutines.
+- [Threat model] OUT OF SCOPE — whether a Codex child can push `model_list` (it cannot today) is noted under Open questions; if one ever did, its rows would be tagged Claude. Picks up with whichever ticket adds a Codex model push.
+
+**Reviewer:** builder (self-review per the security-review checklist)
+**Date:** 2026-09-25

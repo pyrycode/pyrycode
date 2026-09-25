@@ -354,9 +354,11 @@ func TestV2Session_PushedModelList_MergedForMultiAgentConn(t *testing.T) {
 
 			pushed := gatePushedModelList(t)
 			ts := time.Now().UTC()
-			reply := uint64(3)
+			reply, eventID := uint64(3), uint64(7)
 			envs := []protocol.Envelope{
-				{ID: 1, Type: protocol.TypeModelList, TS: ts, Payload: pushed},
+				// EventID set as the turn lane sets it on every live push; the
+				// reply, like #2651's, carries none.
+				{ID: 1, Type: protocol.TypeModelList, TS: ts, Payload: pushed, EventID: &eventID},
 				{ID: 2, Type: protocol.TypeModelList, TS: ts, Payload: pushed, InReplyTo: &reply},
 				{ID: 3, Type: protocol.TypeWorkspaceUpdated, TS: ts, Payload: json.RawMessage(`{"path":"/w","label":"w"}`)},
 			}

@@ -1957,9 +1957,15 @@ func (m *V2SessionManager) forwardEnvelope(_ context.Context, connID string, env
 // mergedForConn returns env as s is to be sent it: for a conn that negotiated
 // protocol.CapabilityMultiAgent, a pushed model_list whose Claude entries are
 // replaced by MergedModelOptions' merged, tagged list (#2652); every other frame,
-// and every frame to any other conn, unchanged. Replies are left alone because
-// #2651 already merged them. conversation_id and dropped_models are the pushed
-// frame's.
+// and every frame to any other conn, unchanged. conversation_id and
+// dropped_models are the pushed frame's.
+//
+// A pushed model_list is told apart by its EventID: the turn lane stamps one on
+// every live push and drainReplayOnce on every replay. #2651's two paths leave it
+// nil — the request_model_list reply and reconcileModelLists' connect-time
+// snapshot — and both already carry the merged list, so merging them here would
+// re-tag Codex's entries as Claude's and append them twice. InReplyTo alone does
+// not separate them: the reconcile snapshot has none either.
 //
 // The pushed envelope is shared by every conn and the replay ring, so this builds
 // the capable conn's copy per call and never writes through env.Payload: env is a
@@ -1968,7 +1974,7 @@ func (m *V2SessionManager) forwardEnvelope(_ context.Context, connID string, env
 // unchanged. Nothing is logged: the payload is claude-authored (#833).
 // Run-goroutine only, like its caller: s.multiAgent is Run-owned.
 func (m *V2SessionManager) mergedForConn(s *V2Session, env protocol.Envelope) protocol.Envelope {
-	if !s.multiAgent || m.cfg.MergedModelOptions == nil || env.Type != protocol.TypeModelList || env.InReplyTo != nil {
+	if !s.multiAgent || m.cfg.MergedModelOptions == nil || env.Type != protocol.TypeModelList || env.EventID == nil {
 		return env
 	}
 	var p protocol.ModelListPayload
