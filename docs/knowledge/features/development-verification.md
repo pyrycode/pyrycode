@@ -89,6 +89,13 @@ which is exactly the shape indistinguishable from inference; #2370's first fixtu
 picked `dropped_categories: 2` beside two retained rows and had to be corrected once
 a stronger assertion caught it.
 
+A test whose premise is "past a named cap" must build its fixture by computing from
+that constant, not by restating a literal believed to be past it. A hardcoded number
+keeps passing for the wrong reason after the cap changes, or silently stops testing
+the boundary at all — [`maxModelVocabularyFile`'s oversized-file
+test](streamsup-package-retaining-the-decoded-model-list-for-the-session.md#holding-codexs-model-families-beside-claudes-2627)
+derives its fixture from the constant for exactly this reason.
+
 ## Protocol boundaries
 
 Round-trip tests must marshal the decoded payload back into the envelope. Comparing
