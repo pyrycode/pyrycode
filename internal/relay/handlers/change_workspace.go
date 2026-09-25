@@ -181,6 +181,7 @@ func ChangeWorkspace(reg ConversationWorkspaceUpdater, resolve WorkspaceResolver
 				ID:         string(cv.ID),
 				IsPromoted: cv.IsPromoted,
 				IsArchived: cv.IsArchived,
+				IsMuted:    cv.IsMuted,
 				Name:       cv.Name,
 				Cwd:        resolved,
 				LastUsedAt: cv.LastUsedAt,

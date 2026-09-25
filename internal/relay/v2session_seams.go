@@ -599,6 +599,19 @@ type V2SessionConfig struct {
 	// and security posture as RekeyInterval.
 	RekeyReplyTimeout time.Duration
 
+	// MinClientVersions holds the minimum app version, as MAJOR.MINOR.PATCH,
+	// keyed by the app name a hello's client_version carries (#2578). Once any
+	// entry is non-empty, a hello whose token is accepted but whose
+	// client_version is unparsable, or below its app's minimum, is refused with
+	// client.update_required and close 4412. Optional: nil or an empty value ⇒
+	// no minimum for that app, and with none set no hello is refused for its
+	// version. NewV2SessionManager errors on a value that does not parse.
+	//
+	// Production (cmd/pyry) passes ShippedMinClientVersions(), the build
+	// constants; tests pass their own map so the shipped constants never change
+	// for a test. Never sourced from the wire or operator input.
+	MinClientVersions map[string]string
+
 	// RekeyRetryInterval overrides the short re-arm cadence used when a
 	// scheduled re-key wake fires while the relay leg is down and the emit is
 	// deferred (#912). Optional: zero ⇒ the rekeyRetryInterval package default
@@ -1130,6 +1143,26 @@ type V2SessionConfig struct {
 	// so it must never be logged, and no reply derived from it ever reaches the wire.
 	AttachmentResolve func(conversationID, attachmentID string) (path string, ok bool)
 
+	// WorkspaceFileRead reads one markdown file LIVE from the recorded workspace
+	// of a conversation (#2598) — the path a client names, not a stored copy.
+	// handleReadWorkspaceFile is its sole reader. Optional: nil makes the
+	// read_workspace_file frame consumed and inert, as a nil AttachmentResolve
+	// does for request_attachment.
+	//
+	// COMMA-OK FOR AttachmentResolve's REASON. Every refusal — wrong extension,
+	// no recorded workspace, missing file, out-of-tree path, non-regular file,
+	// over the size bound — collapses into false inside cmd/pyry's
+	// workspaceFileReader, so the handler cannot branch on what the one
+	// attachment.not_found answer must not distinguish, and never holds a
+	// filesystem error that prints a host path.
+	//
+	// IT DISCHARGES NO REGISTRY CHECK. The handler consults KnownConversation
+	// before the conversation id reaches this seam. Confinement to the
+	// workspace, the markdown-only rule and the checked read are the
+	// implementation's, and the only sanctioned one is workspaceFileReader,
+	// which reuses the attach_file verb's confineFile and readChecked.
+	WorkspaceFileRead func(conversationID, path string) (WorkspaceFile, bool)
+
 	// Interrupter stops the running turn in the conversation an inbound
 	// interactive `interrupt` control frame names (#707, #2103) — or, when the
 	// frame names none, in the one the daemon's cursor points at. Optional: nil ⇒
@@ -1606,8 +1639,9 @@ const (
 //   - THE MINTED DEVICE IS ALWAYS UNPRIVILEGED. MintPairingPayload has no field for
 //     devices.Device.AllowRemotePermissions by declaration, and an implementation
 //     MUST pass false as a literal rather than threading a value from anywhere. A
-//     stolen privileged pairing can mint devices that watch and send; it must never
-//     be able to mint one that approves.
+//     stolen privileged pairing can mint devices that watch, send and answer
+//     prompts (every device may, since #2605); it must never be able to mint one
+//     that can itself mint or actuate MCP servers.
 //   - requester IS THE AUTHENTICATED DEVICE AND THE ONLY IDENTITY THERE IS. It is
 //     the per-conn s.device, bound at handshake after the presented token validated,
 //     and no field of the request names a device. A nil requester is a conn with no
@@ -1682,3 +1716,16 @@ const (
 	// cause can clear without the client changing its request.
 	PairingMintFailed
 )
+
+// WorkspaceFile is one live read answered by the WorkspaceFileRead seam (#2598).
+//
+// AttachmentID is daemon-minted per transfer — a lowercase UUIDv4 that keys this
+// one chunk stream and addresses nothing afterwards: nothing is stored under it.
+// Filename is the base name of the RESOLVED file, which after symlink
+// resolution may differ from the leaf the client named. Neither Filename nor
+// Data may be logged.
+type WorkspaceFile struct {
+	AttachmentID string
+	Filename     string
+	Data         []byte
+}

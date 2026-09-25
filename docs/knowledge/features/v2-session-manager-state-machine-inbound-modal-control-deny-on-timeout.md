@@ -49,10 +49,12 @@ the caller, so no decode error or attacker-controlled byte is ever echoed back.
   `modal_answer.unrouted`, carrying `modal_id` only — no body, prompt, title or
   option text) instead of routing a keystroke; consume, audit and the returned
   dismissal are unchanged — on `ResolveAnswer`'s unrouted arm the audit record
-  still carries the outcome `devices.AuthorizeRemotePermission` computed (e.g.
+  still carries the outcome `devices.AuthorizePromptAnswer` computed (e.g.
   `allowed`) even though nothing actuated it, exactly as it did under
   `noopKeystroker`; the audit log reflects the authorization decision, not
-  whether anything downstream consumed it. Production cannot reach this branch
+  whether anything downstream consumed it. Since #2605 that decision is the
+  answering gate — any authenticated device, not the privileged
+  `AllowRemotePermissions` bit. Production cannot reach this branch
   — `streamApprovalBridge.Surface` is the registry's only producer and always
   correlates — so the Warn is observability for a branch, not a new failure
   mode. A stream-json approval has no PTY modal to dismiss; on timeout it
@@ -197,7 +199,9 @@ actuates.
 - **`modalResolverV2.streamApprovals streamApprovalResolver`** — an optional
   nil-default field (the #1014 pattern; 18 test call sites stay untouched). At
   the actuate step, `ResolveAnswer` computes `allow :=
-  devices.AuthorizeRemotePermission(dev, outcome)` **once** and dispatches:
+  devices.AuthorizePromptAnswer(dev, outcome)` **once** (since #2605 — any
+  authenticated device, not the privileged `AllowRemotePermissions` bit) and
+  dispatches:
   `r.streamApprovals != nil && r.streamApprovals.ResolveStream(modalID, allow,
   reasonRemoteDeny)`; only when that returns `false` (nil bridge, or `modalID`
   absent from `byModal` — not a stream approval) does the unrouted-warn fallback

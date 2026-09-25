@@ -264,6 +264,32 @@ func TestConversationDeletedPayload_RoundTrip(t *testing.T) {
 	}
 }
 
+// #2571: is_muted is always serialized on both the list row and the update
+// record, false included. A client folds an update record into its list in
+// place, so an omitted key would read as "not muted" on a muted channel's next
+// rename. The fixture round-trips cannot pin this: Envelope.Payload is raw
+// bytes, so marshalling the envelope never touches these structs.
+func TestIsMuted_AlwaysSerialized(t *testing.T) {
+	cases := []struct {
+		name string
+		v    any
+	}{
+		{"ConversationSummary", ConversationSummary{}},
+		{"ConversationUpdatedPayload", ConversationUpdatedPayload{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := json.Marshal(tc.v)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if !bytes.Contains(out, []byte(`"is_muted":false`)) {
+				t.Errorf("zero value omitted is_muted:\n%s", out)
+			}
+		})
+	}
+}
+
 func TestConversationUpdatedPayload_RoundTrip(t *testing.T) {
 	raw := readFixture(t, "conversation_updated.json")
 

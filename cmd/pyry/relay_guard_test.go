@@ -126,6 +126,7 @@ var inboundTypes = map[string]string{
 	"TypeDeleteConversation":    "map-dispatched",
 	"TypeArchiveConversation":   "map-dispatched",
 	"TypeUnarchiveConversation": "map-dispatched",
+	"TypeSetConversationMuted":  "map-dispatched",
 	"TypeChangeWorkspace":       "map-dispatched",
 	"TypeSetSystemPrompt":       "map-dispatched",
 	"TypeCreateWorkspaceFolder": "map-dispatched",
@@ -162,6 +163,10 @@ var inboundTypes = map[string]string{
 	// guard reads case SELECTORS rather than case bodies. Unlike that one it is
 	// inbound and nothing else — the chunk type also rides the outbound leg.
 	"TypeRequestAttachment": "switch-intercepted",
+	// The live workspace read verb (#2598). Declared and wired in one slice, so it
+	// never sat in excludedTypes; filed here for the reason the retrieval verb
+	// above is — its case tags the frame and hands it to the conn's appFrameWorker.
+	"TypeReadWorkspaceFile": "switch-intercepted",
 	// The conversation-history request verb (#2116), moved up from excludedTypes'
 	// "pending handler (#2116)" when dispatchAppFrame gained its case — the move
 	// that entry named in advance, and mandatory rather than tidy-up: Assertion #2
@@ -273,14 +278,16 @@ var excludedTypes = map[string]string{
 	// request via in_reply_to", which is now true of only four of this type's five
 	// producers.
 	//
-	//   - reply, on promote / rename / archive / change_workspace: each answers its
-	//     requester through Conn.Reply, correlated by in_reply_to.
-	//   - push, on a host-side `pyry channel new` and, since #2159, on the
-	//     auto-naming of a still-unnamed conversation from the first send_message
-	//     accepted for it: conversationUpdateEmitterV2 fans the stored row to every
-	//     interactive conn. ONE EMITTER, TWO PRODUCERS — the second reuses the first
-	//     one's fan-out rather than adding a loop of its own. NOTHING SOLICITS
-	//     EITHER — there is no request envelope for in_reply_to to name, which is
+	//   - reply, on promote / rename / archive / change_workspace /
+	//     set_conversation_muted: each answers its requester through Conn.Reply,
+	//     correlated by in_reply_to.
+	//   - push, on a host-side `pyry channel new`, since #2159 on the auto-naming
+	//     of a still-unnamed conversation from the first send_message accepted for
+	//     it, and since #2572 on every set_conversation_muted (after its reply):
+	//     conversationUpdateEmitterV2 fans the stored row to every interactive
+	//     conn. ONE EMITTER, THREE PRODUCERS — the later two reuse the first one's
+	//     fan-out rather than adding a loop of their own. NOTHING SOLICITS
+	//     THE PUSH — there is no request envelope for in_reply_to to name, which is
 	//     exactly the one difference TypeAttachmentOffered's entry below records as
 	//     the whole of that classification. Correlation is the payload's own id.
 	//

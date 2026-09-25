@@ -575,6 +575,10 @@ func New(cfg Config) (*Pool, error) {
 			return p.AdoptAnnouncedID(SessionID(oldID), SessionID(newID))
 		},
 		ClaudeArgs: bootstrapArgs,
+		// The bootstrap is the daemon's auto-spawned claude session by definition,
+		// so its entry's own harness key is not read (#2593): a hand-edited value
+		// there would otherwise refuse daemon startup rather than one session.
+		Harness: HarnessClaude,
 		// The stored posture the stream runner asserts to every child it spawns
 		// (#2064). settings is canonicalSettings'd above, so this is a real mode and
 		// never the empty one, whichever of the warm/cold-start branches ran.
@@ -609,6 +613,7 @@ func New(cfg Config) (*Pool, error) {
 		createdAt:    createdAt,
 		lastActiveAt: lastActiveAt,
 		bootstrap:    true,
+		harness:      HarnessClaude,
 		settings:     settings,
 		spawnBase:    base,
 		settingsPath: settingsPath,
@@ -764,11 +769,33 @@ func (p *Pool) rekeyLocked(oldID, newID SessionID) {
 	sess.id = newID
 	sess.lastActiveAt = time.Now().UTC()
 	sess.lcMu.Unlock()
+	// A new pool id is a new conversation, so the rotated entry never inherits
+	// the old harness thread (#2622); the runner reports the one it starts next.
+	sess.threadID = ""
 	delete(p.sessions, oldID)
 	p.sessions[newID] = sess
 	if p.bootstrap == oldID {
 		p.bootstrap = newID
 	}
+}
+
+// recordThread persists threadID as the harness thread of the live session id
+// (#2622): the target of RunnerConfig.RecordThread. ErrSessionNotFound when id is
+// not live — a report racing a rotation that already moved the session — with
+// nothing written; an unchanged thread skips the save. Takes Pool.mu (write) and
+// holds it across the registry write, like Rename.
+func (p *Pool) recordThread(id SessionID, threadID string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	sess, ok := p.sessions[id]
+	if !ok {
+		return ErrSessionNotFound
+	}
+	if sess.threadID == threadID {
+		return nil
+	}
+	sess.threadID = threadID
+	return p.saveLocked()
 }
 
 // Rename updates the named session's label and persists the change to the
@@ -2260,7 +2287,23 @@ func (p *Pool) Mint(label, spawnDir string) (SessionID, error) {
 // This function is unchanged by that and stays off p.mu deliberately: it writes
 // two files and calls the injected RunnerFactory, none of which belongs inside
 // the pool's write lock.
+//
+// The session it builds runs claude: CreateIn is the fresh-id path and nothing
+// exposes a harness to clients yet (#2593). materialise, whose id may name a
+// dormant entry of another harness, calls buildSessionAs.
 func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings SessionSettings) (*Session, error) {
+	return p.buildSessionAs(id, label, spawnDir, settings, HarnessClaude, "")
+}
+
+// buildSessionAs is buildSession for a given harness, which it canonicalises and
+// carries onto both the RunnerConfig and the Session (#2593). A harness the
+// injected factory has no runner for fails here as an ordinary runner-construction
+// error, with the session's two files removed and nothing registered.
+//
+// threadID is the harness thread the session resumes (#2622), carried onto both
+// the RunnerConfig and the Session; empty for a fresh thread and for claude.
+func (p *Pool) buildSessionAs(id SessionID, label, spawnDir string, settings SessionSettings, harness, threadID string) (*Session, error) {
+	harness = canonicalHarness(harness)
 	tpl := p.sessionTpl
 	// Normalise the posture before it reaches either the argv or the stored
 	// value, so a minted session and a revived one — both two-field literals,
@@ -2337,6 +2380,12 @@ func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings Sessi
 			return p.AdoptAnnouncedID(SessionID(oldID), SessionID(newID))
 		},
 		ClaudeArgs: args,
+		Harness:    harness,
+		ThreadID:   threadID,
+		// The runner reports a thread it started with the live id, as above.
+		RecordThread: func(sessionID, threadID string) error {
+			return p.recordThread(SessionID(sessionID), threadID)
+		},
 		// Same seed as Pool.New's, and canonicalSettings runs above this site too
 		// (#2064).
 		PermissionMode: settings.PermissionMode,
@@ -2369,6 +2418,8 @@ func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings Sessi
 		createdAt:        now,
 		lastActiveAt:     now,
 		bootstrap:        false,
+		harness:          harness,
+		threadID:         threadID,
 		settings:         settings,
 		spawnBase:        base,
 		settingsPath:     settingsPath,
@@ -2443,6 +2494,11 @@ func (p *Pool) saveLocked() error {
 			// escalation, so the omitempty shape above stays byte-stable for a
 			// default session and the escalation keeps one on-disk spelling.
 			PermissionMode: permissionModeForDisk(s.settings),
+			// claude writes no key, so a claude session's entry keeps its
+			// pre-#2593 shape.
+			Harness: harnessForDisk(s.harness),
+			// Empty for claude, so omitempty keeps its entry's shape (#2622).
+			ThreadID: s.threadID,
 		}
 		// omitempty on the JSON tag keeps the stable on-disk shape for
 		// the dominant active case — important for the existing

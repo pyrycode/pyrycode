@@ -5,8 +5,8 @@ Split out of [`conversations-registry.md`](conversations-registry.md) (2026-09-0
 model, sort discipline, and load semantics all of these methods sit on top of.
 
 Covers `Create`, `Get`, `List`, `Update`, `Delete`, `SetOnDelete` (#1502), `RebindSession` (#739),
-`SetArchived` (#880), `SetSystemPrompt` (#2149), `WorkspaceLabel` / `SetWorkspaceLabel` (#2206),
-`SetLastContextUsage` (#2460),
+`SetArchived` (#880), `SetMuted` (#2572), `SetSystemPrompt` (#2149), `WorkspaceLabel` /
+`SetWorkspaceLabel` (#2206), `SetLastContextUsage` (#2460),
 `AppendPendingChannelPost` / `PendingChannelPosts` / `ClearPendingChannelPosts` (#2499), and `Promote`.
 
 ## `Create(c Conversation)`
@@ -101,6 +101,28 @@ Had no production callers as of #880; #881's `archive_conversation`/`unarchive_c
 handler (`internal/relay/handlers.ArchiveConversation`) is the sole caller, flipping the flag
 then re-reading via `Get` for the reply snapshot (deliberately not folded into a single `Update`
 closure — see [codebase/881.md](../codebase/881.md)). See [codebase/880.md](../codebase/880.md).
+
+## `SetMuted(id ConversationID, muted bool) bool` (#2572)
+
+Flips the durable manual-mute flag (`IsMuted`, #2571): locate the entry whose `ID` matches, set
+`IsMuted = muted`, return `true`. On miss, return `false` and mutate nothing. Same shape as
+`SetArchived` in every respect — single `bool` arg sets and clears, flips exactly one field
+structurally, no implicit `Save`, single critical section under `r.mu`.
+
+Sole caller is the `set_conversation_muted` handler
+(`internal/relay/handlers.SetConversationMuted`, [`relay-package.md`](relay-package.md)), which
+flips the flag then re-reads via `Get` for the reply snapshot — the same two-call shape
+`ArchiveConversation` uses, not folded into a single `Update` closure. Unlike archive, that
+handler's reply is also fanned out (uncorrelated, to every interactive-capable conn) through the
+existing `conversationUpdateEmitterV2` push, because a mute needs other paired clients to stop
+alerting without them re-listing — see [`docs/protocol-mobile.md`](../../protocol-mobile.md) §
+`set_conversation_muted`.
+
+The registry method itself takes a plain `bool`, but its wire verb's payload does not: the
+payload's `muted` field is a `*bool`, decoded as nil on an absent key or explicit JSON `null` and
+rejected as `protocol.malformed` rather than defaulting to `false` — a plain `bool` there would
+have silently unmuted a conversation on any request missing the key, passing every happy-path
+test while failing the actual malformed-payload acceptance criterion.
 
 ## `SetSystemPrompt(id ConversationID, prompt *string) error` (#2149)
 

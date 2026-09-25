@@ -224,7 +224,17 @@ func (m *V2SessionManager) StreamAttachment(ctx context.Context, connID, attachm
 	// filepath.Base, not the whole path: the leaf is the display name the
 	// retrieval leg publishes, and the directory components are the daemon's own
 	// layout, which no frame may disclose.
-	envs, err := attachmentEnvelopes(attachmentID, filepath.Base(path), blob, inReplyTo)
+	return m.streamAttachmentBytes(ctx, connID, attachmentID, filepath.Base(path), blob, inReplyTo)
+}
+
+// streamAttachmentBytes is StreamAttachment without the read: it chunks bytes
+// the caller already holds and enqueues them in order via Push. Split out for
+// the live workspace read (#2598), whose bytes come from readChecked — reopening
+// them by path, as StreamAttachment does, would discard that function's
+// descriptor identity check. Same error set as StreamAttachment past its read,
+// so attachmentStreamAborted classifies both callers alike.
+func (m *V2SessionManager) streamAttachmentBytes(ctx context.Context, connID, attachmentID, filename string, blob []byte, inReplyTo uint64) error {
+	envs, err := attachmentEnvelopes(attachmentID, filename, blob, inReplyTo)
 	if err != nil {
 		return err
 	}

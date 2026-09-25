@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+
 	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
@@ -453,6 +455,48 @@ func TestV2Session_BadToken_AEADErrorThen4401(t *testing.T) {
 	}
 	if ep.Code != protocol.CodeAuthInvalidToken {
 		t.Errorf("error code = %q, want %q", ep.Code, protocol.CodeAuthInvalidToken)
+	}
+}
+
+// TestV2CloseCodes_MatchSpec pins every close code the daemon sends to its wire
+// value (docs/protocol-mobile.md § Error codes, close-code table). The constants
+// are compared against literals outside this module — the apps' close handlers —
+// so a fat-fingered value would be self-consistent in every test that uses the
+// constant symbolically. It also asserts the daemon's codes are pairwise distinct
+// and disjoint from the other codes in use (1000, 1011, and the relay-sent 4404,
+// 4409, 4429), which is what StatusClientUpdateRequired's "a value not in use"
+// means as a check (#2576).
+func TestV2CloseCodes_MatchSpec(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		got  websocket.StatusCode
+		want websocket.StatusCode
+	}{
+		{"StatusUnauthorized", StatusUnauthorized, 4401},
+		{"StatusIdleTimeout", StatusIdleTimeout, 4408},
+		{"StatusSessionGone", StatusSessionGone, 4410},
+		{"StatusClientUpdateRequired", StatusClientUpdateRequired, 4412},
+		{"StatusQueueOverflow", StatusQueueOverflow, 4413},
+		{"StatusProtocolMismatch", StatusProtocolMismatch, 4421},
+		{"StatusHandshakeFailure", StatusHandshakeFailure, 4426},
+	}
+	seen := map[websocket.StatusCode]string{
+		websocket.StatusNormalClosure: "1000 normal closure",
+		websocket.StatusInternalError: "1011 server error",
+		4404:                          "4404 relay: no server",
+		statusServerIDConflict:        "4409 relay: server-id conflict",
+		4429:                          "4429 relay: rate limited",
+	}
+	for _, c := range cases {
+		if c.got != c.want {
+			t.Errorf("%s = %d, want %d", c.name, c.got, c.want)
+		}
+		if other, dup := seen[c.got]; dup {
+			t.Errorf("%s = %d collides with %s", c.name, c.got, other)
+		}
+		seen[c.got] = c.name
 	}
 }
 
@@ -4516,6 +4560,98 @@ func TestV2Session_IdleChurn_ReturnsToBaseline(t *testing.T) {
 		if conns := mgr.ActiveConns(bg); len(conns) != 0 {
 			t.Fatalf("after idle sweep of %s: ActiveConns = %v, want [] (baseline)", connID, conns)
 		}
+	}
+}
+
+// TestV2Session_PeerClose_TearsDownWithoutReply pins #2601: the relay's close
+// notice for a phone whose WebSocket ended ({conn_id, close_code}) tears that
+// conn's session down at once, leaves every other conn open, and publishes
+// nothing — the phone is already gone. The junk frame on the notice would earn
+// a 4421 close if it were decoded, so "nothing recorded" also proves it is not.
+// Frames is unbuffered so each send is serviced by Run before the next
+// ActiveConns snapshot.
+func TestV2Session_PeerClose_TearsDownWithoutReply(t *testing.T) {
+	setIdleTimeout(t, 100*time.Millisecond)
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+	frames := make(chan protocol.RoutingEnvelope)
+	rec := &v2Recorder{}
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	})
+	t.Cleanup(stop)
+
+	bg := context.Background()
+	handshakeConnToOpen(t, frames, rec, "c-gone", respPub, initPriv)
+	handshakeConnToOpen(t, frames, rec, "c-stays", respPub, initPriv)
+
+	frames <- protocol.RoutingEnvelope{
+		ConnID:    "c-gone",
+		Frame:     json.RawMessage(`"not an inner frame"`),
+		CloseCode: 1001,
+	}
+	conns := mgr.ActiveConns(bg)
+	if len(conns) != 1 || conns[0].ConnID != "c-stays" {
+		t.Fatalf("after close notice: ActiveConns = %v, want exactly [c-stays]", conns)
+	}
+	if envs := rec.snapshot(); len(envs) != 2 {
+		t.Fatalf("recorded %d envelopes, want 2 (the two noise_resps; the close notice publishes nothing)", len(envs))
+	}
+
+	// Past the idle window: the torn-down conn's idle timer must not surface a
+	// late 4408 for it. The surviving conn's own sweep is allowed.
+	time.Sleep(250 * time.Millisecond)
+	for _, e := range rec.snapshot() {
+		if e.ConnID == "c-gone" && e.CloseCode != 0 {
+			t.Errorf("close envelope published for c-gone (close_code %d); want none", e.CloseCode)
+		}
+	}
+
+	stop()
+	if _, ok := mgr.sessions["c-gone"]; ok {
+		t.Errorf("sessions[c-gone] still present after close notice")
+	}
+	mgr.pushMu.Lock()
+	_, qok := mgr.queues["c-gone"]
+	mgr.pushMu.Unlock()
+	if qok {
+		t.Errorf("queues[c-gone] still present after close notice")
+	}
+}
+
+// TestV2Session_PeerClose_UnknownConnIgnored pins #2601: a close notice for a
+// conn_id with no session creates none and sends nothing.
+func TestV2Session_PeerClose_UnknownConnIgnored(t *testing.T) {
+	respPriv, _ := genV2Keypair(t)
+	frames := make(chan protocol.RoutingEnvelope)
+	rec := &v2Recorder{}
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    v2PairedRegistry(t, v2TestToken),
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	})
+	t.Cleanup(stop)
+
+	frames <- protocol.RoutingEnvelope{ConnID: "c-unknown", CloseCode: 1006}
+	if conns := mgr.ActiveConns(context.Background()); len(conns) != 0 {
+		t.Fatalf("ActiveConns = %v, want []", conns)
+	}
+	if envs := rec.snapshot(); len(envs) != 0 {
+		t.Fatalf("recorded %d envelopes, want 0", len(envs))
+	}
+	stop()
+	if _, ok := mgr.sessions["c-unknown"]; ok {
+		t.Errorf("sessions[c-unknown] created by a close notice")
 	}
 }
 

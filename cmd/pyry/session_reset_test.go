@@ -71,17 +71,8 @@ func (r *resetRunner) BeginWrapUp() (*wrapUpReply, func(), bool) {
 	return r.capture.begin()
 }
 
-// noInterruptRunner is resetRunner without the Interrupt method, so
-// interruptRunner's armNone arm is reachable from the table.
-type noInterruptRunner struct {
-	baseRunner
-	capture *wrapUpCapture
-}
-
-func (r *noInterruptRunner) BeginWrapUp() (*wrapUpReply, func(), bool) { return r.capture.begin() }
-
-// plainRunner exposes neither Interrupt nor BeginWrapUp: the "runner cannot wrap
-// up" row, which must leave the previous note standing and not block the reset.
+// plainRunner does not expose BeginWrapUp: the "runner cannot wrap up" row, which
+// must leave the previous note standing and not block the reset.
 type plainRunner struct{ baseRunner }
 
 // resetSteps records the order of the routine's observable steps, which is how
@@ -675,10 +666,10 @@ func TestConversationReset_WrapUp_ReadErrorStillDelivers(t *testing.T) {
 	}
 }
 
-// TestConversationReset_WrapUp_ToleratesAnInertInterrupt covers the two interrupt
-// rows the reject table tolerates: a runner with no Interrupt method, and one whose
-// Interrupt errors. Neither may stop the wrap-up — the idle wait is the real gate,
-// and the interrupt is only what makes it come sooner.
+// TestConversationReset_WrapUp_ToleratesAnInertInterrupt covers the interrupt row
+// the reject table tolerates: a runner whose Interrupt errors. It may not stop the
+// wrap-up — the idle wait is the real gate, and the interrupt is only what makes it
+// come sooner. (A runner with no Interrupt method cannot exist since #2592.)
 func TestConversationReset_WrapUp_ToleratesAnInertInterrupt(t *testing.T) {
 	t.Parallel()
 
@@ -686,9 +677,6 @@ func TestConversationReset_WrapUp_ToleratesAnInertInterrupt(t *testing.T) {
 		name  string
 		build func(c *wrapUpCapture, s *resetSteps) sessions.Runner
 	}{
-		{name: "no interrupt method", build: func(c *wrapUpCapture, s *resetSteps) sessions.Runner {
-			return &noInterruptRunner{capture: c}
-		}},
 		{name: "the interrupt errors", build: func(c *wrapUpCapture, s *resetSteps) sessions.Runner {
 			return &resetRunner{capture: c, steps: s, interruptErr: errors.New("no live child")}
 		}},

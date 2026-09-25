@@ -46,10 +46,14 @@ func newOperatorMessageHistory(store *history.Store, logger *slog.Logger) msgque
 			// msg.Text, and never a value derived from the delivery payload — see
 			// the note above. msg carries no other text-shaped field to reach for.
 			Text: msg.Text,
+			// The ids the send_message handler resolved (#2596), carried on the
+			// queued record beside Text — never parsed out of the delivery payload.
+			// nil for a message that named none, which omits the key.
+			AttachmentIDs: msg.AttachmentIDs,
 		})
 		if err != nil {
 			// Defensive, matching both #2114 producers: MessagePayload is four
-			// strings and cannot fail to marshal in practice. Never echo the payload
+			// strings and a string slice and cannot fail to marshal in practice. Never echo the payload
 			// or err.Error() — encoding/json quotes invalid input bytes into its
 			// error, which would put conversation content in a log line.
 			logger.Debug("relay: operator-message history drop; payload marshal",

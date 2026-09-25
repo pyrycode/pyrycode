@@ -28,6 +28,9 @@ func (stubRunner) SetModel(model string) error          { return nil }
 func (stubRunner) SetSpawnPermissionMode(string)        {}
 func (stubRunner) SetPermissionMode(mode string) error  { return nil }
 func (stubRunner) BeginTeardown()                       {}
+func (stubRunner) Interrupt() error                     { return nil }
+func (stubRunner) RestartFresh(newID string)            {}
+func (stubRunner) BeginRotation() func()                { return func() {} }
 
 // newRouterTestPool builds a real *sessions.Pool. sessions.New constructs the
 // bootstrap session entry without spawning claude, so Pool.Lookup works against

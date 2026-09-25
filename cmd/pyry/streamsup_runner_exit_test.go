@@ -297,14 +297,8 @@ func TestStreamRunnerFactory_RestartFreshRetagsInstalledLanes(t *testing.T) {
 			first.sessionID, constructedID)
 	}
 
-	// Exactly how startFreshRunner reaches it: a type assertion off the un-widened
-	// sessions.Runner. An assertion that stopped matching would fail here rather
-	// than silently no-op, which is the failure mode that shape is chosen to avoid.
-	fresh, ok := runner.(interface{ RestartFresh(string) })
-	if !ok {
-		t.Fatalf("factory runner %T does not expose RestartFresh; the production new_session dispatch cannot reach it either", runner)
-	}
-	fresh.RestartFresh(rotatedID)
+	// Exactly how startFreshRunner reaches it: through sessions.Runner (#2592).
+	runner.RestartFresh(rotatedID)
 
 	// RestartFresh cancels the live iteration, so child 1 dies and its exit fires
 	// the installed OnChildExit — under the tag the rotation just moved.

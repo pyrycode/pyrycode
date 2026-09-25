@@ -90,6 +90,7 @@ func ListConversations(reg ConversationLister) dispatch.Handler {
 				Name:           conv.Name,
 				IsPromoted:     conv.IsPromoted,
 				IsArchived:     conv.IsArchived,
+				IsMuted:        conv.IsMuted,
 				Cwd:            conv.Cwd,
 				WorkspaceLabel: workspaceLabel,
 				// LastMessageTS collapses onto LastUsedAt: Conversation

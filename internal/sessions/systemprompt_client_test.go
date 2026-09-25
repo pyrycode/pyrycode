@@ -443,3 +443,37 @@ func assertPromptFileNames(t *testing.T, path string, clients ...ClientIdentity)
 		t.Errorf("system-prompt file %q content =\n%q\nwant\n%q", path, raw, want)
 	}
 }
+
+// TestAdmitClientVersion pins the exported version gate the device registry's
+// persisted version (#2577) passes through: the same character set and bound
+// admitClient applies, a refusal collapsing to "" and an admitted value
+// returned verbatim.
+func TestAdmitClientVersion(t *testing.T) {
+	t.Parallel()
+	atBound := strings.Repeat("v", maxClientVersionBytes)
+	tests := []struct {
+		name, in, want string
+	}{
+		{"semver passes verbatim", "1.4.0-beta.2", "1.4.0-beta.2"},
+		{"app-prefixed passes verbatim", "pyrycode-android/1.4.0", "pyrycode-android/1.4.0"},
+		{"exactly at the bound passes", atBound, atBound},
+		{"one byte over the bound", atBound + "v", ""},
+		{"blank", "   ", ""},
+		{"empty", "", ""},
+		{"newline", "1.4.0\nevil", ""},
+		{"tab", "1.4.0\t", ""},
+		{"escape run", "1.4" + csiRun, ""},
+		{"DEL", "1.4.0" + string(rune(0x7f)), ""},
+		{"C1", "1.4.0" + string(rune(0x9b)), ""},
+		{"double quote", `1.4.0"`, ""},
+		{"invalid UTF-8", "1.4.0\xff", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := AdmitClientVersion(tc.in); got != tc.want {
+				t.Errorf("AdmitClientVersion(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}

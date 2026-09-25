@@ -16,7 +16,10 @@ type Device struct {
     Platform  string `json:"platform,omitempty"`   // "fcm" | "apns" | ""
     PushToken string `json:"push_token,omitempty"` // opaque APNs/FCM token
 
-    // #702 — authorizes THIS device to ANSWER a remote permission modal.
+    // #702 — authorizes THIS device to mint a pairing for another device and
+    // to actuate an MCP server. Since #2605 it no longer gates answering a
+    // permission/trust/destructive modal or a question batch — every
+    // authenticated device may (Device.MayAnswerPrompt). Name kept.
     AllowRemotePermissions bool `json:"allow_remote_permissions,omitempty"`
 
     // #1527 — deadline for an UNREDEEMED pairing record; enforced by
@@ -29,10 +32,16 @@ const RedemptionWindow = 15 * time.Minute // #1527 — mint-time RedeemBy offset
 func HashToken(plain string) string
 func VerifyToken(plain, hash string) bool
 
-// #702 — the remote-permission gate (in auth.go, beside Validate).
+// #702 — the privileged gate: minting a pairing for another device and MCP
+// actuation ONLY, since #2605 (in auth.go, beside Validate).
 func (d *Device) MayAnswerRemotePermission() bool
 func AuthorizeRemotePermission(d *Device, outcome RemotePermissionOutcome) bool
 type RemotePermissionOutcome int // OutcomeNoAnswer (zero) | OutcomeAllow | OutcomeDeny | OutcomeTimeout | OutcomeCancel
+
+// #2605 — the answering gate: any authenticated device may answer a permission
+// modal or a question batch. AllowRemotePermissions plays no part.
+func (d *Device) MayAnswerPrompt() bool
+func AuthorizePromptAnswer(d *Device, outcome RemotePermissionOutcome) bool
 ```
 
 The crypto primitives (`HashToken` / `VerifyToken`) export no errors, no sentinels — `VerifyToken` returns bool by design. Auth-decision-as-error is the caller's concern, not the crypto primitive's.
@@ -71,41 +80,54 @@ func VerifyToken(plain, hash string) bool {
 
 `==`, `bytes.Equal`, and `strings.EqualFold` are forbidden on hash material. Code review enforces this.
 
-## Remote-permission gate (#702)
+## Remote-permission gates (#702, narrowed by #2605)
 
-`AllowRemotePermissions` (the `Device` field, default OFF) plus two pure predicates in `auth.go` are the **authorization primitive** for answering a remote permission / trust / destructive modal from a paired phone ([ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) § "Security model"; [EPIC #597] Phase 3). Answering such a modal is the highest-trust action the mobile head can take, so it is gated separately — everything else a paired phone does (watch the stream, snapshot, send, interrupt, dequeue) stays **ungated**. The bit is set **only** locally by `pyry pair --allow-remote-permissions` ([`pyry-pair-command.md`](pyry-pair-command.md)), never over the wire; it is read off the already-authenticated `*Device` by the modal control loop (#703, the sole consumer) via `dispatch.Conn.Auth()`.
+Two pairs of pure predicates in `auth.go` share one enum. Which pair a caller uses depends on which of two very different questions it is asking:
+
+- **The privileged gate — `MayAnswerRemotePermission` / `AuthorizeRemotePermission` (#702).** Gates minting a pairing for another device (`pairingMinterV2.MintPairing`) and actuating an MCP server (`mcpActuatorV2.actuate`) — the two verbs whose output multiplies a compromise (a stolen pairing must never be able to mint another, or reach a tool server, by itself). Reads `AllowRemotePermissions`, set **only** locally by `pyry pair --allow-remote-permissions` ([`pyry-pair-command.md`](pyry-pair-command.md)), never over the wire; default OFF.
+- **The answering gate — `MayAnswerPrompt` / `AuthorizePromptAnswer` (#2605).** Gates answering a permission/trust/destructive modal (`modalResolverV2`) and answering or refusing a question batch (`questionResolverV2`). **Operator decision 2026-09-24: view-only clients are not a wanted use case.** Before #2605, every device paired without the flag — the default outcome of `pyry pair` and the *only* outcome of the mint path, since a minted device is always unprivileged — was stuck seeing prompts it could not answer, silently. `MayAnswerPrompt` drops `AllowRemotePermissions` from the check entirely: true for any authenticated (non-nil) device. The accepted cost is that a stolen *unprivileged* pairing can now approve a tool call; `pyry pair revoke` remains the remedy. See [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) § "Security model" (amended 2026-09-24) for the full tradeoff.
+
+Both pairs are read off the already-authenticated `*Device` via `dispatch.Conn.Auth()`; neither is a wire capability. Everything else a paired phone does (watch the stream, snapshot, send, interrupt, dequeue) stays ungated regardless of which pair applies.
 
 ```go
-// Fail-closed eligibility: true ONLY when the per-device bit is set. A nil
-// receiver (no authenticated device on the connection) → false. The nil-guard
-// makes the safe default structural — the predicate is total.
+// The privileged gate (#702). Fail-closed: nil receiver or bit OFF → false.
 func (d *Device) MayAnswerRemotePermission() bool { return d != nil && d.AllowRemotePermissions }
 
-// What #703 observed for a surfaced modal. The zero value (OutcomeNoAnswer) is
-// the safe default and resolves to DENY, so a default-constructed call denies.
+// What the caller observed for a surfaced modal/question. The zero value
+// (OutcomeNoAnswer) is the safe default and resolves to DENY, so a
+// default-constructed call denies. Shared by both predicate pairs.
 type RemotePermissionOutcome int
 const (
     OutcomeNoAnswer RemotePermissionOutcome = iota // default → DENY
     OutcomeAllow                                    // phone explicitly chose an allow option
     OutcomeDeny
-    OutcomeTimeout                                  // deny-on-timeout window elapsed (#703's timer)
+    OutcomeTimeout                                  // deny-on-timeout window elapsed
     OutcomeCancel                                   // phone cancelled / dismissed (ESC)
 )
 
-// Fail-closed decision. ALLOW (true) ONLY on eligible × OutcomeAllow; every
-// other (device, outcome) — ineligible/nil device, no answer, timeout, cancel,
-// explicit deny — DENIES. Re-checks eligibility internally (defense in depth).
+// The privileged decision (#702) — MintPairing, MCP actuation.
 func AuthorizeRemotePermission(d *Device, outcome RemotePermissionOutcome) bool {
     return d.MayAnswerRemotePermission() && outcome == OutcomeAllow
 }
+
+// The answering gate (#2605). Fail-closed on nil (unauthenticated) only —
+// AllowRemotePermissions plays no part.
+func (d *Device) MayAnswerPrompt() bool { return d != nil }
+
+// The answering decision (#2605) — modalResolverV2, questionResolverV2.
+func AuthorizePromptAnswer(d *Device, outcome RemotePermissionOutcome) bool {
+    return d.MayAnswerPrompt() && outcome == OutcomeAllow
+}
 ```
 
-Two design choices make the safe default **structural** rather than a convention a caller must remember:
+Two design choices make the safe default **structural** rather than a convention a caller must remember, and both apply identically to each pair:
 
 - **An enum, not a bare bool, for the outcome.** A bool would collapse no-answer / timeout / cancel into one indistinguishable input. The enum keeps the only ALLOW branch a single conjunction in one unit-tested place; any future outcome defaults to DENY unless explicitly mapped. This realizes the deny-on-timeout model in deterministic code (the safety-net fabric the security model needs).
-- **Two predicates for two #703 paths.** `MayAnswerRemotePermission` gates "may this device answer at all" → reject a non-permitted phone with an *error envelope* before resolving anything. `AuthorizeRemotePermission` resolves "given the outcome, did it grant." The decision re-checks eligibility, so it is correct standalone *and* composes — defense in depth, not a single bypassable point.
+- **Two predicates per pair.** The eligibility predicate (`MayAnswer*`) gates "may this device act at all" → reject an ineligible device with an *error envelope* before resolving anything. The decision predicate (`Authorize*`) resolves "given the outcome, did it grant." The decision re-checks eligibility internally, so it is correct standalone *and* composes — defense in depth, not a single bypassable point.
 
-Both predicates are **pure** — no logging, no I/O, no token handling — keeping the gate unit-testable in isolation and uncoupled from observability. Audit-writing on a decision is #712's primitive, called by #703, deliberately separate. See [`codebase/702.md`](../codebase/702.md) for the full data flow and producer obligations handed to #703.
+`MayAnswerRemotePermission` was **not renamed** when #2605 split off the answering predicate — a rename would have touched every privileged call site and e2e comment for no behaviour change. Its doc comment carries the new, narrower meaning instead; despite the name, it no longer has anything to do with answering.
+
+All four predicates are **pure** — no logging, no I/O, no token handling — keeping each gate unit-testable in isolation and uncoupled from observability. Audit-writing on a decision is #712's primitive, called by the resolver, deliberately separate. See [`codebase/702.md`](../codebase/702.md) for the original data flow and producer obligations.
 
 ## Why no bcrypt or salt
 

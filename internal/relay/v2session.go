@@ -87,7 +87,53 @@ const (
 	// idled out", and a restart or an overflow is not that — the same mislabel
 	// StatusQueueOverflow's comment already records rejecting.
 	StatusSessionGone websocket.StatusCode = 4410
+
+	// StatusClientUpdateRequired is the WS close code the binary asks the
+	// relay to apply when it refuses an app build older than the host's
+	// minimum for that app (#2576). It follows the sealed
+	// protocol.CodeClientUpdateRequired error in the same routing envelope,
+	// after the Noise handshake and the token check, so the client reads the
+	// error before the close — the token-failure arm's shape. Echoes HTTP 412
+	// (Precondition Failed), consistent with the 44xx←HTTP convention: the
+	// minimum app version is a precondition the hello failed. 426 would be
+	// the literal match but 4426 is StatusHandshakeFailure. Wire spec:
+	// docs/protocol-mobile.md § Error codes, close-code row 4412.
+	//
+	// Terminal for THIS host only: a client stops re-dialling this daemon and
+	// keeps its other hosts. Sent only while a minimum is set (#2578); see
+	// MinMobileClientVersion.
+	StatusClientUpdateRequired websocket.StatusCode = 4412
 )
+
+// The minimum app version this daemon release accepts, per app, as
+// MAJOR.MINOR.PATCH (#2578). Build constants, not operator configuration: each
+// daemon release carries its own, so during a staged rollout different hosts
+// may enforce different minimums. Empty means no minimum for that app, and
+// while both are empty no hello is ever refused for its version.
+//
+// Set the first one only after that app has shipped a release sending
+// client_version as <app>/<MAJOR>.<MINOR>.<PATCH>: once any minimum is set,
+// every build sending the older free text is refused (docs/protocol-mobile.md
+// § Compatibility). A value that does not parse fails NewV2SessionManager and
+// TestNewV2SessionManager_MinClientVersions, never reading as "no minimum".
+const (
+	MinMobileClientVersion  = ""
+	MinDesktopClientVersion = ""
+)
+
+// MsgClientUpdateRequired is the static message of the
+// protocol.CodeClientUpdateRequired error. The minimum travels in
+// ErrorPayload.MinClientVersion, never in the message.
+const MsgClientUpdateRequired = "this app version is no longer supported by this host; update the app"
+
+// ShippedMinClientVersions returns this build's minimums keyed by app name, the
+// shape V2SessionConfig.MinClientVersions takes.
+func ShippedMinClientVersions() map[string]string {
+	return map[string]string{
+		protocol.AppMobile:  MinMobileClientVersion,
+		protocol.AppDesktop: MinDesktopClientVersion,
+	}
+}
 
 // idleTimeout is the bounded window a v2 session may go without any
 // inbound frame before the manager tears it down through the in-repo
@@ -431,6 +477,12 @@ type V2SessionManager struct {
 	cfg      V2SessionConfig
 	sessions map[string]*V2Session
 
+	// minClientVersions is cfg.MinClientVersions parsed once by
+	// NewV2SessionManager, keyed by app name, holding only the apps with a
+	// minimum; nil when none is set. Never mutated afterwards, so every
+	// handshake compares against one snapshot.
+	minClientVersions map[string]protocol.Version
+
 	// wake is the wake-up signal channel for per-session timers. Both
 	// the 1-hour rekey-emit timer and the 30s rekey-reply-timeout
 	// timer use time.AfterFunc callbacks (which run on fresh runtime
@@ -592,6 +644,23 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 		return nil, fmt.Errorf("relay: V2SessionManager StaticPriv must be %d bytes, got %d",
 			noise.KeyLen, len(cfg.StaticPriv))
 	}
+	// A malformed minimum fails here rather than reading as "no minimum", which
+	// would fail open. The app key and the version go through the same grammar
+	// a hello's client_version does.
+	var minClientVersions map[string]protocol.Version
+	for app, v := range cfg.MinClientVersions {
+		if v == "" {
+			continue
+		}
+		parsedApp, parsed, ok := protocol.ParseClientVersion(app + "/" + v)
+		if !ok || parsedApp != app {
+			return nil, fmt.Errorf("relay: V2SessionManager MinClientVersions[%q] = %q is not <app> and MAJOR.MINOR.PATCH", app, v)
+		}
+		if minClientVersions == nil {
+			minClientVersions = make(map[string]protocol.Version)
+		}
+		minClientVersions[app] = parsed
+	}
 	return &V2SessionManager{
 		cfg:          cfg,
 		sessions:     make(map[string]*V2Session),
@@ -606,6 +675,8 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 		bundleReady:  make(chan bundleResult, wakeBufferSize),
 
 		newSessionDone: make(chan newSessionResult, wakeBufferSize),
+
+		minClientVersions: minClientVersions,
 	}, nil
 }
 
@@ -778,6 +849,13 @@ func (m *V2SessionManager) handleFrame(ctx context.Context, env protocol.Routing
 		// the v2 manager. Connection.handshake consumes hello_ack before
 		// frames flow through Frames(); any binary-direct frame that
 		// reaches us is unexpected and silently dropped.
+		return
+	}
+	if env.CloseCode != 0 {
+		// The relay's close notice (#2601): that phone's WebSocket has ended.
+		// Handled ahead of the lazy create and the activity stamp so a notice
+		// for an unknown conn creates nothing, and Frame is never decoded.
+		m.handlePeerClose(env)
 		return
 	}
 	s, ok := m.sessions[env.ConnID]
@@ -988,6 +1066,12 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 			// handleRequestAttachment.
 			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameAttachmentRequest})
 			return
+		case protocol.TypeReadWorkspaceFile:
+			// Off Run for the retrieval arm's reason (#2598): answering reads a
+			// file of up to the size bound off disk, hashes it and marshals one
+			// envelope per chunk. The worker routes it to handleReadWorkspaceFile.
+			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameWorkspaceFileRead})
+			return
 		case protocol.TypeRequestHistory:
 			// The third arm to run off Run (#2116), for the same reason as the two
 			// above rather than a new one: answering this frame opens log segments
@@ -1104,6 +1188,9 @@ const (
 	// until the turn ends before it asks the child anything. The only member whose
 	// wait runs off the worker (#2563), so the only one whose reply is not FIFO.
 	appFrameContextUsageRequest
+	// appFrameWorkspaceFileRead is the live workspace markdown read (#2598) —
+	// the retrieval arm's shape, over a file read live rather than a stored copy.
+	appFrameWorkspaceFileRead
 )
 
 // appFrameWorker is the per-conn sub-actor that runs application handlers
@@ -1164,6 +1251,10 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				// (safe from any goroutine) and its rejects through
 				// forwardToRun, so like the arm above it never touches s.send.
 				m.handleRequestAttachment(ctx, s, job.plaintext)
+			case appFrameWorkspaceFileRead:
+				// The live workspace read (#2598), the retrieval arm's twin:
+				// chunks through Push, rejects through forwardToRun.
+				m.handleReadWorkspaceFile(ctx, s, job.plaintext)
 			case appFrameHistoryRequest:
 				// The conversation-history path (#2116), here because it reads log
 				// segments off disk. UNLIKE the two arms above it has only ONE
@@ -1373,11 +1464,17 @@ func (m *V2SessionManager) forwardAppReply(s *V2Session, reply protocol.RoutingE
 // AEAD seal itself failed; JSON marshal failures of static
 // well-typed values are wrapped but practically unreachable.
 func (m *V2SessionManager) sealError(s *V2Session, code, message string, inReplyTo uint64) (json.RawMessage, error) {
-	errPayload, err := json.Marshal(protocol.ErrorPayload{
+	return m.sealErrorPayload(s, protocol.ErrorPayload{
 		Code:      code,
 		Message:   message,
 		Retryable: false,
-	})
+	}, inReplyTo)
+}
+
+// sealErrorPayload is sealError for a caller that sets an optional payload
+// field, such as the client.update_required reply's MinClientVersion (#2578).
+func (m *V2SessionManager) sealErrorPayload(s *V2Session, payload protocol.ErrorPayload, inReplyTo uint64) (json.RawMessage, error) {
+	errPayload, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal error payload: %w", err)
 	}
@@ -1413,15 +1510,55 @@ func marshalInnerFrameV2(frameType string, rawBytes []byte) (json.RawMessage, er
 	return out, nil
 }
 
-// closeWith transitions s to V2StateClosed, deletes the session from
-// the manager, and emits a single routing envelope carrying Frame (when
-// non-nil) and CloseCode. The atomic Frame+CloseCode is what guarantees
-// the spec's ordering MUST: phone observes the error frame before the
-// WS close (spec § Error handling, line 436). Honors ctx by checking
-// before the send; the Outbound call itself is synchronous.
-func (m *V2SessionManager) closeWith(ctx context.Context, s *V2Session, code websocket.StatusCode, frame json.RawMessage) {
-	if s.state == V2StateClosed {
+// handlePeerClose tears down the session for a phone the relay reports gone
+// (#2601): a relay→binary routing envelope with a non-zero CloseCode. Unlike
+// closeWith it publishes nothing — the phone's WebSocket has already ended, so
+// there is nothing for the relay to close. A notice for a conn with no session
+// is dropped. A relay that never sends the notice leaves the idle sweep as the
+// only reaper, exactly as before.
+func (m *V2SessionManager) handlePeerClose(env protocol.RoutingEnvelope) {
+	s, ok := m.sessions[env.ConnID]
+	if !ok {
+		m.cfg.Logger.Debug("relay: v2 peer close for unknown conn",
+			"event", "v2.peer_close.unknown",
+			"conn_id", env.ConnID,
+			"close_code", int(env.CloseCode))
 		return
+	}
+	m.cfg.Logger.Info("relay: v2 peer close teardown",
+		"event", "v2.peer_close.teardown",
+		"conn_id", env.ConnID,
+		"close_code", int(env.CloseCode))
+	m.teardown(s)
+}
+
+// closeWith tears s down (teardown) and emits a single routing envelope
+// carrying Frame (when non-nil) and CloseCode. The atomic Frame+CloseCode is
+// what guarantees the spec's ordering MUST: phone observes the error frame
+// before the WS close (spec § Error handling, line 436). Honors ctx by
+// checking before the send; the Outbound call itself is synchronous.
+func (m *V2SessionManager) closeWith(ctx context.Context, s *V2Session, code websocket.StatusCode, frame json.RawMessage) {
+	if !m.teardown(s) {
+		return
+	}
+	env := protocol.RoutingEnvelope{
+		ConnID:    s.connID,
+		Frame:     frame,
+		CloseCode: uint16(code),
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	m.send(env)
+}
+
+// teardown transitions s to V2StateClosed and releases everything the session
+// holds — timers, app-frame worker, uploads, replay tail — then deletes it and
+// its push queue from the manager. It publishes nothing; closeWith adds the
+// close envelope. Returns false, doing nothing, when s is already closed.
+func (m *V2SessionManager) teardown(s *V2Session) bool {
+	if s.state == V2StateClosed {
+		return false
 	}
 	s.state = V2StateClosed
 	// Stop per-session timers to free runtime timer-heap entries and
@@ -1475,20 +1612,12 @@ func (m *V2SessionManager) closeWith(ctx context.Context, s *V2Session, code web
 	// Symmetric with the create in handleNoiseInit: drop the per-session push
 	// buffer. Any buffered-but-undrained envelopes are discarded — the conn is
 	// terminal (#611 reconnect replay, not this ticket, reconciles a returning
-	// phone). The close envelope itself is sent synchronously below, bypassing
-	// the buffer (it is terminal, not part of the ordered push stream).
+	// phone). closeWith's close envelope is sent synchronously after this,
+	// bypassing the buffer (it is terminal, not part of the ordered push stream).
 	m.pushMu.Lock()
 	delete(m.queues, s.connID)
 	m.pushMu.Unlock()
-	env := protocol.RoutingEnvelope{
-		ConnID:    s.connID,
-		Frame:     frame,
-		CloseCode: uint16(code),
-	}
-	if ctx.Err() != nil {
-		return
-	}
-	m.send(env)
+	return true
 }
 
 // send forwards env via cfg.Outbound and logs any transport error at

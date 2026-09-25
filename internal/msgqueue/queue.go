@@ -63,6 +63,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -217,11 +218,20 @@ type Config struct {
 // its own sent messages and draw it once instead of twice; it is relayed
 // verbatim, is "" when the client sent none, and the daemon never mints one.
 // Nothing reads it — it addresses, authorizes, matches and dedupes nothing.
+//
+// AttachmentIDs (#2596) are the attachment ids the client's send_message named,
+// as the handler resolved them, so the history producer can store them on the
+// operator's turn. They are client-authored and untrusted like MessageID, and
+// the same provenance argument applies: they return to the trust domain that
+// authored them, which is not licence to project the delivery payload. Only the
+// DELIVERED projection (OnDelivered) sets the field; Snapshot and SnapshotAll
+// leave it nil, since queue_state does not carry it.
 type QueuedMessage struct {
-	ID        uint64
-	MessageID string
-	Text      string
-	TS        time.Time
+	ID            uint64
+	MessageID     string
+	Text          string
+	TS            time.Time
+	AttachmentIDs []string
 }
 
 // queued is one buffered inbound message: the stable per-conversation id, the
@@ -247,12 +257,16 @@ type QueuedMessage struct {
 // delivery is a plain value, NOT an "empty means fall back to text" sentinel:
 // Enqueue passes text explicitly, so no branch anywhere distinguishes the two
 // fields' provenance and drain stays one unconditional expression.
+//
+// attachmentIDs is the record's own copy of the ids the message named (#2596),
+// nil when it named none. Like messageID, nothing here reads it.
 type queued struct {
-	id        uint64
-	messageID string
-	text      string
-	delivery  string
-	ts        time.Time
+	id            uint64
+	messageID     string
+	text          string
+	delivery      string
+	ts            time.Time
+	attachmentIDs []string
 }
 
 // convQueue is one conversation's FIFO plus its id counter and the drain-state
@@ -403,6 +417,23 @@ func (q *Queue) Enqueue(convID, text string) uint64 {
 // domain that authored it. Widening for the second is not licence to widen for
 // the first.
 func (q *Queue) EnqueueDelivery(convID, messageID, text, delivery string) uint64 {
+	return q.EnqueueAttached(convID, messageID, text, delivery, nil)
+}
+
+// EnqueueAttached is EnqueueDelivery for a message that named attachments: the
+// ids the send_message handler resolved (#2596) are stored on the record and
+// projected onto the QueuedMessage OnDelivered receives, so the history producer
+// can keep them on the operator's turn. It is the method the handler calls;
+// EnqueueDelivery is this with no ids.
+//
+// attachmentIDs is COPIED here, at the point it enters the queue, so the record
+// never aliases the caller's slice. An empty list is stored as nil. The ids are
+// never logged, like every other string on the record.
+func (q *Queue) EnqueueAttached(convID, messageID, text, delivery string, attachmentIDs []string) uint64 {
+	var ids []string
+	if len(attachmentIDs) > 0 {
+		ids = slices.Clone(attachmentIDs)
+	}
 	q.mu.Lock()
 	c := q.convs[convID]
 	if c == nil {
@@ -423,7 +454,7 @@ func (q *Queue) EnqueueDelivery(convID, messageID, text, delivery string) uint64
 	}
 	id := c.nextID
 	c.nextID++
-	c.items = append(c.items, queued{id: id, messageID: messageID, text: text, delivery: delivery, ts: time.Now()})
+	c.items = append(c.items, queued{id: id, messageID: messageID, text: text, delivery: delivery, ts: time.Now(), attachmentIDs: ids})
 
 	q.maybeSpawnDrainLocked(convID, c)
 	q.mu.Unlock()
@@ -598,7 +629,7 @@ func (q *Queue) notifyGiveUp(convID, reason string) {
 // copy the drain already holds, so nothing is read from the FIFO off-lock.
 func (q *Queue) notifyDelivered(convID string, m queued) {
 	if q.onDelivered != nil {
-		q.onDelivered(convID, QueuedMessage{ID: m.id, MessageID: m.messageID, Text: m.text, TS: m.ts})
+		q.onDelivered(convID, QueuedMessage{ID: m.id, MessageID: m.messageID, Text: m.text, TS: m.ts, AttachmentIDs: m.attachmentIDs})
 	}
 }
 

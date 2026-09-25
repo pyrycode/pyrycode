@@ -31,7 +31,7 @@ reporting/removal handlers map onto (`Snapshot`, `Remove`, `OnChange`).
 - Decision anchor: [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md)
   — `send_message` is "queued by the daemon when claude is busy" (line 123); each
   queued message is the `{queued_msg_id, message_id, text, ts}` record (line 118;
-  `message_id` added by #2092 — see § Security).
+  `message_id` added by #2092 — see [§ Security](msgqueue-package-security.md)).
 - Spec: [`specs/architecture/704-inbound-message-queue.md`](../../specs/architecture/704-inbound-message-queue.md).
 - Ticket record: [codebase/704.md](../codebase/704.md).
 
@@ -95,17 +95,23 @@ type DeliveredFunc func(convID string, msg QueuedMessage)
 type PendingFunc func(error) bool
 
 // QueuedMessage is the engine-side projection of ADR 025's {queued_msg_id, text,
-// ts} record (#719); the element Snapshot returns. TWO fields are untrusted,
-// phone-originated content, not one: Text and MessageID (#2092) — never log
-// either, only surface them to the authorized conversation. MessageID is the
-// client's own id for the message (carried so a client can recognise a queued
-// item as its own echo and draw it once), relayed verbatim, "" when the client
-// sent none, never minted by the daemon; nothing reads it.
+// ts} record (#719); the element Snapshot returns. THREE fields are untrusted,
+// phone-originated content: Text, MessageID (#2092) and AttachmentIDs (#2596)
+// — never log any of them, only surface them to the authorized conversation.
+// MessageID is the client's own id for the message (carried so a client can
+// recognise a queued item as its own echo and draw it once), relayed verbatim,
+// "" when the client sent none, never minted by the daemon; nothing reads it.
+// AttachmentIDs is the deduplicated ids a send_message named, as the handler
+// resolved them, so `internal/history`'s producer can keep them on the stored
+// user entry; nil when the message named none. Populated **only** on the
+// DELIVERED projection (OnDelivered) — Snapshot and SnapshotAll leave it nil,
+// since queue_state does not carry it (§ Security).
 type QueuedMessage struct {
-    ID        uint64
-    MessageID string
-    Text      string
-    TS        time.Time
+    ID            uint64
+    MessageID     string
+    Text          string
+    TS            time.Time
+    AttachmentIDs []string
 }
 
 type Config struct {
@@ -123,6 +129,7 @@ type Config struct {
 func New(cfg Config) (*Queue, error)                       // errors if cfg.Deliver == nil
 func (q *Queue) Enqueue(convID, text string) uint64        // non-blocking; returns the stable per-conv id (>= 1), or 0 if the backlog is at cap (#869: reject, never drop)
 func (q *Queue) EnqueueDelivery(convID, messageID, text, delivery string) uint64 // #2038 added delivery, #2092 added messageID: Enqueue in every respect except those two — text is what Snapshot/SnapshotAll (and so queue_state) reads back, delivery is the []byte the drain hands DeliverFunc, messageID is the client's own id for the message, stored and projected but read by nothing. Enqueue is EnqueueDelivery(convID, "", text, text) — the "" is the true value for a path that mints no client id, not a sentinel; it must NOT take q.mu before delegating (q.mu is not re-entrant — doing so hangs all ~108 existing Enqueue call sites, not just the new one)
+func (q *Queue) EnqueueAttached(convID, messageID, text, delivery string, attachmentIDs []string) uint64 // #2596: EnqueueDelivery plus the resolved attachment ids, copied (slices.Clone) onto the record at the point it enters the queue so it never aliases the caller's slice. EnqueueDelivery is now a one-line wrapper (EnqueueAttached with nil ids), so its ~14 test call sites and Enqueue's ~108 needed no change. The single production caller is internal/relay/handlers.SendMessage.
 func (q *Queue) Run(ctx context.Context) error             // lifecycle; blocks until ctx done, then joins all drains
 func (q *Queue) Snapshot(convID string) []QueuedMessage    // #719: ordered copy of the backlog; unknown conv ⇒ nil
 func (q *Queue) SnapshotAll() map[string][]QueuedMessage    // #878: every conv's backlog keyed by convID, omitting empty ones
@@ -398,11 +405,15 @@ existing `Snapshot`/`SnapshotAll` projection rather than inventing
 `func(convID, messageID, text string)` was the one that mattered. `QueuedMessage`
 declares no `delivery` field, so this seam is *structurally* incapable of
 handing a consumer the daemon-composed payload that may name an on-host path
-(§ Security, `delivery`) — a consumer cannot leak it by forgetting a filter,
+([§ Security](msgqueue-package-security.md), `delivery`) — a consumer cannot leak it by forgetting a filter,
 where an all-strings signature would have compiled just as well with `text`
 and `messageID` transposed. **A projection type shaped to omit a field for one
 consumer's sake is a leak barrier that composes to a new consumer for free —
-reach for it before inventing a parameter list.**
+reach for it before inventing a parameter list.** #2596 confirmed the payoff:
+widening `QueuedMessage` with `AttachmentIDs` (so the history producer could
+store them) needed no `DeliveredFunc` signature change and no new seam —
+just a field the delivered projection populates and `Snapshot`/`SnapshotAll`
+don't.
 
 **A negative-only test proves nothing until its fire site exists.** Built RED
 in two steps (declare the seam, then wire the fire site), the give-up and
@@ -516,91 +527,10 @@ conversations for a single-operator tool.
 
 ## Security
 
-The queue buffers untrusted, phone-originated `send_message` text and releases it
-into the live claude session; ordering, loss-prevention, drain-pacing, and bounding
-are inbound message-dispatch **policy** on an internet-exposed surface (`#704` is
-`security-sensitive`). The engine's stance:
-
-- **`text` is opaque transit.** Stored, never inspected, parsed, or used in a
-  control decision; converted to `[]byte` only at the `deliver` call; **never
-  logged** (above).
-- **`delivery` (#2038) carries the same opaque-transit, never-logged discipline
-  as `text`, and is structurally incapable of reaching a client.**
-  `EnqueueDelivery` lets a caller enqueue a payload distinct from what a client
-  reads back — `internal/relay/handlers.SendMessage` uses it to hand claude a
-  composed prompt naming a stored attachment's on-host path while `text` stays
-  the user's own words, which `docs/protocol-mobile.md` § Error codes forbids
-  putting on the wire. `QueuedMessage` gains no `delivery` field, so
-  `Snapshot`/`SnapshotAll` — and so `queue_state`, on both the enqueue push and
-  the connect-time reconcile — are structurally incapable of projecting one; a
-  future consumer that wants the path on the wire has to widen the exported
-  type to get it, rather than merely forgetting a filter. `Enqueue` is
-  `EnqueueDelivery(convID, text, text)`, so none of its ~108 existing call
-  sites needed touching.
-- **`messageID` (#2092) is untrusted like `text`, but travels the opposite
-  direction on purpose.** It is the client's own id for the `send_message` that
-  produced this record, stored verbatim and projected by both `Snapshot` and
-  `SnapshotAll` so `queue_state` can carry it back out — deliberately echoed to
-  every paired device, as the key a client merges its own optimistic echo on.
-  Nothing in this package or its consumers reads it to route, authorize, match
-  or dedupe; a colliding id across two devices is a client-local
-  merge-attribution question (`docs/protocol-mobile.md` § Queue), not a daemon
-  trust decision. This is the same shape #2038's `attachment_id` warned about: a
-  doc comment that enumerated `Text` as *the* untrusted field went stale the
-  moment a second untrusted field landed beside it, so `QueuedMessage`'s and
-  `QueuedItem`'s comments now name both.
-- **`convID` is a map key only.** Validating/resolving it to a real session is the
-  **caller's** job, upstream of `Enqueue` (the `SessionRouter` / `ValidateConversation`
-  in `send_message.go`). A hostile `convID` can at worst create an isolated FIFO that
-  never drains — **never reach another conversation's session** (per-conversation maps
-  + per-conversation drains are isolated by construction). No type-system signal is
-  added, matching the `WriteUserTurn(ctx, id, payload)` convention where `id` is
-  pre-validated by the caller.
-- **No tokens/secrets/crypto/file/subprocess surface.** The `id` is a non-secret
-  per-conversation counter, not a capability.
-- **Inbound bound / backpressure — implemented (#869).** A phone flooding
-  `send_message` while claude is persistently busy/wedged used to grow
-  `convs[convID].items` without bound (an in-memory DoS; each queued message up
-  to the transport's 1 MiB frame ceiling). #869 closes it at the single insertion
-  point: `Config.MaxQueuedPerConversation` (`<= 0` ⇒ `defaultMaxQueuedPerConversation`,
-  100) caps each conversation's not-yet-delivered backlog (`len(c.items)`,
-  including the in-flight head). Past the cap, `Enqueue` **rejects** — returns `0`
-  (never a valid id) without appending, consuming no id, notifying nothing,
-  spawning no drain — **reject, never drop**, preserving losslessness (the mirror
-  of ADR 025's "control never drops": inbound content gets "tell the sender," not
-  silent-drop or drop-oldest). The `uint64` return arity is unchanged — `0` rides
-  an already-impossible id value, so none of the ~45 pre-existing `Enqueue` call
-  sites needed touching. The `send_message` handler maps `id == 0` to a retryable
-  `protocol.CodeServerBinaryBusy` ("server.binary_busy") envelope and does not
-  ack, so the phone re-issues once the backlog drains. Per-conversation only — N
-  conversations can still hold up to N×cap; a daemon-wide ceiling is out of scope
-  (matches `eventring`'s per-conversation `MaxEventsPerConversation` posture). See
-  [codebase/869.md](../codebase/869.md).
-- **`Snapshot` / `Remove` boundary crossings (#719) — convID trust is the
-  consumer's job.** Both key by **caller-supplied `convID`**, and `Snapshot`
-  *returns* the opaque `text` and (#2092) `messageID` (both will flow out to a
-  phone via `queue_state`). Per-conversation maps give isolation-by-construction
-  **once `convID` is trusted**; trusting it is #705's job (bind `convID` to the
-  requesting phone's authorized conversation, exactly as `send_message` does).
-  Cross-conversation **confidentiality** (`Snapshot` reading another conv's
-  queued text) and **integrity** (`Remove` mutating another conv's FIFO) are
-  prevented only there. The engine adds **zero** new log lines — `Snapshot`
-  returns `text` and `messageID` as values, never logs either; the consumer must
-  preserve the "never logged" discipline across the new exit for both. `Remove`
-  never touches `nextID`, so the stable-id contract is preserved and a removed id
-  is simply never reused. ADR 025 § Security model lists viewing/dequeuing as a
-  paired phone's **ungated** capability (only answering permission-class modals
-  is gated), so no permission gate is needed.
-- **`SnapshotAll` boundary crossing (#878) — same posture as `Snapshot`, no new
-  input trust decision.** `SnapshotAll` takes **no** caller-supplied parameter —
-  it enumerates the engine's own `convs` keys, so there is no `convID` to trust or
-  mistrust at this call. It **returns** the same opaque `text` and (#2092)
-  `messageID` `Snapshot` does, fanned out to `internal/relay`'s connect-time
-  reconcile ([#878](../codebase/878.md), `security-sensitive`) and from there to
-  a possibly-untrusted v2 peer — the reconcile's own gates (Noise_IK auth +
-  `interactive` capability + unicast addressing) are the trust boundary, not
-  this engine. Zero new log lines; the never-logged discipline is unchanged for
-  both fields.
+See [Security](msgqueue-package-security.md): the engine's stance on `text`,
+`delivery`, `messageID`, `attachmentIDs` (#2596), `convID`, and the
+`Snapshot`/`SnapshotAll`/`Remove` boundary crossings (#719, #878), plus the
+inbound bound/backpressure (#869).
 
 ## Files
 
@@ -617,7 +547,10 @@ internal/msgqueue/
 │                             delivery), exactly one call across retries, no call on give-up,
 │                             no call when the head is removed before commit, fires even when a
 │                             Remove races a confirmed delivery (the test that pins "unconditional
-│                             on advanced" against an `if advanced` regression)
+│                             on advanced" against an `if advanced` regression); #2596:
+│                             AttachmentIDs rides the delivered projection in enqueued order,
+│                             copied on entry (mutating the caller's slice after EnqueueAttached
+│                             does not reach the record)
 ├── queue_test.go             #704: ordered one-at-a-time drain (in-flight counter fails >1),
 │                             empty no-op, per-conversation independence, idle-drains-promptly,
 │                             lossless-retry/respawn, stable independent ids,

@@ -98,6 +98,23 @@ type ArchiveConversationPayload struct {
 	ConversationID string `json:"conversation_id"`
 }
 
+// SetConversationMutedPayload is the body of a set_conversation_muted frame
+// (#2572). Phone → binary. It names a target conversation and the muted value to
+// store for it: true mutes, false unmutes, through one verb.
+//
+// Muted is a pointer because the key is required: an absent key (or JSON null)
+// decodes to nil and the handler rejects it as protocol.malformed. A plain bool
+// would read a missing key as false and silently unmute. No omitempty, for the
+// round-trip reason given on CreateConversationPayload.
+//
+// Deliberately NOT a reuse of ArchiveConversationPayload, per the
+// semantic-coupling rationale the sibling payloads document. The reply reuses
+// ConversationUpdatedPayload verbatim.
+type SetConversationMutedPayload struct {
+	ConversationID string `json:"conversation_id"`
+	Muted          *bool  `json:"muted"`
+}
+
 // ChangeWorkspacePayload is the body of a change_workspace frame
 // (docs/protocol-mobile.md § change_workspace). Phone → binary. Both fields are
 // spec-required: a change_workspace must name a target conversation and a target
@@ -181,9 +198,15 @@ type ConversationUpdatedPayload struct {
 	// rows too, where the value is false — an absent key could not distinguish
 	// "restored to active" from "old daemon." Placed right after IsPromoted to
 	// mirror ConversationSummary and group the two state bools.
-	IsArchived bool    `json:"is_archived"`
-	Name       *string `json:"name"`
-	Cwd        string  `json:"cwd"`
+	IsArchived bool `json:"is_archived"`
+	// IsMuted is the conversation's durable mute-notifications flag (#2571),
+	// read from the stored conversation by every producer. Always serialized
+	// (no omitempty, unlike the on-disk Conversation.IsMuted): a client folds
+	// this record into its list in place, so a record that dropped the key
+	// would read as not muted and a rename would silently unmute the channel.
+	IsMuted bool    `json:"is_muted"`
+	Name    *string `json:"name"`
+	Cwd     string  `json:"cwd"`
 	// WorkspaceLabel is the operator-set display name stored for the workspace at
 	// this frame's own Cwd (#2210), so a client patching a row in place from a
 	// pushed frame renders the operator's chosen name without re-listing to find

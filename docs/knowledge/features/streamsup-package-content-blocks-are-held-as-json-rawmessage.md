@@ -57,10 +57,12 @@ dependency. `w == nil` (no live child) is checked first and returns `ErrNoLiveCh
 written — the same safe-no-op contract `WriteTurn` holds — so `Interrupt()` can't panic or partial-write
 when called against an idle runner. Small enough (`<PIPE_BUF`) that one `write(2)` can't interleave with
 a concurrent `WriteTurn` line on the same fd — the package's existing single-writer-per-syscall
-discipline, not a new one. `Interrupt` is a **concrete method on `*Runner`, deliberately not added to
-`sessions.Runner`** (kept un-widened per #1077) — mirrors how `*supervisor.Supervisor` encapsulates
-`SendEsc` (#726) off the interface; the interrupt *routing* sibling (#1121) reaches it via its own
-narrow interface or a type assertion. See [codebase/1120.md](../codebase/1120.md).
+discipline, not a new one. `Interrupt` is on `sessions.Runner` since #2592: `cmd/pyry`'s interrupt
+routing (#1121, `interruptRunner`) called it through an optional type assertion until then, which
+was speculative-surface avoidance with one runner implementation and became a fail-open hazard once
+a second (Codex, #2585) was in view — a runner lacking `Interrupt` would silently drop the keystroke.
+See [codebase/1120.md](../codebase/1120.md) and [sessions-package's `Runner`
+interface](sessions-package-key-types-runner-interface-runnerfactory.md).
 
 **Permission-mode send primitive (#1603, generalised #2042).** `(*Runner).SetPermissionMode(mode
 string) error` writes a single structured `control_request` line —

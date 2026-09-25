@@ -109,8 +109,12 @@ type TurnWriter interface {
 // queued record so a client can merge the queued row with the optimistic echo it
 // already drew. The handler neither validates, normalises nor mints it — an empty
 // id is legal and stays empty.
+// Since #2596 it is EnqueueAttached and also takes the resolved attachment ids,
+// stored beside text so the history log keeps them on the operator's turn. The
+// ids travel as their own argument, never derived from delivery, which is the
+// half that names on-host paths.
 type Enqueuer interface {
-	EnqueueDelivery(conversationID, messageID, text, delivery string) uint64
+	EnqueueAttached(conversationID, messageID, text, delivery string, attachmentIDs []string) uint64
 }
 
 // AttachmentResolver resolves one attachment id named by a send_message to the
@@ -448,7 +452,7 @@ func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolve
 		//
 		// One id failing refuses the WHOLE message, so a partially-attached turn
 		// never reaches claude. Nothing is enqueued.
-		paths, ok := resolveAttachments(resolve, p.ConversationID, p.AttachmentIDs)
+		attachmentIDs, paths, ok := resolveAttachments(resolve, p.ConversationID, p.AttachmentIDs)
 		if !ok {
 			// attachment_count only — never an id. The failing one may be
 			// shape-invalid by definition, and even a valid one would rebuild by
@@ -476,7 +480,11 @@ func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolve
 		// with its optimistic echo instead of drawing the message twice. It is
 		// passed exactly as it arrived: nothing here validates, trims, normalises
 		// or substitutes it, and "" stays "".
-		id := queue.EnqueueDelivery(p.ConversationID, p.MessageID, p.Text, composeAttachmentPrompt(p.Text, paths))
+		//
+		// attachmentIDs rides along too (#2596): the ids resolveAttachments just
+		// checked, once each in first-listed order, so the stored history entry can
+		// name them. Ids only — the paths stay inside the composed prompt.
+		id := queue.EnqueueAttached(p.ConversationID, p.MessageID, p.Text, composeAttachmentPrompt(p.Text, paths), attachmentIDs)
 		if id == 0 {
 			// The conversation's backlog is at its per-conversation cap (#869).
 			// Reject, never drop: nothing was enqueued and the existing backlog is
@@ -635,6 +643,10 @@ func isClearCommand(text string) bool {
 // resolve, having produced no paths — one refusal fails the whole message, so a
 // turn is never delivered with some of its attachments silently missing.
 //
+// It also returns the ids it resolved, index-aligned with paths (#2596): the
+// deduplicated list, each id past the resolver's canonical-shape check, which is
+// what the history log stores on the operator's turn.
+//
 // It DEDUPLICATES on first occurrence (#2038): a repeated id is resolved once and
 // its path named once, at the position the client first listed it. Refusing a
 // repeat would punish a client for something harmless, and naming a path twice
@@ -650,15 +662,16 @@ func isClearCommand(text string) bool {
 //
 // A nil resolve refuses every id, so an unwired seam fails closed. An empty list
 // yields no paths and true, which is the identity case the composer relies on.
-func resolveAttachments(resolve AttachmentResolver, conversationID string, ids []string) ([]string, bool) {
+func resolveAttachments(resolve AttachmentResolver, conversationID string, ids []string) (resolved, paths []string, ok bool) {
 	if len(ids) == 0 {
-		return nil, true
+		return nil, nil, true
 	}
 	if resolve == nil {
-		return nil, false
+		return nil, nil, false
 	}
 	seen := make(map[string]struct{}, len(ids))
-	paths := make([]string, 0, len(ids))
+	resolved = make([]string, 0, len(ids))
+	paths = make([]string, 0, len(ids))
 	for _, id := range ids {
 		if _, dup := seen[id]; dup {
 			continue
@@ -666,11 +679,12 @@ func resolveAttachments(resolve AttachmentResolver, conversationID string, ids [
 		seen[id] = struct{}{}
 		path, ok := resolve(conversationID, id)
 		if !ok {
-			return nil, false
+			return nil, nil, false
 		}
+		resolved = append(resolved, id)
 		paths = append(paths, path)
 	}
-	return paths, true
+	return resolved, paths, true
 }
 
 // composeAttachmentPrompt builds what claude receives: the user's own text,

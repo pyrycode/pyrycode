@@ -99,6 +99,50 @@ func TestQueue_OnDelivered_CarriesQueuedTextNotDeliveryPayload(t *testing.T) {
 	if msgs[0].ID != 1 {
 		t.Errorf("ID = %d, want the queued id 1", msgs[0].ID)
 	}
+	if msgs[0].AttachmentIDs != nil {
+		t.Errorf("AttachmentIDs = %q, want nil for a message enqueued without ids", msgs[0].AttachmentIDs)
+	}
+}
+
+// #2596: EnqueueAttached stores the client's attachment ids on the record and
+// the delivered projection carries them, in the order passed. The ids are copied
+// on entry: the caller rewriting its slice after the call returns must not reach
+// the record the history producer later reads.
+func TestQueue_OnDelivered_CarriesAttachmentIDsCopiedOnEntry(t *testing.T) {
+	t.Parallel()
+	f := newFakeDeliver()
+	rec := newDeliveredRecorder()
+	q, err := New(Config{Deliver: f.deliver, OnDelivered: rec.onDelivered})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Enqueue BEFORE Run so the drain cannot fire until the caller's slice has
+	// been rewritten — the alias, if there were one, is observable every time.
+	ids := []string{"att-2", "att-1"}
+	if id := q.EnqueueAttached("conv-a", deliveredMsgID, deliveredText, deliveredPayload, ids); id != 1 {
+		t.Fatalf("EnqueueAttached id = %d, want 1", id)
+	}
+	ids[0] = "mutated"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = q.Run(ctx) }()
+	recvWithin(t, rec.fired, "the delivered seam to fire")
+
+	if got := f.deliveredOrder(); !equalStrings(got, []string{deliveredPayload}) {
+		t.Fatalf("claude received %q, want the composed delivery payload %q", got, deliveredPayload)
+	}
+	_, msgs := rec.calls()
+	if len(msgs) != 1 {
+		t.Fatalf("OnDelivered fired %d times, want 1", len(msgs))
+	}
+	if want := []string{"att-2", "att-1"}; !equalStrings(msgs[0].AttachmentIDs, want) {
+		t.Errorf("AttachmentIDs = %q, want %q as enqueued", msgs[0].AttachmentIDs, want)
+	}
+	if msgs[0].Text != deliveredText {
+		t.Errorf("Text = %q, want the queued text %q", msgs[0].Text, deliveredText)
+	}
 }
 
 // AC 4: the drain retries the same head after a failure, and only the attempt

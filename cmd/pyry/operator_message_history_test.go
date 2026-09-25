@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -119,10 +120,64 @@ func TestOperatorMessageHistory_AppendsUserMessageWithQueuedText(t *testing.T) {
 	if strings.Contains(raw, opHostPath) {
 		t.Errorf("entry leaked the on-host path %q: %s", opHostPath, raw)
 	}
+	// #2596 AC 2: a message that named no attachments omits the key entirely.
+	if strings.Contains(raw, `"attachment_ids"`) {
+		t.Errorf("entry for a message naming no attachments carries an attachment_ids key: %s", raw)
+	}
 
 	// An empty log buffer means no Warn fired, so the append succeeded — and it
 	// is also the never-log check: neither the text nor the message id may reach
 	// any log line, at any level this handler passes.
+	if buf.Len() != 0 {
+		t.Errorf("producer logged %q; want silence on the success path", buf.String())
+	}
+}
+
+// #2596 AC 1 and AC 2: a message whose attachment ids resolved is stored as one
+// user `message` entry listing those ids, once each in the order the handler
+// passed them (it has already deduplicated on first occurrence), and the entry
+// carries none of the delivery prompt — neither the on-host path nor the
+// daemon-authored text around it.
+func TestOperatorMessageHistory_StoresAttachmentIDs(t *testing.T) {
+	t.Parallel()
+	store := history.New(t.TempDir())
+	var buf bytes.Buffer
+	q, done := opQueue(t, store, &buf, func(context.Context, string, []byte) error { return nil })
+
+	ids := []string{"att-b-0002", "att-a-0001"}
+	q.EnqueueAttached(testConvID, opMsgID, opText, opDelivery, ids)
+	waitAppended(t, done)
+
+	entry := onlyEntry(t, store, testConvID)
+	if entry.Type != protocol.TypeMessage {
+		t.Errorf("entry type = %q, want %q", entry.Type, protocol.TypeMessage)
+	}
+	var payload protocol.MessagePayload
+	if err := json.Unmarshal(entry.Payload, &payload); err != nil {
+		t.Fatalf("decode entry payload: %v", err)
+	}
+	if payload.Role != "user" {
+		t.Errorf("role = %q, want %q", payload.Role, "user")
+	}
+	if payload.Text != opText {
+		t.Errorf("text = %q, want the queued text %q", payload.Text, opText)
+	}
+	if !slices.Equal(payload.AttachmentIDs, ids) {
+		t.Errorf("attachment_ids = %q, want %q in the order passed", payload.AttachmentIDs, ids)
+	}
+
+	// The raw-bytes probe, as in the attachment-less test: the ids' presence is
+	// the non-vacuity control for the two absences below.
+	raw := string(entry.Payload)
+	if !strings.Contains(raw, `"attachment_ids":["att-b-0002","att-a-0001"]`) {
+		t.Fatalf("entry %q does not carry the ids under attachment_ids", raw)
+	}
+	if strings.Contains(raw, opHostPath) {
+		t.Errorf("entry leaked the on-host path %q: %s", opHostPath, raw)
+	}
+	if strings.Contains(raw, "The user attached a file") {
+		t.Errorf("entry carries the daemon-composed delivery prompt: %s", raw)
+	}
 	if buf.Len() != 0 {
 		t.Errorf("producer logged %q; want silence on the success path", buf.String())
 	}

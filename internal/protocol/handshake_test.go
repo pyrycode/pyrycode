@@ -384,6 +384,44 @@ func TestErrorPayload_ConversationIDIsOptional(t *testing.T) {
 	}
 }
 
+// TestErrorPayload_MinClientVersionIsOptional pins #2576's addition to the shared
+// error payload, for the reason the ConversationID test above gives: every error
+// reply marshals through this struct, so an unset field must emit no key and leave
+// every existing error frame byte-identical. Set, it carries the three-part minimum
+// the app-too-old rejection names.
+func TestErrorPayload_MinClientVersionIsOptional(t *testing.T) {
+	t.Parallel()
+
+	unset, err := json.Marshal(ErrorPayload{Code: CodeProtocolMalformed, Message: "nope"})
+	if err != nil {
+		t.Fatalf("marshal unset: %v", err)
+	}
+	if bytes.Contains(unset, []byte("min_client_version")) {
+		t.Errorf("an unset MinClientVersion emitted the key: %s — every pre-#2576 error reply must stay "+
+			"byte-identical", unset)
+	}
+
+	const minVersion = "1.4.0"
+	set, err := json.Marshal(ErrorPayload{
+		Code:             CodeClientUpdateRequired,
+		Message:          "nope",
+		MinClientVersion: minVersion,
+	})
+	if err != nil {
+		t.Fatalf("marshal set: %v", err)
+	}
+	var back ErrorPayload
+	if err := json.Unmarshal(set, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.MinClientVersion != minVersion {
+		t.Errorf("MinClientVersion round-tripped as %q, want %q", back.MinClientVersion, minVersion)
+	}
+	if !bytes.Contains(set, []byte(`"min_client_version":"`+minVersion+`"`)) {
+		t.Errorf("wire key is not min_client_version: %s", set)
+	}
+}
+
 func TestAckPayload_RoundTrip(t *testing.T) {
 	raw := readFixture(t, "ack.json")
 

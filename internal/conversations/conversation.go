@@ -84,6 +84,16 @@ type Conversation struct {
 	// omitempty for consistency with IsPromoted: their contracts are opposite.
 	IsArchived bool `json:"is_archived,omitempty"`
 
+	// IsMuted is the durable mute-notifications flag (#2571): true means the
+	// operator silenced this conversation's alerts. It lives on the host so
+	// every client reads one value; the clients raise their own alerts and
+	// consult it. False by default.
+	//
+	// omitempty carries the same contract as IsArchived's: "an absent key
+	// decodes as not muted, with no migration step." A registry with no muted
+	// rows is byte-identical to its pre-#2571 form.
+	IsMuted bool `json:"is_muted,omitempty"`
+
 	// SystemPrompt is the operator-set system prompt this conversation carries,
 	// so two conversations on the same repository can be told to behave
 	// differently. A pointer for the same reason as Name: nil is "absent" (no

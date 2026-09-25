@@ -1,0 +1,647 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/pyrycode/pyrycode/internal/codexsup"
+	"github.com/pyrycode/pyrycode/internal/sessions"
+	"github.com/pyrycode/pyrycode/internal/streamsup"
+	"github.com/pyrycode/pyrycode/internal/turncommit"
+	"github.com/pyrycode/pyrycode/internal/turnevent"
+)
+
+// codexMinVersion is the oldest Codex the runner drives: the version
+// codexsup's wire contract was captured from.
+const codexMinVersion = "0.156.1"
+
+// harnessCodex is RunnerConfig.Harness for a Codex session. The sessions
+// package carries the value without naming it; the factory decides.
+const harnessCodex = "codex"
+
+const (
+	codexBackoffInitial = time.Second
+	codexBackoffMax     = 30 * time.Second
+	// codexBackoffReset is the uptime after which a crash backs off from
+	// codexBackoffInitial again rather than from the doubled delay.
+	codexBackoffReset = time.Minute
+	// codexStartTimeout bounds one spawn's handshake and thread open.
+	codexStartTimeout = 30 * time.Second
+	// codexCallTimeout bounds an interrupt and a stop.
+	codexCallTimeout = 5 * time.Second
+)
+
+// errCodexPostureFixed is SetPermissionMode's answer: a Codex session's
+// posture is the daemon-written config in its Codex home, and no live switch
+// exists. The mode is deliberately not echoed.
+var errCodexPostureFixed = errors.New("cmd/pyry: codex sessions keep the daemon's read-only posture")
+
+// codexHarness is the daemon-wide input to the Codex runner factory: the
+// binary (-pyry-codex), the daemon-owned CODEX_HOME, and the one turn-event
+// fan-in Claude sessions also feed.
+type codexHarness struct {
+	bin, home string
+	sink      *streamTurnSink
+}
+
+// newCodexRunnerFactory builds a Codex runner per session (#2620). Like
+// newStreamRunnerFactory it mints one live tag and binds BOTH the event lane
+// and the exit lane from it, so a Codex turn and a Codex exit reach the drain
+// under the same session id. The Codex home's config is rewritten on every
+// construction, so the read-only posture is restored even if it was edited.
+//
+// Before returning a runner it probes Codex once (#2621): a Codex below
+// codexMinVersion or a daemon home with no sign-in refuses the session here,
+// because Run would only back off and retry the same failure.
+func newCodexRunnerFactory(h codexHarness) sessions.RunnerFactory {
+	return func(cfg sessions.RunnerConfig) (sessions.Runner, error) {
+		if h.sink == nil || h.home == "" {
+			return nil, errors.New("cmd/pyry: codex runner: no turn sink or Codex home")
+		}
+		if err := prepareCodexHome(h.home); err != nil {
+			return nil, fmt.Errorf("cmd/pyry: codex runner: %w", err)
+		}
+		dir := cfg.WorkDir
+		if dir == "" {
+			wd, err := os.Getwd()
+			if err != nil {
+				return nil, fmt.Errorf("cmd/pyry: codex runner: workdir: %w", err)
+			}
+			dir = wd
+		}
+		bin := h.bin
+		if bin == "" {
+			bin = "codex"
+		}
+		if err := probeCodex(bin, h.home, dir); err != nil {
+			return nil, fmt.Errorf("cmd/pyry: codex runner: %w", err)
+		}
+		tag := newStreamSessionTag(cfg.SessionID)
+		model, effort := codexTurnSettings(cfg.ClaudeArgs)
+		return newCodexRunner(codexRunnerConfig{
+			Binary:   bin,
+			Home:     h.home,
+			Dir:      dir,
+			Tag:      tag,
+			Sink:     h.sink.sinkForTag(tag.ID),
+			OnExit:   h.sink.exitForTag(tag.ID),
+			Model:    model,
+			Effort:   effort,
+			Backoff:  cfg.BackoffInitial,
+			Log:      cfg.Logger,
+			ThreadID: cfg.ThreadID,
+			OnThread: recordCodexThread(cfg.RecordThread, cfg.Logger),
+		}), nil
+	}
+}
+
+// recordCodexThread adapts the pool's RecordThread to the runner's OnThread
+// (#2622). A report for an id the pool no longer holds is a stale one racing a
+// rotation and is dropped quietly; any other failure is logged, without the
+// thread id.
+func recordCodexThread(record func(sessionID, threadID string) error, log *slog.Logger) func(sessionID, threadID string) {
+	if record == nil {
+		return nil
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+	return func(sessionID, threadID string) {
+		if err := record(sessionID, threadID); err != nil && !errors.Is(err, sessions.ErrSessionNotFound) {
+			log.Warn("codex: thread not recorded in the registry", "session", sessionID, "err", err)
+		}
+	}
+}
+
+// probeCodex starts the app-server against the daemon home, checks its
+// version and its sign-in, and stops it. It opens no thread. The account's
+// details are never read, so none reach the error or the log.
+func probeCodex(bin, home, dir string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), codexStartTimeout)
+	defer cancel()
+	client, err := codexsup.Start(ctx, codexsup.Config{
+		Binary: bin, Dir: dir, CodexHome: home, ClientVersion: Version,
+	})
+	if err != nil {
+		return fmt.Errorf("probe codex: %w", err)
+	}
+	defer stopCodexClient(client)
+	if err := checkCodexVersion(client.Version()); err != nil {
+		return err
+	}
+	signedIn, err := client.SignedIn(ctx)
+	if err != nil {
+		return fmt.Errorf("probe codex: %w", err)
+	}
+	if !signedIn {
+		return fmt.Errorf("the daemon's Codex home is not signed in; sign in with CODEX_HOME=%s codex login", home)
+	}
+	return nil
+}
+
+// checkCodexVersion refuses a version below codexMinVersion or one that is
+// not MAJOR.MINOR.PATCH with an optional -prerelease or +build suffix. A
+// prerelease sorts below its release, as in semver.
+func checkCodexVersion(v string) error {
+	have, havePre, ok := parseCodexVersion(v)
+	if !ok {
+		return fmt.Errorf("cannot parse Codex version %q; Codex %s or later is required", v, codexMinVersion)
+	}
+	want, _, _ := parseCodexVersion(codexMinVersion)
+	if c := slices.Compare(have[:], want[:]); c > 0 || (c == 0 && !havePre) {
+		return nil
+	}
+	return fmt.Errorf("found Codex %q, below the required %s; upgrade Codex", v, codexMinVersion)
+}
+
+// parseCodexVersion splits v into its three numeric components and whether it
+// carries a prerelease.
+func parseCodexVersion(v string) (core [3]int, pre, ok bool) {
+	v, _, _ = strings.Cut(v, "+")
+	v, prerelease, pre := strings.Cut(v, "-")
+	parts := strings.Split(v, ".")
+	if len(parts) != len(core) || (pre && prerelease == "") {
+		return core, false, false
+	}
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return core, false, false
+		}
+		core[i] = n
+	}
+	return core, pre, true
+}
+
+// codexTurnSettings reads the session's model and effort out of the
+// Claude-shaped argv the pool composes (claudeSettingsArgs): the last
+// --model and --effort values, in either the spaced or the = form. Every other
+// flag in the argv is Claude-only and ignored. Values pass through unchanged;
+// mapping them is #2586.
+func codexTurnSettings(args []string) (model, effort string) {
+	for i := 0; i < len(args); i++ {
+		for _, flag := range []string{"--model", "--effort"} {
+			var v string
+			switch {
+			case args[i] == flag && i+1 < len(args):
+				v = args[i+1]
+			case strings.HasPrefix(args[i], flag+"="):
+				v = strings.TrimPrefix(args[i], flag+"=")
+			default:
+				continue
+			}
+			if flag == "--model" {
+				model = v
+			} else {
+				effort = v
+			}
+		}
+	}
+	return model, effort
+}
+
+// codexRunnerConfig is one Codex runner's construction input. Sink and OnExit
+// must not block; Tag is the live pool session id both are bound to. ThreadID
+// is the stored thread the first spawn resumes, empty to start one; OnThread,
+// when set, is told the live pool id and the id of every thread the runner
+// starts, so the pool can persist it (#2622).
+type codexRunnerConfig struct {
+	Binary, Home, Dir string
+	Tag               *streamSessionTag
+	Sink              func(turnevent.Event)
+	OnExit            func()
+	Model, Effort     string
+	Backoff           time.Duration
+	Log               *slog.Logger
+	ThreadID          string
+	OnThread          func(sessionID, threadID string)
+}
+
+// codexRunner is the Codex implementation of sessions.Runner: it supervises
+// one codexsup.Client at a time, respawning it after a crash and resuming the
+// same Codex thread, and gives the pool the write-refusal gates streamsup gives
+// a Claude session. Codex mints its own thread ids, so the pool's session id
+// (the tag) stays the stable key and the thread id is held beside it: in
+// memory, where a later Run after an eviction resumes it, and in the session's
+// registry entry through OnThread, where a runner rebuilt after a daemon
+// restart or a revive picks it up as ThreadID (#2622).
+//
+// Every server request takes codexsup's default decline (OnServerRequest is
+// left nil), so no approval is ever accepted until the approvals ticket.
+type codexRunner struct {
+	cfg       codexRunnerConfig
+	log       *slog.Logger
+	restartCh chan struct{}
+
+	// mu is a leaf: it is never held across a Codex call or with trMu.
+	mu          sync.Mutex
+	client      *codexsup.Client // bound live client, nil when none may take a turn
+	threadID    string           // Codex thread to resume; empty means start one
+	turnID      string           // running turn, from turn/started
+	freshSeq    uint64           // bumped by RestartFresh
+	armFreshSeq uint64           // freshSeq when the rotation gate was armed
+	rotateGen   uint64
+	rotating    bool
+	tearingDown bool
+	iterCancel  context.CancelFunc
+	model       string
+	effort      string
+	state       sessions.State
+
+	// trMu guards the current spawn's translator between its read loop and
+	// WriteUserTurn's model update.
+	trMu sync.Mutex
+	tr   *codexsup.Translator
+}
+
+func newCodexRunner(cfg codexRunnerConfig) *codexRunner {
+	if cfg.Backoff <= 0 {
+		cfg.Backoff = codexBackoffInitial
+	}
+	if cfg.Sink == nil {
+		cfg.Sink = func(turnevent.Event) {}
+	}
+	log := cfg.Log
+	if log == nil {
+		log = slog.Default()
+	}
+	return &codexRunner{
+		cfg:       cfg,
+		log:       log,
+		restartCh: make(chan struct{}, 1),
+		model:     cfg.Model,
+		effort:    cfg.Effort,
+		threadID:  cfg.ThreadID,
+	}
+}
+
+func (r *codexRunner) updateState(fn func(*sessions.State)) {
+	r.mu.Lock()
+	fn(&r.state)
+	r.mu.Unlock()
+}
+
+// State reports the supervise loop's phase. ChildPID stays 0: codexsup does
+// not expose the app-server's pid.
+func (r *codexRunner) State() sessions.State {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.state
+}
+
+// WaitForPTY has nothing to wait for: there is no terminal.
+func (r *codexRunner) WaitForPTY(context.Context) error { return nil }
+
+// Run supervises the app-server until ctx ends. Each iteration starts a
+// process, resumes the held thread (or starts one), binds the client for
+// turns, and waits for it to exit. OnExit fires after every iteration, before
+// the shutdown return, as streamsup's OnChildExit does. A deliberate restart
+// relaunches at once; a crash or a failed start backs off.
+func (r *codexRunner) Run(ctx context.Context) error {
+	r.updateState(func(s *sessions.State) {
+		s.Phase = sessions.PhaseStarting
+		s.StartedAt = time.Now()
+	})
+	defer r.updateState(func(s *sessions.State) {
+		s.Phase = sessions.PhaseStopped
+		s.NextBackoff = 0
+	})
+	delay := r.cfg.Backoff
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		iterCtx, cancel := context.WithCancel(ctx)
+		r.mu.Lock()
+		r.iterCancel = cancel
+		threadID, seq := r.threadID, r.freshSeq
+		r.mu.Unlock()
+
+		start := time.Now()
+		err := r.runOnce(iterCtx, threadID, seq)
+		cancel()
+		r.mu.Lock()
+		r.iterCancel = nil
+		r.mu.Unlock()
+		uptime := time.Since(start)
+
+		if r.cfg.OnExit != nil {
+			r.cfg.OnExit()
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil {
+			r.log.Warn("codex app-server exited", "session", r.cfg.Tag.ID(), "err", err, "uptime", uptime)
+		} else {
+			r.log.Info("codex app-server exited", "session", r.cfg.Tag.ID(), "uptime", uptime)
+		}
+		if r.drainRestart() {
+			continue
+		}
+		if uptime >= codexBackoffReset {
+			delay = r.cfg.Backoff
+		}
+		r.updateState(func(s *sessions.State) {
+			s.Phase = sessions.PhaseBackoff
+			s.RestartCount++
+			s.LastUptime = uptime
+			s.NextBackoff = delay
+		})
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-r.restartCh:
+		}
+		delay = min(delay*2, codexBackoffMax)
+	}
+}
+
+// runOnce is one supervised app-server: start, open the thread, bind, wait.
+// It returns nil when ctx ended it and the exit or start error otherwise.
+func (r *codexRunner) runOnce(ctx context.Context, threadID string, seq uint64) error {
+	r.mu.Lock()
+	model := r.model
+	r.mu.Unlock()
+	tr := codexsup.NewTranslator(model)
+	startCtx, cancelStart := context.WithTimeout(ctx, codexStartTimeout)
+	defer cancelStart()
+	client, err := codexsup.Start(startCtx, codexsup.Config{
+		Binary:        r.cfg.Binary,
+		Dir:           r.cfg.Dir,
+		CodexHome:     r.cfg.Home,
+		ClientVersion: Version,
+		OnNotification: func(method string, params json.RawMessage) {
+			r.notify(tr, method, params)
+		},
+		Log: r.log,
+	})
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		return err
+	}
+	started := threadID == ""
+	if started {
+		threadID, err = client.StartThread(startCtx)
+	} else {
+		err = client.ResumeThread(startCtx, threadID)
+	}
+	if err != nil {
+		stopCodexClient(client)
+		if ctx.Err() != nil {
+			return nil
+		}
+		return fmt.Errorf("open thread: %w", err)
+	}
+
+	r.trMu.Lock()
+	r.tr = tr
+	r.trMu.Unlock()
+	r.mu.Lock()
+	if ctx.Err() != nil {
+		r.mu.Unlock()
+		stopCodexClient(client)
+		return nil
+	}
+	// The tag is read beside the seq check: RestartFresh bumps the seq and
+	// rotates the tag in one r.mu section, so a thread this spawn started is
+	// reported under the id it belongs to, or not at all.
+	var reportTo string
+	if r.freshSeq == seq {
+		r.threadID = threadID
+		if started {
+			reportTo = r.cfg.Tag.ID()
+		}
+	}
+	r.client = client
+	r.tearingDown = false
+	if r.rotating && seq > r.armFreshSeq {
+		r.rotating = false
+	}
+	r.state.Phase = sessions.PhaseRunning
+	r.state.NextBackoff = 0
+	r.mu.Unlock()
+	if reportTo != "" && r.cfg.OnThread != nil {
+		r.cfg.OnThread(reportTo, threadID)
+	}
+
+	select {
+	case <-client.Done():
+	case <-ctx.Done():
+	}
+	r.mu.Lock()
+	r.client = nil
+	r.mu.Unlock()
+	exitErr := stopCodexClient(client)
+	r.mu.Lock()
+	r.turnID = ""
+	r.mu.Unlock()
+	if ctx.Err() != nil {
+		return nil
+	}
+	return exitErr
+}
+
+// stopCodexClient stops c within codexCallTimeout and returns its exit error.
+func stopCodexClient(c *codexsup.Client) error {
+	ctx, cancel := context.WithTimeout(context.Background(), codexCallTimeout)
+	defer cancel()
+	return c.Stop(ctx)
+}
+
+// notify runs on the client's read loop. It tracks the running turn — ordered
+// with the turn's own notifications, so it cannot race StartTurn's return —
+// and forwards the translated events. Sink is non-blocking.
+func (r *codexRunner) notify(tr *codexsup.Translator, method string, params json.RawMessage) {
+	switch method {
+	case "turn/started":
+		var p struct {
+			Turn struct {
+				ID string `json:"id"`
+			} `json:"turn"`
+		}
+		if json.Unmarshal(params, &p) == nil && p.Turn.ID != "" {
+			r.mu.Lock()
+			r.turnID = p.Turn.ID
+			r.mu.Unlock()
+		}
+	case "turn/completed":
+		r.mu.Lock()
+		r.turnID = ""
+		r.mu.Unlock()
+	}
+	r.trMu.Lock()
+	events := tr.Translate(method, params)
+	r.trMu.Unlock()
+	for _, ev := range events {
+		r.cfg.Sink(ev)
+	}
+}
+
+// WriteUserTurn starts a Codex turn with payload as its text and the session's
+// model and effort as per-turn overrides. It refuses with the retryable
+// streamsup.ErrNoLiveChild, sending nothing, while a rotation or teardown is
+// armed or no client is bound, and claims the queue's commit gate before
+// sending. Neither the payload nor the conversation id is logged.
+func (r *codexRunner) WriteUserTurn(ctx context.Context, _ string, payload []byte) error {
+	r.mu.Lock()
+	client, rotating, tearingDown := r.client, r.rotating, r.tearingDown
+	model, effort := r.model, r.effort
+	r.mu.Unlock()
+	switch {
+	case rotating:
+		r.log.Info("codex: turn refused; new_session rotation in flight", "session", r.cfg.Tag.ID())
+		return streamsup.ErrNoLiveChild
+	case client == nil:
+		return streamsup.ErrNoLiveChild
+	case tearingDown:
+		r.log.Info("codex: turn refused; session teardown in flight", "session", r.cfg.Tag.ID())
+		return streamsup.ErrNoLiveChild
+	}
+	if gate := turncommit.From(ctx); gate != nil && !gate() {
+		return turncommit.ErrDropped
+	}
+	if model != "" {
+		r.trMu.Lock()
+		if r.tr != nil {
+			r.tr.SetModel(model)
+		}
+		r.trMu.Unlock()
+	}
+	if _, err := client.StartTurn(ctx, codexsup.TurnInput{Text: string(payload), Model: model, Effort: effort}); err != nil {
+		return fmt.Errorf("cmd/pyry: codex turn: %w", err)
+	}
+	return nil
+}
+
+// Interrupt ends the running turn, which then completes as interrupted. With
+// no client bound it is the retryable ErrNoLiveChild; with no turn running
+// there is nothing to end.
+func (r *codexRunner) Interrupt() error {
+	r.mu.Lock()
+	client, turnID := r.client, r.turnID
+	r.mu.Unlock()
+	if client == nil {
+		return streamsup.ErrNoLiveChild
+	}
+	if turnID == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), codexCallTimeout)
+	defer cancel()
+	return client.Interrupt(ctx, turnID)
+}
+
+func (r *codexRunner) setTurnSettings(args []string) {
+	model, effort := codexTurnSettings(args)
+	r.mu.Lock()
+	r.model, r.effort = model, effort
+	r.mu.Unlock()
+}
+
+// endIteration asks Run to relaunch at once and ends the live process.
+func (r *codexRunner) endIteration() {
+	r.mu.Lock()
+	cancel := r.iterCancel
+	r.mu.Unlock()
+	select {
+	case r.restartCh <- struct{}{}:
+	default:
+	}
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (r *codexRunner) drainRestart() bool {
+	select {
+	case <-r.restartCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// Restart installs the model and effort from args and respawns the
+// app-server, which resumes the same thread. The posture is not in args, so a
+// restart cannot change it.
+func (r *codexRunner) Restart(args []string) {
+	r.setTurnSettings(args)
+	r.endIteration()
+}
+
+// SetSpawnArgs installs the model and effort from args for the next turn,
+// leaving the live process alone.
+func (r *codexRunner) SetSpawnArgs(args []string) { r.setTurnSettings(args) }
+
+// SetModel takes effect on the next turn, which carries the model as its
+// override, so it reports success.
+func (r *codexRunner) SetModel(model string) error {
+	r.mu.Lock()
+	r.model = model
+	r.mu.Unlock()
+	return nil
+}
+
+// SetSpawnPermissionMode is a no-op: every spawn runs under the daemon's
+// read-only config, not the stored Claude mode.
+func (r *codexRunner) SetSpawnPermissionMode(string) {}
+
+// SetPermissionMode has no live form for Codex, so it always fails rather
+// than report a change that did not happen.
+func (r *codexRunner) SetPermissionMode(string) error { return errCodexPostureFixed }
+
+// BeginTeardown refuses turns until the next client binds.
+func (r *codexRunner) BeginTeardown() {
+	r.mu.Lock()
+	r.tearingDown = true
+	r.mu.Unlock()
+}
+
+// BeginRotation refuses turns until a client binds from a spawn that follows
+// a RestartFresh issued after this call. The returned abort clears the gate
+// unless another BeginRotation has re-armed it since.
+func (r *codexRunner) BeginRotation() func() {
+	r.mu.Lock()
+	r.rotating = true
+	r.rotateGen++
+	r.armFreshSeq = r.freshSeq
+	gen := r.rotateGen
+	r.mu.Unlock()
+	return func() {
+		r.mu.Lock()
+		if r.rotateGen == gen {
+			r.rotating = false
+		}
+		r.mu.Unlock()
+	}
+}
+
+// RestartFresh moves the runner onto the pool's new session id and respawns
+// on a new Codex thread; the old thread id is dropped, not resumed.
+func (r *codexRunner) RestartFresh(newID string) {
+	if newID == "" {
+		r.log.Warn("codex: RestartFresh called with empty id; ignoring")
+		return
+	}
+	r.mu.Lock()
+	r.threadID = ""
+	r.freshSeq++
+	r.cfg.Tag.Rotate(newID)
+	r.mu.Unlock()
+	r.endIteration()
+}
+
+var _ sessions.Runner = (*codexRunner)(nil)

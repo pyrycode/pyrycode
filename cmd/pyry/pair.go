@@ -34,7 +34,7 @@ const pairVerbList = "list, revoke, preflight"
 var pairLockWait = devices.DefaultLockWait
 
 // mintRequest is one ask of mintDevice: where to write, how long to wait for the
-// lock, what to call the device, and whether it may answer remote permissions.
+// lock, what to call the device, and whether it holds the privileged bit.
 //
 // A STRUCT RATHER THAN FIVE POSITIONAL ARGUMENTS because two of the fields are
 // booleans-in-effect whose meaning is invisible at a call site — a bare `false`
@@ -256,7 +256,7 @@ func parsePairArgs(args []string) (pairArgs, error) {
 	instance := fs.String("pyry-name", defaultName(), "instance name (state dir: ~/.pyry/<name>/)")
 	deviceName := fs.String("name", "", "device label persisted in the registry (default: device-<short>)")
 	relay := fs.String("relay", "", "relay URL override (default: ~/.pyry/config.json or built-in default)")
-	allowRemotePermissions := fs.Bool("allow-remote-permissions", false, "authorize this device to answer remote permission/trust/destructive modals (default OFF)")
+	allowRemotePermissions := fs.Bool("allow-remote-permissions", false, "authorize this device to pair other devices and control MCP servers (default OFF); every paired device may answer prompts")
 	if err := fs.Parse(args); err != nil {
 		return pairArgs{}, err
 	}
@@ -461,7 +461,7 @@ func renderPairList(list []devices.Device, w io.Writer) error {
 		return sorted[i].Name < sorted[j].Name
 	})
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tPAIRED\tLAST SEEN\tTOKEN-PREFIX")
+	fmt.Fprintln(tw, "NAME\tPAIRED\tLAST SEEN\tVERSION\tTOKEN-PREFIX")
 	for _, d := range sorted {
 		lastSeen := "never"
 		if !d.LastSeenAt.IsZero() {
@@ -471,8 +471,11 @@ func renderPairList(list []devices.Device, w io.Writer) error {
 		if len(prefix) >= 8 {
 			prefix = prefix[:8]
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
-			d.Name, d.PairedAt.Format(time.RFC3339), lastSeen, prefix)
+		// VERSION is the client_version the device's last accepted hello
+		// reported (#2577), already admitted by the handshake; empty for a
+		// device that has not connected since, or reported nothing usable.
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			d.Name, d.PairedAt.Format(time.RFC3339), lastSeen, d.ClientVersion, prefix)
 	}
 	return tw.Flush()
 }

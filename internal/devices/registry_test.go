@@ -855,3 +855,47 @@ func TestRegistry_ClearRedeemBy_EmptyRegistry(t *testing.T) {
 		t.Fatalf("ClearRedeemBy on an empty registry = true, want false")
 	}
 }
+
+// TestRegistry_SetClientVersion pins the return value the handshake's version
+// record (#2577) keys its Save decision on: true iff a row matched AND the value
+// changed, so a reconnect reporting the version already stored writes nothing.
+func TestRegistry_SetClientVersion(t *testing.T) {
+	t.Parallel()
+	aHash := HashToken("a")
+	bHash := HashToken("b")
+
+	tests := []struct {
+		name      string
+		aVersion  string
+		tokenHash string
+		version   string
+		wantOK    bool
+		wantA     string
+	}{
+		{name: "first-version-sets", aVersion: "", tokenHash: aHash, version: "1.4.0", wantOK: true, wantA: "1.4.0"},
+		{name: "different-version-replaces", aVersion: "1.4.0", tokenHash: aHash, version: "1.5.0", wantOK: true, wantA: "1.5.0"},
+		{name: "same-version-reports-no-change", aVersion: "1.4.0", tokenHash: aHash, version: "1.4.0", wantOK: false, wantA: "1.4.0"},
+		{name: "empty-clears-stored", aVersion: "1.4.0", tokenHash: aHash, version: "", wantOK: true, wantA: ""},
+		{name: "miss-unknown-hash", aVersion: "1.4.0", tokenHash: HashToken("z"), version: "9.9.9", wantOK: false, wantA: "1.4.0"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := &Registry{}
+			r.Add(Device{Name: "alice", TokenHash: aHash, ClientVersion: tc.aVersion})
+			r.Add(Device{Name: "bob", TokenHash: bHash, ClientVersion: "0.1.0"})
+
+			if got := r.SetClientVersion(tc.tokenHash, tc.version); got != tc.wantOK {
+				t.Fatalf("SetClientVersion(%q, %q) = %v, want %v", tc.tokenHash, tc.version, got, tc.wantOK)
+			}
+			got := r.List()
+			if got[0].ClientVersion != tc.wantA {
+				t.Errorf("alice ClientVersion = %q, want %q", got[0].ClientVersion, tc.wantA)
+			}
+			if got[1].ClientVersion != "0.1.0" {
+				t.Errorf("bob ClientVersion = %q, want untouched %q", got[1].ClientVersion, "0.1.0")
+			}
+		})
+	}
+}

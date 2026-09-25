@@ -4,6 +4,8 @@
 
 Accepted (#2020)
 
+**Amendment — 2026-09-24 ([#2576](../../specs/architecture/2576-app-compatibility-policy.md)).** ADR 025's 2026-06-22 amendment retired old-phone interop as a requirement on the premise that this tool is self-hosted with no old-app install base; #2576 retires that premise (see ADR 025's own 2026-09-24 amendment) once other people install the apps from app stores. `docs/protocol-mobile.md` § Compatibility now defines a daemon-configured minimum app version and an "app too old" rejection (`client.update_required`, WS close `4412`) for a build below it. **This does not change the decision below.** Capability strings remain the only way a client detects whether a *daemon* supports a given wire feature — that question still has no orderable answer, because `pyry --version` still reports a commit sha. The app version introduced by #2576 answers a different question, asked in the other direction: the daemon reading which *app build* is talking to it, for exactly one purpose, refusing a build old enough to be retired. Store releases of one app are monotonic, which is what makes a minimum-version comparison meaningful for that one purpose; the daemon's own build identity still is not, which is why this decision's reasoning for capability strings is untouched.
+
 ## Context
 
 `pyry --version` reports a commit sha, which carries no ordering. A client that

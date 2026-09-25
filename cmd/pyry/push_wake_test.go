@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -93,6 +94,27 @@ func TestPushWaker_Eligibility(t *testing.T) {
 				t.Errorf("wakes = %v, want %v", sends.tokens, tc.want)
 			}
 		})
+	}
+}
+
+// TestPushWaker_NewestPairedFirst pins #2602: the relay drops wakes past its
+// per-server-id burst, so a pass sends newest PairedAt first and dead
+// registrations from older pairings cannot spend the burst before the live phone.
+func TestPushWaker_NewestPairedFirst(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var devs []devices.Device // oldest first, as the registry keeps them
+	for i := range 7 {
+		tok := fmt.Sprintf("tok-%d", i)
+		d := fcmDevice("h"+tok, tok, tok)
+		d.PairedAt = base.Add(time.Duration(i) * 24 * time.Hour)
+		devs = append(devs, d)
+	}
+	w, sends, _, _ := newTestPushWaker(nil, devs)
+	w.wakeAbsent(context.Background())
+	want := []string{"tok-6", "tok-5", "tok-4", "tok-3", "tok-2", "tok-1", "tok-0"}
+	if !slices.Equal(sends.tokens, want) {
+		t.Errorf("wake order = %v, want %v", sends.tokens, want)
 	}
 }
 

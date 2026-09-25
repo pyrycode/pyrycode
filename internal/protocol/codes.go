@@ -292,6 +292,26 @@ const (
 	// never-echo obligation. The message is a compile-time constant in
 	// internal/relay and the confinement error's text reaches neither it nor a log.
 	CodeNewSessionWorkspaceRefused = "new_session.workspace_refused" // the rotation completed; the recorded workspace was refused, so the successor stayed put
+
+	// Client errors (#2576; docs/protocol-mobile.md § Compatibility). The
+	// app-too-old rejection: the hello's client_version names an app build older
+	// than the minimum this host holds for that app, or — once any minimum is
+	// set — cannot be parsed at all. RESERVED AHEAD OF ITS SENDER, deliberately
+	// unlike the MINTED-WITH-THE-HANDLER groups above: the compatibility policy
+	// has to be published before the app releases that obey it, and nothing
+	// enforces it until a later ticket adds the minimum.
+	//
+	// A NEW CATEGORY, not protocol.unsupported (which is about protocol
+	// versions) and not auth (the device is authenticated): the fault is the
+	// client build. It is sent sealed, after the Noise handshake and AFTER the
+	// token check, so an unauthenticated peer learns nothing about the host's
+	// version policy; the relay's StatusClientUpdateRequired close follows it.
+	//
+	// NON-RETRYABLE: the same build fails identically, and only an app update
+	// repairs it. Terminal for THIS host only — a client keeps its other hosts.
+	// The message is static; the minimum travels in
+	// ErrorPayload.MinClientVersion.
+	CodeClientUpdateRequired = "client.update_required" // the app build is older than this host's minimum; never retryable
 )
 
 // Envelope-type constants — wire values for Envelope.Type
@@ -349,6 +369,14 @@ const (
 	// It is a inboundAppTypeSet member, not a v2 control frame — see the v1/v2 partition
 	// in envelope.go / compat_test.go.
 	TypeUnarchiveConversation = "unarchive_conversation"
+	// TypeSetConversationMuted is a phone → binary dispatch.Route write verb
+	// (#2572) that sets or clears an existing conversation's durable muted flag
+	// (IsMuted) from the payload's required muted bool, and replies with the
+	// reused conversation_updated record. Unlike archive, the same record is also
+	// pushed to every interactive conn, so other clients stop alerting without
+	// re-listing. It is a inboundAppTypeSet member, not a v2 control frame — see
+	// the v1/v2 partition in envelope.go / compat_test.go.
+	TypeSetConversationMuted = "set_conversation_muted"
 	// TypeChangeWorkspace is a phone → binary dispatch.Route write verb (like
 	// rename_conversation / delete_conversation): it moves an existing
 	// conversation to a client-chosen workspace folder by updating its recorded
@@ -1529,6 +1557,20 @@ const (
 // declare-then-serve sequencing as #1752→#1897, #1895→#1897 and #1983→#1984.
 const (
 	TypeRequestAttachment = "request_attachment" // phone → binary, inbound v2 control (switch-intercepted — #2054)
+)
+
+// Mobile Protocol v2 LIVE WORKSPACE READ (#2598). The frame a client sends to
+// read one markdown file as it is on the host NOW, from the recorded workspace of
+// the conversation it names. Its payload is ReadWorkspaceFilePayload
+// (attachments.go), and it is answered exactly as TypeRequestAttachment is: an
+// attachment_chunk stream correlated by in_reply_to, or one
+// CodeAttachmentNotFound / CodeAttachmentStreamAborted TypeError.
+//
+// Declared and served in one slice, unlike #2052→#2054: the handler is the
+// declaration's only consumer, so there is no pending-handler interval to file
+// in excludedTypes.
+const (
+	TypeReadWorkspaceFile = "read_workspace_file" // phone → binary, inbound v2 control (switch-intercepted — #2598)
 )
 
 // Mobile Protocol v2 ATTACHMENT ANNOUNCEMENT (#2082; docs/protocol-mobile.md

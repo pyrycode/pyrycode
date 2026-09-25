@@ -12,6 +12,7 @@ Lives in the same `internal/devices` package as `Device`, `HashToken`, `VerifyTo
 - **Handshake reload (#782):** `(*Registry).Reload(path)` — reconciles the on-disk device set into the in-memory registry so a device paired via `pyry pair` after daemon startup authenticates on its next handshake without a restart (and a `pyry pair revoke` stops being accepted, for free). Ninth export, called by `internal/relay`'s v2 handshake (before `Validate`) and by the `register_push_token` handler (before `Save`, as a clobber guard). See § Reload below and [ADR 029](../decisions/029-devices-registry-reload-at-handshake.md).
 - **Redemption clear (#1528):** `(*Registry).ClearRedeemBy(tokenHash string) bool` — zeroes `Device.RedeemBy` on the matching device under `r.mu`, returning true *iff* a row matched **and** its deadline was non-zero. Tenth export. The return value is what decides whether a `Save` is warranted, so idempotency is decided by the registry rather than re-derived at the call site. Consumed by `internal/relay`'s v2 handshake accept tail (`recordRedemption`) — the first `devices.json` writer built on `WithLock` from birth. See § `ClearRedeemBy` below.
 - **Redemption enforcement (#1529):** `Validate`'s return widened from `(Device, bool)` to `(Device, ValidateResult)` — a third outcome, `ValidateWindowElapsed`, refuses a matched device whose `RedeemBy` is set and already past, distinct from `ValidateUnknownToken` so the v2 handshake can log the two apart while giving both the identical `4401` / `auth.invalid_token` wire shape. See § `Validate` below.
+- **Client version record (#2577):** `(*Registry).SetClientVersion(tokenHash, version string) bool` — sets `Device.ClientVersion` on the matching device under `r.mu`, returning true *iff* a row matched **and** the value changed. Eleventh export, same changed-only-return shape as `ClearRedeemBy` so the caller's `Save` decision lives in the registry. Does no filtering itself — the caller (`internal/relay`'s v2 handshake) admits through `sessions.AdmitClientVersion` before calling. Consumed by `recordClientVersion`, which runs immediately after `recordRedemption` on the same handshake accept tail. See § `SetClientVersion` below.
 
 ## Surface
 
@@ -28,6 +29,7 @@ func (r *Registry) Validate(plain string) (Device, ValidateResult)
 func (r *Registry) UpdatePushRegistration(tokenHash, platform, pushToken, name string) bool
 func (r *Registry) Reload(path string) error
 func (r *Registry) ClearRedeemBy(tokenHash string) bool
+func (r *Registry) SetClientVersion(tokenHash, version string) bool
 ```
 
 `Registry` holds the in-memory device slice plus a guarding mutex. Construct via `Load` (cold-start mints empty; warm-start reads from disk); persist via `Save`. Methods are safe for concurrent use.
@@ -49,13 +51,16 @@ The registry API is path-agnostic — `Load(path)` and `Save(path)` take any abs
       "token_hash": "ba7816bf...",
       "name": "Juhana's Pixel 8",
       "paired_at": "2026-05-09T12:34:56.789Z",
-      "last_seen_at": "2026-05-09T12:35:01.012Z"
+      "last_seen_at": "2026-05-09T12:35:01.012Z",
+      "client_version": "pyrycode-mobile/1.4.0"
     }
   ]
 }
 ```
 
 Envelope shape (`{"devices": [...]}`), not a bare top-level array. Reserves room for future top-level fields (schema version, push-token registration metadata per `protocol-mobile.md:495`) without breaking jq pipelines or stdlib decoder discipline. Same future-proofing rationale as the sessions registry's `{"sessions": [...]}` envelope.
+
+`client_version` (#2577) is `omitempty` — a record with no version, including every record predating the field, keeps the key off disk and decodes to `""`. It holds the raw `client_version` string the device's most recent accepted hello reported, admitted through `sessions.AdmitClientVersion` (the same rule `admitClient` applies to the retained session-prompt copy); a value the rule refuses is stored as `""`, not the rejected text. See § `SetClientVersion` below for the write path.
 
 No `version` field today (out of scope per AC; defer until first migration). `Device` JSON tags are pinned by [`features/devices-package.md`](devices-package.md).
 
@@ -454,6 +459,33 @@ both from `internal/relay/v2session_redemption_test.go`:
   reply *and* reopen the `token_hash`-in-a-decode-error path this design closes
   by construction, and nothing would redden. Worth pinning on the next
   `WithLock` caller with a best-effort (rather than abandon-on-failure) reload.
+
+## `SetClientVersion` — app-version record (#2577)
+
+`SetClientVersion(tokenHash, version string) bool` sets `Device.ClientVersion`
+on the row whose `TokenHash` matches, under `r.mu`, in the same indexed-loop
+shape as `UpdatePushRegistration` and `ClearRedeemBy`. The return value is the
+same "was a `Save` warranted" signal as `ClearRedeemBy`'s: true *iff* a device
+matched **and** the stored value actually changed. A device that reconnects
+with the same version it last reported — the common case — returns false, so
+the caller decides "nothing to persist" from this one bool with no separate
+before/after comparison.
+
+Unlike the filter-then-store split elsewhere in this ticket, `SetClientVersion`
+does no admission of its own: it stores whatever string it is given, verbatim,
+including an empty one. The registry has no opinion on what makes a version
+string acceptable — that is `internal/sessions.AdmitClientVersion`'s job (the
+same rule `admitClient` applies to the client-identity system prompt, exported
+so the check exists once — see
+[`features/sessions-package-key-types-writesystemprompt-systemprompttext.md`](sessions-package-key-types-writesystemprompt-systemprompttext.md)).
+The caller, `internal/relay`'s `recordClientVersion`, admits before calling.
+
+Consumed the same way `ClearRedeemBy` is: `recordClientVersion` runs
+`devices.WithLock` → `Reload` → `SetClientVersion` → conditional `Save`,
+immediately after `recordRedemption` on the v2 handshake's accept tail — see
+[the noise_init happy-and-failure-path doc](v2-session-manager-state-machine-noise-init-happy-and-failure-path.md)
+for the call site, its placement rationale, and the accepted cost of a device
+that redeems its token and reports a new version in the same hello.
 
 ## Out of scope (deferred)
 

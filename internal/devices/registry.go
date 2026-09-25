@@ -273,6 +273,30 @@ func (r *Registry) ClearRedeemBy(tokenHash string) bool {
 	return false
 }
 
+// SetClientVersion sets ClientVersion on the device whose TokenHash equals
+// tokenHash. Returns true iff a matching device was found AND its stored value
+// differed — iff a Save is warranted — so a reconnect reporting the version
+// already stored costs the caller no write. It stores version as given: the
+// caller admits it first (see Device.ClientVersion). Caller is responsible for
+// persisting via Save.
+//
+// Concurrency: serialized under Registry.mu; takes no file lock, as with
+// ClearRedeemBy.
+func (r *Registry) SetClientVersion(tokenHash, version string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.devices {
+		if r.devices[i].TokenHash == tokenHash {
+			if r.devices[i].ClientVersion == version {
+				return false
+			}
+			r.devices[i].ClientVersion = version
+			return true
+		}
+	}
+	return false
+}
+
 // FindByTokenHash returns the device whose TokenHash equals hash, and true if
 // one was found. Comparison is byte-exact; constant-time comparison is not
 // required at the hash↔hash boundary (VerifyToken owns the plain↔hash

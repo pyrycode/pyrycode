@@ -162,9 +162,40 @@ func TestQuestionResolverV2_Refusal_GatedDeviceResolvesToTheRefusalDeny(t *testi
 	assertOneRecord(t, logBuf, batchID, "denied")
 }
 
-// AC-2: ineligibility is decided BEFORE the batch is consumed. A device with the
-// opt-in bit unset and a connection with no authenticated device at all both deny,
-// on both arms.
+// #2605: a device with the AllowRemotePermissions bit OFF answers and refuses a
+// batch exactly as a privileged device does — the one-shot is consumed, one
+// question_dismissed is sent, and one allowed/denied record names the device.
+func TestQuestionResolverV2_UnprivilegedDeviceResolves(t *testing.T) {
+	t.Parallel()
+
+	want := map[string]string{"answer": "allowed", "refusal": "denied"}
+	for _, arm := range questionArms {
+		arm := arm
+		t.Run(arm.name, func(t *testing.T) {
+			t.Parallel()
+
+			logger, logBuf := auditLogger()
+			f := newQuestionFixture(t, testConvID, logger)
+			_, _, batchID := surfacedQuestion(t, f, multiQuestionText)
+			r := gatedResolver(f, logger)
+
+			if !arm.call(r, batchID, testDevice(t)) {
+				t.Fatal("resolution = false for an unprivileged device, want true")
+			}
+			waitPush(t, f.pushed)
+			if got := pushTypes(f.bcast.pushes); len(got) != 1 || got[0] != protocol.TypeQuestionDismissed {
+				t.Fatalf("pushes = %v, want exactly one question_dismissed", got)
+			}
+			if _, ok := f.qreg.Lookup(batchID); ok {
+				t.Error("batch still outstanding; the resolution must consume the one-shot")
+			}
+			assertOneRecord(t, logBuf, batchID, want[arm.name])
+		})
+	}
+}
+
+// AC-2: ineligibility is decided BEFORE the batch is consumed. A connection with
+// no authenticated device denies, on both arms.
 //
 // "Left outstanding" is asserted in the form that matters — STILL ANSWERABLE, not
 // merely still present. Each row drives a legitimate gated answer through the same
@@ -178,7 +209,6 @@ func TestQuestionResolverV2_GateDeniesBeforeConsume(t *testing.T) {
 		name string
 		dev  func(*testing.T) *devices.Device
 	}{
-		{"opt-in unset", func(t *testing.T) *devices.Device { return testDevice(t) }},
 		{"no authenticated device", func(*testing.T) *devices.Device { return nil }},
 	}
 	for _, arm := range questionArms {
@@ -273,8 +303,8 @@ func TestQuestionResolverV2_AuditRecordsAreDistinguishableAndContentFree(t *test
 		t.Fatal("ResolveRefusal = false for an outstanding batch and a gated device")
 	}
 	waitPush(t, denied.pushed)
-	if gatedResolver(unauthorized, logger).ResolveAnswer(answerPayload(unauthorizedID, secretAnswers), testDevice(t)) {
-		t.Error("ResolveAnswer = true for a device that may not answer remote prompts")
+	if gatedResolver(unauthorized, logger).ResolveAnswer(answerPayload(unauthorizedID, secretAnswers), nil) {
+		t.Error("ResolveAnswer = true for a connection with no authenticated device")
 	}
 
 	recs := auditRecords(t, logBuf)
@@ -302,9 +332,15 @@ func TestQuestionResolverV2_AuditRecordsAreDistinguishableAndContentFree(t *test
 		if rec["source"] != "remote" {
 			t.Errorf("source = %v, want remote", rec["source"])
 		}
-		if rec["device_hash"] != dev.TokenHash || rec["device_label"] != dev.Name {
-			t.Errorf("identity = {%v %v}, want the device's non-secret hash + label {%q %q}",
-				rec["device_hash"], rec["device_label"], dev.TokenHash, dev.Name)
+		wantHash, wantLabel := dev.TokenHash, dev.Name
+		if batchID == unauthorizedID {
+			wantHash, wantLabel = "", "" // no authenticated device, no identity
+		}
+		gotHash, _ := rec["device_hash"].(string)
+		gotLabel, _ := rec["device_label"].(string)
+		if gotHash != wantHash || gotLabel != wantLabel {
+			t.Errorf("identity = {%q %q}, want the device's non-secret hash + label {%q %q}",
+				gotHash, gotLabel, wantHash, wantLabel)
 		}
 	}
 

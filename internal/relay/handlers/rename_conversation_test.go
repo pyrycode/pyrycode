@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -166,6 +167,37 @@ func TestRenameConversation_Success_UpdatesReplyAndRow(t *testing.T) {
 	}
 	if list[0].Name == nil || *list[0].Name != renameConvNewName {
 		t.Errorf("listed Name = %v, want pointer to %q", list[0].Name, renameConvNewName)
+	}
+}
+
+// #2571 AC3: renaming a muted conversation replies is_muted: true. Mobile folds
+// the reply into its list in place, so a record without the stored flag would
+// silently unmute the channel there. Asserted on the raw payload bytes too, so
+// the key's presence is pinned, not only its decoded value.
+func TestRenameConversation_MutedConversation_ReplyKeepsMuted(t *testing.T) {
+	t.Parallel()
+	reg, regPath := newRenameConvReg(t)
+	reg.Update(conversations.ConversationID(renameConvTargetID), func(cv *conversations.Conversation) {
+		cv.IsMuted = true
+	})
+	c, recv := newRenameConvConn(t)
+	req := renameConvRequest(t, protocol.RenameConversationPayload{
+		ConversationID: renameConvTargetID,
+		Name:           renameConvNewName,
+	})
+
+	h := RenameConversation(reg, regPath, testLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	env := assertRenameConvEnvelopeShape(t, recv(), protocol.TypeConversationUpdated)
+	if !strings.Contains(string(env.Payload), `"is_muted":true`) {
+		t.Errorf("reply payload lacks \"is_muted\":true:\n%s", env.Payload)
+	}
+	stored, ok := reg.Get(conversations.ConversationID(renameConvTargetID))
+	if !ok || !stored.IsMuted {
+		t.Errorf("stored row after rename: got %+v (present=%v), want IsMuted=true", stored, ok)
 	}
 }
 

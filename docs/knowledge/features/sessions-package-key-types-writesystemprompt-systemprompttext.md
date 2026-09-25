@@ -176,8 +176,27 @@ an allocation multiplier. See
 [the relay enumeration doc](v2-session-manager-state-machine-concurrency-safe-open-session-enumeratio.md)
 for the retention side.
 
+**`maxClientVersionBytes` (32) constrained a wire-format decision made two layers away (#2576).** The compatibility-policy ticket that defined `client_version`'s `<app>/<MAJOR>.<MINOR>.<PATCH>` shape almost missed this bound: its first pass capped the format at 64 bytes, matching `internal/relay`'s separate `maxRetainedClientVersionBytes` retention ceiling above, and only a security-review pass caught that a 33–64-byte well-formed version would retain into the session but then be silently dropped here at the *display* door, never reaching the prompt. The format is now capped at 32 bytes for that reason — the longest plausible value, `pyrycode-desktop/100.100.100`, is 28 bytes — so no well-formed `client_version` can pass `internal/relay`'s retention gate and then fail this package's admission gate. A wire-format ticket that adds a new bounded field should check both this package's admission constants and `internal/relay`'s retention ones before picking a length, not just one of the two.
+
 See [docs/specs/architecture/2148-client-identity-system-prompt.md](../../specs/architecture/2148-client-identity-system-prompt.md)
 for the full design, the trust-boundary walk, and the security review.
+
+### The version rule was exported, not duplicated (#2577)
+
+`internal/relay` needed the same admission rule for a second purpose — persisting
+`client_version` onto a paired device's `devices.json` record for `pyry pair
+list` — and `admitClient`'s version arm is now reachable as the standalone
+`AdmitClientVersion(v string) string`, which `admitClient` itself calls so the
+character-set-plus-`maxClientVersionBytes` check exists in exactly one place.
+`internal/relay` already depended on `internal/sessions` transitively (via
+`internal/control`), so importing it directly introduced no cycle. The
+alternative — reimplementing the same bound and character set inside
+`internal/relay` — was the one option the ticket explicitly ruled out: two
+filters drift the moment either one's bound changes without the other
+noticing, which is exactly the failure #2576's near-miss above (a 64-vs-32-byte
+mismatch between two independent constants) shows actually happens. See
+[`features/devices-registry.md`](devices-registry.md) § `SetClientVersion` for
+the consuming write path.
 
 ## Carrying the conversation's handoff note (#2475)
 

@@ -1288,6 +1288,77 @@ func TestRegistry_Save_ActiveOmitsArchivedKey(t *testing.T) {
 	}
 }
 
+// #2571 AC1: the muted flag survives a registry save and reload, in both states.
+func TestRegistry_Muted_RoundTrip(t *testing.T) {
+	t.Parallel()
+	const mutedID ConversationID = "11111111-2222-4333-8444-555555555555"
+	const loudID ConversationID = "22222222-2222-4333-8444-555555555555"
+	when := mustParseTime(t, "2026-09-24T12:34:56.789Z")
+
+	r := &Registry{}
+	r.Create(Conversation{ID: mutedID, Cwd: "/a", IsMuted: true, LastUsedAt: when})
+	r.Create(Conversation{ID: loudID, Cwd: "/b", LastUsedAt: when.Add(time.Second)})
+
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if got, ok := back.Get(mutedID); !ok || !got.IsMuted {
+		t.Errorf("muted conversation after reload: got %+v (present=%v), want IsMuted=true", got, ok)
+	}
+	if got, ok := back.Get(loudID); !ok || got.IsMuted {
+		t.Errorf("unmuted conversation after reload: got %+v (present=%v), want IsMuted=false", got, ok)
+	}
+}
+
+// #2571 AC1: a conversations file written before the flag existed has no
+// is_muted key, and every row loads as not muted with no migration step.
+func TestRegistry_Load_AbsentMutedKeyDecodesUnmuted(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	raw := `{"conversations":[{"id":"11111111-2222-4333-8444-555555555555","cwd":"/legacy","is_promoted":true,"last_used_at":"2026-05-09T12:34:56.789Z"}]}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	r, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, ok := r.Get("11111111-2222-4333-8444-555555555555")
+	if !ok {
+		t.Fatal("legacy row missing after Load")
+	}
+	if got.IsMuted {
+		t.Error("absent is_muted key decoded as muted, want not muted (false)")
+	}
+}
+
+// #2571: the on-disk key is omitempty, like is_archived, so a registry with no
+// muted rows is byte-identical to its pre-#2571 form.
+func TestRegistry_Save_UnmutedOmitsMutedKey(t *testing.T) {
+	t.Parallel()
+	r := &Registry{}
+	r.Create(Conversation{ID: "11111111-2222-4333-8444-555555555555", Cwd: "/a", LastUsedAt: mustParseTime(t, "2026-09-24T12:34:56.789Z")})
+
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read after save: %v", err)
+	}
+	if strings.Contains(string(got), "is_muted") {
+		t.Errorf("unmuted registry serialized an is_muted key:\n%s", got)
+	}
+}
+
 // #2149 AC2/AC5: the setter stores a valid prompt verbatim, touches exactly one
 // field, and does not alias the caller's pointer.
 func TestRegistry_SetSystemPrompt_HitStoresVerbatim(t *testing.T) {
@@ -2782,5 +2853,88 @@ func TestRegistry_Seeded_AbsentKeyDecodesUnseeded(t *testing.T) {
 	}
 	if strings.Contains(string(saved), "seeded") {
 		t.Errorf("unseeded registry serialized a seeded key:\n%s", saved)
+	}
+}
+
+func TestRegistry_SetMuted_HitSetsAndClears(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	when := mustParseTime(t, "2026-05-09T12:34:56.789Z")
+
+	r := &Registry{}
+	r.Create(Conversation{
+		ID:               id,
+		Name:             strPtr("general"),
+		Cwd:              "/home/user/project",
+		CurrentSessionID: "sess-current",
+		SessionHistory:   []string{"sess-old"},
+		IsPromoted:       true,
+		IsArchived:       true,
+		LastUsedAt:       when,
+	})
+
+	// Mute → true, and every other field is left untouched.
+	if ok := r.SetMuted(id, true); !ok {
+		t.Fatal("SetMuted(true) = false, want true")
+	}
+	got, found := r.Get(id)
+	if !found {
+		t.Fatal("Get after SetMuted: not found")
+	}
+	if !got.IsMuted {
+		t.Error("IsMuted = false, want true after SetMuted(true)")
+	}
+	if got.Name == nil || *got.Name != "general" {
+		t.Errorf("Name = %v, want pointer to %q (untouched)", got.Name, "general")
+	}
+	if got.Cwd != "/home/user/project" {
+		t.Errorf("Cwd = %q, want unchanged", got.Cwd)
+	}
+	if got.CurrentSessionID != "sess-current" {
+		t.Errorf("CurrentSessionID = %q, want unchanged", got.CurrentSessionID)
+	}
+	if len(got.SessionHistory) != 1 || got.SessionHistory[0] != "sess-old" {
+		t.Errorf("SessionHistory = %v, want [sess-old] (untouched)", got.SessionHistory)
+	}
+	if !got.IsPromoted || !got.IsArchived {
+		t.Errorf("IsPromoted = %v, IsArchived = %v, want both true (untouched)", got.IsPromoted, got.IsArchived)
+	}
+	if !got.LastUsedAt.Equal(when) {
+		t.Errorf("LastUsedAt = %v, want %v (untouched)", got.LastUsedAt, when)
+	}
+
+	// Setting the value it already has is still a hit and changes nothing.
+	if ok := r.SetMuted(id, true); !ok {
+		t.Fatal("repeated SetMuted(true) = false, want true")
+	}
+	if got, _ = r.Get(id); !got.IsMuted {
+		t.Error("IsMuted = false, want true after repeated SetMuted(true)")
+	}
+
+	// Clear → false via the same method.
+	if ok := r.SetMuted(id, false); !ok {
+		t.Fatal("SetMuted(false) = false, want true")
+	}
+	if got, _ = r.Get(id); got.IsMuted {
+		t.Error("IsMuted = true, want false after SetMuted(false)")
+	}
+}
+
+func TestRegistry_SetMuted_Miss(t *testing.T) {
+	t.Parallel()
+	const present ConversationID = "11111111-2222-4333-8444-555555555555"
+	const absent ConversationID = "22222222-2222-4333-8444-555555555555"
+
+	r := &Registry{}
+	r.Create(Conversation{ID: present, Cwd: "/x"})
+
+	if ok := r.SetMuted(absent, true); ok {
+		t.Errorf("SetMuted(absent) = true, want false")
+	}
+	if n := len(r.List()); n != 1 {
+		t.Errorf("len(List) = %d, want 1 (unchanged on miss)", n)
+	}
+	if got, _ := r.Get(present); got.IsMuted {
+		t.Error("present row IsMuted = true, want false (miss must not mutate)")
 	}
 }

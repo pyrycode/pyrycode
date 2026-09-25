@@ -534,10 +534,8 @@ func (m *V2SessionManager) reconcileQueues(ctx context.Context, s *V2Session) {
 //     or the rendered screen. The conversation_id is NOT logged here; it is
 //     client-supplied and unbounded until the seam's shape check has run, and the
 //     seam records it there under its own bound. The actuation records which arm
-//     it dispatched to on the cmd/pyry side (v2.interrupt.dispatched, or
-//     v2.interrupt.no_actuator for a bound runner exposing no interrupt method),
-//     keyed by conversation id where this handler's records are keyed by conn_id
-//     (#1193).
+//     it dispatched to on the cmd/pyry side (v2.interrupt.dispatched), keyed by
+//     conversation id where this handler's records are keyed by conn_id (#1193).
 //
 // The step-1 record is Info, not Debug like the step-2 one: it reports a
 // live-daemon runtime state an operator needs at the daemon's default level

@@ -6,6 +6,10 @@
 
 **Amendment — 2026-06-22: no old-app-version support; capability negotiation is no longer a requirement.** Decision 2 below kept backward compatibility for already-paired phones running an older app: a phone advertises `interactive`, and a phone that does not falls back to the coarse `message` fan-out. That premise no longer holds. This is a self-hosted, single-operator tool. The operator controls both ends and always ships the daemon and the app together, so there is no install base of old phones to protect. Consequences: (a) the daemon may assume every phone is `interactive`; (b) the coarse / non-interactive `message` fan-out is dead code — the v2 (Noise) coarse path was removed in [#699](../codebase/699.md), leaving the structured interactive stream as the single v2 assistant-turn path (the older v1 / dispatch-leg coarse bridge is a separate mechanism and stays); (c) no future work should treat capability negotiation or old-phone interop as a requirement. The negotiation field may remain in the wire spec as a harmless additive field, but it carries no compatibility obligation. The rest of this ADR — drive model, permission model, phasing — stands unchanged. Anything below that describes the old-vs-new phone split records what was built, not a forward requirement.
 
+**Amendment — 2026-09-24: the no-install-base premise is retired ([#2576](../../specs/architecture/2576-app-compatibility-policy.md)).** The 2026-06-22 amendment above held only while this tool stayed self-hosted with one operator controlling both ends. It no longer holds once other people install the apps from app stores: app updates then lag behind the operator's own hosted daemons, which the operator updates on their own schedule and all at once, and one app can be connected to several hosted daemons running different versions mid-rollout. `docs/protocol-mobile.md` § Compatibility is now the authoritative rule for every wire change and defines the "app too old" rejection (`client.update_required` error, WS close `4412`) a daemon sends an app build older than its configured minimum. This amendment does not reopen capability negotiation as a backward-compatibility mechanism for *phones* — decision 2's `interactive` capability is unaffected — it only retires the claim that no old-app install base exists. See ADR 037 for why capability strings remain the sole mechanism for a client to detect a *daemon feature*, distinct from the minimum-version check this amendment introduces for detecting a *client build*.
+
+**Amendment — 2026-09-24: the per-device remote-permission bit no longer gates answering ([#2605](https://github.com/pyrycode/pyrycode/issues/2605)).** Operator decision (reaffirming pyrycode-mobile#440): view-only clients are not a wanted use case, yet that was the default outcome of pairing — every device paired without `--allow-remote-permissions`, and every minted device, saw prompts it could not answer. Any authenticated device may now answer a permission/trust/destructive modal or a question batch; the per-device bit narrows to gating only minting a pairing and MCP actuation. Accepted cost: a stolen unprivileged pairing can now approve a tool call. See § "Security model — remote permission granting" below for the full amendment.
+
 ## Context
 
 ### The vision
@@ -151,6 +155,18 @@ The authoritative shapes land in `docs/protocol-mobile.md` per implementing tick
 
 This is permission *answering*, default-safe. Tiered permission *scoping* (a phone with less authority than the desk) stays the deferred v3 concern.
 
+**Amendment — 2026-09-24: the per-device gate no longer applies to answering ([#2605](https://github.com/pyrycode/pyrycode/issues/2605)).** Operator decision 2026-09-24 (reaffirming the 2026-07-04 decision on pyrycode-mobile#440): view-only clients are not a wanted use case. That was, however, the default outcome of pairing: `pyry pair` leaves `AllowRemotePermissions` off unless `--allow-remote-permissions` is passed, and the mint path (`mint_pairing`) always mints with the bit off, so every device paired the normal way — from the desktop, or from another phone — was view-only. It saw prompts, its answers were refused, and nothing told it so.
+
+`#2605` drops the per-device bit from the two *answering* paths only: resolving an inbound `modal_answer` (permission/trust/destructive modals) and resolving an inbound `question_answer`/`question_refused` (question batches). **Any authenticated device may now answer both.** The unauthenticated (nil-device) case is unchanged and still fails closed with a `denied_unauthorized` audit record, the modal or batch left outstanding — the fail-closed nil-receiver shape items 2–4 above describe was already structural and needed no change; only the eligibility check downstream of it widened.
+
+The per-device bit — `AllowRemotePermissions`, and the `MayAnswerRemotePermission`/`AuthorizeRemotePermission` predicates in `internal/devices` — is **not removed**. It now gates only the two verbs whose output multiplies a compromise: minting a pairing for another device (`mint_pairing` / `pairingMinterV2.MintPairing`) and actuating an MCP server (`mcpActuatorV2.actuate`). So the bit's meaning narrows from "may pair, actuate, or answer" to "may pair other devices and control tool servers."
+
+**The property this keeps:** the mint path's stated guarantee — a stolen pairing cannot spread itself by minting more devices, or reach a tool server, on its own — is unchanged; both privileged verbs still deny an ineligible device with the same audit record as before.
+
+**The property this gives up, accepted as the cost of no view-only clients:** a stolen *unprivileged* pairing can now approve a tool call it could not before. `pyry pair revoke` (connection-scoped, as before) remains the remedy; there is no new mitigation beyond what already existed for a privileged pairing.
+
+This amendment does not reopen deny-on-timeout, the modal-nonce/idempotency design, first-answer-wins, or the destructive-confirm UX rule — items 2–5 above are unchanged. It narrows item 1 (renamed here, for clarity, as "the answering gate" vs. "the privileged gate") and nothing else. See [`docs/protocol-mobile.md`](../../protocol-mobile.md) § Modal (v2), § Question (v2), and the `2026-09-24` changelog entry for #2605, and [`features/devices-package.md`](../features/devices-package.md) § "Remote-permission gates" for the code-level split.
+
 ## Safe degradation when a screen parser breaks
 
 Screen-parser breaks are expected, especially early, because claude self-updates its terminal UI. The strategy is to degrade to a coarser-but-honest view, never to silence, and to keep one parser-independent escape hatch always available.
@@ -187,6 +203,8 @@ Symmetric with ADR 024. Rejected: there is a paired install base now, the events
 ### C. Auto-grant on timeout (or no per-device gate)
 
 Rejected outright: it makes the dangerous failure mode (silent grant of a destructive permission) the default. Default-safe means deny-on-timeout and default-OFF.
+
+**This is not what the 2026-09-24 amendment does, and the distinction is the whole point.** #2605 removes the per-device gate from *answering*, but deny-on-timeout is untouched — an unanswered prompt still safe-denies, never auto-grants — and *every* answer still requires an authenticated device; there is no unauthenticated path. What changed is which authenticated devices may answer (any, not only privileged ones), not what happens when nobody answers. See the amendment above.
 
 ### D. Permission *scoping* (tiered authority) now
 

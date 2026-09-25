@@ -41,16 +41,18 @@ type Device struct {
 	// protocol.RegisterPushTokenPayload).
 	PushToken string `json:"push_token,omitempty"`
 
-	// AllowRemotePermissions authorizes THIS device to ANSWER a remote
-	// permission / trust / destructive modal (ADR 025 § "Security model").
+	// AllowRemotePermissions is THIS device's privileged bit: it may mint a
+	// pairing for another device and actuate an MCP server. Since #2605 it
+	// does NOT gate answering a permission / trust / destructive modal or a
+	// question batch — every authenticated device may (Device.MayAnswerPrompt).
+	// The name and the on-disk key predate that change and are kept.
 	// Default OFF (the zero value): an omitted/pre-field on-disk record
-	// decodes to false = denied. Set only by
+	// decodes to false = unprivileged. Set only by
 	// `pyry pair --allow-remote-permissions`; never set or carried over the
-	// wire. Read off the authenticated *Device by the modal control loop
-	// (#703) via dispatch.Conn.Auth(). Gating applies ONLY to answering a
-	// permission-class modal; everything else a paired phone does is
-	// ungated. omitempty keeps the secure-default (false) off disk, matching
-	// the Platform/PushToken precedent.
+	// wire, so a minted device is always unprivileged. Read off the
+	// authenticated *Device via Device.MayAnswerRemotePermission. omitempty
+	// keeps the secure-default (false) off disk, matching the
+	// Platform/PushToken precedent.
 	AllowRemotePermissions bool `json:"allow_remote_permissions,omitempty"`
 
 	// RedeemBy is the instant at which an UNREDEEMED pairing record stops
@@ -81,6 +83,16 @@ type Device struct {
 	// code: swapping the operator's own binary needs local write access,
 	// at which point this deadline is not the weakest link.
 	RedeemBy time.Time `json:"redeem_by,omitzero"`
+
+	// ClientVersion is the client_version this device reported in its most
+	// recent accepted hello (#2577), stored raw so the operator can see in
+	// `pyry pair list` whether any device still runs an old app. Written only
+	// by the v2 handshake, and only after internal/sessions'
+	// AdmitClientVersion has passed it: a value that gate refuses is stored as
+	// "". It is still client-authored text — do not log it. omitempty keeps a
+	// record with no version, including every record predating the field, free
+	// of the key.
+	ClientVersion string `json:"client_version,omitempty"`
 }
 
 // RedemptionWindow is how long a freshly minted pairing token stays

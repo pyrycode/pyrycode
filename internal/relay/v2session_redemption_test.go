@@ -19,14 +19,19 @@ import (
 // holding (the same object the manager gets, mirroring production's
 // Load-once-at-startup) and the path it was written to. Save takes no lock, so
 // the sidecar does not exist afterwards and its absence stays a usable witness.
+//
+// The record already carries the version buildHelloEarlyDataCaps reports, so the
+// handshake's version write (#2577) is a no-op for these tests and their lock
+// and mtime witnesses keep observing the redemption write alone.
 func redemptionFixture(t *testing.T, redeemBy time.Time) (*devices.Registry, string) {
 	t.Helper()
 	reg := &devices.Registry{}
 	reg.Add(devices.Device{
-		TokenHash: devices.HashToken(v2TestToken),
-		Name:      v2TestDevName,
-		PairedAt:  time.Now().UTC().Add(-time.Minute),
-		RedeemBy:  redeemBy,
+		TokenHash:     devices.HashToken(v2TestToken),
+		Name:          v2TestDevName,
+		PairedAt:      time.Now().UTC().Add(-time.Minute),
+		RedeemBy:      redeemBy,
+		ClientVersion: "v2-test",
 	})
 	path := filepath.Join(t.TempDir(), "devices.json")
 	if err := reg.Save(path); err != nil {

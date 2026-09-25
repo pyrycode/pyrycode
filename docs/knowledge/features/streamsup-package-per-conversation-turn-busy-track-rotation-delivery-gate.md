@@ -32,28 +32,20 @@ leaves it alone, since the teardown it performs is the
 would only narrow the race, since that call returns after `cancel()` while the kill, `cmd.Wait`,
 and the respawn all still run later on the Run goroutine.
 
-`startFreshRunner` (`cmd/pyry/main.go`) arms the gate via `beginRotationOrNoop`, an **optional**
-type assertion (`interface{ BeginRotation() func() }`) rather than widening `RestartFresh`'s own
-assertion (`interface{ RestartFresh(string) }`, itself un-widened since `#1548` deleted the
-`*supervisor.Supervisor`-only arm it used to switch on) to also require the gate — so a runner
-that offers `RestartFresh` without a gate still rotates, just ungated, instead of silently
-degenerating into the inert default. `rotatingRunner` (`inbound_deliver_rotation_test.go`) is
-what makes that optionality load-bearing to existing coverage rather than academic: it exposes
-both methods unconditionally and leaves arming to the real `startFreshRunner`. The existing
-rotate-before-`RestartFresh` order — originally load-bearing so the (now-retired, #2137) rotation
-watcher would observe the id registered as freshly allocated before it saw the CREATE, avoiding a
-double-rotation — is preserved on a surviving reason (#1330): `rotate()` fires the `ReasonClear`
-transition fan-out, so without the gate armed first, a turn accepted in the window between that
-fan-out and the fresh child existing would write into the doomed outgoing child and be silently
-dropped. The arm is inserted ahead of both statements. `streamRunner.BeginRotation()` forwards
-it, the third concrete method reached by type assertion off the un-widened `sessions.Runner`
-after `Interrupt` (#1120) and `RestartFresh` (#1124).
-
-**A mutation-pin on the arming order needs a stub that exposes the gate.** Hoisting
-`beginRotationOrNoop` above `startFreshRunner`'s inert return is the hazard `#1330`'s ordering
-guards against (§ above); pinning it with a stub that has no `BeginRotation` method is vacuous,
-since `beginRotationOrNoop` takes its own inert branch whether or not the hoist happened, and the
-row passes on both the mutant and the fix (`#1548`).
+`startFreshRunner` (`cmd/pyry/main.go`) arms the gate by calling `r.BeginRotation()` directly —
+`Interrupt`, `RestartFresh` and `BeginRotation` all moved onto `sessions.Runner` in #2592, so every
+runner, production and test double alike, now offers all three as a build-time requirement rather
+than an optional capability. Before #2592 the arm went through `beginRotationOrNoop`, an optional
+type assertion that let a runner offering `RestartFresh` without a gate rotate ungated instead of
+degenerating into an inert default; that fail-open shape is gone along with the assertion. The
+existing rotate-before-`RestartFresh` order — originally load-bearing so the (now-retired, #2137)
+rotation watcher would observe the id registered as freshly allocated before it saw the CREATE,
+avoiding a double-rotation — is preserved on a surviving reason (#1330): `rotate()` fires the
+`ReasonClear` transition fan-out, so without the gate armed first, a turn accepted in the window
+between that fan-out and the fresh child existing would write into the doomed outgoing child and
+be silently dropped. The arm is inserted ahead of both statements. `streamRunner.BeginRotation()`
+forwards it, satisfying `sessions.Runner.BeginRotation` alongside `Interrupt` (#1120/#2592) and
+`RestartFresh` (#1124/#2592).
 
 **The refusal record is logged at `Info`, deliberately diverging from the spec's `Debug`.** The
 e2e's stability guard greps the daemon's *whole* captured stderr for the literal

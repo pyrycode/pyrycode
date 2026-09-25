@@ -1,0 +1,2 @@
+{"kind":"notification","method":"item/reasoning/summaryTextDelta","params":{"threadId":"019a0000-0000-7000-8000-000000000001","turnId":"019a0000-0000-7000-8000-000000000002","itemId":"rs_1","summaryIndex":0,"delta":"Multiply 17 by 23."}}
+{"kind":"notification","method":"item/reasoning/textDelta","params":{"threadId":"019a0000-0000-7000-8000-000000000001","turnId":"019a0000-0000-7000-8000-000000000002","itemId":"rs_1","contentIndex":0,"delta":"17*23=391"}}

@@ -32,6 +32,11 @@ type State struct {
 	NextBackoff  time.Duration // delay scheduled before the next spawn, zero when running
 }
 
+// HarnessClaude is the harness of a session claude runs, and the meaning of an
+// empty harness anywhere one is read (#2593). It is the only harness any path
+// mints today.
+const HarnessClaude = "claude"
+
 // RunnerConfig controls a runner instance. It is what RunnerFactory receives.
 //
 // It carries only the fields the stream runner actually reads. The supervisor's
@@ -84,6 +89,29 @@ type RunnerConfig struct {
 
 	// ClaudeArgs is the extra argv passed through to claude.
 	ClaudeArgs []string
+
+	// Harness names the coding agent this session runs (#2593), and the factory
+	// selects the runner by it. Both pool construction sites set it canonical, so
+	// it is never empty from the pool: HarnessClaude for the bootstrap and every
+	// minted session, and a dormant entry's own persisted value for a revive. The
+	// sessions package carries the value without validating it; the factory is the
+	// one place that decides which harnesses have a runner, and refusing one is an
+	// ordinary construction error.
+	Harness string
+
+	// ThreadID is the harness thread this session resumes, for a harness that
+	// mints its own conversation ids (codex, #2622); empty means start one. Only
+	// Pool.buildSessionAs sets it, from the dormant entry a revive materialises.
+	ThreadID string
+
+	// RecordThread persists a thread the runner STARTED onto the session's
+	// registry entry (#2622). Like AdoptAnnouncedReset it carries no identity of
+	// its own: the caller passes the live session id, so the callback stays
+	// correct across rotations, and an id the pool no longer holds is
+	// ErrSessionNotFound. Set by Pool.buildSessionAs; nil elsewhere, and the
+	// caller skips it. It takes Pool.mu and writes the registry, so it must not
+	// be called with a runner lock held.
+	RecordThread func(sessionID, threadID string) error
 
 	// PermissionMode is the session's stored permission posture, written to every
 	// spawned child in-band and confirmed before any user turn reaches it (#2064).

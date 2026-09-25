@@ -61,15 +61,16 @@ func auditRecords(t *testing.T, buf *bytes.Buffer) []map[string]any {
 	return recs
 }
 
-// testDevice is the ineligible baseline: a paired device with the
-// remote-permission opt-in bit OFF (MayAnswerRemotePermission == false).
+// testDevice is the unprivileged baseline: a paired device with the
+// AllowRemotePermissions bit OFF. Since #2605 it may answer modals and
+// questions; it may not mint pairings or actuate MCP servers.
 func testDevice(t *testing.T) *devices.Device {
 	t.Helper()
 	return &devices.Device{TokenHash: devices.HashToken("plain-device-token"), Name: "test-phone"}
 }
 
-// eligibleDevice is testDevice plus the remote-permission opt-in bit set: the
-// gated device whose answers may reach a parked approval.
+// eligibleDevice is testDevice plus the AllowRemotePermissions bit set: the
+// privileged device. Its answers take exactly the path testDevice's do.
 func eligibleDevice(t *testing.T) *devices.Device {
 	t.Helper()
 	d := testDevice(t)
@@ -256,37 +257,54 @@ func TestModalResolverV2_Answer_Authorized(t *testing.T) {
 	}
 }
 
-// TestModalResolverV2_Answer_UngatedDevice proves an ungated device's answer is
-// denied fail-closed: no actuation, the modal is NOT consumed (left outstanding
-// for a legit local answer / permbridge's timeout), audit denied_unauthorized, (zero,
-// false) return. AC-2.
-func TestModalResolverV2_Answer_UngatedDevice(t *testing.T) {
+// TestModalResolverV2_Answer_UnprivilegedDevice proves #2605: a device with the
+// AllowRemotePermissions bit OFF answers exactly as a privileged one does — the
+// modal is consumed, the audit records allowed/denied with the device's
+// non-secret identity, and the {option_id, remote} dismissal is returned.
+func TestModalResolverV2_Answer_UnprivilegedDevice(t *testing.T) {
 	t.Parallel()
 
-	reg := modalbridge.New()
-	modalID := recordPermissionModal(t, reg, secretModalBody)
-	logger, logBuf := auditLogger()
-	dev := testDevice(t) // opt-in bit OFF -> ineligible
+	tests := []struct {
+		optionID  string
+		wantAudit string
+	}{
+		{"allow_once", "allowed"},
+		{"reject_once", "denied"},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.optionID, func(t *testing.T) {
+			t.Parallel()
 
-	r := newModalResolverV2(reg, logger)
-	d, ok := r.ResolveAnswer(modalID, "allow_once", "tok-1", dev)
+			reg := modalbridge.New()
+			modalID := recordPermissionModal(t, reg, secretModalBody)
+			logger, logBuf := auditLogger()
+			dev := testDevice(t) // bit OFF
 
-	if ok {
-		t.Error("ResolveAnswer ok = true for an ungated device, want false")
-	}
-	if d != (relay.ModalDismissal{}) {
-		t.Errorf("dismissal = %+v, want zero", d)
-	}
-	// NOT consumed: still outstanding.
-	if _, ok := reg.Lookup(modalID); !ok {
-		t.Error("ungated answer consumed the modal; it must stay outstanding")
-	}
-	recs := auditRecords(t, logBuf)
-	if len(recs) != 1 {
-		t.Fatalf("audit records = %d, want 1", len(recs))
-	}
-	if got, _ := recs[0]["outcome"].(string); got != "denied_unauthorized" {
-		t.Errorf("audit outcome = %q, want denied_unauthorized", got)
+			r := newModalResolverV2(reg, logger)
+			d, ok := r.ResolveAnswer(modalID, tt.optionID, "tok-1", dev)
+
+			if !ok {
+				t.Fatal("ResolveAnswer ok = false for an unprivileged device, want true")
+			}
+			if d.Outcome != tt.optionID || d.Source != string(audit.SourceRemote) {
+				t.Errorf("dismissal = %+v, want {%s remote}", d, tt.optionID)
+			}
+			if _, stillThere := reg.Lookup(modalID); stillThere {
+				t.Error("modal still in registry after answer; Resolve must consume it")
+			}
+			recs := auditRecords(t, logBuf)
+			if len(recs) != 1 {
+				t.Fatalf("audit records = %d, want 1", len(recs))
+			}
+			rec := recs[0]
+			if got, _ := rec["outcome"].(string); got != tt.wantAudit {
+				t.Errorf("audit outcome = %q, want %q", got, tt.wantAudit)
+			}
+			if rec["device_hash"] != dev.TokenHash || rec["device_label"] != dev.Name {
+				t.Errorf("audit identity = {%v %v}, want {%q %q}", rec["device_hash"], rec["device_label"], dev.TokenHash, dev.Name)
+			}
+		})
 	}
 }
 
@@ -482,7 +500,7 @@ func TestModalResolverV2_Answer_NoBodyLeak(t *testing.T) {
 	}{
 		{"allowed", eligibleDevice, "allow_once"},
 		{"denied", eligibleDevice, "reject_once"},
-		{"denied_unauthorized", testDevice, "allow_once"},
+		{"denied_unauthorized", func(*testing.T) *devices.Device { return nil }, "allow_once"},
 	}
 	for _, tt := range tests {
 		tt := tt

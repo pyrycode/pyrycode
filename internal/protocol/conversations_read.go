@@ -32,8 +32,13 @@ type ConversationSummary struct {
 	// serialized (no omitempty, unlike the on-disk Conversation.IsArchived):
 	// a client partitions active vs. archived and counts each side, so it must
 	// read the flag on active rows too, where the value is false.
-	IsArchived bool   `json:"is_archived"`
-	Cwd        string `json:"cwd"`
+	IsArchived bool `json:"is_archived"`
+	// IsMuted is the conversation's durable mute-notifications flag (#2571).
+	// Always serialized (no omitempty, unlike the on-disk Conversation.IsMuted):
+	// a client reads false explicitly on every row, and treats an absent key
+	// as not muted only because an older daemon cannot send it.
+	IsMuted bool   `json:"is_muted"`
+	Cwd     string `json:"cwd"`
 	// WorkspaceLabel is the operator-set display name stored for the workspace
 	// at this row's own Cwd (#2208), so a client renders the chosen name without
 	// a second read verb. It belongs to the workspace, not to this conversation:

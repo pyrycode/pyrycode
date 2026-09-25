@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/sessions"
 )
 
 // This file holds the inbound Noise session-establishment path — the
@@ -240,8 +242,16 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 		}
 	}
 	device, tokenResult := m.cfg.Devices.Validate(helloPayload.Token)
-	root := ""
+	// The app version is judged only once the token is accepted (#2578): a peer
+	// without a valid token takes the 4401 arm below, whose bytes and timing never
+	// depend on client_version, so it learns nothing about this host's minimums.
+	// A refused version gets the ack a refused token gets — no workspace_root.
+	var versionReject clientVersionReject
 	if tokenResult == devices.ValidateAccepted {
+		versionReject = m.checkClientVersion(helloPayload.ClientVersion)
+	}
+	root := ""
+	if tokenResult == devices.ValidateAccepted && versionReject.reason == "" {
 		root = WorkspaceRoot()
 	}
 
@@ -352,6 +362,42 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 		return
 	}
 
+	if versionReject.reason != "" {
+		// App-too-old path (#2578): the token arm's shape with its own code and
+		// close — noise_resp, then ONE routing envelope carrying the sealed
+		// client.update_required error and the 4412 close. Returning here keeps
+		// the session short of V2StateOpen: no redemption or client version is
+		// recorded, and s.device, s.clientName and s.clientVersion stay unset.
+		errFrame, sealErr := m.sealErrorPayload(s, protocol.ErrorPayload{
+			Code:             protocol.CodeClientUpdateRequired,
+			Message:          MsgClientUpdateRequired,
+			Retryable:        false,
+			MinClientVersion: versionReject.min,
+		}, helloID)
+		// SECURITY: never the raw client_version (remote-authored), the token or
+		// helloPayload. The app and minimum are logged on below_minimum only: the
+		// app then matched the grammar and the minimum is daemon-authored.
+		attrs := []any{
+			"event", "v2.handshake.reject.client_update_required",
+			"conn_id", s.connID,
+			"close_code", int(StatusClientUpdateRequired),
+			"reason", versionReject.reason,
+		}
+		if versionReject.app != "" {
+			attrs = append(attrs, "app", versionReject.app, "min_client_version", versionReject.min)
+		}
+		m.cfg.Logger.Warn("relay: v2 handshake reject", attrs...)
+		m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: respFrame})
+		if sealErr != nil {
+			m.cfg.Logger.Warn("relay: v2 seal error failed; close-only",
+				"conn_id", s.connID, "err", sealErr)
+			m.closeWith(ctx, s, StatusClientUpdateRequired, nil)
+			return
+		}
+		m.closeWith(ctx, s, StatusClientUpdateRequired, errFrame)
+		return
+	}
+
 	// Success: emit noise_resp, advance to open. Capture the matched
 	// device snapshot so dispatchAppFrame can surface it via *dispatch.Conn
 	// for handlers that consult c.Auth().
@@ -369,6 +415,10 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// transition — the edge every enumeration and every test synchronises on —
 	// also orders the write.
 	m.recordRedemption(s.connID, device)
+	// Persist the app version this device just reported (#2577), for `pyry
+	// pair list`. Same placement and same best-effort contract as the
+	// redemption write above; a no-op when the stored value already matches.
+	m.recordClientVersion(s.connID, device, helloPayload.ClientVersion)
 	// s.device deliberately keeps the pre-clear snapshot: it records what
 	// authentication observed, and no reader consults RedeemBy off the session
 	// (#1529 enforces the deadline at the registry).
@@ -506,6 +556,38 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	}
 }
 
+// clientVersionReject says why a hello's client_version is refused. The zero
+// value accepts. reason is closed-set: "unparsable" or "below_minimum". app and
+// min are set on below_minimum only — app is the parsed, grammar-checked name
+// and min the daemon's own minimum for it — so a caller may log both and put
+// min on the wire without echoing a single client byte.
+type clientVersionReject struct {
+	reason string
+	app    string
+	min    string
+}
+
+// checkClientVersion judges a hello's client_version against the configured
+// minimums (#2578, docs/protocol-mobile.md § Compatibility). With no minimum set
+// it accepts everything, as every daemon did before. Once any is set, an
+// unparsable version is refused, a well-formed one below its own app's minimum
+// is refused, and a well-formed version of an app with no minimum is accepted.
+// Only the parsed value is compared; the raw string is never re-read.
+func (m *V2SessionManager) checkClientVersion(reported string) clientVersionReject {
+	if len(m.minClientVersions) == 0 {
+		return clientVersionReject{}
+	}
+	app, v, ok := protocol.ParseClientVersion(reported)
+	if !ok {
+		return clientVersionReject{reason: "unparsable"}
+	}
+	min, held := m.minClientVersions[app]
+	if !held || v.Compare(min) >= 0 {
+		return clientVersionReject{}
+	}
+	return clientVersionReject{reason: "below_minimum", app: app, min: min.String()}
+}
+
 // handleNoiseMsg processes an inbound noise_msg frame. The awaitingInit
 // branch holds no CipherStates and closes at the retryable 4410, telling a
 // client whose session the daemon no longer has to handshake again. The
@@ -593,5 +675,51 @@ func (m *V2SessionManager) handleNoiseMsg(ctx context.Context, s *V2Session, inn
 		}
 		m.dispatchAppFrame(ctx, s, plaintext)
 		return
+	}
+}
+
+// errClientVersionReloadFailed replaces the in-region Reload's own error before
+// it can reach recordClientVersion's log line, for errRedemptionReloadFailed's
+// reason: a decode failure can echo devices.json bytes, token_hash included.
+var errClientVersionReloadFailed = errors.New("relay: devices reload failed inside the client-version lock")
+
+// recordClientVersion durably records the client_version dev reported in the
+// hello just accepted, so `pyry pair list` — a separate process reading the
+// devices file — can show which app version each device last connected with
+// (#2577). reported is admitted through sessions.AdmitClientVersion, the one
+// copy of the filter the session prompt applies; a refused value is stored as
+// "".
+//
+// It mirrors recordRedemption: best effort, every failure logged and swallowed,
+// because the handshake has already succeeded. The fast path compares against
+// the snapshot Validate returned and skips the lock entirely when nothing
+// changed, so an ordinary reconnect costs no file lock and no fsync on the Run
+// goroutine. Inside the region, Reload keeps disk authoritative for membership:
+// a device revoked since Validate is dropped, SetClientVersion then reports no
+// change, and no Save resurrects it. The lock wait is redemptionLockWait, whose
+// bound is this same Run-goroutine stall.
+//
+// SECURITY: the version is client-authored text (see ActiveConn); the log line
+// carries neither it nor the reload error.
+func (m *V2SessionManager) recordClientVersion(connID string, dev devices.Device, reported string) {
+	version := sessions.AdmitClientVersion(reported)
+	if m.cfg.DevicesPath == "" || version == dev.ClientVersion {
+		return
+	}
+	err := devices.WithLock(m.cfg.DevicesPath, redemptionLockWait, func() error {
+		if err := m.cfg.Devices.Reload(m.cfg.DevicesPath); err != nil {
+			return errClientVersionReloadFailed
+		}
+		if !m.cfg.Devices.SetClientVersion(dev.TokenHash, version) {
+			return nil
+		}
+		return m.cfg.Devices.Save(m.cfg.DevicesPath)
+	})
+	if err != nil {
+		m.cfg.Logger.Warn("relay: v2 client version persist failed",
+			"event", "v2.devices.client_version_persist_failed",
+			"conn_id", connID,
+			"path", m.cfg.DevicesPath,
+			"err", err)
 	}
 }

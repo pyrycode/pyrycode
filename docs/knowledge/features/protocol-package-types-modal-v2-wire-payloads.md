@@ -11,8 +11,8 @@ control/boundary concern, not a turn-stream event, so `messaging.go` not
 manager intercepts at `v2session.go`'s `dispatchAppFrame` **before**
 `dispatch.Route` (the `RequestSnapshotPayload` / `TypeRekeyRequest` precedent —
 **no `dispatch.Route` handler**). **Wire shape only** — the minting/dedup/
-validation/fan-out runtime is the producer's (#703, with #706/#702 building
-ownership/gating).
+validation/fan-out runtime is the producer's (#703, with #706 building
+ownership and #2605's `MayAnswerPrompt` the answer-side eligibility check).
 
 ```go
 type ModalOption struct { // a single ordered choice
@@ -89,9 +89,11 @@ type ModalDismissedPayload struct { // binary → phone
 - **`answer_token` is an idempotency key, not a credential.** Uniqueness and
   stability matter; secrecy does not. It lets the daemon collapse a replayed/
   reordered `modal_answer` to a no-op via `(modal_id, answer_token)`. It is **not**
-  the authorization — that is `modal_id` validity (#706) + the per-device answer
-  gate (#702, default OFF); `answer_token` only deduplicates among already-
-  authorized answers.
+  the authorization — that is `modal_id` validity (#706) + the device being
+  authenticated at all (`devices.MayAnswerPrompt`, any paired device since
+  **#2605** — not the privileged `AllowRemotePermissions` bit, which since #2605
+  gates only minting a pairing and MCP actuation); `answer_token` only
+  deduplicates among already-authorized answers.
 - **`Options` is ordered + `DefaultOptionID ∈ Options[].ID`.** JSON-array order is
   the canonical display/selection order; the default-in-options invariant is
   documented (the producer enforces it).

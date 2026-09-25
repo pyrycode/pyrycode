@@ -344,6 +344,7 @@ var pyryFlagBools = map[string]bool{
 // be glued (`-pyry-claude=/path`) or in the next arg (`-pyry-claude /path`).
 var pyryFlagValues = map[string]bool{
 	"pyry-claude":              true,
+	"pyry-codex":               true,
 	"pyry-workdir":             true,
 	"pyry-socket":              true,
 	"pyry-name":                true,
@@ -696,15 +697,39 @@ func selectsStreamRunner(cfg config.Config) bool {
 // Validation lives here, not in config.Load, because the accepted set is defined
 // by the factory mapping — which the leaf config package cannot import
 // (streamsup). config.Load stays parse-only, matching DebugCapture.
-func selectInteractiveRunner(cfg config.Config, logger *slog.Logger, mcpServersPath string, vocab *modelVocabularyStore, approval streamApprovalConfig) (sessions.RunnerFactory, *streamTurnSink, error) {
+//
+// codex carries the Codex binary and home; its sink is set here to the same
+// fan-in the Claude factory feeds (#2620).
+func selectInteractiveRunner(cfg config.Config, logger *slog.Logger, mcpServersPath string, vocab *modelVocabularyStore, approval streamApprovalConfig, codex codexHarness) (sessions.RunnerFactory, *streamTurnSink, error) {
 	switch cfg.InteractiveRunner {
 	case "", "stream-json":
 		sink := newStreamTurnSink(0, logger)
-		return newStreamRunnerFactory(sink, mcpServersPath, vocab, approval), sink, nil
+		codex.sink = sink
+		return harnessRunnerFactory(newStreamRunnerFactory(sink, mcpServersPath, vocab, approval), newCodexRunnerFactory(codex)), sink, nil
 	case "pty":
 		return nil, nil, fmt.Errorf(`interactive_runner "pty" was removed in #1348: the terminal-driving interactive runner no longer exists. Remove the key or set it to "stream-json"`)
 	default:
 		return nil, nil, fmt.Errorf("interactive_runner %q not recognized (accepted: \"\", \"stream-json\")", cfg.InteractiveRunner)
+	}
+}
+
+// harnessRunnerFactory is the factory the daemon wires into the pool: it selects
+// each session's runner by RunnerConfig.Harness (#2593). claude, and the empty
+// value a RunnerConfig built outside the pool carries, get the claude factory;
+// codex gets the codex factory (#2620). Any other harness is refused as a
+// construction error without calling either, so no runner is ever built for a
+// session recorded as an agent it cannot drive: the pool leaves that session
+// dormant and the daemon keeps running.
+func harnessRunnerFactory(claude, codex sessions.RunnerFactory) sessions.RunnerFactory {
+	return func(cfg sessions.RunnerConfig) (sessions.Runner, error) {
+		switch cfg.Harness {
+		case "", sessions.HarnessClaude:
+			return claude(cfg)
+		case harnessCodex:
+			return codex(cfg)
+		default:
+			return nil, fmt.Errorf("no runner for harness %q", cfg.Harness)
+		}
 	}
 }
 
@@ -729,6 +754,7 @@ func runSupervisor(args []string) error {
 
 	fs := flag.NewFlagSet("pyry", flag.ContinueOnError)
 	claudeBin := fs.String("pyry-claude", "claude", "path to the claude binary")
+	codexBin := fs.String("pyry-codex", "codex", "path to the codex binary")
 	workdir := fs.String("pyry-workdir", "", "working directory for claude (default: current)")
 	resume := fs.Bool("pyry-resume", true, "resume the most recent session on restart")
 	verbose := fs.Bool("pyry-verbose", false, "verbose pyry logging")
@@ -866,7 +892,7 @@ func runSupervisor(args []string) error {
 		registry: approvals,
 		timeout:  approvalWindow,
 		surface:  approvalSurfaces,
-	})
+	}, codexHarness{bin: *codexBin, home: codexHomePath(resolveInstanceDirPath(*name))})
 	if err != nil {
 		return fmt.Errorf("interactive runner: %w", err)
 	}
@@ -1791,30 +1817,20 @@ func (b boundSession) WriteUserTurn(ctx context.Context, conversationID string, 
 type interruptArm string
 
 const (
-	armInterrupt interruptArm = "interrupt" // streamRunner.Interrupt()
-	armNone      interruptArm = "none"      // no interrupt method — inert
+	armInterrupt interruptArm = "interrupt" // sessions.Runner.Interrupt()
 )
 
-// interruptRunner actuates a runner's interrupt through the one concrete method a
-// runner can expose. The dispatch lives in cmd/pyry (#1121) because Interrupt is
-// OFF the sessions.Runner interface (un-widened, #1077) and the streamRunner
-// adapter carrying it lives here, so internal/sessions cannot reach the method at
-// all. It is an OPTIONAL capability, asserted for: a runner without Interrupt is
-// inert (nil) — no actuation beats wrong actuation.
+// interruptRunner actuates a runner's interrupt through sessions.Runner.Interrupt.
+// Interrupt has been ON the interface since #2592, so there is no inert arm: a
+// runner that cannot interrupt does not compile, rather than silently dropping the
+// frame as the type assertion this replaced did.
 //
-// It returns the arm it dispatched to alongside the chosen method's error, so the
-// caller — the only scope holding the conversation id — can record which arm ran
-// (#1193); armNone always pairs with a nil error. The dispatcher itself stays pure:
-// no logger, no ambient state. The arm is an OBSERVABILITY value and nothing may
-// branch on it beyond selecting a record — in particular armNone must NOT trigger a
-// fallback actuation, since the only other runner to try is the bootstrap session's
-// runner, the #678 cross-conversation isolation break resolveBoundRunner's
-// guard exists to prevent.
+// It returns the arm it dispatched to alongside the method's error, so the caller —
+// the only scope holding the conversation id — can record which arm ran (#1193).
+// The dispatcher itself stays pure: no logger, no ambient state. The arm is an
+// OBSERVABILITY value and nothing may branch on it beyond selecting a record.
 func interruptRunner(r sessions.Runner) (interruptArm, error) {
-	if v, ok := r.(interface{ Interrupt() error }); ok {
-		return armInterrupt, v.Interrupt()
-	}
-	return armNone, nil
+	return armInterrupt, r.Interrupt()
 }
 
 // resolveBoundRunner resolves the active conversation's bound runner, mirroring
@@ -2021,8 +2037,8 @@ func (a activeInterrupter) logger() *slog.Logger {
 // blocker's late fix is not automatically the twin's requirement — trace the twin's
 // actuation to its own write site before copying a guard across.
 // EVERY arm records which one it took, at Info so the records are visible at the
-// daemon's default level (#1192, #1193) — the inert ones, the actuation, and a
-// bound runner exposing no interrupt method at all. Combined with handleInterrupt's
+// daemon's default level (#1192, #1193) — the inert ones and the actuation.
+// Combined with handleInterrupt's
 // own records that closes the route: an interrupt reaching it always leaves at
 // least one v2.interrupt.* record, so on a wired daemon an empty log means the
 // frame never arrived. The dispatched record is written when the arm RETURNS —
@@ -2072,12 +2088,6 @@ func (a activeInterrupter) SendEsc(conversationID string) error {
 		return nil
 	}
 	arm, err := interruptRunner(r)
-	if arm == armNone {
-		a.logger().Info("relay: v2 interrupt inert; bound runner exposes no interrupt method",
-			"event", "v2.interrupt.no_actuator",
-			"conversation_id", convID)
-		return err
-	}
 	// Emitted even when the arm returned an error: this records WHICH arm was
 	// dispatched to, not that the child quiesced (hence dispatched, not actuated).
 	// handleInterrupt's v2.interrupt.keystroke_err carries the error but not the
@@ -2423,13 +2433,12 @@ func resolveConversationPrompt(convReg *conversations.Registry, pool spawnedProm
 }
 
 // startFreshRunner is the new_session twin of interruptRunner: it dispatches a
-// fresh-session start to the active conversation's bound runner through the one
-// concrete method a runner can expose. The streamRunner path (*streamsup.Runner,
-// exposing RestartFresh) is DIRECT — rotate the pool-side id then RestartFresh so
-// the next spawn uses --session-id <newID>, with NO /clear keystroke. Like
-// Interrupt it is an OPTIONAL capability, asserted for: a runner without
-// RestartFresh is inert (nil) and rotates nothing — no actuation beats wrong
-// actuation (#1121).
+// fresh-session start to the active conversation's bound runner through
+// sessions.Runner — rotate the pool-side id then RestartFresh so the next spawn
+// uses --session-id <newID>, with NO /clear keystroke. RestartFresh and
+// BeginRotation are ON the interface since #2592, so there is no inert arm: the
+// type assertions this replaced let a runner lacking either method silently rotate
+// nothing, or rotate ungated.
 //
 // Ordering is load-bearing: rotate() completes — the pool-side re-key published
 // under Pool.mu — BEFORE RestartFresh spawns <newID>.jsonl. Its original reason was
@@ -2450,10 +2459,8 @@ func resolveConversationPrompt(convReg *conversations.Registry, pool spawnedProm
 // already re-confined by resolveSpawnDir at the caller (#1475). "" means "leave
 // the runner where it is", which is both the no-recorded-workspace case and the
 // refused case; either way the rotation still completes and the child still comes
-// up. Installing it is an OPTIONAL capability on the same terms
-// beginRotationOrNoop treats the gate: a runner that can RestartFresh but cannot
-// move still rotates, rather than being sent to the inert path where it would
-// rotate nothing.
+// up. Installing it is an OPTIONAL capability (installSpawnDir): a runner that
+// cannot move still rotates, just in place.
 //
 // THE INSTALL SITS BETWEEN rotate AND RestartFresh, the window
 // refreshSystemPromptForRotation occupies, and both edges are load-bearing.
@@ -2474,20 +2481,10 @@ func resolveConversationPrompt(convReg *conversations.Registry, pool spawnedProm
 // log records the install's own failure and must be the daemon's, not
 // slog.Default(): cmd/pyry never calls slog.SetDefault, so a default-logger record
 // would leave the daemon's log entirely. Nil is tolerated and discards, which is
-// what keeps the two direct test callers (dispatch_arms_test.go,
-// inbound_deliver_rotation_test.go) free of a logger they have no assertion for.
+// what keeps the direct test callers free of a logger they have no assertion for.
 func startFreshRunner(r sessions.Runner, oldID sessions.SessionID, spawnDir string,
 	rotate func(sessions.SessionID) (sessions.SessionID, error), log *slog.Logger) error {
-	v, ok := r.(interface{ RestartFresh(string) })
-	if !ok {
-		return nil
-	}
-	// The arming stays BELOW the inert return, not hoisted to the top of the
-	// function: an unrecognised runner rotates nothing, and its return skips the
-	// abort() disarm below, so a gate armed for it would outlive the rotation that
-	// never happened — every subsequent WriteUserTurn on the conversation failing
-	// with ErrNoLiveChild until the next respawn, from a remotely-driven frame.
-	abort := beginRotationOrNoop(r)
+	abort := r.BeginRotation()
 	newID, err := rotate(oldID)
 	if err != nil {
 		// The rotation never happened, so the gate must not outlive it: left
@@ -2501,20 +2498,17 @@ func startFreshRunner(r sessions.Runner, oldID sessions.SessionID, spawnDir stri
 		return err
 	}
 	installSpawnDir(r, spawnDir, log)
-	v.RestartFresh(string(newID))
+	r.RestartFresh(string(newID))
 	return nil
 }
 
 // installSpawnDir moves the runner's next spawn into spawnDir when the runner can
 // be moved and there is somewhere to move it to (#1475); anything else is inert.
 //
-// An OPTIONAL assertion, deliberately, for beginRotationOrNoop's stated reason
-// rather than by resemblance to it: folding the method into startFreshRunner's
-// RestartFresh assertion would send a runner that can restart but cannot move to
-// the inert path, where it would rotate NOTHING — where today it rotates, just
-// without moving. Both existing capability probes (startFreshRunner's and
-// StartNewSession's) therefore keep asserting RestartFresh alone, so the
-// inert-arm log keeps matching the dispatch.
+// An OPTIONAL assertion, deliberately, unlike RestartFresh and BeginRotation,
+// which sessions.Runner carries (#2592): a runner that cannot move still rotates
+// correctly, just in its current directory, so a missing method here loses a
+// workspace move rather than the rotation itself.
 //
 // The install's own failure is Warned and SWALLOWED. It is reachable only when
 // the directory disappears between the caller's confinement and this call, and by
@@ -2541,30 +2535,6 @@ func installSpawnDir(r sessions.Runner, spawnDir string, log *slog.Logger) {
 		log.Warn("relay: v2 new_session could not install the recorded workspace",
 			"event", "v2.new_session.spawn_dir_install_failed")
 	}
-}
-
-// beginRotationOrNoop arms r's rotation gate when the runner has one (#1330) and
-// returns the disarm; a runner without the gate returns an inert disarm, leaving
-// the dispatch shape unchanged.
-//
-// An OPTIONAL assertion, deliberately, rather than widening startFreshRunner's
-// assertion to interface{ RestartFresh(string); BeginRotation() func() }. Widening
-// it would send a runner that exposes RestartFresh without a gate to the inert
-// path, where it would rotate NOTHING — where today it rotates, just ungated. That
-// is the contract streamRunner.BeginRotation's doc already states. Treating the
-// gate as a CAPABILITY is also how Interrupt and RestartFresh are already treated
-// one layer up.
-//
-// rotatingRunner is what makes the optionality load-bearing to the existing
-// coverage rather than academic: it offers the gate unconditionally and leaves the
-// ARMING to the real startFreshRunner, which is what keeps
-// TestInboundDeliver_RotationInProductionOrder_DeliversToFreshChild a question
-// about the dispatch instead of one true by construction.
-func beginRotationOrNoop(r sessions.Runner) (abort func()) {
-	if g, ok := r.(interface{ BeginRotation() func() }); ok {
-		return g.BeginRotation()
-	}
-	return func() {}
 }
 
 // activeSessionStarter satisfies relay.SessionStarter by routing an inbound
@@ -2902,25 +2872,10 @@ func (a activeSessionStarter) start(conversationID string, outcome func(error)) 
 		}
 		used = true
 	}
-	// The rotation capability is probed HERE as well as inside startFreshRunner,
-	// which is deliberate rather than an oversight: this is the arm AC-4 asks to be
-	// recorded, and startFreshRunner cannot report it — it returns nil both for "no
-	// arm" and for a clean rotation. Its own assertion stays where it is because
-	// that assertion is what keeps the #1330 gate arming below the inert return, and
-	// because dispatch_arms_test.go and inbound_deliver_rotation_test.go drive it
-	// directly. This mirrors activeInterrupter, which records its armNone arm the
-	// same way.
-	if _, canRestart := runner.(interface{ RestartFresh(string) }); !canRestart {
-		a.logger().Debug("relay: v2 new_session inert; bound runner cannot restart",
-			"event", "v2.new_session.no_restart",
-			"conversation_id", convID)
-		return nil, false
-	}
-	// AC-4's fourth row, and the ONE arm the capability probe above does not already
-	// cover — which is exactly how it was first shipped broken. The probe asks what
-	// the runner CAN do; production's answer is always yes, because the sole
-	// implementation is streamRunner, which exposes RestartFresh unconditionally and
-	// is assigned at mint time. A conversation created but never messaged therefore
+	// AC-4's fourth row — which was first shipped broken, when a capability probe for
+	// RestartFresh stood in for it. What the runner CAN do is not the question: every
+	// runner can, since RestartFresh is on sessions.Runner (#2592), and the runner is
+	// assigned at mint time. A conversation created but never messaged therefore
 	// reaches this line with a real runner whose child has never spawned (#2085
 	// defers the spawn to the first message), and rotating it would rekey the pool,
 	// persist sessions.json, rebind the conversation and broadcast a
@@ -4140,6 +4095,7 @@ Usage:
 
 Pyry flags (must come before claude args, or after a -- separator):
   -pyry-claude string   path to the claude binary (default "claude")
+  -pyry-codex string    path to the codex binary (default "codex")
   -pyry-workdir string  working directory for claude (default: current)
   -pyry-resume          --continue most recent session on restart (default true)
   -pyry-verbose         verbose pyry logging

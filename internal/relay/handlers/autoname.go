@@ -191,6 +191,7 @@ func autoNameConversation(reg ConversationAutoNamer, registryPath string, announ
 			ID:         string(cv.ID),
 			IsPromoted: cv.IsPromoted,
 			IsArchived: cv.IsArchived, // preserved: naming is not un-archiving
+			IsMuted:    cv.IsMuted,
 			Name:       &title,
 			Cwd:        cv.Cwd,
 			// Auto-naming is a metadata write, not a "use" — the row's own value

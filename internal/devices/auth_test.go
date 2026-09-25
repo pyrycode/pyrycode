@@ -308,6 +308,70 @@ func TestAuthorizeRemotePermission(t *testing.T) {
 	}
 }
 
+// TestDevice_MayAnswerPrompt pins #2605: answering needs an authenticated
+// device and nothing more. The privileged bit is irrelevant; nil still denies.
+func TestDevice_MayAnswerPrompt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		dev  *Device
+		want bool
+	}{
+		{name: "bit set -> may answer", dev: &Device{AllowRemotePermissions: true}, want: true},
+		{name: "bit off -> may answer", dev: &Device{AllowRemotePermissions: false}, want: true},
+		{name: "nil device -> denied", dev: nil, want: false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.dev.MayAnswerPrompt(); got != tc.want {
+				t.Errorf("MayAnswerPrompt() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAuthorizePromptAnswer(t *testing.T) {
+	t.Parallel()
+
+	privileged := &Device{AllowRemotePermissions: true}
+	unprivileged := &Device{AllowRemotePermissions: false}
+
+	tests := []struct {
+		name    string
+		dev     *Device
+		outcome RemotePermissionOutcome
+		want    bool
+	}{
+		// Any authenticated device AND an explicit allow grants.
+		{name: "unprivileged + allow -> grant", dev: unprivileged, outcome: OutcomeAllow, want: true},
+		{name: "privileged + allow -> grant", dev: privileged, outcome: OutcomeAllow, want: true},
+
+		// Every non-allow outcome denies, whatever the device.
+		{name: "unprivileged + explicit deny -> deny", dev: unprivileged, outcome: OutcomeDeny, want: false},
+		{name: "unprivileged + no answer -> deny", dev: unprivileged, outcome: OutcomeNoAnswer, want: false},
+		{name: "unprivileged + timeout -> deny", dev: unprivileged, outcome: OutcomeTimeout, want: false},
+		{name: "unprivileged + cancel -> deny", dev: unprivileged, outcome: OutcomeCancel, want: false},
+		{name: "privileged + zero-value outcome -> deny", dev: privileged, outcome: RemotePermissionOutcome(0), want: false},
+
+		// No authenticated device never grants, even on an explicit allow.
+		{name: "nil device + allow -> deny", dev: nil, outcome: OutcomeAllow, want: false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := AuthorizePromptAnswer(tc.dev, tc.outcome); got != tc.want {
+				t.Errorf("AuthorizePromptAnswer(%+v, %v) = %v, want %v", tc.dev, tc.outcome, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRegistry_Validate_ConcurrentSameToken(t *testing.T) {
 	t.Parallel()
 	when := mustParseTime(t, "2020-01-01T00:00:00Z")
