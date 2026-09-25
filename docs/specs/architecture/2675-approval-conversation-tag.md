@@ -66,6 +66,10 @@ New file `cmd/pyry/approval_conversation_tag_test.go`:
 
 - Does the fake Claude child need to answer the `initialize` request before the parser routes `can_use_tool`? Resolve while writing the test; the script can emit the request right after reading the first line either way.
 
+## Revisions
+
+- 2026-09-25, Phase B: the open question is resolved. The fake Claude child does not need to answer `initialize`; the parser routes the `can_use_tool` request the script prints right after reading it. No design change. The test reuses `chanBcast` from `stream_turn_drain_test.go` rather than adding a second channel broadcaster.
+
 ## Documentation handoff (pending — documentation stage)
 
 None required by the ticket. `docs/protocol-mobile.md` already says `modal_shown`/`question_shown` carry the conversation they concern; this makes that true. The documentation stage may note in the relay/permbridge overview that the stamp is the parking session's conversation, with the cursor as fallback only.

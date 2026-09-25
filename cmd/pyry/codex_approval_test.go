@@ -40,7 +40,7 @@ func newApprovalCodexRunner(t *testing.T, window time.Duration, turnLog string) 
 		return func() { p.retired <- req.ToolUseID }
 	}}
 	h := newTestCodexRunner(t)
-	h.r.cfg.Approvals = newCodexApprovals(p.registry, window, surface)
+	h.r.cfg.Approvals = newCodexApprovals(p.registry, window, surface, nil)
 	return h, p
 }
 
@@ -316,7 +316,7 @@ func TestCodexApprovalLive(t *testing.T) {
 		Sink:      func(ev turnevent.Event) { events <- ev },
 		Model:     "gpt-6-luna",
 		Effort:    "low",
-		Approvals: newCodexApprovals(registry, time.Minute, surface),
+		Approvals: newCodexApprovals(registry, time.Minute, surface, nil),
 	})
 	h := &codexHarnessT{r: r, events: events}
 	h.run(t)

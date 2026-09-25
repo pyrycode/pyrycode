@@ -634,21 +634,25 @@ const (
 // stdioPermissionHandler adapts one runner's can_use_tool requests onto the
 // daemon-wide approval registry. live contains only requests originating from the
 // runner that owns this handler, allowing child exit to fail them closed without
-// disturbing another session's approvals.
+// disturbing another session's approvals. tag is that runner's live session,
+// read at every park so a rotated session reports its current id; nil reports
+// none.
 type stdioPermissionHandler struct {
 	registry *permbridge.Registry
 	timeout  time.Duration
 	surface  *approvalSurfaceReport
+	tag      *streamSessionTag
 
 	mu   sync.Mutex
 	live map[string]*permbridge.Pending
 }
 
-func newStdioPermissionHandler(registry *permbridge.Registry, timeout time.Duration, surface *approvalSurfaceReport) *stdioPermissionHandler {
+func newStdioPermissionHandler(registry *permbridge.Registry, timeout time.Duration, surface *approvalSurfaceReport, tag *streamSessionTag) *stdioPermissionHandler {
 	return &stdioPermissionHandler{
 		registry: registry,
 		timeout:  timeout,
 		surface:  surface,
+		tag:      tag,
 		live:     make(map[string]*permbridge.Pending),
 	}
 }
@@ -675,6 +679,9 @@ func (h *stdioPermissionHandler) handle(req streamsup.CanUseToolRequest, origin 
 		DefaultToNo:             req.DefaultToNo,
 		RequiresUserInteraction: req.RequiresUserInteraction,
 		AlwaysAllow:             permbridge.ParseAlwaysAllow(req.PermissionSuggestions, req.SuppressAlwaysAllowRule),
+	}
+	if h.tag != nil {
+		parked.SessionID = h.tag.ID()
 	}
 	pending, err := h.registry.Register(req.ToolUseID, parked, h.timeout)
 	if err != nil {
@@ -787,7 +794,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 		onChildExit := sink.exitForTag(tag.ID)
 		var r *streamsup.Runner
 		if approval.stdio {
-			handler := newStdioPermissionHandler(approval.registry, approval.timeout, approval.surface)
+			handler := newStdioPermissionHandler(approval.registry, approval.timeout, approval.surface, tag)
 			parser.SetCanUseToolHandler(func(req streamsup.CanUseToolRequest) {
 				handler.handle(req, r.Stdin())
 			})

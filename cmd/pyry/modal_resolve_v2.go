@@ -344,7 +344,7 @@ type streamApprovalBridge struct {
 	perm       *permbridge.Registry   // claude-facing completer store (#1103)
 	modal      streamModalRegistry    // client-facing modal store (#716)
 	bcast      interactiveBroadcaster // *relay.V2SessionManager (ActiveConns/Push)
-	activeConv func() string          // follow-active convID scoping (#1065)
+	activeConv func() string          // cursor; the stamp when sessionConv misses (#1065, #2675)
 	ctx        context.Context        // daemon ctx captured at construction, for broadcasts
 	logger     *slog.Logger
 
@@ -396,6 +396,15 @@ type streamApprovalBridge struct {
 	// questions' reason; nil ⇒ no wake. Read without mu, written before the
 	// control server can call Surface.
 	waker *pushWaker
+
+	// sessionConv resolves the session that parked a request to its
+	// conversation, which Surface stamps on modal_shown and question_shown
+	// (#2675). activeConv is the router's cursor, not the asker: a message
+	// routed to B moves it while A is parked, and since #2644 the stamp decides
+	// which conns may see the frame. Set after construction at the one
+	// production site, for questions' reason; nil, or a miss, keeps the cursor.
+	// Read without mu, written before the control server can call Surface.
+	sessionConv func(sessionID string) (conversationID string, ok bool)
 
 	// mu is a leaf lock guarding byModal + byQuestion + nextID ONLY: held around
 	// O(1) map ops and the counter bump, never across modal.Record,
@@ -830,9 +839,10 @@ func answerVerdict(input json.RawMessage, questions []protocol.Question, answers
 // render falls through to the permission modal below, which is the only prompt
 // that still gets claude an allow/deny decision.
 func (b *streamApprovalBridge) Surface(req permbridge.Request) (retire func()) {
+	conversationID := b.conversationFor(req.SessionID)
 	if b.questions != nil {
 		if batch, ok := questionbridge.Parse(req.ToolName, req.Input); ok {
-			return b.surfaceQuestion(batch, req.ToolUseID)
+			return b.surfaceQuestion(batch, req.ToolUseID, conversationID)
 		}
 	}
 
@@ -843,7 +853,7 @@ func (b *streamApprovalBridge) Surface(req permbridge.Request) (retire func()) {
 		return func() {}
 	}
 
-	payload, err := b.modal.RecordWithContext(permReq, wireClass, b.activeConv(), modalbridge.PermissionContext{
+	payload, err := b.modal.RecordWithContext(permReq, wireClass, conversationID, modalbridge.PermissionContext{
 		Reason:      req.DecisionReason,
 		ReasonType:  req.DecisionReasonType,
 		BlockedPath: req.BlockedPath,
@@ -875,6 +885,19 @@ func (b *streamApprovalBridge) Surface(req permbridge.Request) (retire func()) {
 	return func() { b.retire(modalID) }
 }
 
+// conversationFor is the conversation a request parked by sessionID is about:
+// the one bound to that session, or the cursor when nothing resolves it, such
+// as a request with no session or the bootstrap before it has a conversation
+// (#2675). It logs nothing; both ids are routing keys.
+func (b *streamApprovalBridge) conversationFor(sessionID string) string {
+	if b.sessionConv != nil {
+		if id, ok := b.sessionConv(sessionID); ok {
+			return id
+		}
+	}
+	return b.activeConv()
+}
+
 // surfaceQuestion raises a parsed clarifying-question batch to interactive clients
 // as one question_shown and returns the retire closure the control server defers
 // (#1973). Surface's question arm, reachable only from a questionbridge.Parse that
@@ -897,8 +920,8 @@ func (b *streamApprovalBridge) Surface(req permbridge.Request) (retire func()) {
 // claude-authored strings reach the marshalled payload and NOTHING else; no log
 // field here carries the question text, a header, an option label or description,
 // the tool name, or any other byte of the parked input.
-func (b *streamApprovalBridge) surfaceQuestion(batch protocol.QuestionShownPayload, toolUseID string) (retire func()) {
-	stamped, err := b.questions.Record(batch, b.activeConv())
+func (b *streamApprovalBridge) surfaceQuestion(batch protocol.QuestionShownPayload, toolUseID, conversationID string) (retire func()) {
+	stamped, err := b.questions.Record(batch, conversationID)
 	if err != nil {
 		// crypto/rand failure — drop the batch (no question_shown, no
 		// correlation); claude times out to deny. Never echo err detail; no

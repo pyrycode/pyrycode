@@ -114,7 +114,7 @@ func newCodexRunnerFactory(h codexHarness) sessions.RunnerFactory {
 			Log:            cfg.Logger,
 			ThreadID:       cfg.ThreadID,
 			OnThread:       recordCodexThread(cfg.RecordThread, cfg.Logger),
-			Approvals:      newCodexApprovals(h.approval.registry, h.approval.timeout, h.approval.surface),
+			Approvals:      newCodexApprovals(h.approval.registry, h.approval.timeout, h.approval.surface, tag),
 			Models:         h.vocab.RetainCodex,
 			Families:       h.vocab.CodexModels,
 		}), nil
@@ -785,11 +785,13 @@ const (
 // daemon-wide approval registry and the permission modal, as
 // stdioPermissionHandler does for a Claude session. live holds only this
 // runner's parked requests, so its decline paths leave other sessions alone.
-// mu is a leaf, never held across a registry, surface or Codex call.
+// mu is a leaf, never held across a registry, surface or Codex call. tag is
+// the runner's live session, read at every park; nil reports none.
 type codexApprovals struct {
 	registry *permbridge.Registry
 	timeout  time.Duration
 	surface  *approvalSurfaceReport
+	tag      *streamSessionTag
 
 	mu      sync.Mutex
 	live    map[string]*codexApproval // registry id → parked request
@@ -806,7 +808,7 @@ type codexApproval struct {
 
 // newCodexApprovals returns nil without a registry: every request then takes
 // codexsup's default decline.
-func newCodexApprovals(registry *permbridge.Registry, timeout time.Duration, surface *approvalSurfaceReport) *codexApprovals {
+func newCodexApprovals(registry *permbridge.Registry, timeout time.Duration, surface *approvalSurfaceReport, tag *streamSessionTag) *codexApprovals {
 	if registry == nil {
 		return nil
 	}
@@ -814,6 +816,7 @@ func newCodexApprovals(registry *permbridge.Registry, timeout time.Duration, sur
 		registry: registry,
 		timeout:  timeout,
 		surface:  surface,
+		tag:      tag,
 		live:     make(map[string]*codexApproval),
 		changes:  make(map[string][]string),
 	}
@@ -846,6 +849,9 @@ func (a *codexApprovals) handle(req *codexsup.ServerRequest) {
 	}
 	id := "codex-" + hex.EncodeToString(nonce[:])
 	parked.ToolUseID = id
+	if a.tag != nil {
+		parked.SessionID = a.tag.ID()
+	}
 	pending, err := a.registry.Register(id, parked, a.timeout)
 	if err != nil {
 		_ = req.Decline()
