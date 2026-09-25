@@ -388,6 +388,18 @@ model and effort.** `codexTurnOverrides` (`cmd/pyry/codex_settings.go`) is
 | `bypassPermissions` / YOLO | never | dangerFullAccess | user |
 | anything else, including empty | granular | readOnly | user |
 
+**The last row is unreachable through the pool.** `internal/sessions`'
+`canonicalSettings` runs at both session-construction sites
+(`Pool.mintSettings` and `Pool.revivedSettings`) and turns an empty
+`PermissionMode` into `default` before a Codex runner ever sees it — a
+pool-held session's mode is never `""`. So a session that never had its
+mode explicitly set gets the `default`/`acceptEdits` row (`workspaceWrite`,
+no modal for an in-workspace write), not the read-only row this table's last
+line describes; that row only fires for a mode hand-constructed outside
+`canonicalSettings`. #2660's daemon-level live test assumed the opposite —
+that leaving a conversation's mode unset yields read-only — and found this
+by reading `canonicalPermissionMode` rather than the table alone.
+
 The YOLO bit is read before the mode, mirroring `claudeSettingsArgs`. The
 posture is never empty: Codex keeps a `turn/start` override for the
 thread's *later* turns too, so an omitted field would let a previous,
