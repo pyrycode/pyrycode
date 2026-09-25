@@ -116,3 +116,7 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-25
+
+## Revisions
+
+- 2026-09-25, implementation. Open question resolved: `Session.Evict` followed by `Pool.Activate` reruns the same `codexRunner`, which resumes its held thread, and `thread/resume` carries the prompt the re-activate recomposed (`TestCodexRunner_ConversationPromptReachesThread`). No design change. The runner-level test also has a last step with a file of exactly `codexMaxPrompt` bytes, which is sent in full, so the bound is pinned from both sides.

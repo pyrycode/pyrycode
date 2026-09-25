@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"slices"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -45,6 +47,9 @@ const (
 	codexStartTimeout = 30 * time.Second
 	// codexCallTimeout bounds an interrupt and a stop.
 	codexCallTimeout = 5 * time.Second
+	// codexMaxPrompt bounds the composed prompt file a spawn reads; the pool's
+	// composition sits far below it.
+	codexMaxPrompt = 256 << 10
 )
 
 // codexHarness is the daemon-wide input to the Codex runner factory: the
@@ -117,6 +122,7 @@ func newCodexRunnerFactory(h codexHarness) sessions.RunnerFactory {
 			Approvals:      newCodexApprovals(h.approval.registry, h.approval.timeout, h.approval.surface, tag),
 			Models:         h.vocab.RetainCodex,
 			Families:       h.vocab.CodexModels,
+			PromptFile:     codexPromptFile(cfg.ClaudeArgs),
 		}), nil
 	}
 }
@@ -226,6 +232,24 @@ func codexTurnSettings(args []string) (model, effort string) {
 	return model, effort
 }
 
+// codexPromptFile is the composed system-prompt file the pool names in the
+// argv's last --append-system-prompt-file pair, spaced or = form, and "" when
+// there is none. The pool keeps the path for the session's life (#2662).
+func codexPromptFile(args []string) string {
+	const flag = "--append-system-prompt-file"
+	var path string
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == flag && i+1 < len(args):
+			i++
+			path = args[i]
+		case strings.HasPrefix(args[i], flag+"="):
+			path = strings.TrimPrefix(args[i], flag+"=")
+		}
+	}
+	return path
+}
+
 // codexRunnerConfig is one Codex runner's construction input. Sink and OnExit
 // must not block; Tag is the live pool session id both are bound to. ThreadID
 // is the stored thread the first spawn resumes, empty to start one; OnThread,
@@ -236,6 +260,8 @@ func codexTurnSettings(args []string) (model, effort string) {
 // skips the read. Families returns the model families held now, which every
 // turn resolves its stored model against (#2628); nil holds none. WrapUp is the
 // reply capture chained into Sink, which BeginWrapUp arms (#2663); nil refuses.
+// PromptFile is the pool's composed system-prompt file, read at every spawn
+// and sent as the thread's developer instructions (#2662); "" sends none.
 type codexRunnerConfig struct {
 	Binary, Home, Dir string
 	Tag               *streamSessionTag
@@ -251,6 +277,7 @@ type codexRunnerConfig struct {
 	Models            func([]turnevent.ModelOption)
 	Families          func() []turnevent.ModelOption
 	WrapUp            *wrapUpCapture
+	PromptFile        string
 }
 
 // codexRunner is the Codex implementation of sessions.Runner: it supervises
@@ -423,13 +450,15 @@ func (r *codexRunner) runOnce(ctx context.Context, threadID string, seq uint64) 
 	model := r.model
 	r.mu.Unlock()
 	tr := codexsup.NewTranslator(model)
+	instructions := r.readPrompt()
 	startCtx, cancelStart := context.WithTimeout(ctx, codexStartTimeout)
 	defer cancelStart()
 	client, err := codexsup.Start(startCtx, codexsup.Config{
-		Binary:        r.cfg.Binary,
-		Dir:           r.cfg.Dir,
-		CodexHome:     r.cfg.Home,
-		ClientVersion: Version,
+		Binary:                r.cfg.Binary,
+		Dir:                   r.cfg.Dir,
+		CodexHome:             r.cfg.Home,
+		ClientVersion:         Version,
+		DeveloperInstructions: instructions,
 		OnNotification: func(method string, params json.RawMessage) {
 			r.notify(tr, method, params)
 		},
@@ -506,6 +535,50 @@ func (r *codexRunner) runOnce(ctx context.Context, threadID string, seq uint64) 
 		return nil
 	}
 	return exitErr
+}
+
+// readPrompt returns the composed prompt file's contents for this spawn's
+// thread open, "" when there is no file to read. The pool rewrites the file by
+// rename before every spawn that should see a new composition, so each read
+// sees a whole one. A file that cannot be opened, is not a regular file or
+// exceeds codexMaxPrompt is logged and sends nothing; it never fails the spawn.
+// The open does not block, so a FIFO planted at the path cannot hang Run. No
+// byte of the file is logged: it holds the operator's prompt and the handoff
+// note.
+func (r *codexRunner) readPrompt() string {
+	if r.cfg.PromptFile == "" {
+		return ""
+	}
+	b, err := readPromptFile(r.cfg.PromptFile)
+	if err != nil {
+		r.log.Warn("codex: system prompt not read", "session", r.cfg.Tag.ID(), "err", err)
+		return ""
+	}
+	return string(b)
+}
+
+// readPromptFile reads path, a regular file of at most codexMaxPrompt bytes.
+func readPromptFile(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: not a regular file", path)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, codexMaxPrompt+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > codexMaxPrompt {
+		return nil, fmt.Errorf("%s: larger than %d bytes", path, codexMaxPrompt)
+	}
+	return b, nil
 }
 
 // readModels reads client's model families and hands them to cfg.Models. It

@@ -396,6 +396,8 @@ func TestRequestErrors(t *testing.T) {
 }
 
 func TestThreadStartAndResume(t *testing.T) {
+	threadLog := filepath.Join(t.TempDir(), "threads.jsonl")
+	t.Setenv("FAKECODEX_THREAD_LOG", threadLog)
 	p := startFake(t)
 	p.initialize()
 	id := p.startThread()
@@ -408,11 +410,38 @@ func TestThreadStartAndResume(t *testing.T) {
 			Turns []any  `json:"turns"`
 		} `json:"thread"`
 	}
-	p.result("thread/resume", map[string]any{"threadId": id, "excludeTurns": true}, &r)
+	p.result("thread/resume", map[string]any{"threadId": id, "excludeTurns": true, "developerInstructions": "be brief"}, &r)
 	if r.Thread.ID != id {
 		t.Errorf("thread/resume id = %q, want %q", r.Thread.ID, id)
 	}
 	p.stop()
+
+	// #2662: every thread open is logged with its params, in order.
+	raw, err := os.ReadFile(threadLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var e struct {
+			Method string `json:"method"`
+			Params struct {
+				DeveloperInstructions *string `json:"developerInstructions"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("thread log line %q: %v", line, err)
+		}
+		di := "<none>"
+		if e.Params.DeveloperInstructions != nil {
+			di = *e.Params.DeveloperInstructions
+		}
+		got = append(got, e.Method+" "+di)
+	}
+	want := []string{"thread/start <none>", "thread/start <none>", "thread/resume be brief"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("thread log = %q, want %q", got, want)
+	}
 }
 
 func TestTurnStreamsAgentMessage(t *testing.T) {

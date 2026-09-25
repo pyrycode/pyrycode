@@ -52,6 +52,9 @@ type Config struct {
 	CodexHome string
 	// ClientVersion is sent as clientInfo.version; empty sends "dev".
 	ClientVersion string
+	// DeveloperInstructions, when non-empty, is sent as developerInstructions
+	// on every thread/start and thread/resume; empty omits the key (#2662).
+	DeveloperInstructions string
 
 	// OnNotification receives every server notification, raw and in arrival
 	// order. It runs on the connection's read loop: it must not block, and
@@ -145,6 +148,7 @@ type Client struct {
 	dir   string
 
 	clientVersion string
+	instructions  string // developerInstructions on every thread open
 
 	// exitCtx is cancelled once the connection has drained after exit;
 	// calls in flight then fail instead of hanging.
@@ -245,6 +249,7 @@ func newClient(cfg Config, r io.Reader, w io.WriteCloser, wait func() error, kil
 		stdin:         w,
 		kill:          kill,
 		dir:           cfg.Dir,
+		instructions:  cfg.DeveloperInstructions,
 		exitCtx:       exitCtx,
 		cancelExit:    cancelExit,
 		done:          make(chan struct{}),
@@ -397,12 +402,14 @@ func (c *Client) setThread(method string, res threadResult) (string, error) {
 	return res.Thread.ID, nil
 }
 
-// StartThread starts a thread in the configured directory and returns the id
-// Codex minted, which becomes the client's thread.
+// StartThread starts a thread in the configured directory, with the configured
+// developer instructions, and returns the id Codex minted, which becomes the
+// client's thread.
 func (c *Client) StartThread(ctx context.Context) (string, error) {
 	params := struct {
-		Cwd string `json:"cwd,omitempty"`
-	}{c.dir}
+		Cwd                   string `json:"cwd,omitempty"`
+		DeveloperInstructions string `json:"developerInstructions,omitempty"`
+	}{c.dir, c.instructions}
 	var res threadResult
 	if err := c.call(ctx, methodThreadStart, params, &res); err != nil {
 		return "", err
@@ -410,14 +417,15 @@ func (c *Client) StartThread(ctx context.Context) (string, error) {
 	return c.setThread(methodThreadStart, res)
 }
 
-// ResumeThread resumes the thread with id, without its turn history, and
-// makes it the client's thread.
+// ResumeThread resumes the thread with id, without its turn history, with the
+// configured developer instructions, and makes it the client's thread.
 func (c *Client) ResumeThread(ctx context.Context, threadID string) error {
 	params := struct {
-		ThreadID     string `json:"threadId"`
-		Cwd          string `json:"cwd,omitempty"`
-		ExcludeTurns bool   `json:"excludeTurns"`
-	}{threadID, c.dir, true}
+		ThreadID              string `json:"threadId"`
+		Cwd                   string `json:"cwd,omitempty"`
+		ExcludeTurns          bool   `json:"excludeTurns"`
+		DeveloperInstructions string `json:"developerInstructions,omitempty"`
+	}{threadID, c.dir, true, c.instructions}
 	var res threadResult
 	if err := c.call(ctx, methodThreadResume, params, &res); err != nil {
 		return err
