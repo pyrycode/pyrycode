@@ -43,6 +43,16 @@ so one process serves every scenario a consumer's test needs.
   After the client answers, the fake sends `serverRequest/resolved` and
   completes the item: `accept`/`acceptForSession` → `completed` with exit
   code 0; any other decision → `declined`.
+- `[fakecodex:withdraw]` (#2587) — like `approval`, but the fake sends
+  `serverRequest/resolved` at once, before the client answers, and completes
+  the item as `declined` itself. A response the client still sends for that
+  request afterwards is not an error — the fake appends it to
+  `FAKECODEX_TURN_LOG` as `{"lateResponse":<id>}` instead of rejecting it,
+  so a consumer test can assert the client wrote *nothing* late by checking
+  the log stays free of that line, rather than by racing the fake for a
+  protocol error. This is the marker a withdrawn-approval test needs:
+  `approval` always resolves *after* the answer, which cannot exercise a
+  consumer's "Codex resolved it before I could" path at all.
 - `[fakecodex:hold]` — after `turn/started` the turn blocks until
   `turn/interrupt` names it.
 
@@ -110,5 +120,9 @@ the ordinary call path without the check catching it.
   env-only-configuration convention this fake follows.
 - `internal/codexsup/SCHEMA.md` — how the pinned 0.156.1 schema bundle is
   regenerated; not touched by this ticket.
+- [codexsup-package.md § Approvals reach the permission modal
+  (#2587)](codexsup-package.md#approvals-reach-the-permission-modal-2587) —
+  `cmd/pyry/codex_approval_test.go` is the consumer that drives
+  `[fakecodex:withdraw]`.
 - [e2e-harness.md](e2e-harness.md) — where a consumer wires a fake binary
   into `Harness`.

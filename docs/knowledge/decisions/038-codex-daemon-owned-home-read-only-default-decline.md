@@ -3,7 +3,9 @@
 ## Status
 
 Accepted (#2620). Partially superseded — see [Superseded in part
-(2026-09-25, #2586)](#superseded-in-part-2026-09-25-2586) below.
+(2026-09-25, #2586)](#superseded-in-part-2026-09-25-2586) and
+[Superseded in part (2026-09-25, #2587)](#superseded-in-part-2026-09-25-2587)
+below.
 
 ## Context
 
@@ -84,10 +86,11 @@ on the next turn, not live on the running one.
 
 ## Consequences
 
-- Until #2587 lands, **no Codex session can accept any server request** —
-  every approval, tool call and user-input request is declined, regardless
-  of what the operator would have said. A ticket that needs Codex to take a
-  write action needs #2587 first, not a change to this runner.
+- Before #2587, **no Codex session could accept any server request** —
+  every approval, tool call and user-input request was declined, regardless
+  of what the operator would have said. See [Superseded in part (2026-09-25,
+  #2587)](#superseded-in-part-2026-09-25-2587) below for what changed and
+  what didn't.
 - System-wide or managed Codex configuration outside `CODEX_HOME` (for
   example under `/etc/codex`) is out of scope for this decision and could
   still apply beside it, loosening the effective posture in a way
@@ -116,10 +119,12 @@ What this decision got right and what still stands unchanged:
   construction. That rewrite is now the posture's *baseline before the
   first turn* rather than its permanent value — every turn since #2586
   re-asserts the session's actual posture on top of it.
-- The default decline on every server request (`OnServerRequest` left
-  nil). A looser sandbox or approval policy only changes what Codex is
-  *permitted* to attempt without asking; #2587 still owns whether anything
-  answers an approval request with anything but codexsup's decline.
+- The default decline on every server request codexsup itself doesn't route
+  elsewhere (`OnServerRequest` left nil in this decision's scope). A looser
+  sandbox or approval policy only changes what Codex is *permitted* to
+  attempt without asking — see [Superseded in part (2026-09-25,
+  #2587)](#superseded-in-part-2026-09-25-2587) for the two methods that now
+  route to a real answer instead.
 - `auth.json` is still never read, copied, linked or moved by the daemon.
 
 See [codexsup-package.md § Production
@@ -127,6 +132,38 @@ wiring](../features/codexsup-package.md#production-wiring--the-cmdpyry-codex-run
 for the full posture table and the sticky-override reasoning (an omitted
 field keeps the thread's previous, possibly looser, override — which is
 why every turn asserts all three rather than only the ones that changed).
+
+## Superseded in part (2026-09-25, #2587)
+
+`OnServerRequest` is no longer unconditionally nil. `codex_runner.go`'s
+`codexApprovals` wires it to park `item/commandExecution/requestApproval`
+and `item/fileChange/requestApproval` on the daemon-wide `permbridge.Registry`
+and surface them through the permission modal, the same path a Claude
+session's stdio approvals take. What this decision got right and what still
+stands:
+
+- The daemon-owned `CODEX_HOME`, its `0700` permissions and the unconditional
+  `config.toml` rewrite are unchanged — the sandbox and approval-policy
+  *baseline* this decision sets still stands underneath #2586's per-turn
+  overrides.
+- The default decline is unchanged for the other eight server-request
+  methods at 0.156.1, including the legacy `applyPatchApproval`/
+  `execCommandApproval` and the experimental `item/tool/requestUserInput` —
+  #2587 explicitly kept them out of scope.
+- `auth.json` is still never read, copied, linked or moved by the daemon.
+- Nothing answers `accept` by default: a request is only ever accepted
+  through an explicit operator decision resolving the registry entry, and
+  every path the operator did not choose (window timeout, interrupt,
+  teardown, app-server exit, a request Codex withdrew on its own) still
+  answers `decline`, mirroring this decision's original always-decline
+  guarantee for those paths.
+
+See [codexsup-package.md § Approvals reach the permission modal
+(#2587)](../features/codexsup-package.md#approvals-reach-the-permission-modal-2587)
+for the adapter, the two security-review findings that shaped its final
+shape (decline rather than partially display a scope-changing field;
+mark a truncated display rather than cutting it silently), and the known
+test-coverage gap on the file-change correlation path.
 
 ## Related
 
@@ -136,6 +173,7 @@ why every turn asserts all three rather than only the ones that changed).
 - `docs/specs/architecture/2620-codex-pool-runner.md` — the full plan,
   including the Security review this decision matches.
 - #2586 — applies the stored posture per turn instead of fixing it read-only; see "Superseded in part" above.
-- #2587 — the approvals ticket this posture defers to.
+- #2587 — routes command and file-change approvals to the permission modal;
+  see "Superseded in part (2026-09-25, #2587)" above.
 - #2621 — construction-time sign-in/version checks, the natural place to
   also detect a looser effective posture from outside `CODEX_HOME`.

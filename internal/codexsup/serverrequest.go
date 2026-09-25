@@ -13,6 +13,9 @@ import (
 // is, the Codex turn that raised it waits.
 type ServerRequest struct {
 	Method string
+	// ID is the request's JSON-RPC id, which serverRequest/resolved names as
+	// requestId when the app-server stops waiting for the answer.
+	ID json.RawMessage
 	// Params is the request's params as the app-server sent them. It is
 	// untrusted input and may carry commands, paths and file contents.
 	Params json.RawMessage
@@ -71,7 +74,8 @@ func serverRequestHandler(method string, onRequest func(*ServerRequest)) acp.Han
 			}
 			return result, nil
 		}
-		onRequest(&ServerRequest{Method: method, Params: params, resp: acp.ResponderFrom(ctx)})
+		resp := acp.ResponderFrom(ctx)
+		onRequest(&ServerRequest{Method: method, ID: resp.ID(), Params: params, resp: resp})
 		return nil, acp.ErrDeferred
 	}
 }

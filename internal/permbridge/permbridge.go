@@ -69,15 +69,29 @@ type PermissionUpdate struct {
 
 // AlwaysAllow is an immutable, validated always-allow offer. Its slices are
 // package-owned; accessors return clones so outstanding modal state cannot be
-// changed by a later caller.
+// changed by a later caller. It holds either Claude rule updates or a
+// harness session grant (SessionGrant), never both.
 type AlwaysAllow struct {
 	updates []PermissionUpdate
 	rules   []string
+	session bool
+}
+
+// SessionGrant builds an offer that carries no Claude rule updates: the
+// harness itself remembers the approval for the session when AllowAlways
+// marks the verdict ForSession. label is the one rule the modal shows. An
+// empty label, or one longer than a rendered Claude rule may be, yields no
+// offer, so a grant is never offered without its scope on screen.
+func SessionGrant(label string) AlwaysAllow {
+	if label == "" || len(label) > maxRenderedRuleBytes {
+		return AlwaysAllow{}
+	}
+	return AlwaysAllow{rules: []string{label}, session: true}
 }
 
 // Offered reports whether the value contains a complete validated offer.
 func (a AlwaysAllow) Offered() bool {
-	return len(a.updates) != 0
+	return len(a.updates) != 0 || a.session
 }
 
 // Rules returns rendered display rules in source order.
@@ -237,11 +251,14 @@ type Request struct {
 // two disjoint wire shapes: allow → {"behavior":"allow","updatedInput":{…}}
 // with optional session-scoped updatedPermissions; deny →
 // {"behavior":"deny","message":"…"}. Construct via Allow, AllowAlways, or Deny.
+// ForSession is never on the wire: it marks an allow that accepted a
+// SessionGrant, for a harness that answers in its own vocabulary.
 type Verdict struct {
 	Behavior           string          `json:"behavior"`
 	UpdatedInput       json.RawMessage `json:"updatedInput,omitempty"`       // allow only
 	UpdatedPermissions json.RawMessage `json:"updatedPermissions,omitempty"` // session allow only
 	Message            string          `json:"message,omitempty"`            // deny only
+	ForSession         bool            `json:"-"`                            // session-grant allow only
 }
 
 // Allow builds an allow verdict echoing updatedInput (the request's Input,
@@ -252,13 +269,16 @@ func Allow(updatedInput json.RawMessage) Verdict {
 
 // AllowAlways builds an allow verdict from a daemon-retained validated offer.
 // Every destination is rewritten to session; an unavailable offer preserves the
-// plain allow shape. The typed updates contain only strings, so marshal failure
+// plain allow shape. A SessionGrant keeps the plain allow bytes and sets
+// ForSession. The typed updates contain only strings, so marshal failure
 // is unreachable with the current value, but falling back grants no rule if that
 // contract changes.
 func AllowAlways(updatedInput json.RawMessage, offer AlwaysAllow) Verdict {
 	updates := offer.Updates()
 	if len(updates) == 0 {
-		return Allow(updatedInput)
+		v := Allow(updatedInput)
+		v.ForSession = offer.session
+		return v
 	}
 	for i := range updates {
 		updates[i].Destination = "session"
