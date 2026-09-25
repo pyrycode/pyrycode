@@ -8,8 +8,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"unicode/utf8"
 
+	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/turnbridge"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
@@ -184,7 +185,7 @@ func TestTranslateCapturedCommands(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			events := replay(t, filepath.Join("testdata", "capture", tc.name+".jsonl"), captureModel)
 			input, _ := json.Marshal(map[string]string{"command": tc.command, "cwd": "/capture/cwd"})
-			wantStart := []turnevent.ToolStart{{ToolCallID: tc.id, Title: tc.command, Kind: turnevent.ToolKindExecute, RawInput: input}}
+			wantStart := []turnevent.ToolStart{{ToolCallID: tc.id, Title: "shell", Kind: turnevent.ToolKindExecute, RawInput: input}}
 			if got := only[turnevent.ToolStart](events); !reflect.DeepEqual(got, wantStart) {
 				t.Errorf("ToolStart %#v\nwant %#v", got, wantStart)
 			}
@@ -199,7 +200,7 @@ func TestTranslateCapturedCommands(t *testing.T) {
 	}
 }
 
-// TestTranslateToolItemEdges: the ResultDetail, title and content rules at
+// TestTranslateToolItemEdges: the ResultDetail and content rules at
 // their edges.
 func TestTranslateToolItemEdges(t *testing.T) {
 	completed := func(item string) []turnevent.Event {
@@ -216,11 +217,6 @@ func TestTranslateToolItemEdges(t *testing.T) {
 	got := completed(`"status":"completed","exitCode":"0"`)
 	if len(got) != 1 || got[0].(turnevent.Unrecognized).Site != turnevent.UnrecognizedUndecodable {
 		t.Errorf("string exit code: %#v", got)
-	}
-	long, _ := json.Marshal(strings.Repeat("é", maxToolTitle))
-	start := NewTranslator("").Translate("item/started", json.RawMessage(`{"item":{"type":"commandExecution","id":"c","cwd":"/","status":"inProgress","command":`+string(long)+`}}`))
-	if title := start[0].(turnevent.ToolStart).Title; len(title) > maxToolTitle || !utf8.ValidString(title) {
-		t.Errorf("title len %d valid %v", len(title), utf8.ValidString(title))
 	}
 	for _, m := range []string{"item/commandExecution/outputDelta", "item/fileChange/outputDelta"} {
 		if got := NewTranslator("").Translate(m, json.RawMessage(`{"itemId":"c","delta":"x"}`)); got != nil {
@@ -304,22 +300,25 @@ func TestTranslateHandBuilt(t *testing.T) {
 			turnevent.Compacting{Active: true}, turnevent.Compacting{Active: false},
 		}},
 		{name: "command_failed", want: []turnevent.Event{
-			turnevent.ToolStart{ToolCallID: "exec-1", Title: "/bin/zsh -lc 'ls missing'", Kind: turnevent.ToolKindExecute,
+			turnevent.ToolStart{ToolCallID: "exec-1", Title: "shell", Kind: turnevent.ToolKindExecute,
 				RawInput: json.RawMessage(`{"command":"/bin/zsh -lc 'ls missing'","cwd":"/capture/cwd"}`)},
 			turnevent.ToolUpdate{ToolCallID: "exec-1", Status: turnevent.ToolStatusFailed,
 				Content: turnevent.TextContent{Text: "ls: missing: No such file or directory\n"}, ResultDetail: "exit 2"},
 		}},
 		{name: "file_change", want: []turnevent.Event{
 			turnevent.ToolStart{ToolCallID: "patch-1", Title: "apply_patch", Kind: turnevent.ToolKindEdit,
-				Locations: []turnevent.Location{{Path: "/capture/cwd/notes.txt"}, {Path: "/capture/cwd/added.txt"}}},
+				Locations: []turnevent.Location{{Path: "/capture/cwd/notes.txt"}, {Path: "/capture/cwd/added.txt"}},
+				RawInput:  json.RawMessage(`{"paths":"/capture/cwd/notes.txt, /capture/cwd/added.txt"}`)},
 			turnevent.ToolUpdate{ToolCallID: "patch-1", Status: turnevent.ToolStatusCompleted, Content: turnevent.TextContent{
 				Text: "/capture/cwd/notes.txt\n@@ -1 +1 @@\n-old\n+new\n\n/capture/cwd/added.txt\n@@ -0,0 +1 @@\n+hello\n"}},
 			turnevent.ToolStart{ToolCallID: "patch-2", Title: "apply_patch", Kind: turnevent.ToolKindEdit,
-				Locations: []turnevent.Location{{Path: "/capture/cwd/gone.txt"}}},
+				Locations: []turnevent.Location{{Path: "/capture/cwd/gone.txt"}},
+				RawInput:  json.RawMessage(`{"paths":"/capture/cwd/gone.txt"}`)},
 			turnevent.ToolUpdate{ToolCallID: "patch-2", Status: turnevent.ToolStatusFailed,
 				Content: turnevent.TextContent{Text: "/capture/cwd/gone.txt\n@@ -1 +0,0 @@\n-bye\n"}},
 			turnevent.ToolStart{ToolCallID: "patch-3", Title: "apply_patch", Kind: turnevent.ToolKindEdit,
-				Locations: []turnevent.Location{{Path: "/capture/cwd/notes.txt"}}},
+				Locations: []turnevent.Location{{Path: "/capture/cwd/notes.txt"}},
+				RawInput:  json.RawMessage(`{"paths":"/capture/cwd/notes.txt"}`)},
 			turnevent.ToolUpdate{ToolCallID: "patch-3", Status: turnevent.ToolStatusFailed,
 				Content: turnevent.TextContent{Text: "/capture/cwd/notes.txt\n@@ -1 +1 @@\n-new\n+newer\n"}, ResultDetail: "declined"},
 		}},
@@ -328,6 +327,34 @@ func TestTranslateHandBuilt(t *testing.T) {
 			got := replay(t, filepath.Join("testdata", "handbuilt", tc.name+".jsonl"), tc.model)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("got  %#v\nwant %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestToolRowsOnTheWire: a Codex command reaches the wire as a tool_use named
+// shell whose input holds the command and cwd, and a file change as one named
+// apply_patch whose input and input_summary hold every changed path.
+func TestToolRowsOnTheWire(t *testing.T) {
+	for _, tc := range []struct {
+		fixture string
+		want    protocol.ToolUsePayload
+	}{
+		{"command_failed", protocol.ToolUsePayload{ToolUseID: "exec-1", Name: "shell",
+			InputSummary: `{"command":"/bin/zsh -lc 'ls missing'","cwd":"/capture/cwd"}`,
+			Input:        map[string]string{"command": "/bin/zsh -lc 'ls missing'", "cwd": "/capture/cwd"}}},
+		{"file_change", protocol.ToolUsePayload{ToolUseID: "patch-1", Name: "apply_patch",
+			InputSummary: `{"paths":"/capture/cwd/notes.txt, /capture/cwd/added.txt"}`,
+			Input:        map[string]string{"paths": "/capture/cwd/notes.txt, /capture/cwd/added.txt"}}},
+	} {
+		t.Run(tc.fixture, func(t *testing.T) {
+			events := only[turnevent.ToolStart](replay(t, filepath.Join("testdata", "handbuilt", tc.fixture+".jsonl"), ""))
+			if len(events) == 0 {
+				t.Fatal("no ToolStart")
+			}
+			typ, payload, ok := turnbridge.MapEvent(events[0], turnbridge.TurnContext{})
+			if !ok || typ != protocol.TypeToolUse || !reflect.DeepEqual(payload, tc.want) {
+				t.Errorf("got %v %q %#v\nwant tool_use %#v", ok, typ, payload, tc.want)
 			}
 		})
 	}

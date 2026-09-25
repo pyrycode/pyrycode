@@ -42,14 +42,21 @@ to — a silent downgrade would otherwise pass for the requested model.
 
 `commandExecution` and `fileChange` items (#2609) become tool events instead
 of `Unrecognized`, so a Codex tool row renders like a Claude one with no
-client change: `item/started` is one `ToolStart` (`Kind` execute or edit,
-`RawInput` `{command, cwd}` for a command, one `Location` per changed path
-and the literal title `"apply_patch"` for a file change — Codex reports no
-tool name for a file change, so the translator names the tool that produces
-the item, the same way it would for a Claude `Edit`), and `item/completed` is
-exactly **one** `ToolUpdate` — never a stream of them. That constraint is why
-`item/commandExecution/outputDelta` and `item/fileChange/outputDelta` moved
-to `ignoredMethods` rather than `mappedMethods`: turnbridge turns every
+client change: `item/started` is one `ToolStart` whose `Title` is always the
+literal tool name — `"shell"` for a command, `"apply_patch"` for a file
+change — never the command text itself. turnbridge copies `Title` straight
+to `tool_use.name` and `RawInput` to `tool_use.input`/`input_summary`; a
+title built from the command (#2668 found this the hard way) put the same
+command in both fields, so a client showed it twice with no subject of its
+own. Codex reports no tool name for either item, so the translator supplies
+one for both, the same way it would for a Claude `Edit`. `RawInput` is
+`{command, cwd}` for a command and `{paths}` — every changed path joined by
+`", "` — for a file change; a file change also keeps one `Location` per
+changed path for clients that read Locations instead of input.
+`item/completed` is exactly **one** `ToolUpdate` — never a stream of them.
+That constraint is why `item/commandExecution/outputDelta` and
+`item/fileChange/outputDelta` moved to `ignoredMethods` rather than
+`mappedMethods`: turnbridge turns every
 `ToolUpdate` into a `tool_result` frame, so forwarding the deltas too would
 give one tool row several results. `ResultDetail` is built only from the
 translator's own literals and the decoded exit code — `"declined"`, or
