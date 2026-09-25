@@ -2153,6 +2153,31 @@ func TestModelOption_NilSliceEncodings(t *testing.T) {
 	}
 }
 
+// #2651: agent and family are keys only a multi_agent client's list carries. An
+// untagged row must marshal with NEITHER key, which is what keeps the frame an
+// older client reads byte-identical to the one it read before the fields existed.
+func TestModelOption_AgentAndFamilyKeys(t *testing.T) {
+	untagged, err := json.Marshal(ModelOption{Value: "sonnet"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{`"agent"`, `"family"`} {
+		if bytes.Contains(untagged, []byte(key)) {
+			t.Errorf("an untagged row carries %s; an older client's frame would change: %s", key, untagged)
+		}
+	}
+
+	tagged, err := json.Marshal(ModelOption{Value: "gpt-5", Agent: AgentCodex, Family: "gpt-5"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"agent":"codex"`, `"family":"gpt-5"`} {
+		if !bytes.Contains(tagged, []byte(want)) {
+			t.Errorf("a tagged row lacks %s: %s", want, tagged)
+		}
+	}
+}
+
 // TestModelListType_IsNotClaudesVocabulary pins the translation layer this frame
 // exists to preserve, as its thinking_progress, rate_limited and model_announced
 // siblings above do. The daemon is the ONE place a claude rename lands; naming

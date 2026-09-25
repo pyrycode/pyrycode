@@ -147,7 +147,7 @@ func (m *V2SessionManager) handleRequestModelList(ctx context.Context, s *V2Sess
 	// NOT read the payload on false, so it is assigned only on true. Writing
 	// `payload, _ = …` would happen to work today only because the cmd/pyry producer
 	// zeroes its refusal return — a property of that package, not of this contract.
-	payload, ok := m.cfg.ModelListFor(p.ConversationID)
+	payload, ok := m.cfg.ModelListFor(p.ConversationID, s.multiAgent)
 	if !ok {
 		m.rejectModelListRequest(ctx, s, env.ID, rejectModelListUnavailable, "no vocabulary is retained for this conversation", p.ConversationID)
 		return

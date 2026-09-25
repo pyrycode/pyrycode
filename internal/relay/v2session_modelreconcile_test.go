@@ -124,7 +124,7 @@ func TestV2Session_ModelListReconcile_Delivery(t *testing.T) {
 				Devices:            reg,
 				ServerID:           v2TestServerID,
 				Logger:             silentLogger(),
-				RetainedModelLists: func() []protocol.ModelListPayload { return tt.payloads },
+				RetainedModelLists: func(bool) []protocol.ModelListPayload { return tt.payloads },
 			})
 			t.Cleanup(stop)
 
@@ -171,7 +171,7 @@ func TestV2Session_ModelListReconcile_UnicastOnlyOpeningConn(t *testing.T) {
 		Devices:    reg,
 		ServerID:   v2TestServerID,
 		Logger:     silentLogger(),
-		RetainedModelLists: func() []protocol.ModelListPayload {
+		RetainedModelLists: func(bool) []protocol.ModelListPayload {
 			return []protocol.ModelListPayload{sampleModelListPayload(convID, "sonnet")}
 		},
 	})
@@ -207,13 +207,13 @@ func TestV2Session_ModelListReconcile_NoFrame(t *testing.T) {
 		connCtl = "c-v2-CTL" // interactive control conn, capability row only
 		convID  = "conv-modellist-noframe"
 	)
-	nonEmptySeam := func() []protocol.ModelListPayload {
+	nonEmptySeam := func(bool) []protocol.ModelListPayload {
 		return []protocol.ModelListPayload{sampleModelListPayload(convID, "sonnet")}
 	}
 
 	tests := []struct {
 		name string
-		seam func() []protocol.ModelListPayload
+		seam func(bool) []protocol.ModelListPayload
 		caps []string
 		// controlConn opens a second, interactive conn AFTER the conn under test.
 		// The capability row needs it: without a conn that DOES receive a
@@ -227,7 +227,7 @@ func TestV2Session_ModelListReconcile_NoFrame(t *testing.T) {
 		},
 		{
 			name: "zero payloads",
-			seam: func() []protocol.ModelListPayload { return nil },
+			seam: func(bool) []protocol.ModelListPayload { return nil },
 			caps: []string{protocol.CapabilityInteractive},
 		},
 		{
@@ -325,7 +325,7 @@ func TestV2Session_ModelListReconcile_ContentFreeLogging(t *testing.T) {
 		Devices:            reg,
 		ServerID:           v2TestServerID,
 		Logger:             logger,
-		RetainedModelLists: func() []protocol.ModelListPayload { return []protocol.ModelListPayload{payload} },
+		RetainedModelLists: func(bool) []protocol.ModelListPayload { return []protocol.ModelListPayload{payload} },
 	})
 	t.Cleanup(stop)
 
@@ -346,5 +346,58 @@ func TestV2Session_ModelListReconcile_ContentFreeLogging(t *testing.T) {
 		if strings.Contains(logs, sentinel) {
 			t.Errorf("model value %q leaked into a log record; logs = %q", sentinel, logs)
 		}
+	}
+}
+
+// #2651: the opening conn's multi_agent decision reaches RetainedModelLists, so a
+// conn with the capability is reconciled with the merged, tagged lists and one
+// without it with today's, on the same daemon.
+func TestV2Session_ModelListReconcile_PassesTheConnsMultiAgentDecision(t *testing.T) {
+	t.Parallel()
+
+	plain := sampleModelListPayload("conv-modellist-agents", "sonnet")
+	merged := sampleModelListPayload("conv-modellist-agents", "sonnet", "gpt-5")
+	merged.Models[0].Agent, merged.Models[0].Family = protocol.AgentClaude, "sonnet"
+	merged.Models[1].Agent, merged.Models[1].Family = protocol.AgentCodex, "gpt-5"
+
+	for _, tc := range []struct {
+		name string
+		caps []string
+		want protocol.ModelListPayload
+	}{
+		{"interactive only", []string{protocol.CapabilityInteractive}, plain},
+		{"multi_agent", []string{protocol.CapabilityInteractive, protocol.CapabilityMultiAgent}, merged},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			const connA = "c-v2-A"
+			respPriv, respPub := genV2Keypair(t)
+			frames := make(chan protocol.RoutingEnvelope, 8)
+			rec := &v2Recorder{}
+			mgr, stop := startManager(t, V2SessionConfig{
+				Frames:     frames,
+				Outbound:   rec.outbound,
+				StaticPriv: respPriv,
+				Devices:    v2PairedRegistry(t, v2TestToken),
+				ServerID:   v2TestServerID,
+				Logger:     silentLogger(),
+				RetainedModelLists: func(multiAgent bool) []protocol.ModelListPayload {
+					if multiAgent {
+						return []protocol.ModelListPayload{merged}
+					}
+					return []protocol.ModelListPayload{plain}
+				},
+			})
+			t.Cleanup(stop)
+
+			_, aRecv := openModalConn(t, mgr, frames, rec, respPub, connA, tc.caps)
+			waitForEnvelopes(t, rec, 2)
+
+			got := reconciledModelLists(t, rec, connA, aRecv)
+			if len(got) != 1 || !reflect.DeepEqual(got[tc.want.ConversationID], tc.want) {
+				t.Errorf("reconciled %+v, want only %+v", got, tc.want)
+			}
+		})
 	}
 }

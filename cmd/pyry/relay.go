@@ -266,7 +266,7 @@ type relayWiring struct {
 	// The value is already primitive to internal/relay (protocol is imported both
 	// sides), so it crosses into V2SessionConfig unwrapped. nil in foreground/v1 ⇒
 	// the verb refuses every request as model_list.unavailable.
-	modelListFor func(convID string) (protocol.ModelListPayload, bool)
+	modelListFor func(convID string, multiAgent bool) (protocol.ModelListPayload, bool)
 	// mcpStatusFor queries the exact live child bound to a named conversation and
 	// returns the existing wire payload. It may block on that child, so
 	// V2SessionConfig dispatches it on the requesting connection's worker.
@@ -339,7 +339,7 @@ type relayWiring struct {
 	// internal/sessions, so the queue precedent does not apply here. The value is
 	// already primitive to internal/relay (protocol is imported both sides), so it
 	// crosses into V2SessionConfig unwrapped. nil in foreground/v1 ⇒ no reconcile.
-	retainedModelLists func() []protocol.ModelListPayload
+	retainedModelLists func(multiAgent bool) []protocol.ModelListPayload
 	// retainedSlashCommandLists enumerates the daemon's currently-retained
 	// slash-command inventories as marshal-ready slash_command_list payloads — one
 	// per conversation whose bound session holds one — for the relay's connect-time

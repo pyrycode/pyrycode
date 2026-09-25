@@ -840,7 +840,12 @@ type V2SessionConfig struct {
 	// most ten model rows. An implementation that reads a file or enumerates the
 	// registry belongs off Run, and moving it there means switching the handler's
 	// emit from forwardEnvelope to forwardToRun in the same change.
-	ModelListFor func(conversationID string) (protocol.ModelListPayload, bool)
+	//
+	// multiAgent is the asking conn's negotiated multi_agent decision (#2651): true
+	// asks for the merged list of both agents' entries, tagged with agent and family;
+	// false asks for today's Claude-only list, byte-identical. The capability is per
+	// conn while the menu is per conversation, which is why the handler passes it.
+	ModelListFor func(conversationID string, multiAgent bool) (protocol.ModelListPayload, bool)
 
 	// MCPStatusFor reports the current MCP server status for one hosted
 	// conversation, already shaped as the existing mcp_status payload. The
@@ -1298,7 +1303,11 @@ type V2SessionConfig struct {
 	//
 	// Optional: nil ⇒ no reconcile — byte-identical to the pre-#1863 / foreground /
 	// existing-test posture. #1864 wires the daemon-side producer.
-	RetainedModelLists func() []protocol.ModelListPayload
+	//
+	// multiAgent is the opening conn's negotiated multi_agent decision (#2651), with
+	// ModelListFor's meaning: the merged, tagged list when true, today's Claude-only
+	// list when false.
+	RetainedModelLists func(multiAgent bool) []protocol.ModelListPayload
 
 	// OutstandingQuestions enumerates the daemon's currently-outstanding clarifying-
 	// question batches as marshal-ready question_shown payloads (each already stamped

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"reflect"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -111,7 +112,7 @@ type modelSeamCounts struct {
 // intent instead of threading two closures through every call.
 type modelReqSeams struct {
 	knownConv    func(string) bool
-	modelListFor func(string) (protocol.ModelListPayload, bool)
+	modelListFor func(string, bool) (protocol.ModelListPayload, bool)
 }
 
 // hostedConversations is the membership double: it hosts the three ids above and
@@ -130,7 +131,7 @@ func hostedConversations(id string) bool {
 // resolveFixtureModelList is the ModelListFor double: it answers the bound and
 // the unbound conversation with disjoint menus, and refuses — poisoned —
 // everything else, the starved conversation included.
-func resolveFixtureModelList(id string) (protocol.ModelListPayload, bool) {
+func resolveFixtureModelList(id string, _ bool) (protocol.ModelListPayload, bool) {
 	switch id {
 	case modelReqBoundConvID:
 		return fixtureModelList, true
@@ -153,9 +154,9 @@ func countingModelReqSeams() (modelReqSeams, *modelSeamCounts) {
 			c.known.Add(1)
 			return hostedConversations(id)
 		},
-		modelListFor: func(id string) (protocol.ModelListPayload, bool) {
+		modelListFor: func(id string, multiAgent bool) (protocol.ModelListPayload, bool) {
 			c.resolves.Add(1)
-			return resolveFixtureModelList(id)
+			return resolveFixtureModelList(id, multiAgent)
 		},
 	}, c
 }
@@ -464,5 +465,62 @@ func TestV2Session_RequestModelList_MalformedPayloadReachesNoResolver(t *testing
 	}
 	if n := counts.resolves.Load(); n != 0 {
 		t.Errorf("ModelListFor consulted %d time(s), want 0 — an id membership refused must reach nothing below the gate", n)
+	}
+}
+
+// #2651: the asking conn's multi_agent decision reaches ModelListFor, and the
+// answer it picks is what the conn receives. A conn without the capability asks for
+// today's list; one with it asks for the merged, tagged list. Which rows each shape
+// holds is cmd/pyry's to decide and is pinned there.
+func TestV2Session_RequestModelList_PassesTheConnsMultiAgentDecision(t *testing.T) {
+	t.Parallel()
+
+	merged := protocol.ModelListPayload{
+		ConversationID: modelReqBoundConvID,
+		Models:         []protocol.ModelOption{{Value: "gpt-5", DisplayName: "gpt-5", EffortLevels: []string{}, Agent: protocol.AgentCodex, Family: "gpt-5"}},
+	}
+	for _, tc := range []struct {
+		name string
+		caps []string
+		want protocol.ModelListPayload
+	}{
+		{"interactive only", []string{protocol.CapabilityInteractive}, fixtureModelList},
+		{"multi_agent", []string{protocol.CapabilityInteractive, protocol.CapabilityMultiAgent}, merged},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var asked []bool
+			var mu sync.Mutex
+			seams := modelReqSeams{
+				knownConv: hostedConversations,
+				modelListFor: func(id string, multiAgent bool) (protocol.ModelListPayload, bool) {
+					mu.Lock()
+					asked = append(asked, multiAgent)
+					mu.Unlock()
+					if multiAgent {
+						return merged, true
+					}
+					return resolveFixtureModelList(id, false)
+				},
+			}
+			replies := sendModelListRequest(t, seams, tc.caps, 72, `{"conversation_id":"`+modelReqBoundConvID+`"}`)
+			if len(replies) != 1 || replies[0].Type != protocol.TypeModelList {
+				t.Fatalf("replies = %+v, want one model_list", replies)
+			}
+			var got protocol.ModelListPayload
+			if err := json.Unmarshal(replies[0].Payload, &got); err != nil {
+				t.Fatalf("decode reply: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("reply = %+v, want %+v", got, tc.want)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			wantMulti := len(tc.caps) == 2
+			if len(asked) != 1 || asked[0] != wantMulti {
+				t.Errorf("ModelListFor asked with multiAgent %v, want one call with %v", asked, wantMulti)
+			}
+		})
 	}
 }
