@@ -2260,31 +2260,49 @@ func (p *Pool) Mint(label, spawnDir string) (SessionID, error) {
 // and effort are claude's, so any other harness starts with none and runs at its
 // own defaults.
 func (p *Pool) MintAs(label, spawnDir, harness string) (SessionID, error) {
+	return p.MintWith(label, spawnDir, harness, p.MintDefaults(harness))
+}
+
+// MintDefaults answers the settings MintAs starts a session of harness on: a
+// claude session starts at the operator's configured model and effort (#1575),
+// any other harness at its own defaults (#2647). It is the one definition of
+// what a mint gives, read by MintAs and by a caller composing settings for
+// MintWith (#2665), so the two cannot drift. Posture is never included — see
+// mintSettings.
+//
+// Since #2492 mintSettings is an already-locked reader, so the RLock is taken
+// here rather than inside it, and released before any build, which must stay off
+// p.mu. The window that leaves — a concurrent Pool.UpdateSettings on the
+// BOOTSTRAP between this read and a mint's registration — is the pre-existing,
+// benign one every lock-releasing settings accessor carries: it changes what a
+// new session inherits, never what an existing one holds.
+func (p *Pool) MintDefaults(harness string) SessionSettings {
+	if canonicalHarness(harness) != HarnessClaude {
+		return SessionSettings{}
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.mintSettings()
+}
+
+// MintWith is MintAs starting the session on settings, used verbatim (#2665):
+// create_conversation's requested model and effort are the session's stored
+// settings from the mint, so its first turn carries them with no second write
+// that a refusal could leave half done. Callers pass no posture — a mint is
+// never a bypass grant — which the one caller outside this package guarantees by
+// copying only Model and Effort.
+//
+// This entry point does NOT go through materialise and needs none of its #2492
+// machinery: id comes fresh from NewID, so it can name no dormant entry and no
+// dormant write can race it.
+func (p *Pool) MintWith(label, spawnDir, harness string, settings SessionSettings) (SessionID, error) {
 	harness = canonicalHarness(harness)
 	id, err := NewID()
 	if err != nil {
 		return "", fmt.Errorf("sessions: create id: %w", err)
 	}
 
-	// A minted claude session starts at the operator's configured model and
-	// effort (#1575); any other harness starts at its own defaults (#2647). Since #2492 mintSettings is an already-locked reader, so the RLock
-	// is taken here rather than inside it — and released before buildSession, which
-	// must stay off p.mu.
-	//
-	// This entry point does NOT go through materialise and needs none of its
-	// #2492 machinery: id comes fresh from NewID above, so it can name no dormant
-	// entry and no dormant write can race it. The window that remains — a
-	// concurrent Pool.UpdateSettings on the BOOTSTRAP between this read and the
-	// registration below — is the pre-existing, benign one every lock-releasing
-	// settings accessor carries, and it changes what a new session inherits, never
-	// what an existing one holds.
-	var minted SessionSettings
-	if harness == HarnessClaude {
-		p.mu.RLock()
-		minted = p.mintSettings()
-		p.mu.RUnlock()
-	}
-	sess, err := p.buildSessionAs(id, label, spawnDir, minted, harness, "")
+	sess, err := p.buildSessionAs(id, label, spawnDir, settings, harness, "")
 	if err != nil {
 		return "", err
 	}

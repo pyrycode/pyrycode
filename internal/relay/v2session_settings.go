@@ -22,9 +22,12 @@ import (
 // constant — never attacker-influenced bytes. encoding/json quotes attacker bytes
 // into its decode-error string, so no decode error, payload byte, or model/effort
 // value ever reaches these messages, the wire, or a log.
+//
+// MsgSettingsModelNotOffered is exported for create_conversation (#2665), which
+// refuses a model the same way.
 const (
 	msgSettingsMalformed       = "malformed set_session_settings request"
-	msgSettingsModelNotOffered = "requested model is not offered"
+	MsgSettingsModelNotOffered = "requested model is not offered"
 	msgSettingsNotFound        = "unknown session_id"
 	msgSettingsUnavailable     = "session settings unavailable"
 )
@@ -146,7 +149,7 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 			"event", "v2.settings.model_not_offered",
 			"conn_id", s.connID,
 			"session_id", p.SessionID)
-		m.settingsReplyError(ctx, s, env.ID, protocol.CodeProtocolMalformed, msgSettingsModelNotOffered, false)
+		m.settingsReplyError(ctx, s, env.ID, protocol.CodeProtocolMalformed, MsgSettingsModelNotOffered, false)
 		return
 	}
 	if errors.Is(err, ErrEffortNotOffered) {
@@ -160,7 +163,7 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 			"event", "v2.settings.model_vocabulary_unavailable",
 			"conn_id", s.connID,
 			"session_id", p.SessionID)
-		m.settingsReplyError(ctx, s, env.ID, protocol.CodeModelListUnavailable, msgModelListUnavailable, true)
+		m.settingsReplyError(ctx, s, env.ID, protocol.CodeModelListUnavailable, MsgModelListUnavailable, true)
 		return
 	}
 	if err != nil {
@@ -647,3 +650,13 @@ func sessionCapabilities(agent AgentCapabilities) protocol.SessionCapabilities {
 		Models:             models,
 	}
 }
+
+// ValidModel is validModel for create_conversation (#2665), which accepts a model
+// under set_session_settings' shape rule so one grammar bounds every client
+// model this daemon stores. Exported as a wrapper rather than by rename so
+// validModel's own tests stay where they are.
+func ValidModel(m string) bool { return validModel(m) }
+
+// ValidEffort is validEffort for create_conversation (#2665), on ValidModel's
+// terms.
+func ValidEffort(e string) bool { return validEffort(e) }

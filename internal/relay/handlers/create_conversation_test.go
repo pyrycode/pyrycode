@@ -13,7 +13,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
-// stubSessionCreator records each Create(ctx, label, spawnDir, agent) call and returns
+// stubSessionCreator records each Create(ctx, label, spawnDir, agent, settings) call and returns
 // a configurable id + dir + error. With err == nil and id == "" it returns a
 // fresh distinct id per call ("sess-1", "sess-2", …) so per-conversation
 // distinctness is observable without per-test wiring; a fixed id pins the
@@ -28,12 +28,14 @@ type stubSessionCreator struct {
 	dir       string // when non-empty, every Create returns this as the spawn dir
 	calls     int
 	labels    []string
-	spawnDirs []string // the spawnDir arg recorded per call
-	agents    []string // the agent arg recorded per call (#2647)
+	spawnDirs []string         // the spawnDir arg recorded per call
+	agents    []string         // the agent arg recorded per call (#2647)
+	settings  []CreateSettings // the settings arg recorded per call (#2665)
 }
 
-func (s *stubSessionCreator) Create(ctx context.Context, label, spawnDir, agent string) (string, string, error) {
+func (s *stubSessionCreator) Create(ctx context.Context, label, spawnDir, agent string, settings CreateSettings) (string, string, error) {
 	s.calls++
+	s.settings = append(s.settings, settings)
 	s.labels = append(s.labels, label)
 	s.spawnDirs = append(s.spawnDirs, spawnDir)
 	s.agents = append(s.agents, agent)

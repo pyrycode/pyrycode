@@ -23,6 +23,14 @@ type CreateConversationPayload struct {
 	// fields above it is omitempty: it is newer than the spec example, so a request
 	// without it keeps that example's exact encoding.
 	Agent *string `json:"agent,omitempty"`
+	// Model and Effort are the settings the new conversation's session starts on
+	// (#2665); nil (absent or null) keeps what a create gives today. A set value
+	// is checked against the resolved agent's own vocabulary, by the checks
+	// set_session_settings runs, and a refused one creates nothing. An empty
+	// string means the agent's own default, as on set_session_settings. omitempty
+	// for Agent's reason: a request without them keeps its exact encoding.
+	Model  *string `json:"model,omitempty"`
+	Effort *string `json:"effort,omitempty"`
 }
 
 // ConversationCreatedPayload is the body of a conversation_created frame

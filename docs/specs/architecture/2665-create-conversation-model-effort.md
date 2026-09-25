@@ -128,3 +128,7 @@ All refusals return before `resolveSpawnDir` and `MintWith`: no trust mark, no p
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-25
+
+## Revisions
+
+- 2026-09-25 (implementation): the payload encoding test sits in `internal/relay/handlers` (`TestCreateConversationPayload_SettingsOmitted`) beside the handler tests rather than in `internal/protocol`; the assertion is the one the Testing strategy names. The refusal log's static `reason` is `"shape"` for a shape refusal and the reply code for a membership one. No contract changed.

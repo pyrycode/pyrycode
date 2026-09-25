@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
@@ -21,7 +22,7 @@ func TestSessionMinter_CodexConversation(t *testing.T) {
 
 	sink := newStreamTurnSink(0, nil)
 	a := startCodexPool(t, regPath, codexHome, sink)
-	sessionID, _, err := sessionMinter{a.pool}.Create(context.Background(), "conv-1", "", protocol.AgentCodex)
+	sessionID, _, err := sessionMinter{p: a.pool}.Create(context.Background(), "conv-1", "", protocol.AgentCodex, handlers.CreateSettings{})
 	if err != nil {
 		t.Fatalf("Create(codex): %v", err)
 	}

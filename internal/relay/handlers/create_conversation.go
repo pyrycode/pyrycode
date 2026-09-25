@@ -11,6 +11,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
 	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/relay"
 )
 
 // msgCreateConversationMalformed is the user-facing message emitted in the
@@ -124,8 +125,24 @@ type ConversationCreator interface {
 // place that resolves is what keeps the recorded path and the spawn dir from
 // disagreeing: "default", "~/x/default" and "/home/u/x/default" all spawn in one
 // folder and must be stored as one workspace.
+//
+// settings is the request's model and effort (#2665), already past the shape
+// checks. Create checks a present, non-empty one against agent's own vocabulary
+// before anything else it does — before resolving spawnDir, which trust-marks a
+// directory, and before the mint — and a refusal returns relay.ErrModelNotOffered,
+// relay.ErrEffortNotOffered or relay.ErrModelVocabularyUnavailable with nothing
+// created. An accepted value is the session's stored setting from the mint; an
+// absent one keeps what a mint gives today.
 type SessionCreator interface {
-	Create(ctx context.Context, label, spawnDir, agent string) (sessionID, dir string, err error)
+	Create(ctx context.Context, label, spawnDir, agent string, settings CreateSettings) (sessionID, dir string, err error)
+}
+
+// CreateSettings is a create_conversation's requested model and effort (#2665),
+// the payload's own pointers: nil is absent, and a pointer to "" is the agent's
+// default, as on set_session_settings.
+type CreateSettings struct {
+	Model  *string
+	Effort *string
 }
 
 // CreateConversation returns a dispatch.Handler that processes a
@@ -185,6 +202,17 @@ func CreateConversation(reg ConversationCreator, creator SessionCreator, registr
 			return replyError(ctx, c, env, protocol.CodeProtocolUnsupported, refusal, false)
 		}
 
+		// The shape checks set_session_settings runs, before anything is minted
+		// (#2665). A refusal carries this verb's own static message, never the
+		// value; the membership checks are the creator's, below.
+		if (p.Model != nil && !relay.ValidModel(*p.Model)) || (p.Effort != nil && !relay.ValidEffort(*p.Effort)) {
+			logger.Warn("relay: create_conversation settings refused",
+				"event", "create_conversation.settings_refused",
+				"conn_id", c.ConnID(),
+				"reason", "shape")
+			return replyError(ctx, c, env, protocol.CodeProtocolMalformed, msgCreateConversationMalformed, false)
+		}
+
 		// Resolve the nullable fields to effective values. name is a pointer
 		// passthrough (nil stays nil — an unnamed scratch discussion); promoted
 		// defaults false. cwd is settled after the mint below: the daemon's
@@ -226,8 +254,15 @@ func CreateConversation(reg ConversationCreator, creator SessionCreator, registr
 		// SessionCreator that honours a ctx, which the production one no longer
 		// does — see createConversationMintTimeout for why it is inert here.
 		mintCtx, cancel := context.WithTimeout(ctx, createConversationMintTimeout)
-		sessionID, spawnedIn, err := creator.Create(mintCtx, string(id), spawnDir, agent)
+		sessionID, spawnedIn, err := creator.Create(mintCtx, string(id), spawnDir, agent, CreateSettings{Model: p.Model, Effort: p.Effort})
 		cancel()
+		if code, msg, retryable, refused := settingsRefusal(err); refused {
+			logger.Warn("relay: create_conversation settings refused",
+				"event", "create_conversation.settings_refused",
+				"conn_id", c.ConnID(),
+				"reason", code)
+			return replyError(ctx, c, env, code, msg, retryable)
+		}
 		if err != nil {
 			// A rejected Cwd (escapes $HOME / unresolvable) is deterministic:
 			// re-issuing the same Cwd fails identically, so it maps to a
@@ -311,6 +346,22 @@ func CreateConversation(reg ConversationCreator, creator SessionCreator, registr
 			"session_id", sessionID)
 		return c.Reply(ctx, env, protocol.TypeConversationCreated, payloadJSON)
 	}
+}
+
+// settingsRefusal maps a creator's membership refusal (#2665) to the reply
+// set_session_settings gives for the same value, except that an effort carries
+// this verb's own malformed message. refused is false for any other error,
+// nil included.
+func settingsRefusal(err error) (code, msg string, retryable, refused bool) {
+	switch {
+	case errors.Is(err, relay.ErrModelNotOffered):
+		return protocol.CodeProtocolMalformed, relay.MsgSettingsModelNotOffered, false, true
+	case errors.Is(err, relay.ErrEffortNotOffered):
+		return protocol.CodeProtocolMalformed, msgCreateConversationMalformed, false, true
+	case errors.Is(err, relay.ErrModelVocabularyUnavailable):
+		return protocol.CodeModelListUnavailable, relay.MsgModelListUnavailable, true, true
+	}
+	return "", "", false, false
 }
 
 // resolveCreateAgent settles a create_conversation's requested agent (#2647).
