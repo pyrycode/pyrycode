@@ -510,10 +510,13 @@ func (t *turn) run(text string) {
 		"threadId": t.threadID, "turnId": t.id, "itemId": msg, "delta": reply,
 	})
 	t.s.notify("item/completed", t.itemParams("completedAtMs", agentMessage(msg, reply)))
+	// Removing the turn and sending turn/completed is one step for
+	// turnInterrupt: a turn/interrupt that finds the turn gone is answered
+	// after turn/completed on the wire, never ahead of it.
 	t.s.mu.Lock()
 	delete(t.s.turns, t.id)
-	t.s.mu.Unlock()
 	t.complete("completed")
+	t.s.mu.Unlock()
 }
 
 // usage reports one model call's tokens and the model's context window.

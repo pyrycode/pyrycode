@@ -305,6 +305,24 @@ returns nil without interrupting anything. The window is sub-millisecond
 against human reaction time, so it wasn't worth closing here; revisit if
 interrupt or approval work touches this path (PR #2623 review).
 
+**A turn that completes before Codex handles `turn/interrupt` also makes
+`Interrupt` return nil (#2636).** `declineAll` inside `Interrupt` resolves
+the parked approval before the interrupt call goes out; the decline's
+`await` goroutine can let the turn finish and clear `turnID` first, so
+Codex answers the interrupt with a refusal for a turn it no longer runs.
+`Interrupt` treats that refusal as success when `r.turnID` no longer
+matches the id it interrupted — but only when the error is a routed
+`*acp.Error` (Codex actually answered). A transport failure (timeout, dead
+client) is always returned even if `turnID` has since moved on, because the
+wire-order argument — a `turn/completed` ahead of the response on the wire
+is dispatched inline before that response reaches the caller, see the
+paragraph above — only holds for a response Codex sent. This relies on the
+fake's `turn.run` removing a completing turn and sending `turn/completed`
+as one step under `s.mu` (see [fakecodex-binary.md's note on the same
+fix](fakecodex-binary.md#a-completing-turns-removal-and-its-turncompleted-are-one-step-2636));
+before that the fake could answer `turnInterrupt`'s refusal ahead of the
+notification, which is what made `TestCodexApproval_InterruptDeclines` flake.
+
 **The app-server's `CODEX_HOME` is a daemon-owned directory the daemon keeps
 rewriting, not one it writes once.** `codexHomePath` is `<instance
 dir>/codex-home`; `prepareCodexHome` runs on every `codexRunner`
