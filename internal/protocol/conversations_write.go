@@ -16,6 +16,13 @@ type CreateConversationPayload struct {
 	IsPromoted *bool   `json:"is_promoted"`
 	Name       *string `json:"name"`
 	Cwd        *string `json:"cwd"`
+	// Agent names the agent the new conversation runs on, AgentClaude or
+	// AgentCodex (#2647); nil (absent or null) means claude. AgentCodex is
+	// accepted only from a client that negotiated CapabilityMultiAgent, and any
+	// other value is refused — both before anything is created. Unlike the three
+	// fields above it is omitempty: it is newer than the spec example, so a request
+	// without it keeps that example's exact encoding.
+	Agent *string `json:"agent,omitempty"`
 }
 
 // ConversationCreatedPayload is the body of a conversation_created frame
@@ -40,6 +47,12 @@ type ConversationCreatedPayload struct {
 	WorkspaceLabel *string   `json:"workspace_label"`
 	Name           *string   `json:"name"`
 	LastUsedAt     time.Time `json:"last_used_at"`
+	// Agent is the agent the created conversation runs on, AgentClaude or
+	// AgentCodex (#2647), set only for a client that negotiated
+	// CapabilityMultiAgent — ConversationSummary.Agent's rule. omitempty is
+	// load-bearing: an older client's reply carries no agent key, byte-identical
+	// to the frame it read before agents existed.
+	Agent string `json:"agent,omitempty"`
 }
 
 // PromoteConversationPayload is the body of a promote_conversation frame

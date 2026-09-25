@@ -2244,14 +2244,30 @@ func (p *Pool) CreateIn(ctx context.Context, label, spawnDir string) (SessionID,
 //
 // Concurrency: safe for concurrent use. Each call serialises through Pool.mu
 // briefly (registration + persist), then supervises off-lock.
+//
+// It mints a claude session; MintAs is the same for any harness.
 func (p *Pool) Mint(label, spawnDir string) (SessionID, error) {
+	return p.MintAs(label, spawnDir, HarnessClaude)
+}
+
+// MintAs is Mint for a given harness (#2647), which buildSessionAs carries onto
+// the session and saveLocked persists on its registry entry, so a restart revives
+// it as the same agent. The pool does not validate the harness: the injected
+// factory decides which harnesses have a runner, and refusing one fails the mint
+// as an ordinary runner-construction error with nothing registered.
+//
+// Only a claude session starts from mintSettings. The operator's configured model
+// and effort are claude's, so any other harness starts with none and runs at its
+// own defaults.
+func (p *Pool) MintAs(label, spawnDir, harness string) (SessionID, error) {
+	harness = canonicalHarness(harness)
 	id, err := NewID()
 	if err != nil {
 		return "", fmt.Errorf("sessions: create id: %w", err)
 	}
 
-	// A minted session starts at the operator's configured model and effort
-	// (#1575). Since #2492 mintSettings is an already-locked reader, so the RLock
+	// A minted claude session starts at the operator's configured model and
+	// effort (#1575); any other harness starts at its own defaults (#2647). Since #2492 mintSettings is an already-locked reader, so the RLock
 	// is taken here rather than inside it — and released before buildSession, which
 	// must stay off p.mu.
 	//
@@ -2262,10 +2278,13 @@ func (p *Pool) Mint(label, spawnDir string) (SessionID, error) {
 	// registration below — is the pre-existing, benign one every lock-releasing
 	// settings accessor carries, and it changes what a new session inherits, never
 	// what an existing one holds.
-	p.mu.RLock()
-	minted := p.mintSettings()
-	p.mu.RUnlock()
-	sess, err := p.buildSession(id, label, spawnDir, minted)
+	var minted SessionSettings
+	if harness == HarnessClaude {
+		p.mu.RLock()
+		minted = p.mintSettings()
+		p.mu.RUnlock()
+	}
+	sess, err := p.buildSessionAs(id, label, spawnDir, minted, harness, "")
 	if err != nil {
 		return "", err
 	}
@@ -2329,9 +2348,9 @@ func (p *Pool) Mint(label, spawnDir string) (SessionID, error) {
 // two files and calls the injected RunnerFactory, none of which belongs inside
 // the pool's write lock.
 //
-// The session it builds runs claude: CreateIn is the fresh-id path and nothing
-// exposes a harness to clients yet (#2593). materialise, whose id may name a
-// dormant entry of another harness, calls buildSessionAs.
+// The session it builds runs claude: CreateIn is the fresh-id path. MintAs,
+// which a client can ask for another agent through (#2647), and materialise,
+// whose id may name a dormant entry of another harness, call buildSessionAs.
 func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings SessionSettings) (*Session, error) {
 	return p.buildSessionAs(id, label, spawnDir, settings, HarnessClaude, "")
 }

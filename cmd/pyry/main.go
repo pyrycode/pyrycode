@@ -1515,12 +1515,17 @@ type sessionMinter struct{ p *sessions.Pool }
 // It answers with resolved alongside the id so the handler records exactly the
 // folder the session spawns in (#2568) — one resolver on the create path, no
 // second one to drift from it.
-func (m sessionMinter) Create(_ context.Context, label, spawnDir string) (string, string, error) {
+//
+// agent is the handler-validated protocol.AgentClaude or protocol.AgentCodex
+// (#2647), passed to the pool as the harness: the wire's agent names are the
+// harness names (sessions.HarnessClaude, harnessCodex), the equality
+// handlers.AgentOf already reads the other way.
+func (m sessionMinter) Create(_ context.Context, label, spawnDir, agent string) (string, string, error) {
 	resolved, err := resolveSpawnDir(spawnDir)
 	if err != nil {
 		return "", "", err
 	}
-	id, err := m.p.Mint(label, resolved)
+	id, err := m.p.MintAs(label, resolved, agent)
 	return string(id), resolved, err
 }
 

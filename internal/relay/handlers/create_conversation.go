@@ -44,6 +44,19 @@ const msgCreateConversationMintFailed = "could not start conversation session"
 // confine error is logged but never sent on the wire).
 const msgCreateConversationCwdRejected = "conversation working directory not allowed"
 
+// msgCreateConversationAgentUnsupported is the user-facing message emitted in
+// the protocol.unsupported error payload when a client that did not negotiate
+// protocol.CapabilityMultiAgent asks for a Codex conversation (#2647). Such a
+// client could not render the conversation it would get, so it cannot create
+// one. Non-retryable: the conn's capability is fixed for its lifetime.
+const msgCreateConversationAgentUnsupported = "agent not supported by this client"
+
+// msgCreateConversationAgentUnknown is the user-facing message emitted in the
+// protocol.unsupported error payload when a create_conversation names an agent
+// outside protocol.AgentClaude / protocol.AgentCodex (#2647). Static: the
+// requested value is client-chosen text and is never echoed or logged.
+const msgCreateConversationAgentUnknown = "unknown agent"
+
 // ErrSpawnDirRejected marks a deterministic rejection of a conversation's
 // requested spawn workdir (it escapes $HOME after symlink resolution, or is
 // unresolvable). SessionCreator implementations wrap it; the handler maps it to
@@ -88,9 +101,10 @@ type ConversationCreator interface {
 }
 
 // SessionCreator is the minimal session-mint surface this handler consumes from
-// the sessions pool: mint and supervise one dedicated claude session that will
-// spawn in spawnDir, returning the session id and the directory it will spawn
-// in. It does NOT start the child
+// the sessions pool: mint and supervise one dedicated session of the given agent
+// that will spawn in spawnDir, returning the session id and the directory it will
+// spawn in. agent is protocol.AgentClaude or protocol.AgentCodex, already
+// validated by the handler (#2647); an implementation never sees another value. It does NOT start the child
 // (#2085) — that happens on the conversation's first message, so that every
 // per-session setting chosen before it is simply what the child launches with.
 // It is adapted at the cmd/pyry boundary (sessionMinter) rather than satisfying
@@ -111,12 +125,14 @@ type ConversationCreator interface {
 // disagreeing: "default", "~/x/default" and "/home/u/x/default" all spawn in one
 // folder and must be stored as one workspace.
 type SessionCreator interface {
-	Create(ctx context.Context, label, spawnDir string) (sessionID, dir string, err error)
+	Create(ctx context.Context, label, spawnDir, agent string) (sessionID, dir string, err error)
 }
 
 // CreateConversation returns a dispatch.Handler that processes a
-// create_conversation frame from the phone: it mints a fresh conversation id,
-// mints and binds a dedicated claude session for it via the sessions pool,
+// create_conversation frame from the phone: it settles the requested agent
+// (claude unless a multi_agent client asks for codex, #2647), mints a fresh
+// conversation id, mints and binds a dedicated session of that agent for it via
+// the sessions pool,
 // records a registry row carrying the bound session id plus the effective cwd /
 // promoted flag / name (server defaults applied when a field is null), eagerly
 // persists the registry, and replies with a conversation_created envelope
@@ -157,6 +173,16 @@ func CreateConversation(reg ConversationCreator, creator SessionCreator, registr
 				"conn_id", c.ConnID(),
 				"err", err)
 			return replyError(ctx, c, env, protocol.CodeProtocolMalformed, msgCreateConversationMalformed, false)
+		}
+
+		// Settle the agent before anything is minted, so a refusal creates
+		// nothing: no session in the pool or its registry, no row (#2647).
+		agent, refusal := resolveCreateAgent(p.Agent, c.MultiAgent())
+		if refusal != "" {
+			logger.Warn("relay: create_conversation agent refused",
+				"event", "create_conversation.agent_refused",
+				"conn_id", c.ConnID())
+			return replyError(ctx, c, env, protocol.CodeProtocolUnsupported, refusal, false)
 		}
 
 		// Resolve the nullable fields to effective values. name is a pointer
@@ -200,7 +226,7 @@ func CreateConversation(reg ConversationCreator, creator SessionCreator, registr
 		// SessionCreator that honours a ctx, which the production one no longer
 		// does — see createConversationMintTimeout for why it is inert here.
 		mintCtx, cancel := context.WithTimeout(ctx, createConversationMintTimeout)
-		sessionID, spawnedIn, err := creator.Create(mintCtx, string(id), spawnDir)
+		sessionID, spawnedIn, err := creator.Create(mintCtx, string(id), spawnDir, agent)
 		cancel()
 		if err != nil {
 			// A rejected Cwd (escapes $HOME / unresolvable) is deterministic:
@@ -272,6 +298,7 @@ func CreateConversation(reg ConversationCreator, creator SessionCreator, registr
 			WorkspaceLabel: workspaceLabelFor(reg, cwd),
 			Name:           name,
 			LastUsedAt:     now,
+			Agent:          replyAgent(agent, c.MultiAgent()),
 		})
 		if err != nil {
 			return fmt.Errorf("marshal conversation_created payload: %w", err)
@@ -284,4 +311,34 @@ func CreateConversation(reg ConversationCreator, creator SessionCreator, registr
 			"session_id", sessionID)
 		return c.Reply(ctx, env, protocol.TypeConversationCreated, payloadJSON)
 	}
+}
+
+// resolveCreateAgent settles a create_conversation's requested agent (#2647).
+// Absent is claude, for any client. Codex needs a client that negotiated
+// multi_agent; anything else is unknown. A refusal answers the static message to
+// reply with, and agent is then empty.
+func resolveCreateAgent(requested *string, multiAgent bool) (agent, refusal string) {
+	if requested == nil {
+		return protocol.AgentClaude, ""
+	}
+	switch *requested {
+	case protocol.AgentClaude:
+		return protocol.AgentClaude, ""
+	case protocol.AgentCodex:
+		if !multiAgent {
+			return "", msgCreateConversationAgentUnsupported
+		}
+		return protocol.AgentCodex, ""
+	}
+	return "", msgCreateConversationAgentUnknown
+}
+
+// replyAgent is the conversation_created agent: the created conversation's, for
+// a multi_agent client only. An older client gets none, so its reply keeps the
+// shape it had before agents existed.
+func replyAgent(agent string, multiAgent bool) string {
+	if !multiAgent {
+		return ""
+	}
+	return agent
 }
