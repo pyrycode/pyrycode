@@ -32,13 +32,21 @@ func (d twoAgentVocabularyDouble) CodexModels() []turnevent.ModelOption { return
 // Value, the newest version as ResolvedModel, its effort levels, no display name.
 func sentinelCodexModels() []turnevent.ModelOption {
 	return []turnevent.ModelOption{
-		{Value: "ZZCODEXFAMONEZZ", ResolvedModel: "ZZCODEXRESONEZZ", EffortLevels: []string{"low", "high"}},
-		{Value: "ZZCODEXFAMTWOZZ", ResolvedModel: "ZZCODEXRESTWOZZ"},
+		{Value: "ZZCODEXFAMONEZZ", ResolvedModel: "gpt-9.7-zzone", EffortLevels: []string{"low", "high"}},
+		{Value: "ZZCODEXFAMTWOZZ", ResolvedModel: "gpt-8-zz-two"},
 	}
 }
 
-// assertTaggedRows checks got against want's rows, each tagged with agent, its
-// family as the row's own value, and — for Codex — the family as its display name.
+// sentinelCodexDisplay is the display name each sentinel Codex row is offered under,
+// derived from its resolved model (#2667).
+var sentinelCodexDisplay = map[string]string{
+	"gpt-9.7-zzone": "GPT-9.7 Zzone",
+	"gpt-8-zz-two":  "GPT-8 Zz Two",
+}
+
+// assertTaggedRows checks got against want's rows, each tagged with agent and its
+// family as the row's own value. A Codex row is also named from its resolved model
+// and offers Auto (#2667); a Claude row carries its held name and flag through.
 func assertTaggedRows(t *testing.T, got []protocol.ModelOption, want []turnevent.ModelOption, agent string) {
 	t.Helper()
 	if len(got) != len(want) {
@@ -46,14 +54,14 @@ func assertTaggedRows(t *testing.T, got []protocol.ModelOption, want []turnevent
 	}
 	for i, w := range want {
 		g := got[i]
-		wantDisplay := w.DisplayName
+		wantDisplay, wantAuto := w.DisplayName, w.SupportsAutoMode
 		if agent == protocol.AgentCodex {
-			wantDisplay = w.Value
+			wantDisplay, wantAuto = sentinelCodexDisplay[w.ResolvedModel], true
 		}
 		if g.Value != w.Value || g.ResolvedModel != w.ResolvedModel || g.DisplayName != wantDisplay {
 			t.Errorf("%s row %d = %+v, want value %q resolved %q display %q", agent, i, g, w.Value, w.ResolvedModel, wantDisplay)
 		}
-		if !reflect.DeepEqual(g.EffortLevels, w.EffortLevels) || !reflect.DeepEqual(g.TruncatedFields, w.TruncatedFields) || g.SupportsAutoMode != w.SupportsAutoMode {
+		if !reflect.DeepEqual(g.EffortLevels, w.EffortLevels) || !reflect.DeepEqual(g.TruncatedFields, w.TruncatedFields) || g.SupportsAutoMode != wantAuto {
 			t.Errorf("%s row %d = %+v, want the held row %+v carried through", agent, i, g, w)
 		}
 		if g.Agent != agent || g.Family != w.Value {
@@ -240,5 +248,28 @@ func TestPushedModelOptions_TagsAsTheMergedReply(t *testing.T) {
 				t.Errorf("pushed merge = %+v, want the reply's %+v", got, reply)
 			}
 		})
+	}
+}
+
+// #2667: a Codex row's display name comes from its resolved model — GPT- and the
+// version, then each hyphen part of the family capitalised — and an id not in that
+// shape keeps the family, today's name.
+func TestCodexDisplayName(t *testing.T) {
+	tests := []struct {
+		resolved, family, want string
+	}{
+		{"gpt-5.6-terra", "terra", "GPT-5.6 Terra"},
+		{"gpt-6-luna", "luna", "GPT-6 Luna"},
+		{"gpt-5.1-codex-mini", "codex-mini", "GPT-5.1 Codex Mini"},
+		{"o3-mini", "mini", "mini"},
+		{"gpt-5.6", "terra", "terra"},
+		{"gpt--terra", "terra", "terra"},
+		{"gpt-5.6-", "terra", "terra"},
+		{"", "terra", "terra"},
+	}
+	for _, tt := range tests {
+		if got := codexDisplayName(tt.resolved, tt.family); got != tt.want {
+			t.Errorf("codexDisplayName(%q, %q) = %q, want %q", tt.resolved, tt.family, got, tt.want)
+		}
 	}
 }
