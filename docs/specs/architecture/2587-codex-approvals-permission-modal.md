@@ -154,7 +154,22 @@ Pending for the documentation stage: `docs/knowledge/features/codexsup-package.m
 - [Network & I/O] SHOULD FIX (in plan) — `Description` capped at 4096 bytes; the per-runner file-change path map capped at 256 items so a Codex that never completes items cannot grow it unbounded. The number of parked approvals is bounded as it is for Claude: each lives at most one window once nobody can answer.
 - [Logs] No finding — the adapter logs nothing; params, commands, paths and reasons never reach a log or an error. Deny reasons are fixed constants and are not sent to Codex.
 - [Concurrency] No finding — `codexApprovals.mu` is a leaf, never held across `Register`, `Resolve`, surface or `Respond`. Every `await` goroutine exits when its registry entry resolves, and every path (answer, window, withdraw, interrupt, teardown, exit) resolves it. `withdrawn` is set before `Resolve`, so `await` observes it.
+- [Trust boundaries] MUST FIX (added in Revision 1, from verifier review) — the first pass checked how Codex strings are *displayed*, not which params change what `accept` *grants*. In the 0.156.1 schema four do and the modal showed none of them: command `kind: writeStdin` (input to a running terminal, not a command), a non-null `networkApprovalContext` (a managed-network host grant), a missing `command` (an empty scope), and file-change `grantRoot` (session-wide writes under a root). `codexApprovalRequest` now declines each, and a file change whose item paths were never seen. The other optional fields do not widen `accept`: `proposedExecpolicyAmendment` and `proposedNetworkPolicyAmendments` apply only to the amendment decisions, which are never sent; `approvalId` and `commandActions` are routing and display hints. `environmentId` was `local` on every capture and is left as is.
+- [Network & I/O] MUST FIX (added in Revision 1, from verifier review) — the 4096-byte `Description` cap cut silently, so a long command showed its head and hid its tail and the `cwd:` line. A command request whose description does not fit is now declined, so a command is always shown whole with its cwd. A file-change path list past the cap ends in a visible `…[truncated N bytes]` marker within the cap.
+- [Trust boundaries] No finding (Revision 1) — `reason` now also passes through `codexDisplay` before it is JSON-encoded.
 - [Threat model] No finding — the remote-answer gate (`MayAnswerPrompt`, `RemoteAnswerable`) is unchanged and applies to Codex modals exactly as to Claude's. OUT OF SCOPE: an explicit operator `cancel` and the `item/tool/requestUserInput` / legacy approval requests (the ticket defers them; they keep the default decline).
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-25
+
+## Revisions
+
+### Revision 1 — 2026-09-25, verifier review on PR #2633
+
+Driven by the two MUST FIX findings: the modal must show the whole grant an allow gives, or the request is declined.
+
+- `codexApprovalRequest` returns `ok=false` (the caller answers `decline`) for a command request with `kind` other than absent or `command`, a non-null `networkApprovalContext`, an empty or null `command`, or a description over `codexMaxDescription`; and for a file-change request with a non-null `grantRoot` or no tracked paths. This replaces the plan's "past the cap … its approval shows no paths".
+- `truncateUTF8` is replaced by `truncateDisplay`, which cuts on a rune boundary and appends `…[truncated N bytes]` on its own line, the whole within the cap. Only the file-change path list can reach it.
+- `reason` passes through `codexDisplay`.
+- Tests: table cases for each declined shape and the escaped reason, a truncation-marker test, and `TestCodexApproval_TeardownDeclines` for the `BeginTeardown` path.
+- `TestCodexApprovalLive` is not run by any dispatcher gate. `make e2e-realclaude` never starts Codex, so an operator runs it by hand with `PYRY_CODEX_CAPTURE_BIN` and `PYRY_CODEX_CAPTURE_HOME` set.

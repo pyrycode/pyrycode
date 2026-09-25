@@ -908,11 +908,18 @@ func (a *codexApprovals) declineAll(reason string) {
 // codexApprovalRequest builds the modal's request from a command or
 // file-change approval. params are untrusted: every string shown passes
 // through codexDisplay. paths are the file-change item's, held by observe.
-// Any other method, or params that do not parse, is not parked.
+// Any other method, or params that do not parse, is not parked. Neither is a
+// request whose grant the modal cannot show in full: stdin for a running
+// terminal, a network approval, a missing command, a command too long to
+// show with its cwd, a session-wide write root, or a file change whose paths
+// were not seen.
 func codexApprovalRequest(method string, params json.RawMessage, paths []string) (permbridge.Request, bool) {
 	var p struct {
 		Command            string            `json:"command"`
 		Cwd                string            `json:"cwd"`
+		Kind               string            `json:"kind"`
+		NetworkContext     json.RawMessage   `json:"networkApprovalContext"`
+		GrantRoot          json.RawMessage   `json:"grantRoot"`
 		Reason             string            `json:"reason"`
 		AvailableDecisions []json.RawMessage `json:"availableDecisions"`
 	}
@@ -923,23 +930,31 @@ func codexApprovalRequest(method string, params json.RawMessage, paths []string)
 	var label string
 	switch method {
 	case "item/commandExecution/requestApproval":
+		if (p.Kind != "" && p.Kind != "command") || !jsonAbsent(p.NetworkContext) || p.Command == "" {
+			return permbridge.Request{}, false
+		}
 		label = codexDisplay(p.Command)
 		req.ToolName = "Codex command"
 		req.Description = "command: " + label + "\ncwd: " + codexDisplay(p.Cwd)
+		if len(req.Description) > codexMaxDescription {
+			return permbridge.Request{}, false
+		}
 	case "item/fileChange/requestApproval":
+		if !jsonAbsent(p.GrantRoot) || len(paths) == 0 {
+			return permbridge.Request{}, false
+		}
 		shown := make([]string, len(paths))
 		for i, path := range paths {
 			shown[i] = codexDisplay(path)
 		}
 		label = strings.Join(shown, ", ")
 		req.ToolName = "Codex file change"
-		req.Description = strings.Join(append([]string{"paths:"}, shown...), "\n")
+		req.Description = truncateDisplay(strings.Join(append([]string{"paths:"}, shown...), "\n"), codexMaxDescription)
 	default:
 		return permbridge.Request{}, false
 	}
-	req.Description = truncateUTF8(req.Description, codexMaxDescription)
 	if p.Reason != "" {
-		req.DecisionReason, _ = json.Marshal(p.Reason)
+		req.DecisionReason, _ = json.Marshal(codexDisplay(p.Reason))
 	}
 	for _, d := range p.AvailableDecisions {
 		var s string
@@ -966,13 +981,25 @@ func codexDisplay(s string) string {
 	return b.String()
 }
 
-// truncateUTF8 cuts s to at most n bytes on a rune boundary.
-func truncateUTF8(s string, n int) string {
+// jsonAbsent reports whether an optional field was left out or sent as null.
+func jsonAbsent(v json.RawMessage) bool {
+	v = bytes.TrimSpace(v)
+	return len(v) == 0 || bytes.Equal(v, []byte("null"))
+}
+
+// codexTruncatedMarker ends a cut description, so the operator sees that
+// something is not shown. The cut leaves room for it within the cap.
+const codexTruncatedMarker = "\n…[truncated %d bytes]"
+
+// truncateDisplay cuts s on a rune boundary to fit n bytes with the marker
+// appended.
+func truncateDisplay(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
+	cut := max(0, n-len(fmt.Sprintf(codexTruncatedMarker, len(s))))
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
 	}
-	return s[:n]
+	return s[:cut] + fmt.Sprintf(codexTruncatedMarker, len(s)-cut)
 }

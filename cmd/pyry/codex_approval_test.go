@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -194,6 +195,24 @@ func TestCodexApprovalRequest(t *testing.T) {
 		{name: "file change offering the session", method: "item/fileChange/requestApproval",
 			params: `{"itemId":"f","availableDecisions":["acceptForSession"]}`, paths: []string{"/w/a.txt"},
 			ok: true, tool: "Codex file change", description: "paths:\n/w/a.txt", rules: []string{"/w/a.txt"}},
+		{name: "explicit command kind", method: "item/commandExecution/requestApproval",
+			params: `{"itemId":"i","kind":"command","command":"ls","cwd":"/w","networkApprovalContext":null}`,
+			ok:     true, tool: "Codex command", description: "command: ls\ncwd: /w"},
+		{name: "escaped reason", method: "item/commandExecution/requestApproval",
+			params: `{"itemId":"i","command":"ls","cwd":"/w","reason":"a\nb"}`,
+			ok:     true, tool: "Codex command", description: "command: ls\ncwd: /w", reason: `"a\\nb"`},
+		{name: "stdin for a running terminal", method: "item/commandExecution/requestApproval",
+			params: `{"itemId":"i","kind":"writeStdin","command":"ls","cwd":"/w"}`},
+		{name: "network approval", method: "item/commandExecution/requestApproval",
+			params: `{"itemId":"i","command":"curl x","cwd":"/w","networkApprovalContext":{"host":"example.com","protocol":"https"}}`},
+		{name: "missing command", method: "item/commandExecution/requestApproval",
+			params: `{"itemId":"i","command":null,"cwd":"/w"}`},
+		{name: "command too long to show with its cwd", method: "item/commandExecution/requestApproval",
+			params: `{"itemId":"i","command":"` + strings.Repeat("x", codexMaxDescription) + `","cwd":"/w"}`},
+		{name: "file change with a write root", method: "item/fileChange/requestApproval",
+			params: `{"itemId":"f","grantRoot":"/"}`, paths: []string{"/w/a.txt"}},
+		{name: "file change with no paths seen", method: "item/fileChange/requestApproval",
+			params: `{"itemId":"f"}`},
 		{name: "unsupported method", method: "item/permissions/requestApproval", params: `{}`},
 		{name: "unparsable params", method: "item/commandExecution/requestApproval", params: `[`},
 	} {
@@ -213,6 +232,43 @@ func TestCodexApprovalRequest(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCodexApprovalRequest_TruncatedPathsMarked: a path list past the cap is
+// cut with a visible marker, never silently.
+func TestCodexApprovalRequest_TruncatedPathsMarked(t *testing.T) {
+	paths := make([]string, 400)
+	for i := range paths {
+		paths[i] = "/w/" + strings.Repeat("p", 20)
+	}
+	req, ok := codexApprovalRequest("item/fileChange/requestApproval", json.RawMessage(`{"itemId":"f"}`), paths)
+	if !ok {
+		t.Fatal("file change not parked")
+	}
+	if len(req.Description) > codexMaxDescription {
+		t.Fatalf("Description is %d bytes, over the %d cap", len(req.Description), codexMaxDescription)
+	}
+	full := len("paths:") + len(paths)*len("\n"+paths[0])
+	cut := strings.LastIndex(req.Description, "\n…[truncated ")
+	if cut < 0 {
+		t.Fatalf("Description tail %q carries no truncation marker", req.Description[len(req.Description)-40:])
+	}
+	if want := fmt.Sprintf("\n…[truncated %d bytes]", full-cut); req.Description[cut:] != want {
+		t.Fatalf("marker = %q, want %q", req.Description[cut:], want)
+	}
+}
+
+func TestCodexApproval_TeardownDeclines(t *testing.T) {
+	h, p := newApprovalCodexRunner(t, time.Minute, "")
+	h.run(t)
+	h.bound(t, nil)
+	h.turn(t, "[fakecodex:approval]")
+	req := p.nextShown(t)
+	h.r.BeginTeardown()
+	if got := h.toolResult(t); got != "declined" {
+		t.Fatalf("tool result = %q, want declined", got)
+	}
+	p.awaitRetired(t, req.ToolUseID)
 }
 
 func TestCodexDecision(t *testing.T) {
