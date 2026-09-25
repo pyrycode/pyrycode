@@ -627,6 +627,25 @@ func codexConversation(convReg *conversations.Registry, harnessFor handlers.Sess
 	}
 }
 
+// conversationAgent builds V2SessionConfig.ConversationAgent (#2669): a
+// conversation's agent, resolved by handlers.AgentOf — the rule list_conversations
+// tags rows with — so the agent a capable client reads on a conversation_updated
+// is the one its list shows. An unknown conversation reports ok false. nil when
+// either half is unwired (foreground/v1), which leaves every conversation_updated
+// without an agent.
+func conversationAgent(convReg *conversations.Registry, harnessFor handlers.SessionHarnessFunc) func(conversationID string) (string, bool) {
+	if convReg == nil || harnessFor == nil {
+		return nil
+	}
+	return func(conversationID string) (string, bool) {
+		conv, ok := convReg.Get(conversations.ConversationID(conversationID))
+		if !ok {
+			return "", false
+		}
+		return handlers.AgentOf(conv, harnessFor), true
+	}
+}
+
 // runConfigFor composes the two halves of the conversation-keyed
 // run-configuration seam (#1609) into the primitive-typed value that crosses into
 // internal/relay as V2SessionConfig.RunConfigFor: the settings half (resolve —
@@ -1105,6 +1124,9 @@ func startRelayV2(
 		// pushed frame about a conversation whose bound session runs Codex, by the
 		// same resolution list_conversations filters rows with (#2643).
 		CodexConversation: codexConversation(w.convReg, w.sessionHarness),
+		// conversation_updated agent (#2669): a conn with multi_agent reads every
+		// such frame with the conversation's agent, by the same resolution.
+		ConversationAgent: conversationAgent(w.convReg, w.sessionHarness),
 		// Conversation-keyed run configuration (#1609, consulted since #1610): one
 		// seam reporting a NAMED conversation's own bound session id, model / effort
 		// / YOLO and context-window figures together, composed at runConfigFor. It

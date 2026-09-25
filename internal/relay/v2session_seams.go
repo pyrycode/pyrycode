@@ -713,6 +713,17 @@ type V2SessionConfig struct {
 	// frame is delivered as before #2644.
 	CodexConversation func(conversationID string) bool
 
+	// ConversationAgent answers the agent of conversationID — protocol.AgentClaude
+	// or protocol.AgentCodex — by the rule list_conversations tags rows with
+	// (#2669). ok is false for a conversation it does not know. forwardEnvelope and
+	// forwardAppReply consult it, through agentTaggedForConn, per
+	// conversation_updated sealed for a conn that negotiated
+	// protocol.CapabilityMultiAgent, on the Run goroutine; production wires the
+	// same registry lookup plus sessions.Pool.HarnessFor that CodexConversation
+	// takes. Optional: when nil every conversation_updated is delivered without an
+	// agent, as before #2669.
+	ConversationAgent func(conversationID string) (agent string, ok bool)
+
 	// MergedModelOptions answers, for a pushed model_list's Claude entries, the
 	// list a conn that negotiated protocol.CapabilityMultiAgent is sent instead
 	// (#2652): those entries tagged as Claude's, then the Codex entries the daemon
