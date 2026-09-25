@@ -1801,6 +1801,12 @@ func validateEffortVocabulary(harness string, list turnevent.ModelList, have boo
 // interrupt (sessions.Runner.Interrupt, codexRunner.Interrupt). Neither takes
 // input mid-turn: newInboundDeliver holds every message until the conversation's
 // turn is idle, and Codex's WriteUserTurn then starts a new turn.
+//
+// SlashCommands, MCPServers and ContextUsageDetail (#2670) are true only for
+// Claude: codexRunner implements none of slashCommandLister, mcpStatusQuerier
+// or contextUsageQuerier, so those resolvers refuse every Codex session.
+// TestSettingsUpdaterAdapter_CapabilityFlagsMatchResolvers pins each flag to
+// its resolver's assertion.
 func (a settingsUpdaterAdapter) Capabilities(sessionID, model string) (relay.AgentCapabilities, bool) {
 	if sessionID == "" {
 		return relay.AgentCapabilities{}, false
@@ -1818,11 +1824,15 @@ func (a settingsUpdaterAdapter) Capabilities(sessionID, model string) (relay.Age
 			}
 		}
 	}
+	claude := harness == sessions.HarnessClaude
 	return relay.AgentCapabilities{
-		Interrupt:    true,
-		MidTurnInput: false,
-		EffortLevels: slices.Clone(effortLevelsFor(harness, list, have, model)),
-		Models:       models,
+		Interrupt:          true,
+		MidTurnInput:       false,
+		SlashCommands:      claude,
+		MCPServers:         claude,
+		ContextUsageDetail: claude,
+		EffortLevels:       slices.Clone(effortLevelsFor(harness, list, have, model)),
+		Models:             models,
 	}, true
 }
 

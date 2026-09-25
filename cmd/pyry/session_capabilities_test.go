@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/pyrycode/pyrycode/internal/relay"
+	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
@@ -30,14 +31,14 @@ func TestSettingsUpdaterAdapter_Capabilities(t *testing.T) {
 			dormant: `"model":"opus",`,
 			store:   &agentVocabularyDouble{codex: codexEntries},
 			model:   "opus",
-			want:    relay.AgentCapabilities{Interrupt: true, EffortLevels: []string{"low", "medium", "high"}, Models: []string{"sonnet", "opus", "haiku"}},
+			want:    relay.AgentCapabilities{Interrupt: true, SlashCommands: true, MCPServers: true, ContextUsageDetail: true, EffortLevels: []string{"low", "medium", "high"}, Models: []string{"sonnet", "opus", "haiku"}},
 		},
 		{
 			name:    "claude on its default model",
 			dormant: ``,
 			store:   &agentVocabularyDouble{codex: codexEntries},
 			model:   "",
-			want:    relay.AgentCapabilities{Interrupt: true, EffortLevels: fallbackFive, Models: []string{"sonnet", "opus", "haiku"}},
+			want:    relay.AgentCapabilities{Interrupt: true, SlashCommands: true, MCPServers: true, ContextUsageDetail: true, EffortLevels: fallbackFive, Models: []string{"sonnet", "opus", "haiku"}},
 		},
 		{
 			name:    "codex on luna",
@@ -155,6 +156,52 @@ func TestSettingsUpdaterAdapter_CapabilitiesAreAccepted(t *testing.T) {
 			}
 			if err := adapter.UpdateSettings(dormantWriteTargetID, relay.SettingsUpdate{Model: &stored, Effort: &e}); !errors.Is(err, relay.ErrEffortNotOffered) {
 				t.Errorf("unlisted effort %q on %q = %v, want ErrEffortNotOffered", e, stored, err)
+			}
+		})
+	}
+}
+
+// #2670: each feature flag agrees with its resolver's type assertion — the
+// slash-command list (slashCommandLister), MCP status (mcpStatusQuerier) and the
+// context-usage breakdown (contextUsageQuerier). The Claude runner passes all
+// three and its list says true; the Codex runner fails all three and its list
+// says false.
+func TestSettingsUpdaterAdapter_CapabilityFlagsMatchResolvers(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		dormant string
+		runner  sessions.Runner
+		want    bool
+	}{
+		{"claude", `"model":"opus",`, streamRunner{}, true},
+		{"codex", `"harness":"codex","model":"luna",`, &codexRunner{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			adapter, _ := newAgentVocabularyAdapter(t, tc.dormant, &agentVocabularyDouble{codex: codexEntries})
+			caps, ok := adapter.Capabilities(dormantWriteTargetID, "")
+			if !ok {
+				t.Fatal("Capabilities refused a known session")
+			}
+			_, lists := tc.runner.(slashCommandLister)
+			_, mcp := tc.runner.(mcpStatusQuerier)
+			_, usage := tc.runner.(contextUsageQuerier)
+			for _, flag := range []struct {
+				name           string
+				got, resolvers bool
+			}{
+				{"SlashCommands", caps.SlashCommands, lists},
+				{"MCPServers", caps.MCPServers, mcp},
+				{"ContextUsageDetail", caps.ContextUsageDetail, usage},
+			} {
+				if flag.resolvers != tc.want {
+					t.Errorf("%T passes the %s resolver's assertion = %v, want %v", tc.runner, flag.name, flag.resolvers, tc.want)
+				}
+				if flag.got != flag.resolvers {
+					t.Errorf("%s = %v, but the resolver's assertion gives %v", flag.name, flag.got, flag.resolvers)
+				}
 			}
 		})
 	}

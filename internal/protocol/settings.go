@@ -207,11 +207,14 @@ type SessionSettingsPayload struct {
 // permission, and the list is not the enforcement: the daemon re-checks every
 // request whatever a client shows.
 //
-// No omitempty: a present object carries all six keys, and each list is [] rather
+// No omitempty: a present object carries all nine keys, and each list is [] rather
 // than null when it holds nothing.
 //
 //   - MidTurnInput is true only if a message sent during a running turn reaches
 //     that turn; false means it is held until the turn ends.
+//   - SlashCommands, MCPServers and ContextUsageDetail (#2670) say whether the
+//     session answers request_slash_command_list, mcp_status_request and
+//     request_context_usage's breakdown at all: true for Claude, false for Codex.
 //   - EffortLevels are the levels accepted for the session's current model.
 //   - PermissionModes are the values the permission_mode field accepts. The
 //     bypass posture is not among them: it stays reachable only through yolo.
@@ -221,12 +224,15 @@ type SessionSettingsPayload struct {
 //     vocabulary is unavailable. "" (the agent's default) is accepted but never
 //     listed, as for EffortLevels.
 type SessionCapabilities struct {
-	Interrupt       bool     `json:"interrupt"`
-	MidTurnInput    bool     `json:"mid_turn_input"`
-	EffortLevels    []string `json:"effort_levels"`
-	PermissionModes []string `json:"permission_modes"`
-	AttachmentTypes []string `json:"attachment_types"`
-	Models          []string `json:"models"`
+	Interrupt          bool     `json:"interrupt"`
+	MidTurnInput       bool     `json:"mid_turn_input"`
+	SlashCommands      bool     `json:"slash_commands"`
+	MCPServers         bool     `json:"mcp_servers"`
+	ContextUsageDetail bool     `json:"context_usage_detail"`
+	EffortLevels       []string `json:"effort_levels"`
+	PermissionModes    []string `json:"permission_modes"`
+	AttachmentTypes    []string `json:"attachment_types"`
+	Models             []string `json:"models"`
 }
 
 // NullableString preserves an optional nullable JSON string's three states.

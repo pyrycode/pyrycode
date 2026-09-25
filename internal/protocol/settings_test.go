@@ -422,7 +422,7 @@ func TestSessionSettingsPayload_CapabilitiesPresence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	want := `"capabilities":{"interrupt":true,"mid_turn_input":false,"effort_levels":[],"permission_modes":["default"],"attachment_types":["*/*"],"models":[]}`
+	want := `"capabilities":{"interrupt":true,"mid_turn_input":false,"slash_commands":false,"mcp_servers":false,"context_usage_detail":false,"effort_levels":[],"permission_modes":["default"],"attachment_types":["*/*"],"models":[]}`
 	if !strings.Contains(string(b), want) {
 		t.Errorf("with capabilities = %s, want it to contain %s", b, want)
 	}

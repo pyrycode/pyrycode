@@ -15,10 +15,13 @@ import (
 // fixtureAgentCaps is what the capability seam double reports for the fixture
 // session: one agent's half of the list (#2646).
 var fixtureAgentCaps = AgentCapabilities{
-	Interrupt:    true,
-	MidTurnInput: false,
-	EffortLevels: []string{"low", "high"},
-	Models:       []string{"opus", "sonnet"},
+	Interrupt:          true,
+	MidTurnInput:       false,
+	SlashCommands:      true,
+	MCPServers:         true,
+	ContextUsageDetail: true,
+	EffortLevels:       []string{"low", "high"},
+	Models:             []string{"opus", "sonnet"},
 }
 
 // capsCall is one consultation of the capability seam.
@@ -71,12 +74,15 @@ var (
 	oldClientCaps     = []string{protocol.CapabilityInteractive}
 	multiAgentCaps    = []string{protocol.CapabilityInteractive, protocol.CapabilityMultiAgent}
 	wantFixtureCapObj = protocol.SessionCapabilities{
-		Interrupt:       true,
-		MidTurnInput:    false,
-		EffortLevels:    []string{"low", "high"},
-		PermissionModes: []string{"default", "acceptEdits", "plan", "auto", "dontAsk"},
-		AttachmentTypes: []string{"*/*"},
-		Models:          []string{"opus", "sonnet"},
+		Interrupt:          true,
+		MidTurnInput:       false,
+		SlashCommands:      true,
+		MCPServers:         true,
+		ContextUsageDetail: true,
+		EffortLevels:       []string{"low", "high"},
+		PermissionModes:    []string{"default", "acceptEdits", "plan", "auto", "dontAsk"},
+		AttachmentTypes:    []string{"*/*"},
+		Models:             []string{"opus", "sonnet"},
 	}
 )
 
@@ -194,7 +200,7 @@ func TestSessionCapabilities_DropsValuesTheShapeChecksRefuse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	for _, key := range []string{`"effort_levels":[]`, `"models":[]`, `"interrupt":false`, `"mid_turn_input":false`} {
+	for _, key := range []string{`"effort_levels":[]`, `"models":[]`, `"interrupt":false`, `"mid_turn_input":false`, `"slash_commands":false`, `"mcp_servers":false`, `"context_usage_detail":false`} {
 		if !bytes.Contains(empty, []byte(key)) {
 			t.Errorf("empty capabilities %s lacks %s", empty, key)
 		}

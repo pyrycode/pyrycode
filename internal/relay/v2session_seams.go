@@ -271,10 +271,13 @@ type RunConfig struct {
 // Primitives only, like RunConfig. The relay composes it with the permission
 // modes and attachment types it owns into protocol.SessionCapabilities.
 type AgentCapabilities struct {
-	Interrupt    bool
-	MidTurnInput bool
-	EffortLevels []string
-	Models       []string
+	Interrupt          bool
+	MidTurnInput       bool
+	SlashCommands      bool
+	MCPServers         bool
+	ContextUsageDetail bool
+	EffortLevels       []string
+	Models             []string
 }
 
 // ErrSessionUnknown is the relay-local sentinel the SettingsUpdater adapter
