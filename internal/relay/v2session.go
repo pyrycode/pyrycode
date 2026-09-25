@@ -294,6 +294,13 @@ type V2Session struct {
 	// handleActiveConns on the same dispatch goroutine — no lock/atomic.
 	interactive bool
 
+	// multiAgent is the negotiated protocol.CapabilityMultiAgent decision
+	// (#2643), under interactive's regime exactly: set once in handleNoiseInit's
+	// token-OK path before V2StateOpen, false everywhere else, preserved across a
+	// re-key by never being touched. Surfaced into every per-frame
+	// *dispatch.Conn by routeAppFrame, so a handler reads it as c.MultiAgent().
+	multiAgent bool
+
 	// clientName and clientVersion are the device_name and client_version the
 	// phone reported for ITSELF in its hello (#2148), retained so the session's
 	// appended system prompt can name the client attached to it. Set exactly once
@@ -1338,6 +1345,7 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 func (m *V2SessionManager) routeAppFrame(ctx context.Context, s *V2Session, plaintext []byte) {
 	outbound := make(chan protocol.RoutingEnvelope, handlerOutboundBuf)
 	conn := dispatch.NewConn(s.connID, outbound, s.device)
+	conn.SetMultiAgent(s.multiAgent)
 
 	routeDone := make(chan struct{})
 	go func() {

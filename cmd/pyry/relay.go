@@ -323,6 +323,11 @@ type relayWiring struct {
 	// and the conversation-keyed seam reports zeros. Foreground / v1, and a daemon
 	// that cannot name its own sessions directory (sessionTranscriptDir's gate).
 	sessionTranscriptDir func(sessionID string) string
+	// sessionHarness answers the agent a pool session runs, for the
+	// list_conversations reply's per-row agent and its Codex filter (#2643).
+	// Built at main.go over *sessions.Pool for modelWindows' reason. nil in
+	// foreground/v1, which leaves the list agent-blind: every row reads claude.
+	sessionHarness handlers.SessionHarnessFunc
 	// retainedModelLists enumerates the daemon's currently-retained model lists as
 	// marshal-ready model_list payloads — one per conversation whose bound session
 	// holds a list — for the relay's connect-time reconcile seam (#1867 fills
@@ -1003,7 +1008,7 @@ func startRelayV2(
 		// This release's minimum app versions, both unset today (#2578).
 		MinClientVersions: relay.ShippedMinClientVersions(),
 		Handlers: map[string]dispatch.Handler{
-			protocol.TypeListConversations:  handlers.ListConversations(w.convReg),
+			protocol.TypeListConversations:  handlers.ListConversationsWithAgents(w.convReg, w.sessionHarness),
 			protocol.TypeCreateConversation: handlers.CreateConversation(w.convReg, w.creator, resolveConversationsRegistryPath(w.instanceName), w.defaultCwd, logger),
 			protocol.TypeRenameConversation: handlers.RenameConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger),
 			// rename_workspace is the workspace-keyed sibling of the line above
