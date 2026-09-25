@@ -266,6 +266,17 @@ type RunConfig struct {
 	WindowTokens   int
 }
 
+// AgentCapabilities is the half of a session's capability list that depends on
+// its agent and model (#2646), the value half of V2SessionConfig.CapabilitiesFor.
+// Primitives only, like RunConfig. The relay composes it with the permission
+// modes and attachment types it owns into protocol.SessionCapabilities.
+type AgentCapabilities struct {
+	Interrupt    bool
+	MidTurnInput bool
+	EffortLevels []string
+	Models       []string
+}
+
 // ErrSessionUnknown is the relay-local sentinel the SettingsUpdater adapter
 // returns when set_session_settings names a session the daemon does not host. The
 // cmd/pyry adapter maps sessions.ErrSessionNotFound onto it so internal/relay
@@ -792,6 +803,20 @@ type V2SessionConfig struct {
 	// adds no cache; every accepted request calls the provider once. The contract
 	// carries only one nullable scalar, never a full child settings response.
 	EffectiveEffortFor func(ctx context.Context, conversationID string) (*string, bool)
+
+	// CapabilitiesFor reports the agent-and-model half of a session's capability
+	// list (#2646) for a multi_agent conn's session_settings reply.
+	// handleRequestSessionSettings calls it once, only after RunConfigFor accepted,
+	// with THAT RunConfig's SessionID and Model — ids from the daemon's own record,
+	// never the caller's conversation id. false means no session with a known
+	// agent, and the reply then carries no capability object. The relay adds the
+	// permission modes and attachment types itself, and drops any value its own
+	// shape checks would refuse.
+	//
+	// The lists must be built from the same code the set_session_settings checks
+	// run, so every listed option is accepted for that session. Runs on the conn's
+	// app-frame worker, like EffectiveEffortFor. Optional: nil omits the object.
+	CapabilitiesFor func(sessionID, model string) (AgentCapabilities, bool)
 
 	// ModelListFor reports the NAMED conversation's model menu, already shaped as a
 	// marshal-ready model_list payload, for an inbound request_model_list (#2125).

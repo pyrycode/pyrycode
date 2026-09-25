@@ -226,6 +226,10 @@ type relayWiring struct {
 	// settings persists a per-session model/effort change for the
 	// set_session_settings verb (#845). nil in foreground/v1 replies "unavailable".
 	settings relay.SettingsUpdater
+	// capabilities reports a session's agent-and-model capability half for a
+	// multi_agent conn's session_settings reply (#2646), built over the same pool
+	// and store as settings. nil in foreground/v1 omits the capability object.
+	capabilities func(sessionID, model string) (relay.AgentCapabilities, bool)
 	// runSettings is the settings half of the conversation-keyed run-configuration
 	// seam (#1609): it resolves a NAMED conversation to its bound session id plus
 	// that session's stored model/effort and current-child permission confirmation
@@ -1117,6 +1121,9 @@ func startRelayV2(
 		// and projects one nullable scalar from the deadline-bounded child query.
 		// nil preserves the complete saved reply while omitting effective_effort.
 		EffectiveEffortFor: w.effectiveEffortFor,
+		// Capability-list source (#2646), consulted only for a multi_agent conn
+		// after RunConfigFor resolved, with that session's id and model.
+		CapabilitiesFor: w.capabilities,
 		// On-demand model-list source (#2125): resolves the NAMED conversation's model
 		// menu for an inbound request_model_list, so a client can ask at any time
 		// instead of waiting for the live turn lane (which drops every event whose

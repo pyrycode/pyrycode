@@ -98,6 +98,7 @@ func resolveFixtureConv(id string) (RunConfig, bool) {
 type readSeams struct {
 	runConfig       func(string) (RunConfig, bool)
 	effectiveEffort func(context.Context, string) (*string, bool)
+	capabilities    func(sessionID, model string) (AgentCapabilities, bool)
 	knownConv       func(string) bool
 	updater         SettingsUpdater
 	handlers        map[string]dispatch.Handler
@@ -170,6 +171,7 @@ func readManagerFor(t *testing.T, seams readSeams, logger *slog.Logger) (mgr *V2
 		Logger:             logger,
 		RunConfigFor:       seams.runConfig,
 		EffectiveEffortFor: seams.effectiveEffort,
+		CapabilitiesFor:    seams.capabilities,
 		KnownConversation:  seams.knownConv,
 		SettingsUpdater:    seams.updater,
 		Handlers:           seams.handlers,

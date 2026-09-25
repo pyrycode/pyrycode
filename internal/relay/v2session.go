@@ -990,7 +990,9 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 			if !s.interactive {
 				return
 			}
-			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameSessionSettingsRequest})
+			// multiAgent is Run-owned, so it travels in the job rather than being
+			// read on the worker (#2646).
+			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameSessionSettingsRequest, multiAgent: s.multiAgent})
 			return
 		case protocol.TypeRequestModelList:
 			// Inline on Run (#2125), beside its shape twin above rather than with
@@ -1154,6 +1156,12 @@ type appFrameJob struct {
 	// construction site names its kind rather than leaning on that zero value, so
 	// the producer and the worker's arms read as one enumeration.
 	kind appFrameKind
+
+	// multiAgent is the conn's negotiated multi_agent decision, copied from the
+	// Run-owned V2Session.multiAgent when the job is built on Run, so a worker
+	// handler reads it without touching session state (#2646). Only the
+	// session-settings read consults it.
+	multiAgent bool
 }
 
 // appFrameKind names the off-Run handlers, one member per dispatchAppFrame case
@@ -1282,7 +1290,7 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				// trip. Saved settings resolution and reply composition share this
 				// worker placement, and the unsealed reply returns through
 				// forwardToRun so the worker never touches s.send.
-				m.handleRequestSessionSettings(ctx, s, job.plaintext)
+				m.handleRequestSessionSettings(ctx, s, job.plaintext, job.multiAgent)
 			case appFrameMCPStatusRequest:
 				// The resolver may wait on a child round trip. Its reply and every
 				// reject return through forwardToRun, so the worker never seals under

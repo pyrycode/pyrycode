@@ -77,7 +77,15 @@ success or failure, never a silent drop. Control flow, in load-bearing order:
    model's own entry passes; an entry that advertises no levels accepts none;
    and when the model has **no** entry for its agent — a version no longer
    listed, an empty model, or no vocabulary retained yet — the daemon falls
-   back to the old closed set `{low, medium, high, xhigh, max}`. A refused
+   back to the old closed set `{low, medium, high, xhigh, max}`. **Since #2646,
+   `validateEffortVocabulary` is a behaviour-identical rewrite: it is now
+   membership in `effortLevelsFor(list, have, model)`, the same function
+   `settingsUpdaterAdapter.Capabilities` calls to build the `effort_levels`
+   entry of the [per-session capability list](protocol-package-types-session-settings-read-payloads.md)
+   a `multi_agent` client reads.** The reported list and this check are
+   therefore one function rather than two values a test merely pins together
+   — a future change to the fallback or the truncation rule cannot update one
+   without the other. A refused
    level returns the new sentinel `relay.ErrEffortNotOffered`, mapped to the
    same non-retryable `protocol.malformed` / `msgSettingsMalformed` reply the
    closed set gave, with the whole frame changing nothing — never
