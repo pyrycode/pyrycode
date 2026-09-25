@@ -51,9 +51,10 @@ success or failure, never a silent drop. Control flow, in load-bearing order:
    `server.binary_offline` "unavailable" reply (foreground / unwired), never
    a silent drop.
 5. **Availability gate, persist + reply.** `SettingsUpdater.UpdateSettings`
-   checks a non-empty model against the retained vocabulary before it calls
-   `Pool.UpdateSettings`. An exact, untruncated `ModelOption.Value` match
-   proceeds; complete-menu absence returns `ErrModelNotOffered`, while a
+   checks a non-empty model against the **session's own agent's** vocabulary
+   before it calls `Pool.UpdateSettings` — since #2629, no longer Claude's
+   retained list unconditionally. An exact, untruncated `ModelOption.Value`
+   match proceeds; complete-menu absence returns `ErrModelNotOffered`, while a
    missing/empty menu, dropped row, or any value-truncated row returns
    `ErrModelVocabularyUnavailable`. The handler maps those to non-retryable
    `protocol.malformed` and retryable `model_list.unavailable`, respectively.
@@ -65,6 +66,45 @@ success or failure, never a silent drop. Control flow, in load-bearing order:
    registry entry — so a hit on either still yields `nil`/`session_settings_updated`,
    and `session.not_found` now also covers a dormant session whose frame named
    `yolo` or `permission_mode`. See [`Pool.UpdateDormantSettings`](sessions-package-key-types-pool-updatesettings.md#pool-updatedormantsettings-2463).
+
+   **Since #2629, a non-empty effort is checked the same way, against the
+   model the session will run after this update** — the update's own `model`
+   when the frame sets one (including `""`, which has no entry and falls
+   straight to the fallback below), otherwise the session's currently stored
+   model (read live-then-dormant, the same order the model check's existence
+   probe uses). The check is `validateEffortVocabulary(list, have, model,
+   effort)` in `cmd/pyry`: an exact `EffortLevels` membership match on the
+   model's own entry passes; an entry that advertises no levels accepts none;
+   and when the model has **no** entry for its agent — a version no longer
+   listed, an empty model, or no vocabulary retained yet — the daemon falls
+   back to the old closed set `{low, medium, high, xhigh, max}`. A refused
+   level returns the new sentinel `relay.ErrEffortNotOffered`, mapped to the
+   same non-retryable `protocol.malformed` / `msgSettingsMalformed` reply the
+   closed set gave, with the whole frame changing nothing — never
+   `model_list.unavailable`, since there is no separate "list might still
+   arrive" case for effort the way there is for a model absent from an
+   incomplete menu. Model is checked before effort, so a frame naming both an
+   unoffered model and an effort answers the model's reply. This is how a
+   Codex session's `ultra` is accepted — Codex's own entries advertise it —
+   while the identical string on a Claude session, whose entries do not, is
+   refused; and how a Codex family alias (e.g. `luna`) is accepted as a
+   *model* on a Codex session and refused as not-offered on a Claude one.
+
+   **A `TruncatedFields` entry naming `effort_levels` makes that row's level
+   list inconclusive, not proof of absence.** `validateEffortVocabulary`
+   treats a cut `effort_levels` the same way the model check already treats a
+   cut `value`: it falls through to the fallback set instead of refusing on a
+   partial list, because a level missing from a truncated row may simply be
+   the one that got cut.
+
+   **The session's own agent is resolved via the new
+   `(*sessions.Pool).HarnessFor(id)`**, which replaces the old `requireKnownSession` existence
+   probe: one `RLock`, live session first, then the dormant registry entry,
+   `ErrSessionNotFound` on a miss in both — checked **before** any vocabulary
+   read, for an effort-only frame too, so an unknown id still answers
+   `session.not_found` without learning which agent a session runs or
+   probing vocabulary completeness. See [`Pool.HarnessFor`
+   (#2629)](sessions-package-key-types-pool-settingsfor.md#poolharnessfor-2629).
 
 - **`SettingsUpdater` / `SettingsUpdate` / outcome-sentinel consumer seam**
   (beside `Interrupter` / `SessionStarter` / `QueueRemover`). `SettingsUpdate{
@@ -111,18 +151,40 @@ success or failure, never a silent drop. Control flow, in load-bearing order:
   group. `TestValidModel_ByteSetIsClosed` checks the whitespace-free
   guarantee across all 256 byte values in each of the three grammar positions
   rather than by example. A well-shaped non-empty model can still be rejected
-  when no exact untruncated `ModelOption.Value` row is offered. `validEffort`
-  below carries the identical direction
-  hazard and is deliberately **not** widened — there is no bracketed effort
-  level to admit yet, and widening against a hypothetical is not
-  evidence-based.
-- **`validEffort(e string) bool`** — `""` (clear) or the closed enum `{low,
-  medium, high, xhigh, max}`, matching `cmd/pyry/agent_run.go`'s
-  `validEfforts` but defined relay-local since `internal/relay` cannot import
-  `cmd/pyry`.
-- **`validPermissionMode(mode string) bool`** (#1687) — a closed enum like
-  `validEffort`, not `validModel`'s byte-class grammar: a permission mode is
-  a fixed vocabulary (the five NON-ESCALATING modes claude accepts in band,
+  when no exact untruncated `ModelOption.Value` row is offered.
+
+  **`validEffort` no longer carries this hazard (#2629): it was widened from
+  a closed enum to a grammar precisely so a level like Codex's `ultra` could
+  reach the per-model check below instead of being refused at the wire
+  before that check ever ran.** The direction-hazard argument that used to
+  justify leaving it closed — "there is no bracketed effort level to admit
+  yet, and widening against a hypothetical is not evidence-based" — held
+  only while every agent on this wire was Claude; once #2627 gave Codex its
+  own advertised levels, refusing an unlisted-in-Claude's-five level stopped
+  being conservative and started being wrong for a different agent's session.
+  `validPermissionMode` (below) still carries the identical hazard `validModel`
+  and the old `validEffort` did, because a permission mode genuinely is one
+  closed vocabulary shared by every agent this daemon can run — there is no
+  per-agent posture list to check it against instead.
+- **`validEffort(e string) bool`** — since #2629, a **grammar** (`""`, or a
+  value up to 32 bytes whose first byte is `[a-z0-9]` and whose remaining
+  bytes are `[a-z0-9_-]`), not a closed enum — the untrusted-boundary shape
+  check only, mirroring `validModel`'s posture. The 32-byte bound is the
+  Codex level alphabet's own bound and `streamsup.maxModelEffortLevel`.
+  `TestValidEffort_ByteSetIsClosed` walks all 256 byte values at both
+  positions rather than by example, the same discipline
+  `TestValidModel_ByteSetIsClosed` uses — a leading `-` or `_` here could pose as an argv
+  flag the same way an unchecked model value could. Whether a well-shaped
+  level is *offered* is the per-model membership check above
+  (`ErrEffortNotOffered`), not relay's job. Before #2629 this was the closed enum `{low, medium, high, xhigh,
+  max}`, matching `cmd/pyry/agent_run.go`'s `validEfforts` — that set is the
+  **dispatcher's** own path (`pyry agent-run`) and stays a closed set by the
+  ticket's instruction; it and this grammar are unrelated vocabularies that
+  happened to read alike before this ticket, and the closed set is what
+  refused Codex's `ultra` outright before any per-model check could run.
+- **`validPermissionMode(mode string) bool`** (#1687) — a closed enum, unlike
+  `validModel`'s byte-class grammar or the post-#2629 `validEffort` grammar:
+  a permission mode is a fixed vocabulary (the five NON-ESCALATING modes claude accepts in band,
   measured live by #2041), where a model identifier is not — claude in fact
   accepts a sixth, `bypassPermissions`, in band as of #2066, but that count is
   a **wire** decision following from the two exclusions below, not from what
@@ -134,9 +196,13 @@ success or failure, never a silent drop. Control flow, in load-bearing order:
   bound and is untouched by #2066: the daemon now *delivers* the escalation
   in band once accepted as `yolo:true`, but this validator still refuses it
   as a mode string outright, so a mobile client still has exactly one
-  spelling to send. Carries the same direction hazard `validEffort`
-  already flags: a closed enum refuses inbound anything claude adds later,
-  so widening it needs a fresh live measurement, not a hunch.
+  spelling to send. Carries the direction hazard `validEffort` carried before
+  #2629 and `validModel` still carries: a closed enum refuses inbound
+  anything claude adds later, so widening it needs a fresh live measurement,
+  not a hunch. `validEffort` escaped this hazard by becoming a per-agent
+  membership check instead of a fixed guess; `validPermissionMode` cannot,
+  because posture is one vocabulary shared by every agent, not a per-agent
+  advertised list.
 - **`settingsReplyError(ctx, s, inReplyTo, code, message, retryable)`** — a
   third near-identical copy of the `snapshotReplyError` /
   `debugBundleReplyError` shape (marshal `protocol.ErrorPayload` →

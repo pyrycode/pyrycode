@@ -1836,6 +1836,30 @@ func (p *Pool) DormantSettingsFor(id SessionID) (SessionSettings, error) {
 	}), nil
 }
 
+// HarnessFor returns the coding agent the session id runs — the live session's
+// own harness, else its dormant entry's, canonical in both cases so an entry with
+// no key answers HarnessClaude — or ErrSessionNotFound when this pool holds id in
+// neither half (#2629). The settings gate reads it to check a model and an effort
+// against the entries of that agent rather than of claude alone.
+//
+// Live first, under one read lock, so the two halves are consulted as one
+// partition rather than across a revive window. The harness itself cannot change
+// under a caller: it is construction-fixed on a Session and carried from the
+// entry by a revive. The empty id is a miss, not the bootstrap — both maps are
+// read by exact key, unlike Lookup. No id validation and no logging, and the
+// error is returned bare: DormantSettingsFor's posture.
+func (p *Pool) HarnessFor(id SessionID) (string, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if sess, ok := p.sessions[id]; ok {
+		return sess.harness, nil
+	}
+	if entry, ok := p.dormant[id]; ok {
+		return canonicalHarness(entry.Harness), nil
+	}
+	return "", ErrSessionNotFound
+}
+
 // EverActivated reports whether the session named by id has ever been activated
 // — the durable, restart-surviving answer to "has this conversation ever run?"
 // (#2521). It is what lets the named new_session path tell a conversation created

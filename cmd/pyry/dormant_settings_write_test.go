@@ -84,7 +84,7 @@ func TestSettingsUpdaterAdapter_DormantWriteLands(t *testing.T) {
 	t.Parallel()
 
 	pool, plan := newDormantWritePool(t, `"model":"sonnet","effort":"low",`)
-	plan.arm(dormantWriteBootID, turnevent.ModelList{Models: []turnevent.ModelOption{{Value: "opus"}, {Value: "sonnet"}}})
+	plan.arm(dormantWriteBootID, turnevent.ModelList{Models: []turnevent.ModelOption{{Value: "opus", EffortLevels: claudeLevels}, {Value: "sonnet", EffortLevels: claudeLevels}}})
 	adapter := settingsUpdaterAdapter{p: pool}
 
 	before := pool.List()
@@ -117,7 +117,7 @@ func TestSettingsUpdaterAdapter_DormantModelMembership(t *testing.T) {
 	t.Parallel()
 
 	pool, plan := newDormantWritePool(t, `"model":"sonnet","effort":"low",`)
-	plan.arm(dormantWriteBootID, turnevent.ModelList{Models: []turnevent.ModelOption{{Value: "sonnet"}}})
+	plan.arm(dormantWriteBootID, turnevent.ModelList{Models: []turnevent.ModelOption{{Value: "sonnet", EffortLevels: claudeLevels}}})
 	adapter := settingsUpdaterAdapter{p: pool}
 
 	absent, effort := "opus", "high"
@@ -171,7 +171,7 @@ func TestSettingsUpdaterAdapter_DormantPostureRefused(t *testing.T) {
 			t.Parallel()
 
 			pool, vocab := newDormantWritePool(t, `"model":"sonnet","effort":"low","yolo":true,"permission_mode":"bypassPermissions",`)
-			vocab.arm(dormantWriteBootID, turnevent.ModelList{Models: []turnevent.ModelOption{{Value: "opus"}}})
+			vocab.arm(dormantWriteBootID, turnevent.ModelList{Models: []turnevent.ModelOption{{Value: "opus", EffortLevels: claudeLevels}}})
 			adapter := settingsUpdaterAdapter{p: pool}
 
 			model, effort := "opus", "high"

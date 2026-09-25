@@ -246,6 +246,9 @@ func TestV2Session_SetSessionSettings_ErrorReplies(t *testing.T) {
 		{name: "nil seam replies unavailable", nilSeam: true, wantCode: protocol.CodeServerBinaryOffline, wantMsg: msgSettingsUnavailable, wantRetry: true},
 		{name: "unknown session id", seamErr: ErrSessionUnknown, wantCode: protocol.CodeSessionNotFound, wantMsg: msgSettingsNotFound, wantRetry: false},
 		{name: "model not offered", seamErr: ErrModelNotOffered, wantCode: protocol.CodeProtocolMalformed, wantMsg: msgSettingsModelNotOffered, wantRetry: false, wantEvent: "v2.settings.model_not_offered"},
+		// An effort the session's model does not advertise (#2629) gets the reply the
+		// closed set gave an unknown level, byte for byte, and no log line.
+		{name: "effort not offered", seamErr: ErrEffortNotOffered, wantCode: protocol.CodeProtocolMalformed, wantMsg: msgSettingsMalformed, wantRetry: false},
 		{name: "model vocabulary unavailable", seamErr: ErrModelVocabularyUnavailable, wantCode: protocol.CodeModelListUnavailable, wantMsg: msgModelListUnavailable, wantRetry: true, wantEvent: "v2.settings.model_vocabulary_unavailable"},
 		{name: "persist failure replies unavailable", seamErr: errors.New(persistErrSentinel), wantCode: protocol.CodeServerBinaryOffline, wantMsg: msgSettingsUnavailable, wantRetry: true, wantEvent: "v2.settings.persist_err"},
 	}
@@ -342,7 +345,8 @@ func TestV2Session_SetSessionSettings_MalformedRejected(t *testing.T) {
 		{"invalid model embedded space", mustSettingsPayload(t, protocol.SetSessionSettingsPayload{SessionID: settingsSessionID, Model: strPtr("claude opus")})},
 		{"invalid model control byte", mustSettingsPayload(t, protocol.SetSessionSettingsPayload{SessionID: settingsSessionID, Model: strPtr("claude\x00opus")})},
 		{"invalid model over length", mustSettingsPayload(t, protocol.SetSessionSettingsPayload{SessionID: settingsSessionID, Model: strPtr(longModel)})},
-		{"invalid effort ultra", mustSettingsPayload(t, protocol.SetSessionSettingsPayload{SessionID: settingsSessionID, Effort: strPtr("ultra")})},
+		{"invalid effort leading dash", mustSettingsPayload(t, protocol.SetSessionSettingsPayload{SessionID: settingsSessionID, Effort: strPtr("-high")})},
+		{"invalid effort over length", mustSettingsPayload(t, protocol.SetSessionSettingsPayload{SessionID: settingsSessionID, Effort: strPtr(strings.Repeat("a", 33))})},
 
 		// Permission mode (#1687). Every row here must leave the seam untouched:
 		// a refused posture is one that never reached the registry, and so never
@@ -633,6 +637,9 @@ func TestValidModel_ByteSetIsClosed(t *testing.T) {
 func TestValidEffort(t *testing.T) {
 	t.Parallel()
 
+	// #2629 replaced the closed set with a grammar: whether a well-formed level is
+	// OFFERED is the settings adapter's per-model question, so "ultra" (Codex's) now
+	// passes here where this table used to pin it refused.
 	cases := []struct {
 		in   string
 		want bool
@@ -643,14 +650,40 @@ func TestValidEffort(t *testing.T) {
 		{"high", true},
 		{"xhigh", true},
 		{"max", true},
-		{"ultra", false},
+		{"ultra", true},
+		{"a", true},
+		{"9x_y-z", true},
+		{strings.Repeat("a", 32), true},
+		{strings.Repeat("a", 33), false},
+		{"-high", false},
+		{"_high", false},
 		{"LOW", false},
-		{"lowx", false},
 		{" ", false},
+		{"high\n", false},
 	}
 	for _, tc := range cases {
 		if got := validEffort(tc.in); got != tc.want {
 			t.Errorf("validEffort(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestValidEffort_ByteSetIsClosed walks all 256 byte values in the first and in a
+// later position, so the effort alphabet is machine-checked rather than asserted:
+// only [a-z0-9] may lead (no value poses as a claude flag), and only [a-z0-9_-]
+// may follow (no whitespace, newline, control byte or byte >= 0x80 reaches the argv,
+// the /effort turn or a Codex turn).
+func TestValidEffort_ByteSetIsClosed(t *testing.T) {
+	t.Parallel()
+
+	lead := func(b byte) bool { return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') }
+	for i := 0; i < 256; i++ {
+		b := byte(i)
+		if got, want := validEffort(string([]byte{b})), lead(b); got != want {
+			t.Errorf("first byte 0x%02x: validEffort = %v, want %v", b, got, want)
+		}
+		if got, want := validEffort(string([]byte{'a', b})), lead(b) || b == '_' || b == '-'; got != want {
+			t.Errorf("later byte 0x%02x: validEffort = %v, want %v", b, got, want)
 		}
 	}
 }

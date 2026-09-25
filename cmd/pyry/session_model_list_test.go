@@ -60,7 +60,7 @@ func TestSettingsUpdaterAdapter_RejectsBeforeWholeFrameMutation(t *testing.T) {
 
 	pool, plan := newModelListTestPool(t)
 	id := pool.Default().ID()
-	plan.arm(id, turnevent.ModelList{Models: []turnevent.ModelOption{{Value: "sonnet"}}})
+	plan.arm(id, turnevent.ModelList{Models: []turnevent.ModelOption{{Value: "sonnet", EffortLevels: claudeLevels}}})
 	adapter := settingsUpdaterAdapter{p: pool}
 
 	requested, effort, mode := "opus", "high", "plan"
@@ -1090,6 +1090,8 @@ type savedVocabularyDouble struct {
 func (d savedVocabularyDouble) ModelList() (turnevent.ModelList, bool) {
 	return d.list, d.have
 }
+
+func (d savedVocabularyDouble) CodexModels() []turnevent.ModelOption { return nil }
 
 // #2450 AC 2: the three sources are read in order — the bound session's hold, the
 // bootstrap's hold, then the file — so a live child's own report wins over both
