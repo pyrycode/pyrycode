@@ -97,6 +97,39 @@ func TestConversationCreatedPayload_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestCreateConversation_Agent_Wire (#2647): the request's agent decodes to a
+// pointer (absent stays nil), and both payloads omit the key when it is unset,
+// so a frame without an agent is byte-identical to the one before agents.
+func TestCreateConversation_Agent_Wire(t *testing.T) {
+	var p CreateConversationPayload
+	if err := json.Unmarshal([]byte(`{"is_promoted":null,"name":null,"cwd":null,"agent":"codex"}`), &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if p.Agent == nil || *p.Agent != AgentCodex {
+		t.Errorf("Agent = %v, want pointer to %q", p.Agent, AgentCodex)
+	}
+	out, err := json.Marshal(CreateConversationPayload{})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	if want := `{"is_promoted":null,"name":null,"cwd":null}`; string(out) != want {
+		t.Errorf("request without agent = %s, want %s", out, want)
+	}
+
+	for _, tc := range []struct {
+		agent string
+		want  bool
+	}{{"", false}, {AgentCodex, true}} {
+		out, err := json.Marshal(ConversationCreatedPayload{Agent: tc.agent})
+		if err != nil {
+			t.Fatalf("marshal reply: %v", err)
+		}
+		if got := bytes.Contains(out, []byte(`"agent"`)); got != tc.want {
+			t.Errorf("reply with Agent %q carries agent key = %v, want %v: %s", tc.agent, got, tc.want, out)
+		}
+	}
+}
+
 func TestPromoteConversationPayload_RoundTrip(t *testing.T) {
 	raw := readFixture(t, "promote_conversation.json")
 

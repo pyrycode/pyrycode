@@ -2,7 +2,7 @@
 
 How each phone-created discussion gets its own dedicated, isolated claude session. Two halves tie `internal/conversations` (the `Conversation.CurrentSessionID` binding field) to `internal/sessions` (the `Pool` that mints and supervises sessions):
 
-- **Create path (#677, workdir #685, scratch creation #696, deferred spawn #2085, recorded-cwd drift #2568)** — `create_conversation` eagerly mints + binds a session, recording it on `CurrentSessionID`, in the conversation's own validated, trust-marked `Cwd` (#685) so discussions targeting different projects are isolated on disk. #696 lets the phone's default `~/.pyrycode/scratch` resolve under `$HOME` and be created before spawn (expand leading `~`, `MkdirAll` after the `$HOME` check). Since #2085 the mint registers, persists and supervises the session but does **not** spawn claude — the child comes up on the conversation's first message, on exactly the lazy-respawn path an idle-evicted session already takes. #2568 records the resolved realpath the session actually spawns in, not the client's spelling of it, and rewrites rows recorded before that fix once at startup. See [§ Spawn deferred to the first message](#spawn-deferred-to-the-first-message-2085), [§ One-time startup normalisation](#one-time-startup-normalisation-of-rows-recorded-before-2568).
+- **Create path (#677, workdir #685, scratch creation #696, deferred spawn #2085, recorded-cwd drift #2568, agent selection #2647)** — `create_conversation` eagerly mints + binds a session, recording it on `CurrentSessionID`, in the conversation's own validated, trust-marked `Cwd` (#685) so discussions targeting different projects are isolated on disk. #696 lets the phone's default `~/.pyrycode/scratch` resolve under `$HOME` and be created before spawn (expand leading `~`, `MkdirAll` after the `$HOME` check). Since #2085 the mint registers, persists and supervises the session but does **not** spawn claude — the child comes up on the conversation's first message, on exactly the lazy-respawn path an idle-evicted session already takes. #2568 records the resolved realpath the session actually spawns in, not the client's spelling of it, and rewrites rows recorded before that fix once at startup. #2647 lets a `multi_agent` client mint the conversation's session as Codex instead of Claude — see [§ Agent selection](#agent-selection-2647). See [§ Spawn deferred to the first message](#spawn-deferred-to-the-first-message-2085), [§ One-time startup normalisation](#one-time-startup-normalisation-of-rows-recorded-before-2568).
 - **Routing path (#678)** — `send_message` resolves that bound session and delivers the inbound turn there instead of to the bootstrap.
 - **Rotation maintenance (#739)** — when a bound session is re-keyed by a `/clear` rotation (old id → new id), the owning conversation's `CurrentSessionID` is re-pointed at the new id and the retired id is appended to `SessionHistory`, so the binding stays current beyond the session's first rotation. Eviction is binding-neutral. See [§ Maintaining the binding across rotation](#maintaining-the-binding-across-rotation-739).
 - **Stamping the boundary's routing key (#741)** — the `session_transition` producer reads that maintained binding (session id → owning conversation) and stamps `conversation_id` onto every emitted envelope, so the phone (`pyrycode-mobile#336`) folds the session-boundary marker into the correct thread; an unresolvable binding drops the whole event fail-closed rather than emit a guessed key. See [§ Reading the binding to stamp `conversation_id`](#reading-the-binding-to-stamp-conversation_id-741).
@@ -21,7 +21,7 @@ When the daemon handles a `create_conversation` frame, the handler mints a sessi
 
 1. Decode payload, resolve `name` / `promoted` (server defaults for null fields). `cwd` — what gets **recorded** — is not settled yet; it depends on the mint's answer (step 3).
 2. `id, err := conversations.NewID()` — server-minted conversation id (crypto/rand UUIDv4).
-3. **Mint the session:** `creator.Create(ctx, string(id), spawnDir)` where `spawnDir` is the *raw* phone-requested `p.Cwd` (empty for a null `Cwd`). `Pool.Mint` mints a session UUID → registers + persists it in the sessions registry → supervises. Since [#2085](#spawn-deferred-to-the-first-message-2085) it does **not** activate — no claude spawns here. Returns `(sessionID, dir, err)`: `dir` is the validator's answer — empty for a default `Cwd`, the confined, trust-marked realpath for a set one (#685; see [§ `Cwd` is the validated, trust-marked spawn workdir](#cwd-is-the-validated-trust-marked-spawn-workdir-685)) — and is what step 4 records, not the raw `spawnDir` (#2568).
+3. **Mint the session:** `creator.Create(ctx, string(id), spawnDir, agent)` where `spawnDir` is the *raw* phone-requested `p.Cwd` (empty for a null `Cwd`) and `agent` is `protocol.AgentClaude` or `protocol.AgentCodex`, already resolved and refused-if-invalid by the handler before this call (#2647; see [§ Agent selection](#agent-selection-2647)). `Pool.Mint` mints a session UUID → registers + persists it in the sessions registry → supervises; it is `MintAs(label, spawnDir, HarnessClaude)`, and `creator.Create` calls `MintAs` directly with the resolved agent. Since [#2085](#spawn-deferred-to-the-first-message-2085) it does **not** activate — no claude spawns here (a Codex session's build is the one exception — see [§ Agent selection](#agent-selection-2647)). Returns `(sessionID, dir, err)`: `dir` is the validator's answer — empty for a default `Cwd`, the confined, trust-marked realpath for a set one (#685; see [§ `Cwd` is the validated, trust-marked spawn workdir](#cwd-is-the-validated-trust-marked-spawn-workdir-685)) — and is what step 4 records, not the raw `spawnDir` (#2568).
 4. `cwd := defaultCwd; if p.Cwd != nil { cwd = dir }` — a null request still records the daemon's default; a set one records `creator.Create`'s resolved answer, never the client's spelling, so `default`, `~/x/default` and its absolute form all record the one folder they spawn in rather than three sidebar workspaces for it (#2568). `reg.Create(Conversation{ID, Name, Cwd: cwd, CurrentSessionID: sessionID, IsPromoted, LastUsedAt})` — the bound session id is populated on the row.
 5. `reg.Save(registryPath)` — eager persist (the field round-trips through the registry's atomic Save/Load, so the binding survives a daemon restart).
 6. Reply `conversation_created`. The wire reply is **unchanged** — it carries no session field; the binding is internal state surfaced only in the registry row.
@@ -41,6 +41,16 @@ Consequences:
 - **Process-exhaustion residue got cheaper, not worse** — see [§ Process-exhaustion / spawn amplification](#deferred-to-follow-ups-epic-672) below.
 - **The validated-then-spawn window widens from milliseconds to unbounded — accepted.** [§ Residual TOCTOU window](#cwd-is-the-validated-trust-marked-spawn-workdir-685) above already accepts a symlink-swap race between `resolveSpawnDir`'s `EvalSymlinks` and claude's `chdir`; #2085 widens *when* that race can be won, not *what* winning it takes. The frozen value is `trustMark`'s own realpath, held on the `*Session` with no disk re-read between check and spawn, so winning still requires write access to the operator's `$HOME` — the same requirement, for longer. This differs from #1487's revive, which re-validates at its own spawn site because it re-reads a **raw, persisted** `conv.Cwd` from a mutable file **across a daemon restart** — unvalidated bytes from a previous process lifetime, not an in-process frozen value.
 
+### Agent selection (#2647)
+
+`create_conversation` accepts an optional `agent` (`"claude"` / `"codex"`; absent means claude). The handler resolves it — `resolveCreateAgent` in `internal/relay/handlers/create_conversation.go` — **before** `conversations.NewID` or the mint: `"codex"` from a conn that has not negotiated `multi_agent` ([capability](../../protocol-mobile.md#capability-negotiation-v2)), or any value outside `protocol.AgentClaude` / `protocol.AgentCodex`, is refused with `protocol.unsupported` and creates nothing — no session, no registry entry, no conversation row. Only the two validated constants ever reach `creator.Create`.
+
+`Pool.Mint(label, spawnDir)` is now `MintAs(label, spawnDir, HarnessClaude)`; `MintAs(label, spawnDir, harness)` is the general form and is what `sessionMinter.Create` calls with the handler-resolved agent. It does not validate the harness — the injected `RunnerFactory` is the one place that decides which harnesses have a runner, the same contract [§ Runner + RunnerFactory](sessions-package-key-types-runner-interface-runnerfactory.md) already states for `sessions.json`'s persisted `harness` field. The harness `buildSessionAs` carries onto the built `Session` is what `saveLocked` persists on the registry entry, so a Codex conversation's session revives as Codex after a daemon restart, on the existing #2593 mechanism.
+
+**A Codex mint starts at Codex's own defaults, not the operator's Claude settings.** `MintAs` reads `mintSettings()` (the operator's configured model/effort, never the bypass, #1575) only when `harness == HarnessClaude`; any other harness gets the zero `SessionSettings`, so the spawn argv carries no `--model`/`--effort` and Codex chooses its own. This is a deliberate asymmetry with `Revive`, which inherits the *session's own* persisted settings regardless of harness — `MintAs`'s zero-settings arm applies only to a **fresh** non-Claude session, which has no prior settings to inherit.
+
+**Unlike a Claude mint, a Codex mint can fail before `create_conversation` replies, not on the first message.** [§ Spawn deferred to the first message](#spawn-deferred-to-the-first-message-2085) above holds for the *child process* on every harness — `Pool.Activate` still runs at the conversation's first message, not here. But `buildSessionAs` calls the injected `RunnerFactory` synchronously to construct the `Runner` value itself, for every harness, and the two factories differ in what that construction touches: `newStreamRunnerFactory` (Claude) does no I/O — it only assembles config and decorator closures — while `newCodexRunnerFactory` (`cmd/pyry/codex_runner.go`) probes Codex before returning, starting the app-server against the daemon's Codex home to check its version and sign-in state, then stopping it. A host with no usable Codex (binary missing, too old, not signed in) therefore fails the *mint* — the whole `create_conversation` request — with the existing retryable `server.binary_offline`, exactly like any other mint failure ([§ Mint-failure and timeout behaviour](#mint-failure-and-timeout-behaviour)); it does not defer to the msgqueue drain's retry/give-up path the way a Claude spawn failure does. A reader relying on "the create path never touches the external binary" (true for Claude since #2085) would be wrong for Codex.
+
 ### The `SessionCreator` seam (keeps `handlers/` import-clean)
 
 The handler depends on a narrow consumer-declared interface, mirroring the sibling `TurnWriter`:
@@ -51,13 +61,17 @@ type SessionCreator interface {
     // spawnDir == "" → the daemon's shared trusted workdir (default, unchanged).
     // A non-empty spawnDir is the phone's raw requested Cwd, validated +
     // trust-marked by the impl before the mint (#685); an escape wraps
-    // ErrSpawnDirRejected. Mints and binds only — the child comes up on the
-    // conversation's first message, not here (#2085). dir is the impl's
-    // resolved answer — "" for an empty spawnDir, the confined, trust-marked
-    // realpath otherwise — and is what the handler records as the
-    // conversation's Cwd for a set request (#2568): one resolver on the
-    // create path, so the recorded path and the spawn dir cannot disagree.
-    Create(ctx context.Context, label, spawnDir string) (sessionID, dir string, err error)
+    // ErrSpawnDirRejected. agent is protocol.AgentClaude or protocol.AgentCodex,
+    // already validated by the handler (#2647) — an implementation never sees
+    // another value. Mints and binds only — the child comes up on the
+    // conversation's first message, not here (#2085), except that a Codex
+    // build probes Codex synchronously before Create returns (see
+    // § Agent selection). dir is the impl's resolved answer — "" for an empty
+    // spawnDir, the confined, trust-marked realpath otherwise — and is what
+    // the handler records as the conversation's Cwd for a set request
+    // (#2568): one resolver on the create path, so the recorded path and the
+    // spawn dir cannot disagree.
+    Create(ctx context.Context, label, spawnDir, agent string) (sessionID, dir string, err error)
 }
 ```
 
@@ -66,14 +80,15 @@ type SessionCreator interface {
 ```go
 // cmd/pyry/main.go
 type sessionMinter struct{ p *sessions.Pool }
-// ctx is unused since #2085: Pool.Mint is ctx-free — it spawns nothing, so
-// there is nothing left here to cancel or time out.
-func (m sessionMinter) Create(_ context.Context, label, spawnDir string) (string, string, error) {
+// ctx is unused since #2085: Pool.Mint/MintAs is ctx-free — it spawns nothing
+// on the claude path, so there is nothing left here to cancel or time out. A
+// Codex build's synchronous probe (#2647) is likewise not bounded by ctx.
+func (m sessionMinter) Create(_ context.Context, label, spawnDir, agent string) (string, string, error) {
     resolved, err := resolveSpawnDir(spawnDir)   // confine to $HOME + trust-mark (#685)
     if err != nil {
         return "", "", err
     }
-    id, err := m.p.Mint(label, resolved)
+    id, err := m.p.MintAs(label, resolved, agent)
     return string(id), resolved, err   // resolved is what #2568 records, not spawnDir
 }
 ```
@@ -113,7 +128,7 @@ Before #2568, `create_conversation` recorded the client's raw `Cwd` string, not 
 
 The mint is still bounded by a 30s timeout (`createConversationMintTimeout`, matching control's session-create budget), but since #2085 that budget is **inert against the current implementation**: `sessionMinter.Create` discards its `ctx`, `resolveSpawnDir` takes no `context.Context`, and `Pool.Mint` is ctx-free by design — none of that stops a wedged filesystem syscall. The constant is kept only as the bound a future ctx-honouring `SessionCreator` would get; it protects nothing today. There is no spawn left to bound at create time at all — that wait moves to the first message, where it lands on the drain's own `inboundActivateTimeout`.
 
-Any mint error (pool not running, in-pool save failure) fails the whole create: the handler logs at `Warn` (`create_conversation.session_mint_failed`, fields `conn_id` / `conversation_id` / wrapped `err`) and replies `protocol.CodeServerBinaryOffline` **retryable**, returning **before** `reg.Create` — so there is no half-bound orphan conversation row. The phone retries onto a fresh conversation + session. A spawn failure on the *first message* is no longer a create-time failure at all — it surfaces on the msgqueue drain's own retry/give-up path, identical to an idle-evicted conversation's reactivation failure today.
+Any mint error (pool not running, in-pool save failure) fails the whole create: the handler logs at `Warn` (`create_conversation.session_mint_failed`, fields `conn_id` / `conversation_id` / wrapped `err`) and replies `protocol.CodeServerBinaryOffline` **retryable**, returning **before** `reg.Create` — so there is no half-bound orphan conversation row. The phone retries onto a fresh conversation + session. A spawn failure on the *first message* is no longer a create-time failure at all — it surfaces on the msgqueue drain's own retry/give-up path, identical to an idle-evicted conversation's reactivation failure today — **except for a Codex mint** (#2647), where the runner factory's own probe of Codex can fail the mint itself; see [§ Agent selection](#agent-selection-2647).
 
 ## Routing: `send_message` consumes the binding
 
