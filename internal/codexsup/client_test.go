@@ -420,10 +420,17 @@ func TestVersionFromPlatformUserAgent(t *testing.T) {
 func TestRequestParamShapes(t *testing.T) {
 	c, p := startPeer(t, "codex/0.156.1", Config{})
 	go func() {
-		f := p.next(methodThreadResume)
+		// The pins for a client with no DeveloperInstructions: the key is
+		// omitted, not sent empty or null (#2662).
+		f := p.next(methodThreadStart)
 		p.send(fmt.Sprintf(`{"id":%s,"result":{"thread":{"id":"th-1"}}}`, f["id"]))
-		if got := string(f["params"]); !strings.Contains(got, `"excludeTurns":true`) || !strings.Contains(got, `"threadId":"th-1"`) {
-			t.Errorf("thread/resume params = %s", got)
+		if got, want := string(f["params"]), `{}`; got != want {
+			t.Errorf("thread/start params = %s, want %s", got, want)
+		}
+		f = p.next(methodThreadResume)
+		p.send(fmt.Sprintf(`{"id":%s,"result":{"thread":{"id":"th-1"}}}`, f["id"]))
+		if got, want := string(f["params"]), `{"threadId":"th-1","excludeTurns":true}`; got != want {
+			t.Errorf("thread/resume params = %s, want %s", got, want)
 		}
 		f = p.next(methodTurnStart)
 		p.send(fmt.Sprintf(`{"id":%s,"result":{"turn":{"id":"tu-1"}}}`, f["id"]))
@@ -432,12 +439,40 @@ func TestRequestParamShapes(t *testing.T) {
 			t.Errorf("turn/start params = %s, want %s", got, want)
 		}
 	}()
+	if _, err := c.StartThread(ctx5(t)); err != nil {
+		t.Fatal(err)
+	}
 	if err := c.ResumeThread(ctx5(t), "th-1"); err != nil {
 		t.Fatal(err)
 	}
 	turn, err := c.StartTurn(ctx5(t), TurnInput{Text: "go", Model: "gpt-6-luna", Effort: "low"})
 	if err != nil || turn != "tu-1" {
 		t.Fatalf("StartTurn = %q, %v", turn, err)
+	}
+}
+
+// TestThreadOpenInstructions (#2662): a client configured with developer
+// instructions sends them on both thread/start and thread/resume.
+func TestThreadOpenInstructions(t *testing.T) {
+	const instructions = "You are supervised.\n\nAnswer with ORANGE."
+	c, p := startPeer(t, "codex/0.156.1", Config{Dir: "/work", DeveloperInstructions: instructions})
+	go func() {
+		f := p.next(methodThreadStart)
+		p.send(fmt.Sprintf(`{"id":%s,"result":{"thread":{"id":"th-1"}}}`, f["id"]))
+		if got, want := string(f["params"]), `{"cwd":"/work","developerInstructions":"You are supervised.\n\nAnswer with ORANGE."}`; got != want {
+			t.Errorf("thread/start params = %s, want %s", got, want)
+		}
+		f = p.next(methodThreadResume)
+		p.send(fmt.Sprintf(`{"id":%s,"result":{"thread":{"id":"th-1"}}}`, f["id"]))
+		if got, want := string(f["params"]), `{"threadId":"th-1","cwd":"/work","excludeTurns":true,"developerInstructions":"You are supervised.\n\nAnswer with ORANGE."}`; got != want {
+			t.Errorf("thread/resume params = %s, want %s", got, want)
+		}
+	}()
+	if _, err := c.StartThread(ctx5(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ResumeThread(ctx5(t), "th-1"); err != nil {
+		t.Fatal(err)
 	}
 }
 

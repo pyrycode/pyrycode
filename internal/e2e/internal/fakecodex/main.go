@@ -34,6 +34,11 @@
 //	FAKECODEX_TURN_LOG    a file path: each turn/start's params are
 //	                      appended to it as one line, before the response,
 //	                      so a test can read the overrides a turn carried.
+//	FAKECODEX_THREAD_LOG  a file path: each thread/start and thread/resume
+//	                      is appended to it as one line
+//	                      {"method":<method>,"params":<params>}, before the
+//	                      response, so a test can read the developer
+//	                      instructions a thread was opened with.
 //
 // Per-turn behaviour is selected by a marker anywhere in the text of a
 // turn's input, so one process serves every kind of turn:
@@ -164,6 +169,7 @@ type server struct {
 	version     string
 	signedOut   bool
 	turnLog     string
+	threadLog   string
 	initialized bool // main goroutine only
 
 	writeMu sync.Mutex
@@ -189,16 +195,17 @@ func main() {
 	if version == "" {
 		version = codexVersion
 	}
-	os.Exit(run(os.Stdin, os.Stdout, home, version, os.Getenv("FAKECODEX_SIGNED_OUT") != "", os.Getenv("FAKECODEX_TURN_LOG")))
+	os.Exit(run(os.Stdin, os.Stdout, home, version, os.Getenv("FAKECODEX_SIGNED_OUT") != "", os.Getenv("FAKECODEX_TURN_LOG"), os.Getenv("FAKECODEX_THREAD_LOG")))
 }
 
 // run serves frames from in until EOF, returning the process exit code.
-func run(in io.Reader, out io.Writer, codexHome, version string, signedOut bool, turnLog string) int {
+func run(in io.Reader, out io.Writer, codexHome, version string, signedOut bool, turnLog, threadLog string) int {
 	s := &server{
 		codexHome: codexHome,
 		version:   version,
 		signedOut: signedOut,
 		turnLog:   turnLog,
+		threadLog: threadLog,
 		out:       out,
 		turns:     map[string]chan struct{}{},
 		pending:   map[string]chan json.RawMessage{},
@@ -242,7 +249,7 @@ func (s *server) handle(f incoming) {
 			ch <- f.Result
 		}
 		if late {
-			_ = s.logTurn(json.RawMessage(`{"lateResponse":` + string(f.ID) + `}`))
+			_ = appendLog(s.turnLog, []byte(`{"lateResponse":`+string(f.ID)+`}`))
 		}
 	}
 }
@@ -317,6 +324,9 @@ func (s *server) threadStart(raw json.RawMessage) (any, func(), *rpcError) {
 	if err := decodeParams(raw, &p); err != nil {
 		return nil, nil, err
 	}
+	if err := s.logThread("thread/start", raw); err != nil {
+		return nil, nil, err
+	}
 	return threadResponse(newID(), s.version, p), nil, nil
 }
 
@@ -327,6 +337,9 @@ func (s *server) threadResume(raw json.RawMessage) (any, func(), *rpcError) {
 	}
 	if p.ThreadID == "" {
 		return nil, nil, &rpcError{codeInvalidParams, "threadId is required"}
+	}
+	if err := s.logThread("thread/resume", raw); err != nil {
+		return nil, nil, err
 	}
 	return threadResponse(p.ThreadID, s.version, p), nil, nil
 }
@@ -427,7 +440,7 @@ func (s *server) turnStart(raw json.RawMessage) (any, func(), *rpcError) {
 	if err := decodeParams(raw, &p); err != nil {
 		return nil, nil, err
 	}
-	if err := s.logTurn(raw); err != nil {
+	if err := appendLog(s.turnLog, raw); err != nil {
 		return nil, nil, &rpcError{-32603, "turn log: " + err.Error()}
 	}
 	var text strings.Builder
@@ -446,12 +459,29 @@ func (s *server) turnStart(raw json.RawMessage) (any, func(), *rpcError) {
 		func() { go t.run(text.String()) }, nil
 }
 
-// logTurn appends raw to the turn log, when one is configured.
-func (s *server) logTurn(raw json.RawMessage) error {
-	if s.turnLog == "" {
+// logThread appends a thread open's method and params to the thread log, when
+// one is configured.
+func (s *server) logThread(method string, raw json.RawMessage) *rpcError {
+	line, err := json.Marshal(struct {
+		Method string          `json:"method"`
+		Params json.RawMessage `json:"params"`
+	}{method, raw})
+	if err == nil {
+		err = appendLog(s.threadLog, line)
+	}
+	if err != nil {
+		return &rpcError{-32603, "thread log: " + err.Error()}
+	}
+	return nil
+}
+
+// appendLog appends raw to the log at path as one line; an empty path logs
+// nothing.
+func appendLog(path string, raw []byte) error {
+	if path == "" {
 		return nil
 	}
-	f, err := os.OpenFile(s.turnLog, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}

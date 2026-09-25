@@ -290,7 +290,9 @@ func TestRequestParamsMatchSchema(t *testing.T) {
 		[2]string{methodModelList, `{"data":[],"nextCursor":"page-2"}`},
 		[2]string{methodModelList, `{"data":[],"nextCursor":null}`})
 
-	c, p := startPeer(t, "codex/0.156.1", Config{Dir: "/work"})
+	// Non-empty instructions put developerInstructions through the schema on
+	// both thread opens (#2662); the omitted form is a subset of this one.
+	c, p := startPeer(t, "codex/0.156.1", Config{Dir: "/work", DeveloperInstructions: "be brief"})
 	sent := make(chan [2]string, len(script))
 	go func() {
 		for _, step := range script {
