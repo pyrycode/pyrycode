@@ -636,11 +636,14 @@ func sessionCapabilities(agent AgentCapabilities) protocol.SessionCapabilities {
 		}
 	}
 	return protocol.SessionCapabilities{
-		Interrupt:       agent.Interrupt,
-		MidTurnInput:    agent.MidTurnInput,
-		EffortLevels:    effort,
-		PermissionModes: permissionModeOptions(),
-		AttachmentTypes: []string{"*/*"},
-		Models:          models,
+		Interrupt:          agent.Interrupt,
+		MidTurnInput:       agent.MidTurnInput,
+		SlashCommands:      agent.SlashCommands,
+		MCPServers:         agent.MCPServers,
+		ContextUsageDetail: agent.ContextUsageDetail,
+		EffortLevels:       effort,
+		PermissionModes:    permissionModeOptions(),
+		AttachmentTypes:    []string{"*/*"},
+		Models:             models,
 	}
 }
