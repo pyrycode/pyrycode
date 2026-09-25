@@ -78,6 +78,24 @@ continuation that closes the interrupt channel). This is an implementation
 detail of the fake, not an observed property of the real server — consumers
 should not depend on the ordering between the two.
 
+### A completing turn's removal and its `turn/completed` are one step (#2636)
+
+That non-dependency doesn't extend to a turn `turn/interrupt` finds already
+gone. `turn.run`'s completed path used to delete the turn from `s.turns` and
+send `turn/completed` as two separate steps, only the delete under `s.mu`.
+A `turn/interrupt` for that id, landing in the gap between them, found the
+turn already absent and answered `-32602` before the client had read
+`turn/completed` — overtaking the notification it was actually racing
+against. `turn.run` now holds `s.mu` across both the delete and
+`t.complete("completed")` (`send` only takes `writeMu`, so nesting it inside
+`s.mu` doesn't invert lock order with `turnInterrupt`, which also takes
+`s.mu` to look the turn up). `turnInterrupt` now either still finds the turn
+(interrupt succeeds; the turn completes normally next) or finds it gone with
+`turn/completed` already written first. A consumer that infers "the turn
+already ended" from a `turn/interrupt` refusal — `codexRunner.Interrupt` is
+the one that needed this — can now rely on that ordering; see
+[codexsup-package.md's matching note](codexsup-package.md#production-wiring--the-cmdpyry-codex-runner-2620).
+
 ## Building a frame's payload: `json.RawMessage`, not `[]byte`
 
 A server request's `id` and a response's echoed id must be pre-formed JSON
