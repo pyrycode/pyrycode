@@ -142,13 +142,27 @@ func resolveBoundModelList(convReg *conversations.Registry, pool *sessions.Pool,
 	if !ok {
 		return protocol.ModelListPayload{}, false
 	}
-	// MapEvent returns `payload any` (the payloads share no marker interface), so
-	// reuse costs one assertion back to protocol.ModelListPayload — and that
-	// assertion is the ONLY discriminant. typ is discarded because comparing it to
-	// protocol.TypeModelList would be a strictly weaker second spelling of the same
-	// check; #1858 names the type itself when it builds the envelope, exactly as
-	// outstandingQueues' payloads carry no type field.
-	_, payload, ok := turnbridge.MapEvent(list, turnbridge.TurnContext{ConversationID: string(conv.ID)})
+	return mapModelList(list, string(conv.ID))
+}
+
+// mapModelList translates a held list into its wire payload through
+// turnbridge.MapEvent, the one row mapping (#1848), so neither the Claude-only nor
+// the merged list forks it.
+//
+// MapEvent returns `payload any` (the payloads share no marker interface), so reuse
+// costs one assertion back to protocol.ModelListPayload — and that assertion is the
+// ONLY discriminant. typ is discarded because comparing it to protocol.TypeModelList
+// would be a strictly weaker second spelling of the same check; #1858 names the type
+// itself when it builds the envelope, exactly as outstandingQueues' payloads carry no
+// type field.
+//
+// The two refusing arms are the TYPE SYSTEM's, not states this daemon can reach:
+// MapEvent maps every turnevent.ModelList and returns that concrete payload type.
+// They still need an answer, and "no list" is the only one that keeps
+// resolveBoundModelList's contract — a caller must never be handed a payload with an
+// empty Models. Hence a refusal rather than a panic, and no log.
+func mapModelList(list turnevent.ModelList, convID string) (protocol.ModelListPayload, bool) {
+	_, payload, ok := turnbridge.MapEvent(list, turnbridge.TurnContext{ConversationID: convID})
 	if !ok {
 		return protocol.ModelListPayload{}, false
 	}
@@ -156,12 +170,70 @@ func resolveBoundModelList(convReg *conversations.Registry, pool *sessions.Pool,
 	if !ok {
 		return protocol.ModelListPayload{}, false
 	}
-	// The two arms above are the TYPE SYSTEM's, not states this daemon can reach:
-	// MapEvent maps every turnevent.ModelList and returns that concrete payload
-	// type. They still need an answer, and "no list" is the only one that keeps
-	// the contract above — a caller must never be handed a payload with an empty
-	// Models. Hence a refusal rather than a panic, and no log.
 	return out, true
+}
+
+// resolveBoundMergedModelList is resolveBoundModelList for a multi_agent client
+// (#2651): the same hard registry lookup and the same reported id from the resolved
+// record, answered from mergedModelOptions instead of Claude's list alone. Every
+// security and concurrency statement on resolveBoundModelList holds here unchanged,
+// the no-logger rule included; CodexModels adds one leaf-mutex read, taken after the
+// others and never nested.
+func resolveBoundMergedModelList(convReg *conversations.Registry, pool *sessions.Pool, saved savedModelVocabulary, convID string) (protocol.ModelListPayload, bool) {
+	conv, ok := convReg.Get(conversations.ConversationID(convID))
+	if !ok {
+		return protocol.ModelListPayload{}, false
+	}
+	models, dropped, ok := mergedModelOptions(pool, saved, conv.CurrentSessionID)
+	if !ok {
+		return protocol.ModelListPayload{}, false
+	}
+	return protocol.ModelListPayload{ConversationID: string(conv.ID), Models: models, DroppedModels: dropped}, true
+}
+
+// mergedModelOptions builds the model list a multi_agent client is offered (#2651),
+// and is the one place it is built, so a session's models capability (#2646) reads
+// the same rows: Claude's entries in their held order, then Codex's in the store's
+// order, each tagged with its agent and family.
+//
+// Claude's half comes through retainedModelVocabulary, so which Claude list answers
+// is decided exactly as it is for an older client. A Claude entry's family is its own
+// Value. Codex's half is the store's newest version per family (#2627), whose Value
+// is the family and which carries no display name, so the family stands in for it.
+//
+// dropped is Claude's DroppedModels, the count cut from Claude's list and nothing
+// else; 0 when Claude holds no list. ok is false exactly when neither agent holds an
+// entry, so it is never true with an empty slice — the never-empty Models contract.
+func mergedModelOptions(pool *sessions.Pool, saved savedModelVocabulary, boundSessionID string) (models []protocol.ModelOption, dropped int, ok bool) {
+	if list, ok := retainedModelVocabulary(pool, saved, boundSessionID); ok {
+		if p, ok := mapModelList(list, ""); ok {
+			for _, m := range p.Models {
+				m.Agent, m.Family = protocol.AgentClaude, m.Value
+				models = append(models, m)
+			}
+			dropped = p.DroppedModels
+		}
+	}
+	if saved != nil {
+		if p, ok := mapModelList(turnevent.ModelList{Models: saved.CodexModels()}, ""); ok {
+			for _, m := range p.Models {
+				m.Agent, m.Family, m.DisplayName = protocol.AgentCodex, m.Value, m.Value
+				models = append(models, m)
+			}
+		}
+	}
+	return models, dropped, len(models) > 0
+}
+
+// modelListResolver picks the resolver a conn's list comes from: the merged, tagged
+// list for a conn that negotiated multi_agent, today's Claude-only list for any
+// other. The one place the per-conn choice is made, so the request and reconcile
+// adapters below cannot answer the same conn differently.
+func modelListResolver(multiAgent bool) func(*conversations.Registry, *sessions.Pool, savedModelVocabulary, string) (protocol.ModelListPayload, bool) {
+	if multiAgent {
+		return resolveBoundMergedModelList
+	}
+	return resolveBoundModelList
 }
 
 // savedModelVocabulary is the file-backed THIRD source: the last vocabulary this
@@ -343,7 +415,9 @@ func sessionRetainedModelList(sess *sessions.Session) (turnevent.ModelList, bool
 // would be a second place that rule could be stated and disagree. The comma-ok
 // crosses untouched, which is what lets the relay handler turn "no menu" into a
 // coded error frame rather than an empty models array — the shape
-// turnevent.ModelList.Models' never-empty contract forbids.
+// turnevent.ModelList.Models' never-empty contract forbids. The one choice it does
+// pass on is the conn's multi_agent decision (#2651), and modelListResolver makes it,
+// the same helper the reconcile enumerator uses.
 //
 // A NAMED FUNCTION RATHER THAN AN INLINE CLOSURE AT THE CALL SITE, unlike its
 // neighbour runSettings and like retainedModelLists below. Two reasons, and the
@@ -362,9 +436,9 @@ func sessionRetainedModelList(sess *sessions.Session) (turnevent.ModelList, bool
 // dispatch goroutine, which is new for this resolver and is why the body must stay
 // what it is. It spawns nothing, mints nothing and mutates nothing, and the locks it
 // takes are resolveBoundModelList's, acquired sequentially and never nested.
-func modelListFor(convReg *conversations.Registry, pool *sessions.Pool, saved savedModelVocabulary) func(convID string) (protocol.ModelListPayload, bool) {
-	return func(convID string) (protocol.ModelListPayload, bool) {
-		return resolveBoundModelList(convReg, pool, saved, convID)
+func modelListFor(convReg *conversations.Registry, pool *sessions.Pool, saved savedModelVocabulary) func(convID string, multiAgent bool) (protocol.ModelListPayload, bool) {
+	return func(convID string, multiAgent bool) (protocol.ModelListPayload, bool) {
+		return modelListResolver(multiAgent)(convReg, pool, saved, convID)
 	}
 }
 
@@ -442,6 +516,10 @@ func modelListFor(convReg *conversations.Registry, pool *sessions.Pool, saved sa
 // control truth and the client decides what to show. Neither adding nor omitting
 // a conversations.ListFilter here is a free edit.
 //
+// multiAgent is the opening conn's negotiated decision (#2651) and picks the
+// resolver once for the whole walk, through modelListResolver: a capable conn gets
+// every row's merged, tagged list, any other conn today's Claude-only list.
+//
 // Order is List's (registry insertion order) and is NOT a contract.
 // reconcileModelLists sends one envelope per payload and the client correlates on
 // conversation_id, so callers and tests index by ConversationID, never by
@@ -468,12 +546,13 @@ func modelListFor(convReg *conversations.Registry, pool *sessions.Pool, saved sa
 // resolver documents: a row created, deleted, rebound or rotated inside it either
 // resolves to the menu of the session bound a moment ago or refuses, and both are
 // correct. No re-read, no retry, no re-list.
-func retainedModelLists(convReg *conversations.Registry, pool *sessions.Pool, saved savedModelVocabulary) func() []protocol.ModelListPayload {
-	return func() []protocol.ModelListPayload {
+func retainedModelLists(convReg *conversations.Registry, pool *sessions.Pool, saved savedModelVocabulary) func(multiAgent bool) []protocol.ModelListPayload {
+	return func(multiAgent bool) []protocol.ModelListPayload {
+		resolve := modelListResolver(multiAgent)
 		convs := convReg.List()
 		out := make([]protocol.ModelListPayload, 0, len(convs))
 		for _, c := range convs {
-			payload, ok := resolveBoundModelList(convReg, pool, saved, string(c.ID))
+			payload, ok := resolve(convReg, pool, saved, string(c.ID))
 			if !ok {
 				continue
 			}

@@ -754,7 +754,7 @@ func TestRetainedModelLists_EnumeratesTheBoundSessionsMenu(t *testing.T) {
 		LastUsedAt:       time.Now().UTC(),
 	})
 
-	got := retainedModelLists(reg, pool, nil)()
+	got := retainedModelLists(reg, pool, nil)(false)
 	if len(got) != 1 {
 		t.Fatalf("retainedModelLists returned %d payloads, want exactly 1: %+v", len(got), got)
 	}
@@ -811,7 +811,7 @@ func TestRetainedModelLists_EveryRowContributesOnceAVocabularyIsRetained(t *test
 	reg.Create(conversations.Conversation{ID: "conv-dangling", CurrentSessionID: "session-not-in-pool", LastUsedAt: now})
 	reg.Create(conversations.Conversation{ID: "conv-live", CurrentSessionID: string(pool.BootstrapID()), LastUsedAt: now})
 
-	got := retainedModelLists(reg, pool, nil)()
+	got := retainedModelLists(reg, pool, nil)(false)
 	if len(got) != 4 {
 		t.Fatalf("retainedModelLists returned %d payloads, want 4 — every registry row contributes once a vocabulary is retained: %+v", len(got), got)
 	}
@@ -852,7 +852,7 @@ func TestRetainedModelLists_NothingToSend(t *testing.T) {
 		t.Parallel()
 		pool, plan := newModelListTestPool(t)
 		plan.arm(pool.BootstrapID(), sentinelModelList("UNREACHABLE"))
-		if got := retainedModelLists(&conversations.Registry{}, pool, nil)(); len(got) != 0 {
+		if got := retainedModelLists(&conversations.Registry{}, pool, nil)(false); len(got) != 0 {
 			t.Fatalf("retainedModelLists returned %d payloads over an empty registry, want none — the enumeration walks the registry, not the pool: %+v", len(got), got)
 		}
 	})
@@ -865,7 +865,7 @@ func TestRetainedModelLists_NothingToSend(t *testing.T) {
 		reg.Create(conversations.Conversation{ID: "conv-unbound", CurrentSessionID: "", LastUsedAt: now})
 		reg.Create(conversations.Conversation{ID: "conv-dangling", CurrentSessionID: "session-not-in-pool", LastUsedAt: now})
 		reg.Create(conversations.Conversation{ID: "conv-bootstrap-bound", CurrentSessionID: string(pool.BootstrapID()), LastUsedAt: now})
-		if got := retainedModelLists(reg, pool, nil)(); len(got) != 0 {
+		if got := retainedModelLists(reg, pool, nil)(false); len(got) != 0 {
 			t.Fatalf("retainedModelLists returned %d payloads with nothing retained anywhere, want none: %+v", len(got), got)
 		}
 	})
@@ -894,7 +894,7 @@ func TestRetainedModelLists_ArchivedConversationsContribute(t *testing.T) {
 		LastUsedAt:       time.Now().UTC(),
 	})
 
-	got := retainedModelLists(reg, pool, nil)()
+	got := retainedModelLists(reg, pool, nil)(false)
 	if len(got) != 1 {
 		t.Fatalf("retainedModelLists returned %d payloads, want 1 — archiving does not unbind the session: %+v", len(got), got)
 	}
@@ -932,7 +932,7 @@ func TestRetainedModelLists_DoesNotCrossConversations(t *testing.T) {
 	reg.Create(conversations.Conversation{ID: "conv-a", CurrentSessionID: string(sessA), LastUsedAt: now})
 	reg.Create(conversations.Conversation{ID: "conv-b", CurrentSessionID: string(sessB), LastUsedAt: now})
 
-	got := retainedModelLists(reg, pool, nil)()
+	got := retainedModelLists(reg, pool, nil)(false)
 	if len(got) != 2 {
 		t.Fatalf("retainedModelLists returned %d payloads, want 2: %+v", len(got), got)
 	}
@@ -991,7 +991,7 @@ func TestRetainedModelLists_LogsNothing(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
-	got := retainedModelLists(reg, pool, nil)()
+	got := retainedModelLists(reg, pool, nil)(false)
 	if len(got) != 3 {
 		t.Fatalf("retainedModelLists returned %d payloads, want 3; the log negative needs both the bound reading and the two fallbacks", len(got))
 	}
@@ -1056,7 +1056,7 @@ func TestModelListFor_ForwardsTheResolversAnswer(t *testing.T) {
 		if !wantOK {
 			t.Fatalf("resolveBoundModelList(%q) refused; the fixture is wrong, not the adapter", convID)
 		}
-		got, ok := seam(convID)
+		got, ok := seam(convID, false)
 		if !ok {
 			t.Errorf("modelListFor(...)(%q) refused; the resolver answers it, so the adapter dropped the comma-ok or swapped its arguments", convID)
 			continue
@@ -1072,7 +1072,7 @@ func TestModelListFor_ForwardsTheResolversAnswer(t *testing.T) {
 	// A refusal must cross AS a refusal. Without the comma-ok the relay handler
 	// would emit a model_list with an empty models array, which is exactly what
 	// turnevent.ModelList.Models' never-empty contract forbids.
-	if got, ok := seam("conv-not-hosted"); ok {
+	if got, ok := seam("conv-not-hosted", false); ok {
 		t.Errorf("modelListFor(...)(%q) = (%+v, true); an id the registry does not carry must refuse", "conv-not-hosted", got)
 	}
 }
@@ -1224,7 +1224,7 @@ func TestSavedVocabularyAnswersARestartedDaemon(t *testing.T) {
 	}
 
 	// The connect-time reconcile enumerates the same answer for every row.
-	lists := retainedModelLists(reg, pool, restored)()
+	lists := retainedModelLists(reg, pool, restored)(false)
 	byID := indexByConversation(t, lists)
 	if _, ok := byID["conv-cold"]; !ok {
 		t.Fatalf("the reconcile enumerated %d payloads, none for conv-cold: %+v", len(lists), lists)
@@ -1233,7 +1233,7 @@ func TestSavedVocabularyAnswersARestartedDaemon(t *testing.T) {
 
 	// And the on-demand request seam answers it too.
 	seam := modelListFor(reg, pool, restored)
-	fromSeam, ok := seam("conv-cold")
+	fromSeam, ok := seam("conv-cold", false)
 	if !ok {
 		t.Fatal("modelListFor refused on a restarted daemon with a saved file")
 	}

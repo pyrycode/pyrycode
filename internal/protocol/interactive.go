@@ -1823,6 +1823,12 @@ type RequestModelListPayload struct {
 // claude's text arriving on an inbound path, and the daemon re-validates it at
 // internal/relay's validModel rather than trusting that it came from a list the
 // daemon itself published.
+//
+// Agent and Family are set only on the merged list a multi_agent client receives
+// (#2651): Agent is AgentClaude or AgentCodex, and Family is a Codex entry's family
+// name or a Claude entry's own Value. Both are omitempty, and that is what keeps
+// every other client's frame byte-identical to the one it read before they existed:
+// no producer on an older client's path sets them, so neither key reaches it.
 type ModelOption struct {
 	ResolvedModel    string   `json:"resolved_model"`
 	Value            string   `json:"value"`
@@ -1830,6 +1836,8 @@ type ModelOption struct {
 	EffortLevels     []string `json:"effort_levels"`
 	SupportsAutoMode bool     `json:"supports_auto_mode"`
 	TruncatedFields  []string `json:"truncated_fields"`
+	Agent            string   `json:"agent,omitempty"`
+	Family           string   `json:"family,omitempty"`
 }
 
 // MarshalJSON normalises a nil EffortLevels to an empty array, so a row always

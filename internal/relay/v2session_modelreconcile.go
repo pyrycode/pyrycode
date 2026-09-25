@@ -70,7 +70,7 @@ func (m *V2SessionManager) reconcileModelLists(ctx context.Context, s *V2Session
 	if !s.interactive || m.cfg.RetainedModelLists == nil {
 		return
 	}
-	retained := m.cfg.RetainedModelLists()
+	retained := m.cfg.RetainedModelLists(s.multiAgent)
 	if len(retained) == 0 {
 		return // nothing retained ⇒ nothing sent (AC2).
 	}
