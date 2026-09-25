@@ -111,6 +111,7 @@ func newCodexRunnerFactory(h codexHarness) sessions.RunnerFactory {
 			OnThread:       recordCodexThread(cfg.RecordThread, cfg.Logger),
 			Approvals:      newCodexApprovals(h.approval.registry, h.approval.timeout, h.approval.surface),
 			Models:         h.vocab.RetainCodex,
+			Families:       h.vocab.CodexModels,
 		}), nil
 	}
 }
@@ -227,7 +228,8 @@ func codexTurnSettings(args []string) (model, effort string) {
 // starts, so the pool can persist it (#2622). Approvals routes approval
 // requests to the permission modal; nil declines every one (#2587). Models is
 // handed the newest version per model family each spawn reads (#2627); nil
-// skips the read.
+// skips the read. Families returns the model families held now, which every
+// turn resolves its stored model against (#2628); nil holds none.
 type codexRunnerConfig struct {
 	Binary, Home, Dir string
 	Tag               *streamSessionTag
@@ -241,6 +243,7 @@ type codexRunnerConfig struct {
 	OnThread          func(sessionID, threadID string)
 	Approvals         *codexApprovals
 	Models            func([]turnevent.ModelOption)
+	Families          func() []turnevent.ModelOption
 }
 
 // codexRunner is the Codex implementation of sessions.Runner: it supervises
@@ -550,7 +553,9 @@ func (r *codexRunner) notify(tr *codexsup.Translator, method string, params json
 }
 
 // WriteUserTurn starts a Codex turn with payload as its text and the session's
-// model, effort and posture as per-turn overrides. It refuses with the retryable
+// model, effort and posture as per-turn overrides. A stored model family is
+// sent, and reported, as its newest held version; the stored setting keeps the
+// family. It refuses with the retryable
 // streamsup.ErrNoLiveChild, sending nothing, while a rotation or teardown is
 // armed or no client is bound, and claims the queue's commit gate before
 // sending. Neither the payload nor the conversation id is logged.
@@ -571,6 +576,9 @@ func (r *codexRunner) WriteUserTurn(ctx context.Context, _ string, payload []byt
 	}
 	if gate := turncommit.From(ctx); gate != nil && !gate() {
 		return turncommit.ErrDropped
+	}
+	if r.cfg.Families != nil {
+		in.Model = resolveCodexModel(in.Model, r.cfg.Families())
 	}
 	if in.Model != "" {
 		r.trMu.Lock()

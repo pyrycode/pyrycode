@@ -3,11 +3,13 @@ package main
 import (
 	"github.com/pyrycode/pyrycode/internal/codexsup"
 	"github.com/pyrycode/pyrycode/internal/sessions"
+	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
 // codexTurnOverrides is claudeSettingsArgs' counterpart for a Codex session:
 // it turns the session's stored settings into the overrides every turn/start
-// carries. Model and effort pass through; the posture maps as
+// carries. Model and effort pass through (WriteUserTurn resolves a model
+// family, resolveCodexModel); the posture maps as
 //
 //	YOLO / bypassPermissions  never       dangerFullAccess  user
 //	default, acceptEdits      granular    workspaceWrite    user
@@ -45,4 +47,21 @@ func codexTurnOverrides(s sessions.SessionSettings) codexsup.TurnInput {
 		in.ApprovalPolicy, in.Sandbox = codexsup.ApprovalNever, codexsup.SandboxWorkspaceWrite
 	}
 	return in
+}
+
+// resolveCodexModel is the model a Codex turn runs on (#2628): a stored model
+// that is exactly a held family's Value becomes that family's newest version,
+// its ResolvedModel. Anything else is sent as stored: a version no family
+// names, a family while no entries are held, and an entry with no version. It
+// is resolved per turn, so a family picks up a newer release at its next turn.
+func resolveCodexModel(model string, families []turnevent.ModelOption) string {
+	if model == "" {
+		return model
+	}
+	for _, f := range families {
+		if f.Value == model && f.ResolvedModel != "" {
+			return f.ResolvedModel
+		}
+	}
+	return model
 }

@@ -55,6 +55,9 @@
 //	[fakecodex:hold]      after turn/started the turn waits until
 //	                      turn/interrupt names it, so a test has a running
 //	                      turn to interrupt.
+//	[fakecodex:usage]     before the agent message, the turn sends one
+//	                      thread/tokenUsage/updated with a context window,
+//	                      so the turn's end reports the model it ran on.
 //
 // A turn without a marker never sends a server request.
 package main
@@ -81,6 +84,7 @@ const (
 	markerApproval = "[fakecodex:approval]"
 	markerWithdraw = "[fakecodex:withdraw]"
 	markerHold     = "[fakecodex:hold]"
+	markerUsage    = "[fakecodex:usage]"
 
 	// fakeCommand is the command an approval turn asks to run.
 	fakeCommand = "echo fakecodex"
@@ -496,6 +500,9 @@ func (t *turn) run(text string) {
 		t.complete("interrupted")
 		return
 	}
+	if strings.Contains(text, markerUsage) {
+		t.usage()
+	}
 	msg := t.itemID("msg")
 	reply := "fakecodex reply"
 	t.s.notify("item/started", t.itemParams("startedAtMs", agentMessage(msg, "")))
@@ -507,6 +514,18 @@ func (t *turn) run(text string) {
 	delete(t.s.turns, t.id)
 	t.s.mu.Unlock()
 	t.complete("completed")
+}
+
+// usage reports one model call's tokens and the model's context window.
+func (t *turn) usage() {
+	calls := map[string]any{
+		"inputTokens": 10, "cachedInputTokens": 0, "cacheWriteInputTokens": 0,
+		"outputTokens": 5, "reasoningOutputTokens": 0, "totalTokens": 15,
+	}
+	t.s.notify("thread/tokenUsage/updated", map[string]any{
+		"threadId": t.threadID, "turnId": t.id,
+		"tokenUsage": map[string]any{"total": calls, "last": calls, "modelContextWindow": 200000},
+	})
 }
 
 // approval runs the command item and its approval round-trip. It reports
