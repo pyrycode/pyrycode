@@ -187,6 +187,21 @@ func TestCodexRunner_InterruptEndsRunningTurn(t *testing.T) {
 	}
 }
 
+// TestCodexRunner_InterruptRefusedReturnsError: a refused turn/interrupt for
+// a turn the runner still tracks is returned. Only a turn that completed
+// before Codex handled the interrupt makes the refusal nil.
+func TestCodexRunner_InterruptRefusedReturnsError(t *testing.T) {
+	h := newTestCodexRunner(t)
+	h.run(t)
+	h.bound(t, nil)
+	h.r.mu.Lock()
+	h.r.turnID = "never-minted"
+	h.r.mu.Unlock()
+	if err := h.r.Interrupt(); err == nil {
+		t.Fatal("Interrupt of a turn Codex does not know = nil, want the refusal")
+	}
+}
+
 // TestCodexRunner_ApprovalDeclined: with no approvals path yet, the runner
 // leaves codexsup's default decline in place, so the command never runs.
 func TestCodexRunner_ApprovalDeclined(t *testing.T) {

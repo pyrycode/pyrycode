@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/pyrycode/pyrycode/internal/acp"
 	"github.com/pyrycode/pyrycode/internal/codexsup"
 	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/sessions"
@@ -597,6 +598,10 @@ func (r *codexRunner) WriteUserTurn(ctx context.Context, _ string, payload []byt
 // Interrupt declines the approvals the turn is waiting on and ends the running
 // turn, which then completes as interrupted. With no client bound it is the
 // retryable ErrNoLiveChild; with no turn running there is nothing to end.
+// Codex refusing the interrupt because the turn completed first is nil too:
+// notifications run on the read loop ahead of the response that follows them,
+// so that turn's turn/completed has already cleared turnID when the refusal
+// returns.
 func (r *codexRunner) Interrupt() error {
 	r.cfg.Approvals.declineAll(reasonCodexInterrupt)
 	r.mu.Lock()
@@ -610,7 +615,18 @@ func (r *codexRunner) Interrupt() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), codexCallTimeout)
 	defer cancel()
-	return client.Interrupt(ctx, turnID)
+	err := client.Interrupt(ctx, turnID)
+	var rpcErr *acp.Error
+	if err == nil || !errors.As(err, &rpcErr) {
+		return err
+	}
+	r.mu.Lock()
+	ended := r.turnID != turnID
+	r.mu.Unlock()
+	if ended {
+		return nil
+	}
+	return err
 }
 
 func (r *codexRunner) setTurnSettings(args []string) {
