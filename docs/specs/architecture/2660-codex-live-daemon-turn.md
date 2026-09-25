@@ -99,3 +99,13 @@ The ticket carries no documentation requirement. Suggested, pending for the docu
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-25
+
+## Revisions
+
+**2026-09-25, during implementation.**
+
+- `buildHelloEarlyInteractive` is renamed `buildHelloEarly` rather than only gaining a parameter: its sole caller is now `driveHandshake`, and the old name would claim an interactive-only hello it no longer builds.
+- `runCodexTurn` does not filter `modal_shown` on `ConversationID`. The daemon holds one conversation, and a Codex modal whose scope arrived empty would otherwise be left unanswered until the approval window expired, hiding the real result behind a timeout. The scope is logged with each answer.
+- `spawnCodexDaemon` takes no `home` parameter: the HOME reaches the daemon through the environment `WithWorktreeAuthenticated` pins, as in `spawnPermissionDaemon`.
+- Added `TestCodexVersionBelow`, an offline table under the same tag, because the version comparison is new logic and a mismatch with `checkCodexVersion` would either run a Codex the daemon refuses or skip one it accepts.
+- Open questions: both remain for the operator run to answer (option ids are asserted, `modal_dismissed` is checked when it arrives).
