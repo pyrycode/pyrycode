@@ -170,11 +170,19 @@ reach this table at all: `acp.Transport` answers an unregistered request
 method-not-found on its own. The decline table can only get narrower or wider
 deliberately, at a version bump, never by omission.
 
-**Who answers approvals is still open.** The #2620 runner that owns posture
-leaves `OnServerRequest` nil, so every request still takes this package's
-default decline — see [ADR 038](../decisions/038-codex-daemon-owned-home-read-only-default-decline.md)
-for why that is deliberate rather than a placeholder. Wiring a real operator
-prompt is #2587's job.
+**Who answers approvals was open through #2620; #2587 answers it for the two
+approval methods.** The #2620 runner wires `OnServerRequest` to
+`codexApprovals.handle` (§ Approvals reach the permission modal, below),
+which parks `item/commandExecution/requestApproval` and
+`item/fileChange/requestApproval` on the same daemon-wide `permbridge.Registry`
+and permission modal a Claude session uses. The other eight server-request
+methods at 0.156.1 — including the legacy `applyPatchApproval`/
+`execCommandApproval` and the experimental `item/tool/requestUserInput` — are
+still out of scope and keep this package's default decline. See
+[ADR 038](../decisions/038-codex-daemon-owned-home-read-only-default-decline.md)
+for why the daemon-owned home and the decline-by-default baseline were the
+right posture to ship before an operator path existed, and its "Superseded in
+part (#2587)" note for what changed.
 
 ### The ticket's own literal for the legacy approvals was schema-invalid
 
@@ -390,6 +398,118 @@ correction of an assumption that it held only server-request types. Check
 the committed bundle before assuming a `v2` request type is missing from
 it and needs regenerating.
 
+### Approvals reach the permission modal (#2587)
+
+`codex_runner.go`'s `codexApprovals` wires `codexsup.Config.OnServerRequest`
+to the same daemon-wide `permbridge.Registry` and permission modal a Claude
+stdio session uses (`stdioPermissionHandler` in `streamsup_runner.go`), for
+the two approval methods: `item/commandExecution/requestApproval` and
+`item/fileChange/requestApproval`. `handle` runs on the read loop and only
+parks — `Register` under a fresh `"codex-"`-prefixed random id (32 hex
+chars from `crypto/rand`, so it cannot collide with a Claude `toolu_…` id) —
+then hands the wait to its own `await` goroutine, the same shape
+`stdioPermissionHandler.await` uses. Anything `handle` cannot park (an
+unparseable request, an id-mint failure, a full registry) takes
+`ServerRequest.Decline()`, this package's existing default.
+
+**`ServerRequest.ID` (the JSON-RPC id, not a modal correlation id) is what
+this ticket added to the type**, set in `serverRequestHandler` from
+`acp.ResponderFrom(ctx).ID()` (`internal/acp`'s `Responder.ID()`, itself new).
+It exists for exactly one purpose: correlating an unsolicited
+`serverRequest/resolved` notification — which names the withdrawn request by
+`requestId`, not by anything `codexApprovalRequest` derives — back to a
+parked approval. Nothing else in this package or `cmd/pyry` reads it.
+
+**Codex numbers server requests per process, not globally, so the
+correlation has to be scoped to the runner that sent them.**
+`codexApprovals.observe` matches `serverRequest/resolved`'s `requestId`
+against every entry in *this adapter's own* `live` map, never a daemon-wide
+one — a fresh Codex spawn restarts its request ids at 0, so a daemon-wide
+match could retire a different runner's still-live approval that happens to
+share an id. A match sets `withdrawn` before resolving the registry entry
+with `Deny(reasonCodexWithdrawn)`, so the parked `await` goroutine (which
+runs after `Resolve` delivers) always observes the flag and writes nothing
+back — Codex has already moved on. [`fakecodex-binary.md`](fakecodex-binary.md)'s
+`[fakecodex:withdraw]` marker is what a consumer test needs to exercise
+this: the existing `[fakecodex:approval]` marker always resolves *after* the
+client answers, which cannot reach the "Codex gave up first" path at all.
+
+**A request whose real grant the modal cannot show in full is declined,
+never parked with a partial or misleading display — this was a review
+finding, not the first design.** The first pass of `codexApprovalRequest`
+checked only how Codex's strings were *escaped* on display (see
+`codexDisplay` below), not which optional params change what an `accept`
+actually *grants*. Four fields do, and the first modal design showed none of
+them: command `kind: writeStdin` (input to a running terminal, not a
+command — the modal still read `command: …`), a non-null
+`networkApprovalContext` (a managed-network host grant, host never shown),
+an absent/empty `command` (an empty scope, still offered allow), and
+file-change `grantRoot` (session-wide writes under a root, only the item's
+own paths shown). `codexApprovalRequest` now returns `ok=false` for each —
+the caller declines — rather than displaying the field or accepting the
+narrower risk. The general lesson: before parking any approval on a human,
+enumerate every optional field the schema defines for that request and ask
+"does the modal show this?" — not just "is this string escaped?" A field
+that changes the grant and isn't shown must decline, not display-with-caveat.
+
+**A byte cap on an approval's displayed text needs a visible truncation
+marker, or silent truncation itself becomes the misleading display.** The
+first cut of the 4096-byte `codexMaxDescription` cap just cut the string —
+for a command request, whose `Description` is `command: …\ncwd: …` with the
+command first, a command longer than the cap showed its head and silently
+dropped both its tail and the `cwd:` line with no sign anything was cut. The
+fix: a command request whose full description doesn't fit the cap is
+**declined**, never truncated, so a command is always shown whole with its
+cwd — truncation is reserved for the file-change path list, which
+`truncateDisplay` cuts on a UTF-8 rune boundary and always ends with a
+literal `…[truncated N bytes]` marker inside the cap, never past it.
+
+**Every Codex-supplied string that reaches the modal passes through
+`codexDisplay`** — command, cwd, each changed path, the `reason`, and the
+`SessionGrant` label — which escapes every non-printable rune (newline,
+control, bidi-format) with its `strconv.QuoteRune` form. `permbridge.Request`
+itself does not escape anything (see
+[permbridge-package.md § Domain types](permbridge-package.md#domain-types-wire-contract-envelope-deferred-to-1104)) —
+this is the producer's job, and `codexApprovalRequest` is the single pure
+function where it happens, so a command containing a newline cannot forge a
+second `cwd:` line or extend the path list.
+
+`AlwaysAllow` reaches the modal only when Codex's own `availableDecisions`
+for that request lists the string `acceptForSession` — on every 0.156.1
+capture this was present for command requests and absent for file-change
+ones — and only when `permbridge.SessionGrant`'s label (the command, or the
+joined path list) fits its 1024-byte display cap; past that, the request is
+still parked, just with no always-allow offered. `codexDecision` maps the
+registry's `Verdict` back to Codex's vocabulary: `ForSession` allow →
+`acceptForSession`, plain allow → `accept`, anything else → `decline`.
+`cancel` is never produced — it also interrupts the turn, out of scope here.
+
+`declineAll(reason)` is called from `runOnce` after the client is unbound
+(`reasonCodexExit`), from `Interrupt` before `turn/interrupt`
+(`reasonCodexInterrupt`), and from `BeginTeardown`
+(`reasonCodexTeardown`) — every path the operator did not choose, on top of
+the registry's own window timeout, funnels through the one-shot
+`registry.Resolve`, so a race between one of these and an operator's answer
+resolves exactly once.
+
+**Known coverage gap, flagged on review rather than fixed (#2587's PR
+verifier, SHOULD FIX, non-blocking):** no test drives `observe`'s
+`item/started`/`item/completed` path-tracking and `handle`'s later read of
+it end-to-end for a file-change approval — the table test for
+`codexApprovalRequest` passes `paths` in directly. `fakecodex` has no
+file-change approval marker and no capture has produced a real
+`item/fileChange/requestApproval` (see § The capture's live gaps, above,
+which flags the same absence for the translator). A regression in that
+correlation would silently decline every Codex file edit with no test
+catching it.
+
+`TestCodexApprovalLive` (`cmd/pyry/codex_approval_test.go`) is the live
+counterpart, on `gpt-6-luna` at effort `low`: a declined `touch` does not
+run, an accepted one does. It is not reached by any dispatcher gate —
+`make e2e-realclaude` never starts Codex — so it has to be run by hand with
+`PYRY_CODEX_CAPTURE_BIN`/`PYRY_CODEX_CAPTURE_HOME` set, the same env pair
+`TestCaptureLive` (above) uses.
+
 ## Testing
 
 `client_test.go` builds `fakecodex` by import path, the same `TestMain`
@@ -437,5 +557,9 @@ set, so `make check` still never touches Codex.
   shape mirrors: one child at a time, teardown/rotation write gates, one
   shared turn sink.
 - [ADR 038](../decisions/038-codex-daemon-owned-home-read-only-default-decline.md)
-  — why `CODEX_HOME` is daemon-owned and every server request stays declined
-  until #2587.
+  — why `CODEX_HOME` is daemon-owned, and its "Superseded in part (#2587)"
+  note for how the default-decline baseline changed once command and
+  file-change approvals gained a real operator path.
+- [permbridge-package.md](permbridge-package.md) — the registry and modal
+  `codexApprovals` parks approvals in, `SessionGrant`, and why `Request`
+  fields reach the modal unescaped (the producer's job, `codexDisplay` here).

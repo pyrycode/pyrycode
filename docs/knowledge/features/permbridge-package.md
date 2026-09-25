@@ -21,6 +21,15 @@ This package shipped the registry **primitive only**, unwired and unit-tested in
   to deny Claude and retire the modal. Parsed `AskUserQuestion` batches remain
   answerable through their separate question correlation and `question_answer`
   path; approval-MCP requests leave the bit false and retain their behavior.
+- **#2587 (landed)** — the registry's second producer, and its first one that
+  isn't Claude: `cmd/pyry/codex_runner.go`'s `codexApprovals` parks a Codex
+  command or file-change approval under a `codex-`-prefixed id, the same way
+  `stdioPermissionHandler` parks a Claude one. It is also the first producer
+  to need an always-allow offer with no Claude rule updates behind it — see
+  `SessionGrant` below — and the first proof that `Request.ToolName` and
+  `Description` reach the modal unescaped (§ Domain types). See
+  [codexsup-package.md § Approvals reach the permission modal
+  (#2587)](codexsup-package.md#approvals-reach-the-permission-modal-2587).
 
 Spec: [`specs/architecture/1103-permbridge-registry.md`](../../specs/architecture/1103-permbridge-registry.md). Ticket record: [codebase/1103.md](../codebase/1103.md).
 
@@ -57,18 +66,20 @@ type PermissionUpdate struct {
     Type, Behavior, Destination string
     Rules                       []PermissionRule
 }
-type AlwaysAllow struct { /* immutable validated updates + rendered rules */ }
+type AlwaysAllow struct { /* immutable validated updates + rendered rules, OR a session grant, never both */ }
 func ParseAlwaysAllow(raw json.RawMessage, suppressed bool) AlwaysAllow
+func SessionGrant(label string) AlwaysAllow
 func (a AlwaysAllow) Offered() bool
 func (a AlwaysAllow) Rules() []string
 func (a AlwaysAllow) Updates() []PermissionUpdate
 
 // Verdict is the allow/deny decision claude accepts.
 type Verdict struct {
-    Behavior     string          `json:"behavior"`               // BehaviorAllow | BehaviorDeny
-    UpdatedInput json.RawMessage `json:"updatedInput,omitempty"` // allow only
-    Message      string          `json:"message,omitempty"`      // deny only
+    Behavior           string          `json:"behavior"`                     // BehaviorAllow | BehaviorDeny
+    UpdatedInput       json.RawMessage `json:"updatedInput,omitempty"`       // allow only
     UpdatedPermissions json.RawMessage `json:"updatedPermissions,omitempty"` // session rule grants only
+    Message            string          `json:"message,omitempty"`            // deny only
+    ForSession         bool            `json:"-"`                            // session-grant allow only
 }
 
 const (
@@ -81,6 +92,39 @@ func AllowAlways(updatedInput json.RawMessage, offer AlwaysAllow) Verdict
 ```
 
 `Input`/`UpdatedInput` are `json.RawMessage` so an arbitrary tool-input object round-trips byte-verbatim — the #1080 stream verdict arm (`streamApprovalBridge.ResolveStream`) always echoes the parked `Input` back as `UpdatedInput` unmodified on allow; the primitive only carries the bytes. The five optional ask-context fields are independent Claude-authored display values (#2346): the stdio adapter copies each only from its corresponding `can_use_tool` field, never from `Input`, while the approval MCP producer leaves all five at zero values. They do not participate in the verdict or timeout. `RequiresUserInteraction` is different: it is immutable daemon-internal eligibility copied from the typed stdio ask, excluded from JSON, never displayed or logged, and false for approval-MCP requests. `AlwaysAllow` is also daemon-internal: it retains only validated command-rule grants from a stdio permission-suggestion batch and stays zero for approval MCP. `omitempty` gives the two disjoint verdict wire shapes claude expects. `Allow`/`Deny` constructors make call sites correct-by-construction — no stringly-typed `"allow"`/`"deny"` at the resolver. `reasonTimeout` (unexported, a fixed string, never host-derived content) is the deny message the timer path uses.
+
+**`ToolName`/`Description`/`DecisionReason` reach the modal exactly as the
+producer set them — the registry does not escape anything.** #2587's
+`codexApprovalRequest` (the first non-Claude producer) is what surfaced this:
+Codex's `command`, `cwd`, changed paths and `reason` are model-influenced
+strings that land straight in `ToolName`/`Description`/`DecisionReason`, and a
+newline in one of them would otherwise let it forge a second `cwd:` line or
+another entry in a path list on screen. A producer that fills these fields
+from anything the model or an external peer controls has to escape control
+and bidi-format runes itself before handing the `Request` to `Register` — see
+[codexsup-package.md § Approvals reach the permission modal
+(#2587)](codexsup-package.md#approvals-reach-the-permission-modal-2587)'s
+`codexDisplay` for the pattern. Claude's own stdio and MCP producers have
+never needed this because Claude's ask-context fields aren't model-authored
+free text in the same way.
+
+**`SessionGrant(label string) AlwaysAllow`** (#2587) is `AlwaysAllow`'s second
+constructor, for a producer whose harness remembers a grant for the rest of
+the session itself rather than through Claude's rule-update wire shape:
+it carries no `PermissionUpdate`s, only `label` as the single displayed rule.
+An empty `label`, or one longer than a rendered Claude rule may be
+(`maxRenderedRuleBytes`, 1024 bytes), yields the zero `AlwaysAllow` — a grant
+is never offered without its scope on screen, the same rule `ParseAlwaysAllow`
+already enforces for Claude's rules. `AllowAlways` recognizes a session grant
+(`offer.Updates()` empty but the offer still `Offered()`) and returns the
+**plain allow shape** with `Verdict.ForSession` set, rather than inventing a
+second `UpdatedPermissions` encoding — `ForSession` is `json:"-"`, so it never
+reaches Claude's wire and `TestAllowAlways_SessionGrantKeepsAllowBytes` pins
+that the marshalled bytes are identical to a plain `Allow`. A producer that
+wants an always-allow answer in its own vocabulary reads `Verdict.ForSession`
+directly, the way #2587's `codexDecision` maps it to Codex's
+`acceptForSession` string; the registry itself does not care which shape won,
+only that an allow won.
 
 `ParseAlwaysAllow` validates all command-rule grants before publishing any of them. Suppression and the 16 KiB raw limit apply before decoding the entire source list. The `addDirectories` and `setMode` alternatives are omitted and never retained or granted. This follows checked Claude 2.1.259 evidence: a Bash permission ask supplied a valid command rule alongside those broader choices. Rejecting the entire source list prevented the session-approval path from running.
 
@@ -114,7 +158,7 @@ type AnswerableFunc func(id string, req Request) bool
 - **`SetAnswerable`** (#1931) installs the liveness report, or clears it with `nil` — a setter rather than a `New` option, because the daemon composition root builds the registry long before the thing that can answer the question exists. It does not validate its argument: `nil` is a meaningful value ("nobody can answer"), not an error. Written under `Registry.mu`; the expiry path reads it under the same lock, so last write wins and calling it concurrently with live entries is safe. The report receives the immutable `Request` from the exact pending generation whose timer fired; consumers must use that request rather than recover eligibility from an ID-keyed side map that may still contain an older generation.
 - **`Pending.Await`** blocks until resolved and returns the verdict. With no `AnswerableFunc` installed (the default, and the state this ships in) it is guaranteed to return within the `Register` timeout, exactly as before. With one installed, it returns within one window of the first reading that says nobody can answer — an approval whose answerer stays reachable and simply never decides stays parked indefinitely, by design (see § Conditional bound).
 
-Exported surface: 7 data types (`Request`, `Verdict`, `PermissionRule`, `PermissionUpdate`, `AlwaysAllow`, `Registry`, `Pending`), one func type (`AnswerableFunc`), funcs `New`/`Allow`/`AllowAlways`/`Deny`/`ParseAlwaysAllow`, sentinel `ErrDuplicateID`.
+Exported surface: 7 data types (`Request`, `Verdict`, `PermissionRule`, `PermissionUpdate`, `AlwaysAllow`, `Registry`, `Pending`), one func type (`AnswerableFunc`), funcs `New`/`Allow`/`AllowAlways`/`Deny`/`ParseAlwaysAllow`/`SessionGrant`, sentinel `ErrDuplicateID`.
 
 ## Conditional bound: `expire` and `AnswerableFunc` (#1931)
 
@@ -218,6 +262,14 @@ a blocked stale expiry cannot deny a replacement registration, both
 mixed-eligibility id-reuse orders consult the current request, and timeout
 retirement cannot expose a still-live modal after its eligibility correlation is
 removed. These tests pin the identity and consume-before-delete rules above.
+
+\#2587 adds `permission_offer_test.go` coverage for the session-grant arm:
+`SessionGrant` offers with its label and rejects an empty or over-1024-byte one
+(`Offered()` stays false), and `TestAllowAlways_SessionGrantKeepsAllowBytes`
+marshals a `SessionGrant`-derived `Verdict` and a plain `Allow` and asserts the
+bytes are identical — the only way to prove `ForSession`'s `json:"-"` tag
+actually keeps Claude's wire shape untouched, since a marshal diff is the one
+check a field-by-field assertion can't produce by accident.
 
 ## Related
 
