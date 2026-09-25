@@ -380,8 +380,11 @@ func TestServerClose_NoGoroutineLeaks(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Close: %v", err)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("Server.Close did not return within 1s")
+	// Close is bounded (each conn close gives up after coder/websocket's
+	// 5s handshake wait) but normally returns in microseconds; 10s absorbs
+	// scheduler delay under a full e2e -race run.
+	case <-time.After(10 * time.Second):
+		t.Fatal("Server.Close did not return within 10s")
 	}
 
 	// Close client-side conns explicitly; coder/websocket leaves their

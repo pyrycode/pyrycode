@@ -168,8 +168,8 @@ func TestV2Session_MinVersion_NoMinimumAcceptsAll(t *testing.T) {
 				t.Parallel()
 				out := runVersionHello(t, V2SessionConfig{MinClientVersions: mins}, v2TestToken, v)
 				assertVersionAccepted(t, out)
-				if out.ack.WorkspaceRoot != workspaceRoot() {
-					t.Errorf("workspace_root = %q, want %q", out.ack.WorkspaceRoot, workspaceRoot())
+				if out.ack.WorkspaceRoot != WorkspaceRoot() {
+					t.Errorf("workspace_root = %q, want %q", out.ack.WorkspaceRoot, WorkspaceRoot())
 				}
 			})
 		}
