@@ -89,6 +89,17 @@ which is exactly the shape indistinguishable from inference; #2370's first fixtu
 picked `dropped_categories: 2` beside two retained rows and had to be corrected once
 a stronger assertion caught it.
 
+A test proving a check runs *before* a side effect must not stop at "the side effect
+didn't happen" — a check that moved to run *after* that side effect, for an unrelated
+reason, would leave the same empty end state. Make the ordering itself the
+observable: give the request a second flaw that a later step would catch by a
+*different*, distinguishable error, and confirm the refusal names the check under
+test, not the later step. #2665's refusal cases pass `spawnDir: "/"` — which
+`resolveSpawnDir` rejects — alongside the model/effort value under test; getting the
+settings sentinel back, not `ErrSpawnDirRejected`, is what shows the membership
+check ran first (see
+[conversation-session-binding-create.md § Requested model and effort](conversation-session-binding-create.md#requested-model-and-effort-2665)).
+
 A test whose premise is "past a named cap" must build its fixture by computing from
 that constant, not by restating a literal believed to be past it. A hardcoded number
 keeps passing for the wrong reason after the cap changes, or silently stops testing
