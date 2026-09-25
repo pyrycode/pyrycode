@@ -40,11 +40,6 @@ const (
 	codexCallTimeout = 5 * time.Second
 )
 
-// errCodexPostureFixed is SetPermissionMode's answer: a Codex session's
-// posture is the daemon-written config in its Codex home, and no live switch
-// exists. The mode is deliberately not echoed.
-var errCodexPostureFixed = errors.New("cmd/pyry: codex sessions keep the daemon's read-only posture")
-
 // codexHarness is the daemon-wide input to the Codex runner factory: the
 // binary (-pyry-codex), the daemon-owned CODEX_HOME, and the one turn-event
 // fan-in Claude sessions also feed.
@@ -57,7 +52,8 @@ type codexHarness struct {
 // newStreamRunnerFactory it mints one live tag and binds BOTH the event lane
 // and the exit lane from it, so a Codex turn and a Codex exit reach the drain
 // under the same session id. The Codex home's config is rewritten on every
-// construction, so the read-only posture is restored even if it was edited.
+// construction, so its read-only baseline is restored even if it was edited;
+// every turn then asserts the session's stored posture (codexTurnOverrides).
 //
 // Before returning a runner it probes Codex once (#2621): a Codex below
 // codexMinVersion or a daemon home with no sign-in refuses the session here,
@@ -88,18 +84,19 @@ func newCodexRunnerFactory(h codexHarness) sessions.RunnerFactory {
 		tag := newStreamSessionTag(cfg.SessionID)
 		model, effort := codexTurnSettings(cfg.ClaudeArgs)
 		return newCodexRunner(codexRunnerConfig{
-			Binary:   bin,
-			Home:     h.home,
-			Dir:      dir,
-			Tag:      tag,
-			Sink:     h.sink.sinkForTag(tag.ID),
-			OnExit:   h.sink.exitForTag(tag.ID),
-			Model:    model,
-			Effort:   effort,
-			Backoff:  cfg.BackoffInitial,
-			Log:      cfg.Logger,
-			ThreadID: cfg.ThreadID,
-			OnThread: recordCodexThread(cfg.RecordThread, cfg.Logger),
+			Binary:         bin,
+			Home:           h.home,
+			Dir:            dir,
+			Tag:            tag,
+			Sink:           h.sink.sinkForTag(tag.ID),
+			OnExit:         h.sink.exitForTag(tag.ID),
+			Model:          model,
+			Effort:         effort,
+			PermissionMode: cfg.PermissionMode,
+			Backoff:        cfg.BackoffInitial,
+			Log:            cfg.Logger,
+			ThreadID:       cfg.ThreadID,
+			OnThread:       recordCodexThread(cfg.RecordThread, cfg.Logger),
 		}), nil
 	}
 }
@@ -185,8 +182,8 @@ func parseCodexVersion(v string) (core [3]int, pre, ok bool) {
 // codexTurnSettings reads the session's model and effort out of the
 // Claude-shaped argv the pool composes (claudeSettingsArgs): the last
 // --model and --effort values, in either the spaced or the = form. Every other
-// flag in the argv is Claude-only and ignored. Values pass through unchanged;
-// mapping them is #2586.
+// flag in the argv is Claude-only and ignored; the posture reaches the runner
+// as a mode (SetSpawnPermissionMode), not through the argv.
 func codexTurnSettings(args []string) (model, effort string) {
 	for i := 0; i < len(args); i++ {
 		for _, flag := range []string{"--model", "--effort"} {
@@ -220,6 +217,7 @@ type codexRunnerConfig struct {
 	Sink              func(turnevent.Event)
 	OnExit            func()
 	Model, Effort     string
+	PermissionMode    string
 	Backoff           time.Duration
 	Log               *slog.Logger
 	ThreadID          string
@@ -235,6 +233,9 @@ type codexRunnerConfig struct {
 // registry entry through OnThread, where a runner rebuilt after a daemon
 // restart or a revive picks it up as ThreadID (#2622).
 //
+// Model, effort and posture are per-turn overrides: every turn/start carries
+// all of them from the stored settings (codexTurnOverrides), so a settings
+// change sends nothing and respawns nothing, and applies from the next turn.
 // Every server request takes codexsup's default decline (OnServerRequest is
 // left nil), so no approval is ever accepted until the approvals ticket.
 type codexRunner struct {
@@ -255,6 +256,7 @@ type codexRunner struct {
 	iterCancel  context.CancelFunc
 	model       string
 	effort      string
+	mode        string // stored permission mode, never logged
 	state       sessions.State
 
 	// trMu guards the current spawn's translator between its read loop and
@@ -280,7 +282,20 @@ func newCodexRunner(cfg codexRunnerConfig) *codexRunner {
 		restartCh: make(chan struct{}, 1),
 		model:     cfg.Model,
 		effort:    cfg.Effort,
+		mode:      cfg.PermissionMode,
 		threadID:  cfg.ThreadID,
+	}
+}
+
+// turnSettings is the stored settings every turn asserts. The runner learns the
+// posture only as a mode; the pool derives the YOLO bit from the same mode.
+// Caller holds r.mu.
+func (r *codexRunner) turnSettings() sessions.SessionSettings {
+	return sessions.SessionSettings{
+		Model:          r.model,
+		Effort:         r.effort,
+		PermissionMode: r.mode,
+		YOLO:           r.mode == sessions.PermissionModeBypass,
 	}
 }
 
@@ -491,14 +506,14 @@ func (r *codexRunner) notify(tr *codexsup.Translator, method string, params json
 }
 
 // WriteUserTurn starts a Codex turn with payload as its text and the session's
-// model and effort as per-turn overrides. It refuses with the retryable
+// model, effort and posture as per-turn overrides. It refuses with the retryable
 // streamsup.ErrNoLiveChild, sending nothing, while a rotation or teardown is
 // armed or no client is bound, and claims the queue's commit gate before
 // sending. Neither the payload nor the conversation id is logged.
 func (r *codexRunner) WriteUserTurn(ctx context.Context, _ string, payload []byte) error {
 	r.mu.Lock()
 	client, rotating, tearingDown := r.client, r.rotating, r.tearingDown
-	model, effort := r.model, r.effort
+	in := codexTurnOverrides(r.turnSettings())
 	r.mu.Unlock()
 	switch {
 	case rotating:
@@ -513,14 +528,15 @@ func (r *codexRunner) WriteUserTurn(ctx context.Context, _ string, payload []byt
 	if gate := turncommit.From(ctx); gate != nil && !gate() {
 		return turncommit.ErrDropped
 	}
-	if model != "" {
+	if in.Model != "" {
 		r.trMu.Lock()
 		if r.tr != nil {
-			r.tr.SetModel(model)
+			r.tr.SetModel(in.Model)
 		}
 		r.trMu.Unlock()
 	}
-	if _, err := client.StartTurn(ctx, codexsup.TurnInput{Text: string(payload), Model: model, Effort: effort}); err != nil {
+	in.Text = string(payload)
+	if _, err := client.StartTurn(ctx, in); err != nil {
 		return fmt.Errorf("cmd/pyry: codex turn: %w", err)
 	}
 	return nil
@@ -575,8 +591,8 @@ func (r *codexRunner) drainRestart() bool {
 }
 
 // Restart installs the model and effort from args and respawns the
-// app-server, which resumes the same thread. The posture is not in args, so a
-// restart cannot change it.
+// app-server, which resumes the same thread. The posture is not in args; it is
+// held from SetSpawnPermissionMode and asserted on the next turn.
 func (r *codexRunner) Restart(args []string) {
 	r.setTurnSettings(args)
 	r.endIteration()
@@ -595,13 +611,32 @@ func (r *codexRunner) SetModel(model string) error {
 	return nil
 }
 
-// SetSpawnPermissionMode is a no-op: every spawn runs under the daemon's
-// read-only config, not the stored Claude mode.
-func (r *codexRunner) SetSpawnPermissionMode(string) {}
+// SetEffort takes effect on the next turn, which carries the effort as its
+// override. It is the pool's in-band effort path for Codex, in place of the
+// "/effort" command turn Claude takes, which Codex would run as a prompt.
+func (r *codexRunner) SetEffort(effort string) error {
+	r.mu.Lock()
+	r.effort = effort
+	r.mu.Unlock()
+	return nil
+}
 
-// SetPermissionMode has no live form for Codex, so it always fails rather
-// than report a change that did not happen.
-func (r *codexRunner) SetPermissionMode(string) error { return errCodexPostureFixed }
+// SetSpawnPermissionMode stores the posture the next turn asserts. Codex has
+// no spawn-time posture beyond the home's read-only baseline.
+func (r *codexRunner) SetSpawnPermissionMode(mode string) {
+	r.mu.Lock()
+	r.mode = mode
+	r.mu.Unlock()
+}
+
+// SetPermissionMode is the live posture change: it takes effect on the next
+// turn, which carries the posture as its overrides, so it reports success. A
+// turn already running keeps the posture it started with. An unrecognised
+// mode maps to read-only in codexTurnOverrides.
+func (r *codexRunner) SetPermissionMode(mode string) error {
+	r.SetSpawnPermissionMode(mode)
+	return nil
+}
 
 // BeginTeardown refuses turns until the next client binds.
 func (r *codexRunner) BeginTeardown() {

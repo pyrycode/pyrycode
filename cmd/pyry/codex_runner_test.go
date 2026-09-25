@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -280,8 +281,8 @@ func TestCodexRunner_RestartFreshStartsNewThread(t *testing.T) {
 }
 
 // TestCodexRunner_RestartResumesAndInstallsSettings: Restart respawns on the
-// same thread with the new model and effort, and the stored posture methods
-// never loosen anything.
+// same thread with the new model and effort, and the posture setters store the
+// mode for the next turn.
 func TestCodexRunner_RestartResumesAndInstallsSettings(t *testing.T) {
 	h := newTestCodexRunner(t)
 	h.run(t)
@@ -297,8 +298,14 @@ func TestCodexRunner_RestartResumesAndInstallsSettings(t *testing.T) {
 	if model != "gpt-6-luna" || effort != "low" {
 		t.Fatalf("model, effort = %q, %q; want gpt-6-luna, low", model, effort)
 	}
-	if err := h.r.SetPermissionMode(sessions.PermissionModeBypass); err == nil {
-		t.Fatal("SetPermissionMode = nil, want an error: Codex has no live posture switch")
+	if err := h.r.SetPermissionMode("plan"); err != nil {
+		t.Fatalf("SetPermissionMode = %v, want nil: the posture applies per turn", err)
+	}
+	h.r.mu.Lock()
+	mode := h.r.mode
+	h.r.mu.Unlock()
+	if mode != "plan" {
+		t.Fatalf("mode after SetPermissionMode = %q, want plan", mode)
 	}
 	if err := h.r.SetModel("gpt-6-sol"); err != nil {
 		t.Fatalf("SetModel = %v", err)
@@ -471,5 +478,97 @@ func TestCodexRunnerFactory_Refusals(t *testing.T) {
 				t.Errorf("error %q carries account details", err)
 			}
 		})
+	}
+}
+
+// readTurnLog returns the turn/start params the fake recorded, one per turn.
+func readTurnLog(t *testing.T, path string) []map[string]any {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	var turns []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if line == "" {
+			continue
+		}
+		var p map[string]any
+		if err := json.Unmarshal([]byte(line), &p); err != nil {
+			t.Fatalf("turn log line %q: %v", line, err)
+		}
+		turns = append(turns, p)
+	}
+	return turns
+}
+
+// turnPosture renders a recorded turn's overrides for comparison.
+func turnPosture(p map[string]any) string {
+	b, _ := json.Marshal([]any{p["model"], p["effort"], p["approvalPolicy"], p["sandboxPolicy"], p["approvalsReviewer"]})
+	return string(b)
+}
+
+// TestCodexRunner_LiveSettingsReachNextTurn (#2586): through the pool and the
+// production factory, a live model, effort and posture change sends nothing to
+// Codex and respawns nothing, and the next turn/start carries the new settings.
+// The first turn carries the session's construction-time posture.
+func TestCodexRunner_LiveSettingsReachNextTurn(t *testing.T) {
+	turnLog := filepath.Join(t.TempDir(), "turns.jsonl")
+	t.Setenv("FAKECODEX_TURN_LOG", turnLog)
+	factory := newCodexRunnerFactory(codexHarness{
+		bin: fakeCodexBin(t), home: filepath.Join(t.TempDir(), "codex-home"), sink: newStreamTurnSink(0, nil),
+	})
+	pool, err := sessions.New(sessions.Config{
+		Bootstrap:     sessions.SessionConfig{ClaudeBin: os.Args[0], WorkDir: t.TempDir()},
+		RegistryPath:  filepath.Join(t.TempDir(), "sessions.json"),
+		RunnerFactory: factory,
+	})
+	if err != nil {
+		t.Fatalf("sessions.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = pool.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	id := pool.Default().ID()
+	h := &codexHarnessT{r: pool.Default().Runner().(*codexRunner)}
+	client, _ := h.bound(t, nil)
+
+	h.turn(t, "one")
+	const granular = `{"granular":{"mcp_elicitations":true,"rules":true,"sandbox_approval":true}}`
+	want := []string{`[null,null,` + granular + `,{"type":"workspaceWrite"},"user"]`}
+
+	model, effort, plan := "gpt-6-luna", "low", "plan"
+	if err := pool.UpdateSettings(id, sessions.SettingsUpdate{Model: &model, Effort: &effort, PermissionMode: &plan}); err != nil {
+		t.Fatalf("UpdateSettings = %v", err)
+	}
+	if n := len(readTurnLog(t, turnLog)); n != 1 {
+		t.Fatalf("turn/start count after the settings change = %d, want 1: the change sent a turn", n)
+	}
+	h.turn(t, "two")
+	want = append(want, `["gpt-6-luna","low",`+granular+`,{"type":"readOnly"},"user"]`)
+
+	yolo := true
+	if err := pool.UpdateSettings(id, sessions.SettingsUpdate{YOLO: &yolo}); err != nil {
+		t.Fatalf("UpdateSettings(yolo) = %v", err)
+	}
+	h.turn(t, "three")
+	want = append(want, `["gpt-6-luna","low","never",{"type":"dangerFullAccess"},"user"]`)
+
+	turns := readTurnLog(t, turnLog)
+	if len(turns) != len(want) {
+		t.Fatalf("turn/start count = %d, want %d", len(turns), len(want))
+	}
+	for i, p := range turns {
+		if got := turnPosture(p); got != want[i] {
+			t.Errorf("turn %d overrides = %s, want %s", i+1, got, want[i])
+		}
+	}
+	h.r.mu.Lock()
+	same := h.r.client == client
+	h.r.mu.Unlock()
+	if !same || h.r.State().RestartCount != 0 {
+		t.Errorf("settings change respawned the app-server (same client %v, restarts %d)", same, h.r.State().RestartCount)
 	}
 }
