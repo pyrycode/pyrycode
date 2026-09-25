@@ -53,6 +53,12 @@ type registryEntry struct {
 	// byte shape. A dormant entry carries it verbatim through dormantEntries and
 	// saveLocked, whatever its value.
 	Harness string `json:"harness,omitempty"`
+
+	// ThreadID is the harness's own conversation id, for a harness that mints one
+	// (codex, #2622): the thread a rebuilt runner resumes. Empty for every claude
+	// session and for every entry written before the key existed, so those keep
+	// their byte shape. A dormant entry carries it verbatim.
+	ThreadID string `json:"thread_id,omitempty"`
 }
 
 // canonicalHarness reads a persisted harness: the empty value is claude, anything

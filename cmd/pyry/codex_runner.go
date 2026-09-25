@@ -88,17 +88,37 @@ func newCodexRunnerFactory(h codexHarness) sessions.RunnerFactory {
 		tag := newStreamSessionTag(cfg.SessionID)
 		model, effort := codexTurnSettings(cfg.ClaudeArgs)
 		return newCodexRunner(codexRunnerConfig{
-			Binary:  bin,
-			Home:    h.home,
-			Dir:     dir,
-			Tag:     tag,
-			Sink:    h.sink.sinkForTag(tag.ID),
-			OnExit:  h.sink.exitForTag(tag.ID),
-			Model:   model,
-			Effort:  effort,
-			Backoff: cfg.BackoffInitial,
-			Log:     cfg.Logger,
+			Binary:   bin,
+			Home:     h.home,
+			Dir:      dir,
+			Tag:      tag,
+			Sink:     h.sink.sinkForTag(tag.ID),
+			OnExit:   h.sink.exitForTag(tag.ID),
+			Model:    model,
+			Effort:   effort,
+			Backoff:  cfg.BackoffInitial,
+			Log:      cfg.Logger,
+			ThreadID: cfg.ThreadID,
+			OnThread: recordCodexThread(cfg.RecordThread, cfg.Logger),
 		}), nil
+	}
+}
+
+// recordCodexThread adapts the pool's RecordThread to the runner's OnThread
+// (#2622). A report for an id the pool no longer holds is a stale one racing a
+// rotation and is dropped quietly; any other failure is logged, without the
+// thread id.
+func recordCodexThread(record func(sessionID, threadID string) error, log *slog.Logger) func(sessionID, threadID string) {
+	if record == nil {
+		return nil
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+	return func(sessionID, threadID string) {
+		if err := record(sessionID, threadID); err != nil && !errors.Is(err, sessions.ErrSessionNotFound) {
+			log.Warn("codex: thread not recorded in the registry", "session", sessionID, "err", err)
+		}
 	}
 }
 
@@ -190,7 +210,10 @@ func codexTurnSettings(args []string) (model, effort string) {
 }
 
 // codexRunnerConfig is one Codex runner's construction input. Sink and OnExit
-// must not block; Tag is the live pool session id both are bound to.
+// must not block; Tag is the live pool session id both are bound to. ThreadID
+// is the stored thread the first spawn resumes, empty to start one; OnThread,
+// when set, is told the live pool id and the id of every thread the runner
+// starts, so the pool can persist it (#2622).
 type codexRunnerConfig struct {
 	Binary, Home, Dir string
 	Tag               *streamSessionTag
@@ -199,14 +222,18 @@ type codexRunnerConfig struct {
 	Model, Effort     string
 	Backoff           time.Duration
 	Log               *slog.Logger
+	ThreadID          string
+	OnThread          func(sessionID, threadID string)
 }
 
 // codexRunner is the Codex implementation of sessions.Runner: it supervises
 // one codexsup.Client at a time, respawning it after a crash and resuming the
 // same Codex thread, and gives the pool the write-refusal gates streamsup gives
 // a Claude session. Codex mints its own thread ids, so the pool's session id
-// (the tag) stays the stable key and the thread id is held beside it, in
-// memory; a later Run after an eviction resumes it.
+// (the tag) stays the stable key and the thread id is held beside it: in
+// memory, where a later Run after an eviction resumes it, and in the session's
+// registry entry through OnThread, where a runner rebuilt after a daemon
+// restart or a revive picks it up as ThreadID (#2622).
 //
 // Every server request takes codexsup's default decline (OnServerRequest is
 // left nil), so no approval is ever accepted until the approvals ticket.
@@ -253,6 +280,7 @@ func newCodexRunner(cfg codexRunnerConfig) *codexRunner {
 		restartCh: make(chan struct{}, 1),
 		model:     cfg.Model,
 		effort:    cfg.Effort,
+		threadID:  cfg.ThreadID,
 	}
 }
 
@@ -364,7 +392,8 @@ func (r *codexRunner) runOnce(ctx context.Context, threadID string, seq uint64) 
 		}
 		return err
 	}
-	if threadID == "" {
+	started := threadID == ""
+	if started {
 		threadID, err = client.StartThread(startCtx)
 	} else {
 		err = client.ResumeThread(startCtx, threadID)
@@ -386,8 +415,15 @@ func (r *codexRunner) runOnce(ctx context.Context, threadID string, seq uint64) 
 		stopCodexClient(client)
 		return nil
 	}
+	// The tag is read beside the seq check: RestartFresh bumps the seq and
+	// rotates the tag in one r.mu section, so a thread this spawn started is
+	// reported under the id it belongs to, or not at all.
+	var reportTo string
 	if r.freshSeq == seq {
 		r.threadID = threadID
+		if started {
+			reportTo = r.cfg.Tag.ID()
+		}
 	}
 	r.client = client
 	r.tearingDown = false
@@ -397,6 +433,9 @@ func (r *codexRunner) runOnce(ctx context.Context, threadID string, seq uint64) 
 	r.state.Phase = sessions.PhaseRunning
 	r.state.NextBackoff = 0
 	r.mu.Unlock()
+	if reportTo != "" && r.cfg.OnThread != nil {
+		r.cfg.OnThread(reportTo, threadID)
+	}
 
 	select {
 	case <-client.Done():
@@ -600,8 +639,8 @@ func (r *codexRunner) RestartFresh(newID string) {
 	r.mu.Lock()
 	r.threadID = ""
 	r.freshSeq++
-	r.mu.Unlock()
 	r.cfg.Tag.Rotate(newID)
+	r.mu.Unlock()
 	r.endIteration()
 }
 
