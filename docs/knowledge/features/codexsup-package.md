@@ -258,6 +258,31 @@ crash and a `Restart`, so `threadID` carries across all three without a
 special case for any of them; only `RestartFresh` clears it and starts a new
 thread.
 
+**The thread now survives a daemon restart too, not just an eviction
+(#2622).** `registryEntry.ThreadID` (see
+[sessions-registry.md](sessions-registry.md)) carries the id from a dormant
+entry through `materialise` into `RunnerConfig.ThreadID`, which seeds
+`codexRunner.threadID` the same way reactivation after an eviction does. The
+runner reports every thread it *starts* back to the pool through
+`RunnerConfig.RecordThread`, on the same no-captured-identity shape as
+`RunnerConfig.AdoptAnnouncedReset`: the caller supplies the live pool id, so
+the report lands correctly no matter how many rotations happened first. A
+resumed thread reports nothing, so a rebuild that only resumes never
+rewrites the registry.
+
+The first draft called that report with `freshSeq` and the session tag
+rotated as two separate steps in `RestartFresh`, outside a shared lock. A
+report for the thread the *old* iteration had just started could land in the
+gap and pair the new tag id with the old thread — a bug no test caught,
+because a test drives the restart and the report in a fixed order and never
+interleaves them. The fix moves `r.cfg.Tag.Rotate(newID)` inside the same
+`r.mu` section as `freshSeq++`, so `(seq, tag id)` update as one pair: a
+stale report either still carries the old tag id, which the pool has already
+re-keyed away (`ErrSessionNotFound`, dropped), or fails the seq check and is
+never sent. Any report-back closure built on this pattern needs its identity
+read at call time, under the same lock as whatever it is racing against —
+not captured earlier or read outside the lock.
+
 **The running turn id comes from `turn/started`, never from `StartTurn`'s
 return.** `notify` records `turnID` when the `turn/started` notification
 arrives and clears it on `turn/completed`; `WriteUserTurn` discards the id
@@ -361,6 +386,9 @@ set, so `make check` still never touches Codex.
   interface `cmd/pyry/codex_runner.go`'s `codexRunner` satisfies, and the
   eviction/activation cycle (`Session.runActive`) behind the thread-id lesson
   above.
+- [sessions-registry.md](sessions-registry.md) — the `thread_id` schema field
+  (#2622) this runner writes and reads on rebuild, and the rest of the
+  on-disk registry format.
 - [streamsup-package.md](streamsup-package.md) § Production wiring — the
   Claude analog (`streamsup_runner.go`'s `streamRunner`) the Codex runner's
   shape mirrors: one child at a time, teardown/rotation write gates, one

@@ -424,6 +424,11 @@ type Session struct {
 	// discipline (#2593).
 	harness string
 
+	// threadID is the harness thread this session resumes (#2622), empty for
+	// claude. Guarded by Pool.mu: set in Pool.buildSessionAs, written by
+	// Pool.recordThread, cleared by Pool.rekeyLocked, read by saveLocked.
+	threadID string
+
 	// settings holds the per-session model / effort / YOLO applied to the
 	// claude spawn argv (#833). Set in Pool.New (bootstrap) or
 	// Pool.buildSession (minted) and mutated by Pool.UpdateSettings (#840)

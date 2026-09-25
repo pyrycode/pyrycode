@@ -168,6 +168,9 @@ func (p *Pool) materialise(id SessionID, label, spawnDir string, settings settin
 	p.mu.RLock()
 	provisional := settings()
 	harness := canonicalHarness(p.dormant[id].Harness)
+	// The stored harness thread rides the same read for the same reason (#2622):
+	// nothing writes a dormant entry's thread id either.
+	threadID := p.dormant[id].ThreadID
 	p.mu.RUnlock()
 
 	// buildSession touches no Pool state and is non-blocking
@@ -177,7 +180,7 @@ func (p *Pool) materialise(id SessionID, label, spawnDir string, settings settin
 	// cheaply. It also keeps two file writes and the injected RunnerFactory
 	// call-out out of the pool's write lock, which is why the settings are
 	// carried onto the built session below rather than the build moved down.
-	sess, err := p.buildSessionAs(id, label, spawnDir, provisional, harness)
+	sess, err := p.buildSessionAs(id, label, spawnDir, provisional, harness, threadID)
 	if err != nil {
 		return nil, false, err
 	}
