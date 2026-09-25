@@ -4266,9 +4266,24 @@ This is the **read half** the settings cluster shipped without. Before it, a cli
 
 `permission_mode` and `yolo` are derived from the same current-child confirmation. Confirmed bypass reports `permission_mode: "bypassPermissions"` **and** `yolo: true`; an unavailable confirmation reports `permission_mode: ""` and `yolo: false`. The reply can therefore name a posture the write half refuses to accept on its own `permission_mode` field, but `yolo: false` without a non-empty `permission_mode` must be rendered as unknown rather than enforced.
 
+##### `capabilities` (multi_agent, #2646)
+
+A conn that negotiated the [`multi_agent`](#capability-negotiation-v2) capability, and a reply that resolved a session, additionally carries a `capabilities` object: what that session's agent and current model support, so a client builds its controls from the list instead of hard-coding one agent's menu. **Support is not permission** — the object is advisory only. `set_session_settings` re-checks every request against the same vocabulary regardless of what a client shows, so a listed option can never be refused and an unlisted one is never silently accepted. A conn without `multi_agent`, and any reply that resolved no session (including the all-zero reply), omits the key entirely — that reply stays byte-identical to the shape before this ticket.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `interrupt` | bool | Whether this session's agent can be interrupted mid-turn. True for both agents today. |
+| `mid_turn_input` | bool | Whether a message sent while a turn is running reaches that same turn. **False for both agents today** — `newInboundDeliver` holds every queued message until the conversation's turn goes idle before writing it, and Codex's write path then starts a **new** turn rather than steering the running one. Reported, not enforced: nothing about mid-turn delivery changed with this field. |
+| `effort_levels` | array of string | The levels [`set_session_settings`](#set_session_settings)'s `effort` field accepts for **this session's current model** — the same row's `effort_levels` the effort check reads, or the fallback `{low, medium, high, xhigh, max}` when the model has no usable entry. `""` (the agent's own default) is always accepted but never listed, exactly as for `model` below. |
+| `permission_modes` | array of string | The values [`set_session_settings`](#set_session_settings)'s `permission_mode` field accepts: `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`. **`bypassPermissions` is never listed** — the bypass posture stays reachable only through `yolo`, matching the write half's own refusal of it on this field. |
+| `attachment_types` | array of string | Always the single entry `["*/*"]`. Attachments reach either agent as file paths in the prompt; the daemon keeps no MIME-type allowlist to report a narrower list from. |
+| `models` | array of string | The `value`s of **this session's own agent's** entries in the retained [`model_list`](#model_list) vocabulary — Claude's menu for a Claude session, Codex's for a Codex session, never the other agent's. `[]`, not omitted, when that vocabulary is unavailable. As with `effort_levels`, `""` is accepted but never listed. |
+
+Built from the same code the write-half checks run — `effort_levels` is the effort check's own accepted set, `models` is exactly the rows the model check's exact-match accepts, and `permission_modes` is pinned to the same switch `permission_mode` validation uses — so the list and the enforcement cannot drift apart.
+
 Scope: the values describe the session bound to the **conversation the request named**, and `session_id` names that same session, so a client reads and writes the same place. The daemon first resolves the registry-owned session id, then reads stored settings and any current-child confirmations only for that exact id. A lifecycle transition between those reads can make an applied reading unavailable; it cannot substitute another session's state. A request that resolves to no session gets every original field at its zero value and omits `effective_effort`; it is never answered with some other session's.
 
-Example:
+Example, a conn without `multi_agent`, or a reply that resolved no session — no `capabilities` key:
 
 ```json
 {
@@ -4277,6 +4292,26 @@ Example:
     "session_id": "sess-a", "model": "opus", "effort": "high",
     "effective_effort": "medium", "yolo": false,
     "permission_mode": "default", "used_tokens": 12480, "window_tokens": 200000
+  }
+}
+```
+
+Example, a `multi_agent` conn addressing a resolved Codex session:
+
+```json
+{
+  "id": 46, "type": "session_settings", "ts": "...", "in_reply_to": 813,
+  "payload": {
+    "session_id": "sess-b", "model": "gpt-5-codex", "effort": "xhigh",
+    "yolo": false, "permission_mode": "default",
+    "used_tokens": 4200, "window_tokens": 128000,
+    "capabilities": {
+      "interrupt": true, "mid_turn_input": false,
+      "effort_levels": ["low", "medium", "high", "xhigh"],
+      "permission_modes": ["default", "acceptEdits", "plan", "auto", "dontAsk"],
+      "attachment_types": ["*/*"],
+      "models": ["gpt-5-codex", "gpt-5-codex-mini"]
+    }
   }
 }
 ```
@@ -4971,6 +5006,7 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 
 ## Changelog
 
+- `2026-09-25`: **A `multi_agent` conn's [`session_settings`](#session_settings) reply about a resolved session now carries a `capabilities` object** (#2646) — see § [`capabilities`](#capabilities-multi_agent-2646). `interrupt` and `mid_turn_input` are booleans (`mid_turn_input` is false for both agents today: every queued message is held until the turn goes idle, and Codex's write path then starts a new turn rather than steering the running one); `effort_levels` is the session's current model's accepted levels, or the fallback five; `permission_modes` is the write half's five non-escalating modes, never `bypassPermissions`, which stays reachable only through `yolo`; `attachment_types` is always `["*/*"]`; `models` is the session's own agent's menu, `[]` when unavailable. **Built from the same functions the `set_session_settings` checks run** — `effort_levels` is now literally the effort check's accepted set (`validateEffortVocabulary` is a rewrite, behaviour-identical, to membership in the function that also builds this list) — so a listed option can never be refused and the two cannot drift apart by a later change to one without the other. A conn without `multi_agent`, and any reply that resolved no session, omits the key; that reply is byte-identical to the shape before this ticket. Support is not permission: the object is advisory, and every write is still re-checked regardless of what a client shows.
 - `2026-09-25`: **A `multi_agent` client can now create a Codex conversation** (#2647) — [`create_conversation`](#create_conversation) accepts an optional `agent` (`"claude"` \| `"codex"`, `omitempty`); absent means claude, and a request without it is byte-identical to before this ticket. A `multi_agent` client naming `"codex"` gets a conversation bound to a new Codex session, whose [`conversation_created`](#conversation_created) carries `agent` under the same `multi_agent`-gated `omitempty` rule the [`conversations`](#conversations) row already uses. **A new Codex session does not inherit the operator's configured Claude model and effort** — it starts with neither set, so Codex runs at its own defaults; a Claude conversation's mint is unchanged. **`"codex"` from a client that did not negotiate `multi_agent`, and any value naming neither agent, are both refused** with the new `protocol.unsupported` row in [Error codes](#error-codes), non-retryable, before anything is created — no session, no registry entry, no conversation row. Switching an existing conversation's agent is out of scope (its own ticket).
 - `2026-09-25`: **A `multi_agent` client's [`model_list`](#model_list) now carries Claude's and Codex's models together, each tagged** (#2651) — two new fields on `ModelOption`, `agent` (`"claude"` \| `"codex"`) and `family` (the Codex family name, or a Claude row's own `value`), both `omitempty`. This applies to both remaining per-conn producers of the frame: the connect-time reconcile and the [`request_model_list`](#asking-for-a-model-list-on-demand) reply — the third, the live-lane push on a Claude child's `initialize` answer, is #2652. **A capable client's `models` is Claude's held entries first, in claude's own order, then Codex's in the vocabulary store's order**, one row per family at its newest resolved version; a Codex row's `display_name` equals its own `family`, since Codex publishes no separate display string. `dropped_models` keeps counting only Claude's tail cut — the merge adds no combined cap of its own, reasoned in the ticket's security review. When only one agent has anything held, a capable client gets that agent's rows alone; when neither does, no frame is sent, exactly as before. **A client that does not negotiate `multi_agent` gets exactly today's list** — Claude's entries only, and `agent`/`family` are absent from the wire rather than merely empty, so the frame is byte-identical to what it always was. The two per-conn seams, `ModelListFor` and `RetainedModelLists`, each gained a `multiAgent bool` parameter carrying the conn's negotiated decision, and both resolve it through the same `modelListResolver` helper so a capable conn cannot get a different answer on its two paths.
 - `2026-09-25`: **A client can now learn which agent runs a conversation, and one that can't handle Codex stops being shown Codex conversations** (#2643) — a new capability string, [`multi_agent`](#capability-negotiation-v2), and a new field on the [`conversations`](#conversations) row, `agent` (`"claude"` \| `"codex"`). **This is the first capability string that is not pure client-build detection**: its five predecessors only tell a client which daemon build it is talking to, where negotiating `multi_agent` changes the reply itself — every row gains `agent`, and a row whose bound session runs Codex is included at all only for a negotiating client. It still grants no `interactive` access, and the two decisions are independent: a client can negotiate `multi_agent` alone (no `interactive`) and still get the shaped `conversations` reply, because that verb is not gated on `interactive` at all. **The agent is read from the conversation's bound session, not stored on the conversation itself** — `agentOf` resolves it through a `SessionHarnessFunc` built over `sessions.Pool.HarnessFor` (#2629), and fails open to `"claude"` for a conversation with no bound session or one whose session the pool does not hold, so an evicted or unbound Claude conversation is never hidden from an old client. **A non-negotiating client's reply is not merely missing the key on Codex rows — those rows are left out of the reply entirely**, so its list stays byte-identical to what it read before Codex conversations existed. No production path creates a Codex conversation yet (#2647); this ticket only makes the daemon ready to describe one once #2647 lands. Pushed frames about a Codex conversation (#2644) and `model_list` content for one (#2645) gate on the same negotiated decision, carried on both `V2Session` (for the emitters) and `dispatch.Conn` (for handlers).

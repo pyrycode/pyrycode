@@ -1,4 +1,4 @@
-# Inbound `request_session_settings` (#491/#1214, extended #1586, conversation-keyed #1610, dormant reply #2449, confirmed permission mode #2510, effective effort #2516/#2517) — the read half of the #844 cluster
+# Inbound `request_session_settings` (#491/#1214, extended #1586, conversation-keyed #1610, dormant reply #2449, confirmed permission mode #2510, effective effort #2516/#2517, per-session capability list #2646) — the read half of the #844 cluster
 
 `request_session_settings` is a v2 **control** envelope (phone → binary),
 intercepted in `dispatchAppFrame`'s discriminator switch **before**
@@ -13,6 +13,17 @@ occupancy — **all seven saved/run fields describing the one session bound to
 the conversation the client named** (#1610). An eighth, optional
 `effective_effort` field reports Claude's independently observed applied value
 without turning an inherited default into the stored `effort` choice (#2516).
+A ninth, optional `capabilities` object (#2646) reports what the resolved
+session's agent and current model support — `interrupt`, `mid_turn_input`,
+`effort_levels`, `permission_modes`, `attachment_types`, `models` — built from
+the same functions the `set_session_settings` checks run, so a listed option
+can never be refused. It is attached only for a conn that negotiated the
+`multi_agent` capability; every other conn's reply, and any reply that
+resolved no session, is byte-identical to the shape before that ticket. See
+[`docs/protocol-mobile.md` § `capabilities`](../../protocol-mobile.md#capabilities-multi_agent-2646)
+for the wire contract and
+[`protocol-package-types-session-settings-read-payloads.md`](protocol-package-types-session-settings-read-payloads.md)
+for the payload type.
 Before #1610 the reported id
 and the reported values could describe different sessions: the id followed
 whichever conversation the request named, but the values were always the
@@ -44,7 +55,11 @@ Control flow, in load-bearing order:
    `appFrameSessionSettingsRequest` and enqueued on that connection's existing
    `appFrameWorker`. `EffectiveEffortFor` may wait on a child round trip, so
    provider availability is deliberately *not* a dispatch gate: a nil provider
-   still owes the complete saved-settings reply.
+   still owes the complete saved-settings reply. Since #2646, the job also
+   carries `multiAgent`, copied from Run-owned `s.multiAgent` at this same
+   enqueue point — the worker never reads `s.multiAgent` itself, only
+   `job.multiAgent`, because Run is the only goroutine allowed to touch the
+   session's negotiated-capability state.
 2. **Decode on the worker, tolerated at the payload boundary.** The handler
    re-decodes the immutable plaintext envelope to recover its correlation id.
    Failure is unreachable after `dispatchAppFrame` decoded the same bytes; it
@@ -92,7 +107,10 @@ Control flow, in load-bearing order:
    The relay adds no cache, so every fresh resolvable request performs a fresh
    provider call.
 5. **Marshal + Run-owned reply.** All seven existing fields come only from
-   `cfg`; the provider can populate only `EffectiveEffort`. `PermissionMode`
+   `cfg`; the provider can populate only `EffectiveEffort`, and — only when
+   `multiAgent && m.cfg.CapabilitiesFor != nil` and `RunConfigFor` accepted —
+   one `CapabilitiesFor(cfg.SessionID, cfg.Model)` call populates
+   `Capabilities`. `PermissionMode`
    and `YOLO` may be zero values even when stored fields and session id are
    present; that is the defined unavailable posture, not a partial marshal.
    The worker builds an unsealed correlated reply and passes it through
@@ -146,6 +164,18 @@ Control flow, in load-bearing order:
   replaces, and rebinds no child and retains no runner for a later call, so a
   rebind is observed on the next request rather than leaking the predecessor's
   value.
+- **`CapabilitiesFor func(sessionID, model string) (AgentCapabilities, bool)`
+  (#2646) — keyed by the daemon's own accepted `RunConfig`, never the caller's
+  `conversation_id`.** Called at most once per request, only after
+  `RunConfigFor` accepted and only for a `multiAgent` conn. `false` (no
+  session with a known agent) omits `Capabilities`; a nil seam (foreground /
+  v1 / unwired) does the same, matching every other optional provider on this
+  verb. The relay filters the returned `EffortLevels`/`Models` through
+  `validEffort`/`validModel` and builds `PermissionModes` from
+  `permissionModeOptions()` (a fresh slice literal, never a package-level
+  collection) rather than trusting the producer's values verbatim — so a
+  future producer bug can drop a value from the list but can never widen it
+  past what `set_session_settings` already accepts.
 - **`KnownConversation` and `BootstrapSessionID` are no longer read here.**
   `KnownConversation` (`func(conversationID string) bool`) is now consulted
   by both `handleRequestSnapshot` and `handleMCPStatusRequest` — this handler
@@ -161,8 +191,10 @@ Control flow, in load-bearing order:
   (`Snapshotter` was hardcoded `nil`). #2540 later deleted `SnapshotSettings`,
   `SnapshotUsage`, `Snapshotter` and the render arm that read them, closing the
   declaration along with the unreachable path.
-- **The handler.** `handleRequestSessionSettings(ctx, s, plaintext)` runs on
-  the addressed connection's `appFrameWorker`. Every ordinary decoded branch
+- **The handler.** `handleRequestSessionSettings(ctx, s, plaintext, multiAgent)`
+  (the fourth parameter added by #2646, carried in from the job rather than
+  read off `s`) runs on the addressed connection's `appFrameWorker`. Every
+  ordinary decoded branch
   produces exactly one `session_settings` reply — never a `TypeError`:
 
   | Condition | Reply |
@@ -281,3 +313,10 @@ the single-owner `Run` goroutine. The `cmd/pyry` producer takes its registry
 and pool read locks sequentially, never nested. A lifecycle transition between
 its snapshots can make permission or applied effort unavailable, but cannot
 make saved fields describe another session.
+
+`CapabilitiesFor` (#2646) follows the same worker-synchronous pattern as
+`EffectiveEffortFor`: it runs after `RunConfigFor` on the same
+`appFrameWorker`, takes `HarnessFor`'s lock and then the model-vocabulary
+read's lock sequentially, never nested — the same order
+`settingsUpdaterAdapter.UpdateSettings` takes for the write half — and adds no
+goroutine.

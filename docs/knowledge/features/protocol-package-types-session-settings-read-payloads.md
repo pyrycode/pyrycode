@@ -1,4 +1,4 @@
-# Session settings read payloads (#491/#1214, `ConversationID` field #1586, conversation-keyed reply #1610, confirmed permission mode #2510, effective-effort vocabulary #2515)
+# Session settings read payloads (#491/#1214, `ConversationID` field #1586, conversation-keyed reply #1610, confirmed permission mode #2510, effective-effort vocabulary #2515, per-session capability list #2646)
 
 The READ half the #844 cluster shipped without: `set_session_settings`
 changes the values and `session_settings_updated` only echoes the id back, so
@@ -23,6 +23,16 @@ type SessionSettingsPayload struct {
     PermissionMode  string         `json:"permission_mode"`
     UsedTokens      int            `json:"used_tokens"`
     WindowTokens    int            `json:"window_tokens"`
+    Capabilities    *SessionCapabilities `json:"capabilities,omitempty"`
+}
+
+type SessionCapabilities struct {
+    Interrupt       bool     `json:"interrupt"`
+    MidTurnInput    bool     `json:"mid_turn_input"`
+    EffortLevels    []string `json:"effort_levels"`
+    PermissionModes []string `json:"permission_modes"`
+    AttachmentTypes []string `json:"attachment_types"`
+    Models          []string `json:"models"`
 }
 ```
 
@@ -88,6 +98,24 @@ type SessionSettingsPayload struct {
   resolved id and stored model/effort. The empty mode therefore means
   "confirmation unavailable", not necessarily "nothing resolved", and
   `yolo: false` alone is not evidence that permissions are enforced.
+
+- **`Capabilities` (#2646) is a pointer, unlike every other reply field, and
+  that is load-bearing rather than stylistic.** The existing read tests
+  compare two `SessionSettingsPayload` values with `!=`; a struct-valued field
+  holding slices (`EffortLevels`, `Models`, …) would make the payload
+  uncomparable and fail that comparison at **compile** time, not at review
+  time. `*SessionCapabilities` with `omitempty` keeps the payload comparable
+  and makes "no capability list" byte-identical to the shape before this
+  ticket — nil marshals no `capabilities` key at all, never a `null`. Present,
+  it always carries all six keys on `SessionCapabilities` itself (no
+  `omitempty` inside), with an empty list marshaling as `[]`, never `null` —
+  the inverse of the outer field's own omission rule. Attached only for a
+  `multi_agent` conn and a reply that resolved a session; see
+  [`docs/protocol-mobile.md` § `capabilities`](../../protocol-mobile.md#capabilities-multi_agent-2646)
+  for the field-by-field wire contract and
+  [`v2-session-manager-state-machine-inbound-request-session-settings-the-rea.md`](v2-session-manager-state-machine-inbound-request-session-settings-the-rea.md)
+  for how the relay populates it from the same functions the
+  `set_session_settings` checks run, so a listed option can never be refused.
 
 Golden round-trips in `settings_test.go`: `TestRequestSessionSettingsPayload_RoundTrip`
 against `testdata/request_session_settings.json` (non-empty fixture id — this
