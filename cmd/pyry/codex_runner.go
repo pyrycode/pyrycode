@@ -580,16 +580,25 @@ func (r *codexRunner) runOnce(ctx context.Context, threadID string, seq uint64) 
 	}
 	r.readModels(ctx, client)
 
+	exited := false
 	select {
 	case <-client.Done():
+		exited = true
 	case <-ctx.Done():
+		// The controlled teardown still has a writable peer. Resolve and join
+		// question responses before Stop closes its stdin.
+		r.cfg.Approvals.declineAll(reasonCodexExit)
 	}
 	r.mu.Lock()
 	r.client = nil
 	r.state.ChildPID = 0
 	r.mu.Unlock()
 	exitErr := stopCodexClient(client)
-	r.cfg.Approvals.declineAll(reasonCodexExit)
+	if exited {
+		// A peer that exited on its own cannot receive a response. Clear its
+		// parked UI without making the supervise loop wait on cleanup.
+		r.cfg.Approvals.declineAllNoWait(reasonCodexExit)
+	}
 	r.mu.Lock()
 	r.turnID = ""
 	r.mu.Unlock()
@@ -1230,6 +1239,17 @@ func (a *codexApprovals) observe(method string, params json.RawMessage) {
 // forgets the held file-change paths. The registry one-shot arbitrates a
 // racing answer or window; await stays the sole writer.
 func (a *codexApprovals) declineAll(reason string) {
+	a.resolveAll(reason, true)
+}
+
+// declineAllNoWait resolves parked requests after their Codex process has
+// already exited. There is no writable peer to join, so the supervise loop may
+// continue while await performs local retirement.
+func (a *codexApprovals) declineAllNoWait(reason string) {
+	a.resolveAll(reason, false)
+}
+
+func (a *codexApprovals) resolveAll(reason string, waitQuestions bool) {
 	if a == nil {
 		return
 	}
@@ -1248,7 +1268,7 @@ func (a *codexApprovals) declineAll(reason string) {
 		a.registry.Resolve(entry.id, permbridge.Deny(reason))
 	}
 	for _, entry := range live {
-		if entry.ap.questions != nil {
+		if waitQuestions && entry.ap.questions != nil {
 			<-entry.ap.responded
 		}
 	}

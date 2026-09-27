@@ -187,11 +187,16 @@ type server struct {
 	werr    error
 
 	mu      sync.Mutex
-	turns   map[string]chan struct{}        // running turn id → closed on interrupt
-	pending map[string]chan json.RawMessage // server request id → the client's result
+	turns   map[string]chan struct{}  // running turn id → closed on interrupt
+	pending map[string]pendingRequest // server request id → the client's result
 	// withdrawn holds the ids of server requests resolved before any answer.
 	withdrawn map[string]bool
 	requests  int
+}
+
+type pendingRequest struct {
+	result      chan json.RawMessage
+	logQuestion bool
 }
 
 func main() {
@@ -218,7 +223,7 @@ func run(in io.Reader, out io.Writer, codexHome, version string, signedOut bool,
 		threadLog: threadLog,
 		out:       out,
 		turns:     map[string]chan struct{}{},
-		pending:   map[string]chan json.RawMessage{},
+		pending:   map[string]pendingRequest{},
 		withdrawn: map[string]bool{},
 	}
 	sc := bufio.NewScanner(in)
@@ -251,12 +256,15 @@ func (s *server) handle(f incoming) {
 		// no reply. Unknown ones are ignored.
 	case len(f.ID) > 0:
 		s.mu.Lock()
-		ch, ok := s.pending[string(f.ID)]
+		pending, ok := s.pending[string(f.ID)]
 		delete(s.pending, string(f.ID))
 		late := s.withdrawn[string(f.ID)]
 		s.mu.Unlock()
 		if ok {
-			ch <- f.Result
+			if pending.logQuestion {
+				_ = appendLog(s.turnLog, []byte(`{"questionResponse":`+string(f.Result)+`}`))
+			}
+			pending.result <- f.Result
 		}
 		if late {
 			_ = appendLog(s.turnLog, []byte(`{"lateResponse":`+string(f.ID)+`}`))
@@ -584,19 +592,17 @@ func (t *turn) question() bool {
 	t.s.requests++
 	reqID := json.RawMessage(fmt.Sprintf(`"fakecodex-question-%d"`, t.s.requests))
 	answer := make(chan json.RawMessage, 1)
-	t.s.pending[string(reqID)] = answer
+	t.s.pending[string(reqID)] = pendingRequest{result: answer, logQuestion: true}
 	t.s.mu.Unlock()
 	t.s.send(message{ID: reqID, Method: "item/tool/requestUserInput", Params: t.questionParams()})
-	var result json.RawMessage
 	select {
-	case result = <-answer:
+	case <-answer:
 	case <-t.interrupt:
 		t.s.mu.Lock()
 		delete(t.s.pending, string(reqID))
 		t.s.mu.Unlock()
 		return false
 	}
-	_ = appendLog(t.s.turnLog, []byte(`{"questionResponse":`+string(result)+`}`))
 	t.s.notify("serverRequest/resolved", map[string]any{"threadId": t.threadID, "requestId": reqID})
 	return true
 }
@@ -634,7 +640,7 @@ func (t *turn) approval() bool {
 	t.s.requests++
 	reqID := json.RawMessage(fmt.Sprintf(`"fakecodex-approval-%d"`, t.s.requests))
 	decision := make(chan json.RawMessage, 1)
-	t.s.pending[string(reqID)] = decision
+	t.s.pending[string(reqID)] = pendingRequest{result: decision}
 	t.s.mu.Unlock()
 
 	t.s.send(message{ID: reqID, Method: "item/commandExecution/requestApproval", Params: map[string]any{

@@ -123,3 +123,9 @@ Pending for the documentation stage:
 ### Revision 1 — terminal response ordering
 
 The interrupt RED test showed that resolving `permbridge` and immediately sending `turn/interrupt` lets the interrupt reach Codex before `await` writes the required empty question response. Each `codexApproval` now owns a response-completion channel closed after the response write (or deliberate withdrawal suppression) and before retirement broadcasts. `codexApprovals.declineAll` resolves its snapshot and joins question responses before interrupt, teardown, or exit continues; approval requests keep their non-blocking terminal behavior. Waiting stops before `retireQuestion` because interrupt may originate on the relay run goroutine that the dismissal broadcast itself uses. No lock is held while resolving or waiting, and a racing answer or withdrawal closes the same completion exactly once.
+
+### Revision 2 — controlled process teardown and live proof
+
+Verifier review found that `codexRunner.runOnce` still stopped a context-cancelled, writable Codex process before calling `codexApprovals.declineAll`. Controlled teardown now resolves and joins question responses before closing the client. A process that exits spontaneously instead uses a non-waiting resolution path because its peer is already unwritable; local retirement still clears and dismisses the batch.
+
+The live daemon test now includes the question round trip itself. It asks Luna at low effort first, answers the surfaced single-select batch through the phone protocol, and requires the continuation to name the selected option. If Luna completes without calling the tool, the test records that outcome in its log, changes the session to Sol at low effort, and repeats the same proof. The dispatcher-owned live run remains pending.

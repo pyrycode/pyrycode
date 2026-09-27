@@ -458,7 +458,7 @@ func TestCodexQuestion_WithdrawnWritesNothing(t *testing.T) {
 	}
 }
 
-func TestCodexQuestion_ProcessExitDismissesWithoutResponse(t *testing.T) {
+func TestCodexQuestion_ControlledProcessTeardownReturnsEmpty(t *testing.T) {
 	log := filepath.Join(t.TempDir(), "turns.jsonl")
 	h, f := newQuestionCodexRunner(t, time.Minute, log)
 	stop := h.run(t)
@@ -470,10 +470,8 @@ func TestCodexQuestion_ProcessExitDismissesWithoutResponse(t *testing.T) {
 	if got := pushTypes(f.bcast.pushes); fmt.Sprint(got) != fmt.Sprint([]string{protocol.TypeQuestionShown, protocol.TypeQuestionDismissed}) {
 		t.Fatalf("pushes = %v, want exactly question_shown then question_dismissed", got)
 	}
-	for _, line := range readTurnLog(t, log) {
-		if _, answered := line["questionResponse"]; answered {
-			t.Fatalf("dead process recorded a response: %#v", line)
-		}
+	if got := questionResponseFromLog(t, log); len(got) != 0 {
+		t.Fatalf("Codex response = %#v, want empty answers", got)
 	}
 }
 
