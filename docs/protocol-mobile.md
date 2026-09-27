@@ -4297,7 +4297,7 @@ Built from the same code the write-half checks run — `effort_levels` is the ef
 
 ##### `memory_search` (#2692)
 
-The optional `memory_search` object describes search access for one selected agent and workspace. The wire type is declared; its producer is pending (#2693). It does not describe knowledge capture. A reply that omits `memory_search` gives the client **no report**; it does not assert `absent` and remains compatible with older replies.
+The optional `memory_search` object describes search access for one selected agent and workspace. The relay publishes a supplied report for the resolved conversation and session (#2693); the live daemon provider is #2694. It does not describe knowledge capture. A reply that omits `memory_search` gives the client **no report**; it does not assert `absent` and remains compatible with older replies.
 
 ```json
 {

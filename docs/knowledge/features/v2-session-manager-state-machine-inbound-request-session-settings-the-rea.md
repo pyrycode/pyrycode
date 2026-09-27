@@ -24,6 +24,10 @@ resolved no session, is byte-identical to the shape before that ticket. See
 for the wire contract and
 [`protocol-package-types-session-settings-read-payloads.md`](protocol-package-types-session-settings-read-payloads.md)
 for the payload type.
+An optional `memory_search` report comes from `MemorySearchFor` for the
+conversation and session accepted by `RunConfigFor` (#2693). See
+[the wire contract](../../protocol-mobile.md#memory_search-2692) for its shape.
+
 Before #1610 the reported id
 and the reported values could describe different sessions: the id followed
 whichever conversation the request named, but the values were always the
@@ -64,9 +68,11 @@ Control flow, in load-bearing order:
    re-decodes the immutable plaintext envelope to recover its correlation id.
    Failure is unreachable after `dispatchAppFrame` decoded the same bytes; it
    logs only `conn_id` and emits nothing because no id can be trusted. A bare or
-   malformed payload still leaves `ConversationID == ""` and produces the
-   historical zero-valued reply without consulting either dependency. The
-   payload decode error is never echoed or logged.
+   malformed payload produces the historical zero-valued reply without
+   consulting a provider. A JSON decode error can leave `ConversationID`
+   populated if an earlier field decoded successfully; the handler discards
+   that partial ID before resolution. The payload decode error is never echoed
+   or logged.
 3. **Resolve saved fields, or don't.** One conversation-keyed read replaces
    the pre-#1610 `addressable` boolean and the three bootstrap-scoped seam reads:
 
@@ -106,8 +112,14 @@ Control flow, in load-bearing order:
    or explicit null; `available == false` ignores even a poisoned non-nil value.
    The relay adds no cache, so every fresh resolvable request performs a fresh
    provider call.
-5. **Marshal + Run-owned reply.** All seven existing fields come only from
-   `cfg`; the provider can populate only `EffectiveEffort`, and — only when
+5. **Read memory search only for the accepted binding.** A non-nil
+   `MemorySearchFor` is called once with the request's conversation id and
+   `cfg.SessionID`, using the worker context. Its report is attached unchanged,
+   including `unknown` with provider rows. A provider error attaches
+   `unknown` with an empty provider array; a nil provider or refused binding
+   omits `memory_search`. The relay retains no report for a later request.
+6. **Marshal + Run-owned reply.** All seven existing fields come only from
+   `cfg`; `EffectiveEffortFor` can populate only `EffectiveEffort`, and — only when
    `multiAgent && m.cfg.CapabilitiesFor != nil` and `RunConfigFor` accepted —
    one `CapabilitiesFor(cfg.SessionID, cfg.Model)` call populates
    `Capabilities`. `PermissionMode`
@@ -176,6 +188,12 @@ Control flow, in load-bearing order:
   collection) rather than trusting the producer's values verbatim — so a
   future producer bug can drop a value from the list but can never widen it
   past what `set_session_settings` already accepts.
+- **`MemorySearchFor func(context.Context, string, string) (protocol.MemorySearchReport, error)`
+  (#2693) — a request-local report for the accepted conversation and session.**
+  The session id comes from `RunConfigFor`, never from the request. The provider
+  must honor worker cancellation. A fresh accepted request calls it again even
+  if a prior report or binding changed; a nil provider omits the field, while
+  an error leaves the settings reply intact and reports `unknown` with no rows.
 - **`KnownConversation` and `BootstrapSessionID` are no longer read here.**
   `KnownConversation` (`func(conversationID string) bool`) is now consulted
   by both `handleRequestSnapshot` and `handleMCPStatusRequest` — this handler
@@ -206,7 +224,10 @@ Control flow, in load-bearing order:
   | Accepted `RunConfig`; provider nil or returns `available == false` | All seven fields from that `RunConfig`; `effective_effort` omitted |
   | Accepted `RunConfig`; provider returns non-nil pointer with `available == true` | All seven fields from that `RunConfig`; `effective_effort` is the pointed-to string |
   | Accepted `RunConfig`; provider returns nil pointer with `available == true` | All seven fields from that `RunConfig`; `effective_effort: null` is present |
-  | Named `conversation_id`, bound to a session the pool holds live | That session's id and stored model/effort, context usage, and its exact current child's confirmed permission pair; provider result follows the three rows above |
+  | Accepted `RunConfig`; `MemorySearchFor` nil | Original settings fields; `memory_search` omitted |
+  | Accepted `RunConfig`; `MemorySearchFor` returns a report | Original settings fields; supplied `memory_search` present, including its provider rows |
+  | Accepted `RunConfig`; `MemorySearchFor` fails | Original settings fields; `memory_search` present with `availability: "unknown"` and `providers: []` |
+  | Named `conversation_id`, bound to a session the pool holds live | That session's id and stored model/effort, context usage, and its exact current child's confirmed permission pair; effective effort follows its rows above |
   | Named `conversation_id`, bound to a session the pool holds only as a dormant registry entry (#2449) | That entry's `session_id`, stored `model` and stored `effort`; `permission_mode: ""` / `yolo: false` and usage zero; if the session remains absent from the live pool at the provider's fresh lookup, `effective_effort` is omitted |
 
   `session_id: ""` is already the wire contract's defined "no session to
@@ -237,12 +258,12 @@ along with the render arm, so this verb is now the only place in the manager
 that reports run configuration at all. #2449's dormant answer does not
 reopen that route: it still names only the one session the conversation is
 bound to, sourced from that session's own persisted registry entry, never the
-bootstrap's. The relay deliberately has no live/dormant flag; provider
-unavailability is expressed only by omitting the optional field.
+bootstrap's. The relay deliberately has no live/dormant flag; effective-effort
+provider unavailability is expressed by omitting that optional field.
 
 **Security / log discipline.** `conversation_id` is untrusted network input,
 a lookup key only: `RunConfigFor` must accept it before the same value can reach
-`EffectiveEffortFor`. The `cmd/pyry` run-config producer resolves it against
+`EffectiveEffortFor` or `MemorySearchFor`. The `cmd/pyry` run-config producer resolves it against
 the daemon's own registry and uses only the registry-owned bound id for live
 settings, dormant settings, current-runner confirmation, and context reads.
 The caller's string and both saved and applied values reach no log line, error
@@ -297,8 +318,8 @@ context and proves that no late reply is sealed. Mutation and ordinary-message
 spies keep this read path read-only.
 
 **Concurrency.** No new goroutine, channel, lock, or shared cache was added.
-Each open connection already owns one FIFO `appFrameWorker`; both
-`RunConfigFor` and the possibly blocking `EffectiveEffortFor` run synchronously
+Each open connection already owns one FIFO `appFrameWorker`; `RunConfigFor`,
+`EffectiveEffortFor`, and `MemorySearchFor` run synchronously
 there. A blocked provider delays only later frames for that connection, while
 `Run` and every other connection worker remain serviceable. Moving
 `RunConfigFor` off `Run` means different connections may now call it
