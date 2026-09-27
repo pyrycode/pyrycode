@@ -65,3 +65,8 @@ Pending documentation stage: `docs/knowledge/features/memorysearch-package.md` m
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-27
+
+## Revisions
+
+- The recorded `MCPStatus` fixture confirms `connected` and `failed`; the detector treats other unrecognised statuses as unresolved rather than assuming success. No captured status fixture establishes QMD or Smart Connections server spelling, so `mcpProvider` uses a small explicit allowlist for their search bridges and ignores arbitrary memory-themed names. This resolves the open question without claiming live evidence for those names.
+- Host CLI sightings need a separate `HostCLIsKnown` completeness bit. An empty list alone cannot prove the host was checked, so confirmed absence requires that bit as well as completed child PATH, plugin, MCP, and config checks.

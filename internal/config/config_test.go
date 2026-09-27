@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -11,7 +12,7 @@ func TestDefaultConfig(t *testing.T) {
 	t.Parallel()
 	got := DefaultConfig()
 	want := Config{RelayURL: "wss://relay.pyrycode.dev", DebugCapture: false, StdioPermissionPrompt: false}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("DefaultConfig() = %+v, want %+v", got, want)
 	}
 }
@@ -132,9 +133,29 @@ func TestLoad(t *testing.T) {
 			} else if err != nil {
 				t.Fatalf("Load(%s) unexpected err: %v", path, err)
 			}
-			if got != tc.want {
+			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("Load(%s) = %+v, want %+v", path, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestLoadMemorySearchProviders(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"memory_search_providers":[{"id":"local-index","display_name":"Local Index","agent":"claude","workspace":"/workspace","enabled":false}]}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.MemorySearchProviders) != 1 {
+		t.Fatalf("providers = %#v", cfg.MemorySearchProviders)
+	}
+	got := cfg.MemorySearchProviders[0]
+	if got.ID != "local-index" || got.DisplayName != "Local Index" || got.Agent != "claude" || got.Workspace != "/workspace" || got.Enabled == nil || *got.Enabled {
+		t.Errorf("decoded provider = %#v", got)
 	}
 }
