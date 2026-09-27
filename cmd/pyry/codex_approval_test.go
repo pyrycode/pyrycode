@@ -533,6 +533,57 @@ func TestCodexApprovals_DrainFencesInFlightRegistration(t *testing.T) {
 	}
 }
 
+func TestCodexQuestion_InterruptResponseDoesNotWaitForSurface(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "turns.jsonl")
+	t.Setenv("FAKECODEX_TURN_LOG", log)
+	surfaceEntered := make(chan struct{})
+	releaseSurface := make(chan struct{})
+	retired := make(chan struct{})
+	surface := &approvalSurfaceReport{show: func(permbridge.Request) func() {
+		close(surfaceEntered)
+		<-releaseSurface
+		return func() { close(retired) }
+	}}
+	h := newTestCodexRunner(t)
+	h.r.cfg.Approvals = newCodexApprovals(permbridge.New(), time.Minute, surface, nil)
+	h.run(t)
+	h.bound(t, nil)
+	h.turn(t, "[fakecodex:question]")
+
+	select {
+	case <-surfaceEntered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("question did not enter the blocking surface")
+	}
+	interruptDone := make(chan error, 1)
+	go func() { interruptDone <- h.r.Interrupt() }()
+
+	var interruptErr error
+	interruptedBeforeSurface := false
+	select {
+	case interruptErr = <-interruptDone:
+		interruptedBeforeSurface = true
+	case <-time.After(5 * time.Second):
+	}
+	close(releaseSurface)
+	if !interruptedBeforeSurface {
+		interruptErr = <-interruptDone
+		t.Fatal("Interrupt waited for the blocked question surface")
+	}
+	if interruptErr != nil {
+		t.Fatalf("Interrupt = %v", interruptErr)
+	}
+	select {
+	case <-retired:
+	case <-time.After(10 * time.Second):
+		t.Fatal("question was not retired after the surface completed")
+	}
+	h.await(t, "turn end", isTurnEnd)
+	if got := questionResponseFromLog(t, log); len(got) != 0 {
+		t.Fatalf("Codex response = %#v, want empty answers", got)
+	}
+}
+
 func questionResponseFromLog(t *testing.T, path string) map[string]any {
 	t.Helper()
 	for _, line := range readTurnLog(t, path) {

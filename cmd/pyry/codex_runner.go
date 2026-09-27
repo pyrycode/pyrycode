@@ -1095,9 +1095,12 @@ func (a *codexApprovals) declineClosed(req *codexsup.ServerRequest) {
 }
 
 // await is the sole writer of the request's answer, and writes it only when
-// Codex is still waiting for it.
+// Codex is still waiting for it. Surfacing runs independently so a terminal
+// drain can join the response without waiting on a relay broadcast; retirement
+// still waits until both the response and the surface setup have completed.
 func (a *codexApprovals) await(id string, ap *codexApproval, parked permbridge.Request, pending *permbridge.Pending) {
-	retire := a.surface.surface(parked)
+	surfaced := make(chan func(), 1)
+	go func() { surfaced <- a.surface.surface(parked) }()
 	verdict := pending.Await()
 	a.mu.Lock()
 	if a.live[id] == ap {
@@ -1112,6 +1115,7 @@ func (a *codexApprovals) await(id string, ap *codexApproval, parked permbridge.R
 		}
 	}
 	close(ap.responded)
+	retire := <-surfaced
 	retire()
 }
 
