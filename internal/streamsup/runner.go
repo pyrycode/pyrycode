@@ -612,6 +612,8 @@ type Runner struct {
 	// leaf lock and then reject a target that was replaced in the gap.
 	mcpStatusEligible bool
 	childGeneration   uint64
+	childWorkspace    string
+	childPATH         *string
 
 	// rotating reports that a new_session rotation is armed and no successor child
 	// has bound yet. BeginRotation sets it strictly BEFORE the pool-side rotate()
@@ -1503,6 +1505,17 @@ func (r *Runner) QueryMCPStatus(ctx context.Context) (turnevent.MCPStatus, bool)
 		r.parser.removeMCPStatusQuery(id, pending)
 		return turnevent.MCPStatus{}, false
 	}
+}
+
+// MemorySearchLaunch snapshots the exact live child's launch scope. A missing
+// snapshot means that the child is between binding and evidence publication.
+func (r *Runner) MemorySearchLaunch() (string, *string, string, uint64, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stdin == nil || r.rotating || r.childWorkspace == "" {
+		return "", nil, "", 0, false
+	}
+	return r.childWorkspace, r.childPATH, "", r.childGeneration, true
 }
 
 // mcpActuationIDPrefix namespaces the request ids of the daemon's MCP actuations,
@@ -2445,6 +2458,15 @@ func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, workDir s
 	cmd.Stderr = r.cfg.Stderr
 	if len(env) > 0 {
 		cmd.Env = append(os.Environ(), env...)
+	} else {
+		cmd.Env = os.Environ()
+	}
+	var childPATH *string
+	for _, entry := range cmd.Environ() {
+		if value, ok := strings.CutPrefix(entry, "PATH="); ok {
+			path := value
+			childPATH = &path
+		}
 	}
 	// Install the privacy decision before Start can create the stdout forwarder.
 	// args is beginSpawn's immutable snapshot for this exact child, so a settings
@@ -2578,6 +2600,10 @@ func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, workDir s
 	r.postureGate.arm(postureID)
 
 	r.setStdin(stdin, freshSeq, mcpEligible)
+	r.mu.Lock()
+	r.childWorkspace = workDir
+	r.childPATH = childPATH
+	r.mu.Unlock()
 	r.updateState(func(st *State) {
 		st.Phase = PhaseRunning
 		st.ChildPID = cmd.Process.Pid
@@ -2673,6 +2699,8 @@ func (r *Runner) setStdin(w io.WriteCloser, spawnFreshSeq uint64, mcpEligible bo
 	r.stdin = w
 	r.mcpStatusEligible = mcpEligible
 	r.childGeneration++
+	r.childWorkspace = ""
+	r.childPATH = nil
 	if spawnFreshSeq > r.armFreshSeq {
 		r.rotating = false
 	}
@@ -2698,6 +2726,8 @@ func (r *Runner) takeStdin() io.WriteCloser {
 	r.stdin = nil
 	r.mcpStatusEligible = false
 	r.childGeneration++
+	r.childWorkspace = ""
+	r.childPATH = nil
 	r.mu.Unlock()
 	r.retireParserChild()
 	return w

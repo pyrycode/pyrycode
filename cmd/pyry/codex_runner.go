@@ -363,20 +363,21 @@ type codexRunner struct {
 	restartCh chan struct{}
 
 	// mu is a leaf: it is never held across a Codex call or with trMu.
-	mu          sync.Mutex
-	client      *codexsup.Client // bound live client, nil when none may take a turn
-	threadID    string           // Codex thread to resume; empty means start one
-	turnID      string           // running turn, from turn/started
-	freshSeq    uint64           // bumped by RestartFresh
-	armFreshSeq uint64           // freshSeq when the rotation gate was armed
-	rotateGen   uint64
-	rotating    bool
-	tearingDown bool
-	iterCancel  context.CancelFunc
-	model       string
-	effort      string
-	mode        string // stored permission mode, never logged
-	state       sessions.State
+	mu              sync.Mutex
+	client          *codexsup.Client // bound live client, nil when none may take a turn
+	childGeneration uint64
+	threadID        string // Codex thread to resume; empty means start one
+	turnID          string // running turn, from turn/started
+	freshSeq        uint64 // bumped by RestartFresh
+	armFreshSeq     uint64 // freshSeq when the rotation gate was armed
+	rotateGen       uint64
+	rotating        bool
+	tearingDown     bool
+	iterCancel      context.CancelFunc
+	model           string
+	effort          string
+	mode            string // stored permission mode, never logged
+	state           sessions.State
 
 	// trMu guards the current spawn's translator between its read loop and
 	// WriteUserTurn's model update.
@@ -404,6 +405,17 @@ func newCodexRunner(cfg codexRunnerConfig) *codexRunner {
 		mode:      cfg.PermissionMode,
 		threadID:  cfg.ThreadID,
 	}
+}
+
+// MemorySearchLaunch reports the daemon-owned home and work directory only
+// while this runner has a current child. Replacement changes the generation.
+func (r *codexRunner) MemorySearchLaunch() (string, *string, string, uint64, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.client == nil || r.rotating {
+		return "", nil, "", 0, false
+	}
+	return r.cfg.Dir, nil, r.cfg.Home, r.childGeneration, true
 }
 
 // turnSettings is the stored settings every turn asserts. The runner learns the
@@ -567,6 +579,7 @@ func (r *codexRunner) runOnce(ctx context.Context, threadID string, seq uint64) 
 		}
 	}
 	r.client = client
+	r.childGeneration++
 	r.tearingDown = false
 	if r.rotating && seq > r.armFreshSeq {
 		r.rotating = false
@@ -592,6 +605,7 @@ func (r *codexRunner) runOnce(ctx context.Context, threadID string, seq uint64) 
 	}
 	r.mu.Lock()
 	r.client = nil
+	r.childGeneration++
 	r.state.ChildPID = 0
 	r.mu.Unlock()
 	// Serialize the final stdin close with any server request still on the

@@ -65,3 +65,7 @@ Pending documentation stage: update `docs/knowledge/features/memorysearch-packag
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-27
+
+## Revisions
+
+- The child PATH question resolved by freezing Claude's spawn environment before `cmd.Start` and publishing its PATH beside the stdin binding. Codex's app-server starts from `os.Environ` inside `codexsup.Start`, which does not expose that exact environment afterward. The Codex launcher therefore reports PATH as incomplete instead of treating a later daemon environment read as child evidence. Its active client, work directory, daemon-owned home, and replacement generation still establish the agent and launch scope for declarations.
