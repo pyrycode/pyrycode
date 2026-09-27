@@ -129,3 +129,9 @@ The interrupt RED test showed that resolving `permbridge` and immediately sendin
 Verifier review found that `codexRunner.runOnce` still stopped a context-cancelled, writable Codex process before calling `codexApprovals.declineAll`. Controlled teardown now resolves and joins question responses before closing the client. A process that exits spontaneously instead uses a non-waiting resolution path because its peer is already unwritable; local retirement still clears and dismisses the batch.
 
 The live daemon test now includes the question round trip itself. It asks Luna at low effort first, answers the surfaced single-select batch through the phone protocol, and requires the continuation to name the selected option. If Luna completes without calling the tool, the test records that outcome in its log, changes the session to Sol at low effort, and repeats the same proof. The dispatcher-owned live run remains pending.
+
+### Revision 3 — registration fence and visible live outcome
+
+Verifier review found that a terminal snapshot could complete while `codexApprovals.handle` was still validating and registering a request. The approval lifecycle now closes admission before a drain and waits for every handler that entered while admission was open before snapshotting the parked requests. A handler arriving after the fence never surfaces a batch: an eligible question receives a synchronous empty-answer response, while malformed and unsupported requests retain default-decline. Interrupt reopens admission only when no newer terminal path or process lifecycle superseded its fence.
+
+The live question probe writes a content-free Luna or Sol outcome directly to the test process's standard error. This remains visible under the non-verbose `make e2e-realclaude` invocation while keeping question and answer content out of the log.

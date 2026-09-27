@@ -571,6 +571,7 @@ func (r *codexRunner) runOnce(ctx context.Context, threadID string, seq uint64) 
 	if r.rotating && seq > r.armFreshSeq {
 		r.rotating = false
 	}
+	r.cfg.Approvals.open()
 	r.state.Phase = sessions.PhaseRunning
 	r.state.NextBackoff = 0
 	r.state.ChildPID = client.PID()
@@ -759,13 +760,21 @@ func (r *codexRunner) WriteUserTurn(ctx context.Context, _ string, payload []byt
 // so that turn's turn/completed has already cleared turnID when the refusal
 // returns.
 func (r *codexRunner) Interrupt() error {
-	r.cfg.Approvals.declineAll(reasonCodexInterrupt)
+	generation := r.cfg.Approvals.declineAll(reasonCodexInterrupt)
 	r.mu.Lock()
 	client, turnID := r.client, r.turnID
 	r.mu.Unlock()
 	if client == nil {
 		return streamsup.ErrNoLiveChild
 	}
+	defer func() {
+		r.mu.Lock()
+		reopen := r.client == client && !r.tearingDown
+		r.mu.Unlock()
+		if reopen {
+			r.cfg.Approvals.reopen(generation)
+		}
+	}()
 	if turnID == "" {
 		return nil
 	}
@@ -938,8 +947,16 @@ type codexApprovals struct {
 	tag      *streamSessionTag
 
 	mu      sync.Mutex
+	cond    *sync.Cond
 	live    map[string]*codexApproval // registry id → parked request
 	changes map[string][]string       // fileChange item id → its paths
+
+	// accepting and handling fence registration against terminal drains.
+	// A request that entered handle before a drain is included in that drain;
+	// one that enters afterward is answered synchronously without surfacing.
+	accepting  bool
+	handling   int
+	generation uint64
 }
 
 // codexApproval is one parked request. withdrawn is set when Codex resolved it
@@ -971,7 +988,7 @@ func newCodexApprovals(registry *permbridge.Registry, timeout time.Duration, sur
 	if registry == nil {
 		return nil
 	}
-	return &codexApprovals{
+	a := &codexApprovals{
 		registry: registry,
 		timeout:  timeout,
 		surface:  surface,
@@ -979,6 +996,41 @@ func newCodexApprovals(registry *permbridge.Registry, timeout time.Duration, sur
 		live:     make(map[string]*codexApproval),
 		changes:  make(map[string][]string),
 	}
+	a.cond = sync.NewCond(&a.mu)
+	return a
+}
+
+// open starts a new process lifecycle. No request can enter before the runner
+// has a writable client ready to own it.
+func (a *codexApprovals) open() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.generation++
+	a.accepting = true
+	a.cond.Broadcast()
+	a.mu.Unlock()
+}
+
+// beginRequest joins the current process lifecycle. A terminal drain closes
+// admission and waits for every request that already joined before snapshotting
+// live, so registration cannot land just after the snapshot.
+func (a *codexApprovals) beginRequest() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.accepting {
+		return false
+	}
+	a.handling++
+	return true
+}
+
+func (a *codexApprovals) endRequest() {
+	a.mu.Lock()
+	a.handling--
+	a.cond.Broadcast()
+	a.mu.Unlock()
 }
 
 // handle is codexsup.Config.OnServerRequest. It runs on the read loop, so it
@@ -989,6 +1041,11 @@ func (a *codexApprovals) handle(req *codexsup.ServerRequest) {
 		_ = req.Decline()
 		return
 	}
+	if !a.beginRequest() {
+		a.declineClosed(req)
+		return
+	}
+	defer a.endRequest()
 	var item struct {
 		ItemID string `json:"itemId"`
 	}
@@ -1022,6 +1079,19 @@ func (a *codexApprovals) handle(req *codexsup.ServerRequest) {
 	a.live[id] = ap
 	a.mu.Unlock()
 	go a.await(id, ap, parked, pending)
+}
+
+// declineClosed handles a request that reached the read loop after a terminal
+// fence. An eligible question still receives its schema-shaped empty answer;
+// malformed questions and every unsupported request retain default-decline.
+func (a *codexApprovals) declineClosed(req *codexsup.ServerRequest) {
+	if req.Method == "item/tool/requestUserInput" {
+		if _, refs, ok := codexQuestionRequest(req.Params); ok && refs != nil {
+			_ = req.Respond(codexQuestionResult{Answers: map[string]codexQuestionAnswer{}})
+			return
+		}
+	}
+	_ = req.Decline()
 }
 
 // await is the sole writer of the request's answer, and writes it only when
@@ -1238,22 +1308,29 @@ func (a *codexApprovals) observe(method string, params json.RawMessage) {
 // declineAll resolves every request this runner has parked to a decline and
 // forgets the held file-change paths. The registry one-shot arbitrates a
 // racing answer or window; await stays the sole writer.
-func (a *codexApprovals) declineAll(reason string) {
-	a.resolveAll(reason, true)
+func (a *codexApprovals) declineAll(reason string) uint64 {
+	return a.resolveAll(reason, true)
 }
 
 // declineAllNoWait resolves parked requests after their Codex process has
 // already exited. There is no writable peer to join, so the supervise loop may
 // continue while await performs local retirement.
-func (a *codexApprovals) declineAllNoWait(reason string) {
-	a.resolveAll(reason, false)
+func (a *codexApprovals) declineAllNoWait(reason string) uint64 {
+	return a.resolveAll(reason, false)
 }
 
-func (a *codexApprovals) resolveAll(reason string, waitQuestions bool) {
+func (a *codexApprovals) resolveAll(reason string, waitQuestions bool) uint64 {
 	if a == nil {
-		return
+		return 0
 	}
 	a.mu.Lock()
+	a.generation++
+	generation := a.generation
+	a.accepting = false
+	a.cond.Broadcast()
+	for a.handling > 0 {
+		a.cond.Wait()
+	}
 	type liveApproval struct {
 		id string
 		ap *codexApproval
@@ -1272,6 +1349,21 @@ func (a *codexApprovals) resolveAll(reason string, waitQuestions bool) {
 			<-entry.ap.responded
 		}
 	}
+	return generation
+}
+
+// reopen resumes admission only when no newer terminal path or process start
+// superseded the drain that produced generation.
+func (a *codexApprovals) reopen(generation uint64) {
+	if a == nil || generation == 0 {
+		return
+	}
+	a.mu.Lock()
+	if a.generation == generation {
+		a.accepting = true
+		a.cond.Broadcast()
+	}
+	a.mu.Unlock()
 }
 
 // codexApprovalRequest builds the modal's request from a command or

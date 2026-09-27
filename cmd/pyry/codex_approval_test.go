@@ -475,6 +475,64 @@ func TestCodexQuestion_ControlledProcessTeardownReturnsEmpty(t *testing.T) {
 	}
 }
 
+func TestCodexApprovals_DrainFencesInFlightRegistration(t *testing.T) {
+	registry := permbridge.New()
+	approvals := newCodexApprovals(registry, time.Minute, &approvalSurfaceReport{}, nil)
+	approvals.open()
+	if !approvals.beginRequest() {
+		t.Fatal("open approval lifecycle refused a request")
+	}
+
+	const id = "late-question"
+	parked := permbridge.Request{ToolUseID: id, ToolName: questionbridge.ToolName}
+	pending, err := registry.Register(id, parked, time.Minute)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	ap := &codexApproval{
+		questions: []codexQuestionRef{{id: "choice", text: "Choice?"}},
+		responded: make(chan struct{}),
+	}
+	verdict := make(chan permbridge.Verdict, 1)
+	go func() {
+		verdict <- pending.Await()
+		close(ap.responded)
+	}()
+
+	drained := make(chan struct{})
+	go func() {
+		approvals.declineAll(reasonCodexTeardown)
+		close(drained)
+	}()
+
+	// Wait until declineAll has closed the lifecycle. It must still be
+	// waiting for the request that entered before the fence.
+	approvals.mu.Lock()
+	for approvals.accepting {
+		approvals.cond.Wait()
+	}
+	approvals.live[id] = ap
+	approvals.mu.Unlock()
+	select {
+	case <-drained:
+		t.Fatal("declineAll returned before the in-flight request registered")
+	default:
+	}
+
+	approvals.endRequest()
+	select {
+	case <-drained:
+	case <-time.After(10 * time.Second):
+		t.Fatal("declineAll did not finish after the in-flight request registered")
+	}
+	if got := <-verdict; got.Behavior != permbridge.BehaviorDeny {
+		t.Fatalf("late request verdict = %#v, want deny", got)
+	}
+	if _, live := registry.Lookup(id); live {
+		t.Fatal("late request remained parked after drain")
+	}
+}
+
 func questionResponseFromLog(t *testing.T, path string) map[string]any {
 	t.Helper()
 	for _, line := range readTurnLog(t, path) {

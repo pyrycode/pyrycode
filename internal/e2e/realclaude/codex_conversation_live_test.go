@@ -146,15 +146,16 @@ func TestCodexConversationLive(t *testing.T) {
 	question := runCodexQuestionTurn(t, h, convID, plain.nextReqID, codexLiveModel,
 		codexQuestionPrompt(nonce))
 	if !question.asked {
-		t.Log("GPT-6 Luna at low effort completed without calling request_user_input; retrying the #2671 live proof on GPT-6 Sol")
+		fmt.Fprintln(os.Stderr, "#2671 Codex question probe: GPT-6 Luna at low effort did not call request_user_input; retrying with GPT-6 Sol at low effort")
 		next := setCodexLiveModel(t, h, sessionID, convID, question.nextReqID, codexLiveFallbackModel)
 		question = runCodexQuestionTurn(t, h, convID, next, codexLiveFallbackModel,
 			codexQuestionPrompt(nonce+1))
 		if !question.asked {
 			t.Fatal("GPT-6 Sol at low effort also completed without calling request_user_input")
 		}
+		fmt.Fprintln(os.Stderr, "#2671 Codex question probe: GPT-6 Sol at low effort completed the request_user_input answer round trip")
 	} else {
-		t.Log("GPT-6 Luna at low effort called request_user_input and completed the #2671 answer round trip")
+		fmt.Fprintln(os.Stderr, "#2671 Codex question probe: GPT-6 Luna at low effort completed the request_user_input answer round trip")
 	}
 
 	// AC 3, declined: the write asks, the answer is no, the file stays absent.
