@@ -17,6 +17,8 @@ var (
 	ErrAgentSwitchInProgress           = errors.New("conversation reset already in progress")
 	ErrAgentSwitchUnavailable          = errors.New("conversation agent switch unavailable")
 	ErrAgentSwitchWorkspaceUnavailable = errors.New("conversation workspace unavailable")
+	ErrAgentSwitchMintFailed           = errors.New("conversation agent switch mint failed")
+	ErrAgentSwitchCleanupFailed        = errors.New("conversation agent switch cleanup failed")
 )
 
 // conversationAgentSwitcher is the daemon-side primitive consumed by the relay
@@ -102,10 +104,18 @@ func (s conversationAgentSwitcher) Switch(ctx context.Context, convID, target st
 	}
 	newID, err := s.pool.MintWith(convID, spawnDir, target, start)
 	if err != nil {
-		if newID != "" {
-			err = errors.Join(err, s.pool.Remove(ctx, newID, sessions.RemoveOptions{}))
+		// A runner construction error can contain the accepted workspace path.
+		// Keep only static classifications at this relay-facing boundary.
+		mintErr := error(ErrAgentSwitchMintFailed)
+		if errors.Is(err, sessions.ErrPoolNotRunning) {
+			mintErr = errors.Join(mintErr, sessions.ErrPoolNotRunning)
 		}
-		return "", fmt.Errorf("switch conversation: mint: %w", err)
+		if newID != "" {
+			if s.pool.Remove(ctx, newID, sessions.RemoveOptions{}) != nil {
+				mintErr = errors.Join(mintErr, ErrAgentSwitchCleanupFailed)
+			}
+		}
+		return "", mintErr
 	}
 	cleanup := func(cause error) (sessions.SessionID, error) {
 		return "", errors.Join(cause, s.pool.Remove(ctx, newID, sessions.RemoveOptions{}))

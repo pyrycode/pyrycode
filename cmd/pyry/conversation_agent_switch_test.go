@@ -195,6 +195,55 @@ func TestConversationAgentSwitch_MintErrorWithIDCleansUp(t *testing.T) {
 	}
 }
 
+func TestConversationAgentSwitch_MintFailureOmitsWorkspace(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workspace := filepath.Join(home, "private-project")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plan := newModelListPlan()
+	pool, err := sessions.New(sessions.Config{
+		Bootstrap:    sessions.SessionConfig{ClaudeBin: os.Args[0], WorkDir: home},
+		RegistryPath: filepath.Join(t.TempDir(), "sessions.json"),
+		RunnerFactory: func(cfg sessions.RunnerConfig) (sessions.Runner, error) {
+			if cfg.Harness == protocol.AgentCodex {
+				return nil, &os.PathError{Op: "chdir", Path: cfg.WorkDir, Err: os.ErrNotExist}
+			}
+			return modelListRunner{id: sessions.SessionID(cfg.SessionID), plan: plan}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runPoolReady(t, pool)
+	oldID, err := pool.MintWith("conv-1", home, protocol.AgentClaude, sessions.SessionSettings{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{ID: "conv-1", Cwd: workspace, CurrentSessionID: string(oldID)})
+	sw := conversationAgentSwitcher{pool: pool, conversations: reg, registryPath: filepath.Join(t.TempDir(), "conversations.json"), reset: &conversationReset{}}
+	var transitions []sessions.SessionTransition
+	pool.SetTransitionObserver(func(transition sessions.SessionTransition) { transitions = append(transitions, transition) })
+	id, err := sw.Switch(context.Background(), "conv-1", protocol.AgentCodex, nil, nil)
+	if id != "" || !errors.Is(err, ErrAgentSwitchMintFailed) {
+		t.Fatalf("Switch = %q, %v; want path-free mint failure", id, err)
+	}
+	if strings.Contains(err.Error(), workspace) || strings.Contains(err.Error(), home) {
+		t.Fatalf("mint failure contains workspace path: %v", err)
+	}
+	if got, _ := reg.Get("conv-1"); got.CurrentSessionID != string(oldID) || len(got.SessionHistory) != 0 {
+		t.Fatalf("mint failure changed binding: %+v", got)
+	}
+	if got := pool.List(); len(got) != 2 {
+		t.Fatalf("mint failure changed registry: %+v", got)
+	}
+	if len(transitions) != 0 {
+		t.Fatalf("mint failure published transitions: %+v", transitions)
+	}
+}
+
 func TestConversationAgentSwitch_ConversationSaveFailureRollsBack(t *testing.T) {
 	pool, reg, sw, _ := dormantSwitchFixture(t, "")
 	runPoolReady(t, pool)
