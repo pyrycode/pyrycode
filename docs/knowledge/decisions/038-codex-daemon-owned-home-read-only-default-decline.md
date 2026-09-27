@@ -133,7 +133,7 @@ for the full posture table and the sticky-override reasoning (an omitted
 field keeps the thread's previous, possibly looser, override — which is
 why every turn asserts all three rather than only the ones that changed).
 
-## Superseded in part (2026-09-25, #2587)
+## Superseded in part (2026-09-25, #2587; 2026-09-27, #2671)
 
 `OnServerRequest` is no longer unconditionally nil. `codex_runner.go`'s
 `codexApprovals` wires it to park `item/commandExecution/requestApproval`
@@ -146,10 +146,10 @@ stands:
   `config.toml` rewrite are unchanged — the sandbox and approval-policy
   *baseline* this decision sets still stands underneath #2586's per-turn
   overrides.
-- The default decline is unchanged for the other eight server-request
-  methods at 0.156.1, including the legacy `applyPatchApproval`/
-  `execCommandApproval` and the experimental `item/tool/requestUserInput` —
-  #2587 explicitly kept them out of scope.
+- Eligible `item/tool/requestUserInput` batches now reach the shared question
+  panel. Invalid batches and unsupported server requests keep the default
+  decline. The legacy `applyPatchApproval`/`execCommandApproval` methods
+  remain unsupported.
 - `auth.json` is still never read, copied, linked or moved by the daemon.
 - Nothing answers `accept` by default: a request is only ever accepted
   through an explicit operator decision resolving the registry entry, and

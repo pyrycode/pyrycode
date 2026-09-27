@@ -594,6 +594,9 @@ func (r *codexRunner) runOnce(ctx context.Context, threadID string, seq uint64) 
 	r.client = nil
 	r.state.ChildPID = 0
 	r.mu.Unlock()
+	// Serialize the final stdin close with any server request still on the
+	// read loop, including one that arrived after declineAll closed admission.
+	r.cfg.Approvals.closeInput(client)
 	exitErr := stopCodexClient(client)
 	if exited {
 		// A peer that exited on its own cannot receive a response. Clear its
@@ -946,10 +949,13 @@ type codexApprovals struct {
 	surface  *approvalSurfaceReport
 	tag      *streamSessionTag
 
-	mu      sync.Mutex
-	cond    *sync.Cond
-	live    map[string]*codexApproval // registry id → parked request
-	changes map[string][]string       // fileChange item id → its paths
+	mu   sync.Mutex
+	cond *sync.Cond
+	// requestMu joins an in-flight read-loop handler before stdin is closed.
+	// It is never held while waiting for an operator or for process exit.
+	requestMu sync.RWMutex
+	live      map[string]*codexApproval // registry id → parked request
+	changes   map[string][]string       // fileChange item id → its paths
 
 	// accepting and handling fence registration against terminal drains.
 	// A request that entered handle before a drain is included in that drain;
@@ -963,10 +969,11 @@ type codexApprovals struct {
 // on its own, before the registry entry is resolved, so its await writes
 // nothing to Codex.
 type codexApproval struct {
-	req       *codexsup.ServerRequest
-	questions []codexQuestionRef
-	responded chan struct{}
-	withdrawn atomic.Bool
+	req        *codexsup.ServerRequest
+	questions  []codexQuestionRef
+	responded  chan struct{}
+	responseMu sync.Mutex
+	withdrawn  atomic.Bool
 }
 
 type codexQuestionRef struct {
@@ -1041,6 +1048,8 @@ func (a *codexApprovals) handle(req *codexsup.ServerRequest) {
 		_ = req.Decline()
 		return
 	}
+	a.requestMu.RLock()
+	defer a.requestMu.RUnlock()
 	if !a.beginRequest() {
 		a.declineClosed(req)
 		return
@@ -1081,6 +1090,19 @@ func (a *codexApprovals) handle(req *codexsup.ServerRequest) {
 	go a.await(id, ap, parked, pending)
 }
 
+// closeInput completes every read-loop handler that began while the peer was
+// writable before closing its stdin. Stop then waits for the process without
+// holding requestMu, so a final notification cannot deadlock the read loop.
+func (a *codexApprovals) closeInput(client *codexsup.Client) {
+	if a == nil {
+		client.CloseInput()
+		return
+	}
+	a.requestMu.Lock()
+	client.CloseInput()
+	a.requestMu.Unlock()
+}
+
 // declineClosed handles a request that reached the read loop after a terminal
 // fence. An eligible question still receives its schema-shaped empty answer;
 // malformed questions and every unsupported request retain default-decline.
@@ -1102,11 +1124,7 @@ func (a *codexApprovals) await(id string, ap *codexApproval, parked permbridge.R
 	surfaced := make(chan func(), 1)
 	go func() { surfaced <- a.surface.surface(parked) }()
 	verdict := pending.Await()
-	a.mu.Lock()
-	if a.live[id] == ap {
-		delete(a.live, id)
-	}
-	a.mu.Unlock()
+	ap.responseMu.Lock()
 	if !ap.withdrawn.Load() {
 		if ap.questions != nil {
 			_ = ap.req.Respond(codexQuestionResponse(ap.questions, verdict))
@@ -1115,6 +1133,12 @@ func (a *codexApprovals) await(id string, ap *codexApproval, parked permbridge.R
 		}
 	}
 	close(ap.responded)
+	ap.responseMu.Unlock()
+	a.mu.Lock()
+	if a.live[id] == ap {
+		delete(a.live, id)
+	}
+	a.mu.Unlock()
 	retire := <-surfaced
 	retire()
 }
@@ -1294,17 +1318,23 @@ func (a *codexApprovals) observe(method string, params json.RawMessage) {
 		// Every match: Codex numbers requests per process, and an entry from a
 		// dead process may linger until its await deletes it. Resolving that
 		// one again is a registry no-op.
-		var ids []string
+		type matchedApproval struct {
+			id string
+			ap *codexApproval
+		}
+		var matched []matchedApproval
 		a.mu.Lock()
 		for id, ap := range a.live {
 			if bytes.Equal(bytes.TrimSpace(ap.req.ID), want) {
-				ap.withdrawn.Store(true)
-				ids = append(ids, id)
+				matched = append(matched, matchedApproval{id: id, ap: ap})
 			}
 		}
 		a.mu.Unlock()
-		for _, id := range ids {
-			a.registry.Resolve(id, permbridge.Deny(reasonCodexWithdrawn))
+		for _, entry := range matched {
+			entry.ap.responseMu.Lock()
+			entry.ap.withdrawn.Store(true)
+			entry.ap.responseMu.Unlock()
+			a.registry.Resolve(entry.id, permbridge.Deny(reasonCodexWithdrawn))
 		}
 	}
 }

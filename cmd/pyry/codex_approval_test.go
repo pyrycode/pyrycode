@@ -475,6 +475,79 @@ func TestCodexQuestion_ControlledProcessTeardownReturnsEmpty(t *testing.T) {
 	}
 }
 
+func TestCodexQuestion_DrainJoinsAnswerBeforeClose(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "turns.jsonl")
+	h, f := newQuestionCodexRunner(t, time.Minute, log)
+	h.run(t)
+	h.bound(t, nil)
+	h.turn(t, "[fakecodex:question]")
+	waitPush(t, f.pushed)
+	shown := lastQuestionShown(t, f.bcast.pushes)
+
+	a := h.r.cfg.Approvals
+	a.mu.Lock()
+	var ap *codexApproval
+	for _, live := range a.live {
+		ap = live
+	}
+	a.mu.Unlock()
+	if ap == nil {
+		t.Fatal("question was not tracked while parked")
+	}
+	// Hold the answer just after the registry resolves it. Teardown must
+	// still find this request and join the Codex response before returning.
+	ap.responseMu.Lock()
+	if !f.bridge.AnswerQuestion(shown.QuestionBatchID, []protocol.QuestionAnswerEntry{
+		{QuestionIndex: 0, Values: []string{"Go"}},
+		{QuestionIndex: 1, Values: []string{"Direct"}},
+	}) {
+		ap.responseMu.Unlock()
+		t.Fatal("AnswerQuestion did not consume the Codex batch")
+	}
+	drained := make(chan struct{})
+	go func() {
+		h.r.BeginTeardown()
+		close(drained)
+	}()
+	a.mu.Lock()
+	for a.accepting {
+		a.cond.Wait()
+	}
+	a.mu.Unlock()
+	select {
+	case <-drained:
+		ap.responseMu.Unlock()
+		t.Fatal("teardown returned before the Codex response completed")
+	default:
+	}
+	ap.responseMu.Unlock()
+	select {
+	case <-drained:
+	case <-time.After(10 * time.Second):
+		t.Fatal("teardown did not finish after the response completed")
+	}
+	h.await(t, "turn end", isTurnEnd)
+	if got := questionResponseFromLog(t, log); len(got) != 2 {
+		t.Fatalf("Codex response = %#v, want both answers", got)
+	}
+}
+
+func TestCodexQuestion_RequestAfterDrainGetsEmptyAnswer(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "turns.jsonl")
+	h, f := newQuestionCodexRunner(t, time.Minute, log)
+	h.run(t)
+	h.bound(t, nil)
+	h.r.cfg.Approvals.declineAll(reasonCodexTeardown)
+	h.turn(t, "[fakecodex:question]")
+	h.await(t, "turn end", isTurnEnd)
+	if got := questionResponseFromLog(t, log); len(got) != 0 {
+		t.Fatalf("Codex response = %#v, want empty answers", got)
+	}
+	if got := pushTypes(f.bcast.pushes); len(got) != 0 {
+		t.Fatalf("post-fence question surfaced: %v", got)
+	}
+}
+
 func TestCodexApprovals_DrainFencesInFlightRegistration(t *testing.T) {
 	registry := permbridge.New()
 	approvals := newCodexApprovals(registry, time.Minute, &approvalSurfaceReport{}, nil)
@@ -567,7 +640,7 @@ func TestCodexQuestion_InterruptResponseDoesNotWaitForSurface(t *testing.T) {
 	}
 	close(releaseSurface)
 	if !interruptedBeforeSurface {
-		interruptErr = <-interruptDone
+		<-interruptDone
 		t.Fatal("Interrupt waited for the blocked question surface")
 	}
 	if interruptErr != nil {
