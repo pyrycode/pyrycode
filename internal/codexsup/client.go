@@ -279,9 +279,14 @@ func (c *Client) handshake(ctx context.Context) error {
 			Title   string `json:"title"`
 			Version string `json:"version"`
 		} `json:"clientInfo"`
+		Capabilities struct {
+			ExperimentalAPI bool `json:"experimentalApi"`
+		} `json:"capabilities"`
 	}{}
 	params.ClientInfo.Name, params.ClientInfo.Title = clientName, "Pyrycode"
 	params.ClientInfo.Version = c.clientVersion
+	// Granular approval policy is gated by this app-server capability.
+	params.Capabilities.ExperimentalAPI = true
 	var res struct {
 		UserAgent string `json:"userAgent"`
 	}
@@ -337,11 +342,18 @@ func (c *Client) Err() error {
 	}
 }
 
+// CloseInput closes the process's stdin without waiting for exit. A caller
+// that must coordinate the final close with server-request replies can call
+// this first, then Stop after releasing its own lock.
+func (c *Client) CloseInput() {
+	c.stopOnce.Do(func() { _ = c.stdin.Close() })
+}
+
 // Stop closes the process's stdin, on which app-server exits, and waits for
 // the exit. If ctx ends first the process is sent SIGTERM, then SIGKILL after
 // killGrace. It returns Err.
 func (c *Client) Stop(ctx context.Context) error {
-	c.stopOnce.Do(func() { _ = c.stdin.Close() })
+	c.CloseInput()
 	select {
 	case <-c.done:
 	case <-ctx.Done():

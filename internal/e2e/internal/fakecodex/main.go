@@ -33,7 +33,9 @@
 //	FAKECODEX_MODEL_LIST_FAIL  non-empty: model/list answers an error.
 //	FAKECODEX_TURN_LOG    a file path: each turn/start's params are
 //	                      appended to it as one line, before the response,
-//	                      so a test can read the overrides a turn carried.
+//	                      so a test can read the overrides a turn carried;
+//	                      question markers also append the response they
+//	                      received as a questionResponse line.
 //	FAKECODEX_THREAD_LOG  a file path: each thread/start and thread/resume
 //	                      is appended to it as one line
 //	                      {"method":<method>,"params":<params>}, before the
@@ -57,6 +59,12 @@
 //	                      response the client sends later for that request
 //	                      is appended to FAKECODEX_TURN_LOG as
 //	                      {"lateResponse":<id>}.
+//	[fakecodex:question]  sends one requestUserInput batch with two
+//	                      single-select questions. Its response is appended
+//	                      to FAKECODEX_TURN_LOG as {"questionResponse":...}.
+//	[fakecodex:question-withdraw] sends the same batch, then resolves it
+//	                      before an answer. A late response is logged like
+//	                      the approval withdrawal marker.
 //	[fakecodex:hold]      after turn/started the turn waits until
 //	                      turn/interrupt names it, so a test has a running
 //	                      turn to interrupt.
@@ -85,11 +93,13 @@ import (
 )
 
 const (
-	codexVersion   = "0.156.1"
-	markerApproval = "[fakecodex:approval]"
-	markerWithdraw = "[fakecodex:withdraw]"
-	markerHold     = "[fakecodex:hold]"
-	markerUsage    = "[fakecodex:usage]"
+	codexVersion           = "0.156.1"
+	markerApproval         = "[fakecodex:approval]"
+	markerWithdraw         = "[fakecodex:withdraw]"
+	markerQuestion         = "[fakecodex:question]"
+	markerQuestionWithdraw = "[fakecodex:question-withdraw]"
+	markerHold             = "[fakecodex:hold]"
+	markerUsage            = "[fakecodex:usage]"
 
 	// fakeCommand is the command an approval turn asks to run.
 	fakeCommand = "echo fakecodex"
@@ -140,7 +150,7 @@ var emittedNotifications = []string{
 	"turn/completed",
 }
 
-var serverRequests = []string{"item/commandExecution/requestApproval"}
+var serverRequests = []string{"item/commandExecution/requestApproval", "item/tool/requestUserInput"}
 
 type rpcError struct {
 	Code    int    `json:"code"`
@@ -177,11 +187,16 @@ type server struct {
 	werr    error
 
 	mu      sync.Mutex
-	turns   map[string]chan struct{}        // running turn id → closed on interrupt
-	pending map[string]chan json.RawMessage // server request id → the client's result
+	turns   map[string]chan struct{}  // running turn id → closed on interrupt
+	pending map[string]pendingRequest // server request id → the client's result
 	// withdrawn holds the ids of server requests resolved before any answer.
 	withdrawn map[string]bool
 	requests  int
+}
+
+type pendingRequest struct {
+	result      chan json.RawMessage
+	logQuestion bool
 }
 
 func main() {
@@ -208,7 +223,7 @@ func run(in io.Reader, out io.Writer, codexHome, version string, signedOut bool,
 		threadLog: threadLog,
 		out:       out,
 		turns:     map[string]chan struct{}{},
-		pending:   map[string]chan json.RawMessage{},
+		pending:   map[string]pendingRequest{},
 		withdrawn: map[string]bool{},
 	}
 	sc := bufio.NewScanner(in)
@@ -241,12 +256,15 @@ func (s *server) handle(f incoming) {
 		// no reply. Unknown ones are ignored.
 	case len(f.ID) > 0:
 		s.mu.Lock()
-		ch, ok := s.pending[string(f.ID)]
+		pending, ok := s.pending[string(f.ID)]
 		delete(s.pending, string(f.ID))
 		late := s.withdrawn[string(f.ID)]
 		s.mu.Unlock()
 		if ok {
-			ch <- f.Result
+			if pending.logQuestion {
+				_ = appendLog(s.turnLog, []byte(`{"questionResponse":`+string(f.Result)+`}`))
+			}
+			pending.result <- f.Result
 		}
 		if late {
 			_ = appendLog(s.turnLog, []byte(`{"lateResponse":`+string(f.ID)+`}`))
@@ -526,6 +544,12 @@ func (t *turn) run(text string) {
 	if strings.Contains(text, markerWithdraw) {
 		t.withdrawnApproval()
 	}
+	if strings.Contains(text, markerQuestionWithdraw) {
+		t.withdrawnQuestion()
+	} else if strings.Contains(text, markerQuestion) && !t.question() {
+		t.complete("interrupted")
+		return
+	}
 	if strings.Contains(text, markerApproval) && !t.approval() {
 		t.complete("interrupted")
 		return
@@ -547,6 +571,50 @@ func (t *turn) run(text string) {
 	delete(t.s.turns, t.id)
 	t.complete("completed")
 	t.s.mu.Unlock()
+}
+
+func (t *turn) questionParams() map[string]any {
+	return map[string]any{
+		"threadId": t.threadID, "turnId": t.id, "itemId": t.itemID("question"), "isBlocking": true,
+		"questions": []any{
+			map[string]any{"id": "language", "header": "Language", "question": "Which language?", "isOther": true, "isSecret": false, "options": []any{
+				map[string]any{"label": "Go", "description": "Use Go"}, map[string]any{"label": "Rust", "description": "Use Rust"},
+			}},
+			map[string]any{"id": "style", "header": "Style", "question": "Which style?", "isOther": true, "isSecret": false, "options": []any{
+				map[string]any{"label": "Direct", "description": "Keep it direct"}, map[string]any{"label": "Layered", "description": "Add layers"},
+			}},
+		},
+	}
+}
+
+func (t *turn) question() bool {
+	t.s.mu.Lock()
+	t.s.requests++
+	reqID := json.RawMessage(fmt.Sprintf(`"fakecodex-question-%d"`, t.s.requests))
+	answer := make(chan json.RawMessage, 1)
+	t.s.pending[string(reqID)] = pendingRequest{result: answer, logQuestion: true}
+	t.s.mu.Unlock()
+	t.s.send(message{ID: reqID, Method: "item/tool/requestUserInput", Params: t.questionParams()})
+	select {
+	case <-answer:
+	case <-t.interrupt:
+		t.s.mu.Lock()
+		delete(t.s.pending, string(reqID))
+		t.s.mu.Unlock()
+		return false
+	}
+	t.s.notify("serverRequest/resolved", map[string]any{"threadId": t.threadID, "requestId": reqID})
+	return true
+}
+
+func (t *turn) withdrawnQuestion() {
+	t.s.mu.Lock()
+	t.s.requests++
+	reqID := json.RawMessage(fmt.Sprintf(`"fakecodex-question-%d"`, t.s.requests))
+	t.s.withdrawn[string(reqID)] = true
+	t.s.mu.Unlock()
+	t.s.send(message{ID: reqID, Method: "item/tool/requestUserInput", Params: t.questionParams()})
+	t.s.notify("serverRequest/resolved", map[string]any{"threadId": t.threadID, "requestId": reqID})
 }
 
 // usage reports one model call's tokens and the model's context window.
@@ -572,7 +640,7 @@ func (t *turn) approval() bool {
 	t.s.requests++
 	reqID := json.RawMessage(fmt.Sprintf(`"fakecodex-approval-%d"`, t.s.requests))
 	decision := make(chan json.RawMessage, 1)
-	t.s.pending[string(reqID)] = decision
+	t.s.pending[string(reqID)] = pendingRequest{result: decision}
 	t.s.mu.Unlock()
 
 	t.s.send(message{ID: reqID, Method: "item/commandExecution/requestApproval", Params: map[string]any{

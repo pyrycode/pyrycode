@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/permbridge"
+	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/questionbridge"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
@@ -42,6 +44,18 @@ func newApprovalCodexRunner(t *testing.T, window time.Duration, turnLog string) 
 	h := newTestCodexRunner(t)
 	h.r.cfg.Approvals = newCodexApprovals(p.registry, window, surface, nil)
 	return h, p
+}
+
+func newQuestionCodexRunner(t *testing.T, window time.Duration, turnLog string) (*codexHarnessT, questionFixture) {
+	t.Helper()
+	if turnLog != "" {
+		t.Setenv("FAKECODEX_TURN_LOG", turnLog)
+	}
+	f := newQuestionFixture(t, "codex-conversation", discardLogger())
+	surface := &approvalSurfaceReport{show: f.bridge.Surface}
+	h := newTestCodexRunner(t)
+	h.r.cfg.Approvals = newCodexApprovals(f.perm, window, surface, nil)
+	return h, f
 }
 
 func (p *approvalProbe) nextShown(t *testing.T) permbridge.Request {
@@ -269,6 +283,395 @@ func TestCodexApproval_TeardownDeclines(t *testing.T) {
 		t.Fatalf("tool result = %q, want declined", got)
 	}
 	p.awaitRetired(t, req.ToolUseID)
+}
+
+func TestCodexQuestionRequest(t *testing.T) {
+	valid := `{"threadId":"t","turnId":"turn","itemId":"item","isBlocking":true,"questions":[` +
+		`{"id":"language","header":"Language","question":"Which language?","isOther":true,"isSecret":false,"options":[{"label":"Go","description":"Use Go"},{"label":"Rust","description":"Use Rust"}]},` +
+		`{"id":"style","header":"Style","question":"Which style?","isOther":true,"isSecret":false,"options":[{"label":"Direct","description":"Keep it direct"},{"label":"Layered","description":"Add layers"}]}` +
+		`]}`
+	req, refs, ok := codexQuestionRequest(json.RawMessage(valid))
+	if !ok {
+		t.Fatal("valid Codex question request was rejected")
+	}
+	if req.ToolName != questionbridge.ToolName {
+		t.Fatalf("ToolName = %q, want %q", req.ToolName, questionbridge.ToolName)
+	}
+	wantRefs := []codexQuestionRef{{id: "language", text: "Which language?"}, {id: "style", text: "Which style?"}}
+	if fmt.Sprint(refs) != fmt.Sprint(wantRefs) {
+		t.Fatalf("refs = %#v, want %#v", refs, wantRefs)
+	}
+	batch, ok := questionbridge.Parse(req.ToolName, req.Input)
+	if !ok {
+		t.Fatal("adapted request does not pass the shared parser")
+	}
+	want := []protocol.Question{
+		{Text: "Which language?", Header: "Language", Options: []protocol.QuestionOption{{Label: "Go", Description: "Use Go"}, {Label: "Rust", Description: "Use Rust"}}, MultiSelect: false},
+		{Text: "Which style?", Header: "Style", Options: []protocol.QuestionOption{{Label: "Direct", Description: "Keep it direct"}, {Label: "Layered", Description: "Add layers"}}, MultiSelect: false},
+	}
+	if fmt.Sprint(batch.Questions) != fmt.Sprint(want) {
+		t.Fatalf("questions = %#v, want %#v", batch.Questions, want)
+	}
+	q := func(id, text string) string {
+		return fmt.Sprintf(`{"id":%q,"header":"H","question":%q,"isOther":true,"isSecret":false,"options":[{"label":"a","description":"a"},{"label":"b","description":"b"}]}`, id, text)
+	}
+	fiveQuestions := `{"threadId":"t","turnId":"turn","itemId":"item","isBlocking":true,"questions":[` +
+		q("1", "Q1") + `,` + q("2", "Q2") + `,` + q("3", "Q3") + `,` + q("4", "Q4") + `,` + q("5", "Q5") + `]}`
+	fiveOptions := strings.Replace(valid,
+		`{"label":"Go","description":"Use Go"},{"label":"Rust","description":"Use Rust"}`,
+		`{"label":"1","description":"1"},{"label":"2","description":"2"},{"label":"3","description":"3"},{"label":"4","description":"4"},{"label":"5","description":"5"}`, 1)
+
+	for _, tc := range []struct {
+		name, params string
+	}{
+		{"malformed", `[`},
+		{"no questions", `{"threadId":"t","turnId":"turn","itemId":"item","isBlocking":true,"questions":[]}`},
+		{"five questions", fiveQuestions},
+		{"missing required string", strings.Replace(valid, `"question":"Which language?",`, ``, 1)},
+		{"missing flag", strings.Replace(valid, `"isSecret":false,`, ``, 1)},
+		{"other disabled", strings.Replace(valid, `"isOther":true`, `"isOther":false`, 1)},
+		{"secret", strings.Replace(valid, `"isSecret":false`, `"isSecret":true`, 1)},
+		{"duplicate id", strings.Replace(valid, `"id":"style"`, `"id":"language"`, 1)},
+		{"duplicate text", strings.Replace(valid, `"Which style?"`, `"Which language?"`, 1)},
+		{"one option", strings.Replace(valid, `,{"label":"Rust","description":"Use Rust"}`, ``, 1)},
+		{"five options", fiveOptions},
+		{"missing option field", strings.Replace(valid, `"description":"Use Go"`, `"detail":"Use Go"`, 1)},
+		{"displayed input over bound", strings.Replace(valid, "Use Go", strings.Repeat("x", 17000), 1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, ok := codexQuestionRequest(json.RawMessage(tc.params)); ok {
+				t.Fatal("ineligible Codex question request was accepted")
+			}
+		})
+	}
+}
+
+func TestCodexQuestionResponse(t *testing.T) {
+	refs := []codexQuestionRef{{id: "language", text: "Which language?"}, {id: "style", text: "Which style?"}}
+	allow := permbridge.Allow(json.RawMessage(`{"questions":[],"answers":{"Which language?":"Go","Which style?":"custom"}}`))
+	got := codexQuestionResponse(refs, allow)
+	want := map[string]codexQuestionAnswer{"language": {Answers: []string{"Go"}}, "style": {Answers: []string{"custom"}}}
+	if fmt.Sprint(got.Answers) != fmt.Sprint(want) {
+		t.Fatalf("answers = %#v, want %#v", got.Answers, want)
+	}
+	for _, verdict := range []permbridge.Verdict{
+		permbridge.Deny("no"),
+		permbridge.Allow(json.RawMessage(`{"questions":[],"answers":{"Which language?":"Go"}}`)),
+		permbridge.Allow(json.RawMessage(`{"questions":[],"answers":{"Which language?":["Go"],"Which style?":"custom"}}`)),
+	} {
+		if got := codexQuestionResponse(refs, verdict); len(got.Answers) != 0 {
+			t.Fatalf("invalid verdict produced answers: %#v", got.Answers)
+		}
+	}
+}
+
+func TestCodexQuestion_AnswerRoundTrip(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "turns.jsonl")
+	h, f := newQuestionCodexRunner(t, time.Minute, log)
+	h.run(t)
+	h.bound(t, nil)
+	h.turn(t, "[fakecodex:question]")
+	waitPush(t, f.pushed)
+	shown := lastQuestionShown(t, f.bcast.pushes)
+	if len(shown.Questions) != 2 || shown.Questions[0].Text != "Which language?" || shown.Questions[0].Header != "Language" || shown.Questions[0].MultiSelect {
+		t.Fatalf("question_shown = %#v, want the ordered Codex batch", shown)
+	}
+	if got := shown.Questions[0].Options; len(got) != 2 || got[0].Label != "Go" || got[0].Description != "Use Go" {
+		t.Fatalf("first options = %#v, want Codex labels and descriptions", got)
+	}
+	if !f.bridge.AnswerQuestion(shown.QuestionBatchID, []protocol.QuestionAnswerEntry{
+		{QuestionIndex: 0, Values: []string{"Go"}},
+		{QuestionIndex: 1, Values: []string{"a free-text style"}},
+	}) {
+		t.Fatal("AnswerQuestion did not consume the Codex batch")
+	}
+	waitPush(t, f.pushed)
+	h.await(t, "turn end", isTurnEnd)
+	if got := pushTypes(f.bcast.pushes); fmt.Sprint(got) != fmt.Sprint([]string{protocol.TypeQuestionShown, protocol.TypeQuestionDismissed}) {
+		t.Fatalf("pushes = %v, want exactly question_shown then question_dismissed", got)
+	}
+	response := questionResponseFromLog(t, log)
+	want := map[string]any{
+		"language": map[string]any{"answers": []any{"Go"}},
+		"style":    map[string]any{"answers": []any{"a free-text style"}},
+	}
+	if fmt.Sprint(response) != fmt.Sprint(want) {
+		t.Fatalf("Codex response = %#v, want %#v", response, want)
+	}
+}
+
+func TestCodexQuestion_NoAnswerTerminalsReturnEmpty(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		window time.Duration
+		act    func(*codexHarnessT, questionFixture, string)
+	}{
+		{name: "refused", window: time.Minute, act: func(_ *codexHarnessT, f questionFixture, id string) { f.bridge.RefuseQuestion(id) }},
+		{name: "window expiry", window: 2 * time.Second},
+		{name: "interrupt", window: time.Minute, act: func(h *codexHarnessT, _ questionFixture, _ string) { _ = h.r.Interrupt() }},
+		{name: "teardown", window: time.Minute, act: func(h *codexHarnessT, _ questionFixture, _ string) { h.r.BeginTeardown() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log := filepath.Join(t.TempDir(), "turns.jsonl")
+			h, f := newQuestionCodexRunner(t, tc.window, log)
+			h.run(t)
+			h.bound(t, nil)
+			h.turn(t, "[fakecodex:question]")
+			waitPush(t, f.pushed)
+			if tc.act != nil {
+				shown := lastQuestionShown(t, f.bcast.pushes)
+				tc.act(h, f, shown.QuestionBatchID)
+			}
+			waitPush(t, f.pushed)
+			h.await(t, "turn end", isTurnEnd)
+			if got := questionResponseFromLog(t, log); len(got) != 0 {
+				t.Fatalf("Codex response = %#v, want empty answers", got)
+			}
+			if got := pushTypes(f.bcast.pushes); fmt.Sprint(got) != fmt.Sprint([]string{protocol.TypeQuestionShown, protocol.TypeQuestionDismissed}) {
+				t.Fatalf("pushes = %v, want exactly question_shown then question_dismissed", got)
+			}
+		})
+	}
+}
+
+func TestCodexQuestion_WithdrawnWritesNothing(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "turns.jsonl")
+	h, f := newQuestionCodexRunner(t, time.Minute, log)
+	h.run(t)
+	h.bound(t, nil)
+	h.turn(t, "[fakecodex:question-withdraw]")
+	waitPush(t, f.pushed)
+	waitPush(t, f.pushed)
+	h.await(t, "turn end", isTurnEnd)
+	h.turn(t, "following turn")
+	h.await(t, "turn end", isTurnEnd)
+	if got := pushTypes(f.bcast.pushes); fmt.Sprint(got) != fmt.Sprint([]string{protocol.TypeQuestionShown, protocol.TypeQuestionDismissed}) {
+		t.Fatalf("pushes = %v, want exactly question_shown then question_dismissed", got)
+	}
+	for _, line := range readTurnLog(t, log) {
+		if _, answered := line["questionResponse"]; answered {
+			t.Fatalf("withdrawn request received a response: %#v", line)
+		}
+		if _, late := line["lateResponse"]; late {
+			t.Fatalf("withdrawn request received a late response: %#v", line)
+		}
+	}
+}
+
+func TestCodexQuestion_ControlledProcessTeardownReturnsEmpty(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "turns.jsonl")
+	h, f := newQuestionCodexRunner(t, time.Minute, log)
+	stop := h.run(t)
+	h.bound(t, nil)
+	h.turn(t, "[fakecodex:question]")
+	waitPush(t, f.pushed)
+	stop()
+	waitPush(t, f.pushed)
+	if got := pushTypes(f.bcast.pushes); fmt.Sprint(got) != fmt.Sprint([]string{protocol.TypeQuestionShown, protocol.TypeQuestionDismissed}) {
+		t.Fatalf("pushes = %v, want exactly question_shown then question_dismissed", got)
+	}
+	if got := questionResponseFromLog(t, log); len(got) != 0 {
+		t.Fatalf("Codex response = %#v, want empty answers", got)
+	}
+}
+
+func TestCodexQuestion_DrainJoinsAnswerBeforeClose(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "turns.jsonl")
+	h, f := newQuestionCodexRunner(t, time.Minute, log)
+	h.run(t)
+	h.bound(t, nil)
+	h.turn(t, "[fakecodex:question]")
+	waitPush(t, f.pushed)
+	shown := lastQuestionShown(t, f.bcast.pushes)
+
+	a := h.r.cfg.Approvals
+	a.mu.Lock()
+	var ap *codexApproval
+	for _, live := range a.live {
+		ap = live
+	}
+	a.mu.Unlock()
+	if ap == nil {
+		t.Fatal("question was not tracked while parked")
+	}
+	// Hold the answer just after the registry resolves it. Teardown must
+	// still find this request and join the Codex response before returning.
+	ap.responseMu.Lock()
+	if !f.bridge.AnswerQuestion(shown.QuestionBatchID, []protocol.QuestionAnswerEntry{
+		{QuestionIndex: 0, Values: []string{"Go"}},
+		{QuestionIndex: 1, Values: []string{"Direct"}},
+	}) {
+		ap.responseMu.Unlock()
+		t.Fatal("AnswerQuestion did not consume the Codex batch")
+	}
+	drained := make(chan struct{})
+	go func() {
+		h.r.BeginTeardown()
+		close(drained)
+	}()
+	a.mu.Lock()
+	for a.accepting {
+		a.cond.Wait()
+	}
+	a.mu.Unlock()
+	select {
+	case <-drained:
+		ap.responseMu.Unlock()
+		t.Fatal("teardown returned before the Codex response completed")
+	default:
+	}
+	ap.responseMu.Unlock()
+	select {
+	case <-drained:
+	case <-time.After(10 * time.Second):
+		t.Fatal("teardown did not finish after the response completed")
+	}
+	h.await(t, "turn end", isTurnEnd)
+	if got := questionResponseFromLog(t, log); len(got) != 2 {
+		t.Fatalf("Codex response = %#v, want both answers", got)
+	}
+}
+
+func TestCodexQuestion_RequestAfterDrainGetsEmptyAnswer(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "turns.jsonl")
+	h, f := newQuestionCodexRunner(t, time.Minute, log)
+	h.run(t)
+	h.bound(t, nil)
+	h.r.cfg.Approvals.declineAll(reasonCodexTeardown)
+	h.turn(t, "[fakecodex:question]")
+	h.await(t, "turn end", isTurnEnd)
+	if got := questionResponseFromLog(t, log); len(got) != 0 {
+		t.Fatalf("Codex response = %#v, want empty answers", got)
+	}
+	if got := pushTypes(f.bcast.pushes); len(got) != 0 {
+		t.Fatalf("post-fence question surfaced: %v", got)
+	}
+}
+
+func TestCodexApprovals_DrainFencesInFlightRegistration(t *testing.T) {
+	registry := permbridge.New()
+	approvals := newCodexApprovals(registry, time.Minute, &approvalSurfaceReport{}, nil)
+	approvals.open()
+	if !approvals.beginRequest() {
+		t.Fatal("open approval lifecycle refused a request")
+	}
+
+	const id = "late-question"
+	parked := permbridge.Request{ToolUseID: id, ToolName: questionbridge.ToolName}
+	pending, err := registry.Register(id, parked, time.Minute)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	ap := &codexApproval{
+		questions: []codexQuestionRef{{id: "choice", text: "Choice?"}},
+		responded: make(chan struct{}),
+	}
+	verdict := make(chan permbridge.Verdict, 1)
+	go func() {
+		verdict <- pending.Await()
+		close(ap.responded)
+	}()
+
+	drained := make(chan struct{})
+	go func() {
+		approvals.declineAll(reasonCodexTeardown)
+		close(drained)
+	}()
+
+	// Wait until declineAll has closed the lifecycle. It must still be
+	// waiting for the request that entered before the fence.
+	approvals.mu.Lock()
+	for approvals.accepting {
+		approvals.cond.Wait()
+	}
+	approvals.live[id] = ap
+	approvals.mu.Unlock()
+	select {
+	case <-drained:
+		t.Fatal("declineAll returned before the in-flight request registered")
+	default:
+	}
+
+	approvals.endRequest()
+	select {
+	case <-drained:
+	case <-time.After(10 * time.Second):
+		t.Fatal("declineAll did not finish after the in-flight request registered")
+	}
+	if got := <-verdict; got.Behavior != permbridge.BehaviorDeny {
+		t.Fatalf("late request verdict = %#v, want deny", got)
+	}
+	if _, live := registry.Lookup(id); live {
+		t.Fatal("late request remained parked after drain")
+	}
+}
+
+func TestCodexQuestion_InterruptResponseDoesNotWaitForSurface(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "turns.jsonl")
+	t.Setenv("FAKECODEX_TURN_LOG", log)
+	surfaceEntered := make(chan struct{})
+	releaseSurface := make(chan struct{})
+	retired := make(chan struct{})
+	surface := &approvalSurfaceReport{show: func(permbridge.Request) func() {
+		close(surfaceEntered)
+		<-releaseSurface
+		return func() { close(retired) }
+	}}
+	h := newTestCodexRunner(t)
+	h.r.cfg.Approvals = newCodexApprovals(permbridge.New(), time.Minute, surface, nil)
+	h.run(t)
+	h.bound(t, nil)
+	h.turn(t, "[fakecodex:question]")
+
+	select {
+	case <-surfaceEntered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("question did not enter the blocking surface")
+	}
+	interruptDone := make(chan error, 1)
+	go func() { interruptDone <- h.r.Interrupt() }()
+
+	var interruptErr error
+	interruptedBeforeSurface := false
+	select {
+	case interruptErr = <-interruptDone:
+		interruptedBeforeSurface = true
+	case <-time.After(5 * time.Second):
+	}
+	close(releaseSurface)
+	if !interruptedBeforeSurface {
+		<-interruptDone
+		t.Fatal("Interrupt waited for the blocked question surface")
+	}
+	if interruptErr != nil {
+		t.Fatalf("Interrupt = %v", interruptErr)
+	}
+	select {
+	case <-retired:
+	case <-time.After(10 * time.Second):
+		t.Fatal("question was not retired after the surface completed")
+	}
+	h.await(t, "turn end", isTurnEnd)
+	if got := questionResponseFromLog(t, log); len(got) != 0 {
+		t.Fatalf("Codex response = %#v, want empty answers", got)
+	}
+}
+
+func questionResponseFromLog(t *testing.T, path string) map[string]any {
+	t.Helper()
+	for _, line := range readTurnLog(t, path) {
+		response, ok := line["questionResponse"].(map[string]any)
+		if !ok {
+			continue
+		}
+		answers, ok := response["answers"].(map[string]any)
+		if !ok {
+			t.Fatalf("question response has no answers object: %#v", response)
+		}
+		return answers
+	}
+	t.Fatal("turn log has no question response")
+	return nil
 }
 
 func TestCodexDecision(t *testing.T) {

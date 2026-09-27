@@ -167,6 +167,22 @@ func TestHandshakeAndStop(t *testing.T) {
 	}
 }
 
+func TestHandshakeEnablesGranularApprovals(t *testing.T) {
+	_, p := startPeer(t, "pyrycode/0.156.1", Config{})
+	frame := p.next(methodInitialize)
+	var params struct {
+		Capabilities struct {
+			ExperimentalAPI bool `json:"experimentalApi"`
+		} `json:"capabilities"`
+	}
+	if err := json.Unmarshal(frame["params"], &params); err != nil {
+		t.Fatal(err)
+	}
+	if !params.Capabilities.ExperimentalAPI {
+		t.Fatal("initialize did not enable the capability required by granular approvals")
+	}
+}
+
 // TestClientPID: a started app-server reports its process id; the in-memory
 // peer has no process and reports 0.
 func TestClientPID(t *testing.T) {

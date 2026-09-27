@@ -21,6 +21,9 @@ const codexHomeConfig = `# Written by pyry on every Codex session start; edits a
 approval_policy = "on-request"
 sandbox_mode = "read-only"
 approvals_reviewer = "user"
+
+[features]
+default_mode_request_user_input = true
 `
 
 // codexHomePath is the Codex home for the instance whose directory is

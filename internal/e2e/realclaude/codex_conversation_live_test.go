@@ -8,6 +8,7 @@ package realclaude
 // conversation with agent codex, sets its model and effort through
 // set_session_settings, streams one plain turn, and then answers a file-write
 // permission modal twice: declined, the file stays absent; accepted, it appears.
+// TestCodexQuestionLive shares the setup and verifies a clarifying question.
 //
 // The two Codex tests before it drive the runner directly (TestCodexApprovalLive
 // in cmd/pyry) or the raw app-server (TestCaptureLive in internal/codexsup).
@@ -62,13 +63,14 @@ import (
 // package main cannot be imported. Below it the daemon refuses the session.
 const codexMinVersionForTest = "0.156.1"
 
-// The model and effort the conversation is set to before its first turn. The
-// explicit version, because resolveCodexModel sends a family unchanged while the
-// daemon holds no Codex model list, and a session with no model would run on the
-// account default.
+// The session stores an offered family. The model menu must resolve that family
+// to the requested GPT-6 version before the test starts a turn.
 const (
-	codexLiveModel  = "gpt-6-luna"
-	codexLiveEffort = "low"
+	codexLiveFamily         = "luna"
+	codexLiveModel          = "gpt-6-luna"
+	codexLiveFallbackFamily = "sol"
+	codexLiveFallbackModel  = "gpt-6-sol"
+	codexLiveEffort         = "low"
 )
 
 // codexTurnBudget bounds one Codex turn from send to turn_end, modal answers
@@ -79,7 +81,30 @@ const codexTurnBudget = 3 * time.Minute
 // running Codex yet, so the reply is a registry read or write.
 const codexSettingsBudget = 30 * time.Second
 
-func TestCodexConversationLive(t *testing.T) {
+// TestCodexQuestionLive is the focused #2671 live gate.
+func TestCodexQuestionLive(t *testing.T) {
+	h, convID, sessionID, reqID, nonce := startCodexLiveConversation(t)
+
+	// Luna/low gets the first chance to call request_user_input. If it
+	// completes without asking, record that result, then retry on Sol/low.
+	question := runCodexQuestionTurn(t, h, convID, reqID, codexLiveModel,
+		codexQuestionPrompt(nonce))
+	if !question.asked {
+		fmt.Fprintln(os.Stderr, "#2671 Codex question probe: GPT-6 Luna at low effort did not call request_user_input; retrying with GPT-6 Sol at low effort")
+		next := waitCodexLiveModel(t, h, convID, question.nextReqID, codexLiveFallbackFamily, codexLiveFallbackModel)
+		next = setCodexLiveModel(t, h, sessionID, convID, next, codexLiveFallbackFamily)
+		question = runCodexQuestionTurn(t, h, convID, next, codexLiveFallbackModel,
+			codexQuestionPrompt(nonce+1))
+		if !question.asked {
+			t.Fatal("GPT-6 Sol at low effort also completed without calling request_user_input")
+		}
+		fmt.Fprintln(os.Stderr, "#2671 Codex question probe: GPT-6 Sol at low effort completed the request_user_input answer round trip")
+	} else {
+		fmt.Fprintln(os.Stderr, "#2671 Codex question probe: GPT-6 Luna at low effort completed the request_user_input answer round trip")
+	}
+}
+
+func startCodexLiveConversation(t *testing.T) (*perConvHarness, string, string, uint64, int64) {
 	codexBin, captureHome := requireCodexCapture(t)
 	h := startCodexConversationHarness(t, codexBin, captureHome)
 	nonce := time.Now().UnixNano()
@@ -108,29 +133,33 @@ func TestCodexConversationLive(t *testing.T) {
 	// AC 2, settings half: learn the session the way an app does, set model and
 	// effort, then read them back. The read-back is the deterministic guard that
 	// no turn below runs on the account's default model.
-	sessionID := requestSessionSettings(t, h, convID, 3).SessionID
+	reqID := uint64(3)
+	sessionID := requestSessionSettings(t, h, convID, reqID).SessionID
 	if sessionID == "" {
 		t.Fatal("session_settings carried an empty session_id")
 	}
+	reqID++
+	reqID = waitCodexLiveModel(t, h, convID, reqID, codexLiveFamily, codexLiveModel)
 	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
-		ID:   4,
+		ID:   reqID,
 		Type: protocol.TypeSetSessionSettings,
 		TS:   time.Now().UTC(),
 		Payload: mustJSON(t, protocol.SetSessionSettingsPayload{
 			SessionID: sessionID,
-			Model:     ptr(codexLiveModel),
+			Model:     ptr(codexLiveFamily),
 			Effort:    ptr(codexLiveEffort),
 		}),
 	})
-	drainForReply(t, h.phone, h.initRecv, protocol.TypeSessionSettingsUpdated, 4, codexSettingsBudget)
-	if got := requestSessionSettings(t, h, convID, 5); got.Model != codexLiveModel || got.Effort != codexLiveEffort {
+	drainForReply(t, h.phone, h.initRecv, protocol.TypeSessionSettingsUpdated, reqID, codexSettingsBudget)
+	reqID++
+	if got := requestSessionSettings(t, h, convID, reqID); got.Model != codexLiveFamily || got.Effort != codexLiveEffort {
 		t.Fatalf("session_settings after the change = model %q effort %q, want %q %q; not starting a turn on another model",
-			got.Model, got.Effort, codexLiveModel, codexLiveEffort)
+			got.Model, got.Effort, codexLiveFamily, codexLiveEffort)
 	}
+	reqID++
 
 	// AC 2, turn half: a plain turn streams a non-empty delta and ends. Codex's
 	// words are not asserted.
-	reqID := uint64(6)
 	plain := runCodexTurn(t, h, convID, reqID,
 		fmt.Sprintf("Reply with a single short word. run=%d", nonce),
 		turnevent.PermissionOptionKindRejectOnce)
@@ -138,9 +167,14 @@ func TestCodexConversationLive(t *testing.T) {
 		t.Fatal("the plain Codex turn ended without a non-empty assistant_delta")
 	}
 
+	return h, convID, sessionID, plain.nextReqID, nonce
+}
+
+func TestCodexConversationLive(t *testing.T) {
+	h, convID, _, reqID, nonce := startCodexLiveConversation(t)
 	// AC 3, declined: the write asks, the answer is no, the file stays absent.
 	declined := fmt.Sprintf("declined-%d.txt", nonce)
-	decline := runCodexTurn(t, h, convID, plain.nextReqID, touchPrompt(declined),
+	decline := runCodexTurn(t, h, convID, reqID, touchPrompt(declined),
 		turnevent.PermissionOptionKindRejectOnce)
 	_, statErr := os.Stat(filepath.Join(h.workdir, declined))
 	if decline.modals == 0 {
@@ -164,6 +198,74 @@ func TestCodexConversationLive(t *testing.T) {
 	}
 }
 
+func codexQuestionPrompt(nonce int64) string {
+	return fmt.Sprintf("Before answering, use request_user_input to ask exactly one single-select question about which in-memory cache eviction policy I prefer. Offer exactly two options with descriptions and allow a free-text alternative. After I answer, reply with only the option or free-text value I selected. Do not choose for me and do not use another tool. run=%d", nonce)
+}
+
+// waitCodexLiveModel lets the daemon's asynchronous model read finish before
+// set_session_settings validates the requested family against the offered menu.
+func waitCodexLiveModel(t *testing.T, h *perConvHarness, convID string, reqID uint64, family, model string) uint64 {
+	t.Helper()
+	deadline := time.Now().Add(codexSettingsBudget)
+	for time.Now().Before(deadline) {
+		sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
+			ID:      reqID,
+			Type:    protocol.TypeRequestModelList,
+			TS:      time.Now().UTC(),
+			Payload: mustJSON(t, protocol.RequestModelListPayload{ConversationID: convID}),
+		})
+		env := drainForCorrelatedEnvelope2281(t, h.phone, h.initRecv, reqID, time.Until(deadline))
+		reqID++
+		switch env.Type {
+		case protocol.TypeModelList:
+			var menu protocol.ModelListPayload
+			if err := json.Unmarshal(env.Payload, &menu); err != nil {
+				t.Fatalf("decode model_list: %v", err)
+			}
+			for _, option := range menu.Models {
+				if option.Agent == string(protocol.AgentCodex) && option.Value == family &&
+					option.ResolvedModel == model && slices.Contains(option.EffortLevels, codexLiveEffort) {
+					return reqID
+				}
+			}
+		case protocol.TypeError:
+			var unavailable protocol.ErrorPayload
+			if err := json.Unmarshal(env.Payload, &unavailable); err != nil ||
+				unavailable.Code != protocol.CodeModelListUnavailable || !unavailable.Retryable {
+				t.Fatalf("request_model_list returned an unexpected error: %s", env.Payload)
+			}
+		default:
+			t.Fatalf("request_model_list returned %q", env.Type)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("Codex family %q did not offer %q at effort %q within %s", family, model, codexLiveEffort, codexSettingsBudget)
+	return reqID
+}
+
+// setCodexLiveModel changes the running conversation's model without changing
+// its low effort, then reads the settings back before the fallback turn starts.
+func setCodexLiveModel(t *testing.T, h *perConvHarness, sessionID, convID string, reqID uint64, model string) uint64 {
+	t.Helper()
+	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
+		ID:   reqID,
+		Type: protocol.TypeSetSessionSettings,
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, protocol.SetSessionSettingsPayload{
+			SessionID: sessionID,
+			Model:     ptr(model),
+			Effort:    ptr(codexLiveEffort),
+		}),
+	})
+	drainForReply(t, h.phone, h.initRecv, protocol.TypeSessionSettingsUpdated, reqID, codexSettingsBudget)
+	reqID++
+	got := requestSessionSettings(t, h, convID, reqID)
+	if got.Model != model || got.Effort != codexLiveEffort {
+		t.Fatalf("fallback session_settings = model %q effort %q, want %q %q", got.Model, got.Effort, model, codexLiveEffort)
+	}
+	return reqID + 1
+}
+
 // touchPrompt asks Codex to create name in its working directory, which is the
 // conversation's workspace (the daemon workdir, since the create named no cwd).
 func touchPrompt(name string) string {
@@ -175,6 +277,130 @@ type codexTurn struct {
 	modals    int    // permission modals answered for the conversation
 	sawDelta  bool   // a non-empty assistant_delta for the conversation arrived
 	nextReqID uint64 // the next unused request id
+}
+
+type codexQuestionTurn struct {
+	asked     bool
+	nextReqID uint64
+}
+
+// runCodexQuestionTurn sends a question-producing prompt and drains until the
+// turn and, when surfaced, its batch are both terminal. A model that completes
+// without calling the tool is reported to the caller so Luna can fall back to
+// Sol. Every surfaced question value stays out of the live-gate log.
+func runCodexQuestionTurn(t *testing.T, h *perConvHarness, convID string, reqID uint64, model, text string) codexQuestionTurn {
+	t.Helper()
+	sealSendMessage(t, h.phone, h.initSend, reqID, convID, fmt.Sprintf("m-%d", reqID), text)
+	reqID++
+	var (
+		asked, dismissed, ended bool
+		batchID                 string
+		selected                string
+		otherLabels             []string
+		reply                   strings.Builder
+	)
+	deadline := time.Now().Add(codexTurnBudget)
+	for {
+		if asked && dismissed && ended {
+			requireCodexQuestionChoice(t, reply.String(), selected, otherLabels)
+			return codexQuestionTurn{asked: true, nextReqID: reqID}
+		}
+		env, ok := receiveEnvelope(t, h, time.Until(deadline))
+		if !ok {
+			t.Fatalf("Codex question turn on %s did not finish within %s (asked=%v dismissed=%v ended=%v)", model, codexTurnBudget, asked, dismissed, ended)
+		}
+		switch env.Type {
+		case protocol.TypeError:
+			t.Fatalf("error envelope during the Codex question turn: %s", string(env.Payload))
+		case protocol.TypeModalShown:
+			t.Fatal("Codex raised a permission modal instead of request_user_input for the question prompt")
+		case protocol.TypeQuestionShown:
+			if asked {
+				t.Fatal("Codex surfaced more than one question batch for one prompt")
+			}
+			var shown protocol.QuestionShownPayload
+			if err := json.Unmarshal(env.Payload, &shown); err != nil {
+				t.Fatalf("decode question_shown: %v", err)
+			}
+			if shown.ConversationID != convID || shown.QuestionBatchID == "" || len(shown.Questions) != 1 {
+				t.Fatalf("question_shown has conversation %q, batch-present %v, and %d questions; want %q, true, and 1", shown.ConversationID, shown.QuestionBatchID != "", len(shown.Questions), convID)
+			}
+			q := shown.Questions[0]
+			if q.MultiSelect || len(q.Options) < 2 {
+				t.Fatalf("Codex question has multi_select=%v and %d options; want false and at least 2", q.MultiSelect, len(q.Options))
+			}
+			selected = q.Options[len(q.Options)-1].Label
+			if selected == "" {
+				t.Fatal("Codex question's selected option has an empty label")
+			}
+			for _, option := range q.Options[:len(q.Options)-1] {
+				otherLabels = append(otherLabels, option.Label)
+			}
+			batchID = shown.QuestionBatchID
+			asked = true
+			sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
+				ID:   reqID,
+				Type: protocol.TypeQuestionAnswer,
+				TS:   time.Now().UTC(),
+				Payload: mustJSON(t, protocol.QuestionAnswerPayload{
+					QuestionBatchID: batchID,
+					AnswerToken:     fmt.Sprintf("e2e-2671-%d", reqID),
+					Answers: []protocol.QuestionAnswerEntry{{
+						QuestionIndex: 0,
+						Values:        []string{selected},
+					}},
+				}),
+			})
+			reqID++
+		case protocol.TypeQuestionDismissed:
+			var gone protocol.QuestionDismissedPayload
+			if err := json.Unmarshal(env.Payload, &gone); err != nil {
+				t.Fatalf("decode question_dismissed: %v", err)
+			}
+			if !asked || gone.QuestionBatchID != batchID || gone.Source != wantQuestionSource || gone.Outcome != wantQuestionOutcome {
+				t.Fatalf("question_dismissed did not attribute the surfaced batch to the remote answer")
+			}
+			dismissed = true
+		case protocol.TypeAssistantDelta:
+			var delta protocol.AssistantDeltaPayload
+			if err := json.Unmarshal(env.Payload, &delta); err != nil {
+				t.Fatalf("decode assistant_delta: %v", err)
+			}
+			if delta.ConversationID == convID {
+				reply.WriteString(delta.Text)
+			}
+		case protocol.TypeTurnEnd:
+			var end protocol.TurnEndPayload
+			if err := json.Unmarshal(env.Payload, &end); err != nil {
+				t.Fatalf("decode turn_end: %v", err)
+			}
+			if end.ConversationID != convID {
+				continue
+			}
+			if !asked {
+				t.Logf("%s at low effort completed the question prompt without calling request_user_input", model)
+				return codexQuestionTurn{nextReqID: reqID}
+			}
+			ended = true
+		}
+	}
+}
+
+func requireCodexQuestionChoice(t *testing.T, reply, selected string, otherLabels []string) {
+	t.Helper()
+	answer := strings.ToLower(reply)
+	selectedAt := strings.Index(answer, strings.ToLower(selected))
+	if selectedAt < 0 {
+		t.Fatal("Codex's post-question reply did not name the selected option")
+	}
+	for _, other := range otherLabels {
+		if other == "" || strings.EqualFold(other, selected) {
+			continue
+		}
+		if at := strings.Index(answer, strings.ToLower(other)); at >= 0 && at < selectedAt {
+			t.Fatal("Codex's post-question reply named an unselected option before the selected option")
+		}
+	}
 }
 
 // runCodexTurn sends text on convID as request reqID and drains the wire in

@@ -5,6 +5,7 @@
 Accepted (#2620). Partially superseded — see [Superseded in part
 (2026-09-25, #2586)](#superseded-in-part-2026-09-25-2586) and
 [Superseded in part (2026-09-25, #2587)](#superseded-in-part-2026-09-25-2587)
+and [Superseded in part (2026-09-27, #2671)](#superseded-in-part-2026-09-27-2671)
 below.
 
 ## Context
@@ -128,7 +129,7 @@ What this decision got right and what still stands unchanged:
 - `auth.json` is still never read, copied, linked or moved by the daemon.
 
 See [codexsup-package.md § Production
-wiring](../features/codexsup-package.md#production-wiring--the-cmdpyry-codex-runner-2620)
+wiring](../features/codexsup-package-production-wiring.md#production-wiring--the-cmdpyry-codex-runner-2620)
 for the full posture table and the sticky-override reasoning (an omitted
 field keeps the thread's previous, possibly looser, override — which is
 why every turn asserts all three rather than only the ones that changed).
@@ -149,7 +150,8 @@ stands:
 - The default decline is unchanged for the other eight server-request
   methods at 0.156.1, including the legacy `applyPatchApproval`/
   `execCommandApproval` and the experimental `item/tool/requestUserInput` —
-  #2587 explicitly kept them out of scope.
+  #2587 explicitly kept them out of scope. See the later #2671 supersession
+  below for eligible user-input requests.
 - `auth.json` is still never read, copied, linked or moved by the daemon.
 - Nothing answers `accept` by default: a request is only ever accepted
   through an explicit operator decision resolving the registry entry, and
@@ -159,11 +161,33 @@ stands:
   guarantee for those paths.
 
 See [codexsup-package.md § Approvals reach the permission modal
-(#2587)](../features/codexsup-package.md#approvals-reach-the-permission-modal-2587)
+(#2587)](../features/codexsup-package-production-wiring.md#approvals-reach-the-permission-modal-2587)
 for the adapter, the two security-review findings that shaped its final
 shape (decline rather than partially display a scope-changing field;
 mark a truncated display rather than cutting it silently), and the known
 test-coverage gap on the file-change correlation path.
+
+## Superseded in part (2026-09-27, #2671)
+
+`codexHomeConfig` now enables `default_mode_request_user_input` in the
+daemon-owned `[features]` table, while preserving the approval, sandbox and
+reviewer posture. `Client.handshake` declares `experimentalApi`, required by
+the granular approval policy in the live Codex path. That capability can
+expose experimental API methods and fields; the pinned method registration
+and the runner's parser remain the boundary for requests that can reach an
+operator.
+
+`codexApprovals` now routes eligible `item/tool/requestUserInput` batches to
+the existing question bridge. The bridge accepts an operator answer and the
+runner translates it back under Codex's original question IDs. Invalid or
+ineligible question batches and unsupported server requests still take the
+default-decline path. Refusal and other no-answer terminal paths return an
+empty answers object while the request is writable; a request Codex has
+already withdrawn is dismissed locally without a response. The daemon-owned
+home and the deny-by-default rule for all other requests remain in force.
+
+See [Codex production wiring](../features/codexsup-package-production-wiring.md#codex-questions-reach-the-shared-bridge-2671)
+for the eligibility and terminal boundaries.
 
 ## Related
 
@@ -175,5 +199,7 @@ test-coverage gap on the file-change correlation path.
 - #2586 — applies the stored posture per turn instead of fixing it read-only; see "Superseded in part" above.
 - #2587 — routes command and file-change approvals to the permission modal;
   see "Superseded in part (2026-09-25, #2587)" above.
+- #2671 — routes eligible Codex user-input batches to the question bridge;
+  see "Superseded in part (2026-09-27, #2671)" above.
 - #2621 — construction-time sign-in/version checks, the natural place to
   also detect a looser effective posture from outside `CODEX_HOME`.

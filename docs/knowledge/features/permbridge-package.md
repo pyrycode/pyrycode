@@ -29,7 +29,7 @@ This package shipped the registry **primitive only**, unwired and unit-tested in
   `SessionGrant` below — and the first proof that `Request.ToolName` and
   `Description` reach the modal unescaped (§ Domain types). See
   [codexsup-package.md § Approvals reach the permission modal
-  (#2587)](codexsup-package.md#approvals-reach-the-permission-modal-2587).
+  (#2587)](codexsup-package-production-wiring.md#approvals-reach-the-permission-modal-2587).
 - **#2675 (landed)** — `Request` gains `SessionID string \`json:"-"\``, set by
   `stdioPermissionHandler.handle`/`codexApprovals.handle` from their own
   runner's `streamSessionTag` at park time (read at park, not construction, so
@@ -129,7 +129,7 @@ another entry in a path list on screen. A producer that fills these fields
 from anything the model or an external peer controls has to escape control
 and bidi-format runes itself before handing the `Request` to `Register` — see
 [codexsup-package.md § Approvals reach the permission modal
-(#2587)](codexsup-package.md#approvals-reach-the-permission-modal-2587)'s
+(#2587)](codexsup-package-production-wiring.md#approvals-reach-the-permission-modal-2587)'s
 `codexDisplay` for the pattern. Claude's own stdio and MCP producers have
 never needed this because Claude's ask-context fields aren't model-authored
 free text in the same way.

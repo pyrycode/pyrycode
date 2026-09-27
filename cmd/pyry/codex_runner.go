@@ -23,6 +23,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/acp"
 	"github.com/pyrycode/pyrycode/internal/codexsup"
 	"github.com/pyrycode/pyrycode/internal/permbridge"
+	"github.com/pyrycode/pyrycode/internal/questionbridge"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
 	"github.com/pyrycode/pyrycode/internal/turncommit"
@@ -570,6 +571,7 @@ func (r *codexRunner) runOnce(ctx context.Context, threadID string, seq uint64) 
 	if r.rotating && seq > r.armFreshSeq {
 		r.rotating = false
 	}
+	r.cfg.Approvals.open()
 	r.state.Phase = sessions.PhaseRunning
 	r.state.NextBackoff = 0
 	r.state.ChildPID = client.PID()
@@ -579,16 +581,28 @@ func (r *codexRunner) runOnce(ctx context.Context, threadID string, seq uint64) 
 	}
 	r.readModels(ctx, client)
 
+	exited := false
 	select {
 	case <-client.Done():
+		exited = true
 	case <-ctx.Done():
+		// The controlled teardown still has a writable peer. Resolve and join
+		// question responses before Stop closes its stdin.
+		r.cfg.Approvals.declineAll(reasonCodexExit)
 	}
 	r.mu.Lock()
 	r.client = nil
 	r.state.ChildPID = 0
 	r.mu.Unlock()
+	// Serialize the final stdin close with any server request still on the
+	// read loop, including one that arrived after declineAll closed admission.
+	r.cfg.Approvals.closeInput(client)
 	exitErr := stopCodexClient(client)
-	r.cfg.Approvals.declineAll(reasonCodexExit)
+	if exited {
+		// A peer that exited on its own cannot receive a response. Clear its
+		// parked UI without making the supervise loop wait on cleanup.
+		r.cfg.Approvals.declineAllNoWait(reasonCodexExit)
+	}
 	r.mu.Lock()
 	r.turnID = ""
 	r.mu.Unlock()
@@ -749,13 +763,21 @@ func (r *codexRunner) WriteUserTurn(ctx context.Context, _ string, payload []byt
 // so that turn's turn/completed has already cleared turnID when the refusal
 // returns.
 func (r *codexRunner) Interrupt() error {
-	r.cfg.Approvals.declineAll(reasonCodexInterrupt)
+	generation := r.cfg.Approvals.declineAll(reasonCodexInterrupt)
 	r.mu.Lock()
 	client, turnID := r.client, r.turnID
 	r.mu.Unlock()
 	if client == nil {
 		return streamsup.ErrNoLiveChild
 	}
+	defer func() {
+		r.mu.Lock()
+		reopen := r.client == client && !r.tearingDown
+		r.mu.Unlock()
+		if reopen {
+			r.cfg.Approvals.reopen(generation)
+		}
+	}()
 	if turnID == "" {
 		return nil
 	}
@@ -927,17 +949,44 @@ type codexApprovals struct {
 	surface  *approvalSurfaceReport
 	tag      *streamSessionTag
 
-	mu      sync.Mutex
-	live    map[string]*codexApproval // registry id → parked request
-	changes map[string][]string       // fileChange item id → its paths
+	mu   sync.Mutex
+	cond *sync.Cond
+	// requestMu joins an in-flight read-loop handler before stdin is closed.
+	// It is never held while waiting for an operator or for process exit.
+	requestMu sync.RWMutex
+	live      map[string]*codexApproval // registry id → parked request
+	changes   map[string][]string       // fileChange item id → its paths
+
+	// accepting and handling fence registration against terminal drains.
+	// A request that entered handle before a drain is included in that drain;
+	// one that enters afterward is answered synchronously without surfacing.
+	accepting  bool
+	handling   int
+	generation uint64
 }
 
 // codexApproval is one parked request. withdrawn is set when Codex resolved it
 // on its own, before the registry entry is resolved, so its await writes
 // nothing to Codex.
 type codexApproval struct {
-	req       *codexsup.ServerRequest
-	withdrawn atomic.Bool
+	req        *codexsup.ServerRequest
+	questions  []codexQuestionRef
+	responded  chan struct{}
+	responseMu sync.Mutex
+	withdrawn  atomic.Bool
+}
+
+type codexQuestionRef struct {
+	id   string
+	text string
+}
+
+type codexQuestionAnswer struct {
+	Answers []string `json:"answers"`
+}
+
+type codexQuestionResult struct {
+	Answers map[string]codexQuestionAnswer `json:"answers"`
 }
 
 // newCodexApprovals returns nil without a registry: every request then takes
@@ -946,7 +995,7 @@ func newCodexApprovals(registry *permbridge.Registry, timeout time.Duration, sur
 	if registry == nil {
 		return nil
 	}
-	return &codexApprovals{
+	a := &codexApprovals{
 		registry: registry,
 		timeout:  timeout,
 		surface:  surface,
@@ -954,6 +1003,41 @@ func newCodexApprovals(registry *permbridge.Registry, timeout time.Duration, sur
 		live:     make(map[string]*codexApproval),
 		changes:  make(map[string][]string),
 	}
+	a.cond = sync.NewCond(&a.mu)
+	return a
+}
+
+// open starts a new process lifecycle. No request can enter before the runner
+// has a writable client ready to own it.
+func (a *codexApprovals) open() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.generation++
+	a.accepting = true
+	a.cond.Broadcast()
+	a.mu.Unlock()
+}
+
+// beginRequest joins the current process lifecycle. A terminal drain closes
+// admission and waits for every request that already joined before snapshotting
+// live, so registration cannot land just after the snapshot.
+func (a *codexApprovals) beginRequest() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.accepting {
+		return false
+	}
+	a.handling++
+	return true
+}
+
+func (a *codexApprovals) endRequest() {
+	a.mu.Lock()
+	a.handling--
+	a.cond.Broadcast()
+	a.mu.Unlock()
 }
 
 // handle is codexsup.Config.OnServerRequest. It runs on the read loop, so it
@@ -964,6 +1048,13 @@ func (a *codexApprovals) handle(req *codexsup.ServerRequest) {
 		_ = req.Decline()
 		return
 	}
+	a.requestMu.RLock()
+	defer a.requestMu.RUnlock()
+	if !a.beginRequest() {
+		a.declineClosed(req)
+		return
+	}
+	defer a.endRequest()
 	var item struct {
 		ItemID string `json:"itemId"`
 	}
@@ -971,7 +1062,8 @@ func (a *codexApprovals) handle(req *codexsup.ServerRequest) {
 	a.mu.Lock()
 	paths := a.changes[item.ItemID]
 	a.mu.Unlock()
-	parked, ok := codexApprovalRequest(req.Method, req.Params, paths)
+	var questions []codexQuestionRef
+	parked, questions, ok := codexRequest(req.Method, req.Params, paths)
 	if !ok {
 		_ = req.Decline()
 		return
@@ -991,27 +1083,179 @@ func (a *codexApprovals) handle(req *codexsup.ServerRequest) {
 		_ = req.Decline()
 		return
 	}
-	ap := &codexApproval{req: req}
+	ap := &codexApproval{req: req, questions: questions, responded: make(chan struct{})}
 	a.mu.Lock()
 	a.live[id] = ap
 	a.mu.Unlock()
 	go a.await(id, ap, parked, pending)
 }
 
+// closeInput completes every read-loop handler that began while the peer was
+// writable before closing its stdin. Stop then waits for the process without
+// holding requestMu, so a final notification cannot deadlock the read loop.
+func (a *codexApprovals) closeInput(client *codexsup.Client) {
+	if a == nil {
+		client.CloseInput()
+		return
+	}
+	a.requestMu.Lock()
+	client.CloseInput()
+	a.requestMu.Unlock()
+}
+
+// declineClosed handles a request that reached the read loop after a terminal
+// fence. An eligible question still receives its schema-shaped empty answer;
+// malformed questions and every unsupported request retain default-decline.
+func (a *codexApprovals) declineClosed(req *codexsup.ServerRequest) {
+	if req.Method == "item/tool/requestUserInput" {
+		if _, refs, ok := codexQuestionRequest(req.Params); ok && refs != nil {
+			_ = req.Respond(codexQuestionResult{Answers: map[string]codexQuestionAnswer{}})
+			return
+		}
+	}
+	_ = req.Decline()
+}
+
 // await is the sole writer of the request's answer, and writes it only when
-// Codex is still waiting for it.
+// Codex is still waiting for it. Surfacing runs independently so a terminal
+// drain can join the response without waiting on a relay broadcast; retirement
+// still waits until both the response and the surface setup have completed.
 func (a *codexApprovals) await(id string, ap *codexApproval, parked permbridge.Request, pending *permbridge.Pending) {
-	retire := a.surface.surface(parked)
+	surfaced := make(chan func(), 1)
+	go func() { surfaced <- a.surface.surface(parked) }()
 	verdict := pending.Await()
+	ap.responseMu.Lock()
+	if !ap.withdrawn.Load() {
+		if ap.questions != nil {
+			_ = ap.req.Respond(codexQuestionResponse(ap.questions, verdict))
+		} else {
+			_ = ap.req.Respond(map[string]string{"decision": codexDecision(verdict)})
+		}
+	}
+	close(ap.responded)
+	ap.responseMu.Unlock()
 	a.mu.Lock()
 	if a.live[id] == ap {
 		delete(a.live, id)
 	}
 	a.mu.Unlock()
-	if !ap.withdrawn.Load() {
-		_ = ap.req.Respond(map[string]string{"decision": codexDecision(verdict)})
-	}
+	retire := <-surfaced
 	retire()
+}
+
+func codexRequest(method string, params json.RawMessage, paths []string) (permbridge.Request, []codexQuestionRef, bool) {
+	if method == "item/tool/requestUserInput" {
+		return codexQuestionRequest(params)
+	}
+	request, ok := codexApprovalRequest(method, params, paths)
+	return request, nil, ok
+}
+
+// codexQuestionRequest validates Codex's question shape, adapts it to the
+// shared AskUserQuestion input, and retains only the response correlation.
+// No subprocess-authored string reaches a log from this path.
+func codexQuestionRequest(params json.RawMessage) (permbridge.Request, []codexQuestionRef, bool) {
+	type option struct {
+		Label       *string `json:"label"`
+		Description *string `json:"description"`
+	}
+	type question struct {
+		ID       *string   `json:"id"`
+		Header   *string   `json:"header"`
+		Question *string   `json:"question"`
+		IsOther  *bool     `json:"isOther"`
+		IsSecret *bool     `json:"isSecret"`
+		Options  *[]option `json:"options"`
+	}
+	var input struct {
+		ThreadID   *string    `json:"threadId"`
+		TurnID     *string    `json:"turnId"`
+		ItemID     *string    `json:"itemId"`
+		IsBlocking *bool      `json:"isBlocking"`
+		Questions  []question `json:"questions"`
+	}
+	if json.Unmarshal(params, &input) != nil || input.ThreadID == nil || input.TurnID == nil || input.ItemID == nil || input.IsBlocking == nil {
+		return permbridge.Request{}, nil, false
+	}
+	if len(input.Questions) < 1 || len(input.Questions) > 4 {
+		return permbridge.Request{}, nil, false
+	}
+
+	type sharedOption struct {
+		Label       string `json:"label"`
+		Description string `json:"description"`
+	}
+	type sharedQuestion struct {
+		Question    string         `json:"question"`
+		Header      string         `json:"header"`
+		Options     []sharedOption `json:"options"`
+		MultiSelect bool           `json:"multiSelect"`
+	}
+	shared := struct {
+		Questions []sharedQuestion `json:"questions"`
+	}{Questions: make([]sharedQuestion, 0, len(input.Questions))}
+	refs := make([]codexQuestionRef, 0, len(input.Questions))
+	ids := make(map[string]struct{}, len(input.Questions))
+	texts := make(map[string]struct{}, len(input.Questions))
+	for _, q := range input.Questions {
+		if q.ID == nil || q.Header == nil || q.Question == nil || q.IsOther == nil || q.IsSecret == nil || !*q.IsOther || *q.IsSecret || q.Options == nil || len(*q.Options) < 2 || len(*q.Options) > 4 {
+			return permbridge.Request{}, nil, false
+		}
+		if _, duplicate := ids[*q.ID]; duplicate {
+			return permbridge.Request{}, nil, false
+		}
+		if _, duplicate := texts[*q.Question]; duplicate {
+			return permbridge.Request{}, nil, false
+		}
+		ids[*q.ID] = struct{}{}
+		texts[*q.Question] = struct{}{}
+		adapted := sharedQuestion{Question: *q.Question, Header: *q.Header, Options: make([]sharedOption, len(*q.Options))}
+		for i, o := range *q.Options {
+			if o.Label == nil || o.Description == nil {
+				return permbridge.Request{}, nil, false
+			}
+			adapted.Options[i] = sharedOption{Label: *o.Label, Description: *o.Description}
+		}
+		shared.Questions = append(shared.Questions, adapted)
+		refs = append(refs, codexQuestionRef{id: *q.ID, text: *q.Question})
+	}
+	adapted, err := json.Marshal(shared)
+	if err != nil {
+		return permbridge.Request{}, nil, false
+	}
+	if _, ok := questionbridge.Parse(questionbridge.ToolName, adapted); !ok {
+		return permbridge.Request{}, nil, false
+	}
+	return permbridge.Request{ToolName: questionbridge.ToolName, Input: adapted}, refs, true
+}
+
+// codexQuestionResponse converts the shared bridge's text-keyed, single-select
+// verdict back to Codex's id-keyed answer shape. Any incomplete or unexpected
+// verdict fails closed to an empty answer set.
+func codexQuestionResponse(refs []codexQuestionRef, verdict permbridge.Verdict) codexQuestionResult {
+	empty := codexQuestionResult{Answers: map[string]codexQuestionAnswer{}}
+	if verdict.Behavior != permbridge.BehaviorAllow {
+		return empty
+	}
+	var updated struct {
+		Answers map[string]json.RawMessage `json:"answers"`
+	}
+	if json.Unmarshal(verdict.UpdatedInput, &updated) != nil || len(updated.Answers) != len(refs) {
+		return empty
+	}
+	answers := make(map[string]codexQuestionAnswer, len(refs))
+	for _, ref := range refs {
+		raw, ok := updated.Answers[ref.text]
+		if !ok {
+			return empty
+		}
+		var value string
+		if json.Unmarshal(raw, &value) != nil {
+			return empty
+		}
+		answers[ref.id] = codexQuestionAnswer{Answers: []string{value}}
+	}
+	return codexQuestionResult{Answers: answers}
 }
 
 // codexDecision maps a registry verdict onto Codex's approval vocabulary. Only
@@ -1074,17 +1318,23 @@ func (a *codexApprovals) observe(method string, params json.RawMessage) {
 		// Every match: Codex numbers requests per process, and an entry from a
 		// dead process may linger until its await deletes it. Resolving that
 		// one again is a registry no-op.
-		var ids []string
+		type matchedApproval struct {
+			id string
+			ap *codexApproval
+		}
+		var matched []matchedApproval
 		a.mu.Lock()
 		for id, ap := range a.live {
 			if bytes.Equal(bytes.TrimSpace(ap.req.ID), want) {
-				ap.withdrawn.Store(true)
-				ids = append(ids, id)
+				matched = append(matched, matchedApproval{id: id, ap: ap})
 			}
 		}
 		a.mu.Unlock()
-		for _, id := range ids {
-			a.registry.Resolve(id, permbridge.Deny(reasonCodexWithdrawn))
+		for _, entry := range matched {
+			entry.ap.responseMu.Lock()
+			entry.ap.withdrawn.Store(true)
+			entry.ap.responseMu.Unlock()
+			a.registry.Resolve(entry.id, permbridge.Deny(reasonCodexWithdrawn))
 		}
 	}
 }
@@ -1092,20 +1342,62 @@ func (a *codexApprovals) observe(method string, params json.RawMessage) {
 // declineAll resolves every request this runner has parked to a decline and
 // forgets the held file-change paths. The registry one-shot arbitrates a
 // racing answer or window; await stays the sole writer.
-func (a *codexApprovals) declineAll(reason string) {
+func (a *codexApprovals) declineAll(reason string) uint64 {
+	return a.resolveAll(reason, true)
+}
+
+// declineAllNoWait resolves parked requests after their Codex process has
+// already exited. There is no writable peer to join, so the supervise loop may
+// continue while await performs local retirement.
+func (a *codexApprovals) declineAllNoWait(reason string) uint64 {
+	return a.resolveAll(reason, false)
+}
+
+func (a *codexApprovals) resolveAll(reason string, waitQuestions bool) uint64 {
 	if a == nil {
-		return
+		return 0
 	}
 	a.mu.Lock()
-	ids := make([]string, 0, len(a.live))
-	for id := range a.live {
-		ids = append(ids, id)
+	a.generation++
+	generation := a.generation
+	a.accepting = false
+	a.cond.Broadcast()
+	for a.handling > 0 {
+		a.cond.Wait()
+	}
+	type liveApproval struct {
+		id string
+		ap *codexApproval
+	}
+	live := make([]liveApproval, 0, len(a.live))
+	for id, ap := range a.live {
+		live = append(live, liveApproval{id: id, ap: ap})
 	}
 	clear(a.changes)
 	a.mu.Unlock()
-	for _, id := range ids {
-		a.registry.Resolve(id, permbridge.Deny(reason))
+	for _, entry := range live {
+		a.registry.Resolve(entry.id, permbridge.Deny(reason))
 	}
+	for _, entry := range live {
+		if waitQuestions && entry.ap.questions != nil {
+			<-entry.ap.responded
+		}
+	}
+	return generation
+}
+
+// reopen resumes admission only when no newer terminal path or process start
+// superseded the drain that produced generation.
+func (a *codexApprovals) reopen(generation uint64) {
+	if a == nil || generation == 0 {
+		return
+	}
+	a.mu.Lock()
+	if a.generation == generation {
+		a.accepting = true
+		a.cond.Broadcast()
+	}
+	a.mu.Unlock()
 }
 
 // codexApprovalRequest builds the modal's request from a command or
