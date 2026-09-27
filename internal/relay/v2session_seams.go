@@ -818,6 +818,13 @@ type V2SessionConfig struct {
 	// carries only one nullable scalar, never a full child settings response.
 	EffectiveEffortFor func(ctx context.Context, conversationID string) (*string, bool)
 
+	// MemorySearchFor supplies a wire-ready search-access report for the named
+	// conversation and the session ID accepted by RunConfigFor. The handler calls
+	// it once per fully decoded, resolved settings request; it retains no result.
+	// An error produces an unknown report with no providers. Optional: nil omits
+	// memory_search. This runs on the conn's app-frame worker and must honor ctx.
+	MemorySearchFor func(ctx context.Context, conversationID, sessionID string) (protocol.MemorySearchReport, error)
+
 	// CapabilitiesFor reports the agent-and-model half of a session's capability
 	// list (#2646) for a multi_agent conn's session_settings reply.
 	// handleRequestSessionSettings calls it once, only after RunConfigFor accepted,

@@ -4,8 +4,9 @@
 canonical workspace. It describes search access, not saved conversations or
 knowledge capture. The package is a read-only detector and result model. The
 client wire contract is defined in
-[the mobile protocol](../../protocol-mobile.md#memory_search-2692); its producer
-is #2693.
+[the mobile protocol](../../protocol-mobile.md#memory_search-2692). The relay
+publishes a supplied report through `MemorySearchFor` (#2693); #2694 wires the
+live daemon provider.
 
 ## Declarations
 
