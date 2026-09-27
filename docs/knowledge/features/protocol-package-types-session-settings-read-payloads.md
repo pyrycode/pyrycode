@@ -24,6 +24,7 @@ type SessionSettingsPayload struct {
     UsedTokens      int            `json:"used_tokens"`
     WindowTokens    int            `json:"window_tokens"`
     Capabilities    *SessionCapabilities `json:"capabilities,omitempty"`
+    MemorySearch    *MemorySearchReport `json:"memory_search,omitempty"`
 }
 
 type SessionCapabilities struct {
@@ -65,7 +66,7 @@ type SessionCapabilities struct {
   fresh session; a non-zero `UsedTokens` against `WindowTokens 0` is the
   disproved case, and that used figure is still the true context size). See
   [contextwindow-package.md](contextwindow-package.md#context-window-size--a-believed-default-not-an-asserted-fact).
-- **`EffectiveEffort` is the one optional reply field because its absence is
+- **`EffectiveEffort` has three wire states because its absence is
   itself information.** A present string is Claude's confirmed applied level,
   present `null` means Claude reported no effort parameter, and omission means
   the reading is unavailable or unsupported. A plain `*string` is insufficient:
@@ -99,8 +100,8 @@ type SessionCapabilities struct {
   "confirmation unavailable", not necessarily "nothing resolved", and
   `yolo: false` alone is not evidence that permissions are enforced.
 
-- **`Capabilities` (#2646) is a pointer, unlike every other reply field, and
-  that is load-bearing rather than stylistic.** The existing read tests
+- **Optional slice-bearing reports use pointers to keep the reply comparable.**
+  The existing read tests
   compare two `SessionSettingsPayload` values with `!=`; a struct-valued field
   holding slices (`EffortLevels`, `Models`, …) would make the payload
   uncomparable and fail that comparison at **compile** time, not at review
@@ -116,6 +117,17 @@ type SessionCapabilities struct {
   [`v2-session-manager-state-machine-inbound-request-session-settings-the-rea.md`](v2-session-manager-state-machine-inbound-request-session-settings-the-rea.md)
   for how the relay populates it from the same functions the
   `set_session_settings` checks run, so a listed option can never be refused.
+
+- **`MemorySearch` has the same outer omission rule but a different inner
+  empty-list rule.** A nil `*MemorySearchReport` omits `memory_search`, preserving
+  older replies; this means no client report, not confirmed absence. Once the
+  report is present, even a nil `Providers` slice must marshal as `[]` rather
+  than `null`. The detector can return no rows both for confirmed `absent` and
+  for incomplete-evidence `unknown`, so clients must read aggregate
+  `availability` rather than infer absence from the empty array. An installed
+  but disabled provider retains `installed: true` in its row, avoiding a false
+  install prompt. See the [mobile wire contract](../../protocol-mobile.md#memory_search-2692)
+  and [detector semantics](memorysearch-package.md#aggregate-availability).
 
 Golden round-trips in `settings_test.go`: `TestRequestSessionSettingsPayload_RoundTrip`
 against `testdata/request_session_settings.json` (non-empty fixture id — this

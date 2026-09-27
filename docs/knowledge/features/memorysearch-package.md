@@ -3,8 +3,9 @@
 `Detect(Input)` reports whether a selected agent can use memory search in one
 canonical workspace. It describes search access, not saved conversations or
 knowledge capture. The package is a read-only detector and result model. The
-client wire contract in [the mobile protocol](../../protocol-mobile.md) belongs
-to #2690.
+client wire contract is defined in
+[the mobile protocol](../../protocol-mobile.md#memory_search-2692); its producer
+is #2693.
 
 ## Declarations
 
