@@ -250,4 +250,10 @@ type ConversationUpdatedPayload struct {
 	// safety property: rendering it safely stays the client's job.
 	WorkspaceLabel *string   `json:"workspace_label"`
 	LastUsedAt     time.Time `json:"last_used_at"`
+	// Agent is the conversation's agent, AgentClaude or AgentCodex (#2669), as
+	// the conversations row's Agent is resolved. No producer sets it: the relay
+	// adds it where the frame is sealed for a conn that negotiated
+	// CapabilityMultiAgent, so one rule covers every producer and a conn without
+	// that capability reads the frame with no agent key, as before.
+	Agent string `json:"agent,omitempty"`
 }

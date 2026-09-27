@@ -1454,7 +1454,7 @@ func (m *V2SessionManager) forwardAppReply(s *V2Session, reply protocol.RoutingE
 			"conn_id", s.connID)
 		return
 	}
-	ciphertext, err := s.send.Encrypt(reply.Frame)
+	ciphertext, err := s.send.Encrypt(m.agentTaggedReply(s, reply.Frame))
 	if err != nil {
 		// Realistically unreachable under correct flynn/noise. Drop the
 		// reply rather than emit the unencrypted frame.
@@ -1943,6 +1943,7 @@ func (m *V2SessionManager) forwardEnvelope(_ context.Context, connID string, env
 		return nil
 	}
 	env = m.mergedForConn(s, env)
+	env = m.agentTaggedForConn(s, env)
 	envJSON, err := json.Marshal(env)
 	if err != nil {
 		// Defensive: a well-typed envelope (e.g. a message envelope, a
