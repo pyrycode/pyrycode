@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -425,5 +426,88 @@ func TestSessionSettingsPayload_CapabilitiesPresence(t *testing.T) {
 	want := `"capabilities":{"interrupt":true,"mid_turn_input":false,"slash_commands":false,"mcp_servers":false,"context_usage_detail":false,"effort_levels":[],"permission_modes":["default"],"attachment_types":["*/*"],"models":[]}`
 	if !strings.Contains(string(b), want) {
 		t.Errorf("with capabilities = %s, want it to contain %s", b, want)
+	}
+}
+
+func TestSessionSettingsPayload_MemorySearchRoundTrip(t *testing.T) {
+	t.Parallel()
+	base := SessionSettingsPayload{
+		SessionID:      "sess-a",
+		Model:          "opus",
+		Effort:         "high",
+		PermissionMode: "default",
+		UsedTokens:     12480,
+		WindowTokens:   200000,
+	}
+	cases := []struct {
+		name    string
+		fixture string
+		want    *MemorySearchReport
+	}{
+		{
+			name:    "available",
+			fixture: "session_settings_memory_available.json",
+			want: &MemorySearchReport{Availability: "available", Providers: []MemorySearchProvider{
+				{ID: "qmd", DisplayName: "QMD", Installed: true, Enabled: true, Availability: "available"},
+			}},
+		},
+		{
+			name:    "installed but disabled",
+			fixture: "session_settings_memory_disabled.json",
+			want: &MemorySearchReport{Availability: "unavailable", Providers: []MemorySearchProvider{
+				{ID: "memsearch", DisplayName: "Memsearch", Installed: true, Enabled: false, Availability: "unavailable"},
+			}},
+		},
+		{
+			name:    "confirmed absent",
+			fixture: "session_settings_memory_absent.json",
+			want:    &MemorySearchReport{Availability: "absent", Providers: []MemorySearchProvider{}},
+		},
+		{
+			name:    "unknown evidence",
+			fixture: "session_settings_memory_unknown.json",
+			want:    &MemorySearchReport{Availability: "unknown", Providers: []MemorySearchProvider{}},
+		},
+		{name: "older reply", fixture: "session_settings.json"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			raw := readFixture(t, tc.fixture)
+			var env Envelope
+			if err := json.Unmarshal(raw, &env); err != nil {
+				t.Fatalf("unmarshal envelope: %v", err)
+			}
+			if env.Type != TypeSessionSettings {
+				t.Fatalf("Type: got %q, want %q", env.Type, TypeSessionSettings)
+			}
+			var got SessionSettingsPayload
+			if err := json.Unmarshal(env.Payload, &got); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+			want := base
+			want.MemorySearch = tc.want
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("payload: got %#v, want %#v", got, want)
+			}
+			roundTripEnvelope(t, env, got, raw)
+		})
+	}
+}
+
+func TestSessionSettingsPayload_MemorySearchEmptyProviders(t *testing.T) {
+	t.Parallel()
+	for _, providers := range [][]MemorySearchProvider{nil, {}} {
+		payload := SessionSettingsPayload{MemorySearch: &MemorySearchReport{
+			Availability: "absent",
+			Providers:    providers,
+		}}
+		out, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if !strings.Contains(string(out), `"memory_search":{"availability":"absent","providers":[]}`) {
+			t.Errorf("present report must emit an empty array: %s", out)
+		}
 	}
 }

@@ -596,7 +596,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`set_session_settings`** | phone → binary | no | **New in v2.** Inbound control — a paired client changes one session's per-session model / effort / permission mode / YOLO. Interactive-capability-gated (enforced by the handler #845). See [Session settings](#session-settings-v2). |
 | **`session_settings_updated`** | binary → phone | no | **New in v2.** Outbound reply confirming a `set_session_settings`, correlated by `in_reply_to` (#845). See [Session settings](#session-settings-v2). |
 | **`request_session_settings`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for the run configuration of the conversation it names in `conversation_id`. A request that names no conversation names no session, and is answered with the all-zero reply. Interactive-capability-gated. See [Session settings](#session-settings-v2). |
-| **`session_settings`** | binary → phone | no | **New in v2.** Outbound reply carrying the current run configuration, correlated by `in_reply_to` (#491). See [Session settings](#session-settings-v2). |
+| **`session_settings`** | binary → phone | no | **New in v2.** Outbound reply carrying the current run configuration and optional reports, correlated by `in_reply_to` (#491). See [Session settings](#session-settings-v2). |
 | **`session_error`** | binary → phone | no | **New in v2.** Unsolicited, conversation-scoped terminal session-error frame — the daemon gave up delivering a conversation's queued backlog (`session.blocked`; #1007). Carries `conversation_id`, `code`, `message`; NOT `in_reply_to`-correlated. See [Error codes](#error-codes). |
 | **`attachment_chunk`** | either | no | **New in v2.** One slice of one attachment's bytes, carrying the whole transfer's metadata on every chunk (#1752). The table's first genuinely bidirectional **payload** frame — `ack`/`error`/`rekey_request` above are also `either` but carry no application payload: upload rides this one phone → binary and retrieval rides it binary → phone, and declaring exactly one type is what stops the two legs drifting. It names the conversation the bytes belong to (#2142) — **meaningful on the upload leg only**, a **lookup key validated against the daemon's registry** before it becomes a path component and never a value trusted as sent, with **naming a conversation not authorization**; the daemon files an upload under it since #2143. See [Attachments](#attachments). |
 | **`attachment_stored`** | binary → phone | no | **New in v2.** The upload leg's **success reply** — the transfer completed, its claims were checked, and the bytes are stored under the `attachment_id` the client chose (#1895). Correlated by `in_reply_to`, which names the chunk **whose arrival completed the transfer** rather than the last one sent. Carries that one id and nothing else: no host path, no directory component, no stored filename. Nothing emits it yet (#1897). See [Attachments](#attachments). |
@@ -4258,7 +4258,7 @@ Answered by `session_settings` below, correlated by `in_reply_to`.
 
 #### `session_settings`
 
-Direction **binary → phone** (outbound). The resolved session's stored model and effort, Claude's confirmed applied effort when available, the current child's last confirmed permission posture when available, and the context-window reading. Every original field is always present (no omission tag), so **each original zero value is a real answer rather than an omitted field**. `effective_effort` is the one optional exception; producers that cannot yet report the applied value omit it.
+Direction **binary → phone** (outbound). The resolved session's stored model and effort, Claude's confirmed applied effort when available, the current child's last confirmed permission posture when available, and the context-window reading. Every original field is always present (no omission tag), so **each original zero value is a real answer rather than an omitted field**. Optional reports and unavailable applied effort are omitted as described below.
 
 This is the **read half** the settings cluster shipped without. Before it, a client scraped these values off [`screen_snapshot`](#screen_snapshot), which carried copies of them — that reply was a picture of the terminal, so a daemon running the stream-json interactive runner had no terminal to answer from, and took the settings down with it (`server.binary_offline`). `screen_snapshot` has had no producer at all since #2540; this route is the only one left, gated on nothing but the interactive capability, and answers on both runners.
 
@@ -4272,6 +4272,8 @@ This is the **read half** the settings cluster shipped without. Before it, a cli
 | `permission_mode` | string | The last permission posture Claude confirmed for the exact current child (#2510) — one of the five write-half modes, or `bypassPermissions`. **`""` means no current-child confirmation is available**, not necessarily that no session resolved. It can accompany a non-empty `session_id` for a live child that has not confirmed yet, or for a dormant session with no child. Stored settings and launch argv are never fallback proof. |
 | `used_tokens` | int | Context-window tokens consumed by the latest turn, read from the transcript under **the addressed session's own working directory** — not the daemon's (#2423). A conversation spawned in a workspace reports that workspace's own count; before #2423 every such conversation read against the daemon's directory instead and reported `0`. `0` against a non-zero `window_tokens` is a genuine fresh session. **A reply naming a session the daemon is not currently running** — a dormant registry entry, answered before its first revive — **carries `0` here too**, paired with `window_tokens: 0` below rather than the two read separately (#2449): there is no transcript to read until the session is revived. |
 | `window_tokens` | int | Context-window size. **`0` = the usage reader is unwired**, not an empty window — do not render a percentage from it. **A dormant session's reply also reports `0` here**, alongside `used_tokens: 0` above, rather than the usage reader's default window: reporting a genuine window beside a zero used count would claim a fresh session on a channel that may in fact be near full (#2449). |
+| `capabilities` | object (optional) | The resolved session's supported controls for a `multi_agent` connection; see below. |
+| `memory_search` | object (optional) | Search access for one agent and workspace; see below. Omission means the client has no report, not confirmed absence. |
 
 `permission_mode` and `yolo` are derived from the same current-child confirmation. Confirmed bypass reports `permission_mode: "bypassPermissions"` **and** `yolo: true`; an unavailable confirmation reports `permission_mode: ""` and `yolo: false`. The reply can therefore name a posture the write half refuses to accept on its own `permission_mode` field, but `yolo: false` without a non-empty `permission_mode` must be rendered as unknown rather than enforced.
 
@@ -4292,6 +4294,42 @@ A conn that negotiated the [`multi_agent`](#capability-negotiation-v2) capabilit
 | `models` | array of string | The `value`s of **this session's own agent's** entries in the retained [`model_list`](#model_list) vocabulary — Claude's menu for a Claude session, Codex's for a Codex session, never the other agent's. `[]`, not omitted, when that vocabulary is unavailable. As with `effort_levels`, `""` is accepted but never listed. |
 
 Built from the same code the write-half checks run — `effort_levels` is the effort check's own accepted set, `models` is exactly the rows the model check's exact-match accepts, and `permission_modes` is pinned to the same switch `permission_mode` validation uses — so the list and the enforcement cannot drift apart.
+
+##### `memory_search` (#2692)
+
+The optional `memory_search` object describes search access for one selected agent and workspace. The wire type is declared; its producer is pending (#2693). It does not describe knowledge capture. A reply that omits `memory_search` gives the client **no report**; it does not assert `absent` and remains compatible with older replies.
+
+```json
+{
+  "memory_search": {
+    "availability": "unavailable",
+    "providers": [
+      {
+        "id": "memsearch", "display_name": "Memsearch",
+        "installed": true, "enabled": false,
+        "availability": "unavailable"
+      }
+    ]
+  }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `availability` | string | Aggregate search access: `available`, `unavailable`, `absent`, or `unknown` (defined below). |
+| `providers` | array of object | Detected providers, sorted by `id`. A present report always carries an array, including `[]` when there are no rows; never `null`. |
+
+Every provider row contains all five fields, including booleans when false:
+
+| Provider field | Type | Meaning |
+|---|---|---|
+| `id` | string | Stable provider identity. |
+| `display_name` | string | User-facing provider name. |
+| `installed` | bool | Whether the provider is installed. A detected row is installed even when disabled or unusable. |
+| `enabled` | bool | Whether the provider is enabled for the selected agent and workspace; this is separate from effective access. An installed, disabled row has `installed: true`, `enabled: false` and must not prompt an install. |
+| `availability` | string | This provider's effective search access: `available` means usable, `unavailable` means installed but disabled, failed, or inaccessible, and `unknown` means access could not be established from the available evidence. `absent` is an aggregate state, not a missing-provider row. |
+
+Aggregate `available` means at least one provider is confirmed usable, even if another check is unresolved. `unavailable` means there are installed providers but none usable and no unresolved checks. `absent` means every applicable check completed and found no installed provider, so `providers` is `[]`. `unknown` means no provider is confirmed usable and some applicable evidence is incomplete or unresolved; it may also have `providers: []`. The detector omits a missing provider's row rather than emitting one with `installed: false`; an empty array alone therefore cannot distinguish `absent` from `unknown`.
 
 Scope: the values describe the session bound to the **conversation the request named**, and `session_id` names that same session, so a client reads and writes the same place. The daemon first resolves the registry-owned session id, then reads stored settings and any current-child confirmations only for that exact id. A lifecycle transition between those reads can make an applied reading unavailable; it cannot substitute another session's state. A request that resolves to no session gets every original field at its zero value and omits `effective_effort`; it is never answered with some other session's.
 

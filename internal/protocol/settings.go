@@ -199,6 +199,37 @@ type SessionSettingsPayload struct {
 	// session; nil omits the key, so every other reply is byte-identical to the
 	// shape before it. A pointer so the payload stays comparable.
 	Capabilities *SessionCapabilities `json:"capabilities,omitempty"`
+	// MemorySearch is the selected session's search-access report. Nil means
+	// the reply has no report, preserving the older wire shape.
+	MemorySearch *MemorySearchReport `json:"memory_search,omitempty"`
+}
+
+// MemorySearchReport is one agent-and-workspace search-access result. Availability
+// uses the detector's available, unavailable, absent, or unknown vocabulary.
+// An absent provider has no row; providers is always an array when this object
+// is present, including when the detector found no provider rows.
+type MemorySearchReport struct {
+	Availability string                 `json:"availability"`
+	Providers    []MemorySearchProvider `json:"providers"`
+}
+
+// MarshalJSON keeps an empty provider list as [] even for a zero-value slice.
+func (r MemorySearchReport) MarshalJSON() ([]byte, error) {
+	type wire MemorySearchReport
+	if r.Providers == nil {
+		r.Providers = []MemorySearchProvider{}
+	}
+	return json.Marshal(wire(r))
+}
+
+// MemorySearchProvider reports installation separately from effective access.
+// An installed but disabled provider has Installed true and Enabled false.
+type MemorySearchProvider struct {
+	ID           string `json:"id"`
+	DisplayName  string `json:"display_name"`
+	Installed    bool   `json:"installed"`
+	Enabled      bool   `json:"enabled"`
+	Availability string `json:"availability"`
 }
 
 // SessionCapabilities is one session's capability list (#2646): what its agent
