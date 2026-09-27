@@ -23,6 +23,9 @@ pyrycode/
 ├── internal/config/           User-configurable values (Phase 3 foundation)
 │   ├── config.go              Config struct, DefaultConfig, Load (overlay-decode over defaults)
 │   └── config_test.go         Same-package, table-driven
+├── internal/memorysearch/     Read-only search access detection for a selected agent and canonical workspace
+│   ├── detect.go              Detect merges scoped declarations and effective launch evidence
+│   └── detect_test.go         Provider, availability, and isolation fixtures
 ├── internal/identity/         Typed routing identifiers (Phase 3 foundation)
 │   ├── server_id.go           ServerID newtype, NewServerID (crypto/rand + UUIDv4 version/variant), ParseServerID (canonical validation), ErrInvalidServerID sentinel
 │   └── server_id_test.go      Same-package, table-driven; format/uniqueness/parse/round-trip
