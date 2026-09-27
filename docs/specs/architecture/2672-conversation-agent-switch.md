@@ -45,7 +45,7 @@ All refusal errors are static or wrap existing sentinels without model, effort, 
 
 ## Documentation handoff
 
-Pending for the documentation stage: describe the daemon switch contract and failure/commit distinction in `docs/knowledge/features/conversation-session-binding.md` under the session-transition section. No protocol reference change is required in this ticket; #2674 owns its wire contract.
+Pending for the documentation stage: add the daemon switch contract and failure/commit distinction to `docs/knowledge/features/conversation-session-binding.md` under `## Maintaining the binding across rotation (#739)`. No protocol reference change is required in this ticket; #2674 owns its wire contract.
 
 ## Security review
 
@@ -64,3 +64,9 @@ Pending for the documentation stage: describe the daemon switch contract and fai
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-27
+
+## Revisions
+
+- Phase B: `DormantSettingsFor` deliberately reports the revoked posture that `Revive` would use, including for a persisted non-bypass mode. The switch now reads persisted posture separately through `DormantStoredPostureFor`, then revokes bypass before minting. The existing read contract stays intact.
+- Phase B: `Registry.SwitchSession` now owns the rebind/save pair under `saveMu`, replacing the planned separate `RebindSession`, `Save`, and undo calls. It returns whether the new binding remains if a save fails, so the coordinator never reports that state as an unchanged switch.
+- Phase B: live `Pool.Remove` emitted an eviction during old-child teardown. `notifyTransition` now ignores eviction of an ID already removed from the pool, allowing the committed switch to emit exactly one clear transition.

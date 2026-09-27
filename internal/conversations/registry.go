@@ -180,7 +180,11 @@ func (r *Registry) Save(path string) error {
 	// copy against concurrent mutators. See the saveMu field doc for lock order.
 	r.saveMu.Lock()
 	defer r.saveMu.Unlock()
+	return r.saveLocked(path)
+}
 
+// saveLocked writes a snapshot while saveMu is held by Save or SwitchSession.
+func (r *Registry) saveLocked(path string) error {
 	r.mu.Lock()
 	snapshot := make([]Conversation, len(r.conversations))
 	copy(snapshot, r.conversations)
@@ -366,6 +370,46 @@ func (r *Registry) RebindSession(oldID, newID string) bool {
 		}
 	}
 	return false
+}
+
+// SwitchSession serializes the rebind and its Save with other registry saves.
+// A failed Save restores the binding and appended history entry in memory;
+// concurrent metadata edits remain intact.
+func (r *Registry) SwitchSession(id ConversationID, oldID, newID, path string) (bool, error) {
+	r.saveMu.Lock()
+	defer r.saveMu.Unlock()
+	r.mu.Lock()
+	bound := false
+	for i := range r.conversations {
+		c := &r.conversations[i]
+		if c.ID != id || c.CurrentSessionID != oldID || oldID == "" || newID == "" {
+			continue
+		}
+		c.CurrentSessionID = newID
+		c.SessionHistory = append(c.SessionHistory, oldID)
+		bound = true
+		break
+	}
+	r.mu.Unlock()
+	if !bound {
+		return false, ErrConversationNotFound
+	}
+	if err := r.saveLocked(path); err != nil {
+		r.mu.Lock()
+		restored := false
+		for i := range r.conversations {
+			c := &r.conversations[i]
+			if c.ID == id && c.CurrentSessionID == newID && len(c.SessionHistory) > 0 && c.SessionHistory[len(c.SessionHistory)-1] == oldID {
+				c.CurrentSessionID = oldID
+				c.SessionHistory = c.SessionHistory[:len(c.SessionHistory)-1]
+				restored = true
+				break
+			}
+		}
+		r.mu.Unlock()
+		return !restored, err
+	}
+	return true, nil
 }
 
 // Delete removes the conversation whose ID equals id. Returns true on hit,

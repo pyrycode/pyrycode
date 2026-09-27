@@ -2,6 +2,7 @@ package sessions
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -343,5 +344,53 @@ func TestPool_Revive_PoolNotRunning_RestoresDormantEntry(t *testing.T) {
 	}
 	if !bytes.Equal(before, after) {
 		t.Errorf("registry changed across a rolled-back revive:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
+func TestPool_Remove_DormantLeavesTranscriptAndRollsBackSaveFailure(t *testing.T) {
+	regPath := filepath.Join(t.TempDir(), "sessions.json")
+	oldID := helperDormantID(t)
+	pool, _ := helperPoolWarmStart(t, regPath, t.TempDir(), registryEntry{ID: oldID, Label: "conv-1"})
+	transcripts := t.TempDir()
+	pool.claudeSessionsDir = transcripts
+	transcript := filepath.Join(transcripts, string(oldID)+".jsonl")
+	if err := os.WriteFile(transcript, []byte("history\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	settings := filepath.Join(filepath.Dir(regPath), "session-settings", string(oldID)+".json")
+	if err := os.MkdirAll(filepath.Dir(settings), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settings, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	blocked := filepath.Join(t.TempDir(), "block")
+	if err := os.WriteFile(blocked, []byte("not a dir"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pool.registryPath = filepath.Join(blocked, "sessions.json")
+	if err := pool.Remove(context.Background(), oldID, RemoveOptions{}); err == nil {
+		t.Fatal("Remove succeeded despite registry failure")
+	}
+	if _, err := pool.HarnessFor(oldID); err != nil {
+		t.Fatalf("failed removal dropped dormant entry: %v", err)
+	}
+	pool.registryPath = regPath
+
+	if err := pool.Remove(context.Background(), oldID, RemoveOptions{JSONL: JSONLLeave}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.HarnessFor(oldID); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("old entry still present: %v", err)
+	}
+	if got, err := os.ReadFile(transcript); err != nil || string(got) != "history\n" {
+		t.Fatalf("transcript = %q, %v", got, err)
+	}
+	if entry := entryByID(t, regPath, oldID); entry != nil {
+		t.Fatalf("old entry persisted: %+v", entry)
+	}
+	if _, err := os.Stat(settings); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("settings file remains: %v", err)
 	}
 }

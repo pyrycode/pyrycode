@@ -63,9 +63,33 @@ func (p *Pool) SetTransitionObserver(obs TransitionObserver) {
 func (p *Pool) notifyTransition(t SessionTransition) {
 	if t.Reason == ReasonClear {
 		p.rebindConversation(t.PreviousID, t.NewID)
+	} else if t.Reason == ReasonEviction {
+		// Remove drops the pool entry before it asks a live child to exit.
+		// That teardown is not an idle eviction and must not create a
+		// second delimiter beside a committed agent switch.
+		p.mu.RLock()
+		_, retained := p.sessions[t.PreviousID]
+		p.mu.RUnlock()
+		if !retained {
+			return
+		}
 	}
 	if p.transitionObserver != nil {
 		p.transitionObserver(t)
+	}
+}
+
+// PublishSwitchTransition emits the clear delimiter for a switch whose
+// conversation rebind was already persisted by the caller. It deliberately
+// bypasses notifyTransition's second rebind and best-effort Save path.
+func (p *Pool) PublishSwitchTransition(oldID, newID SessionID) {
+	if p.transitionObserver != nil {
+		p.transitionObserver(SessionTransition{
+			PreviousID: oldID,
+			NewID:      newID,
+			Reason:     ReasonClear,
+			OccurredAt: time.Now().UTC(),
+		})
 	}
 }
 
