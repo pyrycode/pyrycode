@@ -244,8 +244,8 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 // Order is load-bearing:
 //  1. Re-decode the envelope already recognised by dispatchAppFrame. Failure is
 //     unreachable for the same immutable bytes and cannot be correlated safely.
-//  2. Tolerate a payload decode failure. It leaves ConversationID empty, which
-//     addresses nothing and therefore consults neither provider.
+//  2. Tolerate a payload decode failure. Discard even a partially decoded ID;
+//     it addresses nothing and therefore consults no provider.
 //  3. Resolve the non-empty id through RunConfigFor, honouring comma-ok. A nil or
 //     refused resolver produces the existing all-zero reply and stops before the
 //     effective-effort provider.
@@ -257,7 +257,10 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 //     such a reply is byte-identical to the one before #2646. multiAgent arrives
 //     as an argument, copied on Run into the job, because V2Session.multiAgent is
 //     Run-owned.
-//  6. Compose one correlated reply. All original fields come from the accepted
+//  6. For a fully decoded, accepted request, consult MemorySearchFor once with
+//     the conversation and resolved session IDs. A nil provider omits the field;
+//     a provider error reports unknown with no rows.
+//  7. Compose one correlated reply. All original fields come from the accepted
 //     RunConfig, so an applied effort can never overwrite the saved choice.
 //
 // Neither the requested id nor any settings value reaches a log or error string.
@@ -271,13 +274,16 @@ func (m *V2SessionManager) handleRequestSessionSettings(ctx context.Context, s *
 	}
 
 	var p protocol.RequestSessionSettingsPayload
-	// A bare or malformed payload leaves ConversationID empty. The error may
-	// quote remote-authored bytes, so it is deliberately neither logged nor sent.
-	_ = json.Unmarshal(env.Payload, &p)
+	// Discard any partially decoded ID on error. The error may quote remote
+	// bytes, so it is deliberately neither logged nor sent.
+	if err := json.Unmarshal(env.Payload, &p); err != nil {
+		p = protocol.RequestSessionSettingsPayload{}
+	}
 
 	var cfg RunConfig
 	var effectiveEffort protocol.NullableString
 	var capabilities *protocol.SessionCapabilities
+	var memorySearch *protocol.MemorySearchReport
 	if p.ConversationID != "" && m.cfg.RunConfigFor != nil {
 		if got, ok := m.cfg.RunConfigFor(p.ConversationID); ok {
 			cfg = got
@@ -294,6 +300,13 @@ func (m *V2SessionManager) handleRequestSessionSettings(ctx context.Context, s *
 					capabilities = &c
 				}
 			}
+			if m.cfg.MemorySearchFor != nil {
+				report, err := m.cfg.MemorySearchFor(ctx, p.ConversationID, cfg.SessionID)
+				if err != nil {
+					report = protocol.MemorySearchReport{Availability: "unknown", Providers: []protocol.MemorySearchProvider{}}
+				}
+				memorySearch = &report
+			}
 		}
 	}
 
@@ -307,9 +320,10 @@ func (m *V2SessionManager) handleRequestSessionSettings(ctx context.Context, s *
 		UsedTokens:      cfg.UsedTokens,
 		WindowTokens:    cfg.WindowTokens,
 		Capabilities:    capabilities,
+		MemorySearch:    memorySearch,
 	})
 	if err != nil {
-		// Closed scalar fields; defensive only. NEVER echo err or any value.
+		// Wire-ready fields; defensive only. NEVER echo err or any value.
 		m.cfg.Logger.Warn("relay: v2 session_settings marshal failed",
 			"event", "v2.settings.read_marshal_err",
 			"conn_id", s.connID)

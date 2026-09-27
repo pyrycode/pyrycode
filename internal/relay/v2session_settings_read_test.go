@@ -3,7 +3,9 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -98,6 +100,7 @@ func resolveFixtureConv(id string) (RunConfig, bool) {
 type readSeams struct {
 	runConfig       func(string) (RunConfig, bool)
 	effectiveEffort func(context.Context, string) (*string, bool)
+	memorySearch    func(context.Context, string, string) (protocol.MemorySearchReport, error)
 	capabilities    func(sessionID, model string) (AgentCapabilities, bool)
 	knownConv       func(string) bool
 	updater         SettingsUpdater
@@ -171,6 +174,7 @@ func readManagerFor(t *testing.T, seams readSeams, logger *slog.Logger) (mgr *V2
 		Logger:             logger,
 		RunConfigFor:       seams.runConfig,
 		EffectiveEffortFor: seams.effectiveEffort,
+		MemorySearchFor:    seams.memorySearch,
 		CapabilitiesFor:    seams.capabilities,
 		KnownConversation:  seams.knownConv,
 		SettingsUpdater:    seams.updater,
@@ -670,6 +674,166 @@ func assertSessionSettingsPayload(t *testing.T, got, want protocol.SessionSettin
 		t.Errorf("effective effort = %q, want nil", *gotEffective)
 	case gotEffective != nil && *gotEffective != *wantEffective:
 		t.Errorf("effective effort = %q, want %q", *gotEffective, *wantEffective)
+	}
+}
+
+func assertMemorySettingsReply(t *testing.T, reply protocol.Envelope, got protocol.SessionSettingsPayload, raw map[string]json.RawMessage, requestID uint64, want protocol.SessionSettingsPayload) {
+	t.Helper()
+	if reply.InReplyTo == nil || *reply.InReplyTo != requestID {
+		t.Errorf("in_reply_to = %v, want %d", reply.InReplyTo, requestID)
+	}
+	_, present := raw["memory_search"]
+	if present != (want.MemorySearch != nil) {
+		t.Errorf("memory_search presence = %v, want %v", present, want.MemorySearch != nil)
+	}
+	if !reflect.DeepEqual(got.MemorySearch, want.MemorySearch) {
+		t.Errorf("memory_search = %#v, want %#v", got.MemorySearch, want.MemorySearch)
+	}
+	got.MemorySearch = nil
+	want.MemorySearch = nil
+	assertSessionSettingsPayload(t, got, want)
+}
+
+func TestV2Session_RequestSessionSettings_MemorySearchFollowsBindingAndFreshResult(t *testing.T) {
+	t.Parallel()
+	const otherConversation = "conv-memory-other"
+	other := fixtureRunConfig
+	other.SessionID = "sess-memory-other"
+	other.Model = "claude-sonnet-4-8"
+	rebound := fixtureRunConfig
+	rebound.SessionID = "sess-memory-rebound"
+
+	available := protocol.MemorySearchReport{Availability: "available", Providers: []protocol.MemorySearchProvider{{
+		ID: "qmd", DisplayName: "QMD", Installed: true, Enabled: true, Availability: "available",
+	}}}
+	unknownInstalled := protocol.MemorySearchReport{Availability: "unknown", Providers: []protocol.MemorySearchProvider{{
+		ID: "memsearch", DisplayName: "Memsearch", Installed: true, Enabled: false, Availability: "unknown",
+	}}}
+	changed := protocol.MemorySearchReport{Availability: "unavailable", Providers: []protocol.MemorySearchProvider{{
+		ID: "qmd", DisplayName: "QMD", Installed: true, Enabled: false, Availability: "unavailable",
+	}}}
+
+	var namedReads int
+	seams := allReadSeams()
+	seams.runConfig = func(id string) (RunConfig, bool) {
+		switch id {
+		case readKnownConvID:
+			namedReads++
+			if namedReads == 2 {
+				return rebound, true
+			}
+			return fixtureRunConfig, true
+		case otherConversation:
+			return other, true
+		default:
+			return poisonedRunConfig, false
+		}
+	}
+	type call struct{ conversationID, sessionID string }
+	var calls []call
+	results := []protocol.MemorySearchReport{available, unknownInstalled, changed}
+	seams.memorySearch = func(_ context.Context, conversationID, sessionID string) (protocol.MemorySearchReport, error) {
+		calls = append(calls, call{conversationID, sessionID})
+		return results[len(calls)-1], nil
+	}
+	mgr, frames, rec, respPub := readManagerFor(t, seams, silentLogger())
+	send, recv := openModalConn(t, mgr, frames, rec, respPub, "memory-fresh", []string{protocol.CapabilityInteractive})
+
+	for i, tc := range []struct {
+		conversationID string
+		want           protocol.SessionSettingsPayload
+	}{
+		{readKnownConvID, func() protocol.SessionSettingsPayload { p := fixtureReport; p.MemorySearch = &available; return p }()},
+		{otherConversation, func() protocol.SessionSettingsPayload {
+			p := fixtureReport
+			p.SessionID = other.SessionID
+			p.Model = other.Model
+			p.MemorySearch = &unknownInstalled
+			return p
+		}()},
+		{readKnownConvID, func() protocol.SessionSettingsPayload {
+			p := fixtureReport
+			p.SessionID = rebound.SessionID
+			p.MemorySearch = &changed
+			return p
+		}()},
+	} {
+		requestID := uint64(26930 + i)
+		sendSessionSettingsRequest(t, frames, send, "memory-fresh", requestID, tc.conversationID)
+		reply, got, raw := waitSessionSettingsReply(t, rec, "memory-fresh", recv, i)
+		assertMemorySettingsReply(t, reply, got, raw, requestID, tc.want)
+	}
+	wantCalls := []call{{readKnownConvID, readSessionID}, {otherConversation, other.SessionID}, {readKnownConvID, rebound.SessionID}}
+	if !reflect.DeepEqual(calls, wantCalls) {
+		t.Errorf("provider calls = %#v, want %#v", calls, wantCalls)
+	}
+}
+
+func TestV2Session_RequestSessionSettings_MemorySearchOmissionAndFailure(t *testing.T) {
+	t.Parallel()
+	unknown := protocol.MemorySearchReport{Availability: "unknown", Providers: []protocol.MemorySearchProvider{}}
+	partialDecode := json.RawMessage(`{"conversation_id":"` + readKnownConvID + `","conversation_id":42}`)
+	var partial protocol.RequestSessionSettingsPayload
+	if err := json.Unmarshal(partialDecode, &partial); err == nil || partial.ConversationID != readKnownConvID {
+		t.Fatalf("test payload must fail after filling conversation ID: id=%q err=%v", partial.ConversationID, err)
+	}
+	for _, tc := range []struct {
+		name        string
+		payload     json.RawMessage
+		provider    bool
+		failure     bool
+		interactive bool
+		wantCalls   int
+		wantPayload protocol.SessionSettingsPayload
+	}{
+		{"provider failure keeps settings and reports unknown", json.RawMessage(`{"conversation_id":"` + readKnownConvID + `"}`), true, true, true, 1,
+			func() protocol.SessionSettingsPayload { p := fixtureReport; p.MemorySearch = &unknown; return p }()},
+		{"nil provider omits report", json.RawMessage(`{"conversation_id":"` + readKnownConvID + `"}`), false, false, true, 0, fixtureReport},
+		{"refused binding omits report", json.RawMessage(`{"conversation_id":"conv-refused"}`), true, false, true, 0, protocol.SessionSettingsPayload{}},
+		{"empty ID omits report", json.RawMessage(`{"conversation_id":""}`), true, false, true, 0, protocol.SessionSettingsPayload{}},
+		{"bare payload omits report", nil, true, false, true, 0, protocol.SessionSettingsPayload{}},
+		{"partial decode omits report", partialDecode, true, false, true, 0, protocol.SessionSettingsPayload{}},
+		{"non-interactive remains inert", json.RawMessage(`{"conversation_id":"` + readKnownConvID + `"}`), true, false, false, 0, protocol.SessionSettingsPayload{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls []struct{ conversationID, sessionID string }
+			seams := allReadSeams()
+			if tc.provider {
+				seams.memorySearch = func(_ context.Context, conversationID, sessionID string) (protocol.MemorySearchReport, error) {
+					calls = append(calls, struct{ conversationID, sessionID string }{conversationID, sessionID})
+					if tc.failure {
+						return protocol.MemorySearchReport{}, errors.New("private provider detail")
+					}
+					return protocol.MemorySearchReport{Availability: "absent"}, nil
+				}
+			}
+			mgr, frames, rec, respPub := readManagerFor(t, seams, silentLogger())
+			caps := []string{protocol.CapabilityInteractive}
+			if !tc.interactive {
+				caps = nil
+			}
+			send, recv := openModalConn(t, mgr, frames, rec, respPub, "memory-case", caps)
+			const requestID uint64 = 26940
+			frames <- sealAppFrameConn(t, send, "memory-case", protocol.Envelope{
+				ID: requestID, Type: protocol.TypeRequestSessionSettings, TS: time.Now().UTC(), Payload: tc.payload,
+			})
+			if !tc.interactive {
+				openModalConn(t, mgr, frames, rec, respPub, "memory-barrier", []string{protocol.CapabilityInteractive})
+				if got := len(noiseMsgsForConn(t, rec, "memory-case")); got != 0 {
+					t.Errorf("non-interactive replies = %d, want 0", got)
+				}
+			} else {
+				reply, got, raw := waitSessionSettingsReply(t, rec, "memory-case", recv, 0)
+				assertMemorySettingsReply(t, reply, got, raw, requestID, tc.wantPayload)
+			}
+			if len(calls) != tc.wantCalls {
+				t.Fatalf("provider calls = %#v, want %d", calls, tc.wantCalls)
+			}
+			if tc.wantCalls == 1 && (calls[0].conversationID != readKnownConvID || calls[0].sessionID != readSessionID) {
+				t.Errorf("provider called with %#v, want selected binding", calls[0])
+			}
+		})
 	}
 }
 
