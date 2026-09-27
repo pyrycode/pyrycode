@@ -399,7 +399,7 @@ func TestPrepareCodexHome(t *testing.T) {
 		t.Fatalf("config mode = %v, %v; want 0600", fi.Mode().Perm(), err)
 	}
 	got, _ := os.ReadFile(cfgPath)
-	for _, line := range []string{`approval_policy = "on-request"`, `sandbox_mode = "read-only"`, `approvals_reviewer = "user"`} {
+	for _, line := range []string{`approval_policy = "on-request"`, `sandbox_mode = "read-only"`, `approvals_reviewer = "user"`, `[features]`, `default_mode_request_user_input = true`} {
 		if !strings.Contains(string(got), line) {
 			t.Errorf("config.toml lacks %s:\n%s", line, got)
 		}

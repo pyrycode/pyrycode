@@ -33,7 +33,9 @@
 //	FAKECODEX_MODEL_LIST_FAIL  non-empty: model/list answers an error.
 //	FAKECODEX_TURN_LOG    a file path: each turn/start's params are
 //	                      appended to it as one line, before the response,
-//	                      so a test can read the overrides a turn carried.
+//	                      so a test can read the overrides a turn carried;
+//	                      question markers also append the response they
+//	                      received as a questionResponse line.
 //	FAKECODEX_THREAD_LOG  a file path: each thread/start and thread/resume
 //	                      is appended to it as one line
 //	                      {"method":<method>,"params":<params>}, before the
@@ -57,6 +59,12 @@
 //	                      response the client sends later for that request
 //	                      is appended to FAKECODEX_TURN_LOG as
 //	                      {"lateResponse":<id>}.
+//	[fakecodex:question]  sends one requestUserInput batch with two
+//	                      single-select questions. Its response is appended
+//	                      to FAKECODEX_TURN_LOG as {"questionResponse":...}.
+//	[fakecodex:question-withdraw] sends the same batch, then resolves it
+//	                      before an answer. A late response is logged like
+//	                      the approval withdrawal marker.
 //	[fakecodex:hold]      after turn/started the turn waits until
 //	                      turn/interrupt names it, so a test has a running
 //	                      turn to interrupt.
@@ -85,11 +93,13 @@ import (
 )
 
 const (
-	codexVersion   = "0.156.1"
-	markerApproval = "[fakecodex:approval]"
-	markerWithdraw = "[fakecodex:withdraw]"
-	markerHold     = "[fakecodex:hold]"
-	markerUsage    = "[fakecodex:usage]"
+	codexVersion           = "0.156.1"
+	markerApproval         = "[fakecodex:approval]"
+	markerWithdraw         = "[fakecodex:withdraw]"
+	markerQuestion         = "[fakecodex:question]"
+	markerQuestionWithdraw = "[fakecodex:question-withdraw]"
+	markerHold             = "[fakecodex:hold]"
+	markerUsage            = "[fakecodex:usage]"
 
 	// fakeCommand is the command an approval turn asks to run.
 	fakeCommand = "echo fakecodex"
@@ -140,7 +150,7 @@ var emittedNotifications = []string{
 	"turn/completed",
 }
 
-var serverRequests = []string{"item/commandExecution/requestApproval"}
+var serverRequests = []string{"item/commandExecution/requestApproval", "item/tool/requestUserInput"}
 
 type rpcError struct {
 	Code    int    `json:"code"`
@@ -526,6 +536,12 @@ func (t *turn) run(text string) {
 	if strings.Contains(text, markerWithdraw) {
 		t.withdrawnApproval()
 	}
+	if strings.Contains(text, markerQuestionWithdraw) {
+		t.withdrawnQuestion()
+	} else if strings.Contains(text, markerQuestion) && !t.question() {
+		t.complete("interrupted")
+		return
+	}
 	if strings.Contains(text, markerApproval) && !t.approval() {
 		t.complete("interrupted")
 		return
@@ -547,6 +563,52 @@ func (t *turn) run(text string) {
 	delete(t.s.turns, t.id)
 	t.complete("completed")
 	t.s.mu.Unlock()
+}
+
+func (t *turn) questionParams() map[string]any {
+	return map[string]any{
+		"threadId": t.threadID, "turnId": t.id, "itemId": t.itemID("question"), "isBlocking": true,
+		"questions": []any{
+			map[string]any{"id": "language", "header": "Language", "question": "Which language?", "isOther": true, "isSecret": false, "options": []any{
+				map[string]any{"label": "Go", "description": "Use Go"}, map[string]any{"label": "Rust", "description": "Use Rust"},
+			}},
+			map[string]any{"id": "style", "header": "Style", "question": "Which style?", "isOther": true, "isSecret": false, "options": []any{
+				map[string]any{"label": "Direct", "description": "Keep it direct"}, map[string]any{"label": "Layered", "description": "Add layers"},
+			}},
+		},
+	}
+}
+
+func (t *turn) question() bool {
+	t.s.mu.Lock()
+	t.s.requests++
+	reqID := json.RawMessage(fmt.Sprintf(`"fakecodex-question-%d"`, t.s.requests))
+	answer := make(chan json.RawMessage, 1)
+	t.s.pending[string(reqID)] = answer
+	t.s.mu.Unlock()
+	t.s.send(message{ID: reqID, Method: "item/tool/requestUserInput", Params: t.questionParams()})
+	var result json.RawMessage
+	select {
+	case result = <-answer:
+	case <-t.interrupt:
+		t.s.mu.Lock()
+		delete(t.s.pending, string(reqID))
+		t.s.mu.Unlock()
+		return false
+	}
+	_ = appendLog(t.s.turnLog, []byte(`{"questionResponse":`+string(result)+`}`))
+	t.s.notify("serverRequest/resolved", map[string]any{"threadId": t.threadID, "requestId": reqID})
+	return true
+}
+
+func (t *turn) withdrawnQuestion() {
+	t.s.mu.Lock()
+	t.s.requests++
+	reqID := json.RawMessage(fmt.Sprintf(`"fakecodex-question-%d"`, t.s.requests))
+	t.s.withdrawn[string(reqID)] = true
+	t.s.mu.Unlock()
+	t.s.send(message{ID: reqID, Method: "item/tool/requestUserInput", Params: t.questionParams()})
+	t.s.notify("serverRequest/resolved", map[string]any{"threadId": t.threadID, "requestId": reqID})
 }
 
 // usage reports one model call's tokens and the model's context window.

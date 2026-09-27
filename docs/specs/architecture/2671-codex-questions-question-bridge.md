@@ -117,3 +117,9 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-27
+
+## Revisions
+
+### Revision 1 — terminal response ordering
+
+The interrupt RED test showed that resolving `permbridge` and immediately sending `turn/interrupt` lets the interrupt reach Codex before `await` writes the required empty question response. Each `codexApproval` now owns a response-completion channel closed after the response write (or deliberate withdrawal suppression) and before retirement broadcasts. `codexApprovals.declineAll` resolves its snapshot and joins question responses before interrupt, teardown, or exit continues; approval requests keep their non-blocking terminal behavior. Waiting stops before `retireQuestion` because interrupt may originate on the relay run goroutine that the dismissal broadcast itself uses. No lock is held while resolving or waiting, and a racing answer or withdrawal closes the same completion exactly once.

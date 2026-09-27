@@ -23,6 +23,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/acp"
 	"github.com/pyrycode/pyrycode/internal/codexsup"
 	"github.com/pyrycode/pyrycode/internal/permbridge"
+	"github.com/pyrycode/pyrycode/internal/questionbridge"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
 	"github.com/pyrycode/pyrycode/internal/turncommit"
@@ -937,7 +938,22 @@ type codexApprovals struct {
 // nothing to Codex.
 type codexApproval struct {
 	req       *codexsup.ServerRequest
+	questions []codexQuestionRef
+	responded chan struct{}
 	withdrawn atomic.Bool
+}
+
+type codexQuestionRef struct {
+	id   string
+	text string
+}
+
+type codexQuestionAnswer struct {
+	Answers []string `json:"answers"`
+}
+
+type codexQuestionResult struct {
+	Answers map[string]codexQuestionAnswer `json:"answers"`
 }
 
 // newCodexApprovals returns nil without a registry: every request then takes
@@ -971,7 +987,8 @@ func (a *codexApprovals) handle(req *codexsup.ServerRequest) {
 	a.mu.Lock()
 	paths := a.changes[item.ItemID]
 	a.mu.Unlock()
-	parked, ok := codexApprovalRequest(req.Method, req.Params, paths)
+	var questions []codexQuestionRef
+	parked, questions, ok := codexRequest(req.Method, req.Params, paths)
 	if !ok {
 		_ = req.Decline()
 		return
@@ -991,7 +1008,7 @@ func (a *codexApprovals) handle(req *codexsup.ServerRequest) {
 		_ = req.Decline()
 		return
 	}
-	ap := &codexApproval{req: req}
+	ap := &codexApproval{req: req, questions: questions, responded: make(chan struct{})}
 	a.mu.Lock()
 	a.live[id] = ap
 	a.mu.Unlock()
@@ -1009,9 +1026,129 @@ func (a *codexApprovals) await(id string, ap *codexApproval, parked permbridge.R
 	}
 	a.mu.Unlock()
 	if !ap.withdrawn.Load() {
-		_ = ap.req.Respond(map[string]string{"decision": codexDecision(verdict)})
+		if ap.questions != nil {
+			_ = ap.req.Respond(codexQuestionResponse(ap.questions, verdict))
+		} else {
+			_ = ap.req.Respond(map[string]string{"decision": codexDecision(verdict)})
+		}
 	}
+	close(ap.responded)
 	retire()
+}
+
+func codexRequest(method string, params json.RawMessage, paths []string) (permbridge.Request, []codexQuestionRef, bool) {
+	if method == "item/tool/requestUserInput" {
+		return codexQuestionRequest(params)
+	}
+	request, ok := codexApprovalRequest(method, params, paths)
+	return request, nil, ok
+}
+
+// codexQuestionRequest validates Codex's question shape, adapts it to the
+// shared AskUserQuestion input, and retains only the response correlation.
+// No subprocess-authored string reaches a log from this path.
+func codexQuestionRequest(params json.RawMessage) (permbridge.Request, []codexQuestionRef, bool) {
+	type option struct {
+		Label       *string `json:"label"`
+		Description *string `json:"description"`
+	}
+	type question struct {
+		ID       *string   `json:"id"`
+		Header   *string   `json:"header"`
+		Question *string   `json:"question"`
+		IsOther  *bool     `json:"isOther"`
+		IsSecret *bool     `json:"isSecret"`
+		Options  *[]option `json:"options"`
+	}
+	var input struct {
+		ThreadID   *string    `json:"threadId"`
+		TurnID     *string    `json:"turnId"`
+		ItemID     *string    `json:"itemId"`
+		IsBlocking *bool      `json:"isBlocking"`
+		Questions  []question `json:"questions"`
+	}
+	if json.Unmarshal(params, &input) != nil || input.ThreadID == nil || input.TurnID == nil || input.ItemID == nil || input.IsBlocking == nil {
+		return permbridge.Request{}, nil, false
+	}
+	if len(input.Questions) < 1 || len(input.Questions) > 4 {
+		return permbridge.Request{}, nil, false
+	}
+
+	type sharedOption struct {
+		Label       string `json:"label"`
+		Description string `json:"description"`
+	}
+	type sharedQuestion struct {
+		Question    string         `json:"question"`
+		Header      string         `json:"header"`
+		Options     []sharedOption `json:"options"`
+		MultiSelect bool           `json:"multiSelect"`
+	}
+	shared := struct {
+		Questions []sharedQuestion `json:"questions"`
+	}{Questions: make([]sharedQuestion, 0, len(input.Questions))}
+	refs := make([]codexQuestionRef, 0, len(input.Questions))
+	ids := make(map[string]struct{}, len(input.Questions))
+	texts := make(map[string]struct{}, len(input.Questions))
+	for _, q := range input.Questions {
+		if q.ID == nil || q.Header == nil || q.Question == nil || q.IsOther == nil || q.IsSecret == nil || !*q.IsOther || *q.IsSecret || q.Options == nil || len(*q.Options) < 2 || len(*q.Options) > 4 {
+			return permbridge.Request{}, nil, false
+		}
+		if _, duplicate := ids[*q.ID]; duplicate {
+			return permbridge.Request{}, nil, false
+		}
+		if _, duplicate := texts[*q.Question]; duplicate {
+			return permbridge.Request{}, nil, false
+		}
+		ids[*q.ID] = struct{}{}
+		texts[*q.Question] = struct{}{}
+		adapted := sharedQuestion{Question: *q.Question, Header: *q.Header, Options: make([]sharedOption, len(*q.Options))}
+		for i, o := range *q.Options {
+			if o.Label == nil || o.Description == nil {
+				return permbridge.Request{}, nil, false
+			}
+			adapted.Options[i] = sharedOption{Label: *o.Label, Description: *o.Description}
+		}
+		shared.Questions = append(shared.Questions, adapted)
+		refs = append(refs, codexQuestionRef{id: *q.ID, text: *q.Question})
+	}
+	adapted, err := json.Marshal(shared)
+	if err != nil {
+		return permbridge.Request{}, nil, false
+	}
+	if _, ok := questionbridge.Parse(questionbridge.ToolName, adapted); !ok {
+		return permbridge.Request{}, nil, false
+	}
+	return permbridge.Request{ToolName: questionbridge.ToolName, Input: adapted}, refs, true
+}
+
+// codexQuestionResponse converts the shared bridge's text-keyed, single-select
+// verdict back to Codex's id-keyed answer shape. Any incomplete or unexpected
+// verdict fails closed to an empty answer set.
+func codexQuestionResponse(refs []codexQuestionRef, verdict permbridge.Verdict) codexQuestionResult {
+	empty := codexQuestionResult{Answers: map[string]codexQuestionAnswer{}}
+	if verdict.Behavior != permbridge.BehaviorAllow {
+		return empty
+	}
+	var updated struct {
+		Answers map[string]json.RawMessage `json:"answers"`
+	}
+	if json.Unmarshal(verdict.UpdatedInput, &updated) != nil || len(updated.Answers) != len(refs) {
+		return empty
+	}
+	answers := make(map[string]codexQuestionAnswer, len(refs))
+	for _, ref := range refs {
+		raw, ok := updated.Answers[ref.text]
+		if !ok {
+			return empty
+		}
+		var value string
+		if json.Unmarshal(raw, &value) != nil {
+			return empty
+		}
+		answers[ref.id] = codexQuestionAnswer{Answers: []string{value}}
+	}
+	return codexQuestionResult{Answers: answers}
 }
 
 // codexDecision maps a registry verdict onto Codex's approval vocabulary. Only
@@ -1097,14 +1234,23 @@ func (a *codexApprovals) declineAll(reason string) {
 		return
 	}
 	a.mu.Lock()
-	ids := make([]string, 0, len(a.live))
-	for id := range a.live {
-		ids = append(ids, id)
+	type liveApproval struct {
+		id string
+		ap *codexApproval
+	}
+	live := make([]liveApproval, 0, len(a.live))
+	for id, ap := range a.live {
+		live = append(live, liveApproval{id: id, ap: ap})
 	}
 	clear(a.changes)
 	a.mu.Unlock()
-	for _, id := range ids {
-		a.registry.Resolve(id, permbridge.Deny(reason))
+	for _, entry := range live {
+		a.registry.Resolve(entry.id, permbridge.Deny(reason))
+	}
+	for _, entry := range live {
+		if entry.ap.questions != nil {
+			<-entry.ap.responded
+		}
 	}
 }
 
