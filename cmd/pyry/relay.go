@@ -287,6 +287,9 @@ type relayWiring struct {
 	// is absent, preserving saved session-settings replies without the optional
 	// effective_effort field.
 	effectiveEffortFor func(context.Context, string) (*string, bool)
+	// memorySearchFor reads fresh configuration and the exact current child for
+	// the resolved conversation and session. nil omits the optional report.
+	memorySearchFor func(context.Context, string, string) (protocol.MemorySearchReport, error)
 	// contextUsageResolve resolves a named conversation to its bound child as a
 	// context-usage querier, plus the registry's own id for it (#2431). Deliberately
 	// NOT the finished seam: it performs no wait and contacts no child, so the
@@ -1143,6 +1146,7 @@ func startRelayV2(
 		// and projects one nullable scalar from the deadline-bounded child query.
 		// nil preserves the complete saved reply while omitting effective_effort.
 		EffectiveEffortFor: w.effectiveEffortFor,
+		MemorySearchFor:    w.memorySearchFor,
 		// Capability-list source (#2646), consulted only for a multi_agent conn
 		// after RunConfigFor resolved, with that session's id and model.
 		CapabilitiesFor: w.capabilities,

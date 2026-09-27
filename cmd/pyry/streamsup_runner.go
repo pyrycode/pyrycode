@@ -470,6 +470,12 @@ func (a streamRunner) QueryMCPStatus(ctx context.Context) (turnevent.MCPStatus, 
 	return a.r.QueryMCPStatus(ctx)
 }
 
+// MemorySearchLaunch forwards the current child's launch snapshot to the
+// conversation-bound settings provider.
+func (a streamRunner) MemorySearchLaunch() (string, *string, string, uint64, bool) {
+	return a.r.MemorySearchLaunch()
+}
+
 // QueryContextUsage asks this runner's exact live child for a requester-private
 // context-window reading at detail. It stays off sessions.Runner for QueryMCPStatus's
 // reason above: its only consumer is contextUsageResolver in this package.
@@ -1138,3 +1144,4 @@ func stripSessionIDFlags(args []string) []string {
 // implementation lives here.
 var _ sessions.Runner = streamRunner{}
 var _ confirmedPermissionModeReader = streamRunner{}
+var _ memorySearchLauncher = streamRunner{}

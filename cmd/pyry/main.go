@@ -1260,6 +1260,7 @@ func runSupervisor(args []string) error {
 		pushedModelOptions: pushedModelOptions(modelVocabulary),
 		mcpStatusFor:       mcpStatusFor(convReg, pool),
 		effectiveEffortFor: effectiveEffortFor(convReg, pool),
+		memorySearchFor:    memorySearchFor(convReg, pool, resolveConfigPath()),
 		// The resolution half of the on-demand context-usage read (#2431), built
 		// beside its MCP twin over the same registry and pool. The collapsing and
 		// mid-turn-deferral half is composed in startRelayV2, which holds the turn
