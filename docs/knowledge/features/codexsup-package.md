@@ -131,9 +131,10 @@ package's `jsonSchema.validate`:
   no capture confirms Codex populates it that early. **Still open**: a real
   `fileChange` capture would confirm or revise that assumption.
 - The granular approval policy needs the `experimentalApi` capability at
-  `initialize`. The handshake now declares it so daemon turns can use their
-  configured granular posture. The capture uses `untrusted` with the
-  `read-only` sandbox to keep its command approval fixture stable.
+  `initialize`, which this package's handshake does not declare
+  (`askForApproval.granular requires experimentalApi capability`); the
+  capture uses `untrusted` with the `read-only` sandbox instead, which still
+  yields command approval requests.
 
 **Fixture scrub is enforced in code, not just by a manual grep.** The first
 cut of `writeCapture` replaced `cwd` and `os.UserHomeDir()` but not the
@@ -176,23 +177,19 @@ reach this table at all: `acp.Transport` answers an unregistered request
 method-not-found on its own. The decline table can only get narrower or wider
 deliberately, at a version bump, never by omission.
 
-The #2620 runner wires `OnServerRequest` to `codexApprovals.handle`. #2587
-parks command and file-change approvals in the shared permission modal.
-Ticket #2671 parks eligible `item/tool/requestUserInput` batches in the shared
-question panel. The daemon-owned Codex home's `[features]` enables
-`default_mode_request_user_input` without changing its approval or sandbox
-settings. The adapter validates 1–4 single-select questions, unique Codex
-IDs and question texts, free-text eligibility, and the shared 16 KiB display
-limit. It preserves order and option descriptions, then maps the bridge's
-text-keyed answers back to Codex IDs. Refusal, expiry, interrupt and teardown
-return `{"answers":{}}`; a Codex withdrawal dismisses the batch without a
-response. Parked requests stay tracked through response completion. Late
-requests finish before stdin closes. Question text, headers, options and
-descriptions are untrusted and never logged. Invalid batches and unsupported
-methods retain the default decline. See [ADR 038](../decisions/038-codex-daemon-owned-home-read-only-default-decline.md).
-
-`TestCodexQuestionLive` is the focused live gate; `TestCodexConversationLive`
-also checks #2660 permissions.
+**Who answers approvals was open through #2620; #2587 answers it for the two
+approval methods.** The #2620 runner wires `OnServerRequest` to
+`codexApprovals.handle` (§ Approvals reach the permission modal, below),
+which parks `item/commandExecution/requestApproval` and
+`item/fileChange/requestApproval` on the same daemon-wide `permbridge.Registry`
+and permission modal a Claude session uses. The other eight server-request
+methods at 0.156.1 — including the legacy `applyPatchApproval`/
+`execCommandApproval` and the experimental `item/tool/requestUserInput` — are
+still out of scope and keep this package's default decline. See
+[ADR 038](../decisions/038-codex-daemon-owned-home-read-only-default-decline.md)
+for why the daemon-owned home and the decline-by-default baseline were the
+right posture to ship before an operator path existed, and its "Superseded in
+part (#2587)" note for what changed.
 
 ### The ticket's own literal for the legacy approvals was schema-invalid
 
@@ -558,10 +555,16 @@ the registry's own window timeout, funnels through the one-shot
 `registry.Resolve`, so a race between one of these and an operator's answer
 resolves exactly once.
 
-**Known coverage gap (#2587):** no end-to-end test covers file-change path
-tracking from `observe` to `handle`. The table test supplies paths directly,
-the fake has no file-change approval marker, and no live capture has produced
-one. A regression could silently decline every Codex file edit.
+**Known coverage gap, flagged on review rather than fixed (#2587's PR
+verifier, SHOULD FIX, non-blocking):** no test drives `observe`'s
+`item/started`/`item/completed` path-tracking and `handle`'s later read of
+it end-to-end for a file-change approval — the table test for
+`codexApprovalRequest` passes `paths` in directly. `fakecodex` has no
+file-change approval marker and no capture has produced a real
+`item/fileChange/requestApproval` (see § The capture's live gaps, above,
+which flags the same absence for the translator). A regression in that
+correlation would silently decline every Codex file edit with no test
+catching it.
 
 `TestCodexApprovalLive` (`cmd/pyry/codex_approval_test.go`) is the live
 counterpart, on `gpt-6-luna` at effort `low`: a declined `touch` does not
