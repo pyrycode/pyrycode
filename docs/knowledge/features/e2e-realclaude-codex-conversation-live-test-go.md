@@ -30,7 +30,7 @@ otherwise rewrite a production Codex home's `config.toml`.
   `codexTurnOverrides`' `anything else, including empty` row — the one the
   criterion relies on — is therefore unreachable through the pool; `default`
   maps to `workspaceWrite`, where a `touch` can run with no prompt. See
-  [codexsup-package.md § Production wiring](codexsup-package.md#production-wiring--the-cmdpyry-codex-runner-2620)
+  [codexsup-package.md § Production wiring](codexsup-package-production-wiring.md#production-wiring--the-cmdpyry-codex-runner-2620)
   for the corrected posture table. Any reasoning about an "unset" Codex posture has
   to start from `canonicalPermissionMode`, not from the overrides table —
   the table only ever sees what construction already normalised.

@@ -94,7 +94,7 @@ against. `turn.run` now holds `s.mu` across both the delete and
 `turn/completed` already written first. A consumer that infers "the turn
 already ended" from a `turn/interrupt` refusal — `codexRunner.Interrupt` is
 the one that needed this — can now rely on that ordering; see
-[codexsup-package.md's matching note](codexsup-package.md#production-wiring--the-cmdpyry-codex-runner-2620).
+[codexsup-package.md's matching note](codexsup-package-production-wiring.md#production-wiring--the-cmdpyry-codex-runner-2620).
 
 ## Building a frame's payload: `json.RawMessage`, not `[]byte`
 
@@ -139,7 +139,7 @@ the ordinary call path without the check catching it.
 - `internal/codexsup/SCHEMA.md` — how the pinned 0.156.1 schema bundle is
   regenerated; not touched by this ticket.
 - [codexsup-package.md § Approvals reach the permission modal
-  (#2587)](codexsup-package.md#approvals-reach-the-permission-modal-2587) —
+  (#2587)](codexsup-package-production-wiring.md#approvals-reach-the-permission-modal-2587) —
   `cmd/pyry/codex_approval_test.go` is the consumer that drives
   `[fakecodex:withdraw]`.
 - [e2e-harness.md](e2e-harness.md) — where a consumer wires a fake binary

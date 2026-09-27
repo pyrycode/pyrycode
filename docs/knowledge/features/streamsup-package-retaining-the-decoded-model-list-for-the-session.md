@@ -210,7 +210,7 @@ package's persistence recipe for producer-ordered data rather than registry data
 
 `modelVocabularyStore` gained a second, independent field, `codex
 []turnevent.ModelOption`, fed by `RetainCodex` from
-[`codexsup.Client.LatestModels`](codexsup-package.md#reading-the-newest-model-per-family-on-every-spawn-2627)
+[`codexsup.Client.LatestModels`](codexsup-package-production-wiring.md#reading-the-newest-model-per-family-on-every-spawn-2627)
 rather than by any sink on the parser chain — Codex has no stream-json
 `initialize` reply to decorate. On disk the two lists are siblings under
 separate top-level keys, `models` and `codex_models` (the latter

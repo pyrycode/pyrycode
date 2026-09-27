@@ -181,7 +181,7 @@ place is what keeps them safe.):
   `send("effort", …)` default branch unchanged: a future runner that forgets
   the method degrades to a visible `/effort` turn, never a silently skipped
   change. See [codexsup-package.md § Production
-  wiring](codexsup-package.md#production-wiring--the-cmdpyry-codex-runner-2620).
+  wiring](codexsup-package-production-wiring.md#production-wiring--the-cmdpyry-codex-runner-2620).
 
   **Since #2447, that `set_model` request carries `familyAlias(*update.Model)`,
   not `*update.Model` verbatim** — the same rewrite `claudeSettingsArgs`
