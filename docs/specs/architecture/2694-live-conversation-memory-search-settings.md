@@ -69,3 +69,4 @@ Pending documentation stage: update `docs/knowledge/features/memorysearch-packag
 ## Revisions
 
 - The child PATH question resolved by freezing Claude's spawn environment before `cmd.Start` and publishing its PATH beside the stdin binding. Codex's app-server starts from `os.Environ` inside `codexsup.Start`, which does not expose that exact environment afterward. The Codex launcher therefore reports PATH as incomplete instead of treating a later daemon environment read as child evidence. Its active client, work directory, daemon-owned home, and replacement generation still establish the agent and launch scope for declarations.
+- 2026-09-28 verifier review found that production Claude sessions store `streamRunner`, not `*streamsup.Runner`, in the pool. `streamRunner` now forwards `MemorySearchLaunch`; a compile-time capability assertion and a bound provider test using `newStreamRunnerFactory` cover that adapter boundary.

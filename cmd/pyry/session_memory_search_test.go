@@ -156,6 +156,70 @@ func TestMemorySearchFor_ScopesAndReloads(t *testing.T) {
 	}
 }
 
+func TestMemorySearchFor_ProductionClaudeAdapter(t *testing.T) {
+	workDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	claudeBin := filepath.Join(workDir, "claude")
+	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\nexec sleep 3600\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := sessions.New(sessions.Config{
+		Bootstrap:     sessions.SessionConfig{ClaudeBin: claudeBin, WorkDir: workDir},
+		RegistryPath:  filepath.Join(workDir, "sessions.json"),
+		RunnerFactory: newStreamRunnerFactory(newStreamTurnSink(8, discardLogger()), "", nil, streamApprovalConfig{}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := &conversations.Registry{}
+	id := memorySearchBind(t, reg, pool, "conv-production-claude", workDir, "claude")
+	sess, err := pool.Lookup(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := sess.Runner()
+	launcher, ok := runner.(memorySearchLauncher)
+	if !ok {
+		t.Fatalf("production runner %T does not expose its child launch", runner)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(ctx) }()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("production runner did not stop")
+		}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if gotDir, _, _, _, live := launcher.MemorySearchLaunch(); live {
+			if gotDir != workDir {
+				t.Fatalf("child workspace = %q, want %q", gotDir, workDir)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("production child never exposed its launch")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	configPath := filepath.Join(workDir, "config.json")
+	memorySearchWriteConfig(t, configPath, memorySearchDeclaration("scoped-search", "claude", workDir, true))
+	report, err := memorySearchFor(reg, pool, configPath)(context.Background(), "conv-production-claude", string(id))
+	found := false
+	for _, provider := range report.Providers {
+		found = found || provider.ID == "scoped-search" && provider.Availability == "available"
+	}
+	if err != nil || report.Availability != "available" || !found {
+		t.Fatalf("production Claude report = (%#v, %v)", report, err)
+	}
+}
+
 func TestMemorySearchFor_RejectsChangedBindingAndChild(t *testing.T) {
 	reg, pool, runners, claudeDir, _ := memorySearchTestBinding(t)
 	id := memorySearchBind(t, reg, pool, "conv-changing", claudeDir, "claude")
