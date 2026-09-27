@@ -189,11 +189,21 @@ Control flow, in load-bearing order:
   future producer bug can drop a value from the list but can never widen it
   past what `set_session_settings` already accepts.
 - **`MemorySearchFor func(context.Context, string, string) (protocol.MemorySearchReport, error)`
-  (#2693) — a request-local report for the accepted conversation and session.**
-  The session id comes from `RunConfigFor`, never from the request. The provider
-  must honor worker cancellation. A fresh accepted request calls it again even
-  if a prior report or binding changed; a nil provider omits the field, while
-  an error leaves the settings reply intact and reports `unknown` with no rows.
+  (#2693/#2694) — a request-local report for the accepted conversation and
+  session.** The session id comes from `RunConfigFor`, never from the request.
+  Production supplies `memorySearchFor` when both registry and pool exist. On
+  every call it matches the registry's current binding to that id, reads the
+  selected agent and effective workspace from the exact current pool child,
+  reloads config, and rechecks binding and child generation after detection.
+  A missing, replaced, or unsupported child and invalid launch scope yield a
+  present `unknown` report with no borrowed provider rows. Incomplete launch
+  checks can likewise yield `unknown`, unless an independent provider is
+  confirmed usable. Claude MCP status is queried only on the eligible bound
+  child and is bounded to 500 ms so a silent child cannot hold up the ordinary
+  settings reply. The provider honors worker cancellation and retains no
+  result for a later read. A refused `RunConfigFor` binding or nil provider
+  omits `memory_search`; detector failure preserves the saved settings fields
+  and reports present `unknown` with an empty provider array.
 - **`KnownConversation` and `BootstrapSessionID` are no longer read here.**
   `KnownConversation` (`func(conversationID string) bool`) is now consulted
   by both `handleRequestSnapshot` and `handleMCPStatusRequest` — this handler

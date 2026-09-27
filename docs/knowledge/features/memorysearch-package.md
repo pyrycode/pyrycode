@@ -48,6 +48,28 @@ flags. Claude's strict MCP scope excludes user and project registrations;
 Codex evidence must match its daemon-owned `CODEX_HOME`. Mismatched launch scope
 cannot establish availability.
 
+The daemon's `memorySearchFor` resolves the registry-owned conversation binding
+again for every accepted settings read and requires it to match the session ID
+from `RunConfigFor`. It takes the selected agent from `Pool.HarnessFor` and the
+effective workspace from that session's current runner launch, then reloads
+`config.Load`. It never substitutes the saved conversation workspace or the
+bootstrap child. The provider checks the binding, pool session, and child
+generation again after collecting evidence; a replacement or rebind returns
+`unknown` without carrying over the old child's provider rows.
+
+Claude's `streamRunner` forwards the live child's launch snapshot and queries
+that child's MCP status with a 500 ms bound. A silent or ineligible child leaves
+MCP evidence incomplete so the settings reply can still arrive. Codex exposes
+its current work directory and daemon-owned home, but its app server does not
+expose its exact spawn `PATH` afterward. Reading the daemon's later `PATH` would
+mistake host state for child evidence, so the Codex child CLI check remains
+incomplete. Neither runner currently exports effective plugin inventory, and
+the production provider has no completed host CLI inventory. A scoped enabled
+declaration or confirmed eligible MCP server can still establish `available`;
+disabled declarations remain installed without asserting access. With no
+independent usable provider, those incomplete checks yield `unknown` rather
+than `absent`.
+
 - Memsearch is recognized through an enabled `memsearch` plugin or accessible
   child CLI. QMD is recognized through an accessible child CLI or an effective
   MCP server named `qmd` or `qmd-mcp`. Smart Connections needs an effective
