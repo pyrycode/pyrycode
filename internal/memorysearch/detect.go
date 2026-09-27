@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"unicode"
 
 	"github.com/pyrycode/pyrycode/internal/config"
@@ -47,12 +48,15 @@ type Plugin struct {
 // LaunchEvidence must describe the selected child, not the operator's host setup.
 // A nil ChildPATH or MCPStatus means that check could not be completed.
 type LaunchEvidence struct {
-	Agent              string
-	Workspace          string
-	CodexHome          string
-	Plugins            []Plugin
-	PluginsKnown       bool
-	ChildPATH          *string
+	Agent        string
+	Workspace    string
+	CodexHome    string
+	Plugins      []Plugin
+	PluginsKnown bool
+	ChildPATH    *string
+	// ChildRunsAsDaemon asserts that the selected child inherits the daemon's
+	// UID and GID, so an access check in this process applies to that child.
+	ChildRunsAsDaemon  bool
 	HostCLIs           []string
 	HostCLIsKnown      bool
 	MCPStatus          *turnevent.MCPStatus
@@ -100,10 +104,6 @@ func Detect(in Input) (Result, error) {
 			if declaration.Agent != in.Agent {
 				continue
 			}
-			if !canonicalPath(declaration.Workspace) {
-				unresolved = true
-				continue
-			}
 			if declaration.Workspace != in.Workspace {
 				continue
 			}
@@ -147,12 +147,12 @@ func Detect(in Input) (Result, error) {
 			unresolved = true
 		} else {
 			for _, cli := range []string{"memsearch", "qmd"} {
-				found, unknown := executableOnPath(*in.Launch.ChildPATH, cli)
-				if unknown {
+				availability, installed := executableOnPath(*in.Launch.ChildPATH, cli, in.Launch.ChildRunsAsDaemon)
+				if availability == Unknown {
 					unresolved = true
 				}
-				if found {
-					mark(states, cli, builtins[cli], true, Available)
+				if installed {
+					mark(states, cli, builtins[cli], availability == Available, availability)
 				}
 			}
 		}
@@ -245,21 +245,36 @@ func mcpProvider(name string) string {
 	}
 }
 
-func executableOnPath(pathValue, name string) (bool, bool) {
+func executableOnPath(pathValue, name string, childRunsAsDaemon bool) (Availability, bool) {
+	// Access checks the real UID and GID. Only use it when they match the
+	// daemon's effective credentials and the child inherits those credentials.
+	if !childRunsAsDaemon || os.Getuid() != os.Geteuid() || os.Getgid() != os.Getegid() {
+		return Unknown, false
+	}
 	if pathValue == "" {
-		return false, false
+		return Absent, false
 	}
 	dirs := strings.Split(pathValue, string(os.PathListSeparator))
 	unknown := len(dirs) > maxEvidenceEntries
+	installed := false
 	for _, dir := range dirs[:min(len(dirs), maxEvidenceEntries)] {
 		if dir == "" || !filepath.IsAbs(dir) {
 			unknown = true
 			continue
 		}
-		info, err := os.Stat(filepath.Join(dir, name))
+		candidate := filepath.Join(dir, name)
+		info, err := os.Stat(candidate)
 		if err == nil {
-			if info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
-				return true, false
+			if !info.Mode().IsRegular() {
+				continue
+			}
+			installed = true
+			err = syscall.Access(candidate, 1) // POSIX X_OK
+			if err == nil {
+				return Available, true
+			}
+			if !errors.Is(err, syscall.EACCES) {
+				unknown = true
 			}
 			continue
 		}
@@ -267,7 +282,13 @@ func executableOnPath(pathValue, name string) (bool, bool) {
 			unknown = true
 		}
 	}
-	return false, unknown
+	if unknown {
+		return Unknown, installed
+	}
+	if installed {
+		return Unavailable, true
+	}
+	return Absent, false
 }
 
 func canonicalPath(path string) bool {

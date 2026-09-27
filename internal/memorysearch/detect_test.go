@@ -22,7 +22,7 @@ func testInput(t *testing.T) Input {
 		Agent: "claude", Workspace: workspace, Config: config.DefaultConfig(),
 		Launch: LaunchEvidence{
 			Agent: "claude", Workspace: workspace, PluginsKnown: true, Plugins: []Plugin{},
-			ChildPATH: &path, HostCLIsKnown: true, MCPStatus: &turnevent.MCPStatus{}, MCPStatusEffective: true,
+			ChildPATH: &path, ChildRunsAsDaemon: true, HostCLIsKnown: true, MCPStatus: &turnevent.MCPStatus{}, MCPStatusEffective: true,
 		},
 	}
 }
@@ -52,6 +52,19 @@ func TestDetectBuiltins(t *testing.T) {
 		}
 		in.Launch.ChildPATH = &dir
 		testResult(t, in, Available, Provider{ID: "memsearch", DisplayName: "Memsearch", Installed: true, Enabled: true, Availability: Available})
+	})
+	t.Run("owned CLI without owner execute permission", func(t *testing.T) {
+		in := testInput(t)
+		dir := t.TempDir()
+		candidate := filepath.Join(dir, "memsearch")
+		if err := os.WriteFile(candidate, []byte("fixture"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(candidate, 0o010); err != nil {
+			t.Fatal(err)
+		}
+		in.Launch.ChildPATH = &dir
+		testResult(t, in, Unavailable, Provider{ID: "memsearch", DisplayName: "Memsearch", Installed: true, Availability: Unavailable})
 	})
 	t.Run("QMD CLI", func(t *testing.T) {
 		in := testInput(t)
@@ -86,6 +99,11 @@ func TestDetectDeclarationsAndStates(t *testing.T) {
 		in := testInput(t)
 		in.Config.MemorySearchProviders = []config.MemorySearchProvider{{ID: "my-search", DisplayName: "My Search", Agent: "claude", Workspace: in.Workspace, Enabled: boolPtr(true)}}
 		testResult(t, in, Available, Provider{ID: "my-search", DisplayName: "My Search", Installed: true, Enabled: true, Availability: Available})
+	})
+	t.Run("Smart Connections scoped declaration", func(t *testing.T) {
+		in := testInput(t)
+		in.Config.MemorySearchProviders = []config.MemorySearchProvider{{ID: "smart-connections", DisplayName: "Smart Connections", Agent: "claude", Workspace: in.Workspace, Enabled: boolPtr(true)}}
+		testResult(t, in, Available, Provider{ID: "smart-connections", DisplayName: "Smart Connections", Installed: true, Enabled: true, Availability: Available})
 	})
 	t.Run("disabled declaration", func(t *testing.T) {
 		in := testInput(t)
@@ -123,6 +141,11 @@ func TestDetectDeclarationsAndStates(t *testing.T) {
 		in.Launch.ChildPATH = &path
 		testResult(t, in, Unknown)
 	})
+	t.Run("child credentials unproven", func(t *testing.T) {
+		in := testInput(t)
+		in.Launch.ChildRunsAsDaemon = false
+		testResult(t, in, Unknown)
+	})
 	t.Run("unreadable config", func(t *testing.T) {
 		in := testInput(t)
 		in.ConfigErr = errors.New("denied")
@@ -155,6 +178,12 @@ func TestDetectIsolation(t *testing.T) {
 			{ID: "other-agent", DisplayName: "Other Agent", Agent: "codex", Workspace: in.Workspace, Enabled: &yes},
 			{ID: "other-workspace", DisplayName: "Other Workspace", Agent: "claude", Workspace: canonicalTempDir(t), Enabled: &yes},
 		}
+		testResult(t, in, Absent)
+	})
+	t.Run("unrelated missing declaration workspace", func(t *testing.T) {
+		in := testInput(t)
+		yes := true
+		in.Config.MemorySearchProviders = []config.MemorySearchProvider{{ID: "other-workspace", DisplayName: "Other Workspace", Agent: "claude", Workspace: filepath.Join(in.Workspace, "missing"), Enabled: &yes}}
 		testResult(t, in, Absent)
 	})
 	t.Run("excluded MCP status", func(t *testing.T) {
