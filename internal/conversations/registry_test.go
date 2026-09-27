@@ -2648,6 +2648,93 @@ func TestRegistry_OnDelete(t *testing.T) {
 	})
 }
 
+func TestRegistry_SwitchSession_HoldsBindingThroughPersistence(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*Registry)
+	}{
+		{name: "delete", change: func(r *Registry) { r.Delete("conv") }},
+		{name: "rebind", change: func(r *Registry) { r.RebindSession("new", "later") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &Registry{}
+			r.Create(Conversation{ID: "conv", CurrentSessionID: "old"})
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_, _ = r.switchSession("conv", "old", "new", "unused", func(string, registryFile) error {
+					close(entered)
+					<-release
+					return nil
+				})
+			}()
+			<-entered
+			if r.mu.TryLock() {
+				r.mu.Unlock()
+				close(release)
+				<-done
+				t.Fatal("binding unlocked while switch persistence was in progress")
+			}
+			changed := make(chan struct{})
+			go func() { tc.change(r); close(changed) }()
+			select {
+			case <-changed:
+				close(release)
+				<-done
+				t.Fatal("competing binding change completed before switch persistence")
+			default:
+			}
+			close(release)
+			<-done
+			<-changed
+		})
+	}
+}
+
+func TestRegistry_SwitchSession_SaveFailureRestoresBeforeCompetingRebind(t *testing.T) {
+	r := &Registry{}
+	r.Create(Conversation{ID: "conv", CurrentSessionID: "old"})
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	type result struct {
+		committed bool
+		err       error
+	}
+	done := make(chan result, 1)
+	wantErr := errors.New("injected save failure")
+	go func() {
+		committed, err := r.switchSession("conv", "old", "new", "unused", func(string, registryFile) error {
+			close(entered)
+			<-release
+			return wantErr
+		})
+		done <- result{committed, err}
+	}()
+	<-entered
+	if r.mu.TryLock() {
+		r.mu.Unlock()
+		close(release)
+		<-done
+		t.Fatal("binding unlocked before failed save could roll back")
+	}
+	rebound := make(chan bool, 1)
+	go func() { rebound <- r.RebindSession("new", "later") }()
+	close(release)
+	got := <-done
+	if got.committed || !errors.Is(got.err, wantErr) {
+		t.Fatalf("switch = %v, %v; want uncommitted save failure", got.committed, got.err)
+	}
+	if <-rebound {
+		t.Fatal("competing rebind observed transient new session")
+	}
+	row, _ := r.Get("conv")
+	if row.CurrentSessionID != "old" || len(row.SessionHistory) != 0 {
+		t.Fatalf("failed save left %+v", row)
+	}
+}
+
 // #2568: RekeyCwds rewrites every row whose Cwd is a key of the map, counts
 // them, and leaves every other row — absolute ones included — byte-identical.
 func TestRegistry_RekeyCwds_RewritesMatchingRows(t *testing.T) {

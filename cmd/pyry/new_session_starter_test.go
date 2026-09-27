@@ -171,6 +171,30 @@ func TestActiveSessionStarter_UnnamedFollowsTheCursor(t *testing.T) {
 	}
 }
 
+func TestActiveSessionStarter_ChildlessResetWaitsForAgentSwitch(t *testing.T) {
+	reset := &conversationReset{}
+	release, ok := reset.begin(starterConvA)
+	if !ok {
+		t.Fatal("could not claim conversation")
+	}
+	p := &starterProbe{}
+	s := p.newStarter(starterConvA, starterConvA, &restartFreshRunner{}, nil)
+	s.reset = reset
+	if err := s.StartNewSession(""); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.rotatedFrom) != 0 || len(p.resolvedWith) != 0 {
+		t.Fatalf("reset crossed the switch claim: resolved %q, rotated %q", p.resolvedWith, p.rotatedFrom)
+	}
+	release()
+	if err := s.StartNewSession(""); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.rotatedFrom) != 1 {
+		t.Fatalf("reset after release rotated %d times, want one", len(p.rotatedFrom))
+	}
+}
+
 // TestActiveSessionStarter_InertArms walks AC-4's whole reject set plus the
 // pre-existing no-cursor arm. Every row asserts the same three things: nothing
 // rotated, nothing respawned, and no error surfaced to the handler (inert is
