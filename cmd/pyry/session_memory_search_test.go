@@ -28,16 +28,17 @@ import (
 
 type memorySearchTestRunner struct {
 	stubRunner
-	mu         sync.Mutex
-	workspace  string
-	path       string
-	home       string
-	generation uint64
-	current    bool
-	status     turnevent.MCPStatus
-	statusOK   bool
-	onQuery    func()
-	queries    int
+	mu                 sync.Mutex
+	workspace          string
+	path               string
+	home               string
+	generation         uint64
+	current            bool
+	status             turnevent.MCPStatus
+	statusOK           bool
+	waitForQueryCancel bool
+	onQuery            func()
+	queries            int
 }
 
 func (r *memorySearchTestRunner) MemorySearchLaunch() (string, *string, string, uint64, bool) {
@@ -50,12 +51,17 @@ func (r *memorySearchTestRunner) MemorySearchLaunch() (string, *string, string, 
 	return r.workspace, &path, r.home, r.generation, true
 }
 
-func (r *memorySearchTestRunner) QueryMCPStatus(context.Context) (turnevent.MCPStatus, bool) {
+func (r *memorySearchTestRunner) QueryMCPStatus(ctx context.Context) (turnevent.MCPStatus, bool) {
 	r.mu.Lock()
 	r.queries++
 	onQuery := r.onQuery
 	status, ok := r.status, r.statusOK
+	wait := r.waitForQueryCancel
 	r.mu.Unlock()
+	if wait {
+		<-ctx.Done()
+		return turnevent.MCPStatus{}, false
+	}
 	if onQuery != nil {
 		onQuery()
 	}
@@ -447,5 +453,56 @@ func TestMemorySearchFor_SettingsReplySurvivesDetectorError(t *testing.T) {
 	}
 	if settings.MemorySearch == nil || settings.MemorySearch.Availability != "unknown" || len(settings.MemorySearch.Providers) != 0 {
 		t.Errorf("detector failure memory_search = %#v, want present unknown", settings.MemorySearch)
+	}
+
+	// An unresponsive bound child must not hold the ordinary settings reply
+	// until the connection's much longer request context expires.
+	memorySearchWriteConfig(t, configPath)
+	runners[id].mu.Lock()
+	queriesBefore := runners[id].queries
+	runners[id].workspace = dir
+	runners[id].waitForQueryCancel = true
+	runners[id].mu.Unlock()
+	request, err = json.Marshal(protocol.Envelope{
+		ID: 3, Type: protocol.TypeRequestSessionSettings, TS: time.Now().UTC(),
+		Payload: json.RawMessage(`{"conversation_id":"conv-settings"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err = send.Encrypt(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames <- wrap(protocol.TypeNoiseMsg, sealed)
+	replyFrame = await()
+	encoded, err = base64.StdEncoding.DecodeString(replyFrame.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err = receive.Decrypt(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(plaintext, &reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply.Type != protocol.TypeSessionSettings || reply.InReplyTo == nil || *reply.InReplyTo != 3 {
+		t.Fatalf("settings reply after unresponsive child = %#v", reply)
+	}
+	if err := json.Unmarshal(reply.Payload, &settings); err != nil {
+		t.Fatal(err)
+	}
+	if settings.SessionID != string(id) || settings.Model != model || settings.Effort != effort ||
+		settings.UsedTokens != 123 || settings.WindowTokens != 456 ||
+		settings.MemorySearch == nil || settings.MemorySearch.Availability != "unknown" ||
+		len(settings.MemorySearch.Providers) != 0 {
+		t.Errorf("settings after unresponsive child = %#v", settings)
+	}
+	runners[id].mu.Lock()
+	queries := runners[id].queries
+	runners[id].mu.Unlock()
+	if queries != queriesBefore+1 {
+		t.Errorf("unresponsive child queried %d times after %d prior queries, want one more", queries, queriesBefore)
 	}
 }

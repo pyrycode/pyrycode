@@ -15,6 +15,9 @@ type memorySearchLauncher interface {
 	MemorySearchLaunch() (workspace string, childPATH *string, codexHome string, generation uint64, ok bool)
 }
 
+// A settings read must answer promptly even when its selected child is silent.
+const memorySearchMCPQueryTimeout = 500 * time.Millisecond
+
 func unknownMemorySearch() protocol.MemorySearchReport {
 	return protocol.MemorySearchReport{Availability: string(memorysearch.Unknown), Providers: []protocol.MemorySearchProvider{}}
 }
@@ -70,7 +73,7 @@ func memorySearchFor(
 		}
 		if agent == "claude" {
 			if querier, ok := runner.(mcpStatusQuerier); ok {
-				queryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				queryCtx, cancel := context.WithTimeout(ctx, memorySearchMCPQueryTimeout)
 				status, complete := querier.QueryMCPStatus(queryCtx)
 				cancel()
 				if complete {
