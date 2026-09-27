@@ -131,10 +131,9 @@ package's `jsonSchema.validate`:
   no capture confirms Codex populates it that early. **Still open**: a real
   `fileChange` capture would confirm or revise that assumption.
 - The granular approval policy needs the `experimentalApi` capability at
-  `initialize`, which this package's handshake does not declare
-  (`askForApproval.granular requires experimentalApi capability`); the
-  capture uses `untrusted` with the `read-only` sandbox instead, which still
-  yields command approval requests.
+  `initialize`. The handshake now declares it so daemon turns can use their
+  configured granular posture. The capture uses `untrusted` with the
+  `read-only` sandbox to keep its command approval fixture stable.
 
 **Fixture scrub is enforced in code, not just by a manual grep.** The first
 cut of `writeCapture` replaced `cwd` and `os.UserHomeDir()` but not the
@@ -191,6 +190,9 @@ response. Parked requests stay tracked through response completion. Late
 requests finish before stdin closes. Question text, headers, options and
 descriptions are untrusted and never logged. Invalid batches and unsupported
 methods retain the default decline. See [ADR 038](../decisions/038-codex-daemon-owned-home-read-only-default-decline.md).
+
+`TestCodexQuestionLive` is the focused live gate; `TestCodexConversationLive`
+also checks #2660 permissions.
 
 ### The ticket's own literal for the legacy approvals was schema-invalid
 

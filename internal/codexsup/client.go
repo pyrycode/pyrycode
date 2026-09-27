@@ -279,9 +279,14 @@ func (c *Client) handshake(ctx context.Context) error {
 			Title   string `json:"title"`
 			Version string `json:"version"`
 		} `json:"clientInfo"`
+		Capabilities struct {
+			ExperimentalAPI bool `json:"experimentalApi"`
+		} `json:"capabilities"`
 	}{}
 	params.ClientInfo.Name, params.ClientInfo.Title = clientName, "Pyrycode"
 	params.ClientInfo.Version = c.clientVersion
+	// Granular approval policy is gated by this app-server capability.
+	params.Capabilities.ExperimentalAPI = true
 	var res struct {
 		UserAgent string `json:"userAgent"`
 	}
