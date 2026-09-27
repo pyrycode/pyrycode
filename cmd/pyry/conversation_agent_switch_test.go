@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
@@ -149,6 +150,29 @@ func TestConversationAgentSwitch_RefusalsLeaveBinding(t *testing.T) {
 				t.Fatalf("refusal removed old session: %v", err)
 			}
 		})
+	}
+}
+
+func TestConversationAgentSwitch_WorkspaceRefusalOmitsPaths(t *testing.T) {
+	pool, reg, sw, _ := dormantSwitchFixture(t, "")
+	home := t.TempDir()
+	outside := t.TempDir()
+	t.Setenv("HOME", home)
+	reg.Update("conv-1", func(c *conversations.Conversation) { c.Cwd = outside })
+	id, err := sw.Switch(context.Background(), "conv-1", protocol.AgentCodex, nil, nil)
+	if id != "" || !errors.Is(err, handlers.ErrSpawnDirRejected) {
+		t.Fatalf("Switch = %q, %v; want path-free workspace refusal", id, err)
+	}
+	for _, path := range []string{home, outside} {
+		if strings.Contains(err.Error(), path) {
+			t.Fatalf("workspace refusal contains path %q: %v", path, err)
+		}
+	}
+	if got, _ := reg.Get("conv-1"); got.CurrentSessionID != dormantWriteTargetID {
+		t.Fatalf("workspace refusal changed binding: %+v", got)
+	}
+	if got := pool.List(); len(got) != 1 {
+		t.Fatalf("workspace refusal changed sessions: %+v", got)
 	}
 }
 

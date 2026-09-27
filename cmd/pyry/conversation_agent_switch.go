@@ -8,13 +8,15 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 )
 
 var (
-	ErrAgentSwitchSameAgent   = errors.New("conversation already uses target agent")
-	ErrAgentSwitchInProgress  = errors.New("conversation reset already in progress")
-	ErrAgentSwitchUnavailable = errors.New("conversation agent switch unavailable")
+	ErrAgentSwitchSameAgent            = errors.New("conversation already uses target agent")
+	ErrAgentSwitchInProgress           = errors.New("conversation reset already in progress")
+	ErrAgentSwitchUnavailable          = errors.New("conversation agent switch unavailable")
+	ErrAgentSwitchWorkspaceUnavailable = errors.New("conversation workspace unavailable")
 )
 
 // conversationAgentSwitcher is the daemon-side primitive consumed by the relay
@@ -93,7 +95,10 @@ func (s conversationAgentSwitcher) Switch(ctx context.Context, convID, target st
 	// Cwd is persisted data, so validate it again at this spawn boundary.
 	spawnDir, err := resolveSpawnDir(conv.Cwd)
 	if err != nil {
-		return "", err
+		if errors.Is(err, handlers.ErrSpawnDirRejected) {
+			return "", handlers.ErrSpawnDirRejected
+		}
+		return "", ErrAgentSwitchWorkspaceUnavailable
 	}
 	newID, err := s.pool.MintWith(convID, spawnDir, target, start)
 	if err != nil {
