@@ -2,15 +2,26 @@ package main
 
 import (
 	"context"
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/config"
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/devices"
+	"github.com/pyrycode/pyrycode/internal/identity"
+	"github.com/pyrycode/pyrycode/internal/noise"
+	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
@@ -217,5 +228,160 @@ func TestMemorySearchFor_IncompleteEvidenceAndDetectorError(t *testing.T) {
 	got, err = provider(context.Background(), "conv-incomplete", string(id))
 	if err != nil || got.Availability != "unknown" || len(got.Providers) != 0 {
 		t.Fatalf("invalid launch = (%#v,%v)", got, err)
+	}
+}
+
+func TestMemorySearchFor_SettingsReplySurvivesDetectorError(t *testing.T) {
+	reg, pool, runners, dir, _ := memorySearchTestBinding(t)
+	id := memorySearchBind(t, reg, pool, "conv-settings", dir, "claude")
+	model, effort := "claude-sonnet-test", "high"
+	if err := pool.UpdateSettings(id, sessions.SettingsUpdate{Model: &model, Effort: &effort}); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	memorySearchWriteConfig(t, configPath, memorySearchDeclaration("search", "claude", dir, true))
+	// An invalid effective launch workspace makes Detect fail after the settings
+	// resolver has found the ordinary saved fields.
+	runners[id].mu.Lock()
+	runners[id].workspace = "relative"
+	runners[id].mu.Unlock()
+	w := relayWiring{
+		runSettings: func(convID string) (boundRunSettings, bool) {
+			return resolveBoundRunSettings(reg, runSettingsPool{Pool: pool}, convID)
+		},
+		memorySearchFor: memorySearchFor(reg, pool, configPath),
+	}
+	if !strings.Contains(formattedGoFunc(t, "relay.go", "startRelayV2"), "MemorySearchFor: w.memorySearchFor") ||
+		!strings.Contains(formattedGoFunc(t, "main.go", "runSupervisor"), "memorySearchFor: memorySearchFor(convReg, pool, resolveConfigPath())") {
+		t.Fatal("production memory search provider is not attached to settings wiring")
+	}
+
+	serverKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	phoneKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const token = "memory-search-settings-test-token"
+	paired := &devices.Registry{}
+	paired.Add(devices.Device{TokenHash: devices.HashToken(token), Name: "test phone", PairedAt: time.Now().UTC()})
+	frames := make(chan protocol.RoutingEnvelope, 4)
+	outbound := make(chan protocol.RoutingEnvelope, 8)
+	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
+		Frames:          frames,
+		Outbound:        func(env protocol.RoutingEnvelope) error { outbound <- env; return nil },
+		StaticPriv:      serverKey.Bytes(),
+		Devices:         paired,
+		ServerID:        string(identity.NewServerID()),
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RunConfigFor:    runConfigFor(w.runSettings, func(string) (int, int) { return 123, 456 }),
+		MemorySearchFor: w.memorySearchFor,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = mgr.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+
+	initiator, err := noise.NewInitiator(phoneKey.Bytes(), serverKey.PublicKey().Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	helloPayload, err := json.Marshal(protocol.HelloClientPayload{
+		Role: "client", DeviceName: "test phone", ClientVersion: "v2-test",
+		ProtocolVersions: []string{"v2"}, Token: token,
+		Capabilities: []string{protocol.CapabilityInteractive},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello, err := json.Marshal(protocol.Envelope{ID: 1, Type: protocol.TypeHello, TS: time.Now().UTC(), Payload: helloPayload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initMsg, err := initiator.WriteInit(hello)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrap := func(kind string, data []byte) protocol.RoutingEnvelope {
+		t.Helper()
+		frame, err := json.Marshal(protocol.InnerFrameV2{Version: protocol.V2Version, Type: kind, Data: base64.StdEncoding.EncodeToString(data)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return protocol.RoutingEnvelope{ConnID: "settings-conn", Frame: frame}
+	}
+	await := func() protocol.InnerFrameV2 {
+		t.Helper()
+		select {
+		case env := <-outbound:
+			var inner protocol.InnerFrameV2
+			if err := json.Unmarshal(env.Frame, &inner); err != nil {
+				t.Fatal(err)
+			}
+			return inner
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for settings frame")
+			return protocol.InnerFrameV2{}
+		}
+	}
+	frames <- wrap(protocol.TypeNoiseInit, initMsg)
+	response := await()
+	if response.Type != protocol.TypeNoiseResp {
+		t.Fatalf("handshake response type = %q", response.Type)
+	}
+	responseBytes, err := base64.StdEncoding.DecodeString(response.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, send, receive, err := initiator.ReadResp(responseBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := json.Marshal(protocol.Envelope{
+		ID: 2, Type: protocol.TypeRequestSessionSettings, TS: time.Now().UTC(),
+		Payload: json.RawMessage(`{"conversation_id":"conv-settings"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := send.Encrypt(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames <- wrap(protocol.TypeNoiseMsg, sealed)
+	replyFrame := await()
+	if replyFrame.Type != protocol.TypeNoiseMsg {
+		t.Fatalf("settings reply frame type = %q", replyFrame.Type)
+	}
+	encoded, err := base64.StdEncoding.DecodeString(replyFrame.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := receive.Decrypt(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reply protocol.Envelope
+	if err := json.Unmarshal(plaintext, &reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply.Type != protocol.TypeSessionSettings || reply.InReplyTo == nil || *reply.InReplyTo != 2 {
+		t.Fatalf("settings reply = %#v", reply)
+	}
+	var settings protocol.SessionSettingsPayload
+	if err := json.Unmarshal(reply.Payload, &settings); err != nil {
+		t.Fatal(err)
+	}
+	if settings.SessionID != string(id) || settings.Model != model || settings.Effort != effort ||
+		settings.UsedTokens != 123 || settings.WindowTokens != 456 {
+		t.Errorf("saved settings changed on detector failure: %#v", settings)
+	}
+	if settings.MemorySearch == nil || settings.MemorySearch.Availability != "unknown" || len(settings.MemorySearch.Providers) != 0 {
+		t.Errorf("detector failure memory_search = %#v, want present unknown", settings.MemorySearch)
 	}
 }
