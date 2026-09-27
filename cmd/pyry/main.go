@@ -3042,6 +3042,22 @@ func (a activeSessionStarter) start(conversationID string, outcome func(error)) 
 			"conversation_id", boundedConvID(convID))
 		return nil, false
 	}
+	var release func()
+	if a.reset != nil {
+		var armed bool
+		release, armed = a.reset.begin(convID)
+		if !armed {
+			a.logger().Debug("relay: v2 new_session inert; a reset is already in progress",
+				"event", "v2.new_session.reset_in_progress",
+				"conversation_id", convID)
+			return nil, false
+		}
+		defer func() {
+			if release != nil {
+				release()
+			}
+		}()
+	}
 
 	runner, oldID, recordedCwd, ok := a.resolveBound(convID)
 	// used carries the dormant arm's PROOF forward rather than re-deriving it: a
@@ -3119,24 +3135,15 @@ func (a activeSessionStarter) start(conversationID string, outcome func(error)) 
 	// one gets the same wrap-up a named one gets, because the operator pressed the
 	// same control and there is the same session's worth of context to lose.
 	if a.reset != nil && live {
-		release, armed := a.reset.begin(convID)
-		if !armed {
-			// AC-4: DROPPED, not queued. A second reset would run another wrap-up turn
-			// against a child the first one is about to replace — real tokens spent to
-			// write a note over the one being written. Recorded at Debug beside the
-			// other client-driven refusals on this verb.
-			a.logger().Debug("relay: v2 new_session inert; a reset is already in progress",
-				"event", "v2.new_session.reset_in_progress",
-				"conversation_id", convID)
-			return nil, false
-		}
 		// Resolved SYNCHRONOUSLY so it stays BELOW every inert arm AND below the guard
 		// above, which is what keeps a repeated frame from driving MkdirAll — the
 		// containment resolveSpawnDir's own doc requires. The refusal it answers
 		// travels WITH the tail rather than being answered from here; resetThenRotate
 		// mints #2443's value under the rotation that makes it true.
 		spawnDir, refused := a.resolveSpawnDir(convID, recordedCwd)
-		go a.resetThenRotate(release, outcome, runner, oldID, convID, spawnDir, refused)
+		tailRelease := release
+		release = nil
+		go a.resetThenRotate(tailRelease, outcome, runner, oldID, convID, spawnDir, refused)
 		// DEFERRED, AND THE ONLY ARM THAT IS: this frame owes the client a reply it
 		// cannot yet make true. The only reply this verb has is #2443's, and that value
 		// asserts a COMPLETED rotation — one that is ninety seconds away here and may

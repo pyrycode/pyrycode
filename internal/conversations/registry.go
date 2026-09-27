@@ -106,9 +106,9 @@ type Registry struct {
 	// saveMu serializes the full Save sequence (snapshot → encode → fsync →
 	// rename) so a later snapshot always renames later; an older snapshot can
 	// never clobber a newer one on disk. It is deliberately separate from mu so
-	// the slow disk write does not block concurrent reads/mutations. Lock order
-	// is one-directional: saveMu → mu (Save takes saveMu, then briefly mu for
-	// the snapshot copy), never the reverse.
+	// ordinary Save's slow disk write does not block concurrent reads/mutations.
+	// SwitchSession holds mu through its write so a competing binding change
+	// cannot invalidate its save or rollback. Lock order is saveMu → mu.
 	saveMu        sync.Mutex
 	mu            sync.Mutex
 	conversations []Conversation
@@ -180,8 +180,19 @@ func (r *Registry) Save(path string) error {
 	// copy against concurrent mutators. See the saveMu field doc for lock order.
 	r.saveMu.Lock()
 	defer r.saveMu.Unlock()
+	return r.saveLocked(path)
+}
 
+// saveLocked writes a snapshot while saveMu is held by Save.
+func (r *Registry) saveLocked(path string) error {
 	r.mu.Lock()
+	snapshot := r.snapshotLocked()
+	r.mu.Unlock()
+	return writeRegistrySnapshot(path, snapshot)
+}
+
+// snapshotLocked copies mutable registry state while mu is held.
+func (r *Registry) snapshotLocked() registryFile {
 	snapshot := make([]Conversation, len(r.conversations))
 	copy(snapshot, r.conversations)
 	// Copy the label map here too — see the workspaceLabels field doc for why
@@ -193,13 +204,15 @@ func (r *Registry) Save(path string) error {
 		labels[cwd] = label
 	}
 	seeded := r.seeded
-	r.mu.Unlock()
+	return registryFile{Conversations: snapshot, WorkspaceLabels: labels, Seeded: seeded}
+}
 
-	sort.SliceStable(snapshot, func(i, j int) bool {
-		if !snapshot[i].LastUsedAt.Equal(snapshot[j].LastUsedAt) {
-			return snapshot[i].LastUsedAt.Before(snapshot[j].LastUsedAt)
+func writeRegistrySnapshot(path string, snapshot registryFile) error {
+	sort.SliceStable(snapshot.Conversations, func(i, j int) bool {
+		if !snapshot.Conversations[i].LastUsedAt.Equal(snapshot.Conversations[j].LastUsedAt) {
+			return snapshot.Conversations[i].LastUsedAt.Before(snapshot.Conversations[j].LastUsedAt)
 		}
-		return snapshot[i].ID < snapshot[j].ID
+		return snapshot.Conversations[i].ID < snapshot.Conversations[j].ID
 	})
 
 	dir := filepath.Dir(path)
@@ -218,7 +231,7 @@ func (r *Registry) Save(path string) error {
 	}
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(&registryFile{Conversations: snapshot, WorkspaceLabels: labels, Seeded: seeded}); err != nil {
+	if err := enc.Encode(&snapshot); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("registry: encode: %w", err)
 	}
@@ -366,6 +379,35 @@ func (r *Registry) RebindSession(oldID, newID string) bool {
 		}
 	}
 	return false
+}
+
+// SwitchSession serializes the rebind and its Save with other registry saves
+// and mutations. A failed Save restores the binding and appended history entry
+// before any competing mutation can observe the transient new binding.
+func (r *Registry) SwitchSession(id ConversationID, oldID, newID, path string) (bool, error) {
+	return r.switchSession(id, oldID, newID, path, writeRegistrySnapshot)
+}
+
+func (r *Registry) switchSession(id ConversationID, oldID, newID, path string, persist func(string, registryFile) error) (bool, error) {
+	r.saveMu.Lock()
+	defer r.saveMu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.conversations {
+		c := &r.conversations[i]
+		if c.ID != id || c.CurrentSessionID != oldID || oldID == "" || newID == "" {
+			continue
+		}
+		c.CurrentSessionID = newID
+		c.SessionHistory = append(c.SessionHistory, oldID)
+		if err := persist(path, r.snapshotLocked()); err != nil {
+			c.CurrentSessionID = oldID
+			c.SessionHistory = c.SessionHistory[:len(c.SessionHistory)-1]
+			return false, err
+		}
+		return true, nil
+	}
+	return false, ErrConversationNotFound
 }
 
 // Delete removes the conversation whose ID equals id. Returns true on hit,

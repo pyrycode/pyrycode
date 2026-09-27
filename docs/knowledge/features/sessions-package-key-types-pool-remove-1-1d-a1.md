@@ -4,17 +4,17 @@ The typed delete primitive the future `pyry sessions rm` CLI verb (#65) calls in
 
 ```go
 var ErrCannotRemoveBootstrap = errors.New("sessions: cannot remove bootstrap session")
-func (p *Pool) Remove(ctx context.Context, id SessionID) error
+func (p *Pool) Remove(ctx context.Context, id SessionID, opts RemoveOptions) error
 ```
 
 **Sequence — delete-then-evict.**
 
 1. Take `Pool.mu` (write).
-2. Resolve `id` in `p.sessions`. Unknown ⇒ release `Pool.mu`, return `ErrSessionNotFound` (in-memory + on-disk state byte-identical, no `saveLocked` call).
-3. If `sess.bootstrap` ⇒ release `Pool.mu`, return `ErrCannotRemoveBootstrap` (bytes-identical, same as above).
+2. Resolve `id` in `p.sessions`, then `p.dormant`. Unknown in both ⇒ release `Pool.mu`, return `ErrSessionNotFound` (in-memory + on-disk state byte-identical, no `saveLocked` call). A dormant-only entry can now be removed without reviving or spawning it; a failed save restores that entry. The caller's JSONL disposition still applies, so the [agent switch](conversation-session-binding.md#switching-to-the-other-agent-2672) uses `JSONLLeave` to retain its transcript.
+3. If the live session or dormant entry is bootstrap ⇒ release `Pool.mu`, return `ErrCannotRemoveBootstrap` (bytes-identical, same as above).
 4. `delete(p.sessions, id)`, then `delete(p.dormant, id)` (#2448), then `saveLocked()`. On save failure: restore `p.sessions[id] = sess`, release the lock, return the error verbatim. (Mirrors `Pool.Rename`'s rollback discipline.) The `p.dormant` delete has nothing to roll back: `id` was live, so `materialise` already retired any dormant entry for it when the session was registered, and `saveLocked` writes a live id from its `Session` either way — restoring `p.sessions[id]` alone restores the file byte-for-byte. The delete is here anyway because removal's finality is `Remove`'s own claim to make: without it, a future change to where the retire happens could resurrect a removed session on the next save.
-5. Release `Pool.mu`.
-6. Call `sess.Evict(ctx)`. Returns only after the child has exited (or `ctx` cancels). The on-disk JSONL is **not** touched — disposition (archive / purge) is 64-A2 / #95.
+5. Apply the selected JSONL disposition and release `Pool.mu`.
+6. For a live session, call `sess.Evict(ctx)` after removal commits. A dormant-only entry has no child to terminate. See [JSONL disposition](sessions-package-key-types-pool-remove-jsonl-disposition-1-1d-a2.md) for archive and purge behavior.
 
 **Why delete-then-evict (not evict-then-delete).** Holding `Pool.mu` across `Session.Evict` deadlocks: the lifecycle goroutine's `transitionTo` calls `Pool.persist`, which reacquires `Pool.mu` (write). The cap-policy path (#41) hits the same constraint and uses `capMu` as the outer mutex; here the simpler resolution is to release `Pool.mu` after the in-memory delete commits — concurrent `Lookup` / `Activate` / `Rename` / `List` callers see the session as gone from that moment on, so there's no half-removed state for any observer to witness, and no risk of a re-spawn race against a session that's about to die.
 

@@ -1451,6 +1451,26 @@ func (p *Pool) Remove(ctx context.Context, id SessionID, opts RemoveOptions) err
 	p.mu.Lock()
 	sess, ok := p.sessions[id]
 	if !ok {
+		entry, dormant := p.dormant[id]
+		if dormant {
+			if entry.Bootstrap {
+				p.mu.Unlock()
+				return ErrCannotRemoveBootstrap
+			}
+			delete(p.dormant, id)
+			if err := p.saveLocked(); err != nil {
+				p.dormant[id] = entry
+				p.mu.Unlock()
+				return err
+			}
+			disposeErr := p.disposeJSONLLocked(id, opts.JSONL)
+			p.mu.Unlock()
+			if p.registryPath != "" && ValidID(string(id)) {
+				_ = os.Remove(filepath.Join(filepath.Dir(p.registryPath), "session-settings", string(id)+".json"))
+				_ = os.Remove(filepath.Join(sessionPromptsDirFor(p.registryPath), string(id)+".txt"))
+			}
+			return disposeErr
+		}
 		p.mu.Unlock()
 		return ErrSessionNotFound
 	}
@@ -1834,6 +1854,19 @@ func (p *Pool) DormantSettingsFor(id SessionID) (SessionSettings, error) {
 		Model:  entry.Model,
 		Effort: entry.Effort,
 	}), nil
+}
+
+// DormantStoredPostureFor reads the persisted posture for an agent switch.
+// DormantSettingsFor intentionally reports Revive's revoked default posture;
+// the switch instead carries a stored non-bypass mode to the new session.
+func (p *Pool) DormantStoredPostureFor(id SessionID) (string, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	entry, ok := p.dormant[id]
+	if !ok {
+		return "", ErrSessionNotFound
+	}
+	return settingsFromEntry(entry).PermissionMode, nil
 }
 
 // HarnessFor returns the coding agent the session id runs — the live session's

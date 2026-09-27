@@ -90,6 +90,15 @@ merges a `set_session_settings`' model/effort into the same `p.dormant` entry
 this method reads, also used as `settingsUpdaterAdapter`'s existence probe for
 a dormant id.
 
+The [conversation agent switch](conversation-session-binding.md#switching-to-the-other-agent-2672)
+exposed a different question: which non-bypass posture was **stored** before
+restart? `DormantSettingsFor` deliberately answers the posture `Revive` would
+launch, so using it to copy the old posture would silently turn even a stored
+non-bypass mode into `default`. `Pool.DormantStoredPostureFor` reads that
+persisted permission mode separately; the switch still explicitly revokes
+`YOLO` and `bypassPermissions` before minting. Keep the revived-settings read
+revoked for its existing callers.
+
 ## `Pool.HarnessFor` (#2629)
 
 ```go

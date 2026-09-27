@@ -4,7 +4,7 @@ How each phone-created discussion gets its own dedicated, isolated claude sessio
 
 - **Create path (#677, workdir #685, scratch creation #696, deferred spawn #2085, recorded-cwd drift #2568, agent selection #2647)** — `create_conversation` eagerly mints + binds a session, recording it on `CurrentSessionID`, in the conversation's own validated, trust-marked `Cwd` (#685) so discussions targeting different projects are isolated on disk. #696 lets the phone's default `~/.pyrycode/scratch` resolve under `$HOME` and be created before spawn (expand leading `~`, `MkdirAll` after the `$HOME` check). Since #2085 the mint registers, persists and supervises the session but does **not** spawn claude — the child comes up on the conversation's first message, on exactly the lazy-respawn path an idle-evicted session already takes. #2568 records the resolved realpath the session actually spawns in, not the client's spelling of it, and rewrites rows recorded before that fix once at startup. #2647 lets a `multi_agent` client mint the conversation's session as Codex instead of Claude — see [§ Agent selection](#agent-selection-2647). See [§ Spawn deferred to the first message](#spawn-deferred-to-the-first-message-2085), [§ One-time startup normalisation](#one-time-startup-normalisation-of-rows-recorded-before-2568).
 - **Routing path (#678)** — `send_message` resolves that bound session and delivers the inbound turn there instead of to the bootstrap.
-- **Rotation maintenance (#739)** — when a bound session is re-keyed by a `/clear` rotation (old id → new id), the owning conversation's `CurrentSessionID` is re-pointed at the new id and the retired id is appended to `SessionHistory`, so the binding stays current beyond the session's first rotation. Eviction is binding-neutral. See [§ Maintaining the binding across rotation](#maintaining-the-binding-across-rotation-739).
+- **Rotation and agent switch (#739, #2672)** — a `/clear` rotation re-keys the bound session; an agent switch mints a session of the other agent. Both move `CurrentSessionID` and append the retired id to `SessionHistory`. Eviction is binding-neutral. See [§ Maintaining the binding across rotation](#maintaining-the-binding-across-rotation-739).
 - **Stamping the boundary's routing key (#741)** — the `session_transition` producer reads that maintained binding (session id → owning conversation) and stamps `conversation_id` onto every emitted envelope, so the phone (`pyrycode-mobile#336`) folds the session-boundary marker into the correct thread; an unresolvable binding drops the whole event fail-closed rather than emit a guessed key. See [§ Reading the binding to stamp `conversation_id`](#reading-the-binding-to-stamp-conversation_id-741).
 
 The create + routing halves land in the `internal/relay/handlers` package; the rotation maintenance lands in `internal/sessions` + `internal/conversations`. Foundational + consumer slices of EPIC #672 ("per-conversation sessions"). See [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md), [`docs/multi-session.md`](../../multi-session.md).
@@ -23,7 +23,7 @@ Split out to [`conversation-session-binding-routing.md`](conversation-session-bi
 
 ## Maintaining the binding across rotation (#739)
 
-The create path writes `CurrentSessionID` **once**, at conversation creation, then froze it. But a bound session's id is not stable for life: a `/clear` rotation re-keys it in place (old id → new id; `Pool.RotateID`, driven by the [rotation watcher](rotation-watcher.md)). Through #738 the registry was never told, so after the **first** rotation the conversation still pointed at the retired id — the binding was stale, the documented `SessionHistory` trail did not exist, and a reverse lookup (session id → owning conversation) silently missed. #739 implements the **write side** of that maintenance so the downstream consumer #741 (the read side, [§ below](#reading-the-binding-to-stamp-conversation_id-741)) resolves against a correct binding.
+The create path writes `CurrentSessionID` at conversation creation, but a bound session's id is not stable for life: a `/clear` rotation re-keys it in place. Through #738 the registry was never told, so after the first rotation the conversation still pointed at the retired id and reverse lookup missed. #739 maintains that binding for the downstream consumer #741 ([§ below](#reading-the-binding-to-stamp-conversation_id-741)). The [announced reset](sessions-package-key-types-adoptannouncedid.md) and daemon-driven `new_session` paths now drive rotations; the [rotation watcher](rotation-watcher.md) is retired.
 
 ### The rebind, driven from the transition chokepoint
 
@@ -45,8 +45,8 @@ func (p *Pool) notifyTransition(t SessionTransition) {
 Data flow on a `/clear` rotation:
 
 ```
-rotation watcher → onRotate(old,new)
-    → RotateID(old,new)                      [Pool.mu held: map re-key + sessions.json save]
+announced reset or new_session → pool re-key(old,new)
+    → RotateID / AdoptAnnouncedID / RotateForNewSession
     → notifyTransition({Clear, old, new})    [no pool locks held]
         → rebindConversation(old,new)        [ReasonClear branch]
             → convReg.RebindSession(old,new) [conversations.Registry.mu: scan + mutate]
@@ -55,6 +55,16 @@ rotation watcher → onRotate(old,new)
 ```
 
 **Why drive from `notifyTransition`, not a new observer.** The transition signal has a **single** observer slot (`SetTransitionObserver`, "set once"), already owned by the `session_transition_v2.go` producer (installed before `Pool.Run`) — a second observer is impossible. Placing the rebind at the common chokepoint, rebind *then* observer, makes the #741 ordering **structural**: the in-memory rebind (and its `Save`) complete synchronously before the observer hands the signal to its buffered channel, so #741 never resolves against a half-applied binding.
+
+### Switching to the other agent (#2672)
+
+`conversationAgentSwitcher.Switch` in `cmd/pyry` replaces a bound session with a freshly minted session of the other agent. It retains the conversation row, including its name, recorded workspace, system prompt and message history, under the same conversation ID; it does not run a wrap-up turn or replay history (#2673 owns hand-over). The successor is labelled with that conversation ID and uses its recorded workspace after `resolveSpawnDir` validates it again. Live, evicted and dormant old sessions follow the same binding contract. The daemon primitive has no relay verb yet; #2674 owns the caller and wire contract.
+
+Before minting, the switch refuses an unknown or unbound conversation, a same-agent target, unsupported target model or effort, and a refused workspace. Requested model and effort are stored on the new session; absent effort carries forward only when the target model offers the old value. A non-bypass permission mode carries forward, while `YOLO` or `bypassPermissions` becomes `default`, with no bypass grant. The workspace and mint error boundaries return path-free classifications, since even a successful workspace validation can precede a path-bearing runner probe failure. See [the live and dormant settings reads](sessions-package-key-types-pool-settingsfor.md).
+
+`Registry.SwitchSession` compares the expected old binding and persists the new ID plus one history append as one operation. The pool also persists the minted successor and removal of the old live or dormant entry, so the new binding and session survive restart. Removal uses `JSONLLeave` to retain transcripts. The switch then publishes exactly one `ReasonClear` transition with the old and new IDs. It uses `PublishSwitchTransition` because `notifyTransition` would rebind a second time and its ordinary rotation save error is swallowed. Removing a live old session can also produce an eviction from child teardown; `notifyTransition` suppresses that event after the ID has left the pool. Subsequent messages route through the new binding.
+
+The returned ID is the commit signal. An empty ID with an error means the old binding remains and any minted successor is cleaned up, including when mint returned an ID alongside its error. A nonempty ID means the new binding committed even if removing the old entry failed; the clear transition still publishes, and removal may need follow-up cleanup. A failed conversation save restores the old in-memory binding before the switch returns. `conversationReset.begin` excludes a competing reset or switch for this conversation, including a childless `new_session`; the registry holds its mutation lock through persistence or rollback so a competing binding change cannot invalidate that result. The relay caller must run this synchronous operation away from its Run goroutine because a Codex mint may probe synchronously.
 
 ### Eviction is binding-neutral, by construction
 
