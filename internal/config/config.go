@@ -13,7 +13,8 @@ import (
 // additively over time; consumers reading an older file see missing-field
 // defaults via DefaultConfig + overlay-decode in Load.
 type Config struct {
-	RelayURL string `json:"relay_url"`
+	RelayURL              string                 `json:"relay_url"`
+	MemorySearchProviders []MemorySearchProvider `json:"memory_search_providers"`
 
 	// DebugCapture once recorded the daemon's interactive session to a .cast
 	// file (#802). The recorder was removed with the terminal runner in #1348,
@@ -39,6 +40,16 @@ type Config struct {
 	// tool path, so an absent field is the rollback posture. Read once at daemon
 	// startup; changing the file takes effect after a restart.
 	StdioPermissionPrompt bool `json:"stdio_permission_prompt"`
+}
+
+// MemorySearchProvider declares search access for one agent and canonical workspace.
+// Enabled is a pointer so a missing value cannot silently assert a disabled install.
+type MemorySearchProvider struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+	Agent       string `json:"agent"`
+	Workspace   string `json:"workspace"`
+	Enabled     *bool  `json:"enabled"`
 }
 
 // DefaultConfig returns the built-in defaults. Used directly when no config

@@ -1,24 +1,28 @@
 # `internal/config` — typed schema + overlay loader
 
-User-configurable values for pyry, loaded from `~/.pyry/config.json`. Foundation slice for Phase 3 (mobile + relay) work — the first field is the relay URL needed by `pyry pair`. Future fields land additively in the same struct.
+User-configurable values for pyry, loaded from `~/.pyry/config.json`. Fields land additively in the same struct.
 
-This package is leaf-level: stdlib only, no consumers wired in this slice. Daemon startup and `pyry pair` wire `Load` from their own tickets.
+This package is leaf-level and uses only the standard library. `Load` parses the file; consumers validate fields according to their own needs.
 
 ## Surface
 
 ```go
 type Config struct {
-    RelayURL              string `json:"relay_url"`
-    DebugCapture          bool   `json:"debug_capture"`
-    InteractiveRunner     string `json:"interactive_runner"`
-    StdioPermissionPrompt bool  `json:"stdio_permission_prompt"`
+    RelayURL              string                 `json:"relay_url"`
+    MemorySearchProviders []MemorySearchProvider `json:"memory_search_providers"`
+    DebugCapture          bool                   `json:"debug_capture"`
+    InteractiveRunner     string                 `json:"interactive_runner"`
+    StdioPermissionPrompt bool                   `json:"stdio_permission_prompt"`
 }
 
 func DefaultConfig() Config        // built-in defaults
 func Load(path string) (Config, error)
 ```
 
-Three exports total. No `Save`, no `Watch`, no `ErrConfigMissing` sentinel — read-only this slice. If a future ticket needs writes, it lands then (compare `internal/sessions/registry.go`, where `loadRegistry` shipped without `saveRegistry`).
+`MemorySearchProvider` carries `ID`, `DisplayName`, `Agent`, `Workspace`, and
+`Enabled *bool`. The pointer distinguishes a missing `enabled` field from
+explicit `false`. See [memory search detection](memorysearch-package.md#declarations)
+for the field contract and scope. There is no `Save` or `Watch` API.
 
 ## `debug_capture` — rejected at startup since #1514
 
@@ -109,12 +113,14 @@ None. `Load` is one synchronous `os.ReadFile` + one `json.Unmarshal`. No gorouti
 
 ## Tests
 
-`internal/config/config_test.go`, same-package, table-driven. Five cases mapped 1:1 onto the AC enumeration:
+`internal/config/config_test.go` uses same-package, table-driven fixtures:
 
 - `TestDefaultConfig` — pins `DefaultConfig().RelayURL == "wss://relay.pyrycode.dev"`. Fails loudly when the real relay domain lands — that's the right signal.
 - `TestLoad` (table) — missing file → defaults; valid full file → override; partial file `{}` → defaults preserved (regression guard for the overlay property when more fields land); malformed JSON → wrapped error containing `"config: parse"`.
+- `TestLoadMemorySearchProviders` — decodes a scoped declaration and preserves an explicit `enabled: false`.
 
-Each row writes its fixture to `t.TempDir()` (no checked-in golden files). `Config` is a small comparable struct → direct `==` works, no `reflect.DeepEqual` needed.
+Each row writes its fixture to `t.TempDir()` (no checked-in golden files).
+`Config` contains a slice and is compared with `reflect.DeepEqual`.
 
 ## Related
 
