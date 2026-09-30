@@ -133,6 +133,7 @@ func ListConversationsWithAgents(reg ConversationLister, harnessFor SessionHarne
 				IsPromoted:     conv.IsPromoted,
 				IsArchived:     conv.IsArchived,
 				IsMuted:        conv.IsMuted,
+				ArchivedAt:     conv.ArchivedAt,
 				Cwd:            conv.Cwd,
 				WorkspaceLabel: workspaceLabel,
 				// LastMessageTS collapses onto LastUsedAt: Conversation

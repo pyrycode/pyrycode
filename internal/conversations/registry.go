@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 )
 
@@ -457,28 +458,42 @@ func (r *Registry) SetOnDelete(fn func(id ConversationID)) {
 // Returns true on hit, false on miss; on miss no field of any record is
 // modified (AC: "miss for an unknown id, leaving the registry unmodified").
 //
-// It sets exactly one field — IsArchived — so id, cwd, name, promoted state,
-// and session binding are structurally untouched. This is the deterministic
-// enforcement of the ticket's "flips exactly one field" constraint: the
-// #881 verb handler that calls this cannot get it wrong, because the method
-// has no way to touch another field. The scan and mutation happen atomically
-// under r.mu, so there is no find-then-mutate window a concurrent
-// Create/Delete could redirect.
+// It sets exactly the two archive fields — IsArchived and its ArchivedAt stamp
+// (#2698) — so id, cwd, name, promoted state, LastUsedAt and session binding
+// are structurally untouched. This is the deterministic enforcement of the
+// "flips only the archive state" constraint: the #881 verb handler that calls
+// this cannot get it wrong, because the method has no way to touch another
+// field. The scan and mutation happen atomically under r.mu, so there is no
+// find-then-mutate window a concurrent Create/Delete could redirect, and the
+// flag and its stamp can never be observed disagreeing.
 //
-// The single archived bool both sets and clears — SetArchived(id, true) on an
-// already-archived row returns true and leaves it archived (idempotent /
-// symmetric toggle), so no separate Archive/Unarchive pair is needed.
+// The single archived bool both sets and clears. Archiving an active row
+// stamps ArchivedAt with now in UTC — the caller passes now, as the idle sweep's
+// callers do. SetArchived(id, true) on an already-archived row returns true and
+// changes nothing, so the original stamp is kept, and a row archived before the
+// stamp existed stays unstamped rather than reading as the newest archive.
+// Restoring clears both fields.
 //
 // SetArchived does NOT call Save — disk persistence is the caller's concern,
 // matching the Create / Update / Promote / Delete / RebindSession convention.
-func (r *Registry) SetArchived(id ConversationID, archived bool) bool {
+func (r *Registry) SetArchived(id ConversationID, archived bool, now time.Time) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i := range r.conversations {
-		if r.conversations[i].ID == id {
-			r.conversations[i].IsArchived = archived
-			return true
+		c := &r.conversations[i]
+		if c.ID != id {
+			continue
 		}
+		switch {
+		case !archived:
+			c.IsArchived = false
+			c.ArchivedAt = nil
+		case !c.IsArchived:
+			c.IsArchived = true
+			at := now.UTC()
+			c.ArchivedAt = &at
+		}
+		return true
 	}
 	return false
 }

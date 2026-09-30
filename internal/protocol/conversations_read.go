@@ -37,8 +37,14 @@ type ConversationSummary struct {
 	// Always serialized (no omitempty, unlike the on-disk Conversation.IsMuted):
 	// a client reads false explicitly on every row, and treats an absent key
 	// as not muted only because an older daemon cannot send it.
-	IsMuted bool   `json:"is_muted"`
-	Cwd     string `json:"cwd"`
+	IsMuted bool `json:"is_muted"`
+	// ArchivedAt is when the conversation was archived (#2698), so a client
+	// orders its Archive screen newest-archived first. A pointer without
+	// omitempty, like WorkspaceLabel below: the key is always serialized, and
+	// null means an active conversation or one archived before the daemon
+	// recorded the time — the client then falls back to LastUsedAt.
+	ArchivedAt *time.Time `json:"archived_at"`
+	Cwd        string     `json:"cwd"`
 	// WorkspaceLabel is the operator-set display name stored for the workspace
 	// at this row's own Cwd (#2208), so a client renders the chosen name without
 	// a second read verb. It belongs to the workspace, not to this conversation:

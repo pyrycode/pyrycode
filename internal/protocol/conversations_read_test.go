@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestListConversationsPayload_RoundTrip(t *testing.T) {
@@ -46,8 +47,8 @@ func TestConversationsPayload_RoundTrip(t *testing.T) {
 	if err := json.Unmarshal(env.Payload, &p); err != nil {
 		t.Fatalf("unmarshal payload: %v", err)
 	}
-	if len(p.Conversations) != 2 {
-		t.Fatalf("Conversations: got len %d, want 2", len(p.Conversations))
+	if len(p.Conversations) != 3 {
+		t.Fatalf("Conversations: got len %d, want 3", len(p.Conversations))
 	}
 
 	// Row 0: name set, archived on the wire.
@@ -69,6 +70,10 @@ func TestConversationsPayload_RoundTrip(t *testing.T) {
 	if c0.WorkspaceLabel == nil || *c0.WorkspaceLabel != "Kitchen Claw" {
 		t.Errorf("row 0 WorkspaceLabel: got %v, want pointer to %q", c0.WorkspaceLabel, "Kitchen Claw")
 	}
+	wantArchivedAt := time.Date(2026, 5, 8, 10, 32, 40, 0, time.UTC)
+	if c0.ArchivedAt == nil || !c0.ArchivedAt.Equal(wantArchivedAt) {
+		t.Errorf("row 0 ArchivedAt: got %v, want %v", c0.ArchivedAt, wantArchivedAt)
+	}
 
 	// Row 1: name null on wire → nil pointer; active (is_archived false).
 	c1 := p.Conversations[1]
@@ -83,6 +88,28 @@ func TestConversationsPayload_RoundTrip(t *testing.T) {
 	}
 	if c1.WorkspaceLabel != nil {
 		t.Errorf("row 1 WorkspaceLabel: got pointer to %q, want nil (wire was null)", *c1.WorkspaceLabel)
+	}
+	if c1.ArchivedAt != nil {
+		t.Errorf("row 1 ArchivedAt: got %v, want nil (active row, wire was null)", *c1.ArchivedAt)
+	}
+
+	// Row 2: archived before the stamp existed (#2698) — archived, stamp null.
+	c2 := p.Conversations[2]
+	if c2.ID != "c3..." || !c2.IsArchived {
+		t.Errorf("row 2 scalar fields: %+v", c2)
+	}
+	if c2.ArchivedAt != nil {
+		t.Errorf("row 2 ArchivedAt: got %v, want nil (legacy archived row, wire was null)", *c2.ArchivedAt)
+	}
+
+	// archived_at is always serialized: a nil stamp writes an explicit null
+	// rather than dropping the key (#2698).
+	rowJSON, err := json.Marshal(c1)
+	if err != nil {
+		t.Fatalf("marshal row 1: %v", err)
+	}
+	if !bytes.Contains(rowJSON, []byte(`"archived_at":null`)) {
+		t.Errorf("row with nil ArchivedAt serialized without an explicit null: %s", rowJSON)
 	}
 
 	out, err := json.Marshal(env)
