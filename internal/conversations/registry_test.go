@@ -1107,9 +1107,10 @@ func TestRegistry_SetArchived_HitSetsAndClears(t *testing.T) {
 		LastUsedAt:       when,
 	})
 
-	// Archive → true, and every other field is left untouched (the
-	// "flips exactly one field" guarantee).
-	if ok := r.SetArchived(id, true); !ok {
+	// Archive → true, stamped with the caller's time, and every other field is
+	// left untouched (#2698: the flag and its stamp are the only fields moved).
+	archivedAt := time.Date(2026, 9, 30, 10, 0, 0, 0, time.FixedZone("EEST", 3*60*60))
+	if ok := r.SetArchived(id, true, archivedAt); !ok {
 		t.Fatal("SetArchived(true) = false, want true")
 	}
 	got, found := r.Get(id)
@@ -1118,6 +1119,9 @@ func TestRegistry_SetArchived_HitSetsAndClears(t *testing.T) {
 	}
 	if !got.IsArchived {
 		t.Error("IsArchived = false, want true after SetArchived(true)")
+	}
+	if got.ArchivedAt == nil || !got.ArchivedAt.Equal(archivedAt) || got.ArchivedAt.Location() != time.UTC {
+		t.Errorf("ArchivedAt = %v, want %v in UTC", got.ArchivedAt, archivedAt)
 	}
 	if got.Name == nil || *got.Name != "general" {
 		t.Errorf("Name = %v, want pointer to %q (untouched)", got.Name, "general")
@@ -1138,13 +1142,17 @@ func TestRegistry_SetArchived_HitSetsAndClears(t *testing.T) {
 		t.Errorf("LastUsedAt = %v, want %v (untouched)", got.LastUsedAt, when)
 	}
 
-	// Clear → false via the same method (symmetric toggle).
-	if ok := r.SetArchived(id, false); !ok {
+	// Clear → false via the same method (symmetric toggle), and the stamp goes
+	// with the flag.
+	if ok := r.SetArchived(id, false, archivedAt.Add(time.Hour)); !ok {
 		t.Fatal("SetArchived(false) = false, want true")
 	}
 	got, _ = r.Get(id)
 	if got.IsArchived {
 		t.Error("IsArchived = true, want false after SetArchived(false)")
+	}
+	if got.ArchivedAt != nil {
+		t.Errorf("ArchivedAt = %v, want nil after SetArchived(false)", got.ArchivedAt)
 	}
 }
 
@@ -1156,7 +1164,7 @@ func TestRegistry_SetArchived_Miss(t *testing.T) {
 	r := &Registry{}
 	r.Create(Conversation{ID: present, Cwd: "/x", IsArchived: false})
 
-	if ok := r.SetArchived(absent, true); ok {
+	if ok := r.SetArchived(absent, true, time.Now()); ok {
 		t.Errorf("SetArchived(absent) = true, want false")
 	}
 	// Registry left unmodified on miss: the sentinel row is untouched.
@@ -1164,8 +1172,8 @@ func TestRegistry_SetArchived_Miss(t *testing.T) {
 		t.Errorf("len(List) = %d, want 1 (unchanged on miss)", n)
 	}
 	got, _ := r.Get(present)
-	if got.IsArchived {
-		t.Error("present row IsArchived = true, want false (miss must not mutate)")
+	if got.IsArchived || got.ArchivedAt != nil {
+		t.Errorf("present row IsArchived = %v, ArchivedAt = %v; want false, nil (miss must not mutate)", got.IsArchived, got.ArchivedAt)
 	}
 }
 
@@ -1175,15 +1183,38 @@ func TestRegistry_SetArchived_Idempotent(t *testing.T) {
 	r := &Registry{}
 	r.Create(Conversation{ID: id, Cwd: "/x"})
 
-	if ok := r.SetArchived(id, true); !ok {
+	first := time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC)
+	if ok := r.SetArchived(id, true, first); !ok {
 		t.Fatal("first SetArchived(true) = false, want true")
 	}
-	if ok := r.SetArchived(id, true); !ok {
+	if ok := r.SetArchived(id, true, first.Add(time.Hour)); !ok {
 		t.Fatal("second SetArchived(true) = false, want true")
 	}
 	got, _ := r.Get(id)
 	if !got.IsArchived {
 		t.Error("IsArchived = false, want true (stays archived across repeated calls)")
+	}
+	// #2698: re-archiving keeps the original stamp.
+	if got.ArchivedAt == nil || !got.ArchivedAt.Equal(first) {
+		t.Errorf("ArchivedAt = %v, want the first archive's %v", got.ArchivedAt, first)
+	}
+}
+
+// #2698: re-archiving a row archived before the stamp existed leaves it
+// unstamped, so a client keeps ordering it by last_used_at instead of reading
+// it as the newest archive.
+func TestRegistry_SetArchived_LegacyArchivedStaysUnstamped(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	r := &Registry{}
+	r.Create(Conversation{ID: id, Cwd: "/x", IsArchived: true})
+
+	if ok := r.SetArchived(id, true, time.Now()); !ok {
+		t.Fatal("SetArchived(true) = false, want true")
+	}
+	got, _ := r.Get(id)
+	if !got.IsArchived || got.ArchivedAt != nil {
+		t.Errorf("IsArchived = %v, ArchivedAt = %v; want true, nil", got.IsArchived, got.ArchivedAt)
 	}
 }
 
@@ -1195,8 +1226,10 @@ func TestRegistry_SetArchived_RoundTrip(t *testing.T) {
 	when := mustParseTime(t, "2026-05-09T12:34:56.789Z")
 
 	r := &Registry{}
-	r.Create(Conversation{ID: archivedID, Cwd: "/a", IsArchived: true, LastUsedAt: when})
+	r.Create(Conversation{ID: archivedID, Cwd: "/a", LastUsedAt: when})
 	r.Create(Conversation{ID: activeID, Cwd: "/b", IsArchived: false, LastUsedAt: when.Add(time.Second)})
+	archivedAt := when.Add(time.Hour)
+	r.SetArchived(archivedID, true, archivedAt)
 
 	path := filepath.Join(t.TempDir(), "conversations.json")
 	if err := r.Save(path); err != nil {
@@ -1213,6 +1246,9 @@ func TestRegistry_SetArchived_RoundTrip(t *testing.T) {
 	}
 	if !gotArchived.IsArchived {
 		t.Error("archived conversation reloaded as active, want archived")
+	}
+	if gotArchived.ArchivedAt == nil || !gotArchived.ArchivedAt.Equal(archivedAt) {
+		t.Errorf("reloaded ArchivedAt = %v, want %v", gotArchived.ArchivedAt, archivedAt)
 	}
 	gotActive, ok := back.Get(activeID)
 	if !ok {
@@ -1274,6 +1310,57 @@ func TestRegistry_Save_ActiveOmitsArchivedKey(t *testing.T) {
 	back, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
+	}
+	path2 := filepath.Join(t.TempDir(), "conversations.json")
+	if err := back.Save(path2); err != nil {
+		t.Fatalf("re-Save: %v", err)
+	}
+	second, err := os.ReadFile(path2)
+	if err != nil {
+		t.Fatalf("read after re-save: %v", err)
+	}
+	if string(first) != string(second) {
+		t.Errorf("Save→Load→Save not byte-identical:\n first = %s\nsecond = %s", first, second)
+	}
+}
+
+// #2698 AC3: a registry written before the archive stamp existed, including an
+// archived row with no archived_at key, loads unstamped and re-serializes with
+// no archived_at key; Save→Load→Save is a fixed point.
+func TestRegistry_Load_LegacyArchivedRowHasNoStamp(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	raw := `{"conversations":[{"id":"11111111-2222-4333-8444-555555555555","cwd":"/legacy","is_promoted":false,"is_archived":true,"last_used_at":"2026-05-09T12:34:56.789Z"},{"id":"22222222-2222-4333-8444-555555555555","cwd":"/active","is_promoted":true,"last_used_at":"2026-05-09T12:35:56.789Z"}]}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	r, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, ok := r.Get("11111111-2222-4333-8444-555555555555")
+	if !ok {
+		t.Fatal("legacy archived row missing after Load")
+	}
+	if !got.IsArchived || got.ArchivedAt != nil {
+		t.Errorf("legacy row IsArchived = %v, ArchivedAt = %v; want true, nil", got.IsArchived, got.ArchivedAt)
+	}
+
+	path1 := filepath.Join(t.TempDir(), "conversations.json")
+	if err := r.Save(path1); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	first, err := os.ReadFile(path1)
+	if err != nil {
+		t.Fatalf("read after save: %v", err)
+	}
+	if strings.Contains(string(first), "archived_at") {
+		t.Errorf("registry with no stamped rows serialized an archived_at key:\n%s", first)
+	}
+	back, err := Load(path1)
+	if err != nil {
+		t.Fatalf("re-Load: %v", err)
 	}
 	path2 := filepath.Join(t.TempDir(), "conversations.json")
 	if err := back.Save(path2); err != nil {

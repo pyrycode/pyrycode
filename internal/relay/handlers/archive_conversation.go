@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
@@ -19,10 +20,11 @@ const msgArchiveConversationNotFound = "conversation not found"
 // ConversationArchiver is the minimal write surface this handler consumes from
 // the conversations registry. *conversations.Registry satisfies it
 // structurally; no adapter required. SetArchived flips exactly the durable
-// IsArchived flag (#880's deterministic single-field mutator); Get snapshots
-// the post-flip record for the reply; Save eagerly persists.
+// IsArchived flag and its ArchivedAt stamp (#880's deterministic mutator,
+// stamped by #2698 with the now the handler passes); Get snapshots the
+// post-flip record for the reply; Save eagerly persists.
 type ConversationArchiver interface {
-	SetArchived(id conversations.ConversationID, archived bool) bool
+	SetArchived(id conversations.ConversationID, archived bool, now time.Time) bool
 	Get(id conversations.ConversationID) (conversations.Conversation, bool)
 	Save(path string) error
 	// WorkspaceLabel supplies the reply's workspace_label (#2210). Archiving a
@@ -82,7 +84,7 @@ func ArchiveConversation(reg ConversationArchiver, registryPath string, logger *
 		// (no such id, including a garbage/empty conversation_id) is
 		// conversation.not_found and mutates nothing (AC #3).
 		id := conversations.ConversationID(p.ConversationID)
-		if !reg.SetArchived(id, archived) {
+		if !reg.SetArchived(id, archived, time.Now()) {
 			logger.Warn("relay: "+env.Type+" not found",
 				"event", env.Type+".not_found",
 				"conn_id", c.ConnID(),

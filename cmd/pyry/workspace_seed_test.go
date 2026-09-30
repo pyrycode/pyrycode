@@ -112,7 +112,7 @@ func TestSeedDefaultWorkspace_MarkedRegistryLeftAlone(t *testing.T) {
 			reg.Update(id, func(c *conversations.Conversation) { c.Name = &renamed })
 		}},
 		{"archived", func(t *testing.T, reg *conversations.Registry, id conversations.ConversationID) {
-			reg.SetArchived(id, true)
+			reg.SetArchived(id, true, time.Now())
 		}},
 		{"deleted", func(t *testing.T, reg *conversations.Registry, id conversations.ConversationID) {
 			reg.Delete(id)

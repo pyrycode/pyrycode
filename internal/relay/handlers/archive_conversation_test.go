@@ -402,3 +402,110 @@ func TestArchiveConversation_Malformed_DoesNotLeakPayloadBytes(t *testing.T) {
 		})
 	}
 }
+
+// listArchivedAtRaw drives the real ListConversationsWithAgents handler over reg
+// and returns the target row's raw archived_at value, failing if the key is
+// absent: the key is always serialized, null included (#2698).
+func listArchivedAtRaw(t *testing.T, reg ConversationLister) json.RawMessage {
+	t.Helper()
+	c, recv := newListConvConn(t)
+	if err := ListConversationsWithAgents(reg, nil)(context.Background(), c, makeListConversationsRequest(t, 1)); err != nil {
+		t.Fatalf("list handler: %v", err)
+	}
+	inner, _ := decodeConversationsResponse(t, recv())
+	var rows struct {
+		Conversations []map[string]json.RawMessage `json:"conversations"`
+	}
+	if err := json.Unmarshal(inner.Payload, &rows); err != nil {
+		t.Fatalf("decode conversations rows: %v", err)
+	}
+	for _, row := range rows.Conversations {
+		if string(row["id"]) != `"`+archiveConvTargetID+`"` {
+			continue
+		}
+		raw, ok := row["archived_at"]
+		if !ok {
+			t.Fatalf("conversations row omits archived_at; want it always serialized")
+		}
+		return raw
+	}
+	t.Fatalf("conversations reply has no row %q", archiveConvTargetID)
+	return nil
+}
+
+// listArchivedAt parses listArchivedAtRaw into a time, failing on null.
+func listArchivedAt(t *testing.T, reg ConversationLister) time.Time {
+	t.Helper()
+	raw := listArchivedAtRaw(t, reg)
+	var at *time.Time
+	if err := json.Unmarshal(raw, &at); err != nil {
+		t.Fatalf("decode archived_at %s: %v", raw, err)
+	}
+	if at == nil {
+		t.Fatalf("archived_at = null, want a stamp")
+	}
+	return *at
+}
+
+// TestArchiveConversation_ArchivedAtReportedInList covers #2698: archiving
+// stamps the row and the list reports it; re-archiving keeps the stamp; a
+// registry reloaded from the saved file still lists it; unarchiving clears it
+// to an explicit null. Real handlers over a real Registry throughout.
+func TestArchiveConversation_ArchivedAtReportedInList(t *testing.T) {
+	t.Parallel()
+	reg, regPath := newArchiveConvReg(t, false)
+
+	if raw := listArchivedAtRaw(t, reg); string(raw) != "null" {
+		t.Fatalf("active row archived_at = %s, want null", raw)
+	}
+
+	archive := func(archived bool) {
+		t.Helper()
+		typ := protocol.TypeArchiveConversation
+		if !archived {
+			typ = protocol.TypeUnarchiveConversation
+		}
+		c, recv := newArchiveConvConn(t)
+		req := archiveConvRequest(t, typ, protocol.ArchiveConversationPayload{ConversationID: archiveConvTargetID})
+		if err := ArchiveConversation(reg, regPath, testLogger(t), archived)(context.Background(), c, req); err != nil {
+			t.Fatalf("archive handler: %v", err)
+		}
+		assertArchiveConvEnvelopeShape(t, recv(), protocol.TypeConversationUpdated)
+	}
+
+	before := time.Now()
+	archive(true)
+	after := time.Now()
+	stamp := listArchivedAt(t, reg)
+	if stamp.Before(before) || stamp.After(after) {
+		t.Errorf("archived_at = %v, want within [%v, %v]", stamp, before, after)
+	}
+	if stamp.Location() != time.UTC {
+		t.Errorf("archived_at location = %v, want UTC", stamp.Location())
+	}
+
+	// Archiving leaves every other field as it was.
+	stored, _ := reg.Get(conversations.ConversationID(archiveConvTargetID))
+	if !stored.LastUsedAt.Equal(archiveConvSeedTime) || stored.Cwd != archiveConvCwd ||
+		stored.Name == nil || *stored.Name != archiveConvName {
+		t.Errorf("archive moved another field: %+v", stored)
+	}
+
+	archive(true)
+	if again := listArchivedAt(t, reg); !again.Equal(stamp) {
+		t.Errorf("re-archive archived_at = %v, want original %v", again, stamp)
+	}
+
+	reloaded, err := conversations.Load(regPath)
+	if err != nil {
+		t.Fatalf("reload registry from disk: %v", err)
+	}
+	if fromDisk := listArchivedAt(t, reloaded); !fromDisk.Equal(stamp) {
+		t.Errorf("reloaded archived_at = %v, want %v", fromDisk, stamp)
+	}
+
+	archive(false)
+	if raw := listArchivedAtRaw(t, reg); string(raw) != "null" {
+		t.Errorf("unarchived row archived_at = %s, want null", raw)
+	}
+}

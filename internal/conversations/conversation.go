@@ -84,6 +84,18 @@ type Conversation struct {
 	// omitempty for consistency with IsPromoted: their contracts are opposite.
 	IsArchived bool `json:"is_archived,omitempty"`
 
+	// ArchivedAt is when the conversation was archived (#2698), in UTC, so
+	// every client can order its Archive screen newest-archived first. Set and
+	// cleared together with IsArchived by Registry.SetArchived: stamped on the
+	// active → archived transition, kept on a re-archive, nil once restored.
+	// Nil on an archived row means it was archived before the stamp existed;
+	// nothing invents a time for it.
+	//
+	// omitempty carries the same contract as IsArchived's: "an absent key
+	// decodes as unstamped, with no migration step." A registry with no rows
+	// archived since #2698 is byte-identical to its earlier form.
+	ArchivedAt *time.Time `json:"archived_at,omitempty"`
+
 	// IsMuted is the durable mute-notifications flag (#2571): true means the
 	// operator silenced this conversation's alerts. It lives on the host so
 	// every client reads one value; the clients raise their own alerts and
