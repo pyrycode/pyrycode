@@ -210,6 +210,10 @@ type relayWiring struct {
 	// qse is the pre-built queue_state emitter (#722) whose Run goroutine
 	// startRelayV2 starts over the v2 manager.
 	qse *queueStateEmitterV2
+	// operatorMessages is the pre-built live push of the operator's own delivered
+	// message (#2699), fed from the msgqueue OnDelivered seam for qse's reason. Its
+	// Run also takes the replay ring, which this leg creates.
+	operatorMessages *operatorMessageEmitterV2
 	// sessionErr is the pre-built session_error emitter (#1008) whose Run goroutine
 	// startRelayV2 starts over the v2 manager. Built at main.go (channel shared with
 	// the msgqueue OnGiveUp seam) for the same chicken-and-egg reason as qse.
@@ -1580,6 +1584,9 @@ func startRelayV2(
 	// and called from the returned drain closure. A wiring with no sink (a test
 	// literal) leaves it nil, which is what the nil-guard at the call site is for.
 	var streamDrainCleanup func()
+	// replayRing is the emitter's ring, lifted out of the branch for the
+	// operator-message push below (#2699); nil in a wiring with no sink.
+	var replayRing *eventring.Ring
 	if w.streamSink != nil {
 		// STREAM MODE (#1081): the turn stream is fed from the stream-json runner's
 		// turnevent drain, startStreamTurnDrainV2, whose cleanup blocks until its
@@ -1599,6 +1606,7 @@ func startRelayV2(
 		// Free a removed conversation's replay events when the registry drops it
 		// (#1502); installed here because this is where the ring is born.
 		dropRingOnConversationDelete(w.convReg, emitter.ring)
+		replayRing = emitter.ring
 		// The durable conversation log (#2114), assigned the same way the ring is
 		// reached one line up: newInteractiveTurnEmitterV2 has 86 call sites and a
 		// positional parameter is not separable from them in Go. w.hist is minted
@@ -1680,6 +1688,12 @@ func startRelayV2(
 	// connected, the fan-out reaches nobody.
 	streamQueueStateCleanup := startQueueStateStreamV2(ctx, w.qse, mgr)
 
+	// Wire the operator-message push (#2699): each confirmed delivery's `message`
+	// envelope, the bytes the durable log stores, goes to every interactive conn
+	// and into the replay ring. Unconditional like queue_state; with no sink the
+	// ring is nil and the push carries no event_id.
+	streamOperatorMessageCleanup := startOperatorMessageStreamV2(ctx, w.operatorMessages, mgr, replayRing)
+
 	// Wire the session_error producer (#1008): start the pre-built emitter's Run
 	// goroutine over mgr, fanning a typed session_error frame to capability-gated
 	// interactive phones whenever the message queue gives up delivering a
@@ -1708,6 +1722,7 @@ func startRelayV2(
 		}
 		streamTransitionsCleanup()
 		streamQueueStateCleanup()
+		streamOperatorMessageCleanup()
 		streamSessionErrCleanup()
 		streamResettingCleanup()
 		<-mgrDone

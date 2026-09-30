@@ -643,3 +643,10 @@ give-up-notification path as the injected `GiveUpFunc`.
   could not have worked, since it sees only the composed `delivery` payload and never `text`. See
   § Delivered notification above and
   [history-package.md § Producers](history-package.md#producers-2114-2115).
+  **#2699 added a second `OnDelivered` consumer on the same call, `operatorMessageEmitterV2`, needing
+  no new engine guarantee.** The msgqueue tests already pinned `OnDelivered`'s once-per-delivery,
+  never-on-give-up, never-on-removed-head semantics (`TestQueue_OnDelivered_FiresOnceAcrossRetries`,
+  `…_SilentOnGiveUp`, `…_SilentWhenHeadRemovedBeforeCommit`) before this ticket existed; a producer
+  that only ever runs from that seam inherits them for free. The `cmd/pyry`-level test this ticket
+  added therefore covers just the shape specific to the new producer — retry-then-deliver pushed
+  exactly once, carrying the #2038 host-path-free payload — not the once/never cases again.

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -31,9 +32,9 @@ const (
 // deliver the test controls. done closes once the producer has run, so a test
 // reads the log without polling it. The wrapper only sequences — the value under
 // test is still newOperatorMessageHistory's closure.
-func opQueue(t *testing.T, store *history.Store, buf *bytes.Buffer, deliver msgqueue.DeliverFunc) (*msgqueue.Queue, chan struct{}) {
+func opQueue(t *testing.T, store *history.Store, buf *bytes.Buffer, push func(operatorMessage), deliver msgqueue.DeliverFunc) (*msgqueue.Queue, chan struct{}) {
 	t.Helper()
-	producer := newOperatorMessageHistory(store, bufLogger(buf))
+	producer := newOperatorMessageHistory(store, push, bufLogger(buf))
 	done := make(chan struct{})
 	q, err := msgqueue.New(msgqueue.Config{
 		Deliver:       deliver,
@@ -83,7 +84,7 @@ func TestOperatorMessageHistory_AppendsUserMessageWithQueuedText(t *testing.T) {
 	t.Parallel()
 	store := history.New(t.TempDir())
 	var buf bytes.Buffer
-	q, done := opQueue(t, store, &buf, func(context.Context, string, []byte) error { return nil })
+	q, done := opQueue(t, store, &buf, nil, func(context.Context, string, []byte) error { return nil })
 
 	q.EnqueueDelivery(testConvID, opMsgID, opText, opDelivery)
 	waitAppended(t, done)
@@ -142,7 +143,7 @@ func TestOperatorMessageHistory_StoresAttachmentIDs(t *testing.T) {
 	t.Parallel()
 	store := history.New(t.TempDir())
 	var buf bytes.Buffer
-	q, done := opQueue(t, store, &buf, func(context.Context, string, []byte) error { return nil })
+	q, done := opQueue(t, store, &buf, nil, func(context.Context, string, []byte) error { return nil })
 
 	ids := []string{"att-b-0002", "att-a-0001"}
 	q.EnqueueAttached(testConvID, opMsgID, opText, opDelivery, ids)
@@ -197,7 +198,7 @@ func TestOperatorMessageHistory_StampsAtConfirmationNotEnqueue(t *testing.T) {
 	var buf bytes.Buffer
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
-	q, done := opQueue(t, store, &buf, func(context.Context, string, []byte) error {
+	q, done := opQueue(t, store, &buf, nil, func(context.Context, string, []byte) error {
 		entered <- struct{}{}
 		<-release
 		return nil
@@ -219,5 +220,50 @@ func TestOperatorMessageHistory_StampsAtConfirmationNotEnqueue(t *testing.T) {
 
 	if entry := onlyEntry(t, store, testConvID); !entry.TS.After(enqueuedAt) {
 		t.Errorf("entry stamped %s, want strictly after the enqueue time %s", entry.TS, enqueuedAt)
+	}
+}
+
+// #2699 AC 1 and AC 2, through a real queue: a message delivered after a failed
+// attempt is handed to the live push exactly once, as the SAME bytes and stamp
+// the log entry holds — the #2038 shape, so the queued text and attachment ids
+// go out and the delivery payload naming an on-host path never does.
+func TestOperatorMessageHistory_PushesLogEntryOnceAfterRetry(t *testing.T) {
+	t.Parallel()
+	store := history.New(t.TempDir())
+	var buf bytes.Buffer
+	pushes := make(chan operatorMessage, 4)
+	attempts := 0
+	q, done := opQueue(t, store, &buf, func(m operatorMessage) { pushes <- m },
+		func(context.Context, string, []byte) error {
+			attempts++
+			if attempts == 1 {
+				return errors.New("first attempt fails")
+			}
+			return nil
+		})
+
+	q.EnqueueAttached(testConvID, opMsgID, opText, opDelivery, []string{"att-a-0001"})
+	waitAppended(t, done)
+
+	if len(pushes) != 1 {
+		t.Fatalf("pushes = %d, want exactly 1 across %d attempts", len(pushes), attempts)
+	}
+	got := <-pushes
+	entry := onlyEntry(t, store, testConvID)
+	if got.convID != testConvID {
+		t.Errorf("convID = %q, want %q", got.convID, testConvID)
+	}
+	if !bytes.Equal(got.payload, entry.Payload) {
+		t.Errorf("pushed payload = %s, want the log entry's bytes %s", got.payload, entry.Payload)
+	}
+	if !got.ts.Equal(entry.TS) {
+		t.Errorf("pushed ts = %v, want the log entry's stamp %v", got.ts, entry.TS)
+	}
+	raw := string(got.payload)
+	if !strings.Contains(raw, opText) || !strings.Contains(raw, `"attachment_ids":["att-a-0001"]`) {
+		t.Errorf("pushed payload lacks the queued text or attachment ids: %s", raw)
+	}
+	if strings.Contains(raw, opHostPath) {
+		t.Errorf("pushed payload leaked the on-host path: %s", raw)
 	}
 }

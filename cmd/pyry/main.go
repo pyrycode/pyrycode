@@ -1047,6 +1047,11 @@ func runSupervisor(args []string) error {
 	// It takes the SAME registry and registry path every other conversation-keyed
 	// seam resolves against, both already in scope here.
 	postCarry := &channelCarry{reg: convReg, path: convRegistryPath, logger: logger}
+	// operatorMessages is the hand-off from the history producer below to the
+	// live push of the operator's own message (#2699), built BEFORE msgqueue.New
+	// for queueChanges' reason. The ring that push appends to is born in the relay
+	// leg, which hands it to the emitter's Run at start.
+	operatorMessages := make(chan operatorMessage, operatorMessageQueueSize)
 	queue, err := msgqueue.New(msgqueue.Config{
 		// Carry OUTERMOST, so the pending posted text is composed onto the payload
 		// once, at the boundary with the queue, and markApprovalHolds stays adjacent to
@@ -1069,7 +1074,7 @@ func runSupervisor(args []string) error {
 		// runs per ATTEMPT, and a head cleared on an attempt that then fails would
 		// lose the text the retry was meant to carry.
 		OnDelivered: deliveredFuncs(
-			newOperatorMessageHistory(conversationHistory, logger),
+			newOperatorMessageHistory(conversationHistory, operatorMessageNotify(operatorMessages, logger), logger),
 			postCarry.clearDelivered,
 		),
 		// Pending exempts a head held behind an approval parked on a PERSON from the
@@ -1100,6 +1105,11 @@ func runSupervisor(args []string) error {
 	// Built here (so queue.Snapshot is bound) but its Run goroutine starts inside
 	// startRelayV2, where the broadcaster exists.
 	qse := newQueueStateEmitterV2(queueChanges, queue.Snapshot, logger)
+
+	// The live push of the operator's own delivered message (#2699): fed by the
+	// history producer on OnDelivered, started inside startRelayV2 where the
+	// broadcaster and the replay ring exist — same shape as qse.
+	ome := newOperatorMessageEmitterV2(operatorMessages, logger)
 
 	// The session_error producer (#1008): on each msgqueue give-up it fans a typed
 	// session_error envelope (terminal CodeSessionBlocked) to interactive phones,
@@ -1232,6 +1242,8 @@ func runSupervisor(args []string) error {
 		resetting:    resetting,
 		debugBundler: debugBundler,
 		settings:     settingsUpdaterAdapter{pool, modelVocabulary},
+		// #2699: pushes each delivered operator message; Run starts in startRelayV2.
+		operatorMessages: ome,
 		// #2646: the capability list is read off an adapter over the same pool and
 		// store as settings above, so it reports exactly what that one checks.
 		capabilities: settingsUpdaterAdapter{pool, modelVocabulary}.Capabilities,

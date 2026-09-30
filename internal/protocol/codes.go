@@ -1587,13 +1587,14 @@ const (
 // nothing at all (pyrycode-desktop#1028).
 //
 // WIDENING TypeMessage WOULD NOT HAVE WORKED, and it is the obvious move. That
-// frame is not pushed to an attached client at all: its one producer builds a
-// MessagePayload for the durable conversation-history log (#2115), the live
-// assistant reply on the v2 interactive lane is a stream of TypeAssistantDelta
-// closed by TypeTurnEnd, and a client learns a stored message only by asking with
-// TypeRequestHistory. So widening it would announce nothing at the moment a file
-// appears, and would also change a record shape history-page decoders already
-// read.
+// frame is pushed only for the OPERATOR's own turn: its one producer builds a
+// role "user" MessagePayload on confirmed delivery for the durable
+// conversation-history log (#2115) and pushes the same envelope to interactive
+// clients (#2699). The live assistant reply on the v2 interactive lane is a
+// stream of TypeAssistantDelta closed by TypeTurnEnd, and a client learns any
+// other stored message only by asking with TypeRequestHistory. So widening it
+// would announce nothing at the moment a file appears, and would also change a
+// record shape history-page decoders already read.
 //
 // THE NAME follows the past-participle form of TypeAttachmentStored rather than
 // inventing an idiom, and is fixed here rather than left to the producer for
