@@ -33,7 +33,10 @@ import (
 //
 // store may be nil; appendConversationHistory makes that a silent no-op, so the
 // seam stays wired unconditionally and no branch is added here.
-func newOperatorMessageHistory(store *history.Store, logger *slog.Logger) msgqueue.DeliveredFunc {
+//
+// push hands the same payload bytes and stamp to the live push (#2699), after the
+// log append, so the wire and the log cannot differ. nil pushes nothing.
+func newOperatorMessageHistory(store *history.Store, push func(operatorMessage), logger *slog.Logger) msgqueue.DeliveredFunc {
 	return func(convID string, msg msgqueue.QueuedMessage) {
 		payload, err := json.Marshal(protocol.MessagePayload{
 			ConversationID: convID,
@@ -67,7 +70,11 @@ func newOperatorMessageHistory(store *history.Store, logger *slog.Logger) msgque
 		// timestamps and a served page would read out of order. UTC matches what
 		// both #2114 producers hoist, so entries from all three are orderable by
 		// the field the log stores.
+		ts := time.Now().UTC()
 		appendConversationHistory(store, logger, "operator_message.history_append_err",
-			convID, protocol.TypeMessage, payload, time.Now().UTC())
+			convID, protocol.TypeMessage, payload, ts)
+		if push != nil {
+			push(operatorMessage{convID: convID, payload: payload, ts: ts})
+		}
 	}
 }
