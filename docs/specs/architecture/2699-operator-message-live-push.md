@@ -78,3 +78,29 @@ Removed/given-up never firing `OnDelivered` is pinned by the msgqueue tests name
 ## Documentation handoff (pending — documentation stage)
 
 `docs/protocol-mobile.md` § Application message types, the `message` row ("Not minted on the v2 interactive path"): rewrite to say `message` is pushed to interactive clients after confirmed delivery, role `user` only, carries a ring `event_id`, and clients de-duplicate their own echo by `message_id`. Add a dated changelog entry for #2699.
+
+## Security review
+
+**Verdict:** PASS
+
+**Findings:**
+
+- [Trust boundaries] No findings. The authorization boundary is the Noise_IK handshake against paired device keys: a conn reaches `ActiveConns` only once it has a push queue, which exists only from `V2StateOpen`, and `forwardEnvelope` re-checks the state before sealing, so a buffered push to a conn that de-authed is dropped, never delivered. The `Interactive` flag checked in `operatorMessageEmitterV2.broadcast` is a rendering capability, not an authorization: every authenticated conn can already read the same entry through `request_history` (`v2session_history_request.go` applies no interactive gate). The fan-out to all interactive conns, the sender's included, therefore adds no new reader of the operator's text or `attachment_ids`. The conversation id is taken from the daemon's queued message, never from the receiving conn.
+- [Trust boundaries — replay] No findings, one note. The ring now also holds the `message` event. `replayMissed` scopes replay to the daemon-resolved current conversation (never one the client names) and range-bounds the untrusted `last_event_id`; it does not check the `Interactive` flag, so a non-interactive conn that sends `last_event_id` would replay the message as it already replays every other ring event. That is pre-existing behaviour for the whole ring and grants nothing `request_history` does not; unchanged here.
+- [Delivery payload vs queued text] No findings. `newOperatorMessageHistory` builds the payload once from `msgqueue.QueuedMessage` — `Text` and `AttachmentIDs` — and hands the same bytes to both the log and the push; the delivery bytes, which in the #2038 attachment shape name an on-host path, are never read. Evidence: `TestOperatorMessageHistory_PushesLogEntryOnceAfterRetry` delivers a queued message whose delivery payload names a host path, fails once, succeeds, and asserts exactly one push whose payload bytes equal the log entry's, carry `attachment_ids`, and do not contain the host path.
+- [Tokens, secrets, credentials] No findings. The producer handles no keys or tokens; sealing happens in the existing session layer under each conn's own transport keys.
+- [File operations] No findings. No file is created or read; the durable append is the existing #2115 path, unchanged.
+- [Subprocess execution] Not applicable — no process is spawned.
+- [Cryptographic primitives] Not applicable — no primitive is used or added; `event_id` is the ring's sequence number, not a secret.
+- [Network & I/O] No findings. Payload size is bounded upstream by the inbound frame cap on `send_message`; the push rides the existing per-conn push queue with its byte ceiling (`pushQueueByteCeiling`), which tears down a conn that stops draining rather than growing without bound.
+- [Resource bounds] No findings. The hand-off channel holds at most `operatorMessageQueueSize` (16) entries; `operatorMessageNotify` sends non-blocking and drops on full, so delivery never waits on the relay leg and a daemon with no relay leg drops rather than accumulates. The ring retains at most `eventring.MaxEventsPerConversation` (1024) events per conversation, evicting the oldest, the same bound every other ring event already lives under.
+- [Error messages, logs] No findings. The only new log lines are the drop-on-full Warn in `operatorMessageNotify` and the push-error Debug in `broadcast`; both carry only `event`, `conversation_id` and, for the Debug, `conn_id` and `env_id`. The `err` field there is one of `V2SessionManager.Push`'s two returns, `ctx.Err()` or the sentinel `ErrConnNotFound`, neither of which carries envelope bytes. `TestOperatorMessageNotify_DropOnFullDoesNotBlock` asserts the Warn carries no message text. Text, message ids and attachment ids never reach the logger.
+- [Concurrency] No findings. One Run goroutine owns `nextID` and every broadcaster call; `eventring.Ring` has its own mutex; `interactiveTurnEmitterV2.emit` is never called from the queue goroutine. Run exits on ctx cancel and the cleanup returned by `startOperatorMessageStreamV2` joins it; a send racing teardown lands in the unread buffer.
+- [Threat model alignment] No findings. `docs/protocol-mobile.md` § Security model treats every paired device as an equal holder of the conversation; this ticket widens delivery timing, not the set of devices that can read.
+
+**Reviewer:** builder (self-review per the security-review checklist)
+**Date:** 2026-09-30
+
+## Revisions
+
+- **2026-09-30 — security review added after the code (verifier finding, PR #2701).** The ticket carried `security-sensitive` from creation, but the plan was committed without the `## Security review` section the label requires. The section above is the pass run against this plan and the landed implementation. Its verdict is PASS with no MUST FIX or SHOULD FIX findings, so the design and code are unchanged.
