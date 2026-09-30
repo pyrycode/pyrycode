@@ -75,32 +75,46 @@ Contract:
 - **`SessionHistory` is oldest-first, append-in-place.** `append(SessionHistory, oldID)` — the retired id goes on the **end**, satisfying the field's documented "rotation appends in place" contract ([`features/conversations-package.md`](conversations-package.md)). #739 is the first production caller to write this field.
 - **No implicit `Save`.** Disk persistence stays with the caller, matching the `Create`/`Update`/`Promote`/`Delete` convention. The rotation caller (`Pool.rebindConversation`) `Save`s only on a `true` return, treats a `Save` error as non-fatal (the in-memory rebind is already usable), and skips `Save` entirely on a miss so the file mtime stays stable.
 
-## `SetArchived(id ConversationID, archived bool) bool` (#880)
+## `SetArchived(id ConversationID, archived bool, now time.Time) bool` (#880, stamped by #2698)
 
-Flips the durable manual-archive flag: locate the entry whose `ID` matches, set
-`IsArchived = archived`, return `true`. On miss, return `false` and mutate nothing. Scan and
-mutation are a single critical section under `r.mu` — same no-TOCTOU posture as `Update` /
-`Promote` / `RebindSession`.
+Flips the durable manual-archive flag and its archive-time stamp together: locate the entry whose
+`ID` matches, then move `IsArchived` and `ArchivedAt` as one unit (see below), return `true`. On
+miss, return `false` and mutate nothing. Scan and mutation are a single critical section under
+`r.mu` — same no-TOCTOU posture as `Update` / `Promote` / `RebindSession`, and it keeps the flag
+and its stamp from ever being observed disagreeing.
 
-- **One `bool` arg both archives and restores.** `SetArchived(id, true)` on an already-archived
-  row returns `true` and leaves it archived (idempotent); there is no separate `Archive`/
-  `Unarchive` pair.
-- **Flips exactly one field, structurally.** The method has no way to touch `Cwd`, `Name`,
-  `CurrentSessionID`, `SessionHistory`, or `IsPromoted` — this is deterministic enforcement of the
-  #880/#881 contract "toggling archived must not change id, cwd, name, or session binding," not a
-  convention the downstream verb handler has to remember.
+- **One `bool` arg both archives and restores; `now` is only consulted going active → archived.**
+  `archived && !IsArchived` stamps `ArchivedAt = now.UTC()`; `archived && IsArchived` (already
+  archived) changes nothing at all, including on the caller's next `now`; `!archived` clears both
+  `IsArchived` and `ArchivedAt`. There is no separate `Archive`/`Unarchive` pair.
+- **Re-archiving never re-stamps, on purpose — this is the load-bearing behavior, not an
+  oversight.** A row already archived keeps whatever `ArchivedAt` it had, including `nil` for a
+  row archived before #2698 shipped. Stamping a legacy archived row with the current time on a
+  later re-archive would move it to the top of every client's Archive screen — Archive is ordered
+  newest-stamp-first, and inventing a stamp is indistinguishable from a fresh archive. Restoring
+  and re-archiving a legacy row therefore leaves it unstamped forever unless it passes through an
+  active state first.
+- **Flips exactly the two archive fields, structurally.** The method has no way to touch `Cwd`,
+  `Name`, `CurrentSessionID`, `SessionHistory`, `IsPromoted`, or `LastUsedAt` — this is
+  deterministic enforcement of the #880/#881 contract "toggling archived must not change id, cwd,
+  name, or session binding," not a convention the downstream verb handler has to remember. #2698
+  widened the guarantee from one field to two without weakening it: `IsArchived` and `ArchivedAt`
+  move together under the same lock, so nothing else can move with them.
+- **`now` is caller-supplied**, following the idle sweep's "caller passes now" convention rather
+  than the method reading the clock itself — keeps the method deterministic for tests.
 - **No implicit `Save`.** Matches `Create`/`Update`/`Promote`/`Delete`/`RebindSession`; persistence
   is the caller's job.
 - **Modeled on `Delete`/`RebindSession`, not built on `Update`.** `Update(id, fn func(*Conversation))`
   could express the same flip, but that hands the closure free rein over every field — the
-  single-field guarantee would then live only in the caller. A dedicated ~10-line method is this
+  two-field guarantee would then live only in the caller. A dedicated ~10-line method is this
   package's established idiom for named-semantic mutations (`Promote`, `RebindSession`); `Update`
   stays the escape hatch for ad hoc multi-field changes.
 
 Had no production callers as of #880; #881's `archive_conversation`/`unarchive_conversation`
 handler (`internal/relay/handlers.ArchiveConversation`) is the sole caller, flipping the flag
 then re-reading via `Get` for the reply snapshot (deliberately not folded into a single `Update`
-closure — see [codebase/881.md](../codebase/881.md)). See [codebase/880.md](../codebase/880.md).
+closure — see [codebase/881.md](../codebase/881.md)), and since #2698 passing `time.Now()` as
+`now`. See [codebase/880.md](../codebase/880.md).
 
 ## `SetMuted(id ConversationID, muted bool) bool` (#2572)
 
