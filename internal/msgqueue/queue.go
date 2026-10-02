@@ -226,12 +226,22 @@ type Config struct {
 // authored them, which is not licence to project the delivery payload. Only the
 // DELIVERED projection (OnDelivered) sets the field; Snapshot and SnapshotAll
 // leave it nil, since queue_state does not carry it.
+//
+// DeviceName, ClientVersion and ClientSentAt (#2704) say who sent the message
+// and when the client says it was tapped, captured by the handler at enqueue so
+// the history producer can store them on the operator's turn. ClientSentAt is a
+// time the handler already parsed and normalised to UTC, never the client's raw
+// bytes, and zero when the client sent none. Like AttachmentIDs, only the
+// delivered projection sets them, and nothing here reads or logs them.
 type QueuedMessage struct {
 	ID            uint64
 	MessageID     string
 	Text          string
 	TS            time.Time
 	AttachmentIDs []string
+	DeviceName    string
+	ClientVersion string
+	ClientSentAt  time.Time
 }
 
 // queued is one buffered inbound message: the stable per-conversation id, the
@@ -259,7 +269,8 @@ type QueuedMessage struct {
 // fields' provenance and drain stays one unconditional expression.
 //
 // attachmentIDs is the record's own copy of the ids the message named (#2596),
-// nil when it named none. Like messageID, nothing here reads it.
+// nil when it named none. Like messageID, nothing here reads it. The same holds
+// for deviceName, clientVersion and clientSentAt (#2704).
 type queued struct {
 	id            uint64
 	messageID     string
@@ -267,6 +278,9 @@ type queued struct {
 	delivery      string
 	ts            time.Time
 	attachmentIDs []string
+	deviceName    string
+	clientVersion string
+	clientSentAt  time.Time
 }
 
 // convQueue is one conversation's FIFO plus its id counter and the drain-state
@@ -423,13 +437,23 @@ func (q *Queue) EnqueueDelivery(convID, messageID, text, delivery string) uint64
 // EnqueueAttached is EnqueueDelivery for a message that named attachments: the
 // ids the send_message handler resolved (#2596) are stored on the record and
 // projected onto the QueuedMessage OnDelivered receives, so the history producer
-// can keep them on the operator's turn. It is the method the handler calls;
-// EnqueueDelivery is this with no ids.
+// can keep them on the operator's turn. EnqueueDelivery is this with no ids, and
+// this is EnqueueSent with no sender (#2704).
+func (q *Queue) EnqueueAttached(convID, messageID, text, delivery string, attachmentIDs []string) uint64 {
+	return q.EnqueueSent(convID, messageID, text, delivery, attachmentIDs, "", "", time.Time{})
+}
+
+// EnqueueSent is EnqueueAttached that also records who sent the message and when
+// the client says it was tapped (#2704): the pairing record's device name, the
+// app version the connection's hello reported, and the client's tap time, zero
+// when it sent none. They are stored on the record and projected onto the
+// QueuedMessage OnDelivered receives, for the history producer. It is the method
+// the send_message handler calls. Nothing here reads, orders by or logs them.
 //
 // attachmentIDs is COPIED here, at the point it enters the queue, so the record
 // never aliases the caller's slice. An empty list is stored as nil. The ids are
 // never logged, like every other string on the record.
-func (q *Queue) EnqueueAttached(convID, messageID, text, delivery string, attachmentIDs []string) uint64 {
+func (q *Queue) EnqueueSent(convID, messageID, text, delivery string, attachmentIDs []string, deviceName, clientVersion string, clientSentAt time.Time) uint64 {
 	var ids []string
 	if len(attachmentIDs) > 0 {
 		ids = slices.Clone(attachmentIDs)
@@ -454,7 +478,8 @@ func (q *Queue) EnqueueAttached(convID, messageID, text, delivery string, attach
 	}
 	id := c.nextID
 	c.nextID++
-	c.items = append(c.items, queued{id: id, messageID: messageID, text: text, delivery: delivery, ts: time.Now(), attachmentIDs: ids})
+	c.items = append(c.items, queued{id: id, messageID: messageID, text: text, delivery: delivery, ts: time.Now(), attachmentIDs: ids,
+		deviceName: deviceName, clientVersion: clientVersion, clientSentAt: clientSentAt})
 
 	q.maybeSpawnDrainLocked(convID, c)
 	q.mu.Unlock()
@@ -629,7 +654,8 @@ func (q *Queue) notifyGiveUp(convID, reason string) {
 // copy the drain already holds, so nothing is read from the FIFO off-lock.
 func (q *Queue) notifyDelivered(convID string, m queued) {
 	if q.onDelivered != nil {
-		q.onDelivered(convID, QueuedMessage{ID: m.id, MessageID: m.messageID, Text: m.text, TS: m.ts, AttachmentIDs: m.attachmentIDs})
+		q.onDelivered(convID, QueuedMessage{ID: m.id, MessageID: m.messageID, Text: m.text, TS: m.ts, AttachmentIDs: m.attachmentIDs,
+			DeviceName: m.deviceName, ClientVersion: m.clientVersion, ClientSentAt: m.clientSentAt})
 	}
 }
 

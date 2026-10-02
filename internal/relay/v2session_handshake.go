@@ -423,6 +423,13 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// pair list`. Same placement and same best-effort contract as the
 	// redemption write above; a no-op when the stored value already matches.
 	m.recordClientVersion(s.connID, device, helloPayload.ClientVersion)
+	// The snapshot then carries THIS hello's admitted version (#2704), the value
+	// recordClientVersion just persisted, rather than the previous release's
+	// value Validate returned. send_message stores it on each message as the app
+	// version that sent it, and a first connection after an upgrade would
+	// otherwise name the old one. Set after the call, so recordClientVersion's
+	// write-only-on-change comparison still sees the stored value.
+	device.ClientVersion = sessions.AdmitClientVersion(helloPayload.ClientVersion)
 	// s.device deliberately keeps the pre-clear snapshot: it records what
 	// authentication observed, and no reader consults RedeemBy off the session
 	// (#1529 enforces the deadline at the registry).
