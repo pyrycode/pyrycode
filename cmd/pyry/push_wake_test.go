@@ -49,11 +49,12 @@ func (w *wakeSends) send(platform, token string) error {
 }
 
 // newTestPushWaker builds a waker over fakes with a controllable clock and a
-// captured debug log.
+// log captured at Info, the daemon's default level, so a decision line logged
+// any quieter fails the tests that look for it.
 func newTestPushWaker(conns []relay.ActiveConn, devs []devices.Device) (*pushWaker, *wakeSends, *time.Time, *bytes.Buffer) {
 	sends := &wakeSends{}
 	var logs bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	w := newPushWaker(&fakeWakeConns{conns: conns}, &fakeWakeDevices{devs: devs}, sends.send, logger)
 	clock := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
 	w.now = func() time.Time { return clock }
@@ -62,6 +63,54 @@ func newTestPushWaker(conns []relay.ActiveConn, devs []devices.Device) (*pushWak
 
 func fcmDevice(hash, name, token string) devices.Device {
 	return devices.Device{TokenHash: hash, Name: name, Platform: "fcm", PushToken: token}
+}
+
+// testWakeCause is the cause the direct wakeAbsent tests run a pass under.
+var testWakeCause = pushWakeCause{conversationID: testConvID, trigger: pushWakeTurnEnd}
+
+// runPendingPass runs the one pass a Trigger left pending, as run would.
+func runPendingPass(t *testing.T, w *pushWaker) {
+	t.Helper()
+	select {
+	case <-w.trig:
+	default:
+		t.Fatal("no pending wake pass")
+	}
+	w.wakeAbsent(context.Background(), w.takeCause())
+}
+
+// wakeLines parses the captured log into its push_wake decision lines.
+func wakeLines(t *testing.T, logs *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for line := range strings.SplitSeq(strings.TrimSpace(logs.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("log line is not JSON: %q: %v", line, err)
+		}
+		if ev, _ := m["event"].(string); strings.HasPrefix(ev, "push_wake.") {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// lineFor returns the one decision line naming device, failing on none or more.
+func lineFor(t *testing.T, lines []map[string]any, device string) map[string]any {
+	t.Helper()
+	var found []map[string]any
+	for _, l := range lines {
+		if l["device_name"] == device {
+			found = append(found, l)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("decision lines for %q = %d, want 1: %v", device, len(found), lines)
+	}
+	return found[0]
 }
 
 // TestPushWaker_Eligibility pins AC-1's device selection: only an FCM device
@@ -89,7 +138,7 @@ func TestPushWaker_Eligibility(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			w, sends, _, _ := newTestPushWaker(tc.conns, []devices.Device{tc.dev})
-			w.wakeAbsent(context.Background())
+			w.wakeAbsent(context.Background(), testWakeCause)
 			if !slices.Equal(sends.tokens, tc.want) {
 				t.Errorf("wakes = %v, want %v", sends.tokens, tc.want)
 			}
@@ -111,7 +160,7 @@ func TestPushWaker_NewestPairedFirst(t *testing.T) {
 		devs = append(devs, d)
 	}
 	w, sends, _, _ := newTestPushWaker(nil, devs)
-	w.wakeAbsent(context.Background())
+	w.wakeAbsent(context.Background(), testWakeCause)
 	want := []string{"tok-6", "tok-5", "tok-4", "tok-3", "tok-2", "tok-1", "tok-0"}
 	if !slices.Equal(sends.tokens, want) {
 		t.Errorf("wake order = %v, want %v", sends.tokens, want)
@@ -130,7 +179,7 @@ func TestPushWaker_CoalescesPerDevice(t *testing.T) {
 	w.conns = conns
 	t0 := *clock
 
-	w.wakeAbsent(context.Background())
+	w.wakeAbsent(context.Background(), testWakeCause)
 	if want := []string{"tok-a"}; !slices.Equal(sends.tokens, want) {
 		t.Fatalf("t0 wakes = %v, want %v", sends.tokens, want)
 	}
@@ -138,46 +187,125 @@ func TestPushWaker_CoalescesPerDevice(t *testing.T) {
 	// B disconnects; 29 s later A is still inside its window, B is not.
 	conns.conns = nil
 	*clock = t0.Add(pushWakeWindow - time.Second)
-	w.wakeAbsent(context.Background())
+	w.wakeAbsent(context.Background(), testWakeCause)
 	if want := []string{"tok-a", "tok-b"}; !slices.Equal(sends.tokens, want) {
 		t.Fatalf("t0+29s wakes = %v, want %v", sends.tokens, want)
 	}
 
 	// At exactly 30 s A's window has elapsed; B's (opened at t0+29s) has not.
 	*clock = t0.Add(pushWakeWindow)
-	w.wakeAbsent(context.Background())
+	w.wakeAbsent(context.Background(), testWakeCause)
 	if want := []string{"tok-a", "tok-b", "tok-a"}; !slices.Equal(sends.tokens, want) {
 		t.Fatalf("t0+30s wakes = %v, want %v", sends.tokens, want)
 	}
 }
 
-// TestPushWaker_SendFailure_TokenNeverLogged pins AC-3 on the failure path: even
-// when the send error itself carries the token, the log does not. A failed send
-// is not a sent wake, so it opens no window.
+// TestPushWaker_DecisionLines pins #2705 AC-1: every pass logs exactly one
+// Info line per fcm device with a token — sent, send_err, or skipped with its
+// reason — and nothing for a device that is not eligible at all.
+func TestPushWaker_DecisionLines(t *testing.T) {
+	t.Parallel()
+	devs := []devices.Device{
+		fcmDevice("h-sent", "Sent", "tok-sent"),
+		fcmDevice("h-fail", "Fail", "tok-fail"),
+		fcmDevice("h-conn", "Connected", "tok-conn"),
+		fcmDevice("h-recent", "Recent", "tok-recent"),
+		{TokenHash: "h-apns", Name: "Apns", Platform: "apns", PushToken: "tok-apns"},
+		{TokenHash: "h-notok", Name: "NoToken", Platform: "fcm"},
+	}
+	conns := []relay.ActiveConn{{ConnID: "c1", DeviceTokenHash: "h-conn"}}
+	w, _, _, logs := newTestPushWaker(conns, devs)
+	w.last["h-recent"] = w.now() // woken inside the window by an earlier pass
+	w.send = func(_, token string) error {
+		if token == "tok-fail" {
+			return errors.New("fcm unavailable")
+		}
+		return nil
+	}
+
+	w.wakeAbsent(context.Background(), testWakeCause)
+
+	lines := wakeLines(t, logs)
+	if len(lines) != 4 {
+		t.Fatalf("decision lines = %d, want 4 (one per eligible device): %v", len(lines), lines)
+	}
+	tests := []struct{ device, event, reason string }{
+		{"Sent", "push_wake.sent", ""},
+		{"Fail", "push_wake.send_err", ""},
+		{"Connected", "push_wake.skipped", "device_connected"},
+		{"Recent", "push_wake.skipped", "recently_woken"},
+	}
+	for _, tc := range tests {
+		l := lineFor(t, lines, tc.device)
+		if l["level"] != "INFO" {
+			t.Errorf("%s: level = %v, want INFO", tc.device, l["level"])
+		}
+		if l["event"] != tc.event {
+			t.Errorf("%s: event = %v, want %s", tc.device, l["event"], tc.event)
+		}
+		if got, _ := l["reason"].(string); got != tc.reason {
+			t.Errorf("%s: reason = %q, want %q", tc.device, got, tc.reason)
+		}
+		if l["conversation_id"] != testConvID || l["trigger"] != "turn_end" {
+			t.Errorf("%s: conversation_id/trigger = %v/%v, want %s/turn_end", tc.device, l["conversation_id"], l["trigger"], testConvID)
+		}
+	}
+}
+
+// TestPushWaker_SendFailure_TokenNeverLogged pins #2705 AC-3: even when the send
+// error itself carries the token, the log carries neither it, the error text,
+// nor any token hash, and names devices only by their registry entry — never by
+// the name an open connection claims. A failed send is not a sent wake, so it
+// opens no window.
 func TestPushWaker_SendFailure_TokenNeverLogged(t *testing.T) {
 	t.Parallel()
-	const token = "secret-fcm-token-value"
-	w, sends, _, logs := newTestPushWaker(nil, []devices.Device{fcmDevice("h1", "Pixel", token)})
-	sends.err = errors.New("send failed for " + token)
-
-	w.wakeAbsent(context.Background())
-	w.wakeAbsent(context.Background())
-
-	if len(sends.tokens) != 2 {
-		t.Errorf("sends = %d, want 2: a failed send must not open the coalescing window", len(sends.tokens))
+	const (
+		token     = "secret-fcm-token-value"
+		errText   = "fcm rejected registration"
+		hashPixel = "hash-pixel-7f3a9c"
+		hashTab   = "hash-tablet-2b81d4"
+	)
+	devs := []devices.Device{
+		fcmDevice(hashPixel, "Pixel", token),
+		fcmDevice(hashTab, "Tablet", "tok-tablet"),
 	}
-	if !strings.Contains(logs.String(), "push_wake.send_err") {
-		t.Errorf("log lacks the push_wake.send_err event: %s", logs.String())
+	// The tablet's session claims the absent Pixel's name in its hello.
+	conns := []relay.ActiveConn{{ConnID: "c1", DeviceName: "Pixel", DeviceTokenHash: hashTab}}
+	w, sends, _, logs := newTestPushWaker(conns, devs)
+	sends.err = errors.New(errText + ": " + token)
+
+	w.wakeAbsent(context.Background(), testWakeCause)
+	w.wakeAbsent(context.Background(), testWakeCause)
+
+	if want := []string{token, token}; !slices.Equal(sends.tokens, want) {
+		t.Errorf("sends = %v, want %v: a failed send must not open the coalescing window", sends.tokens, want)
 	}
-	if strings.Contains(logs.String(), token) {
-		t.Errorf("log carries the push token: %s", logs.String())
+	lines := wakeLines(t, logs)
+	if len(lines) != 4 {
+		t.Fatalf("decision lines = %d, want 4 (two devices, two passes): %v", len(lines), lines)
+	}
+	for _, l := range lines {
+		switch l["device_name"] {
+		case "Pixel":
+			if l["event"] != "push_wake.send_err" {
+				t.Errorf("Pixel line = %v, want push_wake.send_err", l)
+			}
+		case "Tablet":
+			if l["event"] != "push_wake.skipped" || l["reason"] != "device_connected" {
+				t.Errorf("Tablet line = %v, want push_wake.skipped device_connected", l)
+			}
+		default:
+			t.Errorf("line names device %v, want a registry name: %v", l["device_name"], l)
+		}
 	}
 
 	// And the success path.
 	sends.err = nil
-	w.wakeAbsent(context.Background())
-	if strings.Contains(logs.String(), token) {
-		t.Errorf("log carries the push token after a successful send: %s", logs.String())
+	w.wakeAbsent(context.Background(), testWakeCause)
+	for _, secret := range []string{token, errText, hashPixel, hashTab} {
+		if strings.Contains(logs.String(), secret) {
+			t.Errorf("log carries %q: %s", secret, logs.String())
+		}
 	}
 }
 
@@ -188,24 +316,30 @@ func TestPushWaker_CancelledCtx_SendsNothing(t *testing.T) {
 	w, sends, _, _ := newTestPushWaker(nil, []devices.Device{fcmDevice("h1", "Pixel", "tok-1")})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	w.wakeAbsent(ctx)
+	w.wakeAbsent(ctx, testWakeCause)
 	if len(sends.tokens) != 0 {
 		t.Errorf("wakes on a cancelled ctx = %v, want none", sends.tokens)
 	}
 }
 
 // TestPushWaker_Trigger pins that Trigger is inert on a nil waker and never
-// blocks the caller: a burst leaves exactly one pending pass.
+// blocks the caller: a burst leaves exactly one pending pass, and that pass
+// names the most recent trigger.
 func TestPushWaker_Trigger(t *testing.T) {
 	t.Parallel()
 	var nilWaker *pushWaker
-	nilWaker.Trigger()
+	nilWaker.Trigger(testConvID, pushWakeTurnEnd)
 
-	w, _, _, _ := newTestPushWaker(nil, nil)
-	w.Trigger()
-	w.Trigger()
+	w, _, _, logs := newTestPushWaker(nil, []devices.Device{fcmDevice("h1", "Pixel", "tok-1")})
+	w.Trigger("conv-older", pushWakeTurnEnd)
+	w.Trigger("conv-newer", pushWakeModalShown)
 	if got := len(w.trig); got != 1 {
-		t.Errorf("pending triggers after a burst = %d, want 1", got)
+		t.Fatalf("pending triggers after a burst = %d, want 1", got)
+	}
+	runPendingPass(t, w)
+	l := lineFor(t, wakeLines(t, logs), "Pixel")
+	if l["conversation_id"] != "conv-newer" || l["trigger"] != "modal_shown" {
+		t.Errorf("collapsed pass names %v/%v, want conv-newer/modal_shown", l["conversation_id"], l["trigger"])
 	}
 }
 
@@ -220,7 +354,7 @@ func TestPushWaker_Run_WakesOnTrigger(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); w.run(ctx) }()
 
-	w.Trigger()
+	w.Trigger(testConvID, pushWakeTurnEnd)
 	select {
 	case got := <-sent:
 		if got != "tok-1" {
@@ -238,14 +372,16 @@ func TestPushWaker_Run_WakesOnTrigger(t *testing.T) {
 }
 
 // TestInteractiveTurnEmitterV2_TurnEndTriggersWake pins the turn trigger: the
-// TurnEnd arm asks for a wake, and ordinary turn content does not.
+// TurnEnd arm asks for a wake, ordinary turn content does not, and the pass it
+// starts names the turn's conversation and turn_end (#2705 AC-2).
 func TestInteractiveTurnEmitterV2_TurnEndTriggersWake(t *testing.T) {
 	t.Parallel()
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
 	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
-	e.waker, _, _, _ = newTestPushWaker(nil, nil)
+	waker, _, _, logs := newTestPushWaker(nil, []devices.Device{fcmDevice("h1", "Pixel", "tok-1")})
+	e.waker = waker
 
 	e.Handle(context.Background(), turnevent.TextChunk{Text: "hello"})
 	if got := len(e.waker.trig); got != 0 {
@@ -253,24 +389,35 @@ func TestInteractiveTurnEmitterV2_TurnEndTriggersWake(t *testing.T) {
 	}
 	e.Handle(context.Background(), turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
 	if got := len(e.waker.trig); got != 1 {
-		t.Errorf("pending triggers after turn end = %d, want 1", got)
+		t.Fatalf("pending triggers after turn end = %d, want 1", got)
+	}
+	runPendingPass(t, waker)
+	l := lineFor(t, wakeLines(t, logs), "Pixel")
+	if l["event"] != "push_wake.sent" || l["conversation_id"] != testConvID || l["trigger"] != "turn_end" {
+		t.Errorf("turn-end pass line = %v, want push_wake.sent for %s/turn_end", l, testConvID)
 	}
 }
 
 // TestStreamApprovalBridge_SurfaceTriggersWake pins the permission-prompt
-// trigger: the live modal_shown asks for a wake, and its dismissal does not.
+// trigger: the live modal_shown asks for a wake naming its conversation and
+// modal_shown (#2705 AC-2), and its dismissal does not ask again.
 func TestStreamApprovalBridge_SurfaceTriggersWake(t *testing.T) {
 	t.Parallel()
 	perm := permbridge.New()
 	bridge := newStreamApprovalBridge(perm, modalbridge.New(), oneInteractiveConn("c1"), func() string { return testConvID }, context.Background(), discardLogger())
-	bridge.waker, _, _, _ = newTestPushWaker(nil, nil)
+	waker, _, _, logs := newTestPushWaker(nil, []devices.Device{fcmDevice("h1", "Pixel", "tok-1")})
+	bridge.waker = waker
 
 	req, _ := parkApproval(t, perm, "tu-1", "Bash", json.RawMessage(`{"cmd":"ls"}`))
 	retire := bridge.Surface(req)
 	if got := len(bridge.waker.trig); got != 1 {
 		t.Fatalf("pending triggers after Surface = %d, want 1", got)
 	}
-	<-bridge.waker.trig
+	runPendingPass(t, waker)
+	l := lineFor(t, wakeLines(t, logs), "Pixel")
+	if l["event"] != "push_wake.sent" || l["conversation_id"] != testConvID || l["trigger"] != "modal_shown" {
+		t.Errorf("modal pass line = %v, want push_wake.sent for %s/modal_shown", l, testConvID)
+	}
 	retire()
 	if got := len(bridge.waker.trig); got != 0 {
 		t.Errorf("pending triggers after the dismissal = %d, want 0", got)

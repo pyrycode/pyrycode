@@ -880,7 +880,7 @@ func (b *streamApprovalBridge) Surface(req permbridge.Request) (retire func()) {
 	b.broadcast(protocol.TypeModalShown, payload, "stream_approval.push_err")
 	// After the fan-out, and only on this live path: the reconnect replay
 	// (reconcileModals) never passes through here, so it cannot wake anyone.
-	b.waker.Trigger()
+	b.waker.Trigger(conversationID, pushWakeModalShown)
 
 	return func() { b.retire(modalID) }
 }

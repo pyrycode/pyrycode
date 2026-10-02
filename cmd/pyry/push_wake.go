@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/devices"
@@ -19,6 +20,22 @@ const pushWakeWindow = 30 * time.Second
 // pushWakePlatform is the only platform a wake is sent for today; an apns device
 // has no client to receive it (docs/protocol-mobile.md § push_wake).
 const pushWakePlatform = "fcm"
+
+// pushWakeTrigger names the event that started a wake pass, logged on every
+// decision line so the journal ties a wake to what caused it (#2705).
+type pushWakeTrigger string
+
+const (
+	pushWakeTurnEnd    pushWakeTrigger = "turn_end"
+	pushWakeModalShown pushWakeTrigger = "modal_shown"
+)
+
+// pushWakeCause is the conversation and trigger a pass runs for: the most
+// recent Trigger before the pass started.
+type pushWakeCause struct {
+	conversationID string
+	trigger        pushWakeTrigger
+}
 
 // pushWakeConns is the open-session snapshot the waker suppresses on —
 // *relay.V2SessionManager in production.
@@ -43,8 +60,15 @@ type pushWakeDevices interface {
 // and never by the hello-claimed DeviceName, which a phone could set to another
 // device's name to silence that device's wakes.
 //
-// SECURITY: the push token reaches send and nothing else. No log line here
-// carries a token, a token hash, a device name or a send error.
+// Every pass logs one Info line per fcm device with a token (#2705): sent,
+// send_err, or skipped with its reason, each naming the device, the conversation
+// and the trigger, so the journal alone says whether a wake was asked for.
+//
+// SECURITY: the push token reaches send and nothing else. A log line here may
+// carry the device's name from its devices.Registry entry, as the v2 handshake
+// accept line does, but never a token, a token hash or a send error, whose text
+// can echo the token. Nor the hello-claimed ActiveConn.DeviceName, which a phone
+// chooses for itself.
 type pushWaker struct {
 	conns  pushWakeConns
 	devs   pushWakeDevices
@@ -55,6 +79,11 @@ type pushWaker struct {
 	// trig holds at most one pending pass: a burst of triggers while a pass runs
 	// collapses into one more pass against the then-current state.
 	trig chan struct{}
+
+	// pendMu guards pending, the cause the next pass logs. Trigger overwrites it
+	// before signalling, so a collapsed burst names its most recent trigger.
+	pendMu  sync.Mutex
+	pending pushWakeCause
 
 	// last maps a device's TokenHash to its last SUCCESSFUL wake. Read and
 	// written only on the run goroutine.
@@ -73,12 +102,15 @@ func newPushWaker(conns pushWakeConns, devs pushWakeDevices, send func(platform,
 	}
 }
 
-// Trigger requests a wake pass. It never blocks, and a nil waker — every
-// emitter and bridge built without one — does nothing.
-func (w *pushWaker) Trigger() {
+// Trigger requests a wake pass for conversationID's trigger. It never blocks,
+// and a nil waker — every emitter and bridge built without one — does nothing.
+func (w *pushWaker) Trigger(conversationID string, trigger pushWakeTrigger) {
 	if w == nil {
 		return
 	}
+	w.pendMu.Lock()
+	w.pending = pushWakeCause{conversationID: conversationID, trigger: trigger}
+	w.pendMu.Unlock()
 	select {
 	case w.trig <- struct{}{}:
 	default:
@@ -92,15 +124,22 @@ func (w *pushWaker) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-w.trig:
-			w.wakeAbsent(ctx)
+			w.wakeAbsent(ctx, w.takeCause())
 		}
 	}
 }
 
-// wakeAbsent sends one push_wake to every eligible device. A failed send is
-// logged content-free and dropped: it opens no window, and nothing retries it
-// except the next trigger.
-func (w *pushWaker) wakeAbsent(ctx context.Context) {
+// takeCause returns the cause of the most recent Trigger.
+func (w *pushWaker) takeCause() pushWakeCause {
+	w.pendMu.Lock()
+	defer w.pendMu.Unlock()
+	return w.pending
+}
+
+// wakeAbsent sends one push_wake to every eligible device and logs the decision
+// for each fcm device with a token. A failed send is logged without its error
+// and dropped: it opens no window, and nothing retries it except the next trigger.
+func (w *pushWaker) wakeAbsent(ctx context.Context, cause pushWakeCause) {
 	conns := w.conns.ActiveConns(ctx)
 	// A cancelled snapshot is empty, not "nobody connected": waking every device
 	// on the way down would be exactly wrong.
@@ -129,18 +168,37 @@ func (w *pushWaker) wakeAbsent(ctx context.Context) {
 		return b.PairedAt.Compare(a.PairedAt)
 	})
 	for _, d := range devs {
-		if d.Platform != pushWakePlatform || d.PushToken == "" || open[d.TokenHash] {
+		if d.Platform != pushWakePlatform || d.PushToken == "" {
+			continue
+		}
+		if open[d.TokenHash] {
+			w.logDecision("relay: push_wake skipped", d, cause, "push_wake.skipped", "device_connected")
 			continue
 		}
 		if _, recent := w.last[d.TokenHash]; recent {
+			w.logDecision("relay: push_wake skipped", d, cause, "push_wake.skipped", "recently_woken")
 			continue
 		}
 		if err := w.send(pushWakePlatform, d.PushToken); err != nil {
-			w.logger.Debug("relay: push_wake send dropped",
-				"event", "push_wake.send_err")
+			w.logDecision("relay: push_wake send dropped", d, cause, "push_wake.send_err", "")
 			continue
 		}
 		w.last[d.TokenHash] = now
-		w.logger.Debug("relay: push_wake sent", "event", "push_wake.sent")
+		w.logDecision("relay: push_wake sent", d, cause, "push_wake.sent", "")
 	}
+}
+
+// logDecision logs one device's wake decision at Info, with reason only on a
+// skip. The field set is fixed here so no call site can add a token, a token
+// hash or an error.
+func (w *pushWaker) logDecision(msg string, d devices.Device, cause pushWakeCause, event, reason string) {
+	attrs := []any{"event", event}
+	if reason != "" {
+		attrs = append(attrs, "reason", reason)
+	}
+	attrs = append(attrs,
+		"device_name", d.Name,
+		"conversation_id", cause.conversationID,
+		"trigger", string(cause.trigger))
+	w.logger.Info(msg, attrs...)
 }
