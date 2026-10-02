@@ -151,7 +151,13 @@ The `server`, `relay`, and `server_static_pubkey` values all come from the
 selected daemon's active relay state. In particular, the relay is not resolved
 from the CLI process or supplied by the operator: every `--relay` use is rejected
 before discovery because the daemon owns the destination the new device must
-reach. The `server_static_pubkey` field is that daemon's persistent Noise static
+reach. **`relay` is a bare origin, never a path.** The daemon's own resolved
+relay URL may itself end in `/v1/server` (legal since #631, and this is what
+the daemon dials), but the minter reduces it to `scheme://host[:port]` before
+it enters a pairing, dropping any path, query, fragment or userinfo — the
+phone reads `relay` as an origin and appends `/v1/client` to it itself, so a
+path copied in verbatim would make it dial `/v1/server/v1/client` (#2703). The
+`server_static_pubkey` field is that daemon's persistent Noise static
 public key (see [Static keys — binary side](#static-keys--binary-side)). The
 phone:
 

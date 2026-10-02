@@ -28,6 +28,7 @@ import (
 
 const (
 	pmTestRelayURL  = "wss://relay.invalid/v2/phone"
+	pmTestRelayOrig = "wss://relay.invalid" // what a pairing carries for pmTestRelayURL (#2703)
 	pmTestGrantor   = "operator-laptop"
 	pmTestLabel     = "Kitchen iPad"
 	pmTestPlainTok  = "2127-grantor-plaintext-token"
@@ -125,8 +126,8 @@ func TestPairingMinterV2_PermittedMint(t *testing.T) {
 	if got.Server != pmTestServerID {
 		t.Errorf("server = %q, want this host's %q", got.Server, pmTestServerID)
 	}
-	if got.Relay != pmTestRelayURL {
-		t.Errorf("relay = %q, want the daemon's own resolved URL %q", got.Relay, pmTestRelayURL)
+	if got.Relay != pmTestRelayOrig {
+		t.Errorf("relay = %q, want the origin %q of the daemon's own resolved URL %q", got.Relay, pmTestRelayOrig, pmTestRelayURL)
 	}
 	wantPub := base64.StdEncoding.EncodeToString([]byte(pmTestPubkeyRaw))
 	if got.ServerStaticPubkey != wantPub {
@@ -499,6 +500,7 @@ func TestLocalPairingProvider_BindsEachControlSocketToItsDaemonState(t *testing.
 	type daemonFixture struct {
 		serverID              identity.ServerID
 		relayURL              string
+		relayOrigin           string
 		pub                   [32]byte
 		devicesPath           string
 		label                 string
@@ -512,6 +514,7 @@ func TestLocalPairingProvider_BindsEachControlSocketToItsDaemonState(t *testing.
 		{
 			serverID:              identity.NewServerID(),
 			relayURL:              "wss://relay-one.invalid/live",
+			relayOrigin:           "wss://relay-one.invalid",
 			pub:                   [32]byte{1, 2, 3, 4},
 			devicesPath:           filepath.Join(dir, "one", "devices.json"),
 			label:                 "desk-one",
@@ -520,6 +523,7 @@ func TestLocalPairingProvider_BindsEachControlSocketToItsDaemonState(t *testing.
 		{
 			serverID:              identity.NewServerID(),
 			relayURL:              "wss://relay-two.invalid/live",
+			relayOrigin:           "wss://relay-two.invalid",
 			pub:                   [32]byte{9, 8, 7, 6},
 			devicesPath:           filepath.Join(dir, "two", "devices.json"),
 			label:                 "",
@@ -557,8 +561,8 @@ func TestLocalPairingProvider_BindsEachControlSocketToItsDaemonState(t *testing.
 		if payload.Server != fixture.serverID {
 			t.Errorf("daemon %d server = %q, want %q", i, payload.Server, fixture.serverID)
 		}
-		if payload.Relay != fixture.relayURL {
-			t.Errorf("daemon %d relay = %q, want %q", i, payload.Relay, fixture.relayURL)
+		if payload.Relay != fixture.relayOrigin {
+			t.Errorf("daemon %d relay = %q, want %q", i, payload.Relay, fixture.relayOrigin)
 		}
 		wantPub := base64.StdEncoding.EncodeToString(fixture.pub[:])
 		if payload.ServerStaticPubkey != wantPub {
@@ -711,4 +715,33 @@ func TestLocalPairingProvider_FailuresReturnNoCredential(t *testing.T) {
 		}
 		assertUnchanged()
 	})
+}
+
+// TestRelayOrigin pins #2703: a pairing's relay field is the origin the phone
+// appends /v1/client to, so whatever path the daemon's own dial URL carries —
+// /v1/server above all — must not reach it, and a port must survive.
+func TestRelayOrigin(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name, in, want string
+	}{
+		{"server endpoint stripped", "wss://pyrycode-relay.pyryco.de/v1/server", "wss://pyrycode-relay.pyryco.de"},
+		{"port kept", "wss://relay.example:8443/v1/server", "wss://relay.example:8443"},
+		{"bare origin unchanged", "wss://relay.example", "wss://relay.example"},
+		{"trailing slash dropped", "wss://relay.example/", "wss://relay.example"},
+		{"query and userinfo dropped", "wss://user:pw@relay.example/v1/server?x=1#f", "wss://relay.example"},
+		{"insecure loopback keeps port", "ws://127.0.0.1:54321/v1/server", "ws://127.0.0.1:54321"},
+		{"ipv6 host keeps brackets", "wss://[::1]:8443/v1/server", "wss://[::1]:8443"},
+		{"hostless passes through", "relay.example/v1/server", "relay.example/v1/server"},
+		{"unparseable passes through", "wss://bad host/%zz", "wss://bad host/%zz"},
+		{"empty passes through", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := relayOrigin(tc.in); got != tc.want {
+				t.Errorf("relayOrigin(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
 }

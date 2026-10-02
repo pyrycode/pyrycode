@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/audit"
@@ -80,15 +81,32 @@ type pairingMinterV2 struct {
 // resolveRelayURL produced with PYRY_RELAY_URL consulted. It can differ from what
 // resolveRelay hands the CLI, which consults no environment variable, and when
 // they disagree this is the correct one: it names the relay the new device
-// actually has to reach.
+// actually has to reach. It enters a pairing as its origin only (relayOrigin):
+// the daemon may dial an explicit .../v1/server, but the phone appends its own
+// /v1/client to whatever the pairing names (#2703).
 func newPairingMinterV2(devicesPath, relayURL string, serverID identity.ServerID, pub [32]byte, logger *slog.Logger) *pairingMinterV2 {
 	return &pairingMinterV2{
 		devicesPath: devicesPath,
-		relayURL:    relayURL,
+		relayURL:    relayOrigin(relayURL),
 		serverID:    serverID,
 		staticPub:   base64.StdEncoding.EncodeToString(pub[:]),
 		logger:      logger,
 	}
+}
+
+// relayOrigin reduces a relay URL to scheme://host[:port], the form a pairing's
+// relay field promises the phone. resolveRelayURL hands back PYRY_RELAY_URL
+// verbatim, and since #631 that may name the daemon's own /v1/server endpoint;
+// copied into a pairing, the phone dialled /v1/server/v1/client and reported the
+// host unavailable. Path, query, fragment and userinfo are all dropped. A value
+// with no scheme or host is returned unchanged, since there is no origin to
+// recover and the daemon's dial leg has already refused it.
+func relayOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return raw
+	}
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host}).String()
 }
 
 // MintLocalPairing mints on behalf of the operator connected through the local
