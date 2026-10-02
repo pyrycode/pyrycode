@@ -122,8 +122,12 @@ func TestOperatorMessageHistory_AppendsUserMessageWithQueuedText(t *testing.T) {
 		t.Errorf("entry leaked the on-host path %q: %s", opHostPath, raw)
 	}
 	// #2596 AC 2: a message that named no attachments omits the key entirely.
-	if strings.Contains(raw, `"attachment_ids"`) {
-		t.Errorf("entry for a message naming no attachments carries an attachment_ids key: %s", raw)
+	// #2704 AC 4: so does a message with no sender and no tap time, which is what
+	// keeps an older client's entry byte-identical to one stored before the keys.
+	for _, key := range []string{`"attachment_ids"`, `"device_name"`, `"client_version"`, `"client_sent_at"`} {
+		if strings.Contains(raw, key) {
+			t.Errorf("entry for a message with no value carries a %s key: %s", key, raw)
+		}
 	}
 
 	// An empty log buffer means no Warn fired, so the append succeeded — and it
@@ -178,6 +182,42 @@ func TestOperatorMessageHistory_StoresAttachmentIDs(t *testing.T) {
 	}
 	if strings.Contains(raw, "The user attached a file") {
 		t.Errorf("entry carries the daemon-composed delivery prompt: %s", raw)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("producer logged %q; want silence on the success path", buf.String())
+	}
+}
+
+// #2704 AC 2 and AC 3: the stored user entry names the device and app version
+// that sent it and the client's tap time, the last re-formatted by the daemon
+// as UTC RFC 3339 from the time the handler parsed. The tap time stays the
+// client's — the entry is still stamped at confirmation, not by it.
+func TestOperatorMessageHistory_StoresSender(t *testing.T) {
+	t.Parallel()
+	store := history.New(t.TempDir())
+	var buf bytes.Buffer
+	q, done := opQueue(t, store, &buf, nil, func(context.Context, string, []byte) error { return nil })
+
+	sentAt := time.Date(2020, 1, 2, 3, 4, 5, 120000000, time.FixedZone("EET", 2*60*60))
+	q.EnqueueSent(testConvID, opMsgID, opText, opText, nil, "desktop", "pyrycode-desktop/0.9.1", sentAt)
+	waitAppended(t, done)
+
+	entry := onlyEntry(t, store, testConvID)
+	var payload protocol.MessagePayload
+	if err := json.Unmarshal(entry.Payload, &payload); err != nil {
+		t.Fatalf("decode entry payload: %v", err)
+	}
+	if payload.DeviceName != "desktop" {
+		t.Errorf("device_name = %q, want %q", payload.DeviceName, "desktop")
+	}
+	if payload.ClientVersion != "pyrycode-desktop/0.9.1" {
+		t.Errorf("client_version = %q, want %q", payload.ClientVersion, "pyrycode-desktop/0.9.1")
+	}
+	if want := "2020-01-02T01:04:05.12Z"; payload.ClientSentAt != want {
+		t.Errorf("client_sent_at = %q, want %q (UTC RFC 3339)", payload.ClientSentAt, want)
+	}
+	if entry.TS.Year() == 2020 {
+		t.Errorf("entry stamped %v from the client's tap time; want the confirmation time", entry.TS)
 	}
 	if buf.Len() != 0 {
 		t.Errorf("producer logged %q; want silence on the success path", buf.String())

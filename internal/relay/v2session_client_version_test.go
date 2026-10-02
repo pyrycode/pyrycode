@@ -1,6 +1,8 @@
 package relay
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/devices"
+	"github.com/pyrycode/pyrycode/internal/dispatch"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -101,5 +104,87 @@ func TestV2Session_ClientVersion_InadmissibleStoredEmpty(t *testing.T) {
 	}
 	if strings.Contains(string(raw), `"client_version"`) {
 		t.Fatalf("devices.json still carries a client_version key:\n%s", raw)
+	}
+}
+
+// TestV2Session_ClientVersion_HandlerSeesCurrentHello is #2704's stale-snapshot
+// case: on the first connection after an upgrade the device record still holds
+// the previous release's ClientVersion, and a handler reading c.Auth() — as
+// send_message does to store the version on each message — must see the version
+// THIS hello reported, admitted, not the record's old one.
+func TestV2Session_ClientVersion_HandlerSeesCurrentHello(t *testing.T) {
+	t.Parallel()
+	const stored = "pyrycode-android/1.4.0"
+	tests := []struct {
+		name     string
+		reported string
+		want     string
+	}{
+		{"upgraded version", "pyrycode-android/1.5.0", "pyrycode-android/1.5.0"},
+		{"inadmissible version reads empty", `1.5.0" injected`, ""},
+		{"no version reads empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			respPriv, respPub := genV2Keypair(t)
+			initPriv, _ := genV2Keypair(t)
+			reg := v2PairedRegistry(t, v2TestToken)
+			if !reg.SetClientVersion(devices.HashToken(v2TestToken), stored) {
+				t.Fatal("seed SetClientVersion reported no change")
+			}
+
+			seen := make(chan string, 1)
+			handlers := map[string]dispatch.Handler{
+				protocol.TypeListConversations: func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error {
+					if auth := c.Auth(); auth != nil {
+						seen <- auth.ClientVersion
+					}
+					return c.Reply(ctx, env, protocol.TypeConversations, json.RawMessage(`{}`))
+				},
+			}
+			frames := make(chan protocol.RoutingEnvelope, 2)
+			rec := &v2Recorder{}
+			_, stop := startManager(t, V2SessionConfig{
+				Frames:     frames,
+				Outbound:   rec.outbound,
+				StaticPriv: respPriv,
+				Devices:    reg,
+				ServerID:   v2TestServerID,
+				Logger:     silentLogger(),
+				Handlers:   handlers,
+			})
+			t.Cleanup(stop)
+
+			initiator, err := noise.NewInitiator(initPriv, respPub)
+			if err != nil {
+				t.Fatalf("NewInitiator: %v", err)
+			}
+			initMsg, err := initiator.WriteInit(buildHelloIdentityEarlyData(t, v2TestToken, v2TestDevName, tt.reported))
+			if err != nil {
+				t.Fatalf("WriteInit: %v", err)
+			}
+			frames <- wrapInnerFrame(t, v2TestConnID, protocol.TypeNoiseInit, initMsg)
+			envs := waitForEnvelopes(t, rec, 1)
+			_, initSend, _, err := initiator.ReadResp(decodeRespFrame(t, envs[0]))
+			if err != nil {
+				t.Fatalf("ReadResp: %v", err)
+			}
+
+			frames <- sealAppFrame(t, initSend, protocol.Envelope{
+				ID:      7,
+				Type:    protocol.TypeListConversations,
+				TS:      time.Now().UTC(),
+				Payload: json.RawMessage(`{}`),
+			})
+			select {
+			case got := <-seen:
+				if got != tt.want {
+					t.Errorf("c.Auth().ClientVersion = %q, want %q (stored record held %q)", got, tt.want, stored)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("handler never ran")
+			}
+		})
 	}
 }

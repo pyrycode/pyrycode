@@ -53,10 +53,18 @@ func newOperatorMessageHistory(store *history.Store, push func(operatorMessage),
 			// queued record beside Text — never parsed out of the delivery payload.
 			// nil for a message that named none, which omits the key.
 			AttachmentIDs: msg.AttachmentIDs,
+			// Who sent it (#2704), captured by the handler at enqueue: the pairing
+			// record's name and the app version that connection's hello reported.
+			// "" omits the key, so an older client's entry keeps today's bytes.
+			DeviceName:    msg.DeviceName,
+			ClientVersion: msg.ClientVersion,
+			// The client's tap time, re-formatted HERE from the time the handler
+			// parsed — never the client's own bytes.
+			ClientSentAt: formatClientSentAt(msg.ClientSentAt),
 		})
 		if err != nil {
-			// Defensive, matching both #2114 producers: MessagePayload is four
-			// strings and a string slice and cannot fail to marshal in practice. Never echo the payload
+			// Defensive, matching both #2114 producers: MessagePayload is strings
+			// and a string slice and cannot fail to marshal in practice. Never echo the payload
 			// or err.Error() — encoding/json quotes invalid input bytes into its
 			// error, which would put conversation content in a log line.
 			logger.Debug("relay: operator-message history drop; payload marshal",
@@ -77,4 +85,14 @@ func newOperatorMessageHistory(store *history.Store, push func(operatorMessage),
 			push(operatorMessage{convID: convID, payload: payload, ts: ts})
 		}
 	}
+}
+
+// formatClientSentAt renders the client's parsed tap time for the stored entry
+// (#2704) as UTC RFC 3339, or "" — which omits the key — when the client sent
+// none the handler could parse.
+func formatClientSentAt(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
 }

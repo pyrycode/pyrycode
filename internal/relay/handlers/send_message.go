@@ -113,8 +113,13 @@ type TurnWriter interface {
 // stored beside text so the history log keeps them on the operator's turn. The
 // ids travel as their own argument, never derived from delivery, which is the
 // half that names on-host paths.
+// Since #2704 it is EnqueueSent and also takes who sent the message — the
+// pairing record's device name and the app version this connection's hello
+// reported — and the client's tap time, already parsed and normalised to UTC by
+// parseClientSentAt (zero when absent or unparseable). Positional, because a
+// struct for them would have to live in a package both sides import.
 type Enqueuer interface {
-	EnqueueAttached(conversationID, messageID, text, delivery string, attachmentIDs []string) uint64
+	EnqueueSent(conversationID, messageID, text, delivery string, attachmentIDs []string, deviceName, clientVersion string, clientSentAt time.Time) uint64
 }
 
 // AttachmentResolver resolves one attachment id named by a send_message to the
@@ -484,7 +489,16 @@ func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolve
 		// attachmentIDs rides along too (#2596): the ids resolveAttachments just
 		// checked, once each in first-listed order, so the stored history entry can
 		// name them. Ids only — the paths stay inside the composed prompt.
-		id := queue.EnqueueAttached(p.ConversationID, p.MessageID, p.Text, composeAttachmentPrompt(p.Text, paths), attachmentIDs)
+		//
+		// The sender rides along as well (#2704), for the stored operator turn:
+		// the pairing record's name — never the hello's self-reported device_name,
+		// which a client can set to anything — and the version this connection's
+		// hello reported, which the handshake admitted through
+		// sessions.AdmitClientVersion onto the snapshot. The tap time is the
+		// daemon's parse of client_sent_at, never its raw bytes.
+		deviceName, clientVersion := connSender(c)
+		id := queue.EnqueueSent(p.ConversationID, p.MessageID, p.Text, composeAttachmentPrompt(p.Text, paths), attachmentIDs,
+			deviceName, clientVersion, parseClientSentAt(p.ClientSentAt))
 		if id == 0 {
 			// The conversation's backlog is at its per-conversation cap (#869).
 			// Reject, never drop: nothing was enqueued and the existing backlog is
@@ -498,7 +512,7 @@ func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolve
 				"message_id", p.MessageID)
 			return replyError(ctx, c, env, protocol.CodeServerBinaryBusy, msgSendMessageBacklogFull, true)
 		}
-		logger.Info("relay: send_message enqueued",
+		enqueuedAttrs := []any{
 			"event", "send_message.enqueued",
 			"conn_id", c.ConnID(),
 			"conversation_id", p.ConversationID,
@@ -506,7 +520,19 @@ func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolve
 			"queued_msg_id", id,
 			// A count, never an id and never a path: how many attachments the
 			// prompt names is operationally useful and discloses nothing.
-			"attachment_count", len(paths))
+			"attachment_count", len(paths),
+		}
+		// Who sent it (#2704), so a message can be traced to its sender without
+		// joining against a handshake line that may have aged out. Each key only
+		// when there is a value. The version is the admitted one, which cannot
+		// carry a control character or a quote. client_sent_at is NEVER logged.
+		if deviceName != "" {
+			enqueuedAttrs = append(enqueuedAttrs, "device_name", deviceName)
+		}
+		if clientVersion != "" {
+			enqueuedAttrs = append(enqueuedAttrs, "client_version", clientVersion)
+		}
+		logger.Info("relay: send_message enqueued", enqueuedAttrs...)
 
 		// THE ACK GOES OUT FIRST, and the auto-naming follows it (#2159). Acceptance
 		// is established by the enqueue above, not by anything below: the message is
@@ -538,6 +564,49 @@ func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolve
 
 		return ackErr
 	}
+}
+
+// connSender returns who sent a message on c (#2704): the pairing record's name
+// and the app version this connection's hello reported, both "" on a conn with
+// no device record. The snapshot's ClientVersion is the CURRENT hello's admitted
+// value, not the record's previous one — the handshake sets it before the conn
+// opens.
+func connSender(c *dispatch.Conn) (deviceName, clientVersion string) {
+	auth := c.Auth()
+	if auth == nil {
+		return "", ""
+	}
+	return auth.Name, auth.ClientVersion
+}
+
+// parseClientSentAt turns the client's optional client_sent_at into the tap time
+// the daemon stores (#2704), or the zero time when there is none to store.
+//
+// It is the ONE place the raw value is read. raw is untrusted client input that
+// would be persisted and served to every paired device, so nothing past here
+// holds it: the result is a parsed time in UTC, which the history producer
+// re-formats itself. A value that is absent, not a JSON string, not RFC 3339, or
+// whose UTC year falls outside 1..9999 (so its re-formatting would not itself be
+// RFC 3339) yields zero, and the message is accepted as if none was sent.
+// Silent, deliberately: there is no log line for a refused value to appear in.
+// The client's clock may be wrong, so the value is recorded and never ordered by.
+func parseClientSentAt(raw json.RawMessage) time.Time {
+	if len(raw) == 0 {
+		return time.Time{}
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}
+	}
+	t = t.UTC()
+	if y := t.Year(); y < 1 || y > 9999 {
+		return time.Time{}
+	}
+	return t
 }
 
 // touchConversation stamps a conversation's LastUsedAt with the instant its
