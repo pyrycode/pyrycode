@@ -95,7 +95,7 @@ type DeliveredFunc func(convID string, msg QueuedMessage)
 type PendingFunc func(error) bool
 
 // QueuedMessage is the engine-side projection of ADR 025's {queued_msg_id, text,
-// ts} record (#719); the element Snapshot returns. THREE fields are untrusted,
+// ts} record (#719); the element Snapshot returns. Several fields are untrusted,
 // phone-originated content: Text, MessageID (#2092) and AttachmentIDs (#2596)
 // — never log any of them, only surface them to the authorized conversation.
 // MessageID is the client's own id for the message (carried so a client can
@@ -103,15 +103,23 @@ type PendingFunc func(error) bool
 // "" when the client sent none, never minted by the daemon; nothing reads it.
 // AttachmentIDs is the deduplicated ids a send_message named, as the handler
 // resolved them, so `internal/history`'s producer can keep them on the stored
-// user entry; nil when the message named none. Populated **only** on the
-// DELIVERED projection (OnDelivered) — Snapshot and SnapshotAll leave it nil,
-// since queue_state does not carry it (§ Security).
+// user entry; nil when the message named none. DeviceName and ClientVersion
+// (#2704) are the sender's identity — the paired device record's name and the
+// admitted app version off that connection's hello, both "" on a conn with no
+// device record. ClientSentAt (#2704) is the handler's own parse of the
+// client's optional tap time, already in UTC, zero when absent or unparseable
+// — never the client's raw string. All five are populated **only** on the
+// DELIVERED projection (OnDelivered) — Snapshot and SnapshotAll leave them at
+// their zero values, since queue_state does not carry any of them (§ Security).
 type QueuedMessage struct {
     ID            uint64
     MessageID     string
     Text          string
     TS            time.Time
     AttachmentIDs []string
+    DeviceName    string
+    ClientVersion string
+    ClientSentAt  time.Time
 }
 
 type Config struct {
@@ -129,7 +137,8 @@ type Config struct {
 func New(cfg Config) (*Queue, error)                       // errors if cfg.Deliver == nil
 func (q *Queue) Enqueue(convID, text string) uint64        // non-blocking; returns the stable per-conv id (>= 1), or 0 if the backlog is at cap (#869: reject, never drop)
 func (q *Queue) EnqueueDelivery(convID, messageID, text, delivery string) uint64 // #2038 added delivery, #2092 added messageID: Enqueue in every respect except those two — text is what Snapshot/SnapshotAll (and so queue_state) reads back, delivery is the []byte the drain hands DeliverFunc, messageID is the client's own id for the message, stored and projected but read by nothing. Enqueue is EnqueueDelivery(convID, "", text, text) — the "" is the true value for a path that mints no client id, not a sentinel; it must NOT take q.mu before delegating (q.mu is not re-entrant — doing so hangs all ~108 existing Enqueue call sites, not just the new one)
-func (q *Queue) EnqueueAttached(convID, messageID, text, delivery string, attachmentIDs []string) uint64 // #2596: EnqueueDelivery plus the resolved attachment ids, copied (slices.Clone) onto the record at the point it enters the queue so it never aliases the caller's slice. EnqueueDelivery is now a one-line wrapper (EnqueueAttached with nil ids), so its ~14 test call sites and Enqueue's ~108 needed no change. The single production caller is internal/relay/handlers.SendMessage.
+func (q *Queue) EnqueueAttached(convID, messageID, text, delivery string, attachmentIDs []string) uint64 // #2596: EnqueueDelivery plus the resolved attachment ids, copied (slices.Clone) onto the record at the point it enters the queue so it never aliases the caller's slice. Since #2704 it is a one-line wrapper over EnqueueSent (zero deviceName/clientVersion/zero clientSentAt), kept only for its ~test call sites — EnqueueDelivery is in turn EnqueueAttached with nil ids. The single production caller of EnqueueSent is internal/relay/handlers.SendMessage.
+func (q *Queue) EnqueueSent(convID, messageID, text, delivery string, attachmentIDs []string, deviceName, clientVersion string, clientSentAt time.Time) uint64 // #2704: EnqueueAttached plus who sent it and when they tapped Send. Positional, not a struct — the consumer-side handlers.Enqueuer interface deliberately does not import this package (mirrors TurnWriter/SessionRouter), and a struct parameter would have to live somewhere both sides import. deviceName/clientVersion/clientSentAt are copied onto the record exactly as given — this package neither validates nor re-derives any of the three; the handler already has (connSender, parseClientSentAt).
 func (q *Queue) Run(ctx context.Context) error             // lifecycle; blocks until ctx done, then joins all drains
 func (q *Queue) Snapshot(convID string) []QueuedMessage    // #719: ordered copy of the backlog; unknown conv ⇒ nil
 func (q *Queue) SnapshotAll() map[string][]QueuedMessage    // #878: every conv's backlog keyed by convID, omitting empty ones
@@ -528,9 +537,9 @@ conversations for a single-operator tool.
 ## Security
 
 See [Security](msgqueue-package-security.md): the engine's stance on `text`,
-`delivery`, `messageID`, `attachmentIDs` (#2596), `convID`, and the
-`Snapshot`/`SnapshotAll`/`Remove` boundary crossings (#719, #878), plus the
-inbound bound/backpressure (#869).
+`delivery`, `messageID`, `attachmentIDs` (#2596), `deviceName`/`clientVersion`/
+`clientSentAt` (#2704), `convID`, and the `Snapshot`/`SnapshotAll`/`Remove`
+boundary crossings (#719, #878), plus the inbound bound/backpressure (#869).
 
 ## Files
 

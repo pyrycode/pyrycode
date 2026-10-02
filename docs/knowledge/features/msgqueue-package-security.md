@@ -45,6 +45,7 @@ are inbound message-dispatch **policy** on an internet-exposed surface (`#704` i
   separate argument to `EnqueueAttached`, copied onto the record independently
   of `delivery`, and the on-host path stays reachable only inside the opaque
   `delivery` payload above.
+- **`deviceName` / `clientVersion` / `clientSentAt` (#2704) are untrusted in origin but already past their one validating function by the time they reach `EnqueueSent`.** `deviceName` and `clientVersion` are the daemon's own read of the paired-device record and the admitted hello version respectively — not raw client bytes the queue itself filters. `clientSentAt` is the one genuinely client-authored value of the three (`send_message`'s optional `client_sent_at`), but it arrives as a `time.Time` already produced by `internal/relay/handlers.parseClientSentAt`: the engine stores and later returns a parsed instant, never the client's original string, and has no code path that could regress that even if it wanted to — there is no raw-bytes field on `QueuedMessage` to misuse. Same return path as `attachmentIDs`: `OnDelivered` hands all three to `internal/history`'s producer, and from there to every paired device via `request_history` / the live `message` push.
 - **`convID` is a map key only.** Validating/resolving it to a real session is the
   **caller's** job, upstream of `Enqueue` (the `SessionRouter` / `ValidateConversation`
   in `send_message.go`). A hostile `convID` can at worst create an isolated FIFO that
