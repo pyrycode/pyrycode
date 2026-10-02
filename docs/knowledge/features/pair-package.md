@@ -64,7 +64,7 @@ Seven rejection categories, applied in order, returning the first failure:
 6. **Pubkey base64 shape.** `base64.StdEncoding.DecodeString(p.ServerStaticPubkey)` must succeed. Reject text is `"invalid server_static_pubkey encoding"` — category only, never the decoded bytes nor the input string.
 7. **Pubkey length.** Decoded bytes must be exactly 32 (X25519 public key width). Reject text is `"server_static_pubkey wrong length"` — does not include the observed length value; the category alone is enough for the operator.
 
-Relay URL is **not** parsed/validated here. The protocol contract is "the relay's domain is part of the pairing payload and trust-on-first-use from the phone's POV"; the binary doesn't dial it from this code path. Validation belongs to whichever caller actually dials. Token is **not** length- or alphabet-checked — the protocol fixes the token at "256-bit random, hex-encoded" but that's the minter's contract, not the encoding layer's. `Decode` rejects empty; that's the contract this slice owns.
+Relay URL is **not** parsed/validated here. The protocol contract is "the relay's domain is part of the pairing payload and trust-on-first-use from the phone's POV"; the binary doesn't dial it from this code path. Validation belongs to whichever caller actually dials. Since #2703, that caller — `cmd/pyry`'s `pairingMinterV2` — also reduces the value to its bare origin (`scheme://host[:port]`) before handing it to `Encode`: the daemon's own dial URL may carry a path such as `/v1/server`, but the phone reads `Payload.Relay` as an origin and appends `/v1/client` itself, so this package only ever sees (and round-trips) whatever shape its caller already decided on. Token is **not** length- or alphabet-checked — the protocol fixes the token at "256-bit random, hex-encoded" but that's the minter's contract, not the encoding layer's. `Decode` rejects empty; that's the contract this slice owns.
 
 On any error, the returned `Payload` is the zero value — matches the `config.Load` discipline ("on any error the returned Config is the zero value"). Callers that ignore `err` see empty fields and break loudly rather than working with partial data.
 
@@ -177,7 +177,7 @@ Pairing is its own concern, owned by neither `internal/identity` (typed identifi
 - **Static-key rotation / re-pair flow** — v3 per [ADR 024](../decisions/024-noise-ik-mobile-e2e.md). Payload shape would not need to change (same field name), but the operator-facing CLI and the mobile UX both need design work.
 - **On-disk persistence of paired devices** — owned by `internal/devices` (token hashing) and `internal/devices.Registry` (load/save).
 - **Encrypted inner-payload envelope.** Noise_IK is layered above this package by `internal/relay` + the future Noise wrapper (#433); `pair.Payload` carries only the pre-handshake trust anchor.
-- **Relay URL syntax validation** — owned by whichever caller dials. The QR contract is "round-trip the string a phone scans"; semantic validation layers above.
+- **Relay URL syntax validation, and reducing it to a bare origin** — both owned by whichever caller dials, not this package. The QR contract is "round-trip the string a phone scans"; semantic validation and shaping layer above (see `relayOrigin` in [the `mint_pairing` seam](v2-session-manager-state-machine-inbound-mint-pairing-pairingminter-seam.md)).
 - **Token alphabet/length checks** — the minter owns format; `Decode` only rejects empty.
 
 ## Related
@@ -185,6 +185,7 @@ Pairing is its own concern, owned by neither `internal/identity` (typed identifi
 - [`features/identity-package.md`](identity-package.md) — `Payload.Server` is `identity.ServerID`; `Decode` calls `identity.ParseServerID`.
 - [`features/devices-package.md`](devices-package.md) — Phase 3 sibling; on-disk hash of the same plaintext token this package transports.
 - [`features/config-package.md`](config-package.md) — Phase 3 sibling; the relay URL surfaced in `Payload.Relay` comes from `Config.RelayURL`.
+- [Inbound `mint_pairing` — `PairingMinter` seam](v2-session-manager-state-machine-inbound-mint-pairing-pairingminter-seam.md) — where `relayOrigin` reduces the daemon's dial URL to the bare origin this package actually encodes (#2703).
 - [`features/keys-package.md`](keys-package.md) — provider of the X25519 public point that `Payload.ServerStaticPubkey` transports; `StaticKey.PublicKey()` is the producer-side accessor used by `cmd/pyry/pair.go`.
 - [ADR 024](../decisions/024-noise-ik-mobile-e2e.md) — Mobile Protocol v2 (Noise_IK) parent decision; § *Pairing flow* pins the field naming/order; § *Security review* pins the 8-byte fingerprint width.
 - `docs/protocol-mobile.md` § *Pairing flow* (lines 135-150) — canonical JSON shape including `server_static_pubkey`.

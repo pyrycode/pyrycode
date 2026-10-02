@@ -48,6 +48,29 @@ and is projected by the control server to a fixed error; remote failures retain
 their existing outcome mapping and audit record. Local success and failure logs
 are content-free, while remote audit and revocation behavior remain unchanged.
 
+## The pairing's `relay` field is a bare origin — the daemon's own dial field is not (#2703)
+
+`encodePairing` writes `pairingMinterV2.relayURL` into `Payload.Relay`, but
+that field is not the daemon's resolved dial URL verbatim. `newPairingMinterV2`
+stores `relayOrigin(relayURL)` instead: scheme and host only, any port kept,
+path/query/fragment/userinfo dropped. The daemon's own connection leg
+(`w.relayURL`, consumed by `resolveDialURL`) is untouched and still dials
+either the bare origin or an explicit `/v1/server`. The split exists because
+the same configured string feeds two readers with different contracts for it:
+the daemon's dial code treats a path as meaningful routing (`/v1/server`,
+legal since #631), while the phone treats `relay` as a pure origin and appends
+its own `/v1/client`. Before this ticket, `PYRY_RELAY_URL=wss://host/v1/server`
+copied straight into every minted pairing, and the phone dialled
+`/v1/server/v1/client` — reported as the host being temporarily unavailable.
+
+**The generalizable point:** when one configured value feeds two readers with
+different parsing contracts — one that treats a path as routing, one that
+treats the value as a pure origin and appends its own path — storing the
+shared string once and handing it to both is a latent bug waiting for
+whichever reader's contract changes first. Shape each reader's form at the
+point it's produced for that consumer, rather than trusting one field to
+satisfy both.
+
 ## A connection-scoped privilege check goes stale the moment it's used to authorize a write
 
 The first draft gated the mint on `s.device.MayAnswerRemotePermission()` —
@@ -161,6 +184,11 @@ by convention but has a second, less obvious remote writer already wired in.
   gated one step upstream by #2219, not inside the registry itself.
 - [Pairing request/reply payloads (#2126)](protocol-package-types-pairing-payloads.md) —
   the frozen wire shapes this handler answers.
+- [`internal/pair` — QR pairing payload encoding + render](pair-package.md) —
+  the `Payload` and `Encode` that `encodePairing` calls; its `Relay` field is
+  the bare origin `relayOrigin` produces here, not the daemon's dial URL.
+- `docs/protocol-mobile.md` § *Pairing flow* — the phone-side contract that
+  `relay` is an origin the phone appends `/v1/client` to.
 - [Error codes](protocol-package-constants-codes-go-error-codes-21.md) — the
   two `pairing.*` codes minted here and why neither is `auth.invalid_token`.
 - [`internal/audit`](audit-package.md) — the mint's audit record, and
