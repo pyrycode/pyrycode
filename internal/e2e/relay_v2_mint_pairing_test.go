@@ -43,7 +43,9 @@ import (
 // with -pyry-relay pointing at this test's fakerelay while the CLI resolves its
 // own from config.json, so the two legitimately differ — and the reply must carry
 // THE DAEMON'S, which is the relay the new device actually has to reach. Asserting
-// equality with the CLI's would pin the wrong one of the two.
+// equality with the CLI's would pin the wrong one of the two. It carries the
+// daemon's relay as an origin (#2703): the daemon dials a /v2/server-pathed URL
+// here, and the minted phone dials the pairing's relay exactly as decoded.
 func TestRelayV2_MintPairing(t *testing.T) {
 	const (
 		initialUUID = "11111111-1111-4111-8111-111111111111"
@@ -132,8 +134,10 @@ func TestRelayV2_MintPairing(t *testing.T) {
 	if got.ServerStaticPubkey != grantor.ServerStaticPubkey {
 		t.Error("minted server_static_pubkey differs from the shared setup fixture's key")
 	}
-	if got.Relay != daemonRelayURL {
-		t.Errorf("minted relay = %q, want the daemon's own leg %q", got.Relay, daemonRelayURL)
+	// The daemon dials a pathed URL, but the phone appends /v1/client to the
+	// pairing's relay itself, so the pairing carries the bare origin (#2703).
+	if got.Relay != fr.URL() {
+		t.Errorf("minted relay = %q, want the origin %q of the daemon's dial URL %q", got.Relay, fr.URL(), daemonRelayURL)
 	}
 	if got.Token == grantor.Token || got.Token == watcher.Token {
 		t.Error("the mint handed back an existing device's token instead of a fresh one")
@@ -150,7 +154,7 @@ func TestRelayV2_MintPairing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode the minted pairing's pubkey: %v", err)
 	}
-	mintedPhone, err := fakephone.Dial(mintedDialCtx, fr.URL(), string(got.Server), got.Token, "minted")
+	mintedPhone, err := fakephone.Dial(mintedDialCtx, got.Relay, string(got.Server), got.Token, "minted")
 	if err != nil {
 		t.Fatalf("the minted device could not dial: %v", err)
 	}

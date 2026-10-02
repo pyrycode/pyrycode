@@ -17,3 +17,7 @@
 - New table test `TestRelayOrigin`: `wss://host/v1/server` → `wss://host`; `wss://host:8443/v1/server` → `wss://host:8443`; bare origin and trailing slash → origin; query and userinfo dropped; unparseable or host-less value passes through.
 - `TestPairingMinterV2_PermittedMint` keeps its `/v2/phone`-pathed fixture URL and now asserts the decoded `relay` is the origin, so the minter's wiring is pinned end to end, not just the helper. The two-daemon local-provider test asserts the same against each fixture's expected origin.
 - Dialling either form: existing `resolveDialURL` table in `internal/relay/connection_test.go`.
+
+## Revisions
+
+- 2026-10-03 (verifier MUST FIX, rework 2): the plan missed a third copy of the old verbatim contract, `internal/e2e/relay_v2_mint_pairing_test.go` → `TestRelayV2_MintPairing`, which sits behind the `e2e` build tag outside `cmd/pyry`. It now asserts the minted `relay` equals the fakerelay origin while the daemon keeps dialling the `/v2/server`-pathed URL, and the minted phone dials `got.Relay` as decoded (fakephone appends `/v1/client` like the real phone), so the e2e proves a pairing minted from a pathed daemon URL is dialable as-is. Production contract unchanged.
