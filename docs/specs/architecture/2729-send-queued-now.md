@@ -77,3 +77,25 @@ Pending for the documentation stage: `docs/protocol-mobile.md` § Queue (v2) —
 ## Revisions
 
 - **2026-10-03, build: the grace timer moved out of the tracker.** `TestTurnBusyTracker_ImportsStayMinimal` guards `stream_turn_busy.go` against any clock read: membership moves on an event. A folded write produces no further event, so the release has to be a bound. New contract: on a carried close the tracker holds the mark under a fresh generation (`carried`, `carryGen`) and calls `scheduleCarryRelease(t, conv, gen, graceAfter)`, defined in `cmd/pyry/send_now.go` with `sendNowGrace`, which calls `releaseCarried(conv, gen)` once. An opener or any other close retires the generation, so a late release is a no-op. `stream_turn_busy.go` still reads no clock. The `carry` map is a count, and the undo of a failed write decrements it; once a close has consumed it, the grace runs out rather than closing early.
+- **2026-10-03, security review (run late: the `security-sensitive` label was missed before the plan commit): two SHOULD FIX findings, both built.** (1) `streamsup.WriteTurn` is a plain stdin pipe write with no deadline, so `handleSendQueuedNow` now runs on the conn's `appFrameWorker` (`appFrameSendQueuedNow`), not on Run; the interactive gate stays on Run in `dispatchAppFrame`, and the handler takes the plaintext and does not read the Run-owned `s.interactive`. (2) `newSendNowDeliver` now calls `openForSendNow` before `resolve`, so an idle conversation never reaches `sessionRouter.revive`; a resolve error runs the undo.
+
+## Security review
+
+**Verdict:** PASS
+
+**Findings:**
+
+- [Trust boundaries] No findings. `conversation_id` and `queued_msg_id` are untrusted client input, decoded tolerantly in `handleSendQueuedNow` and used only as the key and id `msgqueue.SendNow` looks up under `q.mu`. A hostile or foreign id finds no item and returns false before any seam runs, so `newSendNowDeliver` only ever sees a conversation that already holds a backlog the `send_message` handler resolved. The authority is the same as `dequeue_message`'s (any paired client on an interactive connection, ADR 025): it can only move the operator's own queued text earlier. It cannot inject new text. The bytes written are the stored delivery payload, never anything from this frame.
+- [Trust boundaries] No findings. The delivery payload can name an on-host path (#2038). It goes only to stdin, and `notifyDelivered` projects through `QueuedMessage`, which has no delivery field, so `SentNow` adds a bool and nothing else to what consumers see.
+- [Trust boundaries] No findings. A send-now write bypasses `markApprovalHolds` and the idle hold by design. It does not answer a parked approval, which is resolved only through the approval surface. The write lands as user input claude reads at its next boundary.
+- [Tokens] No findings. The frame carries no credential, and no token or key is touched.
+- [File operations] No findings. No new file I/O. `clearDelivered` returns before `Save` on a `SentNow` delivery.
+- [Subprocesses] SHOULD FIX (built): `resolve` can register a dormant session through `revive`, so the busy check now runs first. The seam never calls `Activate`, so a send-now cannot spawn a child.
+- [Cryptography] No findings. The frame arrives over the existing Noise transport, and no new primitive is used.
+- [Network and I/O] SHOULD FIX (built): the stdin write has no deadline, so it runs on the per-conn worker, behind that conn's bounded `s.appFrames` queue, and a wedged child stalls one connection's frames, not the relay. The payload size was capped at enqueue by the transport frame ceiling and the per-conversation backlog cap of 100.
+- [Errors, logs, telemetry] No findings. The handler logs `event`, `conn_id`, `conversation_id` and `queued_msg_id` only, and the relay test asserts that field set. `msgqueue.SendNow` and `newSendNowDeliver` log nothing. Decode errors are discarded, never echoed.
+- [Concurrency] No findings. The lock order is unchanged: `q.mu` is never held across the seam, and the tracker's `t.mu` is released before `scheduleCarryRelease`. The taken message is out of the FIFO for the whole write, so `Remove`, `commitGate` and `advanceLocked` all see it as gone, and `reinsert` never places it ahead of a committing head. The release timer fires once and holds nothing, and a stale generation is a no-op. Two send-now frames from one connection are ordered by its single worker.
+- [Threat model] OUT OF SCOPE: advertising the capability (`mid_turn_input`) and the real-claude end-to-end check belong to #2730.
+
+**Reviewer:** builder (self-review per the security-review checklist)
+**Date:** 2026-10-03

@@ -41,13 +41,16 @@ func newSendNowDeliver(resolve func(string) (handlers.TurnWriter, error), isClau
 		if !isClaude(convID) {
 			return errSendNowNotClaude
 		}
-		w, err := resolve(convID)
-		if err != nil {
-			return err
-		}
+		// The busy check comes before resolve, so an idle conversation never
+		// reaches resolve's revive of a dropped session.
 		ok, undo := busy.openForSendNow(convID)
 		if !ok {
 			return errSendNowIdle
+		}
+		w, err := resolve(convID)
+		if err != nil {
+			undo()
+			return err
 		}
 		if err := w.WriteUserTurn(ctx, convID, payload); err != nil {
 			undo()

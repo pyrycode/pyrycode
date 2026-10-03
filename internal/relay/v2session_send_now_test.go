@@ -89,7 +89,13 @@ func TestV2Session_SendQueuedNow_SendsByCapability(t *testing.T) {
 				TS:      time.Now().UTC(),
 				Payload: sendNowPayload(t, convID, msgID),
 			})
+			// Barrier for Run's gate; the call itself runs on c-int's worker, so an
+			// expected call is awaited rather than assumed.
 			openModalConn(t, mgr, frames, rec, respPub, "c-barrier", []string{protocol.CapabilityInteractive})
+			deadline := time.Now().Add(5 * time.Second)
+			for len(fake.snapshot()) < len(tc.wantCalls) && time.Now().Before(deadline) {
+				time.Sleep(5 * time.Millisecond)
+			}
 
 			if got := fake.snapshot(); !reflect.DeepEqual(got, tc.wantCalls) {
 				t.Errorf("SendNow calls = %+v, want %+v", got, tc.wantCalls)

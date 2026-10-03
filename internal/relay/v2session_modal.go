@@ -891,27 +891,33 @@ func (m *V2SessionManager) handleDequeueMessage(s *V2Session, env protocol.Envel
 
 // handleSendQueuedNow writes a queued message named by an inbound send_queued_now
 // control frame into the conversation's running claude turn (#2729). It is
-// handleDequeueMessage's twin in every respect but the queue operation: the same
-// interactive gate first, the same nil-seam inertness, the same tolerant decode
-// whose error and bytes are never echoed, and no reply — the acknowledgement is
-// the queue_state change and the operator message push SendNow's own seams fire.
-// The log fields are dequeue's too: never the queued text, never the client's
-// message id.
+// handleDequeueMessage's twin in every respect but the queue operation and where it
+// runs: the same interactive gate first, the same nil-seam inertness, the same
+// tolerant decode whose error and bytes are never echoed, and no reply — the
+// acknowledgement is the queue_state change and the operator message push
+// SendNow's own seams fire. The log fields are dequeue's too: never the queued
+// text, never the client's message id.
+//
+// It runs on the conn's appFrameWorker, not on Run, because SendNow ends in a
+// stdin pipe write with no deadline (streamsup.WriteTurn). The interactive gate
+// is therefore Run's, checked in dispatchAppFrame before the job is queued:
+// s.interactive is Run-owned and is not read here.
 //
 // SendNow returning false is success of a valid request, as Remove's false is: the
 // turn was idle (the ordinary drain delivers the message), the id is unknown or
 // already delivered, the head is committing, the session is Codex, or the write
 // failed and the message stayed queued.
-func (m *V2SessionManager) handleSendQueuedNow(s *V2Session, env protocol.Envelope) {
-	if !s.interactive {
-		return
-	}
+func (m *V2SessionManager) handleSendQueuedNow(s *V2Session, plaintext []byte) {
 	if m.cfg.QueueSender == nil {
 		m.cfg.Logger.Debug("relay: v2 send_queued_now inert; no queue sender wired",
 			"event", "v2.send_now.inert",
 			"conn_id", s.connID)
 		return
 	}
+	// Both decodes are tolerated: a failure leaves zero-value fields, which
+	// SendNow("", 0) no-ops on. Never echoed back or into a log.
+	var env protocol.Envelope
+	_ = json.Unmarshal(plaintext, &env)
 	var p protocol.SendQueuedNowPayload
 	_ = json.Unmarshal(env.Payload, &p)
 
