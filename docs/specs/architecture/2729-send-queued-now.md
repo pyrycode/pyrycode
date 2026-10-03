@@ -73,3 +73,7 @@ Any `SendNowFunc` error leaves the message at its original position; the drain d
 ## Documentation handoff
 
 Pending for the documentation stage: `docs/protocol-mobile.md` § Queue (v2) — a `#### send_queued_now` subsection after `dequeue_message` and a message-type table row beside it, saying: inbound control, any paired client on an interactive connection, same fields as `dequeue_message`, no reply; acknowledged by the `queue_state` change and the operator `message` push; a no-op when the turn is idle, the id is unknown, or the session is Codex; delivered when the stdin write succeeds, not retried if the child dies before claude reads it.
+
+## Revisions
+
+- **2026-10-03, build: the grace timer moved out of the tracker.** `TestTurnBusyTracker_ImportsStayMinimal` guards `stream_turn_busy.go` against any clock read: membership moves on an event. A folded write produces no further event, so the release has to be a bound. New contract: on a carried close the tracker holds the mark under a fresh generation (`carried`, `carryGen`) and calls `scheduleCarryRelease(t, conv, gen, graceAfter)`, defined in `cmd/pyry/send_now.go` with `sendNowGrace`, which calls `releaseCarried(conv, gen)` once. An opener or any other close retires the generation, so a late release is a no-op. `stream_turn_busy.go` still reads no clock. The `carry` map is a count, and the undo of a failed write decrements it; once a close has consumed it, the grace runs out rather than closing early.

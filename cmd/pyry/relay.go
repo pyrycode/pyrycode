@@ -1393,6 +1393,9 @@ func startRelayV2(
 		// push an updated queue_state. The concrete *msgqueue.Queue (built at
 		// main.go) satisfies QueueRemover via Remove(string, uint64) bool.
 		QueueRemover: w.queue,
+		// Inbound send_queued_now seam (#2729): writes a queued message into the
+		// running claude turn through msgqueue.SendNow.
+		QueueSender: w.queue,
 		// Inbound debug-bundle seam (#813): a paired `request_debug_bundle` frame
 		// assembles the daemon-global bundle (recent log ring + newest recording)
 		// and streams it back over the encrypted channel. The closure (built at

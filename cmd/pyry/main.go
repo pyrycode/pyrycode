@@ -1118,6 +1118,11 @@ func runSupervisor(args []string) error {
 		// exemption ends the moment the approval does — retire deletes the correlation
 		// on every terminal path an approval has.
 		Pending: approvalHoldPending,
+		// #2729: send_queued_now writes a queued message into the running claude
+		// turn. Deliberately NOT through carryPending or markApprovalHolds — see
+		// newSendNowDeliver — and its OnDelivered carries SentNow so the carry's
+		// clear leaves the waiting head's composed posts alone.
+		SendNow: newSendNowDeliver(router.resolve, router.isClaude, turnBusy),
 		Logger:  logger,
 	})
 	if err != nil {
