@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
@@ -51,16 +52,30 @@ func runUpdate(args []string) error {
 		return err
 	}
 
+	o, err := productionUpdateOptions(os.Stdout)
+	if err != nil {
+		return err
+	}
+	o.checkOnly = *checkOnly
+	o.pinVersion = *pinVersion
+	o.noRestart = *noRestart
+	return doUpdate(context.Background(), o)
+}
+
+// productionUpdateOptions returns the real seams `pyry update` and the daemon's
+// auto-update share, writing progress to out. Both callers build from here so
+// the release source, signing key and install path cannot drift apart.
+func productionUpdateOptions(out io.Writer) (updateOptions, error) {
 	signingPubKey, err := hex.DecodeString(releaseSigningPublicKeyHex)
 	if err != nil {
-		return fmt.Errorf("update: signing key: decode hex: %w", err)
+		return updateOptions{}, fmt.Errorf("update: signing key: decode hex: %w", err)
 	}
 	if len(signingPubKey) != ed25519.PublicKeySize {
-		return fmt.Errorf("update: signing key: got %d bytes, want %d",
+		return updateOptions{}, fmt.Errorf("update: signing key: got %d bytes, want %d",
 			len(signingPubKey), ed25519.PublicKeySize)
 	}
 
-	return doUpdate(context.Background(), updateOptions{
+	return updateOptions{
 		currentVersion: Version,
 		goos:           runtime.GOOS,
 		goarch:         runtime.GOARCH,
@@ -73,13 +88,10 @@ func runUpdate(args []string) error {
 		executablePath: resolveExecutable,
 		replace:        update.AtomicReplace,
 		signingPubKey:  ed25519.PublicKey(signingPubKey),
-		out:            os.Stdout,
-		checkOnly:      *checkOnly,
-		pinVersion:     *pinVersion,
-		noRestart:      *noRestart,
+		out:            out,
 		probeRestart:   defaultProbeRestart,
 		runRestart:     defaultRunRestart,
-	})
+	}, nil
 }
 
 // resolveExecutable returns the path to the running pyry binary. Falls back
@@ -198,12 +210,40 @@ func doUpdate(ctx context.Context, o updateOptions) error {
 			"run 'pyry update --version %s' to downgrade intentionally", targetVer, o.currentVersion, targetVer)
 	}
 
-	asset, err := update.AssetName(targetVer, o.goos, o.goarch)
+	if err := installRelease(ctx, o, target, targetVer); err != nil {
+		return err
+	}
+
+	if !o.noRestart {
+		probe := o.probeRestart()
+		if argv := update.DetectRestartCommand(probe); argv != nil {
+			manager := "launchd"
+			if probe.SystemdUnitExists && !probe.LaunchdPlistExists {
+				manager = "systemd"
+			}
+			fmt.Fprintf(o.out, "==> Restarting daemon (%s: %s)...\n", manager, argv[len(argv)-1])
+			if err := o.runRestart(ctx, argv); err != nil {
+				return fmt.Errorf("update: binary replaced to %s, but daemon restart failed: %w", targetVer, err)
+			}
+		}
+	}
+
+	fmt.Fprintf(o.out, "==> Updated to %s.\n", targetVer)
+	return nil
+}
+
+// installRelease downloads release tag, verifies checksums.txt against the
+// baked-in signing key and the tarball against checksums.txt, extracts the pyry
+// binary, keeps the binary at target as pyry.prev, and atomically replaces
+// target. Progress goes to o.out. Nothing on disk changes unless both
+// verifications pass. It does not restart anything.
+func installRelease(ctx context.Context, o updateOptions, target, tag string) error {
+	asset, err := update.AssetName(tag, o.goos, o.goarch)
 	if err != nil {
 		return fmt.Errorf("update: %w", err)
 	}
-	tarballURL := fmt.Sprintf("%s/%s/%s", o.releaseBaseURL, targetVer, asset)
-	checksumsURL := fmt.Sprintf("%s/%s/checksums.txt", o.releaseBaseURL, targetVer)
+	tarballURL := fmt.Sprintf("%s/%s/%s", o.releaseBaseURL, tag, asset)
+	checksumsURL := fmt.Sprintf("%s/%s/checksums.txt", o.releaseBaseURL, tag)
 
 	fmt.Fprintf(o.out, "==> Downloading %s...\n", asset)
 	tgz, err := o.fetcher.FetchAsset(ctx, tarballURL)
@@ -253,24 +293,40 @@ func doUpdate(ctx context.Context, o updateOptions) error {
 	}
 
 	fmt.Fprintf(o.out, "==> Replacing %s...\n", target)
+	current, err := os.ReadFile(target)
+	switch {
+	case err == nil && bytes.Equal(current, bin):
+		// Already installed, by an earlier run or another daemon sharing this
+		// binary. Writing again would overwrite pyry.prev with the new build and
+		// lose the rollback copy.
+		return nil
+	case err == nil:
+		if err := keepPrevious(o, target, current); err != nil {
+			return err
+		}
+	case !errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("update: read current binary: %w", err)
+	}
 	if err := o.replace(target, bin, 0o755); err != nil {
 		return fmt.Errorf("update: replace binary: %w", err)
 	}
-
-	if !o.noRestart {
-		probe := o.probeRestart()
-		if argv := update.DetectRestartCommand(probe); argv != nil {
-			manager := "launchd"
-			if probe.SystemdUnitExists && !probe.LaunchdPlistExists {
-				manager = "systemd"
-			}
-			fmt.Fprintf(o.out, "==> Restarting daemon (%s: %s)...\n", manager, argv[len(argv)-1])
-			if err := o.runRestart(ctx, argv); err != nil {
-				return fmt.Errorf("update: binary replaced to %s, but daemon restart failed: %w", targetVer, err)
-			}
-		}
-	}
-
-	fmt.Fprintf(o.out, "==> Updated to %s.\n", targetVer)
 	return nil
+}
+
+// keepPrevious saves the binary about to be replaced as pyry.prev beside it,
+// the name and place `make rollback` restores from. It runs only after the
+// signature and checksum gates have passed, so a failed verification leaves
+// any existing pyry.prev untouched. An error aborts the install before the
+// target is written: replacing without a rollback copy is not allowed.
+func keepPrevious(o updateOptions, target string, current []byte) error {
+	mode := os.FileMode(0o755)
+	if fi, err := os.Stat(target); err == nil {
+		mode = fi.Mode().Perm()
+	}
+	prev := filepath.Join(filepath.Dir(target), "pyry.prev")
+	if err := o.replace(prev, current, mode); err != nil {
+		return fmt.Errorf("update: keep previous binary: %w", err)
+	}
+	return nil
+
 }
