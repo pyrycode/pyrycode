@@ -671,6 +671,11 @@ func TestTurnMarkFor_TotalOverEveryVariant(t *testing.T) {
 		// answer rather than a new arm; turnMarkFor is unchanged by that ticket.
 		{turnevent.CompactionBoundary{Trigger: "manual"}, turnMarkNone},
 		{turnevent.Unrecognized{Site: turnevent.UnrecognizedLineType, Kind: "some_future_event"}, turnMarkNone},
+		// claude's echo of a user message (#2730) opens nothing: an opener's echo
+		// precedes the turn's own first event, and a send-now echo lands inside a
+		// turn the carry already holds busy. Droppable, since the placement's idle
+		// fallback covers a lost one.
+		{turnevent.UserEcho{}, turnMarkNone},
 		{turnevent.NewPermissionRequest("req-1", "tu-1", "Proceed?", nil), turnMarkNone},
 		// #2232. Neither an opener nor a closer, and its argument is the
 		// PermissionRequest row's rather than a fresh one: a denial is a verdict on a

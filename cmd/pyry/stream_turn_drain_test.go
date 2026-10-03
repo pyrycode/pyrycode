@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -1211,4 +1212,48 @@ func TestStreamSessionTag_ConcurrentRotateAndRead(t *testing.T) {
 		t.Fatalf("concurrent read saw %q, which was never stored", got)
 	default:
 	}
+}
+
+// #2730: claude's echo of a user message reaches the sink's echo observer as a
+// digest, with the producing session, and puts no frame on the wire — the turn's
+// envelopes are exactly the ones it has without the echo line.
+func TestStreamTurnDrainV2_UserEchoReachesObserverOnly(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	active := &stubActiveSession{}
+	active.set("sess-a")
+	bcast := newChanBcast("conn-a")
+	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	sink := newStreamTurnSink(0, discardLogger())
+	type seen struct {
+		sid string
+		ev  turnevent.UserEcho
+	}
+	echoes := make(chan seen, 4)
+	sink.setEchoObserver(func(sid string, ev turnevent.UserEcho) { echoes <- seen{sid, ev} })
+	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil, discardLogger())
+	defer func() { cancel(); cleanup() }()
+
+	echoLine := `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"sent now"}]},"parent_tool_use_id":null,"isReplay":true}`
+	feedLines(sink, "sess-a", assistantTextLine("m1", "hello"), echoLine, resultLine)
+
+	got := collectEnvs(t, bcast.pushed, 4)
+	wantTypes := []string{protocol.TypeTurnState, protocol.TypeAssistantDelta, protocol.TypeTurnEnd, protocol.TypeTurnState}
+	if !slices.Equal(envTypes(got), wantTypes) {
+		t.Fatalf("envelope types:\n got %v\nwant %v", envTypes(got), wantTypes)
+	}
+	select {
+	case s := <-echoes:
+		if s.sid != "sess-a" || s.ev.TextSHA256 != sha256.Sum256([]byte("sent now")) {
+			t.Fatalf("observer got %+v, want sess-a and the digest of the echoed text", s)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the echo never reached the observer")
+	}
+	assertNoPush(t, bcast.pushed)
 }

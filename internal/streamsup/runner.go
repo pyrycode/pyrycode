@@ -2881,13 +2881,16 @@ func useCreateForm(sessionsDir, id string, latchCreate bool) bool {
 // resume, and the approval round-trip all work without it). Pure — no Runner
 // state, and it never mutates base.
 func buildArgs(base []string, create bool, sessionID string) []string {
-	args := make([]string, 0, len(base)+9)
+	args := make([]string, 0, len(base)+10)
 	args = append(args,
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--include-partial-messages",
 		"--forward-subagent-text",
+		// claude echoes each user message where it reads it (#2730); the parser
+		// turns the echo into a digest-only turnevent.UserEcho.
+		"--replay-user-messages",
 	)
 	args = append(args, base...)
 	if create {

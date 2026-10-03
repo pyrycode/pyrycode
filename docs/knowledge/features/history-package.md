@@ -267,13 +267,61 @@ after a restart should not assume it is gap-free across that boundary.
 **Why the write point is the envelope, not `internal/turnevent`.** An
 earlier draft proposed writing the log from `turnevent`'s representation.
 That cannot work: `turnevent`'s variant set carries no operator message, no
-conversation id, no session transition and no question batch. The
-operator's own typed text goes `send_message` → msgqueue → delivery → the
-child's stdin and is never echoed back, so a log written from `turnevent`
-would hold assistant text and tool rows and none of what the operator
-typed. (The operator's own message is #2115's producer — see below — fired
-from `msgqueue`'s `OnDelivered` seam once the write to claude is confirmed,
-not from an envelope emitted in either direction.)
+conversation id, no session transition and no question batch — the operator's
+own typed text goes `send_message` → msgqueue → delivery → the child's stdin,
+and the content this producer stores and pushes always comes from
+`QueuedMessage.Text`, never from `turnevent`. (**Since #2730, claude does echo
+the delivered text back** under `--replay-user-messages`, as a digest-only
+`turnevent.UserEcho` — see [streamsup-package-turn-io-envelope-write-stdout-parser.md
+§ Replayed user echoes](streamsup-package-turn-io-envelope-write-stdout-parser.md#replayed-user-echoes-carry-a-digest-never-the-text-2730).
+That echo carries no text at all, so it still cannot be this producer's
+source; it only times a send-now commit this producer was already going to
+make — see below.) A log written purely from `turnevent` would hold
+assistant text and tool rows and none of what the operator typed.
+
+**Since #2730, a `SentNow` message's commit is held for claude's echo, not
+fired at `OnDelivered`.** Before #2730, every message this producer saw —
+ordinary or send-now — committed (built the `protocol.MessagePayload`,
+appended it to history, pushed the live `message`) the instant
+`OnDelivered` fired, which for a send-now message is the instant the stdin
+write succeeds: before claude has read it, let alone acted on it. That put
+the push and the history entry ahead of the tool result the message actually
+interrupted, for any client rendering in arrival or stamp order. The
+producer now takes a `*sendNowPlacement` (`cmd/pyry/send_now.go`) and, for a
+`SentNow` message only, hands it the built commit instead of running it:
+`place.attach(convID, msg.ID, commit)`. An ordinary message's commit is
+unaffected — `attach` on a nil placement, or on an entry nothing registered,
+runs the commit immediately, so this is a no-op for every pre-#2730 call
+site and test.
+
+`sendNowPlacement` resolves the three-events-any-order problem the write/echo
+race creates — `newSendNowDeliver` registers the payload's digest
+(`place.expect`) *before* the stdin write, since claude's echo can arrive
+before `OnDelivered` does — and commits on whichever of the echo and the
+attach comes second. Committing on the echo puts the push and the stamp
+right after the `tool_result` the message interrupted (or as the next
+turn's opening line, when claude only read it there), which is where a
+client reading in arrival order expects it. If no echo ever arrives — the
+child exits, the turn is interrupted, or the fan-in drops the echo under
+pressure — a waiter goroutine commits once the conversation's turn goes
+idle (`turnBusyTracker.WaitIdle`), so the message is never silently
+stranded; [send-now carry's grace
+window](streamsup-package-per-conversation-turn-busy-track-send-now-carry.md)
+is what keeps that waiter from firing inside the gap a send-now write's own
+turn end may still be settling. Every path takes the entry out under one
+leaf mutex before committing, so a message commits exactly once no matter
+which of echo, attach-with-echo-already-seen, or idle-fallback wins. Full
+mechanism: [`docs/protocol-mobile.md` §
+`send_queued_now`](../../protocol-mobile.md#send_queued_now) for the wire
+contract, and `cmd/pyry/send_now.go`'s `sendNowPlacement` doc comment for the
+implementation.
+
+**`msgqueue.SendNowFunc` carries the queued id since #2730**
+(`func(ctx, convID string, id uint64, payload []byte) error`), which is what
+lets `place.expect` and this producer's `place.attach` agree on which pending
+entry a given `OnDelivered` call belongs to — the id is the only key both
+calls share, since the payload bytes alone would collide on a retried
+identical message.
 
 **The store is nil-tolerant and a concrete pointer, never an interface** —
 the same trap `session_transition_v2.go`'s `busy` field already documents:

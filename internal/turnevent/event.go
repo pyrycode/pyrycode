@@ -2826,6 +2826,20 @@ type Location struct {
 
 // The events are pure value types, so each marker is implemented on a value
 // receiver: TextChunk{}, not only &TextChunk{}, satisfies Event.
+// UserEcho is claude replaying a user message at the point it read it, under
+// --replay-user-messages (#2730). Every turn's opening message echoes this way,
+// and so does a message written into a running turn, right after the tool result
+// it followed. It carries only the SHA-256 of the echoed text, never the text:
+// that text is the DELIVERY payload, which for an attachment-bearing message names
+// on-host paths, so no consumer of this stream can put it on the wire or in a log.
+// The daemon matches the digest against what it wrote to place the operator's own
+// message push.
+//
+// It opens and closes no turn, and no client frame is built from it.
+type UserEcho struct {
+	TextSHA256 [32]byte
+}
+
 func (TextChunk) isTurnEvent()              {}
 func (ThoughtChunk) isTurnEvent()           {}
 func (ToolStart) isTurnEvent()              {}
@@ -2853,6 +2867,7 @@ func (ModelRefusalFallback) isTurnEvent()   {}
 func (ModelRefusalNoFallback) isTurnEvent() {}
 func (Banner) isTurnEvent()                 {}
 func (ConversationReset) isTurnEvent()      {}
+func (UserEcho) isTurnEvent()               {}
 func (Unrecognized) isTurnEvent()           {}
 
 var (
@@ -2876,5 +2891,6 @@ var (
 	_ Event = Compacting{}
 	_ Event = ModelRefusalNoFallback{}
 	_ Event = ConversationReset{}
+	_ Event = UserEcho{}
 	_ Event = Unrecognized{}
 )

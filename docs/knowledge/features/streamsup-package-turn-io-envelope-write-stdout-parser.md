@@ -1,11 +1,13 @@
 # Turn I/O — envelope write + stdout parser (#1088)
 
-`buildArgs` requests both `--include-partial-messages` and
-`--forward-subagent-text` in the fixed prefix for create (`--session-id`) and
-resume (`--resume`) spawns. Production therefore receives the nested
-`stream_event` lines and attributed subagent prose mapped below; caller-supplied
-arguments do not need to opt into either. This prefix belongs only to the
-long-lived interactive child; the separate `pyry agent-run` argv is unchanged.
+`buildArgs` requests `--include-partial-messages`, `--forward-subagent-text`
+and (#2730) `--replay-user-messages` in the fixed prefix for create
+(`--session-id`) and resume (`--resume`) spawns. Production therefore
+receives the nested `stream_event` lines, attributed subagent prose, and a
+replayed `user` echo of every message claude reads, mapped below;
+caller-supplied arguments do not need to opt into any of the three. This
+prefix belongs only to the long-lived interactive child; the separate `pyry
+agent-run` argv (`internal/agentrun/streamrunner`) is unchanged.
 The turn I/O boundary fills
 `Stdin()`/`Config.Stdout` with two additive seams:
 
@@ -283,3 +285,36 @@ on a caller's context while the child may still be writing, where dropping the
 buffer would race `Write`. `stallTracker.childExited` (the watchdog's own copy of
 this splice) keeps its buffer on purpose — there a spliced line only counts as
 activity, so clearing it defends a failure mode never observed.
+
+## Replayed user echoes carry a digest, never the text (#2730)
+
+`--replay-user-messages` makes claude echo back, as an ordinary `user` line,
+every message it reads — both a turn's opening message and one written
+mid-turn by [`send_queued_now`](../../protocol-mobile.md#send_queued_now).
+The #2728 capture ([e2e-realclaude-mid-turn-user-capture-test-go.md](e2e-realclaude-mid-turn-user-capture-test-go.md))
+is what shows the echo lands right after the `tool_result` a mid-turn write
+interrupted, which is the signal [history-package.md §
+Producers](history-package.md#producers-2114-2115) uses to place a send-now
+message's push and history entry. The echo's content is a **block array**
+(`{"type":"user","message":{"role":"user","content":[{"type":"text",…}]},…,"isReplay":true}`),
+not the string content `dropHarnessProseLine` already filters — so turning
+the flag on without a matching parser arm would have sent every echo to
+`emitUnrecognized`, whose `Raw` is the delivery payload: for an
+attachment-bearing message, a daemon-composed prompt naming on-host paths.
+The flag and the arm below landed in the same commit on purpose.
+
+`emitUser`'s replay arm catches a `text` block on a line with `IsReplay` true
+and no `ParentToolUseID` — a subagent's own replay line still falls through to
+the existing parent-id guard, unchanged — and emits **only**
+`turnevent.UserEcho{TextSHA256: sha256.Sum256(text)}`, logging the site and
+block type at Debug and never the text or even the digest (a digest of a
+short message is itself a fingerprint of it). No downstream code holds echo
+text: `turnMarkFor` classes `UserEcho` as an unrecognised variant (the
+none/droppable default arm), so it is never an opener or a closer, and
+`startStreamTurnDrainV2` hands it to a late-bound observer
+(`streamTurnSink.setEchoObserver`, the `crashLoop` atomic-hook pattern) after
+`busy.observe` and before the active-session gate — never to
+`emitter.Handle`, so it reaches no client frame. `sendNowPlacement` is the
+only installed observer, and it matches an echo to a pending send-now write
+by digest equality alone; an ordinary message's opener echo matches no
+pending entry and is silently dropped.
