@@ -78,3 +78,10 @@ Compile check: `go vet -tags e2e_realclaude ./internal/e2e/realclaude/` and the 
 ## Documentation handoff
 
 None from the ticket. The documentation stage may fold the four verdicts into the streamsup / Send now topic once the capture is committed.
+
+## Revisions
+
+- **2026-10-03, during the build.** Three departures from the Design above.
+  1. The verdict for one result with no mid-turn marker in its text is `not-quoted`, not `not-read`. The marker's absence from the final text does not show claude never read the message; the name says only what was measured, and the record's limitations say so.
+  2. The four arms run concurrently, one goroutine and one child each, joined by a `sync.WaitGroup` before the record is built. Each arm also runs `cmd.Wait` in a goroutine so the polling loop can see an early exit; the arm's deferred join receives it. Redaction moved to the test goroutine after the join, because `dropcapRedactor`'s counters are unlocked. This replaces "No goroutine of the probe's own" in the Concurrency model, and cuts the wall clock from the sum of the arms to the slowest one.
+  3. Added `TestMtuSummariseFindsEchoesAndResults` to the offline tests: the echo census (a marker-bearing `user` line is an echo, a `tool_result` is not) and the final text being the last result's.
