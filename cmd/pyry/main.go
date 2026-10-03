@@ -966,6 +966,7 @@ func runSupervisor(args []string) error {
 		ActiveCap:                 *activeCap,
 		ConversationsRegistry:     convReg,
 		ConversationsRegistryPath: convRegistryPath,
+		ReadFolders:               readFolders,
 		SweepInterval:             *convSweepInterval,
 		RunnerFactory:             runnerFactory,
 		Bootstrap: sessions.SessionConfig{

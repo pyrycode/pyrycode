@@ -1,4 +1,4 @@
-# `writeSystemPrompt` + `systemPromptText` (#2093, per-session since #2150, client-named since #2148, handoff note since #2475, fence exported since #2477)
+# `writeSystemPrompt` + `systemPromptText` (#2093, per-session since #2150, client-named since #2148, handoff note since #2475, fence exported since #2477, read folders named since #2711)
 
 ```go
 func composeSystemPrompt(operator string) string
@@ -62,6 +62,34 @@ operator's bytes verbatim (untrimmed, unescaped, unbounded here — #2149's
 `Registry.SetSystemPrompt` is the single validating door). There is no branch
 that returns the operator's text alone: replacing claude's own system prompt
 is what `--append-system-prompt-file` exists not to do.
+
+`daemonPromptText(folders)` (#2711) is the actual daemon-wide head every
+composition starts from, in place of the bare `systemPromptText` constant:
+the constant, plus one sentence naming the folders the in-app markdown
+reader serves besides a conversation's workspace (#2710) —
+`readFolderSentence(folders)` — after the usual blank-line separator.
+`folders` **must** be `resolveReadFolders`'s output, the roots the reader
+actually accepts, so the sentence can never name a folder the reader would
+refuse; it names only what resolved at startup, nothing a bad entry caused
+to be skipped. With no folders, or none that resolved, `daemonPromptText`
+returns `systemPromptText` byte-for-byte, which is what keeps every
+composition on an unconfigured daemon unchanged. `composeSystemPromptOn`
+and `composeSystemPromptForOn` take this daemon text as their first
+parameter in place of the bare constant; `composeSystemPrompt` and
+`composeSystemPromptFor` keep their existing signatures and call the `…On`
+siblings with the plain `systemPromptText`, which is why neither function's
+18 existing call sites nor `TestSystemPromptText_Pinned` needed an edit. All
+three production writes — `New`'s bootstrap file, `buildSession`'s
+per-session file, and `writeComposedPrompt`'s recompose — call
+`daemonPromptText(p.readFolders)` (`cfg.ReadFolders` at `New`), so the
+sentence sits in the same place in every one of them: directly after
+`systemPromptText` and before the client, handoff-note and operator
+sections, the order `writeComposedPrompt`'s own compose already follows for
+those three. It is computed fresh at every compose rather than cached on the
+`Pool`: a cached field would read `""` on any `Pool` built without going
+through `New`'s normal construction path, and `daemonPromptText` would then
+silently drop `systemPromptText` itself from that pool's every recompose
+rather than merely omit the sentence.
 
 `Pool.conversationPrompt(label)` is the resolver, and it is **total** — nil
 registry, empty label, unknown label, and #2149's absent (`nil`) prompt all
