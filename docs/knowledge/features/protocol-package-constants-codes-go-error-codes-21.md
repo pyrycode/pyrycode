@@ -1,4 +1,4 @@
-# Error codes (34)
+# Error codes (35)
 
 Wire values for the `code` field of error payloads (spec § Error codes). Naming convention: `Code<Category><Reason>` mirrors the dotted-string `category.reason` shape.
 
@@ -18,6 +18,7 @@ Wire values for the `code` field of error payloads (spec § Error codes). Naming
 | `CodeRelayServerIDConflict` | `relay.server_id_conflict` |
 | `CodeSessionNotFound` | `session.not_found` |
 | `CodeSessionBlocked` | `session.blocked` |
+| `CodeSessionChildCrashing` | `session.child_crashing` |
 | `CodeAttachmentInvalidChunk` | `attachment.invalid_chunk` |
 | `CodeAttachmentIntegrityFailed` | `attachment.integrity_failed` |
 | `CodeAttachmentTooManyUploads` | `attachment.too_many_uploads` |
@@ -38,6 +39,8 @@ Wire values for the `code` field of error payloads (spec § Error codes). Naming
 | `CodeContextUsageUnavailable` | `context_usage.unavailable` |
 | `CodeNewSessionWorkspaceRefused` | `new_session.workspace_refused` |
 | `CodeClientUpdateRequired` | `client.update_required` |
+
+**`CodeSessionChildCrashing` (#2724) is `session_error`'s first non-terminal code, and it does not replace `CodeSessionBlocked` — the two are siblings on the same frame type.** `TypeSessionError` was minted (#1007) and wired (#1008) as a strictly terminal give-up notice: msgqueue gives up on a conversation's queued head after two minutes and the daemon can say nothing sooner. #2724 adds a second, independent producer — a per-conversation crash-episode detector in `internal/streamsup` ([Supervise loop (`Run`)](streamsup-package-supervise-loop-run.md)) — that fires within seconds of a claude child failing to stay up at startup, before msgqueue's window even closes. Reusing `TypeSessionError` rather than minting a new frame type keeps the client's dispatch on `code`, not on type; `SessionErrorPayload.Code` is documented as "which, not whether terminal" from this ticket on, and `giveUpNotice` (the internal hand-off value both producers feed) gained its own `code` field so the broadcaster stamps whichever code its producer chose instead of a single fixed constant. See [Crash episode notification — `Config.OnCrashLoop`](streamsup-package-crash-episode-notification-oncrashloop.md) for the detector and the cmd/pyry wiring.
 
 **The two `pairing.*` codes (#2127) reject an authenticated device on privilege, never on identity, and `auth.invalid_token` would say the wrong thing.** A `mint_pairing` from a device whose `MayAnswerRemotePermission` is false is answered `pairing.not_permitted` rather than the auth code, because the device's token is fine — reusing the auth code would read to a legitimate, merely-unprivileged client as "your pairing is broken," inviting a needless re-pair. It is also not an oracle: the refusal is unconditioned on the requested `device_name`, so it cannot be used to probe which names already exist, and it tells the caller nothing it could not already learn by answering any permission modal and being denied. `pairing.unavailable` is one retryable code standing in for three distinct daemon-side causes — a busy lock, a registry read/write failure, an RNG failure — merged deliberately on the same reasoning as `CodeModelListUnavailable` above: every cause clears without the client changing anything, and splitting them would publish facts about the host's disk or entropy state rather than about the request.
 
