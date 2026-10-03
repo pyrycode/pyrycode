@@ -237,6 +237,26 @@ type refusalObservation struct {
 	continuation  string
 }
 
+// postRefusalTally is what reached the phone AFTER the dismissal of our batch, kept
+// only for the deadline's message (#2735). Without it that message could not tell a
+// claude that kept working from an upstream API stall: the drain drops every frame
+// it does not act on, api_retry among them, and a stall sends nothing at all.
+type postRefusalTally struct {
+	retries               int
+	lastAttempt, maxRetry int // Current/Total of the last active api_retry
+	textBytes             int
+	other                 map[string]int // every other envelope type, by count
+}
+
+func (p postRefusalTally) empty() bool {
+	return p.retries == 0 && p.textBytes == 0 && len(p.other) == 0
+}
+
+func (p postRefusalTally) String() string {
+	return fmt.Sprintf("%d api_retry frame(s) (last attempt %d of %d), %d byte(s) of assistant text, "+
+		"other frames by type %v", p.retries, p.lastAttempt, p.maxRetry, p.textBytes, p.other)
+}
+
 // settleRefusedTurn drives the post-refusal wire to its end and reports what it saw.
 // It enforces two milestones and actuates on two frame kinds.
 //
@@ -291,6 +311,7 @@ func settleRefusedTurn(t *testing.T, h *perConvHarness, convID, batchID string, 
 		obs          refusalObservation
 		sawDismissal bool
 		text         strings.Builder
+		after        = postRefusalTally{other: map[string]int{}}
 	)
 	reqID := startReqID
 	deadline := time.Now().Add(timeout)
@@ -302,10 +323,15 @@ func settleRefusedTurn(t *testing.T, h *perConvHarness, convID, batchID string, 
 					"batch: it was denied at the device gate, lost the one-shot to the backstop, or never "+
 					"reached the resolver at all", batchID, timeout)
 			}
+			if after.empty() {
+				t.Fatalf("batch %s was dismissed as refused, but claude sent nothing for %q after the refusal "+
+					"within %s — no api_retry, no assistant text, no other frame. That is how an upstream API "+
+					"stall looks, not a claude that kept working", batchID, convID, timeout)
+			}
 			t.Fatalf("batch %s was dismissed as refused, but the turn for %q never reached terminal "+
 				"turn_state{idle} within %s (allowed %d modal(s), refused %d re-asked batch(es)) — claude "+
-				"neither stopped nor finished after being told to stop and wait",
-				batchID, convID, timeout, obs.modalsAllowed, obs.extraRefusals)
+				"neither stopped nor finished after being told to stop and wait. After the dismissal: %s",
+				batchID, convID, timeout, obs.modalsAllowed, obs.extraRefusals, after)
 		}
 		raw, err := h.phone.ReceiveBytes(remaining)
 		if err != nil {
@@ -334,6 +360,9 @@ func settleRefusedTurn(t *testing.T, h *perConvHarness, convID, batchID string, 
 		var env protocol.Envelope
 		if err := json.Unmarshal(plain, &env); err != nil {
 			t.Fatalf("decode envelope (refused-turn drain): %v", err)
+		}
+		if sawDismissal && env.Type != protocol.TypeApiRetry && env.Type != protocol.TypeAssistantDelta {
+			after.other[env.Type]++
 		}
 		switch env.Type {
 		case protocol.TypeError:
@@ -448,6 +477,21 @@ func settleRefusedTurn(t *testing.T, h *perConvHarness, convID, batchID string, 
 			}
 			if p.ConversationID == convID && strings.TrimSpace(p.Text) != "" {
 				text.WriteString(p.Text)
+			}
+			if sawDismissal && p.ConversationID == convID {
+				after.textBytes += len(p.Text)
+			}
+
+		case protocol.TypeApiRetry:
+			var p protocol.ApiRetryPayload
+			if err := json.Unmarshal(env.Payload, &p); err != nil {
+				t.Fatalf("decode api_retry payload (refused-turn drain): %v", err)
+			}
+			if sawDismissal && p.ConversationID == convID {
+				after.retries++
+				if p.Active {
+					after.lastAttempt, after.maxRetry = p.Current, p.Total
+				}
 			}
 
 		case protocol.TypeTurnState:
