@@ -265,7 +265,7 @@ Column rules:
 - `NAME` — `Device.Name` verbatim.
 - `PAIRED` — `Device.PairedAt` formatted as `time.RFC3339`.
 - `LAST SEEN` — `Device.LastSeenAt` formatted as `time.RFC3339`; the literal string `never` when the value is the zero time.
-- `VERSION` (#2577) — `Device.ClientVersion` verbatim; empty when the device has never reported an admissible version (including every device paired before this column existed). The value is the raw client-reported `client_version` string from that device's most recent accepted hello, not parsed into app/version parts — see [`features/devices-registry.md`](devices-registry.md) § `SetClientVersion`.
+- `VERSION` (#2577) — `Device.ClientVersion` verbatim; empty when the device has never reported an admissible version (including every device paired before this column existed). The value is the raw client-reported `client_version` string from that device's most recent accepted hello, not parsed into app/version parts — see [`features/devices-registry-redemption-and-binding.md`](devices-registry-redemption-and-binding.md) § `SetClientVersion`.
 - `TOKEN-PREFIX` — first 8 lowercase hex chars of `Device.TokenHash` (visual identification only; never the plaintext token).
 
 ### Defensive sort, even though `Save` already sorts
@@ -312,7 +312,7 @@ E2E (`internal/e2e/pair_test.go`, `//go:build e2e`):
 
 ## `pyry pair revoke <name>` (#215)
 
-Destructive operator action: remove the registry entry whose `Device.Name` equals `<name>`. Thin wiring on top of `Registry.Remove` + `Registry.Save`.
+Destructive operator action: remove the registry entry whose `Device.Name` equals `<name>`. Thin wiring on top of `Registry.Remove` + `Registry.Save`. `Remove` drops the whole row, so a device bound to an install's Noise static key (#2734, [`devices-registry-redemption-and-binding.md`](devices-registry-redemption-and-binding.md) § `BindStaticKey`) loses that binding along with every other field; a fresh `pyry pair` afterward mints a new, unbound token hash, so whichever install redeems it next is the one it binds to.
 
 ```
 1. Parse flags + sole positional                              → exit 2 on parse / arg-count error
@@ -360,7 +360,7 @@ serialize on the per-instance `devices.json.lock` sidecar and re-read inside the
 lock before mutating. The daemon's `register_push_token` writer takes the same
 lock too (#1532), so a revoke racing the daemon's own background push-token
 persist now serializes on the same sidecar instead of one clobbering the
-other's `Save` — see [`features/devices-registry.md`](devices-registry.md)
+other's `Save` — see [`features/devices-registry-reload.md`](devices-registry-reload.md)
 § *Two-writer clobber guard*.
 
 ### Tests
