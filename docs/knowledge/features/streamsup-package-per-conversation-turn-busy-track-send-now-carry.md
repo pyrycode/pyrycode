@@ -6,11 +6,15 @@ capture](e2e-realclaude-mid-turn-user-capture-test-go.md) measured what claude
 does next: a message written during a running tool call folds into the
 turn that is already ending, but one written while a text-only answer
 streams, or just after the turn's last tool result, opens a **second** turn
-of its own. Production runs with `--replay-user-messages` off, so nothing
-echoes the write back through the fan-in to tell the two cases apart from
-inside this tracker. AC4 of #2729 needs the conversation to read **busy**
-for the whole uncertain window regardless: if the drain reads idle too
-early, it releases the next queued message into a turn that is not
+of its own. Since #2730 the interactive spawn runs with
+`--replay-user-messages`, and claude does echo the write back through the
+fan-in — but only to `sendNowPlacement` ([history-package.md §
+Producers](history-package.md#producers-2114-2115)), which uses the echo to
+place the operator-message push, never to this tracker. `turnBusyTracker`
+stays echo-blind by design: `openForSendNow`'s carry and
+`scheduleCarryRelease`'s grace below are what keep the conversation read
+**busy** for the whole uncertain window regardless — if the drain reads idle
+too early, it releases the next queued message into a turn that is not
 actually over.
 
 ## `openForSendNow` — the atomic busy-check-and-carry

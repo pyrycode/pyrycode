@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"slices"
@@ -14,6 +15,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
 	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
 // The #2038 attachment shape end to end: what the operator typed versus the
@@ -34,7 +36,7 @@ const (
 // test is still newOperatorMessageHistory's closure.
 func opQueue(t *testing.T, store *history.Store, buf *bytes.Buffer, push func(operatorMessage), deliver msgqueue.DeliverFunc) (*msgqueue.Queue, chan struct{}) {
 	t.Helper()
-	producer := newOperatorMessageHistory(store, push, bufLogger(buf))
+	producer := newOperatorMessageHistory(store, push, nil, bufLogger(buf))
 	done := make(chan struct{})
 	q, err := msgqueue.New(msgqueue.Config{
 		Deliver:       deliver,
@@ -305,5 +307,45 @@ func TestOperatorMessageHistory_PushesLogEntryOnceAfterRetry(t *testing.T) {
 	}
 	if strings.Contains(raw, opHostPath) {
 		t.Errorf("pushed payload leaked the on-host path: %s", raw)
+	}
+}
+
+// #2730: a send-now message is written and pushed when claude's echo of the
+// DELIVERY payload arrives, not at OnDelivered, and its content is still built
+// from msg.Text. An ordinary message on the same producer commits at once.
+func TestOperatorMessageHistory_SendNowCommitsAtTheEcho(t *testing.T) {
+	t.Parallel()
+	store := history.New(t.TempDir())
+	var buf bytes.Buffer
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	place := newSendNowPlacement(ctx,
+		func(sid string) (string, bool) { return testConvID, sid == "s1" },
+		func(ctx context.Context, _ string) error { <-ctx.Done(); return ctx.Err() })
+	var pushes []operatorMessage
+	producer := newOperatorMessageHistory(store, func(m operatorMessage) { pushes = append(pushes, m) }, place, bufLogger(&buf))
+
+	place.expect(testConvID, 4, []byte(opDelivery))
+	producer(testConvID, msgqueue.QueuedMessage{ID: 4, MessageID: opMsgID, Text: opText, SentNow: true})
+	if page, err := store.Page(conversations.ConversationID(testConvID), "", 10); err != nil || len(page.Entries) != 0 || len(pushes) != 0 {
+		t.Fatalf("before the echo: entries=%d pushes=%d err=%v, want nothing committed", len(page.Entries), len(pushes), err)
+	}
+
+	place.echo("s1", turnevent.UserEcho{TextSHA256: sha256.Sum256([]byte(opDelivery))})
+	entry := onlyEntry(t, store, testConvID)
+	if len(pushes) != 1 || string(pushes[0].payload) != string(entry.Payload) {
+		t.Fatalf("pushes = %d, want one carrying the entry's bytes", len(pushes))
+	}
+	var payload protocol.MessagePayload
+	if err := json.Unmarshal(entry.Payload, &payload); err != nil || payload.Text != opText {
+		t.Fatalf("entry text = %q (err %v), want the queued text %q", payload.Text, err, opText)
+	}
+	if strings.Contains(string(entry.Payload), opHostPath) {
+		t.Errorf("entry leaked the on-host path: %s", entry.Payload)
+	}
+
+	producer(testConvID, msgqueue.QueuedMessage{ID: 5, MessageID: "ordinary", Text: "plain"})
+	if len(pushes) != 2 {
+		t.Fatalf("an ordinary message pushed %d times in total, want it committed at once", len(pushes)-1)
 	}
 }

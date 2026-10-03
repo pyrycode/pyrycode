@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,15 +18,17 @@ type fakeSendNow struct {
 	mu       sync.Mutex
 	err      error
 	payloads []string
+	ids      []uint64
 }
 
-func (f *fakeSendNow) send(_ context.Context, _ string, payload []byte) error {
+func (f *fakeSendNow) send(_ context.Context, _ string, id uint64, payload []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
 		return f.err
 	}
 	f.payloads = append(f.payloads, string(payload))
+	f.ids = append(f.ids, id)
 	return nil
 }
 
@@ -123,6 +126,14 @@ func TestQueue_SendNow_TakesMessageOutOfOrder(t *testing.T) {
 			_, msgs := rec.calls()
 			if len(msgs) != 1 || msgs[0].ID != tc.id || !msgs[0].SentNow {
 				t.Fatalf("OnDelivered = %+v, want one call for id %d with SentNow", msgs, tc.id)
+			}
+			// The seam is handed the id OnDelivered then carries, which is what lets
+			// the daemon pair the write with its delivered notification (#2730).
+			sn.mu.Lock()
+			ids := slices.Clone(sn.ids)
+			sn.mu.Unlock()
+			if !equalIDs(ids, []uint64{tc.id}) {
+				t.Errorf("send-now seam got ids %v, want [%d]", ids, tc.id)
 			}
 
 			release()

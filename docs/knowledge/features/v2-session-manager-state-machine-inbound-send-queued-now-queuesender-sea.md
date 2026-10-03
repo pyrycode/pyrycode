@@ -89,8 +89,8 @@ boundary.
 `isClaude` (`sessionRouter.isClaude`) refuses before either of those: a
 conversation bound to a Codex session always returns `errSendNowNotClaude`,
 because Codex's write path starts a new turn rather than feeding the running
-one (the ticket's `mid_turn_input` stays `false` for Claude too — #2730
-flips that bit and owns the real-claude end-to-end proof).
+one. `settingsUpdaterAdapter.Capabilities`' `mid_turn_input` reports this
+split since #2730 — true for Claude, still false for Codex.
 
 `newSendNowDeliver` never calls `Activate`: a running turn already has a live
 child by definition, and an absent one must fail the write (leaving the
@@ -98,3 +98,12 @@ message queued for the ordinary drain) rather than spawn a session for a
 send-now that arrived too late. Pinned by
 `TestSendNowDeliver_WritesOnlyIntoARunningClaudeTurn`
 (`cmd/pyry/send_now_test.go`).
+
+**Since #2730, `newSendNowDeliver` also registers the write with a
+`*sendNowPlacement` before it happens** (`place.expect(convID, id, payload)`),
+so the operator-message history entry and live `message` push for this
+delivery wait for claude's own echo of it and land where claude actually
+read it, rather than at this write. See [history-package.md §
+Producers](history-package.md#producers-2114-2115) for the commit-deferral
+mechanism and [streamsup-package-turn-io-envelope-write-stdout-parser.md](streamsup-package-turn-io-envelope-write-stdout-parser.md)
+for the echo the spawn now produces.

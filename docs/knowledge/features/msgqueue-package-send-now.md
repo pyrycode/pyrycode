@@ -9,10 +9,17 @@ acceleration rather than withdrawal.
 // SendNowFunc is the injected send-now seam: it writes a queued message's
 // delivery payload into the conversation's RUNNING turn, without waiting for
 // idle. nil ⇒ SendNow is inert.
-type SendNowFunc func(ctx context.Context, convID string, payload []byte) error
+type SendNowFunc func(ctx context.Context, convID string, id uint64, payload []byte) error
 
 func (q *Queue) SendNow(convID string, id uint64) bool
 ```
+
+`SendNowFunc` gained `id` in #2730: `Queue.SendNow` passes `m.id` straight
+through, and it is the only key the write side (`place.expect`) and the
+delivered side (`place.attach`, from `notifyDelivered`) share to agree on
+which pending entry a given write belongs to — see [history-package.md §
+Producers](history-package.md#producers-2114-2115) for what the id now
+gates.
 
 `Config.SendNow` is the fourth optional caller-supplied seam beside
 `OnChange`/`OnGiveUp`/`OnDelivered`/`Pending`; `nil` makes `SendNow` an

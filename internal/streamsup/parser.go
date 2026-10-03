@@ -2,6 +2,7 @@ package streamsup
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -4781,6 +4782,12 @@ type userLine struct {
 	// optional attribute on a line that has other work to do, and failing the
 	// line would cost the tool_result mapping to protect a grouping hint.
 	ParentToolUseID json.RawMessage `json:"parent_tool_use_id"`
+
+	// IsReplay marks claude replaying a user message under --replay-user-messages
+	// (#2730): every turn's opener, and a message written into a running turn at
+	// the point claude read it. Read by value, like IsSynthetic, and a bool adds
+	// no failure mode to this struct's cannot-fail decode.
+	IsReplay bool `json:"isReplay"`
 }
 
 // harnessProseLine is the decode target for a `user` line whose message content
@@ -9694,6 +9701,22 @@ func (p *Parser) emitUser(msg *streamMessage, line []byte) {
 	for _, raw := range msg.Content {
 		block, ok := p.decodeBlock(raw)
 		if !ok {
+			continue
+		}
+		if block.Type == "text" && ul.IsReplay && parentToolUseID(ul.ParentToolUseID) == "" {
+			// claude's echo of a user message we wrote (#2730). Its text is the
+			// DELIVERY payload — for an attachment-bearing message a daemon-composed
+			// prompt naming on-host paths — so it never surfaces: before this arm a
+			// block-array text line went to emitUnrecognized below, whose Raw would
+			// have put that prompt on the wire. Only the digest leaves, for the
+			// daemon to place the operator's own message push where claude read it.
+			// Logged content-free: not the text, and not the digest either, which
+			// fingerprints a short message. A subagent's replayed line keeps falling
+			// to the harness guard below.
+			p.log.Debug("streamsup: user echo",
+				"site", string(turnevent.UnrecognizedUserBlock),
+				"type", block.Type)
+			p.emit(turnevent.UserEcho{TextSHA256: sha256.Sum256([]byte(block.Text))})
 			continue
 		}
 		if block.Type == "text" && (ul.IsSynthetic ||
