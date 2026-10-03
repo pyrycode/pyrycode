@@ -1006,7 +1006,7 @@ func TestRunner_BeginSpawn_FirstSpawnResumesExistingTranscript(t *testing.T) {
 		claudeSessionsDir: sessionsDir,
 	}
 
-	_, cancel, args, _, _, forceFirst, _, _ := r.beginSpawn(context.Background(), true)
+	_, cancel, _, args, _, _, forceFirst, _, _ := r.beginSpawn(context.Background(), true)
 	defer cancel()
 
 	if forceFirst {
@@ -1115,7 +1115,7 @@ func TestRunner_BeginSpawn_EnvCarriesOwnLiveSessionID(t *testing.T) {
 		{"runner B", idB, idA},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, cancel, _, env, _, _, _, _ := newRunner(tc.own).beginSpawn(context.Background(), true)
+			_, cancel, _, _, env, _, _, _, _ := newRunner(tc.own).beginSpawn(context.Background(), true)
 			defer cancel()
 
 			want := []string{testSessionEnvVar + "=" + tc.own}
@@ -1160,7 +1160,7 @@ func TestRunner_BeginSpawn_EnvTracksRotatedSessionID(t *testing.T) {
 
 	r.RestartFresh(rotatedID)
 
-	_, cancel, args, env, _, forceFirst, _, _ := r.beginSpawn(context.Background(), false)
+	_, cancel, _, args, env, _, forceFirst, _, _ := r.beginSpawn(context.Background(), false)
 	defer cancel()
 
 	// Sanity on the fixture, not the claim: without a consumed rotation the rest of
@@ -1493,7 +1493,7 @@ func TestRunner_RestartFresh_EmptyIDIsNoOp(t *testing.T) {
 
 	r.RestartFresh("")
 
-	_, cancel, args, _, _, forceFirst, _, _ := r.beginSpawn(context.Background(), true)
+	_, cancel, _, args, _, _, forceFirst, _, _ := r.beginSpawn(context.Background(), true)
 	defer cancel()
 	if forceFirst {
 		t.Errorf("beginSpawn forceFirst = true after RestartFresh(%q), want false (no-op held)", "")
@@ -1624,7 +1624,7 @@ func TestRunner_RestartFresh_OnSessionRotateFiresBeforeNextSpawnID(t *testing.T)
 			rotatedSessionID, seen)
 	}
 
-	_, cancel, args, _, _, forceFirst, _, _ := r.beginSpawn(context.Background(), true)
+	_, cancel, _, args, _, _, forceFirst, _, _ := r.beginSpawn(context.Background(), true)
 	defer cancel()
 	if !forceFirst {
 		t.Error("beginSpawn forceFirst = false after RestartFresh, want true (the rotation was not the one consumed)")
@@ -2534,7 +2534,7 @@ func TestRunner_AdoptSessionID_InstallsIDWithoutRotationMachinery(t *testing.T) 
 					"refused with ErrNoLiveChild")
 			}
 
-			_, cancel, args, _, _, forceFirst, _, _ := r.beginSpawn(context.Background(), false)
+			_, cancel, _, args, _, _, forceFirst, _, _ := r.beginSpawn(context.Background(), false)
 			defer cancel()
 			if forceFirst {
 				t.Error("beginSpawn reported forceFirst with no rotation pending")

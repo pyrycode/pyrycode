@@ -2248,13 +2248,14 @@ func (r *Runner) AdoptSessionID(newID string) {
 // place" true by construction, the same way env and args name one session.
 //
 // The return list deliberately places no two same-typed results adjacent: workDir
-// sits between env []string and forceFirst bool, and spawnMode after freshSeq
-// uint64, so transposing the two strings at the call site is a compile error
-// rather than a child spawned in a directory named "acceptEdits". That is
+// sits between env []string and forceFirst bool, spawnMode after freshSeq
+// uint64, and id — the session id the argv was built from, returned for Run's
+// exit record (#2723) — between cancel and args, so transposing two adjacent
+// results at the call site is a compile error rather than a child spawned in a directory named "acceptEdits". That is
 // boundRunSettings' stated reasoning for named-field wiring, applied to a return
 // list that cannot have names.
 func (r *Runner) beginSpawn(ctx context.Context, firstRun bool) (
-	iterCtx context.Context, cancel context.CancelFunc, args, env []string,
+	iterCtx context.Context, cancel context.CancelFunc, id string, args, env []string,
 	workDir string, forceFirst bool, freshSeq uint64, spawnMode string,
 ) {
 	// Derived BEFORE the acquisition on purpose: context.WithCancel takes the
@@ -2266,7 +2267,8 @@ func (r *Runner) beginSpawn(ctx context.Context, firstRun bool) (
 	r.restartMu.Lock()
 	forceFirst = r.rotatePending
 	r.rotatePending = false
-	base, id := r.args, r.sessionID
+	base := r.args
+	id = r.sessionID
 	freshSeq = r.freshSeq
 	spawnMode = r.spawnMode
 	workDir = r.workDir
@@ -2276,7 +2278,7 @@ func (r *Runner) beginSpawn(ctx context.Context, firstRun bool) (
 
 	args = buildArgs(base, useCreateForm(sessionsDir, id, firstRun || forceFirst), id)
 	env = spawnEnv(r.cfg.Env, r.cfg.SessionIDEnvVar, id)
-	return iterCtx, cancel, args, env, workDir, forceFirst, freshSeq, spawnMode
+	return iterCtx, cancel, id, args, env, workDir, forceFirst, freshSeq, spawnMode
 }
 
 // liveSessionID snapshots the live session id under restartMu, for a diagnostic
@@ -2352,7 +2354,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		// with --session-id (a fresh transcript). firstRun's flip-back to false on a
 		// successful spawn (below) then makes the next respawn --resume the new id —
 		// see the started-gated flip.
-		iterCtx, cancel, args, env, workDir, forceFirst, freshSeq, spawnMode := r.beginSpawn(ctx, firstRun)
+		iterCtx, cancel, id, args, env, workDir, forceFirst, freshSeq, spawnMode := r.beginSpawn(ctx, firstRun)
 		if forceFirst {
 			firstRun = true
 		}
@@ -2365,7 +2367,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		r.log.Info("spawning claude", "args", args, "workdir", workDir)
 
 		start := time.Now()
-		started, waitErr := r.spawnAndWait(iterCtx, args, env, workDir, freshSeq, spawnMode)
+		started, stderrTail, waitErr := r.spawnAndWait(iterCtx, args, env, workDir, freshSeq, spawnMode)
 		cancel()
 		r.clearIterCancel()
 		uptime := time.Since(start)
@@ -2388,10 +2390,20 @@ func (r *Runner) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 
+		// session is the id THIS child was spawned with, because the runner logger is
+		// pool-wide and two crash-looping conversations must be told apart (#2723).
+		// The stderr tail rides as a daemonLogOnly value: the daemon's own log output
+		// renders it, and control.SlogTee keeps it out of the ring that `pyry logs`
+		// and the debug bundle read. spawnAndWait returns it only for a child that
+		// failed on its own, never for a restart or a shutdown kill.
 		if waitErr != nil {
-			r.log.Warn("claude exited", "err", waitErr, "uptime", uptime)
+			attrs := []any{"session", id, "err", waitErr, "uptime", uptime}
+			if stderrTail != "" {
+				attrs = append(attrs, "stderr", daemonLogOnly(stderrTail))
+			}
+			r.log.Warn("claude exited", attrs...)
 		} else {
-			r.log.Info("claude exited", "uptime", uptime)
+			r.log.Info("claude exited", "session", id, "uptime", uptime)
 		}
 
 		// Advance firstRun only once claude has actually launched. A
@@ -2451,11 +2463,16 @@ func (r *Runner) Run(ctx context.Context) error {
 // carried through as a parameter rather than read off the Runner (#1475): the
 // field is swappable, and a live read here would race SetSpawnWorkDir and could
 // enter a directory this spawn's argv and transcript probe were not built for.
-func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, workDir string, freshSeq uint64, spawnMode string) (started bool, waitErr error) {
+//
+// stderrTail is the end of the child's stderr (see stderrTail), returned only when
+// the child failed ON ITS OWN: waitErr is non-nil and ctx — the iteration ctx that
+// Restart, RestartFresh and shutdown all cancel before their kill — is still live.
+// The check has to sit here, before Run's cancel() and drainRestart, because a
+// deliberate kill also produces a non-nil waitErr.
+func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, workDir string, freshSeq uint64, spawnMode string) (started bool, stderrTail string, waitErr error) {
 	cmd := exec.CommandContext(ctx, r.cfg.ClaudeBin, args...)
 	cmd.Dir = workDir
 	cmd.Stdout = r.cfg.Stdout
-	cmd.Stderr = r.cfg.Stderr
 	if len(env) > 0 {
 		cmd.Env = append(os.Environ(), env...)
 	} else {
@@ -2500,16 +2517,19 @@ func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, workDir s
 		// A spawn-setup failure is treated as a crashed iteration by the loop
 		// (backoff + retry), so a transient failure never kills the daemon.
 		// started stays false: claude never launched.
-		return false, fmt.Errorf("streamsup: stdin pipe: %w", err)
+		return false, "", fmt.Errorf("streamsup: stdin pipe: %w", err)
 	}
 
+	stderr := captureStderr(cmd, r.cfg.Stderr, r.log)
 	if err := cmd.Start(); err != nil {
+		stderr.started(false)
 		_ = stdin.Close() // best-effort: nothing consumed it, child never ran
 		if r.parser != nil {
 			r.parser.endPermissionModeChild()
 		}
-		return false, fmt.Errorf("streamsup: start: %w", err)
+		return false, "", fmt.Errorf("streamsup: start: %w", err)
 	}
+	stderr.started(true)
 
 	// The posture gate is ARMED BEFORE setStdin, and that ordering is load-bearing:
 	// setStdin publishes the live stdin handle and disarms the rotation gate in ONE
@@ -2649,6 +2669,10 @@ func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, workDir s
 	}
 
 	waitErr = cmd.Wait()
+	stderrTail = stderr.finish()
+	if waitErr == nil || ctx.Err() != nil {
+		stderrTail = ""
+	}
 
 	// The child has exited (crash) or been torn down (cancel). Drop the handle
 	// so Stdin() reports no live child, then close it best-effort — cmd.Wait
@@ -2666,7 +2690,7 @@ func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, workDir s
 		r.parser.dropPartialLine()
 	}
 
-	return true, waitErr
+	return true, stderrTail, waitErr
 }
 
 // setStdin publishes the live child's stdin write end under the leaf mutex and,
