@@ -60,6 +60,23 @@ caught against.
   literal. It is correct today because both vocabularies share the value, but
   a rename on either side would silently redefine what the other's check
   means — worth separating on the next touch of this file rather than now.
+- **A deadline message that describes the product failure it guards against
+  can misname an upstream stall as that failure** (#2735). `settleRefusedTurn`
+  silently drops every post-dismissal frame it does not act on, `api_retry`
+  (`protocol.TypeApiRetry`) among them, so its old timeout message — "claude
+  neither stopped nor finished" — fired identically whether claude pressed on
+  or the Claude API simply stopped sending anything at all. The two look the
+  same from inside this test but came apart under cross-test log comparison:
+  a gate run where this test's deadline fired also showed
+  `TestRealClaude_InBandModeSwitch_Probe`, which runs claude with no daemon
+  involved, stalling in the same window, and the baseline of roughly 100 prior
+  runs all finishing in 5-9s. `settleRefusedTurn` now tallies `api_retry`
+  frames (with the last `Current`/`Total`), bytes of `assistant_delta` text,
+  and every other frame type seen after the dismissal, and reports that tally
+  on timeout — an empty tally says plainly that claude sent nothing, instead
+  of claiming it neither stopped nor finished. Widening `perTurnReplyBudget`
+  was rejected: nothing shows an upstream stall resolves within a fixed time,
+  so a wider budget would only extend the wait, not fix the diagnosis.
 
 See `docs/specs/architecture/1995-live-question-refusal-round-trip.md` for the
 full design and security review, including why the allow arm's exposure is
