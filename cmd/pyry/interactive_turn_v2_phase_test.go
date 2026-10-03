@@ -81,10 +81,10 @@ func TestTurnPhaseSnapshot_TracksLifecycle(t *testing.T) {
 }
 
 // TestTurnPhaseSnapshot_ClearedWhenTurnClosedExternally covers the two paths
-// that end a turn without a TurnEnd event: closeForConversation, which sends the
-// turn's idle, and the follow-active switch in Handle, which abandons the prior
-// conversation's turn without one. Neither may leave the old conversation's
-// phase behind.
+// that ended a turn without a TurnEnd event. closeForConversation sends the turn's
+// idle and must clear only its own conversation's phase; #1062's follow-active
+// switch, the other such path, is gone with #2739, so another conversation's
+// phase must now survive.
 func TestTurnPhaseSnapshot_ClearedWhenTurnClosedExternally(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -106,20 +106,17 @@ func TestTurnPhaseSnapshot_ClearedWhenTurnClosedExternally(t *testing.T) {
 		}
 	})
 
-	t.Run("follow-active switch", func(t *testing.T) {
+	t.Run("other conversation's turn kept", func(t *testing.T) {
 		t.Parallel()
-		e, cur, _, snap := phaseEmitter(t)
-		e.Handle(ctx, turnevent.TextChunk{Text: "hello"})
-		cur.set(otherConvID)
-		// A lifecycle-neutral event on the new conversation: the switch ends the
-		// prior turn, and the new turn has sent no phase yet.
-		e.Handle(ctx, turnevent.ToolProgress{ToolCallID: "t9"})
-		if got := phaseOf(t, snap); got != "" {
-			t.Fatalf("after switch: phase = %q, want none (prior conversation must not linger)", got)
+		e, _, _, snap := phaseEmitter(t)
+		e.HandleFor(ctx, testConvID, turnevent.ThoughtChunk{Text: "a"})
+		e.HandleFor(ctx, otherConvID, turnevent.ThoughtChunk{Text: "b"})
+		if got := len(snap.running()); got != 2 {
+			t.Fatalf("running() = %d payloads, want 2 (one per open turn, #2739)", got)
 		}
-		e.Handle(ctx, turnevent.ThoughtChunk{Text: "new"})
+		e.closeForConversation(ctx, testConvID)
 		if got := phaseOf(t, snap); got != otherConvID+"/thinking" {
-			t.Fatalf("after new turn's thinking: phase = %q, want %q", got, otherConvID+"/thinking")
+			t.Fatalf("after closing A: phase = %q, want B's kept", got)
 		}
 	})
 }

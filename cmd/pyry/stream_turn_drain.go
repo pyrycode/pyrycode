@@ -253,7 +253,7 @@ func (s *streamTurnSink) takeLifecycleCloses() []string {
 // every stream-mode new_session. Before this type the tag was the runner's
 // construction-time id captured in a closure, so a rotation left every later event
 // tagged with an id the conversation was no longer bound to and the drain's
-// active-session gate dropped all of them until the daemon restarted.
+// then active-session gate dropped all of them until the daemon restarted.
 //
 // It has TWO writers since #2135, and is read once per event by sinkForTag /
 // exitForTag. The first is streamsup.Config.OnSessionRotate, which the runner
@@ -272,10 +272,10 @@ func (s *streamTurnSink) takeLifecycleCloses() []string {
 // A mutex here would put a lock on both of those paths and create an ordering
 // question to keep answered; a single atomic word has no ordering to state.
 //
-// The tag can never hold "": an empty tag matches no bound session — the gate
-// compares against boundSessionIDForActive, which reports ok == false for an empty
-// CurrentSessionID, and no non-empty active can equal it — so an emptied tag would
-// black-hole that conversation's stream for the life of the runner. Rotate refuses
+// The tag can never hold "": an empty tag resolves to no conversation —
+// conversationForSession refuses an empty id, so an unbound conversation's empty
+// CurrentSessionID can never match it — so an emptied tag would black-hole that
+// conversation's stream for the life of the runner. Rotate refuses
 // it here because the invariant belongs to this value; RestartFresh's own empty-id
 // refusal means production never reaches the guard.
 type streamSessionTag struct{ id atomic.Pointer[string] }
@@ -520,32 +520,31 @@ func (s *streamTurnSink) exitForTag(tag func() string) func() {
 // The goroutine selects over four cases:
 //   - sink.ch: an exit envelope (#1209) clears the producing session's turn and
 //     its matching published lifecycle; otherwise feed the per-conversation
-//     turn-busy tracker, then resolve
-//     activeSession() and forward the event to emitter.Handle only when the
-//     producing session is the active conversation's bound session (AC2). Any
-//     other session's event is dropped here, BEFORE Handle, so a background
-//     conversation's conn never receives it. Gating at Handle time (not in the
-//     sink) keeps the stamp consistent with the cursor the emitter reads inside
-//     Handle.
+//     turn-busy tracker, then resolve the producing session to the conversation
+//     that owns it and hand the event to emitter.HandleFor under THAT
+//     conversation's id (#2739). Every conversation's events reach its own
+//     history, ring and clients whichever conversation is active; only an event
+//     whose session resolves to no conversation is dropped, BEFORE HandleFor.
 //   - sink.lifecycleCloseWake: a pool teardown recorded one or more conversation
 //     lifecycle closes. The protected set, not the wake token, owns those requests,
 //     so coalescing cannot drop one; the drain applies them on this goroutine before
 //     handling a later child event.
 //   - emitter.flushC(): the ~250ms coalescing timer fired — route it back into
-//     flushDelta on THIS goroutine. The emitter arms the timer inside Handle and
+//     flushAll on THIS goroutine. The emitter arms the timer inside Handle and
 //     needs a driver to select it; the drain is that driver, so both Handle and
 //     flushDelta run on the one goroutine (no cross-goroutine timer race).
 //   - ctx.Done(): stop.
 //
-// Single-writer invariant: only this goroutine ever calls Handle / flushDelta, so
+// Single-writer invariant: only this goroutine ever calls HandleFor / flushAll, so
 // the emitter's unguarded lifecycle / coalescing fields stay race-free — the
 // single-goroutine assumption interactiveTurnEmitterV2 documents. The returned
 // cleanup blocks until the goroutine exits.
 //
 // The emitter is passed in (not built here) so the caller owns its construction
-// and replay wiring; #1081 composes activeSession from the active-conversation
-// cursor + the bound-session lookup and wires SetReplaySource. This ticket's
-// caller is the unit test.
+// and replay wiring. conversationFor resolves a producing session id to its
+// conversation; production passes conversationForSession over the registry, the
+// same resolution turnBusyTracker uses, so a tail from a just-rotated session
+// (in SessionHistory) is attributed to its own conversation rather than dropped.
 //
 // busy is the #1201 per-conversation turn-busy tracker, fed from this same fan-in
 // and keyed by the producing session's conversation. It may be nil (observe is a
@@ -556,7 +555,7 @@ func startStreamTurnDrainV2(
 	ctx context.Context,
 	sink *streamTurnSink,
 	emitter *interactiveTurnEmitterV2,
-	activeSession func() (sessionID string, ok bool),
+	conversationFor func(sessionID string) (conversationID string, ok bool),
 	busy *turnBusyTracker,
 	logger *slog.Logger,
 ) (cleanup func()) {
@@ -612,15 +611,14 @@ func startStreamTurnDrainV2(
 					continue
 				}
 
-				// BEFORE the gate, and the ordering IS the contract: the gate drops
-				// every event whose producing session is not the ACTIVE conversation's,
-				// so a tracker fed after it would report a background conversation idle
-				// because it never heard about it, not because it is idle.
+				// BEFORE the resolution below, and the ordering IS the contract: an
+				// event that resolves to no conversation is dropped there, and the
+				// tracker keeps its own resolution and its own unbound-session record.
 				busy.observe(env.sessionID, env.ev)
 
 				// claude's echo of a user message (#2730) builds no frame. It goes to
 				// the send-now placement HERE, on this goroutine and before the
-				// active-session gate: every event claude emitted ahead of it —
+				// conversation resolution: every event claude emitted ahead of it —
 				// the tool result the message followed — has already been handled,
 				// so the operator-message push it may commit lands after it, and a
 				// background conversation's echo is placed too.
@@ -629,19 +627,23 @@ func startStreamTurnDrainV2(
 					continue
 				}
 
-				active, ok := activeSession()
-				if !ok || env.sessionID != active {
+				// Attribution by the event's OWN session (#2739), never by the active
+				// conversation: the emitter is the only writer of history, ring, client
+				// frames and the turn-end wake, so an event dropped here is lost for
+				// good.
+				conversationID, ok := conversationFor(env.sessionID)
+				if !ok || conversationID == "" {
 					// SECURITY: content-free — discriminant + session id only.
-					logger.Debug("relay: stream-turn drop; not active session",
-						"event", "stream_turn.not_active",
+					logger.Debug("relay: stream-turn drop; no conversation for session",
+						"event", "stream_turn.no_conversation",
 						"kind", eventKind(env.ev),
 						"session_id", env.sessionID)
 					continue
 				}
-				emitter.Handle(ctx, env.ev)
+				emitter.HandleFor(ctx, conversationID, env.ev)
 			case <-emitter.flushC():
 				closePendingLifecycles()
-				emitter.flushDelta(ctx)
+				emitter.flushAll(ctx)
 			}
 		}
 	}()

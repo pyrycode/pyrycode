@@ -28,20 +28,35 @@ import (
 // (interactive_turn_v2_test.go), for the AC2 cross-conversation scoping tests.
 const testConvIDB = "22222222-2222-4222-8222-222222222222"
 
-// stubActiveSession is a race-safe activeSession test double: set() stores the
-// current active session id, get() returns it plus ok = (id != ""). Modelled on
-// stubCursor; the drain reads it concurrently with the test goroutine's set().
+// stubActiveSession is a race-safe session→conversation resolver double for the
+// drain's conversationFor seam (#2739). The name is kept from the active-session
+// gate it replaced so the drain tests' call sites read unchanged: set(id) binds
+// session id to testConvID, bind(id, conv) to any conversation, and get resolves
+// a session id the way conversationForSession does — every binding ever made
+// stays resolvable, as SessionHistory keeps a rotated session resolvable. An
+// unbound session reports ok = false. The drain reads it concurrently with the
+// test goroutine's writes.
 type stubActiveSession struct {
-	mu sync.Mutex
-	id string
+	mu    sync.Mutex
+	convs map[string]string
 }
 
-func (s *stubActiveSession) set(id string) { s.mu.Lock(); s.id = id; s.mu.Unlock() }
+func (s *stubActiveSession) set(id string) { s.bind(id, testConvID) }
 
-func (s *stubActiveSession) get() (string, bool) {
+func (s *stubActiveSession) bind(id, convID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.id, s.id != ""
+	if s.convs == nil {
+		s.convs = make(map[string]string)
+	}
+	s.convs[id] = convID
+}
+
+func (s *stubActiveSession) get(sessionID string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	convID, ok := s.convs[sessionID]
+	return convID, ok
 }
 
 // chanBcast is a channel-based interactiveBroadcaster double for the drain tests.
@@ -69,8 +84,8 @@ func (b *chanBcast) Push(ctx context.Context, connID string, env protocol.Envelo
 	return nil
 }
 
-// dropWatcher is a slog.Handler that signals the drain's content-free not-active
-// drops, carrying the event's "kind", so a negative test can barrier on the last
+// dropWatcher is a slog.Handler that signals the drain's content-free
+// no-conversation drops (#2739; the not-active drops before it), carrying the event's "kind", so a negative test can barrier on the last
 // fed event's drop (guaranteeing every earlier event was processed first — the
 // drain is serial) before asserting nothing was pushed.
 //
@@ -97,7 +112,7 @@ func (h dropWatcher) Handle(_ context.Context, r slog.Record) error {
 		}
 		return true
 	})
-	if event == "stream_turn.not_active" {
+	if event == "stream_turn.no_conversation" {
 		select {
 		case h.kinds <- kind:
 		default:
@@ -336,9 +351,10 @@ func TestStreamTurnDrainV2_AttributedTextExcludesThinkingAndSignature(t *testing
 	}
 }
 
-// AC2: a background conversation's parser events (its session != the active
-// session) are dropped BEFORE the emitter, so its conn never receives them.
-func TestStreamTurnDrainV2_ScopingDropsBackground(t *testing.T) {
+// #2739: a background conversation's parser events (its session is not the
+// active conversation's) are forwarded under ITS OWN conversation id, not
+// dropped and not stamped with the active one.
+func TestStreamTurnDrainV2_BackgroundForwardedUnderOwnConversation(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -347,22 +363,28 @@ func TestStreamTurnDrainV2_ScopingDropsBackground(t *testing.T) {
 	cur.set(testConvID) // active conversation A
 	active := &stubActiveSession{}
 	active.set("sess-a")
+	active.bind("sess-b", testConvIDB)
 	bcast := newChanBcast("conn-a")
 	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
 
-	drops := make(chan string, 8)
 	sink := newStreamTurnSink(0, discardLogger())
-	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil,
-		slog.New(dropWatcher{kinds: drops}))
+	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil, discardLogger())
 	defer func() { cancel(); cleanup() }() // cancel-then-join; joining first deadlocks
 
-	// Feed session B's bytes while A is active — every event must drop.
-	feedLines(sink, "sess-b", assistantTextLine("mb", "SECRET-B"), resultLine)
+	feedLines(sink, "sess-b", assistantTextLine("mb", "for-B"), resultLine)
 
-	// Barrier: the TurnEnd is the last fed event; observing its not-active drop
-	// proves the earlier TextChunk was processed too (the drain is serial).
-	waitDropKind(t, drops, "turn_end")
-	assertNoPush(t, bcast.pushed)
+	got := collectEnvs(t, bcast.pushed, 4)
+	d := decodeDelta(t, got[1])
+	if d.Text != "for-B" || d.ConversationID != testConvIDB {
+		t.Errorf("assistant_delta = {text:%q conv:%q}, want {%q %q}", d.Text, d.ConversationID, "for-B", testConvIDB)
+	}
+	var te protocol.TurnEndPayload
+	if err := json.Unmarshal(got[2].Payload, &te); err != nil || got[2].Type != protocol.TypeTurnEnd {
+		t.Fatalf("third envelope = %s (decode err %v), want turn_end", got[2].Type, err)
+	}
+	if te.ConversationID != testConvIDB {
+		t.Errorf("turn_end conversation_id = %q, want %q", te.ConversationID, testConvIDB)
+	}
 }
 
 // AC2: once a conversation is active, its bound session's events ARE forwarded,
@@ -375,7 +397,7 @@ func TestStreamTurnDrainV2_ScopingForwardsActiveStamped(t *testing.T) {
 	cur := &stubCursor{}
 	cur.set(testConvIDB) // active conversation B
 	active := &stubActiveSession{}
-	active.set("sess-b")
+	active.bind("sess-b", testConvIDB)
 	bcast := newChanBcast("conn-b")
 	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
 
@@ -450,9 +472,10 @@ func TestStreamTurnDrainV2_ConcurrentFeedSingleWriter(t *testing.T) {
 	}
 }
 
-// The drain gate drops every event when no conversation is active (activeSession
-// returns ok=false) — the stream analogue of the emitter's empty-cursor drop.
-func TestStreamTurnDrainV2_NoActiveSessionDrops(t *testing.T) {
+// An event whose session resolves to no conversation is dropped with the
+// content-free no-conversation record, and nothing reaches a client or the ring
+// (#2739 AC3) — the stream analogue of the emitter's empty-cursor drop.
+func TestStreamTurnDrainV2_UnresolvedSessionDrops(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -464,15 +487,35 @@ func TestStreamTurnDrainV2_NoActiveSessionDrops(t *testing.T) {
 	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
 
 	drops := make(chan string, 8)
+	recs := make(chan slog.Record, 16)
 	sink := newStreamTurnSink(0, discardLogger())
 	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil,
-		slog.New(dropWatcher{kinds: drops}))
+		slog.New(dropWatcher{kinds: drops, recs: recs}))
 	defer func() { cancel(); cleanup() }() // cancel-then-join; joining first deadlocks
 
-	feedLines(sink, "sess-a", assistantTextLine("m1", "hello"), resultLine)
+	feedLines(sink, "sess-a", assistantTextLine("m1", "SECRET-hello"), resultLine)
 
 	waitDropKind(t, drops, "turn_end")
 	assertNoPush(t, bcast.pushed)
+	if events, _ := emitter.ring.After(testConvID, 0); len(events) != 0 {
+		t.Errorf("ring holds %d events for an unresolved session, want 0", len(events))
+	}
+
+	// The record's field set is exactly event, kind and session id: no content.
+	for len(recs) > 0 {
+		r := <-recs
+		keys := []string{}
+		r.Attrs(func(a slog.Attr) bool {
+			keys = append(keys, a.Key)
+			if strings.Contains(a.Value.String(), "SECRET") {
+				t.Errorf("drop record carries event content in %q", a.Key)
+			}
+			return true
+		})
+		if !slices.Equal(keys, []string{"event", "kind", "session_id"}) {
+			t.Errorf("drop record keys = %v, want [event kind session_id]", keys)
+		}
+	}
 }
 
 // The drain drives the emitter's ~250ms coalescing timer: a lone assistant text
@@ -1108,19 +1151,17 @@ func TestStreamTurnSink_TagRotationRefusedLeavesEnvelopeTag(t *testing.T) {
 	}
 }
 
-// TestStreamTurnDrainV2_PostRotationForwardsAndStaleStillDrops is the pair of ACs
-// that have to hold TOGETHER, which is why they are one test: after a rotation the
-// drain forwards the rotated runner's events for the conversation now bound to the
-// new id (AC1 — the dark-stream defect is gone), AND an envelope still carrying the
-// pre-rotation id is still dropped before emitter.Handle with the unchanged
-// content-free record (AC2 — the gate stays fail-closed and was not widened).
+// TestStreamTurnDrainV2_PostRotationForwardsStaleTailAndUnknownDrops: after a
+// rotation the drain forwards the rotated runner's events for the conversation
+// now bound to the new id (#1133), a tail still tagged with the pre-rotation id is
+// attributed to the same conversation through its session history (#2739, where
+// it used to be dropped), and an id no conversation holds is still dropped with
+// the content-free record — the resolution stays fail-closed, not widened to a
+// fallback or a prefix match.
 //
-// Asserting only the first would pass against a gate someone had relaxed to a
-// fallback or a prefix match, which is the one change this ticket must not make.
-//
-// The stale envelope is fed LAST and its drop is the barrier: the drain is serial,
-// so observing it proves the forwarded event ahead of it was already handled.
-func TestStreamTurnDrainV2_PostRotationForwardsAndStaleStillDrops(t *testing.T) {
+// The unknown envelope is fed LAST and its drop is the barrier: the drain is
+// serial, so observing it proves everything ahead of it was already handled.
+func TestStreamTurnDrainV2_PostRotationForwardsStaleTailAndUnknownDrops(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1164,9 +1205,17 @@ func TestStreamTurnDrainV2_PostRotationForwardsAndStaleStillDrops(t *testing.T) 
 		t.Errorf("assistant_delta conversation_id = %q, want %q", d.ConversationID, testConvID)
 	}
 
-	// A producer that has NOT rotated onto the active conversation's bound session
-	// is still refused, and the record is still the content-free not-active one.
-	feedLines(sink, "sess-old", assistantTextLine("m3", "STALE"), resultLine)
+	// A tail still tagged with the pre-rotation id resolves through the
+	// conversation's session history to the SAME conversation (#2739): it is
+	// attributed there rather than dropped.
+	feedLines(sink, "sess-old", assistantTextLine("m3", "late tail"), resultLine)
+	tail := collectEnvs(t, bcast.pushed, 4)
+	if d := decodeDelta(t, tail[1]); d.Text != "late tail" || d.ConversationID != testConvID {
+		t.Errorf("stale-tag delta = {text:%q conv:%q}, want {%q %q}", d.Text, d.ConversationID, "late tail", testConvID)
+	}
+
+	// An id no conversation ever held is still refused with the content-free record.
+	feedLines(sink, "sess-unknown", assistantTextLine("m4", "STRAY"), resultLine)
 	waitDropKind(t, drops, "turn_end")
 	assertNoPush(t, bcast.pushed)
 }

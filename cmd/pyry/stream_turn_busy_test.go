@@ -1335,7 +1335,7 @@ func TestStreamTurnDrainV2_BusyFedBeforeActiveGate(t *testing.T) {
 	cur := &stubCursor{}
 	cur.set(testConvIDB) // cursor on conversation B
 	active := &stubActiveSession{}
-	active.set("sess-b") // ...and B's bound session is what the gate admits
+	active.bind("sess-b", testConvIDB) // ...and B's bound session resolves to B
 	bcast := newChanBcast("conn-b")
 	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
 
@@ -1401,7 +1401,7 @@ func exitLaneDrainDeferred(t *testing.T) (sink *streamTurnSink, busy *turnBusyTr
 	cur := &stubCursor{}
 	cur.set(testConvIDB) // cursor on conversation B...
 	active := &stubActiveSession{}
-	active.set("sess-b") // ...and B's bound session is what the gate admits
+	active.bind("sess-b", testConvIDB) // ...and B's bound session resolves to B
 	bcast := newChanBcast("conn-b")
 	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
 
