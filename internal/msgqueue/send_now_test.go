@@ -1,10 +1,15 @@
 package msgqueue
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // fakeSendNow records every send-now write and fails while err is set.
@@ -121,8 +126,10 @@ func TestQueue_SendNow_TakesMessageOutOfOrder(t *testing.T) {
 			}
 
 			release()
+			// rec.fired, not f.completed: the fake signals completed inside deliver,
+			// before the drain fires OnDelivered for that message.
 			for range tc.drained {
-				recvWithin(t, f.completed, "the rest of the backlog to drain")
+				recvWithin(t, rec.fired, "OnDelivered for the rest of the backlog")
 			}
 			if got := f.deliveredOrder(); !equalStrings(got, tc.drained) {
 				t.Fatalf("drained %q, want %q (FIFO order of the rest)", got, tc.drained)
@@ -154,7 +161,7 @@ func TestQueue_SendNow_SeamErrorLeavesMessageInPlace(t *testing.T) {
 		}
 		release()
 		for range 3 {
-			recvWithin(t, f.completed, "the backlog to drain at idle")
+			recvWithin(t, rec.fired, "the backlog to drain at idle")
 		}
 		if got := f.deliveredOrder(); !equalStrings(got, []string{"deliver-one", "deliver-two", "deliver-three"}) {
 			t.Fatalf("id %d: drained %q, want original FIFO order", id, got)
@@ -166,6 +173,93 @@ func TestQueue_SendNow_SeamErrorLeavesMessageInPlace(t *testing.T) {
 			}
 		}
 	}
+}
+
+// A refused send-now of the waiting head cancels its attempt and puts it back
+// before the drain re-locks. The drain must book that as a clean drop: no
+// failure Warn, and no give-up streak that a later single transient failure,
+// after a turn longer than GiveUpAfter, would trip into abandoning the head.
+func TestQueue_SendNow_RefusedHeadStartsNoGiveUpStreak(t *testing.T) {
+	t.Parallel()
+	const giveUpAfter = 50 * time.Millisecond
+	sendNowReturned := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	var attempts atomic.Int32
+	deliver := func(ctx context.Context, _ string, _ []byte) error {
+		switch attempts.Add(1) {
+		case 1:
+			// Waiting for idle until the send-now take cancels this attempt, then
+			// returning only after the failed send-now has put the head back.
+			entered <- struct{}{}
+			<-ctx.Done()
+			<-sendNowReturned
+			return ctx.Err()
+		case 2:
+			// A turn that outlasts the give-up bound, then one transient failure.
+			time.Sleep(3 * giveUpAfter)
+			return errors.New("no live child")
+		default:
+			return nil
+		}
+	}
+	var buf syncBuffer
+	gaveUp := make(chan struct{}, 1)
+	delivered := make(chan struct{}, 1)
+	sn := &fakeSendNow{err: errors.New("not a claude session")}
+	q, err := New(Config{
+		Deliver:       deliver,
+		SendNow:       sn.send,
+		RetryInterval: time.Millisecond,
+		GiveUpAfter:   giveUpAfter,
+		Logger:        slog.New(slog.NewTextHandler(&buf, nil)),
+		OnGiveUp:      func(string, string) { gaveUp <- struct{}{} },
+		OnDelivered:   func(string, QueuedMessage) { delivered <- struct{}{} },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() { runErr <- q.Run(ctx) }()
+	q.Enqueue("c", "one")
+	recvWithin(t, entered, "the head to wait for idle")
+
+	if q.SendNow("c", 1) {
+		t.Fatal("SendNow with a refusing seam = true")
+	}
+	close(sendNowReturned)
+
+	select {
+	case <-delivered:
+	case <-gaveUp:
+		t.Fatal("the head was abandoned: the refused send-now started its give-up streak")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the head to be delivered")
+	}
+	cancel()
+	<-runErr
+	if out := buf.String(); strings.Contains(out, "context canceled") {
+		t.Fatalf("the cancelled attempt was logged as a delivery failure:\n%s", out)
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for the drain goroutine to write while the
+// test later reads it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func TestQueue_SendNow_NoOps(t *testing.T) {

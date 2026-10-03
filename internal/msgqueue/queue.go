@@ -318,6 +318,10 @@ type convQueue struct {
 	draining      bool
 	committing    bool               // the head is past the idle-gate wait and is being written; un-droppable
 	deliverCancel context.CancelFunc // cancels the in-flight delivery ctx; nil when no delivery is in flight
+	// headTaken is set when SendNow takes the head out during an in-flight attempt.
+	// The drain books that attempt as a clean drop even when a failed send-now has
+	// already put the head back by the time the drain re-locks (#2729).
+	headTaken bool
 }
 
 // Queue is a per-conversation, in-memory inbound message backlog with one serial
@@ -641,7 +645,10 @@ func (q *Queue) Remove(convID string, id uint64) bool {
 // cannot find it, and a waiting head taken this way is no longer at the front, so
 // commitGate refuses its in-flight attempt and the drain treats it as dropped —
 // exactly the dequeue path. Taking the waiting head cancels that attempt, as Remove
-// does, so the drain moves on to the next head and waits for idle with it.
+// does, so the drain moves on to the next head and waits for idle with it. The
+// take also sets headTaken, so a failed write that puts the head back before the
+// drain re-locks still reads as that clean drop, never as a delivery failure that
+// would start the head's give-up clock.
 //
 // The write runs with q.mu released, on the caller's goroutine. Nothing here logs
 // the text, the delivery payload or the client's message id.
@@ -664,6 +671,7 @@ func (q *Queue) SendNow(convID string, id uint64) bool {
 	var cancel context.CancelFunc
 	if idx == 0 {
 		cancel = c.deliverCancel
+		c.headTaken = cancel != nil
 	}
 	c.items = slices.Delete(c.items, idx, idx+1)
 	c.shrinkLocked()
@@ -841,6 +849,7 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 		deliverCtx, cancelDeliver := context.WithCancel(ctx)
 		c.committing = false
 		c.deliverCancel = cancelDeliver
+		c.headTaken = false
 		q.mu.Unlock()
 
 		gate := q.commitGate(convID, head.id)
@@ -853,8 +862,12 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 		c.deliverCancel = nil
 		c.committing = false
 		// A drop during the idle-gate wait removed this head from the FIFO (and
-		// canceled the delivery above), so it is neither advanced nor retried.
-		dropped := len(c.items) == 0 || c.items[0].id != head.id
+		// canceled the delivery above), so it is neither advanced nor retried. A
+		// send-now take of this head cancelled the attempt the same way, so it is a
+		// drop too, even if a failed send-now has put the head back: the next
+		// iteration re-peeks it with a fresh clock rather than booking a failure.
+		dropped := len(c.items) == 0 || c.items[0].id != head.id || c.headTaken
+		c.headTaken = false
 		q.mu.Unlock()
 
 		if ctx.Err() != nil {
