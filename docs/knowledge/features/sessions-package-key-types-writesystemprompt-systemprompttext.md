@@ -1,4 +1,4 @@
-# `writeSystemPrompt` + `systemPromptText` (#2093, per-session since #2150, client-named since #2148, handoff note since #2475, fence exported since #2477, read folders named since #2711)
+# `writeSystemPrompt` + `systemPromptText` (#2093, per-session since #2150, client-named since #2148, handoff note since #2475, fence exported since #2477, read folders named since #2711, working folder joins them since #2720)
 
 ```go
 func composeSystemPrompt(operator string) string
@@ -71,7 +71,13 @@ reader serves besides a conversation's workspace (#2710) —
 `folders` **must** be `resolveReadFolders`'s output, the roots the reader
 actually accepts, so the sentence can never name a folder the reader would
 refuse; it names only what resolved at startup, nothing a bad entry caused
-to be skipped. With no folders, or none that resolved, `daemonPromptText`
+to be skipped. Since #2720, `runSupervisor` runs that output through
+`withWorkdirReadFolder` before either consumer sees it, so the slice —
+and therefore this sentence — also names the daemon's own working folder,
+deduplicated against a `-pyry-read-folder` entry naming the same folder, and
+left out under that ticket's home/`/`/contains-home guard (see
+[`workspacefileread`'s working-folder section](v2-session-manager-state-machine-inbound-read-workspace-file-workspacefileread.md#the-daemons-own-working-folder-is-always-a-read-root-too-2720)).
+With no folders, or none that resolved, `daemonPromptText`
 returns `systemPromptText` byte-for-byte, which is what keeps every
 composition on an unconfigured daemon unchanged. `composeSystemPromptOn`
 and `composeSystemPromptForOn` take this daemon text as their first
