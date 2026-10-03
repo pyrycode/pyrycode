@@ -6,6 +6,7 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -80,6 +81,24 @@ func genV2Keypair(t *testing.T) (priv, pub []byte) {
 		t.Fatalf("generate keypair: %v", err)
 	}
 	return k.Bytes(), k.PublicKey().Bytes()
+}
+
+// v2TestInstallPriv is the static private key of the one app install that
+// helpers opening several connections with one token connect from. Since #2734
+// a token binds to the first accepted connection's static key, so a fresh key
+// per connection would be a second install, refused at 4401. Any 32 bytes are
+// a valid X25519 scalar.
+var v2TestInstallPriv = bytes.Repeat([]byte{0x42}, 32)
+
+// v2TestInstallKey is v2TestInstallPriv's public key as Device.StaticKey
+// stores it, for fixtures that start already bound to that install.
+func v2TestInstallKey(t *testing.T) string {
+	t.Helper()
+	k, err := ecdh.X25519().NewPrivateKey(v2TestInstallPriv)
+	if err != nil {
+		t.Fatalf("install key: %v", err)
+	}
+	return hex.EncodeToString(k.PublicKey().Bytes())
 }
 
 // v2PairedRegistry returns an in-memory devices.Registry pre-populated

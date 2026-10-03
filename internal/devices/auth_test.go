@@ -19,7 +19,7 @@ func TestRegistry_Validate_Hit(t *testing.T) {
 	})
 
 	before := time.Now()
-	got, res := r.Validate("plain-1")
+	got, res := r.Validate("plain-1", nil)
 	if res != ValidateAccepted {
 		t.Fatalf("result = %v, want ValidateAccepted", res)
 	}
@@ -75,7 +75,7 @@ func TestRegistry_Validate_RejectsElapsedRedemptionWindow(t *testing.T) {
 		RedeemBy:   expired,
 	})
 
-	got, res := r.Validate("plain-expired")
+	got, res := r.Validate("plain-expired", nil)
 	if res != ValidateWindowElapsed {
 		t.Fatalf("result = %v, want ValidateWindowElapsed", res)
 	}
@@ -133,7 +133,7 @@ func TestRegistry_Validate_AcceptsUnelapsedRedemptionWindow(t *testing.T) {
 				RedeemBy:   tc.redeemBy,
 			})
 
-			got, res := r.Validate("plain-live")
+			got, res := r.Validate("plain-live", nil)
 			if res != ValidateAccepted {
 				t.Fatalf("result = %v, want ValidateAccepted", res)
 			}
@@ -224,7 +224,7 @@ func TestRegistry_Validate_Miss(t *testing.T) {
 			r := &Registry{}
 			tc.setup(r)
 			before := r.List()
-			got, res := r.Validate(tc.plain)
+			got, res := r.Validate(tc.plain, nil)
 			if res != ValidateUnknownToken {
 				t.Errorf("result = %v, want ValidateUnknownToken", res)
 			}
@@ -390,7 +390,7 @@ func TestRegistry_Validate_ConcurrentSameToken(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			d, res := r.Validate("plain-1")
+			d, res := r.Validate("plain-1", nil)
 			if res != ValidateAccepted {
 				t.Errorf("[%d] result = %v, want ValidateAccepted", i, res)
 				return

@@ -22,8 +22,7 @@ import (
 // happens-before edge the callers' disk assertions rely on.
 func openVersionConn(t *testing.T, mgr *V2SessionManager, frames chan protocol.RoutingEnvelope, respPub []byte, connID, clientVersion string) {
 	t.Helper()
-	initPriv, _ := genV2Keypair(t)
-	initiator, err := noise.NewInitiator(initPriv, respPub)
+	initiator, err := noise.NewInitiator(v2TestInstallPriv, respPub)
 	if err != nil {
 		t.Fatalf("NewInitiator(%s): %v", connID, err)
 	}

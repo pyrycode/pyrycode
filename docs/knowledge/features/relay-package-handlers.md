@@ -54,7 +54,7 @@ acquired before the reconcile's read.** Before #1532 this handler was the last
 `Reload` and then `Save` with nothing held between them, so a `pyry pair`
 committing in that window was erased by the handler's whole-file `Save` —
 permanently, since `Reload` reconciles memory *from* disk. See
-[`features/devices-registry.md`](devices-registry.md) § *Two-writer clobber
+[`features/devices-registry-reload.md`](devices-registry-reload.md) § *Two-writer clobber
 guard* for the full cross-process picture and
 [ADR 029](../decisions/029-devices-registry-reload-at-handshake.md) § *Superseded
 (2026-09-15, #1532)* for why the reload is not redundant under the lock: the

@@ -4,8 +4,6 @@ package e2e
 
 import (
 	"context"
-	"crypto/ecdh"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"os"
@@ -43,11 +41,7 @@ func TestRelayV2_Daemon(t *testing.T) {
 // encrypts phone→binary, initRecv decrypts binary→phone).
 func driveHandshakeToOpenDaemon(t *testing.T, phone *fakephone.Client, pubKey []byte, token string) (*noise.CipherState, *noise.CipherState) {
 	t.Helper()
-	initPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("phone keygen: %v", err)
-	}
-	initiator, err := noise.NewInitiator(initPriv.Bytes(), pubKey)
+	initiator, err := noise.NewInitiator(fakephone.InstallKey(token), pubKey)
 	if err != nil {
 		t.Fatalf("NewInitiator: %v", err)
 	}
@@ -236,11 +230,7 @@ func testV2DaemonDefaultEngagesV2(t *testing.T) {
 
 	// The phone sends a v2 Noise handshake init. With v2 the default, the
 	// daemon's Noise manager answers with a noise_resp inner frame.
-	initPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("phone keygen: %v", err)
-	}
-	initiator, err := noise.NewInitiator(initPriv.Bytes(), pubKey)
+	initiator, err := noise.NewInitiator(fakephone.InstallKey(payload.Token), pubKey)
 	if err != nil {
 		t.Fatalf("NewInitiator: %v", err)
 	}

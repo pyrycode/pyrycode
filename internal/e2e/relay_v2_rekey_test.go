@@ -3,8 +3,6 @@
 package e2e
 
 import (
-	"crypto/ecdh"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"log/slog"
@@ -115,11 +113,7 @@ func downShim(down *atomic.Bool) func(*relay.V2SessionConfig) {
 // (send encrypts phone→binary, recv decrypts binary→phone).
 func openRekeySession(t *testing.T, h *v2Harness, phone *fakephone.Client, token string) (initPriv []byte, send, recv *noise.CipherState) {
 	t.Helper()
-	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("phone keygen: %v", err)
-	}
-	initPriv = priv.Bytes()
+	initPriv = fakephone.InstallKey(token)
 	initiator, err := noise.NewInitiator(initPriv, h.pubKey)
 	if err != nil {
 		t.Fatalf("NewInitiator: %v", err)

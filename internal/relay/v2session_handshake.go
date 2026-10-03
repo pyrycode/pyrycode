@@ -184,8 +184,8 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	}
 	// Pin the initiator's static pub at the earliest authenticated
 	// point — ReadInit success means flynn has MAC-verified and
-	// decrypted the static. Consumed by the re-key responder's
-	// peer-continuity check (#453); inert in this slice.
+	// decrypted the static. Consumed by the device binding below (#2734)
+	// and by the re-key responder's peer-continuity check (#453).
 	s.peerStatic = s.resp.PeerStatic()
 
 	var helloEnv protocol.Envelope
@@ -245,7 +245,8 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 				"path", m.cfg.DevicesPath)
 		}
 	}
-	device, tokenResult := m.cfg.Devices.Validate(helloPayload.Token)
+	device, tokenResult := m.cfg.Devices.Validate(helloPayload.Token, s.peerStatic)
+	keyMismatchReason := "bound_to_other_key"
 	// The app version is judged only once the token is accepted (#2578): a peer
 	// without a valid token takes the 4401 arm below, whose bytes and timing never
 	// depend on client_version, so it learns nothing about this host's minimums.
@@ -253,6 +254,25 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	var versionReject clientVersionReject
 	if tokenResult == devices.ValidateAccepted {
 		versionReject = m.checkClientVersion(helloPayload.ClientVersion)
+	}
+	// Bind the pairing to this install's static key once every other admission
+	// check has passed (#2734), so a connection refused at 4412 binds nothing.
+	// BindStaticKey decides atomically: of two installs racing on one unbound
+	// record, the loser is refused here exactly as Validate refuses a key
+	// mismatch. It runs before the ack is built so a loser's ack carries no
+	// workspace_root, the same ack an unknown token gets.
+	newlyBound := false
+	if tokenResult == devices.ValidateAccepted && versionReject.reason == "" {
+		switch m.cfg.Devices.BindStaticKey(device.TokenHash, s.peerStatic) {
+		case devices.BindNewlyBound:
+			newlyBound = true
+		case devices.BindMatched:
+		case devices.BindKeyMismatch:
+			tokenResult = devices.ValidateKeyMismatch
+			keyMismatchReason = "bind_race_lost"
+		default: // BindUnknownDevice: the record went between Validate and here.
+			tokenResult = devices.ValidateUnknownToken
+		}
 	}
 	root := ""
 	if tokenResult == devices.ValidateAccepted && versionReject.reason == "" {
@@ -339,19 +359,31 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 		// confirming that a photographed token was once real. Selecting a
 		// string here rather than branching into a second reject body is
 		// what keeps that identity structural.
+		//
+		// A token used by an install other than the one it is bound to
+		// (#2734) shares the body too, for the same reason.
 		rejectEvent := "v2.handshake.reject.invalid_token"
-		if tokenResult == devices.ValidateWindowElapsed {
+		var keyAttrs []any
+		switch tokenResult {
+		case devices.ValidateWindowElapsed:
 			rejectEvent = "v2.handshake.reject.redemption_window_elapsed"
+		case devices.ValidateKeyMismatch:
+			rejectEvent = "v2.handshake.reject.static_key_mismatch"
+			keyAttrs = []any{"device_name", device.Name, "reason", keyMismatchReason}
 		}
+		attrs := append([]any{
+			"event", rejectEvent,
+			"conn_id", s.connID,
+			"close_code", int(StatusUnauthorized),
+		}, keyAttrs...)
 		errFrame, sealErr := m.sealError(s, protocol.CodeAuthInvalidToken,
 			MsgInvalidToken, helloID)
 		// SECURITY: the line carries neither the plain token nor its hash —
 		// nor the deadline, which would narrow when the token was minted for
-		// anyone reading logs. The event name is the whole discriminator.
-		m.cfg.Logger.Warn("relay: v2 handshake reject",
-			"event", rejectEvent,
-			"conn_id", s.connID,
-			"close_code", int(StatusUnauthorized))
+		// anyone reading logs, nor either static key. The event name is the
+		// discriminator; a key mismatch adds the device the token belongs to
+		// and whether Validate or the bind race refused it.
+		m.cfg.Logger.Warn("relay: v2 handshake reject", attrs...)
 		// Best-effort: send noise_resp first (so the AEAD channel exists
 		// on the wire), then the error+close combined envelope.
 		m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: respFrame})
@@ -410,6 +442,12 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 		"conn_id", s.connID,
 		"device_name", device.Name)
 	m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: respFrame})
+	// Persist the binding BindStaticKey just made (#2734). Same placement and
+	// best-effort contract as the two writes below; only the first accepted
+	// connection of a record pays for it.
+	if newlyBound {
+		m.recordStaticKey(s.connID, device.TokenHash)
+	}
 	// Durably record this token's first redemption (#1528): clear the
 	// deadline `pyry pair` stamped and persist, so a redeemed device stays
 	// distinguishable from a never-scanned one across a restart. No-op for a
@@ -744,6 +782,48 @@ func (m *V2SessionManager) recordClientVersion(connID string, dev devices.Device
 	if err != nil {
 		m.cfg.Logger.Warn("relay: v2 client version persist failed",
 			"event", "v2.devices.client_version_persist_failed",
+			"conn_id", connID,
+			"path", m.cfg.DevicesPath,
+			"err", err)
+	}
+}
+
+// errStaticKeyReloadFailed replaces the in-region Reload's own error before it
+// can reach recordStaticKey's log line, for errRedemptionReloadFailed's reason:
+// a decode failure can echo devices.json bytes, token_hash included.
+var errStaticKeyReloadFailed = errors.New("relay: devices reload failed inside the static-key lock")
+
+// recordStaticKey persists the static-key binding BindStaticKey just made in
+// memory for the device with tokenHash (#2734), so the binding outlives a
+// restart. The binding itself was decided atomically under Registry.mu before
+// the accept; this is only its disk copy.
+//
+// It mirrors recordClientVersion: best effort, every failure logged and
+// swallowed. Inside the region, Reload keeps the in-memory struct for a device
+// still on disk, so the binding survives it; a device revoked since the bind is
+// dropped, the lookup misses, and no Save resurrects it. A Save failure leaves
+// memory bound for this daemon's life — any later Save writes it — and a
+// restart before one re-opens the first-come bind for that record, which the
+// Warn announces.
+//
+// SECURITY: the log line carries neither the key, the token hash nor the
+// reload error.
+func (m *V2SessionManager) recordStaticKey(connID, tokenHash string) {
+	if m.cfg.DevicesPath == "" {
+		return
+	}
+	err := devices.WithLock(m.cfg.DevicesPath, redemptionLockWait, func() error {
+		if err := m.cfg.Devices.Reload(m.cfg.DevicesPath); err != nil {
+			return errStaticKeyReloadFailed
+		}
+		if d, ok := m.cfg.Devices.FindByTokenHash(tokenHash); !ok || d.StaticKey == "" {
+			return nil
+		}
+		return m.cfg.Devices.Save(m.cfg.DevicesPath)
+	})
+	if err != nil {
+		m.cfg.Logger.Warn("relay: v2 static key persist failed",
+			"event", "v2.devices.static_key_persist_failed",
 			"conn_id", connID,
 			"path", m.cfg.DevicesPath,
 			"err", err)

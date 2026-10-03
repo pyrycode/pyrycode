@@ -218,11 +218,7 @@ func testV2HappyPath(t *testing.T) {
 	h := startV2Harness(t, reg, nil)
 	phone := h.dialPhone(t)
 
-	initPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("phone keygen: %v", err)
-	}
-	initiator, err := noise.NewInitiator(initPriv.Bytes(), h.pubKey)
+	initiator, err := noise.NewInitiator(fakephone.InstallKey(plainToken), h.pubKey)
 	if err != nil {
 		t.Fatalf("NewInitiator: %v", err)
 	}
@@ -429,11 +425,7 @@ func sendNoiseMsg(t *testing.T, phone *fakephone.Client, ciphertext []byte) {
 // initRecv decrypts binary→phone).
 func driveHandshakeToOpen(t *testing.T, h *v2Harness, phone *fakephone.Client, token string) (*noise.CipherState, *noise.CipherState) {
 	t.Helper()
-	initPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("phone keygen: %v", err)
-	}
-	initiator, err := noise.NewInitiator(initPriv.Bytes(), h.pubKey)
+	initiator, err := noise.NewInitiator(fakephone.InstallKey(token), h.pubKey)
 	if err != nil {
 		t.Fatalf("NewInitiator: %v", err)
 	}

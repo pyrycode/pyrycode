@@ -3,8 +3,6 @@
 package e2e
 
 import (
-	"crypto/ecdh"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"slices"
@@ -86,11 +84,7 @@ func driveHandshakeToOpenDaemonInteractive(t *testing.T, phone *fakephone.Client
 // above and this ticket must not fan out into them.
 func driveHandshakeToOpenDaemonInteractiveResuming(t *testing.T, phone *fakephone.Client, pubKey []byte, token string, lastEventID *uint64) (*noise.CipherState, *noise.CipherState) {
 	t.Helper()
-	initPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("phone keygen: %v", err)
-	}
-	initiator, err := noise.NewInitiator(initPriv.Bytes(), pubKey)
+	initiator, err := noise.NewInitiator(fakephone.InstallKey(token), pubKey)
 	if err != nil {
 		t.Fatalf("NewInitiator: %v", err)
 	}
