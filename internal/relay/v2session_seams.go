@@ -1583,6 +1583,38 @@ type V2SessionConfig struct {
 	// existing-test posture, the nil-resolver posture the other optional control
 	// seams share. #2079 wires the daemon-side producer.
 	RetainedBackgroundTaskRosters func() []protocol.BackgroundTaskRosterPayload
+
+	// RunningTurnPhases enumerates the current phase of every running turn as
+	// marshal-ready turn_state payloads (each stamped with its own
+	// conversation_id) for connect-time reconcile (#2712) — the seventh Mode B
+	// instance. A running turn's phase is control state, but turn_state otherwise
+	// travels only on the Mode A event stream: a reconnect replays events after
+	// hello.last_event_id, the turn's thinking was sent before the client left, and
+	// the emitter de-duplicates transitions, so a long single-phase turn sends
+	// nothing new. Called on the Run goroutine from handleNoiseInit's
+	// interactive-open tail; the returned payloads are unicast to the just-opened
+	// conn only.
+	//
+	// "Current phase" is the thinking or responding the daemon last SENT for a
+	// turn still open. An implementation MUST NOT derive a phase that was never
+	// sent, and MUST NOT return an idle conversation: nothing is the idle answer,
+	// which the client reads under the reset-on-reconnect rule. The cmd/pyry
+	// producer (turnPhaseSnapshot) returns at most one payload today, because its
+	// emitter holds at most one open turn.
+	//
+	// ORDERING OBLIGATION, which is why the reconcile runs after replayMissed
+	// rather than beside its six twins: the producer must record a transition
+	// before the emitter appends that transition's event to the replay ring and
+	// asks ActiveConns for the fan-out. Then a turn ending while a conn opens
+	// either reads as ended here, or its idle carries an event id above the conn's
+	// replayThrough and reaches the conn live, behind the reconciled frame.
+	//
+	// A pure read in bounded time (the producer takes one leaf mutex and does no
+	// I/O). The payload carries only a server-minted conversation_id and a phase
+	// from turnbridge's closed vocabulary — no claude-authored text.
+	//
+	// Optional: nil ⇒ no reconcile, the posture the six seams above share.
+	RunningTurnPhases func() []protocol.TurnStatePayload
 }
 
 // HistoryPager is the shape of the V2SessionConfig.HistoryPage seam (#2116),

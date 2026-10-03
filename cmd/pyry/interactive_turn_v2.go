@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -171,6 +172,12 @@ type interactiveTurnEmitterV2 struct {
 	// means no wake; assigned after construction for hist's call-site reason.
 	// Trigger is nil-safe and never blocks this goroutine.
 	waker *pushWaker
+
+	// phases is the cross-goroutine view of the open turn's last-sent phase
+	// (#2712), read by the relay's connect-time turn-phase reconcile on its Run
+	// goroutine. Kept current in transitionTo and endTurn only. nil means no
+	// reconcile view; assigned after construction for hist's call-site reason.
+	phases *turnPhaseSnapshot
 
 	// Delta-coalescing state (#609) — read/written only on the single Handle/
 	// flush goroutine, same contract as the lifecycle fields above. The invariant
@@ -871,6 +878,11 @@ func (e *interactiveTurnEmitterV2) transitionTo(ctx context.Context, convID stri
 		return
 	}
 	e.currentState = state
+	// Publish BEFORE emit: emit appends to the ring and then asks the relay's Run
+	// goroutine for its conns, so a connecting conn's reconcile, which runs on Run
+	// after replayMissed, either reads this phase or receives the live frame
+	// behind whatever it read (#2712).
+	e.phases.publish(convID, state)
 	typ, payload := turnbridge.BuildTurnState(convID, state)
 	e.emit(ctx, convID, typ, payload)
 }
@@ -885,6 +897,62 @@ func (e *interactiveTurnEmitterV2) endTurn() {
 	e.seq = 0
 	e.currentState = ""
 	e.childLanes = nil
+	e.phases.clear()
+}
+
+// turnPhaseSnapshot is the open turn's last-sent phase, shared from the
+// emitter's drain goroutine to the relay's Run goroutine for the connect-time
+// turn-phase reconcile (#2712). The emitter's lifecycle fields stay unguarded and
+// drain-only; this is the one synchronised copy, written where the emitter sends
+// a transition or closes a turn. It holds at most one turn because the emitter
+// holds at most one. The zero value is "no turn with a sent phase", which is also
+// what an open turn reads as before its first transition: a phase never sent is
+// never re-asserted.
+//
+// The mutex is a leaf: never held across a push, an emit or a channel operation,
+// so it cannot join a cycle with the emitter's ActiveConns round-trip through Run.
+type turnPhaseSnapshot struct {
+	mu     sync.Mutex
+	convID string
+	state  turnbridge.TurnState
+}
+
+// publish records state as convID's current phase; idle clears it. Nil-safe, so
+// an emitter built without a snapshot behaves as before.
+func (p *turnPhaseSnapshot) publish(convID string, state turnbridge.TurnState) {
+	if p == nil {
+		return
+	}
+	if state == turnbridge.StateIdle {
+		p.clear()
+		return
+	}
+	p.mu.Lock()
+	p.convID, p.state = convID, state
+	p.mu.Unlock()
+}
+
+// clear records that no turn is running. Nil-safe.
+func (p *turnPhaseSnapshot) clear() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.convID, p.state = "", ""
+	p.mu.Unlock()
+}
+
+// running is the V2SessionConfig.RunningTurnPhases seam: one turn_state payload
+// for the running turn, or nil when none is running. A pure read.
+func (p *turnPhaseSnapshot) running() []protocol.TurnStatePayload {
+	p.mu.Lock()
+	convID, state := p.convID, p.state
+	p.mu.Unlock()
+	if convID == "" {
+		return nil
+	}
+	_, payload := turnbridge.BuildTurnState(convID, state)
+	return []protocol.TurnStatePayload{payload}
 }
 
 // closeForConversation returns an externally-abandoned active turn to idle
