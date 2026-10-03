@@ -336,8 +336,9 @@ func runArgs(args []string) error {
 // pyryFlagBools are pyry-specific boolean flags. Recognised by their exact
 // name (with or without a leading -- and with or without =value).
 var pyryFlagBools = map[string]bool{
-	"pyry-resume":  true,
-	"pyry-verbose": true,
+	"pyry-resume":      true,
+	"pyry-verbose":     true,
+	"pyry-auto-update": true,
 }
 
 // pyryFlagValues are pyry-specific flags that take a value. The value can

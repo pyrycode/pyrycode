@@ -168,6 +168,12 @@ func TestSplitArgs(t *testing.T) {
 			wantClaude: []string{"summarize"},
 		},
 		{
+			name:       "auto-update flag stays with pyry",
+			args:       []string{"-pyry-auto-update", "-pyry-read-folder=/vault", "--dangerously-skip-permissions"},
+			wantPyry:   []string{"-pyry-auto-update", "-pyry-read-folder=/vault"},
+			wantClaude: []string{"--dangerously-skip-permissions"},
+		},
+		{
 			name:       "pyry flag then claude flags",
 			args:       []string{"-pyry-verbose", "--model", "sonnet"},
 			wantPyry:   []string{"-pyry-verbose"},
