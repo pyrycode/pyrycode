@@ -30,8 +30,9 @@ const (
 	CodeRelayServerIDConflict = "relay.server_id_conflict"
 
 	// Session errors.
-	CodeSessionNotFound = "session.not_found"
-	CodeSessionBlocked  = "session.blocked" // terminal give-up; NOT a retry hint (contrast server.binary_busy)
+	CodeSessionNotFound      = "session.not_found"
+	CodeSessionBlocked       = "session.blocked"        // terminal give-up; NOT a retry hint (contrast server.binary_busy)
+	CodeSessionChildCrashing = "session.child_crashing" // NOT terminal: claude keeps exiting at startup, the daemon is still restarting it and queued messages are kept (#2724)
 
 	// Attachment errors (#1751; docs/protocol-mobile.md § Attachments). The
 	// reject vocabulary both attachment_chunk legs answer with, declared in one
@@ -1346,15 +1347,23 @@ const (
 )
 
 // Mobile Protocol v2 session-error marker (#1007, split from #1001;
-// docs/protocol-mobile.md § Error codes). When the daemon's interactive
-// message queue (internal/msgqueue) bounds a persistent-failure drain and
-// gives up (the OnGiveUp seam, #1000), it can surface that terminal give-up to
-// a paired phone as this unsolicited, conversation-scoped frame — a typed error
-// the client attaches to the right session and never mistakes for a transient
-// retry. Unlike TypeError it is NOT in_reply_to-correlated to a client request
-// (there is no request to reply to), so the payload (SessionErrorPayload,
-// messaging.go) carries the conversation identity itself, plus the terminal
-// CodeSessionBlocked and a human-readable message.
+// docs/protocol-mobile.md § Error codes). It reports a conversation-scoped
+// session problem to a paired phone as an unsolicited frame, and its code says
+// whether the problem is terminal:
+//
+//   - CodeSessionBlocked is terminal. The daemon's interactive message queue
+//     (internal/msgqueue) bounded a persistent-failure drain and gave up (the
+//     OnGiveUp seam, #1000); the client must never mistake it for a transient
+//     retry.
+//   - CodeSessionChildCrashing is not terminal (#2724). The conversation's claude
+//     child has exited at startup several times in a row and the daemon is still
+//     restarting it. Queued messages are kept, and a CodeSessionBlocked may follow
+//     if delivery never recovers.
+//
+// Unlike TypeError it is NOT in_reply_to-correlated to a client request (there
+// is no request to reply to), so the payload (SessionErrorPayload, messaging.go)
+// carries the conversation identity itself, plus the code and a human-readable
+// message.
 //
 // MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: it is an
 // outbound binary → phone v2 event an old phone must never receive. The drift
@@ -1364,7 +1373,7 @@ const (
 // This ticket (#1007) is wire vocabulary only — the producer that emits the
 // frame on msgqueue give-up is sibling #1008.
 const (
-	TypeSessionError = "session_error" // binary → phone, outbound v2 unsolicited terminal session-error frame
+	TypeSessionError = "session_error" // binary → phone, outbound v2 unsolicited conversation-scoped session-error frame; the code says whether it is terminal
 )
 
 // Mobile Protocol v2 attachment chunk (#1752, split from #1750; the
