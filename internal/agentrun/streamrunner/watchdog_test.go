@@ -200,17 +200,14 @@ func TestRun_SlowTool_NoFire(t *testing.T) {
 // for a run that was sitting idle, no synthetic idle_stall is written.
 func TestRun_OperatorShutdown_NoSyntheticResult(t *testing.T) {
 	t.Parallel()
-	var stdout, stderr bytes.Buffer
-	cfg := helperRunCfg(t, "stall_silent", &stdout, &stderr)
+	var stdout bytes.Buffer
+	stderr := newReadySink()
+	cfg := helperRunCfg(t, "stall_silent", &stdout, stderr)
 	cfg.PromptBytes = []byte("noop")
 	// Long enough that the watchdog will NOT fire before the operator cancel.
 	cfg.IdleTimeout = 5 * time.Second
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		cancel()
-	}()
+	ctx := cancelWhenReady(t, stderr)
 
 	if err := Run(ctx, cfg); err != nil {
 		t.Fatalf("Run on operator shutdown: %v, want nil", err)

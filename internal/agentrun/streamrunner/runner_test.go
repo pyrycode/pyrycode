@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -35,7 +36,7 @@ func (s *syncWriter) String() string {
 
 // helperRunCfg returns a Config wired to TestStreamRunnerHelperProcess.
 // Tests override PromptBytes / Env / writers as needed.
-func helperRunCfg(t *testing.T, mode string, stdout, stderr *bytes.Buffer, extraEnv ...string) Config {
+func helperRunCfg(t *testing.T, mode string, stdout, stderr io.Writer, extraEnv ...string) Config {
 	t.Helper()
 	env := append([]string{
 		"GO_STREAMRUNNER_HELPER=1",
@@ -52,6 +53,54 @@ func helperRunCfg(t *testing.T, mode string, stdout, stderr *bytes.Buffer, extra
 		Stderr: stderr,
 		Env:    env,
 	}
+}
+
+// readySink is a stderr sink for the cancel tests. It buffers the helper
+// child's stderr and closes ready the first time that holds helperReady, so a
+// test cancels only once the child is running with its SIGTERM handler
+// installed. Mutex-guarded: os/exec copies stderr from its own goroutine.
+type readySink struct {
+	mu    sync.Mutex
+	buf   bytes.Buffer
+	once  sync.Once
+	ready chan struct{}
+}
+
+func newReadySink() *readySink {
+	return &readySink{ready: make(chan struct{})}
+}
+
+func (r *readySink) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n, err := r.buf.Write(p)
+	if strings.Contains(r.buf.String(), helperReady) {
+		r.once.Do(func() { close(r.ready) })
+	}
+	return n, err
+}
+
+func (r *readySink) String() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.buf.String()
+}
+
+// cancelWhenReady returns a ctx that is cancelled once the helper child signals
+// readiness on sink. The goroutine also exits when the test's deferred cancel
+// fires, so a child that never signals leaks nothing.
+func cancelWhenReady(t *testing.T, sink *readySink) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() {
+		select {
+		case <-sink.ready:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx
 }
 
 func TestRun_CleanExit(t *testing.T) {
@@ -101,15 +150,12 @@ func TestRun_NonZeroExit(t *testing.T) {
 
 func TestRun_CtxCancelMidRun(t *testing.T) {
 	t.Parallel()
-	var stdout, stderr bytes.Buffer
-	cfg := helperRunCfg(t, "sleep", &stdout, &stderr)
+	var stdout bytes.Buffer
+	stderr := newReadySink()
+	cfg := helperRunCfg(t, "sleep", &stdout, stderr)
 	cfg.PromptBytes = []byte("noop")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		cancel()
-	}()
+	ctx := cancelWhenReady(t, stderr)
 
 	start := time.Now()
 	if err := Run(ctx, cfg); err != nil {
@@ -177,7 +223,7 @@ func assertReapedLivePid(t *testing.T, rec *reapRecorder) {
 
 // TestRun_CtxCancel_ReapsDescendantGroups asserts the operator-SIGTERM teardown
 // reaps claude's detached descendant process groups. Clones TestRun_CtxCancelMidRun
-// (sleep helper mode, cancel the parent ctx ~100ms in) and adds the seam swap +
+// (sleep helper mode, cancel the parent ctx once the child signals ready) and adds the seam swap +
 // assertion on top: the reap wired into cmd.Cancel must fire with the live
 // fake-claude pid before the SIGTERM. Because cmd.Cancel fires whenever childCtx
 // is done — via both the parent ctx (operator SIGTERM/SIGINT) and the watchdog's
@@ -185,18 +231,15 @@ func assertReapedLivePid(t *testing.T, rec *reapRecorder) {
 // paths. Non-parallel: it swaps the reapDescendantGroupsFn package var (see
 // swapReapSeam); do NOT add t.Parallel().
 func TestRun_CtxCancel_ReapsDescendantGroups(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	cfg := helperRunCfg(t, "sleep", &stdout, &stderr)
+	var stdout bytes.Buffer
+	stderr := newReadySink()
+	cfg := helperRunCfg(t, "sleep", &stdout, stderr)
 	cfg.PromptBytes = []byte("noop")
 
 	rec := &reapRecorder{}
 	swapReapSeam(t, rec)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		cancel()
-	}()
+	ctx := cancelWhenReady(t, stderr)
 
 	if err := Run(ctx, cfg); err != nil {
 		t.Fatalf("Run after ctx cancel: %v, want nil", err)

@@ -17,12 +17,20 @@ import (
 // against the exact bytes the helper wrote, not a re-typed copy.
 const partialLine = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"te`
 
+// helperReady is the stderr line the helper writes once its SIGTERM handler is
+// installed. The cancel tests wait for it through readySink instead of a fixed
+// delay: a cancel that lands before Run reaches cmd.Start fails Run with
+// "start: context canceled" on a loaded host.
+const helperReady = "helper ready"
+
 // blockUntilSigterm waits for SIGTERM (exits 0) or a 30s safety timeout. Used
 // by the stall helper modes so a watchdog-driven kill terminates the fake
 // claude promptly instead of falling through to the SIGKILL grace window.
+// Writes helperReady to stderr once the handler is installed.
 func blockUntilSigterm() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM)
+	fmt.Fprintln(os.Stderr, helperReady)
 	select {
 	case <-sigCh:
 		os.Exit(0)
@@ -41,7 +49,8 @@ func blockUntilSigterm() {
 //                    surfaces *exec.ExitError on non-zero child exit.
 //   - "sleep":       read stdin to EOF, install a SIGTERM handler that
 //                    prints "got SIGTERM" to stderr and exits 0; otherwise
-//                    sleep 30s. Used by the ctx-cancel test.
+//                    sleep 30s. Writes helperReady to stderr once the handler
+//                    is installed. Used by the ctx-cancel tests.
 //   - "echo_stdin":  read stdin to EOF, write the bytes verbatim to
 //                    GO_STREAMRUNNER_HELPER_STDIN_FILE (mode 0o600), exit 0.
 //   - "exit0_no_read": exit 0 immediately without reading stdin. Forces the
@@ -106,6 +115,7 @@ func TestStreamRunnerHelperProcess(t *testing.T) {
 	case "sleep":
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGTERM)
+		fmt.Fprintln(os.Stderr, helperReady)
 		go func() { _, _ = io.Copy(io.Discard, os.Stdin) }()
 		select {
 		case <-sigCh:
