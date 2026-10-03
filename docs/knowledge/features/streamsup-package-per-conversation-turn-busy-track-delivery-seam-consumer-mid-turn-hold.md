@@ -93,6 +93,14 @@ its own `result` rather than the one it was written during. See
 [the capture's writeup](e2e-realclaude-mid-turn-user-capture-test-go.md) for the per-arm table and its
 limits (one version, one model, one run per arm, and the after-last-tool window's exact edge unmeasured).
 
+**#2729 built that design**, as `send_queued_now` — a deliberate, consent-gated bypass of the hold above,
+not a regression of it: the ordinary `send_message` path still parks behind `waitIdleForDelivery` exactly
+as this ticket left it. See
+[Send-now carry](streamsup-package-per-conversation-turn-busy-track-send-now-carry.md) for how the tracker
+stays busy across the fold-vs-second-turn uncertainty the capture measured, with production running
+`--replay-user-messages` off so nothing echoes the write back to tell the two cases apart from inside this
+file.
+
 **Forced-ordering test coverage across a `new_session` rotation (#1295).** The #1137 e2e had
 failed twice at its M4 milestone with the same shape — rotation succeeds, the follow-up turn is
 accepted, then zero bytes reach any child for the full 20 s deadline — consistent with a

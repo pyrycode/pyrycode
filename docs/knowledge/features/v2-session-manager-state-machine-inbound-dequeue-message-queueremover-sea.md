@@ -60,3 +60,11 @@ returns nothing, so the deterministic `convID`-scoping is self-validating; addin
 stochastic membership check would defend an unobserved failure mode and risk a
 false-negative drop of a legitimate dequeue (Belt-and-Suspenders → different fabric;
 the deliberate, reviewed choice in [`codebase/723.md`](../codebase/723.md) § Security).
+
+**Twin: `send_queued_now` (#2729)** writes the named message into the running
+turn instead of dropping it, mirroring every posture above (interactive gate
+first, nil-seam inert, tolerant decode, content-free logs, no reply) through
+a `QueueSender` seam declared beside `QueueRemover` — but it runs on the
+conn's `appFrameWorker` rather than inline on `Run`, because the write ends
+in an undeadlined stdin pipe write. See
+[Inbound `send_queued_now`](v2-session-manager-state-machine-inbound-send-queued-now-queuesender-sea.md).
