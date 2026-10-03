@@ -58,9 +58,9 @@ func TestSendNowDeliver_WritesOnlyIntoARunningClaudeTurn(t *testing.T) {
 				}
 				return w, nil
 			}
-			deliver := newSendNowDeliver(resolve, func(string) bool { return tc.claude }, tr)
+			deliver := newSendNowDeliver(resolve, func(string) bool { return tc.claude }, tr, nil)
 
-			err := deliver(context.Background(), testConvID, []byte("now please"))
+			err := deliver(context.Background(), testConvID, 7, []byte("now please"))
 			if !errors.Is(err, tc.want) || (tc.want == nil && err != nil) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}

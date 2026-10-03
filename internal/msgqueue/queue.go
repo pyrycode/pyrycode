@@ -174,7 +174,11 @@ type PendingFunc func(error) bool
 // (the turn is idle, the session cannot take input mid-turn, no live child), and
 // return nil only once the write has succeeded — the same point at which an idle
 // delivery is confirmed. It is called with q.mu released.
-type SendNowFunc func(ctx context.Context, convID string, payload []byte) error
+//
+// id is the queued message's id, the one OnDelivered's QueuedMessage then carries
+// (#2730), so a consumer can pair the write with its delivered notification
+// without the payload ever reaching OnDelivered.
+type SendNowFunc func(ctx context.Context, convID string, id uint64, payload []byte) error
 
 // Config configures a Queue.
 type Config struct {
@@ -684,7 +688,7 @@ func (q *Queue) SendNow(convID string, id uint64) bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := q.sendNow(ctx, convID, []byte(m.delivery)); err != nil {
+	if err := q.sendNow(ctx, convID, m.id, []byte(m.delivery)); err != nil {
 		q.reinsert(convID, m)
 		return false
 	}

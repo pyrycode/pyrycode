@@ -15,9 +15,9 @@ import (
 // chokepoint's emit and the session-transition broadcast. It is a closure
 // factory in the shape of queueStateNotify and sessionErrorNotify.
 //
-// It writes the OPERATOR's own turn, which no other producer can. Claude never
-// echoes the text back (the stream parser's emitUser maps only tool_result) and
-// protocol.MessagePayload with role "user" has no other producer in the binary,
+// It writes the OPERATOR's own turn, which no other producer can. Claude's echo
+// of a delivered message reaches the daemon only as a digest (turnevent.UserEcho,
+// #2730), never as text, and protocol.MessagePayload with role "user" has no other producer in the binary,
 // so without this the served log is claude's half of the conversation with the
 // questions missing.
 //
@@ -36,7 +36,14 @@ import (
 //
 // push hands the same payload bytes and stamp to the live push (#2699), after the
 // log append, so the wire and the log cannot differ. nil pushes nothing.
-func newOperatorMessageHistory(store *history.Store, push func(operatorMessage), logger *slog.Logger) msgqueue.DeliveredFunc {
+//
+// A SEND-NOW MESSAGE COMMITS WHERE CLAUDE READ IT (#2730). Its payload is built
+// here, from msg.Text as for every message, but the stamp, the append and the push
+// are handed to place, which runs them when claude's echo of the write arrives, or
+// when the turn goes idle without one. An ordinary message commits here, at the
+// confirmed write, as before: claude reads it as the turn's opener, so the write
+// is already where it sits. nil place commits every message here.
+func newOperatorMessageHistory(store *history.Store, push func(operatorMessage), place *sendNowPlacement, logger *slog.Logger) msgqueue.DeliveredFunc {
 	return func(convID string, msg msgqueue.QueuedMessage) {
 		payload, err := json.Marshal(protocol.MessagePayload{
 			ConversationID: convID,
@@ -72,18 +79,26 @@ func newOperatorMessageHistory(store *history.Store, push func(operatorMessage),
 				"conversation_id", convID)
 			return
 		}
-		// Stamped HERE, at the confirmed write, not from msg.TS — that is the
-		// ENQUEUE time, and a message can sit in the backlog for a long time, so an
-		// enqueue stamp would place this entry behind ones carrying later
-		// timestamps and a served page would read out of order. UTC matches what
-		// both #2114 producers hoist, so entries from all three are orderable by
-		// the field the log stores.
-		ts := time.Now().UTC()
-		appendConversationHistory(store, logger, "operator_message.history_append_err",
-			convID, protocol.TypeMessage, payload, ts)
-		if push != nil {
-			push(operatorMessage{convID: convID, payload: payload, ts: ts})
+		commit := func() {
+			// Stamped at the commit — the confirmed write, or for a send-now message
+			// claude's echo of it — not from msg.TS: that is the ENQUEUE time, and a
+			// message can sit in the backlog for a long time, so an enqueue stamp
+			// would place this entry behind ones carrying later timestamps and a
+			// served page would read out of order. UTC matches what both #2114
+			// producers hoist, so entries from all three are orderable by the field
+			// the log stores.
+			ts := time.Now().UTC()
+			appendConversationHistory(store, logger, "operator_message.history_append_err",
+				convID, protocol.TypeMessage, payload, ts)
+			if push != nil {
+				push(operatorMessage{convID: convID, payload: payload, ts: ts})
+			}
 		}
+		if msg.SentNow {
+			place.attach(convID, msg.ID, commit)
+			return
+		}
+		commit()
 	}
 }
 

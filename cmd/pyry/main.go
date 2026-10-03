@@ -1078,6 +1078,17 @@ func runSupervisor(args []string) error {
 	// for queueChanges' reason. The ring that push appends to is born in the relay
 	// leg, which hands it to the emitter's Run at start.
 	operatorMessages := make(chan operatorMessage, operatorMessageQueueSize)
+	// #2730: a send-now message's history entry and push wait for claude's echo of
+	// it, which the stream drain hands over through the sink. Built only on the
+	// stream path, beside the tracker whose idle is its fallback; nil elsewhere,
+	// which commits at the write as before.
+	var sendNowPlace *sendNowPlacement
+	if turnBusy != nil {
+		sendNowPlace = newSendNowPlacement(ctx,
+			func(sid string) (string, bool) { return conversationForSession(convReg, sid) },
+			turnBusy.WaitIdle)
+		streamSink.setEchoObserver(sendNowPlace.echo)
+	}
 	queue, err := msgqueue.New(msgqueue.Config{
 		// Carry OUTERMOST, so the pending posted text is composed onto the payload
 		// once, at the boundary with the queue, and markApprovalHolds stays adjacent to
@@ -1100,7 +1111,7 @@ func runSupervisor(args []string) error {
 		// runs per ATTEMPT, and a head cleared on an attempt that then fails would
 		// lose the text the retry was meant to carry.
 		OnDelivered: deliveredFuncs(
-			newOperatorMessageHistory(conversationHistory, operatorMessageNotify(operatorMessages, logger), logger),
+			newOperatorMessageHistory(conversationHistory, operatorMessageNotify(operatorMessages, logger), sendNowPlace, logger),
 			postCarry.clearDelivered,
 		),
 		// Pending exempts a head held behind an approval parked on a PERSON from the
@@ -1122,7 +1133,7 @@ func runSupervisor(args []string) error {
 		// turn. Deliberately NOT through carryPending or markApprovalHolds — see
 		// newSendNowDeliver — and its OnDelivered carries SentNow so the carry's
 		// clear leaves the waiting head's composed posts alone.
-		SendNow: newSendNowDeliver(router.resolve, router.isClaude, turnBusy),
+		SendNow: newSendNowDeliver(router.resolve, router.isClaude, turnBusy, sendNowPlace),
 		Logger:  logger,
 	})
 	if err != nil {
@@ -1912,9 +1923,11 @@ func validateEffortVocabulary(harness string, list turnevent.ModelList, have boo
 // id with no record or an agent this daemon does not know.
 //
 // Interrupt and MidTurnInput report what the daemon does today. Both agents
-// interrupt (sessions.Runner.Interrupt, codexRunner.Interrupt). Neither takes
-// input mid-turn: newInboundDeliver holds every message until the conversation's
-// turn is idle, and Codex's WriteUserTurn then starts a new turn.
+// interrupt (sessions.Runner.Interrupt, codexRunner.Interrupt). Only Claude takes
+// input mid-turn: send_queued_now writes a queued message into its running turn
+// (newSendNowDeliver, #2729) and the operator's push lands where claude read it
+// (sendNowPlacement, #2730). newSendNowDeliver refuses Codex, whose WriteUserTurn
+// starts a new turn.
 //
 // SlashCommands, MCPServers and ContextUsageDetail (#2670) are true only for
 // Claude: codexRunner implements none of slashCommandLister, mcpStatusQuerier
@@ -1941,7 +1954,7 @@ func (a settingsUpdaterAdapter) Capabilities(sessionID, model string) (relay.Age
 	claude := harness == sessions.HarnessClaude
 	return relay.AgentCapabilities{
 		Interrupt:          true,
-		MidTurnInput:       false,
+		MidTurnInput:       claude,
 		SlashCommands:      claude,
 		MCPServers:         claude,
 		ContextUsageDetail: claude,

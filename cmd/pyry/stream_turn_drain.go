@@ -149,11 +149,30 @@ type streamTurnSink struct {
 	// argument. Nil — every test sink, and a daemon before main sets it — drops the
 	// signal.
 	crashLoop atomic.Pointer[func(sessionID string)]
+
+	// echo is the send-now placement every claude echo reaches (#2730), handed
+	// over by the drain rather than by the parser so it runs after the drain has
+	// handled every event claude emitted before the echo. Late-bound and atomic
+	// for crashLoop's reasons; nil drops the echo, which the placement's idle
+	// fallback covers.
+	echo atomic.Pointer[func(sessionID string, ev turnevent.UserEcho)]
 }
 
 // setCrashLoopNotify installs the producer crashLoopForTag's closures call.
 func (s *streamTurnSink) setCrashLoopNotify(fn func(sessionID string)) {
 	s.crashLoop.Store(&fn)
+}
+
+// setEchoObserver installs the consumer the drain hands each UserEcho to.
+func (s *streamTurnSink) setEchoObserver(fn func(sessionID string, ev turnevent.UserEcho)) {
+	s.echo.Store(&fn)
+}
+
+// observeEcho hands one echo to the installed consumer, if any.
+func (s *streamTurnSink) observeEcho(sessionID string, ev turnevent.UserEcho) {
+	if fn := s.echo.Load(); fn != nil {
+		(*fn)(sessionID, ev)
+	}
 }
 
 // crashLoopForTag returns the streamsup.Config.OnCrashLoop hook for the runner
@@ -598,6 +617,17 @@ func startStreamTurnDrainV2(
 				// so a tracker fed after it would report a background conversation idle
 				// because it never heard about it, not because it is idle.
 				busy.observe(env.sessionID, env.ev)
+
+				// claude's echo of a user message (#2730) builds no frame. It goes to
+				// the send-now placement HERE, on this goroutine and before the
+				// active-session gate: every event claude emitted ahead of it —
+				// the tool result the message followed — has already been handled,
+				// so the operator-message push it may commit lands after it, and a
+				// background conversation's echo is placed too.
+				if echo, ok := env.ev.(turnevent.UserEcho); ok {
+					sink.observeEcho(env.sessionID, echo)
+					continue
+				}
 
 				active, ok := activeSession()
 				if !ok || env.sessionID != active {

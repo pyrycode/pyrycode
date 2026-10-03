@@ -31,14 +31,14 @@ func TestSettingsUpdaterAdapter_Capabilities(t *testing.T) {
 			dormant: `"model":"opus",`,
 			store:   &agentVocabularyDouble{codex: codexEntries},
 			model:   "opus",
-			want:    relay.AgentCapabilities{Interrupt: true, SlashCommands: true, MCPServers: true, ContextUsageDetail: true, EffortLevels: []string{"low", "medium", "high"}, Models: []string{"sonnet", "opus", "haiku"}},
+			want:    relay.AgentCapabilities{Interrupt: true, MidTurnInput: true, SlashCommands: true, MCPServers: true, ContextUsageDetail: true, EffortLevels: []string{"low", "medium", "high"}, Models: []string{"sonnet", "opus", "haiku"}},
 		},
 		{
 			name:    "claude on its default model",
 			dormant: ``,
 			store:   &agentVocabularyDouble{codex: codexEntries},
 			model:   "",
-			want:    relay.AgentCapabilities{Interrupt: true, SlashCommands: true, MCPServers: true, ContextUsageDetail: true, EffortLevels: fallbackFive, Models: []string{"sonnet", "opus", "haiku"}},
+			want:    relay.AgentCapabilities{Interrupt: true, MidTurnInput: true, SlashCommands: true, MCPServers: true, ContextUsageDetail: true, EffortLevels: fallbackFive, Models: []string{"sonnet", "opus", "haiku"}},
 		},
 		{
 			name:    "codex on luna",
