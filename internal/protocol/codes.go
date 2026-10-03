@@ -1136,9 +1136,14 @@ const (
 // This ticket (#720) is wire vocabulary only — the producer that emits
 // queue_state is sibling #722 and the handler that applies dequeue_message is
 // sibling #723.
+//
+// send_queued_now (#2729) is dequeue_message's sibling with the opposite effect:
+// it drives msgqueue.SendNow(convID, id), writing the named entry into the running
+// claude turn instead of dropping it. Same nature, same trust posture, same fields.
 const (
 	TypeQueueState     = "queue_state"     // binary → phone, outbound v2 queued-backlog snapshot
 	TypeDequeueMessage = "dequeue_message" // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
+	TypeSendQueuedNow  = "send_queued_now" // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
 )
 
 // Mobile Protocol v2 interrupt control (epic #597 Phase 3,

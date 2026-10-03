@@ -422,6 +422,17 @@ type DequeueMessagePayload struct {
 	QueuedMsgID    uint64 `json:"queued_msg_id"`
 }
 
+// SendQueuedNowPayload is the body of an Envelope whose Type ==
+// TypeSendQueuedNow (docs/protocol-mobile.md § Queue). Phone → binary direction.
+// It is DequeueMessagePayload's shape and posture exactly — an inbound v2 control
+// the session manager intercepts, ungated for any paired client on an interactive
+// connection, ConversationID untrusted — and asks for the named entry to be
+// written into the running claude turn rather than dropped (#2729).
+type SendQueuedNowPayload struct {
+	ConversationID string `json:"conversation_id"`
+	QueuedMsgID    uint64 `json:"queued_msg_id"`
+}
+
 // NewSessionPayload is the body of an Envelope whose Type == TypeNewSession
 // (docs/protocol-mobile.md § New session). Phone → binary direction.
 //

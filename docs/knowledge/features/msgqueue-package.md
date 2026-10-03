@@ -309,6 +309,17 @@ semantics untouched.
   consumer coalesces by re-reading `Snapshot` (matches how the #647 reconnect
   path treats `eventring`).
 
+## Send-now delivery (#2729)
+
+See [Send-now delivery](msgqueue-package-send-now.md): `Config.SendNow` writes
+a queued message into the conversation's *running* turn instead of waiting
+for idle — `Remove`'s cancel, now for acceleration. It shares `Remove`'s
+take-the-head-out-of-the-FIFO safety argument rather than reimplementing it,
+adds one delivered-projection field (`QueuedMessage.SentNow`) so an
+`OnDelivered` consumer can tell the two deliveries apart, and the
+`convQueue.headTaken` flag that keeps a refused head's own re-insertion from
+being misread as a delivery failure that starts a give-up streak.
+
 ## Bounded give-up on persistent delivery failure (#1000)
 
 The drain's retry loop is deliberately lossless: a `Deliver` error retries the
@@ -659,3 +670,12 @@ give-up-notification path as the injected `GiveUpFunc`.
   that only ever runs from that seam inherits them for free. The `cmd/pyry`-level test this ticket
   added therefore covers just the shape specific to the new producer — retry-then-deliver pushed
   exactly once, carrying the #2038 host-path-free payload — not the once/never cases again.
+- **#2729 added `SendNow`, the engine's fifth op and the second that mutates the backlog out of order
+  (after `Remove`).** It writes a queued message into the conversation's running turn rather than its
+  backlog slot, reusing `Remove`'s take-the-waiting-head-out-of-the-FIFO argument instead of a new one,
+  and added `QueuedMessage.SentNow` so `channelCarry.clearDelivered` ([control-plane.md § Carrying a
+  posted channel message into claude's next
+  turn](control-plane.md#carrying-a-posted-channel-message-into-claudes-next-turn-2499)) can skip a
+  delivery it did not compose. See [§ Send-now delivery](msgqueue-package-send-now.md) above and
+  [v2-session-manager-state-machine-inbound-send-queued-now-queuesender-sea.md](v2-session-manager-state-machine-inbound-send-queued-now-queuesender-sea.md)
+  for the relay-side handler.

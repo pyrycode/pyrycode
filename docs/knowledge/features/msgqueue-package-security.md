@@ -55,6 +55,16 @@ are inbound message-dispatch **policy** on an internet-exposed surface (`#704` i
   pre-validated by the caller.
 - **No tokens/secrets/crypto/file/subprocess surface.** The `id` is a non-secret
   per-conversation counter, not a capability.
+- **`SendNow` (#2729) is a write, not a read, so it adds no new boundary
+  crossing of its own.** Unlike `Snapshot`/`SnapshotAll`, it returns nothing
+  to the caller — only `bool` — so it cannot be the vector that leaks `text`,
+  `delivery`, or `messageID` off the engine. Its authority is `Remove`'s:
+  `convID` scopes the mutation (`SendNow(A,…)` provably never touches
+  conversation B's backlog), and the caller-supplied `SendNowFunc` seam is
+  where the daemon decides whether that conversation's turn is actually
+  running, exactly as `DeliverFunc` is where idle delivery's authority lives.
+  No new log line — the drop-into-place on a seam error logs nothing, and the
+  relay-side caller's log fields are `dequeue_message`'s fields verbatim.
 - **Inbound bound / backpressure — implemented (#869).** A phone flooding
   `send_message` while claude is persistently busy/wedged used to grow
   `convs[convID].items` without bound (an in-memory DoS; each queued message up

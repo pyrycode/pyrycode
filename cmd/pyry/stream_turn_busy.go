@@ -188,6 +188,29 @@ type turnBusyTracker struct {
 	// each re-checks its own key after a wakeup, so a spurious wakeup costs a map
 	// lookup and nothing else.
 	changed chan struct{}
+
+	// carry counts, per conversation, the send-now writes (#2729) placed into a
+	// running turn whose producing turn has not yet been accounted for. A close
+	// arriving while it is non-zero does not close: claude may answer a message
+	// written late in a turn with a SECOND turn of its own (the #2728 capture's
+	// no-tool and after-last-tool arms), whose opener reaches this tracker from
+	// stdout only after that close. See openForSendNow.
+	carry map[string]int
+	// carried names, per conversation, the generation of a close that a carry
+	// held open. The mark stays until an opener (the write's own turn, which then
+	// closes on its own TurnEnd), another close, or releaseCarried with the same
+	// generation — the send-now grace, which lives in send_now.go so this file
+	// keeps reading no clock.
+	carried  map[string]uint64
+	carryGen uint64
+	// graceAfter is the caller-supplied bound handed to scheduleCarryRelease.
+	// sendNowGrace unless withSendNowGrace overrides it.
+	graceAfter time.Duration
+}
+
+// withSendNowGrace overrides sendNowGrace, for tests.
+func withSendNowGrace(d time.Duration) turnBusyOption {
+	return func(t *turnBusyTracker) { t.graceAfter = d }
 }
 
 // turnBusyOption is a construction-time binding on turnBusyTracker. The variadic
@@ -228,11 +251,14 @@ func newTurnBusyTracker(resolve func(sessionID string) (conversationID string, o
 		logger = slog.Default()
 	}
 	t := &turnBusyTracker{
-		resolve:  resolve,
-		logger:   logger,
-		busy:     make(map[string]uint64),
-		inflight: make(map[string]map[string]struct{}),
-		changed:  make(chan struct{}),
+		resolve:    resolve,
+		logger:     logger,
+		busy:       make(map[string]uint64),
+		inflight:   make(map[string]map[string]struct{}),
+		changed:    make(chan struct{}),
+		carry:      make(map[string]int),
+		carried:    make(map[string]uint64),
+		graceAfter: sendNowGrace,
 	}
 	for _, opt := range opts {
 		opt(t)
@@ -416,7 +442,93 @@ func (t *turnBusyTracker) observe(sessionID string, ev turnevent.Event) {
 	// opener nor closer contributes no delta even if a future one carried an id.
 	// That is the correct answer: a call cannot be in flight on a conversation
 	// with no turn open.
-	t.setBusy(convID, opens, toolCallDeltaFor(ev))
+	t.observeMark(convID, opens, toolCallDeltaFor(ev))
+}
+
+// observeMark applies one fan-in mark, with the send-now carry (#2729) folded in.
+// An opener ends a held close: the conversation's next turn is now visibly open
+// and its own TurnEnd closes it. A close on a conversation carrying a send-now
+// write does not close; it consumes the carry and holds the mark under a fresh
+// generation, so the mark stays until either the write's second turn opens (and
+// later ends) or the send-now grace releases that generation because claude
+// folded the write into the turn that just ended. Everything else is setBusy's
+// behaviour unchanged.
+//
+// The grace is scheduled after t.mu is released, by scheduleCarryRelease, which
+// is the one place time enters this feature; this file reads no clock.
+func (t *turnBusyTracker) observeMark(conversationID string, open bool, tool toolCallDelta) {
+	t.mu.Lock()
+	if open {
+		delete(t.carried, conversationID)
+	} else if _, busy := t.busy[conversationID]; busy && t.carry[conversationID] > 0 {
+		delete(t.carry, conversationID)
+		// The turn did end, so whatever it had in flight ended with it.
+		delete(t.inflight, conversationID)
+		t.carryGen++
+		gen := t.carryGen
+		t.carried[conversationID] = gen
+		after := t.graceAfter
+		t.mu.Unlock()
+		scheduleCarryRelease(t, conversationID, gen, after)
+		return
+	}
+	t.applyBusyLocked(conversationID, open, tool, 0)
+	t.mu.Unlock()
+}
+
+// releaseCarried closes conversationID's mark if it is still held by the carried
+// close of generation gen. Anything that moved the mark since — an opener, any
+// other close, a later carried close — has retired that generation, so a late
+// release is a no-op and can never close a turn it did not hold.
+func (t *turnBusyTracker) releaseCarried(conversationID string, gen uint64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if g, ok := t.carried[conversationID]; !ok || g != gen {
+		return
+	}
+	t.applyBusyLocked(conversationID, false, toolCallDelta{}, 0)
+}
+
+// openForSendNow records a send-now write (#2729) about to go into
+// conversationID's running turn, and reports false — recording nothing — when the
+// conversation is not busy, which is the caller's signal to write nothing and
+// leave the message to the idle drain. A nil receiver or an empty id reports
+// false: with no tracker there is no way to know a turn is running.
+//
+// The busy check and the carry are one lock acquisition, so a TurnEnd landing
+// after it is a carried close (see observeMark), never a plain one. That is the
+// point: a write that lands as the turn ends leaves the conversation busy until
+// the turn the write produces ends, so the drain cannot release the next queued
+// message into an idle that is not real.
+//
+// The undo, for a write that failed, takes back this call's carry if no close has
+// consumed it yet. Once a close has, the grace is left to run out: closing early
+// could release the drain into a second turn another send-now write opened, and
+// staying busy a little longer is the safe direction.
+//
+// The held close is the one departure from "membership moves only on an event":
+// a write folded into the turn that ended produces no further event, so the
+// release has to be a bound. It is the caller's bound, scheduled in send_now.go,
+// and it releases one named generation rather than the conversation.
+func (t *turnBusyTracker) openForSendNow(conversationID string) (ok bool, undo func()) {
+	if t == nil || conversationID == "" {
+		return false, func() {}
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, busy := t.busy[conversationID]; !busy {
+		return false, func() {}
+	}
+	t.carry[conversationID]++
+	return true, func() {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		if n := t.carry[conversationID]; n > 1 {
+			t.carry[conversationID] = n - 1
+		} else {
+			delete(t.carry, conversationID)
+		}
+	}
 }
 
 // clearForSession closes any open turn on the conversation that owns sessionID,
@@ -702,6 +814,10 @@ func (t *turnBusyTracker) applyBusyLocked(conversationID string, open bool, tool
 		// for every tool-bearing variant — so the early return above can never skip
 		// a sweep that had anything to do.
 		delete(t.inflight, conversationID)
+		// Any close that reaches here — teardown, exit, a failed delivery's undo, or
+		// the grace itself — ends the send-now bookkeeping with the turn (#2729).
+		delete(t.carry, conversationID)
+		delete(t.carried, conversationID)
 	}
 
 	// Close-and-replace under the same lock acquisition as the mutation: that is

@@ -189,9 +189,8 @@ func (c *channelCarry) carryPending(deliver msgqueue.DeliverFunc) msgqueue.Deliv
 // confirmed delivery just carried. It fires once per confirmed delivery, from the
 // drain goroutine, which is the same goroutine that ran the composition above.
 //
-// msg is read for NOTHING. The parameter exists because the seam's shape does, and
-// reading msg.Text here would be a second record of a turn newOperatorMessageHistory
-// already writes. Naming it keeps the signature legible against that seam's doc.
+// msg.Text is read for NOTHING: reading it here would be a second record of a turn
+// newOperatorMessageHistory already writes.
 //
 // TAKE-AND-DELETE, not read-then-clear. A confirmed delivery that carried nothing —
 // a later reply in the same conversation, or one whose composition found the record
@@ -202,8 +201,14 @@ func (c *channelCarry) carryPending(deliver msgqueue.DeliverFunc) msgqueue.Deliv
 // A count of zero still reaches the registry, where ClearPendingChannelPosts treats
 // n <= 0 as "mutate nothing" — so a delivery that carried nothing performs no save
 // either, because the save below sits behind a positive count.
-func (c *channelCarry) clearDelivered(convID string, _ msgqueue.QueuedMessage) {
-	if c == nil || c.reg == nil {
+//
+// A SEND-NOW DELIVERY CLEARS NOTHING (#2729). msg.SentNow is the one field read:
+// that write went around carryPending, so it carried no posts, and the count on
+// record belongs to the waiting head's composition — consuming it here would
+// drop posts that have not reached claude. The count stays for the head's own
+// confirmation, or is overwritten by its next attempt.
+func (c *channelCarry) clearDelivered(convID string, msg msgqueue.QueuedMessage) {
+	if c == nil || c.reg == nil || msg.SentNow {
 		return
 	}
 	c.mu.Lock()

@@ -594,6 +594,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`modal_dismissed`** | binary → phone | no | **New in v2.** Modal resolution notice. See [Modal](#modal-v2). |
 | **`queue_state`** | binary → phone | no | **New in v2** (interactive, capability-gated). Queued-message backlog snapshot (#597 Phase 3). See [Queue](#queue-v2). |
 | **`dequeue_message`** | phone → binary | no | **New in v2.** Inbound control — phone cancels a queued message. See [Queue](#queue-v2). |
+| **`send_queued_now`** | phone → binary | no | **New in v2** (#2729). Inbound control — phone writes a queued message into the running turn instead of waiting for idle. See [Queue](#queue-v2). |
 | **`interrupt`** | phone → binary | no | **New in v2.** Inbound control — phone interrupts the running turn (remote Esc). Interactive-capability-gated; exempt from the permission gate. See [Interrupt](#interrupt-v2). |
 | **`new_session`** | phone → binary | no | **New in v2.** Inbound control — phone starts a fresh session in the conversation it names, or in the daemon's current one when it names none (#2099). On the stream path a kill and respawn under a new session id, not a `/clear`. Interactive-capability-gated; exempt from the permission gate. See [New session](#new-session-v2). |
 | **`debug_bundle_chunk`** | binary → phone | no | **New in v2.** Outbound — one ordered, cap-respecting slice of a streamed debug bundle (#812). See [Debug bundle](#debug-bundle-v2). |
@@ -3191,7 +3192,7 @@ The operator declined to choose, so the batch resolves with no selection. It is 
 
 ### Queue (v2)
 
-A phone that types while claude is busy has its turn buffered in the daemon's queued-message backlog (#597 Phase 3, `internal/msgqueue`). `queue_state` (view) lets the phone see that backlog and `dequeue_message` (cancel) lets it drop an entry it no longer wants. Like answering in the [Modal](#modal-v2) cluster since **#2605**, **both viewing and dequeuing are ungated for any paired (authenticated) phone** (ADR 025 [Security model](#security-model)): there is no privileged per-device gate and no nonce; `queued_msg_id` is a plain per-conversation counter. All fields are always present (no omitempty). This section is wire vocabulary only; *when* the daemon emits `queue_state` and *how* the handler applies `dequeue_message` is the producer's (#722) / handler's (#723) runtime, documented there.
+A phone that types while claude is busy has its turn buffered in the daemon's queued-message backlog (#597 Phase 3, `internal/msgqueue`). `queue_state` (view) lets the phone see that backlog, `dequeue_message` (cancel) lets it drop an entry it no longer wants, and `send_queued_now` (#2729, accelerate) lets it write an entry into the running turn instead of waiting for idle. Like answering in the [Modal](#modal-v2) cluster since **#2605**, **viewing, dequeuing and sending-now are all ungated for any paired (authenticated) phone** (ADR 025 [Security model](#security-model)): there is no privileged per-device gate and no nonce; `queued_msg_id` is a plain per-conversation counter. All fields are always present (no omitempty). This section is wire vocabulary only; *when* the daemon emits `queue_state` and *how* the handlers apply `dequeue_message` / `send_queued_now` is the producer's (#722) / handlers' (#723, #2729) runtime, documented there.
 
 #### `queue_state`
 
@@ -3225,6 +3226,19 @@ Direction **phone → binary** (inbound v2 control). Intercepted by the v2 sessi
 |---|---|---|
 | `conversation_id` | string | The conversation to dequeue from. Untrusted phone input — the handler (#723) resolves it to an authorized conversation. |
 | `queued_msg_id` | integer | The id to remove (the `queued_msg_id` from a `queue_state` entry). |
+
+#### `send_queued_now`
+
+Direction **phone → binary** (inbound v2 control; #2729). Intercepted by the v2 session manager before `dispatch.Route` — it is not a `dispatch.Route` handler. Same fields, same ungated-for-any-paired-client-on-an-interactive-connection posture, and the same no-reply shape as [`dequeue_message`](#dequeue_message): resolving `conversation_id` and applying the write is the handler's job.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | The conversation holding the message. Untrusted phone input — the handler resolves it to an authorized conversation. |
+| `queued_msg_id` | integer | The id to write now (the `queued_msg_id` from a `queue_state` entry). |
+
+It asks the daemon to write the named queued message into that conversation's **currently running** turn instead of waiting for the ordinary drain to reach idle. There is no dedicated reply: the client observes the effect the same way it observes a `dequeue_message` — the entry drops out of the next [`queue_state`](#queue_state) push, and, when the message is the operator's own, the live `message` push the daemon makes for every delivered queued message (#2699) fires too.
+
+It is a **no-op**, with the backlog left exactly as it was, whenever: the conversation's turn is idle (the ordinary drain will deliver it, in FIFO order, same as if nothing had happened); `queued_msg_id` is unknown or already delivered; the message is the current head and its idle delivery has already begun committing; the connection has not negotiated the `interactive` capability; or the conversation's session is Codex, whose write path always starts a new turn rather than feeding a running one. The write is **delivered** at the point the daemon's stdin write to the running child succeeds — the same point an ordinary idle delivery is confirmed — and, like every delivery on this wire, it is **not retried** if the child dies after that write and before claude reads it.
 
 ### Interrupt (v2)
 

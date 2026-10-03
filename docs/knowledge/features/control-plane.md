@@ -253,6 +253,8 @@ A post now leads the next user turn the daemon delivers for that conversation's 
 
 **Why the growth bound refuses the newest post instead of evicting the oldest is a concurrency-correctness finding, not a style choice** — see [conversations-registry-crud.md § `AppendPendingChannelPost`...](conversations-registry-crud.md#appendpendingchannelpost--pendingchannelposts--clearpendingchannelposts-2499).
 
+**`clearDelivered` gained a second caller it must not clear for (#2729).** `send_queued_now`'s `SendNow` write goes around `carryPending` entirely — it writes the queue's waiting-head-or-not entry it was told to, not the conversation's composed head, so it never carried a pending post. `msgqueue.QueuedMessage.SentNow` is the one field `clearDelivered` reads to tell the two deliveries apart; a send-now delivery returns immediately, leaving the composed count to be cleared by the waiting head's own eventual confirmation. See [msgqueue-package-send-now.md](msgqueue-package-send-now.md).
+
 See `docs/specs/architecture/2499-carry-posted-channel-message.md` for the full design and security review.
 
 ## Process-Global vs Per-Session

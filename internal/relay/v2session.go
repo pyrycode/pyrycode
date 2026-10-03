@@ -974,6 +974,16 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 		case protocol.TypeDequeueMessage:
 			m.handleDequeueMessage(s, probeEnv)
 			return
+		case protocol.TypeSendQueuedNow:
+			// The write is a plain stdin pipe write with no deadline, so it runs on
+			// this conn's worker rather than here: a child not reading its stdin
+			// stalls one conn's frames, never the Run loop. The capability gate stays
+			// on Run, so a non-interactive peer never queues work (#2729).
+			if !s.interactive {
+				return
+			}
+			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameSendQueuedNow})
+			return
 		case protocol.TypeRequestDebugBundle:
 			m.handleDebugBundleRequest(ctx, s, probeEnv)
 			return
@@ -1207,6 +1217,7 @@ const (
 	// appFrameWorkspaceFileRead is the live workspace markdown read (#2598) —
 	// the retrieval arm's shape, over a file read live rather than a stored copy.
 	appFrameWorkspaceFileRead
+	appFrameSendQueuedNow
 )
 
 // appFrameWorker is the per-conn sub-actor that runs application handlers
@@ -1254,6 +1265,8 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 			default:
 			}
 			switch job.kind {
+			case appFrameSendQueuedNow:
+				m.handleSendQueuedNow(s, job.plaintext)
 			case appFrameAttachmentChunk:
 				// The upload path (#1897). Runs here rather than in
 				// routeAppFrame because it neither builds an outbound channel

@@ -142,6 +142,7 @@ var inboundTypes = map[string]string{
 	"TypeInterrupt":              "switch-intercepted",
 	"TypeNewSession":             "switch-intercepted",
 	"TypeDequeueMessage":         "switch-intercepted",
+	"TypeSendQueuedNow":          "switch-intercepted",
 	"TypeRequestDebugBundle":     "switch-intercepted",
 	"TypeSetSessionSettings":     "switch-intercepted",
 	"TypeRequestSessionSettings": "switch-intercepted",

@@ -168,6 +168,14 @@ type DeliveredFunc func(convID string, msg QueuedMessage)
 // counts toward the give-up bound (pre-#1014 behaviour). #1014 AC-1.
 type PendingFunc func(error) bool
 
+// SendNowFunc is the injected send-now seam (#2729): it writes a queued message's
+// delivery payload into the conversation's RUNNING turn, without waiting for idle.
+// It must write nothing and return an error when the write does not belong there
+// (the turn is idle, the session cannot take input mid-turn, no live child), and
+// return nil only once the write has succeeded — the same point at which an idle
+// delivery is confirmed. It is called with q.mu released.
+type SendNowFunc func(ctx context.Context, convID string, payload []byte) error
+
 // Config configures a Queue.
 type Config struct {
 	// Deliver is the reliable-delivery seam; required. New errors if it is nil.
@@ -201,6 +209,8 @@ type Config struct {
 	// leak into the held window. nil ⇒ every non-nil delivery error counts
 	// (pre-#1014 behaviour). #1014 AC-1.
 	Pending PendingFunc
+	// SendNow is the optional send-now seam; nil ⇒ SendNow is inert (#2729).
+	SendNow SendNowFunc
 	// Logger; nil ⇒ slog.Default().
 	Logger *slog.Logger
 }
@@ -233,6 +243,11 @@ type Config struct {
 // time the handler already parsed and normalised to UTC, never the client's raw
 // bytes, and zero when the client sent none. Like AttachmentIDs, only the
 // delivered projection sets them, and nothing here reads or logs them.
+//
+// SentNow (#2729) is true only on the delivered projection of a message SendNow
+// wrote into a running turn rather than the drain at idle. It is what lets an
+// OnDelivered consumer that pairs with the drain's own delivery seam — the
+// channel carry's clear — tell a delivery it did not compose apart from one it did.
 type QueuedMessage struct {
 	ID            uint64
 	MessageID     string
@@ -242,6 +257,7 @@ type QueuedMessage struct {
 	DeviceName    string
 	ClientVersion string
 	ClientSentAt  time.Time
+	SentNow       bool
 }
 
 // queued is one buffered inbound message: the stable per-conversation id, the
@@ -302,6 +318,10 @@ type convQueue struct {
 	draining      bool
 	committing    bool               // the head is past the idle-gate wait and is being written; un-droppable
 	deliverCancel context.CancelFunc // cancels the in-flight delivery ctx; nil when no delivery is in flight
+	// headTaken is set when SendNow takes the head out during an in-flight attempt.
+	// The drain books that attempt as a clean drop even when a failed send-now has
+	// already put the head back by the time the drain re-locks (#2729).
+	headTaken bool
 }
 
 // Queue is a per-conversation, in-memory inbound message backlog with one serial
@@ -316,6 +336,7 @@ type Queue struct {
 	onGiveUp    GiveUpFunc    // nil ⇒ give-up notification disabled
 	onDelivered DeliveredFunc // nil ⇒ delivered notification disabled
 	pending     PendingFunc   // nil ⇒ no delivery error is treated as a hold
+	sendNow     SendNowFunc   // nil ⇒ SendNow is inert
 	log         *slog.Logger
 
 	mu      sync.Mutex
@@ -359,6 +380,7 @@ func New(cfg Config) (*Queue, error) {
 		onGiveUp:    cfg.OnGiveUp,
 		onDelivered: cfg.OnDelivered,
 		pending:     cfg.Pending,
+		sendNow:     cfg.SendNow,
 		log:         log,
 		convs:       make(map[string]*convQueue),
 	}, nil
@@ -605,6 +627,96 @@ func (q *Queue) Remove(convID string, id uint64) bool {
 	return true
 }
 
+// SendNow writes the queued message id into convID's running turn through the
+// SendNow seam instead of waiting for the drain, and returns true iff it was
+// delivered (#2729). On success the message has left the backlog, OnChange fires
+// for the queue_state without it, and OnDelivered fires once with SentNow set.
+//
+// It is a no-op returning false, with the backlog unchanged, for a nil seam, an
+// unknown conversation, an unknown or already-delivered id, and the head while its
+// idle delivery is committing — the same refusal Remove makes, decided under the
+// same lock, so a committed idle delivery always wins. A seam error (the turn is
+// idle, the session cannot take input mid-turn, no live child) also returns false
+// and puts the message back at its original position, where the drain delivers it
+// at idle as if nothing had happened.
+//
+// THE MESSAGE IS TAKEN OUT OF THE FIFO FOR THE DURATION OF THE WRITE. That is what
+// settles every race against it with code that already exists: a concurrent Remove
+// cannot find it, and a waiting head taken this way is no longer at the front, so
+// commitGate refuses its in-flight attempt and the drain treats it as dropped —
+// exactly the dequeue path. Taking the waiting head cancels that attempt, as Remove
+// does, so the drain moves on to the next head and waits for idle with it. The
+// take also sets headTaken, so a failed write that puts the head back before the
+// drain re-locks still reads as that clean drop, never as a delivery failure that
+// would start the head's give-up clock.
+//
+// The write runs with q.mu released, on the caller's goroutine. Nothing here logs
+// the text, the delivery payload or the client's message id.
+func (q *Queue) SendNow(convID string, id uint64) bool {
+	if q.sendNow == nil {
+		return false
+	}
+	q.mu.Lock()
+	c := q.convs[convID]
+	if c == nil {
+		q.mu.Unlock()
+		return false
+	}
+	idx := slices.IndexFunc(c.items, func(m queued) bool { return m.id == id })
+	if idx == -1 || (idx == 0 && c.committing) {
+		q.mu.Unlock()
+		return false
+	}
+	m := c.items[idx]
+	var cancel context.CancelFunc
+	if idx == 0 {
+		cancel = c.deliverCancel
+		c.headTaken = cancel != nil
+	}
+	c.items = slices.Delete(c.items, idx, idx+1)
+	c.shrinkLocked()
+	ctx := q.ctx
+	q.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := q.sendNow(ctx, convID, []byte(m.delivery)); err != nil {
+		q.reinsert(convID, m)
+		return false
+	}
+	q.notify(convID)
+	q.notifyDelivered(convID, m, true)
+	return true
+}
+
+// reinsert puts back a message SendNow took out and failed to write, at its
+// original position: ids are assigned in enqueue order, so the first item with a
+// larger id is the one it used to precede. It never goes in front of a head the
+// drain is committing — that head's advance is keyed on its id being at the front
+// — so in that one case it lands second instead. A drain that exited while the
+// FIFO was empty is respawned.
+func (q *Queue) reinsert(convID string, m queued) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	c := q.convs[convID]
+	if c == nil {
+		return
+	}
+	pos := slices.IndexFunc(c.items, func(o queued) bool { return o.id > m.id })
+	if pos == -1 {
+		pos = len(c.items)
+	}
+	if pos == 0 && c.committing && len(c.items) > 0 {
+		pos = 1
+	}
+	c.items = slices.Insert(c.items, pos, m)
+	q.maybeSpawnDrainLocked(convID, c)
+}
+
 // commitGate returns the turncommit.Gate the drain passes down the delivery ctx
 // for the head identified by headID. The delivery seam calls it once, after the
 // idle-gate wait and before the write. Under q.mu it CLAIMS the head — marking it
@@ -652,10 +764,10 @@ func (q *Queue) notifyGiveUp(convID, reason string) {
 // Snapshot and SnapshotAll build, so the delivery payload is left behind at this
 // boundary by the type's own shape rather than by a filter here. m is a value
 // copy the drain already holds, so nothing is read from the FIFO off-lock.
-func (q *Queue) notifyDelivered(convID string, m queued) {
+func (q *Queue) notifyDelivered(convID string, m queued, sentNow bool) {
 	if q.onDelivered != nil {
 		q.onDelivered(convID, QueuedMessage{ID: m.id, MessageID: m.messageID, Text: m.text, TS: m.ts, AttachmentIDs: m.attachmentIDs,
-			DeviceName: m.deviceName, ClientVersion: m.clientVersion, ClientSentAt: m.clientSentAt})
+			DeviceName: m.deviceName, ClientVersion: m.clientVersion, ClientSentAt: m.clientSentAt, SentNow: sentNow})
 	}
 }
 
@@ -737,6 +849,7 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 		deliverCtx, cancelDeliver := context.WithCancel(ctx)
 		c.committing = false
 		c.deliverCancel = cancelDeliver
+		c.headTaken = false
 		q.mu.Unlock()
 
 		gate := q.commitGate(convID, head.id)
@@ -749,8 +862,12 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 		c.deliverCancel = nil
 		c.committing = false
 		// A drop during the idle-gate wait removed this head from the FIFO (and
-		// canceled the delivery above), so it is neither advanced nor retried.
-		dropped := len(c.items) == 0 || c.items[0].id != head.id
+		// canceled the delivery above), so it is neither advanced nor retried. A
+		// send-now take of this head cancelled the attempt the same way, so it is a
+		// drop too, even if a failed send-now has put the head back: the next
+		// iteration re-peeks it with a fresh clock rather than booking a failure.
+		dropped := len(c.items) == 0 || c.items[0].id != head.id || c.headTaken
+		c.headTaken = false
 		q.mu.Unlock()
 
 		if ctx.Err() != nil {
@@ -776,7 +893,7 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 			// that already happened — the text reached claude's stdin and will be
 			// answered. This is also the only branch that fires it: a head dropped
 			// before it committed, or abandoned by giveUp, was never written.
-			q.notifyDelivered(convID, head)
+			q.notifyDelivered(convID, head, false)
 
 			// A confirmed-delivered head left the backlog. Reset the give-up clock so
 			// the next head starts with a fresh bound. Fire after unlock, and only if
