@@ -162,6 +162,12 @@ func TestSplitArgs(t *testing.T) {
 			wantClaude: nil,
 		},
 		{
+			name:       "repeated read-folder flag, separate and glued",
+			args:       []string{"-pyry-read-folder", "/vault", "-pyry-read-folder=/notes", "summarize"},
+			wantPyry:   []string{"-pyry-read-folder", "/vault", "-pyry-read-folder=/notes"},
+			wantClaude: []string{"summarize"},
+		},
+		{
 			name:       "pyry flag then claude flags",
 			args:       []string{"-pyry-verbose", "--model", "sonnet"},
 			wantPyry:   []string{"-pyry-verbose"},

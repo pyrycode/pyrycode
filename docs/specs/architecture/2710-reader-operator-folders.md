@@ -92,3 +92,7 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-03
+
+## Revisions
+
+- 2026-10-03 (build): steps 3–5 of the reader's order live in a named helper, `confineToAnyRoot(workspace, folders, path)`, rather than inline in `workspaceFileReader`, so the root-trying rule reads as one unit. Contract unchanged. Open question settled: `TestSplitArgs` is table-driven and took a row for `-pyry-read-folder` in both spellings.
