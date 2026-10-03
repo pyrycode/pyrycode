@@ -818,3 +818,36 @@ func TestMtuFixtureWorthy(t *testing.T) {
 		}
 	}
 }
+
+// TestMtuCommittedFixture reads every committed capture back through the record
+// type: a field the type no longer carries, a record the promotion gate would now
+// refuse, or a file named for another version fails here rather than in the
+// ticket that first reads the fixture.
+func TestMtuCommittedFixture(t *testing.T) {
+	t.Parallel()
+	paths, err := filepath.Glob(mtuFixtureGlob)
+	if err != nil {
+		t.Fatalf("glob %s: %v", mtuFixtureGlob, err)
+	}
+	for _, path := range paths {
+		blob, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		dec := json.NewDecoder(bytes.NewReader(blob))
+		dec.DisallowUnknownFields()
+		var rec mtuRecord
+		if err := dec.Decode(&rec); err != nil {
+			t.Errorf("%s does not decode as the record type: %v", path, err)
+			continue
+		}
+		version, reason, ok := rec.fixtureWorthy()
+		if !ok {
+			t.Errorf("%s would not be promoted today: %s", path, reason)
+			continue
+		}
+		if path != mtuFixturePath(version) {
+			t.Errorf("%s holds a capture of claude %s", path, version)
+		}
+	}
+}
