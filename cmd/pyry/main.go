@@ -1024,12 +1024,20 @@ func runSupervisor(args []string) error {
 	// typed, client-visible session_error frame instead of a silently dropped head.
 	giveUps := make(chan giveUpNotice, sessionErrorQueueSize)
 	// blocked is the session_error notify closure (a non-blocking, drop-on-full
-	// send into giveUps), and msgqueue's give-up path is its only sender, as
+	// send into giveUps), and msgqueue's give-up path is its only caller, as
 	// OnGiveUp. #1014 gave it a second one, the modal resolver surfacing a
 	// folder-not-trusted session_error on a trust deny; that sender was removed
 	// deliberately (#1545), because trust is settled by trustMark before every
 	// spawn and no trust modal can reach the resolver since #1348.
 	blocked := sessionErrorNotify(giveUps, logger)
+	// The second sender into giveUps (#2724): a stream runner whose claude keeps
+	// exiting at startup reports its crash episode as a non-terminal
+	// session.child_crashing. Installed on the sink after the pool exists because the
+	// factory captured the sink before this channel did; it is set before pool.Run,
+	// and the sink loads it atomically at fire time.
+	streamSink.setCrashLoopNotify(childCrashingNotify(giveUps, func(sid string) (string, bool) {
+		return conversationForSession(convReg, sid)
+	}, logger))
 	// approvalParked is the third value in this block built BEFORE msgqueue.New for
 	// the same chicken-and-egg reason as queueChanges and giveUps: it carries #1919's
 	// ApprovalParked report to the Pending gate below, and the bridge that answers

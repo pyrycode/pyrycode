@@ -22,13 +22,21 @@ import (
 // exit->respawn.
 const sessionErrorQueueSize = 16
 
-// giveUpNotice is the hand-off value the OnGiveUp seam sends to the emitter's Run
-// goroutine. Unlike queue_state — whose channel carries a bare convID because the
-// consumer re-reads current state via Snapshot — the give-up reason is a one-shot
-// edge value that cannot be recovered by re-reading queue state (AC-4), so it
-// rides the channel alongside the id. Same struct-channel shape as
+// giveUpNotice is the hand-off value the two session_error producers send to the
+// emitter's Run goroutine: msgqueue's OnGiveUp seam (sessionErrorNotify) and the
+// runners' crash-episode hook (childCrashingNotify, #2724). Unlike queue_state —
+// whose channel carries a bare convID because the consumer re-reads current state
+// via Snapshot — the reason is a one-shot edge value that cannot be recovered by
+// re-reading queue state (AC-4), so it rides the channel alongside the id. code is
+// the wire code the producer chose; each producer sets its own constant, and
+// neither takes it from its caller. Same struct-channel shape as
 // sessionTransitionEmitterV2.in.
-type giveUpNotice struct{ convID, reason string }
+type giveUpNotice struct{ convID, code, reason string }
+
+// childCrashingMessage is the fixed prose a session.child_crashing frame carries.
+// It is a constant so that nothing from the child — its stderr, its argv, its exit
+// status — and nothing from the queue can reach the wire through this producer.
+const childCrashingMessage = "Claude keeps exiting as soon as it starts for this conversation. The daemon is still restarting it, and queued messages are kept."
 
 // sessionErrorEmitterV2 fans a session_error v2 envelope to every open
 // INTERACTIVE conn when the message queue gives up delivering a conversation's
@@ -99,9 +107,39 @@ func newSessionErrorEmitterV2(in <-chan giveUpNotice, logger *slog.Logger) *sess
 func sessionErrorNotify(ch chan<- giveUpNotice, logger *slog.Logger) msgqueue.GiveUpFunc {
 	return func(convID, reason string) {
 		select {
-		case ch <- giveUpNotice{convID: convID, reason: reason}:
+		case ch <- giveUpNotice{convID: convID, code: protocol.CodeSessionBlocked, reason: reason}:
 		default:
 			logger.Warn("relay: session-error give-up queue full; dropping notification",
+				"event", "session_error.queue_full",
+				"conversation_id", convID)
+		}
+	}
+}
+
+// childCrashingNotify builds the crash-episode seam the stream runners fire through
+// streamTurnSink.crashLoopForTag (#2724): it resolves the session id to its
+// conversation, then does a non-blocking send of a session.child_crashing notice
+// carrying childCrashingMessage. It runs on a runner's supervision goroutine, which
+// streamsup.Config.OnCrashLoop forbids blocking, so a full channel drops with a
+// content-free Warn exactly as sessionErrorNotify does; the notice is one-shot per
+// crash episode and msgqueue's give-up still follows if delivery never recovers.
+//
+// A session no conversation owns has no client to tell, so it is dropped with a
+// Warn too: a crash loop nobody can hear about is what an operator needs to see at
+// the default level.
+func childCrashingNotify(ch chan<- giveUpNotice, resolve func(sessionID string) (string, bool), logger *slog.Logger) func(sessionID string) {
+	return func(sessionID string) {
+		convID, ok := resolve(sessionID)
+		if !ok {
+			logger.Warn("relay: child-crashing notice for a session no conversation owns; dropping",
+				"event", "session_error.child_crashing_unbound",
+				"session_id", sessionID)
+			return
+		}
+		select {
+		case ch <- giveUpNotice{convID: convID, code: protocol.CodeSessionChildCrashing, reason: childCrashingMessage}:
+		default:
+			logger.Warn("relay: session-error queue full; dropping child-crashing notification",
 				"event", "session_error.queue_full",
 				"conversation_id", convID)
 		}
@@ -127,20 +165,19 @@ func (e *sessionErrorEmitterV2) Run(ctx context.Context, bcast interactiveBroadc
 	}
 }
 
-// broadcast builds the session_error payload from the give-up notice, marshals it
-// once, then fans a session_error envelope to every currently-open INTERACTIVE
-// conn. Its only inputs are the notice's daemon-resolved convID and
-// daemon-generated reason; the terminal Code is the fixed CodeSessionBlocked
-// constant this producer stamps (the seam carries no code field) — distinct from
-// the transient CodeServerBinaryBusy so a client cannot read the frame as "retry
-// shortly" (AC-2). The producer holds no queue handle, so no queued text can
+// broadcast builds the session_error payload from the notice, marshals it once,
+// then fans a session_error envelope to every currently-open INTERACTIVE conn. Its
+// only inputs are the notice's daemon-resolved convID, the code its producer
+// stamped (CodeSessionBlocked or CodeSessionChildCrashing, each a fixed constant
+// at its send site, neither the transient CodeServerBinaryBusy, so a client cannot
+// read the frame as "retry shortly", AC-2) and the daemon-generated reason. The producer holds no queue handle, so no queued text can
 // enter the payload (AC-3). A per-conn Push error is logged at DEBUG and the loop
 // continues — a dropped conn must not abort the others (it misses this one-shot
 // edge; no replay); ctx-cancel mid-fan-out returns early.
 func (e *sessionErrorEmitterV2) broadcast(ctx context.Context, bcast interactiveBroadcaster, n giveUpNotice) {
 	payload := protocol.SessionErrorPayload{
 		ConversationID: n.convID,
-		Code:           protocol.CodeSessionBlocked,
+		Code:           n.code,
 		Message:        n.reason,
 	}
 	payloadJSON, err := json.Marshal(payload)

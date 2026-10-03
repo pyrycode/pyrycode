@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -43,7 +44,7 @@ func TestSessionErrorEmitterV2_Broadcast_FansOnePerInteractiveConn(t *testing.T)
 	)
 	e := newSessionErrorEmitterV2(nil, discardLogger())
 
-	e.broadcast(context.Background(), bcast, giveUpNotice{convID: "conv-A", reason: "wedged at startup"})
+	e.broadcast(context.Background(), bcast, giveUpNotice{convID: "conv-A", code: protocol.CodeSessionBlocked, reason: "wedged at startup"})
 
 	if len(bcast.pushes) != 2 {
 		t.Fatalf("want 2 pushes, got %d", len(bcast.pushes))
@@ -79,7 +80,7 @@ func TestSessionErrorEmitterV2_Broadcast_SkipsNonInteractive(t *testing.T) {
 	)
 	e := newSessionErrorEmitterV2(nil, discardLogger())
 
-	e.broadcast(context.Background(), bcast, giveUpNotice{convID: "conv-A", reason: "r"})
+	e.broadcast(context.Background(), bcast, giveUpNotice{convID: "conv-A", code: protocol.CodeSessionBlocked, reason: "r"})
 
 	if len(bcast.pushes) != 2 {
 		t.Fatalf("want 2 pushes (interactive only), got %d", len(bcast.pushes))
@@ -100,7 +101,7 @@ func TestSessionErrorEmitterV2_Broadcast_StampsTerminalCode(t *testing.T) {
 	e := newSessionErrorEmitterV2(nil, discardLogger())
 
 	// A reason that mentions "busy" must NOT flip the terminal code.
-	e.broadcast(context.Background(), bcast, giveUpNotice{convID: "conv-A", reason: "server was busy"})
+	e.broadcast(context.Background(), bcast, giveUpNotice{convID: "conv-A", code: protocol.CodeSessionBlocked, reason: "server was busy"})
 
 	got := decodeSessionError(t, bcast.pushes[0].env)
 	if got.Code != protocol.CodeSessionBlocked {
@@ -120,7 +121,7 @@ func TestSessionErrorEmitterV2_Broadcast_MessageVerbatim(t *testing.T) {
 	bcast := oneInteractiveConn("c1")
 	e := newSessionErrorEmitterV2(nil, discardLogger())
 
-	e.broadcast(context.Background(), bcast, giveUpNotice{convID: "conv-A", reason: reason})
+	e.broadcast(context.Background(), bcast, giveUpNotice{convID: "conv-A", code: protocol.CodeSessionBlocked, reason: reason})
 
 	got := decodeSessionError(t, bcast.pushes[0].env)
 	if got.Message != reason {
@@ -140,7 +141,7 @@ func TestSessionErrorEmitterV2_Broadcast_PushErrorContinuesLoop(t *testing.T) {
 	bcast.pushErr = map[string]error{"c1": context.Canceled}
 	e := newSessionErrorEmitterV2(nil, discardLogger())
 
-	e.broadcast(context.Background(), bcast, giveUpNotice{convID: "conv-A", reason: "r"})
+	e.broadcast(context.Background(), bcast, giveUpNotice{convID: "conv-A", code: protocol.CodeSessionBlocked, reason: "r"})
 
 	// All three are attempted (the failing c1 is recorded too); c2 and c3 succeed.
 	got := pushTypes(bcast.pushes)
@@ -207,6 +208,9 @@ func TestSessionErrorNotify_DeliversFullNotice(t *testing.T) {
 		}
 		if got.reason != "blocked by an unexpected startup dialog" {
 			t.Errorf("reason = %q, want the full one-shot reason", got.reason)
+		}
+		if got.code != protocol.CodeSessionBlocked {
+			t.Errorf("code = %q, want %q — the give-up stays terminal", got.code, protocol.CodeSessionBlocked)
 		}
 	default:
 		t.Fatal("notify did not deliver the notice to the channel")
@@ -294,4 +298,115 @@ func TestSessionErrorEmitterV2_Run_ConcurrentNotify(t *testing.T) {
 
 	cancel()
 	cleanup()
+}
+
+// #2724: the crash-episode notice reaches the wire with its own code and the fixed
+// prose, through the same broadcast the give-up uses.
+func TestSessionErrorEmitterV2_Broadcast_StampsChildCrashingCode(t *testing.T) {
+	t.Parallel()
+	bcast := bcastConns(
+		relay.ActiveConn{ConnID: "c1", Interactive: true},
+		relay.ActiveConn{ConnID: "c2"},
+	)
+	e := newSessionErrorEmitterV2(nil, discardLogger())
+
+	e.broadcast(context.Background(), bcast, giveUpNotice{convID: "conv-A", code: protocol.CodeSessionChildCrashing, reason: childCrashingMessage})
+
+	if len(bcast.pushes) != 1 {
+		t.Fatalf("want 1 push (interactive conn only), got %d", len(bcast.pushes))
+	}
+	got := decodeSessionError(t, bcast.pushes[0].env)
+	if got.Code != protocol.CodeSessionChildCrashing {
+		t.Errorf("code = %q, want %q", got.Code, protocol.CodeSessionChildCrashing)
+	}
+	if got.Code == protocol.CodeSessionBlocked {
+		t.Error("child-crashing notice must not read as the terminal give-up")
+	}
+	if got.ConversationID != "conv-A" || got.Message != childCrashingMessage {
+		t.Errorf("payload = %+v, want conv-A with the fixed message", got)
+	}
+}
+
+func TestChildCrashingNotify(t *testing.T) {
+	t.Parallel()
+	owners := map[string]string{"sess-1": "conv-A"}
+	resolve := func(sid string) (string, bool) {
+		conv, ok := owners[sid]
+		return conv, ok
+	}
+
+	t.Run("resolved session sends the fixed notice", func(t *testing.T) {
+		t.Parallel()
+		ch := make(chan giveUpNotice, 1)
+		childCrashingNotify(ch, resolve, discardLogger())("sess-1")
+		select {
+		case got := <-ch:
+			want := giveUpNotice{convID: "conv-A", code: protocol.CodeSessionChildCrashing, reason: childCrashingMessage}
+			if got != want {
+				t.Errorf("notice = %+v, want %+v", got, want)
+			}
+		default:
+			t.Fatal("no notice sent for a session a conversation owns")
+		}
+	})
+
+	t.Run("unowned session sends nothing", func(t *testing.T) {
+		t.Parallel()
+		var buf bytes.Buffer
+		ch := make(chan giveUpNotice, 1)
+		childCrashingNotify(ch, resolve, slog.New(slog.NewTextHandler(&buf, nil)))("sess-unknown")
+		select {
+		case got := <-ch:
+			t.Fatalf("notice = %+v sent for an unowned session, want none", got)
+		default:
+		}
+		if !strings.Contains(buf.String(), "child_crashing_unbound") {
+			t.Errorf("missing unbound warn; logs = %q", buf.String())
+		}
+	})
+
+	t.Run("full channel drops without blocking or logging the message", func(t *testing.T) {
+		t.Parallel()
+		var buf bytes.Buffer
+		ch := make(chan giveUpNotice, 1)
+		ch <- giveUpNotice{convID: "conv-other"}
+		done := make(chan struct{})
+		go func() {
+			childCrashingNotify(ch, resolve, slog.New(slog.NewTextHandler(&buf, nil)))("sess-1")
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("childCrashingNotify blocked on a full channel")
+		}
+		logs := buf.String()
+		if !strings.Contains(logs, "queue_full") || !strings.Contains(logs, "conv-A") {
+			t.Errorf("drop warn should carry the event and conversation_id; logs = %q", logs)
+		}
+		if strings.Contains(logs, childCrashingMessage) {
+			t.Errorf("drop warn must not log the message; logs = %q", logs)
+		}
+	})
+}
+
+// #2724: the runner hook the factory installs is inert until main sets the
+// producer, and then reports the tag's LIVE id, which RestartFresh moves.
+func TestStreamTurnSink_CrashLoopForTag(t *testing.T) {
+	t.Parallel()
+	sink := newStreamTurnSink(1, discardLogger())
+	tag := newStreamSessionTag("sess-old")
+	hook := sink.crashLoopForTag(tag.ID)
+
+	hook() // unset: must be a no-op, not a nil call
+
+	var got []string
+	sink.setCrashLoopNotify(func(sid string) { got = append(got, sid) })
+	hook()
+	tag.Rotate("sess-new")
+	hook()
+
+	if want := []string{"sess-old", "sess-new"}; !slices.Equal(got, want) {
+		t.Errorf("notified ids = %v, want %v", got, want)
+	}
 }
