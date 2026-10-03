@@ -145,6 +145,46 @@ func TestQueue_OnDelivered_CarriesAttachmentIDsCopiedOnEntry(t *testing.T) {
 	}
 }
 
+// #2704: EnqueueSent stores who sent the message and the client's tap time on
+// the record, and the delivered projection carries them unchanged. The control
+// message enqueued through EnqueueAttached carries none of them, so the values
+// are per-record rather than leaking from one message to the next.
+func TestQueue_OnDelivered_CarriesSender(t *testing.T) {
+	t.Parallel()
+	f := newFakeDeliver()
+	rec := newDeliveredRecorder()
+	q, err := New(Config{Deliver: f.deliver, OnDelivered: rec.onDelivered})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	sentAt := time.Date(2026, 10, 2, 9, 30, 15, 123000000, time.UTC)
+	if id := q.EnqueueSent("conv-a", deliveredMsgID, deliveredText, deliveredText, nil, "desktop", "pyrycode-desktop/0.9.1", sentAt); id != 1 {
+		t.Fatalf("EnqueueSent id = %d, want 1", id)
+	}
+	if id := q.EnqueueAttached("conv-a", "second", "second", "second", nil); id != 2 {
+		t.Fatalf("EnqueueAttached id = %d, want 2", id)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = q.Run(ctx) }()
+	recvWithin(t, rec.fired, "the first delivered seam")
+	recvWithin(t, rec.fired, "the second delivered seam")
+
+	_, msgs := rec.calls()
+	if len(msgs) != 2 {
+		t.Fatalf("OnDelivered fired %d times, want 2", len(msgs))
+	}
+	got := msgs[0]
+	if got.DeviceName != "desktop" || got.ClientVersion != "pyrycode-desktop/0.9.1" || !got.ClientSentAt.Equal(sentAt) {
+		t.Errorf("first message sender = (%q, %q, %v), want (%q, %q, %v)",
+			got.DeviceName, got.ClientVersion, got.ClientSentAt, "desktop", "pyrycode-desktop/0.9.1", sentAt)
+	}
+	if got := msgs[1]; got.DeviceName != "" || got.ClientVersion != "" || !got.ClientSentAt.IsZero() {
+		t.Errorf("second message sender = (%q, %q, %v), want all empty", got.DeviceName, got.ClientVersion, got.ClientSentAt)
+	}
+}
+
 // AC 4: the drain retries the same head after a failure, and only the attempt
 // that is CONFIRMED fires the seam — one entry per message, never one per
 // attempt.

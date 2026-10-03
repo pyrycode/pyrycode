@@ -95,6 +95,9 @@ type enqueueCall struct {
 	text          string
 	delivery      string
 	attachmentIDs []string
+	deviceName    string
+	clientVersion string
+	clientSentAt  time.Time
 }
 
 // fakeEnqueuer is the test double for Enqueuer. It records every (convID, text)
@@ -109,8 +112,9 @@ type fakeEnqueuer struct {
 	reject bool
 }
 
-func (f *fakeEnqueuer) EnqueueAttached(convID, messageID, text, delivery string, attachmentIDs []string) uint64 {
-	f.calls = append(f.calls, enqueueCall{convID: convID, messageID: messageID, text: text, delivery: delivery, attachmentIDs: attachmentIDs})
+func (f *fakeEnqueuer) EnqueueSent(convID, messageID, text, delivery string, attachmentIDs []string, deviceName, clientVersion string, clientSentAt time.Time) uint64 {
+	f.calls = append(f.calls, enqueueCall{convID: convID, messageID: messageID, text: text, delivery: delivery, attachmentIDs: attachmentIDs,
+		deviceName: deviceName, clientVersion: clientVersion, clientSentAt: clientSentAt})
 	if f.reject {
 		return 0
 	}
@@ -279,8 +283,8 @@ func TestSendMessage_TwoConversations_EachEnqueuesIndependently(t *testing.T) {
 	// shape. That is legal and inert: the id addresses nothing, so it neither
 	// merges the two conversations' enqueues nor deduplicates them (#2092 AC 4).
 	want := []enqueueCall{
-		{convID: convA, messageID: sendMsgMessageID, text: textA, delivery: textA},
-		{convID: convB, messageID: sendMsgMessageID, text: textB, delivery: textB},
+		{convID: convA, messageID: sendMsgMessageID, text: textA, delivery: textA, deviceName: "phone"},
+		{convID: convB, messageID: sendMsgMessageID, text: textB, delivery: textB, deviceName: "phone"},
 	}
 	if len(q.calls) != len(want) {
 		t.Fatalf("Enqueue calls = %d, want %d", len(q.calls), len(want))
@@ -999,6 +1003,132 @@ func TestSendMessage_RelaysClientMessageIDVerbatim(t *testing.T) {
 			// The id must not have been sourced from, or clobbered, the text.
 			if q.calls[0].text != sendMsgText {
 				t.Errorf("enqueued text = %q, want %q", q.calls[0].text, sendMsgText)
+			}
+		})
+	}
+}
+
+// --- #2704: who sent a message, and when it was tapped ------------------------
+
+// TestSendMessage_ClientSentAt covers AC 3 at the handler: a parseable
+// client_sent_at reaches the queue as a UTC time and never as the client's
+// bytes, and every other shape — absent, not a string, not RFC 3339, a year that
+// would not re-format as RFC 3339 — reaches it as zero while the message is
+// still acked and enqueued exactly as without one.
+func TestSendMessage_ClientSentAt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		raw  string // "" sends no key
+		want time.Time
+	}{
+		{"absent", "", time.Time{}},
+		{"utc", `"2026-10-02T09:30:15Z"`, time.Date(2026, 10, 2, 9, 30, 15, 0, time.UTC)},
+		{"offset is normalised to utc", `"2026-10-02T12:30:15+03:00"`, time.Date(2026, 10, 2, 9, 30, 15, 0, time.UTC)},
+		{"fractional seconds survive", `"2026-10-02T09:30:15.123456Z"`, time.Date(2026, 10, 2, 9, 30, 15, 123456000, time.UTC)},
+		{"null", `null`, time.Time{}},
+		{"number", `1759397415`, time.Time{}},
+		{"object", `{"at":"2026-10-02T09:30:15Z"}`, time.Time{}},
+		{"not rfc 3339", `"yesterday at 9"`, time.Time{}},
+		{"date only", `"2026-10-02"`, time.Time{}},
+		{"empty string", `""`, time.Time{}},
+		{"year shifts below 1 in utc", `"0001-01-01T00:30:00+01:00"`, time.Time{}},
+		{"year 0000", `"0000-06-01T00:00:00Z"`, time.Time{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			router := &stubSessionRouter{tw: &stubTurnWriter{}}
+			q := &fakeEnqueuer{}
+			c, recv, _ := newSendMsgConn(t)
+			p := protocol.SendMessagePayload{ConversationID: sendMsgConvID, MessageID: sendMsgMessageID, Text: sendMsgText}
+			if tt.raw != "" {
+				p.ClientSentAt = json.RawMessage(tt.raw)
+			}
+
+			h := SendMessage(router, q, nil, nil, "", nil, nil, sendMsgLogger(t))
+			if err := h(context.Background(), c, sendMsgRequest(t, p)); err != nil {
+				t.Fatalf("handler: %v", err)
+			}
+			assertSendMsgEnvelopeShape(t, recv(), protocol.TypeAck)
+
+			if len(q.calls) != 1 {
+				t.Fatalf("Enqueue calls = %d, want 1", len(q.calls))
+			}
+			got := q.calls[0]
+			if !got.clientSentAt.Equal(tt.want) || got.clientSentAt.Location() != time.UTC {
+				t.Errorf("clientSentAt = %v (%v), want %v in UTC", got.clientSentAt, got.clientSentAt.Location(), tt.want)
+			}
+			if got.text != sendMsgText || got.delivery != sendMsgText {
+				t.Errorf("enqueued (text, delivery) = (%q, %q), want both %q", got.text, got.delivery, sendMsgText)
+			}
+		})
+	}
+}
+
+// TestSendMessage_EnqueuedLineNamesSender covers AC 1 and the handler half of
+// AC 2: the enqueue carries the pairing record's name and the connection's
+// version, and so does the enqueued log line — each key only when the conn has a
+// value. client_sent_at is never on the line.
+func TestSendMessage_EnqueuedLineNamesSender(t *testing.T) {
+	t.Parallel()
+	const sentAt = "2026-10-02T09:30:15Z"
+	tests := []struct {
+		name        string
+		auth        *devices.Device
+		wantName    string
+		wantVersion string
+	}{
+		{"name and version", &devices.Device{Name: "desktop", ClientVersion: "pyrycode-desktop/0.9.1"}, "desktop", "pyrycode-desktop/0.9.1"},
+		{"name only", &devices.Device{Name: "desktop"}, "desktop", ""},
+		{"no device record", nil, "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			router := &stubSessionRouter{tw: &stubTurnWriter{}}
+			q := &fakeEnqueuer{}
+			out := make(chan protocol.RoutingEnvelope, 4)
+			c := dispatch.NewTestConn(sendMsgConnIDForTest, out, tt.auth)
+			_ = c.NextID()
+			logger, buf := sendMsgCapturingLogger(t)
+			req := sendMsgRequest(t, protocol.SendMessagePayload{
+				ConversationID: sendMsgConvID,
+				MessageID:      sendMsgMessageID,
+				Text:           sendMsgText,
+				ClientSentAt:   json.RawMessage(`"` + sentAt + `"`),
+			})
+
+			h := SendMessage(router, q, nil, nil, "", nil, nil, logger)
+			if err := h(context.Background(), c, req); err != nil {
+				t.Fatalf("handler: %v", err)
+			}
+			if len(q.calls) != 1 {
+				t.Fatalf("Enqueue calls = %d, want 1", len(q.calls))
+			}
+			if got := q.calls[0]; got.deviceName != tt.wantName || got.clientVersion != tt.wantVersion {
+				t.Errorf("enqueued sender = (%q, %q), want (%q, %q)", got.deviceName, got.clientVersion, tt.wantName, tt.wantVersion)
+			}
+
+			var line string
+			for _, l := range strings.Split(buf.String(), "\n") {
+				if strings.Contains(l, "event=send_message.enqueued") {
+					line = l
+				}
+			}
+			if line == "" {
+				t.Fatalf("no send_message.enqueued line in %q", buf.String())
+			}
+			for key, want := range map[string]string{"device_name": tt.wantName, "client_version": tt.wantVersion} {
+				switch {
+				case want == "" && strings.Contains(line, key+"="):
+					t.Errorf("enqueued line carries %s with no value: %q", key, line)
+				case want != "" && !strings.Contains(line, key+"="+want):
+					t.Errorf("enqueued line lacks %s=%s: %q", key, want, line)
+				}
+			}
+			if strings.Contains(buf.String(), "client_sent_at") || strings.Contains(buf.String(), "2026-10-02T09:30:15") {
+				t.Errorf("the tap time reached the log: %q", buf.String())
 			}
 		})
 	}

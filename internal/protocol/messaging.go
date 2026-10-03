@@ -121,6 +121,13 @@ type SendMessagePayload struct {
 	MessageID      string   `json:"message_id"`
 	Text           string   `json:"text"`
 	AttachmentIDs  []string `json:"attachment_ids,omitempty"` // optional (#2036); every element is an unverified claim that becomes a path component — validate its canonical shape before use
+	// ClientSentAt is when the client says Send was tapped (#2704), on the
+	// client's own clock: optional, RFC 3339. Raw bytes rather than a string so a
+	// wrongly typed value cannot fail the whole decode — an unparseable value is
+	// dropped and the message is still accepted. Untrusted: SendMessage in
+	// internal/relay/handlers parses it and the daemon stores only its own
+	// re-formatting, never these bytes, and never logs it.
+	ClientSentAt json.RawMessage `json:"client_sent_at,omitempty"`
 }
 
 // UnmarshalJSON collapses the three empty wire forms — key absent, null, and []
@@ -179,12 +186,22 @@ func (p *SendMessagePayload) UnmarshalJSON(b []byte) error {
 // marshal exactly as they did before the field existed, and an older decoder
 // ignores the key. It carries ids only, never the on-host path the delivery
 // prompt names.
+//
+// DeviceName, ClientVersion and ClientSentAt are likewise set only on the stored
+// user entry (#2704): the pairing record's name for the device that sent it, the
+// app version that connection's hello reported (past sessions.AdmitClientVersion),
+// and the client's tap time as the daemon re-formatted it (UTC RFC 3339, client
+// clock, never used for ordering). Each is omitted when empty, so an entry from
+// an older client marshals exactly as before.
 type MessagePayload struct {
 	ConversationID string   `json:"conversation_id"`
 	MessageID      string   `json:"message_id"`
 	Role           string   `json:"role"`
 	Text           string   `json:"text"`
 	AttachmentIDs  []string `json:"attachment_ids,omitempty"`
+	DeviceName     string   `json:"device_name,omitempty"`
+	ClientVersion  string   `json:"client_version,omitempty"`
+	ClientSentAt   string   `json:"client_sent_at,omitempty"`
 }
 
 // SessionTransitionPayload is the body of an Envelope whose Type ==
