@@ -47,12 +47,12 @@ import (
 // WHY THE IDS MUST LINE UP (the one non-obvious invariant). The drain gate forwards
 // an event to the emitter only when the event's tag equals activeSession(). The
 // sink tag is the runner's construction-time cfg.SessionID = the bootstrap pool id,
-// pinned to initialUUID by seedBootstrapRegistry; activeSession() resolves the
-// active conversation → its bound session id = knownConvID's binding = initialUUID
-// via seedBoundConversation. So seedBootstrapRegistry(initialUUID) +
-// seedBoundConversation(knownConvID, initialUUID) is what makes the gate pass. A
-// gate drop logs stream_turn.not_active, which the M1 failure checks for before it
-// names a mismatch. (#2610: re-seeding either side with a different UUID was
+// pinned to initialUUID by seedBootstrapRegistry; the drain resolves that session
+// id to the conversation bound to it = knownConvID via seedBoundConversation. So
+// seedBootstrapRegistry(initialUUID) + seedBoundConversation(knownConvID,
+// initialUUID) is what lets the drain attribute the events. An unresolved session
+// logs stream_turn.no_conversation (#2739), which the M1 failure checks for before
+// it names a mismatch. (#2610: re-seeding either side with a different UUID was
 // observed to still drain, so a mismatch is no longer assumed to be the cause.)
 //
 // The ack is not delivery: streamRunner.WriteUserTurn returns the retryable
@@ -244,19 +244,19 @@ func TestRelayV2_StreamSendMessageDrainsTurn(t *testing.T) {
 	}
 }
 
-// drainGateDropDiagnosis reads the daemon's captured stderr for the drain gate's
-// stream_turn.not_active record — the gate logs it (at Debug; the stream harness
-// runs -pyry-verbose) for every event whose producing session is not the active
-// conversation's. Its presence is the evidence of a seed UUID mismatch between
+// drainGateDropDiagnosis reads the daemon's captured stderr for the drain's
+// stream_turn.no_conversation record — the drain logs it (at Debug; the stream
+// harness runs -pyry-verbose) for every event whose producing session resolves to
+// no conversation (#2739). Its presence is the evidence of a seed UUID mismatch between
 // seedBootstrapRegistry and seedBoundConversation; its absence rules that out, so
 // the M1 failure names the mismatch only when this check found one.
 func drainGateDropDiagnosis(h *Harness) string {
 	for _, line := range strings.Split(h.Stderr.String(), "\n") {
-		if strings.Contains(line, "stream_turn.not_active") {
-			return "The drain gate DROPPED events as not the active session — most likely a UUID mismatch " +
+		if strings.Contains(line, "stream_turn.no_conversation") {
+			return "The drain DROPPED events whose session resolved to no conversation — most likely a UUID mismatch " +
 				"between seedBootstrapRegistry and seedBoundConversation. First drop record: " + line
 		}
 	}
-	return "The drain gate logged no stream_turn.not_active drop, so this is not a seed UUID mismatch: " +
+	return "The drain logged no stream_turn.no_conversation drop, so this is not a seed UUID mismatch: " +
 		"delivery never reached the child, or the parser / emitter never produced the delta in time."
 }

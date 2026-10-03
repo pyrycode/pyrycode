@@ -192,7 +192,7 @@ func TestE2E_PerConversation_IdleEvictsAndReactivates(t *testing.T) {
 				t.Fatalf("M1: phone never observed an assistant_delta for the reactivated conversation %s. "+
 					"Either delivery never reached the respawned child (stale sink binding on the new runner, "+
 					"or a drain-gate tag mismatch) or the session re-evicted before the turn landed. The "+
-					"stream_turn.not_active Debug record discriminates them — daemon stderr tail:\n%s",
+					"stream_turn.no_conversation Debug record discriminates them — daemon stderr tail:\n%s",
 					convA, stderrTail(h, 4000))
 			}
 			t.Fatal("M2: phone observed the assistant_delta but never a terminal " +
@@ -391,7 +391,7 @@ func TestE2E_PerConversation_CapEvictsCrossDiscussion(t *testing.T) {
 // SESSIONS_DIR / INITIAL_UUID / TRIGGER / STDIN_LOG are not merely unnecessary,
 // they are dead. Harness.ClaudeSessionsDir is left unset for the same reason.
 // -pyry-verbose raises the stderr handler to slog.LevelDebug and nothing else,
-// which is what makes the drain gate's stream_turn.not_active drop record
+// which is what makes the drain's stream_turn.no_conversation drop record
 // visible — the single highest-value line when a delivery assertion times out.
 //
 // initialUUID is a DAEMON-side seed (seedBootstrapRegistry pins the bootstrap

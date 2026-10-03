@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
@@ -12,11 +13,9 @@ import (
 )
 
 // switchConvA / switchConvB: two distinct valid UUIDv4 conversation ids for the
-// shared-emitter follow-active switch tests (#1062). A single long-lived
-// interactiveTurnEmitterV2 owns the turn lifecycle for every conversation on the
-// interactive leg; these exercise a cursor move from A to B while A's turn is
-// still open (its TurnEnd never delivered because the subscription was torn down
-// mid-turn across the switch).
+// per-conversation turn-state tests (#2739). They replace #1062's follow-active
+// switch tests: a cursor move no longer ends the prior conversation's turn,
+// because that conversation's events keep arriving under its own id.
 const (
 	switchConvA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	switchConvB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
@@ -41,190 +40,167 @@ func turnStateConvPairs(t *testing.T, pushes []recordedPush) [][2]string {
 	return out
 }
 
-// TestInteractiveTurnV2_SwitchWithOpenPriorTurn_EmitsResponding is the AC4 oracle
-// (recovered from feature/1050's zz_repro). It models the follow-active switch
-// onto conv B while conv A's turn is still open — interrupted / torn down mid-turn:
-// no TurnEnd was delivered, so inTurn stays true and currentState stays
-// StateResponding. The SAME shared emitter then handles conv B's first content.
-// B must get a turn_state responding. On unfixed main the carried-over
-// currentState de-dups B's opening transition away, so B streams a delta but NO
-// turn_state (the reported symptom): RED. After the fix the guard abandons A's
-// orphaned turn on the cursor move, so B opens fresh and emits its responding: GREEN.
-func TestInteractiveTurnV2_SwitchWithOpenPriorTurn_EmitsResponding(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
+func newTwoConvEmitter(t *testing.T) (*interactiveTurnEmitterV2, *fakeInteractiveBcast, *turnPhaseSnapshot) {
+	t.Helper()
 	cur := &stubCursor{}
-	cur.set(switchConvA)
+	cur.set(switchConvB) // the cursor names B throughout; HandleFor must not read it
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
 	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
-
-	// Prior turn on conv A that never ends (interrupted before end_turn): opens a
-	// turn (responding emitted), buffers + flushes one delta, NO TurnEnd.
-	e.Handle(ctx, turnevent.TextChunk{MessageID: "a1", Text: "partial A"})
-	e.flushDelta(ctx)
-
-	// Follow-active switch: the active-conversation cursor moves to conv B. (In
-	// production the subscriber tears down A's tail and re-subscribes onto B; the
-	// emitter is the SAME instance and its lifecycle is NOT reset here.)
-	cur.set(switchConvB)
-
-	// Conv B's first turn: first content event.
-	e.Handle(ctx, turnevent.TextChunk{MessageID: "b1", Text: "hello from B"})
-	e.flushDelta(ctx)
-
-	// Precondition (the reported symptom): B's delta DID reach the wire.
-	sawBDelta := false
-	for _, d := range assistantDeltas(t, bcast.pushes) {
-		if d.ConversationID == switchConvB {
-			sawBDelta = true
-		}
-	}
-	if !sawBDelta {
-		t.Fatalf("precondition: expected B's assistant_delta on the wire")
-	}
-
-	// The fix: a turn_state carries conv B.
-	sawBTurnState := false
-	for _, pair := range turnStateConvPairs(t, bcast.pushes) {
-		if pair[0] == switchConvB {
-			sawBTurnState = true
-		}
-	}
-	if !sawBTurnState {
-		t.Fatalf("conv B streamed a delta but NO turn_state; the open prior turn's "+
-			"currentState de-duped its responding transition. turn_state pairs: %v",
-			turnStateConvPairs(t, bcast.pushes))
-	}
+	snap := &turnPhaseSnapshot{}
+	e.phases = snap
+	return e, bcast, snap
 }
 
-// TestInteractiveTurnV2_SwitchResetsTurnIdentity strengthens the recovered
-// GreenWhenLifecycleResetOnSwitch: it does NOT manually reset the emitter (the fix
-// does that itself on the cursor move) and asserts the full fresh-turn identity —
-// B gets a responding turn_state, B's delta carries a turn id distinct from A's,
-// and its seq is reset to 0. RED on main (no reset → de-dup + stale turn id / seq),
-// GREEN after the fix.
-func TestInteractiveTurnV2_SwitchResetsTurnIdentity(t *testing.T) {
+// TestInteractiveTurnV2_InterleavedConversationsKeepOwnTurns interleaves two
+// conversations' turns on one emitter. Each keeps its own turn id, seq numbering
+// and buffered text; A's turn end leaves B's turn open; and the reconcile
+// snapshot reports both running turns, not only the last one touched.
+func TestInteractiveTurnV2_InterleavedConversationsKeepOwnTurns(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	cur := &stubCursor{}
-	cur.set(switchConvA)
-	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e, bcast, snap := newTwoConvEmitter(t)
 
-	e.Handle(ctx, turnevent.TextChunk{MessageID: "a1", Text: "partial A"})
-	e.flushDelta(ctx)
-	turnAID := e.turnID
+	e.HandleFor(ctx, switchConvA, turnevent.TextChunk{MessageID: "ma", Text: "a1 "})
+	e.HandleFor(ctx, switchConvB, turnevent.TextChunk{MessageID: "mb", Text: "b1"})
+	// Same message on A: appends to A's own buffer, untouched by B's text between.
+	e.HandleFor(ctx, switchConvA, turnevent.TextChunk{MessageID: "ma", Text: "a2"})
 
-	// The switch — no manual lifecycle reset; the emitter's own guard does it.
-	cur.set(switchConvB)
-
-	e.Handle(ctx, turnevent.TextChunk{MessageID: "b1", Text: "hello from B"})
-	e.flushDelta(ctx)
-
-	sawBResponding := false
-	for _, pair := range turnStateConvPairs(t, bcast.pushes) {
-		if pair[0] == switchConvB && pair[1] == "responding" {
-			sawBResponding = true
-		}
-	}
-	if !sawBResponding {
-		t.Fatalf("conv B has no responding turn_state: %v", turnStateConvPairs(t, bcast.pushes))
+	running := snap.running()
+	if len(running) != 2 || running[0].ConversationID != switchConvA || running[1].ConversationID != switchConvB {
+		t.Fatalf("running() with two open turns = %+v, want one entry each for A and B", running)
 	}
 
-	deltas := assistantDeltas(t, bcast.pushes)
-	bDelta := deltas[len(deltas)-1]
-	if bDelta.ConversationID != switchConvB {
-		t.Fatalf("last delta not conv B: %+v", bDelta)
-	}
-	if bDelta.TurnID == turnAID {
-		t.Fatalf("conv B delta still carries A's stale turn id %q", turnAID)
-	}
-	if bDelta.Seq != 0 {
-		t.Fatalf("conv B delta seq = %d, want 0 (fresh turn)", bDelta.Seq)
-	}
-}
+	e.HandleFor(ctx, switchConvA, turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
 
-// TestInteractiveTurnV2_SwitchFlushesAbandonedDeltaBeforeNewState asserts AC3
-// scoping and wire ordering across the switch: when conv A has buffered but
-// un-flushed text at the cursor move, the guard flushes it stamped with A's
-// conversation_id BEFORE conv B's opening responding turn_state (stamped B). The
-// abandoned text keeps correct attribution and precedes the new conversation's state.
-func TestInteractiveTurnV2_SwitchFlushesAbandonedDeltaBeforeNewState(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	cur := &stubCursor{}
-	cur.set(switchConvA)
-	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
-
-	// Conv A: open a turn and buffer a delta, but do NOT flush it (no message
-	// boundary, no turn end) — the buffer still holds A's text at the switch.
-	e.Handle(ctx, turnevent.TextChunk{MessageID: "a1", Text: "partial A"})
-
-	// Follow-active switch with A's delta still buffered.
-	cur.set(switchConvB)
-
-	// Conv B's first content triggers the guard: flush A's buffered delta (stamped
-	// A), abandon A's turn, then open B's fresh turn (responding stamped B).
-	e.Handle(ctx, turnevent.TextChunk{MessageID: "b1", Text: "hello from B"})
-	e.flushDelta(ctx)
-
-	wantTypes := []string{
-		protocol.TypeTurnState,      // A responding (A's turn opened)
-		protocol.TypeAssistantDelta, // A's abandoned text, flushed by the guard
-		protocol.TypeTurnState,      // B responding (fresh turn)
-		protocol.TypeAssistantDelta, // B's text
+	if st, ok := e.turns[switchConvB]; !ok || !st.inTurn {
+		t.Fatalf("B's turn closed by A's turn end; want it still open")
 	}
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
-		t.Fatalf("switch envelope order:\n got %v\nwant %v", got, wantTypes)
+	if got := phaseOf(t, snap); got != switchConvB+"/responding" {
+		t.Fatalf("after A's turn end: phase = %q, want B's alone", got)
 	}
+
+	// B's next content opens no new turn: its delta keeps B's turn id and seq 0.
+	e.HandleFor(ctx, switchConvB, turnevent.ToolStart{ToolCallID: "tb", Title: "Read"})
+	e.HandleFor(ctx, switchConvB, turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
 
 	deltas := assistantDeltas(t, bcast.pushes)
 	if len(deltas) != 2 {
-		t.Fatalf("want 2 assistant_delta, got %d", len(deltas))
+		t.Fatalf("assistant deltas = %d, want 2", len(deltas))
 	}
-	if deltas[0].ConversationID != switchConvA || deltas[0].Text != "partial A" {
-		t.Fatalf("abandoned delta: got conv=%q text=%q, want conv=%q text=%q",
-			deltas[0].ConversationID, deltas[0].Text, switchConvA, "partial A")
+	a, b := deltas[0], deltas[1]
+	if a.ConversationID != switchConvA || a.Text != "a1 a2" || a.Seq != 0 {
+		t.Errorf("A's delta = {conv:%q text:%q seq:%d}, want {%q %q 0}", a.ConversationID, a.Text, a.Seq, switchConvA, "a1 a2")
 	}
-	if deltas[1].ConversationID != switchConvB {
-		t.Fatalf("B delta conversation_id: got %q, want %q", deltas[1].ConversationID, switchConvB)
+	if b.ConversationID != switchConvB || b.Text != "b1" || b.Seq != 0 {
+		t.Errorf("B's delta = {conv:%q text:%q seq:%d}, want {%q %q 0}", b.ConversationID, b.Text, b.Seq, switchConvB, "b1")
 	}
-	// The abandoned delta must be stamped A, and B's opening responding stamped B —
-	// never crossed.
-	wantPairs := [][2]string{{switchConvA, "responding"}, {switchConvB, "responding"}}
-	if got := turnStateConvPairs(t, bcast.pushes); !slices.Equal(got, wantPairs) {
-		t.Fatalf("turn_state (conv,state) pairs:\n got %v\nwant %v", got, wantPairs)
+	if a.TurnID == b.TurnID || a.TurnID == "" || b.TurnID == "" {
+		t.Errorf("turn ids A=%q B=%q, want two distinct non-empty ids", a.TurnID, b.TurnID)
+	}
+
+	wantStates := [][2]string{
+		{switchConvA, "responding"},
+		{switchConvB, "responding"},
+		{switchConvA, "idle"},
+		{switchConvB, "idle"},
+	}
+	if got := turnStateConvPairs(t, bcast.pushes); !slices.Equal(got, wantStates) {
+		t.Fatalf("turn_state pairs:\n got %v\nwant %v", got, wantStates)
+	}
+
+	var turnEnds []string
+	for _, p := range bcast.pushes {
+		if p.env.Type != protocol.TypeTurnEnd {
+			continue
+		}
+		var te protocol.TurnEndPayload
+		if err := json.Unmarshal(p.env.Payload, &te); err != nil {
+			t.Fatalf("decode turn_end: %v", err)
+		}
+		turnEnds = append(turnEnds, te.ConversationID)
+	}
+	if !slices.Equal(turnEnds, []string{switchConvA, switchConvB}) {
+		t.Errorf("turn_end conversations = %v, want [A B]", turnEnds)
+	}
+	if got := phaseOf(t, snap); got != "" {
+		t.Errorf("after both turn ends: phase = %q, want none", got)
+	}
+	if len(e.turns) != 0 {
+		t.Errorf("turn state retained for %d conversations after both turns ended, want 0", len(e.turns))
 	}
 }
 
-// TestInteractiveTurnV2_CleanPriorTurnEndUnaffected is the control (recovered
-// ControlCleanPriorTurnEndIsFine): when conv A's turn ends CLEANLY (a TurnEnd
-// arrives → inTurn=false, currentState=idle) before the cursor moves, the switch
-// to conv B works with no extra reset — B still gets its responding. Isolates the
-// defect to the open-prior-turn carryover and guards against the guard misfiring
-// on the normal path. Passes both on main and after the fix.
+// TestInteractiveTurnV2_SharedTimerFlushesOtherConversation: the coalescing timer
+// is shared, so a flush of A's buffer must not stop it while B still holds text,
+// and the timer's fire (flushAll) must emit B's delta under B's id.
+func TestInteractiveTurnV2_SharedTimerFlushesOtherConversation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	e, bcast, _ := newTwoConvEmitter(t)
+
+	e.HandleFor(ctx, switchConvA, turnevent.TextChunk{MessageID: "ma", Text: "from A"})
+	e.HandleFor(ctx, switchConvB, turnevent.TextChunk{MessageID: "mb", Text: "from B"})
+	// A's tool start flushes A's buffer only.
+	e.HandleFor(ctx, switchConvA, turnevent.ToolStart{ToolCallID: "ta", Title: "Read"})
+
+	select {
+	case <-e.flushC():
+	case <-time.After(5 * time.Second):
+		t.Fatal("flush timer never fired while B still held buffered text")
+	}
+	e.flushAll(ctx)
+
+	deltas := assistantDeltas(t, bcast.pushes)
+	if len(deltas) != 2 {
+		t.Fatalf("assistant deltas = %d, want 2", len(deltas))
+	}
+	if deltas[1].ConversationID != switchConvB || deltas[1].Text != "from B" {
+		t.Errorf("timer-flushed delta = {conv:%q text:%q}, want {%q %q}",
+			deltas[1].ConversationID, deltas[1].Text, switchConvB, "from B")
+	}
+	if e.anyBuffered() {
+		t.Error("text still buffered after flushAll")
+	}
+}
+
+// TestInteractiveTurnV2_FlushAllFlushesEveryConversation: one timer fire flushes
+// every conversation's buffer, each under its own conversation and turn id.
+func TestInteractiveTurnV2_FlushAllFlushesEveryConversation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	e, bcast, _ := newTwoConvEmitter(t)
+
+	e.HandleFor(ctx, switchConvA, turnevent.TextChunk{MessageID: "ma", Text: "A text"})
+	e.HandleFor(ctx, switchConvB, turnevent.TextChunk{MessageID: "mb", Text: "B text"})
+	e.flushAll(ctx)
+
+	got := map[string]string{}
+	for _, d := range assistantDeltas(t, bcast.pushes) {
+		got[d.ConversationID] = d.Text
+	}
+	if got[switchConvA] != "A text" || got[switchConvB] != "B text" || len(got) != 2 {
+		t.Fatalf("flushed deltas by conversation = %v, want A text / B text", got)
+	}
+}
+
+// TestInteractiveTurnV2_CleanPriorTurnEndUnaffected: a conversation whose turn
+// ended cleanly opens its next turn with a fresh turn id and a responding state.
 func TestInteractiveTurnV2_CleanPriorTurnEndUnaffected(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	cur := &stubCursor{}
-	cur.set(switchConvA)
-	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e, bcast, _ := newTwoConvEmitter(t)
 
-	e.Handle(ctx, turnevent.TextChunk{MessageID: "a1", Text: "partial A"})
-	e.Handle(ctx, turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}) // clean close
-	cur.set(switchConvB)
-	e.Handle(ctx, turnevent.TextChunk{MessageID: "b1", Text: "hello from B"})
-	e.flushDelta(ctx)
+	e.HandleFor(ctx, switchConvA, turnevent.TextChunk{MessageID: "a1", Text: "one"})
+	e.HandleFor(ctx, switchConvA, turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+	e.HandleFor(ctx, switchConvA, turnevent.TextChunk{MessageID: "a2", Text: "two"})
+	e.flushAll(ctx)
 
-	sawBResponding := false
-	for _, pair := range turnStateConvPairs(t, bcast.pushes) {
-		if pair[0] == switchConvB && pair[1] == "responding" {
-			sawBResponding = true
-		}
+	deltas := assistantDeltas(t, bcast.pushes)
+	if len(deltas) != 2 || deltas[0].TurnID == deltas[1].TurnID {
+		t.Fatalf("deltas = %+v, want two with distinct turn ids", deltas)
 	}
-	if !sawBResponding {
-		t.Fatalf("control: even after clean TurnEnd, B has no responding: %v", turnStateConvPairs(t, bcast.pushes))
+	want := [][2]string{{switchConvA, "responding"}, {switchConvA, "idle"}, {switchConvA, "responding"}}
+	if got := turnStateConvPairs(t, bcast.pushes); !slices.Equal(got, want) {
+		t.Fatalf("turn_state pairs:\n got %v\nwant %v", got, want)
 	}
 }

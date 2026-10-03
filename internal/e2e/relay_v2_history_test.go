@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -53,6 +54,10 @@ func TestRelayV2_ConversationHistory(t *testing.T) {
 	const (
 		initialUUID = "11111111-1111-4111-8111-111111111111"
 		knownConvID = "77777777-7777-4777-8777-777777777777"
+		// The bootstrap child's conversation, and the session knownConvID is bound
+		// to, which no child runs during this test.
+		bootstrapConvID = "66666666-6666-4666-8666-666666666666"
+		knownSessionID  = "22222222-2222-4222-8222-222222222222"
 		// Canonically shaped and never hosted: the membership gate must be what
 		// refuses it, not a shape check.
 		foreignConvID = "88888888-8888-4888-8888-888888888888"
@@ -90,7 +95,23 @@ func TestRelayV2_ConversationHistory(t *testing.T) {
 	// The conversation must be in the registry the daemon loads at startup, or
 	// KnownConversation refuses before any log is opened — the gate doing its job,
 	// and it would make the walk below fail for the wrong reason.
-	seedBoundConversation(t, home, knownConvID, initialUUID)
+	//
+	// It is bound to a session no child runs, NOT the bootstrap's. Since #2739 every
+	// stream event is recorded under the conversation its own session belongs to,
+	// with or without a routed message, so the bootstrap child's startup frames land
+	// in whichever conversation is bound to initialUUID — racing the walk if that
+	// were knownConvID. A separate conversation takes the bootstrap session.
+	convJSON := []byte(`{"conversations":[` +
+		`{"id":"` + bootstrapConvID + `","cwd":"` + home + `","current_session_id":"` + initialUUID +
+		`","is_promoted":false,"last_used_at":"2026-01-01T00:00:00Z"},` +
+		`{"id":"` + knownConvID + `","cwd":"` + home + `","current_session_id":"` + knownSessionID +
+		`","is_promoted":false,"last_used_at":"2026-01-01T00:00:00Z"}]}`)
+	if err := os.MkdirAll(filepath.Join(home, ".pyry", "test"), 0o700); err != nil {
+		t.Fatalf("mkdir instance dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".pyry", "test", "conversations.json"), convJSON, 0o600); err != nil {
+		t.Fatalf("seed conversations.json: %v", err)
+	}
 
 	// Seeded through the log's own writer, over the instance directory the daemon
 	// will open. Ids run 1..seeded, so the walk's expectation is exact.

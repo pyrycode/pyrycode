@@ -1645,14 +1645,14 @@ func startRelayV2(
 		emitter.usageRec = contextUsageRec
 		emitter.waker = waker
 		emitter.phases = turnPhases
-		// The drain's AC2 scoping gate follows the ACTIVE conversation's bound
-		// session — the follow-active cursor boundSessionIDForActive reads, with the
-		// #678 conv.CurrentSessionID == "" isolation guard resolveBoundSession
-		// enforces. An unmatched/empty id forwards nothing (fail-closed).
-		activeSession := func() (string, bool) { return boundSessionIDForActive(w.active, w.convReg) }
+		// The drain attributes each event to the conversation its own session
+		// belongs to (#2739), never to the active one: conversationForSession over
+		// the registry, CurrentSessionID plus SessionHistory, so a just-rotated
+		// session's tail still reaches its conversation. An unmatched or empty id
+		// forwards nothing (fail-closed).
+		conversationFor := func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }
 		// The #1201 per-conversation turn-busy tracker (w.busy), fed from the same
-		// fan-in BEFORE the gate above, so a turn on a non-active conversation still
-		// reports busy. It is minted at the composition root, not here, because the
+		// fan-in BEFORE that resolution. It is minted at the composition root, not here, because the
 		// inbound-delivery seam consumes it too (#1199) and that seam is built for
 		// msgqueue.New — outside this leg entirely. Its resolve closure there is the
 		// same session→conversation closure the session_transition producer uses below,
@@ -1664,7 +1664,7 @@ func startRelayV2(
 		// transition below, the #1210 child-exit lane through the drain, and — for a
 		// write that fails after its mark — the delivery seam's own undo (see
 		// stream_turn_busy.go's feeds note).
-		streamDrainCleanup = startStreamTurnDrainV2(ctx, w.streamSink, emitter, activeSession, w.busy, logger)
+		streamDrainCleanup = startStreamTurnDrainV2(ctx, w.streamSink, emitter, conversationFor, w.busy, logger)
 	}
 	// The terminal-mode arm that stood here is gone with #1348. It read claude's
 	// screen to produce the same turn and modal events the drain above produces

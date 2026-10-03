@@ -149,41 +149,36 @@ func TestInteractiveTurnEmitterV2_TurnEndResetsParentLanes(t *testing.T) {
 	}
 }
 
-func TestInteractiveTurnEmitterV2_SwitchResetsParentLanes(t *testing.T) {
+// Child lanes belong to their conversation (#2739): the same parent tool id in
+// two conversations gets two lane identities, each starting at seq 0.
+func TestInteractiveTurnEmitterV2_ParentLanesPerConversation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	cur, bcast, e := newParentLaneEmitter(t, switchConvA)
+	_, bcast, e := newParentLaneEmitter(t, switchConvA)
 
-	e.Handle(ctx, turnevent.TextChunk{MessageID: "old", ParentToolCallID: parentLaneA, Text: "old-child"})
-	cur.set(switchConvB)
-	e.Handle(ctx, turnevent.TextChunk{MessageID: "new", ParentToolCallID: parentLaneA, Text: "new-child"})
-	e.flushDelta(ctx)
+	e.HandleFor(ctx, switchConvA, turnevent.TextChunk{MessageID: "old", ParentToolCallID: parentLaneA, Text: "a-child"})
+	e.HandleFor(ctx, switchConvB, turnevent.TextChunk{MessageID: "new", ParentToolCallID: parentLaneA, Text: "b-child"})
+	e.flushAll(ctx)
 
 	deltas := assistantDeltas(t, bcast.pushes)
 	if len(deltas) != 2 {
 		t.Fatalf("assistant deltas = %d, want 2", len(deltas))
 	}
-	if deltas[0].ConversationID != switchConvA || deltas[1].ConversationID != switchConvB {
-		t.Errorf("delta conversations = %q then %q, want %q then %q",
-			deltas[0].ConversationID, deltas[1].ConversationID, switchConvA, switchConvB)
+	byConv := map[string]protocol.AssistantDeltaPayload{}
+	for _, d := range deltas {
+		byConv[d.ConversationID] = d
 	}
-	if deltas[0].TurnID == deltas[1].TurnID {
-		t.Errorf("child lane reused turn id %q across conversation switch", deltas[0].TurnID)
+	a, b := byConv[switchConvA], byConv[switchConvB]
+	if a.Text != "a-child" || b.Text != "b-child" {
+		t.Errorf("delta texts A=%q B=%q, want a-child / b-child", a.Text, b.Text)
 	}
-	for i, d := range deltas {
+	if a.TurnID == b.TurnID {
+		t.Errorf("child lane turn id %q shared across conversations", a.TurnID)
+	}
+	for _, d := range []protocol.AssistantDeltaPayload{a, b} {
 		if d.Seq != 0 || d.ParentToolUseID != parentLaneA {
-			t.Errorf("delta %d = {seq:%d parent:%q}, want fresh seq 0 and parent %q", i, d.Seq, d.ParentToolUseID, parentLaneA)
+			t.Errorf("delta %+v, want seq 0 and parent %q", d, parentLaneA)
 		}
-	}
-
-	wantTypes := []string{
-		protocol.TypeTurnState,
-		protocol.TypeAssistantDelta,
-		protocol.TypeTurnState,
-		protocol.TypeAssistantDelta,
-	}
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
-		t.Fatalf("switch envelope order:\n got %v\nwant %v", got, wantTypes)
 	}
 }
 

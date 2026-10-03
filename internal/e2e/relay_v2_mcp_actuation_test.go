@@ -165,9 +165,10 @@ func TestRelayV2_MCPActuationGatedAuditedAndAnsweredFresh(t *testing.T) {
 	waitBinaryHello(t, fr, serverID)
 
 	// The automatic startup report is the child's first mcp_status request. Waiting for
-	// its fixed no-cursor drop makes the membership read below the fake's changed-state
-	// answer — the one naming mcpActServerName — rather than racing startup.
-	waitForDaemonEvent(t, h, "kind=mcp_status", 10*time.Second)
+	// its entry in the bound conversation's history (#2739) makes the membership read
+	// below the fake's changed-state answer — the one naming mcpActServerName — rather
+	// than racing startup.
+	waitForHistoryType(t, home, mcpActConvID, protocol.TypeMCPStatus, 10*time.Second)
 	phoneA := dialMCPQueryPhone(t, fr, serverID, pubKey, payloadA.Token, "phone-a")
 	phoneB := dialMCPQueryPhone(t, fr, serverID, pubKey, payloadB.Token, "phone-b")
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -111,13 +112,14 @@ type interactiveTurnEmitterV2 struct {
 	bcast  interactiveBroadcaster
 	logger *slog.Logger
 
-	// Lifecycle state — read/written only on the single Handle goroutine.
-	inTurn       bool                 // whether a turn is currently open
-	turnID       string               // current turn's id, minted at turn start
-	turnConvID   string               // conversation that owns the open turn; set at turn open, compared each Handle (#1062)
-	seq          int                  // per-turn assistant-delta counter; 0 at each turn boundary
-	currentState turnbridge.TurnState // last-emitted turn_state, for transition de-dup
-	childLanes   map[string]*assistantDeltaLane
+	// Per-conversation turn state (#2739). Every conversation with a turn open or
+	// text buffered owns one convTurnState in turns; the embedded pointer is the
+	// conversation the current call is about, selected by selectConversation at the
+	// top of HandleFor and closeForConversation. Embedding is what lets every method
+	// below keep naming e.inTurn, e.seq or e.deltaBuf and mean "this conversation's".
+	// Read/written only on the single drain goroutine.
+	*convTurnState
+	turns map[string]*convTurnState
 
 	// nextID is the session-monotonic envelope-ID counter. It is NEVER reset
 	// across turns (mirrors #589's policy; the basis for #611 mid-turn-reconnect
@@ -179,14 +181,27 @@ type interactiveTurnEmitterV2 struct {
 	// reconcile view; assigned after construction for hist's call-site reason.
 	phases *turnPhaseSnapshot
 
-	// Delta-coalescing state (#609) — read/written only on the single Handle/
-	// flush goroutine, same contract as the lifecycle fields above. The invariant
-	// the timer relies on: flushTimer is armed iff deltaBuf is non-empty.
+	// The delta-coalescing timer (#609), shared by every conversation. The
+	// invariant it relies on: flushTimer is armed iff some conversation's deltaBuf
+	// is non-empty. Owned here, its channel selected by the producer (flushC).
+	flushTimer *time.Timer
+}
+
+// convTurnState is one conversation's turn lifecycle and delta-coalescing state
+// (#2739). Before it the emitter held one of each, so a second conversation's
+// event either was dropped upstream or closed the first one's turn.
+type convTurnState struct {
+	inTurn       bool                 // whether a turn is currently open
+	turnID       string               // current turn's id, minted at turn start
+	turnConvID   string               // the conversation this state belongs to while a turn is open
+	seq          int                  // per-turn assistant-delta counter; 0 at each turn boundary
+	currentState turnbridge.TurnState // last-emitted turn_state, for transition de-dup
+	childLanes   map[string]*assistantDeltaLane
+
 	deltaBuf    strings.Builder // accumulated assistant text for the open (un-flushed) delta
 	deltaMsgID  string          // MessageID of the buffered text; meaningful only while deltaBuf.Len() > 0
 	deltaParent string          // ParentToolCallID of the buffered text; empty identifies the main lane
-	deltaConvID string          // conversation cursor captured when buffering began; the flush emits against it
-	flushTimer  *time.Timer     // ~250ms latency timer; owned here, its channel selected by the producer (flushC)
+	deltaConvID string          // conversation captured when buffering began; the flush emits against it
 }
 
 // newInteractiveTurnEmitterV2 constructs an emitter wired to sup and bcast. The
@@ -196,12 +211,47 @@ func newInteractiveTurnEmitterV2(sup cursorReader, bcast interactiveBroadcaster,
 	t := time.NewTimer(coalesceWindow)
 	t.Stop()
 	return &interactiveTurnEmitterV2{
-		sup:        sup,
-		bcast:      bcast,
-		logger:     logger,
-		flushTimer: t,
-		ring:       eventring.New(eventring.MaxEventsPerConversation),
+		sup:    sup,
+		bcast:  bcast,
+		logger: logger,
+		// A placeholder selection, never stored in turns, so a fresh emitter's
+		// promoted fields read as zero rather than through a nil pointer.
+		convTurnState: &convTurnState{},
+		turns:         make(map[string]*convTurnState),
+		flushTimer:    t,
+		ring:          eventring.New(eventring.MaxEventsPerConversation),
 	}
+}
+
+// selectConversation points the embedded state at convID's, creating it on first
+// sight. Only the drain goroutine calls it.
+func (e *interactiveTurnEmitterV2) selectConversation(convID string) {
+	st, ok := e.turns[convID]
+	if !ok {
+		st = &convTurnState{}
+		e.turns[convID] = st
+	}
+	e.convTurnState = st
+}
+
+// releaseConversation forgets convID's state once it holds nothing: no open turn
+// and no buffered text. This is what bounds turns to the conversations with work
+// in flight. The selection itself is left alone; the next HandleFor reselects.
+func (e *interactiveTurnEmitterV2) releaseConversation(convID string) {
+	if st, ok := e.turns[convID]; ok && !st.inTurn && st.deltaBuf.Len() == 0 {
+		delete(e.turns, convID)
+	}
+}
+
+// anyBuffered reports whether any conversation holds unflushed text, which is
+// the condition the shared flush timer must be armed under.
+func (e *interactiveTurnEmitterV2) anyBuffered() bool {
+	for _, st := range e.turns {
+		if st.deltaBuf.Len() > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // flushC exposes the coalescing timer's channel for the producer's drain select
@@ -210,32 +260,32 @@ func newInteractiveTurnEmitterV2(sup cursorReader, bcast interactiveBroadcaster,
 // timer fire is not a second goroutine touching the emitter's state.
 func (e *interactiveTurnEmitterV2) flushC() <-chan time.Time { return e.flushTimer.C }
 
-// Handle drives the emitter one event at a time. It reads the conversation
-// cursor once; on an empty cursor it drops the event (mirrors #589). Otherwise
-// it type-switches the event into the lifecycle actions and the ordered
-// envelopes they emit (see the per-kind table in the spec). Not safe for
-// concurrent use — designed for the producer's single Run goroutine.
+// Handle drives the emitter with one event attributed to the cursor's
+// conversation. It is kept for the emitter unit tests, which drive one
+// conversation through a stub cursor; production calls HandleFor with the
+// conversation the event's own session resolves to (#2739).
 func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Event) {
-	convID := e.sup.CurrentConversation()
+	e.HandleFor(ctx, e.sup.CurrentConversation(), ev)
+}
+
+// HandleFor drives the emitter one event at a time for convID, the conversation
+// whose session produced it. An empty convID drops the event (mirrors #589).
+// Otherwise it selects convID's own turn state and type-switches the event into
+// the lifecycle actions and the ordered envelopes they emit (see the per-kind
+// table in the spec). Another conversation's open turn and buffered text are
+// untouched: each conversation keeps its own (#2739), which replaced #1062's
+// follow-active switch that ended the prior conversation's turn whenever the
+// cursor moved. Not safe for concurrent use — designed for the producer's single
+// Run goroutine.
+func (e *interactiveTurnEmitterV2) HandleFor(ctx context.Context, convID string, ev turnevent.Event) {
 	if convID == "" {
 		e.logger.Debug("relay: interactive-turn drop; no cursor",
 			"event", "interactive_turn.no_cursor",
 			"kind", eventKind(ev))
 		return
 	}
-
-	if e.inTurn && convID != e.turnConvID {
-		// Follow-active switch (#1062): the prior conversation's subscription was
-		// torn down mid-turn, so its TurnEnd never arrived and inTurn/currentState
-		// are stale. Flush its buffered delta against its OWN conversation
-		// (deltaConvID is captured, not the live cursor), then mark the turn closed
-		// so startTurnIfNeeded re-mints a fresh turn — a new turnID, seq 0, and an
-		// opening turn_state — for the new conversation. flushDelta before endTurn:
-		// the abandoned text still carries the prior turn's turnID/seq, in place
-		// until the re-mint. No-op when nothing is buffered.
-		e.flushDelta(ctx)
-		e.endTurn()
-	}
+	e.selectConversation(convID)
+	defer e.releaseConversation(convID)
 
 	switch v := ev.(type) {
 	case turnevent.ThoughtChunk:
@@ -264,14 +314,17 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// buffer is necessarily empty.
 		e.transitionTo(ctx, convID, turnbridge.StateResponding)
 		wasEmpty := e.deltaBuf.Len() == 0
+		othersBuffered := wasEmpty && e.anyBuffered()
 		e.deltaConvID = convID
 		e.deltaMsgID = v.MessageID
 		e.deltaParent = v.ParentToolCallID
 		e.deltaBuf.WriteString(v.Text)
-		if wasEmpty {
+		if wasEmpty && !othersBuffered {
 			// Arm the latency window from the OLDEST unflushed chunk; never re-arm
 			// on a same-message append, so a long-streaming message is bounded to
-			// one window, not one-per-chunk.
+			// one window, not one-per-chunk. Nor when another conversation already
+			// holds text: the timer is shared, already armed for that older chunk,
+			// and its fire flushes every conversation (flushAll).
 			e.flushTimer.Reset(coalesceWindow)
 		}
 	case turnevent.ToolStart:
@@ -749,8 +802,8 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// Flush any pending delta first so buffered text keeps its wire position
 		// ahead of the reading. In the production order there is rarely anything
 		// buffered — the turn's own end already flushed — but the flush is not
-		// conditional on that, because a follow-active switch can reorder this lane
-		// and the mid-turn ordering is pinned by its own test.
+		// conditional on that, because the mid-turn ordering is pinned by its own
+		// test.
 		//
 		// The event is passed through UNTOUCHED on the WIRE leg and no field of it is
 		// read to build one. turnbridge.MapEvent's arm is still the only consumer of
@@ -792,8 +845,8 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// have different failure modes and a conn-side drop is not a reason to
 		// forget a reading. Lifecycle stays untouched, per this arm's whole point.
 		//
-		// convID is the follow-active cursor this arm already stamps the frame
-		// with, so the registry write inherits the frame's attribution rather than
+		// convID is the conversation this arm already stamps the frame with, so
+		// the registry write inherits the frame's attribution rather than
 		// making a second one — there is no state in which the row and the frame
 		// disagree about which conversation reported. An id the registry does not
 		// hold writes nothing and saves nothing; see record.
@@ -887,34 +940,35 @@ func (e *interactiveTurnEmitterV2) transitionTo(ctx context.Context, convID stri
 	e.emit(ctx, convID, typ, payload)
 }
 
-// endTurn closes the current turn and discards every main/child lane identity
-// and counter. It need not touch the delta buffer — callers flush before every
-// turn end or conversation switch.
+// endTurn closes the selected conversation's turn and discards every main/child
+// lane identity and counter. It need not touch the delta buffer — callers flush
+// before every turn end.
 func (e *interactiveTurnEmitterV2) endTurn() {
+	convID := e.turnConvID
 	e.inTurn = false
 	e.turnID = ""
 	e.turnConvID = ""
 	e.seq = 0
 	e.currentState = ""
 	e.childLanes = nil
-	e.phases.clear()
+	e.phases.clear(convID)
 }
 
-// turnPhaseSnapshot is the open turn's last-sent phase, shared from the
+// turnPhaseSnapshot is each open turn's last-sent phase, shared from the
 // emitter's drain goroutine to the relay's Run goroutine for the connect-time
 // turn-phase reconcile (#2712). The emitter's lifecycle fields stay unguarded and
 // drain-only; this is the one synchronised copy, written where the emitter sends
-// a transition or closes a turn. It holds at most one turn because the emitter
-// holds at most one. The zero value is "no turn with a sent phase", which is also
-// what an open turn reads as before its first transition: a phase never sent is
-// never re-asserted.
+// a transition or closes a turn. It holds one entry per conversation with a
+// running turn (#2739), since the emitter keeps one turn per conversation. A
+// conversation absent from it has no turn with a sent phase, which is also what
+// an open turn reads as before its first transition: a phase never sent is never
+// re-asserted.
 //
 // The mutex is a leaf: never held across a push, an emit or a channel operation,
 // so it cannot join a cycle with the emitter's ActiveConns round-trip through Run.
 type turnPhaseSnapshot struct {
 	mu     sync.Mutex
-	convID string
-	state  turnbridge.TurnState
+	phases map[string]turnbridge.TurnState
 }
 
 // publish records state as convID's current phase; idle clears it. Nil-safe, so
@@ -924,44 +978,65 @@ func (p *turnPhaseSnapshot) publish(convID string, state turnbridge.TurnState) {
 		return
 	}
 	if state == turnbridge.StateIdle {
-		p.clear()
+		p.clear(convID)
 		return
 	}
 	p.mu.Lock()
-	p.convID, p.state = convID, state
+	if p.phases == nil {
+		p.phases = make(map[string]turnbridge.TurnState)
+	}
+	p.phases[convID] = state
 	p.mu.Unlock()
 }
 
-// clear records that no turn is running. Nil-safe.
-func (p *turnPhaseSnapshot) clear() {
+// clear records that convID has no running turn. Nil-safe.
+func (p *turnPhaseSnapshot) clear(convID string) {
 	if p == nil {
 		return
 	}
 	p.mu.Lock()
-	p.convID, p.state = "", ""
+	delete(p.phases, convID)
 	p.mu.Unlock()
 }
 
 // running is the V2SessionConfig.RunningTurnPhases seam: one turn_state payload
-// for the running turn, or nil when none is running. A pure read.
+// per running turn, ordered by conversation id so the reconcile is deterministic,
+// or nil when none is running. A pure read; the payloads are built after the lock
+// is released.
 func (p *turnPhaseSnapshot) running() []protocol.TurnStatePayload {
 	p.mu.Lock()
-	convID, state := p.convID, p.state
+	convIDs := make([]string, 0, len(p.phases))
+	states := make(map[string]turnbridge.TurnState, len(p.phases))
+	for convID, state := range p.phases {
+		convIDs = append(convIDs, convID)
+		states[convID] = state
+	}
 	p.mu.Unlock()
-	if convID == "" {
+	if len(convIDs) == 0 {
 		return nil
 	}
-	_, payload := turnbridge.BuildTurnState(convID, state)
-	return []protocol.TurnStatePayload{payload}
+	slices.Sort(convIDs)
+	out := make([]protocol.TurnStatePayload, 0, len(convIDs))
+	for _, convID := range convIDs {
+		_, payload := turnbridge.BuildTurnState(convID, states[convID])
+		out = append(out, payload)
+	}
+	return out
 }
 
 // closeForConversation returns an externally-abandoned active turn to idle
 // without inventing a turn_end result the child never emitted. The caller is the
 // stream drain, so lifecycle and delta fields retain their single-writer rule.
+//
+// Only conversationID's own turn is closed (#2739); another conversation's open
+// turn is a different convTurnState and is not touched.
 func (e *interactiveTurnEmitterV2) closeForConversation(ctx context.Context, conversationID string) {
-	if !e.inTurn || e.turnConvID != conversationID {
+	st, ok := e.turns[conversationID]
+	if !ok || !st.inTurn {
 		return
 	}
+	e.convTurnState = st
+	defer e.releaseConversation(conversationID)
 	e.flushDelta(ctx)
 	e.transitionTo(ctx, conversationID, turnbridge.StateIdle)
 	e.endTurn()
@@ -1045,6 +1120,26 @@ func (e *interactiveTurnEmitterV2) flushDelta(ctx context.Context) {
 	e.deltaMsgID = ""
 	e.deltaParent = ""
 	e.deltaConvID = ""
+	// The timer is shared (#2739): stop it only once no conversation holds text,
+	// or another conversation's buffer would never flush on its own.
+	if !e.anyBuffered() {
+		e.flushTimer.Stop()
+	}
+}
+
+// flushAll flushes every conversation's buffered text: the drain's flushC case,
+// since the one timer stands for every conversation's oldest unflushed chunk. The
+// order across conversations is unspecified; each conversation's own frames stay
+// in order, which is the only order a client can observe.
+func (e *interactiveTurnEmitterV2) flushAll(ctx context.Context) {
+	for convID, st := range e.turns {
+		if st.deltaBuf.Len() == 0 {
+			continue
+		}
+		e.convTurnState = st
+		e.flushDelta(ctx)
+		e.releaseConversation(convID)
+	}
 	e.flushTimer.Stop()
 }
 
