@@ -2033,3 +2033,22 @@ func TestStreamTurnDrainV2_ExitAfterTheDeliveryMarkStillClears(t *testing.T) {
 		t.Fatalf("WaitIdle(A) = %v after the delivery mark's own child exited, want nil", err)
 	}
 }
+
+// AnyBusy (#2716) answers the daemon-wide question: false with no turn open,
+// true while any conversation has one, false again once it closes.
+func TestTurnBusyTracker_AnyBusy(t *testing.T) {
+	t.Parallel()
+	tr := newTurnBusyTracker(stubBusyResolve(map[string]string{"sess-a": testConvID}), discardLogger())
+
+	if tr.AnyBusy() {
+		t.Fatalf("AnyBusy = true on a fresh tracker, want false")
+	}
+	tr.observe("sess-a", turnevent.TextChunk{MessageID: "m1", Text: "hello"})
+	if !tr.AnyBusy() {
+		t.Fatalf("AnyBusy = false after an opener, want true")
+	}
+	tr.observe("sess-a", turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+	if tr.AnyBusy() {
+		t.Errorf("AnyBusy = true after TurnEnd, want false")
+	}
+}

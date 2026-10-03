@@ -148,6 +148,13 @@ func TestUpdate_Success(t *testing.T) {
 	if !bytes.Equal(got, newBytes) {
 		t.Errorf("on-disk binary not replaced: got %q, want %q", got, newBytes)
 	}
+	prev, err := os.ReadFile(filepath.Join(tmp, "pyry.prev"))
+	if err != nil {
+		t.Fatalf("read pyry.prev: %v", err)
+	}
+	if string(prev) != "OLD pyry bytes" {
+		t.Errorf("pyry.prev = %q, want the replaced binary's bytes", prev)
+	}
 
 	output := out.String()
 	for _, want := range []string{

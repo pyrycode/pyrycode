@@ -738,9 +738,9 @@ func TestUpdate_VerifyFailure_E2E(t *testing.T) {
 }
 
 // TestUpdate_BrokenNewBinary_E2E asserts the currently-designed contract:
-// pyry update has NO rollback. Once AtomicReplace swaps in the new bytes,
-// the old binary is gone — if the new binary is broken, the operator must
-// intervene. See docs/knowledge/features/pyry-update-command.md and
+// pyry update does not roll back by itself. Once AtomicReplace swaps in the
+// new bytes, the old binary survives only as pyry.prev beside it (#2716) — if
+// the new binary is broken, the operator must intervene (`make rollback`). See docs/knowledge/features/pyry-update-command.md and
 // docs/specs/architecture/187-update-atomic-replace.md.
 //
 // This e2e case mirrors the error contract pinned by the unit test

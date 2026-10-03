@@ -724,6 +724,17 @@ func (t *turnBusyTracker) Busy(conversationID string) bool {
 	return busy
 }
 
+// AnyBusy reports whether any conversation currently has an open turn, Claude or
+// Codex alike, since both feed the one fan-in this tracker observes. It is the
+// daemon-wide question the auto-updater's idle check asks (#2716), and like Busy
+// it answers one bool: never a count and never an id, so it says nothing about
+// which conversations exist.
+func (t *turnBusyTracker) AnyBusy() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.busy) > 0
+}
+
 // ToolCallInFlight reports whether toolCallID is a tool call currently in flight
 // on conversationID (#1917). MEMBERSHIP, not lookup: it answers "does this call
 // belong to this conversation?" and never "which conversation owns this call?",

@@ -152,3 +152,75 @@ func TestCompareVersions(t *testing.T) {
 		})
 	}
 }
+
+func TestParseRelease(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		input   string
+		want    Release
+		wantErr error
+	}{
+		{name: "plain", input: `{"tag_name":"v0.9.2","draft":false,"prerelease":false}`, want: Release{Tag: "v0.9.2"}},
+		{name: "draft", input: `{"tag_name":"v0.9.2","draft":true}`, want: Release{Tag: "v0.9.2", Draft: true}},
+		{name: "prerelease", input: `{"tag_name":"v0.9.2","prerelease":true}`, want: Release{Tag: "v0.9.2", Prerelease: true}},
+		{name: "flags_absent", input: `{"tag_name":"v0.9.2"}`, want: Release{Tag: "v0.9.2"}},
+		{name: "malformed_json", input: `not json`, wantErr: ErrMalformedRelease},
+		{name: "missing_tag", input: `{"draft":false}`, wantErr: ErrMalformedRelease},
+		{name: "draft_not_bool", input: `{"tag_name":"v0.9.2","draft":"no"}`, wantErr: ErrMalformedRelease},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ParseRelease([]byte(tc.input))
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("ParseRelease err = %v, want %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ParseRelease = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEligible(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		current string
+		rel     Release
+		wantErr error
+	}{
+		{name: "newer_patch", current: "v0.9.1", rel: Release{Tag: "v0.9.2"}},
+		{name: "newer_minor_no_v", current: "0.9.1", rel: Release{Tag: "0.10.0"}},
+		{name: "same", current: "v0.9.2", rel: Release{Tag: "v0.9.2"}, wantErr: ErrUpToDate},
+		{name: "older", current: "v0.9.2", rel: Release{Tag: "v0.9.1"}, wantErr: ErrNotEligible},
+		{name: "dev_build", current: "dev", rel: Release{Tag: "v0.9.2"}, wantErr: ErrNotEligible},
+		{name: "draft", current: "v0.9.1", rel: Release{Tag: "v0.9.2", Draft: true}, wantErr: ErrNotEligible},
+		{name: "prerelease_flag", current: "v0.9.1", rel: Release{Tag: "v0.9.2", Prerelease: true}, wantErr: ErrNotEligible},
+		{name: "rc_suffix", current: "v0.9.1", rel: Release{Tag: "v0.10.0-rc1"}, wantErr: ErrNotEligible},
+		{name: "rc_suffix_same_base", current: "v0.10.0", rel: Release{Tag: "v0.10.0-rc1"}, wantErr: ErrNotEligible},
+		{name: "build_metadata", current: "v0.9.1", rel: Release{Tag: "v0.9.2+build5"}, wantErr: ErrNotEligible},
+		{name: "signed_part", current: "v0.9.1", rel: Release{Tag: "v0.+9.2"}, wantErr: ErrNotEligible},
+		{name: "path_in_tag", current: "v0.9.1", rel: Release{Tag: "v0.9.2/../x"}, wantErr: ErrNotEligible},
+		{name: "two_parts", current: "v0.9.1", rel: Release{Tag: "v1.0"}, wantErr: ErrNotEligible},
+		{name: "empty_part", current: "v0.9.1", rel: Release{Tag: "v1..0"}, wantErr: ErrNotEligible},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := Eligible(tc.current, tc.rel)
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("Eligible = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Eligible = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}

@@ -124,3 +124,93 @@ func cmpInt(a, b int) Comparison {
 		return Same
 	}
 }
+
+// ErrUpToDate is returned by Eligible when the release is the running version.
+var ErrUpToDate = errors.New("already at the latest release")
+
+// ErrNotEligible is returned by Eligible when the release must not be installed
+// automatically. The wrapping error names the reason.
+var ErrNotEligible = errors.New("release not eligible")
+
+// Release is the subset of a GitHub Releases API payload that decides whether a
+// release may be installed without an operator.
+type Release struct {
+	Tag        string
+	Draft      bool
+	Prerelease bool
+}
+
+// ParseRelease decodes tag_name, draft and prerelease from a GitHub Releases API
+// JSON payload. It has the same ErrMalformedRelease contract as
+// ParseLatestRelease: invalid JSON, a non-object document, or an absent or empty
+// tag_name are all malformed.
+func ParseRelease(jsonBytes []byte) (Release, error) {
+	var payload struct {
+		TagName    string `json:"tag_name"`
+		Draft      bool   `json:"draft"`
+		Prerelease bool   `json:"prerelease"`
+	}
+	if err := json.Unmarshal(jsonBytes, &payload); err != nil {
+		return Release{}, fmt.Errorf("decoding release JSON: %w", ErrMalformedRelease)
+	}
+	if payload.TagName == "" {
+		return Release{}, fmt.Errorf("missing tag_name field: %w", ErrMalformedRelease)
+	}
+	return Release{Tag: payload.TagName, Draft: payload.Draft, Prerelease: payload.Prerelease}, nil
+}
+
+// Eligible reports whether rel may be installed over a running build of version
+// current without an operator. It returns nil when it may, an error wrapping
+// ErrUpToDate when rel is the running version, and an error wrapping
+// ErrNotEligible otherwise: a running build that is not a release (such as
+// "dev"), a draft or pre-release, a tag that is not exactly
+// v<major>.<minor>.<patch>, or a release older than the running one.
+//
+// The tag check is stricter than CompareVersions on purpose. CompareVersions
+// strips a "-rc1" suffix before comparing, and strconv.Atoi accepts a sign, so
+// either would let a tag through that no hand-made release carries. The tag is
+// also joined into download URLs, so only digits and dots pass.
+func Eligible(current string, rel Release) error {
+	if _, _, _, err := parseSemver(current); err != nil {
+		return fmt.Errorf("running build %q is not a release: %w", current, ErrNotEligible)
+	}
+	switch {
+	case rel.Draft:
+		return fmt.Errorf("draft release: %w", ErrNotEligible)
+	case rel.Prerelease:
+		return fmt.Errorf("pre-release: %w", ErrNotEligible)
+	case !isPlainReleaseTag(rel.Tag):
+		return fmt.Errorf("tag is not a plain release version: %w", ErrNotEligible)
+	}
+	cmp, err := CompareVersions(current, rel.Tag)
+	if err != nil {
+		return fmt.Errorf("comparing versions: %w", ErrNotEligible)
+	}
+	switch cmp {
+	case Same:
+		return ErrUpToDate
+	case Newer:
+		return fmt.Errorf("downgrade: %w", ErrNotEligible)
+	}
+	return nil
+}
+
+// isPlainReleaseTag reports whether tag is v?<digits>.<digits>.<digits> with
+// nothing else.
+func isPlainReleaseTag(tag string) bool {
+	parts := strings.Split(strings.TrimPrefix(tag, "v"), ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, p := range parts {
+		if p == "" {
+			return false
+		}
+		for _, r := range p {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
