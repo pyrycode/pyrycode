@@ -81,6 +81,10 @@ func (r *RingBuffer) Cap() int { return r.size }
 // stderr stays consistent with what callers asked for) AND the parallel
 // text formatter that feeds the ring. Without that propagation, attrs
 // added via slog.Logger.With(...) would silently drop from `pyry logs`.
+//
+// The one thing the ring copy leaves out is a value implementing
+// LogDaemonOnly() (see daemonLogOnly): next receives it unchanged, the ring
+// shows ringOmitted under the same key.
 func SlogTee(next slog.Handler, ring *RingBuffer) slog.Handler {
 	buf := &bytes.Buffer{}
 	return &teeHandler{
@@ -90,6 +94,42 @@ func SlogTee(next slog.Handler, ring *RingBuffer) slog.Handler {
 		fmtBuf: buf,
 		fmtMu:  &sync.Mutex{},
 	}
+}
+
+// daemonLogOnly is the method set of an attribute value that may reach the
+// primary handler — the daemon's own log output — but never the ring. The ring
+// feeds `pyry logs` and the debug bundle, which a paired phone can fetch with no
+// redaction (#812), so a value carrying untrusted child output (streamsup's
+// stderr tail, #2723) implements this and the ring copy shows ringOmitted in its
+// place. A method set rather than a shared type, because the producers must not
+// import this package.
+type daemonLogOnly interface{ LogDaemonOnly() }
+
+// ringOmitted replaces a daemonLogOnly value in the ring copy. It is a constant,
+// so not even the value's length reaches the ring.
+const ringOmitted = "(daemon log only)"
+
+// ringAttr returns a with any daemonLogOnly value, at any group depth, replaced
+// by ringOmitted.
+func ringAttr(a slog.Attr) slog.Attr {
+	v := a.Value.Resolve()
+	switch v.Kind() {
+	case slog.KindAny:
+		if _, ok := v.Any().(daemonLogOnly); ok {
+			return slog.String(a.Key, ringOmitted)
+		}
+	case slog.KindGroup:
+		return slog.Attr{Key: a.Key, Value: slog.GroupValue(ringAttrs(v.Group())...)}
+	}
+	return a
+}
+
+func ringAttrs(attrs []slog.Attr) []slog.Attr {
+	out := make([]slog.Attr, len(attrs))
+	for i, a := range attrs {
+		out[i] = ringAttr(a)
+	}
+	return out
 }
 
 // teeHandler is the slog.Handler returned by SlogTee. Each derived handler
@@ -114,9 +154,14 @@ func (t *teeHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 func (t *teeHandler) Handle(ctx context.Context, r slog.Record) error {
+	ringRec := slog.NewRecord(r.Time, r.Level, r.Message, r.PC)
+	r.Attrs(func(a slog.Attr) bool {
+		ringRec.AddAttrs(ringAttr(a))
+		return true
+	})
 	t.fmtMu.Lock()
 	t.fmtBuf.Reset()
-	if err := t.fmtH.Handle(ctx, r); err == nil {
+	if err := t.fmtH.Handle(ctx, ringRec); err == nil {
 		t.ring.Add(strings.TrimRight(t.fmtBuf.String(), "\n"))
 	}
 	t.fmtMu.Unlock()
@@ -129,7 +174,7 @@ func (t *teeHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 		ring:   t.ring,
 		fmtBuf: t.fmtBuf,
 		fmtMu:  t.fmtMu,
-		fmtH:   t.fmtH.WithAttrs(attrs),
+		fmtH:   t.fmtH.WithAttrs(ringAttrs(attrs)),
 	}
 }
 

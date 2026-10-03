@@ -22,6 +22,10 @@ that look obvious instead — the `claude exited` log, or a `return ctx.Err()` s
 one sits in the actual fire window) — each satisfy two of the three exit paths and silently miss the
 third, which is why the shutdown-path test is the load-bearing one.
 
+That log line is the same "which of the three exit paths" branch this seam's placement is built around:
+since #2723 it also names the session id, and carries a capped tail of the child's stderr on the
+crash branch only — see [Supervise loop (`Run`) § `claude exited` record](streamsup-package-supervise-loop-run.md#claude-exited-record-session-id-and-a-capped-stderr-tail-2723).
+
 **Cardinality is per iteration, not per live child.** The call is unconditional, so it also fires when
 `spawnAndWait` reports `started == false` — a pre-launch setup failure where no claude process ever
 existed. Deliberate: no child existed, so no turn of this runner's can be open, and #1207's intended clear

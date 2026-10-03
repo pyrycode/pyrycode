@@ -158,6 +158,62 @@ func TestSlogTee_WithGroupCarriesThroughTee(t *testing.T) {
 	}
 }
 
+// daemonOnlyValue stands in for streamsup's stderr tail: any value with a
+// LogDaemonOnly method.
+type daemonOnlyValue string
+
+func (daemonOnlyValue) LogDaemonOnly()                 {}
+func (d daemonOnlyValue) MarshalText() ([]byte, error) { return []byte(d), nil }
+
+// TestSlogTee_DaemonLogOnlyStaysOutOfRing pins #2723's exclusion: a value marked
+// LogDaemonOnly reaches the primary handler intact, while the ring line keeps the
+// key and the rest of the record but holds a constant in place of the value — so
+// `pyry logs` and the debug bundle carry none of its bytes.
+func TestSlogTee_DaemonLogOnlyStaysOutOfRing(t *testing.T) {
+	t.Parallel()
+	const secret = "tok3n-SECRET/path"
+	tests := []struct {
+		name string
+		log  func(*slog.Logger)
+	}{
+		{"record attr", func(l *slog.Logger) {
+			l.Warn("claude exited", "session", "s1", "stderr", daemonOnlyValue(secret))
+		}},
+		{"With attr", func(l *slog.Logger) {
+			l.With("stderr", daemonOnlyValue(secret)).Warn("claude exited", "session", "s1")
+		}},
+		{"inside a group", func(l *slog.Logger) {
+			l.Warn("claude exited", "session", "s1", slog.Group("child", "stderr", daemonOnlyValue(secret)))
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ring := NewRingBuffer(10)
+			var primary strings.Builder
+			tc.log(slog.New(SlogTee(slog.NewTextHandler(&primary, nil), ring)))
+
+			if !strings.Contains(primary.String(), secret) {
+				t.Errorf("primary output lost the value; got %q", primary.String())
+			}
+			lines := ring.Snapshot()
+			if len(lines) != 1 {
+				t.Fatalf("ring captured %d lines, want 1", len(lines))
+			}
+			for _, part := range []string{secret, "tok3n", "SECRET"} {
+				if strings.Contains(lines[0], part) {
+					t.Errorf("ring line carries %q from the daemon-only value: %q", part, lines[0])
+				}
+			}
+			for _, want := range []string{"claude exited", "session=s1", `stderr="` + ringOmitted + `"`} {
+				if !strings.Contains(lines[0], want) {
+					t.Errorf("ring line missing %q: %q", want, lines[0])
+				}
+			}
+		})
+	}
+}
+
 func TestServer_Logs(t *testing.T) {
 	t.Parallel()
 

@@ -97,6 +97,12 @@ func helperSpawnID() string {
 //     one complete result line, then blocks like "record_block".
 //     Used to prove a dead child's partial never splices onto its
 //     successor's first line.
+//   - "stderr_crash":  write helperStderrLines to stderr, then exit 1 — the
+//     2026-10-03 crash loop's shape. "stderr_exit0" writes the
+//     same and exits 0. "stderr_block" writes the same, prints
+//     "READY" on stdout, then blocks; on SIGTERM it writes one
+//     more stderr line and exits 1, so a deliberate kill still
+//     yields a non-zero exit. Used by the #2723 exit-record tests.
 func helperChild() {
 	switch os.Getenv("GO_STREAMSUP_HELPER_MODE") {
 	case "echo_lines":
@@ -236,8 +242,45 @@ func helperChild() {
 		case <-time.After(30 * time.Second):
 			os.Exit(0)
 		}
+	case "stderr_crash", "stderr_exit0", "stderr_block":
+		for _, line := range helperStderrLines() {
+			fmt.Fprintln(os.Stderr, line)
+		}
+		switch os.Getenv("GO_STREAMSUP_HELPER_MODE") {
+		case "stderr_crash":
+			os.Exit(1)
+		case "stderr_exit0":
+			os.Exit(0)
+		}
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGTERM)
+		go func() { _, _ = io.Copy(io.Discard, os.Stdin) }()
+		fmt.Fprintln(os.Stdout, "READY")
+		select {
+		case <-sigCh:
+			fmt.Fprintln(os.Stderr, helperStderrMarker+"on-sigterm")
+			os.Exit(1)
+		case <-time.After(30 * time.Second):
+			os.Exit(0)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown GO_STREAMSUP_HELPER_MODE: %q\n", os.Getenv("GO_STREAMSUP_HELPER_MODE"))
 		os.Exit(99)
 	}
+}
+
+// helperStderrMarker prefixes every stderr line the stderr_* modes write, so a
+// test can prove that no byte of the child's stderr reached the log ring.
+const helperStderrMarker = "CHILD-STDERR-"
+
+// helperStderrLines is what the stderr_* modes write: ten distinct 300-byte
+// lines, 3010 bytes with newlines — past both the line cap and the byte cap of
+// the exit record's tail.
+func helperStderrLines() []string {
+	lines := make([]string, 10)
+	for i := range lines {
+		head := fmt.Sprintf("%s%02d ", helperStderrMarker, i)
+		lines[i] = head + strings.Repeat("e", 300-len(head))
+	}
+	return lines
 }
