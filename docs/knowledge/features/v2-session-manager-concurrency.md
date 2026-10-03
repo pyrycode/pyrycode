@@ -15,12 +15,22 @@ As of [#965](../codebase/965.md), each open session also owns a long-lived per-c
 `mcp_status_request` (#2381) joins that same worker because `MCPStatusFor` may
 wait on a child round trip. Running it inline would stall every connection on the
 manager, while starting a free-standing goroutine would discard the worker's
-per-connection serialization and queue bound. The reply still cannot be sealed by
-the worker: success and all three rejects cross `forwardToRun`, keeping
-`CipherState` mutation on `Run`. A blocked-resolver test must therefore prove both
-halves — another connection replies before release, and the original connection's
-eventual reply decrypts after release — because either assertion alone misses one
-side of the ownership boundary.
+per-connection serialization and queue bound. **#2702 moved the wait itself off
+the worker, the shape #2563 gave `request_context_usage`**: `handleMCPStatusRequest`
+still runs decode and membership on the worker, then takes a non-blocking slot on
+its own `maxMCPStatusAsksPerConn = 4` semaphore and hands the seam call to a
+per-ask goroutine running under the worker's `connCtx`. A full semaphore refuses
+the ask at once with the existing retryable `mcp_status.unavailable` rather than
+re-parking the worker, and `connCtx` ending (conn teardown or manager shutdown)
+ends the wait and seals no reply for it. The reply still cannot be sealed by that
+goroutine: success and every reject cross `forwardToRun`, keeping `CipherState`
+mutation on `Run`. The cost is the same ordering trade #2563 took: this verb's
+reply can now arrive after replies to frames sent later on the same conn, so
+clients correlate on `in_reply_to`. In `cmd/pyry`, `resolveBoundMCPStatus` now
+bounds the child round trip itself at `mcpStatusQueryTimeout` (30s,
+`effectiveEffortQueryTimeout`'s precedent) rather than passing the conn's own
+undeadlined ctx straight to `QueryMCPStatus` — before #2702 a silent child held
+the ask, and the whole worker behind it, until the connection closed.
 
 `mcp_reconnect` / `mcp_toggle` (#2419) join the same worker for the identical
 reason — the `MCPActuator` seam that would eventually back them may wait on a
@@ -94,11 +104,14 @@ the existing retryable `context_usage.unavailable` rather than re-parking the
 worker — and is ended by a `connCtx` the worker derives from its own `ctx` and
 cancels on return (`s.done` or `runCtx`), so conn teardown or manager
 shutdown ends every waiting ask for that conn and no reply is built, let alone
-sealed, for a conn that is gone. Other bounded-wait arms
-(`mcp_status_request`, `mcp_reconnect`/`mcp_toggle`, `request_attachment`,
-`attachment_chunk`) still run under the worker's plain `ctx` rather than a
-per-conn context — untouched by this fix, and lower-severity since each waits
-only on one child round trip rather than an entire turn.
+sealed, for a conn that is gone. `mcp_status_request` (#2702) got the identical
+`connCtx` + per-verb-semaphore treatment later, its own severity being that an
+unanswered ask held not just `s.appFrames` but the connection's later
+`send_message`s. The remaining bounded-wait arms (`mcp_reconnect`/`mcp_toggle`,
+`request_attachment`, `attachment_chunk`) still run under the worker's plain
+`ctx` rather than a per-conn context — untouched by either fix, and
+lower-severity since each waits only on one child round trip rather than an
+entire turn.
 
 **Moving shared work off the caller's context is only half a fix for a
 collapsing seam; it has to come off the caller's goroutine too — the security
