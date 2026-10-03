@@ -86,6 +86,11 @@ func (f *fakeDialer) dial(_ context.Context, _ string) (net.Conn, error) {
 }
 
 func TestDialWithRetry(t *testing.T) {
+	// schedSlack absorbs scheduling delay on a loaded gate host (187.8ms was
+	// measured against a 150ms ceiling). The upper bounds only need to catch
+	// a dialWithRetry that ignores budget and runs on to DialTimeout (5s).
+	const schedSlack = 500 * time.Millisecond
+
 	t.Run("recovers after N transient failures", func(t *testing.T) {
 		const n = 3
 		const interval = 10 * time.Millisecond
@@ -106,9 +111,7 @@ func TestDialWithRetry(t *testing.T) {
 		if f.calls != n+1 {
 			t.Errorf("calls = %d, want %d", f.calls, n+1)
 		}
-		// +50ms slack for CI scheduling — modest enough that "no retry"
-		// or "wrong budget" still fails, generous enough for a loaded CI.
-		maxElapsed := n*interval + 50*time.Millisecond
+		maxElapsed := n*interval + schedSlack
 		if elapsed > maxElapsed {
 			t.Errorf("elapsed = %v, want <= %v", elapsed, maxElapsed)
 		}
@@ -138,8 +141,7 @@ func TestDialWithRetry(t *testing.T) {
 		if elapsed < budget {
 			t.Errorf("elapsed = %v, want >= budget %v (proves retries actually ran)", elapsed, budget)
 		}
-		// +50ms slack for CI scheduling.
-		maxElapsed := budget + 50*time.Millisecond
+		maxElapsed := budget + schedSlack
 		if elapsed > maxElapsed {
 			t.Errorf("elapsed = %v, want <= %v", elapsed, maxElapsed)
 		}

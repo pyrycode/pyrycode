@@ -171,12 +171,15 @@ func TestRun_SlowTool_NoFire(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	cfg := helperRunCfg(t, "slow_tool", &stdout, &stderr,
-		"GO_STREAMRUNNER_HELPER_SLEEP_MS=1500",
+		"GO_STREAMRUNNER_HELPER_SLEEP_MS=5000",
 	)
 	cfg.PromptBytes = []byte("noop")
-	// idle threshold well under the 1500ms tool silence: a type-blind
-	// watchdog WOULD fire; the type-aware one must not.
-	cfg.IdleTimeout = 500 * time.Millisecond
+	// The parser starts awaiting claude's first assistant turn, so the idle
+	// threshold also covers the helper's startup: re-execing the race-built
+	// test binary can take well over 500ms on a loaded gate host. Seconds
+	// absorb that, and the 5s tool silence is still far past the threshold,
+	// so a type-blind watchdog WOULD fire; the type-aware one must not.
+	cfg.IdleTimeout = 2 * time.Second
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
