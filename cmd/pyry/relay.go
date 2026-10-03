@@ -1050,6 +1050,19 @@ func startRelayV2(
 		announceConversation(p)
 	}
 
+	// The running turn's phase for the connect-time turn-phase reconcile (#2712).
+	// Minted here because the config literal below needs the seam before the
+	// emitter exists; the emitter is handed the same snapshot after construction.
+	// Only stream mode has an emitter, so with no sink both stay nil and the nil
+	// seam keeps the reconcile off — the method value of a nil pointer would be a
+	// non-nil func and defeat that.
+	var turnPhases *turnPhaseSnapshot
+	var runningTurnPhases func() []protocol.TurnStatePayload
+	if w.streamSink != nil {
+		turnPhases = &turnPhaseSnapshot{}
+		runningTurnPhases = turnPhases.running
+	}
+
 	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
 		Frames:      conn.Frames(),
 		Outbound:    conn.Send,
@@ -1280,6 +1293,8 @@ func startRelayV2(
 		// signal a client needs. Both halves of that contract are the producer's and the
 		// reconcile's; nothing is decided at this assignment.
 		RetainedBackgroundTaskRosters: w.retainedBackgroundTaskRosters,
+		// The running turn's phase (#2712), nil without a stream sink; see turnPhases.
+		RunningTurnPhases: runningTurnPhases,
 		// The remote wire pairing minter, alongside the `pyry pair` CLI and local
 		// control provider. All three reach the same mintDevice, so a record
 		// created here is indistinguishable from one either host-operator path
@@ -1626,6 +1641,7 @@ func startRelayV2(
 		// for it.
 		emitter.usageRec = contextUsageRec
 		emitter.waker = waker
+		emitter.phases = turnPhases
 		// The drain's AC2 scoping gate follows the ACTIVE conversation's bound
 		// session — the follow-active cursor boundSessionIDForActive reads, with the
 		// #678 conv.CurrentSessionID == "" isolation guard resolveBoundSession

@@ -568,6 +568,18 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	if helloPayload.LastEventID != nil {
 		m.replayMissed(ctx, s, *helloPayload.LastEventID)
 	}
+
+	// Connect-time turn-phase reconcile (#2712): re-assert the current phase of a
+	// running turn to this conn — the seventh Mode B instance. Unlike the six above
+	// it is placed AFTER replayMissed, and the position is load-bearing: replayMissed
+	// sets s.replayThrough from the ring, so reading the phase afterwards means a turn
+	// whose idle was appended before that watermark already reads as ended here,
+	// while an idle appended after it is above the watermark and reaches this conn
+	// live, behind the reconciled frame. Read before replayMissed, an idle could land
+	// in the replay tail, which drains first, have its live copy deduped, and leave
+	// the reconciled running phase as the last word. No-op for a non-interactive conn
+	// or an unwired seam.
+	m.reconcileTurnPhases(ctx, s)
 }
 
 // clientVersionReject says why a hello's client_version is refused. The zero
