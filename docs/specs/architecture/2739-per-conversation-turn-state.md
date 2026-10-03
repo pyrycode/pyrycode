@@ -76,3 +76,15 @@ Pending for the documentation stage: the interactive turn emitter / stream drain
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-03
+
+## Revisions
+
+### 2026-10-03: startup frames now reach the bound conversation's history (verifier rework 1)
+
+The verifier's gate found four e2e regressions the Testing strategy missed: `TestRelayV2_MCPActuationGatedAuditedAndAnsweredFresh`, `TestRelayV2_MCPStatusRequestQueriesLiveChildRequesterOnly`, `TestRelayV2_StreamMCPStatusReachesConnectedPhone` and `TestRelayV2_ConversationHistory`. All four relied on the bootstrap child's startup frames being dropped because no client had routed a message yet, so no active cursor existed.
+
+**Decision: startup frames with no turn behind them are recorded, not gated.** The production design is unchanged. A frame such as `mcp_status` describes the child, and the child belongs to its bound conversation, so it is that conversation's history. On main the same frames already reached history whenever a child started for the active conversation; only the no-cursor case dropped them, which was an artefact of the active gate this ticket removes. Gating them in the emitter would reintroduce a cursor-shaped rule for one class of event.
+
+**Test changes.**
+- The three MCP-status tests synced on the `stream_turn.not_active kind=mcp_status` drop record. They now sync on the bootstrap status's entry in the bound conversation's on-disk history, through a new e2e helper `waitForHistoryType`, which proves the emitter handled that frame before any phone connected. Their later expectations were unaffected: a phone that connects without a resume cursor receives no ring replay.
+- `TestRelayV2_ConversationHistory` walked a seeded log on the conversation bound to the bootstrap session, so the bootstrap child's startup entries raced the walk. It now seeds the walked conversation bound to a session no child runs, and binds a separate conversation to the bootstrap session, keeping the walk's exact-count claim deterministic.

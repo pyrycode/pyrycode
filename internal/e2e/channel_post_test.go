@@ -50,31 +50,57 @@ type assistantDeltaBody struct {
 // segment is not an entry and is skipped by its missing "type".
 func waitForHistoryEntries(t *testing.T, home, convID string) []historyEntry {
 	t.Helper()
-	dir := filepath.Join(home, ".pyry", "test", "conversations", convID, "history")
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		names, _ := filepath.Glob(filepath.Join(dir, "*"))
-		var out []historyEntry
-		for _, name := range names {
-			raw, err := os.ReadFile(name)
-			if err != nil {
-				continue
-			}
-			for _, line := range bytes.Split(bytes.TrimRight(raw, "\n"), []byte("\n")) {
-				var e historyEntry
-				if json.Unmarshal(line, &e) != nil || e.Type == "" {
-					continue // the segment header, or a partially-written line
-				}
-				out = append(out, e)
-			}
-		}
-		if len(out) > 0 {
+		if out := readHistoryEntries(home, convID); len(out) > 0 {
 			return out
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("no history entries for conversation %s under %s within 5s", convID, dir)
+	t.Fatalf("no history entries for conversation %s within 5s", convID)
 	return nil
+}
+
+// waitForHistoryType polls the conversation's durable log until it holds an
+// entry of type typ. Since #2739 a stream event is recorded under the
+// conversation its own session belongs to whether or not any client has routed a
+// message, so a child's startup frames (its mcp_status, say) land in the bound
+// conversation's history; this is the sync point for "the daemon has handled that
+// frame" that the old no-cursor drop record used to provide.
+func waitForHistoryType(t *testing.T, home, convID, typ string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, e := range readHistoryEntries(home, convID) {
+			if e.Type == typ {
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("no %q entry in conversation %s's history within %s", typ, convID, timeout)
+}
+
+// readHistoryEntries returns every entry across the conversation's history
+// segments in arrival order, or nothing when the log does not exist yet.
+func readHistoryEntries(home, convID string) []historyEntry {
+	dir := filepath.Join(home, ".pyry", "test", "conversations", convID, "history")
+	names, _ := filepath.Glob(filepath.Join(dir, "*"))
+	var out []historyEntry
+	for _, name := range names {
+		raw, err := os.ReadFile(name)
+		if err != nil {
+			continue
+		}
+		for _, line := range bytes.Split(bytes.TrimRight(raw, "\n"), []byte("\n")) {
+			var e historyEntry
+			if json.Unmarshal(line, &e) != nil || e.Type == "" {
+				continue // the segment header, or a partially-written line
+			}
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // TestChannelPost_E2E_RecordsAssistantEntry drives `pyry channel post` against a

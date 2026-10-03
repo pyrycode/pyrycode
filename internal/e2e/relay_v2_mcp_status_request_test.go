@@ -130,10 +130,10 @@ func TestRelayV2_MCPStatusRequestQueriesLiveChildRequesterOnly(t *testing.T) {
 	serverID := readPersistedServerID(t, home)
 	waitBinaryHello(t, fr, serverID)
 
-	// The first request is the automatic startup report. Waiting for its fixed
-	// no-cursor drop makes the next request against this same child the fake's
-	// changed-state response rather than racing startup.
-	waitForDaemonEvent(t, h, "kind=mcp_status", 10*time.Second)
+	// The first request is the automatic startup report. Waiting for its entry in
+	// the bound conversation's history (#2739) makes the next request against this
+	// same child the fake's changed-state response rather than racing startup.
+	waitForHistoryType(t, home, mcpQueryConvID, protocol.TypeMCPStatus, 10*time.Second)
 	phoneA := dialMCPQueryPhone(t, fr, serverID, pubKey, payloadA.Token, "phone-a")
 	phoneB := dialMCPQueryPhone(t, fr, serverID, pubKey, payloadB.Token, "phone-b")
 

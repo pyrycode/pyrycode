@@ -57,10 +57,11 @@ func TestRelayV2_StreamMCPStatusReachesConnectedPhone(t *testing.T) {
 
 	serverID := readPersistedServerID(t, home)
 	waitBinaryHello(t, fr, serverID)
-	// Drain the bootstrap child's rider before the phone connects. The fixed
-	// content-free kind proves that child's status reached Handle while the cursor
-	// was empty, so only the later replacement can be observed on the client wire.
-	waitForDaemonEvent(t, h, "kind=mcp_status", 10*time.Second)
+	// Drain the bootstrap child's rider before the phone connects. Since #2739 that
+	// status is recorded under the bound conversation, so its history entry proves
+	// the emitter has handled it before any phone was open, and only the later
+	// replacement can be observed on the client wire.
+	waitForHistoryType(t, home, mcpStatusConvID, protocol.TypeMCPStatus, 10*time.Second)
 	dialCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	phone, err := fakephone.Dial(dialCtx, fr.URL(), serverID, pairing.Token, "phone-a")
