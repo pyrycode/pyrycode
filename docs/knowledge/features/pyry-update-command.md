@@ -1,6 +1,6 @@
 # `pyry update` — user-facing self-update command
 
-The CLI wiring (#189, extended in #190) that ties the `internal/update` primitives into a single self-update flow plus daemon-restart wiring. See [update-package.md](update-package.md) for the building-block primitives this command composes.
+The CLI wiring (#189, extended in #190, and in #2716 to share its verified install step with an opt-in daemon auto-updater) that ties the `internal/update` primitives into a single self-update flow plus daemon-restart wiring. See [update-package.md](update-package.md) for the building-block primitives this command composes.
 
 ## What it does
 
@@ -40,6 +40,34 @@ Hint: this pyry was installed via Homebrew; consider 'brew upgrade pyry' instead
 
 Non-blocking — the update still proceeds. The hint exists because a Homebrew-installed pyry will hit `AtomicReplace` and successfully overwrite the binary in `/opt/homebrew/bin/pyry`, but the user's *next* `brew upgrade` will revert it. Refusing would block the Homebrew user who knowingly wants the GitHub-release version.
 
+## Automatic update (#2716)
+
+An opt-in daemon loop installs an eligible release by itself once the daemon is idle, so a machine reached only to update it stays current without a login. Off by default: a daemon started without `-pyry-auto-update` builds no updater and makes no release request. There is no `config.json` key — one switch is enough, and the flag lives in the launchd/systemd unit file the operator already edits.
+
+With the flag set, the daemon checks the latest release 2 minutes after startup (`autoUpdateStartDelay`), then every 4 hours (`autoUpdateInterval`). Checks are independent — an eligible release not yet installed is simply re-evaluated on the next tick.
+
+**Eligibility** (`update.Eligible`, pure, table-tested in `internal/update/version_test.go`) refuses a release unless all hold: the running build is a release, not `dev`; the release is not a draft and not marked pre-release; its tag is exactly `v?<digits>.<digits>.<digits>` — a `-rc1` or `+meta` suffix is refused explicitly, since `update.CompareVersions` would otherwise strip it before comparing; and it is strictly newer than the running version. An equal version returns `ErrUpToDate`; anything else ineligible returns `ErrNotEligible` wrapping a short reason, which becomes the log line's `reason`.
+
+**Idleness** (`daemonIdle`, pure, table-tested in `cmd/pyry/auto_update_test.go`) requires both: no conversation has a turn open — `turnBusyTracker.AnyBusy()`, fed by Claude and Codex turns alike, since both share the one turn-event fan-in the tracker observes — and no session's `LastActiveAt` falls within the last 15 minutes (`autoUpdateQuietWindow`). A connected phone is deliberately not an input: a phone left connected overnight would otherwise hold every update off indefinitely. A nil turn tracker fails closed (counts as a turn being open), never defaulting to idle.
+
+Nothing is downloaded when the release is ineligible or the daemon is not idle; the next scheduled check tries again. Nothing is installed when `update.DetectRestartCommand` finds no managed unit, or when the binary lives under `/opt/homebrew/` — both checked before any network request.
+
+**Install** goes through `installRelease`, the same function `pyry update` itself now calls (see Architecture below): the same signature check against `releaseSigningPublicKeyHex`, the same SHA-256 checksum check, and the same `update.AtomicReplace`. A signature or checksum failure leaves the binary and any existing `pyry.prev` untouched.
+
+Once the swap succeeds and the "installed" log line is written, the daemon asks `idle()` again before restarting — a turn may have opened while the release downloaded — polling once a minute until it is, then hands the restart to the detected `launchctl`/`systemctl` command. The loop then stops: a later scheduled check would otherwise find the new binary already installed and skip, but a *second* install of the same release would overwrite `pyry.prev` with the build just installed, losing the rollback copy, so stopping is the simpler guarantee.
+
+**Logging.** Each check ends in exactly one `auto-update check` slog line, `outcome` one of:
+
+| Outcome | Meaning |
+|---------|---------|
+| `up_to_date` | The latest release is the running version. |
+| `waiting_for_idle` | An eligible release exists but the daemon is not idle; nothing was downloaded. |
+| `installed` | The release was downloaded, verified and swapped in; logged before the restart is issued. |
+| `skipped` | The release is not eligible, or no managed unit was found, or the binary is a Homebrew install — `reason` names which. |
+| `failed` | A fetch, parse, download, verification or install step errored; `err` carries the wrapped error. The tag is truncated to 64 bytes before it reaches any log line. |
+
+A restart failure after a successful install is logged as a separate `auto-update restart failed` Error line, since the check's own `installed` outcome line has already been written. **Known log quirk:** because the restart command runs inside the unit it restarts, a restart that *succeeds* can also produce this line — the service manager's SIGTERM, sent once it has accepted the restart request, can reach and kill the restart command before it returns, so `runRestart` reports an error for a handoff that is in fact going through. Whether the daemon actually comes back at the new version is the real signal; the Error line alone does not mean the restart failed.
+
 ## Architecture
 
 `runUpdate(args []string) error` parses flags and dispatches to a private `doUpdate(ctx, updateOptions) error`. The `updateOptions` struct is the integration-test seam — production callers populate it once with real defaults inside `runUpdate`; tests substitute `httptest`-driven equivalents.
@@ -65,6 +93,8 @@ type updateOptions struct {
 
 Seven field-level seams the integration tests need: (a) `Fetcher.BaseURL` for the latest-release call (already a Fetcher field), (b) `releaseBaseURL` for the tarball + checksums URL templating, (c) `executablePath()` so tests point at a tempdir file rather than the real `/usr/local/bin/pyry`, (d) `out` for capturing progress lines without racing stdout, (e) `probeRestart` so tests fixture a `RestartProbe` instead of stat'ing real plist/unit paths, (f) `runRestart` so tests record argv instead of exec'ing real `launchctl` / `systemctl`, and (g) `signingPubKey` (#776) so tests inject a throwaway test key and sign fixtures with its private half rather than needing the production private key. Bundling them into one struct keeps the `runUpdate → doUpdate` boundary single-argument and lets every default land in one place. No `init()`, no global vars, no `httptest` baked into production code.
 
+Since #2716, the download/verify/replace tail — steps 7–13 below — lives in `installRelease(ctx, o updateOptions, target, tag string) error`, called by both `doUpdate` and the daemon's auto-updater (see Automatic update above). `productionUpdateOptions(out io.Writer) (updateOptions, error)` builds the real seam values (signing key, fetcher, replace, probe/run-restart) that both callers populate from, so the CLI and the daemon cannot drift apart; `doUpdate`'s own output and behaviour are unchanged.
+
 ### Flow
 
 1. Resolve the executable path (`os.Executable()`, falling back to `os.Args[0]`); print Homebrew hint if applicable.
@@ -79,7 +109,7 @@ Seven field-level seams the integration tests need: (a) `Fetcher.BaseURL` for th
 10. `update.ParseChecksumsFile(body, asset)` plucks the SHA-256 hex (only reached once the signature has vouched for the checksums bytes).
 11. `update.VerifySHA256(tgz, digest)`. On mismatch, print `FAIL` and return wrapped `ErrChecksumMismatch`.
 12. `update.ExtractBinary(tgz, "pyry")` returns the new binary's bytes.
-13. `update.AtomicReplace(target, bin, 0o755)` swaps the on-disk binary.
+13. **Keep the previous binary (#2716).** If `target` exists and its bytes differ from the extracted binary, `keepPrevious` copies the current bytes to `pyry.prev` beside `target` — the same name and place `make rollback` reads — at `target`'s own permission bits, through `o.replace`. When the bytes already match (a repeat install of the same release, e.g. two daemons sharing one binary), both this step and the replace are skipped, so `pyry.prev` is never overwritten with the new build. A target that does not yet exist skips the copy. Any other read/write error aborts before `target` is touched. `update.AtomicReplace(target, bin, 0o755)` then swaps the on-disk binary.
 14. **Daemon restart (#190).** Unless `--no-restart` is set, call `o.probeRestart()` to stat the canonical launchd plist (`~/Library/LaunchAgents/dev.pyrycode.pyry.plist`) and systemd user-unit (`~/.config/systemd/user/pyry.service`) paths. Pass the resulting `RestartProbe` to `update.DetectRestartCommand`. If non-nil argv is returned, print `==> Restarting daemon (<manager>: <last-argv-element>)...` and call `o.runRestart(ctx, argv)`. If the probe returns no managed unit (both stats fail), the step is silently skipped.
 15. Print `==> Updated to <v>.` — last in the happy path so it terminates the output.
 
@@ -138,8 +168,8 @@ If a future ticket adds Ctrl-C handling, swap `context.Background()` for `signal
 ## Out of scope (handled in follow-up tickets or deferred)
 
 - **Renamed daemons** (`pyry install-service --name <other>`). The probe is hardcoded to `dev.pyrycode.pyry.plist` / `pyry.service`; renamed installs are silently skipped on update (treated as "no managed unit"). Follow-up if observed.
-- **Rollback / `.bak` of the old binary.** Deferred entirely. `AtomicReplace` already provides crash-safety up to the rename; partial-write corruption is structurally unreachable. Rollback after a successful but undesired update is a separate feature with its own design (where to store the old binary, how to garbage-collect, how the user invokes it).
-- **Scheduled auto-update / channel selection.** Deferred. Only the `latest` GitHub release is consulted; pre-release tags are ignored.
+- **Rollback beyond `pyry.prev`.** Since #2716, `pyry update` and the daemon's auto-updater both keep the replaced binary as `pyry.prev` beside the target before swapping in the new one — the location `make rollback` already restores from — so either kind of install can be rolled back by hand. Nothing restores it automatically, only one previous binary is ever kept, and a repeat install of the same release skips the copy rather than overwriting it with the new build. Automatic rollback, keeping more than one prior binary, and garbage-collecting old ones remain a separate, undesigned feature.
+- **Release channel selection.** Deferred. Only the `latest` GitHub release is consulted; drafts and pre-releases are refused both by GitHub's endpoint and, since #2716, by `update.Eligible`.
 - **Ctrl-C / SIGINT handling.** `context.Background()` today; swap to `signal.NotifyContext` if the need arises.
 - **Retry on transient network failure.** Forbidden by `Fetcher`'s AC. Operator re-runs `pyry update`.
 
@@ -263,9 +293,14 @@ Same file (`cmd/pyry/update_e2e_test.go`), same build tag, three new sibling tes
 
 ## Files
 
-- `cmd/pyry/update.go` (~285 LOC) — `runUpdate`, `resolveExecutable`, `updateOptions`, `defaultProbeRestart`, `defaultRunRestart`, `doUpdate`, plus the `releaseSigningPublicKeyHex` baked-in constant (#776) and the non-pinned-downgrade refusal guard (#1498).
-- `cmd/pyry/update_test.go` (~730 LOC) — integration tests + httptest fixtures + the auto-signing server + signature tests (#776) + the downgrade-refusal tests and `newDowngradeReleaseServer` (#1498).
-- `cmd/pyry/main.go` — `case "update":` dispatch + `printHelp` entry.
+- `cmd/pyry/update.go` (~285 LOC) — `runUpdate`, `resolveExecutable`, `updateOptions`, `defaultProbeRestart`, `defaultRunRestart`, `doUpdate`, plus the `releaseSigningPublicKeyHex` baked-in constant (#776) and the non-pinned-downgrade refusal guard (#1498). Since #2716: `productionUpdateOptions` (the shared seam builder), `installRelease` (the download/verify/replace tail `doUpdate` now calls), and `keepPrevious` (writes `pyry.prev`).
+- `cmd/pyry/update_test.go` (~730 LOC) — integration tests + httptest fixtures + the auto-signing server + signature tests (#776) + the downgrade-refusal tests and `newDowngradeReleaseServer` (#1498). `TestUpdate_Success` also asserts `pyry.prev` holds the pre-update bytes (#2716).
+- `cmd/pyry/auto_update.go` (#2716, ~180 LOC) — `daemonIdle`, `autoUpdater`, `(*autoUpdater).Run`/`check`/`restart`, `newAutoUpdater`: the opt-in daemon auto-update loop.
+- `cmd/pyry/auto_update_test.go` (#2716, ~370 LOC) — table test for `daemonIdle`; check-level tests against a signed httptest release covering every outcome, including that a bad signature leaves `pyry.prev` untouched and that `installed` logs before `runRestart` is called.
+- `cmd/pyry/main.go` — `case "update":` dispatch + `printHelp` entry. Since #2716: the `-pyry-auto-update` flag and the updater's start/join alongside `pool.Run`.
+- `cmd/pyry/stream_turn_busy.go` — since #2716, `(*turnBusyTracker).AnyBusy()`, a bool-only "does any conversation have a turn open" query alongside `Busy`.
+- `internal/update/version.go` — since #2716, also `Release`, `ParseRelease`, `Eligible`, `ErrUpToDate`, `ErrNotEligible`, alongside the existing `ParseLatestRelease`/`CompareVersions` (unchanged).
+- `internal/update/version_test.go` (#2716) — table tests for `Eligible` and `ParseRelease`.
 - `internal/update/signature.go` (#776) — `VerifySignature` + `ErrInvalidSignature` / `ErrInvalidPublicKey`; see [`update-package.md`](update-package.md).
 - `internal/update/restart.go` — `RestartProbe` + `DetectRestartCommand` (#181, consumed unchanged).
 - `.goreleaser.yaml` — `signs:` block that signs `checksums.txt` → `checksums.txt.sig` (#776).
@@ -285,5 +320,7 @@ Same file (`cmd/pyry/update_e2e_test.go`), same build tag, three new sibling tes
 - [ADR 015](../decisions/015-update-restart-probe-inline.md) — daemon-restart probe placement and executor seam.
 - [`docs/specs/architecture/189-update-subcommand-wiring.md`](../../specs/architecture/189-update-subcommand-wiring.md) — #189 build-time spec.
 - [`docs/specs/architecture/190-update-daemon-restart-wiring.md`](../../specs/architecture/190-update-daemon-restart-wiring.md) — #190 build-time spec.
+- [`docs/specs/architecture/2716-daemon-auto-update.md`](../../specs/architecture/2716-daemon-auto-update.md) — #2716 build-time spec and security review for the auto-updater.
+- [ADR 040](../decisions/040-auto-update-eligible-release-and-idle-are-independent.md) — why eligibility and idleness are kept as two independent, pure predicates.
 - `cmd/pyry/main.go` — `var Version = "dev"` is the input that triggers the dev-build skip branch.
 - `.goreleaser.yaml` — the build matrix `AssetName` mirrors and the source of the published tarballs the command consumes.
