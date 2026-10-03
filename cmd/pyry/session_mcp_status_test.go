@@ -17,17 +17,19 @@ import (
 )
 
 type mcpStatusQueryPlan struct {
-	mu      sync.Mutex
-	byID    map[sessions.SessionID]turnevent.MCPStatus
-	blocked map[sessions.SessionID]bool
-	calls   map[sessions.SessionID]int
+	mu        sync.Mutex
+	byID      map[sessions.SessionID]turnevent.MCPStatus
+	blocked   map[sessions.SessionID]bool
+	calls     map[sessions.SessionID]int
+	deadlines map[sessions.SessionID]time.Time
 }
 
 func newMCPStatusQueryPlan() *mcpStatusQueryPlan {
 	return &mcpStatusQueryPlan{
-		byID:    make(map[sessions.SessionID]turnevent.MCPStatus),
-		blocked: make(map[sessions.SessionID]bool),
-		calls:   make(map[sessions.SessionID]int),
+		byID:      make(map[sessions.SessionID]turnevent.MCPStatus),
+		blocked:   make(map[sessions.SessionID]bool),
+		calls:     make(map[sessions.SessionID]int),
+		deadlines: make(map[sessions.SessionID]time.Time),
 	}
 }
 
@@ -46,6 +48,8 @@ func (p *mcpStatusQueryPlan) block(id sessions.SessionID) {
 func (p *mcpStatusQueryPlan) query(ctx context.Context, id sessions.SessionID) (turnevent.MCPStatus, bool) {
 	p.mu.Lock()
 	p.calls[id]++
+	deadline, _ := ctx.Deadline()
+	p.deadlines[id] = deadline
 	blocked := p.blocked[id]
 	status, ok := p.byID[id]
 	p.mu.Unlock()
@@ -54,6 +58,15 @@ func (p *mcpStatusQueryPlan) query(ctx context.Context, id sessions.SessionID) (
 		return turnevent.MCPStatus{}, false
 	}
 	return status, ok
+}
+
+// deadlineFor reports the deadline the last query for id carried; false when it had
+// none.
+func (p *mcpStatusQueryPlan) deadlineFor(id sessions.SessionID) (time.Time, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	deadline := p.deadlines[id]
+	return deadline, !deadline.IsZero()
 }
 
 func (p *mcpStatusQueryPlan) callCount(id sessions.SessionID) int {
@@ -252,5 +265,42 @@ func TestMCPStatusFor_PreservesNilAndDelegates(t *testing.T) {
 	got, ok := seam(context.Background(), "conv-mcp-adapter")
 	if !ok || got.ConversationID != "conv-mcp-adapter" || got.DroppedServers != 7 {
 		t.Fatalf("adapter result = (%+v,%v), want mapped bound status", got, ok)
+	}
+}
+
+// TestResolveBoundMCPStatus_BoundsTheChildWait is #2702 AC-2's daemon half: a live
+// child that never answers mcp_status must not hold the ask until the connection
+// closes. The query reaches the child under a deadline of mcpStatusQueryTimeout even
+// when the caller's ctx has none, and a child that stays silent past its deadline
+// yields not-ok, which the relay answers with the retryable mcp_status.unavailable.
+func TestResolveBoundMCPStatus_BoundsTheChildWait(t *testing.T) {
+	t.Parallel()
+	pool, plan := newMCPStatusQueryTestPool(t)
+	plan.arm(pool.BootstrapID(), sentinelMCPStatus("bounded"))
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{
+		ID:               "conv-mcp-bounded",
+		CurrentSessionID: string(pool.BootstrapID()),
+		LastUsedAt:       time.Now().UTC(),
+	})
+
+	started := time.Now()
+	if _, ok := resolveBoundMCPStatus(context.Background(), reg, pool, "conv-mcp-bounded"); !ok {
+		t.Fatal("background-context query was unavailable")
+	}
+	deadline, hasDeadline := plan.deadlineFor(pool.BootstrapID())
+	if !hasDeadline {
+		t.Fatal("child query context had no deadline")
+	}
+	if remaining := deadline.Sub(started); remaining <= 0 || remaining > mcpStatusQueryTimeout+time.Second {
+		t.Errorf("child query deadline remaining = %v, want within (0,%v]", remaining, mcpStatusQueryTimeout+time.Second)
+	}
+
+	plan.block(pool.BootstrapID())
+	timedOut, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	if got, ok := resolveBoundMCPStatus(timedOut, reg, pool, "conv-mcp-bounded"); ok ||
+		!reflect.DeepEqual(got, protocol.MCPStatusPayload{}) {
+		t.Fatalf("silent child result = (%+v,%v), want zero,false", got, ok)
 	}
 }

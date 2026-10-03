@@ -1191,7 +1191,8 @@ const (
 	// appFrameSessionSettingsRequest is the effective-effort read (#2516), whose
 	// optional provider may wait on a child round trip.
 	appFrameSessionSettingsRequest
-	// appFrameMCPStatusRequest is the potentially blocking live-status read (#2381).
+	// appFrameMCPStatusRequest is the live-status read (#2381). Its wait on a child
+	// round trip runs off the worker (#2702), so its reply is not FIFO.
 	appFrameMCPStatusRequest
 	// appFrameMCPReconnect and appFrameMCPToggle are the two MCP actuations (#2419)
 	// — blocking like the read above, but WRITES to a running child's configuration,
@@ -1200,8 +1201,8 @@ const (
 	appFrameMCPToggle
 	// appFrameContextUsageRequest is the on-demand context-window read (#2431) —
 	// the longest-waiting member of this set, since it defers a mid-turn request
-	// until the turn ends before it asks the child anything. The only member whose
-	// wait runs off the worker (#2563), so the only one whose reply is not FIFO.
+	// until the turn ends before it asks the child anything. Its wait runs off the
+	// worker (#2563), so like the MCP status read its reply is not FIFO.
 	appFrameContextUsageRequest
 	// appFrameWorkspaceFileRead is the live workspace markdown read (#2598) —
 	// the retrieval arm's shape, over a file read live rather than a stored copy.
@@ -1218,12 +1219,14 @@ const (
 // in closeWith) or ctx (runCtx) is cancelled (Run exit) — leaving no
 // goroutine behind under conn churn or shutdown.
 //
-// ONE EXCEPTION to that ordering (#2563): a request_context_usage is checked
-// here but its seam wait and reply run on a goroutine of their own, so that
-// reply can emit after replies to frames that arrived later. Clients
-// correlate it on in_reply_to. connCtx is what ends those goroutines: it is
-// cancelled when this worker returns, which is exactly on s.done or ctx, and
-// asks bounds how many one conn can hold (maxContextUsageAsksPerConn).
+// TWO EXCEPTIONS to that ordering: a request_context_usage (#2563) and an
+// mcp_status_request (#2702) are checked here but their seam wait and reply
+// run on a goroutine of their own, so that reply can emit after replies to
+// frames that arrived later. Clients correlate it on in_reply_to. connCtx is
+// what ends those goroutines: it is cancelled when this worker returns, which
+// is exactly on s.done or ctx. Each verb has its own semaphore bounding how
+// many one conn can hold: asks (maxContextUsageAsksPerConn) and mcpAsks
+// (maxMCPStatusAsksPerConn).
 //
 // The worker NEVER touches s.send / s.recv / keys / session state: it only
 // runs Route → handler → c.Send (a marshal + channel push, no AEAD) and
@@ -1233,6 +1236,7 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 	connCtx, cancelConn := context.WithCancel(ctx)
 	defer cancelConn()
 	asks := make(chan struct{}, maxContextUsageAsksPerConn)
+	mcpAsks := make(chan struct{}, maxMCPStatusAsksPerConn)
 	for {
 		select {
 		case <-ctx.Done():
@@ -1292,10 +1296,12 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				// forwardToRun so the worker never touches s.send.
 				m.handleRequestSessionSettings(ctx, s, job.plaintext, job.multiAgent)
 			case appFrameMCPStatusRequest:
-				// The resolver may wait on a child round trip. Its reply and every
-				// reject return through forwardToRun, so the worker never seals under
-				// s.send or touches any other Run-owned session state.
-				m.handleMCPStatusRequest(ctx, s, job.plaintext)
+				// The resolver may wait on a child round trip. That wait does NOT
+				// stall this conn's later frames (#2702): the handler checks
+				// membership here and hands the wait to a goroutine of its own. Its
+				// reply and every reject return through forwardToRun, so nothing
+				// seals under s.send off Run.
+				m.handleMCPStatusRequest(connCtx, s, mcpAsks, job.plaintext)
 			case appFrameMCPReconnect:
 				// The actuator waits on a child round trip, so this stalls only the
 				// addressed conn's later frames. Its reply and every reject return
@@ -1306,7 +1312,7 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				m.handleMCPToggle(ctx, s, job.plaintext)
 			case appFrameContextUsageRequest:
 				// The resolver may wait for an open turn to end and then for a child
-				// round trip. Unlike the arms above, that wait does NOT stall this
+				// round trip. Like the MCP status arm, that wait does NOT stall this
 				// conn's later frames (#2563): the handler checks membership here and
 				// hands the wait to a goroutine of its own, so its reply may emit
 				// after later frames' replies. Its reply and every reject return
