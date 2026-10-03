@@ -13,7 +13,9 @@ newStreamSessionTag(cfg.SessionID)` (#1133 — the live handle both fan-in lanes
 newSessionParser(sink.sinkForTag(tag.ID), cfg.Logger)` (#1840, below); `scfg.Stdout = parser`;
 `scfg.OnChildExit = sink.exitForTag(tag.ID)`; `scfg.OnSessionRotate = tag.Rotate` — see [Session rotation
 notification](streamsup-package-session-rotation-notification-onsessionrotate.md) for why the tag is
-minted here, ahead of both halves, rather than threaded through either signature; `streamsup.New(scfg)`;
+minted here, ahead of both halves, rather than threaded through either signature; `scfg.OnCrashLoop =
+sink.crashLoopForTag(tag.ID)` (#2724, same live tag again) — see [Crash episode
+notification](streamsup-package-crash-episode-notification-oncrashloop.md); `streamsup.New(scfg)`;
 on error, `fmt.Errorf("cmd/pyry: stream runner: %w", err)` and a genuine nil `sessions.Runner`; on success,
 `streamRunner{r: r, models: held}`.
 

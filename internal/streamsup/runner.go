@@ -224,6 +224,28 @@ type Config struct {
 	// that sink, not from this callback.
 	OnChildExit func()
 
+	// OnCrashLoop is called once per CRASH EPISODE: when crashLoopFastExits
+	// consecutive supervision iterations have entered the backoff ladder each with
+	// an uptime under crashLoopFastUptime (#2724). Optional and nil-checked. The
+	// interactive daemon turns it into a non-terminal session_error so clients hear
+	// within seconds that claude cannot stay up, instead of after msgqueue's
+	// two-minute give-up.
+	//
+	// It is fed from the backoff branch and nowhere else, which is the whole of
+	// what separates it from OnChildExit. A deliberate restart (Restart,
+	// RestartFresh) skips that branch, so it neither counts nor ends an episode; a
+	// shutdown returns above it. A spawn that failed before claude launched does
+	// reach it, with near-zero uptime, and counts. An exit that is not fast ends the
+	// episode, and a later run of fast exits fires again.
+	//
+	// It carries nothing out of the child — no exit status, no stderr, no argv —
+	// so a consumer cannot put child output on the wire through it.
+	//
+	// Same calling contract as OnChildExit: synchronous on the Run goroutine with
+	// no Runner lock held, after the backoff state update and before the wait. It
+	// must not block, since the respawn waits on it, and must not panic.
+	OnCrashLoop func()
+
 	// OnSessionRotate is called when RestartFresh ACCEPTS a rotation, with the id
 	// it rotated onto. Optional — nil-checked at the fire site and left nil by
 	// every construction path but one — and non-nil only on the interactive
@@ -2328,6 +2350,7 @@ func (r *Runner) drainRestart() bool {
 // is not a crash). Mirrors supervisor.Run.
 func (r *Runner) Run(ctx context.Context) error {
 	bo := newBackoffTimer(r.cfg.BackoffInitial, r.cfg.BackoffMax, r.cfg.BackoffReset)
+	var episode crashEpisode
 	firstRun := true
 
 	startedAt := time.Now()
@@ -2429,6 +2452,9 @@ func (r *Runner) Run(ctx context.Context) error {
 			st.NextBackoff = delay
 		})
 		r.log.Info("restarting after backoff", "delay", delay)
+		if episode.observe(uptime) && r.cfg.OnCrashLoop != nil {
+			r.cfg.OnCrashLoop()
+		}
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():

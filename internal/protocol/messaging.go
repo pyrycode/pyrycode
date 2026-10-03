@@ -468,11 +468,13 @@ type InterruptPayload struct {
 
 // SessionErrorPayload is the body of an Envelope whose Type ==
 // TypeSessionError (docs/protocol-mobile.md § Error codes). Binary → phone
-// direction; the unsolicited, conversation-scoped frame the daemon emits when
-// its interactive message queue gives up delivering queued messages (the
-// msgqueue OnGiveUp seam, #1000). Wire vocabulary only — the producer that
-// emits it is sibling #1008; the never-log discipline for Message is #1008's
-// concern.
+// direction; the unsolicited, conversation-scoped frame the daemon emits for a
+// session problem. Code says which: CodeSessionBlocked when its interactive
+// message queue gives up delivering queued messages (the msgqueue OnGiveUp seam,
+// #1000), which is terminal, or CodeSessionChildCrashing when the conversation's
+// claude child keeps exiting at startup and the daemon is still restarting it
+// (#2724), which is not. Wire vocabulary only — the producers live in cmd/pyry;
+// the never-log discipline for Message is theirs.
 //
 // ConversationID is the routing key — a plain string with no omitempty,
 // mirroring the sibling interactive payloads (QueueStatePayload,
@@ -481,18 +483,20 @@ type InterruptPayload struct {
 // conversation_id), never attacker-derived — same posture as
 // QueueStatePayload.ConversationID.
 //
-// Code is the terminal wire code (CodeSessionBlocked); a plain string over a
-// closed wire set, not a named enum (leaf-data convention, matching
-// MessagePayload.Role / SessionTransitionPayload.Reason). It names a terminal
-// give-up, distinct from the transient CodeServerBinaryBusy, so a client cannot
-// read the frame as "retry shortly". The struct carries NO Retryable /
-// RetryAfterS fields: their structural absence is what prevents a client
-// reading the frame as transient. Message is the daemon-generated
-// human-readable reason. No field carries omitempty — all three are always
+// Code is the wire code, CodeSessionBlocked or CodeSessionChildCrashing; a plain
+// string over a closed wire set, not a named enum (leaf-data convention,
+// matching MessagePayload.Role / SessionTransitionPayload.Reason). Neither is
+// the transient CodeServerBinaryBusy, so a client cannot read the frame as
+// "retry shortly": session.blocked is a terminal give-up, and
+// session.child_crashing reports that the daemon is already retrying on its own.
+// The struct carries NO Retryable / RetryAfterS fields: their structural absence
+// is what prevents a client reading the frame as a cue to resend. Message is
+// daemon-written human-readable prose and never carries child output or queued
+// text. No field carries omitempty — all three are always
 // present so the golden fixture pins the full shape.
 type SessionErrorPayload struct {
 	ConversationID string `json:"conversation_id"` // routing key; plain string, no omitempty — mirrors the sibling interactive payloads
-	Code           string `json:"code"`            // terminal wire code (CodeSessionBlocked); plain string, not a named enum (leaf-data convention)
+	Code           string `json:"code"`            // CodeSessionBlocked (terminal) or CodeSessionChildCrashing (not); plain string, not a named enum (leaf-data convention)
 	Message        string `json:"message"`         // daemon-generated human-readable reason
 }
 

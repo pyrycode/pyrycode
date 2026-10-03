@@ -141,6 +141,32 @@ type streamTurnSink struct {
 	lifecycleCloseMu      sync.Mutex
 	lifecycleClosePending map[string]struct{}
 	lifecycleCloseWake    chan struct{}
+
+	// crashLoop is the session_error producer every runner's crash-episode hook
+	// reaches through crashLoopForTag (#2724). Late-bound because the pool, and with
+	// it the bootstrap runner, is built before the hand-off channel it sends into;
+	// loaded at fire time, and atomic so a set racing a fire needs no ordering
+	// argument. Nil — every test sink, and a daemon before main sets it — drops the
+	// signal.
+	crashLoop atomic.Pointer[func(sessionID string)]
+}
+
+// setCrashLoopNotify installs the producer crashLoopForTag's closures call.
+func (s *streamTurnSink) setCrashLoopNotify(fn func(sessionID string)) {
+	s.crashLoop.Store(&fn)
+}
+
+// crashLoopForTag returns the streamsup.Config.OnCrashLoop hook for the runner
+// whose live session id tag reads. It reads the tag at fire time for exitForTag's
+// reason: RestartFresh rotates the id, and the conversation lookup downstream
+// matches the live one. It does not block on its own; the installed producer owns
+// that half of OnCrashLoop's contract.
+func (s *streamTurnSink) crashLoopForTag(tag func() string) func() {
+	return func() {
+		if fn := s.crashLoop.Load(); fn != nil {
+			(*fn)(tag())
+		}
+	}
 }
 
 // newStreamTurnSink constructs the fan-in. buf <= 0 falls back to

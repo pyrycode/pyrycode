@@ -812,6 +812,9 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 			scfg.OnChildExit = onChildExit
 		}
 		scfg.OnSessionRotate = tag.Rotate
+		// #2724: a crash episode reaches clients as session.child_crashing through the
+		// sink's late-bound producer, read off the same live tag as the exit lane.
+		scfg.OnCrashLoop = sink.crashLoopForTag(tag.ID)
 		// #2064's posture gate is bound HERE rather than in mapStreamsupConfig, on the
 		// same dividing line Stdout sits on: it is a runtime object, not a plain value
 		// derived from a RunnerConfig field. Taken from the parser that was just built
