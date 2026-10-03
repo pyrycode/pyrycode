@@ -401,6 +401,7 @@ func TestWithWorkdirReadFolder(t *testing.T) {
 		{"symlink to the home folder is not added", nil, homeLink, home, nil, true},
 		{"home given by a symlinked spelling is still caught", nil, home, homeLink, nil, true},
 		{"root is not added", nil, "/", home, nil, true},
+		{"a folder containing home is not added", nil, root, home, nil, true},
 		{"unresolvable home adds nothing", nil, wd, "", nil, true},
 	}
 	for _, tt := range tests {

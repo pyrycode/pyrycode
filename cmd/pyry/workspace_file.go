@@ -161,10 +161,13 @@ func resolveReadFolders(entries []string, log *slog.Logger) []string {
 // entry, so a folder that is also configured matches it and is listed once.
 // It goes first when added: it is the daemon's own folder.
 //
-// THE GUARD. A working folder that is the home folder or the root is not added:
-// starting the daemon from $HOME would otherwise expose every markdown file in
-// it. Both sides are compared as realpaths, so a symlinked home is still
-// caught. When home does not resolve the folder is not added either, because
+// THE GUARD. A working folder that is the home folder, the root or any other
+// folder containing home is not added: starting the daemon from $HOME would
+// otherwise expose every markdown file in it. confineWorkdirToHome already
+// refuses a working folder outside home, so in the daemon only the first case
+// is reachable; the others hold here on their own rather than through that
+// call order. Both sides are compared as realpaths, so a symlinked home is
+// still caught. When home does not resolve the folder is not added either, because
 // the guard cannot be checked; an empty home counts, since ResolveWorkdir
 // would read "" as the process directory. Each case logs one line naming the
 // folder — operator configuration, not a client-named path. log may be nil.
@@ -181,6 +184,8 @@ func withWorkdirReadFolder(folders []string, workdir, home string, log *slog.Log
 		reason = "is the home folder"
 	} else if resolved == string(filepath.Separator) {
 		reason = "is the filesystem root"
+	} else if withinDir(resolved, homeReal) {
+		reason = "contains the home folder"
 	}
 	if reason != "" {
 		if log != nil {
