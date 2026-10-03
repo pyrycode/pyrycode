@@ -64,12 +64,14 @@ func dial(ctx context.Context, socketPath string) (net.Conn, error) {
 
 `dial_test.go` keeps the existing six-row `TestIsTransientStartupError` (predicate, #198) and adds `TestDialWithRetry` (retry loop, #199) with three subtests driven by a shared `fakeDialer`:
 
-- **Recovers after N transient failures.** `seq: [ENOENT, ENOENT, ENOENT, nil]` with `budget = 200 ms`, `interval = 10 ms`. Asserts non-nil conn, `f.calls == 4`, elapsed ≤ `N*interval + 50 ms`.
-- **Always-transient exhausts budget.** Empty `seq` (defaults to ENOENT). Asserts `errors.Is(err, syscall.ENOENT)`, error string contains `"dial /fake/path:"`, elapsed ∈ `[budget, budget + 50 ms]` — lower bound proves retries actually ran.
-- **Non-transient error fails immediately.** `seq: [io.EOF]` with production constants. Asserts `f.calls == 1`, `errors.Is(err, io.EOF)`, elapsed ≤ 50 ms (sanity).
+- **Recovers after N transient failures.** `seq: [ENOENT, ENOENT, ENOENT, nil]` with `budget = 200 ms`, `interval = 10 ms`. Asserts non-nil conn, `f.calls == 4`, elapsed ≤ `N*interval + schedSlack`.
+- **Always-transient exhausts budget.** Empty `seq` (defaults to ENOENT). Asserts `errors.Is(err, syscall.ENOENT)`, error string contains `"dial /fake/path:"`, elapsed ∈ `[budget, budget + schedSlack]` — lower bound proves retries actually ran.
+- **Non-transient error fails immediately.** `seq: [io.EOF]` with production constants. Asserts `f.calls == 1`, `errors.Is(err, io.EOF)`, elapsed ≤ 50 ms (sanity, unrelated to `schedSlack` — this subtest never retries).
 
-`fakeDialer.dial` returns `net.Pipe`'s c1 (with c2 closed) on `nil` entries — `net.Pipe` is the cheapest stdlib `net.Conn` that doesn't need a listener. Tests close the returned conn before exiting. Timing slack is `+50 ms` for CI scheduling under `-race` (the architect's "+~5 ms" was the loop's steady-state intent, not the assertion margin); raise to 100 ms if real `-race` flakes appear.
+`fakeDialer.dial` returns `net.Pipe`'s c1 (with c2 closed) on `nil` entries — `net.Pipe` is the cheapest stdlib `net.Conn` that doesn't need a listener. Tests close the returned conn before exiting.
+
+**`schedSlack` (#2714): one shared 500 ms allowance, not per-assertion `+50 ms`.** The original `+50 ms` was the loop's steady-state intent, not a margin sized for a loaded host — a `make check` gate run measured 187.8 ms against what was then a 150 ms ceiling, failing a PR (#2713) that never touched this package. `schedSlack` replaces both upper-bound slacks with one named 500 ms constant (bounds of 530 ms and 600 ms here), still an order of magnitude under the 5 s `DialTimeout` a `budget`-ignoring loop would run to, so that failure mode still fails the test. The lower bound (`elapsed >= budget`, proving retries actually ran) is untouched. Any new timed assertion in this file should size its slack in the hundreds of milliseconds against gate-host scheduling delay, not tens.
 
 **No e2e in this ticket.** The retry behaviour is driven by `dialFunc` injection; the real dial path is exercised by every existing `pyry status` / `pyry sessions list` e2e that already routes through `dial`. AC #1 (success after `launchctl kickstart -k`) is satisfied structurally — the wrapper covers all client verbs at one site.
 
-See [`docs/specs/architecture/198-transient-startup-error-predicate.md`](../../specs/architecture/198-transient-startup-error-predicate.md) and [`docs/specs/architecture/199-dial-with-retry.md`](../../specs/architecture/199-dial-with-retry.md) for the architect's specs.
+See [`docs/specs/architecture/198-transient-startup-error-predicate.md`](../../specs/architecture/198-transient-startup-error-predicate.md) and [`docs/specs/architecture/199-dial-with-retry.md`](../../specs/architecture/199-dial-with-retry.md) for the architect's specs, and [`docs/specs/architecture/2714-timing-bound-slack.md`](../../specs/architecture/2714-timing-bound-slack.md) for the `schedSlack` widening.
