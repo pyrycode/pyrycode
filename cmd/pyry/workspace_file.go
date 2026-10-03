@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/pyrycode/pyrycode/internal/agentrun"
@@ -148,6 +149,54 @@ func resolveReadFolders(entries []string, log *slog.Logger) []string {
 		folders = append(folders, resolved)
 	}
 	return folders
+}
+
+// withWorkdirReadFolder adds the daemon's own working folder to the read
+// folders (#2720), so the assistant's own files open from every conversation
+// with no -pyry-read-folder set. It runs once at startup on resolveReadFolders
+// output, and the result feeds both the reader and the session prompt's
+// read-folder sentence.
+//
+// The working folder is canonicalised with the same recipe as a configured
+// entry, so a folder that is also configured matches it and is listed once.
+// It goes first when added: it is the daemon's own folder.
+//
+// THE GUARD. A working folder that is the home folder, the root or any other
+// folder containing home is not added: starting the daemon from $HOME would
+// otherwise expose every markdown file in it. confineWorkdirToHome already
+// refuses a working folder outside home, so in the daemon only the first case
+// is reachable; the others hold here on their own rather than through that
+// call order. Both sides are compared as realpaths, so a symlinked home is
+// still caught. When home does not resolve the folder is not added either, because
+// the guard cannot be checked; an empty home counts, since ResolveWorkdir
+// would read "" as the process directory. Each case logs one line naming the
+// folder — operator configuration, not a client-named path. log may be nil.
+func withWorkdirReadFolder(folders []string, workdir, home string, log *slog.Logger) []string {
+	reason := ""
+	resolved, err := agentrun.ResolveWorkdir(workdir)
+	if err != nil {
+		reason = "does not resolve"
+	} else if home == "" {
+		reason = "home folder does not resolve"
+	} else if homeReal, err := agentrun.ResolveWorkdir(home); err != nil {
+		reason = "home folder does not resolve"
+	} else if resolved == homeReal {
+		reason = "is the home folder"
+	} else if resolved == string(filepath.Separator) {
+		reason = "is the filesystem root"
+	} else if withinDir(resolved, homeReal) {
+		reason = "contains the home folder"
+	}
+	if reason != "" {
+		if log != nil {
+			log.Info("pyry: working folder not made readable", "folder", workdir, "reason", reason)
+		}
+		return folders
+	}
+	if slices.Contains(folders, resolved) {
+		return folders
+	}
+	return append([]string{resolved}, folders...)
 }
 
 // folderList is a repeatable string flag: each occurrence appends one entry.

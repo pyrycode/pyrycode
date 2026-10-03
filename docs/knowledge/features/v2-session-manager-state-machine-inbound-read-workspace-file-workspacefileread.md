@@ -132,6 +132,44 @@ signature takes none, and `confineFile`'s own behaviour and callers are
 unchanged by the split — so it keeps its workspace-only rule regardless of
 what is configured.
 
+## The daemon's own working folder is always a read root too (#2720)
+
+`withWorkdirReadFolder` (`cmd/pyry/workspace_file.go`) runs once in
+`runSupervisor`, after `resolveReadFolders`, and prepends the daemon's own
+working folder (`-pyry-workdir`, or the process directory when that is unset
+— `workdirReal`) to the same slice, canonicalised with the same
+`agentrun.ResolveWorkdir` recipe. This is what lets a client open
+`BEHAVIOR.md`, `FEEDBACK.md` and the rest from any conversation, including
+one whose workspace is a subfolder of the working folder, with no
+`-pyry-read-folder` set. The folder enters the reader exactly like a
+configured one — same `confineToAnyRoot`, same both-leaf markdown check, same
+`readChecked` identity proof, same undistinguished `false` — because it is
+folded into the one slice both consumers read; no reader code changed.
+
+**The guard excludes home, not just the exact match.** The working folder is
+left out, and one `slog.Info` line names it with a static reason (never a
+client-named path), when it resolves to the operator's home folder, to `/`,
+or to any folder that *contains* home (`withinDir(resolved, homeReal)`) —
+otherwise starting the daemon from `$HOME` would expose every markdown file
+in it. `confineWorkdirToHome` already refuses a working folder outside home
+earlier in `runSupervisor`, so only the exact-home case is reachable in the
+daemon as shipped; the broader "contains home" check holds on its own rather
+than depending on that call order, per the plan's security review. An
+unresolvable home (including an empty one, since `agentrun.ResolveWorkdir("")`
+would otherwise mean the process directory) also leaves the folder out. Both
+sides are compared as realpaths, so a symlinked home or working folder is
+still caught.
+
+**Dedup, not a second entry.** When the canonical working folder is already
+in the configured list — including through a symlinked spelling, since both
+go through the same resolution — `withWorkdirReadFolder` returns the slice
+unchanged rather than adding a duplicate. This is also what keeps the #2711
+prompt sentence (below) naming the folder once.
+
+`fileAttacher` does not take the folder list (see above), so `attach_file`
+still refuses a file in the working folder from a conversation whose
+workspace is elsewhere — this ticket widens only the markdown reader.
+
 ## Related
 
 - [Inbound `request_attachment` (#2054)](v2-session-manager-state-machine-inbound-request-attachment-attachmentresolve.md) — the handler this one copies step for step: nil-seam-inert, reject-not-tolerate decode, the `KnownConversation`-before-path-component ordering, and the two-code (`not_found` vs. `stream_aborted`) partition on the stream error's identity.

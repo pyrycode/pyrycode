@@ -843,6 +843,14 @@ func runSupervisor(args []string) error {
 	// checks against the same canonical roots. A bad entry is skipped with a
 	// warning and the daemon still starts.
 	readFolders := resolveReadFolders(readFolderEntries, logger)
+	// The daemon's own working folder is always readable too (#2720), unless it
+	// is the home folder or the root, which withWorkdirReadFolder refuses with
+	// one startup line.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home directory: %w", err)
+	}
+	readFolders = withWorkdirReadFolder(readFolders, workdirReal, home, logger)
 
 	// Two-layer shutdown context so a shutdown's ORIGIN survives to the exit
 	// classification below. The signal layer handles SIGTERM/SIGINT (operator
