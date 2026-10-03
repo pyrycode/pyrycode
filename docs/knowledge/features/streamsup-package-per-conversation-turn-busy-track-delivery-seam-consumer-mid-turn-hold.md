@@ -82,6 +82,17 @@ write to.
 PTY is unaffected: the tracker is nil there, both calls are no-ops, and `newInboundDeliver`'s body is
 semantically identical to before #1199. See [codebase/1199.md](../codebase/1199.md).
 
+**What a direct mid-turn write would do, if this hold were ever bypassed on purpose (#2728).** Production
+never writes to a live child's stdin while a turn runs — that's the entire point of the hold above — but a
+"Send now" design that deliberately interrupts the hold needs to know what claude does with a `user` line
+that arrives mid-turn. A committed capture (claude 2.1.280, haiku, one run per arm) answers four shapes:
+a message written during a running tool call folds into the current turn; one written while a text-only
+answer streams, or one written just after the turn's only tool result (before the next request goes out),
+both open a second turn instead. No message went unread in either case — an unfolded one just surfaces in
+its own `result` rather than the one it was written during. See
+[the capture's writeup](e2e-realclaude-mid-turn-user-capture-test-go.md) for the per-arm table and its
+limits (one version, one model, one run per arm, and the after-last-tool window's exact edge unmeasured).
+
 **Forced-ordering test coverage across a `new_session` rotation (#1295).** The #1137 e2e had
 failed twice at its M4 milestone with the same shape — rotation succeeds, the follow-up turn is
 accepted, then zero bytes reach any child for the full 20 s deadline — consistent with a

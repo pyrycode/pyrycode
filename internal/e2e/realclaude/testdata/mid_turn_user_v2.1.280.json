@@ -1,0 +1,1169 @@
+{
+  "ticket": "2728",
+  "claude_version": "2.1.280 (Claude Code)",
+  "captured_at": "2026-10-03T13:11:07+03:00",
+  "model": "haiku",
+  "argv": [
+    "-p",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--forward-subagent-text",
+    "--replay-user-messages",
+    "--model",
+    "haiku",
+    "--dangerously-skip-permissions",
+    "--session-id",
+    "$SESSION_ID"
+  ],
+  "arms": [
+    {
+      "name": "tool-boundary",
+      "trigger": "2s after the first assistant tool_use line",
+      "opening_prompt": "Use the Bash tool exactly once to run `sleep 15 \u0026\u0026 echo slept`. When it finishes, reply in one short paragraph, and include the exact word OPENING-TOOL-BOUNDARY in that reply.",
+      "opening_marker": "OPENING-TOOL-BOUNDARY",
+      "writes": [
+        "MIDTURN-TOOL-BOUNDARY-1"
+      ],
+      "sequence": [
+        {
+          "type": "system",
+          "subtype": "init",
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "status",
+          "count": 1
+        },
+        {
+          "type": "user",
+          "blocks": [
+            "text"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_start",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_start",
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "thinking_tokens",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 2
+        },
+        {
+          "type": "system",
+          "subtype": "thinking_tokens",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 1
+        },
+        {
+          "type": "assistant",
+          "blocks": [
+            "thinking"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_stop",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_start",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 9
+        },
+        {
+          "type": "assistant",
+          "blocks": [
+            "tool_use"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_stop",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_delta",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_stop",
+          "count": 1
+        },
+        {
+          "type": "rate_limit_event",
+          "count": 1
+        },
+        {
+          "write": "MIDTURN-TOOL-BOUNDARY-1"
+        },
+        {
+          "type": "system",
+          "subtype": "task_started",
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "task_notification",
+          "count": 1
+        },
+        {
+          "type": "user",
+          "blocks": [
+            "tool_result"
+          ],
+          "count": 1
+        },
+        {
+          "type": "user",
+          "blocks": [
+            "text"
+          ],
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "status",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_start",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_start",
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "thinking_tokens",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 2
+        },
+        {
+          "type": "system",
+          "subtype": "thinking_tokens",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 1
+        },
+        {
+          "type": "assistant",
+          "blocks": [
+            "thinking"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_stop",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_start",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 32
+        },
+        {
+          "type": "assistant",
+          "blocks": [
+            "text"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_stop",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_delta",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_stop",
+          "count": 1
+        },
+        {
+          "type": "result",
+          "subtype": "success",
+          "count": 1
+        }
+      ],
+      "echoes": [
+        {
+          "index": 2,
+          "markers": [
+            "OPENING-TOOL-BOUNDARY"
+          ],
+          "line": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Use the Bash tool exactly once to run `sleep 15 \u0026\u0026 echo slept`. When it finishes, reply in one short paragraph, and include the exact word OPENING-TOOL-BOUNDARY in that reply.\"}]},\"session_id\":\"$SESSION_ID\",\"parent_tool_use_id\":null,\"uuid\":\"c66f3a05-6521-45a7-b559-8f66f3183efb\",\"timestamp\":\"2026-10-03T10:11:07.830Z\",\"isReplay\":true}"
+        },
+        {
+          "index": 30,
+          "markers": [
+            "MIDTURN-TOOL-BOUNDARY-1"
+          ],
+          "line": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"One more thing: include the exact word MIDTURN-TOOL-BOUNDARY-1 in your final reply.\"}]},\"session_id\":\"$SESSION_ID\",\"parent_tool_use_id\":null,\"uuid\":\"3faf8200-47fa-433b-a4e2-58fda4765b24\",\"timestamp\":\"2026-10-03T10:11:11.971Z\",\"isReplay\":true}"
+        }
+      ],
+      "result_count": 1,
+      "results": [
+        {
+          "index": 78,
+          "subtype": "success",
+          "markers_in_result_text": [
+            "OPENING-TOOL-BOUNDARY",
+            "MIDTURN-TOOL-BOUNDARY-1"
+          ]
+        }
+      ],
+      "final_text_markers": {
+        "MIDTURN-TOOL-BOUNDARY-1": true,
+        "OPENING-TOOL-BOUNDARY": true
+      },
+      "verdict": "folded",
+      "lines_captured": 79,
+      "seconds": 41.837323459,
+      "exit": "exit 0"
+    },
+    {
+      "name": "no-tool",
+      "trigger": "1s after the first content_block_delta stream_event",
+      "opening_prompt": "Without using any tools, write an essay of about 800 words on the history of lighthouses, and end it with the exact word OPENING-NO-TOOL.",
+      "opening_marker": "OPENING-NO-TOOL",
+      "writes": [
+        "MIDTURN-NO-TOOL-1"
+      ],
+      "sequence": [
+        {
+          "type": "system",
+          "subtype": "init",
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "status",
+          "count": 1
+        },
+        {
+          "type": "user",
+          "blocks": [
+            "text"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_start",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_start",
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "thinking_tokens",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 2
+        },
+        {
+          "type": "system",
+          "subtype": "thinking_tokens",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 1
+        },
+        {
+          "type": "assistant",
+          "blocks": [
+            "thinking"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_stop",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_start",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 31
+        },
+        {
+          "write": "MIDTURN-NO-TOOL-1"
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 427
+        },
+        {
+          "type": "assistant",
+          "blocks": [
+            "text"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_stop",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_delta",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_stop",
+          "count": 1
+        },
+        {
+          "type": "rate_limit_event",
+          "count": 1
+        },
+        {
+          "type": "result",
+          "subtype": "success",
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "init",
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "status",
+          "count": 1
+        },
+        {
+          "type": "user",
+          "blocks": [
+            "text"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_start",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_start",
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "thinking_tokens",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 2
+        },
+        {
+          "type": "system",
+          "subtype": "thinking_tokens",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 1
+        },
+        {
+          "type": "assistant",
+          "blocks": [
+            "thinking"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_stop",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_start",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 24
+        },
+        {
+          "type": "assistant",
+          "blocks": [
+            "text"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_stop",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_delta",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_stop",
+          "count": 1
+        },
+        {
+          "type": "result",
+          "subtype": "success",
+          "count": 1
+        }
+      ],
+      "echoes": [
+        {
+          "index": 2,
+          "markers": [
+            "OPENING-NO-TOOL"
+          ],
+          "line": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Without using any tools, write an essay of about 800 words on the history of lighthouses, and end it with the exact word OPENING-NO-TOOL.\"}]},\"session_id\":\"$SESSION_ID\",\"parent_tool_use_id\":null,\"uuid\":\"4217eace-019a-4406-9262-7d2b2cc856a7\",\"timestamp\":\"2026-10-03T10:11:07.987Z\",\"isReplay\":true}"
+        },
+        {
+          "index": 479,
+          "markers": [
+            "MIDTURN-NO-TOOL-1"
+          ],
+          "line": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"One more thing: include the exact word MIDTURN-NO-TOOL-1 in your final reply.\"}]},\"session_id\":\"$SESSION_ID\",\"parent_tool_use_id\":null,\"uuid\":\"69aa8552-95be-4fa0-a04a-0a30a8268294\",\"timestamp\":\"2026-10-03T10:11:20.814Z\",\"isReplay\":true}"
+        }
+      ],
+      "result_count": 2,
+      "results": [
+        {
+          "index": 476,
+          "subtype": "success",
+          "markers_in_result_text": [
+            "OPENING-NO-TOOL"
+          ]
+        },
+        {
+          "index": 518,
+          "subtype": "success",
+          "markers_in_result_text": [
+            "OPENING-NO-TOOL",
+            "MIDTURN-NO-TOOL-1"
+          ]
+        }
+      ],
+      "final_text_markers": {
+        "MIDTURN-NO-TOOL-1": true,
+        "OPENING-NO-TOOL": true
+      },
+      "verdict": "second-turn",
+      "lines_captured": 519,
+      "seconds": 36.525784458,
+      "exit": "exit 0"
+    },
+    {
+      "name": "after-last-tool",
+      "trigger": "on the first user tool_result line",
+      "opening_prompt": "Use the Bash tool exactly once to run `echo ready`. After it returns, use no more tools and write an essay of about 800 words on the history of lighthouses, and end it with the exact word OPENING-AFTER-LAST-TOOL.",
+      "opening_marker": "OPENING-AFTER-LAST-TOOL",
+      "writes": [
+        "MIDTURN-AFTER-LAST-TOOL-1"
+      ],
+      "sequence": [
+        {
+          "type": "system",
+          "subtype": "init",
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "status",
+          "count": 1
+        },
+        {
+          "type": "user",
+          "blocks": [
+            "text"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_start",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_start",
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "thinking_tokens",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 2
+        },
+        {
+          "type": "system",
+          "subtype": "thinking_tokens",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 1
+        },
+        {
+          "type": "assistant",
+          "blocks": [
+            "thinking"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_stop",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_start",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 3
+        },
+        {
+          "type": "assistant",
+          "blocks": [
+            "tool_use"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_stop",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_delta",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_stop",
+          "count": 1
+        },
+        {
+          "type": "rate_limit_event",
+          "count": 1
+        },
+        {
+          "type": "user",
+          "blocks": [
+            "tool_result"
+          ],
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "status",
+          "count": 1
+        },
+        {
+          "write": "MIDTURN-AFTER-LAST-TOOL-1"
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_start",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_start",
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "thinking_tokens",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 2
+        },
+        {
+          "type": "system",
+          "subtype": "thinking_tokens",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 1
+        },
+        {
+          "type": "assistant",
+          "blocks": [
+            "thinking"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_stop",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_start",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 467
+        },
+        {
+          "type": "assistant",
+          "blocks": [
+            "text"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_stop",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_delta",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_stop",
+          "count": 1
+        },
+        {
+          "type": "result",
+          "subtype": "success",
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "init",
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "status",
+          "count": 1
+        },
+        {
+          "type": "user",
+          "blocks": [
+            "text"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_start",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_start",
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "thinking_tokens",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "thinking_tokens",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 2
+        },
+        {
+          "type": "system",
+          "subtype": "thinking_tokens",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 1
+        },
+        {
+          "type": "assistant",
+          "blocks": [
+            "thinking"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_stop",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_start",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 10
+        },
+        {
+          "type": "assistant",
+          "blocks": [
+            "text"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_stop",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_delta",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_stop",
+          "count": 1
+        },
+        {
+          "type": "result",
+          "subtype": "success",
+          "count": 1
+        }
+      ],
+      "echoes": [
+        {
+          "index": 2,
+          "markers": [
+            "OPENING-AFTER-LAST-TOOL"
+          ],
+          "line": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Use the Bash tool exactly once to run `echo ready`. After it returns, use no more tools and write an essay of about 800 words on the history of lighthouses, and end it with the exact word OPENING-AFTER-LAST-TOOL.\"}]},\"session_id\":\"$SESSION_ID\",\"parent_tool_use_id\":null,\"uuid\":\"03f384f3-ade9-491b-bc70-0bfdb7952a0e\",\"timestamp\":\"2026-10-03T10:11:07.886Z\",\"isReplay\":true}"
+        },
+        {
+          "index": 507,
+          "markers": [
+            "MIDTURN-AFTER-LAST-TOOL-1"
+          ],
+          "line": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"One more thing: include the exact word MIDTURN-AFTER-LAST-TOOL-1 in your final reply.\"}]},\"session_id\":\"$SESSION_ID\",\"parent_tool_use_id\":null,\"uuid\":\"dafa5b7d-2bb2-4411-9739-5b86bd6b1ff9\",\"timestamp\":\"2026-10-03T10:11:23.365Z\",\"isReplay\":true}"
+        }
+      ],
+      "result_count": 2,
+      "results": [
+        {
+          "index": 504,
+          "subtype": "success",
+          "markers_in_result_text": [
+            "OPENING-AFTER-LAST-TOOL"
+          ]
+        },
+        {
+          "index": 534,
+          "subtype": "success",
+          "markers_in_result_text": [
+            "MIDTURN-AFTER-LAST-TOOL-1"
+          ]
+        }
+      ],
+      "final_text_markers": {
+        "MIDTURN-AFTER-LAST-TOOL-1": true,
+        "OPENING-AFTER-LAST-TOOL": false
+      },
+      "verdict": "second-turn",
+      "lines_captured": 535,
+      "seconds": 40.086668541,
+      "exit": "exit 0"
+    },
+    {
+      "name": "back-to-back",
+      "trigger": "2s after the first assistant tool_use line, both written together",
+      "opening_prompt": "Use the Bash tool exactly once to run `sleep 15 \u0026\u0026 echo slept`. When it finishes, reply in one short paragraph, and include the exact word OPENING-BACK-TO-BACK in that reply.",
+      "opening_marker": "OPENING-BACK-TO-BACK",
+      "writes": [
+        "MIDTURN-BACK-TO-BACK-1",
+        "MIDTURN-BACK-TO-BACK-2"
+      ],
+      "sequence": [
+        {
+          "type": "system",
+          "subtype": "init",
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "status",
+          "count": 1
+        },
+        {
+          "type": "user",
+          "blocks": [
+            "text"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_start",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_start",
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "thinking_tokens",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 2
+        },
+        {
+          "type": "system",
+          "subtype": "thinking_tokens",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 1
+        },
+        {
+          "type": "assistant",
+          "blocks": [
+            "thinking"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_stop",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_start",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 8
+        },
+        {
+          "type": "assistant",
+          "blocks": [
+            "tool_use"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_stop",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_delta",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_stop",
+          "count": 1
+        },
+        {
+          "type": "rate_limit_event",
+          "count": 1
+        },
+        {
+          "write": "MIDTURN-BACK-TO-BACK-1"
+        },
+        {
+          "write": "MIDTURN-BACK-TO-BACK-2"
+        },
+        {
+          "type": "system",
+          "subtype": "task_started",
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "task_notification",
+          "count": 1
+        },
+        {
+          "type": "user",
+          "blocks": [
+            "tool_result"
+          ],
+          "count": 1
+        },
+        {
+          "type": "user",
+          "blocks": [
+            "text"
+          ],
+          "count": 2
+        },
+        {
+          "type": "system",
+          "subtype": "status",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_start",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_start",
+          "count": 1
+        },
+        {
+          "type": "system",
+          "subtype": "thinking_tokens",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 2
+        },
+        {
+          "type": "system",
+          "subtype": "thinking_tokens",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 1
+        },
+        {
+          "type": "assistant",
+          "blocks": [
+            "thinking"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_stop",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_start",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_delta",
+          "count": 34
+        },
+        {
+          "type": "assistant",
+          "blocks": [
+            "text"
+          ],
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "content_block_stop",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_delta",
+          "count": 1
+        },
+        {
+          "type": "stream_event",
+          "subtype": "message_stop",
+          "count": 1
+        },
+        {
+          "type": "result",
+          "subtype": "success",
+          "count": 1
+        }
+      ],
+      "echoes": [
+        {
+          "index": 2,
+          "markers": [
+            "OPENING-BACK-TO-BACK"
+          ],
+          "line": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Use the Bash tool exactly once to run `sleep 15 \u0026\u0026 echo slept`. When it finishes, reply in one short paragraph, and include the exact word OPENING-BACK-TO-BACK in that reply.\"}]},\"session_id\":\"$SESSION_ID\",\"parent_tool_use_id\":null,\"uuid\":\"fcb47b94-fd11-42cc-ae91-a80fe612bb5f\",\"timestamp\":\"2026-10-03T10:11:07.890Z\",\"isReplay\":true}"
+        },
+        {
+          "index": 29,
+          "markers": [
+            "MIDTURN-BACK-TO-BACK-1"
+          ],
+          "line": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"One more thing: include the exact word MIDTURN-BACK-TO-BACK-1 in your final reply.\"}]},\"session_id\":\"$SESSION_ID\",\"parent_tool_use_id\":null,\"uuid\":\"29ef3232-42c4-42ce-b99d-d6b8056f28ca\",\"timestamp\":\"2026-10-03T10:11:11.567Z\",\"isReplay\":true}"
+        },
+        {
+          "index": 30,
+          "markers": [
+            "MIDTURN-BACK-TO-BACK-2"
+          ],
+          "line": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"One more thing: include the exact word MIDTURN-BACK-TO-BACK-2 in your final reply.\"}]},\"session_id\":\"$SESSION_ID\",\"parent_tool_use_id\":null,\"uuid\":\"01894488-0322-4b9d-b915-b1f2bdce3abf\",\"timestamp\":\"2026-10-03T10:11:11.567Z\",\"isReplay\":true}"
+        }
+      ],
+      "result_count": 1,
+      "results": [
+        {
+          "index": 80,
+          "subtype": "success",
+          "markers_in_result_text": [
+            "OPENING-BACK-TO-BACK",
+            "MIDTURN-BACK-TO-BACK-1",
+            "MIDTURN-BACK-TO-BACK-2"
+          ]
+        }
+      ],
+      "final_text_markers": {
+        "MIDTURN-BACK-TO-BACK-1": true,
+        "MIDTURN-BACK-TO-BACK-2": true,
+        "OPENING-BACK-TO-BACK": true
+      },
+      "verdict": "folded",
+      "lines_captured": 81,
+      "seconds": 40.991616875,
+      "exit": "exit 0"
+    }
+  ],
+  "redaction": [
+    {
+      "class": "session_id",
+      "replacement": "$SESSION_ID",
+      "count": 10
+    }
+  ],
+  "credential_scan_applied": {
+    "ANTHROPIC_API_KEY": false,
+    "CLAUDE_CODE_OAUTH_TOKEN": true,
+    "account_id": true,
+    "anthropic-key-prefix": true,
+    "artifact_dir": true,
+    "home-path-prefix": true,
+    "operator_home": true,
+    "private-var-folders-prefix": true,
+    "temp_home": true,
+    "users-path-prefix": true,
+    "var-folders-prefix": true
+  },
+  "credential_scan_skipped": [
+    "ANTHROPIC_API_KEY"
+  ],
+  "limitations": "One claude version, one model (haiku), one run per arm. A verdict reads the final result text for the written markers: not-quoted means the marker is absent from that text, not that claude never read the message — the sequence and echoes are the other evidence. Write positions are the stdout line count observed just before the write."
+}
