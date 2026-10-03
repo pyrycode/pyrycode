@@ -159,8 +159,7 @@ func gateEqual(t *testing.T, connID string, got []protocol.Envelope, want []stri
 func TestV2Session_CodexFrames_ReachOnlyMultiAgentConns(t *testing.T) {
 	t.Parallel()
 	respPriv, respPub := genV2Keypair(t)
-	initPrivA, _ := genV2Keypair(t)
-	initPrivB, _ := genV2Keypair(t)
+	initPrivA, initPrivB := v2TestInstallPriv, v2TestInstallPriv
 	const capable, old = "c-gate-capable", "c-gate-old"
 
 	frames := make(chan protocol.RoutingEnvelope, 2)
@@ -329,8 +328,7 @@ func TestV2Session_PushedModelList_MergedForMultiAgentConn(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			respPriv, respPub := genV2Keypair(t)
-			initPrivA, _ := genV2Keypair(t)
-			initPrivB, _ := genV2Keypair(t)
+			initPrivA, initPrivB := v2TestInstallPriv, v2TestInstallPriv
 			const capable, old = "c-merge-capable", "c-merge-old"
 
 			frames := make(chan protocol.RoutingEnvelope, 2)
@@ -398,8 +396,7 @@ func TestV2Session_PushedModelList_MergedForMultiAgentConn(t *testing.T) {
 func TestV2Session_ReplayedModelList_MergedForMultiAgentConn(t *testing.T) {
 	t.Parallel()
 	respPriv, respPub := genV2Keypair(t)
-	initPrivA, _ := genV2Keypair(t)
-	initPrivB, _ := genV2Keypair(t)
+	initPrivA, initPrivB := v2TestInstallPriv, v2TestInstallPriv
 	const capable, old = "c-merge-replay-capable", "c-merge-replay-old"
 
 	pushed := gatePushedModelList(t)

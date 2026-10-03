@@ -100,8 +100,7 @@ func sealAppFrameConn(t *testing.T, cs *noise.CipherState, connID string, env pr
 // manager for the dismiss fan-out.
 func openModalConn(t *testing.T, mgr *V2SessionManager, frames chan protocol.RoutingEnvelope, rec *v2Recorder, respPub []byte, connID string, caps []string) (initSend, initRecv *noise.CipherState) {
 	t.Helper()
-	initPriv, _ := genV2Keypair(t)
-	initiator, err := noise.NewInitiator(initPriv, respPub)
+	initiator, err := noise.NewInitiator(v2TestInstallPriv, respPub)
 	if err != nil {
 		t.Fatalf("NewInitiator(%s): %v", connID, err)
 	}

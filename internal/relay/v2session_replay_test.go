@@ -379,8 +379,7 @@ func TestV2Session_Reconnect_ReplayDisabled_NoReplay(t *testing.T) {
 func TestV2Session_Reconnect_OtherConnsUnaffected(t *testing.T) {
 	t.Parallel()
 	respPriv, respPub := genV2Keypair(t)
-	initPrivA, _ := genV2Keypair(t)
-	initPrivB, _ := genV2Keypair(t)
+	initPrivA, initPrivB := v2TestInstallPriv, v2TestInstallPriv
 	const connA, connB = "c-v2-A", "c-v2-B"
 
 	ring := eventring.New(eventring.MaxEventsPerConversation)

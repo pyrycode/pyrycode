@@ -118,3 +118,12 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-03
+
+## Revisions
+
+### 2026-10-03 — build: one install per token in the test harnesses
+
+The open question resolved as expected: about eighty relay tests and every e2e handshake helper drew a fresh initiator key per connection while reusing one token, which is now a second install and refused. No production design changed. The test-side fixes:
+
+- `internal/relay` tests: `v2TestInstallPriv`, one fixed install key, used by the shared conn-opening helpers (`openModalConn`, `openVersionConn`, `runVersionHello`) and by the multi-conn tests that passed per-conn keys. `redemptionFixture` is pre-bound to that install (`v2TestInstallKey`), so the redemption and client-version tests' "no lock, no write" assertions still isolate their own write. `runVersionHello` became a wrapper over `runHelloFrom`, which takes the install key, for the new tests.
+- e2e harnesses (`internal/e2e`, `realclaude`, `liverelay`): new `fakephone.InstallKey(token)` derives the install key from the token (SHA-256), so every helper in every package presents the same key for the same token without threading it through. Unknown-token reject helpers keep their random keys.

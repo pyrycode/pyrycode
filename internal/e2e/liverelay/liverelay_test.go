@@ -29,8 +29,6 @@ package liverelay
 import (
 	"bytes"
 	"context"
-	"crypto/ecdh"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -601,11 +599,7 @@ func readPersistedServerID(t *testing.T, home string) string {
 // initRecv decrypts binary→phone).
 func driveHandshake(t *testing.T, phone *fakephone.Client, pubKey []byte, token string) (*noise.CipherState, *noise.CipherState) {
 	t.Helper()
-	initPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("phone keygen: %v", err)
-	}
-	initiator, err := noise.NewInitiator(initPriv.Bytes(), pubKey)
+	initiator, err := noise.NewInitiator(fakephone.InstallKey(token), pubKey)
 	if err != nil {
 		t.Fatalf("NewInitiator: %v", err)
 	}
