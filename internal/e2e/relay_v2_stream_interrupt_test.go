@@ -351,31 +351,20 @@ func TestRelayV2_StreamInterruptStopsRunningTurn(t *testing.T) {
 //	                     on A, a daemon that ignored the named id stops A.
 //	M4  interrupt B    — the frame under test.
 //
-// AC-4 ASKS FOR B's turn_end ON THE WIRE AND THAT FRAME CANNOT EXIST IN THIS STATE,
-// which is a fact about the daemon rather than about this test. startStreamTurnDrainV2
-// gates every turn event on the CURSOR conversation's bound session and drops the
-// rest; there is one shared interactiveTurnEmitterV2 over one global cursor, and
-// emitter.Handle sits below that gate. So with the cursor on A, B's TurnEnd is
-// dropped before it is ever shaped into an envelope — it has no conversation_id and
-// no StopReason to assert on, because it never becomes one. Making background
-// conversations' turn events reach the phone is a different ticket; this one must
-// not smuggle it in.
-//
-// The substitute is a trio, and each member covers the others' blind spot:
+// The assertion is a trio, and each member covers the others' blind spot:
 //
 //	(a) v2.interrupt.dispatched carrying B's conversation id. Proves the frame
 //	    arrived, resolved B and dispatched to B's bound runner. Under the pre-#2103
 //	    daemon the identical record carries A's id, so the ID is the discriminator,
 //	    not the record's existence.
-//	(b) stream_turn.not_active with kind=turn_end and B's session id. This IS AC-4's
-//	    turn_end for B, observed at the one point the architecture lets it be seen.
+//	(b) B's turn_end on the wire, stamped with B's id. Before #2739 the drain
+//	    dropped every event of a non-active conversation, so this frame could not
+//	    exist with the cursor on A and the test waited for the drop record instead.
 //	    It is not a proxy for the actuation: fakeclaude's interrupt mode emits no
 //	    result on a user turn, so the only possible source of a TurnEnd for B is its
-//	    response to the interrupt control_request — the same structural causality
-//	    the bare-path sibling above relies on.
-//	(c) no turn_end for A on the wire. A is the ACTIVE session, so a turn_end for A
-//	    would drain to the phone; under the defect the interrupt stops A and
-//	    turn_end{convA,cancelled} arrives. This is the live, on-the-wire form of
+//	    response to the interrupt control_request.
+//	(c) no turn_end for A on the wire. Under the #2103 defect the interrupt stops A
+//	    and turn_end{convA,cancelled} arrives. This is the live, on-the-wire form of
 //	    "A's turn is still in flight".
 //
 // (c) runs LAST because it is destructive: it ends on a receive that reaches its
@@ -599,13 +588,30 @@ func TestRelayV2_StreamInterruptNamedConversationStopsThatOne(t *testing.T) {
 	waitForLogLineAll(t, h.Stderr, []string{"v2.interrupt.dispatched", convB}, 15*time.Second)
 	t.Logf("[t=%s] M4(a): the interrupt dispatched to conversation B's own bound runner", elapsed())
 
-	// (b) B's turn ended. The drain observes the TurnEnd and then drops it because
-	// B is not the cursor's conversation, which is the only place this frame is
-	// visible in this state — see the header. The fake emits no result on a user
-	// turn, so the interrupt is its only possible cause.
-	waitForLogLineAll(t, h.Stderr,
-		[]string{"stream_turn.not_active", "turn_end", entryB.ID}, 15*time.Second)
-	t.Logf("[t=%s] M4(b): conversation B's turn ended (session %s)", elapsed(), entryB.ID)
+	// (b) B's turn ended, on the wire under B's own id (#2739). A turn_end for A
+	// before it is the #2103 defect and fails here rather than in (c).
+	turnEndDeadline := time.Now().Add(15 * time.Second)
+	for {
+		env, ok := nextEnv(turnEndDeadline)
+		if !ok {
+			t.Fatalf("M4(b): no turn_end for conversation B (%s, session %s) reached the phone", convB, entryB.ID)
+		}
+		if env.Type != protocol.TypeTurnEnd {
+			continue
+		}
+		var te protocol.TurnEndPayload
+		if err := json.Unmarshal(env.Payload, &te); err != nil {
+			t.Fatalf("M4(b): decode turn_end payload: %v", err)
+		}
+		if te.ConversationID == convA {
+			t.Fatalf("M4(b) (AC-1): conversation A's turn ended (StopReason %q) after an interrupt naming B (%s)",
+				te.StopReason, convB)
+		}
+		if te.ConversationID == convB {
+			break
+		}
+	}
+	t.Logf("[t=%s] M4(b): conversation B's turn_end reached the phone (session %s)", elapsed(), entryB.ID)
 
 	// (c) A's turn is still in flight. Destructive and therefore last: this loop
 	// ends on a receive that reaches its deadline, which takes the phone conn down.
