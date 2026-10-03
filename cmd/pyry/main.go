@@ -353,6 +353,7 @@ var pyryFlagValues = map[string]bool{
 	"pyry-conv-sweep-interval": true,
 	"pyry-wrapup-deadline":     true,
 	"pyry-relay":               true,
+	"pyry-read-folder":         true,
 }
 
 // splitArgs walks args left-to-right and partitions them into pyry's own
@@ -772,6 +773,8 @@ func runSupervisor(args []string) error {
 	// wrapUpDeadline's own doc refuses an operator a LONGER one, and both hold.
 	wrapUpDeadlineFlag := fs.Duration("pyry-wrapup-deadline", 0, "shorten the conversation reset's wrap-up bound (testing; 0 or >= the 90s default = production default)")
 	relayFlag := fs.String("pyry-relay", "", "relay URL override (default: $PYRY_RELAY_URL or ~/.pyry/config.json)")
+	var readFolderEntries folderList
+	fs.Var(&readFolderEntries, "pyry-read-folder", "absolute folder the markdown reader may also open; repeatable")
 	if err := fs.Parse(pyryArgs); err != nil {
 		return err
 	}
@@ -835,6 +838,11 @@ func runSupervisor(args []string) error {
 	// the registry, with the strict resolver: it neither creates a folder nor
 	// trust-marks one, and a row it cannot resolve is left as it was.
 	normaliseLegacyCwds(convReg, convRegistryPath, resolveWorkspaceDir, logger)
+	// The operator-named folders the markdown reader may open besides a
+	// conversation's workspace (#2710), resolved ONCE here so every reader request
+	// checks against the same canonical roots. A bad entry is skipped with a
+	// warning and the daemon still starts.
+	readFolders := resolveReadFolders(readFolderEntries, logger)
 
 	// Two-layer shutdown context so a shutdown's ORIGIN survives to the exit
 	// classification below. The signal layer handles SIGTERM/SIGINT (operator
@@ -1158,6 +1166,7 @@ func runSupervisor(args []string) error {
 		allowInsecure: allowInsecure,
 		shutdown:      cancelCause,
 		convReg:       convReg,
+		readFolders:   readFolders,
 		creator:       sessionMinter{pool, modelVocabulary},
 		router:        router,
 		queue:         queue,
@@ -4332,6 +4341,9 @@ Pyry flags (must come before claude args, or after a -- separator):
                         (testing; 0 or >= the 90s default = production default.
                         It can only shorten: the ceiling is not operator-raisable)
   -pyry-relay string    relay URL (default: $PYRY_RELAY_URL or ~/.pyry/config.json)
+  -pyry-read-folder path  an absolute folder the in-app markdown reader may
+                        also open besides the conversation's workspace;
+                        repeat for several (a bad entry is skipped with a warning)
 
 Examples:
   pyry                                  # supervised claude (default instance)

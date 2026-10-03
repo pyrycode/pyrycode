@@ -169,6 +169,10 @@ type relayWiring struct {
 	// convReg is the conversations registry backing the list/create/rename/
 	// delete/archive/change-workspace/recent handlers.
 	convReg *conversations.Registry
+	// readFolders are the operator-named folders the markdown reader may open
+	// besides a conversation's workspace (#2710): resolveReadFolders output,
+	// resolved once in the composition root and never written afterwards.
+	readFolders []string
 	// creator mints a new session for the create_conversation handler.
 	creator handlers.SessionCreator
 	// router resolves the bound session for the send_message handler.
@@ -1336,7 +1340,7 @@ func startRelayV2(
 		// and stored nowhere. The conversation id reaches it only after the
 		// KnownConversation gate above. The size bound is the attach_file verb's
 		// unpublished receiver policy.
-		WorkspaceFileRead: workspaceFileReader(w.convReg, maxAttachFileBytes),
+		WorkspaceFileRead: workspaceFileReader(w.convReg, maxAttachFileBytes, w.readFolders...),
 		// Inbound conversation-HISTORY seam (#2116): the read half of the durable
 		// log #2114 and #2115 append to, over w.hist — the daemon's ONE store,
 		// minted at the composition root, so a served page and a just-appended

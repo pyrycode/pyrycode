@@ -1,11 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"flag"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"syscall"
 	"testing"
 
+	"github.com/pyrycode/pyrycode/internal/agentrun"
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/relay"
 )
@@ -186,5 +192,185 @@ func TestIsMarkdownName(t *testing.T) {
 		if got := isMarkdownName(name); got != want {
 			t.Errorf("isMarkdownName(%q) = %v, want %v", name, got, want)
 		}
+	}
+}
+
+// folderReadFixture is workspaceReadFixture's registry plus two operator-named
+// folders resolved the way the daemon resolves them at startup.
+type folderReadFixture struct {
+	*workspaceReadFixture
+	vault, notes string
+	read         func(conversationID, path string) (relay.WorkspaceFile, bool)
+}
+
+func newFolderReadFixture(t *testing.T, maxBytes int64) *folderReadFixture {
+	t.Helper()
+	base := newWorkspaceReadFixture(t, maxBytes)
+	root := filepath.Dir(base.ws)
+	f := &folderReadFixture{
+		workspaceReadFixture: base,
+		vault:                filepath.Join(root, "vault"),
+		notes:                filepath.Join(root, "notes"),
+	}
+	for _, d := range []string{f.vault, f.notes} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+	}
+	folders := resolveReadFolders([]string{f.vault, f.notes}, nil)
+	if len(folders) != 2 {
+		t.Fatalf("resolveReadFolders kept %d of 2 folders", len(folders))
+	}
+	f.read = workspaceFileReader(base.reg, maxBytes, folders...)
+	return f
+}
+
+// TestWorkspaceFileReader_ConfiguredFolders: an absolute path resolving inside
+// any configured folder is served; a relative path still resolves against the
+// workspace only; and the folders apply to a conversation with no workspace.
+func TestWorkspaceFileReader_ConfiguredFolders(t *testing.T) {
+	t.Parallel()
+	f := newFolderReadFixture(t, maxAttachFileBytes)
+	writeFile(t, f.ws, "ws.md", "# workspace")
+	writeFile(t, f.vault, "daily/today.md", "# today")
+	writeFile(t, f.notes, "idea.md", "# idea")
+	mustSymlink(t, f.vault, filepath.Join(filepath.Dir(f.vault), "vault-link"))
+
+	noWS, err := conversations.NewID()
+	if err != nil {
+		t.Fatalf("NewID: %v", err)
+	}
+	f.reg.Create(conversations.Conversation{ID: noWS})
+
+	conv := string(f.convID)
+	tests := []struct {
+		name, conv, path, wantName, wantBody string
+	}{
+		{"workspace still served", conv, "ws.md", "ws.md", "# workspace"},
+		{"absolute path in the first folder", conv, filepath.Join(f.vault, "daily", "today.md"), "today.md", "# today"},
+		{"absolute path in the second folder", conv, filepath.Join(f.notes, "idea.md"), "idea.md", "# idea"},
+		{"folder reached through a symlinked spelling", conv, filepath.Join(filepath.Dir(f.vault), "vault-link", "daily", "today.md"), "today.md", "# today"},
+		{"empty workspace still reads a folder", string(noWS), filepath.Join(f.notes, "idea.md"), "idea.md", "# idea"},
+	}
+	for _, tt := range tests {
+		got, ok := f.read(tt.conv, tt.path)
+		if !ok {
+			t.Errorf("%s: refused, want served", tt.name)
+			continue
+		}
+		if string(got.Data) != tt.wantBody || got.Filename != tt.wantName {
+			t.Errorf("%s: got (%q, %q), want (%q, %q)", tt.name, got.Filename, got.Data, tt.wantName, tt.wantBody)
+		}
+	}
+}
+
+// TestWorkspaceFileReader_ConfiguredFolderRefusals: every reader rule holds
+// inside a configured folder, and failing every root is the same one false.
+func TestWorkspaceFileReader_ConfiguredFolderRefusals(t *testing.T) {
+	t.Parallel()
+	f := newFolderReadFixture(t, 8)
+	writeFile(t, f.vault, ".env", "SECRET=1")
+	writeFile(t, f.vault, "only-here.md", "vault")
+	writeFile(t, f.vault, "big.md", "123456789") // one byte over the bound of 8
+	writeFile(t, f.outside, "escape.md", "outside")
+	mustSymlink(t, ".env", filepath.Join(f.vault, "notes.md"))
+	mustSymlink(t, filepath.Join(f.outside, "escape.md"), filepath.Join(f.vault, "out.md"))
+	if err := os.MkdirAll(filepath.Join(f.vault, "dir.md"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(f.vault, "pipe.md"), 0o600); err != nil {
+		t.Fatalf("Mkfifo: %v", err)
+	}
+	// A sibling sharing the folder's name as a prefix is not inside it.
+	writeFile(t, f.vault+"-other", "x.md", "prefix sibling")
+
+	emptyWS, err := conversations.NewID()
+	if err != nil {
+		t.Fatalf("NewID: %v", err)
+	}
+	f.reg.Create(conversations.Conversation{ID: emptyWS})
+	unknown, err := conversations.NewID()
+	if err != nil {
+		t.Fatalf("NewID: %v", err)
+	}
+
+	conv := string(f.convID)
+	tests := []struct{ name, conv, path string }{
+		{"relative path naming a file only in a folder", conv, "only-here.md"},
+		{"relative path for a conversation with no workspace", string(emptyWS), "only-here.md"},
+		{"absolute path outside the workspace and every folder", conv, filepath.Join(f.outside, "escape.md")},
+		{"symlink in a folder pointing outside every root", conv, filepath.Join(f.vault, "out.md")},
+		{"traversal out of a folder", conv, filepath.Join(f.vault, "..", "outside", "escape.md")},
+		{"prefix sibling of a folder", conv, filepath.Join(f.vault+"-other", "x.md")},
+		{"markdown symlink to .env in the same folder", conv, filepath.Join(f.vault, "notes.md")},
+		{"wrong extension in a folder", conv, filepath.Join(f.vault, ".env")},
+		{"directory in a folder", conv, filepath.Join(f.vault, "dir.md")},
+		{"FIFO in a folder", conv, filepath.Join(f.vault, "pipe.md")},
+		{"over the size bound in a folder", conv, filepath.Join(f.vault, "big.md")},
+		{"missing file in a folder", conv, filepath.Join(f.vault, "absent.md")},
+		{"unknown conversation", string(unknown), filepath.Join(f.vault, "only-here.md")},
+	}
+	for _, tt := range tests {
+		if got, ok := f.read(tt.conv, tt.path); ok {
+			t.Errorf("%s: served %q, want refused", tt.name, got.Data)
+		}
+	}
+}
+
+// TestResolveReadFolders: each entry is resolved once with the workspace's own
+// recipe; an entry that is not absolute, does not resolve or is not a
+// directory is skipped with exactly one warning, and the rest are kept in
+// order.
+func TestResolveReadFolders(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	vault := filepath.Join(root, "vault")
+	if err := os.MkdirAll(vault, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	file := writeFile(t, root, "file.md", "not a folder")
+	link := filepath.Join(root, "link")
+	mustSymlink(t, vault, link)
+	canonicalVault, err := agentrun.ResolveWorkdir(vault)
+	if err != nil {
+		t.Fatalf("ResolveWorkdir: %v", err)
+	}
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	got := resolveReadFolders([]string{
+		"relative/vault",
+		filepath.Join(root, "missing"),
+		file,
+		link,
+		vault,
+	}, log)
+
+	want := []string{canonicalVault, canonicalVault}
+	if !slices.Equal(got, want) {
+		t.Errorf("resolveReadFolders = %q, want %q", got, want)
+	}
+	if n := strings.Count(buf.String(), "level=WARN"); n != 3 {
+		t.Errorf("logged %d warnings, want 3 (one per skipped entry):\n%s", n, buf.String())
+	}
+	if got := resolveReadFolders(nil, log); len(got) != 0 {
+		t.Errorf("resolveReadFolders(nil) = %q, want empty", got)
+	}
+}
+
+// TestFolderList: the flag value appends one entry per occurrence.
+func TestFolderList(t *testing.T) {
+	t.Parallel()
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	var folders folderList
+	fs.Var(&folders, "pyry-read-folder", "")
+	if err := fs.Parse([]string{"-pyry-read-folder", "/a", "-pyry-read-folder=/b"}); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !slices.Equal([]string(folders), []string{"/a", "/b"}) {
+		t.Errorf("folders = %q, want [/a /b]", folders)
+	}
+	if !strings.Contains(helpText, "-pyry-read-folder") {
+		t.Error("helpText does not list -pyry-read-folder")
 	}
 }

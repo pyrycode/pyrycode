@@ -259,6 +259,15 @@ func confineFile(root, path string) (string, os.FileInfo, error) {
 	if err != nil {
 		return "", nil, errAttachUnresolved
 	}
+	return confineToRoot(canonicalRoot, path)
+}
+
+// confineToRoot is confineFile's recipe after the root is resolved: canonicalRoot
+// must already be agentrun.ResolveWorkdir output. It exists for a root resolved
+// ONCE rather than per call — the reader's operator-named folders (#2710) — so
+// that a folder whose path is swapped for a symlink after startup cannot move
+// the boundary. Re-resolving here would follow the swap.
+func confineToRoot(canonicalRoot, path string) (string, os.FileInfo, error) {
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(canonicalRoot, path)
 	}
