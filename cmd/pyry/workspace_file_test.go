@@ -358,6 +358,137 @@ func TestResolveReadFolders(t *testing.T) {
 	}
 }
 
+// TestWithWorkdirReadFolder: the daemon's working folder joins the read folders
+// in its canonical spelling, once, unless it is the home folder or the root,
+// in which case it is left out with exactly one startup line naming it.
+func TestWithWorkdirReadFolder(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	wd := filepath.Join(home, "pyry-workspace")
+	vault := filepath.Join(root, "vault")
+	for _, d := range []string{wd, vault} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+	}
+	wdLink := filepath.Join(root, "wd-link")
+	mustSymlink(t, wd, wdLink)
+	homeLink := filepath.Join(root, "home-link")
+	mustSymlink(t, home, homeLink)
+	canonical := func(p string) string {
+		t.Helper()
+		r, err := agentrun.ResolveWorkdir(p)
+		if err != nil {
+			t.Fatalf("ResolveWorkdir: %v", err)
+		}
+		return r
+	}
+	canonicalWD, canonicalVault := canonical(wd), canonical(vault)
+
+	tests := []struct {
+		name          string
+		folders       []string
+		workdir, home string
+		want          []string
+		wantLog       bool
+	}{
+		{"added when nothing is configured", nil, wd, home, []string{canonicalWD}, false},
+		{"added first beside a configured folder", []string{canonicalVault}, wd, home, []string{canonicalWD, canonicalVault}, false},
+		{"canonicalised from a symlinked spelling", nil, wdLink, home, []string{canonicalWD}, false},
+		{"not repeated when also configured", resolveReadFolders([]string{vault, wdLink}, nil), wd, home, []string{canonicalVault, canonicalWD}, false},
+		{"home folder is not added", []string{canonicalVault}, home, home, []string{canonicalVault}, true},
+		{"symlink to the home folder is not added", nil, homeLink, home, nil, true},
+		{"home given by a symlinked spelling is still caught", nil, home, homeLink, nil, true},
+		{"root is not added", nil, "/", home, nil, true},
+		{"unresolvable home adds nothing", nil, wd, "", nil, true},
+	}
+	for _, tt := range tests {
+		var buf bytes.Buffer
+		log := slog.New(slog.NewTextHandler(&buf, nil))
+		got := withWorkdirReadFolder(tt.folders, tt.workdir, tt.home, log)
+		if !slices.Equal(got, tt.want) {
+			t.Errorf("%s: got %q, want %q", tt.name, got, tt.want)
+		}
+		n := strings.Count(buf.String(), "working folder not made readable")
+		if want := map[bool]int{true: 1, false: 0}[tt.wantLog]; n != want || strings.Count(buf.String(), "\n") != want {
+			t.Errorf("%s: logged %q, want %d line(s) saying the folder was not made readable", tt.name, buf.String(), want)
+		}
+		if tt.wantLog && !strings.Contains(buf.String(), tt.workdir) {
+			t.Errorf("%s: log %q does not name the folder %q", tt.name, buf.String(), tt.workdir)
+		}
+	}
+}
+
+// workdirReadFixture is the pyrybox layout: the daemon runs from wd, and the
+// conversation's workspace is a subfolder of it, with no -pyry-read-folder.
+type workdirReadFixture struct {
+	reg             *conversations.Registry
+	convID          conversations.ConversationID
+	wd, ws, outside string
+}
+
+func newWorkdirReadFixture(t *testing.T) *workdirReadFixture {
+	t.Helper()
+	root := t.TempDir()
+	reg, err := conversations.Load(filepath.Join(root, "conversations.json"))
+	if err != nil {
+		t.Fatalf("conversations.Load: %v", err)
+	}
+	f := &workdirReadFixture{
+		reg:     reg,
+		wd:      filepath.Join(root, "home", "pyry-workspace"),
+		outside: filepath.Join(root, "outside"),
+	}
+	f.ws = filepath.Join(f.wd, "default")
+	for _, d := range []string{f.ws, f.outside} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+	}
+	id, err := conversations.NewID()
+	if err != nil {
+		t.Fatalf("NewID: %v", err)
+	}
+	reg.Create(conversations.Conversation{ID: id, Cwd: f.ws})
+	f.convID = id
+	return f
+}
+
+// TestWorkspaceFileReader_WorkdirFolder: with no configured folders, a
+// conversation in a subfolder of the working folder reads a markdown file in
+// the working folder by absolute path, and every other reader rule still holds
+// there: a markdown symlink leaving every root and a non-markdown file are the
+// same one false.
+func TestWorkspaceFileReader_WorkdirFolder(t *testing.T) {
+	t.Parallel()
+	f := newWorkdirReadFixture(t)
+	writeFile(t, f.wd, "BEHAVIOR.md", "# behavior")
+	writeFile(t, f.wd, "notes.txt", "not markdown")
+	writeFile(t, f.outside, "secret.md", "outside")
+	mustSymlink(t, filepath.Join(f.outside, "secret.md"), filepath.Join(f.wd, "escape.md"))
+
+	folders := withWorkdirReadFolder(resolveReadFolders(nil, nil), f.wd, filepath.Dir(f.wd), nil)
+	read := workspaceFileReader(f.reg, maxAttachFileBytes, folders...)
+	conv := string(f.convID)
+
+	got, ok := read(conv, filepath.Join(f.wd, "BEHAVIOR.md"))
+	if !ok || string(got.Data) != "# behavior" || got.Filename != "BEHAVIOR.md" {
+		t.Errorf("working-folder markdown: got (%q, %q, %v), want served", got.Filename, got.Data, ok)
+	}
+	if _, ok := workspaceFileReader(f.reg, maxAttachFileBytes)(conv, filepath.Join(f.wd, "BEHAVIOR.md")); ok {
+		t.Error("without the working folder the reader served it; the fixture does not discriminate")
+	}
+	for name, path := range map[string]string{
+		"markdown symlink to a file outside every root": filepath.Join(f.wd, "escape.md"),
+		"non-markdown file in the working folder":       filepath.Join(f.wd, "notes.txt"),
+	} {
+		if got, ok := read(conv, path); ok {
+			t.Errorf("%s: served %q, want refused", name, got.Data)
+		}
+	}
+}
+
 // TestFolderList: the flag value appends one entry per occurrence.
 func TestFolderList(t *testing.T) {
 	t.Parallel()

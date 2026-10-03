@@ -143,6 +143,27 @@ func assertContentFree(t *testing.T, reason string, secrets ...string) {
 	}
 }
 
+// TestFileAttacher_RefusesWorkdirFile: the reader's working-folder root (#2720)
+// does not reach attach_file, which stays workspace-only. A conversation whose
+// workspace is a subfolder of the daemon's working folder cannot attach a file
+// that sits in the working folder itself.
+func TestFileAttacher_RefusesWorkdirFile(t *testing.T) {
+	t.Parallel()
+	wd := t.TempDir()
+	ws := filepath.Join(wd, "default")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	path := writeFile(t, wd, "BEHAVIOR.md", "# behavior")
+
+	f := newAttachFixture(t)
+	const sid = "11111111-2222-4333-8444-555555555555"
+	f.bindConversation(sid, ws)
+	if id, err := f.attach(sid, path); err == nil {
+		t.Fatalf("attach(%q) = %q, want a refusal", path, id)
+	}
+}
+
 // TestFileAttacher_Confinement is AC-2's single table. Every row runs against
 // one workspace and asserts the stated outcome.
 //
