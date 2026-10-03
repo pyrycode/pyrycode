@@ -89,6 +89,49 @@ because `confineFile("", path)` would otherwise canonicalise against the
 daemon's own process directory — the daemon's own layout, not any conversation's
 workspace.
 
+## Operator-named folders widen the absolute case only (#2710)
+
+The operator can name extra absolute folders on the daemon command line with a
+repeatable `-pyry-read-folder` flag, such as an Obsidian vault most of the
+links `claude` sends point into. `resolveReadFolders` (`cmd/pyry/workspace_file.go`)
+canonicalises the list **once, at daemon startup**, with the same
+`agentrun.ResolveWorkdir` recipe `confineFile` applies to the workspace. An
+entry is skipped with one `slog.Warn` — naming the operator's own entry and a
+static reason, never `ResolveWorkdir`'s own path-bearing error — when it is
+not absolute, does not resolve, or does not name a directory; the daemon
+still starts. The directory check is not in the confinement recipe `confineFile`
+already had: a configured **file** resolves fine through `ResolveWorkdir`, and
+`withinDir(file, file)` is true, so without it a mistyped entry would quietly
+grant that one file rather than being skipped.
+
+`workspaceFileReader` tries the workspace first, then each resolved folder in
+order (`confineToAnyRoot`), and only for a path that is already absolute — a
+relative path never reaches the folder loop, so it still resolves against the
+workspace only. Every existing rule (both-leaf markdown check, regular-file-only,
+`readChecked`'s identity proof, the single undistinguished `false`) applies
+inside a folder exactly as inside the workspace, because a folder is confined
+with the same `confineToRoot` helper `confineFile` now delegates to.
+
+**A folder root is resolved once and never re-resolved per request.**
+`confineFile` was split into itself (resolve `root`, then delegate) and
+`confineToRoot(canonicalRoot, path)`, which assumes its root is already
+canonical. A configured folder goes straight to `confineToRoot` with the
+startup-resolved path. Re-resolving a folder on every request, the way a
+workspace root is resolved, would have reopened the swap window the split
+exists to close: an operator's folder whose path component is later replaced
+by a symlink would move the boundary on the next request if the root were
+canonicalised again then. The resolved list is handed to the reader through
+`relayWiring.readFolders` and never mutated afterwards, so no lock is needed.
+[`#2711`](https://github.com/pyrycode/pyrycode/issues/2711) reads this same
+resolved list to name the folders in the session prompt, which is why the
+list is resolved once in the daemon's composition root rather than inside the
+reader.
+
+`fileAttacher` (the `attach_file` verb) never sees the folder list — its
+signature takes none, and `confineFile`'s own behaviour and callers are
+unchanged by the split — so it keeps its workspace-only rule regardless of
+what is configured.
+
 ## Related
 
 - [Inbound `request_attachment` (#2054)](v2-session-manager-state-machine-inbound-request-attachment-attachmentresolve.md) — the handler this one copies step for step: nil-seam-inert, reject-not-tolerate decode, the `KnownConversation`-before-path-component ordering, and the two-code (`not_found` vs. `stream_aborted`) partition on the stream error's identity.
