@@ -104,16 +104,23 @@ unset, which today means the test literals in this package, not a runtime "PTY m
 arm that used to sit beside the stream turn drain — the raw `w.sup.State()` reads and the PTY
 interactive/modal streams — was deleted with #1348 along with `internal/supervisor`; the stream-json
 turn drain (`startStreamTurnDrainV2`) feeding `newInteractiveTurnEmitterV2` + `mgr.SetReplaySource(...)`
-is now the only turn producer. It is scoped to the active conversation's bound session via
-`boundSessionIDForActive(w.active, w.convReg)` — fail-closed on no active conversation / unknown
-conversation / unbound session (never falls through to the bootstrap session). See
-[codebase/1081.md](../codebase/1081.md) for the original wiring (now superseded by #1348) and
-[config-package.md](config-package.md) for the operator-facing `interactive_runner` field.
+is now the only turn producer. **Since #2739 it is no longer scoped to the active conversation's bound
+session.** Each event is instead attributed to the conversation its own producing session resolves to,
+via `conversationFor := func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }`
+— the same resolver [the turn-busy tracker](streamsup-package-per-conversation-turn-busy-tracking.md)
+uses — so every conversation's events reach its own history, ring and clients regardless of which one
+the daemon's cursor currently points at; only a session that resolves to no conversation at all is
+dropped. `boundSessionIDForActive(w.active, w.convReg)`, the resolver this replaced, has no production
+caller left — it stays in `relay.go` for its own unit test. See [Draining turnevents into the interactive
+emitter](streamsup-package-draining-turnevents-into-the-interactive-emitter.md) for the drain and
+emitter's per-conversation state, [codebase/1081.md](../codebase/1081.md) for the original (now
+superseded) wiring, and [config-package.md](config-package.md) for the operator-facing
+`interactive_runner` field.
 
 **Fixed (#1133): the sink tag now rotates with `RestartFresh`.** The sink used to tag each event with
 the runner's *construction-time* `SessionID`; a stream-mode `new_session` rebound `conv.CurrentSessionID`
-to a fresh id without retagging the Parser, so `boundSessionIDForActive` and the event tag diverged and
-the drain's scoping gate dropped everything for that conversation until the daemon restarted. An
+to a fresh id without retagging the Parser, so the resolved conversation and the event tag diverged and
+the drain dropped everything for that conversation until the daemon restarted. An
 atomic-backed `streamSessionTag` now moves with the rotation, read once per event by both fan-in lanes —
 see [§ Session rotation notification](streamsup-package-session-rotation-notification-onsessionrotate.md).
 This is what the #1137 `new_session` e2e's post-rotation milestone (`codebase/1137.md` § The post-rotation

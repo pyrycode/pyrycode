@@ -25,14 +25,25 @@ as a belt line.
 
 ### Why the bootstrap pool id and the bound conversation id must be equal
 
-The one non-obvious invariant a caller must get right. The stream turn drain
-(`startStreamTurnDrainV2`, #1098) forwards an event only when the event's sink
-tag equals `activeSession()`:
+The one non-obvious invariant a caller must get right. Before #2739, the
+stream turn drain (`startStreamTurnDrainV2`, #1098) forwarded an event only
+when the event's sink tag equalled `activeSession()`:
 
 - The **sink tag** is the runner's construction-time `cfg.SessionID` — the
   bootstrap **pool id**, pinned by `seedBootstrapRegistry(t, home, initialUUID)`.
-- `activeSession()` resolves the active conversation → its bound session id —
+- `activeSession()` resolved the active conversation → its bound session id —
   set by `seedBoundConversation(t, home, knownConvID, initialUUID)`.
+
+**Since #2739 the drain resolves the producing session's own conversation
+instead** (`conversationForSession` over the registry — the same function
+`seedBoundConversation` ultimately makes resolvable), so a bootstrap pool id
+and a bound conversation id that disagree no longer silently drops the
+runner's events; whichever conversation the session actually resolves to
+receives them. The seeding pairing below is no longer load-bearing for
+*delivery*, but every existing caller still seeds both with the same
+`initialUUID` and there is no reason for a new caller to diverge from that —
+it keeps the bootstrap conversation's own id predictable for assertions that
+read its history or event ring directly.
 
 Both must be seeded with the *same* `initialUUID` before
 `StartStreamInteractiveWithRelay` is called — the rider specs #1136–#1139 and
@@ -40,15 +51,16 @@ the real-claude capstone #1083 all repeat this pairing, and it remains the
 right way to seed a new caller.
 
 **The "a mismatch hangs the drain" half of this claim did not hold up under
-test (#2610).** Re-seeding either `seedBootstrapRegistry` or
+test even before #2739 (#2610).** Re-seeding either `seedBootstrapRegistry` or
 `seedBoundConversation` with a different UUID was observed to still drain
 green in `TestRelayV2_StreamSendMessageDrainsTurn`. So a timeout waiting for
-`assistant_delta` is not good evidence of a seed mismatch by itself. The
-gate's own record is: it logs `stream_turn.not_active` (Debug, under
-`-pyry-verbose`, which every harness daemon runs) for every event it drops as
-not the active session. Treat that log line, not a hung drain, as the
-mismatch signal — check for it before naming a mismatch as the cause of a
-stuck test.
+`assistant_delta` was never good evidence of a seed mismatch by itself. Before
+\#2739 the gate's own record was its `stream_turn.not_active` Debug log (under
+`-pyry-verbose`, which every harness daemon runs) for every event dropped as
+not the active session; that record no longer exists — a mismatch now shows
+up, if at all, as `stream_turn.no_conversation` (only when the session
+resolves to no conversation at all, which seeding a UUID mismatch does not
+normally produce) rather than as a drop against the active cursor.
 
 ### `relay_v2_stream_send_test.go` — `TestRelayV2_StreamSendMessageDrainsTurn`
 
@@ -113,34 +125,40 @@ pair, dial and handshake. Proving delivery means making a *second* spawn
 happen while a client is already connected.
 
 Two routes force that second spawn. A child kill + respawn keeps the
-runner's construction-time session id, so the drain's active-session gate
-(`boundSessionIDForActive` in `cmd/pyry/relay.go`, feeding
-`startStreamTurnDrainV2`) still matches and lets the fresh child's events
-through. `driveModelListRespawn` is built on `killChild` +
+runner's construction-time session id, so the resolved conversation stays the
+same and the fresh child's events reach it exactly as the first child's did —
+true both before and after #2739, since the session id itself never changes
+on this route. `driveModelListRespawn` is built on `killChild` +
 `waitForRunnerStatus` — the first helper in this package to combine a
 phone-side frame observation with a kill.
 
 **A `new_session` rotation used to be the route that couldn't reach a
 phone-side frame here — #1133 closed that gap, and this helper was never
 revisited to use it.** Before #1133 a rotation rebound the conversation to a
-new id while the runner's sink tag stayed on the outgoing one, so the gate
-dropped every event the fresh child produced; `relay_v2_stream_new_session_test.go`
+new id while the runner's sink tag stayed on the outgoing one, so the fresh
+child's events carried a tag matching no live producer the drain recognised;
+`relay_v2_stream_new_session_test.go`
 asserted the post-rotation child's stdin instead of a phone-side frame for
 exactly that reason. `RestartFresh` now moves the sink tag with the rotation
 (see [streamsup-package.md § Session rotation
 notification](streamsup-package-session-rotation-notification-onsessionrotate.md)),
-so a rotation-driven respawn's frames now reach the gate as themselves. Kill
-+ respawn still works and nothing forced this helper to change, but a future
-reader should not treat "a `new_session` rotation can't produce an
-observable phone-side frame" as still true.
+so a rotation-driven respawn's frames now reach the emitter as themselves —
+and since #2739 removed the active-conversation gate entirely, a rotation's
+fresh child reaches its own conversation even on a daemon whose cursor
+points elsewhere. Kill + respawn still works and nothing forced this helper
+to change, but a future reader should not treat "a `new_session` rotation
+can't produce an observable phone-side frame" as still true.
 
-The gate also has nothing to compare against until a turn has been driven —
-`activeConversation.set` is stamped only from `sessionRouter.Route`'s success
-path — so the helper drives one `send_message` and waits for `turn_end`
-*before* killing the child. That pre-kill turn isn't incidental scaffolding;
-it's what makes the post-kill respawn observable at all, and any e2e that
-needs a spawn-time frame after the bootstrap child should expect to pay the
-same "drive a turn, then force a respawn that keeps the session id" shape.
+The helper still drives one `send_message` and waits for `turn_end` *before*
+killing the child — not, since #2739, to give a cursor-based gate something
+to compare against, but because this section's whole premise is that a
+spawn-time frame can't be observed by connecting and waiting: the live lane
+fires once per child spawn, and the daemon's bootstrap child spawns eagerly
+before any test can dial. That pre-kill turn is what makes the post-kill
+respawn a **second**, observable spawn while a client is already connected,
+and any e2e that needs a spawn-time frame after the bootstrap child should
+expect to pay the same "drive a turn, then force a respawn that keeps the
+session id" shape regardless of how the drain attributes events.
 See § Build Helper for the mutation-testing methodology this spec's AC
 required (`PYRY_E2E_BIN` + a control run, not `-overlay` alone).
 

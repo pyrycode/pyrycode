@@ -236,13 +236,19 @@ uses, not by lowering the level.
 - [`new_session`'s package overview](v2-session-manager-state-machine-inbound-new-session-sessionstarter-seam.md)
   — the identical optional-payload shape, tolerant-decode posture, and the
   cursor-vs-named question this doc answers for `interrupt`.
-- [Draining turnevents into the interactive emitter § per-event session
-  gate](streamsup-package-draining-turnevents-into-the-interactive-emitter.md)
-  — why a background conversation's `turn_end` never reaches the wire while the
-  cursor points elsewhere, the fact #2103's e2e is built around: with the cursor on
-  A and the frame naming B, B's `TurnEnd` is dropped by this gate before it is ever
-  shaped into an envelope, so the e2e proves the interrupt reached B from the
-  `v2.interrupt.dispatched` record and the drain's own `stream_turn.not_active`
-  drop record instead of a `turn_end` that structurally cannot arrive. Worth
-  checking, before writing a test against an acceptance criterion, whether the
-  observable it names actually survives to the surface the criterion watches.
+- [Draining turnevents into the interactive emitter § per-event conversation
+  attribution](streamsup-package-draining-turnevents-into-the-interactive-emitter.md)
+  — at #2103, a background conversation's `turn_end` never reached the wire while
+  the cursor pointed elsewhere, the fact #2103's e2e (milestone M4(b)) was built
+  around: with the cursor on A and the frame naming B, B's `TurnEnd` was dropped
+  by the drain's active-session gate before it was ever shaped into an envelope,
+  so the e2e proved the interrupt reached B from the `v2.interrupt.dispatched`
+  record and the drain's own `stream_turn.not_active` drop record instead of a
+  `turn_end` that structurally could not arrive. **#2739 removed that gate**: B's
+  `TurnEnd` is now attributed to B's own conversation and reaches the wire stamped
+  with B's id regardless of where the cursor points, so M4(b) now asserts that
+  frame directly instead of the two drop-shaped proxies. Worth checking, before
+  writing a test against an acceptance criterion, whether the observable it names
+  actually survives to the surface the criterion watches — and, having once
+  written such a workaround, revisiting it when the gate it worked around is
+  removed.

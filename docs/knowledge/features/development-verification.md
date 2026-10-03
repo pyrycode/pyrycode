@@ -107,6 +107,15 @@ the boundary at all — [`maxModelVocabularyFile`'s oversized-file
 test](streamsup-package-retaining-the-decoded-model-list-for-the-session.md#holding-codexs-model-families-beside-claudes-2627)
 derives its fixture from the constant for exactly this reason.
 
+Before removing a log record a test syncs on, grep for the record's field values, not
+only its event name. A test can wait on one discriminant of a structured log line
+(`kind=mcp_status`, a session id, a conversation id) without the event name itself
+ever appearing in the test file, so a name-only grep for the record being removed
+misses it. #2739 removed the stream drain's `stream_turn.not_active` drop and its
+list of affected tests named every call site that synced on the record's name, but
+missed four e2e tests that synced on `kind=mcp_status` specifically — found only once
+`make check` turned red on the rework.
+
 ## Protocol boundaries
 
 Round-trip tests must marshal the decoded payload back into the envelope. Comparing

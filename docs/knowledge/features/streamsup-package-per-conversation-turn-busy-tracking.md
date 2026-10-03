@@ -7,17 +7,21 @@ path will need ("is a turn running for conversation X?") that the emitter's own 
 structurally cannot give: those are unguarded (single-Handle-goroutine only), scalar rather than
 per-conversation, and populated only for the conversation the cursor points at.
 
-**Fed from `startStreamTurnDrainV2`'s `sink.ch` arm, one line before the `activeSession()` gate** — a
-`busy.observe(env.sessionID, env.ev)` call, unconditional, ahead of the existing drop-if-not-active check.
-Ordering is the entire contract: the gate gets its identity from a *different* place than `emitter.Handle`
-does (`env.sessionID`, tagged at parser construction, vs. the cursor `Handle` reads internally), so feeding
-before the gate is what lets a turn on a *non-active* conversation still report busy — feeding after it
-would make the tracker just as cursor-blind as the emitter it's replacing. `observe` resolves
+**Fed from `startStreamTurnDrainV2`'s `sink.ch` arm, one line before the event's own conversation is
+resolved for `HandleFor`** — a `busy.observe(env.sessionID, env.ev)` call, unconditional, ahead of the
+drop that applies when the session resolves to no conversation at all. `observe` resolves
 `sessionID → conversationID` via an injected closure (production passes `conversationForSession(w.convReg,
-sid)` — the same resolver `session_transition` frames use), keyed by conversation (not
+sid)` — since #2739 the *same* resolver the drain itself uses to attribute the event to `HandleFor`, and
+the one `session_transition` frames use), keyed by conversation (not
 session) so a `/clear`-rotated session's late events still land under `SessionHistory`'s match. An
 unresolvable or empty-string conversation id is simply not tracked (never under an empty key — that would
-both wedge and collide with the "unknown conversation" answer).
+both wedge and collide with the "unknown conversation" answer). Before #2739, when the drain fed a
+*different* gate — `activeSession()`, the active conversation's bound session — ordering mattered more
+sharply: feeding `observe` ahead of that gate was what let a turn on a non-active conversation still
+report busy, while the emitter it fed only ever saw the active one's events. Now both lanes resolve
+through the same function, so the two agree on which conversations exist; `observe` still runs first so
+its own unbound-session accounting stays independent of the drain's `stream_turn.no_conversation` drop,
+each diagnosing its own lane rather than one silently standing in for the other.
 
 The opener set is a **whitelist**: `ThoughtChunk`/`ThinkingProgress`/`TextChunk`/`ToolStart`/`ToolUpdate`
 add the conversation, `TurnEnd` (either stop reason — `resultTurnEndReason` sends both through one parser
@@ -28,10 +32,10 @@ server evidence that the model has entered an interruptible turn, unlike a clien
 echo.
 
 Opening the busy mark during initial thinking is intentional. `startStreamTurnDrainV2` calls `observe`
-before the active-session gate and before `interactiveTurnEmitterV2.Handle` publishes
-`turn_state: thinking`. Inbound delivery therefore parks in `msgqueue` before a client can react to the
-state frame, instead of racing a second message into the child's stdin. A different conversation keeps
-its own membership and published state.
+before the event's conversation is resolved for `HandleFor`, and so before
+`interactiveTurnEmitterV2.HandleFor` publishes `turn_state: thinking`. Inbound delivery therefore parks in
+`msgqueue` before a client can react to the state frame, instead of racing a second message into the
+child's stdin. A different conversation keeps its own membership and published state.
 
 **The whitelist has now been vindicated by a real case.** `Stall`/`ApiRetry`/`Compacting` are tui-driver
 signals this sink's only producer never emits, so they are asserted at the unit tier only, fed directly.
@@ -60,16 +64,18 @@ past the nil guard into a nil-map read — the `screenSnapshotterOrNil` hazard).
 
 Opening on thinking exposed a second state store that an ordinary busy-clear
 test does not exercise: `turnBusyTracker` is per-conversation delivery state,
-while `interactiveTurnEmitterV2` holds the active conversation's scalar published
-lifecycle. Clearing only the former on child exit leaves clients reporting
-`thinking` and can let a respawn reuse a stale turn identity even though delivery
-is no longer busy. Every abandonment path must therefore close both views.
+and `interactiveTurnEmitterV2` holds its own per-conversation published
+lifecycle (one `convTurnState` per conversation since #2739, formerly a single
+scalar set of fields for whichever conversation was active). Clearing only the
+former on child exit leaves clients reporting `thinking` and can let a respawn
+reuse a stale turn identity even though delivery is no longer busy. Every
+abandonment path must therefore close both views.
 
 A decoded `result` is the ordinary shared closer: every subtype produces one
 `TurnEnd`; `error_during_execution` becomes cancelled, and success or another
 error keeps its existing terminal reason. The tracker consumes that event before
-active-session filtering, while the emitter publishes `turn_end`, then
-`turn_state: idle`, and clears its turn identity.
+the event's conversation is resolved for `HandleFor`, while the emitter publishes
+`turn_end`, then `turn_state: idle`, and clears that conversation's turn identity.
 
 The no-result paths close on the drain that already owns emitter mutation. A
 child-exit envelope is FIFO behind that child's events; `clearForExit` returns a

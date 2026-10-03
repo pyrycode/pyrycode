@@ -23,7 +23,7 @@ func startStreamTurnDrainV2(
     ctx context.Context,
     sink *streamTurnSink,
     emitter *interactiveTurnEmitterV2,
-    activeSession func() (sessionID string, ok bool),
+    conversationFor func(sessionID string) (conversationID string, ok bool),
     busy *turnBusyTracker,
     logger *slog.Logger,
 ) (cleanup func())
@@ -45,30 +45,94 @@ never `ev`'s assistant/thought/tool content). The channel is **never closed** (a
 drain during shutdown; the drain stops on `ctx`, not on channel close, so a send-on-closed panic is
 structurally impossible).
 
-**The per-event session gate is AC2's scoping property.** The drain goroutine resolves `activeSession()`
-and forwards to `emitter.Handle` only when the producing session equals the active conversation's bound
-session; every other session's event is dropped **before** `Handle` is ever called, so a background
-conversation's connection never receives it. Gating happens at `Handle` time (in the drain goroutine),
-not inside the sink, so the drop decision stays consistent with the cursor `Handle` itself reads via
-`CurrentConversation()`. On an active-conversation switch the emitter's own #1062 `turnConvID` guard
-flushes the prior conversation's buffered delta and re-mints a fresh turn for the new one — the drain
-supplies session-level gating, the emitter's existing follow-active logic does the rest.
+**Per-event conversation attribution, not an active-conversation gate (#2739).** The drain goroutine
+resolves `conversationFor(env.sessionID)` and forwards to `emitter.HandleFor(ctx, convID, ev)` under
+**that** conversation's id — never the cursor's. Only an event whose session resolves to no conversation
+at all is dropped, logged content-free as `stream_turn.no_conversation` (`kind` + `session_id` only).
+Every conversation's events reach its own history, ring and clients, whichever conversation currently
+holds the daemon's cursor; a background conversation's connection receives its own frames exactly as the
+active one does.
 
-**Fixed (#1133): the gate no longer drops a turn's worth of delivery across a session rotation.** Until
-\#1133, `sinkFor`'s session tag was captured once, at runner construction, by `newStreamRunnerFactory` (see
-[streamsup-package-constructing-a-streamrunner-newstreamrunnerfacto.md](streamsup-package-constructing-a-streamrunner-newstreamrunnerfacto.md));
+**A side effect, decided on rather than filtered out: a child's startup frames now reach history too.**
+A frame like `mcp_status` or `model_list` describes the child, not a turn (`HandleFor`'s arms for both
+open, transition and close nothing), and the bootstrap session is bound to the bootstrap conversation
+from startup — so the bootstrap child's own report now reaches that conversation's history and ring the
+moment it is admitted, even though no client has routed a message to it yet. Before #2739 this exact case
+was dropped, not because of anything about startup specifically, but as a side effect of the
+active-conversation gate: no message routed meant no active conversation, which meant every event was
+"not active" and dropped. The fix kept this behaviour rather than special-casing it back in — the frame
+is still a true report about that conversation's own child — which is why four e2e tests that synced on
+the drop this produced had to be reworked to sync on the history entry instead (see [`request_history`'s
+wire contract](../../protocol-mobile.md#mcp_status) for the client-visible shape of this change).
+
+This replaced an earlier design, until #2739: the drain compared the producing session against
+`activeSession()`, the active conversation's bound session, and dropped every other session's event
+before `Handle` was ever called (logged `stream_turn.not_active`, Debug) — so a background conversation's
+turn tail was lost for good. The emitter's own `Handle` paired that gate with a follow-active switch
+(#1062): a cursor move closed the *prior* conversation's turn outright. #2739 removed both halves. The
+emitter now keeps one `convTurnState` per conversation (see below) rather than one scalar set of
+lifecycle fields, so a conversation's turn stays open, and its buffered delta stays buffered, regardless
+of which conversation the cursor points at or how many other conversations' events arrive in between.
+`Handle(ctx, ev)` is kept as a thin wrapper — `e.HandleFor(ctx, e.sup.CurrentConversation(), ev)` — purely
+for its 182 pre-existing unit-test call sites, which drive one conversation through a stub cursor;
+production never calls it.
+
+**The emitter's turn state is per conversation (#2739), not scalar.** `interactiveTurnEmitterV2` embeds a
+`*convTurnState` (`inTurn`, `turnID`, `turnConvID`, `seq`, `currentState`, `childLanes`, and the
+`deltaBuf`/`deltaMsgID`/`deltaParent`/`deltaConvID` coalescing group) and keeps `turns map[string]*convTurnState`,
+one entry per conversation with a turn open or text buffered. `selectConversation(convID)` re-points the
+embedded pointer at that conversation's own state, creating it on first sight — called at the top of
+`HandleFor` and of `closeForConversation`, only from the drain goroutine. Because the state is embedded
+rather than copied into a map of structs, every method below keeps reading `e.inTurn`, `e.seq`,
+`e.deltaBuf` and meaning "the selected conversation's" — the same ~100 test assertions that read those
+fields after driving one conversation through `Handle` keep compiling unchanged; moving the fields into
+the map directly would have forced rewriting every one of them. `releaseConversation(convID)`, deferred at
+the end of `HandleFor`, deletes the entry once it holds no open turn and no buffered text, so `turns`
+stays bounded to conversations with work in flight rather than growing for the daemon's life.
+`closeForConversation` (the drain's lifecycle-close and child-exit paths) selects only the named
+conversation's state and returns its turn to idle without touching any other conversation's.
+
+**The coalescing timer is shared across every conversation, and must flush all of them.** `flushTimer` is
+armed, per the invariant its own doc comment states, iff *some* conversation's `deltaBuf` is non-empty —
+not iff the selected one's is. Arming re-arms only from an empty→non-empty transition when no other
+conversation already holds buffered text (`anyBuffered()`), so the latency window always runs from the
+oldest unflushed chunk across every conversation, not from whichever one buffered most recently.
+`flushDelta` (reached from `Handle`'s per-kind arms, flushing the selected conversation only) stops the
+timer only once `anyBuffered()` is false — if it stopped unconditionally, a second conversation's text
+would sit buffered forever once the first one's flush ran. The drain's `flushC()` case does not call
+`flushDelta` directly; it calls `flushAll(ctx)`, which flushes every conversation with buffered text (each
+conversation's own frames stay in order; order *across* conversations is unspecified, which is the only
+order a client can observe anyway).
+
+**`turnPhaseSnapshot` holds one entry per conversation with a running turn (#2739), not one scalar pair.**
+Before #2739 the emitter held at most one open turn, so the connect-time turn-phase reconcile's producer
+(`cmd/pyry/interactive_turn_v2.go`'s `turnPhaseSnapshot`, see [its own
+doc](v2-session-manager-state-machine-connect-time-turn-phase-reconcile-running.md)) was a single
+`(conversationID, state)` pair. It is now a mutex-guarded `map[string]turnbridge.TurnState`: `publish`
+sets or (on `StateIdle`) deletes a conversation's entry, `clear` deletes it unconditionally, and
+`running()` returns one `protocol.TurnStatePayload` per entry, sorted by conversation id for determinism,
+so a freshly-connected conn is reconciled on every conversation with a turn running, not only the last one
+touched.
+
+**Fixed (#1133): a session rotation no longer drops a turn's worth of delivery.** Until #1133, `sinkFor`'s
+session tag was captured once, at runner construction, by `newStreamRunnerFactory` (see [Constructing a
+streamRunner](streamsup-package-constructing-a-streamrunner-newstreamrunnerfacto.md));
 `Pool.rekeyLocked` (`RotateForNewSession`) re-keyed the pool entry and rebound the conversation **in
 place**, while the surviving runner's already-bound sink kept its construction-time tag — a mapping gone
 stale at rekey (#2010, surfaced by the `slash_command_list`/`model_list` docs re-derivation), not a narrow
 race window. `newStreamRunnerFactory` now mints an atomic-backed `streamSessionTag` that `RestartFresh`
 rotates through `Config.OnSessionRotate`, and both fan-in lanes (`sinkForTag`/`exitForTag`, which `sinkFor`
 now delegates to) read that tag once per event rather than a captured constant — see [Session rotation
-notification](streamsup-package-session-rotation-notification-onsessionrotate.md).
+notification](streamsup-package-session-rotation-notification-onsessionrotate.md). #2739's `conversationFor`
+resolution (`conversationForSession`, which also checks `SessionHistory`) means a tail from a session that
+has *already* rotated away still resolves to its conversation rather than needing the tag fix at all; the
+two fixes are complementary, not redundant — #1133 keeps the *producing* session's own tag current, #2739
+is what lets a late tail from an *earlier* session in that same conversation's history still land.
 
-**Single-writer invariant.** Only the drain goroutine ever calls `emitter.Handle`/`flushDelta` — same
+**Single-writer invariant.** Only the drain goroutine ever calls `HandleFor`/`flushDelta`/`flushAll` — same
 single-Run-goroutine assumption the PTY producer relies on, `-race`-tested by feeding two sessions'
 Parsers concurrently. The drain also selects `emitter.flushC()` (the emitter arms its own coalescing
-timer inside `Handle` but does not select it — a driver must) and calls `flushDelta` on the same
+timer inside `Handle`/`HandleFor` but does not select it — a driver must) and calls `flushAll` on the same
 goroutine, so there's no cross-goroutine timer race.
 
 **No transcript on this path (AC3).** `stream_turn_drain.go` imports no fsnotify, resolves no `<uuid>.jsonl`
@@ -76,6 +140,10 @@ path — structural, asserted by the test file doing no filesystem setup.
 
 **The emitter is passed in, not built here** — the caller (the unit test in this ticket; #1081's
 production wiring, below) owns its construction and replay wiring (`SetReplaySource`). This ticket's
-`activeSession` is a plain injected func; #1081 composes it as `boundSessionIDForActive(w.active,
-w.convReg)` — the relay leg's own follow-active resolver, not `boundHost`. See
+`activeSession` was a plain injected func; #2739 widened it to `conversationFor`, and #1081's wiring now
+composes it as `conversationFor := func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }`
+(`cmd/pyry/relay.go`) — the same resolver [the per-conversation turn-busy
+tracker](streamsup-package-per-conversation-turn-busy-tracking.md) uses, not `boundSessionIDForActive`.
+`boundSessionIDForActive` has no production caller left after #2739; it stays in `relay.go` for its own
+unit test only, with its removal called out as a follow-up rather than done in that ticket. See
 [codebase/1098.md](../codebase/1098.md).

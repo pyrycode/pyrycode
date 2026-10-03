@@ -2,11 +2,15 @@
 
 Closes the gap recorded against this package since #1081 shipped production wiring: the turn-event sink
 tagged each event with the runner's *construction-time* `SessionID`, and `RestartFresh` (a stream-mode
-`new_session`) rebound the conversation to a fresh id without retagging the Parser — so the drain's
-active-session gate (`startStreamTurnDrainV2`, see [Draining turnevents into the interactive
+`new_session`) rebound the conversation to a fresh id without retagging the Parser — so the drain
+(`startStreamTurnDrainV2`, see [Draining turnevents into the interactive
 emitter](streamsup-package-draining-turnevents-into-the-interactive-emitter.md)) dropped every event for
-that conversation until the daemon restarted. Fail-closed throughout (unmatched tag ⇒ dropped, never
-misdelivered) — an availability gap, not a disclosure one.
+that conversation until the daemon restarted, because nothing resolved the fresh tag back to it. Fail-closed
+throughout (unmatched tag ⇒ dropped, never misdelivered) — an availability gap, not a disclosure one. (Until
+\#2739 the drain's resolver was `boundSessionIDForActive`, the active conversation's bound session; #2739
+replaced it with `conversationForSession` over every conversation, but the tag-staleness gap this ticket
+closes predates and is independent of that change — a stale tag matches no conversation under either
+resolver.)
 
 ```go
 // OnSessionRotate is called when RestartFresh accepts a rotation, with the id
@@ -49,10 +53,11 @@ stale line-cite is worse than a missing one. The two writers are not peers: this
 calls the tag's plain, unconditional `Rotate` — it drove its own rotation and already re-keyed the
 registry, so it is the authority — while `sessionResetFollower`'s writes became conditional
 `CompareAndSwap`s in #2176, because a follower racing this callback must decline rather than
-overwrite it. `Rotate("")` is a no-op: the tag can never go empty, because an empty tag matches no bound
-session (`boundSessionIDForActive` reports `ok == false` for an empty `CurrentSessionID`) and would
-black-hole the conversation for the runner's life — enforced at the tag itself even though
-`RestartFresh`'s own empty-id refusal means production never reaches the guard. `sinkFor`/`exitFor` keep
+overwrite it. `Rotate("")` is a no-op: the tag can never go empty, because an empty tag resolves to no conversation
+(`conversationForSession` refuses an empty `sid` immediately, mirroring the same empty-`CurrentSessionID`
+guard `boundSessionIDForActive` enforced before #2739) and would black-hole the conversation for the
+runner's life — enforced at the tag itself even though `RestartFresh`'s own empty-id refusal means
+production never reaches the guard. `sinkFor`/`exitFor` keep
 their frozen-tag signatures as one-line delegates over `sinkForTag`/`exitForTag`, so none of the 27
 existing call sites changed and the class-aware drop policy still has exactly one implementation.
 `newStreamRunnerFactory` mints one tag per runner and binds it to both fan-in lanes and to this field in
