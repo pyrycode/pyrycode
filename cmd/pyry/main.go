@@ -773,6 +773,7 @@ func runSupervisor(args []string) error {
 	// wrapUpDeadline's own doc refuses an operator a LONGER one, and both hold.
 	wrapUpDeadlineFlag := fs.Duration("pyry-wrapup-deadline", 0, "shorten the conversation reset's wrap-up bound (testing; 0 or >= the 90s default = production default)")
 	relayFlag := fs.String("pyry-relay", "", "relay URL override (default: $PYRY_RELAY_URL or ~/.pyry/config.json)")
+	autoUpdate := fs.Bool("pyry-auto-update", false, "install a new release by itself once the daemon is idle, then restart the managed unit")
 	var readFolderEntries folderList
 	fs.Var(&readFolderEntries, "pyry-read-folder", "absolute folder the markdown reader may also open; repeatable")
 	if err := fs.Parse(pyryArgs); err != nil {
@@ -1442,6 +1443,27 @@ func runSupervisor(args []string) error {
 		"claude", *claudeBin,
 		"socket", socketPath,
 	)
+	// The auto-updater (#2716), off unless -pyry-auto-update is set: no release
+	// request is made without it. A nil tracker fails closed — never idle — rather
+	// than reading "no turn open" from the absence of a signal.
+	auDone := make(chan error, 1)
+	if *autoUpdate {
+		au, err := newAutoUpdater(func() bool {
+			infos := pool.List()
+			lastActive := make([]time.Time, len(infos))
+			for i, s := range infos {
+				lastActive[i] = s.LastActiveAt
+			}
+			return daemonIdle(turnBusy == nil || turnBusy.AnyBusy(), lastActive, time.Now(), autoUpdateQuietWindow)
+		}, logger)
+		if err != nil {
+			return err
+		}
+		go func() { auDone <- au.Run(ctx) }()
+	} else {
+		auDone <- nil
+	}
+
 	runErr := pool.Run(ctx)
 	// Pool.Run can return with the daemon ctx still LIVE: any early non-ctx error
 	// out of its errgroup returns from a ctx DERIVED from ours, so cancelling that
@@ -1463,6 +1485,7 @@ func runSupervisor(args []string) error {
 	// daemon from exiting while a drain goroutine is still in flight.
 	<-qDone
 	<-seedDone
+	<-auDone
 
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		return fmt.Errorf("supervisor: %w", runErr)
