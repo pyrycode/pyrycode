@@ -210,12 +210,14 @@ Prints the last 200 lifecycle log lines from the supervisor's in-memory ring buf
 $ pyry logs
 time=2026-04-29T07:17:13.241+03:00 level=INFO msg="pyrycode starting" version=dev name=pyry claude=claude socket=/Users/me/.pyry/pyry.sock
 time=2026-04-29T07:17:13.242+03:00 level=INFO msg="spawning claude" args=[] workdir=""
-time=2026-04-29T07:17:18.401+03:00 level=WARN msg="claude exited" err="exit status 1" uptime=5.158s
+time=2026-04-29T07:17:18.401+03:00 level=WARN msg="claude exited" session=98fcb6d2-1e4a-4b1e-9c3d-7a6f9e2b5c10 err="exit status 1" uptime=5.158s
 time=2026-04-29T07:17:18.402+03:00 level=INFO msg="restarting after backoff" delay=500ms
 time=2026-04-29T07:17:18.903+03:00 level=INFO msg="spawning claude" args=[--continue] workdir=""
 ```
 
 The buffer covers supervisor-level events (spawns, exits, restarts, attach/detach, shutdown) — not claude's own output. Under launchd or systemd, claude's stdout is captured by the service manager (`/tmp/pyry.out.log` for the example launchd plist; `journalctl --user -u pyry` for systemd).
+
+When claude exits on its own — not a restart or shutdown pyry asked for — the daemon's own log output also carries the last few lines claude printed to stderr before it died, capped at 1024 bytes. That tail deliberately never reaches this ring, so it never reaches `pyry logs` or the debug bundle either: it can hold a file path or a credential from whatever claude was doing when it failed. See the next section for where to actually read it.
 
 ### `pyry stop`
 
@@ -360,6 +362,8 @@ Your `claude` binary is failing to start. Common causes:
 - Wrong path: check `pyry logs` for `claude=...` and confirm the path is right (or set `-pyry-claude /actual/path`).
 - Missing config: `~/.claude/` not initialised. Run `claude` directly once first to set up auth.
 - Bad flags: pyry forwards your flags verbatim. If they're rejected by claude, the child exits immediately. Try without them.
+
+`pyry logs` tells you *that* claude exited, not *why* — the reason lives in claude's own stderr, which the ring buffer never holds. Read the daemon's own log output instead: `journalctl --user -u pyry` under systemd, or the launchd plist's stderr path (`/tmp/pyry.err.log` in the example plist) under launchd. The `claude exited` line there carries the session id and the last few lines claude printed to stderr before exiting, which is usually enough to diagnose a bad flag or missing config without re-running claude by hand over SSH.
 
 The exponential backoff means crash loops slow down (500 ms → 1 s → 2 s → 4 s … → 30 s cap) — pyry stays available for `status` / `stop` queries throughout.
 

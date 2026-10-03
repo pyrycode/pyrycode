@@ -160,7 +160,10 @@ archive).
 - [ptyrunner-package.md § Session flight recorder](ptyrunner-package.md#session-flight-recorder-pyry_record_dir)
   — the recording source (#552 recorder, #802 persisted gate + fixed location).
 - [control-plane.md](control-plane.md) — `internal/control` `RingBuffer.Snapshot()`,
-  the log source (same content `pyry logs` returns).
+  the log source (same content `pyry logs` returns). See
+  [§ Keeping a value out of the log ring](control-plane.md#keeping-a-value-out-of-the-log-ring-logdaemononly-2723)
+  for the one thing a producer can keep out of that content before it ever reaches this package: this
+  package itself still does no redaction and reads the ring as given.
 - [update-package.md](update-package.md) — the in-repo `archive/tar` +
   `compress/gzip` precedent (`ExtractBinary`, reader side) this package mirrors on
   the writer side.

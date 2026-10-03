@@ -265,6 +265,16 @@ See `docs/specs/architecture/2499-carry-posted-channel-message.md` for the full 
 
 `pyry sessions new` (#76) and `pyry sessions list` extend the per-session column. Logs and stop stay process-global until a concrete need pushes them otherwise.
 
+## Keeping a value out of the log ring (`LogDaemonOnly`, #2723)
+
+`SlogTee` (`logs.go`) wraps the daemon's primary `slog.Handler` so every record also lands in `RingBuffer`, which backs both `pyry logs` and `debugbundle.Assemble`'s only log source — and that bundle reaches a paired phone with no redaction ([debugbundle-package.md](debugbundle-package.md)). Most of what the daemon logs is safe to put in front of a phone; the one exception so far is a child process's own stderr, which can hold a file path or a credential.
+
+An attribute value whose type exposes a `LogDaemonOnly()` method reaches the primary handler — the daemon's own log output — untouched, but is replaced by the constant `(daemon log only)` in the ring copy, at any nesting depth: a plain record attribute, one added via `logger.With(...)`, or one inside an `slog.Group`. Not even the value's length reaches the ring, since the replacement is a fixed string rather than something derived from it.
+
+The marker is a method-set contract (`daemonLogOnly interface{ LogDaemonOnly() }`), not a shared type exported from this package, because `internal/control` imports `internal/sessions` and a producer package (`internal/streamsup`) must not grow that edge just to mark a value. Any package can satisfy it without importing `internal/control`.
+
+First producer: `streamsup`'s stderr tail on the `claude exited` record, when the child exited on its own — see [streamsup-package-supervise-loop-run.md § `claude exited` record](streamsup-package-supervise-loop-run.md#claude-exited-record-session-id-and-a-capped-stderr-tail-2723). This is a per-value opt-out a producer makes deliberately, not a general-purpose redactor for the ring or the bundle — none exists, and nothing about this mechanism scans a value's content for secrets.
+
 ## Lifecycle
 
 Two top-level goroutines, unchanged from Phase 0:
