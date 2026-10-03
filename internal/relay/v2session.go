@@ -974,6 +974,9 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 		case protocol.TypeDequeueMessage:
 			m.handleDequeueMessage(s, probeEnv)
 			return
+		case protocol.TypeSendQueuedNow:
+			m.handleSendQueuedNow(s, probeEnv)
+			return
 		case protocol.TypeRequestDebugBundle:
 			m.handleDebugBundleRequest(ctx, s, probeEnv)
 			return

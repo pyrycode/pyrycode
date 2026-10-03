@@ -37,7 +37,7 @@ type changeCounter struct {
 }
 
 func (c *changeCounter) onChange(string) { c.mu.Lock(); c.n++; c.mu.Unlock() }
-func (c *changeCounter) count() int     { c.mu.Lock(); defer c.mu.Unlock(); return c.n }
+func (c *changeCounter) count() int      { c.mu.Lock(); defer c.mu.Unlock(); return c.n }
 
 // sendNowQueue starts a queue whose drain blocks on conv "c" (a running turn)
 // until the returned release is called, with three messages queued and the head

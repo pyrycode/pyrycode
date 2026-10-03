@@ -189,6 +189,17 @@ type QueueRemover interface {
 	Remove(conversationID string, queuedMsgID uint64) bool
 }
 
+// QueueSender writes a queued message into the conversation's running turn
+// instead of waiting for idle (#2729). *msgqueue.Queue satisfies it. Declared
+// here beside QueueRemover for the same reason. Returns true iff the message was
+// written; every refusal (idle turn, unknown id, committing head, a session that
+// cannot take input mid-turn, a failed write) is a safe no-op (false) that leaves
+// the backlog as it was. The conversationID arg is the mutation scope, as for
+// QueueRemover.
+type QueueSender interface {
+	SendNow(conversationID string, queuedMsgID uint64) bool
+}
+
 // SettingsUpdate is the presence contract for an inbound set_session_settings
 // change (#845): a nil field leaves the stored value untouched; a non-nil field
 // sets it — including *"" for Model/Effort and *false for YOLO, which are thereby
@@ -1263,6 +1274,11 @@ type V2SessionConfig struct {
 	// control frame (#723). Optional: nil ⇒ dequeue_message is inert (foreground
 	// / unwired). Production wires *msgqueue.Queue.
 	QueueRemover QueueRemover
+
+	// QueueSender writes a queued message named by an inbound send_queued_now
+	// control frame into the running claude turn (#2729). Optional: nil ⇒
+	// send_queued_now is inert. Production wires *msgqueue.Queue.
+	QueueSender QueueSender
 
 	// DebugBundler assembles the current session's debug bundle (recent daemon
 	// logs plus the newest recording when present) as one in-memory archive, for
