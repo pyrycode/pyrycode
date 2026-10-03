@@ -189,6 +189,33 @@ that reproduces red without the fix. A teardown test that covers only the
 manager-stop path would pass on both trees and prove nothing about this
 ticket.
 
+Moving `mcp_status_request`'s wait off the worker the same way (#2702,
+`v2session_mcpstatus_test.go`) reused this shape rather than rediscovering it,
+and added one trap of its own. `TestV2Session_MCPStatusRequest_WaitDoesNotBlockLaterFrames`
+mirrors `…_RequestContextUsage_WaitDoesNotBlockLaterFrames` exactly: a
+`send_message` sent on the same conn while the seam waits gets its reply
+first, failing on the pre-fix inline tree.
+`TestV2Session_MCPStatusRequest_WaitingAsksAreBoundedAndEndOnTeardown` merges
+what #2563 split into two tests into one, since both needed the same
+`blockingMCPStatus` double: it fills `maxMCPStatusAsksPerConn` slots, refuses
+a fifth ask at once, then tears the conn down and asserts exactly one sealed
+reply exists on the conn — the overflow refusal — even though the fake seam
+deliberately answers every held ask with a **successful** status after its
+`ctx` is cancelled rather than a refusal. That choice is the trap worth
+keeping: a seam answering `false` after cancellation would let a handler that
+wrongly sealed a reply for a dead connection pass for a correctly-behaved
+refusal, since a test that only inspected one reply's shape cannot tell a
+true refusal from a late success sent by mistake. Counting every sealed frame
+on the conn and asserting there is exactly one, instead of inspecting a
+single reply, is what makes a wrongly-sealed late reply visible. On the
+`cmd/pyry` side, `TestResolveBoundMCPStatus_BoundsTheChildWait`'s second half
+(a short caller deadline yielding `(zero, false)`) proves only that the query
+inherits *some* deadline from its caller — the first half, asserting the
+deadline handed to a background-context call falls within
+`(0, mcpStatusQueryTimeout+1s]`, is what actually pins `mcpStatusQueryTimeout`
+as the bound's source. Noted on review as a test-strength gap, not an
+implementation leak.
+
 Two fixture traps surfaced building the above, worth knowing before touching this file again. `blockingBundler.release` must be closed from a `t.Cleanup` **registered after** the manager's `stop` cleanup — `t.Cleanup` runs LIFO, and release-before-stop unparks the seam before `stop` waits for `Run` to exit; registered the other way round, a pre-fix tree *hangs* in cleanup instead of failing, turning the RED proof AC #1 demands into a timeout with no diagnostic. And a pre-fix failure and a mutation-kill can redden the same test for unrelated reasons: `…_RejectsSecondWhileAssembling` also fails pre-fix, but only because `Run` is parked and never reaches the second request at all — that says nothing about the marker specifically. Only a mutant that drops `s.bundleAssembling` from the gate while leaving assembly off `Run` isolates the accept-side half, and it reddens as a missing-reply count rather than an obviously-wrong value — the absent reply *is* the two-concurrent-assemblies bug, read backwards.
 
 ### E2E (`internal/e2e/relay_v2_handshake_test.go`, build tag `e2e`)

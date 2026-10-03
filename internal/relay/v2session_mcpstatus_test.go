@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/dispatch"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -51,21 +52,37 @@ func mcpStatusManagerFor(
 	logger *slog.Logger,
 ) (mgr *V2SessionManager, frames chan protocol.RoutingEnvelope, rec *v2Recorder, respPub []byte) {
 	t.Helper()
+	mgr, frames, rec, respPub, _ = mcpStatusManagerWith(t, known, resolve, nil, logger)
+	return mgr, frames, rec, respPub
+}
+
+// mcpStatusManagerWith is mcpStatusManagerFor plus a v1 handler table and the
+// manager's stop func, for the #2702 tests that send a frame behind a waiting ask.
+// stop is idempotent and also runs at cleanup.
+func mcpStatusManagerWith(
+	t *testing.T,
+	known func(string) bool,
+	resolve func(context.Context, string) (protocol.MCPStatusPayload, bool),
+	handlers map[string]dispatch.Handler,
+	logger *slog.Logger,
+) (mgr *V2SessionManager, frames chan protocol.RoutingEnvelope, rec *v2Recorder, respPub []byte, stop func()) {
+	t.Helper()
 	respPriv, respPub := genV2Keypair(t)
 	frames = make(chan protocol.RoutingEnvelope, 16)
 	rec = &v2Recorder{}
-	mgr, stop := startManager(t, V2SessionConfig{
+	mgr, stop = startManager(t, V2SessionConfig{
 		Frames:            frames,
 		Outbound:          rec.outbound,
 		StaticPriv:        respPriv,
 		Devices:           v2PairedRegistry(t, v2TestToken),
 		ServerID:          v2TestServerID,
 		Logger:            logger,
+		Handlers:          handlers,
 		KnownConversation: known,
 		MCPStatusFor:      resolve,
 	})
 	t.Cleanup(stop)
-	return mgr, frames, rec, respPub
+	return mgr, frames, rec, respPub, stop
 }
 
 func sendMCPStatusRequest(t *testing.T, frames chan protocol.RoutingEnvelope, send *noise.CipherState, connID string, id uint64, payload string) {
@@ -354,5 +371,98 @@ func TestV2Session_MCPStatusRequest_LogsContainNoRemoteValues(t *testing.T) {
 		if strings.Contains(gotLogs, secret) {
 			t.Errorf("logs contain remote-authored value %q: %s", secret, gotLogs)
 		}
+	}
+}
+
+// blockingMCPStatus is a seam that announces each call on entered, then waits until
+// its ctx ends, announces that on cancelled, and STILL answers the fixture, true: a
+// successful status arriving after teardown is exactly the reply that must not be
+// sealed, so a refusal here would let a handler that sealed anything pass by accident.
+func blockingMCPStatus(entered, cancelled chan<- struct{}) func(context.Context, string) (protocol.MCPStatusPayload, bool) {
+	return func(ctx context.Context, _ string) (protocol.MCPStatusPayload, bool) {
+		entered <- struct{}{}
+		<-ctx.Done()
+		cancelled <- struct{}{}
+		return mcpStatusFixture, true
+	}
+}
+
+// TestV2Session_MCPStatusRequest_WaitDoesNotBlockLaterFrames is #2702 AC-1: while the
+// seam waits on a child that never answers, a send_message sent after the ask on the
+// SAME conn is handled and answered. Against a worker that runs the seam inline, the
+// send_message queues behind the ask until teardown and its reply never arrives.
+func TestV2Session_MCPStatusRequest_WaitDoesNotBlockLaterFrames(t *testing.T) {
+	t.Parallel()
+	entered := make(chan struct{}, 1)
+	cancelled := make(chan struct{}, 1)
+	mgr, frames, rec, respPub, _ := mcpStatusManagerWith(t, func(string) bool { return true },
+		blockingMCPStatus(entered, cancelled),
+		map[string]dispatch.Handler{protocol.TypeSendMessage: prolificHandler()},
+		silentLogger())
+	const conn = "mcp-nonblocking"
+	send, recv := openModalConn(t, mgr, frames, rec, respPub, conn, []string{protocol.CapabilityInteractive})
+
+	sendMCPStatusRequest(t, frames, send, conn, 27020, `{"conversation_id":"`+mcpStatusKnownConv+`"}`)
+	waitSignal(t, entered, "the seam to be entered")
+	frames <- sealAppFrameConn(t, send, conn, protocol.Envelope{
+		ID:      27021,
+		Type:    protocol.TypeSendMessage,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(`{"count":1}`),
+	})
+
+	first := waitMCPStatusReply(t, rec, conn, recv, 0)
+	if first.Type != protocol.TypeConversations || first.InReplyTo == nil || *first.InReplyTo != 27021 {
+		t.Fatalf("first reply = (%q, in_reply_to %v), want the send_message's reply to 27021 while the ask waits", first.Type, first.InReplyTo)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := len(noiseMsgsForConn(t, rec, conn)); got != 1 {
+		t.Fatalf("produced %d replies while the seam waits, want only the send_message's", got)
+	}
+}
+
+// TestV2Session_MCPStatusRequest_WaitingAsksAreBoundedAndEndOnTeardown is #2702
+// AC-3: with every slot held, the next ask is refused at once with the retryable
+// code, correlated to its own id; tearing the conn down then ends every waiting
+// ask, and none of them is answered — even though the seam answers a successful
+// status after the cancellation.
+func TestV2Session_MCPStatusRequest_WaitingAsksAreBoundedAndEndOnTeardown(t *testing.T) {
+	t.Parallel()
+	entered := make(chan struct{}, maxMCPStatusAsksPerConn)
+	cancelled := make(chan struct{}, maxMCPStatusAsksPerConn)
+	mgr, frames, rec, respPub, _ := mcpStatusManagerWith(t, func(string) bool { return true },
+		blockingMCPStatus(entered, cancelled), nil, silentLogger())
+	const conn = "mcp-bounded"
+	send, recv := openModalConn(t, mgr, frames, rec, respPub, conn, []string{protocol.CapabilityInteractive})
+
+	req := `{"conversation_id":"` + mcpStatusKnownConv + `"}`
+	for i := 0; i < maxMCPStatusAsksPerConn; i++ {
+		sendMCPStatusRequest(t, frames, send, conn, uint64(27030+i), req)
+		waitSignal(t, entered, "a held ask to reach the seam")
+	}
+	const overflowID = 27039
+	sendMCPStatusRequest(t, frames, send, conn, overflowID, req)
+	refused := waitMCPStatusReply(t, rec, conn, recv, 0)
+	assertMCPStatusError(t, refused, overflowID, protocol.CodeMCPStatusUnavailable, true)
+
+	// A malformed inner frame is a protocol violation, which closes the conn.
+	frames <- protocol.RoutingEnvelope{ConnID: conn, Frame: json.RawMessage(`{`)}
+	waitForCloseCode(t, rec, conn, uint16(StatusProtocolMismatch))
+	for i := 0; i < maxMCPStatusAsksPerConn; i++ {
+		waitSignal(t, cancelled, "a waiting seam's ctx to be cancelled")
+	}
+
+	// Counted by hand rather than with noiseMsgsForConn: the close envelope carries
+	// no inner frame, which that helper refuses to decode.
+	time.Sleep(50 * time.Millisecond)
+	sealed := 0
+	for _, env := range rec.snapshot() {
+		var inner protocol.InnerFrameV2
+		if env.ConnID == conn && len(env.Frame) > 0 && json.Unmarshal(env.Frame, &inner) == nil && inner.Type == protocol.TypeNoiseMsg {
+			sealed++
+		}
+	}
+	if sealed != 1 {
+		t.Fatalf("sealed %d replies, want exactly 1 — the overflow refusal, and nothing for the torn-down asks", sealed)
 	}
 }

@@ -2073,6 +2073,10 @@ func resolveBoundRunner(
 	return sess.Runner(), conv.ID, true
 }
 
+// mcpStatusQueryTimeout bounds one on-demand MCP status round trip, for
+// effectiveEffortQueryTimeout's reason: a live child can stay silent forever.
+const mcpStatusQueryTimeout = 30 * time.Second
+
 type mcpStatusQuerier interface {
 	QueryMCPStatus(context.Context) (turnevent.MCPStatus, bool)
 }
@@ -2082,6 +2086,11 @@ type mcpStatusQuerier interface {
 // The request id remains lookup-only; the mapped payload is stamped with the
 // registry-owned conversation id returned alongside the runner. Every refusal
 // returns the zero payload; there is no retained-status fallback.
+//
+// The child round trip runs under mcpStatusQueryTimeout. QueryMCPStatus leaves the
+// bound to its caller (actuateMCP's doc says why), and the relay passes the conn's
+// ctx, which has no deadline — so without this a live child that never answers
+// would hold the ask, and its per-conn slot, until the connection closed (#2702).
 func resolveBoundMCPStatus(
 	ctx context.Context,
 	convReg *conversations.Registry,
@@ -2096,7 +2105,9 @@ func resolveBoundMCPStatus(
 	if !ok {
 		return protocol.MCPStatusPayload{}, false
 	}
-	status, ok := querier.QueryMCPStatus(ctx)
+	queryCtx, cancel := context.WithTimeout(ctx, mcpStatusQueryTimeout)
+	defer cancel()
+	status, ok := querier.QueryMCPStatus(queryCtx)
 	if !ok {
 		return protocol.MCPStatusPayload{}, false
 	}
