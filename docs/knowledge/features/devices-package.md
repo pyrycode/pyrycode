@@ -25,6 +25,14 @@ type Device struct {
     // #1527 — deadline for an UNREDEEMED pairing record; enforced by
     // Registry.Validate since #1529 (see features/devices-registry.md).
     RedeemBy time.Time `json:"redeem_by,omitzero"`
+
+    // #2734 — binds this pairing to one app install: lowercase hex of the
+    // Noise_IK device-static public key the first accepted connection
+    // presented. Empty = unbound. Written once by Registry.BindStaticKey;
+    // Validate refuses a later connection whose key differs (see
+    // features/devices-registry-validate.md and
+    // features/devices-registry-redemption-and-binding.md).
+    StaticKey string `json:"static_key,omitzero"`
 }
 
 const RedemptionWindow = 15 * time.Minute // #1527 — mint-time RedeemBy offset
@@ -49,6 +57,8 @@ The crypto primitives (`HashToken` / `VerifyToken`) export no errors, no sentine
 JSON tags use snake_case. The four identity / lifecycle fields have no `omitempty` — required fields round-trip at their zero value. The optional fields (`Platform`, `PushToken`, added by #282; `AllowRemotePermissions`, added by #702) DO carry `omitempty` so a pre-existing `devices.json` round-trips through load → save without sprouting `"platform": ""` / `"push_token": ""` / `"allow_remote_permissions": false` entries; zero-migration change. Mirrors the `registryEntry` pattern in `internal/sessions/registry.go:17-29`, so the sibling registry CRUD marshals `Device` with stdlib `encoding/json` unchanged.
 
 `RedeemBy` (#1527) is a `time.Time`, so its optional-field tag is `omitzero`, not `omitempty` — `encoding/json`'s `omitempty` only omits empty scalars/maps/slices, never a struct, so it would be a silent no-op on a timestamp and would start writing `"redeem_by":"0001-01-01T00:00:00Z"` into every legacy record on the next `Save`. `omitzero` (Go 1.26.2+) consults `time.Time.IsZero` and keeps the zero off disk, doing for a struct field what `omitempty` does for the three fields above. See [`codebase/1527.md`](../codebase/1527.md) for the full design and why the field is named `RedeemBy` rather than `ExpiresAt`.
+
+`StaticKey` (#2734) is a plain string, so `omitzero` here just means "empty" — the same effect `omitempty` would give a string, used for consistency with `RedeemBy` next to it rather than out of necessity. A string rather than `[]byte` keeps `Device` comparable (used by the race test in [`features/devices-registry-redemption-and-binding.md`](devices-registry-redemption-and-binding.md) § `BindStaticKey`) and the on-disk form human-readable; it is a public key, not a secret, but nothing logs it either. The field binds a pairing to the one install that redeemed it: `pyrycode-mobile#1573` saw a phone and an emulator share one token and be treated as the same device, with the daemon's `UpdatePushRegistration` flipping `Name` and the push address between them on each reconnect. See [`features/devices-registry-redemption-and-binding.md`](devices-registry-redemption-and-binding.md) § `BindStaticKey` for how and when the field is written, and `docs/protocol-mobile.md` § "Static keys — mobile side" for the reversed design decision.
 
 `Platform`'s doc comment mirrors `protocol.RegisterPushTokenPayload.Platform` verbatim (`"fcm"` Android, `"apns"` iOS) so the on-disk and wire contracts stay aligned. `PushToken` is the opaque platform-supplied wake token; written by the future `register_push_token` handler (#250), never marshalled across the wire (the wire form is `protocol.RegisterPushTokenPayload` from #275).
 
@@ -170,7 +180,7 @@ No fuzz target — the input space is fully covered by the table. No `-race` tes
 - **Auth wiring.** Phase 3: the WS-handshake auth predicate `(*Registry).Validate(plain) (Device, bool)` is delivered by #210 — see [`features/devices-registry.md`](devices-registry.md). The WS handler that calls it (returning `auth.invalid_token` per `protocol-mobile.md:97-98` on a miss, advancing `LastSeenAt` durability via scheduled `Save` on a hit) is a follow-up Phase-3 ticket. `VerifyToken` is intentionally NOT used by `Validate` — see the registry doc and #210's "Why not iterate `VerifyToken` over all devices?" for the reasoning.
 - **`pyry pair revoke <name>`.** Per-device revocation falls out of removing the row; structurally supported (each row is independent).
 - **`Device.TokenHashPrefix() string` for `pair list` UI.** The display rule lives in `protocol-mobile.md:663`; defer to whichever ticket builds the UI.
-- ~~**Redemption-deadline enforcement.**~~ Delivered by #1527 (mint-time `RedeemBy` stamp) → #1528 (`ClearRedeemBy`, the relay's redemption persist) → #1529 (`Validate` rejects an unredeemed record past its deadline, and the v2 handshake gives that rejection the same wire shape as an unknown token). See [`features/devices-registry.md`](devices-registry.md) § `Validate`.
+- ~~**Redemption-deadline enforcement.**~~ Delivered by #1527 (mint-time `RedeemBy` stamp) → #1528 (`ClearRedeemBy`, the relay's redemption persist) → #1529 (`Validate` rejects an unredeemed record past its deadline, and the v2 handshake gives that rejection the same wire shape as an unknown token). See [`features/devices-registry-validate.md`](devices-registry-validate.md).
 
 ## Related
 

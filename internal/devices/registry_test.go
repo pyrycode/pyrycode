@@ -694,7 +694,7 @@ func TestReload(t *testing.T) {
 			}
 
 			for tok, wantHit := range tc.validate {
-				if _, res := r.Validate(tok); (res == ValidateAccepted) != wantHit {
+				if _, res := r.Validate(tok, nil); (res == ValidateAccepted) != wantHit {
 					t.Errorf("Validate(%q) = %v, want accepted=%v", tok, res, wantHit)
 				}
 			}
@@ -719,7 +719,7 @@ func TestReload_PreservesInMemoryLastSeenAt(t *testing.T) {
 	}
 
 	// Validate bumps LastSeenAt in memory to ~now; disk still shows old.
-	if _, res := r.Validate(tok); res != ValidateAccepted {
+	if _, res := r.Validate(tok, nil); res != ValidateAccepted {
 		t.Fatal("Validate: miss, want hit")
 	}
 	writeDevicesFile(t, path, devA) // disk record still carries the old LastSeenAt
@@ -756,7 +756,7 @@ func TestReload_ConcurrentReloadValidate(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			_ = r.Reload(path)
-			_, _ = r.Validate(tok)
+			_, _ = r.Validate(tok, nil)
 			_ = r.List()
 		}()
 	}

@@ -145,6 +145,14 @@ afterward. See
 [e2e-realclaude-interactive-stream-hook-blocked-banner-test-go.md](e2e-realclaude-interactive-stream-hook-blocked-banner-test-go.md)'s
 `letRefusedTurnSettle` for the pattern.
 
+## One install key per token (#2734)
+
+`InstallKey(token string) []byte` (`internal/e2e/internal/fakephone/install.go`) derives a 32-byte Noise static private key deterministically from `token` (SHA-256 of a fixed prefix plus the token). It exists because the v2 daemon now binds a pairing to the Noise static key of its first accepted connection ([`devices-registry-redemption-and-binding.md`](devices-registry-redemption-and-binding.md) § `BindStaticKey`): a test that reconnects, or opens a second connection, with the same token must present the same key each time, the way a real phone does by keeping one keypair per paired daemon in its Keystore. A helper that calls `GenerateKey`/`ecdh.X25519().GenerateKey` fresh per connection is modelling *two* installs sharing one token, which the daemon now refuses as of #2734.
+
+Every helper in every package that opens a v2 connection should derive its initiator key from `InstallKey(token)` (e2e suites) or the package-local equivalent — `v2TestInstallPriv` in `internal/relay`'s own same-package tests (`internal/relay/v2session_test.go`), a single fixed 32-byte value rather than a per-call `InstallKey` call, since those tests don't go through this package. An unknown-token reject helper is the one exception: it wants a key that provably matches no bound record, so it keeps generating a random one.
+
+This package itself speaks v1-shaped `Send(env)`/`Receive(timeout)` and has no Noise handshake of its own (see "What's NOT modeled" below) — `InstallKey` is a key-derivation helper for v2 test callers that build the handshake frames themselves (`internal/relay`, `internal/e2e`'s v2 suites), not something this package's `Dial`/`Send`/`Receive` consume.
+
 ## What's NOT modeled (deliberate)
 
 - **Routing-envelope wrap/unwrap.** The phone speaks raw
@@ -187,3 +195,5 @@ package to e2e callers.
   `internal/e2e/internal/` placement convention).
 - Consumer roadmap: roundtrip e2e test (third split from #254) consumes
   this + `fakerelay` together; not wired yet.
+- Install-key convention: [`devices-registry-redemption-and-binding.md`](devices-registry-redemption-and-binding.md)
+  § `BindStaticKey` (#2734) — why a v2 test must reuse one key per token.

@@ -72,8 +72,7 @@ func TestV2Session_PushedConversationUpdated_AgentForMultiAgentConn(t *testing.T
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			respPriv, respPub := genV2Keypair(t)
-			initPrivA, _ := genV2Keypair(t)
-			initPrivB, _ := genV2Keypair(t)
+			initPrivA, initPrivB := v2TestInstallPriv, v2TestInstallPriv
 			const capable, old = "c-tag-capable", "c-tag-old"
 
 			frames := make(chan protocol.RoutingEnvelope, 2)

@@ -93,6 +93,19 @@ type Device struct {
 	// record with no version, including every record predating the field, free
 	// of the key.
 	ClientVersion string `json:"client_version,omitempty"`
+
+	// StaticKey binds this pairing to one app install (#2734): the lowercase
+	// hex of the Noise_IK device-static public key the first accepted
+	// connection presented. Empty means unbound — a record minted but never
+	// accepted, or one accepted before this field existed. Written once, by
+	// Registry.BindStaticKey from the v2 handshake; a later connection whose
+	// token matches but whose key differs is refused as if the token were
+	// unknown (Validate's ValidateKeyMismatch). Revoke drops it with the
+	// record, so re-pairing is how an install change is made.
+	//
+	// A string rather than []byte keeps Device comparable and the on-disk form
+	// readable. It is a public key, not a secret, but nothing logs it either.
+	StaticKey string `json:"static_key,omitzero"`
 }
 
 // RedemptionWindow is how long a freshly minted pairing token stays

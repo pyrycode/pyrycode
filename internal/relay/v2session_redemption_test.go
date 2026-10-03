@@ -32,6 +32,9 @@ func redemptionFixture(t *testing.T, redeemBy time.Time) (*devices.Registry, str
 		PairedAt:      time.Now().UTC().Add(-time.Minute),
 		RedeemBy:      redeemBy,
 		ClientVersion: "v2-test",
+		// Pre-bound to openModalConn's install (#2734), so the bind write
+		// stays out of these tests' write and lock assertions.
+		StaticKey: v2TestInstallKey(t),
 	})
 	path := filepath.Join(t.TempDir(), "devices.json")
 	if err := reg.Save(path); err != nil {

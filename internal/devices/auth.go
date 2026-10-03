@@ -1,6 +1,9 @@
 package devices
 
-import "time"
+import (
+	"encoding/hex"
+	"time"
+)
 
 // ValidateResult is why Validate accepted or refused a presented token. The
 // zero value denies, so a default-constructed result — or a future Validate
@@ -21,6 +24,13 @@ const (
 	// NOT let the distinction reach the client (#1529 — a distinct wire
 	// signal would confirm to a token's holder that it was once real).
 	ValidateWindowElapsed
+	// ValidateKeyMismatch: a device matches, but it is bound to a different
+	// Noise static key than the one this connection presented (#2734) — the
+	// token is being used by an install other than the one that first
+	// redeemed it. The handshake also produces it when BindStaticKey loses a
+	// race. Same rule as ValidateWindowElapsed: log it apart, never let the
+	// client see the difference.
+	ValidateKeyMismatch
 )
 
 // redemptionWindowElapsed reports whether d's redemption deadline has passed at
@@ -37,18 +47,27 @@ func (d Device) redemptionWindowElapsed(now time.Time) bool {
 }
 
 // Validate is the WS-perimeter auth predicate. It hashes plain, looks up the
-// matching device by hash, checks that device's redemption window, and — only
-// on acceptance — advances its LastSeenAt to time.Now() in the in-memory
-// registry. Returns the matched Device and ValidateAccepted on a hit. Every
-// refusal returns the zero Device (never the matched record, which would invite
-// a caller to read it) alongside the reason: ValidateUnknownToken when no
-// device matches or plain is the empty string, ValidateWindowElapsed when a
-// device matches but its unredeemed pairing token is past RedeemBy (#1529).
+// matching device by hash, checks that device's redemption window and its
+// static-key binding, and — only on acceptance — advances its LastSeenAt to
+// time.Now() in the in-memory registry. Returns the matched Device and
+// ValidateAccepted on a hit. Refusals return the reason: ValidateUnknownToken
+// when no device matches or plain is the empty string, ValidateWindowElapsed
+// when a device matches but its unredeemed pairing token is past RedeemBy
+// (#1529), ValidateKeyMismatch when a device matches but is bound to a static
+// key other than peerStatic (#2734). Those first two return the zero Device
+// (never the matched record, which would invite a caller to read it). The
+// key mismatch alone returns the matched record, because the caller must
+// name the device in its log line; it must still refuse on that result.
 //
-// SECURITY: the LastSeenAt stamp happens strictly AFTER the window check, so a
-// rejected attempt mutates nothing at all. That is what keeps `pyry pair list`
-// an honest witness — an expired token that kept refreshing LastSeenAt would
-// look exactly like a device in daily use. Validate likewise never removes the
+// Validate does not bind an unbound record — an unbound device is accepted
+// whatever key it presents, and BindStaticKey makes the binding once the
+// caller's remaining admission checks have passed.
+//
+// SECURITY: the LastSeenAt stamp happens strictly AFTER the window and key
+// checks, so a rejected attempt mutates nothing at all. That is what keeps
+// `pyry pair list` an honest witness — an expired token, or another install's
+// copy of a bound one, that kept refreshing LastSeenAt would look exactly like
+// a device in daily use. Validate likewise never removes the
 // expired record: Remove is the only deleter, and `pyry pair revoke` is its
 // only caller.
 //
@@ -74,17 +93,21 @@ func (d Device) redemptionWindowElapsed(now time.Time) bool {
 // monotonically-non-decreasing LastSeenAt, the window check cannot be
 // interleaved with the stamp it guards, and the mutation never races with
 // Add / Remove / List / FindByTokenHash / ClearRedeemBy / Save snapshots.
-func (r *Registry) Validate(plain string) (Device, ValidateResult) {
+func (r *Registry) Validate(plain string, peerStatic []byte) (Device, ValidateResult) {
 	if plain == "" {
 		return Device{}, ValidateUnknownToken
 	}
 	hash := HashToken(plain)
+	key := hex.EncodeToString(peerStatic)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i := range r.devices {
 		if r.devices[i].TokenHash == hash {
 			if r.devices[i].redemptionWindowElapsed(time.Now()) {
 				return Device{}, ValidateWindowElapsed
+			}
+			if r.devices[i].StaticKey != "" && r.devices[i].StaticKey != key {
+				return r.devices[i], ValidateKeyMismatch
 			}
 			r.devices[i].LastSeenAt = time.Now()
 			return r.devices[i], ValidateAccepted

@@ -1,6 +1,7 @@
 package devices
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -310,4 +311,56 @@ func (r *Registry) FindByTokenHash(hash string) (Device, bool) {
 		}
 	}
 	return Device{}, false
+}
+
+// BindResult is what BindStaticKey decided. The zero value refuses, so a
+// default-constructed result fails closed, as ValidateResult's does.
+type BindResult int
+
+const (
+	// BindUnknownDevice: no device has the token hash, or the presented key
+	// is empty. The fail-closed zero value.
+	BindUnknownDevice BindResult = iota
+	// BindMatched: the device was already bound to this key. Nothing changed.
+	BindMatched
+	// BindNewlyBound: the device was unbound and is now bound to this key.
+	// The caller persists.
+	BindNewlyBound
+	// BindKeyMismatch: the device is bound to a different key — another
+	// install holds this pairing, or won a race to bind it first.
+	BindKeyMismatch
+)
+
+// BindStaticKey binds the device whose TokenHash equals tokenHash to
+// peerStatic, the Noise static public key its connection presented, if it is
+// not bound yet (#2734). The check and the write are one critical section
+// under Registry.mu, so of two connections racing to bind one unbound record
+// with different keys exactly one gets BindNewlyBound and the other
+// BindKeyMismatch. A bound device is never rebound: only `pyry pair revoke`,
+// which removes the record, releases a binding. Caller is responsible for
+// persisting via Save on BindNewlyBound.
+//
+// Concurrency: serialized under Registry.mu; takes no file lock, as with
+// ClearRedeemBy.
+func (r *Registry) BindStaticKey(tokenHash string, peerStatic []byte) BindResult {
+	if len(peerStatic) == 0 {
+		return BindUnknownDevice
+	}
+	key := hex.EncodeToString(peerStatic)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.devices {
+		if r.devices[i].TokenHash == tokenHash {
+			switch r.devices[i].StaticKey {
+			case "":
+				r.devices[i].StaticKey = key
+				return BindNewlyBound
+			case key:
+				return BindMatched
+			default:
+				return BindKeyMismatch
+			}
+		}
+	}
+	return BindUnknownDevice
 }

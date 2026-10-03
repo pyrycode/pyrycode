@@ -34,8 +34,14 @@ type versionOutcome struct {
 // every envelope it sent is recorded.
 func runVersionHello(t *testing.T, cfg V2SessionConfig, token, clientVersion string) versionOutcome {
 	t.Helper()
+	return runHelloFrom(t, cfg, v2TestInstallPriv, token, clientVersion)
+}
+
+// runHelloFrom is runVersionHello from the install whose static private key is
+// initPriv, for tests that tell installs apart (#2734).
+func runHelloFrom(t *testing.T, cfg V2SessionConfig, initPriv []byte, token, clientVersion string) versionOutcome {
+	t.Helper()
 	respPriv, respPub := genV2Keypair(t)
-	initPriv, _ := genV2Keypair(t)
 	frames := make(chan protocol.RoutingEnvelope)
 	rec := &v2Recorder{}
 	cfg.Frames = frames

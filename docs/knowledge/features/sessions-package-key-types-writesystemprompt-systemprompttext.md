@@ -229,7 +229,7 @@ alternative — reimplementing the same bound and character set inside
 filters drift the moment either one's bound changes without the other
 noticing, which is exactly the failure #2576's near-miss above (a 64-vs-32-byte
 mismatch between two independent constants) shows actually happens. See
-[`features/devices-registry.md`](devices-registry.md) § `SetClientVersion` for
+[`features/devices-registry-redemption-and-binding.md`](devices-registry-redemption-and-binding.md) § `SetClientVersion` for
 the consuming write path.
 
 ## Carrying the conversation's handoff note (#2475)
