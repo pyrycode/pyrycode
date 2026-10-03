@@ -160,12 +160,14 @@ Same-package `_test.go` with a `TestStreamRunnerHelperProcess` fake claude (re-e
 
 - `clean` — read stdin to EOF, write three deterministic stream-json lines (`system init` / `assistant text` / `result success`), exit 0.
 - `exit1` — drain stdin briefly, exit 1.
-- `sleep` — install SIGTERM handler that prints `"got SIGTERM"` to stderr and exits 0 within ~50ms; otherwise sleep 30s.
+- `sleep` — install SIGTERM handler, write `helperReady` to stderr, then print `"got SIGTERM"` to stderr and exit 0 within ~50ms on receipt; otherwise sleep 30s.
 - `echo_stdin` — copy stdin to `GO_STREAMRUNNER_HELPER_STDIN_FILE` (mode 0o600), exit 0.
 
 Four test cases against the four observable behaviours: clean exit (stdout substring check), non-zero exit (`errors.As(&exitErr)` + `ExitCode() == 1`), ctx-cancel mid-run (`Run` returns nil, elapsed < 6s, `"got SIGTERM"` on stderr — sanity-checks SIGTERM not SIGKILL was the trigger), and stdin envelope round-trip with a deliberately tricky prompt (embedded `"`, `\n`, `\\`, `\x01`) → assert the helper's captured file unmarshalls into the expected `userTurn` shape with `Content[0].Text` byte-for-byte equal to the input. Plus (#924) `TestRun_CtxCancel_ReapsDescendantGroups`, cloning the ctx-cancel-mid-run `sleep`-mode harness with the `reapDescendantGroupsFn` seam swapped to a recorder — see [Teardown reap](#teardown-reap-descendant-process-groups-reapgo-924) above.
 
 `helper_test.go` additionally carries a family of `stall_*` modes exercising the idle-stall watchdog (§ above) in `watchdog_test.go`, including (#1497) a mode that writes one unterminated line and then blocks until SIGTERM, for the newline-guard tests.
+
+**Cancel tests wait for the child's readiness signal, not a fixed delay (#2738).** `TestRun_CtxCancelMidRun`, `TestRun_CtxCancel_ReapsDescendantGroups`, and `TestRun_OperatorShutdown_NoSyntheticResult` all cancel the context mid-run to exercise § ctx-cancel teardown above. They used to cancel after a hardcoded `time.Sleep(100 * time.Millisecond)`, which assumed the child would have reached `cmd.Start` and installed its SIGTERM handler by then. On a loaded gate host the cancel could land first, and `Run` returns `streamrunner: start: context canceled` instead of nil — a false failure in the test, not a bug in `Run`. The fix is synchronization, not a longer delay: the helper (`sleep` mode and `blockUntilSigterm`, which backs the `stall_*` modes) writes a `helperReady` line to stderr right after `signal.Notify` installs its handler, and the test's stderr sink (`readySink`, mutex-guarded since os/exec copies stderr on its own goroutine) closes a channel the first time that line appears. `cancelWhenReady` cancels only once that channel closes, or exits cleanly on test teardown if the child never signals. The general shape — give the test double a readiness signal instead of sleeping and hoping — applies to any future test here that needs to cancel or signal a helper subprocess mid-run.
 
 ## Consumers
 
