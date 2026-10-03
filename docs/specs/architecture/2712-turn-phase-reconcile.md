@@ -91,3 +91,22 @@ Pending for the documentation stage — `docs/protocol-mobile.md` § Reconnect /
 - Match-and-replace bullet: add `conversation_id` for a turn phase; a re-sent `turn_state` for a known `conversation_id` replaces that conversation's phase in place.
 - Closing count: six frames → seven, naming #2712.
 - § `turn_state`: one sentence that the frame is also re-asserted on connect for a running turn, without an `event_id`.
+
+## Security review
+
+**Verdict:** PASS
+
+**Findings:**
+
+- [Trust boundaries] No findings. Nothing client-authored reaches the frame: the only client input is the negotiated capability set, judged once in `handleNoiseInit` into `s.interactive`, which `reconcileTurnPhases` gates on. `conversation_id` comes from the daemon's own cursor (`cursorReader.CurrentConversation`) via `transitionTo`, and the state from the closed `turnbridge.TurnState` vocabulary. The multi-agent gate still applies: the reconciled frame drains through `forwardEnvelope`, whose `withheldFromConn` withholds a Codex conversation's `turn_state` from a conn without `multi_agent`, exactly as for the live copy.
+- [Tokens] No findings. The path touches no token, key or credential.
+- [File operations] No findings. The snapshot is memory-only; nothing is persisted, so it is not appended to the ring or the durable history (AC3).
+- [Subprocesses] No findings. None started or addressed.
+- [Cryptography] No findings. The reconcile enqueues via `Push` and never seals, so no send-nonce is spent for a frame `drainOnce` cannot deliver (the #874 posture the twins share).
+- [Network and I/O] No findings. Bounded output: the snapshot holds at most one payload, so one frame per handshake; no new read path.
+- [Errors and logs] SHOULD FIX: keep the twins' content-free records — marshal arm logs event, conn_id and conversation_id only and never `err`; push arm logs event, conn_id and Push's sentinel; success logs nothing. Verifier confirms in `reconcileTurnPhases`.
+- [Concurrency] No findings. One leaf mutex inside `turnPhaseSnapshot`, never held across `emit`, `Push` or a channel operation, so it cannot form a cycle with the `ActiveConns` round-trip through Run. No goroutine is started. The stale-phase race is closed by placement after `replayMissed` and publish-before-emit (see Concurrency model); a test pins publish-before-fan-out.
+- [Threat model] No findings. A paired device without the interactive capability receives nothing; an interactive one already receives every live `turn_state`, so the reconcile discloses no state it could not see live. Phone-side handling of the frame is pyrycode-mobile's twin ticket.
+
+**Reviewer:** builder (self-review per the security-review checklist)
+**Date:** 2026-10-03
