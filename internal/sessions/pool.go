@@ -103,6 +103,13 @@ type Config struct {
 	// Required when ConversationsRegistry is non-nil; ignored when nil.
 	ConversationsRegistryPath string
 
+	// ReadFolders are the folders the markdown reader serves besides a
+	// conversation's workspace (#2710), as cmd/pyry's resolveReadFolders
+	// returned them: only the entries that resolved, never a skipped one. Every
+	// appended system prompt names them in one sentence after systemPromptText
+	// (#2711). Nil, the zero value, composes every prompt byte for byte as before.
+	ReadFolders []string
+
 	// SweepInterval, when > 0, overrides the conversations sweep tick
 	// interval Pool.Run passes to conversations.RunSweepLoop. Zero (the
 	// default) means use conversations.SweepInterval (one hour). Production
@@ -249,6 +256,10 @@ type Pool struct {
 	// goroutine. No lock needed.
 	convReg          *conversations.Registry
 	convRegistryPath string
+
+	// readFolders mirrors Config.ReadFolders. Read-only after New, so no lock;
+	// every compose passes it through daemonPromptText (#2711).
+	readFolders []string
 
 	// convSweepInterval is the resolved interval Pool.Run passes to
 	// conversations.RunSweepLoop. Set in New from cfg.SweepInterval, with
@@ -527,7 +538,7 @@ func New(cfg Config) (*Pool, error) {
 	// failure is fatal at startup for the settings file's reason inverted: a daemon
 	// that started anyway would silently spawn every session reasoning about the
 	// wrong surface, which is a quiet wrong answer rather than a loud one.
-	systemPromptPath, err := writeSystemPrompt(cfg.RegistryPath, "", systemPromptText)
+	systemPromptPath, err := writeSystemPrompt(cfg.RegistryPath, "", daemonPromptText(cfg.ReadFolders))
 	if err != nil {
 		// Ordered after the settings write so this failure is covered by the defer
 		// below, which is installed with the two paths already in hand.
@@ -642,6 +653,7 @@ func New(cfg Config) (*Pool, error) {
 		claudeSessionsDir:  cfg.ClaudeSessionsDir,
 		convReg:            cfg.ConversationsRegistry,
 		convRegistryPath:   cfg.ConversationsRegistryPath,
+		readFolders:        slices.Clone(cfg.ReadFolders),
 		convSweepInterval:  sweepInterval,
 		activeCap:          cfg.ActiveCap,
 		sessionTpl:         cfg.Bootstrap,
@@ -2444,7 +2456,7 @@ func (p *Pool) buildSessionAs(id SessionID, label, spawnDir string, settings Ses
 	// since #2085 a conversation's session is minted at create and started on its
 	// first message, so the prompt is typically set AFTER this runs.
 	operatorPrompt := p.conversationPrompt(label)
-	promptPath, err := writeSystemPrompt(p.registryPath, id, composeSystemPrompt(operatorPrompt))
+	promptPath, err := writeSystemPrompt(p.registryPath, id, composeSystemPromptOn(daemonPromptText(p.readFolders), operatorPrompt))
 	if err != nil {
 		// The wrapped error carries paths only. No error and no log line on any
 		// path may carry a fragment of the operator's prompt (#2150 AC #3).

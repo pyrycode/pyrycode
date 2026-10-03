@@ -69,10 +69,59 @@ const systemPromptText = "You are running as a supervised child of the pyry daem
 // every argv assertion in this package while silently discarding what #2093 was
 // built to say (#2150).
 func composeSystemPrompt(operator string) string {
+	return composeSystemPromptOn(systemPromptText, operator)
+}
+
+// composeSystemPromptOn is composeSystemPrompt over daemon, the daemon-wide text
+// daemonPromptText returns, in place of the bare constant. The production
+// writes call it with the pool's read folders; composeSystemPrompt keeps its
+// signature for the tests that pin the unconfigured composition (#2711).
+func composeSystemPromptOn(daemon, operator string) string {
 	if operator == "" {
+		return daemon
+	}
+	return daemon + "\n" + operator
+}
+
+// readFolderSentence is the line naming the folders the markdown reader serves
+// besides a conversation's workspace (#2710), or "" when there are none. It is a
+// daemon fact and no client capability, systemPromptText's rule, so it belongs
+// in the daemon-wide text rather than in any per-conversation prompt (#2711).
+//
+// folders MUST be resolveReadFolders' output, the roots the reader actually
+// accepts, so the sentence can never name a folder the reader would refuse.
+// They are operator configuration and trusted like the operator prompt, so
+// they do not pass through admissibleClientField. Each is wrapped in backticks
+// so a path holding a comma or the word "and" still reads as one path.
+//
+// TestReadFolderSentence_Pinned pins the wording against an independent
+// transcription, for systemPromptText's reason.
+func readFolderSentence(folders []string) string {
+	if len(folders) == 0 {
+		return ""
+	}
+	quoted := make([]string, len(folders))
+	for i, f := range folders {
+		quoted[i] = "`" + f + "`"
+	}
+	list := quoted[0]
+	if n := len(quoted); n > 1 {
+		list = strings.Join(quoted[:n-1], ", ") + " and " + quoted[n-1]
+	}
+	return "This daemon serves markdown files under " + list +
+		" to a client that asks for one by absolute path.\n"
+}
+
+// daemonPromptText is the daemon-wide head of every composition: systemPromptText,
+// then the read-folder sentence after the usual blank-line separator. With no
+// folders it returns the constant byte for byte, which is what keeps an
+// unconfigured daemon's every prompt file as it was before #2711.
+func daemonPromptText(folders []string) string {
+	sentence := readFolderSentence(folders)
+	if sentence == "" {
 		return systemPromptText
 	}
-	return systemPromptText + "\n" + operator
+	return systemPromptText + "\n" + sentence
 }
 
 // ClientIdentity is one attached client's self-reported identity: the
@@ -372,12 +421,21 @@ func clientSection(clients []ClientIdentity) string {
 // by refreshSystemPrompt before any child comes up, so composing client names or a
 // note there would produce bytes nothing ever reads.
 func composeSystemPromptFor(operator string, clients []ClientIdentity, note string) string {
+	return composeSystemPromptForOn(systemPromptText, operator, clients, note)
+}
+
+// composeSystemPromptForOn is composeSystemPromptFor over daemon, the text
+// daemonPromptText returns, exactly as composeSystemPromptOn is to
+// composeSystemPrompt (#2711). The read-folder sentence therefore sits after
+// systemPromptText and before every section below, and the operator's text stays
+// last.
+func composeSystemPromptForOn(daemon, operator string, clients []ClientIdentity, note string) string {
 	section := clientSection(clients)
 	handoff := handoffNoteSection(note)
 	if section == "" && handoff == "" {
-		return composeSystemPrompt(operator)
+		return composeSystemPromptOn(daemon, operator)
 	}
-	out := systemPromptText
+	out := daemon
 	if section != "" {
 		out += "\n" + section
 	}
@@ -892,7 +950,8 @@ func (p *Pool) writeComposedPrompt(sess *Session, clients []ClientIdentity) {
 	operator := p.conversationPrompt(label)
 	note := p.handoffNoteFor(label)
 	named := admittedClients(clients)
-	if _, err := writeSystemPromptFile(sess.systemPromptPath, composeSystemPromptFor(operator, named, note)); err != nil {
+	text := composeSystemPromptForOn(daemonPromptText(p.readFolders), operator, named, note)
+	if _, err := writeSystemPromptFile(sess.systemPromptPath, text); err != nil {
 		p.log.Warn("compose appended system prompt", "error", err)
 		return
 	}
