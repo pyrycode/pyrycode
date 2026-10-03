@@ -336,7 +336,7 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		e.endTurn()
 		// After the fan-out: connected phones already have the turn_end; the
 		// waker reaches the ones that do not.
-		e.waker.Trigger()
+		e.waker.Trigger(convID, pushWakeTurnEnd)
 	case turnevent.Stall:
 		// Onset-only control/state signal — a peer of turn_state. Emit with NO
 		// turn-lifecycle mutation: a stall is orthogonal to thinking/responding/
