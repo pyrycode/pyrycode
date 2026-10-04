@@ -69,3 +69,8 @@ Pending for documentation stage: `docs/knowledge/features/control-plane.md`, **S
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-04
+
+## Revisions
+
+- 2026-10-04, verifier rework on PR #2763: `TestPool_Run_RemovesSessionPromptsAtShutdown` failed at `Mint` in the injected gate. Repeated the exact test with `go test -race ./internal/sessions -run '^TestPool_Run_RemovesSessionPromptsAtShutdown$' -count=1000`: unchanged merge base `11978ddaa2f00f086e40b8be578d18be7ec0c238` reproduced 129 failures (6.670s); original PR head `ee8d6e67` reproduced 3 (4.332s). Every failure was `Mint: sessions: pool not running`, and the sessions tree is identical across those revisions. `recordingRunnerFactory` records argv during construction, so `waitArgvRaw` does not synchronize this test with `Pool.Run` readiness. Filed the pre-existing test race and missing failure cleanup as #2765, on the board in Inbox. The contract and production design remain unchanged; no sessions edits belong to this ticket. Fresh control race tests, vet and binary build passed. The verifier owns re-running its gate and completing judgment review.
+- QMD is available on this rework run: searched the control deadline history, including #865 and #2388. The feature branch #2760 has no overlap with this ticket's files. The documentation handoff above remains pending.
