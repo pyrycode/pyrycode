@@ -202,6 +202,9 @@ type MessagePayload struct {
 	DeviceName     string   `json:"device_name,omitempty"`
 	ClientVersion  string   `json:"client_version,omitempty"`
 	ClientSentAt   string   `json:"client_sent_at,omitempty"`
+	// SentNow identifies a queued message delivered into a running turn. Clients
+	// use its push position; an ordinary drain's late push must not move a settled echo.
+	SentNow bool `json:"sent_now,omitempty"`
 }
 
 // SessionTransitionPayload is the body of an Envelope whose Type ==

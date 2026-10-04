@@ -344,8 +344,29 @@ func TestOperatorMessageHistory_SendNowCommitsAtTheEcho(t *testing.T) {
 		t.Errorf("entry leaked the on-host path: %s", entry.Payload)
 	}
 
+	var delivered map[string]any
+	if err := json.Unmarshal(pushes[0].payload, &delivered); err != nil || delivered["sent_now"] != true {
+		t.Fatalf("send-now push must identify its delivery kind: sent_now=%v err=%v", delivered["sent_now"], err)
+	}
+
 	producer(testConvID, msgqueue.QueuedMessage{ID: 5, MessageID: "ordinary", Text: "plain"})
 	if len(pushes) != 2 {
 		t.Fatalf("an ordinary message pushed %d times in total, want it committed at once", len(pushes)-1)
+	}
+}
+
+// Mobile 1642 must distinguish a delayed normal confirmation from peer Send now.
+func TestOperatorMessageHistory_OrdinaryDeliveryDoesNotClaimSendNow(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	var pushed operatorMessage
+	producer := newOperatorMessageHistory(nil, func(m operatorMessage) { pushed = m }, nil, bufLogger(&buf))
+	producer(testConvID, msgqueue.QueuedMessage{MessageID: "ordinary", Text: "plain"})
+	var payload map[string]any
+	if err := json.Unmarshal(pushed.payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := payload["sent_now"]; present {
+		t.Fatal("ordinary delivery must omit sent_now")
 	}
 }
