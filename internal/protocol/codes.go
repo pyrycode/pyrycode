@@ -2371,3 +2371,12 @@ const (
 const (
 	TypeRequestContextUsage = "request_context_usage" // phone → binary, inbound v2 control (switch-intercepted — #2431)
 )
+
+// TypeStopBackgroundTask is a phone → binary v2 control verb, intercepted before
+// v1 dispatch. It requires negotiated interactive; production remains inert until
+// the stop seam is wired. It introduces no capability of its own.
+const TypeStopBackgroundTask = "stop_background_task"
+
+// CodeStopBackgroundTaskRefused merges invalid task ids and seam refusals into
+// one nonretryable answer without exposing child diagnostics or task existence.
+const CodeStopBackgroundTaskRefused = "stop_background_task.refused"

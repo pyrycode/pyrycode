@@ -554,7 +554,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | `workspace_updated` | binary → phone | no | Has **two kinds of producer**, and a client MUST accept both. As a **reply** it is correlated by `in_reply_to` and answers `rename_workspace`; it carries the workspace's path and its stored label (`null` when cleared). As an **unsolicited push** (#2209) it carries **no `in_reply_to` at all**: when one client renames a workspace, the daemon fans the same record to every *other* interactive-capable conn, so the name chosen on one machine is the name shown on all of them without a reload. A client that matches this type on correlation alone will drop the pushed frame; correlate on the payload's own `path` instead. The record is identical either way, and its `path` is projected from the matched conversation's stored `cwd` rather than from the request. The **requester's own conn receives the reply and no push** — exclusion is per **conn**, so a requester with a second client open is pushed on that second conn. The push is **live-only**: there is no replay, and a client that was disconnected reads the label off its next `list_conversations`. A **new type rather than a new arm on an existing one**, so an un-upgraded client drops it as unknown instead of mis-rendering a record it already handles. |
 | `register_push_token` | phone → binary | no | The phone's push registration: `platform` (`fcm` or `apns`), the opaque FCM/APNs `token`, and a self-reported `device_name` the daemon files the device under. Sent on **every WS connect**; the daemon de-duplicates against the stored triple, so an identical re-send is acked with no write. **The phone is the source of truth for its own name**, so `device_name` overwrites the label the device was paired under. **Since #2219 the two rendered fields are checked before they can be stored.** `device_name` is bounded at **128 UTF-8 bytes** (the same bound [`mint_pairing`](#minting-a-pairing-from-a-paired-client) publishes for the same label), and neither `device_name` nor `platform` may carry a **C0 control (LF, CR and ESC included), DEL, or a C1 control (U+0080–U+009F)**. Breaking either rule is a **rejected frame** answered `protocol.malformed` — **never a truncated, escaped or repaired value**: nothing is stored, `devices.json` is not written, and the reply names the offending field without echoing its bytes. The refusal is **non-retryable**, and since this frame is re-sent on every connect it is **permanent for that device until it renames itself**. The check runs **before the de-duplication**, so a name stored before the gate existed cannot be re-acked by re-sending it. `token` is deliberately **unchecked** — it is never logged as a field value, and its only other sink is a JSON string value the encoder escapes. An accepted payload is stored **verbatim**, an empty `device_name` included, which means "the client named no device". |
 | `ack` | either | no | |
-| `error` | either | no | `ErrorPayload` carries an optional `conversation_id` (#2443, `omitempty`), set only where `in_reply_to` cannot identify the reply's subject — as of #2443 only [`new_session`](#new-session-v2)'s workspace-refusal reply sets it. Every other error reply omits the key, so their wire shape stays byte-identical to before #2443. It also carries an optional `min_client_version` (#2576, `omitempty`), daemon-authored, never an echo of the client's own `client_version` — see [Compatibility](#compatibility). |
+| `error` | either | no | `ErrorPayload` carries an optional `conversation_id` (#2443, `omitempty`). [`new_session`](#new-session-v2)'s workspace-refusal reply sets it from the daemon's resolved conversation. [`stop_background_task.refused`](#stop-background-task-v2) is the correlation-only exception: it reflects the requested conversation id, including a missing-task refusal for an unknown conversation, and asserts no membership. Other producers retain daemon-authored provenance; other replies omit the key. It also carries an optional `min_client_version` (#2576, `omitempty`), daemon-authored, never an echo of the client's own `client_version` — see [Compatibility](#compatibility). |
 | **`rekey_request`** | either | no | **New in v2.** See [Re-key](#re-key). |
 | **`turn_state`** | binary → phone | no | **New in v2** (interactive, capability-gated). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`assistant_delta`** | binary → phone | no | **New in v2** (interactive, capability-gated). Has **two kinds of producer** since #2498: `interactiveTurnEmitterV2` derives it from claude's own supervised turn stream, and `channelPostEmitterV2` also emits it for a `pyry channel post` — a host-side control verb with no claude in the path at all, addressed to a `turn_id` it mints itself and closed with **no** `turn_state` or `turn_end`, so a turn actually running in the same conversation is left undisturbed. See [`assistant_delta`](#assistant_delta). |
@@ -600,6 +600,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`dequeue_message`** | phone → binary | no | **New in v2.** Inbound control — phone cancels a queued message. See [Queue](#queue-v2). |
 | **`send_queued_now`** | phone → binary | no | **New in v2** (#2729). Inbound control — phone writes a queued message into the running turn instead of waiting for idle. See [Queue](#queue-v2). |
 | **`interrupt`** | phone → binary | no | **New in v2.** Inbound control — phone interrupts the running turn (remote Esc). Interactive-capability-gated; exempt from the permission gate. See [Interrupt](#interrupt-v2). |
+| **`stop_background_task`** | phone → binary | no | **New in v2** (#2791). Names one task by `conversation_id` and `task_id`; requires negotiated `interactive`, with no per-device permission gate or cursor fallback. Shipped daemon construction leaves the stop seam nil, so every request is silently inert until wired. No new capability is advertised. See [Stop background task](#stop-background-task-v2). |
 | **`new_session`** | phone → binary | no | **New in v2.** Inbound control — phone starts a fresh session in the conversation it names, or in the daemon's current one when it names none (#2099). On the stream path a kill and respawn under a new session id, not a `/clear`. Interactive-capability-gated; exempt from the permission gate. See [New session](#new-session-v2). |
 | **`debug_bundle_chunk`** | binary → phone | no | **New in v2.** Outbound — one ordered, cap-respecting slice of a streamed debug bundle (#812). See [Debug bundle](#debug-bundle-v2). |
 | **`debug_bundle_done`** | binary → phone | no | **New in v2.** Outbound — completion marker after the last `debug_bundle_chunk`, carrying the exact chunk count (#812). See [Debug bundle](#debug-bundle-v2). |
@@ -3587,6 +3588,81 @@ A conversation whose **child is not running** is not a refusal but a no-op, and 
 
 The client observes the stop through the existing [`turn_end`](#interactive-events-v2-capability-gated) marker (`stop_reason: cancelled`) for that conversation — **there is no synchronous ack.** `interrupt` is fire-and-forget, like `new_session`; it is **not** part of the reconnect-replay ring and needs no correlation key.
 
+### Stop background task (v2)
+
+A paired client sends `stop_background_task` to request a stop of one named
+background task (#2791). Direction **phone → binary**, v2-only; v1 rejects the
+type. The v2 manager intercepts it before ordinary dispatch, requires negotiated
+[`interactive`](#capability-negotiation-v2), and bypasses the per-device
+tool-permission gate, like [`interrupt`](#interrupt-v2).
+
+**Currently inert in shipped daemon construction:** the optional
+`BackgroundTaskStopper` interface is left as a true nil interface. With that
+seam nil, or without negotiated `interactive`, the manager consumes the frame on
+`Run` before typed payload decoding or worker enqueueing, with no reply even for
+a payload that would fail typed decoding. #2792 owns production child actuation,
+capability advertisement and the resulting production documentation; #2791
+adds no capability string and actuates no child.
+
+The payload has two string fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Required, nonempty conversation lookup key. There is no fallback to the daemon's cursor conversation. |
+| `task_id` | string | Required, nonempty task lookup key, using the id carried by [`background_task_started`](#background_task_started), [`background_task_updated`](#background_task_updated) and roster rows. |
+
+```json
+{
+  "id": 42,
+  "type": "stop_background_task",
+  "ts": "2026-10-04T22:00:00Z",
+  "payload": {"conversation_id": "conv_01ABC", "task_id": "task_01XYZ"}
+}
+```
+
+With both gates open, the handler runs on the connection's FIFO
+`appFrameWorker`. It treats the ids as untrusted lookup identifiers, never paths;
+the seam owns conversation validation and resolution. The outcomes are:
+
+| Request or seam outcome | Behavior |
+|---|---|
+| Absent, null or undecodable payload; decoded missing/empty `conversation_id` | Silently drop; do not call the seam. A failed decode never acts on partially decoded fields. |
+| Decoded nonempty `conversation_id` with missing/empty `task_id` | Refuse before calling the seam or checking conversation membership, including for an unknown conversation. |
+| Both ids nonempty | Call the seam once with those ids and the worker's cancellation context. |
+| Seam accepts or cannot act on the conversation | No reply. Never select the cursor or another conversation. Silence is not confirmation that a task stopped. |
+| Seam refuses | Send the same fixed refusal as the missing-task case. |
+
+Each refusal sends exactly one requester-only `error`, correlated by envelope
+`in_reply_to` to the request's `id`, with this exact payload:
+
+```json
+{
+  "id": 1,
+  "type": "error",
+  "ts": "2026-10-04T22:00:00Z",
+  "in_reply_to": 42,
+  "payload": {
+    "code": "stop_background_task.refused",
+    "message": "background task stop refused",
+    "retryable": false,
+    "conversation_id": "conv_01ABC"
+  }
+}
+```
+
+The reflected `conversation_id` is **correlation only**, including when a missing
+task id is refused for a conversation the daemon does not host. It asserts no
+conversation membership or task existence. This is a narrow exception to
+`ErrorPayload.ConversationID`'s daemon-authored provenance rule; other producers
+must still use daemon-resolved ids. No task id, child diagnostic or raw decoder
+error appears in replies or logs, and the reflected id must never be logged.
+
+Refusals use the existing requester reply lane and are sealed only by `Run`,
+with no peer broadcast or replay `event_id`. A blocking stop seam holds that
+connection's worker; other connections and inline `interrupt` handling continue
+on `Run`. The seam must honor its cancellation context so manager shutdown can
+end the wait.
+
 ### New session (v2)
 
 A paired phone sends `new_session` to start a fresh session in **one conversation** (#597 Phase 3, #831, #2099). On the stream path that is a **kill and respawn under a freshly minted session id**, not a `/clear` keystroke — the terminal-era framing this section used to carry described a supervisor that no longer runs the interactive path. Unlike `interrupt` it maps to no neutral `turnevent` command.
@@ -5079,6 +5155,7 @@ Application-level error codes (carried in `error` envelopes inside `noise_msg` p
 | Code | Retryable | Notes |
 |---|---|---|
 | `host_system_prompt.unavailable` | yes | Storage failure for [daemon-wide host instructions](#daemon-wide-host-system-prompt); correlated requester-only error with a static message, no success acknowledgement, and prior memory/store retained. |
+| `stop_background_task.refused` | no | With both [stop-background-task gates](#stop-background-task-v2) open, a decoded nonempty conversation id with missing/empty task id, or a refused stop-seam outcome. Exactly one requester-only error: message `background task stop refused`, `retryable: false`, requested `conversation_id`, and envelope `in_reply_to` equal to the request id. The reflected id is correlation only, including for unknown conversations, and must never be logged; no task id or child/decoder diagnostics are included. Shipped construction leaves the seam nil and sends no refusal. |
 | `read_mark.unavailable` | yes | A [`mark_conversation_read`](#marking-a-conversation-read) advance could not be persisted (#2780): the registry save failed, so the daemon reverted the in-memory mark before replying and pushed nothing. The message is static and names no path. Retry the same request once the registry can save again — it is not treated as a no-op, because the held mark was already rolled back. |
 | `noise.handshake_failed` | no | Reported only to local logs — wire-level handshake failure closes the WS with `4426` and no AEAD-sealed envelope can be sent. Included here for completeness. |
 | `noise.rekey_failed` | yes | The peer's `rekey_request` was rejected (e.g. rate-limited) or the subsequent handshake didn't complete; sender may retry after a backoff. |

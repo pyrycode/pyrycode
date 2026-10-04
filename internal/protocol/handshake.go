@@ -181,14 +181,16 @@ type HelloAckPayload struct {
 // the refusal is about and the field is omitted — new_session is the exception
 // that minted it: a bare frame names no conversation and rotates the daemon's
 // cursor one, so only the daemon knows which conversation the answer describes.
-// Omitted (omitempty) by every other reply, which keeps their wire shape
-// byte-identical to the pre-#2443 one.
+// stop_background_task.refused is the correlation exception: it carries the
+// requested conversation id even for a missing task id or an unknown conversation.
+// This is correlation data only and asserts nothing about daemon membership.
+// Omitted (omitempty) by other replies, keeping their earlier wire shape.
 //
-// SECURITY: the value is DAEMON-AUTHORED and MUST NOT be an echo of a
-// client-supplied id — the discipline V2SessionConfig's RunConfigFor and
-// ModelListFor already state for their own reported ids. A producer sets it from
-// the daemon's own registry or cursor, never from the request it is answering;
-// echoing would make an error reply a mirror for arbitrary remote bytes.
+// SECURITY: except for stop_background_task.refused, the value is DAEMON-AUTHORED
+// and MUST NOT echo a client-supplied id — the discipline V2SessionConfig's
+// RunConfigFor and ModelListFor state for their own reported ids. Other producers
+// set it from the daemon's registry or cursor, never from the request. The stop
+// refusal's reflected id must never be logged.
 //
 // MinClientVersion is the three-part minimum (e.g. "1.4.0") the host holds for
 // the requesting app, carried by CodeClientUpdateRequired alone (#2576) so the

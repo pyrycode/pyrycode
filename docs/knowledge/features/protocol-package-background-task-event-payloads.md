@@ -2,6 +2,23 @@
 
 The v2 wire shape for the three **background-task events** — work claude starts that outlives the turn that started it (a `local_bash` command backgrounded on timeout). The first frames in the vocabulary whose subject is turn-independent: #1240 found `turn_state{idle}` emitted, and `turn_end.stop_reason == "end_turn"`, while a backgrounded command was still alive, with nothing on the wire to tell a client the two cases apart. `internal/streamsup/parser.go` produces the source `turnevent.BackgroundTask{Started,Updated,Roster}` variants (#1380/#1381/#1382); this ticket (#1393) gave them the wire shape below, 1:1 against `TypeBackgroundTaskStarted` / `TypeBackgroundTaskUpdated` / `TypeBackgroundTaskRoster` (their own const block in `codes.go`, next to `TypeUnrecognizedMessage`). #1394 wired `internal/turnbridge/outbound.go`'s `MapEvent` to actually emit them and wrote `docs/protocol-mobile.md` § `background_task_started` / `_updated` / `_roster` — see [codebase/1394.md](../codebase/1394.md). #2245 widened `BackgroundTaskUpdatedPayload` with `status`/`summary` so a client can finally close a row `background_task_started` opened — see below.
 
+The inbound [`stop_background_task`](../../protocol-mobile.md#stop-background-task-v2)
+uses `StopBackgroundTaskPayload`'s required string keys `conversation_id` and
+`task_id`; the latter is the event/roster task id, not `tool_call_id` (#2791).
+The two ids remain untrusted lookup identifiers, never paths. Unlike `interrupt`,
+an empty conversation id or an undecodable body silently drops and never selects
+the cursor; copying interrupt's compatibility fallback would stop work in a
+different chat. An empty task id with a nonempty conversation id produces the
+fixed `CodeStopBackgroundTaskRefused` before any membership lookup, even for an
+unknown conversation. Its reflected id is
+[correlation only](protocol-package-handshake-control-payloads.md), not evidence
+that a task or conversation exists. Production leaves `BackgroundTaskStopper`
+nil, so all requests are consumed before typed decode; no stop capability is
+advertised until #2792 wires actuation. `TestStopBackgroundTaskPayload_RoundTrip`
+remarshals the decoded payload against the committed `stop_background_task.json`
+fixture with deliberately distinct conversation/task ids, so swapping the two
+fields cannot stay green.
+
 ```go
 type BackgroundTaskStartedPayload struct {
     ConversationID  string   `json:"conversation_id"`

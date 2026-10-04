@@ -2,6 +2,11 @@
 
 Each test constructs a `V2SessionManager` with an in-memory `outbound` recorder (mutex-guarded slice; goroutine-safe) and a `devices.Registry` built inline.
 
+A later handshake proves only `Run` progressed, not that a silent worker handler
+finished. Wait for a subsequent reply on the same connection's FIFO worker before
+asserting no calls or replies; `TestV2Session_StopBackgroundTask_Contract` uses a
+`send_message` ack (#2791).
+
 Rejection fixtures must start with one intended device record: `Registry.Add`
 appends, and `Registry.Validate` uses the first matching token hash. Appending
 an expired or differently key-bound record beside an existing valid record

@@ -143,6 +143,7 @@ var inboundTypes = map[string]string{
 	"TypeModalAnswer":            "switch-intercepted",
 	"TypeModalCancel":            "switch-intercepted",
 	"TypeInterrupt":              "switch-intercepted",
+	"TypeStopBackgroundTask":     "switch-intercepted",
 	"TypeNewSession":             "switch-intercepted",
 	"TypeDequeueMessage":         "switch-intercepted",
 	"TypeSendQueuedNow":          "switch-intercepted",

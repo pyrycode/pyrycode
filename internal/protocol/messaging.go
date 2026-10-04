@@ -548,3 +548,12 @@ type DebugBundleChunkPayload struct {
 type DebugBundleDonePayload struct {
 	Total int `json:"total"`
 }
+
+// StopBackgroundTaskPayload names exactly one conversation and background task.
+// Both ids are untrusted lookup identifiers, never paths. An empty conversation
+// is dropped without cursor fallback; an empty task in a named conversation is
+// refused. Neither field is omitted when marshalled.
+type StopBackgroundTaskPayload struct {
+	ConversationID string `json:"conversation_id"`
+	TaskID         string `json:"task_id"`
+}

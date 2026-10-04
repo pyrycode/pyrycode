@@ -146,6 +146,7 @@ func TestIsKnownAppType(t *testing.T) {
 		// the v2-only interrupt control: an inbound control type an old phone
 		// never sees, so IsKnownAppType must reject it.
 		{"interrupt-rejected", TypeInterrupt, false, ErrUnknownType},
+		{"stop-background-task-rejected", TypeStopBackgroundTask, false, ErrUnknownType},
 		// the v2-only debug-bundle streaming vocabulary: outbound binary → phone
 		// chunk/completion events an old phone never receives, so IsKnownAppType
 		// must reject both.
@@ -318,7 +319,8 @@ var v2OnlyTypes = map[string]bool{
 	TypeDequeueMessage: true,
 	TypeSendQueuedNow:  true,
 	// v2 interrupt control.
-	TypeInterrupt: true,
+	TypeInterrupt:          true,
+	TypeStopBackgroundTask: true,
 	// v2 debug-bundle streaming vocabulary.
 	TypeDebugBundleChunk: true,
 	TypeDebugBundleDone:  true,
@@ -459,6 +461,7 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeQueueState, TypeDequeueMessage, TypeSendQueuedNow,
 		// v2 interrupt control.
 		TypeInterrupt,
+		TypeStopBackgroundTask,
 		// v2 debug-bundle streaming vocabulary.
 		TypeDebugBundleChunk, TypeDebugBundleDone,
 		// v2 debug-bundle request verb.
@@ -585,6 +588,7 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeModelListUnavailable":        CodeModelListUnavailable,
 		"CodeMCPStatusUnavailable":        CodeMCPStatusUnavailable,
 		"CodeMCPActuationRefused":         CodeMCPActuationRefused,
+		"CodeStopBackgroundTaskRefused":   CodeStopBackgroundTaskRefused,
 		"CodeWorkspaceNotFound":           CodeWorkspaceNotFound,
 		"CodeClientUpdateRequired":        CodeClientUpdateRequired,
 		"CodeReadMarkUnavailable":         CodeReadMarkUnavailable,
@@ -616,6 +620,7 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeModelListUnavailable":        "model_list.unavailable",
 		"CodeMCPStatusUnavailable":        "mcp_status.unavailable",
 		"CodeMCPActuationRefused":         "mcp_actuation.refused",
+		"CodeStopBackgroundTaskRefused":   "stop_background_task.refused",
 		"CodeWorkspaceNotFound":           "workspace.not_found",
 		"CodeClientUpdateRequired":        "client.update_required",
 		"CodeReadMarkUnavailable":         "read_mark.unavailable",
