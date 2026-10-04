@@ -73,3 +73,7 @@ Pending documentation stage: update `docs/protocol-mobile.md`, “Stop backgroun
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-04
+
+## Revisions
+
+- 2026-10-04: update `V2SessionConfig.BackgroundTaskStopper`'s stale shipped-nil comment alongside production wiring. No interface or behavior change beyond the planned adapter; include relay in the scoped race check. Final written work remains below 800 lines.

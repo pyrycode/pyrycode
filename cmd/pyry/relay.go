@@ -193,6 +193,9 @@ type relayWiring struct {
 	// the ACTIVE conversation, not the bootstrap supervisor — the #1121 isolation
 	// fix. Wired to V2SessionConfig.Interrupter below.
 	activeInterrupter relay.Interrupter
+
+	// backgroundTaskStopper addresses only the named conversation and retained task.
+	backgroundTaskStopper relay.BackgroundTaskStopper
 	// activeSessionStarter routes an inbound new_session frame to the runner bound
 	// to the ACTIVE conversation, not the bootstrap supervisor — the #1125
 	// isolation fix (the new_session twin of activeInterrupter). Wired to
@@ -1393,6 +1396,8 @@ func startRelayV2(
 		// does not; it satisfies Interrupter via activeInterrupter.SendEsc, the
 		// seam's abstract "claude's own interrupt" name.
 		Interrupter: w.activeInterrupter,
+
+		BackgroundTaskStopper: w.backgroundTaskStopper,
 		// Inbound new_session seam (#831): an interactive `new_session` frame
 		// routes to the runner bound to the ACTIVE conversation (#1125) — not the
 		// bootstrap supervisor. The activeSessionStarter adapter (main.go) resolves

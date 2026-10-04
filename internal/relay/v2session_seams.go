@@ -1289,8 +1289,8 @@ type V2SessionConfig struct {
 	// and the registry resolution this package cannot perform.
 	Interrupter Interrupter
 
-	// BackgroundTaskStopper is optional and left unset in shipped constructions
-	// until #2792 supplies the implementation. Leave a true nil interface, never
+	// BackgroundTaskStopper is optional; production installs the bound-child
+	// adapter in cmd/pyry. Unwired callers leave a true nil interface, never
 	// a typed nil pointer: dispatchAppFrame's nil gate must consume the verb before
 	// payload decode or enqueue. Negotiated interactive is the only other gate;
 	// this paired-device action bypasses the tool-permission gate.
