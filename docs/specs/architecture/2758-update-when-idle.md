@@ -51,10 +51,18 @@ None. Daemon-selection flags use the existing prefix-before-verb-flags conventio
 
 ## Documentation handoff
 
-Pending for the documentation stage:
+Satisfied by the documentation stage; behavior checked against the implementation and Unix-socket tests:
 
 - `docs/knowledge/features/pyry-update-command.md`, **Flags** and **Automatic update (#2716)**: document `--when-idle`, conflicts, daemon selection, the three decisions and error exit behavior, support without auto-update enabled, shared pending-tag deduplication, failure retry behavior, and minute polling with the existing 15-minute quiet window. Clarify that "returns at once" excludes the bounded metadata check but never waits for installation. Replace the claim that a daemon without auto-update builds no updater with the absence of unsolicited checks/retries.
 - `docs/knowledge/features/control-plane.md`, **Update-when-idle provider**: replace the unwired-provider statement with production daemon/CLI wiring; state that accepted work survives the requesting connection, stops and is joined on daemon shutdown, and the acceptance response survives an update-triggered shutdown within the response deadline.
+
+The update overview now links its **Automatic update (#2716)** section to
+[`pyry-update-command-automatic-update.md`](../../knowledge/features/pyry-update-command-automatic-update.md).
+The original [Flags](../../knowledge/features/pyry-update-command.md#flags) and
+[Update-when-idle provider](../../knowledge/features/control-plane.md#update-when-idle-provider)
+sections remain at their handed-off paths. Retry-publication and replacement-counting
+lessons are recorded under [Concurrency](../../knowledge/features/pyry-update-command.md#concurrency)
+and [Tests](../../knowledge/features/pyry-update-command-tests.md#tests).
 
 ## Security review
 
