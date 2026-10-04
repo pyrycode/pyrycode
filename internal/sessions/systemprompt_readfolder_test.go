@@ -79,7 +79,7 @@ func TestComposeSystemPromptForOn_SentenceOrder(t *testing.T) {
 	const note = "We were halfway through the parser."
 	const operator = "Answer in Finnish."
 
-	got := composeSystemPromptForOn(daemonPromptText(folders), operator, []ClientIdentity{client}, note)
+	got := composeSystemPromptForOn(daemonPromptText(folders), "", operator, []ClientIdentity{client}, note)
 	want := systemPromptText + "\n" + readFolderSentence(folders) + "\n" +
 		clientSection([]ClientIdentity{client}) + "\n" + handoffNoteSection(note) + "\n" + operator
 	if got != want {
@@ -123,6 +123,9 @@ func TestPool_ReadFolders_NamedInEveryComposition(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("sessions.New: %v", err)
+	}
+	if err := pool.SetDaemonInstructions(""); err != nil {
+		t.Fatal(err)
 	}
 	client := ClientIdentity{Name: "Pixel 8", Version: "1.2.0"}
 	holder := &clientResolverHolder{}
