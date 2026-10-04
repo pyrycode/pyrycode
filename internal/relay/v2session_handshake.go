@@ -276,7 +276,11 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	}
 	root := ""
 	if tokenResult == devices.ValidateAccepted && versionReject.reason == "" {
-		root = WorkspaceRoot()
+		if m.cfg.WorkspaceBase == nil {
+			root = WorkspaceRoot()
+		} else if filepath.IsAbs(*m.cfg.WorkspaceBase) {
+			root = *m.cfg.WorkspaceBase
+		}
 	}
 
 	// Build and AEAD-seal hello_ack via WriteResp's early-data slot. The

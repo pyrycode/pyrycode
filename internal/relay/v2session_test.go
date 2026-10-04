@@ -330,73 +330,117 @@ func TestV2Session_HappyPath(t *testing.T) {
 }
 
 func TestV2Session_HelloAckWorkspaceRoot(t *testing.T) {
-	handshake := func(t *testing.T, logger *slog.Logger) (protocol.HelloAckPayload, []byte, []protocol.RoutingEnvelope) {
-		t.Helper()
-		respPriv, respPub := genV2Keypair(t)
-		initPriv, _ := genV2Keypair(t)
-		frames := make(chan protocol.RoutingEnvelope, 1)
-		rec := &v2Recorder{}
-		session, earlyAck := driveToOpenCaps(t, V2SessionConfig{
-			Frames:     frames,
-			Outbound:   rec.outbound,
-			StaticPriv: respPriv,
-			Devices:    v2PairedRegistry(t, v2TestToken),
-			ServerID:   v2TestServerID,
-			Logger:     logger,
-		}, frames, rec, respPub, initPriv, v2TestToken, nil)
-		t.Cleanup(session.stop)
-		waitConnOpen(t, session.mgr, v2TestConnID)
-		return decodeHelloAck(t, earlyAck), earlyAck, rec.snapshot()
-	}
-
-	t.Run("reports absolute base without creating it", func(t *testing.T) {
-		home := t.TempDir()
-		t.Setenv("HOME", home)
-		want := filepath.Join(home, "pyry-workspace")
-		if _, err := os.Stat(want); !os.IsNotExist(err) {
-			t.Fatalf("workspace root before handshake: got err %v, want not-exist", err)
-		}
-
-		var logs bytes.Buffer
-		logger := slog.New(slog.NewTextHandler(&logs, nil))
-		ack, _, wire := handshake(t, logger)
-		if ack.WorkspaceRoot != want {
-			t.Errorf("WorkspaceRoot = %q, want %q", ack.WorkspaceRoot, want)
-		}
-		if ack.ProtocolVersion != "v2" || ack.ServerID != v2TestServerID || ack.ConnID != v2TestConnID {
-			t.Errorf("existing greeting fields changed: got %+v", ack)
-		}
-		wireJSON, err := json.Marshal(wire)
-		if err != nil {
-			t.Fatalf("marshal recorded wire: %v", err)
-		}
-		if bytes.Contains(wireJSON, []byte(want)) {
-			t.Errorf("workspace root exposed outside encrypted early data: %s", wireJSON)
-		}
-		if bytes.Contains(logs.Bytes(), []byte(want)) {
-			t.Errorf("workspace root exposed in logs: %s", logs.Bytes())
-		}
-		if _, err := os.Stat(want); !os.IsNotExist(err) {
-			t.Fatalf("workspace root after handshake: got err %v, want not-exist", err)
-		}
-	})
-
+	home := t.TempDir()
+	base := filepath.Join(home, "operator-workspace")
+	verbatim := home + "/missing/../operator-workspace/"
+	empty, relative := "", "relative-workspace"
 	for _, tc := range []struct {
 		name string
 		home string
+		base *string
+		want string
 	}{
-		{name: "home unavailable", home: ""},
-		{name: "home not absolute", home: "relative-home"},
+		{"legacy default", home, nil, filepath.Join(home, "pyry-workspace")},
+		{"home unavailable", "", nil, ""},
+		{"home not absolute", "relative-home", nil, ""},
+		{"supplied absolute", home, &base, base},
+		{"supplied absolute verbatim", home, &verbatim, verbatim},
+		{"supplied absolute without home", "", &base, base},
+		{"supplied absolute with relative home", "relative-home", &base, base},
+		{"explicit empty overrides default", home, &empty, ""},
+		{"explicit relative overrides default", home, &relative, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("HOME", tc.home)
-			ack, earlyAck, _ := handshake(t, silentLogger())
-			if ack.WorkspaceRoot != "" {
-				t.Errorf("WorkspaceRoot = %q, want empty", ack.WorkspaceRoot)
+			if tc.want != "" {
+				if _, err := os.Stat(filepath.Clean(tc.want)); !os.IsNotExist(err) {
+					t.Fatalf("workspace root before handshake: got err %v, want not-exist", err)
+				}
 			}
-			if bytes.Contains(earlyAck, []byte(`"workspace_root"`)) {
-				t.Errorf("workspace_root should be omitted; got %s", earlyAck)
+			logger, logs := bufferLogger()
+			out := runVersionHello(t, V2SessionConfig{WorkspaceBase: tc.base, Logger: logger}, v2TestToken, "v2-test")
+			assertVersionAccepted(t, out)
+			if out.ack.WorkspaceRoot != tc.want {
+				t.Errorf("WorkspaceRoot = %q, want %q", out.ack.WorkspaceRoot, tc.want)
 			}
+			if bytes.Contains(out.ackRaw, []byte(`"workspace_root"`)) != (tc.want != "") {
+				t.Errorf("workspace_root key presence does not match value %q: %s", tc.want, out.ackRaw)
+			}
+			if out.ack.ProtocolVersion != "v2" || out.ack.ServerID != v2TestServerID || out.ack.ConnID != v2TestConnID {
+				t.Errorf("existing greeting fields changed: got %+v", out.ack)
+			}
+			if tc.want != "" {
+				assertWorkspaceBasePrivate(t, out, logs.String(), tc.want)
+				if _, err := os.Stat(filepath.Clean(tc.want)); !os.IsNotExist(err) {
+					t.Fatalf("workspace root after handshake: got err %v, want not-exist", err)
+				}
+			}
+		})
+	}
+}
+
+func assertWorkspaceBasePrivate(t *testing.T, out versionOutcome, logs, base string) {
+	t.Helper()
+	wireJSON, err := json.Marshal(out.envs)
+	if err != nil {
+		t.Fatalf("marshal recorded wire: %v", err)
+	}
+	if bytes.Contains(wireJSON, []byte(base)) {
+		t.Errorf("workspace base exposed outside encrypted early data: %s", wireJSON)
+	}
+	if strings.Contains(logs, base) {
+		t.Errorf("workspace base exposed in logs: %s", logs)
+	}
+}
+
+func TestV2Session_HelloAckWorkspaceRoot_Rejected(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ reason, event string }{
+		{"unknown token", "v2.handshake.reject.invalid_token"},
+		{"expired token", "v2.handshake.reject.redemption_window_elapsed"},
+		{"static key mismatch", "v2.handshake.reject.static_key_mismatch"},
+		{"version", "v2.handshake.reject.client_update_required"},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			t.Parallel()
+			base := filepath.Join(t.TempDir(), "private-operator-workspace")
+			logger, logs := bufferLogger()
+			reg := &devices.Registry{}
+			device := devices.Device{TokenHash: devices.HashToken(v2TestToken), Name: v2TestDevName}
+			cfg := V2SessionConfig{WorkspaceBase: &base, Devices: reg, Logger: logger}
+			token, version := v2TestToken, "v2-test"
+			switch tc.reason {
+			case "unknown token":
+				token = "wrong-token"
+			case "expired token":
+				device.RedeemBy = time.Now().Add(-time.Minute)
+			case "static key mismatch":
+				_, key := installKey(t, 1)
+				device.StaticKey = key
+			case "version":
+				cfg.MinClientVersions = map[string]string{protocol.AppMobile: "1.4.0"}
+				version = "pyrycode-mobile/1.0.0"
+			}
+			reg.Add(device)
+			out := runVersionHello(t, cfg, token, version)
+			if tc.reason == "version" {
+				assertVersionRejected(t, out, "1.4.0")
+			} else {
+				if out.open || len(out.envs) != 2 || out.closeCode != uint16(StatusUnauthorized) {
+					t.Fatalf("open=%v, envelopes=%d, close=%d; want false, 2, 4401", out.open, len(out.envs), out.closeCode)
+				}
+				if !out.hasErr || out.errEnv.Type != protocol.TypeError || out.errEnv.InReplyTo == nil || *out.errEnv.InReplyTo != 1 ||
+					out.errBody.Code != protocol.CodeAuthInvalidToken || out.errBody.Message != MsgInvalidToken || out.errBody.Retryable {
+					t.Errorf("unexpected encrypted rejection: envelope=%+v, payload=%+v", out.errEnv, out.errBody)
+				}
+			}
+			if out.ack.WorkspaceRoot != "" || bytes.Contains(out.ackRaw, []byte(`"workspace_root"`)) {
+				t.Errorf("rejected ack disclosed workspace_root: %s", out.ackRaw)
+			}
+			if !strings.Contains(logs.String(), tc.event) {
+				t.Errorf("rejection did not reach %q: %s", tc.event, logs.String())
+			}
+			assertWorkspaceBasePrivate(t, out, logs.String(), base)
 		})
 	}
 }

@@ -19,6 +19,7 @@ type versionOutcome struct {
 	open      bool
 	envs      []protocol.RoutingEnvelope
 	ack       protocol.HelloAckPayload
+	ackRaw    []byte
 	closeCode uint16
 	hasErr    bool
 	errEnv    protocol.Envelope
@@ -83,6 +84,7 @@ func runHelloFrom(t *testing.T, cfg V2SessionConfig, initPriv []byte, token, cli
 		t.Fatalf("initiator.ReadResp: %v", err)
 	}
 	out.ack = decodeHelloAck(t, ackBytes)
+	out.ackRaw = ackBytes
 	if len(out.envs) < 2 {
 		return out
 	}
