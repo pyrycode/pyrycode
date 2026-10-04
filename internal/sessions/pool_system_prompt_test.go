@@ -285,8 +285,24 @@ func TestPool_Run_RemovesSystemPromptFileAtShutdown(t *testing.T) {
 
 	pool := helperPoolArgvRecorder(t, regPath, tplWorkDir)
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- pool.Run(ctx) }()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = pool.Run(ctx) // Cancellation is expected; file removal is asserted below.
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			t.Error("pool.Run did not exit within 15s after cancel")
+		}
+	})
+	select {
+	case <-pool.Ready():
+	case <-time.After(5 * time.Second):
+		t.Fatal("pool.Run did not become ready within 5s")
+	}
 
 	path := systemPromptArgPath(t, waitArgvRaw(t, tplWorkDir))
 	if _, err := os.Stat(path); err != nil {
@@ -753,9 +769,24 @@ func TestPool_Run_RemovesSessionPromptsAtShutdown(t *testing.T) {
 
 	pool := helperPoolWithConversations(t, regPath, tplWorkDir, conversationWithPrompt(convPromptID, &prompt))
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- pool.Run(ctx) }()
-	waitArgvRaw(t, tplWorkDir)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = pool.Run(ctx) // Cancellation is expected; file removal is asserted below.
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			t.Error("pool.Run did not exit within 15s after cancel")
+		}
+	})
+	select {
+	case <-pool.Ready():
+	case <-time.After(5 * time.Second):
+		t.Fatal("pool.Run did not become ready within 5s")
+	}
 
 	id, err := pool.Mint(convPromptID, spawnDir)
 	if err != nil {
