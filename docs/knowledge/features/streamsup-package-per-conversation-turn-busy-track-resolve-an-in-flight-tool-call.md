@@ -1,9 +1,8 @@
 # Resolve an in-flight tool call to its conversation (#1917)
 
 `turnBusyTracker` gained a third feed: `inflight map[string]map[string]struct{}`, keyed
-conversation-then-`tool_use_id`, fed by `toolCallDeltaFor` (a pure classifier reading
-`ToolStart`/`ToolUpdate` only, mirroring `turnMarkFor`'s discipline of switching on the Go
-variant, never a field value) and applied inside the existing single `setBusy` acquisition.
+conversation-then-`tool_use_id`, fed by `toolCallDeltaFor` (reading `ToolStart`/`ToolUpdate` only)
+and applied inside the existing single `setBusy` acquisition.
 `ToolCallInFlight(conversationID, toolCallID) bool` answers membership only, extending
 `Busy`'s existence-oracle posture to a two-key question so neither id can be inferred from the
 other. #1919's `streamApprovalBridge.ApprovalParked` (`cmd/pyry/modal_resolve_v2.go`) is now the
@@ -13,6 +12,14 @@ calls `ApprovalParked` itself yet; #1911 (the delivery hold) is next. See
 [Session-teardown clear](streamsup-package-per-conversation-turn-busy-track-session-teardown-clear.md)
 and [Exit lane on the turn-busy fan-in](streamsup-package-per-conversation-turn-busy-track-exit-lane-on-the-turn-busy-fan.md)
 for the other two feeds this one's close arm rides.
+
+**Since #2781, `toolCallDeltaFor` also reads `ParentToolCallID`, not the Go variant alone.** A
+`ToolStart`/`ToolUpdate` carrying an existing parent id is a subagent's own call, not the top-level
+spawning call, and returns the zero delta instead of touching `inflight` — so a child's tool calls
+are never added, and a child `ToolUpdate` can never remove a retained top-level call even when its
+`ToolCallID` happens to collide with the parent's. See
+[Per-conversation turn-busy tracking](streamsup-package-per-conversation-turn-busy-tracking.md) for
+the matching change to `turnMarkFor` and why the top-level Agent/Task call itself is unaffected.
 
 **A distinct-id independence fixture cannot tell nested retention from a flat map — only a
 same-id collision across two conversations can.** The shape exists to keep a claude-derived key

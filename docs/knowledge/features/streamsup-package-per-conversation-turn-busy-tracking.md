@@ -29,7 +29,23 @@ arm) deletes it, and everything else (`Stall`/`ApiRetry`/`Compacting`/`Unrecogni
 variant) is a no-op. `ThoughtChunk` includes the empty event produced by a valid partial-message
 `thinking_delta`; `ThinkingProgress` is the independent numeric observation. Either is authoritative
 server evidence that the model has entered an interruptible turn, unlike a client's optimistic message
-echo.
+echo. Unattributed thinking events keep this behavior regardless of the rest of this section: pyrycode
+has no attribution field for them today, so a subagent's thinking still opens the main mark.
+
+**Since #2781, `TextChunk`/`ToolStart`/`ToolUpdate` are openers only when they carry no existing
+`ParentToolCallID`.** A subagent's own text and tool activity is marked with the spawning call's id by
+the producer that built it; `turnMarkFor` and `toolCallDeltaFor` both read that field now (`turnMarkFor`
+returns `turnMarkNone` for a parent-attributed event instead of `turnMarkOpen`, and `toolCallDeltaFor`
+returns the zero delta instead of recording the child call), so neither can reopen an idle main mark,
+change an already-open one, or add a child's tool call to `inflight`. A child `ToolUpdate` whose
+`ToolCallID` collides with the spawning call's own id is still inert: the collision is attributed to the
+child, not the parent, and does not remove the retained top-level call. The top-level Agent/Task call that
+spawns a subagent is itself an empty-parent `ToolStart`/`ToolUpdate` pair, so it keeps opening the turn and
+keeps being retained in `inflight` until its own top-level result or the main `TurnEnd` — a background
+agent still reads as busy, and only its child's unattributed chatter stops being mistaken for that
+busy-ness. Before this, a subagent's events arriving after the main `TurnEnd` reopened the mark with
+nothing left to close it, holding every later queued message for that conversation; an interrupt made the
+hold permanent because interrupting the child produces no further top-level `TurnEnd`.
 
 Opening the busy mark during initial thinking is intentional. `startStreamTurnDrainV2` calls `observe`
 before the event's conversation is resolved for `HandleFor`, and so before
