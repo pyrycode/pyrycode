@@ -797,7 +797,13 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 		}
 		parser, held := newSessionParser(parserSink, cfg.Logger)
 		scfg.Stdout = parser
-		onChildExit := sink.exitForTag(tag.ID)
+		exitSink := sink.exitForTag(tag.ID)
+		// The hold outlives respawns; invalidate joins before either exit path
+		// reports the child gone. Retention never infers task completion.
+		onChildExit := func() {
+			held.tasks.childExited()
+			exitSink()
+		}
 		var r *streamsup.Runner
 		if approval.stdio {
 			handler := newStdioPermissionHandler(approval.registry, approval.timeout, approval.surface, tag)

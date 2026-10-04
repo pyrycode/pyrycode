@@ -665,6 +665,7 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 		for _, t := range e.Tasks {
 			tasks = append(tasks, protocol.BackgroundTask{
 				TaskID:          t.TaskID,
+				ToolCallID:      t.ToolCallID,
 				TaskType:        t.TaskType,
 				Description:     t.Description,
 				TruncatedFields: t.TruncatedFields,

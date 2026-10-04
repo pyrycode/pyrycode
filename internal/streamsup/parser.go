@@ -197,37 +197,16 @@ const maxTaskSummary = 4 << 10
 // log. Overflow is REPORTED (BackgroundTaskRoster.DroppedTasks), not silent, so
 // an under-sized count is visible rather than a lie.
 //
-// It QUALIFIES the family's single-worst-case doctrine stated at maxTaskPatch,
-// which does not survive an aggregate variant unexamined. Reusing
-// maxTaskDescription here would put one entry at 256 + 256 + 4096 = 4608 bytes,
-// so only a ONE-entry roster could match the scalar pair's ~4.9 KB — and a
-// one-entry roster is not a roster; at 14 entries a single event would consume
-// 98.5% of the envelope and at 15 exceed it. The doctrine's purpose is
-// legibility, so it is qualified rather than forced: ONE worst case per SHAPE,
-// not per variant. A scalar background-task event is <= ~4.9 KB; the roster is
-// <= 8 KiB. Two numbers, one per shape, both a small fraction of the envelope.
-// maxTaskPatch's own sentence is left unedited — it describes the scalar pair
-// accurately and still does.
-//
-// The arithmetic, in maxUnrecognizedRaw's style:
-//
-//   - One entry: maxTaskFieldID + maxTaskFieldID + maxTaskRosterDescription =
-//     256 + 256 + 512 = 1024 bytes exactly, a unit a reader can hold.
-//   - Worst case one event: 8 * 1024 = 8192 bytes, 12.5% of the v2
-//     application-envelope cap of 65519 bytes (docs/protocol-mobile.md §
-//     Application-envelope size cap). Larger than the scalar pair's 7.4% and
-//     6.6%, per the qualification above, and still a fraction.
-//   - 8192 is exactly HALF of maxUnrecognizedRaw's whole-line 16 KiB, which
-//     preserves the package's ordering one level up: a whole KNOWN event must
-//     not approach the cap on an entire UNKNOWN line.
-//   - Escaping is mild for maxUnrecognizedRaw's reason, verbatim: these are JSON
-//     string values, so control characters arrive pre-escaped as printable pairs
-//     and the growth is quotes and backslashes, not a \u00XX expansion of every
-//     byte. Pathological all-quote content roughly doubles it — ~16 KB, ~25% of
-//     the envelope, still comfortable.
-//   - The count itself: the observed roster holds ONE entry, so 8 is 8x the
-//     observation — the same multiple-of-observation form maxTaskFieldID uses,
-//     and the number that makes the product land on a clean 8 KiB.
+// Claude's three-field input is 256 + 256 + 512 = 1024 field bytes per
+// entry. The daemon-enriched event also carries a bounded 256-byte ToolCallID,
+// joined outside the parser: 1280 unescaped field bytes per row, 8 * 1280 =
+// 10240 bytes (10 KiB), about 15.6% of the 65519-byte application-envelope cap.
+// This excludes keys and truncation metadata and is separate from escaped-wire
+// measurement: TestBackgroundTaskPayloads_FitV2EnvelopeCap fills every field
+// with characters that expand to six bytes in JSON and measures the envelope.
+// Eight rows remain 8x the one-row observation; scalar and aggregate shapes
+// have separate worst cases. The old 8 KiB/half-of-16-KiB arithmetic applies
+// only to the input fields, not the enriched event.
 //
 // The cap is applied AFTER json.Unmarshal, so a hostile array is materialised in
 // transient memory before it is shortened. That is bounded, not unbounded:
@@ -3339,10 +3318,10 @@ type systemBackgroundTasksLine struct {
 	Tasks []systemBackgroundTaskEntry `json:"tasks"`
 }
 
-// systemBackgroundTaskEntry is one element of that array. The field set is
-// exactly what the committed capture shows and nothing invented: no tool_use_id
-// and no patch, which the scalar siblings' targets carry because their LINES do,
-// and mirroring either here would invent a key claude does not send.
+// systemBackgroundTaskEntry is Claude's three-field roster input. It deliberately
+// has no tool_use_id, tool_call_id or patch. The daemon's enriched BackgroundTask
+// row joins its id from BackgroundTaskStarted outside the parser; the parser
+// neither reads an id from this entry nor retains per-task join state.
 //
 // All three are plain strings, which is why truncateField's json.RawMessage
 // exception does not reach this subtype: encoding/json has already

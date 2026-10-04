@@ -7,6 +7,17 @@ import (
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
+// maxBackgroundTaskJoins bounds joins independently of the parser's roster cap.
+// Sixteen slots protect the eight current rows and allow eight pending starts.
+// Pending overflow forgets the oldest unlisted start; the next roster prunes all
+// absent starts. Neither forgetting nor pruning infers task completion.
+const maxBackgroundTaskJoins = 16
+
+type backgroundTaskJoin struct {
+	taskID, toolCallID string
+	truncated          bool
+}
+
 // sessionBackgroundTaskHold is one session's retained turnevent.BackgroundTaskRoster
 // plus the sink decorator that fills it (#2077). streamsup's emitBackgroundTaskRoster
 // decodes claude's system/background_tasks_changed line into exactly one roster and the
@@ -56,8 +67,9 @@ import (
 type sessionBackgroundTaskHold struct {
 	mu     sync.Mutex
 	roster turnevent.BackgroundTaskRoster
+	joins  []backgroundTaskJoin
 	have   bool
-	// next is the downstream sink every event is forwarded to, unchanged. nil
+	// next receives enriched rosters and all other events unchanged. nil
 	// forwards nothing — a test convenience; production always supplies the next
 	// link of newSessionParser's chain.
 	next func(turnevent.Event)
@@ -80,32 +92,25 @@ func newSessionBackgroundTaskHold(next func(turnevent.Event)) *sessionBackground
 // been observed and the daemon reports no finish it cannot detect. Store the newer
 // value; derive nothing from the pair.
 //
-// Every event of every variant is then forwarded unchanged, this variant included:
-// swallowing it here would change what the fan-in and the drain observe, which this
-// ticket has no reason to do.
+// Starts retain only their bounded join fields and are forwarded unchanged.
+// Rosters prune absent joins, then forward an enriched deep copy. A late start
+// changes subsequent reads without synthesizing an extra roster event.
 //
-// Stored WITHOUT copying: emitBackgroundTaskRoster builds its Tasks slice and each
-// entry's TruncatedFields fresh per emit, by append into a nil slice, out of a
-// function-local decode target the parser retains no reference to — so the hold takes
-// sole ownership of what it is handed. The COPY is made on the read side instead.
-//
-// The mutex is a LEAF lock and is never held across the call to next. Holding it across
-// a channel send would put a new edge into the daemon's lock order for no benefit; as
-// written it participates in no ordering with Pool.mu, Session.lcMu or capMu. The lock
-// is needed rather than defensive, and the pair it is needed for is ONE WRITER AND MANY
-// READERS — not two writers. Writes are serial across every respawn, because
-// spawnAndWait blocks on cmd.Wait, which os/exec documents as joining the goroutine
-// copying the child's stdout into a non-*os.File Stdout, so forwarder N+1 cannot start
-// until forwarder N has finished; streamsup.Parser's own doc asserts that serialisation.
-// What the lock protects against is #2079's resolver reading on a relay-leg goroutine
-// while that one writer runs.
+// The mutex is a leaf lock, never held across next. It protects raw roster and
+// joins from concurrent reads, writes and child-exit reset. Parser output remains
+// serial across respawns because cmd.Wait joins the stdout copier.
 func (h *sessionBackgroundTaskHold) Sink(ev turnevent.Event) {
-	if roster, ok := ev.(turnevent.BackgroundTaskRoster); ok {
-		h.mu.Lock()
-		h.roster = roster
+	h.mu.Lock()
+	switch e := ev.(type) {
+	case turnevent.BackgroundTaskStarted:
+		h.retainStart(e)
+	case turnevent.BackgroundTaskRoster:
+		h.roster = e
 		h.have = true
-		h.mu.Unlock()
+		h.joins = slices.DeleteFunc(h.joins, func(j backgroundTaskJoin) bool { return !h.listsTask(j.taskID) })
+		ev = h.enrichedRoster()
 	}
+	h.mu.Unlock()
 	if h.next != nil {
 		h.next(ev)
 	}
@@ -153,7 +158,7 @@ func (h *sessionBackgroundTaskHold) BackgroundTaskRoster() (turnevent.Background
 	if !h.have {
 		return turnevent.BackgroundTaskRoster{}, false
 	}
-	return cloneBackgroundTaskRoster(h.roster), true
+	return h.enrichedRoster(), true
 }
 
 // cloneBackgroundTaskRoster deep-copies a BackgroundTaskRoster. It is TWO levels: the
@@ -176,6 +181,61 @@ func cloneBackgroundTaskRoster(roster turnevent.BackgroundTaskRoster) turnevent.
 	out.Tasks = slices.Clone(roster.Tasks)
 	for i := range out.Tasks {
 		out.Tasks[i].TruncatedFields = slices.Clone(out.Tasks[i].TruncatedFields)
+	}
+	return out
+}
+
+// childExited invalidates provenance from the previous child. The raw roster
+// remains observed state; enriched ids and markers are never stored in it.
+func (h *sessionBackgroundTaskHold) childExited() {
+	h.mu.Lock()
+	h.joins = nil
+	h.mu.Unlock()
+}
+
+// listsTask checks the capped current roster; the caller holds mu.
+func (h *sessionBackgroundTaskHold) listsTask(id string) bool {
+	return slices.ContainsFunc(h.roster.Tasks, func(t turnevent.BackgroundTask) bool { return t.TaskID == id })
+}
+
+// retainStart keeps at most maxBackgroundTaskJoins compact joins. Updating a
+// known task keeps its original insertion position. Overflow evicts the oldest
+// pending join, preserving current roster matches. The caller holds mu.
+func (h *sessionBackgroundTaskHold) retainStart(e turnevent.BackgroundTaskStarted) {
+	j := backgroundTaskJoin{e.TaskID, e.ToolCallID, slices.Contains(e.TruncatedFields, "tool_call_id")}
+	for i := range h.joins {
+		if h.joins[i].taskID == e.TaskID {
+			h.joins[i] = j
+			return
+		}
+	}
+	if len(h.joins) == maxBackgroundTaskJoins {
+		oldest := slices.IndexFunc(h.joins, func(j backgroundTaskJoin) bool { return !h.listsTask(j.taskID) })
+		if oldest < 0 {
+			return
+		}
+		h.joins = slices.Delete(h.joins, oldest, oldest+1)
+	}
+	h.joins = append(h.joins, j)
+}
+
+// enrichedRoster derives annotations into an independent copy, never into the
+// raw roster, so child reset and repeated reads cannot retain stale markers.
+// The caller holds mu.
+func (h *sessionBackgroundTaskHold) enrichedRoster() turnevent.BackgroundTaskRoster {
+	out := cloneBackgroundTaskRoster(h.roster)
+	for i := range out.Tasks {
+		row := &out.Tasks[i]
+		for _, j := range h.joins {
+			if row.TaskID != j.taskID {
+				continue
+			}
+			row.ToolCallID = j.toolCallID
+			if j.truncated && !slices.Contains(row.TruncatedFields, "tool_call_id") {
+				row.TruncatedFields = append(row.TruncatedFields, "tool_call_id")
+			}
+			break
+		}
 	}
 	return out
 }
