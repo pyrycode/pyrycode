@@ -23,6 +23,18 @@ intermittently return `ErrPoolNotRunning`; a single green run can miss the race
 and draining as cleanup before assertions, so a fatal assertion cannot leave
 the pool running.
 
+### Cancellation and completed eviction
+
+An already-cancelled context cannot deterministically force `Session.Evict`
+to fail: its `select` may choose the completed eviction channel and return
+nil when both completion and `ctx.Done()` are ready. `Pool.Remove` calls this
+after committing registry removal, so cancellation alone also cannot guarantee
+a post-commit removal error. `TestConversationAgentSwitch_PostCommitRemovalErrorReportsNewID`
+relied on that assumption and intermittently failed with a successful switch
+([#2773](https://github.com/pyrycode/pyrycode/issues/2773)). An error-path fixture
+must control eviction completion so the cancellation branch is the only ready
+outcome; repeating a race run until green does not prove that branch.
+
 ### Why no `TestHelperProcess` re-exec helper
 
 The parent spec considered duplicating `internal/supervisor`'s `TestHelperProcess` re-exec pattern into the sessions package (~20 lines) per the project's "duplicate, don't export test surface" convention. The blocker: `supervisor.Config.helperEnv` is unexported and is the only way to pass test-only env to the spawned child without polluting the parent test process's `os.Environ()`. External packages cannot set it.
