@@ -383,7 +383,7 @@ func TestParser_ParentToolUseID_LeavesTheUserSidecarIntact(t *testing.T) {
 		`"message":{"role":"user","content":[`+
 			`{"tool_use_id":"toolu_child","type":"tool_result","content":"ok"}]}`,
 		`"parent_tool_use_id":{"nope":1}`,
-		`"tool_use_result":{"type":"text","file":{"filePath":"/tmp/x","content":"a\nb\n","numLines":2,"startLine":1,"totalLines":2}}`)
+		`"tool_use_result":`+editSidecar(`[{"lines":["+a","-b"]}]`))
 	if got := toolUpdateFrom(t, parseOneLine(t, line)).ResultDetail; got == "" {
 		t.Errorf("ResultDetail = %q, want non-empty — an unreadable parent_tool_use_id must not "+
 			"blank the tool_use_result sidecar", got)
