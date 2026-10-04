@@ -62,6 +62,15 @@ For combined predicates, exercise each branch independently. A shared log site c
 prove which branch was taken if both inputs satisfy the first condition. Use an
 independent observable result of the path under test.
 
+An already-cancelled context does not force an error when a `select` can also
+observe completion: either ready case can win. Hold completion behind a
+test-owned gate when proving the cancellation path. A runner gated during
+teardown must be released before cleanup cancels and waits for its pool.
+`t.Cleanup` runs in reverse registration order, so register the gate release
+after the pool helper's cleanup; otherwise shutdown waits on a runner whose
+release cannot run until that wait ends. See [session eviction fixtures](sessions-package-testing.md#cancellation-and-completed-eviction)
+for the `gatedRunner` and `runPoolReady` example.
+
 A `context.WithCancel` stand-in cannot prove OS-signal shutdown classification:
 `signal.NotifyContext` can record a signal-specific cause instead of
 `context.Canceled`. Send real SIGTERM and SIGINT in isolated helper subprocesses,

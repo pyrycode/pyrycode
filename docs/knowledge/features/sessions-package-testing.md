@@ -38,11 +38,25 @@ An already-cancelled context cannot deterministically force `Session.Evict`
 to fail: its `select` may choose the completed eviction channel and return
 nil when both completion and `ctx.Done()` are ready. `Pool.Remove` calls this
 after committing registry removal, so cancellation alone also cannot guarantee
-a post-commit removal error. `TestConversationAgentSwitch_PostCommitRemovalErrorReportsNewID`
-relied on that assumption and intermittently failed with a successful switch
-([#2773](https://github.com/pyrycode/pyrycode/issues/2773)). An error-path fixture
-must control eviction completion so the cancellation branch is the only ready
-outcome; repeating a race run until green does not prove that branch.
+a post-commit removal error. Completed removal may legitimately report success
+despite cancellation; error-path fixtures must control completion rather than
+change that production contract.
+
+`TestConversationAgentSwitch_PostCommitRemovalErrorReportsNewID` uses
+`gatedRunner.Run`, which waits for cancellation and then for a test-owned
+`release` channel to close. `Session.runActive` cannot finish draining the
+runner or reach `endEvict` to close `evictedCh` while the gate is held, leaving
+`ctx.Done()` as the only ready case during `Switch`. The test checks that the
+new binding is committed with one history entry and exactly one transition is
+recorded even when old-session removal reports an error
+([#2773](https://github.com/pyrycode/pyrycode/issues/2773)); repeating a race run
+until green with an ungated runner does not prove that branch.
+
+Register the release cleanup after `runPoolReady`: `t.Cleanup` runs LIFO, so the
+gate opens before the helper cancels and joins the pool. Reversing registration
+makes shutdown wait on runners whose release cannot run until the join's
+15-second timeout expires. This applies even when a fatal assertion ends the
+test early. See [development verification](development-verification.md#prove-that-tests-distinguish-the-change).
 
 ### Why no `TestHelperProcess` re-exec helper
 
