@@ -50,8 +50,8 @@ func requireWaitIdle(t *testing.T, tr *turnBusyTracker, convID string) {
 
 // --- unit tier: the tracker driven directly ---------------------------------
 
-// The opener set is a WHITELIST — exactly the five variants that open a turn
-// today, with everything else leaving the conversation idle.
+// The opener set is a WHITELIST: thinking events and top-level text/tool
+// events open a turn; parent-attributed subagent events leave it unchanged.
 //
 // Stall, ApiRetry and Compacting are tui-driver signals that the stream-json
 // sink's only producer —
@@ -97,6 +97,79 @@ func TestTurnBusyTracker_OpenerWhitelist(t *testing.T) {
 			tr.observe("sess-a", tc.ev)
 			if got := tr.Busy(testConvID); got != tc.wantBusy {
 				t.Errorf("Busy after %T = %v, want %v", tc.ev, got, tc.wantBusy)
+			}
+		})
+	}
+}
+
+// Parent-attributed activity must be neutral from idle and during a main turn.
+// Colliding IDs matter: a child's result must never finish the spawning call.
+func TestTurnBusyTracker_ParentAttributedEvents(t *testing.T) {
+	t.Parallel()
+	events := []struct {
+		name string
+		ev   turnevent.Event
+	}{
+		{"text", turnevent.TextChunk{ParentToolCallID: "main", Text: "child"}},
+		{"tool start", turnevent.ToolStart{ParentToolCallID: "main", ToolCallID: "child"}},
+		{"colliding tool start", turnevent.ToolStart{ParentToolCallID: "main", ToolCallID: "main"}},
+		{"tool update", turnevent.ToolUpdate{ParentToolCallID: "main", ToolCallID: "child"}},
+		{"colliding tool update", turnevent.ToolUpdate{ParentToolCallID: "main", ToolCallID: "main"}},
+	}
+	for _, tc := range events {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := turnMarkFor(tc.ev); got != turnMarkNone {
+				t.Errorf("turnMarkFor = %v, want none", got)
+			}
+			if got := toolCallDeltaFor(tc.ev); got != (toolCallDelta{}) {
+				t.Errorf("toolCallDeltaFor = %+v, want no delta", got)
+			}
+			for _, open := range []bool{false, true} {
+				tr := newTurnBusyTracker(stubBusyResolve(map[string]string{"sess-a": testConvID}), discardLogger())
+				if open {
+					tr.observe("sess-a", turnevent.ToolStart{ToolCallID: "main", Title: "Agent"})
+				}
+				tr.mu.Lock()
+				changed := tr.changed
+				tr.mu.Unlock()
+				tr.observe("sess-a", tc.ev)
+				if tr.Busy(testConvID) != open || tr.ToolCallInFlight(testConvID, "main") != open {
+					t.Errorf("open=%v: child changed main busy or retained call", open)
+				}
+				if tr.ToolCallInFlight(testConvID, "child") {
+					t.Errorf("open=%v: retained child call", open)
+				}
+				select {
+				case <-changed:
+					t.Errorf("open=%v: child broadcast a state change", open)
+				default:
+				}
+			}
+		})
+	}
+}
+
+func TestTurnBusyTracker_TopLevelSpawningCall(t *testing.T) {
+	t.Parallel()
+	for _, title := range []string{"Agent", "Task"} {
+		t.Run(title, func(t *testing.T) {
+			t.Parallel()
+			tr := newTurnBusyTracker(stubBusyResolve(map[string]string{"sess-a": testConvID}), discardLogger())
+			start := turnevent.ToolStart{ToolCallID: "main", Title: title}
+			tr.observe("sess-a", start)
+			tr.observe("sess-a", turnevent.TextChunk{Text: "main reply"})
+			if !tr.Busy(testConvID) || !tr.ToolCallInFlight(testConvID, "main") {
+				t.Fatal("top-level spawning call not retained in open turn")
+			}
+			tr.observe("sess-a", turnevent.ToolUpdate{ToolCallID: "main", Status: turnevent.ToolStatusCompleted})
+			if !tr.Busy(testConvID) || tr.ToolCallInFlight(testConvID, "main") {
+				t.Fatal("top-level result must drop the call while leaving the turn open")
+			}
+			tr.observe("sess-a", start)
+			tr.observe("sess-a", turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+			if tr.Busy(testConvID) || tr.ToolCallInFlight(testConvID, "main") {
+				t.Fatal("main turn end must clear busy and retained calls")
 			}
 		})
 	}
@@ -1001,15 +1074,15 @@ func TestTurnBusyTracker_ToolCallCapturedMidTurn(t *testing.T) {
 	}
 }
 
-// #1917: toolCallDeltaFor is pure and switches on the Go variant type only.
+// toolCallDeltaFor classifies top-level tool variants; parent attribution
+// excludes subagent events from main-turn retention.
 //
 // The ToolUpdate rows are one per ToolStatus value, all expecting the SAME drop
 // — that is what pins "Status is deliberately not read" and reddens a later
-// `switch upd.Status` refinement. Reading it would break the discipline
-// turnMarkFor states, that no content claude produced steers the answer, and
-// would fail OPEN: a fabricated in-progress tool_result would pin a finished
-// call in flight instead of dropping it. In production a ToolUpdate is always
-// terminal anyway — the parser emits it from one site, emitUser, and toolStatus
+// `switch upd.Status` refinement. Reading status would fail OPEN: a fabricated
+// in-progress tool_result would pin a finished call in flight instead of dropping
+// it. In production a ToolUpdate is always terminal anyway — the parser emits
+// it from one site, emitUser, and toolStatus
 // maps is_error onto completed/failed only.
 //
 // The PermissionRequest row is the interesting negative: it is the one other
@@ -1027,7 +1100,7 @@ func TestToolCallDeltaFor_ClassifiesToolVariantsOnly(t *testing.T) {
 		{"tool_update drops (in_progress)", turnevent.ToolUpdate{ToolCallID: "tu-1", Status: turnevent.ToolStatusInProgress}, toolCallDelta{id: "tu-1"}},
 		{"tool_update drops (completed)", turnevent.ToolUpdate{ToolCallID: "tu-1", Status: turnevent.ToolStatusCompleted}, toolCallDelta{id: "tu-1"}},
 		{"tool_update drops (failed)", turnevent.ToolUpdate{ToolCallID: "tu-1", Status: turnevent.ToolStatusFailed}, toolCallDelta{id: "tu-1"}},
-		// The ID alone is the discriminant — an empty one is no delta whatever
+		// For top-level events an empty ID is no delta whatever
 		// `started` says, which is why setBusy tests `tool.id != ""` and never the
 		// zero VALUE. Asserting the zero value here instead would pin a normalisation
 		// the classifier deliberately does not perform, so this row is named for what
