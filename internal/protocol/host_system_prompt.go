@@ -1,7 +1,7 @@
 package protocol
 
-// Daemon-wide host system prompt frames are pure wire data. Handler wiring,
-// runtime validation and I/O are pending #2768. Both inbound verbs use
+// Daemon-wide host system prompt frames are pure wire data. Relay handlers
+// delegate runtime validation and durable I/O to the sessions pool. Both inbound verbs use
 // authenticated paired-client map dispatch, with no conversation/session lookup
 // and no interactive-capability gate.
 //

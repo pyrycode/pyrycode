@@ -1197,18 +1197,19 @@ func runSupervisor(args []string) error {
 	}
 
 	relayCleanup, approvalSurface, announceAttachment, announceConversation, announcePost, pairingProvider, err := startRelay(ctx, logger, relayWiring{
-		instanceName:  *name,
-		relayURL:      relayURL,
-		version:       Version,
-		allowInsecure: allowInsecure,
-		shutdown:      cancelCause,
-		convReg:       convReg,
-		workspaceBase: workspaceBase,
-		readFolders:   readFolders,
-		creator:       sessionMinter{pool, modelVocabulary},
-		router:        router,
-		queue:         queue,
-		active:        active,
+		instanceName:     *name,
+		relayURL:         relayURL,
+		version:          Version,
+		allowInsecure:    allowInsecure,
+		shutdown:         cancelCause,
+		convReg:          convReg,
+		hostSystemPrompt: pool,
+		workspaceBase:    workspaceBase,
+		readFolders:      readFolders,
+		creator:          sessionMinter{pool, modelVocabulary},
+		router:           router,
+		queue:            queue,
+		active:           active,
 		activeInterrupter: activeInterrupter{
 			currentConv: active.CurrentConversation,
 			resolveRunner: func(convID string) (sessions.Runner, bool) {

@@ -145,6 +145,16 @@ afterward. See
 [e2e-realclaude-interactive-stream-hook-blocked-banner-test-go.md](e2e-realclaude-interactive-stream-hook-blocked-banner-test-go.md)'s
 `letRefusedTurnSettle` for the pattern.
 
+For requester-only replies, a correlated request can serve as a barrier without
+expiring a receive deadline. `TestRelayV2_HostSystemPrompt` follows a successful
+read or write with a read on the bystander connection, requiring the next reply
+to carry that read's `in_reply_to`. A misdelivered reply already queued there
+fails correlation; a further requester read catches duplicate success replies.
+Both connections remain usable for the rest of the restart proof. This pattern
+depends on ordered dispatch/delivery and checks the next reply directly rather
+than skipping unrelated replies until the expected one appears. See
+[daemon-wide relay replies](../../protocol-mobile.md#daemon-wide-host-system-prompt).
+
 ## One install key per token (#2734)
 
 `InstallKey(token string) []byte` (`internal/e2e/internal/fakephone/install.go`) derives a 32-byte Noise static private key deterministically from `token` (SHA-256 of a fixed prefix plus the token). It exists because the v2 daemon now binds a pairing to the Noise static key of its first accepted connection ([`devices-registry-redemption-and-binding.md`](devices-registry-redemption-and-binding.md) § `BindStaticKey`): a test that reconnects, or opens a second connection, with the same token must present the same key each time, the way a real phone does by keeping one keypair per paired daemon in its Keystore. A helper that calls `GenerateKey`/`ecdh.X25519().GenerateKey` fresh per connection is modelling *two* installs sharing one token, which the daemon now refuses as of #2734.
