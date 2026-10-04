@@ -43,9 +43,12 @@ hand-curated "latest" could still fail to be one. `daemonIdle` refuses to
 act while any conversation, Claude or Codex, has an open turn, or while any
 session was touched within a 15-minute quiet window; a connected phone is
 deliberately not part of that signal, since a phone left connected overnight
-would otherwise hold every update off forever. The daemon checks both on
-every tick and takes no partial action: an eligible release found while busy
-is simply downloaded on a later tick, not now.
+would otherwise hold every update off forever. After a scheduled check selects
+an eligible release, it retains that tag and polls `daemonIdle` once a minute
+until idle or cancelled (#2756). Waiting performs no downloads or repeated
+latest-release requests, even across four-hour boundaries. At the first idle
+poll it downloads and installs the selected release; a later change to latest
+does not change the selection. Eligibility and idle remain independent.
 
 ## Rationale
 
@@ -77,11 +80,12 @@ a turn can open during the download.
   the network and the clock directly; only the install path itself needs the
   signed httptest fixture `cmd/pyry/update_test.go` already built for
   `pyry update`.
-- The quiet window and the startup delay are the only timing knobs; there is
-  no backoff or jitter. A fleet of daemons started near the same time checks
-  near the same time — accepted because the GitHub request is anonymous and
-  a once-per-four-hours check stays far under the rate limit (see the plan's
-  Security review).
+- Timing uses a two-minute startup delay, a 15-minute session quiet window,
+  one-minute idle polls before installation and restart, and a four-hour retry
+  delay after an unsuccessful check completes. There is no backoff or jitter.
+  A fleet of daemons started near the same time checks near the same time —
+  accepted because the GitHub request is anonymous and a once-per-four-hours
+  check stays far under the rate limit (see the plan's Security review).
 
 ## Related
 
