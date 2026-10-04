@@ -158,12 +158,11 @@ func TestRelayV2_StreamAnnouncedResetFollowsClaude(t *testing.T) {
 		}
 		return got
 	}
-	// driveTurn sends one user turn and drains to its turn_end, counting the
-	// session_transition frames that interleave. Counting them HERE rather than in a
-	// separate drain is what makes "exactly one" assertable: the frames arrive
-	// unsolicited, interleaved with the turn's own, and a later read would have
-	// already discarded them.
-	driveTurn := func(reqID uint64, convID, msgID, text string) []protocol.SessionTransitionPayload {
+	// driveTurn observes both turn completion and the expected reset. The transition
+	// and turn emitters run on separate goroutines: parsing the reset before the
+	// result does not order their wire frames. Keep collecting after turn_end when
+	// the reset frame has not arrived yet, without discarding either observation.
+	driveTurn := func(reqID uint64, convID, msgID, text string, wantReset bool) []protocol.SessionTransitionPayload {
 		t.Helper()
 		sealSend(protocol.Envelope{
 			ID:   reqID,
@@ -176,11 +175,13 @@ func TestRelayV2_StreamAnnouncedResetFollowsClaude(t *testing.T) {
 			}),
 		})
 		var transitions []protocol.SessionTransitionPayload
+		turnEnded := false
 		deadline := time.Now().Add(30 * time.Second)
 		for {
 			env, ok := nextEnv(deadline)
 			if !ok {
-				t.Fatalf("the turn never closed (no turn_end for conversation %s after %q)", convID, text)
+				t.Fatalf("turn/reset observations incomplete for conversation %s after %q: turn ended=%v, transitions=%d",
+					convID, text, turnEnded, len(transitions))
 			}
 			if env.Type == protocol.TypeError {
 				t.Fatalf("unexpected error envelope during the turn: %s", string(env.Payload))
@@ -193,6 +194,9 @@ func TestRelayV2_StreamAnnouncedResetFollowsClaude(t *testing.T) {
 				transitions = append(transitions, p)
 			}
 			if env.Type == protocol.TypeTurnEnd {
+				turnEnded = true
+			}
+			if turnEnded && (!wantReset || len(transitions) > 0) {
 				return transitions
 			}
 		}
@@ -235,8 +239,9 @@ func TestRelayV2_StreamAnnouncedResetFollowsClaude(t *testing.T) {
 
 	// Turn one: the rider writes the announcement BEFORE the reply, so this
 	// turn_end implies the announcement has already been through the parser, the
-	// follower and the pool re-key. No sleep, no poll.
-	transitions := driveTurn(sendReqID, convID, "m-2135-1", "e2e-2135 announce a reset")
+	// follower and the pool re-key. The independent transition emitter may still
+	// be sending its frame, so await that observation as well. No sleep, no poll.
+	transitions := driveTurn(sendReqID, convID, "m-2135-1", "e2e-2135 announce a reset", true)
 
 	if len(transitions) != 1 {
 		t.Fatalf("client saw %d session_transition frames, want exactly 1: %+v — "+
@@ -272,7 +277,7 @@ func TestRelayV2_StreamAnnouncedResetFollowsClaude(t *testing.T) {
 	// a second turn from the STILL-RUNNING child must still reach the phone. The
 	// child was never replaced, so every event it produces now carries the rotated
 	// tag or none of them cross the drain's active-session gate.
-	if got := driveTurn(send2ReqID, convID, "m-2135-2", "e2e-2135 after the reset"); len(got) != 0 {
+	if got := driveTurn(send2ReqID, convID, "m-2135-2", "e2e-2135 after the reset", false); len(got) != 0 {
 		t.Errorf("client saw %d further session_transition frames on the second turn, want 0: %+v — "+
 			"the reset is announced once and re-announcing the same id must change nothing", len(got), got)
 	}
