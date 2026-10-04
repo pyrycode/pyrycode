@@ -69,3 +69,7 @@ Pending for the documentation stage: in `docs/knowledge/features/streamsup-packa
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-04
+
+## Revisions
+
+- 2026-10-04: Corrected the sizing sketch's guard count: implementation uses five attribution checks across the two classifiers for three event variants. Total written work remains about 400 lines, with no exported types or consumer changes. The design and product contract are unchanged.
