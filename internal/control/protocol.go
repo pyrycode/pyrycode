@@ -195,7 +195,34 @@ const (
 	// and explicit remote-permission choice; Response.Pairing carries the
 	// provider's opaque pairing string.
 	VerbPairingMint Verb = "pairing.mint"
+
+	// VerbUpdateWhenIdle asks the provider to select and schedule the latest
+	// release. It carries no payload; Response.UpdateWhenIdle is a decision,
+	// returned before waiting for idle, downloading, installing or restarting.
+	VerbUpdateWhenIdle Verb = "update.when-idle"
 )
+
+// UpdateDecision identifies the provider's release/scheduling decision.
+type UpdateDecision string
+
+const (
+	UpdateUpToDate    UpdateDecision = "up-to-date"
+	UpdateNotEligible UpdateDecision = "not-eligible"
+	UpdateWillInstall UpdateDecision = "will-install"
+)
+
+// UpdateWhenIdleResult describes a scheduling decision, not a completed update.
+// Not-eligible requires Reason; will-install requires the selected or already
+// pending ReleaseTag. Release selection and eligibility belong to the provider.
+type UpdateWhenIdleResult struct {
+	Decision   UpdateDecision `json:"decision"`
+	Reason     string         `json:"reason,omitempty"`
+	ReleaseTag string         `json:"releaseTag,omitempty"`
+}
+
+// updateWhenIdleTimeout bounds client I/O and server response writes. It allows
+// a provider's 60-second metadata check but does not bound provider execution.
+const updateWhenIdleTimeout = 70 * time.Second
 
 // JSONLPolicy is the wire-level enum selecting how the daemon disposes of a
 // removed session's on-disk JSONL transcript file. Empty string is treated
@@ -463,22 +490,24 @@ type AttachFileResult struct {
 //   - AttachFile: minted attachment id for VerbAttachFile
 //   - ChannelNew: minted conversation id for VerbChannelNew
 //   - Pairing: opaque bearer string for VerbPairingMint
+//   - UpdateWhenIdle: scheduling decision for VerbUpdateWhenIdle
 //   - OK: success acknowledgment for verbs without a typed payload (e.g. VerbStop)
 //
 // Error is set when the server rejects the request.
 type Response struct {
-	Status        *StatusPayload       `json:"status,omitempty"`
-	Logs          *LogsPayload         `json:"logs,omitempty"`
-	SessionsNew   *SessionsNewResult   `json:"sessionsNew,omitempty"`   // populated for VerbSessionsNew
-	SessionsList  *SessionsListPayload `json:"sessionsList,omitempty"`  // populated for VerbSessionsList (1.1b-B1)
-	SessionsHasID *SessionsHasIDResult `json:"sessionsHasID,omitempty"` // populated for VerbSessionsHasID (1.3c-1)
-	Approve       *ApproveResult       `json:"approve,omitempty"`       // populated for VerbMCPApprove
-	AttachFile    *AttachFileResult    `json:"attachFile,omitempty"`    // populated for VerbAttachFile
-	ChannelNew    *ChannelNewResult    `json:"channelNew,omitempty"`    // populated for VerbChannelNew
-	Pairing       *PairingResult       `json:"pairing,omitempty"`       // populated for VerbPairingMint
-	OK            bool                 `json:"ok,omitempty"`
-	Error         string               `json:"error,omitempty"`
-	ErrorCode     ErrorCode            `json:"errorCode,omitempty"` // typed sentinel token (1.1d-B1)
+	Status         *StatusPayload        `json:"status,omitempty"`
+	Logs           *LogsPayload          `json:"logs,omitempty"`
+	SessionsNew    *SessionsNewResult    `json:"sessionsNew,omitempty"`   // populated for VerbSessionsNew
+	SessionsList   *SessionsListPayload  `json:"sessionsList,omitempty"`  // populated for VerbSessionsList (1.1b-B1)
+	SessionsHasID  *SessionsHasIDResult  `json:"sessionsHasID,omitempty"` // populated for VerbSessionsHasID (1.3c-1)
+	Approve        *ApproveResult        `json:"approve,omitempty"`       // populated for VerbMCPApprove
+	AttachFile     *AttachFileResult     `json:"attachFile,omitempty"`    // populated for VerbAttachFile
+	ChannelNew     *ChannelNewResult     `json:"channelNew,omitempty"`    // populated for VerbChannelNew
+	Pairing        *PairingResult        `json:"pairing,omitempty"`       // populated for VerbPairingMint
+	UpdateWhenIdle *UpdateWhenIdleResult `json:"updateWhenIdle,omitempty"`
+	OK             bool                  `json:"ok,omitempty"`
+	Error          string                `json:"error,omitempty"`
+	ErrorCode      ErrorCode             `json:"errorCode,omitempty"` // typed sentinel token (1.1d-B1)
 }
 
 // SessionsNewResult carries the result of a successful sessions.new

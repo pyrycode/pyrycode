@@ -11,6 +11,18 @@ Three test files mirror the production layout. Stdlib `testing` only.
 - **`pool_remove_test.go`** (1.1d-A1) — `HappyPath` (Create + Remove a non-bootstrap session: assert child PID gone, `Lookup` returns `ErrSessionNotFound`, registry on disk has bootstrap only, stub JSONL byte-identical); `Bootstrap_Rejected` (Remove bootstrap returns `ErrCannotRemoveBootstrap`; registry bytes/mtime + `List` snapshot + JSONL byte-identical); `UnknownID` (zero-UUID returns `ErrSessionNotFound`; same byte-identity assertions); `RaceWithList` (concurrent Create+Remove writers and `List` readers under `-race`); `TerminatesUncooperativeChild` (`/bin/sh -c 'trap "" TERM INT HUP; exec sleep 86400'` as the fake claude — SIGKILL via `exec.CommandContext` cancel terminates it inside a 10s budget, no real-time `time.Sleep` in the assertion).
 - **`session_test.go`** — `State` delegation, `Attach` with no bridge, `Attach` busy via `io.Pipe` (first attach blocks on input, second races and gets `supervisor.ErrBridgeBusy`), `Run` ctx-cancel via a real `/bin/sleep 3600` child.
 
+### Pool readiness in runner fixtures
+
+`recordingRunnerFactory` captures argv when a runner is constructed, including
+the bootstrap during `Pool.New`. `waitArgvRaw` proves those arguments were
+composed; it does not prove that `Pool.Run` has installed `runGroup`/`runCtx`.
+After starting `Run` in the background, wait for [`Pool.Ready()`](sessions-package-key-types-config-bootstrapevicted-pool-ready.md)
+before calling `Mint` or `Create`. Using argv capture as the startup signal can
+intermittently return `ErrPoolNotRunning`; a single green run can miss the race
+([#2765](https://github.com/pyrycode/pyrycode/issues/2765)). Register cancellation
+and draining as cleanup before assertions, so a fatal assertion cannot leave
+the pool running.
+
 ### Why no `TestHelperProcess` re-exec helper
 
 The parent spec considered duplicating `internal/supervisor`'s `TestHelperProcess` re-exec pattern into the sessions package (~20 lines) per the project's "duplicate, don't export test surface" convention. The blocker: `supervisor.Config.helperEnv` is unexported and is the only way to pass test-only env to the spawned child without polluting the parent test process's `os.Environ()`. External packages cannot set it.
