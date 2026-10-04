@@ -519,6 +519,47 @@ func (r *Registry) SetMuted(id ConversationID, muted bool) bool {
 	return false
 }
 
+// AdvanceReadUpTo raises the host read mark of the conversation whose ID equals
+// id (#2780) to max(held, min(upTo, latest)), where latest is the newest durable
+// history entry id. A proposed mark past latest cannot mark future entries read,
+// and a lower or equal one changes nothing. It returns the stored record and
+// whether the mark advanced; a miss returns ErrConversationNotFound.
+//
+// Unlike the other mutators it persists to path itself, and only on an actual
+// advance. The compare, the write and a failed write's revert all run while
+// saveMu and mu are held, as SwitchSession does: concurrent advances cannot
+// regress the held or the saved mark, and no reader ever sees an advance that
+// is not on disk. A retry after a failed save therefore advances afresh rather
+// than reading as a no-op.
+func (r *Registry) AdvanceReadUpTo(id ConversationID, upTo, latest uint64, path string) (Conversation, bool, error) {
+	return r.advanceReadUpTo(id, upTo, latest, path, writeRegistrySnapshot)
+}
+
+func (r *Registry) advanceReadUpTo(id ConversationID, upTo, latest uint64, path string, persist func(string, registryFile) error) (Conversation, bool, error) {
+	r.saveMu.Lock()
+	defer r.saveMu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.conversations {
+		c := &r.conversations[i]
+		if c.ID != id {
+			continue
+		}
+		held := c.ReadUpTo
+		next := max(held, min(upTo, latest))
+		if next == held {
+			return *c, false, nil
+		}
+		c.ReadUpTo = next
+		if err := persist(path, r.snapshotLocked()); err != nil {
+			c.ReadUpTo = held
+			return Conversation{}, false, err
+		}
+		return *c, true, nil
+	}
+	return Conversation{}, false, ErrConversationNotFound
+}
+
 // SetSystemPrompt sets the operator-set system prompt of the conversation whose
 // ID equals id. It sets exactly one field — SystemPrompt — so id, cwd, name,
 // promoted/archived state, and session binding are structurally untouched, the
