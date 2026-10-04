@@ -68,6 +68,7 @@ func newOperatorMessageHistory(store *history.Store, push func(operatorMessage),
 			// The client's tap time, re-formatted HERE from the time the handler
 			// parsed — never the client's own bytes.
 			ClientSentAt: formatClientSentAt(msg.ClientSentAt),
+			SentNow:      msg.SentNow,
 		})
 		if err != nil {
 			// Defensive, matching both #2114 producers: MessagePayload is strings
