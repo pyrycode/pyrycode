@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,7 +42,7 @@ func TestRealClaudeStopBackgroundTaskCompletion(t *testing.T) {
 			continue
 		}
 		for _, row := range p.Tasks {
-			if row.TaskID != "" && !slices.Contains(row.TruncatedFields, "task_id") {
+			if row.TaskID != "" && row.TaskType == "local_bash" && strings.Contains(row.Description, fifo) && !slices.Contains(row.TruncatedFields, "task_id") {
 				taskID = row.TaskID
 				break
 			}
