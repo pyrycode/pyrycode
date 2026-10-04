@@ -858,18 +858,30 @@ surface.
 ```
 
 `workspace_root` is optional (`omitempty`: absent, not `null`). For an
-authorised peer, it reports the absolute base on the **daemon host** that
-corresponds to the `~/pyry-workspace/` convention, so a client can preview the
-destination of a relative workspace path. It is a lexical report only: the
-directory need not exist, and computing the value neither inspects nor creates
-it. If the daemon cannot resolve an absolute home directory, the field is
-omitted and the handshake otherwise succeeds.
+admitted peer, it reports an absolute workspace base on the **daemon host**,
+so a client can preview the destination of a relative workspace path. The
+daemon's relay caller may supply a resolved base through the optional
+`V2SessionConfig.WorkspaceBase`. A supplied absolute value is advertised
+verbatim, without cleaning its spelling or resolving symlinks. An explicitly
+empty or relative value omits the key without falling back to HOME; omission
+does not fail the handshake.
+
+Only an unsupplied base (`WorkspaceBase == nil`) uses the legacy
+`WorkspaceRoot()` default, `$HOME/pyry-workspace`. If HOME is unknown or
+non-absolute, that default is omitted. A supplied absolute base is independent
+of HOME. This is advertisement only and grants no filesystem access: the
+directory need not exist, and selecting the value neither inspects nor creates
+it. Daemon startup resolution and HOME confinement are separate caller
+responsibilities.
 
 The Noise responder also sends a decryptable `hello_ack` before delivering the
 encrypted rejection to a peer whose device token is invalid, expired or
-revoked. Such an acknowledgement omits `workspace_root`: Noise authentication
-and encryption do not replace device-token authorisation for daemon-host
-metadata. The value is never written to daemon logs.
+revoked, whose static key fails install binding, or whose client version is
+refused. Every such acknowledgement omits `workspace_root`, including when an
+absolute base was supplied. Selection occurs only after token validation,
+client-version admission and atomic static-key binding: Noise authentication
+and encryption do not replace admission for daemon-host metadata. The value
+is never written to daemon logs or unencrypted routing fields.
 
 ### Capability negotiation (v2)
 

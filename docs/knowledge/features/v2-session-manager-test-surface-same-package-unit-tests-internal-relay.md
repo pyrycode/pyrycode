@@ -2,6 +2,14 @@
 
 Each test constructs a `V2SessionManager` with an in-memory `outbound` recorder (mutex-guarded slice; goroutine-safe) and a `devices.Registry` built inline.
 
+Rejection fixtures must start with one intended device record: `Registry.Add`
+appends, and `Registry.Validate` uses the first matching token hash. Appending
+an expired or differently key-bound record beside an existing valid record
+still authenticates against the first one. Assert the expected rejection event
+as well as the encrypted error and close shape, so an omission assertion cannot
+pass without reaching the intended denial. `TestV2Session_HelloAckWorkspaceRoot_Rejected`
+uses this pattern for token, install-binding and version refusals (#2760).
+
 Reproducing a load-sensitive flake in this suite: a `GOMAXPROCS`/`-count` contention ladder is unreliable, and a whole-package `-count=10` run under `GOMAXPROCS=1` can hit Go's own 10-minute `-test.timeout` before it ever reproduces. A production-side `time.Sleep` mutant that widens the specific hazard window, run via `go test -overlay` pointed at a pre-fix test file (`git show <ref>:<file>`), reproduces deterministically and names the mechanism directly instead of waiting for the scheduler to expose it.
 
 - `TestV2Session_HappyPath` — paired-device `hello` in early-data → state advances to `V2StateOpen`; `noise_resp` envelope on `Outbound` carries hello_ack; CipherStates non-nil; no close-code emitted.
