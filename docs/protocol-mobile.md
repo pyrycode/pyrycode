@@ -1820,9 +1820,35 @@ Each element of `tasks`:
 | Field | Type | Meaning |
 |---|---|---|
 | `task_id` | string | The join key back to the `background_task_started` that opened the task. |
+| `tool_call_id` | string | The launching tool call, joined from a retained `background_task_started` for the same `task_id` in this session and child lifetime. **Always present**, including `""` when no retained match exists — see below. |
 | `task_type` | string | claude's kind for the task (`local_bash` is the only observed value). |
-| `description` | string | The task's label, under a **tighter** cap than `background_task_started.description` — here it is one label in a list whose length claude chooses, and the full-length copy already crossed the wire on the `background_task_started` this row joins back to. |
-| `truncated_fields` | array of string \| null | Names of **this row's** cut fields: `task_id`, `task_type`, `description`. `null` when nothing was cut. Each row reports its own; there is no hoisted or flattened list. |
+| `description` | string | The task's label, under a **tighter** cap than `background_task_started.description` — here it is one label in a list whose length claude chooses; a client that has the matching start can use its fuller description. |
+| `truncated_fields` | array of string \| null | Names of **this row's** cut fields: `task_id`, `task_type`, `description`, `tool_call_id`. The joined id carries its start's cut marker, added once after existing row markers. `null` when nothing was cut. Each row reports its own; there is no hoisted or flattened list. |
+
+Example payload with a retained match and an unmatched row:
+
+```json
+{
+  "conversation_id": "c1",
+  "tasks": [
+    {
+      "task_id": "task_01ABC",
+      "tool_call_id": "tool_01START",
+      "task_type": "local_bash",
+      "description": "grep -rn 'a<b&c' .",
+      "truncated_fields": ["description", "tool_call_id"]
+    },
+    {
+      "task_id": "task_02DEF",
+      "tool_call_id": "",
+      "task_type": "local_bash",
+      "description": "sleep 300",
+      "truncated_fields": null
+    }
+  ],
+  "dropped_tasks": 3
+}
+```
 
 Like its two siblings it is **binary → phone only** and `interactive`-gated. A
 frame emitted on the **live turn lane** carries an envelope-level `event_id`; a
@@ -1900,17 +1926,41 @@ carried rather than a name because a name-only report loses *how many* were lost
 per-row text cuts are a property of one row and ride that row's own
 `truncated_fields`.
 
-**There is no terminal, finish, or completion event in this family, and that is
-deliberate.** A task's disappearance from a later roster is the *available*
-finish signal, but that transition has never been observed, and the daemon does
-not report a finish it cannot detect. Diffing successive snapshots is a
-legitimate thing for a **client** to do on its own terms — it is simply not an
-inference the daemon makes on your behalf, so anything a client shows as
-"finished" is the client's own conclusion.
+**The roster does not infer task completion.** A terminal
+[`background_task_updated`](#background_task_updated) carries claude's reported
+status; roster replacement and join pruning synthesize no finish or diff event.
+Diffing successive snapshots is a legitimate thing for a **client** to do on its
+own terms, but it is not a completion inference the daemon makes on your behalf.
 
 Ordering within a turn is claude's, not the daemon's: a roster can arrive before
 or after the `background_task_started` for a task it lists. Join on `task_id`
 rather than assuming an order.
+
+**Launching-tool enrichment (#2753).** Claude's roster input carries only
+`task_id`, `task_type` and `description`; the daemon joins `tool_call_id` from the
+same task's retained start, using its already-bounded id (at most 256 bytes).
+`""` means no retained match, including an unseen, pruned or overflow-forgotten
+start. A roster that arrives before its start can be forwarded with an empty id;
+a later connect-time read gains the id even without another roster line. The
+start is forwarded unchanged and triggers no extra roster frame. Live rosters
+and connect-time reads use the same enrichment.
+
+Retention is bounded independently of the eight-row roster cap: **16** joins
+per session, protecting matches for the current capped roster and allowing
+pending starts for tasks not yet listed. At capacity, the oldest pending join
+is forgotten first; current-roster matches are protected. A repeated start
+updates its match without changing its insertion position. Each next roster
+discards every match it does not list, including pending starts. An empty roster
+therefore clears all matches. Neither forgetting nor pruning reports completion.
+
+Joins last only for the current child lifetime. Child exit clears all matches
+and their joined truncation markers, while the last reported roster remains
+retained. Reusing a task id after pruning or child replacement cannot inherit its
+old link. Enrichment is derived into independent copies of the raw roster, so
+repeated reads preserve existing row markers without accumulating duplicate
+`tool_call_id` markers. This adds a field to the existing frame under
+[Compatibility](#compatibility)'s additive rule; no new frame type, request verb
+or capability is introduced.
 
 **SECURITY.** Each row's `description` carries the same literal command line as
 `background_task_started.description`, under a tighter cap. The
@@ -5288,6 +5338,8 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 **Date:** 2026-05-16
 
 ## Changelog
+
+- `2026-10-04`: **Background-task roster rows now name their launching tool call** (#2753) — every [`background_task_roster`](#background_task_roster) row includes `tool_call_id`, joined from the same task's retained start within one session and child lifetime, or `""` without a retained match. Row `truncated_fields` carries the start's `tool_call_id` cut marker. A roster-before-start frame can be empty while a later connect-time read gains the id without a new roster line; starts trigger no extra roster. Retention protects current-roster matches within an independent 16-entry bound, forgets oldest pending matches on overflow, prunes absent matches on the next roster and clears joins on child exit. This is additive enrichment of the existing frame, with no new frame type, request verb or capability.
 
 - `2026-10-03`: **Every event is now attributed to the conversation its own session is bound to, not to whichever conversation holds the daemon's cursor** (#2739) — fixing the bug where a background conversation's events were dropped while another was active. This closes three loss points this file previously named as permanent: § [`model_list`](#model_list) and § [`slash_command_list`](#slash_command_list) both corrected their claims that the bootstrap child's menu/inventory is lost unconditionally and that a session rotation delivers no fresh one — both now reach their own conversation's live lane, history and event ring exactly like any other conversation's. § [`mcp_status`](#mcp_status) is corrected the same way: a status is no longer dropped for arriving before the daemon has a routed conversation cursor, since there is no longer such a cursor gate on this path. None of this widens what a client with the `interactive` capability already saw once connected and routed — it only recovers frames that used to be lost before a client ever got that far, now visible through [`request_history`](#request_history) and the existing connect-time reconciles. No wire shape, field or type changed.
 - `2026-10-03`: **[`capabilities`](#capabilities-multi_agent-2646)'s `mid_turn_input` now reports true for Claude sessions, and a send-now message's [`message`](#message) push and history entry land where claude actually read it** (#2730) — `settingsUpdaterAdapter.Capabilities` sets `mid_turn_input` from the session's harness: true for Claude, still false for Codex, whose write path starts a new turn rather than steering the running one. The interactive claude spawn now passes `--replay-user-messages`, so claude echoes every message back at the point it reads it, including one [`send_queued_now`](#send_queued_now) delivered mid-turn. The parser turns each echo into a content-free `turnevent.UserEcho` carrying only a SHA-256 digest of the echoed text — the echo text itself, which can name on-host attachment paths, never reaches the wire, a log line or history. A send-now message's `message` push and history entry now wait for its echo and commit then: after the `tool_result` the message interrupted, or as the next turn's opening line when claude only read it there. Without an echo — the child exits, or the turn is interrupted — they commit once the conversation's turn goes idle, exactly once either way. An ordinary (not sent-now) message is unaffected: it still commits at the write.

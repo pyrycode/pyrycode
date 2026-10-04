@@ -15,6 +15,15 @@ is still blocked, then returns the error and proves the waiting parser emits
 nothing. Otherwise a regression that reads the response before the write result
 is published can leave both simpler tests green.
 
+Seeding a factory runner through a retention hold also forwards those events
+into the downstream fan-in. Waiting for any queued event can therefore falsely
+signal child readiness before the child has produced output. Drain seeded events
+and wait for the child's own stdout before releasing it to exit.
+`TestBackgroundTaskJoin_FactoryChildExit` uses this ordering to prove join reset
+and preservation of the existing exit callbacks in both permission modes, then
+checks task-id reuse in the replacement child (#2753). A hold-only reset test
+cannot detect missing factory callback wiring.
+
 **#1630 added three tests, all pure insertions — the four argv-through-a-real-spawn pins and the three `buildArgs`-shape tests above stay byte-unmodified.** `TestUseCreateForm_ProbeDecidesIDFlag` (pure, table, composes `useCreateForm`+`buildArgs` over `t.TempDir()` fixtures with hand-written `<uuid>.jsonl` files, mtime-differentiated via `os.Chtimes` so a "newer unrelated transcript" row is deterministic rather than write-order-dependent); `TestRunner_BeginSpawn_FirstSpawnResumesExistingTranscript` (the wiring pin — proves `beginSpawn` actually feeds the probe's answer to `buildArgs` rather than passing `firstRun` straight through); `TestRunner_RestartFresh_ProbeDecidesPerSpawn` (the per-spawn pin — an *asymmetric* fixture, transcript present only for the pre-rotation id, is the one arrangement that discriminates a per-spawn decision from one memoised at construction; a fixture with both ids absent would pass either way). One general lesson from building the table: a row composing two functions (`useCreateForm` then `buildArgs`) only proves the override if its `latchCreate` column is set *against* the expected flag — a row where the latch already agrees with the probe's answer stays green under a mutant that deletes the probe entirely, so it reads as coverage while proving nothing about the override.
 
 A content-free-logging guard must scan what was actually logged, not a rendered
