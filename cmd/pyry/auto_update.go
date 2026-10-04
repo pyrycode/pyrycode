@@ -6,8 +6,10 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/update"
 )
 
@@ -46,7 +48,7 @@ func daemonIdle(anyTurnOpen bool, lastActive []time.Time, now time.Time, quiet t
 // autoUpdater checks the latest release on a schedule and, when the daemon is
 // idle, installs an eligible one through installRelease — the same signature,
 // checksum and AtomicReplace path `pyry update` uses — and restarts the managed
-// unit. It is built only when the daemon runs with -pyry-auto-update.
+// unit. Explicit requests share the same worker even with scheduling disabled.
 type autoUpdater struct {
 	opts       updateOptions
 	idle       func() bool
@@ -57,14 +59,95 @@ type autoUpdater struct {
 	restartPoll time.Duration
 	// wait optionally controls duration waits; nil uses context-aware timers.
 	wait func(context.Context, time.Duration) bool
+
+	mu            sync.Mutex
+	active        *updateAttempt
+	installedDone chan struct{}
+	workers       sync.WaitGroup
 }
+
+// updateAttempt publishes its immutable decision before work can install.
+// Terminal fields are read only after done closes.
+type updateAttempt struct {
+	decided, done chan struct{}
+	result        control.UpdateWhenIdleResult
+	err           error
+	installed     bool
+}
+
+func (p *updateAttempt) decide(result control.UpdateWhenIdleResult, err error) {
+	p.result, p.err = result, err
+	if result.Decision == control.UpdateWillInstall {
+		close(p.decided)
+	}
+}
+
+// begin is the sole attempt producer, shared by explicit and scheduled checks.
+func (a *autoUpdater) begin(ctx context.Context) *updateAttempt {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.installedDone == nil {
+		a.installedDone = make(chan struct{})
+	}
+	if a.active != nil {
+		return a.active
+	}
+	p := &updateAttempt{decided: make(chan struct{}), done: make(chan struct{})}
+	a.active = p
+	a.workers.Add(1)
+	go func() {
+		defer a.workers.Done()
+		p.installed = a.perform(ctx, p)
+		a.mu.Lock()
+		if !p.installed {
+			a.active = nil
+		} else {
+			close(a.installedDone)
+		}
+		// A rejected/failed check can be retried as soon as its caller returns.
+		if p.result.Decision != control.UpdateWillInstall {
+			close(p.decided)
+		}
+		close(p.done)
+		a.mu.Unlock()
+	}()
+	return p
+}
+
+// request uses the daemon context, never the requesting connection's lifetime.
+// Always read the published decision, even if an immediate restart cancelled ctx.
+func (a *autoUpdater) request(ctx context.Context) (control.UpdateWhenIdleResult, error) {
+	p := a.begin(ctx)
+	<-p.decided
+	return p.result, p.err
+}
+
+// join is called after control handlers and the scheduler have stopped producing.
+func (a *autoUpdater) join() { a.workers.Wait() }
 
 // Run checks once after startDelay and waits interval after each unsuccessful
 // completed check. It returns nil when ctx is done, and also after a check that
 // installed a release: a second install could lose the rollback copy in pyry.prev.
 func (a *autoUpdater) Run(ctx context.Context) error {
+	a.mu.Lock()
+	if a.installedDone == nil {
+		a.installedDone = make(chan struct{})
+	}
+	installedDone := a.installedDone
+	a.mu.Unlock()
+	waitCtx, cancel := context.WithCancel(ctx)
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		select {
+		case <-installedDone:
+			cancel()
+		case <-waitCtx.Done():
+		}
+	}()
+	defer func() { cancel(); <-watchDone }()
 	delay := a.startDelay
-	for a.waitFor(ctx, delay) {
+	for a.waitFor(waitCtx, delay) {
 		if a.check(ctx) {
 			return nil
 		}
@@ -75,7 +158,17 @@ func (a *autoUpdater) Run(ctx context.Context) error {
 
 // check reports whether a release was installed. A busy eligible check logs one
 // waiting_for_idle entry, then a terminal outcome unless the wait is cancelled.
-func (a *autoUpdater) check(ctx context.Context) (installed bool) {
+func (a *autoUpdater) check(ctx context.Context) bool {
+	p := a.begin(ctx)
+	<-p.done
+	return p.installed
+}
+
+func (a *autoUpdater) perform(ctx context.Context, p *updateAttempt) bool {
+	if err := ctx.Err(); err != nil {
+		p.decide(control.UpdateWhenIdleResult{}, err)
+		return false
+	}
 	o := a.opts
 	attrs := []any{"current", o.currentVersion}
 	logOutcome := func(level slog.Level, outcome string, extra ...any) {
@@ -86,22 +179,26 @@ func (a *autoUpdater) check(ctx context.Context) (installed bool) {
 	target := o.executablePath()
 	if strings.HasPrefix(target, "/opt/homebrew/") {
 		logOutcome(slog.LevelInfo, "skipped", "reason", "homebrew install")
+		p.decide(control.UpdateWhenIdleResult{Decision: control.UpdateNotEligible, Reason: "homebrew install"}, nil)
 		return false
 	}
 	argv := update.DetectRestartCommand(o.probeRestart())
 	if argv == nil {
 		logOutcome(slog.LevelInfo, "skipped", "reason", "no managed unit")
+		p.decide(control.UpdateWhenIdleResult{Decision: control.UpdateNotEligible, Reason: "no managed unit"}, nil)
 		return false
 	}
 
 	body, err := o.fetcher.FetchLatestRelease(ctx, o.repo)
 	if err != nil {
 		logOutcome(slog.LevelWarn, "failed", "err", err)
+		p.decide(control.UpdateWhenIdleResult{}, err)
 		return false
 	}
 	rel, err := update.ParseRelease(body)
 	if err != nil {
 		logOutcome(slog.LevelWarn, "failed", "err", err)
+		p.decide(control.UpdateWhenIdleResult{}, err)
 		return false
 	}
 	attrs = append(attrs, "latest", truncateTag(rel.Tag))
@@ -109,12 +206,15 @@ func (a *autoUpdater) check(ctx context.Context) (installed bool) {
 	switch err := update.Eligible(o.currentVersion, rel); {
 	case errors.Is(err, update.ErrUpToDate):
 		logOutcome(slog.LevelInfo, "up_to_date")
+		p.decide(control.UpdateWhenIdleResult{Decision: control.UpdateUpToDate}, nil)
 		return false
 	case err != nil:
 		logOutcome(slog.LevelInfo, "skipped", "reason", err.Error())
+		p.decide(control.UpdateWhenIdleResult{Decision: control.UpdateNotEligible, Reason: err.Error()}, nil)
 		return false
 	}
 
+	p.decide(control.UpdateWhenIdleResult{Decision: control.UpdateWillInstall, ReleaseTag: rel.Tag}, nil)
 	if !a.waitUntilIdle(ctx, func() { logOutcome(slog.LevelInfo, "waiting_for_idle") }) {
 		return false
 	}

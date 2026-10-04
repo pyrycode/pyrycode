@@ -83,12 +83,32 @@ success payload. `UpdateWhenIdle(ctx, socketPath) (*UpdateWhenIdleResult, error)
 returns nil on every failure, including transport and validation failures; a
 non-empty wire `error` takes precedence over any accompanying success payload.
 
-`will-install` accepts scheduling; it does not report a completed installation.
-The provider must return before waiting for idle, downloading assets, installing
-or restarting, and keep accepted work independent of the connection. A
-disconnect or client timeout does not retract accepted work. The production
-daemon provider and CLI remain unwired in this slice; [#2758](https://github.com/pyrycode/pyrycode/issues/2758)
-owns that integration. See the [contract spec](../../specs/architecture/2757-update-when-idle-contract.md).
+`runSupervisor` installs the production `autoUpdater.request` provider before
+the control server serves requests, with or without `-pyry-auto-update`.
+`runUpdateArgs` calls `control.UpdateWhenIdle` for `pyry update --when-idle`.
+The selected daemon owns metadata, eligibility, installation and restart;
+explicit requests share the scheduler's active attempt and pending tag. Disabling
+automatic scheduling prevents unsolicited checks/retries. See
+[update flags](pyry-update-command.md#flags) and
+[automatic update](pyry-update-command-automatic-update.md).
+
+`will-install` accepts work; it does not report a completed installation. The
+provider waits only for the bounded metadata/eligibility decision, with a
+60-second production HTTP budget, never for idle, asset download, installation
+or restart. Accepted work uses the daemon context, so disconnect or client
+timeout does not retract it. Daemon shutdown cancels the work; `runSupervisor`
+drains control handlers through `ctrlDone`, joins the scheduler, then joins
+updater workers even when scheduling is disabled.
+
+Publishing acceptance before installation alone does not prove the response was
+written: an already-idle daemon can install and request restart immediately.
+`autoUpdater.request` reads the published decision even after restart cancels
+the daemon context, `Server.Serve` drains handlers through their response writes,
+and `runSupervisor` joins that drain before exiting. For a connected caller
+within the existing response deadline, this ordering preserves acceptance
+across an update-triggered shutdown. A timing delay would not establish that
+ordering. See the [contract spec](../../specs/architecture/2757-update-when-idle-contract.md)
+and [integration spec](../../specs/architecture/2758-update-when-idle.md).
 
 ## Handshake Deadline: per-conn timeout and the session-verb extend (#865)
 
