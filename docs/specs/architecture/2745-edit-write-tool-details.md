@@ -18,3 +18,12 @@ Sizing: one deliverable, two acceptance criteria, no new exported types or consu
 ## Testing strategy
 
 First update read, shell and search parser assertions to require empty details and observe failures against the original producer. Retain Edit/Write assertions unchanged, including glyph and confinement checks. Switch the multi-block and synthetic-user positive controls to Edit fixtures so attribution and suppression coverage remains meaningful. Update the bound tests to check remaining forms against the conservative allowance. Run `go test -race ./internal/streamsup/...`, `go vet ./...`, and `go build ./cmd/pyry`; the verifier owns the full-module gate.
+
+## Revisions
+
+- 2026-10-04: The package race run exposed another positive control, `TestParser_ParentToolUseID_LeavesTheUserSidecarIntact` in `internal/streamsup/parent_tool_use_test.go`. Switch its Read fixture to Edit so it still detects accidental sidecar suppression. Source review also found Read/five-shape claims in `internal/turnevent/event.go` → `ToolUpdate`, `internal/protocol/interactive.go` → `ToolResultPayload`, and `internal/turnbridge/outbound.go` / `outbound_test.go` → `MapEvent` / `TestToolResultPayload_FitV2EnvelopeCap`. Update only their descriptions and make the envelope test's existing 48-byte fill explicitly conservative. Run race checks for these packages too. The wire format and mapper behavior remain unchanged; total written work remains below 300 lines.
+
+## Documentation handoff
+
+- Pending for the documentation stage: update `docs/knowledge/features/streamsup-package-content-blocks-are-held-as-json-rawmessage.md`, the tool-result sidecar decode and confinement paragraphs, to describe only Edit/Write producers and the conservative 48-byte allowance.
+- Pending for the documentation stage: update `docs/knowledge/features/protocol-package-interactive-event-payloads.md`, the `ResultDetail` description, to state that Read/Bash/Grep/Glob send empty details while Edit and Write retain their existing formats.
