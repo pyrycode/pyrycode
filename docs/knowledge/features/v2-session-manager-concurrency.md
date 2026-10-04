@@ -41,6 +41,19 @@ connection never enqueues a job at all. Every reply, accepted or refused, crosse
 `CipherState` mutation stays on `Run` for these two verbs exactly as it does for
 `mcp_status_request`.
 
+`stop_background_task` uses `appFrameStopBackgroundTask` on that FIFO worker
+because its `BackgroundTaskStopper` seam may block (#2791). The true-nil seam
+and negotiated-`interactive` gates stay on `Run` before typed payload decode or
+enqueue: reply silence alone would also pass if an inert request occupied the
+worker. `TestV2Session_StopBackgroundTask_InertGatesStayOnRun` checks the queue
+directly. The stop handler's refusals reuse `forwardMCPStatusReply` and
+`forwardToRun`, so the worker never seals. A blocked stop holds only that
+connection's worker; another connection and the same connection's inline
+`interrupt` continue on `Run`. The seam must honor the worker context, whose
+cancellation ends the wait on manager shutdown. See the
+[wire contract](../../protocol-mobile.md#stop-background-task-v2) and the
+[worker completion proof](v2-session-manager-test-surface-same-package-unit-tests-internal-relay.md).
+
 `request_context_usage` (#2431) joins the same worker for a stronger version of
 `mcp_status_request`'s reason: answering it can wait **twice** — first on
 `turnBusyTracker.WaitIdle` for an open turn to end (unbounded by design, since
@@ -158,6 +171,11 @@ here a mis-wire turns a stop-the-world crash into the fail path for an
 authorization gate rather than for a convenience feature. Not escalated to a
 build-time guard — no premature or nil wiring has been observed on any of these
 seams (Evidence-Based Fix Selection); revisit if one ever ships.
+
+`BackgroundTaskStopper` has the same interface-nil trap: shipped construction
+leaves its field unset so `stop_background_task` is consumed before decode or
+enqueue. Assigning a typed nil pointer would admit the frame and defeat that
+inert contract. Production wiring and capability advertisement belong to #2792.
 
 **A zero-value enum member needs a producer that names it, or staticcheck flags it dead even though the type "handles" it by default.** The first cut of this widening leaned on `appFrameRoute`'s zero value implicitly — the v1 `enqueueAppFrame` call built `appFrameJob{plaintext: plaintext}` with no `kind`, and the worker caught it with a bare `default:` rather than a `case appFrameRoute:`. `staticcheck`'s `U1000` correctly called `appFrameRoute` unused: nothing in the source named the identifier, so the compiler couldn't see that the zero value was meaningful rather than accidental, and the doc-block claim that "the routing decision lives in one place" rested on a member neither producer nor consumer mentioned. The fix is to name it at both ends — the v1 call passes `kind: appFrameRoute` explicitly and the worker gains its own `case appFrameRoute:` — which makes `default:` genuinely unreachable in normal operation while still being the safe catch for a kind added without an arm. The general lesson: when a tagged-dispatch enum's zero value is meant to be a real, load-bearing case (not just "unset"), give it an explicit producer and an explicit consumer arm rather than trusting Go's zero-value default to stand in for both — the compiler cannot verify that a default arm and an elided zero-value case actually agree on what they mean.
 

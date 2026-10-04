@@ -968,6 +968,14 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 		case protocol.TypeInterrupt:
 			m.handleInterrupt(s, probeEnv)
 			return
+		case protocol.TypeStopBackgroundTask:
+			// Both inert gates stay on Run, before payload decode or enqueue. The
+			// paired-device stop action has no tool-permission gate or v1 fallback.
+			if m.cfg.BackgroundTaskStopper == nil || !s.interactive {
+				return
+			}
+			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameStopBackgroundTask})
+			return
 		case protocol.TypeNewSession:
 			m.handleNewSession(ctx, s, probeEnv)
 			return
@@ -1209,6 +1217,8 @@ const (
 	// which is why their dispatch arms gate on a seam that stays nil until #2420.
 	appFrameMCPReconnect
 	appFrameMCPToggle
+	// appFrameStopBackgroundTask isolates the stop seam wait from Run.
+	appFrameStopBackgroundTask
 	// appFrameContextUsageRequest is the on-demand context-window read (#2431) —
 	// the longest-waiting member of this set, since it defers a mid-turn request
 	// until the turn ends before it asks the child anything. Its wait runs off the
@@ -1323,6 +1333,9 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 			case appFrameMCPToggle:
 				// The arm above's twin; same placement for the same reason.
 				m.handleMCPToggle(ctx, s, job.plaintext)
+			case appFrameStopBackgroundTask:
+				// Replies return through forwardToRun for Run-owned sealing.
+				m.handleStopBackgroundTask(ctx, s, job.plaintext)
 			case appFrameContextUsageRequest:
 				// The resolver may wait for an open turn to end and then for a child
 				// round trip. Like the MCP status arm, that wait does NOT stall this
