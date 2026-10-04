@@ -20,8 +20,17 @@ After starting `Run` in the background, wait for [`Pool.Ready()`](sessions-packa
 before calling `Mint` or `Create`. Using argv capture as the startup signal can
 intermittently return `ErrPoolNotRunning`; a single green run can miss the race
 ([#2765](https://github.com/pyrycode/pyrycode/issues/2765)). Register cancellation
-and draining as cleanup before assertions, so a fatal assertion cannot leave
-the pool running.
+and joining as cleanup before assertions, with bounded readiness and shutdown
+waits, so a fatal assertion still cancels and waits for the pool to stop.
+
+Shutdown tests must also cancel and join explicitly before checking removal;
+`t.Cleanup` runs after those assertions. Close a `chan struct{}` after `Run`
+returns so both the explicit shutdown and cleanup can observe completion.
+Sending one result leaves only one waiter able to consume it, causing the
+other to time out. Wait for readiness before minting or cancelling, prove the
+file exists before shutdown, then check its removal after completion: `Run`'s
+removal defers finish before it returns. The prompt and bootstrap-settings
+shutdown tests use five seconds for readiness and fifteen seconds for joining.
 
 ### Cancellation and completed eviction
 

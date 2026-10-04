@@ -207,12 +207,25 @@ func TestPool_Run_CleansUpBootstrapSettingsFile(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- pool.Run(ctx) }()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = pool.Run(ctx) // Cancellation is expected; file removal is asserted below.
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			t.Error("pool.Run did not exit within 15s after cancel")
+		}
+	})
+	select {
+	case <-pool.Ready():
+	case <-time.After(5 * time.Second):
+		t.Fatal("pool.Run did not become ready within 5s")
+	}
 
-	// Wait until the bootstrap has actually spawned before cancelling, so Run is
-	// past the point where the cleanup defer is registered.
-	waitArgvRaw(t, tplWorkDir)
 	cancel()
 	select {
 	case <-done:
