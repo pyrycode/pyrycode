@@ -106,7 +106,7 @@ type controlRequest struct {
 // against the one #1595 measured live, subtype before mode.
 //
 // The omitempty tags are load-bearing rather than cosmetic. Detail, Mode, Model,
-// ServerName and Enabled each belong to specific control subtypes; without the
+// ServerName, Enabled and TaskID each belong to specific control subtypes; without the
 // tags every other control line would grow fields it has no business carrying, and
 // marshalInterruptEnvelope's and marshalInitializeEnvelope's output would stop
 // matching the lines claude has been sent since #1120 and measured in #1763.
@@ -119,6 +119,44 @@ type controlRequestInner struct {
 	Model      string  `json:"model,omitempty"`      // set_model only
 	ServerName *string `json:"serverName,omitempty"` // mcp_reconnect and mcp_toggle only
 	Enabled    *bool   `json:"enabled,omitempty"`    // mcp_toggle only; pointer preserves false
+	TaskID     *string `json:"task_id,omitempty"`    // stop_task only; pointer preserves empty string
+}
+
+// marshalStopTaskEnvelope forwards taskID as string data on one physical line.
+func marshalStopTaskEnvelope(requestID, taskID string) ([]byte, error) {
+	env := controlRequest{
+		Type:      "control_request",
+		RequestID: requestID,
+		Request: controlRequestInner{
+			Subtype: "stop_task",
+			TaskID:  &taskID,
+		},
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
+// WriteStopTask writes one stop_task request without closing the held-open stdin.
+// Task membership and authorization belong to the caller boundary.
+func WriteStopTask(w io.Writer, requestID, taskID string) error {
+	if w == nil {
+		return ErrNoLiveChild
+	}
+	env, err := marshalStopTaskEnvelope(requestID, taskID)
+	if err != nil {
+		return fmt.Errorf("streamsup: marshal stop task: %w", err)
+	}
+	n, err := w.Write(env)
+	if err != nil {
+		return fmt.Errorf("streamsup: write stop task: %w", err)
+	}
+	if n != len(env) {
+		return fmt.Errorf("streamsup: write stop task: %w", io.ErrShortWrite)
+	}
+	return nil
 }
 
 // marshalInterruptEnvelope returns the single newline-terminated interrupt

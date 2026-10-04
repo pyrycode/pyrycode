@@ -1540,7 +1540,7 @@ func (r *Runner) MemorySearchLaunch() (string, *string, string, uint64, bool) {
 	return r.childWorkspace, r.childPATH, "", r.childGeneration, true
 }
 
-// mcpActuationIDPrefix namespaces the request ids of the daemon's MCP actuations,
+// mcpActuationIDPrefix namespaces the request ids of the daemon's MCP and task-stop actuations,
 // and its DISJOINTNESS FROM mcpStatusQueryIDPrefix is load-bearing rather than
 // cosmetic. mcpStatusQueries.claim treats ANY unregistered id carrying its own
 // prefix as claimed and consumed, and claimMCPStatusQuery runs first in the parser's
@@ -1610,12 +1610,32 @@ func (r *Runner) SetMCPServerEnabled(ctx context.Context, serverName string, ena
 // makes the check meaningful — a child replaced in the gap retires an entry that
 // already exists, where the reverse order would leave a registration nothing can find.
 func (r *Runner) actuateMCP(ctx context.Context, write func(io.Writer, string) error) bool {
+	return r.actuateControl(ctx, true, write)
+}
+
+// StopTask asks the live child to stop taskID and reports acceptance, not task
+// completion. Membership and authorization belong to the caller. MCP provenance
+// does not gate this request. Normal outcomes preserve the child and reply; if
+// cancellation interrupts a blocked write, only its captured generation is retired.
+// The caller context bounds both writing and waiting; no request or error text is
+// logged or returned.
+func (r *Runner) StopTask(ctx context.Context, taskID string) bool {
+	return r.actuateControl(ctx, false, func(w io.Writer, id string) error {
+		return WriteStopTask(w, id, taskID)
+	})
+}
+
+// actuateControl shares private correlation between MCP and task-stop requests.
+// requireMCP retains the MCP provenance gate and synchronous write contract;
+// task stops instead bound the write with the captured-generation cancellation
+// callback, as QueryAppliedSettings does. Runner.mu remains a leaf lock.
+func (r *Runner) actuateControl(ctx context.Context, requireMCP bool, write func(io.Writer, string) error) bool {
 	if ctx.Err() != nil || r.parser == nil {
 		return false
 	}
 
 	r.mu.Lock()
-	if r.stdin == nil || r.rotating || !r.mcpStatusEligible {
+	if r.stdin == nil || r.rotating || (requireMCP && !r.mcpStatusEligible) {
 		r.mu.Unlock()
 		return false
 	}
@@ -1627,7 +1647,7 @@ func (r *Runner) actuateMCP(ctx context.Context, write func(io.Writer, string) e
 	pending := r.parser.registerMCPActuation(id)
 
 	r.mu.Lock()
-	current := r.stdin != nil && !r.rotating && r.mcpStatusEligible && r.childGeneration == generation
+	current := r.stdin != nil && !r.rotating && (!requireMCP || r.mcpStatusEligible) && r.childGeneration == generation
 	r.mu.Unlock()
 	if !current || ctx.Err() != nil {
 		r.parser.removeMCPActuation(id, pending)
@@ -1636,8 +1656,20 @@ func (r *Runner) actuateMCP(ctx context.Context, write func(io.Writer, string) e
 		return false
 	}
 
+	var stopWriteCancel func() bool
+	var writeCancelDone chan struct{}
+	if !requireMCP {
+		writeCancelDone = make(chan struct{})
+		stopWriteCancel = context.AfterFunc(ctx, func() {
+			r.retireStdinGeneration(generation)
+			close(writeCancelDone)
+		})
+	}
 	err := write(w, id)
-	pending.resolveWrite(err == nil)
+	if stopWriteCancel != nil && !stopWriteCancel() {
+		<-writeCancelDone
+	}
+	pending.resolveWrite(err == nil && ctx.Err() == nil)
 	if err != nil || ctx.Err() != nil {
 		r.parser.removeMCPActuation(id, pending)
 		pending.complete(false)
@@ -1646,7 +1678,13 @@ func (r *Runner) actuateMCP(ctx context.Context, write func(io.Writer, string) e
 
 	select {
 	case accepted := <-pending.result:
-		return accepted && ctx.Err() == nil
+		// A parser can claim the response before the write ends, removing the
+		// pending entry before child cleanup sees it. The generation check keeps
+		// that early success from surviving a child boundary.
+		r.mu.Lock()
+		current = r.stdin != nil && !r.rotating && r.childGeneration == generation
+		r.mu.Unlock()
+		return accepted && current && ctx.Err() == nil
 	case <-ctx.Done():
 		r.parser.removeMCPActuation(id, pending)
 		return false
