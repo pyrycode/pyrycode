@@ -417,19 +417,21 @@ func clientSection(clients []ClientIdentity) string {
 // get this wrong by passing them in the wrong order.
 //
 // composeSystemPrompt keeps its own signature and its own body for the same
-// reason. buildSession stays on it too: the construction-time write is overwritten
-// by refreshSystemPrompt before any child comes up, so composing client names or a
-// note there would produce bytes nothing ever reads.
+// reason. Construction passes instructions to composeSystemPromptForOn directly;
+// clients and notes are resolved at the next-start refresh before a child comes up.
 func composeSystemPromptFor(operator string, clients []ClientIdentity, note string) string {
-	return composeSystemPromptForOn(systemPromptText, operator, clients, note)
+	return composeSystemPromptForOn(systemPromptText, "", operator, clients, note)
 }
 
 // composeSystemPromptForOn is composeSystemPromptFor over daemon, the text
 // daemonPromptText returns, exactly as composeSystemPromptOn is to
 // composeSystemPrompt (#2711). The read-folder sentence therefore sits after
-// systemPromptText and before every section below, and the operator's text stays
-// last.
-func composeSystemPromptForOn(daemon, operator string, clients []ClientIdentity, note string) string {
+// systemPromptText, then instructions precede clients and the handoff note.
+// The operator's text stays last; empty instructions add no separator.
+func composeSystemPromptForOn(daemon, instructions, operator string, clients []ClientIdentity, note string) string {
+	if instructions != "" {
+		daemon += "\n" + instructions
+	}
 	section := clientSection(clients)
 	handoff := handoffNoteSection(note)
 	if section == "" && handoff == "" {
@@ -950,7 +952,7 @@ func (p *Pool) writeComposedPrompt(sess *Session, clients []ClientIdentity) {
 	operator := p.conversationPrompt(label)
 	note := p.handoffNoteFor(label)
 	named := admittedClients(clients)
-	text := composeSystemPromptForOn(daemonPromptText(p.readFolders), operator, named, note)
+	text := composeSystemPromptForOn(daemonPromptText(p.readFolders), p.DaemonInstructions(), operator, named, note)
 	if _, err := writeSystemPromptFile(sess.systemPromptPath, text); err != nil {
 		p.log.Warn("compose appended system prompt", "error", err)
 		return

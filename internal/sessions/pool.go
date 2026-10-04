@@ -194,6 +194,10 @@ type SessionConfig struct {
 // Pool owns the set of sessions managed by one pyry process. Phase 1.0
 // constructs exactly one entry — the bootstrap session — at New().
 type Pool struct {
+	// Separate from mu: construction already holds mu when it reads instructions.
+	instructionsMu     sync.RWMutex
+	daemonInstructions string
+
 	mu                sync.RWMutex
 	sessions          map[SessionID]*Session
 	bootstrap         SessionID
@@ -662,6 +666,9 @@ func New(cfg Config) (*Pool, error) {
 		newRunner:          newRunner,
 	}
 	sess.pool = p
+	if err := p.loadDaemonInstructions(); err != nil {
+		return nil, err
+	}
 
 	// Persist on cold start (no prior file). Warm starts do not rewrite —
 	// the AC promises "writes only on state-changing operations", and a
@@ -2456,7 +2463,7 @@ func (p *Pool) buildSessionAs(id SessionID, label, spawnDir string, settings Ses
 	// since #2085 a conversation's session is minted at create and started on its
 	// first message, so the prompt is typically set AFTER this runs.
 	operatorPrompt := p.conversationPrompt(label)
-	promptPath, err := writeSystemPrompt(p.registryPath, id, composeSystemPromptOn(daemonPromptText(p.readFolders), operatorPrompt))
+	promptPath, err := writeSystemPrompt(p.registryPath, id, composeSystemPromptForOn(daemonPromptText(p.readFolders), p.DaemonInstructions(), operatorPrompt, nil, ""))
 	if err != nil {
 		// The wrapped error carries paths only. No error and no log line on any
 		// path may carry a fragment of the operator's prompt (#2150 AC #3).
