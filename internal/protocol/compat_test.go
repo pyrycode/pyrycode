@@ -15,7 +15,7 @@ func TestIsKnownAppType(t *testing.T) {
 		TypeRenameConversation,
 		TypeDeleteConversation, TypeConversationDeleted,
 		TypeArchiveConversation, TypeUnarchiveConversation,
-		TypeSetConversationMuted,
+		TypeSetConversationMuted, TypeMarkConversationRead,
 		TypeChangeWorkspace,
 		TypeSetSystemPrompt,
 		TypeRequestHostSystemPrompt, TypeSetHostSystemPrompt,
@@ -252,7 +252,7 @@ func TestInboundAppTypeSet_CoversAllExportedTypeConstants(t *testing.T) {
 		TypeRenameConversation,
 		TypeDeleteConversation, TypeConversationDeleted,
 		TypeArchiveConversation, TypeUnarchiveConversation,
-		TypeSetConversationMuted,
+		TypeSetConversationMuted, TypeMarkConversationRead,
 		TypeChangeWorkspace,
 		TypeSetSystemPrompt,
 		TypeRequestHostSystemPrompt, TypeSetHostSystemPrompt,
@@ -261,7 +261,7 @@ func TestInboundAppTypeSet_CoversAllExportedTypeConstants(t *testing.T) {
 		TypeRenameWorkspace, TypeWorkspaceUpdated,
 		TypeRegisterPushToken,
 	}
-	if got, want := len(all), 29; got != want {
+	if got, want := len(all), 30; got != want {
 		t.Fatalf("type-list length: got %d, want %d", got, want)
 	}
 	if got, want := len(inboundAppTypeSet), len(all); got != want {
@@ -430,7 +430,7 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeRenameConversation,
 		TypeDeleteConversation, TypeConversationDeleted,
 		TypeArchiveConversation, TypeUnarchiveConversation,
-		TypeSetConversationMuted,
+		TypeSetConversationMuted, TypeMarkConversationRead,
 		TypeChangeWorkspace,
 		TypeSetSystemPrompt,
 		TypeRequestHostSystemPrompt, TypeSetHostSystemPrompt,
@@ -587,6 +587,7 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeMCPActuationRefused":         CodeMCPActuationRefused,
 		"CodeWorkspaceNotFound":           CodeWorkspaceNotFound,
 		"CodeClientUpdateRequired":        CodeClientUpdateRequired,
+		"CodeReadMarkUnavailable":         CodeReadMarkUnavailable,
 	}
 	want := map[string]string{
 		"CodeProtocolUnknownType":         "protocol.unknown_type",
@@ -617,6 +618,7 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeMCPActuationRefused":         "mcp_actuation.refused",
 		"CodeWorkspaceNotFound":           "workspace.not_found",
 		"CodeClientUpdateRequired":        "client.update_required",
+		"CodeReadMarkUnavailable":         "read_mark.unavailable",
 	}
 	if len(cases) != len(want) {
 		t.Fatalf("case-count drift: got %d, want %d", len(cases), len(want))

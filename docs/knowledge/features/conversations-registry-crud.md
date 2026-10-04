@@ -5,8 +5,8 @@ Split out of [`conversations-registry.md`](conversations-registry.md) (2026-09-0
 model, sort discipline, and load semantics all of these methods sit on top of.
 
 Covers `Create`, `Get`, `List`, `Update`, `Delete`, `SetOnDelete` (#1502), `RebindSession` (#739),
-`SetArchived` (#880), `SetMuted` (#2572), `SetSystemPrompt` (#2149), `WorkspaceLabel` /
-`SetWorkspaceLabel` (#2206), `SetLastContextUsage` (#2460),
+`SetArchived` (#880), `SetMuted` (#2572), `AdvanceReadUpTo` (#2780), `SetSystemPrompt` (#2149),
+`WorkspaceLabel` / `SetWorkspaceLabel` (#2206), `SetLastContextUsage` (#2460),
 `AppendPendingChannelPost` / `PendingChannelPosts` / `ClearPendingChannelPosts` (#2499), and `Promote`.
 
 ## `Create(c Conversation)`
@@ -137,6 +137,45 @@ payload's `muted` field is a `*bool`, decoded as nil on an absent key or explici
 rejected as `protocol.malformed` rather than defaulting to `false` — a plain `bool` there would
 have silently unmuted a conversation on any request missing the key, passing every happy-path
 test while failing the actual malformed-payload acceptance criterion.
+
+## `AdvanceReadUpTo(id ConversationID, upTo, latest uint64, path string) (Conversation, bool, error)` (#2780)
+
+Raises the durable host read mark (`ReadUpTo`, #2779) of the conversation whose `ID` matches to
+`max(held, min(upTo, latest))`, where `held` is the mark already on disk and `latest` is the
+caller-supplied newest durable history entry id. Returns the stored record and whether the mark
+actually advanced; a miss returns `ErrConversationNotFound`. An unchanged mark (`upTo <= held`, or
+an empty conversation with `latest == 0`) returns `advanced == false` and **does not call
+`persist`** — a no-op never touches disk.
+
+**This is the one mutator in this file that persists itself, rather than leaving `Save` to the
+caller — and that is the load-bearing difference from `SetMuted` right above it, not an
+inconsistency to tidy up.** `SetMuted`'s caller flips the flag, then makes its own best-effort
+`Save` call; if that `Save` fails, the flag is simply stale in memory until the next successful
+write — an acceptable cost for a notification preference. A read mark cannot take that shape:
+this ticket's AC requires that a request whose save fails must not be silently acknowledged as
+done, and that retrying the *same* request once saving works again must advance for real rather
+than reading as a no-op. A separate best-effort `Save` can give you one or the other — report
+success without persisting, or treat "already advanced in memory" as nothing-to-do on retry — but
+not both at once. Folding the compare, the mutation and the persist into one call, with the lock
+held across all three (`saveMu` then `mu`, `SwitchSession`'s order and its unexported
+`persist func(string, registryFile) error` test seam, both reused verbatim here as
+`advanceReadUpTo`), is what makes both guarantees hold simultaneously: a failed `persist` restores
+`held` before the lock releases, so the mark a reader observes is always the mark on disk, and a
+retry that lands after the registry recovers sees the original `held` again and advances afresh.
+
+**Concurrent requests cannot regress the mark, for the same structural reason `SwitchSession`
+gives: the compare-then-write is one critical section, not a read followed by a separate write.**
+Two overlapping advances for the same conversation serialize on `mu`; whichever runs second
+computes its `max` against the first one's already-written `held`, so the result is the same
+regardless of arrival order, and an unrelated `Save` call cannot rename an older full-registry
+snapshot over this one's advance, because `Save` also takes `saveMu` first.
+
+Sole caller is `handlers.MarkConversationRead` ([`relay-package-handlers.md`](relay-package-handlers.md)
+§ `MarkConversationRead`), which resolves the conversation via `Get` and reads the newest history
+entry id *before* calling this method — so `latest` is always the caller's own fresh read, never
+reconsulted here, and a history-store failure never reaches this method at all. `ErrConversationNotFound`
+from a concurrent delete between that `Get` and this call is truthfully re-reported as `conversation.not_found`,
+not folded into the save-failure code.
 
 ## `SetSystemPrompt(id ConversationID, prompt *string) error` (#2149)
 

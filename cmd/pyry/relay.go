@@ -1110,6 +1110,10 @@ func startRelayV2(
 			// changes what clients do with alerts. Unlike archive it fans its record
 			// out, through the same hook send_message's auto-naming uses.
 			protocol.TypeSetConversationMuted: handlers.SetConversationMuted(w.convReg, resolveConversationsRegistryPath(w.instanceName), announceConversationHook, logger),
+			// mark_conversation_read (#2780) likewise takes no session surface. It
+			// clamps to w.hist's newest entry and fans out only an actual advance,
+			// through the same hook.
+			protocol.TypeMarkConversationRead: handlers.MarkConversationRead(w.convReg, w.hist, resolveConversationsRegistryPath(w.instanceName), announceConversationHook, logger),
 			protocol.TypeChangeWorkspace:      handlers.ChangeWorkspace(w.convReg, resolveWorkspaceDir, resolveConversationsRegistryPath(w.instanceName), logger),
 			// set_system_prompt takes no session surface (#2151): the value's route
 			// to a running child is the registry, re-read at the pool's own spawn
