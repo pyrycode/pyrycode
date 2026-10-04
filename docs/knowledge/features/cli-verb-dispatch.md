@@ -22,6 +22,28 @@ Server-side, `internal/control` deleted the wire surface these verbs rode (`Verb
 - **Proving a removed-verb arm's absence is caught before it does damage, not after.** Deleting an arm makes `runArgs` fall through to `runSupervisor`, whose first substantive step (`confineWorkdirToHome`) rejects a cwd outside `$HOME`. A test that wants "arm deleted ⇒ red, with zero side effects" needs `t.Setenv("HOME", t.TempDir())` even though that line does nothing in the passing, shipped-code run — it only fires once the arm is mutated away. An unexplained line like that reads as dead code to the next editor; comment why it stays.
 - **A help-text absence check must not be a bare substring match.** `strings.Contains(helpText, "acp")` is vacuously true forever, because the surviving `pyry mcp-approve` entry contains the letters `acp`. Split each line on whitespace and match the token that follows a leading `pyry` field instead — and assert a couple of *surviving* entries are still found first, so a broken predicate can't report an absence unconditionally.
 
+## Daemon shutdown and exit status
+
+An ordinary SIGTERM, SIGINT, or `pyry stop` makes `runSupervisor` log
+`pyrycode stopped` at INFO and return nil, so the daemon exits 0. A persistent
+relay 4409 conflict instead logs `pyrycode fatal shutdown` at ERROR and returns
+the conflict cause; `main` propagates the error as exit 1. This lets service
+managers distinguish a planned stop from a failure. Launchd's
+`KeepAlive` with `SuccessfulExit:false` restarts the fatal path; systemd's
+restart policy remains controlled by the unit configuration.
+
+`runSupervisor` derives a `context.WithCancelCause` context from the
+`signal.NotifyContext` parent. The control stop calls `cancelCause(nil)`, which
+records `context.Canceled`; an OS signal can carry a signal-specific error
+instead. `fatalCause(ctx, sigCtx)` accepts nil, `context.Canceled`, and a cause
+matching `context.Cause(sigCtx)` as clean stops. Checking only `sigCtx.Err()`
+would lose an earlier fatal cause when a signal arrives during shutdown:
+the first cancellation cause wins, including over cleanup's `cancelCause(nil)`.
+
+See [relay supervisor wiring](relay-package.md#consumers-and-roadmap) for fatal
+error propagation and [verification guidance](development-verification.md#prove-that-tests-distinguish-the-change)
+for the real-signal regression pattern.
+
 ## Related
 
 - [config-package.md](config-package.md) — `interactive_runner`'s `selectInteractiveRunner`, the loud-removal precedent this switch's arms mirror.

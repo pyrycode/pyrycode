@@ -62,6 +62,19 @@ For combined predicates, exercise each branch independently. A shared log site c
 prove which branch was taken if both inputs satisfy the first condition. Use an
 independent observable result of the path under test.
 
+A `context.WithCancel` stand-in cannot prove OS-signal shutdown classification:
+`signal.NotifyContext` can record a signal-specific cause instead of
+`context.Canceled`. Send real SIGTERM and SIGINT in isolated helper subprocesses,
+since signal handlers are process-wide. Exercise both an operator-only stop and
+a fatal cause recorded before the signal, asserting that the fatal sentinel
+survives. `TestFatalCauseSignals` covers these four cases: removing signal-cause
+matching fails the operator cases, while replacing it with `sigCtx.Err() != nil`
+fails the fatal-first cases. Either half alone leaves the other bug undetected.
+`TestRelay_OperatorSignalExitsZero` also signals actual daemons connected to the
+fake relay, asserting exit 0, INFO `pyrycode stopped`, and absence of
+`pyrycode fatal shutdown`; a control-plane `pyry stop` test never exercises the
+signal parent's cause. See [daemon shutdown and exit status](cli-verb-dispatch.md#daemon-shutdown-and-exit-status).
+
 Read the consumer above a mapper. A pure payload mapper does not decide whether a
 frame is emitted. A whole message family can be ignored before subtype handling, so
 absence of an error frame cannot prove which subtype branch ran. Child stdout,
