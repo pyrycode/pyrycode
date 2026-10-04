@@ -174,15 +174,20 @@ multiplied by a count claude chooses) on each entry's text, reported per entry i
 `TruncatedFields`. That forced a qualification of the family's stated single-worst-case doctrine
 (`maxTaskPatch`'s comment: one number a reader can hold) — an aggregate variant cannot share a scalar
 variant's worst case unless its cardinality is 1, so the doctrine now reads one worst case **per shape**:
-the scalar pair ≤ ~4.9 KB, the roster ≤ 8 KiB (12.5% of the 65519-byte v2 application-envelope cap),
-rather than forced to fit or silently abandoned.
+the scalar pair ≤ ~4.9 KB, with the roster's input at 8 KiB. The daemon-enriched
+roster (#2753) adds a bounded 256-byte `ToolCallID` to each row: 1280 unescaped
+field bytes per row, 10 KiB for eight rows (about 15.6% of the 65519-byte v2
+application-envelope cap). These figures exclude keys and truncation metadata.
+Hostile JSON escaping expands the enriched envelope to 63,109 bytes; raw field
+arithmetic cannot replace the [serialized-envelope measurement](protocol-package-background-task-event-payloads.md).
 
 claude's `session_id` and `uuid` are deliberately not carried by any of the four — absent from the
 decode targets themselves (a field never declared cannot leak), enforced further by a reflection sweep
 in each mapping test. No terminal/finish event is ever synthesized for a background task: the parser
-holds no roster and no per-task memory, and a task's disappearance from a later roster — the only
-available finish signal — has never been observed, so `BackgroundTaskRoster` reports the snapshot and
-nothing more. (`thinkingSinceEmit`, #1385's token counter, doesn't change this refusal — it remembers no
+holds no roster or per-task join memory, and `BackgroundTaskRoster` reports only a snapshot.
+The session hold retains starts to join launching-tool ids but neither its pruning nor child-exit
+reset infers completion. Terminal `BackgroundTaskUpdated` reports come from Claude's
+`system/task_notification` instead. (`thinkingSinceEmit`, #1385's token counter, doesn't change this refusal — it remembers no
 task and no roster, only a count reset at the turn boundary.) Field mapping and cap arithmetic for the
 three text-bearing events are built from the same committed capture (#1260), never a hand-built line; the
 two bounds `BackgroundTaskRoster` needs are proven by lines synthesized to exceed them, since the

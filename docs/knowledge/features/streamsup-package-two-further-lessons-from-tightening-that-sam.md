@@ -22,16 +22,19 @@ capture sets the floor with four slots of headroom — not the roster's 8, which
 
 The per-entry multiplicand is **1024 bytes since #1821** — `maxModelResolved + maxModelValue +
 maxModelDisplayName + (maxModelEffortLevelCount × maxModelEffortLevel) = 256×3 + 8×32` — the family's
-one-kibibyte entry unit, shared byte-for-byte with `maxTaskRosterEntries`' own per-entry figure despite
-the two entries having different field sets (256+256+512 vs. 4×256): a coincidence of arithmetic, not a
+one-kibibyte entry unit, shared byte-for-byte with Claude's three-field roster input despite
+the two inputs having different field sets (256+256+512 vs. 4×256): a coincidence of arithmetic, not a
 rule the *next* aggregate variant is bound by (see [ADR 036](../decisions/036-aggregate-cap-product-is-not-a-ceiling.md)).
 `maxModelListEntries` itself did **not** move: `10 × 1024 = 10240` bytes (15.6% of the v2
 application-envelope cap, `docs/protocol-mobile.md` § Application-envelope size cap). The doc no longer
 measures that product against a fixed 8192 — 8192 was always `maxTaskRosterEntries`' own product,
 noticed to land on half of `maxUnrecognizedRaw`'s 16 KiB, and #1821 demoted it from an inherited
-ceiling back to that landmark. What actually bounds the product is `maxUnrecognizedRaw` itself, with
-the fraction stated per shape rather than a shared constant: the roster is 1/2, the model list is 5/8
-(10240/16384) — each aggregate variant re-derives its own fraction rather than inheriting the other's.
+ceiling back to that landmark. The roster's daemon-enriched rows (#2753) now add a
+256-byte joined tool-call id: 1280 unescaped field bytes per row, 10 KiB for eight
+rows, about 15.6% of the 65519-byte application-envelope cap. The old half-of-16-KiB
+landmark describes only Claude's input, not the enriched event. Each aggregate
+variant derives its own raw product and separately measures the escaped wire
+shape; see [the enriched roster's envelope measurement](protocol-package-background-task-event-payloads.md).
 
 `turnevent.ModelList.DroppedModels` carries what was cut (`0` when nothing was), so
 `len(Models) + DroppedModels` is the list's true size and a client can render "6 of 40" rather than

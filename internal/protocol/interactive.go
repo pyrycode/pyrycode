@@ -1172,15 +1172,13 @@ type ThinkingProgressPayload struct {
 	EstimatedTokensDelta int    `json:"estimated_tokens_delta"`
 }
 
-// BackgroundTask is one row of a BackgroundTaskRosterPayload
-// (docs/protocol-mobile.md § background_task_roster, #1394). Its fields are
-// exactly the per-entry keys claude's roster line carries and nothing invented —
-// in particular there is no tool_call_id and no patch, which the scalar frames
-// carry because their LINES do. TaskID is the join key back to the
-// background_task_started that opened the task.
+// BackgroundTask is one daemon-enriched row of a BackgroundTaskRosterPayload.
+// Claude's roster has three text fields; ToolCallID is joined from the same
+// task's retained start in this session and child lifetime. Empty means no
+// retained match, including unseen or forgotten starts.
 //
 // TruncatedFields names THIS row's cut fields ("task_id", "task_type",
-// "description"), null when nothing was cut.
+// "description", "tool_call_id"), null when nothing was cut.
 //
 // SECURITY: Description carries the same literal command line as
 // BackgroundTaskStartedPayload.Description, under a tighter producer cap
@@ -1192,6 +1190,7 @@ type ThinkingProgressPayload struct {
 // single one.
 type BackgroundTask struct {
 	TaskID          string   `json:"task_id"`
+	ToolCallID      string   `json:"tool_call_id"`
 	TaskType        string   `json:"task_type"`
 	Description     string   `json:"description"`
 	TruncatedFields []string `json:"truncated_fields"`

@@ -161,6 +161,36 @@ edit: it is scoped to the event family rather than the parser, and its "diffing 
 is a legitimate thing for a *consumer* to do on its own terms" survives verbatim, since the hold makes
 no inference.
 
+The hold also joins launching-tool provenance (#2753), but the parser remains
+stateless for this join: `systemBackgroundTaskEntry` decodes only `task_id`,
+`task_type` and `description`. A roster-supplied id cannot establish provenance.
+`sessionBackgroundTaskHold` retains only the started event's bounded task id,
+tool-call id and tool-call truncation bool. A missing match reads as `""`, including
+an unseen, pruned or overflow-forgotten start. Starts pass through unchanged and
+emit no extra roster; both live rosters and `resolveBoundBackgroundTaskRoster`
+reads gain the current join through the same bridge mapping.
+
+`maxBackgroundTaskJoins` independently caps retention at 16. Current capped-roster
+matches are protected; overflow evicts the oldest join absent from that roster.
+Updating a known task preserves its insertion position. Each next roster prunes
+all absent joins, including pending starts. Pruning only forgets provenance and
+never synthesizes a finish or roster-diff event. This permits start-before-roster
+without promising unlimited recollection of pending starts.
+
+**A session-lifetime hold must invalidate child-lifetime provenance.** Pruning
+alone leaves a replacement child able to reuse a task id and inherit the previous
+child's link. `newStreamRunnerFactory` composes `childExited` with its existing
+exit callbacks in both permission modes. The reset clears joins, leaving the raw
+roster retained. `enrichedRoster` derives ids and joined truncation markers into
+fresh deep copies rather than caching annotations, so reset removes both at once;
+roster-before-start also gains the id on a later read without a new roster line.
+Existing row markers survive and the joined marker is added at most once.
+
+The hold's leaf mutex protects roster, joins and reset; downstream sinks run
+after unlocking. Reads clone both the task slice and each `TruncatedFields`
+slice, so mutating one enriched read cannot affect another. See the
+[wire contract and envelope measurement](protocol-package-background-task-event-payloads.md).
+
 ## Persisting the retained model list across a restart, a decorator beside the hold rather than a fifth hold (#2450)
 
 `modelVocabularyStore` (`cmd/pyry/model_vocabulary_store.go`) makes the daemon-wide vocabulary
