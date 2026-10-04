@@ -288,9 +288,9 @@ const (
 	turnMarkClose
 )
 
-// turnMarkFor classifies one event. Pure: it switches on the Go variant type
-// only, never on a field value, so no content claude produced can steer the
-// answer.
+// turnMarkFor classifies one event by variant and existing parent attribution.
+// Parent-attributed text and tool events belong to a subagent, so they cannot
+// reopen or change the main-turn mark. Unattributed thinking remains an opener.
 //
 // The opener set is a WHITELIST, not "anything that is not a TurnEnd". The
 // evidence was the producer's growth path rather than a stray event: streamsup's
@@ -315,8 +315,23 @@ const (
 // while the wedge only ever comes from a CLOSER misclassified as droppable — and
 // closers are the enumerated arm, not the fall-through.
 func turnMarkFor(ev turnevent.Event) turnMark {
-	switch ev.(type) {
-	case turnevent.ThoughtChunk, turnevent.ThinkingProgress, turnevent.TextChunk, turnevent.ToolStart, turnevent.ToolUpdate:
+	switch e := ev.(type) {
+	case turnevent.ThoughtChunk, turnevent.ThinkingProgress:
+		return turnMarkOpen
+	case turnevent.TextChunk:
+		if e.ParentToolCallID != "" {
+			return turnMarkNone
+		}
+		return turnMarkOpen
+	case turnevent.ToolStart:
+		if e.ParentToolCallID != "" {
+			return turnMarkNone
+		}
+		return turnMarkOpen
+	case turnevent.ToolUpdate:
+		if e.ParentToolCallID != "" {
+			return turnMarkNone
+		}
 		return turnMarkOpen
 	case turnevent.TurnEnd:
 		// Both stop reasons close the turn; resultTurnEndReason (`maxTaskRosterDescription`)
@@ -353,15 +368,14 @@ type toolCallDelta struct {
 	started bool   // true: the call went in flight; false: it finished
 }
 
-// toolCallDeltaFor classifies one event. Pure, and switches on the Go variant
-// type only — the sole field it reads is the id itself, never a discriminant.
-// That is turnMarkFor's discipline, kept for the same reason: no content claude
-// produced may steer the answer.
+// toolCallDeltaFor classifies top-level tool events. Parent-attributed starts
+// and updates carry no delta, including updates whose id collides with a main
+// call. The top-level Agent/Task spawning call still belongs to the main turn.
 //
-// A ToolUpdate always DROPS, and its Status is deliberately not read. The parser
-// emits ToolUpdate from exactly one site, emitUser, out of a tool_result block,
-// and toolStatus maps is_error onto completed/failed only — never pending, never
-// in progress — so a ToolUpdate in production is always terminal.
+// A top-level ToolUpdate always DROPS, and its Status is deliberately not read.
+// The parser emits ToolUpdate from exactly one site, emitUser, out of a
+// tool_result block, and toolStatus maps is_error onto completed/failed only —
+// never pending, never in progress — so a ToolUpdate in production is terminal.
 // turnevent.ToolStatusInProgress has no production producer at all. Reading
 // Status would therefore buy nothing and would fail OPEN: a fabricated
 // in-progress tool_result would pin a finished call in flight instead of
@@ -374,8 +388,14 @@ type toolCallDelta struct {
 func toolCallDeltaFor(ev turnevent.Event) toolCallDelta {
 	switch e := ev.(type) {
 	case turnevent.ToolStart:
+		if e.ParentToolCallID != "" {
+			return toolCallDelta{}
+		}
 		return toolCallDelta{id: e.ToolCallID, started: true}
 	case turnevent.ToolUpdate:
+		if e.ParentToolCallID != "" {
+			return toolCallDelta{}
+		}
 		return toolCallDelta{id: e.ToolCallID}
 	default:
 		// Every other variant, PermissionRequest included — it carries a
