@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/sessions"
@@ -15,6 +16,61 @@ import (
 // socket. Short — the server is local and a slow response means something is
 // wrong, not slow.
 const DialTimeout = 5 * time.Second
+
+// UpdateWhenIdle requests a release/scheduling decision, without waiting for
+// idle or installation. Dial, write and read share a 70-second ceiling, shortened
+// by an earlier caller deadline. Cancellation wakes parked I/O but does not
+// retract work accepted by the provider. Every failure returns a nil result.
+func UpdateWhenIdle(ctx context.Context, socketPath string) (*UpdateWhenIdleResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, updateWhenIdleTimeout)
+	defer cancel()
+	conn, err := dial(ctx, socketPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = conn.Close() }()
+	deadline, _ := ctx.Deadline() // WithTimeout always installs a deadline.
+	_ = conn.SetDeadline(deadline)
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stop()
+	resp, err := exchange(conn, Request{Verb: VerbUpdateWhenIdle})
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if resp.Error != "" {
+		return nil, errors.New(resp.Error)
+	}
+	if err := validateUpdateWhenIdleResult(resp.UpdateWhenIdle); err != nil {
+		return nil, err
+	}
+	return resp.UpdateWhenIdle, nil
+}
+
+// validateUpdateWhenIdleResult is shared by the provider and wire boundaries.
+// Fixed errors avoid echoing malformed provider/peer values to the caller.
+func validateUpdateWhenIdleResult(result *UpdateWhenIdleResult) error {
+	if result == nil {
+		return errors.New("update.when-idle: missing decision")
+	}
+	switch result.Decision {
+	case UpdateUpToDate:
+		return nil
+	case UpdateNotEligible:
+		if strings.TrimSpace(result.Reason) == "" {
+			return errors.New("update.when-idle: missing reason")
+		}
+	case UpdateWillInstall:
+		if strings.TrimSpace(result.ReleaseTag) == "" {
+			return errors.New("update.when-idle: missing release tag")
+		}
+	default:
+		return errors.New("update.when-idle: invalid decision")
+	}
+	return nil
+}
 
 // Status connects to the control socket, requests a status snapshot, and
 // returns the payload. The context's deadline is honored if set; otherwise
@@ -430,8 +486,8 @@ func AttachFile(ctx context.Context, socketPath string, req AttachFilePayload) (
 
 // request sends one Request and reads one Response over a fresh connection,
 // bounded by the ctx's deadline or DialTimeout when it carries none. Used by
-// every client verb except Approve — all of them sub-second round-trips, whose
-// bound must not move when the approve path's does.
+// the short-lived client verbs; Approve and UpdateWhenIdle install their own
+// cancellation and deadline policies.
 func request(ctx context.Context, socketPath string, req Request) (*Response, error) {
 	conn, err := dial(ctx, socketPath)
 	if err != nil {
@@ -480,7 +536,7 @@ func requestPatient(ctx context.Context, socketPath string, req Request) (*Respo
 }
 
 // exchange encodes req and decodes one Response on an already-dialled conn. The
-// two request helpers differ only in the deadline policy they install before
+// request helpers differ only in the deadline policy they install before
 // calling this, so that difference is the only thing that reads as different.
 func exchange(conn net.Conn, req Request) (*Response, error) {
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
