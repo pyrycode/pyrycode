@@ -15,6 +15,15 @@ is still blocked, then returns the error and proves the waiting parser emits
 nothing. Otherwise a regression that reads the response before the write result
 is published can leave both simpler tests green.
 
+Writer entry is also insufficient to prove that a request is waiting for its
+response. In `StopTask` tests, cancellation while writing may retire the
+captured child, whereas cancellation after the write preserves it. Wait for the
+pending actuation's `writeDone` gate before cancelling to prove response-wait
+preservation; `awaitStopWrite` establishes that boundary. A signal from inside
+`Write` can arrive before the method returns and leave the test exercising the
+retirement exception instead. See [control-response correlation](streamsup-package-turn-io-envelope-write-stdout-parser.md)
+for the write gate and final child-generation check.
+
 Seeding a factory runner through a retention hold also forwards those events
 into the downstream fan-in. Waiting for any queued event can therefore falsely
 signal child readiness before the child has produced output. Drain seeded events

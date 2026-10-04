@@ -314,6 +314,20 @@ that had grown a `cwd`. Generalizes past this ticket — any e2e proving "frame 
 fact Y and nothing else" needs the raw payload's key set asserted beside the decoded
 values, not the decoded struct alone.
 
+### Announced-reset frame collection
+
+`TestRelayV2_StreamAnnouncedResetFollowsClaude` must await both the first
+turn's `turn_end` and its `session_transition` under the same deadline, in
+either arrival order. Parsing an announced reset before the result completes
+the [reset follower's](streamsup-package-announced-reset-follower.md) pool
+re-key before turn completion, but `sessionTransitionEmitterV2.Enqueue` only
+queues the transition for its own `Run` goroutine. The turn emitter runs
+independently, so parser order does not establish wire order. Ending collection
+at `turn_end` can falsely report a missing transition; delaying transition
+broadcast on the pre-change baseline reproduced that failure. Keep the exact
+transition count and identity, transcript-usage and second-turn assertions
+after collecting both observations.
+
 ### `RestartStreamInteractiveWithRelay` and the dormant-reset specs (#2521)
 
 A restart-shaped spec needs a *second* daemon on the *same* `HOME`, and the
