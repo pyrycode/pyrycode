@@ -147,16 +147,17 @@ func ListConversationsWithAgents(reg ConversationLister, harnessFor SessionHarne
 				workspaceLabel = &label
 			}
 			out = append(out, protocol.ConversationSummary{
-				ID:             string(conv.ID),
-				Name:           conv.Name,
-				IsPromoted:     conv.IsPromoted,
-				IsArchived:     conv.IsArchived,
-				IsMuted:        conv.IsMuted,
-				ReadUpTo:       conv.ReadUpTo,
-				LatestEntryID:  latestID,
-				ArchivedAt:     conv.ArchivedAt,
-				Cwd:            conv.Cwd,
-				WorkspaceLabel: workspaceLabel,
+				ID:               string(conv.ID),
+				CurrentSessionID: conv.CurrentSessionID,
+				Name:             conv.Name,
+				IsPromoted:       conv.IsPromoted,
+				IsArchived:       conv.IsArchived,
+				IsMuted:          conv.IsMuted,
+				ReadUpTo:         conv.ReadUpTo,
+				LatestEntryID:    latestID,
+				ArchivedAt:       conv.ArchivedAt,
+				Cwd:              conv.Cwd,
+				WorkspaceLabel:   workspaceLabel,
 				// LastMessageTS collapses onto LastUsedAt: Conversation
 				// does not carry a distinct last-message timestamp today.
 				// When a real LastMessageTS lands on the registry, update

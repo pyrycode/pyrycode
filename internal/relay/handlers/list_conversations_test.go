@@ -61,6 +61,52 @@ func decodeConversationsResponse(t *testing.T, out protocol.RoutingEnvelope) (pr
 	return inner, payload
 }
 
+func TestListConversations_CurrentSessionIDOnFirstList(t *testing.T) {
+	t.Parallel()
+	reg := &conversations.Registry{}
+	bindings := map[string]string{
+		"conv-a":       "session-a",
+		"conv-b":       "session-b",
+		"conv-unbound": "",
+	}
+	for id, sessionID := range bindings {
+		reg.Create(conversations.Conversation{ID: conversations.ConversationID(id), CurrentSessionID: sessionID})
+	}
+	c, recv := newListConvConn(t)
+	h := ListConversationsWithAgents(reg, nil, emptyListHistory{})
+	if err := h(context.Background(), c, makeListConversationsRequest(t, 1)); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	inner, payload := decodeConversationsResponse(t, recv())
+	if len(payload.Conversations) != len(bindings) {
+		t.Fatalf("got %d rows, want %d", len(payload.Conversations), len(bindings))
+	}
+	for _, row := range payload.Conversations {
+		want, ok := bindings[row.ID]
+		if !ok || row.CurrentSessionID != want {
+			t.Errorf("row %q binding: got %q, want %q (known=%t)", row.ID, row.CurrentSessionID, want, ok)
+		}
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal decoded payload: %v", err)
+	}
+	for _, raw := range [][]byte{inner.Payload, encoded} {
+		var wire struct {
+			Conversations []map[string]json.RawMessage `json:"conversations"`
+		}
+		if err := json.Unmarshal(raw, &wire); err != nil {
+			t.Fatalf("decode serialized rows: %v", err)
+		}
+		for i, row := range wire.Conversations {
+			want := bindings[payload.Conversations[i].ID]
+			if got := string(row["current_session_id"]); got != `"`+want+`"` {
+				t.Errorf("row %q current_session_id JSON: got %s, want %q", payload.Conversations[i].ID, got, want)
+			}
+		}
+	}
+}
+
 func TestListConversations_EmptyRegistry(t *testing.T) {
 	t.Parallel()
 	reg := &conversations.Registry{}
