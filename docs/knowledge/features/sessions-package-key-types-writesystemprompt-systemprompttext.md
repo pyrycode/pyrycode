@@ -3,14 +3,18 @@
 ```go
 func composeSystemPrompt(operator string) string
 func composeSystemPromptFor(operator string, clients []ClientIdentity, note string) string
+func composeSystemPromptForOn(daemon, instructions, operator string, clients []ClientIdentity, note string) string
 func writeSystemPrompt(registryPath string, id SessionID, text string) (string, error)
 func (p *Pool) conversationPrompt(label string) string
 func (p *Pool) attachedClients(ctx context.Context) []ClientIdentity
 func (p *Pool) handoffNoteFor(label string) string
-func (p *Pool) refreshSystemPrompt(sess *Session)
+func (p *Pool) refreshSystemPrompt(ctx context.Context, sess *Session)
 func (p *Pool) refreshSystemPromptForRotation(sess *Session)
 func (p *Pool) writeComposedPrompt(sess *Session, clients []ClientIdentity)
 func (p *Pool) SystemPromptFor(id SessionID) (string, error)
+func (p *Pool) DaemonInstructions() string
+func (p *Pool) DefaultDaemonInstructions() string
+func (p *Pool) SetDaemonInstructions(text string) error
 ```
 
 Writes the appended system prompt file every interactive claude is spawned
@@ -57,7 +61,7 @@ already-resolved path.
 ## Composition and resolution
 
 `composeSystemPrompt(operator)` returns `systemPromptText` byte-for-byte when
-`operator == ""`, otherwise the constant plus a blank-line separator plus the
+`operator == ""`, otherwise the constant plus a newline separator plus the
 operator's bytes verbatim (untrimmed, unescaped, unbounded here — #2149's
 `Registry.SetSystemPrompt` is the single validating door). There is no branch
 that returns the operator's text alone: replacing claude's own system prompt
@@ -67,7 +71,7 @@ is what `--append-system-prompt-file` exists not to do.
 composition starts from, in place of the bare `systemPromptText` constant:
 the constant, plus one sentence naming the folders the in-app markdown
 reader serves besides a conversation's workspace (#2710) —
-`readFolderSentence(folders)` — after the usual blank-line separator.
+`readFolderSentence(folders)` — after the usual newline separator.
 `folders` **must** be `resolveReadFolders`'s output, the roots the reader
 actually accepts, so the sentence can never name a folder the reader would
 refuse; it names only what resolved at startup, nothing a bad entry caused
@@ -77,22 +81,30 @@ and therefore this sentence — also names the daemon's own working folder,
 deduplicated against a `-pyry-read-folder` entry naming the same folder, and
 left out under that ticket's home/`/`/contains-home guard (see
 [`workspacefileread`'s working-folder section](v2-session-manager-state-machine-inbound-read-workspace-file-workspacefileread.md#the-daemons-own-working-folder-is-always-a-read-root-too-2720)).
-With no folders, or none that resolved, `daemonPromptText`
-returns `systemPromptText` byte-for-byte, which is what keeps every
-composition on an unconfigured daemon unchanged. `composeSystemPromptOn`
-and `composeSystemPromptForOn` take this daemon text as their first
-parameter in place of the bare constant; `composeSystemPrompt` and
-`composeSystemPromptFor` keep their existing signatures and call the `…On`
-siblings with the plain `systemPromptText`, which is why neither function's
-18 existing call sites nor `TestSystemPromptText_Pinned` needed an edit. All
-three production writes — `New`'s bootstrap file, `buildSession`'s
-per-session file, and `writeComposedPrompt`'s recompose — call
-`daemonPromptText(p.readFolders)` (`cfg.ReadFolders` at `New`), so the
-sentence sits in the same place in every one of them: directly after
-`systemPromptText` and before the client, handoff-note and operator
-sections, the order `writeComposedPrompt`'s own compose already follows for
-those three. It is computed fresh at every compose rather than cached on the
-`Pool`: a cached field would read `""` on any `Pool` built without going
+With no folders, or none that resolved, `daemonPromptText` returns
+`systemPromptText` byte-for-byte. `composeSystemPromptOn` and
+`composeSystemPromptForOn` take this daemon text as their first parameter;
+`composeSystemPrompt` and `composeSystemPromptFor` keep their existing
+signatures, use the plain `systemPromptText`, and omit daemon instructions.
+The bootstrap file written by `sessions.New` contains only
+`daemonPromptText(cfg.ReadFolders)`. Conversation construction in
+`Pool.buildSessionAs` and refresh in `Pool.writeComposedPrompt` use
+`composeSystemPromptForOn` with this five-contributor order:
+
+1. `daemonPromptText(p.readFolders)` — fixed architecture text and the
+   read-folder sentence.
+2. `Pool.DaemonInstructions()` — the daemon-wide operator instructions.
+3. `clientSection(clients)` — admitted attached-client identities.
+4. `handoffNoteSection(note)` — the conversation's fenced handoff note.
+5. Per-conversation operator text from `Pool.conversationPrompt(label)`.
+
+Nonempty daemon instructions are included verbatim after one newline; an
+empty string adds no section or separator. Each conversation retains its own
+operator text last so it can narrow or override the shared instructions.
+Construction includes the current instructions and operator text; clients and
+the note are resolved at next-start refresh. `daemonPromptText` is computed
+fresh at every compose rather than cached on the `Pool`: a cached field would
+read `""` on any `Pool` built without going
 through `New`'s normal construction path, and `daemonPromptText` would then
 silently drop `systemPromptText` itself from that pool's every recompose
 rather than merely omit the sentence.
@@ -116,8 +128,9 @@ release and before its `notifyTransition` fan-out, so the write lands before
 `RestartFresh` cancels the live child. Both funnels share the actual compose
 step, `(*Pool).writeComposedPrompt(sess, clients)`: resolve the operator bytes
 via `conversationPrompt`, resolve the conversation's handoff note via
-`handoffNoteFor` (#2475), compose through `composeSystemPromptFor`, write
-`sess.systemPromptPath` verbatim, and record what the session was composed
+`handoffNoteFor` (#2475), read `DaemonInstructions`, compose through
+`composeSystemPromptForOn`, write `sess.systemPromptPath` verbatim, and record
+what the session was composed
 with. Because both resolves and the write live in this one shared step, this
 is also the single lookup site for the note across all three spawn paths that
 carry one — first spawn, revive, and the rotation recompose — rather than
@@ -127,6 +140,58 @@ only the guards each puts in front of that call —
 clients through `attachedClients`; `refreshSystemPromptForRotation` runs
 unconditionally, since nothing a rotation does leaves `stateActive`, and
 resolves no client identity at all (see below).
+
+### Durable daemon-wide instructions (#2766)
+
+`Pool.DaemonInstructions` returns the current text;
+`Pool.DefaultDaemonInstructions` returns the exact built-in default, whose
+responsiveness and delegation guidance is pinned independently by
+`TestDaemonInstructionsStartup`. Clear with `SetDaemonInstructions("")`;
+reset with `SetDaemonInstructions(p.DefaultDaemonInstructions())`. The setter
+preserves valid UTF-8 verbatim, including whitespace, through the inclusive
+`conversations.MaxSystemPromptBytes` bound of **8192 bytes**, not runes.
+`ErrDaemonInstructionsTooLong` and `ErrDaemonInstructionsInvalidUTF8` are
+distinguishable validation failures, and neither changes memory or disk.
+
+The setting lives at `<Pool.dataDir()>/daemon-instructions.json`, separate
+from `conversations.Registry` and transient prompt files. `sessions.New`
+seeds and eagerly persists the default only when that setting file is absent,
+on both fresh installs and upgrades with an existing sessions registry.
+Stored custom text and an explicitly empty string survive reconstruction;
+empty is a durable clear, never a request to reseed. Unreadable, malformed,
+nonregular (including symlink), oversized or invalid-UTF-8 stores fail startup,
+as does failure to persist the initial default. With persistence disabled,
+startup seeds memory only and the setter writes no setting file.
+
+Writes use `writeSystemPromptFile`'s same-directory 0600 tempfile, sync,
+close and atomic rename, creating the daemon directory with 0700 permissions
+when needed. `SetDaemonInstructions` publishes memory only after persistence
+succeeds; a persistence failure returns an error and retains the prior memory
+and stored value. Reads and writes use a dedicated `instructionsMu` RWMutex,
+with the setter holding its write lock through persistence and publication.
+It never takes `Pool.mu`: `buildSessionAs` can already hold that lock when it
+reads instructions, so sharing the pool lock would deadlock construction.
+Errors and logs contain no instruction text, including load, validation and
+persistence failures.
+
+**Validate original bytes before a decoder can repair them.** An ordinary
+JSON string can silently replace invalid UTF-8, making subsequent validation
+accept text the operator never supplied. `daemonInstructionsStore` instead
+stores a required `instructions` field as base64-encoded `[]byte`; the loader
+bounds reads, rejects missing/null fields, and validates the decoded original
+bytes. Malformed-store errors omit parser details that could echo private
+text. This representation also distinguishes a stored empty byte string from
+an absent setting.
+
+`SetDaemonInstructions` changes only the durable setting and pool memory.
+It never restarts or interrupts an active child or rewrites its composed
+prompt file. Each conversation reads the latest value at its next composition
+for first activation, inactive reactivation/revival or `new_session` rotation;
+the bootstrap retains its separate prompt lifecycle and receives none of
+these instructions. Session removal, rotation, daemon shutdown and startup's
+transient-prompt purge leave the setting intact. See
+[the design](../../specs/architecture/2766-daemon-instructions.md) and
+[the next-start evidence below](#the-mint-window-trap-this-design-exists-to-avoid).
 
 ## Naming the attached client (#2148)
 
@@ -234,12 +299,12 @@ the consuming write path.
 
 ## Carrying the conversation's handoff note (#2475)
 
-`composeSystemPromptFor` gained a third contributor: the conversation's
-handoff note, resolved by `(*Pool).handoffNoteFor(label)` and rendered by
-`handoffNoteSection(note)`. Composed order is **constant, then clients, then
-the note, then the operator's bytes** — the operator's text stays last, where
-it has always been. The note was filed as a *pointer* (one line naming the
-note's absolute path); #2474 measured that a `Read` outside the workspace is
+The conversation's handoff note is resolved by `(*Pool).handoffNoteFor(label)`
+and rendered by `handoffNoteSection(note)`. It follows the client section and
+precedes the operator's bytes in the
+[five-contributor order](#composition-and-resolution). The note was filed as
+a *pointer* (one line naming the note's absolute path); #2474 measured that a
+`Read` outside the workspace is
 gated under the daemon's in-band `default` posture, so a background
 conversation could never act on a bare path, and the design shipped as inline
 composition instead.
@@ -338,26 +403,31 @@ that gap rather than trusting the store's blank-only check. See
 
 ## The mint-window trap this design exists to avoid
 
-Composing once inside `buildSession` would satisfy every argv assertion and
-still ship the feature dead, because of when operators actually set a prompt.
+Composing once inside `Pool.buildSessionAs` would satisfy every argv assertion
+and still ship the feature dead, because of when operators actually set a prompt.
 Since [#2085](https://github.com/pyrycode/pyrycode/issues/2085) split "session
 minted" from "session started," the normal flow — create the conversation, set
-its prompt, send the first message — sets the prompt *after* `buildSession`
-has already frozen `spawnBase` and *before* any child exists. That is exactly
-the shape `Conversation.Cwd` is stuck in today: its doc comment claims a
-change "takes effect on the conversation's next fresh session spawn," and no
-production path reads the stored value to make that true.
+its prompt, send the first message — sets the prompt *after* `buildSessionAs`
+has already frozen `spawnBase` and *before* any child exists. Daemon-wide
+instructions have the same window: reading them only at construction would
+miss a `SetDaemonInstructions` edit made before the first activation.
 
-`Pool.refreshSystemPrompt(sess)`, called from `Pool.Activate` — the pool-owned
-funnel every first spawn and every re-activate passes through — is what closes
-the window: it re-reads the registry and rewrites the file `spawnBase` already
-names, immediately before the child comes up. Because the write is a rename
-onto a stable path, a backoff restart re-executing the installed argv reads
-whatever the file then holds. An already-active session is skipped (Juhana's
+`Pool.refreshSystemPrompt(ctx, sess)`, called from `Pool.Activate` — the
+pool-owned funnel every first spawn and every re-activate passes through — closes
+the window: `writeComposedPrompt` re-reads both the conversation registry and
+the pool's current daemon instructions, then rewrites the file `spawnBase`
+already names, immediately before the child comes up. Inactive reactivation
+and revival use this same refresh. `refreshSystemPromptForRotation` also
+re-reads the instructions for the next `new_session` child, while carrying
+the admitted client identities rather than resolving clients on the relay's
+dispatch goroutine. Both refresh functions skip the bootstrap. Because the
+write is a rename onto a stable path, a backoff restart re-executing the
+installed argv reads whatever the file then holds. An already-active session
+is skipped (Juhana's
 ruling in code: setting a prompt does not restart a running child), which also
 keeps a disk write off `Activate`'s LRU-touch hot path. A refresh write failure
 is logged and swallowed rather than failing the spawn — the file was already
-written at `buildSession` and the write is atomic, so the fallback is one
+written at `buildSessionAs` and the write is atomic, so the fallback is one
 revision of stale-but-complete bytes, never a missing or truncated file.
 
 The assertion that actually catches a regression here is "mint with no
@@ -365,6 +435,16 @@ prompt, `SetSystemPrompt` on the registry, then `Activate` — the file the argv
 names holds the prompt" (`TestPool_Activate_ComposesPromptSetAfterMint`) — not
 "the flag is present in the argv," which a construction-only composition would
 also pass.
+
+`TestDaemonInstructionsNextStarts` adds the shared-setting version of that
+proof: edit after mint, activate, and inspect the file named by the recorded
+argv for all five contributors in order. It also checks that an edit leaves
+an active child's PID, prompt bytes and file timestamp unchanged, then checks
+the latest instructions at inactive reactivation, rotation and a separately
+revived conversation with its own operator text last. File-content assertions
+at those lifecycle boundaries catch a missing re-read that argv-presence
+assertions would leave green. `TestDaemonInstructionsRefreshFailureKeepsCompletePrompt`
+holds the prior-complete-file fallback and instruction-free refresh log.
 
 ## `Pool.SystemPromptFor`
 

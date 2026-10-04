@@ -147,6 +147,10 @@ func helperPoolArgvRecorder(t *testing.T, registryPath, tplWorkDir string, claud
 	if err != nil {
 		t.Fatalf("sessions.New: %v", err)
 	}
+	// These fixtures isolate the per-conversation contributors.
+	if err := pool.SetDaemonInstructions(""); err != nil {
+		t.Fatal(err)
+	}
 	return pool
 }
 
