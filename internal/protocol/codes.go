@@ -22,6 +22,10 @@ const (
 	CodeConversationNotFound        = "conversation.not_found"
 	CodeConversationAlreadyPromoted = "conversation.already_promoted"
 
+	// Host system prompt storage failures are retryable. Malformed requests use
+	// CodeProtocolMalformed (non-retryable); handlers are pending #2768.
+	CodeHostSystemPromptUnavailable = "host_system_prompt.unavailable"
+
 	// Message errors.
 	CodeMessageTooLong = "message.too_long"
 
@@ -408,6 +412,13 @@ const (
 	// to every phone on this server-id. The new value takes effect at the
 	// conversation's next session start, not on a running child.
 	TypeSetSystemPrompt = "set_system_prompt"
+
+	// Daemon-wide host prompt family. Both client → daemon verbs are
+	// map-dispatched; the daemon → client reply is outbound only. See the
+	// consumer contract in host_system_prompt.go; handlers are pending #2768.
+	TypeRequestHostSystemPrompt = "request_host_system_prompt"
+	TypeSetHostSystemPrompt     = "set_host_system_prompt"
+	TypeHostSystemPrompt        = "host_system_prompt"
 
 	// Workspace.
 	// TypeCreateWorkspaceFolder is a phone → binary dispatch.Route write verb

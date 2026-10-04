@@ -376,6 +376,11 @@ var excludedTypes = map[string]string{
 	// inboundTypes.
 	"TypeSystemPrompt": "reply",
 
+	// Daemon-wide host prompt vocabulary precedes the map handlers in #2768.
+	"TypeRequestHostSystemPrompt": "pending handler (#2768)",
+	"TypeSetHostSystemPrompt":     "pending handler (#2768)",
+	"TypeHostSystemPrompt":        "reply",
+
 	// outbound push / event — binary→phone, never dispatched inbound.
 	"TypeMessage":             "push",
 	"TypeTurnState":           "push",
