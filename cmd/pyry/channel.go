@@ -253,6 +253,7 @@ func channelCreator(
 					IsPromoted:     got.IsPromoted,
 					IsArchived:     got.IsArchived,
 					IsMuted:        got.IsMuted,
+					ReadUpTo:       got.ReadUpTo,
 					Name:           got.Name,
 					Cwd:            got.Cwd,
 					WorkspaceLabel: workspaceLabel,

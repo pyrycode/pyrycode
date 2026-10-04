@@ -106,6 +106,7 @@ func SetConversationMuted(reg ConversationMuter, registryPath string, announce C
 			IsPromoted:     cv.IsPromoted,
 			IsArchived:     cv.IsArchived,
 			IsMuted:        cv.IsMuted,
+			ReadUpTo:       cv.ReadUpTo,
 			Name:           cv.Name,
 			Cwd:            cv.Cwd,
 			WorkspaceLabel: workspaceLabelFor(reg, cv.Cwd),

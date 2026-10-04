@@ -179,6 +179,7 @@ func TestRenameConversation_MutedConversation_ReplyKeepsMuted(t *testing.T) {
 	reg, regPath := newRenameConvReg(t)
 	reg.Update(conversations.ConversationID(renameConvTargetID), func(cv *conversations.Conversation) {
 		cv.IsMuted = true
+		cv.ReadUpTo = 1<<63 + 7
 	})
 	c, recv := newRenameConvConn(t)
 	req := renameConvRequest(t, protocol.RenameConversationPayload{
@@ -192,11 +193,14 @@ func TestRenameConversation_MutedConversation_ReplyKeepsMuted(t *testing.T) {
 	}
 
 	env := assertRenameConvEnvelopeShape(t, recv(), protocol.TypeConversationUpdated)
+	if !strings.Contains(string(env.Payload), `"read_up_to":9223372036854775815`) {
+		t.Fatalf("reply lost read mark: %s", env.Payload)
+	}
 	if !strings.Contains(string(env.Payload), `"is_muted":true`) {
 		t.Errorf("reply payload lacks \"is_muted\":true:\n%s", env.Payload)
 	}
 	stored, ok := reg.Get(conversations.ConversationID(renameConvTargetID))
-	if !ok || !stored.IsMuted {
+	if !ok || !stored.IsMuted || stored.ReadUpTo != 1<<63+7 {
 		t.Errorf("stored row after rename: got %+v (present=%v), want IsMuted=true", stored, ok)
 	}
 }

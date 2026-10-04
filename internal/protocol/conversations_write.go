@@ -225,9 +225,12 @@ type ConversationUpdatedPayload struct {
 	// (no omitempty, unlike the on-disk Conversation.IsMuted): a client folds
 	// this record into its list in place, so a record that dropped the key
 	// would read as not muted and a rename would silently unmute the channel.
-	IsMuted bool    `json:"is_muted"`
-	Name    *string `json:"name"`
-	Cwd     string  `json:"cwd"`
+	IsMuted bool `json:"is_muted"`
+
+	// ReadUpTo is the stored durable history read mark, including zero.
+	ReadUpTo uint64  `json:"read_up_to"`
+	Name     *string `json:"name"`
+	Cwd      string  `json:"cwd"`
 	// WorkspaceLabel is the operator-set display name stored for the workspace at
 	// this frame's own Cwd (#2210), so a client patching a row in place from a
 	// pushed frame renders the operator's chosen name without re-listing to find

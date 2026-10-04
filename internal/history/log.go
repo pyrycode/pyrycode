@@ -330,6 +330,32 @@ func (s *Store) Append(convID conversations.ConversationID, typ string, payload 
 	return id, nil
 }
 
+// LatestEntryID returns the newest durable entry id, or zero for a missing or
+// empty log. It shares Append's recovered cursor and opens no segment files
+// once that cursor is initialized. Directory containment is checked every call.
+func (s *Store) LatestEntryID(convID conversations.ConversationID) (uint64, error) {
+	if !conversations.ValidID(string(convID)) {
+		return 0, fmt.Errorf("%w: conversation id %q", ErrInvalidID, string(convID))
+	}
+	if s == nil {
+		return 0, fmt.Errorf("history: store is unavailable")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	dir, err := s.resolveDir(convID, false)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	c, err := s.load(convID, dir)
+	if err != nil {
+		return 0, err
+	}
+	return c.nextID - 1, nil
+}
+
 // Page returns up to limit of convID's entries, newest-first, ending at cursor's
 // position when one is given.
 //

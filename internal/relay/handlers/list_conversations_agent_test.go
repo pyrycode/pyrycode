@@ -44,7 +44,7 @@ func listWithAgents(t *testing.T, reg *conversations.Registry, harnessFor Sessio
 	t.Helper()
 	c, recv := newListConvConn(t)
 	c.SetMultiAgent(multiAgent)
-	if err := ListConversationsWithAgents(reg, harnessFor)(context.Background(), c, makeListConversationsRequest(t, 1)); err != nil {
+	if err := ListConversationsWithAgents(reg, harnessFor, emptyListHistory{})(context.Background(), c, makeListConversationsRequest(t, 1)); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
 	inner, payload := decodeConversationsResponse(t, recv())
@@ -105,7 +105,7 @@ func TestListConversationsWithAgents_IncapableClientSeesTodaysList(t *testing.T)
 
 	claudeOnly, _ := agentFixture(t, false)
 	c, recv := newListConvConn(t)
-	if err := ListConversations(claudeOnly)(context.Background(), c, makeListConversationsRequest(t, 1)); err != nil {
+	if err := ListConversations(claudeOnly, emptyListHistory{})(context.Background(), c, makeListConversationsRequest(t, 1)); err != nil {
 		t.Fatalf("agent-blind handler: %v", err)
 	}
 	inner, _ := decodeConversationsResponse(t, recv())

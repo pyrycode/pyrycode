@@ -409,7 +409,7 @@ func TestArchiveConversation_Malformed_DoesNotLeakPayloadBytes(t *testing.T) {
 func listArchivedAtRaw(t *testing.T, reg ConversationLister) json.RawMessage {
 	t.Helper()
 	c, recv := newListConvConn(t)
-	if err := ListConversationsWithAgents(reg, nil)(context.Background(), c, makeListConversationsRequest(t, 1)); err != nil {
+	if err := ListConversationsWithAgents(reg, nil, emptyListHistory{})(context.Background(), c, makeListConversationsRequest(t, 1)); err != nil {
 		t.Fatalf("list handler: %v", err)
 	}
 	inner, _ := decodeConversationsResponse(t, recv())

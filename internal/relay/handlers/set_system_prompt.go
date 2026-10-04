@@ -227,6 +227,7 @@ func SetSystemPrompt(reg ConversationSystemPromptSetter, registryPath string, lo
 			IsPromoted: cv.IsPromoted,
 			IsArchived: cv.IsArchived,
 			IsMuted:    cv.IsMuted,
+			ReadUpTo:   cv.ReadUpTo,
 			Name:       cv.Name,
 			Cwd:        cv.Cwd,
 			// The workspace's label, not the conversation's prompt: this is a

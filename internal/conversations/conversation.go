@@ -106,6 +106,9 @@ type Conversation struct {
 	// rows is byte-identical to its pre-#2571 form.
 	IsMuted bool `json:"is_muted,omitempty"`
 
+	// ReadUpTo is the host operator's durable history entry read mark.
+	ReadUpTo uint64 `json:"read_up_to,omitempty"`
+
 	// SystemPrompt is the operator-set system prompt this conversation carries,
 	// so two conversations on the same repository can be told to behave
 	// differently. A pointer for the same reason as Name: nil is "absent" (no

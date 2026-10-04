@@ -38,6 +38,11 @@ type ConversationSummary struct {
 	// a client reads false explicitly on every row, and treats an absent key
 	// as not muted only because an older daemon cannot send it.
 	IsMuted bool `json:"is_muted"`
+
+	// ReadUpTo is the stored durable history read mark, including zero.
+	ReadUpTo uint64 `json:"read_up_to"`
+	// LatestEntryID is the newest durable history entry, or zero for no entries.
+	LatestEntryID uint64 `json:"latest_entry_id"`
 	// ArchivedAt is when the conversation was archived (#2698), so a client
 	// orders its Archive screen newest-archived first. A pointer without
 	// omitempty, like WorkspaceLabel below: the key is always serialized, and
