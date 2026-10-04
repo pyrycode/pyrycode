@@ -147,4 +147,8 @@ var inboundAppTypeSet = map[string]bool{
 	TypeRenameWorkspace:        true,
 	TypeWorkspaceUpdated:       true,
 	TypeRegisterPushToken:      true,
+
+	// Daemon-wide host prompt verbs; handlers are pending #2768.
+	TypeRequestHostSystemPrompt: true,
+	TypeSetHostSystemPrompt:     true,
 }

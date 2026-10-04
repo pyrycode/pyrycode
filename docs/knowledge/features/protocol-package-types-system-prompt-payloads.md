@@ -1,4 +1,4 @@
-# Conversation system-prompt read payloads (#2152)
+# System-prompt payloads
 
 Wire vocabulary only, in a new `internal/protocol/system_prompt.go` — the read
 half of the #2151 cluster, which shipped write-only. Its own file rather than a
@@ -7,7 +7,7 @@ carries payloads that mutate the conversation *record*, and this pair is a read
 of the prompt itself, with its own reply type and its own verdict vocabulary —
 `settings.go`, `history.go` and `snapshot.go` each own a frame family for the
 same reason. Published contract:
-[`docs/protocol-mobile.md` § Reading a conversation's system prompt](../../protocol-mobile.md#reading-a-conversations-system-prompt-v2).
+[`docs/protocol-mobile.md` § Reading a conversation's system prompt](../../protocol-mobile.md#reading-a-conversations-system-prompt).
 
 ```go
 type RequestSystemPromptPayload struct {
@@ -79,6 +79,33 @@ operator text back over the wire to prove it. A client wanting a diff is a
 later ticket, and the reply's `conversation_id`-less shape (correlation rides
 `InReplyTo`, matching `SessionSettingsPayload`) is what lets an unhosted
 conversation's answer be byte-identical to a hosted-but-quiet one.
+
+## Daemon-wide host prompt boundaries
+
+Do not copy the conversation prompt's nullable clear semantics into
+`SetHostSystemPromptPayload`: its required `*string` without `omitempty`
+distinguishes missing/null (nil, invalid) from an explicit `""` (nonnil,
+durable clear). Successful JSON decoding of missing/null is not validation;
+the consumer must reject nil. `HostSystemPromptPayload` uses two required
+strings without `omitempty`, so an empty current value still carries both
+keys. `TestHostSystemPromptPayloads_WireKeys` pins the complete key sets
+independently of fixture regeneration, preventing an added conversation/session
+identifier or status verdict from silently entering this daemon-scoped family.
+See [the mobile contract](../../protocol-mobile.md#daemon-wide-host-system-prompt)
+for paired access and the handlers/routing still pending #2768.
+
+**Two individually bounded strings need not fit one envelope.** Two arbitrary
+8192-byte strings can expand to 98304 JSON content bytes, already above the
+65519-byte application-envelope cap. `TestHostSystemPromptPayload_EnvelopeFit`
+instead measures sixfold escaping of `conversations.MaxSystemPromptBytes`
+bytes for current text plus the actual `Pool.DefaultDaemonInstructions`,
+maximum envelope IDs and a fractional timestamp. Reading the shipped default
+through a test-only sessions import catches default growth without adding a
+production dependency or copying reset text into protocol. Revisit this proof
+when the default or reply shape changes; a populated example alone does not
+prove the worst case fits. Reset remains an ordinary set of the returned
+default, and an empty stored current value never requests default seeding;
+see [the persistence boundary](sessions-package-key-types-writesystemprompt-systemprompttext.md#durable-daemon-wide-instructions-2766).
 
 ## Related
 
