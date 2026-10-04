@@ -138,6 +138,7 @@ var inboundAppTypeSet = map[string]bool{
 	TypeArchiveConversation:    true,
 	TypeUnarchiveConversation:  true,
 	TypeSetConversationMuted:   true,
+	TypeMarkConversationRead:   true,
 	TypeChangeWorkspace:        true,
 	TypeSetSystemPrompt:        true,
 	TypeCreateWorkspaceFolder:  true,
