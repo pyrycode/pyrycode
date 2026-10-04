@@ -169,6 +169,9 @@ type relayWiring struct {
 	// convReg is the conversations registry backing the list/create/rename/
 	// delete/archive/change-workspace/recent handlers.
 	convReg *conversations.Registry
+	// workspaceBase is the immutable service workspace base resolved at startup.
+	// Empty is supplied explicitly so the handshake cannot re-resolve HOME.
+	workspaceBase string
 	// readFolders are the operator-named folders the markdown reader may open
 	// besides a conversation's workspace (#2710): resolveReadFolders output,
 	// resolved once in the composition root and never written afterwards.
@@ -1064,15 +1067,16 @@ func startRelayV2(
 	}
 
 	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
-		Frames:      conn.Frames(),
-		Outbound:    conn.Send,
-		Connected:   conn.Connected,
-		Reconnect:   conn.Reconnected(),
-		StaticPriv:  priv[:],
-		Devices:     registry,
-		DevicesPath: resolveDevicesPath(w.instanceName),
-		ServerID:    string(serverID),
-		Logger:      logger,
+		Frames:        conn.Frames(),
+		Outbound:      conn.Send,
+		Connected:     conn.Connected,
+		Reconnect:     conn.Reconnected(),
+		StaticPriv:    priv[:],
+		Devices:       registry,
+		DevicesPath:   resolveDevicesPath(w.instanceName),
+		ServerID:      string(serverID),
+		Logger:        logger,
+		WorkspaceBase: &w.workspaceBase,
 		// This release's minimum app versions, both unset today (#2578).
 		MinClientVersions: relay.ShippedMinClientVersions(),
 		Handlers: map[string]dispatch.Handler{

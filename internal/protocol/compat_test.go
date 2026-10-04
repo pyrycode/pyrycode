@@ -18,6 +18,7 @@ func TestIsKnownAppType(t *testing.T) {
 		TypeSetConversationMuted,
 		TypeChangeWorkspace,
 		TypeSetSystemPrompt,
+		TypeRequestHostSystemPrompt, TypeSetHostSystemPrompt,
 		TypeCreateWorkspaceFolder, TypeWorkspaceFolderCreated,
 		TypeRecentWorkspaces, TypeRecentWorkspacesList,
 		TypeRegisterPushToken,
@@ -38,6 +39,7 @@ func TestIsKnownAppType(t *testing.T) {
 		want      error
 	}{
 		{"empty-type-rejected", "", false, ErrUnknownType},
+		{"host_system_prompt-rejected", TypeHostSystemPrompt, false, ErrUnknownType},
 		{"unknown-type-rejected", "frobnicate", false, ErrUnknownType},
 		{"typo-near-known-rejected", "helo", false, ErrUnknownType},
 		{"encrypted-with-known-type", TypeHello, true, ErrUnsupported},
@@ -253,12 +255,13 @@ func TestInboundAppTypeSet_CoversAllExportedTypeConstants(t *testing.T) {
 		TypeSetConversationMuted,
 		TypeChangeWorkspace,
 		TypeSetSystemPrompt,
+		TypeRequestHostSystemPrompt, TypeSetHostSystemPrompt,
 		TypeCreateWorkspaceFolder, TypeWorkspaceFolderCreated,
 		TypeRecentWorkspaces, TypeRecentWorkspacesList,
 		TypeRenameWorkspace, TypeWorkspaceUpdated,
 		TypeRegisterPushToken,
 	}
-	if got, want := len(all), 27; got != want {
+	if got, want := len(all), 29; got != want {
 		t.Fatalf("type-list length: got %d, want %d", got, want)
 	}
 	if got, want := len(inboundAppTypeSet), len(all); got != want {
@@ -389,6 +392,8 @@ var v2OnlyTypes = map[string]bool{
 	// prompt.
 	TypeRequestSystemPrompt: true,
 	TypeSystemPrompt:        true,
+	// Daemon-wide host prompt reply is outbound; its two verbs are map-dispatched.
+	TypeHostSystemPrompt: true,
 	// v2 pairing-mint pair: the request verb (inbound control) and the minted
 	// pairing it is answered with (outbound reply). The lane matters more here
 	// than on any neighbour above — the reply is a bearer credential, so
@@ -428,6 +433,7 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeSetConversationMuted,
 		TypeChangeWorkspace,
 		TypeSetSystemPrompt,
+		TypeRequestHostSystemPrompt, TypeSetHostSystemPrompt,
 		TypeCreateWorkspaceFolder, TypeWorkspaceFolderCreated,
 		TypeRecentWorkspaces, TypeRecentWorkspacesList,
 		TypeRenameWorkspace, TypeWorkspaceUpdated,
@@ -513,6 +519,7 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeRequestModelList,
 		// v2 conversation system-prompt read pair.
 		TypeRequestSystemPrompt, TypeSystemPrompt,
+		TypeHostSystemPrompt,
 		// v2 pairing-mint pair.
 		TypeMintPairing, TypePairingMinted,
 		// v2 compaction boundary (outbound status, #2237).
@@ -554,6 +561,7 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 	cases := map[string]string{
 		"CodeProtocolUnknownType":         CodeProtocolUnknownType,
 		"CodeProtocolMalformed":           CodeProtocolMalformed,
+		"CodeHostSystemPromptUnavailable": CodeHostSystemPromptUnavailable,
 		"CodeProtocolUnsupported":         CodeProtocolUnsupported,
 		"CodeAuthInvalidToken":            CodeAuthInvalidToken,
 		"CodeAuthTokenRevoked":            CodeAuthTokenRevoked,
@@ -583,6 +591,7 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 	want := map[string]string{
 		"CodeProtocolUnknownType":         "protocol.unknown_type",
 		"CodeProtocolMalformed":           "protocol.malformed",
+		"CodeHostSystemPromptUnavailable": "host_system_prompt.unavailable",
 		"CodeProtocolUnsupported":         "protocol.unsupported",
 		"CodeAuthInvalidToken":            "auth.invalid_token",
 		"CodeAuthTokenRevoked":            "auth.token_revoked",

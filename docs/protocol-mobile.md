@@ -542,6 +542,9 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | `set_conversation_muted` | phone → binary | no | Sets or clears a conversation's durable mute-notifications flag (`IsMuted`, #2571) via a single payload key, `muted`. **`muted` is required**: it is decoded as a pointer, so an absent key or an explicit `null` is `protocol.malformed` rather than read as `false` — the same trap #2571 flagged for the field's own `omitempty`, now enforced on the write side too. An unknown `conversation_id` is `conversation.not_found`. Both reject cases are non-retryable, static-message and echo none of the payload. Replies with the reused `conversation_updated` record, correlated by `in_reply_to`. **Unlike `archive_conversation`, this write is also fanned out**: the same record is pushed, uncorrelated, to every interactive-capable conn — the requester included, like the [`conversation_updated`](#conversation_updated) auto-naming push — so muting a noisy conversation from one client silences it on every paired client without a `list_conversations` round trip. |
 | `change_workspace` | phone → binary | no | Moves a conversation to a client-chosen workspace folder (updates its `cwd`, confined to `$HOME`); replies with the reused `conversation_updated` record. |
 | `set_system_prompt` | phone → binary | no | Sets or clears a conversation's durable system prompt — the operator-authored text every session it spawns is given, on **either agent** (#2662: a Codex session reads the same composed file and sends it as `developerInstructions`). Replies with the reused `conversation_updated` record, which does **not** carry the value. Takes effect at the conversation's next session start or thread resume, not on a running child. The read half is [`request_system_prompt`](#request_system_prompt), a different type on a different dispatch surface. See [Setting a conversation's system prompt](#setting-a-conversations-system-prompt). |
+| `request_host_system_prompt` | client → daemon | no | Reads the connected daemon's current and default host instructions. Authenticated paired-client map dispatch, no interactive-capability gate. **Handlers/routing pending #2768.** See [Daemon-wide host system prompt](#daemon-wide-host-system-prompt). |
+| `set_host_system_prompt` | client → daemon | no | Durably sets or clears the daemon-wide host instructions; reset sets the returned default. **Handlers/routing pending #2768.** See [Daemon-wide host system prompt](#daemon-wide-host-system-prompt). |
+| `host_system_prompt` | daemon → client | no | Exactly one correlated unicast reply to a successful read or durable write, never broadcast; always carries current and default strings. **Handlers/routing pending #2768.** See [Daemon-wide host system prompt](#daemon-wide-host-system-prompt). |
 | `create_workspace_folder` | phone → binary | no | Creates a new folder on the daemon host under a client-supplied parent path (confined to `$HOME`); touches no conversation registry. Replies with `workspace_folder_created`. |
 | `workspace_folder_created` | binary → phone | no | Reply to `create_workspace_folder`, correlated by `in_reply_to`; carries the created folder's canonical (symlink-resolved) absolute path. |
 | `recent_workspaces` | phone → binary | no | Read verb (like `list_conversations`); requests the distinct set of recently-used workspace folders. Empty request payload. Replies with `recent_workspaces_list`. |
@@ -719,6 +722,142 @@ Example — a conversation whose stored prompt has moved on from what its live s
 
 **Prompt bytes reach no daemon log on any path**, the not-found and malformed branches included — nor does the prompt's length, nor the conversation id, nor the verdict, which is derived from the operator's text. Every record this verb writes carries a `conn_id` and an event name and nothing else.
 
+### Daemon-wide host system prompt
+
+**Vocabulary and serialization examples landed in #2767; handlers/routing,
+runtime validation and response enforcement are pending #2768.** The behavior
+below is the consumer contract for that wiring, not an available handler yet.
+
+The host system prompt is the connected daemon's durable operator instructions,
+shared by every conversation/channel it starts. It is separate from the
+[per-conversation prompt](#setting-a-conversations-system-prompt). Clients read
+the current value and the daemon's shipped default together, so desktop and
+mobile edit the same setting and can reset without embedding default text.
+
+Both inbound verbs use authenticated paired-client map dispatch. Any paired
+client may read or write this setting; there is no conversation/session lookup
+and no `interactive` capability gate. Frames use the existing encrypted
+[Noise transport](#security-model). No payload in this family carries a
+conversation/session identifier or a session-status verdict.
+
+#### `request_host_system_prompt`
+
+Direction **client → daemon** (phone → binary). Reads the connected daemon's
+setting; the payload is an empty object.
+
+| Field | Type | Meaning |
+|---|---|---|
+| None | — | Send `{}`. |
+
+```json
+{
+  "id": 101, "type": "request_host_system_prompt", "ts": "...",
+  "payload": {}
+}
+```
+
+#### `set_host_system_prompt`
+
+Direction **client → daemon** (phone → binary). Stores the shared instructions.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `system_prompt` | required string | Stored verbatim, including whitespace, through **8192 bytes inclusive**, not characters/runes. Only `""` clears; missing, `null`, and non-string values are invalid. |
+
+```json
+{
+  "id": 102, "type": "set_host_system_prompt", "ts": "...",
+  "payload": { "system_prompt": "Answer concisely.\nPreserve whitespace.  " }
+}
+```
+
+An ordinary write clears the setting durably:
+
+```json
+{
+  "id": 103, "type": "set_host_system_prompt", "ts": "...",
+  "payload": { "system_prompt": "" }
+}
+```
+
+Missing and `null` may share one invalid decoded state; neither means clear or
+reset. A whitespace-only string is valid text and is preserved, not trimmed
+into a clear. A value of exactly 8192 bytes is allowed; a larger value is refused.
+The bound is `conversations.MaxSystemPromptBytes`.
+
+#### `host_system_prompt`
+
+Direction **daemon → client** (binary → phone). A successful read or durable
+write returns **exactly one unicast reply** to the requesting connection,
+correlated by envelope `in_reply_to`; it is never broadcast. Write success is
+reported only after persistence succeeds. This outbound type is not accepted
+as an inbound application verb.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `system_prompt` | required string | Current stored host instructions. Always present, including `""` after a clear. |
+| `default_system_prompt` | required string | The exact shipped reset text from this daemon. Always present, including when current text is empty; independent of custom stored instructions. |
+
+Examples below abbreviate the shipped default to illustrate the wire shape;
+clients use the **entire returned string**, not this example text. A read of a
+populated setting replies to request 101 (a successful populated write replies
+with the same payload and `in_reply_to: 102`):
+
+```json
+{
+  "id": 201, "type": "host_system_prompt", "ts": "...", "in_reply_to": 101,
+  "payload": {
+    "system_prompt": "Answer concisely.\nPreserve whitespace.  ",
+    "default_system_prompt": "Keep the main thread free."
+  }
+}
+```
+
+The clear replies to request 103 with an explicit empty current value and the
+same nonempty default:
+
+```json
+{
+  "id": 202, "type": "host_system_prompt", "ts": "...", "in_reply_to": 103,
+  "payload": {
+    "system_prompt": "",
+    "default_system_prompt": "Keep the main thread free."
+  }
+}
+```
+
+**Reset is an ordinary `set_host_system_prompt`** whose `system_prompt` is the
+last returned `default_system_prompt`; there is no separate reset operation.
+The daemon seeds and persists its default only when the setting is absent,
+including on upgrade. Stored custom text and an explicit empty survive daemon
+restart; empty never triggers reseeding. Reset writes the returned default as
+the current stored value. Persistence/composition landed in #2766; see
+[durable daemon-wide instructions](knowledge/features/sessions-package-key-types-writesystemprompt-systemprompttext.md#durable-daemon-wide-instructions-2766).
+
+**Changes take effect at the next session start**, including first activation,
+inactive reactivation/revival and `new_session` rotation. An already-running
+child is not restarted or interrupted, and its prompt file is not rewritten.
+Composition puts fixed daemon architecture/read-folder text first, then these
+host instructions, attached-client identities, the handoff note, and finally
+the per-conversation/channel instructions so they can narrow or override shared
+guidance. Clearing removes only the host-instruction contribution.
+
+Refusals use a correlated `error` envelope with a static message containing no
+submitted text or storage path; nothing is stored on refusal:
+
+| Condition | Code | Retryable |
+|---|---|---|
+| Malformed payload, missing/`null`/non-string write, or value over 8192 bytes | `protocol.malformed` | no |
+| Storage failure | `host_system_prompt.unavailable` | yes |
+
+The [65519-byte application-envelope cap](#application-envelope-size-cap) still
+applies. The fit test includes a worst-case JSON-escaped 8192-byte current value
+and the actual shipped default; it does not claim two arbitrary maximum-sized
+strings fit. Committed examples live under `internal/protocol/testdata/` as
+`request_host_system_prompt.json`, `set_host_system_prompt.json`,
+`set_host_system_prompt_empty.json`, `host_system_prompt.json`, and
+`host_system_prompt_empty.json`.
+
 ### Renaming a workspace
 
 `rename_workspace` sets or clears a workspace's display name — the operator-chosen label a client shows instead of, or beside, the folder's own path, so a workspace whose folder is called something unhelpful reads the way the operator thinks of it. **The name travels with the workspace, not with the client**: it is stored on the daemon, so every client sees the same label.
@@ -859,8 +998,8 @@ surface.
 
 `workspace_root` is optional (`omitempty`: absent, not `null`). For an
 admitted peer, it reports an absolute workspace base on the **daemon host**,
-so a client can preview the destination of a relative workspace path. The
-daemon's relay caller may supply a resolved base through the optional
+so a client can preview the destination of a relative workspace path. A
+relay caller may supply a resolved base through the optional
 `V2SessionConfig.WorkspaceBase`. A supplied absolute value is advertised
 verbatim, without cleaning its spelling or resolving symlinks. An explicitly
 empty or relative value omits the key without falling back to HOME; omission
@@ -870,9 +1009,20 @@ Only an unsupplied base (`WorkspaceBase == nil`) uses the legacy
 `WorkspaceRoot()` default, `$HOME/pyry-workspace`. If HOME is unknown or
 non-absolute, that default is omitted. A supplied absolute base is independent
 of HOME. This is advertisement only and grants no filesystem access: the
-directory need not exist, and selecting the value neither inspects nor creates
-it. Daemon startup resolution and HOME confinement are separate caller
-responsibilities.
+directory need not exist, and handshake selection neither inspects nor creates
+it. The caller owns resolution and keeps the supplied string immutable while
+the manager runs.
+
+The production daemon resolves one base at startup from its service process
+cwd (the service's `WorkingDirectory`), independently of `--pyry-workdir`.
+A usable absolute cwd within canonical HOME, including HOME itself, selects
+its canonical realpath. An unavailable, empty, relative, unresolvable or
+HOME-escaping cwd selects the lexical `$HOME/pyry-workspace` fallback, which
+need not exist. Without an available absolute HOME, the daemon supplies an
+explicitly empty value regardless of cwd, so the key is omitted. Startup
+resolution creates and trust-marks no directory; the same immutable base
+feeds the [one-time General seed](knowledge/features/conversations-registry.md),
+which creates `<startup-base>/default` through the existing channel creator.
 
 The Noise responder also sends a decryptable `hello_ack` before delivering the
 encrypted rejection to a peer whose device token is invalid, expired or
@@ -4765,6 +4915,7 @@ Application-level error codes (carried in `error` envelopes inside `noise_msg` p
 
 | Code | Retryable | Notes |
 |---|---|---|
+| `host_system_prompt.unavailable` | yes | Storage failure for [daemon-wide host instructions](#daemon-wide-host-system-prompt); static message with no submitted text or storage path. **Handlers/routing pending #2768.** |
 | `noise.handshake_failed` | no | Reported only to local logs — wire-level handshake failure closes the WS with `4426` and no AEAD-sealed envelope can be sent. Included here for completeness. |
 | `noise.rekey_failed` | yes | The peer's `rekey_request` was rejected (e.g. rate-limited) or the subsequent handshake didn't complete; sender may retry after a backoff. |
 | `protocol.unsupported` | no | A well-formed frame asking for something this daemon will not do for this client — contrast `protocol.malformed`, which means the frame itself is bad. A [`create_conversation`](#create_conversation) naming `agent: "codex"` from a client that did not negotiate [`multi_agent`](#capability-negotiation-v2), or naming any value outside `"claude"` / `"codex"`, is refused with this code before `conversations.NewID` or the mint runs — no session, no registry entry, no conversation row (#2647). One code covers both causes so a client's handling is one branch; the two static messages distinguishing them for a human are never echoed with the requested value, which is client-controlled text and appears in neither the reply nor the daemon's log line. |

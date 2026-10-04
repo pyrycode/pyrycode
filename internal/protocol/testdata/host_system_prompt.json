@@ -1,0 +1,10 @@
+{
+  "id": 201,
+  "type": "host_system_prompt",
+  "ts": "2026-10-04T12:00:00Z",
+  "payload": {
+    "system_prompt": "Answer concisely.\nPreserve whitespace.  ",
+    "default_system_prompt": "Keep the main thread free."
+  },
+  "in_reply_to": 101
+}

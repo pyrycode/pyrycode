@@ -1,0 +1,8 @@
+{
+  "id": 101,
+  "type": "set_host_system_prompt",
+  "ts": "2026-10-04T12:00:00Z",
+  "payload": {
+    "system_prompt": "Answer concisely.\nPreserve whitespace.  "
+  }
+}
