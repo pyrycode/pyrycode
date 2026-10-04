@@ -111,6 +111,12 @@ const (
 	CodeHistoryInvalidCursor   = "history.invalid_cursor"    // undecodable, foreign, or naming a position not in this log — one merged answer
 	CodeHistoryUnavailable     = "history.unavailable"       // the log could not be read; the only retryable member of this group
 
+	// Read-mark save error (#2780; docs/protocol-mobile.md § Error codes), minted
+	// with the mark_conversation_read handler that sends it. The advance could not
+	// be persisted, so the daemon reverted it and pushed nothing; the same request
+	// can succeed once the registry saves again.
+	CodeReadMarkUnavailable = "read_mark.unavailable" // retryable
+
 	// On-demand model-list error (#2125; docs/protocol-mobile.md § Error codes).
 	// MINTED WITH THE HANDLER THAT SENDS IT, the sequencing #2052 established and
 	// the history group above followed: no reject vocabulary exists ahead of the
@@ -382,6 +388,14 @@ const (
 	// re-listing. It is a inboundAppTypeSet member, not a v2 control frame — see
 	// the v1/v2 partition in envelope.go / compat_test.go.
 	TypeSetConversationMuted = "set_conversation_muted"
+	// TypeMarkConversationRead is a phone → binary dispatch.Route write verb
+	// (#2780) that raises an existing conversation's host-local read mark
+	// (ReadUpTo) toward the payload's required up_to, clamped to the newest
+	// durable history entry and never lowered. Every success replies with the
+	// reused conversation_updated record; only an actual advance also pushes it
+	// to every interactive conn. It is a inboundAppTypeSet member, not a v2
+	// control frame — see the v1/v2 partition in envelope.go / compat_test.go.
+	TypeMarkConversationRead = "mark_conversation_read"
 	// TypeChangeWorkspace is a phone → binary dispatch.Route write verb (like
 	// rename_conversation / delete_conversation): it moves an existing
 	// conversation to a client-chosen workspace folder by updating its recorded

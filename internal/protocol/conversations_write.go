@@ -136,6 +136,20 @@ type SetConversationMutedPayload struct {
 	Muted          *bool  `json:"muted"`
 }
 
+// MarkConversationReadPayload is the body of a mark_conversation_read frame
+// (#2780). Phone → binary. It names a target conversation and the durable
+// history entry id the operator has read up to.
+//
+// UpTo is a pointer because the key is required: an absent key (or JSON null)
+// decodes to nil and the handler rejects it as protocol.malformed. The uint64
+// target makes encoding/json enforce the wire range: a negative, fractional,
+// exponent, string, boolean or over-2^64-1 value fails the decode. The reply
+// reuses ConversationUpdatedPayload verbatim.
+type MarkConversationReadPayload struct {
+	ConversationID string  `json:"conversation_id"`
+	UpTo           *uint64 `json:"up_to"`
+}
+
 // ChangeWorkspacePayload is the body of a change_workspace frame
 // (docs/protocol-mobile.md § change_workspace). Phone → binary. Both fields are
 // spec-required: a change_workspace must name a target conversation and a target
