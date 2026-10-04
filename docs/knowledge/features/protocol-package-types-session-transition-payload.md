@@ -1,6 +1,18 @@
 # Session-transition payload (#656)
 
-Body of an `Envelope` whose `Type == TypeSessionTransition` (`docs/protocol-mobile.md` § session_transition). Binary → phone; the wire form of a session boundary the phone renders as a `ThreadItem.SessionBoundary` marker (`pyrycode-mobile#336`) when the daemon's session rotates (a `/clear`, an idle eviction, or a workspace change) — instead of inferring the boundary from message fields that do not exist. Lives in `messaging.go` (not `interactive.go`: a session boundary is not a turn-stream event, and `messaging.go` already houses the `time.Time` + `*string`-no-omitempty precedents this struct copies). **Wire shape only** — the producer that emits it is sibling #657 (`security-sensitive`, blocked on #656).
+Body of an `Envelope` whose `Type == TypeSessionTransition` (`docs/protocol-mobile.md` § session_transition). Binary → phone; the wire form of a session boundary the phone renders as a `ThreadItem.SessionBoundary` marker (`pyrycode-mobile#336`) when the daemon's session rotates (a `/clear`, an idle eviction, or a workspace change) — instead of inferring the boundary from message fields that do not exist. Lives in `messaging.go` (not `interactive.go`: a session boundary is not a turn-stream event, and `messaging.go` already houses the `time.Time` + `*string`-no-omitempty precedents this struct copies). The producer is `sessionTransitionEmitterV2.broadcast`, installed by `startSessionTransitionStreamV2` at the `cmd/pyry` boundary.
+
+**Update-only; receiving no boundary does not mean there is no session.**
+Creation (`sessions.New`, `Pool.Mint` / `CreateIn`, `GetOrCreateIn`) emits no
+`session_transition`, and not every ID change is reported:
+`Pool.RotateBootstrapForSelfHeal` is silent and has no production caller today.
+Clients discover or re-read IDs using
+[`request_session_settings`](../../protocol-mobile.md#request_session_settings)
+with the named conversation's `conversation_id`, then read
+`session_settings.session_id`; an empty ID means no addressable session.
+Listening only for pushes leaves a fresh conversation's settings unusable.
+See the [transition observer](sessions-package-key-types-transition-observer.md)
+for notification paths and the callback contract.
 
 ```go
 type SessionTransitionPayload struct {
