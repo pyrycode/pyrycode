@@ -127,6 +127,7 @@ var inboundTypes = map[string]string{
 	"TypeArchiveConversation":     "map-dispatched",
 	"TypeUnarchiveConversation":   "map-dispatched",
 	"TypeSetConversationMuted":    "map-dispatched",
+	"TypeMarkConversationRead":    "map-dispatched",
 	"TypeChangeWorkspace":         "map-dispatched",
 	"TypeSetSystemPrompt":         "map-dispatched",
 	"TypeRequestHostSystemPrompt": "map-dispatched",
