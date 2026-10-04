@@ -859,8 +859,8 @@ surface.
 
 `workspace_root` is optional (`omitempty`: absent, not `null`). For an
 admitted peer, it reports an absolute workspace base on the **daemon host**,
-so a client can preview the destination of a relative workspace path. The
-daemon's relay caller may supply a resolved base through the optional
+so a client can preview the destination of a relative workspace path. A
+relay caller may supply a resolved base through the optional
 `V2SessionConfig.WorkspaceBase`. A supplied absolute value is advertised
 verbatim, without cleaning its spelling or resolving symlinks. An explicitly
 empty or relative value omits the key without falling back to HOME; omission
@@ -870,9 +870,20 @@ Only an unsupplied base (`WorkspaceBase == nil`) uses the legacy
 `WorkspaceRoot()` default, `$HOME/pyry-workspace`. If HOME is unknown or
 non-absolute, that default is omitted. A supplied absolute base is independent
 of HOME. This is advertisement only and grants no filesystem access: the
-directory need not exist, and selecting the value neither inspects nor creates
-it. Daemon startup resolution and HOME confinement are separate caller
-responsibilities.
+directory need not exist, and handshake selection neither inspects nor creates
+it. The caller owns resolution and keeps the supplied string immutable while
+the manager runs.
+
+The production daemon resolves one base at startup from its service process
+cwd (the service's `WorkingDirectory`), independently of `--pyry-workdir`.
+A usable absolute cwd within canonical HOME, including HOME itself, selects
+its canonical realpath. An unavailable, empty, relative, unresolvable or
+HOME-escaping cwd selects the lexical `$HOME/pyry-workspace` fallback, which
+need not exist. Without an available absolute HOME, the daemon supplies an
+explicitly empty value regardless of cwd, so the key is omitted. Startup
+resolution creates and trust-marks no directory; the same immutable base
+feeds the [one-time General seed](knowledge/features/conversations-registry.md),
+which creates `<startup-base>/default` through the existing channel creator.
 
 The Noise responder also sends a decryptable `hello_ack` before delivering the
 encrypted rejection to a peer whose device token is invalid, expired or
