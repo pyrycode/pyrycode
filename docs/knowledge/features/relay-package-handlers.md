@@ -145,7 +145,7 @@ for the full correction.
 
 ### Sub-package isolation
 
-`handlers` imports `internal/devices`, `internal/dispatch`, and `internal/protocol`. **It does NOT import `internal/relay`.** The new `internal/dispatch` edge (added #319) is cycle-free because `internal/dispatch`'s only handler-direction dependency is the `Handler` function type, which `handlers` consumes structurally. `auth.go` stays in `internal/relay` proper alongside the live Noise_IK handshake that now consumes its two WS close-code constants (see [`relay-package.md` § Auth](relay-package.md#auth-ws-close-code-constants-authgo)) — it is no longer a per-type handler or a dispatch gate.
+`handlers` uses consumer-declared interfaces for registry and session access; `SetHostSystemPrompt` also imports `internal/sessions` to translate its validation sentinels. **It does NOT import `internal/relay`.** The new `internal/dispatch` edge (added #319) is cycle-free because `internal/dispatch`'s only handler-direction dependency is the `Handler` function type, which `handlers` consumes structurally. `auth.go` stays in `internal/relay` proper alongside the live Noise_IK handshake that now consumes its two WS close-code constants (see [`relay-package.md` § Auth](relay-package.md#auth-ws-close-code-constants-authgo)) — it is no longer a per-type handler or a dispatch gate.
 
 The `wrap(connID, inReplyTo, nextID, envType, payload)` file-local helper from #250 is gone — `c.Reply(ctx, env, type, payloadJSON)` is the central stamping path now (#319). Two file-local helpers (`replyAck`, `replyError`) marshal the payload and call `c.Reply`.
 
@@ -255,6 +255,30 @@ It runs after `replyAck`, for the ordering reason above, and — new here — *b
 Ordering is reply, then push, then return the reply's error: the push must still reach every other client even when the requester's own connection is torn down and the reply write fails.
 
 **No interactive gate, deliberately asymmetric with `new_session`'s.** `handleNewSession` is intercepted ahead of `dispatch.Route` and gated on the negotiated `interactive` capability; `dispatch.Conn` (what `SendMessage` runs behind) carries no such flag, and plumbing one in would be new machinery for no authorization gain — pairing is the authorization boundary, and `new_session` is already published as exempt from the privileged per-device gate (#702, which since #2605 covers only minting a pairing and MCP actuation). A non-interactive client's `/clear` still resets; it simply does not see the `resetting` frames reporting it. See `docs/protocol-mobile.md`'s `send_message` row for the wire-facing statement of this asymmetry, including the one client-visible gap it produces: a client's own optimistic echo of `/clear` never finds a matching row in history, since the daemon never delivers the message.
+
+## Daemon-wide instructions and durable acknowledgement
+
+`SetHostSystemPrompt` must not inherit `SetSystemPrompt`'s best-effort `Save`
+success behavior: its acknowledgement promises durability. The consumer-declared
+`HostSystemPromptStore` exposes only the pool's instructions getters and
+`SetDaemonInstructions`, so validation, persistence and publication stay behind
+one door and the handler cannot actuate sessions. `runSupervisor` passes the
+existing conversation pool through `relayWiring.hostSystemPrompt`; wiring a
+separate store would let relay tests pass while conversation starts consumed
+stale instructions. `TestHostSystemPromptRelayUsesConversationPool` checks
+active child/file stability, pre-minted activation, later starts and retention
+of memory/disk after a real persistence failure. See
+[pool composition](sessions-package-key-types-writesystemprompt-systemprompttext.md#durable-daemon-wide-instructions-2766).
+
+Translate wrapped pool validation sentinels with `errors.Is` into non-retryable
+`protocol.malformed`; other setter failures return retryable
+`host_system_prompt.unavailable` and no success reply. Never pass parser or store
+error text into a log or reply: either can contain private instructions.
+`TestHostSystemPromptHandlers` injects secret-bearing wrapped errors to check
+that boundary. Both host handlers use authenticated map dispatch without an
+interactive gate or session lookup, and `dispatch.Conn.Reply` supplies
+requester-only correlation. See the
+[wire contract](../../protocol-mobile.md#daemon-wide-host-system-prompt).
 
 ## `ListConversations` grows an agent-aware sibling instead of a new parameter (#2643)
 

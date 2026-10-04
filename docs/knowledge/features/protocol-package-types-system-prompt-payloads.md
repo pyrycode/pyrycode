@@ -92,7 +92,8 @@ keys. `TestHostSystemPromptPayloads_WireKeys` pins the complete key sets
 independently of fixture regeneration, preventing an added conversation/session
 identifier or status verdict from silently entering this daemon-scoped family.
 See [the mobile contract](../../protocol-mobile.md#daemon-wide-host-system-prompt)
-for paired access and the handlers/routing still pending #2768.
+for paired access and the shipped
+[`RequestHostSystemPrompt` / `SetHostSystemPrompt` handlers](relay-package-handlers.md#daemon-wide-instructions-and-durable-acknowledgement).
 
 **Two individually bounded strings need not fit one envelope.** Two arbitrary
 8192-byte strings can expand to 98304 JSON content bytes, already above the
