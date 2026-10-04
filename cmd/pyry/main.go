@@ -856,9 +856,10 @@ func runSupervisor(args []string) error {
 
 	// Two-layer shutdown context so a shutdown's ORIGIN survives to the exit
 	// classification below. The signal layer handles SIGTERM/SIGINT (operator
-	// stop → nil cause → exit 0). The cause layer lets a self-initiated fatal
-	// path (a persistent 4409 server-id conflict) cancel WITH an error, which
-	// fatalCause turns into a non-zero exit so launchd restarts the daemon
+	// stop → inherited signal cause → exit 0). The cause layer lets a
+	// self-initiated fatal path (a persistent 4409 server-id conflict) cancel
+	// WITH an error, which fatalCause turns into a non-zero exit so launchd
+	// restarts the daemon
 	// (the 2026-07-16 outage's second half). `pyry stop` cancels with a nil
 	// cause via the control server, so it stays down like a signal.
 	sigCtx, sigCancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -1518,8 +1519,9 @@ func runSupervisor(args []string) error {
 	// A clean ctx-cancel got us here. Distinguish WHY: a self-initiated fatal
 	// shutdown (persistent 4409) cancelled with an error cause, so exit
 	// non-zero and let launchd restart the daemon. An operator stop (SIGTERM,
-	// `pyry stop`) cancelled with a nil cause and stays down at exit 0.
-	if cause := fatalCause(ctx); cause != nil {
+	// `pyry stop`) carries the signal parent's cause or context.Canceled and
+	// stays down at exit 0.
+	if cause := fatalCause(ctx, sigCtx); cause != nil {
 		logger.Error("pyrycode fatal shutdown", "cause", cause)
 		return cause
 	}
@@ -1529,16 +1531,16 @@ func runSupervisor(args []string) error {
 
 // fatalCause reports the self-initiated fatal shutdown reason carried by the
 // daemon's cause context, or nil for an operator-initiated stop. A shutdown
-// via context.CancelCauseFunc records a cause: the operator paths (SIGTERM /
-// SIGINT / `pyry stop`) cancel with nil, which context.Cause reports as
-// context.Canceled, while a self-initiated fatal path (the relay's persistent
-// 4409 handler) cancels with a real error. Returning that error makes
+// via `pyry stop` records context.Canceled; SIGTERM/SIGINT inherit sigCtx's
+// signal cause. A self-initiated fatal path (the relay's persistent 4409
+// handler) records a distinct error. Compare causes rather than sigCtx.Err:
+// a fatal cause recorded before a later signal must survive. Returning it makes
 // runSupervisor exit non-zero so launchd (KeepAlive SuccessfulExit:false)
 // restarts the daemon; the operator paths return nil and stay down. Pure so it
-// can be unit-tested directly (nil cause / context.Canceled / real cause).
-func fatalCause(ctx context.Context) error {
+// can be unit-tested directly (nil / cancelled / signal / fatal cause).
+func fatalCause(ctx, sigCtx context.Context) error {
 	cause := context.Cause(ctx)
-	if cause == nil || errors.Is(cause, context.Canceled) {
+	if cause == nil || errors.Is(cause, context.Canceled) || errors.Is(cause, context.Cause(sigCtx)) {
 		return nil
 	}
 	return cause

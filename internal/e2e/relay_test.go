@@ -229,3 +229,40 @@ func TestRelay_OperatorStopExitsZero(t *testing.T) {
 			code, h.Stderr.String())
 	}
 }
+
+func TestRelay_OperatorSignalExitsZero(t *testing.T) {
+	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGINT} {
+		t.Run(sig.String(), func(t *testing.T) {
+			fr := fakerelay.New(relayTestLogger())
+			t.Cleanup(func() { _ = fr.Close() })
+			home := shortHome(t)
+			h := StartInWithEnv(t, home,
+				[]string{"PYRY_ALLOW_INSECURE_RELAY=1"},
+				"-pyry-relay="+fr.URL()+"/v2/server",
+			)
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			defer cancel()
+			if !fr.WaitBinary(ctx, readPersistedServerID(t, home)) {
+				t.Fatalf("relay not connected\nstderr:\n%s", h.Stderr.String())
+			}
+			if err := syscall.Kill(h.PID, sig); err != nil {
+				t.Fatalf("signal daemon: %v", err)
+			}
+			select {
+			case <-h.Done():
+			case <-time.After(5 * time.Second):
+				t.Fatalf("daemon did not exit after signal\nstderr:\n%s", h.Stderr.String())
+			}
+			stderr := h.Stderr.String()
+			if code := h.ExitCode(); code != 0 {
+				t.Errorf("daemon exit=%d after signal, want 0\nstderr:\n%s", code, stderr)
+			}
+			if !strings.Contains(stderr, "level=INFO msg=\"pyrycode stopped\"") {
+				t.Errorf("missing INFO stop log\nstderr:\n%s", stderr)
+			}
+			if strings.Contains(stderr, "pyrycode fatal shutdown") {
+				t.Errorf("operator signal logged as fatal\nstderr:\n%s", stderr)
+			}
+		})
+	}
+}
