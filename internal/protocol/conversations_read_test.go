@@ -7,6 +7,43 @@ import (
 	"time"
 )
 
+func TestConversationsPayload_CurrentSessionID(t *testing.T) {
+	t.Parallel()
+	raw := []byte(`{"conversations":[
+		{"id":"conv-a","current_session_id":"session-a"},
+		{"id":"conv-b","current_session_id":"session-b"},
+		{"id":"conv-unbound","current_session_id":""}
+	]}`)
+	var payload ConversationsPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	want := []string{"session-a", "session-b", ""}
+	if len(payload.Conversations) != len(want) {
+		t.Fatalf("got %d rows, want %d", len(payload.Conversations), len(want))
+	}
+	for i, row := range payload.Conversations {
+		if row.CurrentSessionID != want[i] {
+			t.Errorf("row %q binding: got %q, want %q", row.ID, row.CurrentSessionID, want[i])
+		}
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal decoded payload: %v", err)
+	}
+	var wire struct {
+		Conversations []map[string]json.RawMessage `json:"conversations"`
+	}
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatalf("decode serialized rows: %v", err)
+	}
+	for i, row := range wire.Conversations {
+		if got := string(row["current_session_id"]); got != `"`+want[i]+`"` {
+			t.Errorf("row %d current_session_id JSON: got %s, want %q", i, got, want[i])
+		}
+	}
+}
+
 func TestListConversationsPayload_RoundTrip(t *testing.T) {
 	raw := readFixture(t, "list_conversations.json")
 
