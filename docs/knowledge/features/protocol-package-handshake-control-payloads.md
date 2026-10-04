@@ -90,7 +90,21 @@ Conventions:
   backfill; it never did — see that section's Changelog, #2090). A reconnecting
   phone that wants the tail it missed sends `LastEventID` instead. Whether real
   history should exist, and what would source it, is #2091's decision.
-- **`ErrorPayload.ConversationID` is additive + `omitempty` (#2443), and it names the conversation an error is ABOUT rather than the request it answers.** Every existing error reply already lets the client infer its subject from `in_reply_to` (the client sent the request, so it knows what it named) and omits the field, keeping their wire shape byte-identical to the pre-#2443 one. It exists for the one reply that can't: `new_session`'s bare (unnamed) form rotates the daemon's own cursor conversation, so only the daemon — which resolved that cursor — knows which conversation a refusal reply is about. **SECURITY, stated in the field's own doc comment: the value is DAEMON-AUTHORED and MUST NOT be an echo of a client-supplied id** — the same discipline `V2SessionConfig.RunConfigFor` / `ModelListFor` already state for their own reported ids. A future producer that reaches for this field to save itself a lookup, rather than to name a subject `in_reply_to` genuinely cannot, would be misusing it.
+- **`ErrorPayload.ConversationID` is additive + `omitempty` (#2443).**
+  `new_session`'s bare form rotates the daemon's cursor conversation, so its
+  workspace-refusal reply supplies the daemon-resolved subject that
+  `in_reply_to` alone cannot identify. Other producers must retain that
+  daemon-authored provenance rather than echo a client lookup key.
+
+  **`stop_background_task.refused` is the narrow correlation exception (#2791):**
+  it carries the requested nonempty conversation id even when a missing task id
+  is refused before conversation resolution. Gating this refusal on registry
+  membership would turn it into a conversation-membership probe. The id
+  therefore asserts neither membership nor task existence and must never be
+  logged. `in_reply_to` still identifies the request; no task id or child
+  diagnostic is reflected. Other error replies omit the field, preserving their
+  earlier wire shape. See the
+  [stop contract](../../protocol-mobile.md#stop-background-task-v2).
 - **`ErrorPayload.MinClientVersion` is additive + `omitempty` (#2576), and carries `CodeClientUpdateRequired`'s minimum version alone — never any other error's.** `omitempty` keeps every existing error reply byte-identical. Same never-echo discipline as `ConversationID` above: it is the daemon's configured minimum for the requesting app, not a reflection of the client's own `client_version`. It is omitted on the same reject when the `hello`'s `client_version` could not be parsed at all, because the daemon then has no app name to look a minimum up by — see [protocol-package-constants-codes-go-error-codes-21.md](protocol-package-constants-codes-go-error-codes-21.md) and `docs/protocol-mobile.md` § Compatibility. The sender is `internal/relay`'s `handleNoiseInit`/`checkClientVersion` (#2578) — see [`v2-session-manager-state-machine-noise-init-happy-and-failure-path.md` § The client-version reject arm](v2-session-manager-state-machine-noise-init-happy-and-failure-path.md#the-client-version-reject-arm-2578).
 - **`LastEventID *uint64` is additive + `omitempty` (#647).** The phone's inbound reconnect-replay cursor: the durable `event_id` (the `Envelope.EventID` #649 surfaces outbound) it last saw, advertised on mid-turn reconnect so the daemon replays the missed tail from the `internal/eventring` ring or emits a `resync` marker. **Pointer + `omitempty` is load-bearing** — ring ids are always ≥ 1, so a non-nil pointer never encodes `0` and a nil pointer is omitted; a phone advertising none keeps the v1 hello byte-identical (key absent, not `null`). Same shape as `LastSeenTS`. This wire-type layer does **no enforcement** — `LastEventID` is **untrusted remote input**, and the consumer (`internal/relay`, #647, `security-sensitive`) range/shape-validates it and bounds replay by the ring. `TestHelloClientPayload_LastEventIDRoundTrip` pins the omit/round-trip shape. **Implementation caveat:** the #647 daemon consumer carries an unresolved code-review MUST FIX and is not yet merged — see [codebase/647.md](../codebase/647.md). The wire field itself is stable.
 

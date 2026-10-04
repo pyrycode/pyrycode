@@ -24,6 +24,26 @@ import (
 // NewV2SessionManager, Run, handleWake, handleFrame, the app-frame router, the
 // outbound send/drain path, and the connection registry — stays in v2session.go.
 
+// BackgroundTaskStopOutcome is the result of one task stop attempt. Refused is
+// the zero value so an implementation must explicitly accept an attempt.
+type BackgroundTaskStopOutcome uint8
+
+const (
+	BackgroundTaskStopRefused BackgroundTaskStopOutcome = iota
+	BackgroundTaskStopAccepted
+	BackgroundTaskStopCannotActOnConversation
+)
+
+// BackgroundTaskStopper stops one named task. The implementation owns conversation
+// validation and resolution: ids are untrusted lookup keys, never paths, and must
+// never select the cursor conversation. CannotActOnConversation silently means the
+// requested conversation cannot be acted on; Refused produces the fixed wire error.
+// The call runs on the connection's appFrameWorker and must honor ctx cancellation.
+// It receives no device permission decision: stopping is a paired-device action.
+type BackgroundTaskStopper interface {
+	StopBackgroundTask(ctx context.Context, conversationID, taskID string) BackgroundTaskStopOutcome
+}
+
 // Interrupter stops the running turn in ONE conversation (#707, widened by #2103)
 // — the remote equivalent of a local Esc, claude's own interrupt. Declared here
 // (consumer side), so internal/relay imports neither internal/supervisor nor
@@ -1268,6 +1288,13 @@ type V2SessionConfig struct {
 	// Production wires cmd/pyry's activeInterrupter, which owns the shape check
 	// and the registry resolution this package cannot perform.
 	Interrupter Interrupter
+
+	// BackgroundTaskStopper is optional and left unset in shipped constructions
+	// until #2792 supplies the implementation. Leave a true nil interface, never
+	// a typed nil pointer: dispatchAppFrame's nil gate must consume the verb before
+	// payload decode or enqueue. Negotiated interactive is the only other gate;
+	// this paired-device action bypasses the tool-permission gate.
+	BackgroundTaskStopper BackgroundTaskStopper
 
 	// SessionStarter starts a fresh session in the conversation an inbound
 	// interactive `new_session` control frame names (#831, #2099) — or, when the
