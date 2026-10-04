@@ -66,7 +66,7 @@ func TestListConversations_EmptyRegistry(t *testing.T) {
 	reg := &conversations.Registry{}
 	c, recv := newListConvConn(t)
 
-	h := ListConversations(reg)
+	h := ListConversations(reg, emptyListHistory{})
 	if err := h(context.Background(), c, makeListConversationsRequest(t, 11)); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestListConversations_SingleConversation(t *testing.T) {
 
 	c, recv := newListConvConn(t)
 
-	h := ListConversations(reg)
+	h := ListConversations(reg, emptyListHistory{})
 	if err := h(context.Background(), c, makeListConversationsRequest(t, 99)); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestListConversations_SurfacesArchivedFlag(t *testing.T) {
 
 	c, recv := newListConvConn(t)
 
-	h := ListConversations(reg)
+	h := ListConversations(reg, emptyListHistory{})
 	if err := h(context.Background(), c, makeListConversationsRequest(t, 7)); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestListConversations_SurfacesMutedFlag(t *testing.T) {
 	reg.Create(conversations.Conversation{ID: "conv-muted", Cwd: "/b", IsMuted: true, LastUsedAt: ts.Add(time.Hour)})
 
 	c, recv := newListConvConn(t)
-	h := ListConversations(reg)
+	h := ListConversations(reg, emptyListHistory{})
 	if err := h(context.Background(), c, makeListConversationsRequest(t, 23)); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestListConversations_WorkspaceLabelIsPerWorkspace(t *testing.T) {
 	reg.SetWorkspaceLabel("/work/alpha", &alpha)
 
 	c, recv := newListConvConn(t)
-	h := ListConversations(reg)
+	h := ListConversations(reg, emptyListHistory{})
 	if err := h(context.Background(), c, makeListConversationsRequest(t, 21)); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestListConversations_UnlabelledWorkspaceSendsExplicitNull(t *testing.T) {
 	reg.Create(conversations.Conversation{ID: "conv-2", Cwd: "/work/two", LastUsedAt: ts.Add(time.Hour)})
 
 	c, recv := newListConvConn(t)
-	h := ListConversations(reg)
+	h := ListConversations(reg, emptyListHistory{})
 	if err := h(context.Background(), c, makeListConversationsRequest(t, 22)); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestListConversations_ArchivedRowCarriesWorkspaceLabel(t *testing.T) {
 	reg.SetWorkspaceLabel("/work/shelved", &label)
 
 	c, recv := newListConvConn(t)
-	h := ListConversations(reg)
+	h := ListConversations(reg, emptyListHistory{})
 	if err := h(context.Background(), c, makeListConversationsRequest(t, 23)); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestListConversations_StoredEmptyLabelIsNotNull(t *testing.T) {
 	reg.SetWorkspaceLabel("/work/blank", &empty)
 
 	c, recv := newListConvConn(t)
-	h := ListConversations(reg)
+	h := ListConversations(reg, emptyListHistory{})
 	if err := h(context.Background(), c, makeListConversationsRequest(t, 24)); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -371,7 +371,7 @@ func TestListConversations_DeterministicOrdering(t *testing.T) {
 
 	c, recv := newListConvConn(t)
 
-	h := ListConversations(reg)
+	h := ListConversations(reg, emptyListHistory{})
 	if err := h(context.Background(), c, makeListConversationsRequest(t, 5)); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -399,7 +399,7 @@ func TestListConversations_InReplyToAndIDMonotonic(t *testing.T) {
 	// Both replies land on the SAME conn, so NextID advances 1→2 across the
 	// two handler invocations (a fresh conn per call would reset it to 1).
 	c, recv := newListConvConn(t)
-	h := ListConversations(reg)
+	h := ListConversations(reg, emptyListHistory{})
 
 	if err := h(context.Background(), c, makeListConversationsRequest(t, 100)); err != nil {
 		t.Fatalf("first handler: %v", err)

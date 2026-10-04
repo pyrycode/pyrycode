@@ -8,6 +8,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -78,12 +79,20 @@ func AgentOf(conv conversations.Conversation, harnessFor SessionHarnessFunc) str
 	return protocol.AgentClaude
 }
 
+// historyLatestReader is the append cursor read needed by conversation lists.
+// *history.Store supplies it in production.
+type historyLatestReader interface {
+	LatestEntryID(conversations.ConversationID) (uint64, error)
+}
+
+const msgListHistoryUnavailable = "conversation history is unavailable"
+
 // ListConversations is ListConversationsWithAgents with no harness read: every
 // conversation reads as Claude's, so the reply is the pre-#2643 list for every
 // client. The daemon wires the agent-aware form; this one serves callers that
 // hold no pool.
-func ListConversations(reg ConversationLister) dispatch.Handler {
-	return ListConversationsWithAgents(reg, nil)
+func ListConversations(reg ConversationLister, hist historyLatestReader) dispatch.Handler {
+	return ListConversationsWithAgents(reg, nil, hist)
 }
 
 // ListConversationsWithAgents returns a dispatch.Handler that answers a
@@ -96,8 +105,14 @@ func ListConversations(reg ConversationLister) dispatch.Handler {
 // client that negotiated it reads every row with its agent. A client that did
 // not is never sent a Codex conversation, and each row it is sent carries no
 // agent key, byte-identical to the row it read before agents existed.
-func ListConversationsWithAgents(reg ConversationLister, harnessFor SessionHarnessFunc) dispatch.Handler {
+func ListConversationsWithAgents(reg ConversationLister, harnessFor SessionHarnessFunc, hist historyLatestReader) dispatch.Handler {
+	if store, ok := hist.(*history.Store); ok && store == nil {
+		hist = nil
+	}
 	return func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error {
+		if hist == nil {
+			return replyError(ctx, c, env, protocol.CodeHistoryUnavailable, msgListHistoryUnavailable, true)
+		}
 		multiAgent := c.MultiAgent()
 		list := reg.List()
 		sort.SliceStable(list, func(i, j int) bool {
@@ -116,6 +131,10 @@ func ListConversationsWithAgents(reg ConversationLister, harnessFor SessionHarne
 				}
 				agent = ""
 			}
+			latestID, err := hist.LatestEntryID(conv.ID)
+			if err != nil {
+				return replyError(ctx, c, env, protocol.CodeHistoryUnavailable, msgListHistoryUnavailable, true)
+			}
 			// Resolved from this row's own Cwd, passed verbatim: the registry
 			// matches the key byte-exactly and normalizes nothing, so
 			// canonicalizing here would look up a key rename_workspace never
@@ -133,6 +152,8 @@ func ListConversationsWithAgents(reg ConversationLister, harnessFor SessionHarne
 				IsPromoted:     conv.IsPromoted,
 				IsArchived:     conv.IsArchived,
 				IsMuted:        conv.IsMuted,
+				ReadUpTo:       conv.ReadUpTo,
+				LatestEntryID:  latestID,
 				ArchivedAt:     conv.ArchivedAt,
 				Cwd:            conv.Cwd,
 				WorkspaceLabel: workspaceLabel,

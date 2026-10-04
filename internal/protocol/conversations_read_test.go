@@ -50,6 +50,9 @@ func TestConversationsPayload_RoundTrip(t *testing.T) {
 	if len(p.Conversations) != 3 {
 		t.Fatalf("Conversations: got len %d, want 3", len(p.Conversations))
 	}
+	if p.Conversations[0].ReadUpTo != 17 || p.Conversations[0].LatestEntryID != 23 {
+		t.Fatalf("fixture lost read ids: %+v", p.Conversations[0])
+	}
 
 	// Row 0: name set, archived on the wire.
 	c0 := p.Conversations[0]

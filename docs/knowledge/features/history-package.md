@@ -51,6 +51,7 @@ type Entry struct{ ID uint64; Type string; Payload json.RawMessage; TS time.Time
 type Page struct{ Entries []Entry; Cursor string; AtStart bool }
 func (s *Store) Append(convID conversations.ConversationID, typ string, payload json.RawMessage, ts time.Time) (uint64, error)
 func (s *Store) Page(convID conversations.ConversationID, cursor string, limit int) (Page, error)
+func (s *Store) LatestEntryID(convID conversations.ConversationID) (uint64, error)
 ```
 
 `limit` is **clamped** to `MaxPageEntries`, never refused above it — a page is
@@ -354,6 +355,34 @@ again:**
   drop lines are filtered out separately. Two log statements at the same
   level would make that assertion vacuous.
 
+## `LatestEntryID` shares `Append`'s cursor instead of a second counter (#2779)
+
+`list_conversations` needs the newest durable entry id per conversation, for the
+`latest_entry_id` row [`docs/protocol-mobile.md`](../../protocol-mobile.md#conversations)
+reports. The obvious-looking alternative — a dedicated counter bumped at
+`Append` — was rejected before it was written: `convLog.nextID` already *is*
+that counter, recovered by `load` on first touch, so a second one would be two
+sources of truth for the same fact, with no way to keep them from drifting the
+first time one write path forgets to update both.
+
+`LatestEntryID` instead validates the id, re-resolves the directory (uncreated —
+a missing conversation reads `0`, never an error), and calls the same `load`
+`Append` calls, under the same `s.mu`. Once `load` has run once for a
+conversation (`convLog.loaded`), every subsequent call — from either method —
+returns `c.nextID - 1` with **no segment file opened**: recovery ran exactly
+once, at first touch, and both the append path and this read path share its
+result from then on. `nextID` starts at `1` (see `load` above), so the
+subtraction cannot underflow. On a cold cursor the first `LatestEntryID` call
+pays exactly `load`'s existing bounded tail-walk — empty, header-only and
+incomplete trailing segments are rolled past exactly as they are for an
+append, never scanning the whole log — so this method adds no new recovery
+logic, only a second caller of the existing kind.
+
+Containment is **not** cached across calls, on the same reasoning as
+*Directory resolution* above: `resolveDir(convID, false)` re-resolves and
+re-checks every call, even once the cursor is warm, so a symlink planted after
+the cursor loaded is still caught on the next `list_conversations` reply.
+
 ## Reader (#2116)
 
 The first caller of `Store.Page` outside this package's own tests is
@@ -392,3 +421,9 @@ internal/history/
 - [attachments-package-directory-resolution-and-creation.md](attachments-package-directory-resolution-and-creation.md) —
   the root-as-argument style, the resolve-and-compare-for-equality containment
   check, and the 0o700/0o600 modes this package copies verbatim.
+- [relay-package-handlers.md](relay-package-handlers.md) § `ListConversations` —
+  `LatestEntryID`'s consumer: the `historyLatestReader` interface `*Store`
+  satisfies, and what happens on the wire when a lookup fails.
+- [`conversations-package.md`](conversations-package.md) § `ReadUpTo` — the
+  durable read mark stated in this package's same per-conversation id space,
+  landed in the same ticket (#2779).

@@ -338,6 +338,10 @@ func TestConversationUpdatedPayload_RoundTrip(t *testing.T) {
 	if err := json.Unmarshal(env.Payload, &p); err != nil {
 		t.Fatalf("unmarshal payload: %v", err)
 	}
+	if p.ReadUpTo != 17 {
+		t.Fatalf("fixture read mark = %d, want 17", p.ReadUpTo)
+	}
+
 	if p.ID != "c2..." {
 		t.Errorf("ID: got %q, want %q", p.ID, "c2...")
 	}
