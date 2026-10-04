@@ -44,24 +44,24 @@ Non-blocking — the update still proceeds. The hint exists because a Homebrew-i
 
 An opt-in daemon loop installs an eligible release by itself once the daemon is idle, so a machine reached only to update it stays current without a login. Off by default: a daemon started without `-pyry-auto-update` builds no updater and makes no release request. There is no `config.json` key — one switch is enough, and the flag lives in the launchd/systemd unit file the operator already edits.
 
-With the flag set, the daemon checks the latest release 2 minutes after startup (`autoUpdateStartDelay`), then every 4 hours (`autoUpdateInterval`). Checks are independent — an eligible release not yet installed is simply re-evaluated on the next tick.
+With the flag set, the daemon checks the latest release 2 minutes after startup (`autoUpdateStartDelay`). An up-to-date, ineligible, host-refusal, metadata-failure or install-failure outcome schedules the next check 4 hours (`autoUpdateInterval`) after that check completes.
 
 **Eligibility** (`update.Eligible`, pure, table-tested in `internal/update/version_test.go`) refuses a release unless all hold: the running build is a release, not `dev`; the release is not a draft and not marked pre-release; its tag is exactly `v?<digits>.<digits>.<digits>` — a `-rc1` or `+meta` suffix is refused explicitly, since `update.CompareVersions` would otherwise strip it before comparing; and it is strictly newer than the running version. An equal version returns `ErrUpToDate`; anything else ineligible returns `ErrNotEligible` wrapping a short reason, which becomes the log line's `reason`.
 
 **Idleness** (`daemonIdle`, pure, table-tested in `cmd/pyry/auto_update_test.go`) requires both: no conversation has a turn open — `turnBusyTracker.AnyBusy()`, fed by Claude and Codex turns alike, since both share the one turn-event fan-in the tracker observes — and no session's `LastActiveAt` falls within the last 15 minutes (`autoUpdateQuietWindow`). A connected phone is deliberately not an input: a phone left connected overnight would otherwise hold every update off indefinitely. A nil turn tracker fails closed (counts as a turn being open), never defaulting to idle.
 
-Nothing is downloaded when the release is ineligible or the daemon is not idle; the next scheduled check tries again. Nothing is installed when `update.DetectRestartCommand` finds no managed unit, or when the binary lives under `/opt/homebrew/` — both checked before any network request.
+An eligible tag found while busy stays selected within the ongoing check. `waitUntilIdle` polls the idle predicate once a minute (`autoUpdateRestartPoll`); at the first idle poll, `check` downloads and installs that selected release. Waiting makes no asset downloads or repeated latest-release requests, even across four-hour boundaries; a later change to latest does not replace the selected tag. An ineligible release is never downloaded. Nothing is installed when `update.DetectRestartCommand` finds no managed unit, or when the binary lives under `/opt/homebrew/` — both checked before any network request.
 
 **Install** goes through `installRelease`, the same function `pyry update` itself now calls (see Architecture below): the same signature check against `releaseSigningPublicKeyHex`, the same SHA-256 checksum check, and the same `update.AtomicReplace`. A signature or checksum failure leaves the binary and any existing `pyry.prev` untouched.
 
-Once the swap succeeds and the "installed" log line is written, the daemon asks `idle()` again before restarting — a turn may have opened while the release downloaded — polling once a minute until it is, then hands the restart to the detected `launchctl`/`systemctl` command. The loop then stops: a later scheduled check would otherwise find the new binary already installed and skip, but a *second* install of the same release would overwrite `pyry.prev` with the build just installed, losing the rollback copy, so stopping is the simpler guarantee.
+Once the swap succeeds and the "installed" log line is written, the daemon asks `idle()` again before restarting — a turn may have opened while the release downloaded — polling once a minute until it is, then hands the restart to the detected `launchctl`/`systemctl` command. `Run` stops after installation succeeds, including if restart fails, so later checks cannot overwrite the rollback copy in `pyry.prev`. Cancelling the daemon context ends an idle wait and returns from `Run` without starting the pending download, install or restart.
 
-**Logging.** Each check ends in exactly one `auto-update check` slog line, `outcome` one of:
+**Logging.** A check that waits before installation emits one `auto-update check` slog record with `waiting_for_idle` on entering the wait, then an eventual `installed` or `failed` record unless the wait is cancelled. Polls emit no records; cancellation during this wait leaves only the entry record. Other completed checks emit one outcome record. Restart waiting adds no check records. The `outcome` values are:
 
 | Outcome | Meaning |
 |---------|---------|
 | `up_to_date` | The latest release is the running version. |
-| `waiting_for_idle` | An eligible release exists but the daemon is not idle; nothing was downloaded. |
+| `waiting_for_idle` | An eligible tag is retained while busy; emitted once on entering the pre-install wait, with no downloads while waiting. |
 | `installed` | The release was downloaded, verified and swapped in; logged before the restart is issued. |
 | `skipped` | The release is not eligible, or no managed unit was found, or the binary is a Homebrew install — `reason` names which. |
 | `failed` | A fetch, parse, download, verification or install step errored; `err` carries the wrapped error. The tag is truncated to 64 bytes before it reaches any log line. |
@@ -159,7 +159,9 @@ This is a one-shot CLI verb, not a daemon. Output is human-facing progress lines
 
 ## Concurrency
 
-Sequential. One goroutine (the calling one). One `context.Context` (`context.Background()` from `runUpdate`; tests pass `t.Context()`). No locks, no channels, no goroutine fan-out.
+The CLI update is sequential in the calling goroutine, with one `context.Context` (`context.Background()` from `runUpdate`; tests pass `t.Context()`). No locks, no channels, no goroutine fan-out.
+
+The daemon updater owns its selected release in one context-bound `Run` worker. A `select` can choose a ready timer even when cancellation is also ready, so `waitFor` checks context both before and after waking. `waitUntilIdle` also checks before polling and after an idle answer, preventing already-visible cancellation from permitting installation or restart. The supervisor cancels and joins the worker during shutdown.
 
 The two HTTP fetches (tarball + checksums) are issued back-to-back rather than in parallel. Parallelising would shave maybe a second on a fast connection, requires an `errgroup`, and complicates the `==> Downloading <asset>...` progress-line ordering — not worth the complexity.
 
@@ -175,7 +177,7 @@ If a future ticket adds Ctrl-C handling, swap `context.Background()` for `signal
 
 ## Error contract
 
-All errors propagate up through `main()`'s wrapper at `cmd/pyry/main.go:141-144`, which prints `pyry: <err>` to stderr and exits 1.
+CLI errors propagate up through `main()`'s wrapper, which prints `pyry: <err>` to stderr and exits 1.
 
 | `errors.Is` predicate | Behaviour |
 |-----------------------|-----------|
@@ -192,6 +194,8 @@ All errors propagate up through `main()`'s wrapper at `cmd/pyry/main.go:141-144`
 No partial-failure cleanup: `AtomicReplace` is the only filesystem-mutating step, and it's all-or-nothing (the temp file is removed on its own error paths per #187). A failed restart leaves the new binary on disk by design — the user is told both facts in one error line.
 
 ## Tests
+
+Scheduled-update tests reuse `newAutoUpdateFixture` with fake idle answers and controllable duration waits. `TestAutoUpdater_CancelIdleWait` cancels as a poll wakes, testing both a ready wake and a cancelled wait: testing only the cancellation branch would miss a timer wake permitting work after cancellation. `TestAutoUpdater_RetainsReleaseWhileBusy` crosses four hours of minute polls with changed latest metadata and proves the original tag, one wait record and zero asset requests while busy.
 
 `cmd/pyry/update_test.go` (~600 LOC). A dozen integration tests, each driving `doUpdate` with the `Fetcher` pointed at an `httptest.NewServer` (canned release JSON + tar.gz fixture + matching `checksums.txt` + auto-signed `checksums.txt.sig`) and the install path set to a tempdir, plus one pure `TestReleaseSigningKey_Decodes` unit test.
 

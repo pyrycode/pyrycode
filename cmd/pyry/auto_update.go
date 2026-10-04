@@ -12,15 +12,15 @@ import (
 )
 
 // Auto-update defaults (#2716). The startup delay lets a freshly started daemon
-// settle before its first request; the interval is how often it asks again; the
+// settle before its first request; the interval follows a completed check; the
 // quiet window is how long every session must have been untouched before the
 // daemon counts as idle.
 const (
 	autoUpdateStartDelay  = 2 * time.Minute
 	autoUpdateInterval    = 4 * time.Hour
 	autoUpdateQuietWindow = 15 * time.Minute
-	// autoUpdateRestartPoll is how often a swapped-in binary re-asks for idle
-	// before restarting, when a turn opened while the release downloaded.
+	// autoUpdateRestartPoll is how often a selected release re-asks for idle
+	// before installation and again before restarting.
 	autoUpdateRestartPoll = time.Minute
 	// autoUpdateMaxLoggedTag bounds the network-supplied tag in the log line.
 	autoUpdateMaxLoggedTag = 64
@@ -53,32 +53,28 @@ type autoUpdater struct {
 	logger     *slog.Logger
 	startDelay time.Duration
 	interval   time.Duration
-	// restartPoll is how often a finished install re-asks idle before restarting.
+	// restartPoll is how often installation and restart re-ask idle.
 	restartPoll time.Duration
+	// wait optionally controls duration waits; nil uses context-aware timers.
+	wait func(context.Context, time.Duration) bool
 }
 
-// Run checks once after startDelay and then every interval. It returns nil when
-// ctx is done, and also after a check that installed a release: the process is
-// about to be restarted, and a second install would overwrite pyry.prev with
-// the build just installed, losing the rollback copy.
+// Run checks once after startDelay and waits interval after each unsuccessful
+// completed check. It returns nil when ctx is done, and also after a check that
+// installed a release: a second install could lose the rollback copy in pyry.prev.
 func (a *autoUpdater) Run(ctx context.Context) error {
-	timer := time.NewTimer(a.startDelay)
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-timer.C:
-		}
+	delay := a.startDelay
+	for a.waitFor(ctx, delay) {
 		if a.check(ctx) {
 			return nil
 		}
-		timer.Reset(a.interval)
+		delay = a.interval
 	}
+	return nil
 }
 
-// check runs one check and ends in exactly one "auto-update check" log line. It
-// reports whether a release was installed.
+// check reports whether a release was installed. A busy eligible check logs one
+// waiting_for_idle entry, then a terminal outcome unless the wait is cancelled.
 func (a *autoUpdater) check(ctx context.Context) (installed bool) {
 	o := a.opts
 	attrs := []any{"current", o.currentVersion}
@@ -119,8 +115,7 @@ func (a *autoUpdater) check(ctx context.Context) (installed bool) {
 		return false
 	}
 
-	if !a.idle() {
-		logOutcome(slog.LevelInfo, "waiting_for_idle")
+	if !a.waitUntilIdle(ctx, func() { logOutcome(slog.LevelInfo, "waiting_for_idle") }) {
 		return false
 	}
 	if err := installRelease(ctx, o, target, rel.Tag); err != nil {
@@ -139,17 +134,47 @@ func (a *autoUpdater) check(ctx context.Context) (installed bool) {
 // acceptance of the request, so the restart command being killed then cannot
 // cancel the restart.
 func (a *autoUpdater) restart(ctx context.Context, argv []string) {
-	for !a.idle() {
-		t := time.NewTimer(a.restartPoll)
-		select {
-		case <-ctx.Done():
-			t.Stop()
-			return
-		case <-t.C:
-		}
+	if !a.waitUntilIdle(ctx, nil) {
+		return
 	}
 	if err := a.opts.runRestart(ctx, argv); err != nil {
 		a.logger.Error("auto-update restart failed", "err", err)
+	}
+}
+
+// waitUntilIdle calls onWait once when entering a busy wait. Cancellation is
+// checked before each idle poll and again before permitting the caller to act.
+func (a *autoUpdater) waitUntilIdle(ctx context.Context, onWait func()) bool {
+	for ctx.Err() == nil {
+		if a.idle() {
+			return ctx.Err() == nil
+		}
+		if onWait != nil {
+			onWait()
+			onWait = nil
+		}
+		if !a.waitFor(ctx, a.restartPoll) {
+			return false
+		}
+	}
+	return false
+}
+
+// waitFor makes cancellation take precedence when a timer and ctx are both ready.
+func (a *autoUpdater) waitFor(ctx context.Context, d time.Duration) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if a.wait != nil {
+		return a.wait(ctx, d) && ctx.Err() == nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return ctx.Err() == nil
 	}
 }
 
@@ -162,8 +187,8 @@ func truncateTag(tag string) string {
 }
 
 // newAutoUpdater builds the daemon's updater over the same production seams
-// `pyry update` uses, with progress discarded: the daemon reports through its
-// one log line per check instead.
+// `pyry update` uses, with progress discarded: the daemon reports through
+// structured check outcomes instead.
 func newAutoUpdater(idle func() bool, logger *slog.Logger) (*autoUpdater, error) {
 	o, err := productionUpdateOptions(io.Discard)
 	if err != nil {
