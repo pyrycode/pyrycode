@@ -74,3 +74,7 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-04
+
+## Revisions
+
+- 2026-10-04: Security audit clarification after reading `Server.handle`: the existing JSON decoder has a handshake deadline but no request byte cap. This payload-free verb adds no decoder or client-supplied installation parameters; the HTTP body cap and response deadlines described above still apply. No protocol or generic control hardening change is part of this ticket.

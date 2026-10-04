@@ -1455,6 +1455,20 @@ func runSupervisor(args []string) error {
 	// this is where a post becomes pending state, and the queue's two seams are where
 	// it is carried to claude and cleared.
 	ctrl.SetChannelPoster(channelPoster(convReg, createChannel, defaultCwd, conversationHistory.Append, announcePost, postCarry.record, logger))
+	// Explicit requests always have a provider; the flag controls scheduling only.
+	// A nil tracker fails closed rather than inferring idle from missing signals.
+	au, err := newAutoUpdater(func() bool {
+		infos := pool.List()
+		lastActive := make([]time.Time, len(infos))
+		for i, s := range infos {
+			lastActive[i] = s.LastActiveAt
+		}
+		return daemonIdle(turnBusy == nil || turnBusy.AnyBusy(), lastActive, time.Now(), autoUpdateQuietWindow)
+	}, logger)
+	if err != nil {
+		return err
+	}
+	ctrl.SetUpdateWhenIdleProvider(func() (control.UpdateWhenIdleResult, error) { return au.request(ctx) })
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)
 	}
@@ -1469,22 +1483,8 @@ func runSupervisor(args []string) error {
 		"claude", *claudeBin,
 		"socket", socketPath,
 	)
-	// The auto-updater (#2716), off unless -pyry-auto-update is set: no release
-	// request is made without it. A nil tracker fails closed — never idle — rather
-	// than reading "no turn open" from the absence of a signal.
 	auDone := make(chan error, 1)
 	if *autoUpdate {
-		au, err := newAutoUpdater(func() bool {
-			infos := pool.List()
-			lastActive := make([]time.Time, len(infos))
-			for i, s := range infos {
-				lastActive[i] = s.LastActiveAt
-			}
-			return daemonIdle(turnBusy == nil || turnBusy.AnyBusy(), lastActive, time.Now(), autoUpdateQuietWindow)
-		}, logger)
-		if err != nil {
-			return err
-		}
 		go func() { auDone <- au.Run(ctx) }()
 	} else {
 		auDone <- nil
@@ -1503,6 +1503,8 @@ func runSupervisor(args []string) error {
 	// Stop the control server (already wired to ctx but Close is idempotent
 	// and ensures the socket file is gone before we return).
 	_ = ctrl.Close()
+	// Serve drains response writes even when an update restart cancels ctx
+	// immediately after publishing acceptance. Keep this join before daemon exit.
 	<-ctrlDone
 
 	// Join the inbound-queue lifecycle: ctx is cancelled by the time we get here
@@ -1512,6 +1514,7 @@ func runSupervisor(args []string) error {
 	<-qDone
 	<-seedDone
 	<-auDone
+	au.join()
 
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		return fmt.Errorf("supervisor: %w", runErr)
@@ -4367,6 +4370,7 @@ Usage:
   pyry update [--check] [--version <v>]          download and install the latest
                                                   release (--check: print versions
                                                   only; --version <v>: pin a tag)
+  pyry update [daemon flags] --when-idle        request the daemon's next idle update
   pyry agent-run [flags]                         drive a single supervised claude
                                                   turn headlessly; replaces
                                                   ` + "`claude -p`" + ` in the dispatcher
