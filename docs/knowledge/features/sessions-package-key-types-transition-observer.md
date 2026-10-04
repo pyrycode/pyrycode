@@ -6,6 +6,24 @@ session boundaries onto the v2 `session_transition` wire event — **without**
 cycle that forces the producer to the `cmd/pyry` boundary). All the machinery
 lives in `transition.go`.
 
+**Update-only, not an ID-discovery feed.** Creation (`sessions.New`,
+`Pool.Mint` / `CreateIn`, `GetOrCreateIn`) emits no transition, and the push does
+not cover every session ID change. `Pool.RotateBootstrapForSelfHeal` silently
+rekeys the bootstrap session, but is an uncalled primitive with no production
+caller today. Its silence is pinned by `TestRotateBootstrapForSelfHeal`'s
+“does not fire a client transition” subtest. Listening alone therefore leaves a
+fresh conversation's client without a session ID and cannot keep IDs current
+in every case.
+
+Clients discover or re-read IDs through
+[`request_session_settings`](../../protocol-mobile.md#request_session_settings):
+supply the named conversation's `conversation_id`, then read
+`session_settings.session_id`. An empty ID means no addressable session; session
+settings remain read-only. `handleRequestSessionSettings` uses `RunConfigFor`,
+whose production source, `resolveBoundRunSettings`, resolves that conversation's
+live or persisted dormant binding rather than a shared bootstrap fallback.
+See the [wire contract](../../protocol-mobile.md#session_transition).
+
 ```go
 type TransitionReason string
 
@@ -33,48 +51,52 @@ mapping is the consumer's job, not the primitive's" convention — the cycle-fre
 boundary stays at `internal/sessions`.
 
 **Func type, not interface.** Matches the package's closure-injection precedent
-(`rotation.Config.OnRotate`, `supervisor.Config.ValidateConversation`).
+(`RunnerConfig.AdoptAnnouncedReset`).
 
 **Post-construction setter, set-once-before-`Run`.** The pool is built via
-`sessions.New` at `cmd/pyry/main.go:460`; the consumer/emitter (#657) comes up
+`sessions.New` in `cmd/pyry.main`; the consumer/emitter (#657) comes up
 later (`startRelay`), so the observer cannot be a `Config` field. `SetTransitionObserver`
 writes `Pool.transitionObserver`; the field is then **read-only**, read lock-free
-by the lifecycle + watcher goroutines (both spawned by `Run`) via `Run`'s
+by the per-session lifecycle goroutines and the runners they start via `Run`'s
 goroutine-start happens-before edge — the same "read-only after New" convention as
 `convReg` / `activeCap`. A set-after-`Run` call is a programming error the race
 detector flags. `nil` (the zero value) disables signalling.
 
-**Two fire sites, both off-lock and post-persist** (the `#41`/`#155`/`#169`
-lock-order + pre-persist-exposure lessons):
+**Current notification paths, all off-lock** (the `#41`/`#155`/`#169`
+lock-order lessons):
 
-- **Clear** — `Pool.onRotate(old, new)` (the `Pool.Run` `OnRotate` closure routes
-  through it instead of calling `RotateID` directly): on `RotateID` success, fire
-  `ReasonClear` with old/new ids; the `RotateID` error is returned verbatim and a
-  failed/no-op rotation fires nothing. Fires after `Pool.mu` is released.
-  Startup reconciliation (`reconcile.go`) calls `RotateID` **directly**, so no
-  spurious clear fires at boot before an observer is wired. Production clear paths
-  are the live fsnotify watcher, `RotateForNewSession` since #1125 (the `new_session`
-  control verb's daemon-driven direct rotation), and `AdoptAnnouncedID` since #2135
-  (the parser-side follower adopting claude's own reset announcement) — all three
-  fire the same `ReasonClear` off-`Pool.mu`, no new `TransitionReason`. See
+- **Clear** — `Pool.RotateForNewSession` drives a daemon-minted rotation;
+  `Pool.AdoptAnnouncedID` follows the child's reset announcement. Both rekey and
+  attempt persistence before firing `ReasonClear` off-`Pool.mu`.
+  `AdoptAnnouncedID` suppresses equal-ID announcements; refused rotations fire
+  nothing. `notifyTransition` rebinds the owning conversation before fan-out so
+  the consumer can resolve the new ID. The fsnotify watcher and `onRotate` were
+  retired by #2137; neither is a current notification source. See
   [`sessions-package-key-types-adoptannouncedid.md`](sessions-package-key-types-adoptannouncedid.md).
-- **Eviction** — `Session.runActive` now returns `(TransitionReason, error)`;
-  `Session.Run` fires `ReasonEviction` (empty `NewID`) **after** `transitionTo(stateEvicted)`
-  returns (post-persist, no `lcMu` held), behind a `reason != "" && s.pool != nil`
-  guard. The idle path (`<-timerCh`, firing only once `Config.TurnBusy` — nil or
-  reporting no open turn — no longer defers it, #1486) and the cap path
+- **Agent switch** — `Pool.PublishSwitchTransition` directly fires `ReasonClear`
+  after the caller has persisted the conversation's new binding. It bypasses
+  `notifyTransition` to avoid a second rebind and best-effort save.
+- **Eviction** — `Session.beginEvict` fires `ReasonEviction` (empty `NewID`)
+  **before** the lifecycle state flip and child teardown, with no `lcMu` held,
+  behind a `reason != "" && s.pool != nil` guard. `Session.endEvict` persists
+  after the child stops. The idle path (`<-timerCh`, firing only once
+  `Config.TurnBusy` — nil or reporting no open turn — no longer defers it, #1486) and the cap path
   (`<-s.evictCh`) both return `ReasonEviction`; the defensive spontaneous-exit
   (`<-runErr`) and shutdown (`<-ctx.Done()`) paths return `""` / `ctx.Err()` and
   fire nothing — the wire has no "crashed"/shutdown reason.
+  `notifyTransition` suppresses eviction for a session already removed from the
+  pool, preventing teardown from adding a second boundary beside an agent switch.
 
-`Pool.notifyTransition` (unexported) is the nil-guarded leaf callback both sites
-call; it takes no lock and the observer runs with no `Pool.mu`/`Session.lcMu`/`capMu`
+`Pool.notifyTransition` (unexported) is the shared fan-out for rotation and
+eviction. Its eviction membership check takes and releases `Pool.mu` before
+the nil-guarded observer callback; the observer runs with no `Pool.mu`/`Session.lcMu`/`capMu`
 held. **Idle and cap collapse to one `ReasonEviction`** (evidence-based — #656's
 wire has no separate cap reason); the `string` type leaves room for a future
 `ReasonCapEviction` with zero signature churn.
 
 **Synchronous, no new goroutine.** Fires run on the goroutine that already owns
-the transition (lifecycle for eviction, rotation-watcher for clear) — a per-fire
+the transition (lifecycle for eviction; the runner's parse goroutine or the
+control-plane caller for clear) — a per-fire
 goroutine would add goroutines to paths that deliberately have none and could
 reorder signals. The non-blocking burden is therefore the observer's: the
 `TransitionObserver` contract documents "MUST NOT block — hand off to a buffered

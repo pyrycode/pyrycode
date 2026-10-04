@@ -30,9 +30,16 @@ type SessionTransition struct {
 	OccurredAt time.Time
 }
 
-// TransitionObserver is notified of clear/eviction transitions. It is invoked
-// SYNCHRONOUSLY from the goroutine that owns the transition (the lifecycle
-// goroutine for eviction; for clear, whichever goroutine drove the rotation —
+// TransitionObserver is notified of clear/eviction transitions. Notifications
+// are update-only: creation (New, Pool.Mint/CreateIn, GetOrCreateIn) emits no
+// transition, and not every session ID change is reported. The silent
+// RotateBootstrapForSelfHeal primitive has no production caller today.
+// Clients discover or re-read IDs with request_session_settings for the named
+// conversation: supply conversation_id and read session_settings.session_id;
+// an empty ID means no addressable session.
+//
+// It is invoked SYNCHRONOUSLY from the goroutine that owns the transition
+// (the lifecycle goroutine for eviction; for clear, whichever drove the rotation —
 // the runner's parse goroutine via AdoptAnnouncedID, or a control-plane
 // goroutine via RotateForNewSession) with NO session or pool lock held. The
 // implementation MUST NOT block — hand the signal off to a buffered channel and

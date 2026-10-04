@@ -2637,6 +2637,20 @@ no turn is open.
 
 Direction **binary → phone** (outbound v2 session-boundary marker; not in `v1TypeSet` — an old phone never receives it). This is a **session-boundary marker, distinct from the twenty-three turn-stream events above** — it does not belong to the structured live-session stream and carries no `event_id`. It is the wire form of `pyrycode-mobile#336`'s `ThreadItem.SessionBoundary`: the daemon's session rotated, so the phone renders a boundary marker instead of inferring one from message fields that do not exist.
 
+**The push is update-only.** Session creation (`sessions.New`, `Pool.Mint` /
+`CreateIn`, `GetOrCreateIn`) emits no transition, and the push does not report
+every session ID change. `Pool.RotateBootstrapForSelfHeal` silently rekeys the
+bootstrap session; it is an uncalled primitive with no production caller today,
+not a running recovery path. A client that only listens for transitions cannot
+discover a fresh conversation's session ID or keep IDs current in every case.
+
+Discover or re-read the ID with
+[`request_session_settings`](#request_session_settings): supply the named
+conversation's `conversation_id` and read `session_settings.session_id` from
+the reply. An empty ID means **no addressable session**; keep session settings
+read-only until a later read returns an addressable ID. A populated reply can
+name a live session or a persisted dormant session, as that section describes.
+
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation this session-boundary marker belongs to (routing key, matching every other interactive event). |
