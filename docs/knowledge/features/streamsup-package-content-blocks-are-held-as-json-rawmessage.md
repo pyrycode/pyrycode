@@ -233,38 +233,51 @@ decode outcome, and reporting an undecodable `can_use_tool` payload as `Unrecogn
 frame an unrelated subtype gets — is deliberate, not an oversight: an ask this codec cannot read is still
 news the daemon should see.
 
-**Tool-result sidecar decode — fail-closed is a confinement control, not just AC hygiene (#2024, extended
-to all five shapes by #2025).** `consumeLine`'s `user` arm hands `emitUser` the raw line bytes (the
+**Tool-result sidecar decode — fail-closed is a confinement control (#2024/#2025, narrowed by #2745).**
+`consumeLine`'s `user` arm hands `emitUser` the raw line bytes (the
 `emitRateLimit(line)` shape), which decodes the line's `tool_use_result` sidecar a second time into
-`json.RawMessage`-typed fields, the `systemTaskUpdatedLine.Patch` precedent. #2024 shipped only the read
-shape and named #2025 as the ticket that would add the rest, predicting a dispatch with arms; #2025 found
-that prediction wrong — `readLineCount` was a single-shape composer, not a dispatch — and restructured it
-into `toolResultDetail`, five composers tried in a fixed order (read → shell → edit → write → search, each
-returning `""` on non-match, `""` at the end when none matched). That fixed order is what makes the
-fail-closed default hold for a shape recognised only in part: a `structuredPatch` sidecar matching neither
-the edit nor the write arm, or a write whose `type` is neither `create` nor `update`, both run off the end
-with no count. The reason the default matters this much: `emitUnrecognized` puts the offending line's
+`json.RawMessage`-typed fields, the `systemTaskUpdatedLine.Patch` precedent. `toolResultDetail` tries only
+`editDetail` then `writeDetail`; Read, Bash and Grep/Glob send `""`. An Edit reports hunk-line prefixes as
+`+10 −3`, omitting a zero half and sending nothing when both are zero. A Write retains
+`created · N lines` or `updated · N lines`, including zero for an empty file; a trailing newline adds no
+line. Absent, undecodable and unsupported sidecars send no detail. A `structuredPatch` sidecar matching
+neither producer, or a write whose `type` is neither `create` nor `update`, also sends nothing.
+The reason the default matters this much: `emitUnrecognized` puts the offending line's
 bytes on the wire (truncated to `maxUnrecognizedRaw`) for the phone to render, and an undeclared field can
 be **the entire contents of a file claude read or edited**, an absolute path, or raw grep output — so no
 sidecar path may ever emit `Unrecognized`, structurally, not just by test coverage.
 
-**Identify by presence of keys, never by exact key set — and presence-only decoding is what lets an
-unbounded confinement rule scale to five shapes.** #1794's census found 288 of 4883 observed shell
-sidecars (5.9%) carry a sixth key (`gitOperation`, `persistedOutputPath`, …) and 90 edit/write sidecars
-carry an extra one; an arm keyed on "exactly these keys" would silently lose all of them. `toolResultSidecar`
-is widened into a **shape discriminator**: safe scalars by value, everything else — `structuredPatch`,
-`oldString`/`newString`, `content`, `mode` — decoded only for *presence*, via a `*jsonKey` field whose
+**Identify by presence of keys, never by exact key set.** #1794's census found 90 edit/write sidecars
+carrying an extra key; an arm keyed on "exactly these keys" would silently lose them. `toolResultSidecar`
+is a **shape discriminator**: `type` is a scalar, while `structuredPatch`,
+`oldString`/`newString` and `content` are decoded only for *presence*, via a `*jsonKey` field whose
 `UnmarshalJSON` retains no byte of the value. That is what lets `structuredPatch: []` (**every observed
-create, 240 of 240**) be recognised as present without decoding a single hunk — extending `sidecarFile`'s
-pointer-so-absent-differs-from-present-zero rule from a scalar to a whole sub-document.
+create, 240 of 240**) be recognised as present without decoding a single hunk — preserving the
+pointer-so-absent-differs-from-present-zero rule for a whole sub-document.
+Non-null presence matters; read, shell and search decode fields are absent from this discriminator.
 
 **Two shapes spelling a key the same are not the same field.** `content` is a write sidecar's full file
-text *and* a search sidecar's whole grep output; a shared decode field between them would put the search
-arm's grep output on the write arm's target (or vice versa) the moment either shape carried the other's
-key. Every arm that needs an unbounded claude-supplied value for its count — shell's `stdout`, the write's
+text *and* a search sidecar's whole grep output; decoding it as text before identifying a supported Write
+would materialise grep output for no purpose. `writeDetail` checks `structuredPatch`, `content` and a
+supported `type` before decoding `sidecarContent`; `editDetail` requires `structuredPatch`, `oldString`
+and `newString` before decoding `sidecarPatch`. Each counted value — the write's
 `content`, the edit's hunk `lines` — gets its **own narrow stage-2 target**, re-decoded from the same
 `json.RawMessage` and never returned from its composer: every composer returns a `string`, never a decoded
 value, so a stage-2 struct can never escape into a caller that might hold claude's bytes.
+
+**The 48-byte allowance is conservative over the two remaining forms.** `maxResultDetailBytes` retains
+the historical allowance used by `TestToolResultPayload_FitV2EnvelopeCap`. With at most 19 digits per
+non-negative `int64`, Edit is bounded by 43 bytes and Write by 36, including U+2212 and U+00B7.
+`TestToolResultDetail_BoundedByConstruction` checks both forms against that allowance. The field contains
+only formatted integers and fixed literals; no sidecar text crosses into `ResultDetail`.
+
+**Attribution and suppression tests need a supported positive control.** Read sidecars no longer prove
+that details survive a path: changing their expected count to `""` would leave a decoder that drops every
+detail green. `TestParser_SidecarMultiBlockSendsNoCount`, `TestParser_SyntheticUserLineDropsTextBlocks`
+and `TestParser_ParentToolUseID_LeavesTheUserSidecarIntact` therefore use Edit fixtures with non-empty
+details. The single-block control proves the same sidecar can compose a count before the multi-block
+case checks suppression; synthetic-user and hostile-parent-ID controls prove their guards preserve the
+supported detail. See [development verification](development-verification.md#prove-that-tests-distinguish-the-change).
 
 **The plausible-wrong edit-arm implementation was caught only by mutation, not by review.** A hunk's
 `oldLines`/`newLines` are its *spans*, context lines included; differencing them looks like it should

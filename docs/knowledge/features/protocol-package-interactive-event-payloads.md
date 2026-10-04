@@ -53,7 +53,7 @@ type ToolResultPayload struct {
     ParentToolUseID string `json:"parent_tool_use_id"` // ToolUsePayload's field, same meaning (#2191)
     IsError         bool   `json:"is_error"`
     ResultSummary   string `json:"result_summary"` // human-readable précis, not raw output
-    ResultDetail    string `json:"result_detail"` // daemon-composed display text, e.g. a read's line count (#2024)
+    ResultDetail    string `json:"result_detail"` // daemon-composed Edit/Write detail; empty for Read/Bash/Grep/Glob (#2745)
 }
 
 // #2324 — a non-terminal reading for the ToolUsePayload row with the same id.
@@ -510,10 +510,15 @@ type BannerPayload struct {
   presence is also what makes `ToolUsePayload` non-comparable with `==`; every
   existing comparison already goes through `reflect.DeepEqual` or byte
   equality.
-- **`ToolResultPayload.ResultDetail` (#2024, four more sidecar shapes folded in by #2025) needs
+- **`ToolResultPayload.ResultDetail` (#2024/#2025, Edit/Write only since #2745) needs
   no rune cap of its own, unlike its sibling `ResultSummary`.** The producer
-  (`internal/streamsup`'s `toolResultDetail`, renamed from the single-shape `readLineCount`
-  when #2025 turned it into a five-arm dispatch) formats bounded `int64`s and fixed literals —
+  (`internal/streamsup`'s `toolResultDetail`) tries Edit then Write. Read, Bash and Grep/Glob
+  send empty details, as do absent, undecodable and unsupported sidecars. Edit retains `+N −M`,
+  omitting zero halves and sending nothing when both are zero; Write retains
+  `created · N lines` or `updated · N lines`, including zero for an empty file.
+  The client renders the string verbatim and never parses it; `result_detail` has no
+  `omitempty`, so an empty detail still sends the key and draws nothing beside the row.
+  The producer formats bounded `int64`s and fixed literals —
   never claude's text carried through — so no byte decoded from claude's own bytes ever reaches
   the field. Its alphabet is no longer ASCII-only: `+10 −3` and `created · 54 lines` (#2025) use
   U+2212 MINUS SIGN and U+00B7 MIDDLE DOT, the field's first non-ASCII bytes. `encoding/json`
@@ -522,8 +527,8 @@ type BannerPayload struct {
   byte", and that one still holds. `resultSummary`'s cap exists because that field *is* claude's
   text, verbatim, with no bound of its own; a claude-derived field needs the same treatment only
   when the daemon is forwarding claude's bytes rather than formatting its own. The field is
-  named generically rather than after the read shape because it now composes five shapes onto
-  one wire field without minting a new type — see
+  named generically because the two supported forms share one wire field. Their byte bounds
+  are 43 for Edit and 36 for Write; the envelope test retains its conservative 48-byte allowance. See
   [streamsup-package-content-blocks-are-held-as-json-rawmessage.md](streamsup-package-content-blocks-are-held-as-json-rawmessage.md)
   for the dispatch itself and the fifth stale ASCII-alphabet claim #2025's security review found
   beyond the four the ticket had named.

@@ -82,10 +82,9 @@ type ToolStart struct {
 // nil for a status-only update.
 //
 // ResultDetail is a short, DAEMON-COMPOSED précis of the call's structured
-// outcome — "265 lines", "110 of 1676 lines", "+10 −3", "created · 54 lines",
-// "5 files" — derived from the tool_use_result sidecar claude writes alongside
-// each result (#2024, #2025). Empty means "no count", which is the answer for
-// every shape the producer does not recognise.
+// outcome for edits and writes — "+10 −3", "created · 54 lines" — derived
+// from the tool_use_result sidecar claude writes alongside each result.
+// Read, shell, search and unrecognised shapes send an empty detail (#2745).
 //
 // Its provenance is the opposite of Content's and the distinction matters to
 // every consumer. Content carries claude's own bytes, so it needs a cap

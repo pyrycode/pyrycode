@@ -4537,12 +4537,12 @@ func TestParser_SyntheticUserLineDropsTextBlocks(t *testing.T) {
 			name: "flagged line's tool_result keeps its sidecar detail",
 			line: `{"type":"user","message":{"role":"user","content":[` +
 				toolResultBlock("tu-2087b") + `]},"tool_use_result":` +
-				readSidecar("4", "4") + `,` + syntheticFlagFixture + `}`,
+				editSidecar(`[{"lines":["+a"]}]`) + `,` + syntheticFlagFixture + `}`,
 			want: []turnevent.Event{turnevent.ToolUpdate{
 				ToolCallID:   "tu-2087b",
 				Status:       turnevent.ToolStatusCompleted,
 				Content:      turnevent.TextContent{Text: "x"},
-				ResultDetail: "4 lines",
+				ResultDetail: "+1",
 			}},
 		},
 		{
@@ -9107,170 +9107,48 @@ func sidecarLine(toolUseID, sidecar string) string {
 // readSidecar builds a read-shaped sidecar with the two counts written as raw
 // JSON, so a case can put a non-integer or out-of-range token where a number
 // belongs. startLine and filePath are present because the observed shape carries
-// them, and neither is decoded.
+// them; the read sidecar is ignored when composing details.
 func readSidecar(numLines, totalLines string) string {
 	return `{"type":"text","file":{"filePath":"/tmp/x.go","content":"irrelevant","numLines":` +
 		numLines + `,"startLine":1,"totalLines":` + totalLines + `}}`
 }
 
-// TestParser_SidecarReadLineCount covers the accept and reject arms of the read
-// shape (AC2, AC3). Each case drives a real line through the real parser and
-// asserts the WHOLE event list, which is what proves AC3's second half: an
-// unwanted Unrecognized would make the list differ rather than hide inside a
-// field comparison.
-func TestParser_SidecarReadLineCount(t *testing.T) {
+// TestParser_SidecarReadSendsNoCount keeps read rows free of trailing counts.
+func TestParser_SidecarReadSendsNoCount(t *testing.T) {
 	t.Parallel()
+	t.Run("captured stdout preserves result content", func(t *testing.T) {
+		t.Parallel()
+		got := collectEvents(sidecarReadEqualLine)
+		want := []turnevent.Event{turnevent.ToolUpdate{
+			ToolCallID: "toolu_01QGE5CxkESTinJMgTZzMCdE",
+			Status:     turnevent.ToolStatusCompleted,
+			Content:    turnevent.TextContent{Text: sidecarReadEqualContent},
+		}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("events:\n got: %#v\nwant: %#v", got, want)
+		}
+	})
 	tests := []struct {
-		name string
-		line string
-		want []turnevent.Event
+		name, sidecar string
 	}{
-		{
-			// The one arm observed on stdout, and the only evidence that the
-			// snake_case envelope key is the right one.
-			name: "captured stdout read with equal counts sends the short form",
-			line: sidecarReadEqualLine,
-			want: []turnevent.Event{turnevent.ToolUpdate{
-				ToolCallID:   "toolu_01QGE5CxkESTinJMgTZzMCdE",
-				Status:       turnevent.ToolStatusCompleted,
-				Content:      turnevent.TextContent{Text: sidecarReadEqualContent},
-				ResultDetail: "4 lines",
-			}},
-		},
-		{
-			// Transcript-derived (internal/agentrun/jsonl/testdata/clean.jsonl,
-			// registry_test.go read): the `file` object's counts, re-wrapped in a
-			// stdout-shaped line. The observed filePath is NOT carried over — it is
-			// an operator home path, and the counts are the whole observation.
-			name: "differing counts send both, returned before total",
-			line: sidecarLine("tu-40of256", readSidecar("40", "256")),
-			want: []turnevent.Event{turnevent.ToolUpdate{
-				ToolCallID:   "tu-40of256",
-				Status:       turnevent.ToolStatusCompleted,
-				Content:      turnevent.TextContent{Text: "x"},
-				ResultDetail: "40 of 256 lines",
-			}},
-		},
-		{
-			// Transcript-derived (no_end_turn.jsonl, attach_pty_test.go read): the
-			// one observed sidecar with a startLine past 1, so it pins that an
-			// offset read is still reported by its two counts and that startLine
-			// takes no part in the composition.
-			name: "offset read ignores startLine and reports both counts",
-			line: sidecarLine("tu-50of236", `{"type":"text","file":{"numLines":50,"startLine":155,"totalLines":236}}`),
-			want: []turnevent.Event{turnevent.ToolUpdate{
-				ToolCallID:   "tu-50of236",
-				Status:       turnevent.ToolStatusCompleted,
-				Content:      turnevent.TextContent{Text: "x"},
-				ResultDetail: "50 of 236 lines",
-			}},
-		},
-		{
-			// A zero returned count against a non-zero total says something TRUE
-			// and is deliberately not folded into the both-zero drop.
-			name: "zero returned against a non-zero total still sends both",
-			line: sidecarLine("tu-0of1676", readSidecar("0", "1676")),
-			want: []turnevent.Event{turnevent.ToolUpdate{
-				ToolCallID:   "tu-0of1676",
-				Status:       turnevent.ToolStatusCompleted,
-				Content:      turnevent.TextContent{Text: "x"},
-				ResultDetail: "0 of 1676 lines",
-			}},
-		},
-		{
-			// No relational validation: the daemon does not second-guess claude's
-			// arithmetic, so a returned count above the total renders as given.
-			name: "returned above total is rendered as given",
-			line: sidecarLine("tu-over", readSidecar("300", "256")),
-			want: []turnevent.Event{turnevent.ToolUpdate{
-				ToolCallID:   "tu-over",
-				Status:       turnevent.ToolStatusCompleted,
-				Content:      turnevent.TextContent{Text: "x"},
-				ResultDetail: "300 of 256 lines",
-			}},
-		},
-		{
-			name: "both counts zero send no count",
-			line: sidecarLine("tu-zero", readSidecar("0", "0")),
-			want: []turnevent.Event{turnevent.ToolUpdate{
-				ToolCallID: "tu-zero", Status: turnevent.ToolStatusCompleted,
-				Content: turnevent.TextContent{Text: "x"},
-			}},
-		},
-		{
-			// One key without the other is not a read. Both spellings of the
-			// half-shape are covered because a decoder that defaulted the missing
-			// one to zero would pass whichever half the test omitted.
-			name: "numLines alone sends no count",
-			line: sidecarLine("tu-numonly", `{"type":"text","file":{"numLines":40}}`),
-			want: []turnevent.Event{turnevent.ToolUpdate{
-				ToolCallID: "tu-numonly", Status: turnevent.ToolStatusCompleted,
-				Content: turnevent.TextContent{Text: "x"},
-			}},
-		},
-		{
-			name: "totalLines alone sends no count",
-			line: sidecarLine("tu-totonly", `{"type":"text","file":{"totalLines":256}}`),
-			want: []turnevent.Event{turnevent.ToolUpdate{
-				ToolCallID: "tu-totonly", Status: turnevent.ToolStatusCompleted,
-				Content: turnevent.TextContent{Text: "x"},
-			}},
-		},
-		{
-			// The numbers come from claude and are not trusted. A count that does
-			// not decode as a fixed-width whole number sends nothing, which is what
-			// makes the composed string's length structural rather than a second
-			// cap to keep correct.
-			name: "fractional count sends no count",
-			line: sidecarLine("tu-frac", readSidecar("4.5", "256")),
-			want: []turnevent.Event{turnevent.ToolUpdate{
-				ToolCallID: "tu-frac", Status: turnevent.ToolStatusCompleted,
-				Content: turnevent.TextContent{Text: "x"},
-			}},
-		},
-		{
-			name: "stringified count sends no count",
-			line: sidecarLine("tu-str", readSidecar(`"40"`, "256")),
-			want: []turnevent.Event{turnevent.ToolUpdate{
-				ToolCallID: "tu-str", Status: turnevent.ToolStatusCompleted,
-				Content: turnevent.TextContent{Text: "x"},
-			}},
-		},
-		{
-			// Past int64. This is the arm the 48-byte bound rests on: a count that
-			// cannot be held in a fixed-width integer never reaches the composer,
-			// so no absurd number can grow the frame.
-			name: "count past int64 sends no count",
-			line: sidecarLine("tu-huge", readSidecar("99999999999999999999999999", "256")),
-			want: []turnevent.Event{turnevent.ToolUpdate{
-				ToolCallID: "tu-huge", Status: turnevent.ToolStatusCompleted,
-				Content: turnevent.TextContent{Text: "x"},
-			}},
-		},
-		{
-			name: "negative count sends no count",
-			line: sidecarLine("tu-neg", readSidecar("-1", "256")),
-			want: []turnevent.Event{turnevent.ToolUpdate{
-				ToolCallID: "tu-neg", Status: turnevent.ToolStatusCompleted,
-				Content: turnevent.TextContent{Text: "x"},
-			}},
-		},
-		{
-			name: "negative total sends no count",
-			line: sidecarLine("tu-negtot", readSidecar("40", "-256")),
-			want: []turnevent.Event{turnevent.ToolUpdate{
-				ToolCallID: "tu-negtot", Status: turnevent.ToolStatusCompleted,
-				Content: turnevent.TextContent{Text: "x"},
-			}},
-		},
+		{"equal counts", readSidecar("4", "4")},
+		{"partial read", readSidecar("40", "256")},
+		{"offset read", `{"type":"text","file":{"numLines":50,"startLine":155,"totalLines":236}}`},
+		{"zero returned", readSidecar("0", "1676")},
+		{"returned above total", readSidecar("300", "256")},
+		{"empty file", readSidecar("0", "0")},
+		{"numLines alone", `{"file":{"numLines":40}}`},
+		{"totalLines alone", `{"file":{"totalLines":256}}`},
+		{"fractional count", readSidecar("4.5", "256")},
+		{"stringified count", readSidecar(`"40"`, "256")},
+		{"count past int64", readSidecar("99999999999999999999999999", "256")},
+		{"negative count", readSidecar("-1", "256")},
+		{"negative total", readSidecar("40", "-256")},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := collectEvents(tc.line)
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("events:\n got: %#v\nwant: %#v", got, tc.want)
-			}
+			wantDetail(t, sidecarLine("tu-read", tc.sidecar), "")
 		})
 	}
 }
@@ -9359,7 +9237,7 @@ func TestParser_SidecarFailsClosed(t *testing.T) {
 // all would pass the multi-block half.
 func TestParser_SidecarMultiBlockSendsNoCount(t *testing.T) {
 	t.Parallel()
-	const sidecar = `,"tool_use_result":` + `{"type":"text","file":{"numLines":40,"startLine":1,"totalLines":256}}`
+	const sidecar = `,"tool_use_result":{"oldString":"before","newString":"after","structuredPatch":[{"lines":["+a","-r"]}]}`
 	block := func(id string) string {
 		return `{"type":"tool_result","tool_use_id":"` + id + `","content":"x","is_error":false}`
 	}
@@ -9371,7 +9249,7 @@ func TestParser_SidecarMultiBlockSendsNoCount(t *testing.T) {
 			ToolCallID:   "tu-solo",
 			Status:       turnevent.ToolStatusCompleted,
 			Content:      turnevent.TextContent{Text: "x"},
-			ResultDetail: "40 of 256 lines",
+			ResultDetail: "+1 " + minusGlyph + "1",
 		}}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("control case:\n got: %#v\nwant: %#v", got, want)
@@ -9421,9 +9299,9 @@ func TestParser_SidecarContentIsConfined(t *testing.T) {
 	if !ok {
 		t.Fatalf("want a ToolUpdate, got %#v", got[0])
 	}
-	// The count still lands: this asserts confinement, not suppression.
-	if upd.ResultDetail != "40 of 256 lines" {
-		t.Errorf("ResultDetail: got %q, want %q", upd.ResultDetail, "40 of 256 lines")
+	// Read details are suppressed, and the original sidecar stays confined.
+	if upd.ResultDetail != "" {
+		t.Errorf("ResultDetail: got %q, want empty", upd.ResultDetail)
 	}
 	blob, err := json.Marshal(upd)
 	if err != nil {
@@ -9455,93 +9333,37 @@ func TestStreamLine_StaysSegmentationOnly(t *testing.T) {
 	}
 }
 
-// TestToolResultDetail_BoundedByConstruction proves the number turnbridge's cap
-// test carries is the PRODUCER's own rather than a guess. Every count is a
-// non-negative int64, so each formats to at most 19 digits and the longest
-// composable string is the READ's 19 + len(" of ") + 19 + len(" lines") = 48
-// bytes.
-//
-// #2025 added four more forms and, with them, the first non-ASCII bytes this
-// field has ever carried, so the read form is no longer the longest for the
-// reason it used to be: it is the longest of five rather than the only one.
-// TestToolResultDetail_OtherFormsAreShorter is what keeps that true.
-//
-// This is what makes the field safe to leave uncapped downstream: the bound is
-// over int64's RANGE, not over claude's input length, so no hostile or absurd
-// line count can grow the frame.
+// TestToolResultDetail_BoundedByConstruction checks the remaining forms against
+// the conservative byte allowance and pins their non-ASCII separator glyphs.
 func TestToolResultDetail_BoundedByConstruction(t *testing.T) {
 	t.Parallel()
-	const maxInt64 = "9223372036854775807"
-	worst := toolResultDetail(json.RawMessage(
-		`{"file":{"numLines":` + maxInt64 + `,"totalLines":` + maxInt64 + `0}}`))
-	// numLines == maxInt64 and totalLines past it: the total fails to decode, so
-	// the whole thing is rejected. The reachable worst case is both at maxInt64
-	// but DIFFERING, which needs two distinct 19-digit values.
-	if worst != "" {
-		t.Errorf("a total past int64 must send nothing, got %q", worst)
-	}
-	worst = toolResultDetail(json.RawMessage(
-		`{"file":{"numLines":9223372036854775806,"totalLines":` + maxInt64 + `}}`))
-	if n := len(worst); n != maxResultDetailBytes {
-		t.Errorf("worst case is %d bytes (%q), want the stated bound of %d", n, worst, maxResultDetailBytes)
-	}
-	if utf8.RuneCountInString(worst) != len(worst) {
-		t.Errorf("worst case must be all single-byte runes, got %q", worst)
-	}
-	// The equal-counts form is shorter, so the differing form above is the bound.
-	if n := len(toolResultDetail(json.RawMessage(`{"file":{"numLines":` + maxInt64 + `,"totalLines":` + maxInt64 + `}}`))); n >= maxResultDetailBytes {
-		t.Errorf("equal-count form is %d bytes, want < %d", n, maxResultDetailBytes)
-	}
-}
-
-// TestToolResultDetail_OtherFormsAreShorter carries the other half of the bound
-// that #2025 introduced: the read form is now the longest OF FIVE rather than
-// the only one, so each of the other four is measured at its own worst case
-// instead of assumed small.
-//
-// It also pins the alphabet. maxResultDetailBytes' derivation, turnevent's and
-// protocol's ResultDetail docs and turnbridge's uncapped mapping all rest on
-// knowing exactly which bytes this producer can emit; before #2025 that was
-// "digits, spaces and ASCII letters" and it is now those plus U+2212 and U+00B7.
-// A third glyph appearing here would falsify four committed doc comments
-// silently, so the assertion is that these two are the ONLY non-ASCII runes any
-// form can produce.
-func TestToolResultDetail_OtherFormsAreShorter(t *testing.T) {
-	t.Parallel()
-	const maxInt64 = "9223372036854775807"
-	// The edit and write worst cases cannot be reached through claude-supplied
-	// numbers the way the search ones can — they are counted from a line that
-	// Parser.Write bounds at defaultMaxParseBuf — so the reachable worst case is
-	// measured here and the DERIVED one is checked as arithmetic against it.
 	forms := map[string]string{
-		"edit":         toolResultDetail(json.RawMessage(editSidecar(`[{"lines":["+a","-r"]}]`))),
-		"write":        toolResultDetail(json.RawMessage(writeSidecar("update", ``, `[]`))),
-		"shell":        toolResultDetail(json.RawMessage(shellSidecar(`a`, ``, ``))),
-		"search lines": toolResultDetail(json.RawMessage(searchSidecar(`,"numLines":` + maxInt64))),
-		"search files": toolResultDetail(json.RawMessage(searchSidecar(`,"numFiles":` + maxInt64))),
+		"edit":  toolResultDetail(json.RawMessage(editSidecar(`[{"lines":["+a","-r"]}]`))),
+		"write": toolResultDetail(json.RawMessage(writeSidecar("update", ``, `[]`))),
 	}
 	for name, got := range forms {
 		if got == "" {
-			t.Errorf("%s form composed nothing; the case no longer measures what it names", name)
-			continue
+			t.Errorf("%s form composed nothing", name)
 		}
 		if len(got) >= maxResultDetailBytes {
 			t.Errorf("%s form is %d bytes (%q), want < %d", name, len(got), got, maxResultDetailBytes)
 		}
 		for _, r := range got {
 			if r > unicode.MaxASCII && r != '−' && r != '·' {
-				t.Errorf("%s form emits %q (U+%04X); the documented alphabet is ASCII plus U+2212 and U+00B7", name, r, r)
+				t.Errorf("%s form emits unexpected non-ASCII rune %q", name, r)
 			}
 		}
 	}
-	// The derived edit and write worst cases, as arithmetic over the same
-	// literals the composer uses, so maxResultDetailBytes' table is checked
-	// rather than trusted.
-	if n := len("+") + 19 + len(" ") + len(minusGlyph) + 19; n != 43 {
-		t.Errorf("derived edit worst case is %d bytes, want the documented 43", n)
-	}
-	if n := len("updated") + 1 + len(dotGlyph) + 1 + 19 + len(" lines"); n != 36 {
-		t.Errorf("derived write worst case is %d bytes, want the documented 36", n)
+	// Each non-negative int64 formats to at most 19 digits. These upper bounds
+	// include the multi-byte separators, even though parse-buffer limits keep
+	// the counted inputs too small to reach them.
+	for name, n := range map[string]int{
+		"edit":  len("+") + 19 + len(" ") + len(minusGlyph) + 19,
+		"write": len("updated") + 1 + len(dotGlyph) + 1 + 19 + len(" lines"),
+	} {
+		if n >= maxResultDetailBytes {
+			t.Errorf("derived %s bound is %d bytes, want < %d", name, n, maxResultDetailBytes)
+		}
 	}
 }
 
@@ -9628,53 +9450,22 @@ func wantDetail(t *testing.T, line, want string) {
 	}
 }
 
-// TestParser_SidecarShellLineCount covers AC1. The count is of stdout ONLY, by
-// the trailing-newline rule, and an empty stdout says nothing rather than "0
-// lines" — a call that produced nothing has nothing worth reporting, which is
-// the fail-closed principle the dispatch already applies.
-func TestParser_SidecarShellLineCount(t *testing.T) {
+// TestParser_SidecarShellSendsNoCount suppresses both stdout and stderr counts.
+func TestParser_SidecarShellSendsNoCount(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name, line, want string
+		name, line string
 	}{
-		{
-			// The one shell arm observed on stdout, and with it the evidence that
-			// the snake_case envelope key is right for this shape too.
-			name: "captured stdout shell call sends its stdout line count",
-			line: sidecarShellLine,
-			want: "1 lines",
-		},
-		{
-			// stderr is six lines against stdout's two. A composer that counted
-			// the wrong field, or summed them, cannot produce 2.
-			name: "a longer stderr does not inflate the stdout count",
-			line: sidecarLine("tu-stderr", shellSidecar(`a\nb\n`, `e1\ne2\ne3\ne4\ne5\ne6`, ``)),
-			want: "2 lines",
-		},
-		{
-			// 288 of 4883 observed shell sidecars (5.9%) carry a sixth key. An arm
-			// keyed on an EXACT key set silently loses every one of them.
-			name: "an observed extra key still sends the count",
-			line: sidecarLine("tu-gitop", shellSidecar(`a\nb\nc`, ``, `,"gitOperation":true`)),
-			want: "3 lines",
-		},
-		{
-			// The trailing-newline rule, pinned as a pair against the case above:
-			// "a\nb\nc" and "a\nb\nc\n" are both 3.
-			name: "a trailing newline does not add a line",
-			line: sidecarLine("tu-trail", shellSidecar(`a\nb\nc\n`, ``, ``)),
-			want: "3 lines",
-		},
-		{
-			name: "empty stdout sends no count",
-			line: sidecarLine("tu-noout", shellSidecar(``, `something on stderr`, ``)),
-			want: "",
-		},
+		{"captured stdout", sidecarShellLine},
+		{"longer stderr", sidecarLine("tu-stderr", shellSidecar(`a\nb\n`, `e1\ne2\ne3\ne4\ne5\ne6`, ``))},
+		{"extra key", sidecarLine("tu-gitop", shellSidecar(`a\nb\nc`, ``, `,"gitOperation":true`))},
+		{"trailing newline", sidecarLine("tu-trail", shellSidecar(`a\nb\nc\n`, ``, ``))},
+		{"empty stdout", sidecarLine("tu-noout", shellSidecar(``, `something on stderr`, ``))},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			wantDetail(t, tc.line, tc.want)
+			wantDetail(t, tc.line, "")
 		})
 	}
 }
@@ -9775,8 +9566,7 @@ func TestParser_SidecarEditGlyphIsMinusSign(t *testing.T) {
 // structuredPatch is [] on EVERY observed create — all 240 of them — so an arm
 // requiring a non-empty patch to recognise a write is dead code on 97% of
 // writes, and a fixture built from a create would agree with it. Present-but-
-// empty must be distinguishable from absent, which is sidecarFile's
-// pointer-vs-present-zero rule again.
+// empty must be distinguishable from absent, which jsonKey preserves.
 func TestParser_SidecarWriteCounts(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -9795,9 +9585,7 @@ func TestParser_SidecarWriteCounts(t *testing.T) {
 			want: "updated " + dotGlyph + " 2 lines",
 		},
 		{
-			// The opposite call to the shell arm's empty stdout, and deliberately
-			// so: the VERB is the news here. An empty file that was created is
-			// something that happened; a command that printed nothing is not.
+			// The verb still names the creation of an empty file.
 			name: "empty content still names the verb",
 			line: sidecarLine("tu-emptyfile", writeSidecar("create", ``, `[]`)),
 			want: "created " + dotGlyph + " 0 lines",
@@ -9821,61 +9609,23 @@ func TestParser_SidecarWriteCounts(t *testing.T) {
 	}
 }
 
-// TestParser_SidecarSearchCounts covers AC4. AUTHORED FROM CENSUS.
-//
-// Precedence between the two counts is pinned rather than left incidental: the
-// numLines case carries numFiles:0 alongside, so a composer that read the wrong
-// field would report "0 files" rather than quietly agreeing.
-func TestParser_SidecarSearchCounts(t *testing.T) {
+// TestParser_SidecarSearchSendsNoCount suppresses Grep and Glob result counts.
+func TestParser_SidecarSearchSendsNoCount(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name, line, want string
+		name, sidecar string
 	}{
-		{
-			name: "numLines wins over a numFiles that is also present",
-			line: sidecarLine("tu-slines", searchSidecar(`,"numLines":78,"numFiles":0,"totalLines":120`)),
-			want: "78 lines",
-		},
-		{
-			name: "numFiles with no numLines sends a file count",
-			line: sidecarLine("tu-sfiles", searchSidecar(`,"numFiles":5,"totalFiles":5`)),
-			want: "5 files",
-		},
-		{
-			// totalLines rides along on 200 of 200 observed numLines shapes, so the
-			// read's two-part form is AVAILABLE here and is deliberately not sent:
-			// reads are partial 56.5% of the time and no equivalent has been
-			// measured for search. One number, and this pins that it stays one.
-			name: "a total present alongside is not folded into a two-part form",
-			line: sidecarLine("tu-stotal", searchSidecar(`,"numLines":17,"totalLines":900`)),
-			want: "17 lines",
-		},
-		{
-			name: "mode with neither count sends no count",
-			line: sidecarLine("tu-smode", searchSidecar(`,"totalFiles":5`)),
-			want: "",
-		},
-		{
-			// A present-but-invalid numLines does NOT fall back to numFiles.
-			// Precedence is decided by presence, so a fallback would let a
-			// malformed field silently change WHICH quantity the row reports — a
-			// wrong count, the one outcome this design refuses.
-			name: "a negative numLines sends no count and does not fall back to numFiles",
-			line: sidecarLine("tu-sneg", searchSidecar(`,"numLines":-1,"numFiles":5`)),
-			want: "",
-		},
-		{
-			// numFiles with no `mode` is in the census's no-count row: without the
-			// mode key this is not a search, whatever else it carries.
-			name: "numFiles with no mode is not a search",
-			line: sidecarLine("tu-nomode", `{"numFiles":5,"totalFiles":5}`),
-			want: "",
-		},
+		{"Grep line and file counts", searchSidecar(`,"numLines":78,"numFiles":0,"totalLines":120`)},
+		{"Grep file count", searchSidecar(`,"numFiles":5,"totalFiles":5`)},
+		{"Grep partial results", searchSidecar(`,"numLines":17,"totalLines":900`)},
+		{"no count", searchSidecar(`,"totalFiles":5`)},
+		{"negative line count", searchSidecar(`,"numLines":-1,"numFiles":5`)},
+		{"Glob file count", `{"filenames":["/tmp/a.go"],"numFiles":1,"truncated":false}`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			wantDetail(t, tc.line, tc.want)
+			wantDetail(t, sidecarLine("tu-search", tc.sidecar), "")
 		})
 	}
 }
@@ -9962,7 +9712,7 @@ func TestParser_SidecarShapesAreConfined(t *testing.T) {
 		{
 			name:       "shell stderr is neither counted nor carried",
 			line:       sidecarLine("tu-c1", shellSidecar(`a\nb`, m, ``)),
-			wantDetail: "2 lines",
+			wantDetail: "",
 		},
 		{
 			name: "edit originalFile, filePath and hunk text stay out",
@@ -9980,7 +9730,7 @@ func TestParser_SidecarShapesAreConfined(t *testing.T) {
 			name: "search filenames and grep output stay out",
 			line: sidecarLine("tu-c4", `{"mode":"content","filenames":["/home/`+m+
 				`/a.go"],"content":"`+m+`","numLines":9,"numFiles":1}`),
-			wantDetail: "9 lines",
+			wantDetail: "",
 		},
 	}
 	for _, tc := range tests {
@@ -9994,7 +9744,7 @@ func TestParser_SidecarShapesAreConfined(t *testing.T) {
 			if !ok {
 				t.Fatalf("want a ToolUpdate, got %#v", got[0])
 			}
-			// The count still lands: this asserts confinement, not suppression.
+			// Supported counts still land while all sidecar text stays confined.
 			if upd.ResultDetail != tc.wantDetail {
 				t.Errorf("ResultDetail: got %q, want %q", upd.ResultDetail, tc.wantDetail)
 			}
