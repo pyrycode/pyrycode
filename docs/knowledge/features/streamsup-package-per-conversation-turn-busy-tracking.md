@@ -71,6 +71,24 @@ regardless. Existence-oracle discipline (#1101 posture): `Busy`'s signature is `
 second `found` bool — so a foreign conversation id is indistinguishable from an idle one in both value and
 code path.
 
+**Wait observability must use the wait's own membership check (#2782).** A separate `Busy` pre-check
+can see idle just before a turn opens, then let the wait park silently. `waitIdle` keeps the membership
+read and generation-channel capture under one lock and invokes its optional `onPark` hook once, after
+unlocking and before the first `select`. Logging under the lock would stall tracker mutations on slow
+log I/O. `waitIdleForDelivery` supplies the
+[delivery-hold INFO record](streamsup-package-per-conversation-turn-busy-track-delivery-seam-consumer-mid-turn-hold.md);
+`WaitIdle` passes nil, keeping reset and context-usage callers silent.
+
+**Repeated-wakeup tests must let the waiter re-park.** In
+`TestTurnBusyTracker_WaitIdleForDeliveryLogsHoldOnce`, opening and closing another conversation and
+then clearing the target without a scheduling gap can collapse into one wakeup: the waiter sees idle
+and returns, so even a record emitted on every busy iteration passes. The test first observes the hold
+record, proving the generation channel was captured, then leaves grace windows between transitions.
+Removing the once-guard then produces three records and fails the test. Those windows allow scheduling;
+they do not guarantee it under every load. The test pins observable behavior, while source review must
+also check that logging uses the wait's membership read: a separate `Busy` pre-check can pass the same
+test while retaining the silent-park race. See [the review](https://github.com/pyrycode/pyrycode/pull/2787#issuecomment-5984513630).
+
 **Shipped unwired.** At #1201's landing no production caller read `Busy`/`WaitIdle` — `observe`'s
 `nil`-receiver no-op is what let the 7 pre-existing drain-test call sites take a bare `nil` for the new
 parameter instead of each constructing a tracker. That is no longer true: #1199 (below) is the
