@@ -564,6 +564,13 @@ type AttachmentIntake interface {
 // same contract for the same bytes; this struct extends the contract
 // to the manager's holding site.
 type V2SessionConfig struct {
+	// WorkspaceBase is a caller-resolved base advertised only to admitted peers
+	// in the encrypted hello_ack. Nil uses WorkspaceRoot(); a supplied absolute
+	// value is reported verbatim, while empty or relative values omit the key
+	// without fallback. Advertisement performs no filesystem access. The caller
+	// must not mutate the pointed-to value while the manager runs.
+	WorkspaceBase *string
+
 	// Frames is the inbound RoutingEnvelope stream from a relay.Connection
 	// (or an in-memory channel in tests). Run consumes until Frames
 	// closes or ctx is done.
