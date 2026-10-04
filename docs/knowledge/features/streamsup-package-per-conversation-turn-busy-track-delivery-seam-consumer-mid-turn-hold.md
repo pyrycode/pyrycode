@@ -1,13 +1,22 @@
 # Delivery-seam consumer, mid-turn hold (#1199)
 
-The first — and, as of this ticket, only — production reader of `Busy`/`WaitIdle`. It closes the actual
+The inbound-delivery consumer of `turnBusyTracker` closes the actual
 regression #1201 was built for: on `interactive_runner: stream-json`, `streamsup.Runner.WriteUserTurn`
-returns as soon as the user-turn envelope is in the child's stdin pipe (`runner.go:283-285`), so
+returns as soon as the user-turn envelope is in the child's stdin pipe, so
 `internal/msgqueue`'s serial drain emptied as fast as it could write bytes instead of pacing on turn-end
 the way `msgqueue.DeliverFunc`'s contract requires ("MUST block while claude is busy … that blocking IS
-the drain's turn-end pacing", `msgqueue/queue.go:87-92`). The queued-backlog UI and the drop-before-drain
+the drain's turn-end pacing"). The queued-backlog UI and the drop-before-drain
 control were both regressed as a result — present on `pty` (which honours the contract via
 `supervisor.WriteUserTurn`'s idle gate) and absent on `stream-json`.
+
+When `waitIdleForDelivery` first finds its conversation busy, it emits the INFO record
+`relay: stream-turn delivery held; conversation busy`, with `event=stream_turn.delivery_hold` and
+`conversation_id` (#2782). It fires once for each delivery attempt that waits, before the wait returns,
+including on timeout or cancellation. Wakeups from other conversations changing state do not repeat it;
+idle, nil-tracker and empty-ID attempts emit no record. The tracker uses its existing logger, and the
+record contains no payload, message text or session ID. See
+[turn-busy concurrency and wakeup tests](streamsup-package-per-conversation-turn-busy-tracking.md)
+for why the record must come from the wait's own membership check.
 
 Two new nil-receiver-safe, empty-key-safe methods on `turnBusyTracker`, both thin wrappers over the
 existing primitives — no new fields, no new synchronisation:
@@ -105,7 +114,7 @@ file.
 failed twice at its M4 milestone with the same shape — rotation succeeds, the follow-up turn is
 accepted, then zero bytes reach any child for the full 20 s deadline — consistent with a
 delivery parked here (`waitIdleForDelivery`, bounded by `streamTurnHoldTimeout`, 15 min: far
-outside the e2e's window, and silent while parked, matching the record). Rather than wait for
+outside the e2e's window, and silent while parked at the time, matching the record). Rather than wait for
 the ~1-in-N-per-week e2e to fire again, #1295 drives the ordering directly at this seam: park a
 delivery in the hold, run the rotation underneath it (rekey the binding, tear the child down,
 fire `clearForSession` keyed to the rotation's new session id), and check whether the clear is
