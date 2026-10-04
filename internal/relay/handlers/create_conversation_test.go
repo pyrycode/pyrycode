@@ -582,7 +582,7 @@ func TestCreateConversation_SetCwd_RecordsResolvedDir(t *testing.T) {
 	}
 
 	lc, lrecv := newCreateConvConn(t)
-	if err := ListConversations(reg)(context.Background(), lc, protocol.Envelope{ID: createConvRequestID, Type: protocol.TypeListConversations}); err != nil {
+	if err := ListConversations(reg, emptyListHistory{})(context.Background(), lc, protocol.Envelope{ID: createConvRequestID, Type: protocol.TypeListConversations}); err != nil {
 		t.Fatalf("list handler: %v", err)
 	}
 	var lenv protocol.Envelope

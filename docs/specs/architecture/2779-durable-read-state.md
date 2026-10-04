@@ -76,3 +76,9 @@ Pending for the documentation stage in `docs/protocol-mobile.md`:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-04
+
+## Revisions
+
+- 2026-10-04: Use a consumer-owned `historyLatestReader` interface instead of a concrete constructor argument. Existing handler fixtures deliberately use synthetic ids, so their empty-history double preserves the behavior each test targets without weakening the real store's canonical-id guard. Real-store tests cover the durable contract. `Store.LatestEntryID` handles a nil receiver with an error; the handler also normalizes a typed nil store to a missing dependency, including empty registries. No new exported type is added.
+
+- 2026-10-04: Final source count corrects the sketch: 18 existing external list-constructor calls require updates (17 tests, one production), plus internal delegation. The floor-rule exception still applies. Final written work is about 590 lines including this plan, zero new exported types/interfaces and the same four acceptance criteria.

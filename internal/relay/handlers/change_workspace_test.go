@@ -218,7 +218,7 @@ func TestChangeWorkspace_ListReflectsNewWorkspace(t *testing.T) {
 		TS:      time.Now().UTC(),
 		Payload: mustMarshal(t, protocol.ListConversationsPayload{}),
 	}
-	list := ListConversations(reg)
+	list := ListConversations(reg, emptyListHistory{})
 	if err := list(context.Background(), c, listReq); err != nil {
 		t.Fatalf("list handler: %v", err)
 	}
