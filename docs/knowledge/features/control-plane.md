@@ -2,7 +2,7 @@
 
 `internal/control` exposes the on-disk control surface of `pyry`: a Unix domain socket (`~/.pyry/<name>.sock`, mode `0600`) speaking line-delimited JSON. Each connection is one request, one response — every verb `Server.handle` dispatches replies with one JSON `Response` and returns; no verb hands off connection ownership. (`VerbAttach` was the one verb that did, until #1348 deleted its server-side handler and #1535 deleted the now-orphaned wire type itself.)
 
-Verbs today: `status`, `stop`, `logs`, `sessions.new`, `sessions.rm`, `sessions.rename`, `sessions.list`, `sessions.has-id`, `rekey`, `mcp.approve`, `attachment.file` (#2164, ships live but inert — see [§ Attachment.file](control-plane-attachment-file-confine-and-store-a-claude-named-path.md)), `channel.new` (#2155, see [§ Channel: new verb](#channel-new-verb-channelnew-2155) below), and `pairing.mint` (#2388). `attach` and `resize` are gone — #1535 deleted `VerbAttach`, `VerbResize`, `AttachPayload`, `ResizePayload`, and the `Request.Attach`/`Request.Resize` fields, plus the orphaned `control.SendResize` client helper, none of which had a live dispatch arm since #1348. The deletion is decode-compatible with a stale (pre-#1348) client: nothing in the repo calls `json.Decoder.DisallowUnknownFields`, and Go's `encoding/json` ignores unknown object fields by default, so a client still sending `{"verb":"attach","attach":{…}}` decodes cleanly and gets the same `unknown verb: "attach"` reply it already got post-#1348 — deleting a `Request` field only ever *widens* what the decoder accepts, never narrows it. The wire shape otherwise is held stable across phases — `VerbSessionsNew` (#75) adds a `Request.Sessions *SessionsPayload` field with `omitempty` so existing-verb wire output stays byte-identical (pinned by `TestProtocol_SessionsRoundTripBackCompat`). `VerbSessionsRm` (#98) extends `SessionsPayload` with `ID`/`JSONLPolicy` (both `omitempty`) and adds a `Response.ErrorCode` field (also `omitempty`) for typed-sentinel propagation — same back-compat guard, byte-identical existing-verb output. `VerbSessionsRename` (#90) extends `SessionsPayload` with one further `omitempty` field (`NewLabel`) and reuses the `Response.ErrorCode` envelope verbatim — no new wire constants. `VerbPairingMint` follows the same additive rule: the optional outer `Request.Pairing` and `Response.Pairing` fields preserve every older encoding, while the inner `PairingPayload` deliberately always emits both `DeviceLabel` and `AllowRemotePermissions`. Those are the only caller-selected mint inputs; `PairingResult.Pairing` is an opaque plaintext bearer credential, not a place to expose identity, key, relay, registry, expiry, or diagnostics.
+Verbs today: `status`, `stop`, `logs`, `sessions.new`, `sessions.rm`, `sessions.rename`, `sessions.list`, `sessions.has-id`, `rekey`, `mcp.approve`, `attachment.file` (#2164, ships live but inert — see [§ Attachment.file](control-plane-attachment-file-confine-and-store-a-claude-named-path.md)), `channel.new` (#2155, see [§ Channel: new verb](#channel-new-verb-channelnew-2155) below), `pairing.mint` (#2388), and payload-free `update.when-idle` (`VerbUpdateWhenIdle`, #2757; see [Server Construction](#server-construction) for its decision contract). `attach` and `resize` are gone — #1535 deleted `VerbAttach`, `VerbResize`, `AttachPayload`, `ResizePayload`, and the `Request.Attach`/`Request.Resize` fields, plus the orphaned `control.SendResize` client helper, none of which had a live dispatch arm since #1348. The deletion is decode-compatible with a stale (pre-#1348) client: nothing in the repo calls `json.Decoder.DisallowUnknownFields`, and Go's `encoding/json` ignores unknown object fields by default, so a client still sending `{"verb":"attach","attach":{…}}` decodes cleanly and gets the same `unknown verb: "attach"` reply it already got post-#1348 — deleting a `Request` field only ever *widens* what the decoder accepts, never narrows it. The wire shape otherwise is held stable across phases — `VerbSessionsNew` (#75) adds a `Request.Sessions *SessionsPayload` field with `omitempty` so existing-verb wire output stays byte-identical (pinned by `TestProtocol_SessionsRoundTripBackCompat`). `VerbSessionsRm` (#98) extends `SessionsPayload` with `ID`/`JSONLPolicy` (both `omitempty`) and adds a `Response.ErrorCode` field (also `omitempty`) for typed-sentinel propagation — same back-compat guard, byte-identical existing-verb output. `VerbSessionsRename` (#90) extends `SessionsPayload` with one further `omitempty` field (`NewLabel`) and reuses the `Response.ErrorCode` envelope verbatim — no new wire constants. `VerbPairingMint` follows the same additive rule: the optional outer `Request.Pairing` and `Response.Pairing` fields preserve every older encoding, while the inner `PairingPayload` deliberately always emits both `DeviceLabel` and `AllowRemotePermissions`. Those are the only caller-selected mint inputs; `PairingResult.Pairing` is an opaque plaintext bearer credential, not a place to expose identity, key, relay, registry, expiry, or diagnostics. `VerbUpdateWhenIdle` adds no request field, and `Response.UpdateWhenIdle` is optional with `omitempty`, preserving older verb encodings too.
 
 ## Server Construction
 
@@ -38,11 +38,64 @@ path, remains daemon-only. Its fixed success and failure events omit the
 caller-supplied label, token, token hash, and encoded pairing, so copying the log
 snapshot into a diagnostic bundle does not create another credential egress.
 
+### Update-when-idle provider
+
+`SetUpdateWhenIdleProvider(func() (UpdateWhenIdleResult, error))` installs the
+optional release-selection and scheduling provider without changing `NewServer`.
+It is safe to call concurrently; nil clears the provider. `handleUpdateWhenIdle`
+copies it under `Server.mu`, unlocks, and invokes it exactly once for the request.
+The provider owns release selection and eligibility. The payload-free request
+exposes no binary path, release URL, version override or eligibility bypass:
+
+```json
+{"verb":"update.when-idle"}
+```
+
+`Response.UpdateWhenIdle` (JSON `updateWhenIdle`) carries an
+`UpdateWhenIdleResult`: required `decision`, optional `reason`, and optional
+`releaseTag`. Success returns one of these typed decisions:
+
+| Decision | Go constant | Required detail |
+| --- | --- | --- |
+| `up-to-date` | `UpdateUpToDate` | None |
+| `not-eligible` | `UpdateNotEligible` | Nonblank `reason` explaining the refusal |
+| `will-install` | `UpdateWillInstall` | Nonblank `releaseTag` naming the selected or already-pending release |
+
+For example, an accepted scheduling decision is:
+
+```json
+{"updateWhenIdle":{"decision":"will-install","releaseTag":"v9.8.7"}}
+```
+
+Both server and client use `validateUpdateWhenIdleResult` to reject a missing or
+unknown decision, `not-eligible` without a reason, or `will-install` without a
+tag. Whitespace-only reason/tag values are rejected; valid values are preserved
+verbatim. A missing response result returns `update.when-idle: missing decision`;
+an empty or unknown discriminant returns `update.when-idle: invalid decision`.
+Missing required details return `update.when-idle: missing reason` or
+`update.when-idle: missing release tag`.
+
+An absent provider returns `Response.Error` with exactly
+`update.when-idle: provider not configured`. Any provider error returns exactly
+`update.when-idle: operation failed`, discarding both its error detail and any
+returned result. Invalid provider results also produce only an error, with no
+success payload. `UpdateWhenIdle(ctx, socketPath) (*UpdateWhenIdleResult, error)`
+returns nil on every failure, including transport and validation failures; a
+non-empty wire `error` takes precedence over any accompanying success payload.
+
+`will-install` accepts scheduling; it does not report a completed installation.
+The provider must return before waiting for idle, downloading assets, installing
+or restarting, and keep accepted work independent of the connection. A
+disconnect or client timeout does not retract accepted work. The production
+daemon provider and CLI remain unwired in this slice; [#2758](https://github.com/pyrycode/pyrycode/issues/2758)
+owns that integration. See the [contract spec](../../specs/architecture/2757-update-when-idle-contract.md).
+
 ## Handshake Deadline: per-conn timeout and the session-verb extend (#865)
 
 `handle` (the per-conn goroutine `Serve` spawns) sets `conn.SetDeadline(time.Now().Add(s.handshakeTimeout))` before decoding the client's JSON request — the bound that limits how long a connected-but-silent client can pin a per-conn goroutine. `s.handshakeTimeout` defaults to `defaultHandshakeTimeout` (5s), set once in `NewServer`'s struct literal; same-package tests may shrink it via the unexported `Server.handshakeTimeout` field (written once before `Serve` starts, read-only per-conn thereafter — no lock needed, same post-construction-override shape as `SetRekeyer`).
 
-Two handler paths move it after the handshake read has already completed:
+Handlers adjust the connection or write deadline after the handshake read has
+already completed. The approval and session-verb policies are:
 
 - `handleApprove` **clears** it (`conn.SetDeadline(time.Time{})`) for the length of a blocking approval wait — the conn stays open for however long the human decision takes, until `mcpApprovalTimeout` or a disconnect/shutdown watcher resolves it. (Until #1535, `handleAttach` was the other clearer, handing the conn to the bridge for the indefinite life of an attachment; that verb and its handler are gone.)
 - `handleSessionsNew` / `handleSessionsRm` **extend** it to `sessionOpTimeout + sessionOpConnGrace` (30s + 5s = 35s) immediately before calling `Pool.Create` / `Pool.Remove`. Before #865, the deadline was left at its 5s handshake value while each handler's own ctx budgeted 30s for the op — once `Create`/`Remove` ran past 5s (routine on a cold claude spawn: documented 2-15s latency), the final `enc.Encode(Response{...})` failed with a silently-discarded deadline error and the client's read got EOF, even though the mutation had actually succeeded (an operator-visible orphan on `sessions.new`, a false failure on `sessions.rm`). Extending — not clearing — keeps the 30s op ctx as the binding budget on the normal path, while a write that's still stuck at 35s hits a hard upper bound rather than hanging the conn goroutine forever.
@@ -51,7 +104,31 @@ Both extend calls run strictly after `handle` has decoded the request, so the ha
 
 `pairing.mint` needs a different two-sided bound. `MintPairing` derives the earlier of the caller's existing deadline and `time.Now().Add(DialTimeout)` before it calls `request`, so dial retry, encode, and decode consume one operation-wide budget; changing `request` globally would incorrectly shorten callers that intentionally choose a longer deadline. Server-side, `handlePairingMint` retains `handle`'s finite request-read deadline and installs a fresh `DialTimeout` response-write deadline before entering the provider. The write is therefore bounded even if the provider returns after the original handshake window.
 
-The provider closure is synchronous and has no context, so these I/O deadlines cannot cancel it after entry. A client may return on its deadline while the provider is still running; the handler attempts its already-bounded write only after the provider returns, and `Serve` continues to drain that in-flight handler during shutdown. Do not turn the deadline into a detached worker or describe it as a provider-execution timeout—the concrete provider must bound its own lock waits and local I/O.
+The pairing provider closure is synchronous and has no context, so these I/O deadlines cannot cancel it after entry. A client may return on its deadline while the provider is still running; the handler attempts its already-bounded write only after the provider returns, and `Serve` continues to drain that in-flight handler during shutdown. Do not turn the deadline into a detached worker or describe it as a provider-execution timeout—the concrete provider must bound its own lock waits and local I/O.
+
+`update.when-idle` has its own 70-second policy (`updateWhenIdleTimeout`).
+`UpdateWhenIdle` derives a bounded context before dialing, so dial, request write
+and response read share one operation-wide ceiling, shortened by any earlier
+caller deadline. It sets the connection's absolute deadline and uses
+`context.AfterFunc` to wake parked I/O promptly on caller cancellation, even
+after the provider has entered. The watcher is stopped on return and the
+connection is closed. These policies are scoped to this helper; `request`,
+`requestPatient`, and other verbs retain their existing bounds.
+
+After request decoding, `handleUpdateWhenIdle` installs a fresh 70-second
+response-write bound with `SetWriteDeadline` before entering the provider. The
+five-second handshake-read limit stays in place. A valid decision can therefore
+arrive after five seconds, allowing the release metadata check's 60-second HTTP
+budget. The client ceiling starts before dial, while the server write window
+starts after decoding; neither is reset when the provider returns.
+
+These are I/O bounds, not execution bounds. The synchronous update provider has
+no context parameter and must bound its own release/metadata check. Cancellation
+or expiry ends the client's wait without stopping the provider or accepted
+installation work. If the provider returns after the write bound expires, its
+response may never reach the caller; a failed exchange cannot establish that
+scheduling was retracted. `Serve` still waits for that handler to return during
+shutdown.
 
 ## Resolver Seam
 
@@ -305,7 +382,20 @@ the wrong registry under another name. Lock, malformed-load, and save failures
 also prove the fixed client error and inspect both daemon logs and diagnostic
 bundle logs for credential-like sentinels.
 
-The timeout tests cover both sides of the liveness contract: a silent peer must terminate at `DialTimeout` even when the caller allows longer, and an already-entered provider held past an earlier caller deadline must not keep the client blocked. The held provider is explicitly released so the synchronous server handler can drain; a green client-deadline assertion alone would not prove server shutdown remains finite.
+The pairing timeout tests cover both sides of the liveness contract: a silent peer must terminate at `DialTimeout` even when the caller allows longer, and an already-entered provider held past an earlier caller deadline must not keep the client blocked. The held provider is explicitly released so the synchronous server handler can drain; a green client-deadline assertion alone would not prove server shutdown remains finite.
+
+For update providers, a concurrent status response alone cannot prove execution
+outside `Server.mu`: the status arm never takes that lock.
+`TestUpdateWhenIdle_ResponseOutlastsHandshake` also completes
+`SetUpdateWhenIdleProvider` while the provider is held, then accepts its decision
+after the five-second handshake window. This tests lock release as well as the
+longer response window. `TestUpdateWhenIdle_SilentPeerCeiling` gives the caller a
+longer deadline to prove the helper's own 70-second ceiling;
+`TestUpdateWhenIdle_CallerStopsWaiting` tests earlier deadlines and cancellation
+after provider entry. Held providers are released before draining the server,
+and custom peers are drained too. Malformed-result tests check both provider and
+wire boundaries, including error-plus-success replies; exact request/decision
+encodings and `TestProtocol_SessionsRoundTripBackCompat` pin the wire contract.
 
 ## References
 
