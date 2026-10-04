@@ -65,3 +65,23 @@ Pending for the documentation stage: in `docs/knowledge/features/streamsup-packa
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-04
+
+## Revisions
+
+- 2026-10-04 — Verifier red-gate finding: `TestRelayV2_StreamAnnouncedResetFollowsClaude`
+  ended its collection at `turn_end`, although `sessionTransitionEmitterV2.Run` and
+  the turn emitter deliver frames from independent goroutines. The focused PR run
+  reproduced zero transitions in three of ten runs. A test-only overlay delaying
+  `sessionTransitionEmitterV2.broadcast` on the exact pre-change baseline reproduced
+  the same failure, establishing that the assertion assumed an ordering the existing
+  production contract never promised. Change only the test's collection window to
+  await both the first turn's completion and its reset frame, in either order under
+  the existing deadline. Preserve the exact transition-count, identity, usage and
+  second-turn assertions. No stop API or production contract changes. Additional
+  files read: `internal/e2e/relay_v2_stream_announced_reset_test.go` →
+  `TestRelayV2_StreamAnnouncedResetFollowsClaude`, and `cmd/pyry/session_transition_v2.go`
+  → `Enqueue`, `Run`, `broadcast`: asynchronous transition delivery. Verify the
+  corrected test against the delayed baseline, repeat it against the PR, then run
+  the race-enabled fake e2e tier and the builder-owned checks. The dispatcher owns
+  the full-module gate. Total written work remains below 800 lines, with no new
+  types, interfaces, production call sites or reject branches.
