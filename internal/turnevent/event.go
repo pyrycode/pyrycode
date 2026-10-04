@@ -659,16 +659,18 @@ type BackgroundTaskUpdated struct {
 	TruncatedFields []string
 }
 
-// BackgroundTask is one entry of a BackgroundTaskRoster: the roster's element
-// type, NOT an Event, so it carries no marker. Its three fields are exactly the
-// per-entry keys claude's system/background_tasks_changed line shows and nothing
-// invented — in particular there is no tool_use_id and no patch, which the
-// scalar siblings carry because their LINES do.
+// BackgroundTask is a daemon-enriched roster row, not an Event. Claude's
+// systemBackgroundTaskEntry input has only task_id, task_type and description;
+// ToolCallID is joined from a retained BackgroundTaskStarted by the session hold.
 type BackgroundTask struct {
 	// TaskID is claude's opaque handle for the task: the join key back to the
 	// BackgroundTaskStarted that opened it and every BackgroundTaskUpdated since.
 	// Same name, no translation.
 	TaskID string
+	// ToolCallID names the launching tool call in this session and child lifetime.
+	// Empty means no retained start match. The hold copies the already-bounded
+	// BackgroundTaskStarted.ToolCallID (at most streamsup's maxTaskFieldID bytes).
+	ToolCallID string
 	// TaskType is claude's kind for the task ("local_bash" in the one captured
 	// roster). A plain string rather than a closed enum, for
 	// BackgroundTaskStarted.TaskType's reason.
@@ -686,9 +688,9 @@ type BackgroundTask struct {
 	// BackgroundTaskStarted this entry's TaskID joins back to.
 	Description string
 	// TruncatedFields names THIS entry's fields the producer cut to fit their
-	// caps, in declaration order, using the DAEMON's snake_case names: "task_id",
-	// "task_type", "description". No name is translated — claude's keys and these
-	// fields agree. nil when nothing was cut, never an empty non-nil slice.
+	// caps, in Claude's field order, using the DAEMON's snake_case names: "task_id",
+	// "task_type", "description", followed by "tool_call_id" when the joined
+	// start id was cut. nil when nothing was cut, never an empty non-nil slice.
 	TruncatedFields []string
 }
 

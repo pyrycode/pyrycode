@@ -956,7 +956,7 @@ func TestBackgroundTaskRosterPayload_RoundTrip(t *testing.T) {
 	// The two entries pin both forms of the per-entry truncation report:
 	// populated on one, null on the other. truncated_fields is deliberately NOT
 	// normalised (unlike tasks) — nil and [] say the identical thing here.
-	if got, want := strings.Join(payload.Tasks[0].TruncatedFields, ","), "description"; got != want {
+	if got, want := strings.Join(payload.Tasks[0].TruncatedFields, ","), "description,tool_call_id"; got != want {
 		t.Errorf("Tasks[0].TruncatedFields: got %q, want %q", got, want)
 	}
 	if payload.Tasks[1].TruncatedFields != nil {
@@ -969,6 +969,12 @@ func TestBackgroundTaskRosterPayload_RoundTrip(t *testing.T) {
 		t.Errorf("DroppedTasks: got %d, want 3", payload.DroppedTasks)
 	}
 
+	for i, want := range []string{"tool_01START", ""} {
+		if payload.Tasks[i].ToolCallID != want {
+			t.Errorf("Tasks[%d].ToolCallID = %q, want %q", i, payload.Tasks[i].ToolCallID, want)
+		}
+	}
+	// Golden round-trip pins the key's presence even when its value is empty.
 	roundTripEnvelope(t, env, payload, raw)
 }
 
@@ -2682,9 +2688,10 @@ func TestBackgroundTaskPayloads_FitV2EnvelopeCap(t *testing.T) {
 	for i := 0; i < capTaskRosterEntries; i++ {
 		roster.Tasks = append(roster.Tasks, BackgroundTask{
 			TaskID:          fill(capTaskFieldID),
+			ToolCallID:      fill(capTaskFieldID),
 			TaskType:        fill(capTaskFieldID),
 			Description:     fill(capTaskRosterDescription),
-			TruncatedFields: []string{"task_id", "task_type", "description"},
+			TruncatedFields: []string{"task_id", "task_type", "description", "tool_call_id"},
 		})
 	}
 

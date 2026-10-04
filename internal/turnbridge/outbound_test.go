@@ -844,7 +844,7 @@ func TestMapEventOutbound(t *testing.T) {
 			name: "BackgroundTaskRoster -> background_task_roster, entries in order + dropped_tasks",
 			ev: turnevent.BackgroundTaskRoster{
 				Tasks: []turnevent.BackgroundTask{
-					{TaskID: "task-1", TaskType: "local_bash", Description: "sleep 300"},
+					{TaskID: "task-1", ToolCallID: "launch-1", TaskType: "local_bash", Description: "sleep 300"},
 					{TaskID: "task-2", TaskType: "local_bash", Description: "tail -f log"},
 				},
 				DroppedTasks: 3,
@@ -854,7 +854,7 @@ func TestMapEventOutbound(t *testing.T) {
 			wantPayload: protocol.BackgroundTaskRosterPayload{
 				ConversationID: "c1",
 				Tasks: []protocol.BackgroundTask{
-					{TaskID: "task-1", TaskType: "local_bash", Description: "sleep 300"},
+					{TaskID: "task-1", ToolCallID: "launch-1", TaskType: "local_bash", Description: "sleep 300"},
 					{TaskID: "task-2", TaskType: "local_bash", Description: "tail -f log"},
 				},
 				DroppedTasks: 3,
@@ -869,7 +869,7 @@ func TestMapEventOutbound(t *testing.T) {
 			ev: turnevent.BackgroundTaskRoster{
 				Tasks: []turnevent.BackgroundTask{
 					{TaskID: "task-1", TaskType: "local_bash", Description: "short"},
-					{TaskID: "task-2", TaskType: "local_bash", Description: "cut…", TruncatedFields: []string{"description"}},
+					{TaskID: "task-2", ToolCallID: "launch-2", TaskType: "local_bash", Description: "cut…", TruncatedFields: []string{"description", "tool_call_id"}},
 				},
 			},
 			tc:      tc,
@@ -878,7 +878,7 @@ func TestMapEventOutbound(t *testing.T) {
 				ConversationID: "c1",
 				Tasks: []protocol.BackgroundTask{
 					{TaskID: "task-1", TaskType: "local_bash", Description: "short"},
-					{TaskID: "task-2", TaskType: "local_bash", Description: "cut…", TruncatedFields: []string{"description"}},
+					{TaskID: "task-2", ToolCallID: "launch-2", TaskType: "local_bash", Description: "cut…", TruncatedFields: []string{"description", "tool_call_id"}},
 				},
 				DroppedTasks: 0,
 			},
