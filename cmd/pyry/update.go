@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/update"
 )
 
@@ -44,15 +45,48 @@ const releaseSigningPublicKeyHex = "c1839980c8be806616a2761058692426a33f15999b70
 // binary on disk, and (unless --no-restart is set) restart the managed pyry
 // daemon if a launchd plist or systemd user unit is detected.
 func runUpdate(args []string) error {
+	return runUpdateArgs(args, os.Stdout)
+}
+
+func runUpdateArgs(args []string, out io.Writer) error {
+	socketPath, args, err := parseClientFlags("pyry update", args)
+	if err != nil {
+		return err
+	}
 	fs := flag.NewFlagSet("pyry update", flag.ContinueOnError)
+	whenIdle := fs.Bool("when-idle", false, "request the selected daemon's next idle update")
 	checkOnly := fs.Bool("check", false, "print current and latest versions, then exit")
 	pinVersion := fs.String("version", "", "install this version instead of the latest release")
 	noRestart := fs.Bool("no-restart", false, "skip daemon restart even if a managed unit is detected")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if *whenIdle {
+		var conflict string
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "check" || f.Name == "version" || f.Name == "no-restart" {
+				conflict = f.Name
+			}
+		})
+		if conflict != "" {
+			return fmt.Errorf("update: cannot combine --when-idle with --%s", conflict)
+		}
+		result, err := control.UpdateWhenIdle(context.Background(), socketPath)
+		if err != nil {
+			return fmt.Errorf("update: %w", err)
+		}
+		switch result.Decision {
+		case control.UpdateUpToDate:
+			fmt.Fprintln(out, "up to date")
+		case control.UpdateNotEligible:
+			fmt.Fprintf(out, "not eligible: %s\n", result.Reason)
+		case control.UpdateWillInstall:
+			fmt.Fprintf(out, "will install %s when idle\n", result.ReleaseTag)
+		}
+		return nil
+	}
 
-	o, err := productionUpdateOptions(os.Stdout)
+	o, err := productionUpdateOptions(out)
 	if err != nil {
 		return err
 	}
