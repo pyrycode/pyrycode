@@ -28,7 +28,7 @@ const (
 // created row, never on a rebuilt path: a workspace_labels key must byte-equal a
 // stored cwd, and the stored one is the realpath.
 //
-// root is relay.WorkspaceRoot() in production, passed in so tests choose it.
+// root is the startup-resolved service workspace base, also advertised to peers.
 //
 // Every failure logs a static event — a stage, never a path or an error value,
 // because Save's errors name the registry path and the creator's name the

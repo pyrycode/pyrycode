@@ -834,6 +834,7 @@ func runSupervisor(args []string) error {
 		slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}),
 		logRing,
 	))
+	workspaceBase := resolveStartupWorkspaceBase(os.Getwd, logger)
 	// Rows recorded before #2568 carry the client's spelling of their folder —
 	// relative or "~"-prefixed — beside rows holding its realpath, so one folder
 	// shows as several workspaces. Rewrite them once, before anything else reads
@@ -1202,6 +1203,7 @@ func runSupervisor(args []string) error {
 		allowInsecure: allowInsecure,
 		shutdown:      cancelCause,
 		convReg:       convReg,
+		workspaceBase: workspaceBase,
 		readFolders:   readFolders,
 		creator:       sessionMinter{pool, modelVocabulary},
 		router:        router,
@@ -1429,7 +1431,7 @@ func runSupervisor(args []string) error {
 	// below, and a Mint before it runs persists a session and then fails, which
 	// would orphan one session per start. Joined after pool.Run returns.
 	seedDone := seedWhenReady(ctx, pool.Ready(), func() {
-		seedDefaultWorkspace(convReg, convRegistryPath, relay.WorkspaceRoot(), createChannel, logger)
+		seedDefaultWorkspace(convReg, convRegistryPath, workspaceBase, createChannel, logger)
 	})
 	// Install the channel.post poster (#2497) over that creator and the SAME
 	// conversation registry and durable log every other conversation-keyed seam

@@ -70,3 +70,7 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-04
+
+## Revisions
+
+- 2026-10-04: inspection during implementation clarified pointer ownership: `NewV2SessionManager` retains the supplied pointer rather than copying its pointed-to string. `startRelayV2` supplies the address of its private `relayWiring` value's field, which remains immutable for the manager's lifetime. The external contract and shared startup value are unchanged.
