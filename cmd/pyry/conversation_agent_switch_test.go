@@ -264,12 +264,41 @@ func TestConversationAgentSwitch_ConversationSaveFailureRollsBack(t *testing.T) 
 	}
 }
 
+// gatedRunner is a modelListRunner whose Run, once cancelled, still waits for
+// release. A teardown therefore cannot finish until the test opens the gate.
+type gatedRunner struct {
+	modelListRunner
+	release <-chan struct{}
+}
+
+func (r gatedRunner) Run(ctx context.Context) error {
+	<-ctx.Done()
+	<-r.release
+	return ctx.Err()
+}
+
 func TestConversationAgentSwitch_PostCommitRemovalErrorReportsNewID(t *testing.T) {
-	pool, plan := newDormantWritePool(t, "")
-	plan.arm(dormantWriteBootID, claudeEntries)
+	// Session.Evict selects on evictedCh and ctx.Done(). With a runner that
+	// returns on cancel, teardown can close evictedCh first and Remove then
+	// reports nil at random. The gate keeps evictedCh open while Switch runs.
+	release := make(chan struct{})
+	plan := newModelListPlan()
+	pool, err := sessions.New(sessions.Config{
+		Bootstrap:    sessions.SessionConfig{ClaudeBin: os.Args[0]},
+		RegistryPath: filepath.Join(t.TempDir(), "sessions.json"),
+		RunnerFactory: func(cfg sessions.RunnerConfig) (sessions.Runner, error) {
+			return gatedRunner{modelListRunner: modelListRunner{id: sessions.SessionID(cfg.SessionID), plan: plan}, release: release}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	var transitions []sessions.SessionTransition
 	pool.SetTransitionObserver(func(t sessions.SessionTransition) { transitions = append(transitions, t) })
 	poolCtx := runPoolReady(t, pool)
+	// Registered after runPoolReady, so it runs first: pool shutdown waits on
+	// these runners.
+	t.Cleanup(func() { close(release) })
 	oldID, err := pool.MintWith("conv-1", "", protocol.AgentClaude, sessions.SessionSettings{})
 	if err != nil {
 		t.Fatal(err)
