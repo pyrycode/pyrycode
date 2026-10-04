@@ -910,6 +910,15 @@ func (t *turnBusyTracker) ToolCallInFlight(conversationID, toolCallID string) bo
 // the gap would close a channel the waiter has not captured yet, leaving it asleep
 // on the replacement.
 func (t *turnBusyTracker) WaitIdle(ctx context.Context, conversationID string) error {
+	return t.waitIdle(ctx, conversationID, nil)
+}
+
+// waitIdle is WaitIdle with a hook: onPark, when non-nil, runs once, on the first
+// iteration that finds the conversation busy, before the wait parks. It runs after
+// t.mu is released, so the hook may block (a logger writing to a slow stderr)
+// without stalling the tracker. Later iterations — wakeups from other
+// conversations' transitions — never run it again.
+func (t *turnBusyTracker) waitIdle(ctx context.Context, conversationID string, onPark func()) error {
 	for {
 		t.mu.Lock()
 		_, busy := t.busy[conversationID]
@@ -918,6 +927,10 @@ func (t *turnBusyTracker) WaitIdle(ctx context.Context, conversationID string) e
 
 		if !busy {
 			return nil
+		}
+		if onPark != nil {
+			onPark()
+			onPark = nil
 		}
 
 		select {
@@ -966,13 +979,24 @@ func (t *turnBusyTracker) WaitIdle(ctx context.Context, conversationID string) e
 //
 // timeout bounds ONE delivery attempt, not the message; see streamTurnHoldTimeout
 // (main.go) for the arithmetic against msgqueue's give-up bound.
+//
+// An attempt that finds the conversation busy logs one INFO record before it parks
+// (#2782), so a held message is visible while it is held rather than only when the
+// hold fails. The record comes from waitIdle's own membership check, not a separate
+// Busy call, so a turn opening between two checks cannot park the delivery
+// silently. It carries the conversation id and nothing the turn or the queued
+// message holds; the payload never reaches this method.
 func (t *turnBusyTracker) waitIdleForDelivery(ctx context.Context, conversationID string, timeout time.Duration) error {
 	if t == nil || conversationID == "" {
 		return nil
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return t.WaitIdle(waitCtx, conversationID)
+	return t.waitIdle(waitCtx, conversationID, func() {
+		t.logger.Info("relay: stream-turn delivery held; conversation busy",
+			"event", "stream_turn.delivery_hold",
+			"conversation_id", conversationID)
+	})
 }
 
 // openForDelivery marks conversationID mid-turn for a delivery that is about to

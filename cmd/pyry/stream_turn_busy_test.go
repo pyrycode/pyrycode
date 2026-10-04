@@ -1389,6 +1389,128 @@ func TestTurnBusyTracker_WaitIdleForDeliveryHonoursCancel(t *testing.T) {
 	}
 }
 
+// deliveryHoldRecords parses every JSON log line in logs and returns the #2782
+// hold records, keyed by their event.
+func deliveryHoldRecords(t *testing.T, logs *lockedBuffer) []map[string]any {
+	t.Helper()
+	var recs []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(logs.BytesCopy())), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("log line is not JSON: %q: %v", line, err)
+		}
+		if m["event"] == "stream_turn.delivery_hold" {
+			recs = append(recs, m)
+		}
+	}
+	return recs
+}
+
+// #2782: a delivery that finds its conversation busy says so once, at INFO,
+// before it returns — so a held message is visible while it is held rather than
+// only when the hold fails. The record names the conversation and nothing the
+// turn carried.
+func TestTurnBusyTracker_WaitIdleForDeliveryLogsHoldOnce(t *testing.T) {
+	t.Parallel()
+
+	const secretText = "opener text that must never reach the log"
+	newTracker := func() (*turnBusyTracker, *lockedBuffer) {
+		logs := &lockedBuffer{}
+		logger := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		resolve := stubBusyResolve(map[string]string{"sess-a": testConvID, "sess-b": "conv-b"})
+		return newTurnBusyTracker(resolve, logger), logs
+	}
+	assertOneHold := func(t *testing.T, logs *lockedBuffer) {
+		t.Helper()
+		recs := deliveryHoldRecords(t, logs)
+		if len(recs) != 1 {
+			t.Fatalf("hold records = %d, want exactly 1; log:\n%s", len(recs), logs.BytesCopy())
+		}
+		if got := recs[0]["level"]; got != "INFO" {
+			t.Errorf("hold record level = %v, want INFO", got)
+		}
+		if got := recs[0]["conversation_id"]; got != testConvID {
+			t.Errorf("hold record conversation_id = %v, want %q", got, testConvID)
+		}
+		if strings.Contains(string(logs.BytesCopy()), secretText) {
+			t.Error("the turn's text reached the log; the hold record must be content-free")
+		}
+	}
+
+	// The other conversation's open and close each wake the parked waiter, which
+	// re-checks its own key, finds it still busy and parks again. Only a record
+	// emitted outside the loop survives that as one record.
+	t.Run("busy, other-conversation churn, then clear", func(t *testing.T) {
+		t.Parallel()
+		tr, logs := newTracker()
+		tr.observe("sess-a", turnevent.TextChunk{MessageID: "m1", Text: secretText})
+
+		done := make(chan error, 1)
+		go func() { done <- tr.waitIdleForDelivery(context.Background(), testConvID, 5*time.Second) }()
+
+		// The record is emitted after the waiter captured its generation channel,
+		// so once it is visible the churn below is guaranteed to wake that waiter.
+		deadline := time.Now().Add(2 * time.Second)
+		for len(deliveryHoldRecords(t, logs)) == 0 {
+			if time.Now().After(deadline) {
+				t.Fatal("no hold record while the delivery was parked on a busy conversation")
+			}
+			time.Sleep(time.Millisecond)
+		}
+
+		// The grace windows let the waiter wake, re-check and re-park after each
+		// transition; without them all three land before it is rescheduled and it
+		// wakes once to find A idle, which a per-park record would also pass. They
+		// can never fail a correct implementation, only weaken the check.
+		tr.observe("sess-b", turnevent.TextChunk{MessageID: "m2", Text: "other"})
+		time.Sleep(50 * time.Millisecond)
+		tr.observe("sess-b", turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+		time.Sleep(50 * time.Millisecond)
+		tr.observe("sess-a", turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("waitIdleForDelivery = %v, want nil", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("waitIdleForDelivery never returned after the conversation's TurnEnd")
+		}
+		assertOneHold(t, logs)
+	})
+
+	t.Run("busy, timeout", func(t *testing.T) {
+		t.Parallel()
+		tr, logs := newTracker()
+		tr.observe("sess-a", turnevent.TextChunk{MessageID: "m1", Text: secretText})
+
+		err := tr.waitIdleForDelivery(context.Background(), testConvID, 20*time.Millisecond)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("waitIdleForDelivery = %v, want %v", err, context.DeadlineExceeded)
+		}
+		assertOneHold(t, logs)
+	})
+
+	t.Run("idle and empty id log nothing", func(t *testing.T) {
+		t.Parallel()
+		tr, logs := newTracker()
+		tr.observe("sess-b", turnevent.TextChunk{MessageID: "m2", Text: "other"})
+
+		if err := tr.waitIdleForDelivery(context.Background(), testConvID, time.Second); err != nil {
+			t.Errorf("waitIdleForDelivery on an idle conversation = %v, want nil", err)
+		}
+		if err := tr.waitIdleForDelivery(context.Background(), "", time.Second); err != nil {
+			t.Errorf("waitIdleForDelivery with an empty id = %v, want nil", err)
+		}
+		if recs := deliveryHoldRecords(t, logs); len(recs) != 0 {
+			t.Errorf("hold records = %d, want 0; log:\n%s", len(recs), logs.BytesCopy())
+		}
+	})
+}
+
 // --- drain tier: the real drain and the real streamsup.Parser ---------------
 
 // AC3 (second half — the teeth): the tracker is fed BEFORE the drain's
