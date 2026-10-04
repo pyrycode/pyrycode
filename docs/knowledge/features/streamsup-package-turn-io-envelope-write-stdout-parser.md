@@ -138,22 +138,59 @@ mutex. It registers an exact request id outside that lock, then rechecks the
 generation before writing. This preserves the runner's leaf-lock rule while
 rejecting a child replaced during registration.
 
-`Runner.ReconnectMCPServer` and `Runner.SetMCPServerEnabled` (#2418) copy this
-same snapshot/register/recheck/write shape through a shared `actuateMCP` helper,
-under their own `mcpActuationIDPrefix` namespace so their acks cannot be
+`Runner.ReconnectMCPServer` and `Runner.SetMCPServerEnabled` (#2418) use this
+same snapshot/register/recheck/write shape through `actuateMCP`, which delegates
+to `actuateControl` with the MCP eligibility gate enabled. Their shared private
+`mcpActuationIDPrefix` namespace keeps their acks from being
 swallowed by `mcpStatusQueries.claim`, which consumes any unregistered id
 carrying the status prefix. Both acks are a bare `control_response` with no
 server list: a `success` subtype reports accepted, anything else — including
 `error` — reports not-accepted, and a caller that wants a fresh inventory after
 either call still issues a separate `QueryMCPStatus`. `Parser.claimMCPActuation`
 sits beside `claimMCPStatusQuery` ahead of the shared control-response
-consumers, so an unclaimed ack — an unknown id, or a reply after the pending
-actuation already retired on cancellation or a child boundary — falls through
-to the shape decoders below and would otherwise reach the shared turn sink as
-an ordinary `MCPStatus`-shaped event; claiming it first is what keeps a
-daemon-private ack off that sink. It decodes into the same payload-free
+consumers. It consumes unknown, duplicate and retired ids in the private
+namespace without retaining tombstones; otherwise an ack carrying an
+`MCPStatus`-shaped payload could reach the shared turn sink. Automatic numeric
+ids and unrelated namespaces retain their existing paths. It decodes into the
+same payload-free
 `controlAckLine` target, so server names and claude-authored error text are
 structurally unreachable from this path.
+
+`Runner.StopTask(ctx, taskID) bool` (#2790), a concrete method outside
+`sessions.Runner`, shares `actuateControl`, `registerMCPActuation` and
+`claimMCPActuation`, including their private namespace. Overlapping stops and
+MCP actuations each receive a distinct exact request id. `WriteStopTask` sends
+one newline-terminated JSON line with `request.subtype:"stop_task"` and
+`request.task_id` as string data. The `TaskID` pointer preserves an empty
+string, structured encoding escapes metacharacters, and `task_id` remains
+omitted from every other control subtype. A short write fails the write gate.
+Stopping a task requires a live, non-rotating child and a correlation parser,
+but omits `mcpStatusEligible`: MCP-config provenance does not establish whether
+a child can stop a task. The MCP methods retain their eligibility gate.
+
+The boolean reports Claude's acceptance, not evidence that the task finished.
+Only a completed write and the first exact-id response with subtype `success`
+can return true, with the captured child still current and the caller context
+still live. Error, missing or unknown subtypes, failed writes, unavailable
+children, rotation, cancellation and child boundaries all return false. An
+early reply cannot override a failed write or an ended context. The parser
+removes a matching registration before waiting for the write gate, so lifecycle
+cleanup alone cannot fail an already-claimed reply; the final generation check
+prevents it from reporting success after child replacement. Task ids, writer
+errors and Claude's error text are neither logged nor returned by `StopTask`;
+private replies reach neither shared event decoding nor its logging.
+
+The caller context bounds writing and waiting, including a silent live child;
+`StopTask` adds no timeout and requires no deadline. An already-ended context
+prevents writing. During the write, a `context.AfterFunc` can call
+`retireStdinGeneration` to close only the captured child's stdin and release a
+blocked write; a replacement is untouched. The callback is stopped or joined
+before resolving the write gate and waiting for the answer. Normal acceptance,
+refusal and cancellation while awaiting a response preserve the child, current
+reply and turn-busy state, sending no interrupt, restart or user turn. Write
+cancellation is the retirement exception. Task membership, client authorization,
+daemon wiring and live completion proof belong to #2792, which also owns client
+wire documentation; the initialize affordance decision belongs to #2775.
 
 `Parser.claimMCPStatusQuery` runs before the shared control-response consumers.
 The first matching response retires the query, including an error or malformed

@@ -2571,7 +2571,7 @@ type Parser struct {
 	// relay workers and claims from the stdout forwarder.
 	mcpStatusQueries mcpStatusQueries
 
-	// mcpActuations correlates the daemon-private MCP reconnect and toggle acks,
+	// mcpActuations correlates daemon-private MCP reconnect, toggle and task-stop acks,
 	// with the same privacy property as mcpStatusQueries above: a claimed ack
 	// completes one waiter and never reaches the shared event sink. Its own mutex
 	// covers registration from callers while Write consumes stdout on another
@@ -4154,8 +4154,8 @@ func (q *mcpStatusQueries) failAll() {
 	}
 }
 
-// pendingMCPActuation is one caller waiting on the ack to its own MCP reconnect or
-// toggle. The result is a BARE VERDICT and that is the capture's finding, not a
+// pendingMCPActuation is one caller waiting on its MCP reconnect, toggle or task
+// stop ack. The result is a BARE VERDICT and that is the MCP capture's finding, not a
 // simplification: internal/e2e/realclaude/testdata/mcp_status_v2.1.259.json records
 // claude answering both verbs with a control_response carrying subtype and
 // request_id and NOTHING ELSE — no server list, no per-server row. There is no
@@ -8085,7 +8085,7 @@ func (p *Parser) claimMCPStatusQuery(line []byte) bool {
 	return true
 }
 
-// claimMCPActuation consumes the ack to a daemon-private MCP reconnect or toggle
+// claimMCPActuation consumes the ack to a daemon-private MCP reconnect, toggle or task stop
 // before any shared control-response consumer sees it. Matching the id retires the
 // actuation before the subtype is read, so the first ack is terminal whatever it says.
 //
