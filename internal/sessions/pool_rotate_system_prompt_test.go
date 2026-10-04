@@ -411,6 +411,10 @@ func TestPool_RotateForNewSession_NeverLogsPromptBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sessions.New: %v", err)
 	}
+	// Isolate the older contributor's confidentiality contract.
+	if err := pool.SetDaemonInstructions(""); err != nil {
+		t.Fatal(err)
+	}
 	ctx, _ := runPoolInBackground(t, pool)
 	id, path := spawnedRotationSession(t, ctx, pool, spawnDir, before)
 

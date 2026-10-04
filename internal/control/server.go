@@ -298,6 +298,10 @@ type Server struct {
 	// values. Its pairing and error are both sensitive and never logged or
 	// passed through as error detail by the control layer.
 	pairingProvider func(deviceLabel string, allowRemotePermissions bool) (string, error)
+
+	// Read under mu, invoked unlocked. The provider owns release selection,
+	// scheduling and its execution bound, independently of connection lifetime.
+	updateWhenIdleProvider func() (UpdateWhenIdleResult, error)
 }
 
 // NewServer constructs a Server. The socket is not opened until Listen.
@@ -505,6 +509,16 @@ func (s *Server) SetChannelPoster(post func(name, text string) error) {
 func (s *Server) SetPairingProvider(provider func(deviceLabel string, allowRemotePermissions bool) (string, error)) {
 	s.mu.Lock()
 	s.pairingProvider = provider
+	s.mu.Unlock()
+}
+
+// SetUpdateWhenIdleProvider installs the optional release-decision provider.
+// Safe to call from any goroutine; nil clears it. The provider must bound its
+// release check and schedule accepted work independently of the connection,
+// returning before idle waits, downloads, installation or restart.
+func (s *Server) SetUpdateWhenIdleProvider(provider func() (UpdateWhenIdleResult, error)) {
+	s.mu.Lock()
+	s.updateWhenIdleProvider = provider
 	s.mu.Unlock()
 }
 
@@ -725,6 +739,8 @@ func (s *Server) handle(conn net.Conn) {
 		s.handleChannelPost(conn, enc, req.ChannelPost)
 	case VerbPairingMint:
 		s.handlePairingMint(conn, enc, req.Pairing)
+	case VerbUpdateWhenIdle:
+		s.handleUpdateWhenIdle(conn, enc)
 	default:
 		_ = enc.Encode(Response{Error: fmt.Sprintf("unknown verb: %q", req.Verb)})
 	}
@@ -1240,6 +1256,29 @@ func (s *Server) handlePairingMint(conn net.Conn, enc *json.Encoder, payload *Pa
 		return
 	}
 	_ = enc.Encode(Response{Pairing: &PairingResult{Pairing: pairing}})
+}
+
+func (s *Server) handleUpdateWhenIdle(conn net.Conn, enc *json.Encoder) {
+	// The request has been decoded; preserve the handshake read bound while
+	// replacing only the response-write bound. This cannot stop the provider.
+	_ = conn.SetWriteDeadline(time.Now().Add(updateWhenIdleTimeout))
+	s.mu.Lock()
+	provider := s.updateWhenIdleProvider
+	s.mu.Unlock()
+	if provider == nil {
+		_ = enc.Encode(Response{Error: "update.when-idle: provider not configured"})
+		return
+	}
+	result, err := provider()
+	if err != nil {
+		_ = enc.Encode(Response{Error: "update.when-idle: operation failed"})
+		return
+	}
+	if err := validateUpdateWhenIdleResult(&result); err != nil {
+		_ = enc.Encode(Response{Error: err.Error()})
+		return
+	}
+	_ = enc.Encode(Response{UpdateWhenIdle: &result})
 }
 
 // handleApprove serves a VerbMCPApprove request: register the forwarded
