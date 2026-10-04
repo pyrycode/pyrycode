@@ -169,6 +169,9 @@ type relayWiring struct {
 	// convReg is the conversations registry backing the list/create/rename/
 	// delete/archive/change-workspace/recent handlers.
 	convReg *conversations.Registry
+	// hostSystemPrompt is the existing conversation pool's durable instructions
+	// surface, with no session-control access or interactive capability gate.
+	hostSystemPrompt handlers.HostSystemPromptStore
 	// workspaceBase is the immutable service workspace base resolved at startup.
 	// Empty is supplied explicitly so the handshake cannot re-resolve HOME.
 	workspaceBase string
@@ -1112,10 +1115,12 @@ func startRelayV2(
 			// to a running child is the registry, re-read at the pool's own spawn
 			// funnel by #2150's refreshSystemPrompt. Wiring a pool or runner in here
 			// would build the restart this verb is specified NOT to do.
-			protocol.TypeSetSystemPrompt:       handlers.SetSystemPrompt(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger),
-			protocol.TypeCreateWorkspaceFolder: handlers.CreateWorkspaceFolder(resolveWorkspaceFolder, logger),
-			protocol.TypeRecentWorkspaces:      handlers.RecentWorkspaces(w.convReg),
-			protocol.TypeRegisterPushToken:     handlers.RegisterPushToken(registry, resolveDevicesPath(w.instanceName), logger),
+			protocol.TypeSetSystemPrompt:         handlers.SetSystemPrompt(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger),
+			protocol.TypeRequestHostSystemPrompt: handlers.RequestHostSystemPrompt(w.hostSystemPrompt, logger),
+			protocol.TypeSetHostSystemPrompt:     handlers.SetHostSystemPrompt(w.hostSystemPrompt, logger),
+			protocol.TypeCreateWorkspaceFolder:   handlers.CreateWorkspaceFolder(resolveWorkspaceFolder, logger),
+			protocol.TypeRecentWorkspaces:        handlers.RecentWorkspaces(w.convReg),
+			protocol.TypeRegisterPushToken:       handlers.RegisterPushToken(registry, resolveDevicesPath(w.instanceName), logger),
 			// send_message gained the auto-naming seams in #2159: a message accepted
 			// for a conversation whose stored Name is still nil names that chat after
 			// itself, so a desktop-started chat stops rendering as `Untitled`.

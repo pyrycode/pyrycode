@@ -118,21 +118,23 @@ func formattedGoFunc(t *testing.T, path, name string) string {
 // #950 spec audit against main.)
 var inboundTypes = map[string]string{
 	// Surface #1 — map-dispatched via dispatch.Route (relay.go Handlers map).
-	"TypeSendMessage":           "map-dispatched",
-	"TypeListConversations":     "map-dispatched",
-	"TypeCreateConversation":    "map-dispatched",
-	"TypePromoteConversation":   "map-dispatched",
-	"TypeRenameConversation":    "map-dispatched",
-	"TypeDeleteConversation":    "map-dispatched",
-	"TypeArchiveConversation":   "map-dispatched",
-	"TypeUnarchiveConversation": "map-dispatched",
-	"TypeSetConversationMuted":  "map-dispatched",
-	"TypeChangeWorkspace":       "map-dispatched",
-	"TypeSetSystemPrompt":       "map-dispatched",
-	"TypeCreateWorkspaceFolder": "map-dispatched",
-	"TypeRecentWorkspaces":      "map-dispatched",
-	"TypeRenameWorkspace":       "map-dispatched",
-	"TypeRegisterPushToken":     "map-dispatched",
+	"TypeSendMessage":             "map-dispatched",
+	"TypeListConversations":       "map-dispatched",
+	"TypeCreateConversation":      "map-dispatched",
+	"TypePromoteConversation":     "map-dispatched",
+	"TypeRenameConversation":      "map-dispatched",
+	"TypeDeleteConversation":      "map-dispatched",
+	"TypeArchiveConversation":     "map-dispatched",
+	"TypeUnarchiveConversation":   "map-dispatched",
+	"TypeSetConversationMuted":    "map-dispatched",
+	"TypeChangeWorkspace":         "map-dispatched",
+	"TypeSetSystemPrompt":         "map-dispatched",
+	"TypeRequestHostSystemPrompt": "map-dispatched",
+	"TypeSetHostSystemPrompt":     "map-dispatched",
+	"TypeCreateWorkspaceFolder":   "map-dispatched",
+	"TypeRecentWorkspaces":        "map-dispatched",
+	"TypeRenameWorkspace":         "map-dispatched",
+	"TypeRegisterPushToken":       "map-dispatched",
 
 	// Surface #2 — switch-intercepted before dispatch.Route (dispatchAppFrame).
 	"TypeRekeyRequest":           "switch-intercepted",
@@ -376,10 +378,7 @@ var excludedTypes = map[string]string{
 	// inboundTypes.
 	"TypeSystemPrompt": "reply",
 
-	// Daemon-wide host prompt vocabulary precedes the map handlers in #2768.
-	"TypeRequestHostSystemPrompt": "pending handler (#2768)",
-	"TypeSetHostSystemPrompt":     "pending handler (#2768)",
-	"TypeHostSystemPrompt":        "reply",
+	"TypeHostSystemPrompt": "reply",
 
 	// outbound push / event — binary→phone, never dispatched inbound.
 	"TypeMessage":             "push",

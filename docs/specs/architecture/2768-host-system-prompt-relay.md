@@ -70,3 +70,7 @@ Pending for the documentation stage: in `docs/protocol-mobile.md`, under “Daem
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-04
+
+## Revisions
+
+- 2026-10-04: source search also found pending-handler comments beside the host prompt constants in `internal/protocol/codes.go` and inbound classification in `internal/protocol/envelope.go`. Remove those stale comments alongside the DTO comment; wire types and behavior remain unchanged. Final projected written work is about 700 lines, still within all sizing limits.

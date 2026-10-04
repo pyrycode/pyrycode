@@ -148,7 +148,7 @@ var inboundAppTypeSet = map[string]bool{
 	TypeWorkspaceUpdated:       true,
 	TypeRegisterPushToken:      true,
 
-	// Daemon-wide host prompt verbs; handlers are pending #2768.
+	// Daemon-wide host prompt verbs use authenticated paired-client map dispatch.
 	TypeRequestHostSystemPrompt: true,
 	TypeSetHostSystemPrompt:     true,
 }

@@ -23,7 +23,7 @@ const (
 	CodeConversationAlreadyPromoted = "conversation.already_promoted"
 
 	// Host system prompt storage failures are retryable. Malformed requests use
-	// CodeProtocolMalformed (non-retryable); handlers are pending #2768.
+	// CodeProtocolMalformed (non-retryable).
 	CodeHostSystemPromptUnavailable = "host_system_prompt.unavailable"
 
 	// Message errors.
@@ -415,7 +415,7 @@ const (
 
 	// Daemon-wide host prompt family. Both client → daemon verbs are
 	// map-dispatched; the daemon → client reply is outbound only. See the
-	// consumer contract in host_system_prompt.go; handlers are pending #2768.
+	// consumer contract in host_system_prompt.go.
 	TypeRequestHostSystemPrompt = "request_host_system_prompt"
 	TypeSetHostSystemPrompt     = "set_host_system_prompt"
 	TypeHostSystemPrompt        = "host_system_prompt"
