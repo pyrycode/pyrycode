@@ -113,6 +113,17 @@ is never observed. `IdleTimeout=0` defeats the eviction timer by default;
 tests that need eviction pass `-pyry-idle-timeout=<dur>` via the variadic on
 `StartIn`.
 
+For service-folder tests, set `exec.Cmd.Dir` explicitly as well as the isolated
+HOME. `spawnWith` sets `--pyry-workdir` but inherits the test process cwd; that
+flag controls Claude's spawn directory, while the daemon's startup workspace
+base comes from its own process cwd. With the usual isolated HOME, leaving
+`Dir` unset exercises the legacy fallback instead of the intended service folder.
+Use a distinct spawn override
+and assert both the decrypted raw `hello_ack.workspace_root` and the persisted
+General cwd, label and seed marker so wiring either consumer to the wrong base
+fails the test. See `TestWorkspaceBase_DaemonAdvertisesAndSeedsProcessCwd` and
+the [startup-base contract](../../protocol-mobile.md#hello_ack-v2-specific-note).
+
 ### Pre-daemon paired-device setup
 
 Tests that need an authenticated phone before daemon startup use

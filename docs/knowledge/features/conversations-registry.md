@@ -16,7 +16,30 @@ Lives in the same `internal/conversations` package as the `Conversation` type (#
 - **Workspace-label storage primitive (#2206):** `(*Registry).WorkspaceLabel(cwd string) (string, bool)` / `(*Registry).SetWorkspaceLabel(cwd string, label *string)` persist an operator-chosen display name for a workspace, keyed by the exact `cwd` string (byte-exact, no normalization) rather than by conversation id — a workspace has no row of its own, so the label lives in its own top-level map instead of a per-conversation field. Storage only: no wire verb sets it yet (#2207) and no payload reads it onto the wire yet (#2208, #2210). See § *`WorkspaceLabel` / `SetWorkspaceLabel`* below.
 - **Last context-usage reading primitive (#2460):** `(*Registry).SetLastContextUsage(id ConversationID, reading ContextUsageReading) bool` records the summary of the last context-window reading claude reported for a conversation — `Model`, `TotalTokens`, `MaxTokens`, `Percentage`, `AsOf` — under the registry lock, structurally touching only `Conversation.LastContextUsage`. Takes a value rather than a pointer, unlike `SetSystemPrompt`'s tri-state door: no producer ever clears a reading, so "set it back to nil" is unreachable rather than merely unused. Two production callers write through the same recorder — the post-turn interactive-turn emitter arm and the on-demand `request_context_usage` flight — so the stored value is whichever reading claude produced last; last write wins by design (see § *`SetLastContextUsage`* in [`conversations-registry-crud.md`](conversations-registry-crud.md)). No wire verb reads it back yet — deferred as a named follow-up, see *Out of scope* below.
 - **Removal observer (#1502):** `(*Registry).SetOnDelete(fn func(id ConversationID))` installs a single removal callback, replacing any earlier one; `nil` clears it. `Delete` calls it once per hit, with that conversation's id, after releasing `r.mu` — never on a miss. Because `Delete` is the one funnel both removal paths use (the `delete_conversation` handler and the idle `Sweep`), this one slot sees every removal regardless of which path caused it. The daemon's only caller wires it to `(*eventring.Ring).Drop`, freeing the removed conversation's retained replay events (see [`features/eventring-package.md`](eventring-package.md) § *Ownership & wiring*). See § *`SetOnDelete`* in [`conversations-registry-crud.md`](conversations-registry-crud.md).
-- **One-time seed marker (#2569):** `(*Registry).Seeded() bool` / `(*Registry).MarkSeeded()` back a single top-level `seeded` flag, `omitempty` like `WorkspaceLabels` so an older file still loads unchanged and an unseeded save stays byte-identical. `MarkSeeded` follows the package's no-implicit-save convention — the caller's own `Save` persists it. Not a per-conversation or per-cwd key: it gates a startup-only action, not a stored fact about any row. The sole reader is `seedDefaultWorkspace` in `cmd/pyry/workspace_seed.go`, which on first boot with an empty, unmarked registry creates one promoted `General` channel under `$HOME/pyry-workspace/default` (folder path built from the exported `relay.WorkspaceRoot`, not a second literal) and labels that cwd `Default workspace` via `SetWorkspaceLabel` — keyed on the row's own read-back `Cwd`, never a path rebuilt by the seed, per the byte-equality rule below. A registry that already holds conversations gets only the marker, never a channel: existing hosts are left alone. The seed must wait for `sessions.Pool.Ready()` (or daemon shutdown) before calling `channelCreator` — minting before `Pool.Run` persists a session and then returns `ErrPoolNotRunning`, which reads as a create failure and would leave an orphan session on every restart. See `docs/specs/architecture/2569-seed-default-workspace.md`.
+- **One-time seed marker (#2569):** `(*Registry).Seeded() bool` / `(*Registry).MarkSeeded()` back a single top-level `seeded` flag, `omitempty` like `WorkspaceLabels` so an older file still loads unchanged and an unseeded save stays byte-identical. `MarkSeeded` follows the package's no-implicit-save convention — the caller's own `Save` persists it. Not a per-conversation or per-cwd key: it gates a startup-only action, not a stored fact about any row.
+  The sole reader is `seedDefaultWorkspace`, which on first boot with an empty,
+  unmarked registry creates one promoted `General` channel at
+  `<startup-base>/default` and labels that cwd `Default workspace` via
+  `SetWorkspaceLabel` — keyed on the row's own read-back `Cwd`, never a path
+  rebuilt by the seed, per the byte-equality rule below. `runSupervisor` resolves
+  that base once from the service process cwd, independently of `--pyry-workdir`,
+  and shares it with the [encrypted handshake advertisement](../../protocol-mobile.md#hello_ack-v2-specific-note).
+  Usable absolute cwd within canonical HOME selects its realpath; otherwise the
+  base is the lexical `$HOME/pyry-workspace` fallback. Without an available
+  absolute HOME, the base is empty and an empty unseeded registry gets neither
+  channel nor marker. Resolution creates and trust-marks nothing; seeding uses
+  `channelCreator` for creation, confinement and trust marking.
+
+  Changing the startup base never migrates existing rows or workspace labels,
+  including an existing `General`. A seeded registry remains untouched; a
+  non-empty unseeded registry gets only the marker, never a new channel. Existing
+  relative/tilde-cwd normalization by `normaliseLegacyCwds` remains independent
+  of this seed policy. The seed must wait for `sessions.Pool.Ready()` (or daemon
+  shutdown) before calling `channelCreator` — minting before `Pool.Run` persists
+  a session and then returns `ErrPoolNotRunning`, which reads as a create failure
+  and would leave an orphan session on every restart. See the
+  [seed plan](../../specs/architecture/2569-seed-default-workspace.md) and
+  [startup-base plan](../../specs/architecture/2761-startup-workspace-base.md).
 
 ## Surface
 
