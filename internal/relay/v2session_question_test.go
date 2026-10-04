@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -45,14 +46,18 @@ type questionRefusalCall struct {
 // The mutex guards the cross-goroutine read — the Run goroutine writes, the test
 // goroutine reads — mirroring fakeModalResolver.
 type fakeQuestionResolver struct {
-	mu           sync.Mutex
-	answerOKFor  string
-	refusalOKFor string
-	answerCalls  []questionAnswerCall
-	refusalCalls []questionRefusalCall
+	mu            sync.Mutex
+	beforeResolve func()
+	answerOKFor   string
+	refusalOKFor  string
+	answerCalls   []questionAnswerCall
+	refusalCalls  []questionRefusalCall
 }
 
 func (f *fakeQuestionResolver) ResolveAnswer(p protocol.QuestionAnswerPayload, dev *devices.Device) bool {
+	if f.beforeResolve != nil {
+		f.beforeResolve()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.answerCalls = append(f.answerCalls, questionAnswerCall{payload: p, dev: dev})
@@ -60,6 +65,9 @@ func (f *fakeQuestionResolver) ResolveAnswer(p protocol.QuestionAnswerPayload, d
 }
 
 func (f *fakeQuestionResolver) ResolveRefusal(p protocol.QuestionRefusedPayload, dev *devices.Device) bool {
+	if f.beforeResolve != nil {
+		f.beforeResolve()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.refusalCalls = append(f.refusalCalls, questionRefusalCall{payload: p, dev: dev})
@@ -84,6 +92,192 @@ func (f *fakeQuestionResolver) totalCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.answerCalls) + len(f.refusalCalls)
+}
+
+// Separate recorders make a double resolution or a wrong-path call observable.
+type fakeDiagnosticQuestionResolver struct {
+	*fakeQuestionResolver
+	diagnostic *fakeQuestionResolver
+	reason     string
+}
+
+func (f *fakeDiagnosticQuestionResolver) ResolveAnswerDiagnostic(p protocol.QuestionAnswerPayload, dev *devices.Device) (bool, string) {
+	return f.diagnostic.ResolveAnswer(p, dev), f.reason
+}
+
+func (f *fakeDiagnosticQuestionResolver) ResolveRefusalDiagnostic(p protocol.QuestionRefusedPayload, dev *devices.Device) (bool, string) {
+	return f.diagnostic.ResolveRefusal(p, dev), f.reason
+}
+
+func questionControlRecords(log string) []string {
+	var records []string
+	for _, line := range strings.Split(log, "\n") {
+		if strings.Contains(line, "event=v2.question.") {
+			records = append(records, line)
+		}
+	}
+	return records
+}
+
+func TestV2Session_QuestionControl_DiagnosticRecords(t *testing.T) {
+	t.Parallel()
+	const questionText = "ZZ2800QUESTIONTEXTZZ"
+	const optionLabel = "ZZ2800OPTIONLABELZZ"
+	// Include controls, quotes and whitespace to prove the identifier is escaped.
+	batchID := qTestBatchID + string(rune(0x1b)) + "\n\" spaced"
+	tests := []struct {
+		name       string
+		mode       string
+		consumed   bool
+		payload    string
+		wantReason string
+		wantCalls  int
+		decoded    bool
+	}{
+		{"legacy consumed", "legacy", true, "valid", "resolved", 1, true},
+		{"legacy non-consumed", "legacy", false, "valid", "legacy_not_consumed", 1, true},
+		{"diagnostic consumed", "diagnostic", true, "valid", "resolved", 1, true},
+		{"diagnostic non-consumed", "diagnostic", false, "valid", "no_actuator", 1, true},
+		{"diagnostic other reason", "diagnostic", false, "valid", "invalid_answer", 1, true},
+		{"nil resolver", "nil", false, "valid", "no_resolver", 0, false},
+		{"nil before decode", "nil", false, "invalid", "no_resolver", 0, false},
+		{"legacy decode failure", "legacy", false, "invalid", "decode_rejected", 0, false},
+		{"diagnostic decode failure", "diagnostic", false, "invalid", "decode_rejected", 0, false},
+		{"legacy null", "legacy", false, "null", "legacy_not_consumed", 1, true},
+		{"legacy empty object", "legacy", false, "{}", "legacy_not_consumed", 1, true},
+		{"diagnostic null", "diagnostic", false, "null", "no_actuator", 1, true},
+		{"diagnostic empty object", "diagnostic", false, "{}", "no_actuator", 1, true},
+	}
+	for _, kind := range []string{protocol.TypeQuestionAnswer, protocol.TypeQuestionRefused} {
+		for _, tt := range tests {
+			t.Run(kind+"/"+tt.name, func(t *testing.T) {
+				t.Parallel()
+				legacy := &fakeQuestionResolver{}
+				diagnostic := &fakeQuestionResolver{}
+				selected := legacy
+				var resolver QuestionResolver = legacy
+				if tt.mode == "nil" {
+					resolver = nil
+				} else if tt.mode == "diagnostic" {
+					selected = diagnostic
+					reason := "no_actuator"
+					if tt.wantReason == "invalid_answer" {
+						reason = tt.wantReason
+					}
+					resolver = &fakeDiagnosticQuestionResolver{legacy, diagnostic, reason}
+				}
+				if tt.consumed {
+					selected.answerOKFor, selected.refusalOKFor = batchID, batchID
+				}
+				mgr, frames, send, rec, logBuf, stop := startQuestionConn(t, resolver)
+				// Set callbacks before sending a frame; no resolver call occurs in
+				// the handshake. Either path must observe just the receipt.
+				beforeResolve := func() {
+					records := questionControlRecords(logBuf.String())
+					if len(records) != 1 || !strings.Contains(records[0], "event=v2.question.received") {
+						t.Errorf("records before actuation = %q, want one receipt", records)
+					}
+				}
+				legacy.beforeResolve, diagnostic.beforeResolve = beforeResolve, beforeResolve
+				payload := tt.payload
+				if payload == "valid" || payload == "invalid" {
+					// Unknown content fields ensure both kinds can carry these
+					// sentinels without the logger learning their values.
+					body := struct {
+						BatchID string   `json:"question_batch_id"`
+						Token   any      `json:"answer_token"`
+						Answers any      `json:"answers"`
+						Text    string   `json:"question"`
+						Options []string `json:"options"`
+					}{
+						BatchID: batchID, Token: qTestAnswerToken,
+						Answers: []protocol.QuestionAnswerEntry{{QuestionIndex: 0, Values: []string{qTestAnswerValue}}},
+						Text:    questionText, Options: []string{optionLabel},
+					}
+					if payload == "invalid" {
+						// A later field fails after the batch ID has populated.
+						if kind == protocol.TypeQuestionAnswer {
+							body.Answers = qTestAnswerValue
+						} else {
+							body.Token = 42
+						}
+					}
+					encoded, err := json.Marshal(body)
+					if err != nil {
+						t.Fatal(err)
+					}
+					payload = string(encoded)
+				}
+				sendQuestionFrame(t, frames, send, kind, payload)
+				waitForLogContains(t, logBuf, "event=v2.question.completed")
+				stop()
+				if got := selected.totalCalls(); got != tt.wantCalls {
+					t.Errorf("selected calls = %d, want %d", got, tt.wantCalls)
+				}
+				if tt.mode == "diagnostic" && legacy.totalCalls() != 0 {
+					t.Errorf("legacy path called %d times with diagnostic resolver", legacy.totalCalls())
+				}
+				if kind == protocol.TypeQuestionAnswer && len(selected.refusalSnapshot()) != 0 ||
+					kind == protocol.TypeQuestionRefused && len(selected.answerSnapshot()) != 0 {
+					t.Error("wrong frame kind resolved")
+				}
+				log := logBuf.String()
+				records := questionControlRecords(log)
+				if len(records) != 2 {
+					t.Fatalf("question records = %q, want receipt and terminal only", records)
+				}
+				for i, event := range []string{"v2.question.received", "v2.question.completed"} {
+					for _, field := range []string{"level=INFO", "event=" + event, "frame_kind=" + kind, "conn_id=" + v2TestConnID} {
+						if !strings.Contains(" "+records[i]+" ", " "+field+" ") {
+							t.Errorf("record %q missing %q", records[i], field)
+						}
+					}
+				}
+				if strings.Contains(records[0], "question_batch_id") || strings.Contains(records[0], "reason=") {
+					t.Errorf("receipt contains outcome or batch ID: %s", records[0])
+				}
+				if !strings.Contains(records[1]+" ", " reason="+tt.wantReason+" ") {
+					t.Errorf("terminal missing reason %q: %s", tt.wantReason, records[1])
+				}
+				wantID := batchID
+				if tt.payload == "null" || tt.payload == "{}" {
+					wantID = ""
+				}
+				if tt.wantCalls == 1 {
+					var gotID string
+					var gotDev *devices.Device
+					if kind == protocol.TypeQuestionAnswer {
+						got := selected.answerSnapshot()[0]
+						gotID, gotDev = got.payload.QuestionBatchID, got.dev
+					} else {
+						got := selected.refusalSnapshot()[0]
+						gotID, gotDev = got.payload.QuestionBatchID, got.dev
+					}
+					if gotID != wantID || gotDev != mgr.sessions[v2TestConnID].device {
+						t.Errorf("resolver got ID %q/device %p, want %q/connection device", gotID, gotDev, wantID)
+					}
+				}
+				if tt.decoded {
+					if !strings.Contains(records[1], "question_batch_id="+strconv.Quote(wantID)) {
+						t.Errorf("terminal missing escaped ID %q: %s", wantID, records[1])
+					}
+				} else if strings.Contains(log, "question_batch_id") || strings.Contains(log, qTestBatchID) {
+					t.Errorf("undecoded identifier logged: %s", log)
+				}
+				for _, secret := range []string{questionText, optionLabel, qTestAnswerValue, qTestAnswerToken, qTestPayloadKey, payload, "json:", "cannot unmarshal"} {
+					if strings.Contains(log, secret) {
+						t.Errorf("log disclosed %q: %s", secret, log)
+					}
+				}
+				if strings.ContainsRune(log, 0x1b) {
+					t.Error("identifier emitted a raw terminal escape")
+				}
+				if msgs := noiseMsgsForConn(t, rec, v2TestConnID); len(msgs) != 0 {
+					t.Errorf("question control emitted %d replies/broadcasts", len(msgs))
+				}
+			})
+		}
+	}
 }
 
 // startQuestionConn stands up a manager with res wired (nil for the unwired
@@ -158,8 +352,8 @@ func TestV2Session_QuestionAnswer_ReachesResolver(t *testing.T) {
 		okFor       string
 		wantLogEvnt string
 	}{
-		{"known batch consumed", qTestBatchID, "event=v2.question.answer.resolved"},
-		{"unknown batch still handed off", "some-other-batch", "event=v2.question.answer.noop"},
+		{"known batch consumed", qTestBatchID, "reason=resolved"},
+		{"unknown batch still handed off", "some-other-batch", "reason=legacy_not_consumed"},
 	}
 
 	for _, tt := range tests {
@@ -239,7 +433,7 @@ func TestV2Session_QuestionRefusal_ReachesResolver(t *testing.T) {
 	}
 	sendQuestionFrame(t, frames, send, protocol.TypeQuestionRefused, string(body))
 	waitForResolverCall(t, res.totalCalls, 1, "ResolveRefusal")
-	waitForLogContains(t, logBuf, "event=v2.question.refusal.resolved")
+	waitForLogContains(t, logBuf, "reason=resolved")
 	stop()
 
 	calls := res.refusalSnapshot()
@@ -282,8 +476,8 @@ func TestV2Session_QuestionControl_NilResolver(t *testing.T) {
 		payload string
 		logWant string
 	}{
-		{"answer inert", protocol.TypeQuestionAnswer, answerPayload(qTestBatchID), "event=v2.question.answer.inert"},
-		{"refusal inert", protocol.TypeQuestionRefused, `{"question_batch_id":"` + qTestBatchID + `","answer_token":"` + qTestAnswerToken + `"}`, "event=v2.question.refusal.inert"},
+		{"answer inert", protocol.TypeQuestionAnswer, answerPayload(qTestBatchID), "reason=no_resolver"},
+		{"refusal inert", protocol.TypeQuestionRefused, `{"question_batch_id":"` + qTestBatchID + `","answer_token":"` + qTestAnswerToken + `"}`, "reason=no_resolver"},
 	}
 
 	for _, tt := range tests {
@@ -329,19 +523,19 @@ func TestV2Session_QuestionControl_DecodeFailure_Rejected(t *testing.T) {
 			name:    "answer with a non-array answers",
 			ftype:   protocol.TypeQuestionAnswer,
 			payload: `{"question_batch_id":"` + qTestBatchID + `","answer_token":"` + qTestAnswerToken + `","answers":"` + qTestAnswerValue + `"}`,
-			logWant: "event=v2.question.answer.decode_err",
+			logWant: "reason=decode_rejected",
 		},
 		{
 			name:    "answer with a non-object entry",
 			ftype:   protocol.TypeQuestionAnswer,
 			payload: `{"question_batch_id":"` + qTestBatchID + `","answer_token":"` + qTestAnswerToken + `","answers":[7]}`,
-			logWant: "event=v2.question.answer.decode_err",
+			logWant: "reason=decode_rejected",
 		},
 		{
 			name:    "refusal with a numeric token",
 			ftype:   protocol.TypeQuestionRefused,
 			payload: `{"question_batch_id":"` + qTestBatchID + `","answer_token":42}`,
-			logWant: "event=v2.question.refusal.decode_err",
+			logWant: "reason=decode_rejected",
 		},
 	}
 
@@ -363,7 +557,7 @@ func TestV2Session_QuestionControl_DecodeFailure_Rejected(t *testing.T) {
 			if msgs := noiseMsgsForConn(t, rec, v2TestConnID); len(msgs) != 0 {
 				t.Errorf("rejected %s drew %d noise_msg, want 0 (nothing echoed)", tt.ftype, len(msgs))
 			}
-			// The reject record carries event + conn_id only: no batch id (the
+			// The reject record carries fixed metadata only: no batch id (the
 			// decode is what failed, so it is not trustworthy), no payload byte,
 			// and no wrapped json error — encoding/json quotes offending input
 			// into its error string, and those bytes are remote-authored.
@@ -402,7 +596,7 @@ func TestV2Session_QuestionControl_NullPayload_NotJudgedHere(t *testing.T) {
 
 	sendQuestionFrame(t, frames, send, protocol.TypeQuestionAnswer, `null`)
 	waitForResolverCall(t, res.totalCalls, 1, "ResolveAnswer(null payload)")
-	waitForLogContains(t, logBuf, "event=v2.question.answer.noop")
+	waitForLogContains(t, logBuf, "reason=legacy_not_consumed")
 	stop()
 
 	calls := res.answerSnapshot()
@@ -449,10 +643,10 @@ func TestV2Session_QuestionControl_LogsCarryNoPayload(t *testing.T) {
 		payload string
 		logWant string
 	}{
-		{"inert", false, answerPayload(qTestBatchID), "event=v2.question.answer.inert"},
-		{"rejected", true, `{"question_batch_id":"` + qTestBatchID + `","answers":"` + qTestAnswerValue + `"}`, "event=v2.question.answer.decode_err"},
-		{"handed off", true, answerPayload(qTestBatchID), "event=v2.question.answer.resolved"},
-		{"handed off with an escape-bearing id", true, string(escPayload), "event=v2.question.answer.noop"},
+		{"inert", false, answerPayload(qTestBatchID), "reason=no_resolver"},
+		{"rejected", true, `{"question_batch_id":"` + qTestBatchID + `","answers":"` + qTestAnswerValue + `"}`, "reason=decode_rejected"},
+		{"handed off", true, answerPayload(qTestBatchID), "reason=resolved"},
+		{"handed off with an escape-bearing id", true, string(escPayload), "reason=legacy_not_consumed"},
 	}
 
 	for _, tt := range tests {
@@ -500,7 +694,7 @@ func TestV2Session_QuestionControl_OtherFramesUnchanged(t *testing.T) {
 
 	// noise_resp + exactly one sealed error reply.
 	waitForEnvelopes(t, rec, 2)
-	waitForLogContains(t, logBuf, "event=v2.question.answer.inert")
+	waitForLogContains(t, logBuf, "reason=no_resolver")
 	stop()
 
 	msgs := noiseMsgsForConn(t, rec, v2TestConnID)
