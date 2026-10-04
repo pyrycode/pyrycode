@@ -212,6 +212,13 @@ type MessagePayload struct {
 // Binary → phone direction; the wire form of a session boundary the phone
 // renders as a ThreadItem.SessionBoundary marker (pyrycode-mobile#336).
 //
+// The push is update-only: session creation (sessions.New, Pool.Mint/CreateIn,
+// GetOrCreateIn) emits no transition, and it does not report every session ID
+// change. The silent RotateBootstrapForSelfHeal primitive has no production
+// caller today. Clients discover or re-read IDs with request_session_settings
+// for the named conversation: supply conversation_id and read
+// session_settings.session_id; an empty ID means no addressable session.
+//
 // ConversationID is the routing key — a plain string with no omitempty,
 // mirroring the sibling interactive payloads (SendMessagePayload, etc.) — so
 // the phone folds the boundary marker into the correct conversation's thread.
