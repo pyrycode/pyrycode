@@ -116,6 +116,11 @@ func TestReplySuggestions_SetConditions(t *testing.T) {
 			s.noteDelivered(testConvID, msgqueue.QueuedMessage{Text: "also this", SentNow: true})
 			e.HandleFor(ctx, testConvID, successEnd)
 		}, false},
+		{"delivery confirmed after the turn end", func(e *interactiveTurnEmitterV2, s *replySuggestions) {
+			e.HandleFor(ctx, testConvID, turnevent.TextChunk{MessageID: "m1", Text: "Done."})
+			e.HandleFor(ctx, testConvID, successEnd)
+			s.noteDelivered(testConvID, msgqueue.QueuedMessage{Text: "go"})
+		}, true},
 		{"next queued delivery re-arms", func(e *interactiveTurnEmitterV2, s *replySuggestions) {
 			e.HandleFor(ctx, testConvID, turnevent.ThoughtChunk{Text: "earlier turn"})
 			e.HandleFor(ctx, testConvID, successEnd)
@@ -251,6 +256,31 @@ func TestReplySuggestions_ClearTriggers(t *testing.T) {
 				t.Errorf("late suggestion changed state to %+v", p2)
 			}
 		})
+	}
+}
+
+// TestReplySuggestions_HeldUntilDeliveryConfirmed: msgqueue confirms delivery on
+// its own goroutine, so the suggestion can reach the owner first. It waits for
+// that turn's confirmation, and an invalidation in between drops it.
+func TestReplySuggestions_HeldUntilDeliveryConfirmed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for _, invalidateFirst := range []bool{false, true} {
+		e, s := newSuggestionEmitter(testConvID)
+		e.HandleFor(ctx, testConvID, turnevent.TextChunk{MessageID: "m1", Text: "Done."})
+		e.HandleFor(ctx, testConvID, successEnd)
+		e.HandleFor(ctx, testConvID, turnevent.PromptSuggestion{Text: suggestText})
+		if got := s.current(); len(got) != 0 {
+			t.Fatalf("published %+v before the delivery was confirmed", got)
+		}
+		if invalidateFirst {
+			s.invalidate(testConvID)
+		}
+		s.noteDelivered(testConvID, msgqueue.QueuedMessage{Text: "go", SentNow: invalidateFirst})
+		p, ok := suggestionFor(t, s, testConvID)
+		if published := ok && p.SuggestedReply != nil; published == invalidateFirst {
+			t.Errorf("invalidated=%v: published = %v (%+v)", invalidateFirst, published, p)
+		}
 	}
 }
 

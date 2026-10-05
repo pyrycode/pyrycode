@@ -55,10 +55,19 @@ type replySuggestionConv struct {
 	text      *string // nil is the clear
 	sessionID string
 
-	delivered   bool // non-empty user text delivered since the last TurnEnd
+	delivered   bool // non-empty user text delivered and not yet credited to a turn
 	assistant   bool // main-agent text in the current turn
 	invalidated bool // set by every invalidation, reset only by the next queued delivery
-	eligible    bool // the last TurnEnd qualified and nothing has invalidated it
+
+	// The just-ended turn. turnOK: it ended successfully with main-agent text and
+	// nothing has invalidated it since. userOK: its delivered user text has been
+	// confirmed. The confirmation is not ordered against the stream (msgqueue
+	// fires it on its own goroutine, often after the turn's result), so a
+	// suggestion that arrives first waits in pending until it lands.
+	ended          bool
+	turnOK, userOK bool
+	pending        *string
+	pendingSID     string
 }
 
 func newReplySuggestions(logger *slog.Logger) *replySuggestions {
@@ -102,15 +111,25 @@ func (s *replySuggestions) noteDelivered(convID string, msg msgqueue.QueuedMessa
 		return
 	}
 	s.mu.Lock()
-	if c := s.entry(convID, true); c != nil {
-		if strings.TrimSpace(msg.Text) != "" {
+	defer s.mu.Unlock()
+	c := s.entry(convID, true)
+	if c == nil {
+		return
+	}
+	if strings.TrimSpace(msg.Text) != "" {
+		if c.ended && c.turnOK && !c.userOK {
+			// The confirmation for the turn that just ended.
+			c.userOK = true
+			if c.pending != nil {
+				s.setLocked(convID, c, *c.pending, c.pendingSID)
+			}
+		} else {
 			c.delivered = true
 		}
-		if !msg.SentNow {
-			c.invalidated = false
-		}
 	}
-	s.mu.Unlock()
+	if !msg.SentNow {
+		c.invalidated = false
+	}
 }
 
 // turnStarted records that convID opened a new turn, which invalidates the
@@ -125,7 +144,7 @@ func (s *replySuggestions) turnStarted(convID string) {
 	if c == nil {
 		return
 	}
-	c.assistant, c.eligible = false, false
+	c.assistant, c.ended, c.turnOK, c.userOK, c.pending = false, false, false, false, nil
 	s.clearLocked(convID, c)
 }
 
@@ -150,14 +169,17 @@ func (s *replySuggestions) turnEnded(convID string, ev turnevent.TurnEnd) {
 	success := ev.Reason == turnevent.TurnEndReasonEndTurn && ev.Outcome == "success" && !ev.IsError
 	s.mu.Lock()
 	if c := s.entry(convID, false); c != nil {
-		c.eligible = success && c.delivered && c.assistant && !c.invalidated
+		c.ended = true
+		c.turnOK = success && c.assistant && !c.invalidated
+		c.userOK = c.delivered
 		c.delivered = false
 	}
 	s.mu.Unlock()
 }
 
-// suggest publishes text for convID when its last turn is eligible, and does
-// nothing otherwise. One suggestion per turn: eligibility is consumed. Nil-safe.
+// suggest publishes text for convID when its just-ended turn qualifies, holds it
+// when only the delivery confirmation is missing, and does nothing otherwise.
+// One suggestion per turn. Nil-safe.
 func (s *replySuggestions) suggest(convID, text string) {
 	if s == nil {
 		return
@@ -169,10 +191,20 @@ func (s *replySuggestions) suggest(convID, text string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c := s.entry(convID, false)
-	if c == nil || !c.eligible {
+	if c == nil || !c.ended || !c.turnOK || c.pending != nil {
 		return
 	}
-	c.eligible = false
+	if !c.userOK {
+		c.pending, c.pendingSID = &text, sessionID
+		return
+	}
+	s.setLocked(convID, c, text, sessionID)
+}
+
+// setLocked publishes text and closes the turn to further suggestions. Caller
+// holds mu.
+func (s *replySuggestions) setLocked(convID string, c *replySuggestionConv, text, sessionID string) {
+	c.turnOK, c.pending = false, nil
 	c.sessionID = sessionID
 	c.text = &text
 	s.publishLocked(convID, c)
@@ -192,7 +224,7 @@ func (s *replySuggestions) invalidate(convID string) {
 	if c == nil {
 		return
 	}
-	c.invalidated, c.eligible = true, false
+	c.invalidated, c.turnOK, c.pending = true, false, nil
 	s.clearLocked(convID, c)
 }
 
