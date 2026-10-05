@@ -23,6 +23,8 @@ type channelDeliveryHistory interface {
 	Append(conversations.ConversationID, string, json.RawMessage, time.Time) (uint64, error)
 	Page(conversations.ConversationID, string, int) (history.Page, error)
 }
+type channelDeliveryFactory func(string, channelDeliveryHistory, func(conversations.ConversationID, string), *slog.Logger) (*channelDelivery, error)
+
 type channelDeliveryPost struct {
 	ConversationID conversations.ConversationID `json:"conversation_id"`
 	TurnID         string                       `json:"turn_id"`
@@ -35,7 +37,10 @@ type channelDeliveryPost struct {
 // mu serializes snapshot renames with acceptance and the sole consumer. No user
 // turn is written while holding it; beforeInbound only checks pending state.
 type channelDelivery struct {
+	// Handler gates always precede mu; the consumer takes only mu.
+	handlers sync.RWMutex
 	mu       sync.Mutex
+	stopped  bool
 	path     string
 	posts    []channelDeliveryPost
 	hist     channelDeliveryHistory
@@ -94,6 +99,9 @@ func (d *channelDelivery) persist(posts []channelDeliveryPost) error {
 func (d *channelDelivery) accept(id conversations.ConversationID, turnID, text string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.stopped {
+		return errors.New(msgChannelPostRecordFailed)
+	}
 	candidate := append(append([]channelDeliveryPost(nil), d.posts...), channelDeliveryPost{ConversationID: id, TurnID: turnID, Text: text, TS: time.Now().UTC()})
 	if err := d.save(candidate); err != nil {
 		d.log.Warn("control: channel.post acceptance failed", "event", "channel_post.accept_err", "conversation_id", string(id))
@@ -109,6 +117,29 @@ func (d *channelDelivery) accept(id conversations.ConversationID, turnID, text s
 	default:
 	}
 	return nil
+}
+
+// guardPoster covers lookup/creation as well as acceptance, so shutdown joins
+// the whole callback before releasing ownership and late requests do no work.
+func (d *channelDelivery) guardPoster(post func(string, string) error) func(string, string) error {
+	return func(name, text string) error {
+		d.handlers.RLock()
+		defer d.handlers.RUnlock()
+		if d.stopped {
+			return errors.New(msgChannelPostRecordFailed)
+		}
+		return post(name, text)
+	}
+}
+
+// stopAccepting joins post callbacks and seals acceptance before the instance
+// socket is released. The consumer is joined separately by the composition root.
+func (d *channelDelivery) stopAccepting() {
+	d.handlers.Lock()
+	defer d.handlers.Unlock()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.stopped = true
 }
 
 func (d *channelDelivery) run(ctx context.Context) {

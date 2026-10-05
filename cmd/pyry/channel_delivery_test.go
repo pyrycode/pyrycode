@@ -444,3 +444,173 @@ func TestChannelDelivery_RejectedDaemonLeavesPendingUntouched(t *testing.T) {
 		})
 	}
 }
+
+type testBlockedPostHistory struct {
+	channelDeliveryHistory
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (h testBlockedPostHistory) Append(id conversations.ConversationID, typ string, raw json.RawMessage, ts time.Time) (uint64, error) {
+	close(h.entered)
+	<-h.release
+	return h.channelDeliveryHistory.Append(id, typ, raw, ts)
+}
+
+func TestChannelDelivery_ShutdownRetainsOwnershipUntilWritersStop(t *testing.T) {
+	for _, writer := range []string{"delivery", "acceptance"} {
+		t.Run(writer, func(t *testing.T) {
+			home := shortTempDir(t)
+			t.Setenv("HOME", home)
+			t.Setenv("PYRY_RELAY_URL", "")
+			if err := os.MkdirAll(filepath.Dir(resolveConfigPath()), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(resolveConfigPath(), []byte(`{"relay_url":""}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			const name = "pending-shutdown"
+			instance := resolveInstanceDirPath(name)
+			reg, _ := newChannelTestRegistry(t, home)
+			id := addConversation(t, reg, "questions", true, false)
+			if err := reg.Save(resolveConversationsRegistryPath(name)); err != nil {
+				t.Fatal(err)
+			}
+			pending := testDelivery(t, instance, history.New(instance), nil)
+			if writer == "delivery" {
+				testAccept(t, pending, id, "old accepted post")
+			}
+			entered, release := make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			done := make(chan error, 1)
+			socket := filepath.Join(home, "daemon.sock")
+			go func() {
+				done <- runSupervisor([]string{"-pyry-name", name, "-pyry-socket", socket, "-pyry-workdir", home, "-pyry-codex", "/bin/true", "-pyry-claude", "/bin/true"},
+					func(path string, h channelDeliveryHistory, carry func(conversations.ConversationID, string), log *slog.Logger) (*channelDelivery, error) {
+						if writer == "delivery" {
+							h = testBlockedPostHistory{h, entered, release}
+						}
+						d, err := newChannelDelivery(path, h, carry, log)
+						if err == nil && writer == "acceptance" {
+							var once sync.Once
+							d.save = func(posts []channelDeliveryPost) error {
+								once.Do(func() { close(entered); <-release })
+								return d.persist(posts)
+							}
+						}
+						return d, err
+					})
+			}()
+			joined := false
+			t.Cleanup(func() {
+				unblock()
+				if !joined {
+					cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cleanupCancel()
+					_ = control.Stop(cleanupCtx, socket)
+					select {
+					case <-done:
+					case <-cleanupCtx.Done():
+						t.Error("daemon cleanup did not finish")
+					}
+				}
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			defer unblock()
+			// A dial alone is insufficient: Listen precedes handler installation.
+			for {
+				if _, err := control.SessionsList(ctx, socket); err == nil {
+					break
+				}
+				select {
+				case err := <-done:
+					joined = true
+					t.Fatalf("startup: %v", err)
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+			postDone := make(chan error, 1)
+			if writer == "acceptance" {
+				go func() { postDone <- control.ChannelPost(ctx, socket, "questions", "old accepted post") }()
+			}
+			select {
+			case <-entered:
+			case <-ctx.Done():
+				t.Fatal("writer did not enter")
+			}
+			if err := control.Stop(ctx, socket); err != nil {
+				t.Fatal(err)
+			}
+			replacement := control.NewServer(socket, poolResolver{}, nil, nil, quietLogger(), nil)
+			defer replacement.Close()
+			claimedEarly := false
+			deadline := time.Now().Add(200 * time.Millisecond)
+			for time.Now().Before(deadline) {
+				if err := replacement.Listen(); err == nil {
+					claimedEarly = true
+					break
+				} else if !errors.Is(err, control.ErrInstanceRunning) {
+					t.Fatal(err)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			var freshTurn string
+			if claimedEarly {
+				freshTurn = testAccept(t, testDelivery(t, instance, history.New(instance), nil), id, "replacement accepted post")
+			}
+			unblock()
+			select {
+			case err := <-done:
+				joined = true
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-ctx.Done():
+				t.Fatal("shutdown did not join writers")
+			}
+			if writer == "acceptance" {
+				if err := <-postDone; err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !claimedEarly {
+				if err := replacement.Listen(); err != nil {
+					t.Fatalf("ownership not released after shutdown: %v", err)
+				}
+				freshTurn = testAccept(t, testDelivery(t, instance, history.New(instance), nil), id, "replacement accepted post")
+			}
+			reloaded := testDelivery(t, instance, history.New(instance), nil)
+			found := false
+			for _, p := range reloaded.posts {
+				found = found || p.TurnID == freshTurn
+			}
+			if claimedEarly || !found {
+				t.Fatalf("released ownership before writer stopped: early=%v, replacement post retained=%v", claimedEarly, found)
+			}
+		})
+	}
+}
+
+func TestChannelDelivery_ShutdownRefusesLateAcceptance(t *testing.T) {
+	dir := t.TempDir()
+	h := history.New(dir)
+	var calls int
+	d := testDelivery(t, dir, h, func(conversations.ConversationID, string) { calls++ })
+	id := conversations.ConversationID(testPostID(t))
+	testAccept(t, d, id, "accepted")
+	d.stopAccepting()
+	post := d.guardPoster(func(string, string) error { calls++; return nil })
+	if err := post("new channel", "posted-secret"); err == nil || err.Error() != msgChannelPostRecordFailed {
+		t.Fatalf("late handler refusal: %v", err)
+	}
+	if err := d.accept(id, testPostID(t), "posted-secret"); err == nil || err.Error() != msgChannelPostRecordFailed {
+		t.Fatalf("late acceptance refusal: %v", err)
+	}
+	if calls != 1 || len(testDelivery(t, dir, h, nil).posts) != 1 {
+		t.Fatal("shutdown changed carry or durable acceptance")
+	}
+}

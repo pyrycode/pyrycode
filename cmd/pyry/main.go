@@ -754,7 +754,12 @@ func checkDebugCapture(cfg config.Config) error {
 
 // runSupervisor starts the supervisor and the control server together, blocks
 // until the context is cancelled by SIGINT/SIGTERM, then drains both.
-func runSupervisor(args []string) error {
+func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) error {
+	// Tests can pause delivery I/O without replacing the composition root.
+	makeDelivery := newChannelDelivery
+	if len(deliveryFactory) != 0 {
+		makeDelivery = deliveryFactory[0]
+	}
 	pyryArgs, claudeArgs := splitArgs(args)
 
 	fs := flag.NewFlagSet("pyry", flag.ContinueOnError)
@@ -998,7 +1003,19 @@ func runSupervisor(args []string) error {
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)
 	}
-	defer func() { _ = ctrl.Close() }()
+	// Serve's cancellation watcher releases ownership, so its context must outlive
+	// the daemon's writers. This defer runs after their cancel/seal/join defers.
+	controlCtx, controlCancel := context.WithCancel(context.WithoutCancel(ctx))
+	var ctrlDone chan error
+	controlJoined := false
+	defer func() {
+		cancelCause(nil)
+		controlCancel()
+		_ = ctrl.Close()
+		if ctrlDone != nil && !controlJoined {
+			<-ctrlDone
+		}
+	}()
 
 	relayURL := resolveRelayURL(*relayFlag, os.Getenv("PYRY_RELAY_URL"), cfg)
 	// PYRY_ALLOW_INSECURE_RELAY is a dev/test-only flag (set only by the e2e harness,
@@ -1085,10 +1102,11 @@ func runSupervisor(args []string) error {
 	// seam resolves against, both already in scope here.
 	postCarry := &channelCarry{reg: convReg, path: convRegistryPath, logger: logger}
 	// Read a fresh pending snapshot after ownership and before inbound delivery.
-	postDelivery, err := newChannelDelivery(filepath.Join(resolveInstanceDirPath(*name), "channel-delivery.json"), conversationHistory, postCarry.record, logger)
+	postDelivery, err := makeDelivery(filepath.Join(resolveInstanceDirPath(*name), "channel-delivery.json"), conversationHistory, postCarry.record, logger)
 	if err != nil {
 		return err
 	}
+	defer postDelivery.stopAccepting()
 	// operatorMessages is the hand-off from the history producer below to the
 	// live push of the operator's own message (#2699), built BEFORE msgqueue.New
 	// for queueChanges' reason. The ring that push appends to is born in the relay
@@ -1358,7 +1376,11 @@ func runSupervisor(args []string) error {
 	postDelivery.announce = announcePost
 	postDeliveryDone := make(chan struct{})
 	go func() { postDelivery.run(ctx); close(postDeliveryDone) }()
-	defer func() { cancelCause(nil); <-postDeliveryDone }()
+	defer func() {
+		cancelCause(nil)
+		postDelivery.stopAccepting()
+		<-postDeliveryDone
+	}()
 	// Cancel-then-join: relayCleanup joins producer drains whose Run loops
 	// return only on ctx.Done, so the daemon ctx must already be cancelled when
 	// it runs. Defers are LIFO, so the `defer cancelCause(nil)` registered at the
@@ -1455,7 +1477,7 @@ func runSupervisor(args []string) error {
 	// null-cwd path already takes it, rather than a second time here. The verb
 	// carries no cwd on its wire, so this is the only path value it can have.
 	//
-	ctrl.SetChannelPoster(channelPoster(convReg, createChannel, defaultCwd, postDelivery.accept, logger))
+	ctrl.SetChannelPoster(postDelivery.guardPoster(channelPoster(convReg, createChannel, defaultCwd, postDelivery.accept, logger)))
 	// Explicit requests always have a provider; the flag controls scheduling only.
 	// A nil tracker fails closed rather than inferring idle from missing signals.
 	au, err := newAutoUpdater(func() bool {
@@ -1470,8 +1492,8 @@ func runSupervisor(args []string) error {
 		return err
 	}
 	ctrl.SetUpdateWhenIdleProvider(func() (control.UpdateWhenIdleResult, error) { return au.request(ctx) })
-	ctrlDone := make(chan error, 1)
-	go func() { ctrlDone <- ctrl.Serve(ctx) }()
+	ctrlDone = make(chan error, 1)
+	go func() { ctrlDone <- ctrl.Serve(controlCtx) }()
 
 	logger.Info("pyrycode starting",
 		"version", Version,
@@ -1496,12 +1518,14 @@ func runSupervisor(args []string) error {
 	// displace the recorded cause.
 	cancelCause(nil)
 
-	// Stop the control server (already wired to ctx but Close is idempotent
-	// and ensures the socket file is gone before we return).
+	// Keep ownership through post callback quiescence and consumer completion.
+	// Then stop control handlers before joining their auto-update workers.
+	postDelivery.stopAccepting()
+	<-postDeliveryDone
+	controlCancel()
 	_ = ctrl.Close()
-	// Serve drains response writes even when an update restart cancels ctx
-	// immediately after publishing acceptance. Keep this join before daemon exit.
 	<-ctrlDone
+	controlJoined = true
 
 	// Join the inbound-queue lifecycle: ctx is cancelled by the time we get here
 	// (either before pool.Run returned or by the cancelCause above), so queue.Run
