@@ -58,6 +58,20 @@ func installSeams(t *testing.T) {
 	}
 }
 
+// stubBinary writes a minimal executable script to a temp dir and returns
+// its path. Tests use this as a stand-in claude binary when they only need
+// a path that exists. /bin/true is not portable: macOS only has
+// /usr/bin/true.
+func stubBinary(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stub-true")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write stub binary: %v", err)
+	}
+	return path
+}
+
 // baseConfig returns a Config wired with a short OverallTimeout and the
 // minimal required fields. Per-test bodies layer in overrides.
 func baseConfig(t *testing.T) Config {
@@ -313,7 +327,7 @@ func TestSelfCheck_ConfigValidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			installSeams(t)
 			cfg := Config{
-				ClaudeBin: "/bin/true",
+				ClaudeBin: stubBinary(t),
 				WorkDir:   t.TempDir(),
 			}
 			tc.mutate(&cfg)

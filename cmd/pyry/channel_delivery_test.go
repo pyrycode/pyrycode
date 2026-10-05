@@ -39,6 +39,20 @@ func (h *testPostHistory) Append(id conversations.ConversationID, typ string, ra
 	}
 	return h.Store.Append(id, typ, raw, ts)
 }
+// stubBinary writes a minimal executable script to a temp dir and returns
+// its path. Tests use this as a stand-in claude/codex binary when they only
+// need a path that exists and exits successfully. /bin/true is not portable:
+// macOS only has /usr/bin/true.
+func stubBinary(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stub-true")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write stub binary: %v", err)
+	}
+	return path
+}
+
 func testDelivery(t *testing.T, dir string, h channelDeliveryHistory, carry func(conversations.ConversationID, string)) *channelDelivery {
 	t.Helper()
 	d, err := newChannelDelivery(filepath.Join(dir, "channel-delivery.json"), h, carry, quietLogger())
@@ -472,7 +486,8 @@ func TestChannelDelivery_RejectedDaemonLeavesPendingUntouched(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				err = runSupervisor([]string{"-pyry-name", "pending-startup", "-pyry-socket", socket, "-pyry-workdir", home, "-pyry-codex", "/bin/true", "-pyry-claude", "/bin/true"})
+				bin := stubBinary(t)
+				err = runSupervisor([]string{"-pyry-name", "pending-startup", "-pyry-socket", socket, "-pyry-workdir", home, "-pyry-codex", bin, "-pyry-claude", bin})
 				if !errors.Is(err, control.ErrInstanceRunning) {
 					t.Fatalf("startup result: %v, want instance ownership refusal", err)
 				}
@@ -532,8 +547,9 @@ func TestChannelDelivery_ShutdownRetainsOwnershipUntilWritersStop(t *testing.T) 
 			unblock := func() { releaseOnce.Do(func() { close(release) }) }
 			done := make(chan error, 1)
 			socket := filepath.Join(home, "daemon.sock")
+			bin := stubBinary(t)
 			go func() {
-				done <- runSupervisor([]string{"-pyry-name", name, "-pyry-socket", socket, "-pyry-workdir", home, "-pyry-codex", "/bin/true", "-pyry-claude", "/bin/true"},
+				done <- runSupervisor([]string{"-pyry-name", name, "-pyry-socket", socket, "-pyry-workdir", home, "-pyry-codex", bin, "-pyry-claude", bin},
 					func(path string, h channelDeliveryHistory, carry func(conversations.ConversationID, string), log *slog.Logger) (*channelDelivery, error) {
 						if writer == "delivery" {
 							h = testBlockedPostHistory{h, entered, release}
