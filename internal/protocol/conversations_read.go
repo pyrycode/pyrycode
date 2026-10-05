@@ -28,6 +28,9 @@ type ConversationSummary struct {
 	ID         string  `json:"id"`
 	Name       *string `json:"name"`
 	IsPromoted bool    `json:"is_promoted"`
+	// CurrentSessionID is the stored binding, not a process liveness guarantee.
+	// Always serialized, including an empty string when no session is bound.
+	CurrentSessionID string `json:"current_session_id"`
 	// IsArchived is the conversation's durable archived flag. Always
 	// serialized (no omitempty, unlike the on-disk Conversation.IsArchived):
 	// a client partitions active vs. archived and counts each side, so it must

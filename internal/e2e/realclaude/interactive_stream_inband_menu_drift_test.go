@@ -205,7 +205,7 @@ func inbandMenuPairs(menu []inbandMenuRow) string {
 // direction, each varying a single field, so neither half can go vacuous alone.
 //
 // It compares THE CHOSEN ROW rather than the whole menu. The chosen row is what
-// inbandPickBracketedValue handed to UpdateSettings and therefore what B1/B2 acted
+// inbandPickPhaseTwoTarget handed to UpdateSettings and therefore what B1/B2 acted
 // on; a menu that merely grew an unrelated row is not the drift being diagnosed,
 // and reporting it as such would put a false lead in front of the first operator to
 // meet this red.

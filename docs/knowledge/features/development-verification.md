@@ -143,7 +143,9 @@ missed four e2e tests that synced on `kind=mcp_status` specifically — found on
 Round-trip tests must marshal the decoded payload back into the envelope. Comparing
 an untouched raw payload with itself does not check struct tags or new fields.
 Explicitly assert decoded field values. Distinct fixture values detect accidental
-field swaps. To distinguish an absent key from a present null, inspect raw JSON too.
+field swaps. To distinguish an absent key from a present null or empty string,
+inspect the JSON produced by marshalling the decoded DTO too; decoded zero
+values alone cannot prove a required key was emitted.
 The current protocol test helper uses `json.Compact`, which removes whitespace but
 preserves key order; do not describe it as sorting keys. It also does not normalise
 string escaping — `encoding/json.Marshal` escapes a literal `<`, `>` or `&` byte to
