@@ -6,13 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
@@ -386,6 +389,57 @@ func TestChannelDelivery_LoadRefusesUnsafeState(t *testing.T) {
 			}
 			if _, err := newChannelDelivery(path, history.New(dir), nil, quietLogger()); err == nil || strings.Contains(err.Error(), "posted-secret") {
 				t.Fatalf("unsafe load: %v", err)
+			}
+		})
+	}
+}
+
+func TestChannelDelivery_RejectedDaemonLeavesPendingUntouched(t *testing.T) {
+	previous := runtime.GOMAXPROCS(2)
+	defer runtime.GOMAXPROCS(previous)
+	for _, state := range []string{"accepted", "malformed"} {
+		t.Run(state, func(t *testing.T) {
+			for attempt := 0; attempt < 10; attempt++ {
+				home := shortTempDir(t)
+				t.Setenv("HOME", home)
+				t.Setenv("PYRY_RELAY_URL", "")
+				if err := os.MkdirAll(filepath.Dir(resolveConfigPath()), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(resolveConfigPath(), []byte(`{"relay_url":""}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+				socket := filepath.Join(home, "live.sock")
+				ln, err := net.Listen("unix", socket)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = ln.Close() })
+				instance := resolveInstanceDirPath("pending-startup")
+				id := conversations.ConversationID(testPostID(t))
+				d := testDelivery(t, instance, history.New(instance), nil)
+				testAccept(t, d, id, "existing accepted post")
+				if state == "malformed" {
+					// Ownership refusal must precede even reading pending state.
+					if err := os.WriteFile(d.path, []byte("invalid pending state"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before, err := os.ReadFile(d.path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = runSupervisor([]string{"-pyry-name", "pending-startup", "-pyry-socket", socket, "-pyry-workdir", home, "-pyry-codex", "/bin/true", "-pyry-claude", "/bin/true"})
+				if !errors.Is(err, control.ErrInstanceRunning) {
+					t.Fatalf("startup result: %v, want instance ownership refusal", err)
+				}
+				after, err := os.ReadFile(d.path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(before, after) || len(testDeltas(t, history.New(instance), id)) != 0 {
+					t.Fatal("rejected daemon modified pending state or history")
+				}
 			}
 		})
 	}

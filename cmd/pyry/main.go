@@ -992,6 +992,14 @@ func runSupervisor(args []string) error {
 		return fmt.Errorf("pool init: %w", err)
 	}
 
+	// Claim instance ownership before loading pending posts or starting relay
+	// inbound delivery. Listen only binds; Serve waits until all hooks are wired.
+	ctrl := control.NewServer(socketPath, poolResolver{pool}, logRing, func() { cancelCause(nil) }, logger, pool)
+	if err := ctrl.Listen(); err != nil {
+		return fmt.Errorf("control listen: %w", err)
+	}
+	defer func() { _ = ctrl.Close() }()
+
 	relayURL := resolveRelayURL(*relayFlag, os.Getenv("PYRY_RELAY_URL"), cfg)
 	// PYRY_ALLOW_INSECURE_RELAY is a dev/test-only flag (set only by the e2e harness,
 	// never by production code) that lets the relay client accept an insecure ws://
@@ -1076,7 +1084,7 @@ func runSupervisor(args []string) error {
 	// It takes the SAME registry and registry path every other conversation-keyed
 	// seam resolves against, both already in scope here.
 	postCarry := &channelCarry{reg: convReg, path: convRegistryPath, logger: logger}
-	// Load recovery before queue construction or any relay inbound delivery.
+	// Read a fresh pending snapshot after ownership and before inbound delivery.
 	postDelivery, err := newChannelDelivery(filepath.Join(resolveInstanceDirPath(*name), "channel-delivery.json"), conversationHistory, postCarry.record, logger)
 	if err != nil {
 		return err
@@ -1356,7 +1364,7 @@ func runSupervisor(args []string) error {
 	// it runs. Defers are LIFO, so the `defer cancelCause(nil)` registered at the
 	// top of runSupervisor runs AFTER this one — too late to unblock them. Cancel
 	// here instead, so an error return between startRelay and the end of
-	// runSupervisor (today: ctrl.Listen's ErrInstanceRunning) takes the same
+	// runSupervisor takes the same
 	// ordering the normal shutdown path already takes, rather than wedging with
 	// the unblocking cancel queued behind the block (#1492). Cause contexts are
 	// first-cause-wins, so a 4409 already recorded by startRelay's conn.Wait
@@ -1366,14 +1374,6 @@ func runSupervisor(args []string) error {
 		relayCleanup()
 	}()
 
-	// Pool satisfies control.Sessioner directly — Pool.Create returns
-	// sessions.SessionID and Pool.Remove returns plain error, matching
-	// Sessioner.Create / Sessioner.Remove (via embedded Remover) signatures
-	// with no adapter (contrast with poolResolver for the read-side Lookup).
-	// `pyry stop` is an OPERATOR-initiated shutdown: cancel with a nil cause
-	// so the daemon exits 0 and launchd leaves it down (unlike the relay's
-	// self-initiated fatal path, which passes an error cause).
-	ctrl := control.NewServer(socketPath, poolResolver{pool}, logRing, func() { cancelCause(nil) }, logger, pool)
 	// Install the shared approval registry between NewServer and Serve so the
 	// mcp.approve verb reaches the same instance #1080's modal wiring will
 	// resolve against (AC-4). Nil until here — v1/foreground never calls this.
@@ -1470,11 +1470,6 @@ func runSupervisor(args []string) error {
 		return err
 	}
 	ctrl.SetUpdateWhenIdleProvider(func() (control.UpdateWhenIdleResult, error) { return au.request(ctx) })
-	if err := ctrl.Listen(); err != nil {
-		return fmt.Errorf("control listen: %w", err)
-	}
-	defer func() { _ = ctrl.Close() }()
-
 	ctrlDone := make(chan error, 1)
 	go func() { ctrlDone <- ctrl.Serve(ctx) }()
 
