@@ -38,6 +38,26 @@ type TurnStatePayload struct {
 	State          string `json:"state"`
 }
 
+// ReplySuggestionPayload is the body of an Envelope whose Type ==
+// TypeReplySuggestion. Declared, not yet emitted: a daemon-to-client v2 state
+// frame gated by the negotiated "interactive" capability.
+//
+// Revision is positive and increases per conversation within one daemon
+// lifetime. Clients replace suggestion state by conversation/session, ignore
+// lower revisions, and discard cached suggestions on a fresh handshake.
+// SuggestedReply is inert, single-line UTF-8 text of at most 1024 bytes. Only
+// explicit null clears state; omission and an empty string do not. No field
+// uses omitempty, so a nil SuggestedReply always emits the clear signal.
+//
+// Emission and semantic validation belong to later consumers. Ordinary JSON
+// decoding into this DTO does not distinguish an omitted suggestion from null.
+type ReplySuggestionPayload struct {
+	ConversationID string  `json:"conversation_id"`
+	SessionID      string  `json:"session_id"`
+	Revision       uint64  `json:"revision"`
+	SuggestedReply *string `json:"suggested_reply"`
+}
+
 // AssistantDeltaPayload is the body of an Envelope whose Type ==
 // TypeAssistantDelta (docs/protocol-mobile.md § assistant_delta). Binary →
 // phone direction; an incremental, coalesced chunk of assistant text. Seq

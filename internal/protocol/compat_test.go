@@ -48,6 +48,7 @@ func TestIsKnownAppType(t *testing.T) {
 		// v2-only interactive events are not v1-compatible: an old phone
 		// never receives them, so IsKnownAppType must reject each.
 		{"turn_state-rejected", TypeTurnState, false, ErrUnknownType},
+		{"reply_suggestion-rejected", TypeReplySuggestion, false, ErrUnknownType},
 		{"assistant_delta-rejected", TypeAssistantDelta, false, ErrUnknownType},
 		{"tool_use-rejected", TypeToolUse, false, ErrUnknownType},
 		{"tool_result-rejected", TypeToolResult, false, ErrUnknownType},
@@ -288,6 +289,7 @@ func TestInboundAppTypeSet_CoversAllExportedTypeConstants(t *testing.T) {
 var v2OnlyTypes = map[string]bool{
 	TypeRekeyRequest:        true,
 	TypeTurnState:           true,
+	TypeReplySuggestion:     true,
 	TypeAssistantDelta:      true,
 	TypeToolUse:             true,
 	TypeToolResult:          true,
@@ -444,6 +446,7 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeRekeyRequest,
 		// v2 interactive application events.
 		TypeTurnState, TypeAssistantDelta, TypeToolUse,
+		TypeReplySuggestion,
 		TypeToolResult, TypeTurnEnd, TypeStall,
 		// v2 PTY-derived status peers of stall.
 		TypeApiRetry, TypeCompacting,
