@@ -542,6 +542,12 @@ const (
 	TypeStall          = "stall"
 )
 
+// TypeReplySuggestion declares outbound v2 suggestion state, gated by the
+// negotiated "interactive" capability. ReplySuggestionPayload defines its set
+// and explicit-null clear contract. Not yet emitted; never dispatched inbound
+// or added to the v1 inboundAppTypeSet.
+const TypeReplySuggestion = "reply_suggestion"
+
 // Mobile Protocol v2 PTY-derived status peers of TypeStall. Like stall, these
 // are additive, capability-gated status frames the binary pushes to a phone
 // that advertised the "interactive" capability — they surface claude's
