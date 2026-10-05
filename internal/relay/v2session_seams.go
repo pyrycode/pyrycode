@@ -1682,6 +1682,27 @@ type V2SessionConfig struct {
 	//
 	// Optional: nil ⇒ no reconcile, the posture the six seams above share.
 	RunningTurnPhases func() []protocol.TurnStatePayload
+
+	// ReplySuggestions enumerates the producer's current suggested-reply state as
+	// marshal-ready reply_suggestion payloads for connect-time reconcile (#2830) —
+	// the eighth Mode B instance. One payload per conversation that has state; a
+	// conversation whose suggestion was cleared is returned with SuggestedReply nil,
+	// because the clear is real state a reconnecting client must apply, not an
+	// absence. Called on the Run goroutine from handleNoiseInit's interactive-open
+	// tail; the payloads are unicast to the just-opened conn only.
+	//
+	// A pure read in bounded time. It runs on Run, so it MUST NOT call anything
+	// that round-trips through Run (ActiveConns), or the handshake deadlocks; a
+	// leaf mutex over the producer's map is the expected shape. Ordering against a
+	// live publish racing this read needs nothing from the producer beyond its
+	// per-conversation revision: forwardEnvelope drops a reply_suggestion at or
+	// below the highest revision already delivered for that conversation on that
+	// conn (replySuggestionStale).
+	//
+	// SuggestedReply is claude-derived text, so the reconcile never logs a payload.
+	//
+	// Optional: nil ⇒ no reconcile, the posture the seven seams above share.
+	ReplySuggestions func() []protocol.ReplySuggestionPayload
 }
 
 // HistoryPager is the shape of the V2SessionConfig.HistoryPage seam (#2116),
