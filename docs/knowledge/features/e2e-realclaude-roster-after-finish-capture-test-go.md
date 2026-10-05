@@ -64,6 +64,26 @@ status, the quiet window was spent to its floor, a further turn was read) regard
 roster fired. A capture probe measuring for an absence needs this distinction made explicit before
 the first live run, not discovered after one comes back empty and gets refused as broken.
 
+### Stop completion needs a held task and all terminal signals
+
+`TestRealClaudeStopBackgroundTaskCompletion` uses `rafcapPrompt` to explicitly
+request background execution, then waits for the FIFO task's untruncated id in
+the daemon's roster and for the FIFO rendezvous before sending the client stop
+(#2796). The FIFO remains held until terminal evidence or teardown; otherwise a
+natural finish could make an unwired stop look successful. A control acceptance
+alone cannot pass. The completion drain accepts either `background_task_updated`
+with `status: stopped` or a subsequent roster omitting that previously held id,
+without requiring one signal to precede the other.
+
+The authenticated live gate observed **roster omission while the FIFO stayed
+held**, not a stopped update as its passing signal. Requiring the update would
+discard the observed completion path. Fakeclaude emits both a stopped
+`task_notification` and roster removal; its synthetic notification is not a
+guarantee about live Claude's first terminal signal. The standing test runs in
+normal `make e2e-realclaude` with credentials, without a probe flag or capture
+artifact. The [passing gate evidence](https://github.com/pyrycode/pyrycode/issues/2796#issuecomment-5986241732)
+records executed counts and skips.
+
 ### Related
 
 - [`tool_progress_capture_test.go`](e2e-realclaude-tool-progress-capture-test-go.md) — `tpcapHoldFIFO`, `tpcapCensus`, reused here.

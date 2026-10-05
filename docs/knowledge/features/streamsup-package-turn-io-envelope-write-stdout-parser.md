@@ -188,9 +188,14 @@ blocked write; a replacement is untouched. The callback is stopped or joined
 before resolving the write gate and waiting for the answer. Normal acceptance,
 refusal and cancellation while awaiting a response preserve the child, current
 reply and turn-busy state, sending no interrupt, restart or user turn. Write
-cancellation is the retirement exception. Task membership, client authorization,
-daemon wiring and live completion proof belong to #2792, which also owns client
-wire documentation; the initialize affordance decision belongs to #2775.
+cancellation is the retirement exception. Production's
+`backgroundTaskStopper.StopBackgroundTask` owns membership and the 30-second
+timeout, and `streamRunner.StopTask` forwards to this primitive (#2796); neither
+method widens `sessions.Runner`. The
+[mobile wire contract](../../protocol-mobile.md#stop-background-task-v2) keeps
+acceptance separate from completion: the standing live proof observed roster
+removal while the task's FIFO remained held. The initialize affordance decision
+belongs to #2775.
 
 `Parser.claimMCPStatusQuery` runs before the shared control-response consumers.
 The first matching response retires the query, including an error or malformed

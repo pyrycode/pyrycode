@@ -370,6 +370,11 @@ func (a streamRunner) BackgroundTaskRoster() (turnevent.BackgroundTaskRoster, bo
 	return a.tasks.BackgroundTaskRoster()
 }
 
+// StopTask forwards one bounded control request to this session's live child.
+func (a streamRunner) StopTask(ctx context.Context, taskID string) bool {
+	return a.r != nil && a.r.StopTask(ctx, taskID)
+}
+
 // ModelWindows reports the per-model context windows this session's child last named in a
 // `result` line, or ok == false when no child has reported a usable one (#2106). It reads
 // the hold newSessionParser bound to this runner's parser, so it answers outside a turn, on
