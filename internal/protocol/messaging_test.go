@@ -325,12 +325,58 @@ func TestMessagePayload_RoundTrip(t *testing.T) {
 		t.Errorf("Text: got empty, want non-empty")
 	}
 
+	encodedPayload, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	env.Payload = encodedPayload
 	out, err := json.Marshal(env)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 	if !bytes.Equal(canonical(t, out), canonical(t, raw)) {
 		t.Errorf("round-trip bytes differ:\n got: %s\nwant: %s", out, raw)
+	}
+}
+
+func TestMessagePayload_QueuedMsgID(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, role, inputID, wantID string
+		queuedID                    uint64
+	}{
+		{"queued-user", "user", "42", "42", 42},
+		{"uint64-precision", "user", "18446744073709551615", "18446744073709551615", ^uint64(0)},
+		{"zero-user", "user", "0", "", 0},
+		{"zero-assistant", "assistant", "0", "", 0},
+		{"legacy-user", "user", "", "", 0},
+		{"legacy-assistant", "assistant", "", "", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := `{"conversation_id":"c1","message_id":"m1","role":"` + tc.role + `","text":"hello"`
+			if tc.inputID != "" {
+				raw += `,"queued_msg_id":` + tc.inputID
+			}
+			var payload MessagePayload
+			if err := json.Unmarshal([]byte(raw+`}`), &payload); err != nil {
+				t.Fatal(err)
+			}
+			want := MessagePayload{ConversationID: "c1", MessageID: "m1", Role: tc.role, Text: "hello", QueuedMsgID: tc.queuedID}
+			if !reflect.DeepEqual(payload, want) {
+				t.Fatalf("decoded payload = %#v, want %#v", payload, want)
+			}
+			out, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(out, &fields); err != nil {
+				t.Fatal(err)
+			}
+			if got := string(fields["queued_msg_id"]); got != tc.wantID {
+				t.Errorf("queued_msg_id = %q, want JSON integer %q (empty means omitted)", got, tc.wantID)
+			}
+		})
 	}
 }
 
