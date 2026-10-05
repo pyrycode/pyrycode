@@ -55,11 +55,29 @@ nothing in the file explaining why that margin was enough. A dedicated named
 constant states the margin against the specific timeout under test, so a later
 widening reads as the regression it would be (#2416).
 
-A live test proving a permission denial must tell the model not to retry the tool.
-A denied call that leaves the turn free to try something else raises a second,
-unanswered permission modal, and the resulting hang looks exactly like the
-parked-completer bug the test exists to catch — in the one tier where a red run is
-most expensive to re-read (#2416).
+A live permission-denial prompt must tell Claude not to retry, not to use another
+tool, and to give a short reply after denial. A prompt that describes only
+successful completion leaves the model free to retry: an unanswered retry modal
+can mimic a parked-completer hang (#2416), and even successfully rejected retries
+can exhaust a bounded drain. In the [#2851 evidence](https://github.com/pyrycode/pyrycode/issues/2851#issuecomment-6000600746),
+the first remote denial resolved at 18:13:11.585Z on 2026-10-05, four retries were
+rejected, and the fifth exceeded the cap at 18:13:25.599Z; a same-tree rerun reached
+idle with zero retries at 18:22:51.071Z. This supports missing denial guidance and
+variable model retries; no external defect is established by these logs.
+
+Keep the instruction local to `driveInteractiveStreamPermissionDeny`, preserving
+`writeFileTrigger` for allow tests. Prompt guidance supplements the independent
+proof: `raiseRealPermissionModal` requires a genuine permission modal; its
+matching dismissal must have `source=remote` and `outcome=reject_once`;
+`denyModalsUntilIdle` rejects retries within the four-retry cap and
+`perTurnReplyBudget`; and `requireTriggerFileAbsent` walks the workspace after
+terminal idle. File absence and idle alone could also pass after a timeout denial
+or a dropped remote answer, so attribution remains essential.
+
+`TestInteractiveStreamPermissionDenyAfterSettingsRespawn` additionally waits for
+`session_settings_updated` before killing the child, then `restartLiveChild`
+requires a running successor with a different PID before the denial proof. These
+checks prevent racing the settings installation or testing the original child.
 
 `TestInteractiveStreamStdioAlwaysAllowIsSessionScoped` proves that two identical
 Bash commands execute after one approval in a session, then requires a fresh
