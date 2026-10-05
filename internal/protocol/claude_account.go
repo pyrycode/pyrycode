@@ -19,8 +19,8 @@ const (
 	ClaudeAccountKindMachineLogin = "machine_login"
 	ClaudeAccountKindFile         = "file"
 	ClaudeAccountKindOnePassword  = "1password"
-	// ClaudeAccountKindOSKeychain has no daemon source yet (#2815); it is
-	// declared so clients can be built against it.
+	// ClaudeAccountKindOSKeychain is a keychain:<name> source (#2815): the
+	// macOS Keychain or the Linux Secret Service.
 	ClaudeAccountKindOSKeychain = "os_keychain"
 )
 

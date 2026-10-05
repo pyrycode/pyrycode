@@ -125,7 +125,7 @@ These configure pyry itself and must come **before** any claude args (or after a
 | `-pyry-verbose` | `false` | Debug-level pyry logging on stderr |
 | `-pyry-name <name>` | `pyry` (or `$PYRY_NAME`) | Instance name; socket is `~/.pyry/<name>.sock` |
 | `-pyry-socket <path>` | (unset) | Explicit socket path; overrides `-pyry-name` |
-| `-pyry-claude-account-source <path-or-op-ref>` | (unset) | This instance's Claude account token source — an absolute path to an owner-only token file, or an `op://vault/item/field` 1Password reference. See [Claude account source](#claude-account-source) below. |
+| `-pyry-claude-account-source <source>` | (unset) | This instance's Claude account token source — an absolute path to an owner-only token file, an `op://vault/item/field` 1Password reference, or `keychain:<name>` for the macOS Keychain or Linux Secret Service. See [Claude account source](#claude-account-source) below. |
 | `-pyry-claude-account-op-cli <name-or-path>` | `op` | The 1Password CLI an `op://` account source runs. One bare executable name on `PATH`, or one absolute path. See [Claude account source](#claude-account-source) below. |
 
 If a claude flag happens to start with `-pyry-`, separate the two with `--`:
@@ -277,11 +277,11 @@ For unusual setups (Docker mounts, shared sockets, paths outside `$HOME`), `-pyr
 
 ### Claude account source
 
-By default a pyry instance's claude child inherits whatever `CLAUDE_CODE_OAUTH_TOKEN` (or other Claude authentication) is already in the daemon's environment — the same account you'd get running `claude` interactively. When you run more than one instance, or want daemon usage to draw on a separate account from your interactive one, point an instance at its own owner-only token file instead.
+By default a pyry instance's claude child inherits whatever `CLAUDE_CODE_OAUTH_TOKEN` (or other Claude authentication) is already in the daemon's environment — the same account you'd get running `claude` interactively. When you run more than one instance, or want daemon usage to draw on a separate account from your interactive one, point an instance at its own token file, 1Password reference, or OS secret-store item.
 
 The source is resolved once per instance, in this order, and the first nonempty value wins:
 
-1. `-pyry-claude-account-source <path-or-op-ref>`
+1. `-pyry-claude-account-source <source>`
 2. `$PYRY_CLAUDE_ACCOUNT_SOURCE`
 3. the `source` field in `~/.pyry/<name>/claude-account.json`
 
@@ -313,7 +313,7 @@ The file can also carry an optional `label` — an operator-chosen name for this
 
 `label` is read only when `claude-account.json` itself supplies the `source` — an instance pointed at its source by the flag or `$PYRY_CLAUDE_ACCOUNT_SOURCE` always reports an empty label, even if the file also sets one. It must be at most 64 bytes of valid UTF-8 with no control character; anything else is a startup error naming the file, never the label value (it could be a token pasted into the wrong field). Keys other than `source`, `op_cli` and `label` are ignored. The file itself must be owned by the user running pyry and must not be group- or other-writable — it is refused otherwise, since it picks which owner-only file is read, or which executable is run, to produce the token handed to a claude child. This ownership check, and the UTF-8 validity check above, apply to every key the file supplies: an invalid-UTF-8 `source` or `op_cli` is also a startup error now, rather than a value that silently turned into a mangled path that could only fail later at read time.
 
-There are two source kinds: an absolute path to a token file, or an `op://vault/item/field` reference ([#2825](https://github.com/pyrycode/pyrycode/issues/2825)) read through the 1Password CLI. A relative path, any other URI scheme, or anything else nonempty is refused and stops startup.
+There are three source kinds: an absolute path to a token file, an `op://vault/item/field` reference read through the 1Password CLI, or `keychain:<name>` read from the macOS Keychain or Linux Secret Service. A relative path, any other URI scheme, or anything else nonempty is refused and stops startup.
 
 **The token file.** One raw token, optionally followed by a single LF or CRLF — not a `source`d shell assignment and not an `EnvironmentFile` line, just the bytes of the token itself:
 
@@ -333,7 +333,7 @@ The CLI itself is resolved independently of where the source came from, in this 
 3. the `op_cli` field in `~/.pyry/<name>/claude-account.json`
 4. `op`
 
-`op_cli` is only ever looked at for an `op://` source — a file source ignores it, so an odd value left in `claude-account.json` can't break a token-file instance. The value must be either one bare executable name (letters, digits, `.`, `_`, `+`, `-`, other than `.` or `..`) looked up on `PATH`, or one absolute path, which may contain spaces — never a shell command (`op read`, `./op`, and similar are refused). Anything else is a startup error naming only where the `op_cli` setting came from.
+`op_cli` is only ever looked at for an `op://` source — file and keychain sources ignore it, so an odd value left in `claude-account.json` can't break those instances. The value must be either one bare executable name (letters, digits, `.`, `_`, `+`, `-`, other than `.` or `..`) looked up on `PATH`, or one absolute path, which may contain spaces — never a shell command (`op read`, `./op`, and similar are refused). Anything else is a startup error naming only where the `op_cli` setting came from.
 
 On Windows binaries reached through WSL, point `op_cli` at the Windows CLI's absolute path, e.g.:
 
@@ -343,13 +343,47 @@ pyry -pyry-claude-account-op-cli "/mnt/c/Program Files/1Password CLI/op.exe" -py
 
 There is no WSL autodetection — the operator must already have WSL interop, the Windows 1Password CLI, and [1Password's desktop-app integration](https://developer.1password.com/docs/cli/app-integration/) set up and unlocked before the daemon starts. See the [`op read` reference](https://developer.1password.com/docs/cli/reference/commands/read/) for what a reference looks like and what the CLI itself requires.
 
-**When it's read.** The daemon makes one read at startup to initialize the account, and after that re-reads the source fresh on every claude launch attempt — first launches, crash-loop restarts, and respawns alike. A rotated token file (write a new one and `mv` it into place) or a rotated 1Password item takes effect on the very next launch; there's no caching to invalidate or restart to trigger.
+**The OS secret-store item.** Use `keychain:<name>`, where `<name>` is a dedicated item's service name. For example, these flag and environment settings select the same item:
 
-**Failure and recovery.** An unusable *source* — a bad flag/env value, an unreadable or malformed `claude-account.json`, or an invalid `op_cli` — is a startup error: the daemon refuses to start, the same posture as a bad `interactive_runner` or `debug_capture` setting. A *read* that fails once the daemon is running (the token file got deleted or permissions loosened; the 1Password CLI is missing, locked, denied, times out, or prints something unusable) only refuses that claude launch, with no fallback to a previously read token; the daemon, its control socket and the relay keep running. The next successful read clears the failure and launches resume normally. Neither case ever logs or echoes the token, the configured path, the 1Password reference, or the CLI's own stdout/stderr — failures name only where the setting came from (flag, env, or file) or report one of a small fixed set of reasons ("1Password CLI unavailable", "1Password read timed out", "1Password read failed", and similar).
+```bash
+pyry -pyry-name elli -pyry-claude-account-source "keychain:pyry-elli-claude-token"
+PYRY_CLAUDE_ACCOUNT_SOURCE="keychain:pyry-elli-claude-token" pyry -pyry-name elli
+```
 
-The read is bounded to ten seconds at startup, matching the per-attempt deadline the runner itself applies. For the token file that bound covers reads that complete, not reads that hang — an open or read against a wedged FUSE or network mount is not interrupted, so don't rely on this as a hard ceiling on startup time for a token file on unusual storage; a plain local file returns essentially immediately. For a 1Password read the bound is reliable either way: the CLI runs as a subprocess that is killed, along with anything it started, the moment the bound expires, so a hung or slow CLI never holds a claude launch past it.
+Or set `~/.pyry/elli/claude-account.json`:
 
-**What a paired client can see.** Any paired client can ask the daemon which account source it uses by sending `request_claude_account` over the relay; the daemon answers with the source's kind (`machine_login`, `file` or `1password`), its `label`, and whether its latest read is `ready` or `failed` with a short reason. This is read-only and always reflects a read the daemon already made on its own — asking never triggers one. It never exposes the token, the configured file path, or the 1Password reference. See [`protocol-mobile.md` § Claude account source](protocol-mobile.md#claude-account-source) for the wire format.
+```json
+{
+  "source": "keychain:pyry-elli-claude-token",
+  "label": "Work account"
+}
+```
+
+On macOS, create a generic-password item in your login Keychain:
+
+```bash
+security add-generic-password -s "pyry-elli-claude-token" -a "$USER" -w
+```
+
+Enter the raw account token at the password prompt. **Do not reuse `Claude Code-credentials`: it holds Claude Code's interactive login.** Create a separate item for the daemon's account; the daemon does not reject that reserved name itself.
+
+On Linux, install `libsecret-tools` (the package providing `secret-tool` on Debian/Ubuntu), then create a Secret Service item with the matching `service` attribute:
+
+```bash
+secret-tool store --label="Pyry elli Claude token" service "pyry-elli-claude-token"
+```
+
+Enter the raw token at the password prompt in a logged-in desktop session. The label describes the item; lookup uses the `service` attribute. See the [secret-tool manual](https://manpages.ubuntu.com/manpages/noble/man1/secret-tool.1.html) for its store and lookup commands.
+
+On every read, macOS runs `security find-generic-password -s <name> -w`; Linux runs `secret-tool lookup service <name>`. The tool is resolved through the daemon's `PATH`, and the name is one argument with no shell or stdin. Stdout must satisfy the same token format and 4096-byte limit as the token file; stderr is discarded. An empty name, a control byte (including DEL), or a name starting with `-` is a startup error naming only the setting's origin. This source is supported only on macOS and Linux. See [deployment guidance](deployment.md#claude-account-source) for access prompts, login services and the headless Linux limit.
+
+**When it's read.** The daemon makes one read at startup to initialize the account, and after that re-reads the source fresh on every claude launch attempt — first launches, crash-loop restarts, and respawns alike. A rotated token file (write a new one and `mv` it into place), 1Password item, or OS secret-store item takes effect on the very next launch; there's no caching to invalidate or restart to trigger.
+
+**Failure and recovery.** An unusable *source* — a bad flag/env value, an unreadable or malformed `claude-account.json`, or an invalid `op_cli` — is a startup error: the daemon refuses to start, the same posture as a bad `interactive_runner` or `debug_capture` setting. A *read* that fails at startup or once the daemon is running (the token file got deleted or permissions loosened; a tool is missing; the vault or keyring is locked; an item is missing or access denied; the tool times out, is cancelled, or prints something unusable) refuses that claude launch, with no fallback to a previously read token or the inherited login; the daemon, its control socket and the relay keep running. The next successful read clears the failure and launches resume normally. Neither case ever logs or echoes the token, the configured path, the 1Password reference, the keychain item name, or the tool's own stdout/stderr — failures name only where the setting came from (flag, env, or file) or report one of a small fixed set of reasons ("1Password CLI unavailable", "1Password read timed out", "1Password read failed", and similar). For keychain reads the reasons are "keychain tool unavailable", "keychain read failed", "keychain output empty", "keychain output invalid", "keychain read timed out" and "keychain read cancelled".
+
+The read is bounded to ten seconds at startup, matching the per-attempt deadline the runner itself applies. For the token file that bound covers reads that complete, not reads that hang — an open or read against a wedged FUSE or network mount is not interrupted, so don't rely on this as a hard ceiling on startup time for a token file on unusual storage; a plain local file returns essentially immediately. For 1Password and keychain reads, the caller returns when the bound expires and the tool's process group is killed; a hung tool or access prompt never holds a claude launch past the deadline.
+
+**What a paired client can see.** Any paired client can ask the daemon which account source it uses by sending `request_claude_account` over the relay; the daemon answers with the source's kind (`machine_login`, `file`, `1password` or `os_keychain`), its `label`, and whether its latest read is `ready` or `failed` with a short reason. This is read-only and always reflects a read the daemon already made on its own — asking never triggers one. It never exposes the token, the configured file path, the 1Password reference, or the keychain item name. See [`protocol-mobile.md` § Claude account source](protocol-mobile.md#claude-account-source) for the wire format.
 
 **What stays shared.** This only changes which account token a claude child receives. Settings, plugins, skills, memory and everything else under `CLAUDE_CONFIG_DIR` stay shared across every instance; a Claude account source is not a sandboxed configuration directory.
 
