@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/devices"
@@ -199,7 +200,28 @@ func startPairingDaemon(t *testing.T, home, name, relayURL string) *Harness {
 		"PYRY_MOBILE_V2=1",
 	}, "-pyry-name="+name, "-pyry-relay="+relayURL)
 	exposePairSocket(t, home, name, h.SocketPath)
+	waitForStaticKey(t, home, name)
 	return h
+}
+
+// waitForStaticKey blocks until name's static_key.json exists. Harness
+// readiness (waitForReady) only proves the control socket is dialable —
+// ctrl.Listen opens it before startRelay mints this daemon's identity
+// (server-id, then static_key.json) — so a caller that snapshots security
+// state right after startPairingDaemon returns can otherwise race the
+// daemon's own first-boot key mint and see the file appear mid-test. Same
+// gap readPersistedServerID polls for on the server-id file.
+func waitForStaticKey(t *testing.T, home, name string) {
+	t.Helper()
+	path := filepath.Join(home, ".pyry", name, "static_key.json")
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("static key file never appeared at %s", path)
 }
 
 func exposePairSocket(t *testing.T, home, name, target string) {
