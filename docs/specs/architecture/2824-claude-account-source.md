@@ -80,3 +80,7 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-05
+
+## Revisions
+
+- 2026-10-05 (build): the startup tests drive each instance to its Claude helper with `control.SessionsNew` rather than a channel post. A channel post records a host-authored message and does not start a turn; `sessions.new` mints and activates a session, which spawns the child. This settles the open question without the `internal/e2e` fallback. The recovery case (missing token file at startup → daemon serves the control socket, no child launches, the child launches with the token once the file appears) is also covered at startup level in `TestClaudeAccount_FailedReadKeepsDaemonUpAndRecovers`. The owned-by-another-UID refusal is implemented but not unit-tested, since creating such a file needs root.

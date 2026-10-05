@@ -355,6 +355,7 @@ var pyryFlagValues = map[string]bool{
 	"pyry-wrapup-deadline":     true,
 	"pyry-relay":               true,
 	"pyry-read-folder":         true,
+	claudeAccountFlagName:      true,
 }
 
 // splitArgs walks args left-to-right and partitions them into pyry's own
@@ -780,6 +781,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	wrapUpDeadlineFlag := fs.Duration("pyry-wrapup-deadline", 0, "shorten the conversation reset's wrap-up bound (testing; 0 or >= the 90s default = production default)")
 	relayFlag := fs.String("pyry-relay", "", "relay URL override (default: $PYRY_RELAY_URL or ~/.pyry/config.json)")
 	autoUpdate := fs.Bool("pyry-auto-update", false, "install a new release by itself once the daemon is idle, then restart the managed unit")
+	accountSource := fs.String(claudeAccountFlagName, "", "Claude account token source for this instance: an absolute path to an owner-only token file (default: $"+claudeAccountSourceEnv+" or ~/.pyry/<name>/"+claudeAccountFileName+")")
 	var readFolderEntries folderList
 	fs.Var(&readFolderEntries, "pyry-read-folder", "absolute folder the markdown reader may also open; repeatable")
 	if err := fs.Parse(pyryArgs); err != nil {
@@ -880,6 +882,15 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	if err := checkDebugCapture(cfg); err != nil {
 		return err
 	}
+	// The instance's Claude account source (#2824) is fixed until restart; the
+	// token bytes are re-read on every Claude launch attempt. An unusable source
+	// stops startup like interactive_runner and debug_capture do, while a failed
+	// read only refuses Claude launches and leaves the daemon running.
+	account, err := newClaudeAccount(*accountSource, os.Getenv(claudeAccountSourceEnv), resolveInstanceDirPath(*name), logger)
+	if err != nil {
+		return err
+	}
+	account.prime(ctx)
 	// Approval-tool wiring (#1168): on the stream-json interactive path, write the
 	// per-daemon --mcp-config file that points claude's approval-prompt tool at
 	// THIS daemon's control socket, so a non-yolo permission-bearing turn surfaces
@@ -921,6 +932,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		registry: approvals,
 		timeout:  approvalWindow,
 		surface:  approvalSurfaces,
+		account:  account.provider(),
 	}, codex)
 	if err != nil {
 		return fmt.Errorf("interactive runner: %w", err)
