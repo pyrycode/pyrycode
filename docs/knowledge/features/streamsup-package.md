@@ -17,6 +17,7 @@ type Config struct {
     Stderr         io.Writer     // optional; nil → discarded
     Env            []string      // optional; appended to os.Environ() in the child; nil in production
     SessionIDEnvVar string      // optional; name bound per-spawn to that spawn's live session id
+    AccountTokenProvider AccountTokenProvider // optional; re-read on every launch attempt (#2823/#2824)
     Logger         *slog.Logger  // optional; nil → slog.Default()
     BackoffInitial time.Duration // zero → 500ms
     BackoffMax     time.Duration // zero → 30s
@@ -125,6 +126,10 @@ atomic-backed `streamSessionTag` now moves with the rotation, read once per even
 see [§ Session rotation notification](streamsup-package-session-rotation-notification-onsessionrotate.md).
 This is what the #1137 `new_session` e2e's post-rotation milestone (`codebase/1137.md` § The post-rotation
 drain divergence) could not assert at a phone-side frame before #1133 landed; `relay_v2_stream_new_session_test.go`'s M6 now does.
+
+## Per-instance Claude account token (#2823/#2824)
+
+`Config.AccountTokenProvider`, when set, is re-read for every launch attempt — first spawns, crash-loop retries and restarts alike — and its token replaces every inherited `CLAUDE_CODE_OAUTH_TOKEN` entry in that attempt's child environment; a rejected read refuses the launch rather than falling back to an earlier token. `cmd/pyry` is the only caller that sets it, and only on the Claude runner factory (`newStreamRunnerFactory`'s `scfg.AccountTokenProvider = approval.account`, above) — Codex children and the daemon's own environment never see it. See [Claude account source](claude-account-source.md) for per-instance source selection, the file reader and the accessor `cmd/pyry` builds around this field.
 
 ## Test fake for this wire — fakeclaude stream-json mode (#1140)
 

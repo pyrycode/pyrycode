@@ -608,11 +608,16 @@ func mapStreamState(s streamsup.State) sessions.State {
 
 // streamApprovalConfig carries the optional stdio transport's daemon-singleton
 // dependencies into each per-session handler. A zero value preserves the MCP path.
+//
+// account is the instance's Claude account token provider (#2824). It rides here
+// because this is the one daemon-singleton argument every Claude runner already
+// receives; nil keeps inherited credentials. Only the Claude factory reads it.
 type streamApprovalConfig struct {
 	stdio    bool
 	registry *permbridge.Registry
 	timeout  time.Duration
 	surface  *approvalSurfaceReport
+	account  streamsup.AccountTokenProvider
 }
 
 // approvalSurfaceReport bridges the composition-order gap between runner creation
@@ -764,6 +769,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 		// each completed spawn argv, so bypass children whose args stayed unchanged
 		// remain ineligible.
 		scfg.MCPStatusConfigPath = mcpServersPath
+		scfg.AccountTokenProvider = approval.account
 		tag := newStreamSessionTag(cfg.SessionID)
 		// #2135 chains the announced-reset follower between the retention holds and
 		// the fan-in send, rather than inside newSessionParser: it retains nothing,
