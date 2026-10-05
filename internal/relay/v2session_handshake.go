@@ -88,6 +88,8 @@ type InnerFrameV2Decoded struct {
 // what the daemon sends rather than detecting a verb: it is recorded on its own
 // flag, s.multiAgent, by the same value-specific reduction, and grants nothing
 // s.interactive gates.
+// protocol.CapabilityStopBackgroundTask (#2797) detects the stop verb only:
+// dispatchAppFrame still gates it on s.interactive alone.
 //
 // New members are APPENDED, never inserted. negotiateCapabilities emits in this
 // slice's order and both of its test tables compare with slices.Equal, so the
@@ -97,7 +99,7 @@ type InnerFrameV2Decoded struct {
 // Read-only after package init and read on the manager's Run goroutine; it is a
 // var only because a slice cannot be const. Nothing may assign to it or to its
 // backing array at runtime.
-var supportedV2Capabilities = []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage, protocol.CapabilityMultiAgent}
+var supportedV2Capabilities = []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage, protocol.CapabilityMultiAgent, protocol.CapabilityStopBackgroundTask}
 
 // negotiateCapabilities returns the phone's advertised set ∩
 // supportedV2Capabilities, in supported-set order. It iterates the supported

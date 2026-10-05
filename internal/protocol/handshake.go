@@ -95,6 +95,13 @@ const CapabilityContextUsage = "context_usage"
 // consumer, internal/relay, not here.
 const CapabilityMultiAgent = "multi_agent"
 
+// CapabilityStopBackgroundTask detects support for stopping one background task.
+// A client advertises it in hello and draws a per-task stop button only when
+// hello_ack echoes it through capability intersection negotiation (ADR 037).
+// Detection only: the stop verb gates on CapabilityInteractive alone; this
+// string grants no interactive access and is not required to use the verb.
+const CapabilityStopBackgroundTask = "stop_background_task"
+
 // HelloServerPayload is the body of a "hello" envelope sent by the binary
 // after WS upgrade (docs/protocol-mobile.md § Message types). Role is
 // always "server".
