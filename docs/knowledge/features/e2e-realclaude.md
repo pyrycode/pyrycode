@@ -137,6 +137,16 @@ requires an explicit null at a higher revision after a follow-up send. Short
 conversations and cold caches can stay silent. A green turn or a skipped probe
 cannot prove [native suggestion publication](streamsup-package-draining-turnevents-into-the-interactive-emitter.md#native-reply-suggestions-after-the-result-2831).
 
+**A suggestion frame alone cannot prove its source.** `installSuggestCLI`
+keeps the native probe specific by refusing non-stream CLI launches, so Haiku
+fallback cannot make it pass. `TestInteractiveStream_FallbackReplySuggestionSetThenClear`
+instead disables suggestions only on the persistent child and allows the real
+production fallback call. After a completed exchange it requires a nonempty
+reply within the fallback bounds, then an explicit-null clear at a higher
+revision after accepted input. With credentials present, absent output fails;
+it is not a successful skip. Both tests use the same wire shape, so each must
+exclude the competing producer rather than infer provenance from that frame.
+
 Since #2569, a fresh-home daemon now seeds a promoted `General` channel and a
 bound-but-never-spawned session on first boot (see
 [`conversations-registry.md`](conversations-registry.md)). `spawnBootstrapDaemon`
