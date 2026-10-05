@@ -2841,6 +2841,24 @@ type UserEcho struct {
 	TextSHA256 [32]byte
 }
 
+// PromptSuggestion is claude's own suggested next prompt (#2829), read off a
+// top-level prompt_suggestion line, which claude emits after the turn's result
+// when prompt suggestions are enabled. Reusing it saves the daemon a model call
+// of its own.
+//
+// Text is claude-authored and UNTRUSTED. The producer has checked its shape —
+// a non-blank string of at most 1024 valid UTF-8 bytes holding no line break —
+// and carries it verbatim, with no trimming or other repair. It has NOT vetted
+// the content: control characters and bidi marks other than line breaks pass
+// through, and the text is model output, not an operator's words.
+//
+// It opens and closes no turn and names no turn: claude's uuid and session_id
+// on the line establish no daemon turn attribution, so neither is carried. The
+// bridge supplies the session, like every variant here.
+type PromptSuggestion struct {
+	Text string
+}
+
 func (TextChunk) isTurnEvent()              {}
 func (ThoughtChunk) isTurnEvent()           {}
 func (ToolStart) isTurnEvent()              {}
@@ -2869,6 +2887,7 @@ func (ModelRefusalNoFallback) isTurnEvent() {}
 func (Banner) isTurnEvent()                 {}
 func (ConversationReset) isTurnEvent()      {}
 func (UserEcho) isTurnEvent()               {}
+func (PromptSuggestion) isTurnEvent()       {}
 func (Unrecognized) isTurnEvent()           {}
 
 var (
@@ -2893,5 +2912,6 @@ var (
 	_ Event = ModelRefusalNoFallback{}
 	_ Event = ConversationReset{}
 	_ Event = UserEcho{}
+	_ Event = PromptSuggestion{}
 	_ Event = Unrecognized{}
 )
