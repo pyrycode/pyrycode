@@ -600,7 +600,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`dequeue_message`** | phone → binary | no | **New in v2.** Inbound control — phone cancels a queued message. See [Queue](#queue-v2). |
 | **`send_queued_now`** | phone → binary | no | **New in v2** (#2729). Inbound control — phone writes a queued message into the running turn instead of waiting for idle. See [Queue](#queue-v2). |
 | **`interrupt`** | phone → binary | no | **New in v2.** Inbound control — phone interrupts the running turn (remote Esc). Interactive-capability-gated; exempt from the permission gate. See [Interrupt](#interrupt-v2). |
-| **`stop_background_task`** | phone → binary | no | **New in v2** (#2791). Names one task by `conversation_id` and `task_id`; requires negotiated `interactive`, with no per-device permission gate or cursor fallback. Shipped daemon construction leaves the stop seam nil, so every request is silently inert until wired. No new capability is advertised. See [Stop background task](#stop-background-task-v2). |
+| **`stop_background_task`** | phone → binary | no | **New in v2** (#2791; production wiring #2796). Stops one retained task through the named conversation's live Claude child; requires negotiated `interactive`, with no per-device permission gate or cursor fallback. No success reply; completion is observed through task events or roster removal. See [Stop background task](#stop-background-task-v2). |
 | **`new_session`** | phone → binary | no | **New in v2.** Inbound control — phone starts a fresh session in the conversation it names, or in the daemon's current one when it names none (#2099). On the stream path a kill and respawn under a new session id, not a `/clear`. Interactive-capability-gated; exempt from the permission gate. See [New session](#new-session-v2). |
 | **`debug_bundle_chunk`** | binary → phone | no | **New in v2.** Outbound — one ordered, cap-respecting slice of a streamed debug bundle (#812). See [Debug bundle](#debug-bundle-v2). |
 | **`debug_bundle_done`** | binary → phone | no | **New in v2.** Outbound — completion marker after the last `debug_bundle_chunk`, carrying the exact chunk count (#812). See [Debug bundle](#debug-bundle-v2). |
@@ -3613,27 +3613,25 @@ type. The v2 manager intercepts it before ordinary dispatch, requires negotiated
 [`interactive`](#capability-negotiation-v2), and bypasses the per-device
 tool-permission gate, like [`interrupt`](#interrupt-v2).
 
-**Currently inert in shipped daemon construction:** the optional
-`BackgroundTaskStopper` interface is left as a true nil interface. With that
-seam nil, or without negotiated `interactive`, the manager consumes the frame on
-`Run` before typed payload decoding or worker enqueueing, with no reply even for
-a payload that would fail typed decoding. #2792 owns production child actuation,
-capability advertisement and the resulting production documentation; #2791
-adds no capability string and actuates no child.
+Production installs `BackgroundTaskStopper` to resolve the named conversation's
+stored session binding and stop a task through that same live Claude runner
+(#2796). Without negotiated `interactive`, or in an embedding that leaves the
+optional seam nil, the manager consumes the frame on `Run` before typed payload
+decoding or worker enqueueing, with no reply even for malformed payloads.
 
 The payload has two string fields:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `conversation_id` | string | Required, nonempty conversation lookup key. There is no fallback to the daemon's cursor conversation. |
-| `task_id` | string | Required, nonempty task lookup key, using the id carried by [`background_task_started`](#background_task_started), [`background_task_updated`](#background_task_updated) and roster rows. |
+| `conversation_id` | string | Required, nonempty canonical conversation id (lowercase UUIDv4). There is no cursor or bootstrap-child fallback. |
+| `task_id` | string | Required, nonempty task lookup key, using the id carried by [`background_task_started`](#background_task_started), [`background_task_updated`](#background_task_updated) and roster rows, rather than `tool_call_id`. |
 
 ```json
 {
   "id": 42,
   "type": "stop_background_task",
   "ts": "2026-10-04T22:00:00Z",
-  "payload": {"conversation_id": "conv_01ABC", "task_id": "task_01XYZ"}
+  "payload": {"conversation_id": "27960000-0000-4000-8000-000000000001", "task_id": "task_01XYZ"}
 }
 ```
 
@@ -3649,6 +3647,26 @@ the seam owns conversation validation and resolution. The outcomes are:
 | Seam accepts or cannot act on the conversation | No reply. Never select the cursor or another conversation. Silence is not confirmation that a task stopped. |
 | Seam refuses | Send the same fixed refusal as the missing-task case. |
 
+For a request with both ids nonempty, a noncanonical or unknown conversation,
+a missing session binding, or a binding absent from the session pool is silent:
+the daemon cannot act on that conversation. It never reads the cursor or falls
+back to the bootstrap child.
+
+A resolved conversation refuses locally if its stored agent identity is Codex
+(or otherwise not Claude), it has no live child or usable roster/stop capability,
+or its retained roster is unreported, empty or lacks the requested task. A
+matching row also refuses if `truncated_fields` contains `task_id`; length alone
+does not disqualify an unmarked id. These checks write nothing to any child.
+
+An eligible row causes exactly one `StopTask` call on that bound runner, using
+the retained row's id; its child control request has subtype `stop_task`.
+Claude acceptance succeeds only while the
+request context is still live. Claude refusal/error, cancellation or timeout
+refuses. The wait inherits worker cancellation and is bounded by 30 seconds or
+the parent's earlier deadline, including when the child never answers. Registry
+and pool locks are not held across the wait; a concurrent rebind does not switch
+the request to another runner.
+
 Each refusal sends exactly one requester-only `error`, correlated by envelope
 `in_reply_to` to the request's `id`, with this exact payload:
 
@@ -3662,7 +3680,7 @@ Each refusal sends exactly one requester-only `error`, correlated by envelope
     "code": "stop_background_task.refused",
     "message": "background task stop refused",
     "retryable": false,
-    "conversation_id": "conv_01ABC"
+    "conversation_id": "27960000-0000-4000-8000-000000000001"
   }
 }
 ```
@@ -3677,8 +3695,22 @@ error appears in replies or logs, and the reflected id must never be logged.
 Refusals use the existing requester reply lane and are sealed only by `Run`,
 with no peer broadcast or replay `event_id`. A blocking stop seam holds that
 connection's worker; other connections and inline `interrupt` handling continue
-on `Run`. The seam must honor its cancellation context so manager shutdown can
-end the wait.
+on `Run`. Manager shutdown cancels the wait.
+
+Accepted stops send no success reply. Normal outcomes send no interrupt,
+restart or user turn and preserve the conversation and reply in progress. The
+control primitive's exception is cancellation during a blocked stdin write:
+it may close the captured child's stdin to release that write, without closing
+a replacement child's stdin.
+
+Completion is separate from acceptance. The standing live test
+[`TestRealClaudeStopBackgroundTaskCompletion`](knowledge/features/e2e-realclaude-roster-after-finish-capture-test-go.md#stop-completion-needs-a-held-task-and-all-terminal-signals) observed a subsequent
+[`background_task_roster`](#background_task_roster) omitting the previously held
+task while the rig's FIFO remained held. Clients must accept that removal as
+completion rather than require a
+[`background_task_updated`](#background_task_updated) with `status: stopped`;
+that update is also valid terminal evidence when emitted. Silence alone proves
+neither acceptance nor completion.
 
 ### New session (v2)
 
@@ -5172,7 +5204,7 @@ Application-level error codes (carried in `error` envelopes inside `noise_msg` p
 | Code | Retryable | Notes |
 |---|---|---|
 | `host_system_prompt.unavailable` | yes | Storage failure for [daemon-wide host instructions](#daemon-wide-host-system-prompt); correlated requester-only error with a static message, no success acknowledgement, and prior memory/store retained. |
-| `stop_background_task.refused` | no | With both [stop-background-task gates](#stop-background-task-v2) open, a decoded nonempty conversation id with missing/empty task id, or a refused stop-seam outcome. Exactly one requester-only error: message `background task stop refused`, `retryable: false`, requested `conversation_id`, and envelope `in_reply_to` equal to the request id. The reflected id is correlation only, including for unknown conversations, and must never be logged; no task id or child/decoder diagnostics are included. Shipped construction leaves the seam nil and sends no refusal. |
+| `stop_background_task.refused` | no | With both [stop-background-task gates](#stop-background-task-v2) open, a decoded nonempty conversation id with missing/empty task id, or a local/Claude refusal, cancellation or timeout. Exactly one requester-only error: message `background task stop refused`, `retryable: false`, requested `conversation_id`, and envelope `in_reply_to` equal to the request id. The reflected id is correlation only, including for unknown conversations in the missing-task case, and must never be logged; no task id or child/decoder diagnostics are included. Cannot-act-on-conversation outcomes remain silent. |
 | `read_mark.unavailable` | yes | A [`mark_conversation_read`](#marking-a-conversation-read) advance could not be persisted (#2780): the registry save failed, so the daemon reverted the in-memory mark before replying and pushed nothing. The message is static and names no path. Retry the same request once the registry can save again — it is not treated as a no-op, because the held mark was already rolled back. |
 | `noise.handshake_failed` | no | Reported only to local logs — wire-level handshake failure closes the WS with `4426` and no AEAD-sealed envelope can be sent. Included here for completeness. |
 | `noise.rekey_failed` | yes | The peer's `rekey_request` was rejected (e.g. rate-limited) or the subsequent handshake didn't complete; sender may retry after a backoff. |

@@ -2051,6 +2051,7 @@ func runStreamJSONConfigured(r io.Reader, w io.Writer, cfg streamRunConfig) {
 	rateLimitStatus := cfg.rateLimitStatus
 	withholdModeAck := cfg.withholdModeAck
 	rosterTasks := cfg.rosterTasks
+	var currentTasks []map[string]any
 	modelWindows := cfg.modelWindows
 	resetToID := cfg.resetToID
 	emitInit := cfg.emitInit
@@ -2216,6 +2217,7 @@ func runStreamJSONConfigured(r io.Reader, w io.Writer, cfg streamRunConfig) {
 					if werr := writeBackgroundTaskRoster(w, rosterTasks); werr != nil {
 						return
 					}
+					currentTasks = backgroundTaskRows(rosterTasks)
 				}
 				// The announced-reset rider (#2135) writes on the same terms and for
 				// the same reason once more: BEFORE the reply, so a turn_end reaching a
@@ -2251,6 +2253,39 @@ func runStreamJSONConfigured(r io.Reader, w io.Writer, cfg streamRunConfig) {
 				}
 				if werr != nil {
 					return
+				}
+			} else if req, ok := decodeControlRequest(b, "stop_task"); ok {
+				var task struct {
+					Request struct {
+						TaskID string `json:"task_id"`
+					} `json:"request"`
+				}
+				if json.Unmarshal(b, &task) != nil {
+					return
+				}
+				index := -1
+				for i, row := range currentTasks {
+					if row["task_id"] == task.Request.TaskID {
+						index = i
+						break
+					}
+				}
+				response := map[string]any{"request_id": req.RequestID, "subtype": "error", "error": "unknown task"}
+				if index >= 0 {
+					response = map[string]any{"request_id": req.RequestID, "subtype": "success", "response": map[string]any{}}
+				}
+				if writeJSONLine(w, map[string]any{"type": "control_response", "response": response}) != nil {
+					return
+				}
+				if index >= 0 {
+					currentTasks = append(currentTasks[:index], currentTasks[index+1:]...)
+					// Provisional terminal signal; the standing live gate verifies the vocabulary.
+					if writeJSONLine(w, map[string]any{"type": "system", "subtype": "task_notification", "task_id": task.Request.TaskID, "status": "stopped"}) != nil {
+						return
+					}
+					if writeTaskRosterRows(w, currentTasks) != nil {
+						return
+					}
 				}
 			} else if reqID, ok := controlRequestID(b, subtypeInitialize); ok {
 				// The daemon asked this child to initialize (#1689) — the request real
@@ -2726,6 +2761,10 @@ const (
 // deterministic without declaring a struct for a shape nothing else reads. Returns
 // the first marshal/write error.
 func writeBackgroundTaskRoster(w io.Writer, entries int) error {
+	return writeTaskRosterRows(w, backgroundTaskRows(entries))
+}
+
+func backgroundTaskRows(entries int) []map[string]any {
 	tasks := make([]map[string]any, 0, entries)
 	for i := range entries {
 		if i == 0 {
@@ -2742,6 +2781,10 @@ func writeBackgroundTaskRoster(w io.Writer, entries int) error {
 			"description": fmt.Sprintf("%s%d", rosterSyntheticDescPrefix, i),
 		})
 	}
+	return tasks
+}
+
+func writeTaskRosterRows(w io.Writer, tasks []map[string]any) error {
 	return writeJSONLine(w, map[string]any{
 		"type":       "system",
 		"subtype":    "background_tasks_changed",

@@ -1327,6 +1327,7 @@ func runSupervisor(args []string) error {
 		// tracker and the daemon context.
 		contextUsageResolve:           contextUsageResolve(convReg, pool),
 		mcpActuatorFor:                boundMCPChildActuator(convReg, pool),
+		backgroundTaskStopper:         boundBackgroundTaskStopper(convReg, pool),
 		retainedModelLists:            retainedModelLists(convReg, pool, modelVocabulary),
 		retainedSlashCommandLists:     retainedSlashCommandLists(convReg, pool),
 		retainedBackgroundTaskRosters: retainedBackgroundTaskRosters(convReg, pool),
