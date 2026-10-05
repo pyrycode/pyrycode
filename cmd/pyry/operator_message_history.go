@@ -21,13 +21,13 @@ import (
 // so without this the served log is claude's half of the conversation with the
 // questions missing.
 //
-// WHY THIS SEAM AND NOT THE DELIVERY ONE. msgqueue.DeliverFunc receives the
+// SAFE PROJECTION. msgqueue.DeliverFunc receives the
 // delivered payload bytes, which for an attachment-bearing message (#2038) are a
 // daemon-composed prompt naming an attachment's ON-HOST PATH.
 // docs/protocol-mobile.md § Error codes forbids putting the daemon's layout on
 // the wire, and this log is served to paired devices (#2116), so a producer at
-// newInboundDeliver would write the one value that must never leave the host.
-// OnDelivered carries a msgqueue.QueuedMessage instead — the projection that
+// writing those bytes would expose the one value that must never leave the host.
+// OnDelivered and DeliveryMessage carry msgqueue.QueuedMessage — the projection that
 // declares no delivery field — so the client-readable text is the only content
 // reachable here, structurally rather than by a filter below.
 //
@@ -37,12 +37,11 @@ import (
 // push hands the same payload bytes and stamp to the live push (#2699), after the
 // log append, so the wire and the log cannot differ. nil pushes nothing.
 //
-// A SEND-NOW MESSAGE COMMITS WHERE CLAUDE READ IT (#2730). Its payload is built
-// here, from msg.Text as for every message, but the stamp, the append and the push
-// are handed to place, which runs them when claude's echo of the write arrives, or
-// when the turn goes idle without one. An ordinary message commits here, at the
-// confirmed write, as before: claude reads it as the turn's opener, so the write
-// is already where it sits. nil place commits every message here.
+// Queue-backed stream Claude writes prepare this safe producer before the write
+// and commit it on the stream drain at the echo or idle fallback. Their later
+// OnDelivered only acknowledges placement. Unregistered messages, including
+// Codex/no-stream deliveries, still commit at confirmation. Legacy send-now
+// callers retain expect/attach placement.
 func newOperatorMessageHistory(store *history.Store, push func(operatorMessage), place *sendNowPlacement, logger *slog.Logger) msgqueue.DeliveredFunc {
 	return func(convID string, msg msgqueue.QueuedMessage) {
 		payload, err := json.Marshal(protocol.MessagePayload{
@@ -82,8 +81,8 @@ func newOperatorMessageHistory(store *history.Store, push func(operatorMessage),
 			return
 		}
 		commit := func() {
-			// Stamped at the commit — the confirmed write, or for a send-now message
-			// claude's echo of it — not from msg.TS: that is the ENQUEUE time, and a
+			// Stamped at confirmation or stream placement, never msg.TS (enqueue
+			// time). A
 			// message can sit in the backlog for a long time, so an enqueue stamp
 			// would place this entry behind ones carrying later timestamps and a
 			// served page would read out of order. UTC matches what both #2114
@@ -96,11 +95,7 @@ func newOperatorMessageHistory(store *history.Store, push func(operatorMessage),
 				push(operatorMessage{convID: convID, payload: payload, ts: ts})
 			}
 		}
-		if msg.SentNow {
-			place.attach(convID, msg.ID, commit)
-			return
-		}
-		commit()
+		place.attach(convID, msg.ID, commit)
 	}
 }
 

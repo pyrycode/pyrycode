@@ -1699,6 +1699,9 @@ func startRelayV2(
 		// transition below, the #1210 child-exit lane through the drain, and — for a
 		// write that fails after its mark — the delivery seam's own undo (see
 		// stream_turn_busy.go's feeds note).
+		if w.operatorMessages != nil {
+			w.streamSink.setOperatorPublisher(func(m operatorMessage) { w.operatorMessages.broadcast(ctx, mgr, emitter.ring, m) })
+		}
 		streamDrainCleanup = startStreamTurnDrainV2(ctx, w.streamSink, emitter, conversationFor, w.busy, logger)
 	}
 	// The terminal-mode arm that stood here is gone with #1348. It read claude's

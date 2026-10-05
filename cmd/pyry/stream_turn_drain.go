@@ -164,12 +164,15 @@ type streamTurnSink struct {
 	// signal.
 	crashLoop atomic.Pointer[func(sessionID string)]
 
-	// echo is the send-now placement every claude echo reaches (#2730), handed
+	// echo is the queued-message placement every claude echo reaches, handed
 	// over by the drain rather than by the parser so it runs after the drain has
 	// handled every event claude emitted before the echo. Late-bound and atomic
 	// for crashLoop's reasons; nil drops the echo, which the placement's idle
 	// fallback covers.
-	echo atomic.Pointer[func(sessionID string, ev turnevent.UserEcho)]
+	echo              atomic.Pointer[func(sessionID string, ev turnevent.UserEcho)]
+	placementIdle     atomic.Pointer[func(string)]
+	operatorPublisher atomic.Pointer[func(operatorMessage)]
+	placementCommands chan func()
 }
 
 // setCrashLoopNotify installs the producer crashLoopForTag's closures call.
@@ -220,6 +223,7 @@ func newStreamTurnSink(buf int, logger *slog.Logger) *streamTurnSink {
 	}
 	return &streamTurnSink{
 		ch:                    make(chan streamTurnEnvelope, buf),
+		placementCommands:     make(chan func(), operatorMessageQueueSize),
 		stopped:               make(map[string]confirmedStreamStop),
 		stoppedWake:           make(chan struct{}, 1),
 		droppableCap:          buf - min(streamTurnSinkCloseReserve, buf/2),
@@ -632,6 +636,7 @@ func startStreamTurnDrainV2(
 				// Retain exit-epoch protection; flush and close publication before
 				// releasing posts, only when the producing exit was accepted.
 				if conversationID, cleared := busy.clearForExit(env.sessionID, env.exitEpoch); cleared {
+					sink.observePlacementIdle(env.sessionID)
 					emitter.closeForConversation(ctx, conversationID)
 					busy.publishPostBoundary(conversationID, false)
 					if teardownEpoch != nil {
@@ -646,10 +651,13 @@ func startStreamTurnDrainV2(
 			// BEFORE the resolution below, and the ordering IS the contract: an
 			// event that resolves to no conversation is dropped there, and the
 			// tracker keeps its own resolution and its own unbound-session record.
+			if turnMarkFor(env.ev) == turnMarkClose {
+				sink.observePlacementIdle(env.sessionID)
+			}
 			busy.observe(env.sessionID, env.ev)
 
 			// claude's echo of a user message (#2730) builds no frame. It goes to
-			// the send-now placement HERE, on this goroutine and before the
+			// queued-message placement HERE, on this goroutine and before the
 			// conversation resolution: every event claude emitted ahead of it —
 			// the tool result the message followed — has already been handled,
 			// so the operator-message push it may commit lands after it, and a
@@ -695,6 +703,8 @@ func startStreamTurnDrainV2(
 				handleStops()
 			case <-sink.lifecycleCloseWake:
 				closePendingLifecycles()
+			case commit := <-sink.placementCommands:
+				commit()
 			case env := <-sink.ch:
 				if busy == nil || busy.posts == nil {
 					closePendingLifecycles()

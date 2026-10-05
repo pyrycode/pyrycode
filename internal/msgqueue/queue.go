@@ -688,7 +688,7 @@ func (q *Queue) SendNow(convID string, id uint64) bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := q.sendNow(ctx, convID, m.id, []byte(m.delivery)); err != nil {
+	if err := q.sendNow(deliveryContext(ctx, m, true), convID, m.id, []byte(m.delivery)); err != nil {
 		q.reinsert(convID, m)
 		return false
 	}
@@ -770,8 +770,7 @@ func (q *Queue) notifyGiveUp(convID, reason string) {
 // copy the drain already holds, so nothing is read from the FIFO off-lock.
 func (q *Queue) notifyDelivered(convID string, m queued, sentNow bool) {
 	if q.onDelivered != nil {
-		q.onDelivered(convID, QueuedMessage{ID: m.id, MessageID: m.messageID, Text: m.text, TS: m.ts, AttachmentIDs: m.attachmentIDs,
-			DeviceName: m.deviceName, ClientVersion: m.clientVersion, ClientSentAt: m.clientSentAt, SentNow: sentNow})
+		q.onDelivered(convID, m.message(sentNow))
 	}
 }
 
@@ -859,7 +858,7 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 		gate := q.commitGate(convID, head.id)
 		// head.delivery, never head.text: the delivered payload is the composed one
 		// where the two differ (#2038), and equals text for every other message.
-		err := q.deliver(turncommit.With(deliverCtx, gate), convID, []byte(head.delivery))
+		err := q.deliver(deliveryContext(turncommit.With(deliverCtx, gate), head, false), convID, []byte(head.delivery))
 		cancelDeliver()
 
 		q.mu.Lock()
