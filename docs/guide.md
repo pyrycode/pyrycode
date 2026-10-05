@@ -302,7 +302,16 @@ The JSON file is read only when both the flag and the environment variable are e
 }
 ```
 
-Keys other than `source` and `op_cli` are ignored. The file itself must be owned by the user running pyry and must not be group- or other-writable — it is refused otherwise, since it picks which owner-only file is read, or which executable is run, to produce the token handed to a claude child.
+The file can also carry an optional `label` — an operator-chosen name for this account, shown to paired clients so an operator juggling several instances can tell accounts apart at a glance:
+
+```json
+{
+  "source": "/home/op/.config/pyry/elli-claude-token",
+  "label": "Work account"
+}
+```
+
+`label` is read only when `claude-account.json` itself supplies the `source` — an instance pointed at its source by the flag or `$PYRY_CLAUDE_ACCOUNT_SOURCE` always reports an empty label, even if the file also sets one. It must be at most 64 bytes of valid UTF-8 with no control character; anything else is a startup error naming the file, never the label value (it could be a token pasted into the wrong field). Keys other than `source`, `op_cli` and `label` are ignored. The file itself must be owned by the user running pyry and must not be group- or other-writable — it is refused otherwise, since it picks which owner-only file is read, or which executable is run, to produce the token handed to a claude child. This ownership check, and the UTF-8 validity check above, apply to every key the file supplies: an invalid-UTF-8 `source` or `op_cli` is also a startup error now, rather than a value that silently turned into a mangled path that could only fail later at read time.
 
 There are two source kinds: an absolute path to a token file, or an `op://vault/item/field` reference ([#2825](https://github.com/pyrycode/pyrycode/issues/2825)) read through the 1Password CLI. A relative path, any other URI scheme, or anything else nonempty is refused and stops startup.
 
@@ -339,6 +348,8 @@ There is no WSL autodetection — the operator must already have WSL interop, th
 **Failure and recovery.** An unusable *source* — a bad flag/env value, an unreadable or malformed `claude-account.json`, or an invalid `op_cli` — is a startup error: the daemon refuses to start, the same posture as a bad `interactive_runner` or `debug_capture` setting. A *read* that fails once the daemon is running (the token file got deleted or permissions loosened; the 1Password CLI is missing, locked, denied, times out, or prints something unusable) only refuses that claude launch, with no fallback to a previously read token; the daemon, its control socket and the relay keep running. The next successful read clears the failure and launches resume normally. Neither case ever logs or echoes the token, the configured path, the 1Password reference, or the CLI's own stdout/stderr — failures name only where the setting came from (flag, env, or file) or report one of a small fixed set of reasons ("1Password CLI unavailable", "1Password read timed out", "1Password read failed", and similar).
 
 The read is bounded to ten seconds at startup, matching the per-attempt deadline the runner itself applies. For the token file that bound covers reads that complete, not reads that hang — an open or read against a wedged FUSE or network mount is not interrupted, so don't rely on this as a hard ceiling on startup time for a token file on unusual storage; a plain local file returns essentially immediately. For a 1Password read the bound is reliable either way: the CLI runs as a subprocess that is killed, along with anything it started, the moment the bound expires, so a hung or slow CLI never holds a claude launch past it.
+
+**What a paired client can see.** Any paired client can ask the daemon which account source it uses by sending `request_claude_account` over the relay; the daemon answers with the source's kind (`machine_login`, `file` or `1password`), its `label`, and whether its latest read is `ready` or `failed` with a short reason. This is read-only and always reflects a read the daemon already made on its own — asking never triggers one. It never exposes the token, the configured file path, or the 1Password reference. See [`protocol-mobile.md` § Claude account source](protocol-mobile.md#claude-account-source) for the wire format.
 
 **What stays shared.** This only changes which account token a claude child receives. Settings, plugins, skills, memory and everything else under `CLAUDE_CONFIG_DIR` stay shared across every instance; a Claude account source is not a sandboxed configuration directory.
 

@@ -1,9 +1,9 @@
 package protocol
 
-// Claude account source status frames are pure wire data. Handler wiring is
-// pending #2839. request_claude_account uses authenticated paired-client map
-// dispatch, with no conversation/session lookup and no interactive-capability
-// gate.
+// Claude account source status frames are pure wire data. They are wired in
+// handlers.RequestClaudeAccount (#2839). request_claude_account uses
+// authenticated paired-client map dispatch, with no conversation/session lookup
+// and no interactive-capability gate.
 //
 // Each request is answered by exactly one unicast claude_account correlated by
 // Envelope.InReplyTo, never broadcast. A client refreshes by asking again. A
