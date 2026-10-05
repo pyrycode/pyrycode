@@ -242,17 +242,9 @@ const (
 	inbandSpawnWait = 60 * time.Second
 	inbandPoll      = 100 * time.Millisecond
 
-	// One live turn's budget. A one-word reply lands in seconds; the headroom is
-	// for evidence run A, where the turn has to outlive a kill and a respawn.
+	// One live turn's budget. A one-word reply usually lands in seconds, but a
+	// gate run has measured ~57 s (#2843), and the turn is never written twice.
 	inbandTurnBudget = 3 * time.Minute
-
-	// How long a written turn may go unanswered before it is written again. The
-	// resend exists for evidence run A, not for the shipped green path: a tree
-	// that respawns instead of writing in-band can accept a write into the
-	// outgoing child's still-open stdin and lose the turn with it, and no
-	// ErrNoLiveChild is ever returned there. Comfortably longer than a healthy
-	// one-word turn (~3-8 s measured), so the green path never duplicates.
-	inbandResendAfter = 45 * time.Second
 
 	// A set_model response is one line from an already-idle child. Its absence is
 	// a failed mechanism, not a slow application turn, so the wait is fatal.
@@ -644,7 +636,7 @@ func TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel(t *testing
 			"are both needed", len(models), models)
 	}
 	// set_model creates no turn and therefore no intermediate init. Read first and
-	// last so a retried application turn cannot change the verdict.
+	// last so the verdict does not depend on how many init lines one turn emits.
 	first, last := models[0], models[len(models)-1]
 
 	if last == first {
@@ -959,25 +951,30 @@ type inbandResultCounter interface{ resultCount() int }
 // result line. rec is taken as inbandResultCounter rather than the concrete
 // recorder because the count is all it reads.
 //
-// It re-sends while no new result has landed. That is for evidence run A, not for
-// the shipped green path where the first attempt lands: a tree that respawns
-// instead of writing in-band leaves the stdin handle either briefly dead
-// (ErrNoLiveChild, retried immediately) or, worse, still pointing at the outgoing
-// child, where the write succeeds and the turn dies with the process. Retrying on
-// ErrNoLiveChild mirrors what msgqueue does in production. A duplicate send is
-// harmless to the verdict: the assertions read the FIRST and LAST init model, so
-// an extra turn costs tokens, not truth.
+// The guarantee: prompt is written exactly once, and the call returns on the
+// first result after that write. Every earlier call consumed its own result the
+// same way, so no earlier turn is still queued in claude, and the result that
+// releases this call is the result of the turn it wrote. A write refused with
+// ErrNoLiveChild reached no child, so it is retried until one is up, mirroring
+// msgqueue in production.
+//
+// CORRECTED 2026-10-05 (#2843): the helper used to write the prompt again when no
+// result had landed within 45 s, for evidence run A's respawning tree, and this
+// comment called a duplicate harmless. It was not. A turn that was slow rather
+// than lost ran twice, the next call returned on the duplicate's result, and the
+// model test read the pre-set_model model twice. A tree that loses a write into a
+// dying child now fails here, with no result line, rather than being carried.
 func inbandSendTurn(t *testing.T, sup sessions.Runner, rec inbandResultCounter, prompt string) {
 	t.Helper()
 	baseline := rec.resultCount()
 	deadline := time.Now().Add(inbandTurnBudget)
-	var lastSend time.Time
+	written := false
 	for {
-		if lastSend.IsZero() || time.Since(lastSend) >= inbandResendAfter {
+		if !written {
 			err := sup.WriteUserTurn(context.Background(), "", []byte(prompt))
 			switch {
 			case err == nil:
-				lastSend = time.Now()
+				written = true
 			case errors.Is(err, streamsup.ErrNoLiveChild):
 				// No child to write to yet — a spawn or a respawn is in flight.
 			default:
