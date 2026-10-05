@@ -63,3 +63,7 @@ Write table-driven hermetic scenarios for exact command/task correlation, unrela
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-05
+
+## Revisions
+
+- 2026-10-05: resolved the cause with the original predicate plus redacted diagnostics. In `/tmp/builder-2848/diagnosis-3.log`, exact background Bash input was observed at 16:58:49.347Z; the roster had an untruncated local_bash id but no description path match at 16:58:49.408Z; task start and FIFO arrival followed at 16:58:49.411Z. Setup failed at 17:00:42.024Z without a stop request. The preceding two runs matched the description and completed via roster omission. This is task-identification failure, not failed staging or evidence of a stop product bug. Preserve the latest bound roster because it can precede the task start; join the start's untruncated tool/task ids to the exact Bash input. The start alone still cannot pass. The open question is resolved; no upstream dependency or production change is needed.
