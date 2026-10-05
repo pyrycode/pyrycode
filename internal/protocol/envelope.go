@@ -152,4 +152,7 @@ var inboundAppTypeSet = map[string]bool{
 	// Daemon-wide host prompt verbs use authenticated paired-client map dispatch.
 	TypeRequestHostSystemPrompt: true,
 	TypeSetHostSystemPrompt:     true,
+
+	// Claude account source read verb; the handler is pending #2839.
+	TypeRequestClaudeAccount: true,
 }

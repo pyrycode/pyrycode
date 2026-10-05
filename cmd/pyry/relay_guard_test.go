@@ -382,6 +382,10 @@ var excludedTypes = map[string]string{
 
 	"TypeHostSystemPrompt": "reply",
 
+	// Claude account source status pair (#2838); the map handler lands in #2839.
+	"TypeRequestClaudeAccount": "pending handler (#2839)",
+	"TypeClaudeAccount":        "reply",
+
 	// outbound push / event — binary→phone, never dispatched inbound.
 	"TypeMessage":             "push",
 	"TypeTurnState":           "push",

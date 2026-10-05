@@ -1,0 +1,6 @@
+{
+  "id": 300,
+  "type": "request_claude_account",
+  "ts": "2026-10-05T12:00:00Z",
+  "payload": {}
+}
