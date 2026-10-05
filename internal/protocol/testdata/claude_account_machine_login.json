@@ -1,0 +1,12 @@
+{
+  "id": 301,
+  "type": "claude_account",
+  "ts": "2026-10-05T12:00:00Z",
+  "payload": {
+    "kind": "machine_login",
+    "label": "",
+    "state": "not_configured",
+    "reason": ""
+  },
+  "in_reply_to": 300
+}

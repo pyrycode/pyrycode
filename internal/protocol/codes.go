@@ -434,6 +434,12 @@ const (
 	TypeSetHostSystemPrompt     = "set_host_system_prompt"
 	TypeHostSystemPrompt        = "host_system_prompt"
 
+	// Claude account source status pair. The client → daemon read verb is
+	// map-dispatched; the daemon → client reply is outbound only. See the
+	// consumer contract in claude_account.go; the handler is pending #2839.
+	TypeRequestClaudeAccount = "request_claude_account"
+	TypeClaudeAccount        = "claude_account"
+
 	// Workspace.
 	// TypeCreateWorkspaceFolder is a phone → binary dispatch.Route write verb
 	// (like create_conversation / change_workspace): it creates a new folder on
