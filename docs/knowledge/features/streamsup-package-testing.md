@@ -6,6 +6,16 @@ Table-driven stdlib `testing`, `go test -race`. Fake-child harness dispatches fr
 
 Scenarios: `buildArgs` shape (pure, table — fixed prefix present, `-p` absent, `--session-id` vs `--resume`, id byte-identical across first-spawn/respawn, `base` order preserved and not mutated); held-open stdin (echo round-trip + `GOT_EOF` absent while alive); backoff ladder (lifted `supervisor.backoff_test.go` verbatim against the copied `backoffTimer`); restart-on-crash (≥2 spawns observed via `onSpawn`); resume-id-stable-across-restart (captured argv: spawn 1 has `--session-id <id>`, spawn 2 has `--resume <id>`, same id); teardown SIGTERM+grace (`Run` returns within `< killGrace`, "got SIGTERM" on stderr); teardown reaps descendant groups (`reapDescendantGroupsFn` swap, non-parallel); the `firstRun`-gate regression test (non-existent binary, every retry keeps `--session-id`).
 
+An actual child launch witness and the parent's stdin publication are separate
+observations: the child can write its environment/argv record before the parent
+has published its handle. Before commanding a child to crash, wait for both the
+complete child-written record (`awaitTokenWitness`) and non-nil `Runner.Stdin()`
+(`writeTokenChild`). `onSpawn` alone does not establish that the child ran its own
+code. Account admission tests also need a rejection after an admitted child,
+followed by recovery with a different token and the expected resume form; an
+initial-rejection-only test cannot catch reuse of a prior successful token.
+See [account token admission and the `firstRun` gate](streamsup-package-supervise-loop-run.md#optional-account-token-admission).
+
 For request/reply correlation that spans an `io.Writer` call, proving
 "registered before write" and "a failed write cannot emit" in separate tests
 does not prove their ordering under concurrency. A matching response can arrive
