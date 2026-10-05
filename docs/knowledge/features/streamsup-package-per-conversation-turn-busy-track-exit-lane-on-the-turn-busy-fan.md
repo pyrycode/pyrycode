@@ -1,69 +1,84 @@
 # Exit lane on the turn-busy fan-in (#1209)
 
-Split from #1207 (itself the last child of the #1203/#1198 crash-clear lineage), alongside open sibling #1210. #1206's `Config.OnChildExit` is explicitly *not* a drain barrier: `cmd.Wait` joins the stdout
-copier goroutine and `Parser.emit` calls its sink synchronously (`parser.go:231-235`), so by the time the
-callback fires, every event the dead child produced has been **pushed** onto `streamTurnSink.ch` — but not
-necessarily **drained** by the separate drain goroutine reading that 256-slot buffer. A clear delivered on
-any lane other than that channel could land before the drain processes buffered openers the crashed child
-already emitted, re-marking the conversation busy with the clear already spent and no further exit coming.
-This slice closes that ordering hole by putting the clear signal **on the fan-in itself**: FIFO with a
-single reader, so it cannot be overtaken.
+`streamsup.Config.OnChildExit` fires after `spawnAndWait` has joined stdout
+through `cmd.Wait`. `Parser.emit` calls its sink synchronously, so the callback
+follows every parsed event offered by that child. It is a producer boundary,
+not a publication barrier: the single drain may still have a queued tail or
+buffered delta to publish. Exits normally ride `streamTurnSink.ch` behind that
+tail. Delivering a close on an independent select lane could let it overtake
+openers and leave busy state reopened after the close was spent.
 
-That guarantee covers every mark fed **through** the fan-in — `observe`'s, and the exit-driven clear
-itself, because both run in envelope order on the single drain goroutine. It does not cover a mark placed
-directly on `turnBusyTracker` from outside the fan-in: `openForDelivery` (#1199) writes its mark from the
-msgqueue drain goroutine, with no envelope of its own, so an exit still queued behind a busy conversation's
-event burst could be drained *after* that mark and clear it. #1483 closes that gap with a second, narrower
-guarantee — an exit-lane epoch stamped on each exit envelope and checked against the mark before clearing
-— rather than widening this one; see [turn-busy-track-delivery-seam-consumer-mid-turn-hold.md](streamsup-package-per-conversation-turn-busy-track-delivery-seam-consumer-mid-turn-hold.md)
-for the guard itself.
+## Retained boundaries when the queue is full
 
-That guard also caught a fixture bug worth naming: the shared drain-tier test fixture built its tracker
-with no fan-in bound to it, so the four incumbent exit-lane regression tests would have kept passing
-whether the #1483 guard was armed or absent — a regression assertion that reads green either way. Wiring
-the fixture's tracker to its own sink is what makes those tests exercise the guard at all; an unwired
-fixture is not a smaller test, it is a vacuous one.
+The closing reserve narrows loss but cannot guarantee capacity: closing events
+can fill all 256 slots too. Losing both a child exit and confirmed runner stop
+would strand the eviction hold, accepted posts and successor turns. Since
+\#2811, `streamTurnSink.offer` retains a full-queue exit in `stopped`;
+`runnerStopped` always retains the confirmed boundary supplied by
+[`sessions.Config.OnRunnerStopped`](sessions-package-key-types-transition-observer.md#confirmed-runner-stop-configonrunnerstopped).
+Neither callback waits for queue capacity.
 
-`streamTurnEnvelope` gains an explicit `exit bool` field — never a nil `turnevent.Event` used as a
-sentinel, since `eventKind(nil)` returns `"unknown"` rather than failing (`interactive_turn_v2.go:419-421`),
-which would make a missed nil-check silent rather than loud, and would make the exit signal a value of the
-same type `Handle` accepts, retiring "Handle cannot receive a non-event" as a type-level fact.
-`streamTurnSink.exitFor(sessionID string) func()` mirrors `sinkFor`'s non-blocking `select`/`default` send
-— same drop-newest-on-full behaviour — but is a deliberately separate closure with its own diagnostic: the
-drop is logged at **`Warn`** (`sinkFor`'s is `Debug`) with exactly `event: "stream_turn.exit_sink_full"` and
-`session_id` — no `kind`, mirroring the existing content-free `clear_unresolved` shape. The asymmetry is
-the point: a dropped ordinary event is a lost delta, invisible at the default `LevelInfo` on purpose; a
-dropped exit is a conversation that (once #1210 wires a producer) stays busy forever, which is degraded
-operation and must be visible by default.
+A short leaf `offerMu` serializes successful enqueues and stop retention.
+`queued` advances only for a successfully enqueued envelope; each retained stop
+records the last such position in `confirmedStreamStop.after`. The sole drain
+tracks processed positions, applies ready stops after those predecessors have
+been published, and checks them before handling later queued output. Queue
+emptiness cannot prove that barrier, and receiving a wake token cannot replace
+it. `stoppedWake` only coalesces wakeups; the map owns the notifications.
 
-The drain's `sink.ch` arm handles `env.exit` as its **first** statement — ahead of `observe`, the
-active-session gate, and `emitter.Handle`. Each position is load-bearing: before `observe`, because an
-exit carries no event to route through the event path; before the gate, for the same reason the tracker
-itself is fed before it — the gate would otherwise drop a background conversation's exit, and background
-is the common case for a crash; before `Handle`, which (combined with the explicit field) keeps `Handle`
-structurally unable to receive a non-event. The arm originally called `clearForSession` directly; since
-\#1483 it calls `clearForExit(env.sessionID, env.exitEpoch)`, the exit-lane-epoch-guarded sibling described
-above. Both still resolve the session and inherit the nil-receiver no-op and the fail-closed
-`clear_unresolved` skip on an unresolvable session from the same shared core — no second session→conversation
-resolution, no second copy of the membership-mutation protocol — which is why this slice's own drop
-diagnostic withholds the conversation id (the sink closure holds no resolver and structurally cannot name
-one). `clearForSession` itself (`stream_turn_busy.go`, extended in #1202) survives with its unconditional
-semantics for its one remaining caller, the pool teardown feed — see the boundary note above.
+Retention keeps the newest exit stamp per daemon-owned session identity.
+Repeated stops move the boundary toward the later producer join; an older child
+exit arriving at the lock later cannot overwrite it. State growth follows
+session identities, not child-authored event volume. No tracker calls, history
+I/O or broadcaster I/O run under the sink lock. Full-queue child exits retain
+the existing content-free `stream_turn.exit_sink_full` Warn with `session_id`
+only. This retention applies to exits/stops, **not** `TurnEnd`, which remains
+subject to closing-class drops after the reserve is exhausted. See
+[class-aware capacity](streamsup-package-per-conversation-turn-busy-track-class-aware-fan-in-reserve.md).
 
-**No new goroutine.** The clear runs inline on the drain goroutine — the same single reader/writer
-`observe` already uses — so this feed is serialised against the event feed by construction rather than by
-the tracker's mutex. A deferred or goroutine-dispatched clear would satisfy the positive ordering test
-(`[opener, exit]` → idle) but fail the negative one (`[exit, opener]` → busy): the test that catches it
-barriers on a *third*, later envelope rather than on the absence of an effect, since with the exit arriving
-first a goroutine-dispatched clear is a harmless no-op regardless of scheduling (see
-[codebase/1209.md](../codebase/1209.md) for the mutation-testing writeup).
+## Exit epochs protect marks outside the fan-in
 
-**Fired in production since #1210.** `newStreamRunnerFactory` assigns
-`streamsup.Config.OnChildExit = sink.exitFor(cfg.SessionID)` one line below the `sinkFor` install
-(`streamsup_runner.go`), bound from the same `cfg.SessionID` — which is what keeps the two lanes' session
-tags identical by construction. A conversation whose claude child dies mid-turn now returns to idle: no
-`TurnEnd` for the abandoned turn and no pool transition are involved, the two feeds that are structurally
-silent on that path. The tracker itself stays unread by any delivery path and no v2 frame changed — the
-lane closes the crash-clear gap, it does not open a consumer. See [codebase/1210.md](../codebase/1210.md)
-for the wiring and its structural (no-runtime-check) ordering argument; [codebase/1209.md](../codebase/1209.md)
-for the lane itself.
+FIFO positions cover marks placed by the drain, but `openForDelivery` places a
+busy mark directly from the inbound/reset delivery goroutine. An old exit
+already queued or retained could be consumed after that newer mark.
+`exitForTag` stamps exits before offering them; `runnerStopped` stamps confirmed
+stops too. `clearForExit` rejects a boundary whose epoch is at or before the
+mark's captured exit-lane position. A retained stale stop therefore cannot
+clear a successor any more than a queued stale exit can. See
+[delivery-seam epoch protection](streamsup-package-per-conversation-turn-busy-track-delivery-seam-consumer-mid-turn-hold.md).
+
+A post-bound tracker additionally rejects exits at or before a pending eviction
+hold's captured epoch, even if completion cleared busy membership. An accepted
+boundary flushes and closes that conversation's emitter lifecycle before
+releasing post activity; compare-and-delete retires only the hold it accepted.
+See [confirmed teardown](streamsup-package-per-conversation-turn-busy-track-session-teardown-clear.md).
+
+## Routing and single-writer discipline
+
+`streamTurnEnvelope.exit` explicitly discriminates a close from an event;
+`ev` is unset on exits. A nil event sentinel would be silently classified as
+`unknown` by `eventKind` and would make a non-event a value accepted by `Handle`.
+The drain handles exits before event observation or emission, using the same
+session-to-conversation resolver as `clearForSession`. Unresolvable boundaries
+change nothing. Background conversations receive their own closes regardless
+of the active cursor.
+
+`newStreamRunnerFactory` binds `OnChildExit` through `exitForTag` and the parser
+through `sinkForTag`, both reading the same live `streamSessionTag`. Rotation
+cannot leave their tags on different sessions. `runSupervisor` separately binds
+confirmed `Runner.Run` return to `runnerStopped`. All exit handling and emitter
+calls remain inline on the one drain goroutine; no asynchronous clear can
+reorder closure with later openers.
+
+## Tests that exercise the ordering
+
+Bind a drain fixture's tracker to **its own** sink's exit epoch source. Earlier
+exit tests without that binding stayed green with or without the stale-exit
+guard, so they did not prove it was armed. For a negative ordering assertion,
+barrier on a later envelope rather than the absence of an effect.
+
+`TestChannelDelivery_ConfirmedStopSurvivesSaturation` exhausts closing capacity,
+checks callback return and eventual post release, and rejects stale stops behind
+newer activity. `TestChannelDelivery_RetainedStopBeforeLaterProducerOutput`
+proves a retained stop follows queued predecessors but precedes later output;
+merely adding another select lane would fail that ordering.

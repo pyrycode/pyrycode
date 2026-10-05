@@ -130,6 +130,16 @@ recovered pending history delivery precedes a new user turn in that conversation
 Claude carry is recorded separately on acceptance and is never consumed by client
 delivery or re-added by recovery.
 
+The consumer mutex also gates turn reservation and published activity. Busy
+acceptance persists promptly, while posts wait for published real completion or
+an accepted actual exit/confirmed runner stop that flushes the preceding tail
+and closes lifecycle. Pending posts/retries precede successor reservations;
+in-flight child writes hold reservations while running outside the mutex.
+Early eviction requests keep holding through confirmed producer stop. The
+single stream drain applies retained stops after their successful enqueue
+barriers, including when its queue is full. With no relay URL, the same drain
+publishes into history through `historyOnlyBroadcaster`.
+
 The control socket owns this writer boundary: `runSupervisor` binds it before
 pending-state load and retains it until post callbacks are sealed/joined and the
 consumer stops. Releasing it on daemon cancellation before joining writers would

@@ -117,3 +117,23 @@ The general form: this setter shape is race-free only when every reader
 goroutine is a descendant of the *same* `Run` the install precedes — verify
 that per field, since two setters that look identical can differ in exactly
 this way.
+
+## Confirmed runner stop: `Config.OnRunnerStopped`
+
+`sessions.Config.OnRunnerStopped func(SessionID)` is optional and fixed at
+`Pool.New`. `Session.runActive` invokes it after **each** `Runner.Run` returns,
+without pool/session locks, before sending the run result that permits eviction
+completion or reactivation. It must not block. This callback confirms producer
+shutdown; `ReasonEviction` only announces the earlier request, before
+cancellation/join. An empty event queue at that request cannot prove shutdown:
+the old producer can still append a late tail. A real completion can also arrive
+while eviction remains pending, so completion alone cannot retire that hold.
+
+`runSupervisor` routes the callback to `streamTurnSink.runnerStopped`, which
+retains a stamped boundary after all successfully queued preceding output.
+This also covers a child exit already offered before the eviction request;
+waiting only for a newer child exit would strand the hold when no child remains
+to produce one. The callback returns without waiting for queue capacity,
+history or broadcaster I/O; the stream drain applies the publication close.
+See [confirmed teardown publication](streamsup-package-per-conversation-turn-busy-track-session-teardown-clear.md)
+and [retained exit transport](streamsup-package-per-conversation-turn-busy-track-exit-lane-on-the-turn-busy-fan.md).

@@ -26,10 +26,21 @@ func (t *turnBusyTracker) waitIdleForDelivery(ctx context.Context, conversationI
 func (t *turnBusyTracker) openForDelivery(conversationID string) (undo func())
 ```
 
-`newInboundDeliver` (`cmd/pyry/main.go`, the `msgqueue.Config.Deliver` seam) calls both, in this exact
-order, both between `Activate` and `WriteUserTurn`: `waitIdleForDelivery` first (bounded by the new
-`streamTurnHoldTimeout`, 15 minutes), then `openForDelivery`, whose returned `undo` runs only if the
-subsequent write fails. Two placement facts make this a **guarantee**, not a better race:
+`newInboundDeliver` (`cmd/pyry/main.go`, the `msgqueue.Config.Deliver` seam) waits
+between `Activate` and `WriteUserTurn`: `waitIdleForDelivery` first (bounded by
+`streamTurnHoldTimeout`, 15 minutes), then `beginDelivery`, whose returned `undo`
+runs only if the subsequent write fails. With a post-bound tracker,
+`beginDelivery` atomically checks pending posts, published activity, eviction
+holds, busy membership and in-flight writes, then calls `openForDelivery` and
+reserves the write under the consumer gate. Its finished callback releases the
+reservation on every write-return path; waits and child writes hold no consumer
+mutex. Unbound trackers retain the direct `openForDelivery` behavior.
+Reset wrap-ups use the same reservation. A snapshot before inbound delivery
+cannot prevent acceptance racing a later write, and tracker-idle cannot prove
+completion publication. Pending retries and startup recovery therefore retain
+precedence over successor reservations even after a recorded history prefix.
+See [durable channel posts](control-plane-channel-post-live-delivery.md).
+Two placement facts preserve ordinary turn pacing:
 
 - **Before the write, therefore before `WriteTurn`'s `turncommit` claim.** `msgqueue.commitGate`'s own
   doc says the seam calls it "after the idle-gate wait and before the write" (`queue.go:419-425`) —
