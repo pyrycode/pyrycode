@@ -749,6 +749,9 @@ func TestTurnMarkFor_TotalOverEveryVariant(t *testing.T) {
 		// turn the carry already holds busy. Droppable, since the placement's idle
 		// fallback covers a lost one.
 		{turnevent.UserEcho{}, turnMarkNone},
+		// #2829. Arrives after result, between turns, so opening a mark on it would
+		// wedge the conversation with no TurnEnd left to clear it.
+		{turnevent.PromptSuggestion{Text: "Run the tests next"}, turnMarkNone},
 		{turnevent.NewPermissionRequest("req-1", "tu-1", "Proceed?", nil), turnMarkNone},
 		// #2232. Neither an opener nor a closer, and its argument is the
 		// PermissionRequest row's rather than a fresh one: a denial is a verdict on a

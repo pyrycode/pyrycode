@@ -360,3 +360,47 @@ none/droppable default arm), so it is never an opener or a closer, and
 only installed observer, and it matches an echo to a pending send-now write
 by digest equality alone; an ordinary message's opener echo matches no
 pending entry and is silently dropped.
+
+## Claude's native prompt suggestion becomes one neutral event (#2829)
+
+Claude can emit a top-level `prompt_suggestion` line after a turn's `result`
+when prompt suggestions are enabled — the SDK's `SDKPromptSuggestionMessage`,
+carrying `suggestion`, `uuid` and `session_id`. `consumeLine`'s `prompt_suggestion`
+arm consumes every such line, valid or not, by matching on the top-level type
+alone, so `emitUnrecognized` is structurally unreachable for it; nested
+suggestion-shaped content inside an `assistant` block or a `stream_event` never
+reaches this arm, since dispatch never looks past the outer `type`. The arm
+reads and writes no parser state — no `clearAPIRetry`, no accumulator, no turn
+boundary — because a suggestion arrives between turns and must neither close a
+result already closed nor clear anything the next turn starts from.
+
+`decodePromptSuggestion` is the pure decode gate behind `emitPromptSuggestion`.
+It accepts only a JSON string `suggestion` field whose source bytes are valid
+UTF-8 with no unpaired surrogate escape — both checked **before** string
+decoding, because `encoding/json` silently turns an invalid byte or an unpaired
+surrogate escape alike into U+FFFD, and a replacement character Claude never
+sent must not be accepted as its text. A raw value longer than
+`maxPromptSuggestionRaw` (the widest JSON spelling of 1024 decoded bytes: six
+bytes per `\u00XX` escape plus the two quotes) is rejected before any Go string
+is built from it, so an oversized value never costs a string allocation. After
+decoding, the text must be non-blank (`unicode.IsSpace`-trimmed, not merely
+ASCII-trimmed, so U+3000 and other Unicode whitespace reject the same as a
+space), hold none of CR, LF, NEL (U+0085), LINE SEPARATOR (U+2028) or PARAGRAPH
+SEPARATOR (U+2029), and be at most 1024 UTF-8 bytes. Accepted text is emitted
+verbatim as `turnevent.PromptSuggestion{Text: text}` — never trimmed, truncated
+or otherwise rewritten; missing, null, non-string, empty, whitespace-only,
+over-length, invalid-UTF-8 and line-break-bearing values alike produce no event
+and no `Unrecognized`. Every reject is silent on purpose: nothing about the
+line is logged on any path, including the `json` decode error, which is not
+logged because `encoding/json` quotes the offending input into its text.
+
+`turnevent.PromptSuggestion` carries only `Text`. Claude's `uuid` and
+`session_id` on the line are message identifiers, not turn identifiers, and
+neither establishes daemon turn attribution, so neither is decoded or carried;
+the producing session is already tagged by `streamTurnSink.sinkForTag`. The
+type's own doc marks `Text` as claude-authored and untrusted: the decode gate
+checks shape, not content, so control characters and bidi marks other than the
+rejected line breaks pass through unchanged. This slice only recognises the
+line and publishes its text — it carries no spawn flag to request prompt
+suggestions from Claude and publishes the event to no client; activation and
+wire/daemon consumption are #2831.
