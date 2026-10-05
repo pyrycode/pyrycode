@@ -1258,6 +1258,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		shutdown:         cancelCause,
 		convReg:          convReg,
 		hostSystemPrompt: pool,
+		claudeAccount:    account,
 		workspaceBase:    workspaceBase,
 		readFolders:      readFolders,
 		creator:          sessionMinter{pool, modelVocabulary},

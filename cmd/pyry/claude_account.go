@@ -15,7 +15,10 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
+	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
 )
 
@@ -41,6 +44,9 @@ const (
 // shorter; anything larger is refused rather than read in full.
 const maxAccountTokenBytes = 4096
 
+// maxAccountLabelBytes caps the operator label paired clients are shown.
+const maxAccountLabelBytes = 64
+
 // claudeAccountStartupRead bounds the one read runSupervisor makes before any
 // session exists, matching the per-attempt deadline streamsup applies.
 const claudeAccountStartupRead = 10 * time.Second
@@ -57,6 +63,7 @@ const (
 // carries the token or the source path, so it is safe to log or surface.
 type claudeAccountStatus struct {
 	Kind   string
+	Label  string
 	State  string
 	Reason string
 }
@@ -76,12 +83,18 @@ func (e *accountReadError) Error() string { return e.reason }
 // token. The token itself is never held here.
 type claudeAccount struct {
 	kind   string
+	label  string
 	reader streamsup.AccountTokenProvider
 	logger *slog.Logger
 
 	mu     sync.Mutex
 	state  string
 	reason string
+	// started numbers each read as it begins; recorded is the number of the
+	// read whose outcome state and reason hold. Reads overlap, so an outcome
+	// is recorded only when no later-started read has recorded one already.
+	started  uint64
+	recorded uint64
 }
 
 // newClaudeAccount selects this instance's source and builds its accessor. An
@@ -89,13 +102,24 @@ type claudeAccount struct {
 // read, or an unusable claude-account.json, is a startup error naming only
 // where the setting came from: the value could be a token pasted by mistake.
 // The 1Password CLI setting is resolved only for an op:// source, so a file
-// source never depends on it.
+// source never depends on it. The label is read only when claude-account.json
+// supplies the source, so it always describes the source it sits beside.
 func newClaudeAccount(flagValue, envValue, opCLIFlag, opCLIEnv, instanceDir string, logger *slog.Logger) (*claudeAccount, error) {
 	source, origin, err := resolveClaudeAccountSource(flagValue, envValue, instanceDir)
 	if err != nil {
 		return nil, err
 	}
 	a := &claudeAccount{logger: logger, state: claudeAccountNotConfigured}
+	if flagValue == "" && envValue == "" && source != "" {
+		label, labelOrigin, err := readClaudeAccountField(instanceDir, "label")
+		if err != nil {
+			return nil, err
+		}
+		if !validAccountLabel(label) {
+			return nil, fmt.Errorf("claude account label from %s: must be at most %d bytes of printable UTF-8", labelOrigin, maxAccountLabelBytes)
+		}
+		a.label = label
+	}
 	switch {
 	case source == "":
 		return a, nil
@@ -195,7 +219,9 @@ func readClaudeAccountField(instanceDir, key string) (value, origin string, err 
 	if !ok {
 		return "", "", nil
 	}
-	if err := json.Unmarshal(raw, &value); err != nil || string(raw) == "null" {
+	// Unmarshal would replace invalid UTF-8 with U+FFFD, so it is refused on
+	// the raw bytes first.
+	if err := json.Unmarshal(raw, &value); err != nil || string(raw) == "null" || !utf8.Valid(raw) {
 		return "", "", fmt.Errorf("claude account source from %s: %q must be a string", origin, key)
 	}
 	return value, origin, nil
@@ -213,6 +239,20 @@ func validOpCLI(cli string) bool {
 	for _, r := range cli {
 		ok := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._+-", r)
 		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// validAccountLabel admits up to maxAccountLabelBytes of valid UTF-8 with no
+// control character, C1 included, since clients render it.
+func validAccountLabel(label string) bool {
+	if len(label) > maxAccountLabelBytes || !utf8.ValidString(label) {
+		return false
+	}
+	for _, r := range label {
+		if unicode.IsControl(r) {
 			return false
 		}
 	}
@@ -413,9 +453,15 @@ func (a *claudeAccount) prime(ctx context.Context) {
 	_, _, _ = a.read(ctx)
 }
 
-// read is the provider: it reads the source afresh and records the outcome.
-// The mutex covers only the state, never the read itself.
+// read is the provider: it reads the source afresh and records the outcome
+// unless a read that started after it has recorded one first. The mutex covers
+// only the state and the read numbers, never the read itself. The caller always
+// gets its own read's result.
 func (a *claudeAccount) read(ctx context.Context) (string, streamsup.AccountTokenFailure, error) {
+	a.mu.Lock()
+	a.started++
+	seq := a.started
+	a.mu.Unlock()
 	token, failure, err := a.reader(ctx)
 	if err != nil || failure != "" {
 		reason := "token read failed"
@@ -429,14 +475,21 @@ func (a *claudeAccount) read(ctx context.Context) (string, streamsup.AccountToke
 			reason = "token read timed out"
 		}
 		a.mu.Lock()
-		a.state, a.reason = claudeAccountFailed, reason
+		if seq > a.recorded {
+			a.recorded = seq
+			a.state, a.reason = claudeAccountFailed, reason
+		}
 		a.mu.Unlock()
 		a.logger.Warn("claude account: token read failed; claude launch refused", "kind", a.kind, "reason", reason)
 		return "", failure, err
 	}
 	a.mu.Lock()
-	recovered := a.state == claudeAccountFailed
-	a.state, a.reason = claudeAccountReady, ""
+	recovered := false
+	if seq > a.recorded {
+		a.recorded = seq
+		recovered = a.state == claudeAccountFailed
+		a.state, a.reason = claudeAccountReady, ""
+	}
 	a.mu.Unlock()
 	if recovered {
 		a.logger.Info("claude account: token read recovered", "kind", a.kind)
@@ -448,5 +501,23 @@ func (a *claudeAccount) read(ctx context.Context) (string, streamsup.AccountToke
 func (a *claudeAccount) status() claudeAccountStatus {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return claudeAccountStatus{Kind: a.kind, State: a.state, Reason: a.reason}
+	return claudeAccountStatus{Kind: a.kind, Label: a.label, State: a.state, Reason: a.reason}
+}
+
+// ClaudeAccount is the relay's view of status: the accessor's kind and state
+// mapped to the wire vocabulary. It carries no token, path or reference.
+func (a *claudeAccount) ClaudeAccount() protocol.ClaudeAccountPayload {
+	return claudeAccountPayload(a.status())
+}
+
+func claudeAccountPayload(s claudeAccountStatus) protocol.ClaudeAccountPayload {
+	kind := s.Kind
+	if kind == "" {
+		kind = protocol.ClaudeAccountKindMachineLogin
+	}
+	state := s.State
+	if state == claudeAccountNotConfigured {
+		state = protocol.ClaudeAccountStateNotConfigured
+	}
+	return protocol.ClaudeAccountPayload{Kind: kind, Label: s.Label, State: state, Reason: s.Reason}
 }
