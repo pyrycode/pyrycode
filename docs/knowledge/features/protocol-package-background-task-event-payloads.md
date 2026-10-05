@@ -12,9 +12,16 @@ different chat. An empty task id with a nonempty conversation id produces the
 fixed `CodeStopBackgroundTaskRefused` before any membership lookup, even for an
 unknown conversation. Its reflected id is
 [correlation only](protocol-package-handshake-control-payloads.md), not evidence
-that a task or conversation exists. Production leaves `BackgroundTaskStopper`
-nil, so all requests are consumed before typed decode; no stop capability is
-advertised until #2792 wires actuation. `TestStopBackgroundTaskPayload_RoundTrip`
+that a task or conversation exists. Production installs `BackgroundTaskStopper`
+against the named session's live Claude child (#2796); negotiated `interactive`
+remains required. A roster row marked `task_id` in `truncated_fields` is
+ineligible: a displayed prefix is not the child task's lookup key. An unmarked
+id at the length cap remains eligible, so length cannot substitute for truncation
+provenance. Acceptance has no reply and does not establish completion; the live
+stop proof observed a roster omitting the held task, which clients must accept
+even without a `status: stopped` update. See the
+[completion staging](e2e-realclaude-roster-after-finish-capture-test-go.md#stop-completion-needs-a-held-task-and-all-terminal-signals).
+`TestStopBackgroundTaskPayload_RoundTrip`
 remarshals the decoded payload against the committed `stop_background_task.json`
 fixture with deliberately distinct conversation/task ids, so swapping the two
 fields cannot stay green.
