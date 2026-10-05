@@ -365,9 +365,7 @@ func TestAccountTokenReadDeadline(t *testing.T) {
 		t.Fatal("provider never entered")
 	}
 	// Wait through the real production deadline; no mutable clock/timeout seam.
-	select {
-	case <-time.After(10200 * time.Millisecond):
-	}
+	time.Sleep(10200 * time.Millisecond)
 	assertTokenWitness(t, awaitTokenWitness(t, out, 0), "after-timeout", testSessionID, "--session-id")
 	rows := rec.withMessage("claude exited")
 	if len(rows) != 1 || rows[0].attrs["err"] != "streamsup: account token: timeout" {
