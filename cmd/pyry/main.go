@@ -976,8 +976,8 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		}
 		// A whole runner can stop after its last child exit was already offered.
 		// Stamp a confirmed stop before the pool permits reactivation, so an early
-		// eviction hold always has a later producer boundary on the FIFO exit lane.
-		sessionRunnerStopped = func(id sessions.SessionID) { streamSink.exitFor(string(id))() }
+		// eviction hold always has a retained boundary after its queued producer tail.
+		sessionRunnerStopped = func(id sessions.SessionID) { streamSink.runnerStopped(string(id)) }
 	}
 	pool, err := sessions.New(sessions.Config{
 		Logger:                    logger,

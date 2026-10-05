@@ -431,3 +431,118 @@ func TestChannelDelivery_TeardownCompletionGatesSuccessorUntilExit(t *testing.T)
 		t.Fatal("preceding teardown cleared successor")
 	}
 }
+
+func TestChannelDelivery_ConfirmedStopSurvivesSaturation(t *testing.T) {
+	for _, stale := range []bool{false, true} {
+		t.Run(map[bool]string{false: "teardown", true: "stale stop"}[stale], func(t *testing.T) {
+			d, busy, h, sink := testBoundDelivery(t)
+			testOpenPostTurn(t, busy)
+			if !stale {
+				busy.holdForTeardown("sess-a")
+			}
+			sink.sinkFor("sess-a")(turnevent.TextChunk{MessageID: "reply", Text: "preceding tail"})
+			for len(sink.ch) < cap(sink.ch) {
+				sink.sinkFor("unbound-session")(snEnd)
+			}
+			sink.exitFor("sess-a")() // actual child exit has no space
+			stopped := make(chan struct{})
+			go func() {
+				sink.runnerStopped("sess-a") // composition root's confirmed runner stop
+				close(stopped)
+			}()
+			select {
+			case <-stopped:
+			case <-time.After(time.Second):
+				t.Fatal("confirmed stop blocked the pool callback")
+			}
+			if stale {
+				busy.setBusy(testConvID, false, toolCallDelta{})
+				busy.openForDelivery(testConvID) // newer reservation captures the stop epoch
+			}
+			post := testAccept(t, d, testConvID, "scheduled post")
+			d.drain()
+			if len(testDeltas(t, h, testConvID)) != 0 {
+				t.Fatal("post bypassed the queued producer tail")
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			e := newInteractiveTurnEmitterV2(&stubCursor{}, historyOnlyBroadcaster{}, discardLogger())
+			e.hist = h
+			barrier := make(chan struct{}, 1)
+			sink.setEchoObserver(func(string, turnevent.UserEcho) { barrier <- struct{}{} })
+			cleanup := startStreamTurnDrainV2(ctx, sink, e, busy.resolve, busy, discardLogger())
+			defer func() { cancel(); cleanup() }()
+			select {
+			case sink.ch <- streamTurnEnvelope{sessionID: "sess-a", ev: turnevent.UserEcho{}}:
+			case <-time.After(3 * time.Second):
+				t.Fatal("stream drain did not resume")
+			}
+			select {
+			case <-barrier:
+			case <-time.After(3 * time.Second):
+				t.Fatal("stream backlog was not consumed")
+			}
+			if stale {
+				d.drain()
+				if len(d.posts) != 1 || !busy.Busy(testConvID) || d.posts[0].delivered {
+					t.Fatal("retained stale stop released the successor")
+				}
+				sink.exitFor("sess-a")()
+			}
+			deadline := time.After(3 * time.Second)
+			tick := time.NewTicker(time.Millisecond)
+			defer tick.Stop()
+			for {
+				d.drain()
+				if len(d.posts) == 0 {
+					break
+				}
+				select {
+				case <-tick.C:
+				case <-deadline:
+					t.Fatal("confirmed stopped producer stranded accepted post")
+				}
+			}
+			got := testDeltas(t, h, testConvID)
+			if len(got) != 2 || got[0].Text != "preceding tail" || got[1].TurnID != post || busy.Busy(testConvID) {
+				t.Fatalf("confirmed stop reordered tail/post or failed to close: %+v", got)
+			}
+		})
+	}
+}
+
+func TestChannelDelivery_RetainedStopBeforeLaterProducerOutput(t *testing.T) {
+	d, busy, h, sink := testBoundDelivery(t)
+	testOpenPostTurn(t, busy)
+	sink.sinkFor("sess-a")(turnevent.TextChunk{MessageID: "old", Text: "old tail"})
+	sink.runnerStopped("sess-a")
+	// A new runner can enqueue output before the retained boundary is consumed.
+	sink.sinkFor("sess-a")(turnevent.TextChunk{MessageID: "new", Text: "new reply"})
+	post := testAccept(t, d, testConvID, "post")
+	b := newChanBcast("conn")
+	e := newInteractiveTurnEmitterV2(&stubCursor{}, b, discardLogger())
+	e.hist = h
+	ctx, cancel := context.WithCancel(context.Background())
+	cleanup := startStreamTurnDrainV2(ctx, sink, e, busy.resolve, busy, discardLogger())
+	defer func() { cancel(); cleanup() }()
+	frames := collectEnvs(t, b.pushed, 4)
+	if frames[1].Type != protocol.TypeAssistantDelta || frames[2].Type != protocol.TypeTurnState || frames[3].Type != protocol.TypeTurnState {
+		t.Fatal("retained stop did not separate old tail and later output")
+	}
+	var closed, opened protocol.TurnStatePayload
+	_ = json.Unmarshal(frames[2].Payload, &closed)
+	_ = json.Unmarshal(frames[3].Payload, &opened)
+	if closed.State != "idle" || opened.State != "responding" {
+		t.Fatal("retained stop closed later producer output")
+	}
+	d.drain()
+	if !busy.Busy(testConvID) || len(d.posts) != 1 {
+		t.Fatal("post entered the later producer turn")
+	}
+	sink.exitFor("sess-a")()
+	collectEnvs(t, b.pushed, 2)
+	d.drain()
+	got := testDeltas(t, h, testConvID)
+	if len(got) != 3 || got[0].Text != "old tail" || got[1].Text != "new reply" || got[2].TurnID != post {
+		t.Fatalf("retained boundary reordered producer output and post: %+v", got)
+	}
+}
