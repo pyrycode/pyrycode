@@ -66,3 +66,11 @@ Pending documentation stage: update `docs/knowledge/features/v2-session-manager-
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-04
+
+## Revisions
+
+### 2026-10-05 — verifier gate comparison
+
+The verifier returned PR #2805 after `TestRelayV2_StreamNewSessionRotatesAndRestartsFresh` timed out at M1. Validation now includes the full fake-daemon e2e tier on this branch and the verifier's exact merge base `78747cb74bce7044e7601f91e33d978abc044160`, plus matched repeated runs of the named test. The unchanged merge base reproduces the same M1 timeout, so a single green baseline run cannot establish this intermittent failure as a regression. Open #2614 already tracks the test's discarded pre-ack frames; that mechanism remains a hypothesis for these failures, not a proven diagnosis. No resolution, dispatch or dismissal contract changes are needed here.
+
+Clarify the touched handler and fixture comments: a successfully decoded batch identifier remains untrusted correlation metadata, and answer tokens stay absent from both logging records even though the protocol permits logging them elsewhere. The documentation handoff remains pending as specified above.

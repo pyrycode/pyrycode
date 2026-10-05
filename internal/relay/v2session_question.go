@@ -74,10 +74,10 @@ import (
 // QuestionAnswerPayload's doc block states the rule and this is the handler it was
 // written for. The reject record therefore carries no batch id either: the decode
 // is what failed, so a partially-populated id would attribute refused bytes to a
-// batch. On the paths where it IS trustworthy, question_batch_id is logged — that
-// same doc block marks it and answer_token explicitly safe to log, so this handler
-// neither invents a redaction rule nor assumes one exists. No answer value and no
-// raw payload byte appears on any path.
+// batch. After a successful decode, question_batch_id is an untrusted correlation
+// value escaped by structured slog fields, never authorization evidence. Receipt
+// and terminal records contain no answer token, question text, option label,
+// answer value, raw payload or decoder-error text.
 func (m *V2SessionManager) handleQuestionAnswer(s *V2Session, env protocol.Envelope) {
 	logger := m.cfg.Logger.With("frame_kind", protocol.TypeQuestionAnswer, "conn_id", s.connID)
 	logger.Info("relay: v2 question control received", "event", "v2.question.received")

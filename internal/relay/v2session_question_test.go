@@ -17,8 +17,8 @@ import (
 
 // Sentinel values chosen so a substring scan of the log buffer cannot match them
 // incidentally: an answer value and a payload key that MUST never be logged on any
-// path, and the ids that MAY be (internal/protocol marks question_batch_id and
-// answer_token safe to log, expressly so this handler invents no redaction rule).
+// path. Only the batch ID may appear after decoding; the answer token must stay
+// absent from both receipt and terminal records.
 const (
 	qTestBatchID     = "qb-ZZ1984BATCHZZ"
 	qTestAnswerToken = "tok-ZZ1984TOKENZZ"
