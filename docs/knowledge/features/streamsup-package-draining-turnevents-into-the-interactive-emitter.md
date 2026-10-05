@@ -181,3 +181,62 @@ tracker](streamsup-package-per-conversation-turn-busy-tracking.md) uses, not `bo
 `boundSessionIDForActive` has no production caller left after #2739; it stays in `relay.go` for its own
 unit test only, with its removal called out as a follow-up rather than done in that ticket. See
 [codebase/1098.md](../codebase/1098.md).
+
+## Native reply suggestions after the result (#2831)
+
+`HandleFor` attributes `turnevent.PromptSuggestion` to the producing session's
+conversation, just like other drained events, even when another conversation
+is active. Its arm opens no turn and emits no `turn_state`. Eligibility lives
+in `replySuggestions`, outside `convTurnState`: the emitter usually releases
+that state before the post-result suggestion arrives. A set requires
+`TurnEndReasonEndTurn`, `Outcome == "success"`, no error, non-empty delivered
+user text and non-empty main-agent `TextChunk` text (`ParentToolCallID == ""`),
+with no invalidation. Published text is carried verbatim and never logged.
+
+**Delivery order cannot identify the producing message.** `OnDelivered` can
+arrive after both `TurnEnd` and the native suggestion. `trackDelivery` wraps
+the existing `turncommit` gate; after the gate accepts, `beginWrite` records
+`DeliveryMessage`'s queued message ID before stdin is written. `noteDelivered`
+credits only that ID's safe `QueuedMessage.Text`, excluding composed attachment
+host paths. A valid suggestion missing only this confirmation waits in
+`pending`. The matching late confirmation can release it, but never resets
+invalidation. A spontaneous turn has no producing message ID and cannot borrow
+text from the next CLI or channel delivery.
+
+The queue may begin writing before `EnqueueSent` returns to its adapter.
+`accepted` retains the greatest accepted ID even for an unseen conversation;
+`beginWrite` preserves invalidation by any newer accepted ID. A delayed accept
+for the producing ID does not invalidate its own turn. Arrival-order credit,
+resetting invalidation on confirmation, and counting outstanding accepts all
+miss this distinction. Tests must assert after the following confirmation:
+`TestReplySuggestions_OvertakenTurn` covers both accept-before-first-content
+interleavings, `TestReplySuggestions_UnrelatedDelivery` rejects borrowed text,
+and `TestReplySuggestions_DeliveryGate` exercises success, failure and dropped
+gates through the real queue context. A failed write invalidates only its
+matching identity; a refused commit gate registers no identity.
+
+New turn activity and a new queued write drop prior pending text and clear a
+held suggestion. Accepted queued sends, accepted send-now, successful `/clear`,
+reset/eviction transitions and `closeForConversation` on exit or teardown also
+invalidate the producing turn. Refused sends or resets preserve state. A clear
+advances the conversation's revision only when published text was held; other
+conversations remain untouched. The null stays in `current()` for reconnects,
+while deletion prunes published and unpublished entries.
+
+The owner has one leaf mutex, released before registry reads, queue gates,
+writes or pushes. Its publisher snapshots dirty conversations' current state
+and fans out only to interactive connections; bursts may coalesce to the
+latest revision. The relay's revision guard prevents an overtaken snapshot
+from restoring old text. These frames carry no `EventID` and enter neither
+history nor replay. `main` mints the stream-only owner beside msgqueue;
+`startRelayV2` binds the session resolver, wires `ReplySuggestions` beside
+`RunningTurnPhases`, and starts a publisher joined during cleanup.
+See [the wire contract](../../protocol-mobile.md#reply_suggestion) and
+[connect-time reconciliation](v2-session-manager-state-machine-connect-time-reply-suggestion-reconcile.md).
+
+Persistent stream `buildArgs` requests `--prompt-suggestions` on create and
+resume spawns unless `promptSuggestionsDisabled` finds the last effective
+`CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` entry equal to `false`. Claude honours
+its own `promptSuggestionEnabled: false` settings disable. Missing native
+output remains silent until #2832's fallback; see
+[the live-test staging and reader lessons](e2e-realclaude.md#test-infrastructure).
