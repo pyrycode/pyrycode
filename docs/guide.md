@@ -125,6 +125,7 @@ These configure pyry itself and must come **before** any claude args (or after a
 | `-pyry-verbose` | `false` | Debug-level pyry logging on stderr |
 | `-pyry-name <name>` | `pyry` (or `$PYRY_NAME`) | Instance name; socket is `~/.pyry/<name>.sock` |
 | `-pyry-socket <path>` | (unset) | Explicit socket path; overrides `-pyry-name` |
+| `-pyry-claude-account-source <path>` | (unset) | This instance's Claude account token source — an absolute path to an owner-only token file. See [Claude account source](#claude-account-source) below. |
 
 If a claude flag happens to start with `-pyry-`, separate the two with `--`:
 
@@ -162,6 +163,7 @@ A few runtime settings are read from the environment rather than from flags, so 
 |---|---|---|
 | `PYRY_NAME` | `pyry` | Instance name, same as `-pyry-name`; the flag wins when both are set |
 | `PYRY_APPROVAL_TIMEOUT` | `10m` | How long an approval waits for a human before the daemon denies it |
+| `PYRY_CLAUDE_ACCOUNT_SOURCE` | (unset) | Same as `-pyry-claude-account-source`; the flag wins when both are set. See [Claude account source](#claude-account-source) below. |
 
 `PYRY_APPROVAL_TIMEOUT` is the one worth setting deliberately. When claude asks permission to use a tool, the request is parked until a client answers it, and this is how long the daemon waits before answering "no" on your behalf. Waiting is not the risky state, because the tool does not run while the request is outstanding, so the value is about how long you might reasonably take to reach your phone rather than about safety. The default is sized for answering from a phone. Shorten it if you sit at the machine and want a faster fail-closed:
 
@@ -270,6 +272,49 @@ pyry-elli attach                # attaches to elli
 ```
 
 For unusual setups (Docker mounts, shared sockets, paths outside `$HOME`), `-pyry-socket /any/path.sock` overrides the name-derived default entirely.
+
+### Claude account source
+
+By default a pyry instance's claude child inherits whatever `CLAUDE_CODE_OAUTH_TOKEN` (or other Claude authentication) is already in the daemon's environment — the same account you'd get running `claude` interactively. When you run more than one instance, or want daemon usage to draw on a separate account from your interactive one, point an instance at its own owner-only token file instead.
+
+The source is resolved once per instance, in this order, and the first nonempty value wins:
+
+1. `-pyry-claude-account-source <path>`
+2. `$PYRY_CLAUDE_ACCOUNT_SOURCE`
+3. the `source` field in `~/.pyry/<name>/claude-account.json`
+
+The JSON file is read only when both the flag and the environment variable are empty. A missing file, or a file without a `source` key, means no source is configured and launches keep whatever credentials they inherit — nothing changes. Example `~/.pyry/elli/claude-account.json`:
+
+```json
+{
+  "source": "/home/op/.config/pyry/elli-claude-token"
+}
+```
+
+Keys other than `source` are ignored (a later source kind will add its own key beside it). The file itself must be owned by the user running pyry and must not be group- or other-writable — it is refused otherwise, since it picks which owner-only file gets handed to a claude child.
+
+Today the only source kind is an absolute path to a token file. A relative path, a URI scheme (`op://...`), or anything else nonempty is refused and stops startup.
+
+**The token file.** One raw token, optionally followed by a single LF or CRLF — not a `source`d shell assignment and not an `EnvironmentFile` line, just the bytes of the token itself:
+
+```bash
+printf '%s\n' "sk-ant-oat01-..." > ~/.config/pyry/elli-claude-token
+chmod 600 ~/.config/pyry/elli-claude-token
+```
+
+The file must be a regular file, owned by the user running pyry, with no group or other permission bits set — `0400` or `0600` are both accepted. It is refused if it's missing, unreadable, not a regular file (a directory or FIFO included), owned by someone else, loosely permissioned, empty, over 4096 bytes, or holds anything other than printable non-space ASCII once the trailing newline is stripped.
+
+**When it's read.** The daemon makes one read at startup to initialize the account, and after that re-reads the file fresh on every claude launch attempt — first launches, crash-loop restarts, and respawns alike. A rotated file (write a new one and `mv` it into place) takes effect on the very next launch; there's no caching to invalidate.
+
+**Failure and recovery.** An unusable *source* — a bad flag/env value, or an unreadable or malformed `claude-account.json` — is a startup error: the daemon refuses to start, the same posture as a bad `interactive_runner` or `debug_capture` setting. A *read* that fails once the daemon is running (the token file got deleted, permissions loosened, and so on) only refuses that claude launch; the daemon, its control socket and the relay keep running. The next successful read clears the failure and launches resume normally. Neither case ever logs or echoes the token or the configured path — failures name only where the setting came from (flag, env, or file).
+
+The read is bounded to ten seconds at startup, matching the per-attempt deadline the runner itself applies. That bound covers reads that complete, not reads that hang — an open or read against a wedged FUSE or network mount is not interrupted, so don't rely on this as a hard ceiling on startup time for a token file on unusual storage. A plain local file returns essentially immediately.
+
+**What stays shared.** This only changes which account token a claude child receives. Settings, plugins, skills, memory and everything else under `CLAUDE_CONFIG_DIR` stay shared across every instance; a Claude account source is not a sandboxed configuration directory.
+
+**A successful read doesn't prove the token works.** It means the daemon handed claude a syntactically acceptable token, not that Claude has accepted it — `claude` itself still decides. Other, higher-priority Claude authentication settings (an API key, a different credential helper) can still override the subscription OAuth token this feature sets. See [Claude Code's authentication documentation](https://code.claude.com/docs/en/authentication) for how Claude resolves credentials.
+
+Only the claude child's environment is affected. The daemon's own environment, any Codex child, and other subprocesses never see this token.
 
 ## CLI transparency
 

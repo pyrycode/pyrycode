@@ -283,6 +283,25 @@ Note that you have to supply the original claude flags again — pyry does not r
 
 **The mobile (or desktop) app connects, then immediately drops and reconnects in a loop.** The relay leg speaks Mobile Protocol v2 (Noise_IK end-to-end encryption) — the only protocol the daemon or the mobile/desktop clients speak. (Before [#913](knowledge/codebase/913.md), `PYRY_MOBILE_V2=0` could force the daemon onto a legacy v1 dispatch path that produced exactly this loop against a v2-only client; that escape hatch no longer exists — a stale `PYRY_MOBILE_V2=0` in the unit/plist `Environment` is now inert and cannot cause this symptom.) If you hit this loop, the remaining cause is a stale relay deployment still sending binary WebSocket frames — redeploy the relay from current `main`.
 
+## Claude account source
+
+See [`guide.md`](guide.md#claude-account-source) for the full mechanics (precedence, token file format, startup read, failure and recovery). This section covers provisioning and operational timing.
+
+**Provisioning from 1Password.** The master copy of each instance's token lives in 1Password; the machine gets a derived, owner-only copy on disk, since pyry reads a plain file rather than calling out to a secret manager (that's [#2825](https://github.com/pyrycode/pyrycode/issues/2825)'s `op://` source, not this one). A typical refresh:
+
+```bash
+op read "op://vault/pyry-elli-claude-token/token" | tr -d '\n' > ~/.config/pyry/elli-claude-token
+chmod 600 ~/.config/pyry/elli-claude-token
+```
+
+Keep the derived file out of version control and off any shared filesystem; it is exactly as sensitive as the subscription login it replaces.
+
+**What needs a restart, what doesn't.** The *source* — which file, flag, or `claude-account.json` an instance points at — is resolved once at startup and is fixed until the daemon restarts; changing `-pyry-claude-account-source`, `$PYRY_CLAUDE_ACCOUNT_SOURCE`, or the instance's `claude-account.json` needs a restart to take effect. *Rotating the token itself* — overwriting the file a source already points at — does not: the daemon re-reads the file fresh on every claude launch attempt, so the next launch after a rotation picks up the new token with no restart.
+
+**Why a derived file, not systemd's encrypted credentials, on pyrybox.** systemd's `LoadCredentialEncrypted=` depends on a TPM-backed key; pyrybox runs systemd 255, which has no TPM available, and encrypted credentials for *user* services only arrived in systemd 256. Until that's available here, an owner-only derived file on disk is the practical store, protected by ordinary file permissions rather than by the service manager. Migrating pyrybox's existing `~/pyry-workspace/.secrets/claude-env` (an `EnvironmentFile`, today inherited rather than sourced through this feature) to a derived per-instance token file is tracked as follow-up operator work, not part of this feature.
+
+**Related, not yet built.** Surfacing an instance's account source and read status to a connected client is [#2816](https://github.com/pyrycode/pyrycode/issues/2816). Reading the token from an OS secret store (Keychain, Secret Service) instead of a flat file is [#2815](https://github.com/pyrycode/pyrycode/issues/2815).
+
 ## See also
 
 - [`guide.md`](guide.md) — full user guide

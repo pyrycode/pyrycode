@@ -15,7 +15,9 @@ newSessionParser(sink.sinkForTag(tag.ID), cfg.Logger)` (#1840, below); `scfg.Std
 notification](streamsup-package-session-rotation-notification-onsessionrotate.md) for why the tag is
 minted here, ahead of both halves, rather than threaded through either signature; `scfg.OnCrashLoop =
 sink.crashLoopForTag(tag.ID)` (#2724, same live tag again) — see [Crash episode
-notification](streamsup-package-crash-episode-notification-oncrashloop.md); `streamsup.New(scfg)`;
+notification](streamsup-package-crash-episode-notification-oncrashloop.md); `scfg.AccountTokenProvider =
+approval.account` (#2824 — nil unless this instance has a configured Claude account source; see [Claude
+account source](claude-account-source.md)); `streamsup.New(scfg)`;
 on error, `fmt.Errorf("cmd/pyry: stream runner: %w", err)` and a genuine nil `sessions.Runner`; on success,
 `streamRunner{r: r, models: held}`.
 
