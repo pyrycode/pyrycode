@@ -9,8 +9,8 @@ import (
 	"github.com/pyrycode/pyrycode/internal/questionbridge"
 )
 
-// questionActuator is the pair of daemon-side primitives a gated resolution
-// delegates to. Declared at the consumer (CODING-STYLE) so the resolver's tests
+// questionActuator is the pair of daemon-side diagnostic primitives a gated
+// resolution delegates to. Declared at the consumer so the resolver's tests
 // can drive it, exactly as streamApprovalResolver declares ResolveStream beside
 // modalResolverV2; *streamApprovalBridge is the production implementer of both.
 //
@@ -23,8 +23,8 @@ import (
 // that safe is this file — the gate sits above both, and nothing else calls them
 // from the wire.
 type questionActuator interface {
-	AnswerQuestion(batchID string, answers []protocol.QuestionAnswerEntry) (consumed bool)
-	RefuseQuestion(batchID string) (consumed bool)
+	AnswerQuestionDiagnostic(batchID string, answers []protocol.QuestionAnswerEntry) (consumed bool, reason string)
+	RefuseQuestionDiagnostic(batchID string) (consumed bool, reason string)
 }
 
 // classQuestion is the audit ModalClass value marking a record as a
@@ -40,7 +40,7 @@ type questionActuator interface {
 // already carry exactly what a record needs to say WHICH batch and WHAT KIND.
 const classQuestion = "question"
 
-// questionResolverV2 is the cmd/pyry implementation of relay.QuestionResolver: it
+// questionResolverV2 implements relay.DiagnosticQuestionResolver in cmd/pyry: it
 // is the per-device authorization boundary for an inbound question_answer /
 // question_refused, the record of every decision it makes, and nothing else. The
 // batch's consume, claude's verdict and the single question_dismissed all belong to
@@ -146,8 +146,16 @@ func newQuestionResolverV2(reg *questionbridge.Registry, logger *slog.Logger) *q
 // deliberately not built: it would re-broadcast a prior result, breaking the
 // single-dismissal property, while adding unbounded state.
 func (r *questionResolverV2) ResolveAnswer(p protocol.QuestionAnswerPayload, dev *devices.Device) bool {
-	if !r.admit(p.QuestionBatchID, dev) {
-		return false
+	consumed, _ := r.ResolveAnswerDiagnostic(p, dev)
+	return consumed
+}
+
+// ResolveAnswerDiagnostic performs the same single attempt as ResolveAnswer,
+// returning a fixed, content-free code for the first check that declined it.
+// Only the relay handler logs this reason; audits retain their existing meaning.
+func (r *questionResolverV2) ResolveAnswerDiagnostic(p protocol.QuestionAnswerPayload, dev *devices.Device) (bool, string) {
+	if ok, reason := r.admit(p.QuestionBatchID, dev); !ok {
+		return false, reason
 	}
 
 	// Step 4. Unreachable given the gate above passed — both spell the same
@@ -156,15 +164,15 @@ func (r *questionResolverV2) ResolveAnswer(p protocol.QuestionAnswerPayload, dev
 	// silently turn this into an ungated allow.
 	if !devices.AuthorizePromptAnswer(dev, devices.OutcomeAllow) {
 		r.auditQuestion(dev, p.QuestionBatchID, audit.OutcomeDeniedUnauthorized)
-		return false
+		return false, "allow_authorization_failed"
 	}
 
-	if !r.bridge.AnswerQuestion(p.QuestionBatchID, p.Answers) {
-		return false
+	if consumed, reason := r.bridge.AnswerQuestionDiagnostic(p.QuestionBatchID, p.Answers); !consumed {
+		return false, reason
 	}
 
 	r.auditQuestion(dev, p.QuestionBatchID, audit.OutcomeAllowed)
-	return true
+	return true, "resolved"
 }
 
 // ResolveRefusal resolves an inbound question_refused: the operator declined to
@@ -185,16 +193,23 @@ func (r *questionResolverV2) ResolveAnswer(p protocol.QuestionAnswerPayload, dev
 // decided, the other says the daemon refused to let a device decide. audit.Outcome
 // already publishes exactly that split.
 func (r *questionResolverV2) ResolveRefusal(p protocol.QuestionRefusedPayload, dev *devices.Device) bool {
-	if !r.admit(p.QuestionBatchID, dev) {
-		return false
+	consumed, _ := r.ResolveRefusalDiagnostic(p, dev)
+	return consumed
+}
+
+// ResolveRefusalDiagnostic reports the first failed check from one refusal
+// attempt, preserving the eligibility gate, audit and sole dismissal arbiter.
+func (r *questionResolverV2) ResolveRefusalDiagnostic(p protocol.QuestionRefusedPayload, dev *devices.Device) (bool, string) {
+	if ok, reason := r.admit(p.QuestionBatchID, dev); !ok {
+		return false, reason
 	}
 
-	if !r.bridge.RefuseQuestion(p.QuestionBatchID) {
-		return false
+	if consumed, reason := r.bridge.RefuseQuestionDiagnostic(p.QuestionBatchID); !consumed {
+		return false, reason
 	}
 
 	r.auditQuestion(dev, p.QuestionBatchID, audit.OutcomeDenied)
-	return true
+	return true, "resolved"
 }
 
 // admit is steps 1-3 of both arms — no actuator, no outstanding batch, no eligible
@@ -212,18 +227,18 @@ func (r *questionResolverV2) ResolveRefusal(p protocol.QuestionRefusedPayload, d
 // The looked-up payload is discarded rather than returned: no caller needs the
 // batch, and handing one back would put claude-authored question text in reach of a
 // path whose whole discipline is that it holds none.
-func (r *questionResolverV2) admit(batchID string, dev *devices.Device) bool {
+func (r *questionResolverV2) admit(batchID string, dev *devices.Device) (bool, string) {
 	if r.bridge == nil {
-		return false // foreground / PTY: nothing to resolve with, and nothing to decide
+		return false, "no_actuator" // foreground / PTY: nothing to resolve with
 	}
 	if _, ok := r.reg.Lookup(batchID); !ok {
-		return false // unknown or already-resolved — no security decision, no record
+		return false, "unknown_or_retired_batch" // no tombstones to distinguish these
 	}
 	if !dev.MayAnswerPrompt() {
 		r.auditQuestion(dev, batchID, audit.OutcomeDeniedUnauthorized)
-		return false
+		return false, "unauthorized_device"
 	}
-	return true
+	return true, ""
 }
 
 // auditQuestion writes exactly one terminal-decision record for a question

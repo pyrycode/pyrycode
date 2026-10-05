@@ -13,7 +13,8 @@ relay (spec-stage security review, verdict PASS). See
 [`specs/architecture/1984-question-answer-interception.md`](../../specs/architecture/1984-question-answer-interception.md).
 
 **Unlike modal control, this seam must never broadcast.** `question_dismissed`
-has one arbiter, `streamApprovalBridge.retireQuestion` on the `cmd/pyry` side
+is owned by `streamApprovalBridge` on the `cmd/pyry` side, whose answer,
+refusal and `retireQuestion` paths share the registry's one-shot arbiter
 (see [the question arm](v2-session-manager-state-machine-inbound-modal-control-deny-on-timeout.md#the-question-arm-1973--a-second-discriminant-ahead-of-the-permission-path)) —
 a second broadcaster here would be a second arbiter of whether a batch was
 consumed. `QuestionResolver`'s returned `bool` is a diagnostic only, used
@@ -136,8 +137,43 @@ otherwise the original bool-only method. It calls exactly one selected method,
 never both. Consumption always produces `resolved`, regardless of a supplied
 reason. Existing bool-only implementations and
 `V2SessionConfig.QuestionResolver` wiring remain usable without migration.
-The current daemon implementation, `questionResolverV2`, uses the legacy path;
-daemon-specific reasons arrive with [#2801](https://github.com/pyrycode/pyrycode/issues/2801).
+The daemon's `questionResolverV2` implements the diagnostic contract. Its
+bool-only methods call the corresponding diagnostic method once and discard
+the reason; `streamApprovalBridge` keeps the same wrappers for existing
+callers. Neither layer retries resolution or emits a separate reason record.
+
+The daemon returns the code for the **first failed check**, in the order
+below; answer-only rows are skipped for refusals.
+
+| Daemon reason | Failed check or successful outcome | Applies to |
+| --- | --- | --- |
+| `no_actuator` | `admit`: no question actuator is installed. | Answer and refusal |
+| `unknown_or_retired_batch` | `admit`: the admission registry `Lookup` misses. | Answer and refusal |
+| `unauthorized_device` | `admit`: `dev.MayAnswerPrompt()` fails. | Answer and refusal |
+| `allow_authorization_failed` | `devices.AuthorizePromptAnswer` rejects the allow outcome after admission. | Answer |
+| `missing_correlation` | The bridge's `byQuestion` lookup has no batch-to-tool-use correlation. | Answer and refusal |
+| `missing_parked_request` | `permbridge.Registry.Lookup` has no parked request supplying the allow input. | Answer |
+| `missing_batch_during_validation` | The bridge's question registry `Lookup` misses after admission. | Answer |
+| `verdict_rejected` | `answerVerdict` rejects the answer entries or cannot assemble the updated input. | Answer |
+| `resolution_lost` | The question registry's one-shot `Resolve` misses after the preceding checks passed. | Answer and refusal |
+| `resolved` | The question batch was consumed. | Answer and refusal |
+
+The admission registry stores only outstanding batches, with no tombstones:
+an unknown ID, a retired ID and an empty decoded ID all produce
+`unknown_or_retired_batch`. That lookup cannot identify which history led to
+the miss. The later `missing_batch_during_validation` and `resolution_lost`
+codes identify where a previously admitted attempt lost the batch. The
+defensive allow check currently repeats the eligibility predicate, so
+`allow_authorization_failed` cannot occur after successful admission with
+today's predicates.
+
+Eligibility and answer validation precede consumption; a `verdict_rejected`
+answer leaves the batch answerable. A permission-registry `Resolve` miss
+**after** successful batch consumption still returns `resolved` and dismisses
+once on either arm. Consumption is the reported outcome, even when the
+permission verdict was already decided elsewhere. Unknown batches and
+declined delegates write no security audit; authorization denials and
+successful decisions retain their existing audits.
 
 Diagnostic reasons must be stable, content-free outcome codes supplied by the
 implementation, never derived from client content or error messages. The
@@ -154,9 +190,10 @@ not security audit decisions or proof of phone delivery. Diagnostic methods
 retain the resolver's validation, eligibility-before-consume and bounded-time
 obligations on the single `Run` dispatch goroutine. Authentication, verdicts
 and dismissal ownership are unchanged. Relay logging emits no reply,
-dismissal or broadcast; `streamApprovalBridge.retireQuestion` remains the
-sole `question_dismissed` broadcaster. Diagnosis, the hang fix and live proof
-remain with [#2802](https://github.com/pyrycode/pyrycode/issues/2802).
+dismissal or broadcast; `streamApprovalBridge` remains the sole owner of
+`question_dismissed`, with the registry one-shot arbitrating between its
+answer, refusal and `retireQuestion` paths. Diagnosis, the hang fix and live
+proof remain with [#2802](https://github.com/pyrycode/pyrycode/issues/2802).
 
 ## Testing
 
@@ -176,21 +213,30 @@ The diagnostic matrix uses that shape over the sealed-frame harness and
 asserts zero resolver calls and no batch ID in either record on failure.
 Checking only the received ID would leave a tolerant decode undetected.
 
-`cmd/pyry/question_resolve_v2_test.go`'s six tests prove all five ACs at the
-`admit`/delegate boundary, but one branch inside `ResolveAnswer` /
-`ResolveRefusal` has no test that isolates it: a **false** return from
-`bridge.AnswerQuestion` / `RefuseQuestion` *after* `admit` already passed —
-the one-shot lost to a concurrent retire or refusal, or entries the answer
-primitive rejected — must skip the audit write. Every fixture that reaches
-the delegate in the existing suite also gets a **true** back from it, so an
-overlay mutation deleting `if !r.bridge.{Answer,Refuse}Question(...) { return
-false }` and letting the audit call run unconditionally survives the whole
-`cmd/pyry` package under `-race` (found by #1986's own verifier pass; shipped
-as a SHOULD FIX, not closed, because the code reads correctly and the gap is
-in coverage, not behaviour). Closing it needs a `questionActuator` stub that
-returns `false` from an eligible-device call — the real `streamApprovalBridge`
-in the existing fixtures cannot be coaxed into that return without also
-losing the one-shot, which is a different, already-covered branch.
+`TestQuestionResolverV2_DeclinedDelegateOnceWithoutAudit` isolates a false
+delegate result **after** successful admission with a `questionActuator`
+double. Both arms and both entry-point styles must delegate exactly once,
+return non-consumption and skip the successful-decision audit. Success-only
+delegate fixtures would let an unconditional audit write survive.
+
+`TestQuestionResolverV2_DiagnosticFailures` checks every reachable failed
+check on the applicable arms, competing failures in their actual order,
+bool/diagnostic parity and a corrected answer after `verdict_rejected`.
+**Retiring a batch before admission cannot test later validation or one-shot
+losses:** every attempt stops at the admission lookup. The
+`diagnosticQuestionRegistry` wrapper surrounds only the bridge's registry,
+leaving admission on the real outstanding batch, then deterministically
+retires it before validation or consumption. This exercises
+`missing_batch_during_validation` and `resolution_lost` without timing races.
+`TestQuestionResolverV2_DiagnosticSuccess` also expires the permission after
+consumption and verifies `resolved`, the decision audit and one dismissal.
+
+`TestQuestionResolverV2_RelayDiagnosticRecords` supplies the daemon resolver
+through an authenticated relay session for both frame kinds: success,
+missing correlation, unknown IDs and empty IDs. It requires exactly one
+receipt and one terminal Info record, the actual reason, `conn_id` and the
+decoded `question_batch_id`, with no additional reason records or question,
+option, answer or token sentinels in the logs.
 
 ## Related
 
