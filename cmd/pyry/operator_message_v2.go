@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/eventring"
@@ -29,8 +30,8 @@ type operatorMessage struct {
 // operatorMessageEmitterV2 pushes the operator's own delivered message, as a
 // `message` envelope with role "user", to every open INTERACTIVE conn, the
 // sender's included (#2699). It mirrors queueStateEmitterV2: a buffered channel
-// decouples the queue's drain goroutines from the one Run goroutine that owns
-// nextID and every broadcaster call.
+// decouples unplaced queue confirmations from Run. Placed Claude messages
+// call broadcast synchronously from the stream drain; mu serializes both paths.
 //
 // Unlike queue_state the event joins the #647 replay ring, so a conn that
 // reconnects with an earlier last_event_id gets the message ahead of the reply it
@@ -46,8 +47,8 @@ type operatorMessageEmitterV2 struct {
 	in     <-chan operatorMessage
 	logger *slog.Logger
 
-	// nextID is this producer's own per-conn envelope counter, touched only on
-	// the Run goroutine.
+	// mu protects the producer counter and fan-out shared by Run and stream placement.
+	mu     sync.Mutex
 	nextID uint64
 }
 
@@ -96,6 +97,8 @@ func (e *operatorMessageEmitterV2) Run(ctx context.Context, bcast interactiveBro
 // conn sharing that one event id, payload and stamp — the shape of
 // interactiveTurnEmitterV2.emit.
 func (e *operatorMessageEmitterV2) broadcast(ctx context.Context, bcast interactiveBroadcaster, ring *eventring.Ring, m operatorMessage) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	var eventID *uint64
 	if ring != nil {
 		id := ring.Append(m.convID, protocol.TypeMessage, m.payload, m.ts)

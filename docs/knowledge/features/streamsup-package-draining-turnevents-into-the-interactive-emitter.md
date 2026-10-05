@@ -141,6 +141,21 @@ Parsers concurrently. The drain also selects `emitter.flushC()` (the emitter arm
 timer inside `Handle`/`HandleFor` but does not select it — a driver must) and calls `flushAll` on the same
 goroutine, so there's no cross-goroutine timer race.
 
+**Queue placement waits for the writer, never its callback (#2820).**
+Echo handling can wait for `sendNowPlacement.write`'s outcome while the drain
+holds the `channelDelivery` post-publication mutex. Signal that outcome before
+write-reservation cleanup tries to acquire the same mutex; reversing these
+steps deadlocks the writer and drain. `OnDelivered` may be withheld past the
+answering turn's end, so it cannot be a stream-placement barrier.
+The placement mutex guards bookkeeping only, never the writer or commit.
+Echo commits and cancellation-aware fallback commands run on this drain;
+ordinary no-echo commits precede the closing event's idle release, while
+send-now retains its carry grace. `startRelayV2` binds synchronous operator
+publication to the shared replay ring before starting the drain.
+The history-only drain needs no live publisher. See
+[history producers](history-package.md#producers-2114-2115) for safe content
+and the history/live/replay ordering guarantee.
+
 **Published completion, not an idle snapshot, releases durable posts (#2811).**
 The drain gates tracker observation and `HandleFor` together under the
 `channelDelivery` mutex, clearing published activity only after completion has
