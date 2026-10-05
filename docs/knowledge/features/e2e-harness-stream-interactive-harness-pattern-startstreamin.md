@@ -78,6 +78,30 @@ as well as matching its live payload after completion. Checking payload/order
 only inside a matching-ID branch stays green when the history page omits the
 post altogether.
 
+An escaped maximum-size post may span several served history pages because the
+page has its own byte bound. Follow cursors before treating absent chunks as a
+missing record. A multi-chunk fixture that fits one page proves served-history
+shape; a separate maximum-size unit proof checks full byte reconstruction and
+envelope bounds. See [channel-post chunking](control-plane-channel-post-live-delivery.md#chunking-and-envelope-bounds).
+
+### Observing an absent-device wake
+
+Closing the fake phone's WebSocket alone does not prove absence to the daemon.
+The fake relay must forward its existing peer-close notice, and the test must
+wait for daemon consumption (`v2.peer_close.teardown`); otherwise the stale
+authenticated session correctly suppresses wake. Before disconnecting, await
+the preceding routed turn's `reason=device_connected` decision so that turn's
+pending trigger cannot masquerade as the post's wake.
+
+Observe the actual relay-addressed request with `fakerelay.Server.NextPushWake`,
+not conn-addressed phone frames: `push_wake` carries neither `conn_id` nor
+content. For reconnect proof, route a user message through the existing router
+to establish the daemon's active replay conversation and save an earlier
+`event_id`; naming a post's channel alone does not select it for replay.
+`TestChannelPost_E2E_DisconnectedWakeReplayAndHistory` follows this sequence,
+checks ordered deltas/completion against served history, and rejects a second
+wake during replay. See [push-wake eligibility](relay-package-push-wake.md).
+
 ### `relay_v2_stream_send_test.go` — `TestRelayV2_StreamSendMessageDrainsTurn`
 
 The first live, integrated proof of the stream-interactive path: every leg

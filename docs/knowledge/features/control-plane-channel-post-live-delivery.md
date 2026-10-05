@@ -1,20 +1,23 @@
-# Fanning `channel.post` out: `assistant_delta` live delivery (#2498)
+# Fanning `channel.post` out: completed host posts, replay and wake
 
 A successful `channel.post` durably accepts the entire message before returning.
 `channelPoster` resolves the channel and mints its turn identity;
 `channelDelivery.accept` atomically saves the whole text, conversation ID, turn ID
 and acceptance timestamp in the instance's private `channel-delivery.json`.
-Its sole daemon-owned consumer chunks the post, records every chunk in the
-composition root's existing `conversationHistory`, then announces the same
-payloads through `channelPostEmitterV2`. Idle delivery starts immediately on
-acceptance without waiting for a client, relay configuration or user turn.
+Its sole daemon-owned consumer chunks the post, records every chunk and one
+completion in the composition root's existing `conversationHistory`, then
+publishes the same payloads through `channelPostEmitterV2`. Idle delivery starts
+immediately on acceptance without waiting for a client, relay configuration or
+user turn.
 
 `channelPostEmitterV2` retains `conversationUpdateEmitterV2`'s fan-out shape:
 a leaf mutex over its envelope-ID counter, the #607 interactive-capability gate,
 and a `Push` loop that logs and skips a torn-down connection. `startRelayV2` returns
-its announce hook through `startRelay`; `runSupervisor` installs it on
-`channelDelivery` before starting the consumer independently of the relay leg.
-The hook is nil without a relay, and its result is never consulted. A fan-out
+its announce hook through `startRelay`; `startRelayV2` also installs the completion
+hook and shares the interactive emitter's ring and existing `pushWaker`.
+`runSupervisor` installs the delta hook before starting the consumer independently
+of the relay leg. Both hooks are nil without a relay; durable completion still
+records, and hook results are never consulted. A fan-out
 failure cannot turn durable acceptance into a refusal.
 
 `assistant_delta` is otherwise produced only by a supervised claude turn (`interactiveTurnEmitterV2`); `channelPostEmitterV2` is its second producer and the first that is not one. The two must stay distinguishable at the daemon boundary even though the wire frame is identical, which is why `docs/protocol-mobile.md`'s v2 type table records both.
@@ -31,15 +34,18 @@ without another post or restart.
 
 Concurrent posts to one conversation deliver FIFO by durable acceptance, with
 each post's chunks contiguous relative to other posts and Claude output. Each
-has its own turn ID, sequences from zero, and text whose concatenation reproduces the input
-byte-for-byte. All chunks reach history before the first live announcement;
-announcements follow their recorded post/chunk order. A failed head keeps later
+has its own turn ID, sequences from zero, and text whose concatenation reproduces
+the input byte-for-byte. Its ordered `assistant_delta` chunks are followed by
+exactly one `turn_end` with the same turn ID, in live delivery and served history.
+All chunks and completion reach history before the first live announcement;
+publication follows their recorded order. A failed head keeps later
 posts in that conversation pending while other conversations can progress.
 
 An active Claude turn holds delivery, not acceptance: `channel post` returns
 success after persisting the whole post without waiting for that turn to finish.
-No held chunk enters served history or live frames. Release follows the preceding
-turn's published real completion, or an accepted actual child exit/confirmed
+No held delta or post completion enters served history or live frames. Release
+follows the preceding turn's published real completion, or an accepted actual
+child exit/confirmed
 runner stop after preceding queued deltas have been handled, buffered text
 flushed and the published lifecycle closed. An early pool eviction request is
 not that boundary; it holds posts and successor starts through confirmed stop,
@@ -49,19 +55,26 @@ turn. See [session teardown](streamsup-package-per-conversation-turn-busy-track-
 Posts accepted by the release boundary finish whole-post delivery before an
 ordinary successor user turn or reset wrap-up can start. `beginDelivery` makes
 the final pending check atomic with the busy mark and write reservation under
-the same consumer mutex as acceptance, recording and announcement. Child writes
+the same consumer mutex as acceptance, recording, replay, live fan-out and wake
+triggering. `turnBusyTracker.lockPostBoundary` shares that gate. Child writes
 run outside that mutex; reservations keep posts held until writes return,
 including in-flight send-now writes after a completion or carry/grace close.
 A pending history retry blocks successor starts even after a recorded prefix.
 Checking only an inbound snapshot or tracker-idle state would let a later
 acceptance or unpublished completion split the reply or post.
 
-The served text remains `assistant_delta` alone, with no `turn_state` or
-`turn_end`. A lone delta renders live or from a history page, and its fresh turn
-ID starts a fresh bubble. `TurnEndPayload` would claim Claude-authored results
-that a host post cannot supply. Completion, reconnect replay and wake belong to
-[#2809](https://github.com/pyrycode/pyrycode/issues/2809). Holding preserves the
-original Claude reply and its real completion; it supplies no post lifecycle.
+The text has one representation: `assistant_delta`, with no second
+`message`/role-assistant entry or post `turn_state`. A lone delta renders live
+or from a served page and starts a fresh bubble, but does not finish the post or
+notify a device. The post's private `channelPostTurnEndPayload` supplies exactly
+four keys: `conversation_id`, `turn_id`, `stop_reason: "end_turn"`, and
+`producer: "channel_post"`. The producer identifies daemon-authored host-post
+completion. Claude-only `outcome`, `is_error`, `terminal_reason`,
+`error_category`, duration, cost, turn-count and token-usage fields are entirely
+absent, including zero/null placeholders. Claude's `protocol.TurnEndPayload`
+serialization and result reporting stay unchanged. Holding preserves the intact
+Claude reply and its real completion before the separate completed post, which
+finishes before a successor turn.
 
 **The id's failure contract follows what it addresses, not what the old code called it.** `newChannelPostMessageID` fell back to `""` on an rng failure, correctly — a dedupe key nobody reads degrades harmlessly. `newChannelPostTurnID` refuses the post instead: a `turn_id` is the address a client groups chunks by, and every post minting `""` would coalesce into a single bubble with every other one, breaking the "one post is one rendering" property outright rather than degrading a field nobody reads.
 
@@ -77,15 +90,37 @@ uses, and constructs each payload once for both history and announcement.
 `<`-filled post against the envelope cap and checks its rejoined bytes. If it
 fails, lower `maxDeltaTextBytes` rather than relaxing the measurement.
 
-## Live-only announcements and durable recovery
+A heavily escaped maximum post can exceed a single served history page's byte
+bound even though every envelope fits. Follow page cursors to reconstruct the
+whole post; a short page is not the entire log. The multi-chunk fake-daemon
+fixture fits one page, while `TestChannelPost_RecordingReplayLiveWakeOrder`
+retains maximum-size byte reconstruction.
 
-Live announcements have no connect-time replay or exactly-once network receipt
-guarantee. Private pending delivery makes acceptance durable; the conversation
-log makes missed frames readable through the existing history delta-rendering
-path. `assistant_delta` remains droppable in `pushQueue.enqueue` and
-`convRing.evictOldest`. `EventID` stays unset because this emitter owns no
-`eventring`. History recovery does not imply automatic tail catch-up, which
-belongs to [#2744](https://github.com/pyrycode/pyrycode/issues/2744).
+## Live announcements, bounded replay and durable recovery
+
+After all durable writes succeed, `channelPostEmitterV2.announce` and `complete`
+append each delta/completion to the same ring registered with
+`V2SessionManager.SetReplaySource` before that event's live fan-out. Each live
+envelope carries its assigned connection-independent `event_id`, identical for
+all recipients of that event and retained on replay. Ring event IDs and durable
+history entry IDs are different domains. After completion fan-out, `complete`
+calls `pushWaker.Trigger` with the post's own conversation and `pushWakeTurnEnd`,
+including when no client is connected. All post events are recorded in history
+and the shared ring before this trigger; the interactive emitter's best-effort
+history path cannot establish that guarantee. Existing eligibility,
+connected-device suppression, coalescing and client mute/per-conversation
+notification rules remain; see [push wake](relay-package-push-wake.md).
+
+Reconnect replay reads retained events without invoking the completion hook or
+waking again. `replayMissed` uses the daemon's active conversation and
+`hello.last_event_id`, not a client-selected conversation. Retention remains
+bounded by `MaxEventsPerConversation` (1024); `assistant_delta` remains droppable
+in `pushQueue.enqueue` and preferentially evicted by `convRing.evictOldest`.
+An expired cursor receives the existing `resync`. The ring lives only in the
+daemon and does not survive restart; history-backed restart recovery and bounded
+replay provide no exactly-once network receipt guarantee or conversation-selection
+change. Automatic durable tail catch-up remains
+[#2744](https://github.com/pyrycode/pyrycode/issues/2744).
 
 The hold diagnostic deadline is **five minutes from durable acceptance**
 (`channelPostHoldDeadline`). Crossing it while held emits
@@ -94,19 +129,25 @@ event text, conversation ID and turn ID. The post stays pending. Expiry never
 delivers, interrupts, marks idle, abandons or ends a still-live Claude turn.
 It is a diagnostic threshold, not a delivery timeout.
 
-`history.Store.Append` is per-chunk, so a recorded prefix can be visible while a
+`history.Store.Append` is per-event, so a recorded prefix can be visible while a
 later write retries. `channelDelivery.deliver` scans **every** newest-first
 `Page`, matching the conversation, turn ID, sequence and text, then appends only
-missing chunks in ascending sequence. Looking only at the newest page would
-duplicate a prefix hidden by unrelated newer entries.
+missing chunks in ascending sequence, then the matching four-field completion.
+Looking only at the newest page would duplicate a prefix hidden by unrelated
+newer entries. A failure at any write, including completion after every delta,
+keeps accepted work pending for automatic retry and publishes nothing to replay,
+live clients or wake. Delta-only pending records need completion and publication;
+retry reconciles the same identity without duplicating durable chunks/completion.
 
 After process restart, undelivered or partially recorded posts resume with their
 original identities and chunk order, yielding exactly one history delta per
-chunk. A fully recorded post left pending by interrupted cleanup is removed
-without another append or announcement, even if the process died before its
-first live push. In-memory delivered markers also prevent repeated announcements
-when cleanup persistence fails. Durability matches history's process-restart
-contract; it does not promise survival of a machine crash.
+chunk and exactly one completion. Only deltas **and completion** make pending
+work durably complete. A fully completed post left pending by interrupted cleanup
+is removed without another append, replay insertion, announcement or wake, even
+if the process died before its first live push. In-memory delivered markers also
+prevent repeated publication/wake when cleanup persistence fails. Durability
+matches history's process-restart contract; it does not promise survival of a
+machine crash.
 
 `runSupervisor` claims the control socket before loading pending state and
 establishes `channelDelivery.beforeInbound` before inbound delivery starts.
@@ -123,6 +164,10 @@ URL. In that configuration `startRelay` still runs the stream drain with a
 history-backed interactive emitter and `historyOnlyBroadcaster`; completion and
 confirmed stop close publication into history before posts can be recorded.
 
+The ten daily posts measured in `7dc049bc` between 2026-09-24 and 2026-10-03
+retain recoverable text and their missed alerts. They are not migrated, completed
+retroactively or re-notified by this change.
+
 ## Pending delivery and channel carry
 
 Private client delivery and [`channelCarry`](control-plane.md#carrying-a-posted-channel-message-into-claudes-next-turn-2499)
@@ -137,8 +182,12 @@ Refusals and logs omit posted text, raw storage errors and content-derived chunk
 counts or sequences. Acceptance, delivery-retry and cleanup logs use fixed
 events and identity fields.
 
-`TestChannelDelivery_ReloadInterruptions` places recorded chunks behind newer
-history pages and checks undelivered, partial and fully recorded recovery.
+`TestChannelDelivery_ReloadInterruptions` places recorded events behind newer
+history pages and checks undelivered, partial, delta-only and fully completed
+recovery. `TestChannelDelivery_CompletionRequired` proves automatic retry after
+completion recording fails; `TestChannelPost_RecordingReplayLiveWakeOrder`
+inspects the exact raw completion keys across history/replay/live and observes
+durable recording → per-event shared replay recording → live fan-out → wake.
 `TestChannelDelivery_RetryAndCarryIndependence` checks both directions of carry
 independence and automatic retry with and without an announcer;
 `TestChannelDelivery_ConcurrentFIFO` compares durable acceptance, history and
@@ -155,10 +204,15 @@ beyond a carried close; `TestChannelDelivery_NoRelayPublicationAndTeardown`
 checks relay-disabled production wiring. The release-file-gated
 `TestChannelPost_E2E_HeldUntilRealCompletion` checks successful held acceptance,
 absence from live/history before release, and the intact reply followed by its
-real completion before the separate live post.
+real completion before the separate completed post and successor turn.
+`TestChannelPost_E2E_DisconnectedWakeReplayAndHistory` routes the replay
+conversation, observes an actual content-free outbound wake, then checks ordered
+reconnect replay and the same completed post in served history, with no replay wake.
 
 See the [original fan-out design](../../specs/architecture/2498-channel-post-live-delivery.md#revisions)
 and [durable-delivery design](../../specs/architecture/2810-durable-channel-post.md)
 for the acceptance/recovery revision and ownership security review; the
 [turn-boundary design](../../specs/architecture/2811-channel-post-turn-boundary.md)
 records the holding and confirmed-stop ordering contract.
+The [completion design](../../specs/architecture/2809-channel-post-completion.md)
+records the minimal host-post payload and replay/wake ordering.

@@ -363,3 +363,52 @@ lone delta renders live or in a history page, without an exactly-once network
 receipt guarantee. Completion/replay/wake remain #2809; tail catch-up remains
 \#2744. See [the #2811 plan](2811-channel-post-turn-boundary.md) for the final
 producer-stop and saturation revisions.
+
+**2026-10-05 — #2809 supersedes the no-lifecycle and no-ring decisions.**
+The original design's delta-only/no-`turn_end` decision and the first revision's
+unset `EventID` decision no longer apply. A lone delta renders live or from a
+served page, but does not finish its bubble or notify. Each newly delivered
+post now has ordered `assistant_delta` chunks followed by exactly one
+`turn_end`, sharing its fresh post turn ID, without a second
+`message`/role-assistant representation or a post `turn_state`.
+
+The raw completion has exactly four fields: `conversation_id`, `turn_id`,
+`stop_reason: "end_turn"`, and `producer: "channel_post"`. The private
+`channelPostTurnEndPayload` explicitly identifies daemon-authored host-post
+provenance. It omits Claude-only `outcome`, `is_error`, `terminal_reason`,
+`error_category`, duration, cost, turn-count and token-usage fields entirely,
+including zero/null placeholders. Claude's `protocol.TurnEndPayload`
+serialization and result reporting stay unchanged.
+
+`channelDelivery.deliver` reconciles all history pages for matching chunks and
+completion, appends missing chunks then completion, and requires every write
+to succeed before publication. Completion-write failures after all deltas keep
+accepted work pending for automatic retry without replay/live/wake; delta-only
+pending work requires completion and publication. Deltas **and completion**
+define a durably complete post. Completed pending work left by interrupted
+cleanup is cleanup-only on reload, with no repeated announcement or wake, even
+if the first push never happened. In-memory delivered markers preserve that
+policy through cleanup-save failure; carry remains independent.
+
+The emitter shares the interactive ring registered with
+`V2SessionManager.SetReplaySource` and the existing `pushWaker`. Both post hooks
+are installed before the consumer starts. After all durable writes, each event
+enters the ring before its live fan-out, carrying its connection-independent
+event ID on every envelope. Ring IDs and history entry IDs are distinct.
+Completion fan-out precedes `pushWakeTurnEnd` for the post's own conversation,
+including with no client connected. Replay never invokes this wake path;
+eligibility, connected-device suppression, coalescing and client notification
+rules remain unchanged. Relay-disabled delivery still persists completion.
+
+All of this stays inside #2811's serialized safe boundary: after real Claude
+completion or confirmed producer stop and flushed prior output, before
+successor user turns, preserving FIFO, retry and startup precedence. The
+five-minute deadline diagnoses and keeps holding; it never closes or splits a
+live Claude turn. Replay uses the daemon's active conversation and
+`hello.last_event_id`, with unchanged ring bounds/eviction and `resync` behavior.
+The ring does not survive daemon restart; recovery remains history-backed,
+without an exactly-once network receipt guarantee. Tail catch-up remains #2744.
+The ten historic daily posts in `7dc049bc` (2026-09-24 through 2026-10-03) retain
+recoverable text and missed alerts, without migration or retroactive notification.
+See [the completion plan](2809-channel-post-completion.md) for implementation
+and offline wake/replay/history evidence.
