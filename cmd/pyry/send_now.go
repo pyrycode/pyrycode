@@ -61,6 +61,13 @@ func newSendNowDeliver(resolve func(string) (handlers.TurnWriter, error), isClau
 			undo()
 			return err
 		}
+		if _, ok := msgqueue.DeliveryMessage(ctx); ok && place != nil && place.record != nil {
+			err := place.write(ctx, convID, payload, func() error { return w.WriteUserTurn(ctx, convID, payload) })
+			if err != nil {
+				undo()
+			}
+			return err
+		}
 		cancel := place.expect(convID, id, payload)
 		if err := w.WriteUserTurn(ctx, convID, payload); err != nil {
 			cancel()
@@ -71,28 +78,15 @@ func newSendNowDeliver(resolve func(string) (handlers.TurnWriter, error), isClau
 	}
 }
 
-// sendNowPlacement holds back the operator-message commit (the history entry and
-// the live push, newOperatorMessageHistory) of each send-now message until claude
-// echoes it under --replay-user-messages (#2730), so the push sits in the stream
-// where claude read the message — after the tool result it followed, or as the
-// opener of the turn it started — rather than at the stdin write.
+// sendNowPlacement places queued Claude messages at digest-only user echoes.
+// Queue-backed writes prepare their safe commit before writing, so the drain
+// commits at the echo independently of OnDelivered. Ordinary entries without
+// echoes commit at the answering turn's idle boundary; send-now entries retain
+// the carried-close grace fallback. See write and idle in queued_message_placement.go.
 //
-// THREE EVENTS, ANY ORDER, ONE COMMIT. expect registers the payload's digest before
-// the write; attach hands over the commit once msgqueue confirms delivery; echo
-// marks the digest seen. Whichever of echo and attach comes second commits. If no
-// echo comes — the child exited, the turn was interrupted, the fan-in dropped the
-// echo — the waiter attach starts commits when the conversation's turn goes idle.
-// A send-now write's carried close keeps the conversation busy through
-// sendNowGrace, so that fallback cannot fire inside the window and then duplicate
-// on a second turn's opener. Each path takes the entry out under mu and commits
-// after releasing it, so a message commits exactly once.
-//
-// Matching is by digest, first match in registration order: echoes arrive in
-// write order, and an ordinary message's echo (every turn's opener) matches
-// nothing, since only send-now writes are registered.
-//
-// A nil *sendNowPlacement registers nothing and commits at attach — the pre-#2730
-// behaviour, and what every wiring without a stream tracker gets.
+// Legacy callers without queue metadata use expect/attach: whichever of the
+// echo and attach comes second commits. A nil placement commits at attach.
+// Matching is conversation-scoped and follows registration/write order.
 type sendNowPlacement struct {
 	ctx context.Context
 	// resolve maps the echo's producing session to its conversation, daemon-side;
@@ -100,15 +94,26 @@ type sendNowPlacement struct {
 	resolve  func(sessionID string) (conversationID string, ok bool)
 	waitIdle func(ctx context.Context, conversationID string) error
 
-	mu      sync.Mutex
-	pending map[string][]*placedMessage
+	record   func(string, msgqueue.QueuedMessage)
+	dispatch func(func())
+	isClaude func(string) bool
+	managed  map[string]map[uint64]*placedMessage
+	writes   map[string]*placementWriteLock
+	mu       sync.Mutex
+	pending  map[string][]*placedMessage
 }
 
 type placedMessage struct {
-	id     uint64
-	digest [sha256.Size]byte
-	echoed bool
-	commit func()
+	id       uint64
+	digest   [sha256.Size]byte
+	echoed   bool
+	commit   func()
+	queued   bool
+	sentNow  bool
+	outcome  chan struct{}
+	writeErr error
+	notified bool
+	placed   bool
 }
 
 func newSendNowPlacement(ctx context.Context, resolve func(string) (string, bool), waitIdle func(context.Context, string) error) *sendNowPlacement {
@@ -141,6 +146,14 @@ func (p *sendNowPlacement) attach(convID string, id uint64, commit func()) {
 		return
 	}
 	p.mu.Lock()
+	if e := p.managed[convID][id]; e != nil {
+		e.notified = true
+		if e.placed {
+			p.forgetLocked(convID, id)
+		}
+		p.mu.Unlock()
+		return
+	}
 	var e *placedMessage
 	for _, m := range p.pending[convID] {
 		if m.id == id && m.commit == nil {
@@ -181,6 +194,11 @@ func (p *sendNowPlacement) echo(sessionID string, ev turnevent.UserEcho) {
 		if e.echoed || e.digest != ev.TextSHA256 {
 			continue
 		}
+		if e.queued {
+			p.mu.Unlock()
+			p.takeQueued(convID, e)
+			return
+		}
 		if e.commit == nil {
 			e.echoed = true
 			p.mu.Unlock()
@@ -194,9 +212,16 @@ func (p *sendNowPlacement) echo(sessionID string, ev turnevent.UserEcho) {
 }
 
 // take commits e if it is still pending; a second taker finds it gone.
+// Queue-backed entries retain only callback bookkeeping until OnDelivered.
 func (p *sendNowPlacement) take(convID string, e *placedMessage) {
 	p.mu.Lock()
 	ok := p.removeLocked(convID, e)
+	if ok && e.queued {
+		e.placed = true
+		if e.notified {
+			p.forgetLocked(convID, e.id)
+		}
+	}
 	p.mu.Unlock()
 	if ok && e.commit != nil {
 		e.commit()

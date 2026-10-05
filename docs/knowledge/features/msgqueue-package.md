@@ -109,7 +109,7 @@ type PendingFunc func(error) bool
 // device record. ClientSentAt (#2704) is the handler's own parse of the
 // client's optional tap time, already in UTC, zero when absent or unparseable
 // — never the client's raw string. All five are populated **only** on the
-// DELIVERED projection (OnDelivered) — Snapshot and SnapshotAll leave them at
+// delivery projection (OnDelivered and DeliveryMessage) — Snapshot and SnapshotAll leave them at
 // their zero values, since queue_state does not carry any of them (§ Security).
 type QueuedMessage struct {
     ID            uint64
@@ -435,6 +435,16 @@ store them) needed no `DeliveredFunc` signature change and no new seam —
 just a field the delivered projection populates and `Snapshot`/`SnapshotAll`
 don't.
 
+**Placement needs the safe projection before confirmation (#2820).**
+`DeliveryMessage(ctx)` exposes a value copy for ordinary and send-now attempts,
+cloning attachment ids and omitting delivery bytes. Decorators preserve the
+context instead of widening `DeliverFunc`. The sole placement consumer can
+register final composed bytes privately while preparing client/history content
+from this projection. `OnDelivered` is still a confirmation notification, not
+a stream-order barrier: placed Claude entries acknowledge it without committing
+again. Codex/no-stream recording retains confirmation-at-write timing. See
+[history producers](history-package.md#producers-2114-2115).
+
 **A negative-only test proves nothing until its fire site exists.** Built RED
 in two steps (declare the seam, then wire the fire site), the give-up and
 removed-before-commit assertions here were green from the moment the seam was
@@ -489,8 +499,10 @@ commit point, never from this field).
   A delivery that confirms in the same instant shutdown begins can land in the
   window `drain` checks `ctx.Err()` **before** the confirmed-delivery branch —
   that head is left queued and fires neither `q.notify` nor (#2115)
-  `OnDelivered`: the message reached claude's stdin but produces no downstream
-  record. Inherited from #487/#1484's ordering, not introduced by any one seam;
+  `OnDelivered`: the message reached claude's stdin but callback-only consumers
+  receive no record. Stream Claude placement can already have recorded it
+  independently; shutdown still offers no gap-free persistence guarantee.
+  Inherited from #487/#1484's ordering, not introduced by any one seam;
   a consumer that persists what a seam reports (`internal/history`) is not
   gap-free across a daemon restart for this reason.
 
@@ -660,7 +672,8 @@ give-up-notification path as the injected `GiveUpFunc`.
   consumed outside `cmd/pyry`'s wire producers.** `cmd/pyry`'s `newOperatorMessageHistory` hooks it
   to write the operator's own typed message into [`internal/history`](history-package.md)'s durable
   conversation log — the first consumer for which `newInboundDeliver` (the delivery seam itself)
-  could not have worked, since it sees only the composed `delivery` payload and never `text`. See
+  could not have worked from its payload argument, which contains composed `delivery` rather than
+  `text`. `DeliveryMessage` now supplies the safe projection there for stream placement. See
   § Delivered notification above and
   [history-package.md § Producers](history-package.md#producers-2114-2115).
   **#2699 added a second `OnDelivered` consumer on the same call, `operatorMessageEmitterV2`, needing

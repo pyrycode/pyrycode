@@ -1119,8 +1119,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// for queueChanges' reason. The ring that push appends to is born in the relay
 	// leg, which hands it to the emitter's Run at start.
 	operatorMessages := make(chan operatorMessage, operatorMessageQueueSize)
-	// #2730: a send-now message's history entry and push wait for claude's echo of
-	// it, which the stream drain hands over through the sink. Built only on the
+	// Queued Claude history entries and pushes wait for their echoes, which the stream drain hands over through the sink. Built only on the
 	// stream path, beside the tracker whose idle is its fallback; nil elsewhere,
 	// which commits at the write as before.
 	var sendNowPlace *sendNowPlacement
@@ -1128,6 +1127,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		sendNowPlace = newSendNowPlacement(ctx,
 			func(sid string) (string, bool) { return conversationForSession(convReg, sid) },
 			turnBusy.WaitIdle)
+		sendNowPlace.bindQueued(ctx, streamSink, conversationHistory, router.isClaude, logger)
 		streamSink.setEchoObserver(sendNowPlace.echo)
 	}
 	queue, err := msgqueue.New(msgqueue.Config{
@@ -1136,21 +1136,13 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		// the seam that produces the hold error it marks. The composed value goes no
 		// further than newInboundDeliver's WriteUserTurn — see channelCarry on why the
 		// "clients see no change" property is structural here rather than a filter.
-		Deliver:  postDelivery.beforeInbound(postCarry.carryPending(approvalParked.markApprovalHolds(newInboundDeliver(router.resolve, turnBusy, streamTurnHoldTimeout)))),
+		Deliver:  postDelivery.beforeInbound(postCarry.carryPending(approvalParked.markApprovalHolds(newInboundDeliver(router.resolve, turnBusy, streamTurnHoldTimeout, sendNowPlace)))),
 		OnChange: queueStateNotify(queueChanges, logger),
 		OnGiveUp: blocked,
-		// #2115: the operator's own message reaches the durable log HERE and
-		// nowhere else. It cannot be written from the Deliver seam above, which
-		// receives the composed payload that may name an on-host path; this one
-		// carries the client-readable text. Fires only on a confirmed write, so a
-		// dequeued or abandoned message is never recorded as said.
-		//
-		// #2499 shares the seam through deliveredFuncs. History FIRST — its doc block
-		// states that its record is written as close to the commit as possible — then
-		// the carry's clear, which drops exactly the pending text this delivery
-		// carried. The clear cannot be done from the Deliver seam either: that seam
-		// runs per ATTEMPT, and a head cleared on an attempt that then fails would
-		// lose the text the retry was meant to carry.
+		// History uses only the safe queued projection. Stream Claude writes
+		// prepare it at the final write boundary and OnDelivered acknowledges
+		// placement; other deliveries commit here. The channel carry is cleared
+		// only on confirmation, never on a failed attempt or send-now delivery.
 		OnDelivered: deliveredFuncs(
 			newOperatorMessageHistory(conversationHistory, operatorMessageNotify(operatorMessages, logger), sendNowPlace, logger),
 			postCarry.clearDelivered,
@@ -3621,7 +3613,11 @@ func approvalHoldPending(err error) bool { return errors.Is(err, errHeldForAppro
 // a drain-time re-stamp. Taking resolve as a func value (not the struct) keeps
 // the seam unit-testable with a fake resolve; busy and hold are taken the same way
 // so the hold is exercisable with a short bound.
-func newInboundDeliver(resolve func(string) (handlers.TurnWriter, error), busy *turnBusyTracker, hold time.Duration) msgqueue.DeliverFunc {
+func newInboundDeliver(resolve func(string) (handlers.TurnWriter, error), busy *turnBusyTracker, hold time.Duration, placement ...*sendNowPlacement) msgqueue.DeliverFunc {
+	var place *sendNowPlacement
+	if len(placement) != 0 {
+		place = placement[0]
+	}
 	return func(ctx context.Context, convID string, payload []byte) error {
 		w, err := resolve(convID)
 		if err != nil {
@@ -3647,12 +3643,19 @@ func newInboundDeliver(resolve func(string) (handlers.TurnWriter, error), busy *
 			return err
 		}
 		defer finished()
-		if err := w.WriteUserTurn(ctx, convID, payload); err != nil {
+		write := func() error { return w.WriteUserTurn(ctx, convID, payload) }
+		var writeErr error
+		if place != nil && place.isClaude(convID) {
+			writeErr = place.write(ctx, convID, payload, write)
+		} else {
+			writeErr = write()
+		}
+		if writeErr != nil {
 			// Returned VERBATIM (unwrapped): msgqueue classifies ErrNoLiveSession,
 			// ErrTrustModalPending and turncommit.ErrDropped by errors.Is, and the undo
 			// leaves the tracker exactly as it was before this attempt.
 			undo()
-			return err
+			return writeErr
 		}
 		return nil
 	}

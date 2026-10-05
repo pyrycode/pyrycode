@@ -138,6 +138,16 @@ list of affected tests named every call site that synced on the record's name, b
 missed four e2e tests that synced on `kind=mcp_status` specifically — found only once
 `make check` turned red on the rework.
 
+Queue placement tests must compare history payloads/timestamps, live arrival
+and replay/event-id order through the wired drain and operator broadcaster.
+Sequential ring appends cannot expose a reply overtaking an asynchronous user
+push. When withholding `OnDelivered`, await a callback-completed signal after
+the recording call before asserting that release added nothing: a barrier on
+the stream drain proves only that drain's progress, not the queue goroutine's.
+See [history producers](history-package.md#producers-2114-2115) and
+`TestOrdinaryQueuePlacement_OrderWithDelayedConfirmation`; its foreign-conversation
+barrier alone leaves this late-callback assertion under-synchronized (#2820).
+
 ## Protocol boundaries
 
 Round-trip tests must marshal the decoded payload back into the envelope. Comparing
