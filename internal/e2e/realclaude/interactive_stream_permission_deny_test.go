@@ -91,7 +91,10 @@ func driveInteractiveStreamPermissionDeny(t *testing.T, h *perConvHarness, convI
 	// modal that never surfaced deadlines the drain rather than passing silently.
 	// This proves the Write was requested and HELD — the anchor that makes the
 	// later absence check non-vacuous.
-	modalID := raiseRealPermissionModal(t, h, 2, convID, writeFileTrigger(nonce))
+	// Without a denial path, Claude can keep retrying past the bounded drain
+	// (#2851). Keep this instruction local to the denial driver.
+	prompt := writeFileTrigger(nonce) + " If the tool call is denied, do not retry it, do not use any other tool, and reply with one short word."
+	modalID := raiseRealPermissionModal(t, h, 2, convID, prompt)
 
 	// Answer DENY. The ONLY change from #1154's allow envelope is
 	// allow_once → reject_once. AnswerToken is a client-minted idempotency key,
