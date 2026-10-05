@@ -14,6 +14,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 	"github.com/pyrycode/pyrycode/internal/sessions"
+	"github.com/pyrycode/pyrycode/internal/turncommit"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
@@ -55,22 +56,15 @@ type replySuggestionConv struct {
 	text      *string // nil is the clear
 	sessionID string
 
-	delivered   bool // non-empty user text delivered and not yet credited to a turn
-	assistant   bool // main-agent text in the current turn
-	invalidated bool // set by every invalidation, reset only by the next queued delivery
-	turnHit     bool // an invalidation since the drain saw the current turn start
-
-	// The just-ended turn. turnOK: it ended successfully with main-agent text and
-	// nothing has invalidated it since. userOK: its delivered user text has been
-	// confirmed. The confirmation is not ordered against the stream (msgqueue
-	// fires it on its own goroutine, often after the turn's result), so a
-	// suggestion that arrives first waits in pending until it lands. The same
-	// confirmation is what resets the sticky invalidated flag the turn's own
-	// accept set, so that flag is read at publication, never folded into turnOK.
-	ended          bool
-	turnOK, userOK bool
-	pending        *string
-	pendingSID     string
+	// Queue ids are monotone within a conversation. The commit gate identifies
+	// the producing message before stdout can open its turn; OnDelivered may
+	// confirm it after the result. A newer accept never gets erased by either.
+	writeID, acceptedID    uint64
+	awaitingStart          bool
+	assistant, invalidated bool
+	ended, turnOK, userOK  bool
+	pending                *string
+	pendingSID             string
 }
 
 func newReplySuggestions(logger *slog.Logger) *replySuggestions {
@@ -100,43 +94,73 @@ func (s *replySuggestions) entry(convID string, create bool) *replySuggestionCon
 	return c
 }
 
-// noteDelivered is the msgqueue OnDelivered hook: the text claude was actually
-// given for a turn, without attachment paths. Nil-safe.
-//
-// A queued delivery is also what re-arms a conversation after an invalidation.
-// The accept that invalidated always precedes its own delivery, so resetting
-// here rather than at turn start keeps an accept that races the drain (the
-// child already started the next turn, the drain has not seen it) from being
-// erased. A send-now delivery joins the running turn the accept invalidated,
-// so it re-arms nothing.
-func (s *replySuggestions) noteDelivered(convID string, msg msgqueue.QueuedMessage) {
+// trackDelivery observes the existing turncommit gate, after idle and before
+// the write. Metadata is the safe queued projection, never composed host paths.
+// Failed/dropped attempts cannot credit user text. The gate and inner delivery
+// run outside the leaf mutex. Nil owners preserve the delivery unchanged.
+func (s *replySuggestions) trackDelivery(inner msgqueue.DeliverFunc) msgqueue.DeliverFunc {
 	if s == nil {
-		return
+		return inner
 	}
+	return func(ctx context.Context, convID string, payload []byte) error {
+		msg, ok := msgqueue.DeliveryMessage(ctx)
+		gate := turncommit.From(ctx)
+		if !ok || gate == nil {
+			return inner(ctx, convID, payload)
+		}
+		started := false
+		ctx = turncommit.With(ctx, func() bool {
+			if !gate() {
+				return false
+			}
+			s.beginWrite(convID, msg.ID)
+			started = true
+			return true
+		})
+		err := inner(ctx, convID, payload)
+		if err != nil && started {
+			s.invalidateWrite(convID, msg.ID)
+		}
+		return err
+	}
+}
+
+// beginWrite establishes turn identity before its first content event. An
+// accept for a newer id still invalidates it even when it raced the queue's
+// return to the relay adapter. Only a fresh write can re-arm eligibility.
+func (s *replySuggestions) beginWrite(convID string, id uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c := s.entry(convID, true)
 	if c == nil {
 		return
 	}
-	if strings.TrimSpace(msg.Text) != "" {
-		if c.ended && c.turnOK && !c.userOK {
-			// The confirmation for the turn that just ended.
-			c.userOK = true
-		} else {
-			c.delivered = true
-		}
+	c.writeID, c.awaitingStart = id, true
+	c.assistant, c.ended, c.turnOK, c.userOK, c.pending = false, false, false, false, nil
+	c.invalidated = c.acceptedID > id
+	s.clearLocked(convID, c)
+}
+
+// noteDelivered credits only the producing message. It never resets an
+// invalidation, and send-now joins an invalidated running turn.
+func (s *replySuggestions) noteDelivered(convID string, msg msgqueue.QueuedMessage) {
+	if s == nil || msg.SentNow {
+		return
 	}
-	if !msg.SentNow {
-		c.invalidated = false
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.entry(convID, false)
+	if c == nil || c.writeID == 0 || c.writeID != msg.ID {
+		return
 	}
-	if c.pending != nil && c.userOK && !c.invalidated {
+	c.userOK = strings.TrimSpace(msg.Text) != ""
+	if c.pending != nil && c.turnOK && c.userOK && !c.invalidated {
 		s.setLocked(convID, c, *c.pending, c.pendingSID)
 	}
 }
 
-// turnStarted records that convID opened a new turn, which invalidates the
-// previous one and clears any suggestion it published. Nil-safe.
+// turnStarted keeps the identity and invalidations already recorded at the
+// write gate. A spontaneous turn has no producing queued message to credit.
 func (s *replySuggestions) turnStarted(convID string) {
 	if s == nil {
 		return
@@ -147,8 +171,12 @@ func (s *replySuggestions) turnStarted(convID string) {
 	if c == nil {
 		return
 	}
-	c.assistant, c.ended, c.turnOK, c.userOK, c.pending = false, false, false, false, nil
-	c.turnHit = false
+	if c.awaitingStart {
+		c.awaitingStart = false
+	} else {
+		c.writeID = 0
+		c.assistant, c.ended, c.turnOK, c.userOK, c.pending = false, false, false, false, nil
+	}
 	s.clearLocked(convID, c)
 }
 
@@ -165,7 +193,7 @@ func (s *replySuggestions) noteAssistantText(convID string) {
 }
 
 // turnEnded decides whether convID's just-ended turn may publish a suggestion,
-// and consumes the delivered user text. Nil-safe.
+// using the identity recorded before the write. Nil-safe.
 func (s *replySuggestions) turnEnded(convID string, ev turnevent.TurnEnd) {
 	if s == nil {
 		return
@@ -174,9 +202,7 @@ func (s *replySuggestions) turnEnded(convID string, ev turnevent.TurnEnd) {
 	s.mu.Lock()
 	if c := s.entry(convID, false); c != nil {
 		c.ended = true
-		c.turnOK = success && c.assistant && !c.turnHit
-		c.userOK = c.delivered
-		c.delivered = false
+		c.turnOK = success && c.assistant && c.writeID != 0 && !c.invalidated
 	}
 	s.mu.Unlock()
 }
@@ -195,13 +221,11 @@ func (s *replySuggestions) suggest(convID, text string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c := s.entry(convID, false)
-	if c == nil || !c.ended || !c.turnOK || c.pending != nil {
+	if c == nil || !c.ended || !c.turnOK || c.invalidated || c.pending != nil {
 		return
 	}
-	if !c.userOK || c.invalidated {
-		// Wait for the delivery confirmation: it credits the user text and
-		// re-arms the turn's own accept. An accept with no delivery to follow
-		// before the next turn start leaves this unpublished.
+	if !c.userOK {
+		// Only this turn's own confirmation may release the pending text.
 		c.pending, c.pendingSID = &text, sessionID
 		return
 	}
@@ -218,7 +242,7 @@ func (s *replySuggestions) setLocked(convID string, c *replySuggestionConv, text
 }
 
 // invalidate drops convID's current turn so a later suggestion for it is
-// ignored, and clears a held suggestion. Accepted sends, send-now, /clear,
+// ignored, and clears a held suggestion. Send-now, /clear,
 // resets, evictions and exits all land here. A conversation this owner has
 // never seen has nothing to invalidate. Nil-safe and safe from any goroutine.
 func (s *replySuggestions) invalidate(convID string) {
@@ -231,7 +255,37 @@ func (s *replySuggestions) invalidate(convID string) {
 	if c == nil {
 		return
 	}
-	c.invalidated, c.turnHit, c.turnOK, c.pending = true, true, false, nil
+	s.invalidateLocked(convID, c)
+}
+
+// accepted records the accepted queue id even if its write raced EnqueueSent's
+// return. An own-message accept must not invalidate the turn it already opened.
+func (s *replySuggestions) accepted(convID string, id uint64) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.entry(convID, true)
+	if c == nil {
+		return
+	}
+	c.acceptedID = max(c.acceptedID, id)
+	if id > c.writeID {
+		s.invalidateLocked(convID, c)
+	}
+}
+
+func (s *replySuggestions) invalidateWrite(convID string, id uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c := s.entry(convID, false); c != nil && c.writeID == id {
+		s.invalidateLocked(convID, c)
+	}
+}
+
+func (s *replySuggestions) invalidateLocked(convID string, c *replySuggestionConv) {
+	c.invalidated, c.turnOK, c.pending = true, false, nil
 	s.clearLocked(convID, c)
 }
 
@@ -273,13 +327,20 @@ func payloadLocked(convID string, c *replySuggestionConv) protocol.ReplySuggesti
 func (s *replySuggestions) current() []protocol.ReplySuggestionPayload {
 	s.mu.Lock()
 	out := make([]protocol.ReplySuggestionPayload, 0, len(s.convs))
+	ids := make([]string, 0, len(s.convs))
 	for convID, c := range s.convs {
+		ids = append(ids, convID)
 		if c.published {
 			out = append(out, payloadLocked(convID, c))
 		}
 	}
 	s.mu.Unlock()
 	if fn := s.resolver(); fn != nil {
+		for _, id := range ids {
+			if _, ok := fn(id); !ok {
+				s.forget(id)
+			}
+		}
 		out = slices.DeleteFunc(out, func(p protocol.ReplySuggestionPayload) bool {
 			if _, ok := fn(p.ConversationID); ok {
 				return false
@@ -398,7 +459,7 @@ type suggestionEnqueuer struct {
 func (q suggestionEnqueuer) EnqueueSent(conversationID, messageID, text, delivery string, attachmentIDs []string, deviceName, clientVersion string, clientSentAt time.Time) uint64 {
 	id := q.inner.EnqueueSent(conversationID, messageID, text, delivery, attachmentIDs, deviceName, clientVersion, clientSentAt)
 	if id != 0 {
-		q.s.invalidate(conversationID)
+		q.s.accepted(conversationID, id)
 	}
 	return id
 }
@@ -418,15 +479,18 @@ func (q suggestionQueueSender) SendNow(conversationID string, queuedMsgID uint64
 }
 
 // suggestionResetter invalidates when a client's "/clear" reaches the
-// conversation reset. The send_message intercept has already accepted it.
+// conversation reset succeeds. A refused reset preserves suggestion state.
 type suggestionResetter struct {
 	inner handlers.ConversationResetter
 	s     *replySuggestions
 }
 
 func (r suggestionResetter) StartNewSession(conversationID string) error {
+	if err := r.inner.StartNewSession(conversationID); err != nil {
+		return err
+	}
 	r.s.invalidate(conversationID)
-	return r.inner.StartNewSession(conversationID)
+	return nil
 }
 
 // suggestionTransitionSink composes the suggestion invalidation onto the pool's

@@ -1159,7 +1159,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		// the seam that produces the hold error it marks. The composed value goes no
 		// further than newInboundDeliver's WriteUserTurn — see channelCarry on why the
 		// "clients see no change" property is structural here rather than a filter.
-		Deliver:  postDelivery.beforeInbound(postCarry.carryPending(approvalParked.markApprovalHolds(newInboundDeliver(router.resolve, turnBusy, streamTurnHoldTimeout, sendNowPlace)))),
+		Deliver:  postDelivery.beforeInbound(postCarry.carryPending(approvalParked.markApprovalHolds(replySugg.trackDelivery(newInboundDeliver(router.resolve, turnBusy, streamTurnHoldTimeout, sendNowPlace))))),
 		OnChange: queueStateNotify(queueChanges, logger),
 		OnGiveUp: blocked,
 		// History uses only the safe queued projection. Stream Claude writes
