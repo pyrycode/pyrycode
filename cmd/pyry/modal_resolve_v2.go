@@ -309,6 +309,14 @@ func truncateForLog(s string, n int) string {
 	return s[:n]
 }
 
+// streamQuestionRegistry is the bridge's question storage boundary. Resolve is
+// the sole one-shot arbiter; Lookup must leave rejected answers outstanding.
+type streamQuestionRegistry interface {
+	Record(protocol.QuestionShownPayload, string) (protocol.QuestionShownPayload, error)
+	Lookup(string) (protocol.QuestionShownPayload, bool)
+	Resolve(string) (protocol.QuestionShownPayload, bool)
+}
+
 // streamApprovalBridge joins the two composition scopes a stream-json permission
 // prompt straddles (#1080): the claude-facing permbridge parked-approval store
 // (keyed by claude's tool_use_id, #1103) and the client-facing modalbridge
@@ -389,7 +397,7 @@ type streamApprovalBridge struct {
 	//
 	// Read without mu, like perm/modal/bcast/activeConv/ctx: written once at
 	// wiring time before the manager's Run goroutine starts.
-	questions *questionbridge.Registry
+	questions streamQuestionRegistry
 
 	// waker asks the relay to wake absent phones when a permission modal_shown
 	// goes live (#2564). Set after construction at the one production site, for
@@ -600,15 +608,22 @@ const reasonQuestionRefused = "The user declined to choose an option. They want 
 // record here would duplicate it while its only new material — the batch body or
 // the deny message — is exactly what must not be logged.
 func (b *streamApprovalBridge) RefuseQuestion(batchID string) (consumed bool) {
+	consumed, _ = b.RefuseQuestionDiagnostic(batchID)
+	return consumed
+}
+
+// RefuseQuestionDiagnostic returns the first failed check from one refusal.
+// It shares RefuseQuestion's ungated contract; questionResolverV2 gates wire input.
+func (b *streamApprovalBridge) RefuseQuestionDiagnostic(batchID string) (bool, string) {
 	b.mu.Lock()
 	toolUseID, ok := b.byQuestion[batchID]
 	b.mu.Unlock()
 	if !ok {
-		return false
+		return false, "missing_correlation"
 	}
 
 	if _, ok := b.questions.Resolve(batchID); !ok {
-		return false // the backstop, or an earlier refusal, already consumed it
+		return false, "resolution_lost" // the backstop or another attempt consumed it
 	}
 
 	// A Resolve miss here means permbridge already resolved this approval on its
@@ -622,7 +637,7 @@ func (b *streamApprovalBridge) RefuseQuestion(batchID string) (consumed bool) {
 		Source:          sourceQuestionRemote,
 	}, "stream_question.refused_push_err")
 
-	return true
+	return true, "resolved"
 }
 
 // AnswerQuestion resolves the outstanding batch named by batchID as the
@@ -643,9 +658,8 @@ func (b *streamApprovalBridge) RefuseQuestion(batchID string) (consumed bool) {
 // IT APPLIES NO AUTHORIZATION AND IS NOT SELF-GUARDING. Possession of the batch
 // id is treated as sufficient here, which is safe only because the per-device
 // answer gate (#1986) sits above it and because nothing reaches this path from
-// the wire until that gate exists — relay.QuestionResolver is unimplemented and
-// V2SessionConfig.QuestionResolver is nil at every construction site. A wiring
-// site that calls this without gating first lets any paired device answer.
+// the wire except through questionResolverV2's admission gate. A wiring site
+// that calls this without gating first bypasses device eligibility.
 //
 // RefuseQuestion is the template, and its ordering argument carries over intact —
 // read the correlation without deleting it, consume the one-shot before handing
@@ -694,34 +708,41 @@ func (b *streamApprovalBridge) RefuseQuestion(batchID string) (consumed bool) {
 // the other direction, and it is structural here: the path emits NO log record of
 // its own, so there is no field for question text, an answer value or any other
 // byte of the batch to leak into. The relay handler already logs the outcome with
-// the batch id and the answer token, the two fields internal/protocol marks safe,
-// so a record here would duplicate it while its only new material is exactly what
-// may never be logged.
+// the batch id and fixed diagnostic reason, so a record here would duplicate it
+// while its only new material is exactly what may never be logged.
 func (b *streamApprovalBridge) AnswerQuestion(batchID string, answers []protocol.QuestionAnswerEntry) (consumed bool) {
+	consumed, _ = b.AnswerQuestionDiagnostic(batchID, answers)
+	return consumed
+}
+
+// AnswerQuestionDiagnostic returns the first failed check from one answer.
+// Validation still precedes consume, and permission expiry after consume still
+// succeeds and dismisses. This method shares AnswerQuestion's ungated contract.
+func (b *streamApprovalBridge) AnswerQuestionDiagnostic(batchID string, answers []protocol.QuestionAnswerEntry) (bool, string) {
 	b.mu.Lock()
 	toolUseID, ok := b.byQuestion[batchID]
 	b.mu.Unlock()
 	if !ok {
-		return false
+		return false, "missing_correlation"
 	}
 
 	// Before the consume: no input bytes means no verdict, and the backstop
 	// still owes this batch its dismissal.
 	req, ok := b.perm.Lookup(toolUseID)
 	if !ok {
-		return false
+		return false, "missing_parked_request"
 	}
 	batch, ok := b.questions.Lookup(batchID)
 	if !ok {
-		return false
+		return false, "missing_batch_during_validation"
 	}
 	updated, ok := answerVerdict(req.Input, batch.Questions, answers)
 	if !ok {
-		return false
+		return false, "verdict_rejected"
 	}
 
 	if _, ok := b.questions.Resolve(batchID); !ok {
-		return false // the backstop, a refusal, or an earlier answer already consumed it
+		return false, "resolution_lost" // the backstop or another attempt consumed it
 	}
 
 	// A Resolve miss here means permbridge resolved this approval between the
@@ -736,7 +757,7 @@ func (b *streamApprovalBridge) AnswerQuestion(batchID string, answers []protocol
 		Source:          sourceQuestionRemote,
 	}, "stream_question.answered_push_err")
 
-	return true
+	return true, "resolved"
 }
 
 // answerVerdict validates a client's entries against the parked batch and, if
