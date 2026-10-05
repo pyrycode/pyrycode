@@ -20,10 +20,11 @@ type ClaudeAccountPayload struct {
 }
 ```
 
-`Kind` is one of `machine_login`, `file`, `1password` or `os_keychain` (a
-client must accept an unknown value — `os_keychain` itself has no daemon
-source yet, #2815, and is declared so clients can be built against it before
-one exists); `State` is `ready`, `failed` or `not_configured`. No `omitempty`
+`Kind` is one of `machine_login`, `file`, `1password` or `os_keychain`; a
+client must accept an unknown value. `os_keychain` is produced by a
+`keychain:<name>` source using the macOS Keychain or Linux Secret Service
+(#2815), and `claudeAccountPayload` passes that accessor kind through
+unchanged. `State` is `ready`, `failed` or `not_configured`. No `omitempty`
 anywhere: all four keys of `ClaudeAccountPayload` always serialize, `label`
 and `reason` as `""` when absent, which is what the committed
 `claude_account_machine_login.json` / `_file_ready.json` / `_file_failed.json`
@@ -77,8 +78,10 @@ computes either string. A reader who greps `internal/protocol` for
 `"machine_login"` or `"not_configured"` and finds only the constant
 declarations, never a conversion, is not looking at a bug — the wire strings
 are a client-facing contract chosen independently of the daemon's internal
-state names, which is also why `os_keychain` exists on the wire with no
-producer behind it yet (#2815).
+state names. `os_keychain` was declared before its source existed; now
+`newClaudeAccount` produces that same kind for `keychain:<name>` (#2815),
+so it needs no additional conversion. `TestNewClaudeAccount_KeychainSourceFromEachOrigin`
+checks the wire kind for flag, environment and JSON sources.
 
 ## Related
 

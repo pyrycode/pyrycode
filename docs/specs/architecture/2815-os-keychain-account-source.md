@@ -49,10 +49,12 @@ New `cmd/pyry/claude_account_keychain_test.go`, fakes `security` and `secret-too
 
 ## Documentation handoff
 
-Pending for the documentation stage:
+Satisfied in the documentation stage; wording checked against `newClaudeAccount`, `keychainCommand`, `runTokenCommand`, `claudeAccountPayload` and the account-source tests:
 
 - `docs/guide.md`, "Claude account source": add `keychain:<name>` with flag, env and JSON examples. Show item creation on macOS (`security add-generic-password -s <name> -a "$USER" -w`) and Linux (`secret-tool store --label=... service <name>`, package `libsecret-tools`). Warn against reusing "Claude Code-credentials".
 - `docs/deployment.md`, "Claude account source": macOS access prompt and "Always Allow"; LaunchAgent works, system LaunchDaemon cannot reach the login keychain; Linux needs an unlocked desktop keyring and a session D-Bus; headless Linux, pyrybox included, keeps the owner-only file. Replace the "Related, not yet built" mention of #2815.
+
+The verifier's additional handoff is also satisfied: `docs/knowledge/features/claude-account-source.md` covers the third source, shared runner, fixed keychain reasons and testing lessons; `docs/knowledge/features/protocol-package-types-claude-account-payloads.md` and `docs/protocol-mobile.md` identify the live `os_keychain` producer. The existing catalog entry is updated; no document was added or removed. Actual OS unlocking and service access remain operator checks, as the verifier noted.
 
 ## Security review
 
