@@ -118,6 +118,7 @@ func TestBuildArgs(t *testing.T) {
 				"--include-partial-messages",
 				"--forward-subagent-text",
 				"--replay-user-messages",
+				"--prompt-suggestions",
 				"--model", "sonnet",
 				"--session-id", id,
 			},
@@ -133,6 +134,7 @@ func TestBuildArgs(t *testing.T) {
 				"--include-partial-messages",
 				"--forward-subagent-text",
 				"--replay-user-messages",
+				"--prompt-suggestions",
 				"--model", "sonnet",
 				"--resume", id,
 			},
@@ -148,6 +150,7 @@ func TestBuildArgs(t *testing.T) {
 				"--include-partial-messages",
 				"--forward-subagent-text",
 				"--replay-user-messages",
+				"--prompt-suggestions",
 				"--session-id", id,
 			},
 		},
@@ -155,7 +158,7 @@ func TestBuildArgs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := buildArgs(tt.base, tt.firstRun, id)
+			got := buildArgs(tt.base, tt.firstRun, id, true)
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("buildArgs()\n got  = %v\n want = %v", got, tt.want)
 			}
@@ -174,10 +177,39 @@ func TestBuildArgs_DoesNotMutateBase(t *testing.T) {
 	t.Parallel()
 	base := []string{"--model", "sonnet"}
 	orig := slices.Clone(base)
-	_ = buildArgs(base, true, "id")
-	_ = buildArgs(base, false, "id")
+	_ = buildArgs(base, true, "id", true)
+	_ = buildArgs(base, false, "id", false)
 	if !slices.Equal(base, orig) {
 		t.Errorf("buildArgs mutated base: got %v, want %v", base, orig)
+	}
+}
+
+// TestBuildArgs_PromptSuggestionsOptOut pins #2831: the flag rides every
+// persistent spawn unless the child environment sets claude's own switch to
+// "false", and the spawn's last entry for it is the one that counts.
+func TestBuildArgs_PromptSuggestionsOptOut(t *testing.T) {
+	t.Parallel()
+	const key = "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION="
+	tests := []struct {
+		name string
+		env  []string
+		want bool // flag present
+	}{
+		{"unset", []string{"HOME=/h"}, true},
+		{"true", []string{key + "true"}, true},
+		{"false", []string{key + "false"}, false},
+		{"empty", []string{key}, true},
+		{"later entry re-enables", []string{key + "false", key + "1"}, true},
+		{"later entry disables", []string{key + "true", key + "false"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			args := buildArgs(nil, true, "id", !promptSuggestionsDisabled(tt.env))
+			if got := slices.Contains(args, "--prompt-suggestions"); got != tt.want {
+				t.Errorf("--prompt-suggestions present = %v, want %v (args %v)", got, tt.want, args)
+			}
+		})
 	}
 }
 
@@ -187,10 +219,10 @@ func TestBuildArgs_DoesNotMutateBase(t *testing.T) {
 func TestBuildArgs_StableIDAcrossFirstAndResume(t *testing.T) {
 	t.Parallel()
 	const id = "deadbeef-uuid"
-	if got := idFlagValue(buildArgs(nil, true, id), "--session-id"); got != id {
+	if got := idFlagValue(buildArgs(nil, true, id, true), "--session-id"); got != id {
 		t.Errorf("first spawn --session-id = %q, want %q", got, id)
 	}
-	if got := idFlagValue(buildArgs(nil, false, id), "--resume"); got != id {
+	if got := idFlagValue(buildArgs(nil, false, id, true), "--resume"); got != id {
 		t.Errorf("respawn --resume = %q, want %q", got, id)
 	}
 }
@@ -350,7 +382,7 @@ func TestUseCreateForm_ProbeDecidesIDFlag(t *testing.T) {
 			t.Parallel()
 			dir := tt.dir(t)
 
-			got := buildArgs(base, useCreateForm(dir, tt.id, tt.latchCreate), tt.id)
+			got := buildArgs(base, useCreateForm(dir, tt.id, tt.latchCreate), tt.id, false)
 			want := []string{
 				"--input-format", "stream-json",
 				"--output-format", "stream-json",
