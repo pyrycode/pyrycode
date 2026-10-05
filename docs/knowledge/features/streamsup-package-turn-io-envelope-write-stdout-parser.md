@@ -5,9 +5,12 @@ and (#2730) `--replay-user-messages` in the fixed prefix for create
 (`--session-id`) and resume (`--resume`) spawns. Production therefore
 receives the nested `stream_event` lines, attributed subagent prose, and a
 replayed `user` echo of every message claude reads, mapped below;
-caller-supplied arguments do not need to opt into any of the three. This
-prefix belongs only to the long-lived interactive child; the separate `pyry
-agent-run` argv (`internal/agentrun/streamrunner`) is unchanged.
+caller-supplied arguments do not need to opt into any of the three.
+`buildArgs` also requests `--prompt-suggestions` on every persistent spawn
+unless the child's last effective `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` entry
+is `false` (#2831). Claude honours its own `promptSuggestionEnabled: false`
+setting. This prefix belongs only to the long-lived interactive child; the
+separate `pyry agent-run` argv (`internal/agentrun/streamrunner`) is unchanged.
 The turn I/O boundary fills
 `Stdin()`/`Config.Stdout` with two additive seams:
 
@@ -400,7 +403,9 @@ neither establishes daemon turn attribution, so neither is decoded or carried;
 the producing session is already tagged by `streamTurnSink.sinkForTag`. The
 type's own doc marks `Text` as claude-authored and untrusted: the decode gate
 checks shape, not content, so control characters and bidi marks other than the
-rejected line breaks pass through unchanged. This slice only recognises the
-line and publishes its text — it carries no spawn flag to request prompt
-suggestions from Claude and publishes the event to no client; activation and
-wire/daemon consumption are #2831.
+rejected line breaks pass through unchanged. The parser only recognises the
+line and emits neutral text; the daemon's
+[native suggestion owner](streamsup-package-draining-turnevents-into-the-interactive-emitter.md#native-reply-suggestions-after-the-result-2831)
+decides eligibility, publishes current state and invalidates it on new work or
+session lifecycle changes. Its message-ID tracking is separate from the
+stateless parser because delivery confirmation can follow the result.

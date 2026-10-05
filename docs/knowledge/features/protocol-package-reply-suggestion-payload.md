@@ -1,6 +1,13 @@
 # Reply-suggestion payload (#2828)
 
-Body of an `Envelope` whose `Type == TypeReplySuggestion` (`docs/protocol-mobile.md` § `reply_suggestion`). Binary → phone, gated on the negotiated `interactive` capability. **Declared, not yet emitted**: this ticket adds the wire shape and compatibility classification only — nothing in the daemon produces one. The same declare-ahead-of-producer sequencing [`rate_limited`](protocol-package-rate-limited-event-payload.md) (#1405 declared, #1410 emitted) and [`model_list`](protocol-package-model-list-payload.md) (#1704 declared, #1849 emitted) used. Split from #2817; the two client consumers, pyrycode-desktop#1761 and pyrycode-mobile#1805, are blocked on this shape landing.
+Body of an `Envelope` whose `Type == TypeReplySuggestion`
+([wire contract](../../protocol-mobile.md#reply_suggestion)). Binary → phone,
+gated on the negotiated `interactive` capability. The daemon's
+[native-source owner](streamsup-package-draining-turnevents-into-the-interactive-emitter.md#native-reply-suggestions-after-the-result-2831)
+publishes this state after eligible successful turns and clears it on accepted
+new work or session lifecycle changes (#2831). Live and connect-time copies
+carry no `event_id` and enter neither history nor replay. Missing native output
+remains silent until #2832's fallback.
 
 ```go
 type ReplySuggestionPayload struct {
@@ -12,10 +19,21 @@ type ReplySuggestionPayload struct {
 ```
 
 - **`SuggestedReply` is `*string` WITHOUT `omitempty` — the session-transition payload's `WorkspaceCwd` precedent, reused for a different invariant.** There, `*string`-no-`omitempty` encodes a cross-field "non-null iff some other field says so"; here it encodes a two-state contract standing on its own: `nil` marshals to the literal `null` that **clears** a suggestion, and a pointer to `""` marshals to a present empty string that does **not** clear it. `omitempty` would collapse that second state into an absent key, destroying the distinction this ticket exists to declare. `TestReplySuggestionPayload_EmptyStringIsNotNull` pins the second half; the round-trip fixtures pin the first.
-- **`Revision` is a client-side staleness guard, not a persisted or daemon-validated counter.** `uint64`, positive, increasing per conversation within one daemon lifetime — the contract (`docs/protocol-mobile.md` § `reply_suggestion`) has the client ignore a frame whose revision is not higher than one already held for the same `conversation_id`/`session_id` pair, and discard cached suggestions on a fresh handshake, since nothing here says a restarted daemon's counter resumes above zero. Enforcing monotonicity and the text's single-line/UTF-8/1024-byte bound is deferred to whichever ticket adds the producer; this struct and its tests do not check either.
+- **`Revision` orders current state, never persisted history.** `uint64`, positive,
+  increasing per conversation within one daemon lifetime. `replySuggestions`
+  advances it on sets and clears; the relay's
+  [per-connection guard](v2-session-manager-state-machine-connect-time-reply-suggestion-reconcile.md)
+  drops revisions at or below the highest delivered for that conversation.
+  Clients compare revisions for the `conversation_id`/`session_id` pair and
+  discard cached state on a fresh handshake because a daemon restart resets
+  counters. This DTO validates neither revisions nor text; the native parser
+  enforces single-line, non-blank UTF-8 and the 1024-byte text bound.
 - **Routing key is the pair, not `conversation_id` alone.** Unlike every sibling interactive payload in this package, state here is replaced per `conversation_id` **and** `session_id` together — a session rotation on the same conversation must not have its suggestion state confused with the session that preceded it.
 - **Not a `turnevent` variant.** This is a conversation/session state frame, with no `turn_id` and no turn-lifecycle role — [`model_list`](protocol-package-model-list-payload.md) and the [session-transition payload](protocol-package-types-session-transition-payload.md) draw the same line for the same reason, and `docs/protocol-mobile.md` keeps this frame out of its "twenty-three turn-stream events" count accordingly.
-- **SECURITY.** `SuggestedReply` is display-only, inert text — never executed, never treated as a control input. No producer exists yet, so no text has crossed the subprocess trust boundary through this path; whichever ticket adds the producer inherits the obligation to bound and, if the source is claude-authored, to not sanitize-but-report exactly as the rest of this package does.
+- **SECURITY.** `SuggestedReply` is Claude-authored, untrusted, inert display text.
+  `decodePromptSuggestion` validates source encoding and shape before it crosses
+  the subprocess boundary, then carries accepted text verbatim. The owner never
+  logs it or submits it to Claude automatically; only an explicit user send does.
 - **Pure DTO: no methods, no constructor, no `Validate()`.** Same posture as every payload in this file's siblings.
 
 Two round-trip tests in `reply_suggestion_test.go`: `TestReplySuggestionPayload_RoundTrip`, table-driven over `reply_suggestion_set.json` (a populated suggestion, revision 7) and `reply_suggestion_clear.json` (revision 8, `"suggested_reply":null`) — each decodes, re-marshals through the shared `roundTripEnvelope` helper, and asserts all four keys are present with the clear fixture's `suggested_reply` a literal `null`; and `TestReplySuggestionPayload_EmptyStringIsNotNull`, which marshals a pointer to `""` and asserts the wire value is `""`, not `null`. Classified v2-only (`v2OnlyTypes`, `TestIsKnownAppType`, `TestTypeConstants_V1V2Partition`) and outbound `push` (`cmd/pyry/relay_guard_test.go`'s `excludedTypes`) alongside every other interactive event.

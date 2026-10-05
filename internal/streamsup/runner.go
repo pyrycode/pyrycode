@@ -2362,8 +2362,9 @@ func (r *Runner) beginSpawn(ctx context.Context, firstRun bool) (
 	r.iterCancel = cancel
 	r.restartMu.Unlock()
 
-	args = buildArgs(base, useCreateForm(sessionsDir, id, firstRun || forceFirst), id)
 	env = spawnEnv(r.cfg.Env, r.cfg.SessionIDEnvVar, id)
+	args = buildArgs(base, useCreateForm(sessionsDir, id, firstRun || forceFirst), id,
+		!promptSuggestionsDisabled(append(os.Environ(), env...)))
 	return iterCtx, cancel, id, args, env, workDir, forceFirst, freshSeq, spawnMode
 }
 
@@ -2944,8 +2945,8 @@ func useCreateForm(sessionsDir, id string, latchCreate bool) bool {
 // non-print choice is billing-tied and spike-verified (multi-turn, interrupt,
 // resume, and the approval round-trip all work without it). Pure — no Runner
 // state, and it never mutates base.
-func buildArgs(base []string, create bool, sessionID string) []string {
-	args := make([]string, 0, len(base)+10)
+func buildArgs(base []string, create bool, sessionID string, promptSuggestions bool) []string {
+	args := make([]string, 0, len(base)+11)
 	args = append(args,
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
@@ -2956,11 +2957,33 @@ func buildArgs(base []string, create bool, sessionID string) []string {
 		// turns the echo into a digest-only turnevent.UserEcho.
 		"--replay-user-messages",
 	)
+	if promptSuggestions {
+		// A stream-json child generates its native post-result suggestion only
+		// when asked (#2831); the parser turns it into turnevent.PromptSuggestion.
+		args = append(args, "--prompt-suggestions")
+	}
 	args = append(args, base...)
 	if create {
 		return append(args, "--session-id", sessionID)
 	}
 	return append(args, "--resume", sessionID)
+}
+
+// promptSuggestionEnv is claude's own switch for native prompt suggestions.
+const promptSuggestionEnv = "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"
+
+// promptSuggestionsDisabled reports whether the child environment env turns
+// claude's prompt suggestions off (#2831). The last entry wins, as it does for
+// the spawned process, and only the literal "false" disables. A settings-file
+// promptSuggestionEnabled: false is claude's own to honour.
+func promptSuggestionsDisabled(env []string) bool {
+	disabled := false
+	for _, entry := range env {
+		if value, ok := strings.CutPrefix(entry, promptSuggestionEnv+"="); ok {
+			disabled = value == "false"
+		}
+	}
+	return disabled
 }
 
 // mcpStatusEligible reports whether args confines this child to the daemon's one

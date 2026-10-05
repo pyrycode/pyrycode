@@ -1144,13 +1144,22 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		sendNowPlace.bindQueued(ctx, streamSink, conversationHistory, router.isClaude, logger)
 		streamSink.setEchoObserver(sendNowPlace.echo)
 	}
+	// Native suggested-reply state (#2831), stream path only. Minted here because
+	// its delivered-text hook is fixed in the msgqueue literal below; the relay leg
+	// binds its broadcaster and starts its Run.
+	var replySugg *replySuggestions
+	var replySuggDelivered msgqueue.DeliveredFunc
+	if streamSink != nil {
+		replySugg = newReplySuggestions(logger)
+		replySuggDelivered = replySugg.noteDelivered
+	}
 	queue, err := msgqueue.New(msgqueue.Config{
 		// Recovery precedes carry, so the pending posted text is composed onto the payload
 		// once, at the boundary with the queue, and markApprovalHolds stays adjacent to
 		// the seam that produces the hold error it marks. The composed value goes no
 		// further than newInboundDeliver's WriteUserTurn — see channelCarry on why the
 		// "clients see no change" property is structural here rather than a filter.
-		Deliver:  postDelivery.beforeInbound(postCarry.carryPending(approvalParked.markApprovalHolds(newInboundDeliver(router.resolve, turnBusy, streamTurnHoldTimeout, sendNowPlace)))),
+		Deliver:  postDelivery.beforeInbound(postCarry.carryPending(approvalParked.markApprovalHolds(replySugg.trackDelivery(newInboundDeliver(router.resolve, turnBusy, streamTurnHoldTimeout, sendNowPlace))))),
 		OnChange: queueStateNotify(queueChanges, logger),
 		OnGiveUp: blocked,
 		// History uses only the safe queued projection. Stream Claude writes
@@ -1160,6 +1169,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		OnDelivered: deliveredFuncs(
 			newOperatorMessageHistory(conversationHistory, operatorMessageNotify(operatorMessages, logger), sendNowPlace, logger),
 			postCarry.clearDelivered,
+			replySuggDelivered,
 		),
 		// Pending exempts a head held behind an approval parked on a PERSON from the
 		// give-up bound (#1911). #1014 wired this seam to claude's startup trust modal;
@@ -1378,6 +1388,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		retainedBackgroundTaskRosters: retainedBackgroundTaskRosters(convReg, pool),
 		approvals:                     approvals,
 		streamSink:                    streamSink,
+		suggestions:                   replySugg,
 		busy:                          turnBusy,
 		hist:                          conversationHistory,
 		postDelivery:                  postDelivery,

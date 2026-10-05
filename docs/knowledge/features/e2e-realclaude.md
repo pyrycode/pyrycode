@@ -121,6 +121,22 @@ then keep strict assertions for malformed payloads and unexpected parent lanes.
 Treating every non-target envelope as a lane failure rejects valid turns; skipping
 its decryption desynchronizes the receive nonce.
 
+Optional event waits must not expire the fakephone read context: coder/websocket
+closes the connection when that read times out, so a missing event can make the
+next turn's send fail with a closed connection. `startSuggestReader` gives one
+goroutine ownership of reads and Noise receive nonces; `suggestWatch.pumpUntil`
+times out on its channel instead, preserving the connection between turns.
+Reader errors are returned to the test goroutine for failure reporting.
+
+Native suggestions need useful staging rather than an assumption that every
+successful turn emits one. On Claude 2.1.280, six prompts ending in open
+questions produced none; small coding steps with an obvious follow-up did.
+`TestInteractiveStream_NativeReplySuggestionSetThenClear` drives up to six
+completed turns, fails if no native set arrives with credentials present, then
+requires an explicit null at a higher revision after a follow-up send. Short
+conversations and cold caches can stay silent. A green turn or a skipped probe
+cannot prove [native suggestion publication](streamsup-package-draining-turnevents-into-the-interactive-emitter.md#native-reply-suggestions-after-the-result-2831).
+
 Since #2569, a fresh-home daemon now seeds a promoted `General` channel and a
 bound-but-never-spawned session on first boot (see
 [`conversations-registry.md`](conversations-registry.md)). `spawnBootstrapDaemon`
