@@ -103,6 +103,25 @@ func TestReplySuggestions_SetConditions(t *testing.T) {
 			s.invalidate(testConvID)
 			e.HandleFor(ctx, testConvID, successEnd)
 		}, false},
+		{"accept racing the drain's turn start", func(e *interactiveTurnEmitterV2, s *replySuggestions) {
+			s.noteDelivered(testConvID, msgqueue.QueuedMessage{Text: "go"})
+			s.invalidate(testConvID) // a second message accepted before the drain saw the turn open
+			e.HandleFor(ctx, testConvID, turnevent.TextChunk{MessageID: "m1", Text: "Done."})
+			e.HandleFor(ctx, testConvID, successEnd)
+		}, false},
+		{"send-now joins the turn", func(e *interactiveTurnEmitterV2, s *replySuggestions) {
+			s.noteDelivered(testConvID, msgqueue.QueuedMessage{Text: "go"})
+			e.HandleFor(ctx, testConvID, turnevent.TextChunk{MessageID: "m1", Text: "Done."})
+			s.invalidate(testConvID)
+			s.noteDelivered(testConvID, msgqueue.QueuedMessage{Text: "also this", SentNow: true})
+			e.HandleFor(ctx, testConvID, successEnd)
+		}, false},
+		{"next queued delivery re-arms", func(e *interactiveTurnEmitterV2, s *replySuggestions) {
+			e.HandleFor(ctx, testConvID, turnevent.ThoughtChunk{Text: "earlier turn"})
+			e.HandleFor(ctx, testConvID, successEnd)
+			s.invalidate(testConvID)
+			suggestedTurn(e, s, testConvID)
+		}, true},
 		{"invalidated after turn end", func(e *interactiveTurnEmitterV2, s *replySuggestions) {
 			suggestedTurn(e, s, testConvID)
 			s.invalidate(testConvID)

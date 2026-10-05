@@ -57,7 +57,7 @@ type replySuggestionConv struct {
 
 	delivered   bool // non-empty user text delivered since the last TurnEnd
 	assistant   bool // main-agent text in the current turn
-	invalidated bool // something invalidated the current turn since it started
+	invalidated bool // set by every invalidation, reset only by the next queued delivery
 	eligible    bool // the last TurnEnd qualified and nothing has invalidated it
 }
 
@@ -90,13 +90,25 @@ func (s *replySuggestions) entry(convID string, create bool) *replySuggestionCon
 
 // noteDelivered is the msgqueue OnDelivered hook: the text claude was actually
 // given for a turn, without attachment paths. Nil-safe.
+//
+// A queued delivery is also what re-arms a conversation after an invalidation.
+// The accept that invalidated always precedes its own delivery, so resetting
+// here rather than at turn start keeps an accept that races the drain (the
+// child already started the next turn, the drain has not seen it) from being
+// erased. A send-now delivery joins the running turn the accept invalidated,
+// so it re-arms nothing.
 func (s *replySuggestions) noteDelivered(convID string, msg msgqueue.QueuedMessage) {
-	if s == nil || strings.TrimSpace(msg.Text) == "" {
+	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	if c := s.entry(convID, true); c != nil {
-		c.delivered = true
+		if strings.TrimSpace(msg.Text) != "" {
+			c.delivered = true
+		}
+		if !msg.SentNow {
+			c.invalidated = false
+		}
 	}
 	s.mu.Unlock()
 }
@@ -113,7 +125,7 @@ func (s *replySuggestions) turnStarted(convID string) {
 	if c == nil {
 		return
 	}
-	c.assistant, c.invalidated, c.eligible = false, false, false
+	c.assistant, c.eligible = false, false
 	s.clearLocked(convID, c)
 }
 

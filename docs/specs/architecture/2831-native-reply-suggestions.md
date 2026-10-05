@@ -69,3 +69,27 @@ Pending for the documentation stage:
 
 - `docs/protocol-mobile.md` § `reply_suggestion` and its frame-table row: replace "declared, not yet emitted" / "the seam stays unwired" with the shipped behaviour — per-conversation/session scope, the set conditions, the clear triggers (new turn, accepted send/send-now//clear, reset, exit/eviction), reconnect receiving current state including null, missing native output silent until #2832.
 - `docs/knowledge/features/streamsup-package-draining-turnevents-into-the-interactive-emitter.md`: publication of native suggestion state after the result, and lifecycle invalidation.
+
+## Security review
+
+**Verdict:** PASS
+
+**Findings:**
+
+- [Trust boundaries] No findings. The one boundary for the suggestion text is `decodePromptSuggestion` in `internal/streamsup` (#2829): single-line, non-blank UTF-8, at most 1024 bytes. Downstream it is carried verbatim and only as `ReplySuggestionPayload.SuggestedReply`. Attribution is by the producing session's conversation (`conversationForSession` in the drain, passed to `HandleFor`), never the active cursor, so one conversation's suggestion cannot be stamped onto another. The frame goes through `Push` and so through `forwardEnvelope`, where `withheldFromConn` and `replySuggestionStale` apply as for the reconcile. The daemon never sends the text to claude itself: only an explicit client send does.
+- [Tokens] No findings. Nothing secret is created or read. `promptSuggestionsDisabled` compares one env value against the literal `false` and logs nothing; `accountTokenEnv` is untouched.
+- [File operations] No findings. State is daemon memory only; nothing is written to disk.
+- [Subprocesses] No findings. `buildArgs` adds one constant flag; no caller-controlled value reaches argv, and the inherited environment is unchanged. Operators can opt out with `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` or claude's own settings. Whether every supported claude accepts the flag is what the `needs-real-claude` gate proves.
+- [Cryptography] No findings. Revisions are ordering counters, not secrets; frames are sealed by the existing Noise transport.
+- [Network and I/O] No findings. One frame is at most about 1.2 KB. The publish rate is bounded: one set per eligible turn and one clear per held suggestion, so repeated sends from a client cannot amplify (`clearLocked` publishes only while text is held), and `Run` coalesces a burst to each conversation's current state. Memory is one small entry per conversation that delivered or ran a turn; `current` forgets deleted conversations.
+- [Errors, logs, telemetry] No findings. The text is never logged: `Run` logs event, conn id, conversation id and Push's transport error only; the live test logs only its length.
+- [Concurrency] SHOULD FIX, fixed in the build: resetting `invalidated` at turn start lets an accept that arrives after the child opened the next turn, but before the drain saw it, be erased, so that turn could publish while a newer message waits. The reset moves to the next queued (non-send-now) delivery, which always follows its own accept; see Revisions. Otherwise one leaf mutex, the registry read behind `sessionFor` always taken with it released, no push under it, and `Run` exits on ctx with its cleanup waiting.
+- [Threat model] No findings against `docs/protocol-mobile.md` § Security model: paired, end-to-end encrypted conns only, and the same interactive gate as every v2 event frame. A prompt-injected suggestion is still inert text the user must choose to send.
+
+**Reviewer:** builder (self-review per the security-review checklist)
+**Date:** 2026-10-05
+
+## Revisions
+
+- 2026-10-05, from the security review run after the plan commit (the `security-sensitive` label was missed at plan time): `turnStarted` no longer resets `invalidated`. `noteDelivered` resets it, but not for a send-now delivery, which joins the turn its accept invalidated. Contract: an accepted send invalidates every turn up to the next queued delivery, so an accept racing the drain's view of a turn start is not lost. `turnStarted` still clears a held suggestion and the turn's text and eligibility flags.
+- 2026-10-05: `current` reads the registry with the mutex released, through `resolver` and `forget`, so the mutex stays a leaf. `sessionFor` is installed by `bindSessions` under the mutex.
