@@ -27,3 +27,26 @@ Add a new payload file `internal/protocol/claude_account.go` declaring `RequestC
 ## Documentation handoff
 
 Pending for the documentation stage: in `docs/protocol-mobile.md`, add a "Claude account source" section beside "Daemon-wide host system prompt", plus rows in the application-message table — frame names and directions, the payload table, the `kind` (`machine_login`, `file`, `1password`, `os_keychain`; unknown values accepted) and `state` (`ready`, `failed`, `not_configured`) vocabularies with meanings, the always-present empty-string rule for `label` and `reason`, correlated examples, paired-client access and unicast scope, and the statement that no frame carries the token, the source path or a 1Password reference. Mark handling as pending #2839.
+
+## Security review
+
+**Verdict:** PASS
+
+**Findings:**
+
+- [Trust boundaries] No findings for this ticket. The only inbound frame is `RequestClaudeAccountPayload`, an empty struct, so no client-controlled value crosses into the daemon; `IsKnownAppType` admits the request type only and keeps `claude_account` outbound-only via `inboundAppTypeSet`. Decoding is structural, not authorization. OUT OF SCOPE (#2839): the handler must answer only an AEAD-authenticated paired device from the map dispatch, never an unauthenticated or pre-handshake conn. With no `interactive` gate, any paired client may learn the account `kind`, `label` and failure `state`/`reason`; that disclosure is accepted, since paired clients already hold daemon-wide authority (for example over the host system prompt, #2767).
+- [Tokens, secrets, credentials] No token is generated, stored or carried. `ClaudeAccountPayload` has exactly four keys and the wire-key tests in `claude_account_test.go` pin that exact set, so adding a token, path or reference field breaks a test. The residual risk is free text: `Reason` is daemon-authored and `Label` is operator-given. Today every reason in `cmd/pyry/claude_account.go` is a static literal passed to `accountReadFailure` (for example "token file unreadable", "1Password read failed"), with no wrapped `error` text. OUT OF SCOPE (#2839): the handler must copy `claudeAccount.status()`'s static reason and never an `err.Error()` from `os` or `op`, which can include a file path or an `op://` item reference. `Label` may name the account (for example an email); it is operator-chosen display text and is disclosed to paired clients by design.
+- [File operations] No findings. The DTOs and constants touch no filesystem; the source file read and its mode/owner checks stay in `cmd/pyry/claude_account.go`, which this ticket does not change.
+- [Subprocesses] No findings. No command execution is added; the `op` invocation for 1Password stays in `cmd/pyry/claude_account.go`.
+- [Cryptography] No findings. Frames ride the existing Noise_IK paired transport; no keys, nonces or secret comparisons are added.
+- [Network and I/O] No findings. No sockets or readers are added; the inbound request is `{}` and the existing envelope size cap applies. The reply is bounded by short static reasons plus an operator label. Rate limiting a paired client that asks repeatedly is OUT OF SCOPE (#2839 serves a cached `status()` snapshot, so a request costs no token read); broader rate limiting stays deferred by `docs/protocol-mobile.md` § Security model.
+- [Errors, logs, telemetry] No error code is added: a read failure is reported in-band as `state: failed`, and a malformed request uses the existing `CodeProtocolMalformed`. OUT OF SCOPE (#2839): the handler must not log the label or the reply payload beyond the frame type and device ID, matching the existing `claudeAccount.read` log line, which logs only `kind` and the static reason.
+- [Concurrency] No findings. No goroutines or shared state are added. #2839 reads `claudeAccount.status()`, which already takes the account mutex.
+- [Threat model] Unicast scope: the comment in `claude_account.go` requires exactly one `claude_account` reply per request, correlated by `Envelope.InReplyTo` and never broadcast, so one client's request cannot push account state to other connected devices. OUT OF SCOPE (#2839): prove paired access, unicast delivery and no broadcast in handler tests. Relay MITM, replay and static-key threats remain covered by the existing Noise and pairing code.
+
+**Reviewer:** builder (self-review per the security-review checklist)
+**Date:** 2026-10-05
+
+## Revisions
+
+- 2026-10-05: added `## Security review` in response to the verifier's MUST FIX on PR #2842 (the plan of a `security-sensitive` ticket had none). The review found no MUST FIX and no SHOULD FIX for this declaration-only change; its OUT OF SCOPE items are consumer obligations for the #2839 handler. Design and code unchanged.
