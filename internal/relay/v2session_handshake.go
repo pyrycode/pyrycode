@@ -624,6 +624,13 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// the reconciled running phase as the last word. No-op for a non-interactive conn
 	// or an unwired seam.
 	m.reconcileTurnPhases(ctx, s)
+
+	// Connect-time reply-suggestion reconcile (#2830), the eighth Mode B instance.
+	// Its position is not load-bearing: the frames never enter the replay ring, and
+	// forwardEnvelope's per-conversation revision guard orders them against any
+	// live copy whichever drains first. No-op for a non-interactive conn or an
+	// unwired seam.
+	m.reconcileReplySuggestions(ctx, s)
 }
 
 // clientVersionReject says why a hello's client_version is refused. The zero

@@ -400,6 +400,14 @@ type V2Session struct {
 	// them.
 	replayThrough uint64
 
+	// replySuggestionRevisions is the highest reply_suggestion revision already
+	// delivered to this conn, per conversation_id (#2830). Run-owned, the
+	// replayThrough regime: read and written only in forwardEnvelope. nil until the
+	// first delivery, and a fresh V2Session per handshake, so a reconnect is never
+	// held back by revisions an earlier conn saw. Bounded by the conversations this
+	// conn received a suggestion for, and freed with the session.
+	replySuggestionRevisions map[string]uint64
+
 	// replayQueue is the not-yet-forwarded tail of a mid-turn-reconnect replay
 	// (#777), populated by replayMissed and drained one event per Run pass by
 	// drainReplayOnce so a large replay can no longer monopolise the Run loop.
@@ -1974,6 +1982,14 @@ func (m *V2SessionManager) forwardEnvelope(_ context.Context, connID string, env
 	if env.EventID != nil && *env.EventID <= s.replayThrough {
 		return nil
 	}
+	// Per-conversation revision ordering for reply_suggestion (#2830): a stale
+	// connect-time snapshot draining behind a newer live clear is dropped here.
+	// Recorded only after m.send, so a frame that never reached the wire does not
+	// advance the watermark.
+	suggestionConv, suggestionRev, stale := replySuggestionStale(s, env)
+	if stale {
+		return nil
+	}
 	env = m.mergedForConn(s, env)
 	env = m.agentTaggedForConn(s, env)
 	envJSON, err := json.Marshal(env)
@@ -1992,6 +2008,9 @@ func (m *V2SessionManager) forwardEnvelope(_ context.Context, connID string, env
 		return fmt.Errorf("marshal push frame: %w", err)
 	}
 	m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: frame})
+	if suggestionRev > 0 {
+		recordReplySuggestion(s, suggestionConv, suggestionRev)
+	}
 	return nil
 }
 
