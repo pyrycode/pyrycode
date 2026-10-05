@@ -122,29 +122,19 @@ package realclaude
 // is unchanged byte-for-byte, and structurally cannot be moved by what follows —
 // A1-A4 read a `models` slice snapshotted before phase 2 exists.
 //
-// Phase 2 is #1838's AC 4: a BRACKETED value (claude-fable-5[1m]) delivered to the
-// same running child, asserted by B1-B3. #1838 widened internal/relay's validModel
-// to accept the trailing bracket group claude publishes for a variant row; that
-// widening is proven hermetically in internal/relay, which is where the validator
-// lives. What a hermetic test cannot answer is whether claude's own `set_model`
-// accepts the form claude's own menu publishes as "the argument you pass to select
-// this model" — so the split is deliberate: the hermetic tests prove THE DAEMON
-// ACCEPTS THE VALUE, this phase proves CLAUDE APPLIES IT TO A RUNNING CHILD, and
-// together they close the user story. Driving the relay handler end to end would
-// need a Noise handshake and a V2SessionManager wrapped around a live claude,
-// out of all proportion to what it would add.
+// Phase 2 always proves a second exact model transition in the same child.
+// It prefers a bracketed value from the child's own initialize menu, covering
+// #1838's widened validator and live bracketed delivery when such a row exists.
+// When no usable bracketed row is published, it selects a plain alias from that
+// same menu. A bracket-free pass proves in-band delivery but cannot prove live
+// bracketed-value support; internal/relay's hermetic validation remains covered.
 //
-// The bracketed value is READ FROM CLAUDE'S OWN REPLY, never pinned — do not go
-// looking for an inbandModelTargets-style table for it, because deliberately none
-// was written. The measurement is why: on 2.1.220 (2026-08-21) the bracketed rows
-// were `opus[1m]` and `claude-fable-5[1m]`; on 2.1.239 (the committed capture
-// initialize_control_v2.1.239.json) `opus[1m]` is GONE — the Opus row is plain
-// `opus` — and `claude-fable-5[1m]` is the only bracketed value left. A pinned
-// string would go red on a menu change that has nothing to do with the mechanism.
-// So the phase asks the child for its own menu with RequestInitialize, taps the
-// control_response off the same stdout, and sends back a value that child just
-// published. Phase 1 keeps its pinned table because an ALIAS is stable across
-// versions in a way a variant row is not.
+// Neither the selected value nor its expected resolution is pinned: menus can
+// change even within one binary version. Plain aliases also avoid familyAlias's
+// full-ID rewrite in Pool.deliverSettingsInBand, so the fallback compares against
+// the resolution of the exact alias row the child just published. Failure to
+// deliver or apply a selected bracketed target never triggers an alias retry.
+// Phase 1 keeps its stable alias table and independent A1-A4 snapshot.
 //
 // # A red B1/B2 now says whether claude's own menu moved (#2045)
 //
@@ -518,9 +508,9 @@ var _ sessions.Runner = inbandRunner{}
 
 // TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel drives one
 // live claude session through a turn, a model change delivered by the daemon's
-// own Pool.UpdateSettings, and a further turn — then asserts from claude's own
-// per-turn system/init announcement that the model changed to the requested one,
-// and that the same child served both turns.
+// own Pool.UpdateSettings, and a further turn, followed by a second model change
+// chosen from the child's live menu. Its per-turn system/init announcements must
+// match both requested resolutions, with the same child serving all three turns.
 func TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel(t *testing.T) {
 	claudeBin := resolveClaudeBin(t)     // t.Skip when claude is not on PATH
 	home := WithWorktreeAuthenticated(t) // t.Skip when there are no credentials
@@ -675,7 +665,7 @@ func TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel(t *testing
 			"the settings change respawned the child", spawnCount)
 	}
 
-	// --- phase 2 (#1838 AC 4): the same running child, a BRACKETED value ------
+	// --- phase 2: another exact model transition in the same running child ----
 	//
 	// A1-A4 above read `models`, snapshotted before this phase exists, so nothing
 	// below can move their verdict.
@@ -695,23 +685,27 @@ func TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel(t *testing
 	}
 
 	// `last` is phase 1's final announced model and so is this phase's baseline:
-	// B1 asks that the bracketed change moves it AGAIN.
+	// B1 asks that the selected change moves it AGAIN.
 	baseline := last
-	row := inbandPickBracketedValue(t, menu, baseline)
-	t.Logf("#1838: menu %+v", menu)
-	t.Logf("#1838: baseline model %q, changing to bracketed value %q (expecting %q)",
-		baseline, row.Value, row.ResolvedModel)
+	t.Logf("#2803: menu %+v", menu)
+	row, ok := inbandPickPhaseTwoTarget(menu, baseline)
+	if !ok {
+		t.Fatalf("#2803: no usable phase 2 target resolving away from %q; menu %+v", baseline, menu)
+	}
+	bracketedCoverage := strings.Contains(row.Value, "[")
+	t.Logf("#2803: baseline model %q, changing to menu value %q (expecting %q), bracketed coverage available=%t",
+		baseline, row.Value, row.ResolvedModel, bracketedCoverage)
 
 	// Model ONLY, for the identical reason phase 1 states: a non-nil YOLO or a
 	// present-but-empty Model routes onto the restart path via inBandDeliverable,
 	// which would make B3 measure the mechanism it exists to rule out.
-	bracketed := row.Value
-	if err := pool.UpdateSettings(pool.Default().ID(), sessions.SettingsUpdate{Model: &bracketed}); err != nil {
-		t.Fatalf("#1838: UpdateSettings(model=%q): %v", bracketed, err)
+	selected := row.Value
+	if err := pool.UpdateSettings(pool.Default().ID(), sessions.SettingsUpdate{Model: &selected}); err != nil {
+		t.Fatalf("#1838: UpdateSettings(model=%q): %v", selected, err)
 	}
 	// RequestInitialize used id 2; this model request therefore correlates on id 3.
 	if !inbandWaitControlSuccess(rec, "3", inbandControlBudget) {
-		t.Fatalf("#2280: no matching bracketed set_model success within %s (success ids=%q)",
+		t.Fatalf("#2280: no matching phase 2 set_model success within %s (success ids=%q)",
 			inbandControlBudget, rec.successfulControlIDs())
 	}
 
@@ -733,23 +727,25 @@ func TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel(t *testing
 		modelAssertionFailed = true
 		t.Errorf("B1: the child reported model %q both before and after set_model %s; "+
 			"claude publishes that value in its own menu as the argument you pass to select "+
-			"the model, and did not apply it to the running child. The daemon now ACCEPTS the "+
-			"bracketed form (internal/relay's validModel, #1838) and delivered it in band, so a "+
-			"red here means the defect moved to claude rather than closing — route it back "+
-			"rather than weakening this assertion", baseline, bracketed)
+			"the model, and did not apply it to the running child. Record this failure "+
+			"rather than weakening the assertion or retrying another target", baseline, selected)
 	}
 	if bLast != row.ResolvedModel {
 		modelAssertionFailed = true
 		t.Errorf("B2: the child reported model %q after set_model %s, want %q — the "+
 			"resolvedModel claude's OWN menu gave for that row in this same session. "+
-			"If B1 passed, the bracketed value applied and claude's announcement disagrees "+
-			"with its own menu: that is a claude-side inconsistency to record, not a defect "+
-			"in the daemon's widened validator", bLast, bracketed, row.ResolvedModel)
+			"If B1 passed, the selected value applied and claude's announcement disagrees "+
+			"with its own menu: record that inconsistency without retrying another target",
+			bLast, selected, row.ResolvedModel)
 	}
 	if pidEnd != pidAfter {
-		t.Errorf("B3: child pid %d served the turn before the bracketed change but %d served "+
+		t.Errorf("B3: child pid %d served the turn before the phase 2 change but %d served "+
 			"the one after; AC 4 asks for a value delivered to a RUNNING child, and a respawn "+
 			"would produce B1's evidence through the recomposed argv instead", pidAfter, pidEnd)
+	}
+
+	if spawnCount := spawns(); spawnCount != 1 {
+		t.Errorf("B3: %d spawns over the whole run, want exactly 1", spawnCount)
 	}
 
 	// #2045: B1 or B2 is red, so say IN THIS RUN whether claude's published menu moved
@@ -773,31 +769,105 @@ func TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel(t *testing
 	}
 }
 
-// inbandPickBracketedValue returns the first menu row carrying a bracketed value
-// whose resolvedModel differs from start. Both conditions are load-bearing: the
-// bracket is what #1838 widened the validator for, and the differing resolution is
-// what stops the phase asserting a change that was already true.
-//
-// It FAILS rather than skips when no row qualifies, for two reasons. A skip is
-// indistinguishable from this package's absent-credentials skip in a run count,
-// which is the one number a reader is told to trust. And a claude that publishes
-// no bracketed value at all retires this ticket's premise — somebody should be
-// told that, not have it pass quietly.
-func inbandPickBracketedValue(t *testing.T, menu []inbandMenuRow, start string) inbandMenuRow {
-	t.Helper()
+// inbandPickPhaseTwoTarget prefers the first usable bracketed row, then the
+// first usable plain alphabetic alias. Empty fields and baseline resolutions
+// cannot prove a transition. Full IDs are excluded from the fallback because
+// Pool.deliverSettingsInBand may rewrite them to aliases with other resolutions.
+func inbandPickPhaseTwoTarget(menu []inbandMenuRow, start string) (inbandMenuRow, bool) {
 	for _, row := range menu {
-		if strings.Contains(row.Value, "[") && row.ResolvedModel != start {
-			return row
+		if row.Value != "" && row.ResolvedModel != "" && row.ResolvedModel != start && strings.Contains(row.Value, "[") {
+			return row, true
 		}
 	}
-	values := make([]string, 0, len(menu))
 	for _, row := range menu {
-		values = append(values, row.Value)
+		if row.Value != "" && row.ResolvedModel != "" && row.ResolvedModel != start &&
+			strings.Trim(row.Value, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") == "" {
+			return row, true
+		}
 	}
-	t.Fatalf("#1838: claude's menu offers no bracketed value resolving away from %q; "+
-		"values %q. If claude has stopped publishing a bracketed variant row entirely, this "+
-		"ticket's premise is retired and the phase should be too", start, values)
-	return inbandMenuRow{}
+	return inbandMenuRow{}, false
+}
+
+func TestInbandPickPhaseTwoTarget(t *testing.T) {
+	t.Parallel()
+	alias := inbandMenuRow{Value: "sonnet", ResolvedModel: "claude-sonnet-5"}
+	bracketed := inbandMenuRow{Value: "opus[1m]", ResolvedModel: "claude-opus-5"}
+	baseline := "claude-haiku-4-5-20251001"
+	tests := []struct {
+		name string
+		menu []inbandMenuRow
+		want inbandMenuRow
+		ok   bool
+	}{
+		{
+			name: "bracketed preferred over earlier alias",
+			menu: []inbandMenuRow{alias, bracketed}, want: bracketed, ok: true,
+		},
+		{
+			name: "first usable bracketed row",
+			menu: []inbandMenuRow{bracketed, {Value: "sonnet[1m]", ResolvedModel: alias.ResolvedModel}},
+			want: bracketed, ok: true,
+		},
+		{
+			name: "reported bracket-free menu",
+			menu: []inbandMenuRow{
+				{Value: "default", ResolvedModel: "claude-sonnet-5"}, alias,
+				{Value: "claude-fable-5-1", ResolvedModel: "claude-fable-5-1"},
+				{Value: "opus", ResolvedModel: bracketed.ResolvedModel},
+				{Value: "haiku", ResolvedModel: baseline},
+			},
+			want: inbandMenuRow{Value: "default", ResolvedModel: "claude-sonnet-5"}, ok: true,
+		},
+		{
+			name: "empty bracketed resolution cannot displace alias",
+			menu: []inbandMenuRow{{Value: "opus[1m]"}, alias}, want: alias, ok: true,
+		},
+		{
+			name: "empty alias value and resolution excluded",
+			menu: []inbandMenuRow{{ResolvedModel: alias.ResolvedModel}, {Value: "default"}, alias},
+			want: alias, ok: true,
+		},
+		{
+			name: "baseline bracketed row cannot displace alias",
+			menu: []inbandMenuRow{{Value: "haiku[1m]", ResolvedModel: baseline}, alias},
+			want: alias, ok: true,
+		},
+		{
+			name: "baseline alias and full ID excluded",
+			menu: []inbandMenuRow{
+				{Value: "haiku", ResolvedModel: baseline},
+				{Value: "claude-fable-5-1", ResolvedModel: "claude-fable-5-1"}, alias,
+			},
+			want: alias, ok: true,
+		},
+		{
+			name: "invalid rows before usable bracketed row",
+			menu: []inbandMenuRow{
+				{Value: "haiku[1m]", ResolvedModel: baseline},
+				{Value: "sonnet[1m]"}, bracketed,
+			},
+			want: bracketed, ok: true,
+		},
+		{name: "empty menu"},
+		{
+			name: "no usable target",
+			menu: []inbandMenuRow{
+				{}, {Value: "opus[1m]"}, {ResolvedModel: alias.ResolvedModel},
+				{Value: "haiku", ResolvedModel: baseline},
+				{Value: "haiku[1m]", ResolvedModel: baseline},
+				{Value: "claude-sonnet-5", ResolvedModel: alias.ResolvedModel},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := inbandPickPhaseTwoTarget(tt.menu, baseline)
+			if got != tt.want || ok != tt.ok {
+				t.Fatalf("selection = (%+v, %t), want (%+v, %t); menu %+v", got, ok, tt.want, tt.ok, tt.menu)
+			}
+		})
+	}
 }
 
 // inbandWaitMenu polls until the recorder has decoded a non-empty model menu off
