@@ -1107,6 +1107,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		return err
 	}
 	defer postDelivery.stopAccepting()
+	postDelivery.bind(turnBusy)
 	// operatorMessages is the hand-off from the history producer below to the
 	// live push of the operator's own message (#2699), built BEFORE msgqueue.New
 	// for queueChanges' reason. The ring that push appends to is born in the relay
@@ -3634,7 +3635,11 @@ func newInboundDeliver(resolve func(string) (handlers.TurnWriter, error), busy *
 		if err := busy.waitIdleForDelivery(ctx, convID, hold); err != nil {
 			return fmt.Errorf("%w: %w", errStreamTurnHold, err)
 		}
-		undo := busy.openForDelivery(convID)
+		undo, finished, err := busy.beginDelivery(ctx, convID)
+		if err != nil {
+			return err
+		}
+		defer finished()
 		if err := w.WriteUserTurn(ctx, convID, payload); err != nil {
 			// Returned VERBATIM (unwrapped): msgqueue classifies ErrNoLiveSession,
 			// ErrTrustModalPending and turncommit.ErrDropped by errors.Is, and the undo

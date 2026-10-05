@@ -79,3 +79,7 @@ None. Completion/replay/wake and history tail catch-up remain explicitly deferre
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-05
+
+## Revisions
+
+- 2026-10-05: pool teardown can arrive while its child's tail is still queued in the fan-in. With the post gate bound, drain those queued events before consuming the teardown close, then close publication and retire any busy mark those old events reopened. Successor writes remain gated throughout. This extends the planned buffered-text flush to queued text as well, without changing the legacy unbound tracker path.

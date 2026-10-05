@@ -6,6 +6,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -148,5 +151,158 @@ func TestChannelPost_E2E_ReachesAttachedClient(t *testing.T) {
 	if recorded != delta {
 		t.Errorf("recorded %+v but pushed %+v; a client that reconnects must read back what a "+
 			"connected one was shown", recorded, delta)
+	}
+}
+
+func TestChannelPost_E2E_HeldUntilRealCompletion(t *testing.T) {
+	const convID = "28110000-0000-4000-8000-000000000002"
+	const post = "scheduled-secret-post"
+	dir := t.TempDir()
+	first, second, release := filepath.Join(dir, "first"), filepath.Join(dir, "second"), filepath.Join(dir, "release")
+	for path, text := range map[string]string{
+		first:  `{"type":"assistant","message":{"id":"head","role":"assistant","content":[{"type":"text","text":"reply-head"}]}}` + "\n" + bgConvFirst,
+		second: bgConvSecond,
+	} {
+		if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	home := shortHome(t)
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	relayURL := fr.URL() + "/v2/server"
+	payload, err := paireddevice.Setup(paireddevice.Config{Home: home, InstanceName: "test", Relay: relayURL, DeviceName: "phone-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := base64.StdEncoding.DecodeString(payload.ServerStaticPubkey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedPromotedBoundConversation(t, home, convID, "held", bgConvBootstrapUUID)
+	h := StartStreamInteractiveWithRelay(t, home, bgConvBootstrapUUID, relayURL,
+		"PYRY_FAKE_CLAUDE_STREAM_REPLAY_FIRST="+first, "PYRY_FAKE_CLAUDE_STREAM_REPLAY_SECOND="+second,
+		"PYRY_FAKE_CLAUDE_STREAM_REPLAY_RELEASE="+release)
+	t.Cleanup(func() { h.Stop(t) })
+	serverID := readPersistedServerID(t, home)
+	waitBinaryHello(t, fr, serverID)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	phone, err := fakephone.Dial(ctx, fr.URL(), serverID, payload.Token, "phone-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = phone.Close() })
+	send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pub, payload.Token)
+	seal, next := sealedConnDriver(t, phone, "phone", send, recv)
+	seal(protocol.Envelope{ID: 28110, Type: protocol.TypeSendMessage, TS: time.Now().UTC(),
+		Payload: mustJSON(t, protocol.SendMessagePayload{ConversationID: convID, MessageID: "held-user", Text: "go"})})
+	var reply strings.Builder
+	var claudeTurn string
+	for {
+		env, ok := next(time.Now().Add(15 * time.Second))
+		if !ok {
+			t.Fatal("turn never opened")
+		}
+		if env.Type == protocol.TypeAssistantDelta {
+			var p protocol.AssistantDeltaPayload
+			if err := json.Unmarshal(env.Payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			reply.WriteString(p.Text)
+			claudeTurn = p.TurnID
+		}
+		if env.Type == protocol.TypeToolUse {
+			break
+		}
+	}
+	p := runVerb(t, h.SocketPath, home, "channel", "post", "--name", "held", "--text", post)
+	if p.ExitCode != 0 {
+		t.Fatalf("acceptance failed: %s", p.Stderr)
+	}
+	requestHistory := func(req uint64, held bool) protocol.HistoryPagePayload {
+		t.Helper()
+		seal(protocol.Envelope{ID: req, Type: protocol.TypeRequestHistory, TS: time.Now().UTC(),
+			Payload: mustJSON(t, protocol.RequestHistoryPayload{ConversationID: convID})})
+		for {
+			env, ok := next(time.Now().Add(15 * time.Second))
+			if !ok {
+				t.Fatal("history page absent")
+			}
+			if held && (env.Type == protocol.TypeAssistantDelta || env.Type == protocol.TypeTurnEnd) {
+				t.Fatalf("output crossed the held boundary: %s", env.Type)
+			}
+			if env.Type == protocol.TypeHistoryPage {
+				var page protocol.HistoryPagePayload
+				if err := json.Unmarshal(env.Payload, &page); err != nil {
+					t.Fatal(err)
+				}
+				return page
+			}
+		}
+	}
+	// The file gate proves the turn cannot finish during this observation window.
+	time.Sleep(350 * time.Millisecond)
+	for _, e := range requestHistory(28111, true).Entries {
+		if strings.Contains(string(e.Payload), post) {
+			t.Fatal("held post entered served history")
+		}
+	}
+	if err := os.WriteFile(release, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ended := false
+	var posted protocol.AssistantDeltaPayload
+	for posted.Text == "" {
+		env, ok := next(time.Now().Add(15 * time.Second))
+		if !ok {
+			t.Fatal("released post absent")
+		}
+		if env.Type == protocol.TypeTurnEnd {
+			ended = true
+		}
+		if env.Type != protocol.TypeAssistantDelta {
+			continue
+		}
+		var p protocol.AssistantDeltaPayload
+		if err := json.Unmarshal(env.Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		if p.TurnID == claudeTurn {
+			reply.WriteString(p.Text)
+			continue
+		}
+		if !ended || p.Text != post || p.Seq != 0 {
+			t.Fatalf("post crossed completion: %+v", p)
+		}
+		posted = p
+	}
+	if reply.String() != "reply-head"+bgConvNeedle {
+		t.Fatalf("reply split or changed: %q", reply.String())
+	}
+	page := requestHistory(28112, false)
+	reply.Reset()
+	ended = false
+	for i := len(page.Entries) - 1; i >= 0; i-- {
+		e := page.Entries[i]
+		if e.Type == protocol.TypeTurnEnd {
+			ended = true
+		}
+		if e.Type != protocol.TypeAssistantDelta {
+			continue
+		}
+		var p protocol.AssistantDeltaPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		if p.TurnID == claudeTurn {
+			reply.WriteString(p.Text)
+		}
+		if p.TurnID == posted.TurnID && (!ended || p != posted) {
+			t.Fatal("history/live post order differs")
+		}
+	}
+	if reply.String() != "reply-head"+bgConvNeedle {
+		t.Fatal("served history split or changed the reply")
 	}
 }

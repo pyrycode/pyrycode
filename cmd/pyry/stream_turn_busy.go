@@ -130,6 +130,7 @@ import (
 // nothing: no read is added, and Busy still collapses unknown / unbound / idle to
 // one answer through one map lookup.
 type turnBusyTracker struct {
+	posts *channelDelivery // construction-bound; published turn/write boundary gate
 	// resolve maps a producing session id to the conversation that owns it.
 	// Injected (conversationForSession(w.convReg, sid) in production) so this file
 	// never imports internal/conversations — the same purity discipline

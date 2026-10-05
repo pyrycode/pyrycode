@@ -443,6 +443,12 @@ type relayWiring struct {
 	approvalParked *approvalParkedReport
 }
 
+// historyOnlyBroadcaster lets daemon-owned stream publication run without clients.
+type historyOnlyBroadcaster struct{}
+
+func (historyOnlyBroadcaster) ActiveConns(context.Context) []relay.ActiveConn        { return nil }
+func (historyOnlyBroadcaster) Push(context.Context, string, protocol.Envelope) error { return nil }
+
 // startRelay opens the binary↔relay leg in a supervisor-owned goroutine.
 // Returns a no-op cleanup, nil local pairing provider, and nil error when
 // relayURL is empty (relay disabled — see operator note below). Otherwise loads
@@ -476,6 +482,15 @@ func startRelay(
 ) (cleanup func(), surface func(permbridge.Request) func(), announce func(conversationID, attachmentID, filename string), announceConversation func(protocol.ConversationUpdatedPayload), announcePost func(protocol.AssistantDeltaPayload), pairingProvider localPairingProvider, err error) {
 	if w.relayURL == "" {
 		logger.Info("relay: disabled (no URL configured)")
+		if w.streamSink != nil {
+			bcast := historyOnlyBroadcaster{}
+			emitter := newInteractiveTurnEmitterV2(w.active, bcast, logger)
+			emitter.hist = w.hist
+			resolve := func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }
+			drain := startStreamTurnDrainV2(ctx, w.streamSink, emitter, resolve, w.busy, logger)
+			transitions := startSessionTransitionStreamV2(ctx, w.transitions, bcast, resolve, w.busy, w.hist, logger)
+			return func() { drain(); transitions() }, nil, nil, nil, nil, nil, nil
+		}
 		// No relay leg ⇒ no stream-approval bridge, none of the three fan-out
 		// emitters, and no local pairing provider; all five stay nil.
 		// SetApprovalSurfacer(nil) leaves mcp.approve

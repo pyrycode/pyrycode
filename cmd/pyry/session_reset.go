@@ -404,7 +404,11 @@ func (r *conversationReset) wrapUp(convID string) (wrote bool) {
 	}
 	defer stop()
 
-	undo := r.busy.openForDelivery(convID)
+	undo, finished, err := r.busy.beginDelivery(ctx, convID)
+	if err != nil {
+		return false
+	}
+	defer finished()
 	if err := target.write(ctx, convID, []byte(composeWrapUpPrompt(r.previousNote(convID)))); err != nil {
 		undo()
 		// SECURITY: the error value is deliberately NOT recorded; see the rule in

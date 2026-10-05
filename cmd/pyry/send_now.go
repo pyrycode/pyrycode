@@ -51,7 +51,8 @@ func newSendNowDeliver(resolve func(string) (handlers.TurnWriter, error), isClau
 		}
 		// The busy check comes before resolve, so an idle conversation never
 		// reaches resolve's revive of a dropped session.
-		ok, undo := busy.openForSendNow(convID)
+		ok, undo, finished := busy.beginSendNow(convID)
+		defer finished()
 		if !ok {
 			return errSendNowIdle
 		}

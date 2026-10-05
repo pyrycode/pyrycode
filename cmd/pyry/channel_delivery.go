@@ -31,11 +31,12 @@ type channelDeliveryPost struct {
 	Text           string                       `json:"text"`
 	TS             time.Time                    `json:"ts"`
 	delivered      bool                         // cleanup can fail after delivery; never repeat its announcement
+	diagnosed      bool                         // content-free hold warning, once per process
 }
 
 // channelDelivery is private client-delivery state, independent of channelCarry.
-// mu serializes snapshot renames with acceptance and the sole consumer. No user
-// turn is written while holding it; beforeInbound only checks pending state.
+// mu gates acceptance, post delivery, published turn boundaries and write
+// reservations. Child writes and waits run outside it. Lock order is mu → busy.mu.
 type channelDelivery struct {
 	// Handler gates always precede mu; the consumer takes only mu.
 	handlers sync.RWMutex
@@ -49,10 +50,24 @@ type channelDelivery struct {
 	log      *slog.Logger
 	save     func([]channelDeliveryPost) error
 	wake     chan struct{}
+	busy     *turnBusyTracker
+	active   map[string]bool
+	writes   map[string]int
+	now      func() time.Time
+}
+
+const channelPostHoldDeadline = 5 * time.Minute
+
+// bind runs before the tracker or consumer is published to delivery/drain callers.
+func (d *channelDelivery) bind(busy *turnBusyTracker) {
+	d.busy = busy
+	if busy != nil {
+		busy.posts = d
+	}
 }
 
 func newChannelDelivery(path string, hist channelDeliveryHistory, carry func(conversations.ConversationID, string), log *slog.Logger) (*channelDelivery, error) {
-	d := &channelDelivery{path: path, hist: hist, carry: carry, log: log, wake: make(chan struct{}, 1)}
+	d := &channelDelivery{path: path, hist: hist, carry: carry, log: log, wake: make(chan struct{}, 1), active: make(map[string]bool), writes: make(map[string]int), now: time.Now}
 	d.save = d.persist
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if errors.Is(err, os.ErrNotExist) {
@@ -169,6 +184,14 @@ func (d *channelDelivery) drain() {
 	pending := make([]channelDeliveryPost, 0, len(d.posts))
 	for i := range d.posts {
 		p := &d.posts[i]
+		if !p.delivered && d.held(string(p.ConversationID)) {
+			if !p.diagnosed && d.now().Sub(p.TS) >= channelPostHoldDeadline {
+				d.log.Warn("control: channel.post still held", "event", "channel_post.hold_deadline", "conversation_id", string(p.ConversationID), "turn_id", p.TurnID)
+				p.diagnosed = true
+			}
+			pending = append(pending, *p)
+			continue
+		}
 		if !p.delivered && !failed[p.ConversationID] {
 			if err := d.deliver(*p); err != nil {
 				failed[p.ConversationID] = true
@@ -189,6 +212,102 @@ func (d *channelDelivery) drain() {
 		return
 	}
 	d.posts = pending
+}
+
+// held and pendingFor require mu. Published activity outlives an internal busy
+// clear until the drain has flushed text and closed the emitter's lifecycle.
+func (d *channelDelivery) held(id string) bool {
+	return d.active[id] || d.writes[id] > 0 || (d.busy != nil && d.busy.Busy(id))
+}
+
+func (d *channelDelivery) pendingFor(id string) bool {
+	for _, p := range d.posts {
+		if string(p.ConversationID) == id && !p.delivered {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *channelDelivery) finishWrite(id string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.writes[id]--
+	if d.writes[id] == 0 {
+		delete(d.writes, id)
+	}
+}
+
+// beginDelivery makes the final pending/idle check atomic with the busy mark.
+// The write reservation also survives a completion arriving before write return.
+func (t *turnBusyTracker) beginDelivery(ctx context.Context, id string) (undo, finished func(), err error) {
+	if t == nil || t.posts == nil {
+		return t.openForDelivery(id), func() {}, nil
+	}
+	d := t.posts
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		d.mu.Lock()
+		if !d.pendingFor(id) && !d.held(id) {
+			undoMark := t.openForDelivery(id)
+			d.active[id] = true
+			d.writes[id]++
+			d.mu.Unlock()
+			return func() {
+				d.mu.Lock()
+				defer d.mu.Unlock()
+				undoMark()
+				delete(d.active, id)
+			}, func() { d.finishWrite(id) }, nil
+		}
+		d.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		case <-tick.C:
+		}
+	}
+}
+
+func (t *turnBusyTracker) beginSendNow(id string) (ok bool, undo, finished func()) {
+	if t == nil || t.posts == nil {
+		ok, undo = t.openForSendNow(id)
+		return ok, undo, func() {}
+	}
+	d := t.posts
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	ok, undo = t.openForSendNow(id)
+	if !ok {
+		return false, undo, func() {}
+	}
+	d.writes[id]++
+	return true, undo, func() { d.finishWrite(id) }
+}
+
+// lockPostBoundary is used only by the stream drain. Its paired publication
+// operations run under this gate, preserving the emitter's single writer.
+func (t *turnBusyTracker) lockPostBoundary() func() {
+	if t == nil || t.posts == nil {
+		return func() {}
+	}
+	t.posts.mu.Lock()
+	return t.posts.mu.Unlock
+}
+
+func (t *turnBusyTracker) publishPostBoundary(id string, active bool) {
+	if t == nil || t.posts == nil || id == "" {
+		return
+	}
+	if active {
+		t.posts.active[id] = true
+	} else {
+		delete(t.posts.active, id)
+	}
 }
 
 // deliver reconciles every history page: unrelated newer entries may hide a

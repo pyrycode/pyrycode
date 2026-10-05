@@ -563,8 +563,19 @@ func startStreamTurnDrainV2(
 	go func() {
 		defer close(done)
 		closePendingLifecycles := func() {
+			// A torn-down child's queued tail precedes its publication close.
+			// Bound post gates prevent successor writes until this close runs.
+			if busy != nil && busy.posts != nil && len(sink.ch) > 0 {
+				return
+			}
 			for _, conversationID := range sink.takeLifecycleCloses() {
+				unlock := busy.lockPostBoundary()
 				emitter.closeForConversation(ctx, conversationID)
+				busy.publishPostBoundary(conversationID, false)
+				if busy != nil && busy.posts != nil {
+					busy.setBusy(conversationID, false, toolCallDelta{})
+				}
+				unlock()
 			}
 		}
 		for {
@@ -575,72 +586,59 @@ func startStreamTurnDrainV2(
 			case <-sink.lifecycleCloseWake:
 				closePendingLifecycles()
 			case env := <-sink.ch:
-				// A pool teardown records its close before returning to the pool.
-				// Apply it before any later child event selected in the same cycle,
-				// preserving teardown-before-successor ordering across the two lanes.
-				closePendingLifecycles()
-				if env.exit {
-					// FIRST statement of the arm, and each thing it precedes matters.
-					// Before observe: an exit carries no event, and routing a non-event
-					// through the event path is the confusion the explicit field exists
-					// to prevent. Before the active-session gate: the gate drops every
-					// event whose producing session is not the ACTIVE conversation's, so
-					// an exit filtered there would never clear a BACKGROUND conversation
-					// — the common case for a crash. Before Handle: combined with the
-					// explicit field, that keeps Handle structurally unable to receive a
-					// non-event.
-					//
-					// Called synchronously on this goroutine, never handed to another:
-					// a deferred clear could land after a turn opened by the RESPAWNED
-					// child and report a live turn idle.
-					//
-					// clearForExit rather than clearForSession, and the split is the
-					// whole of #1483. The two callers of the clear have opposite
-					// ordering needs: this arm is ordered against the fan-in and must
-					// refuse an exit that was enqueued before the mark it would clear,
-					// while the teardown feed (the pool's transition observer) is not
-					// ordered against anything here and must clear unconditionally. So
-					// the epoch condition lives on a door the teardown feed cannot reach
-					// by name. Everything else is unchanged: one session→conversation
-					// resolution, one copy of the membership-mutation protocol
-					// (`applyBusyLocked`), and a nil-receiver no-op so a drain with no
-					// tracker is unaffected.
-					if conversationID, cleared := busy.clearForExit(env.sessionID, env.exitEpoch); cleared {
-						emitter.closeForConversation(ctx, conversationID)
+				if busy == nil || busy.posts == nil {
+					closePendingLifecycles()
+				}
+				func() {
+					unlock := busy.lockPostBoundary()
+					defer unlock()
+					if env.exit {
+						// Retain exit-epoch protection; flush and close publication before
+						// releasing posts, only when the producing exit was accepted.
+						if conversationID, cleared := busy.clearForExit(env.sessionID, env.exitEpoch); cleared {
+							emitter.closeForConversation(ctx, conversationID)
+							busy.publishPostBoundary(conversationID, false)
+						}
+						return
 					}
-					continue
-				}
 
-				// BEFORE the resolution below, and the ordering IS the contract: an
-				// event that resolves to no conversation is dropped there, and the
-				// tracker keeps its own resolution and its own unbound-session record.
-				busy.observe(env.sessionID, env.ev)
+					// BEFORE the resolution below, and the ordering IS the contract: an
+					// event that resolves to no conversation is dropped there, and the
+					// tracker keeps its own resolution and its own unbound-session record.
+					busy.observe(env.sessionID, env.ev)
 
-				// claude's echo of a user message (#2730) builds no frame. It goes to
-				// the send-now placement HERE, on this goroutine and before the
-				// conversation resolution: every event claude emitted ahead of it —
-				// the tool result the message followed — has already been handled,
-				// so the operator-message push it may commit lands after it, and a
-				// background conversation's echo is placed too.
-				if echo, ok := env.ev.(turnevent.UserEcho); ok {
-					sink.observeEcho(env.sessionID, echo)
-					continue
-				}
+					// claude's echo of a user message (#2730) builds no frame. It goes to
+					// the send-now placement HERE, on this goroutine and before the
+					// conversation resolution: every event claude emitted ahead of it —
+					// the tool result the message followed — has already been handled,
+					// so the operator-message push it may commit lands after it, and a
+					// background conversation's echo is placed too.
+					if echo, ok := env.ev.(turnevent.UserEcho); ok {
+						sink.observeEcho(env.sessionID, echo)
+						return
+					}
 
-				// Attribution by the event's OWN session (#2739), never by the active
-				// conversation: the emitter is the only writer of history, ring, client
-				// frames and the turn-end wake, so an event dropped here is lost for
-				// good.
-				conversationID, ok := conversationFor(env.sessionID)
-				if !ok || conversationID == "" {
-					// SECURITY: content-free — discriminant + session id only.
-					logger.Debug("relay: stream-turn drop; no conversation for session",
-						"event", "stream_turn.no_conversation",
-						"kind", eventKind(env.ev),
-						"session_id", env.sessionID)
-					continue
-				}
-				emitter.HandleFor(ctx, conversationID, env.ev)
+					// Attribution by the event's OWN session (#2739), never by the active
+					// conversation: the emitter is the only writer of history, ring, client
+					// frames and the turn-end wake, so an event dropped here is lost for
+					// good.
+					conversationID, ok := conversationFor(env.sessionID)
+					if !ok || conversationID == "" {
+						// SECURITY: content-free — discriminant + session id only.
+						logger.Debug("relay: stream-turn drop; no conversation for session",
+							"event", "stream_turn.no_conversation",
+							"kind", eventKind(env.ev),
+							"session_id", env.sessionID)
+						return
+					}
+					if turnMarkFor(env.ev) == turnMarkOpen {
+						busy.publishPostBoundary(conversationID, true)
+					}
+					emitter.HandleFor(ctx, conversationID, env.ev)
+					if turnMarkFor(env.ev) == turnMarkClose {
+						busy.publishPostBoundary(conversationID, false)
+					}
+				}()
 			case <-emitter.flushC():
 				closePendingLifecycles()
 				emitter.flushAll(ctx)
