@@ -35,7 +35,7 @@ func TestDropRingOnConversationDelete(t *testing.T) {
 	}
 	keptNewest := ring.NewestID(kept)
 
-	dropRingOnConversationDelete(reg, ring)
+	dropRingOnConversationDelete(reg, ring, nil)
 
 	if !reg.Delete(deleted) {
 		t.Fatal("Delete(deleted) = false, want true")
@@ -62,5 +62,5 @@ func TestDropRingOnConversationDelete(t *testing.T) {
 // relay leg has no conversations registry: wiring is a no-op, not a panic.
 func TestDropRingOnConversationDelete_NilRegistry(t *testing.T) {
 	t.Parallel()
-	dropRingOnConversationDelete(nil, eventring.New(1))
+	dropRingOnConversationDelete(nil, eventring.New(1), nil)
 }

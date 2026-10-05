@@ -47,6 +47,11 @@ type replySuggestions struct {
 	sessionFor func(convID string) (sessionID string, ok bool)
 	logger     *slog.Logger
 	nextID     uint64 // Run-goroutine only
+	fallback   func(context.Context, string, string) (string, error)
+	waitNative func(context.Context) bool
+	workers    sync.WaitGroup
+	stopped    bool
+	parent     context.Context
 }
 
 // replySuggestionConv is one conversation's suggestion state.
@@ -59,12 +64,18 @@ type replySuggestionConv struct {
 	// Queue ids are monotone within a conversation. The commit gate identifies
 	// the producing message before stdout can open its turn; OnDelivered may
 	// confirm it after the result. A newer accept never gets erased by either.
-	writeID, acceptedID    uint64
-	awaitingStart          bool
-	assistant, invalidated bool
-	ended, turnOK, userOK  bool
-	pending                *string
-	pendingSID             string
+	writeID, acceptedID                uint64
+	awaitingStart                      bool
+	assistant, invalidated             bool
+	ended, turnOK, userOK              bool
+	pending                            *string
+	pendingSID                         string
+	userText, assistantText, messageID string
+	assistantFull                      bool
+	generation                         uint64
+	cancel                             context.CancelFunc
+	attempt, windowDone                bool
+	turnSID                            string
 }
 
 func newReplySuggestions(logger *slog.Logger) *replySuggestions {
@@ -73,6 +84,7 @@ func newReplySuggestions(logger *slog.Logger) *replySuggestions {
 		dirty:  make(map[string]struct{}),
 		wake:   make(chan struct{}, 1),
 		logger: logger,
+		parent: context.Background(),
 	}
 }
 
@@ -135,6 +147,7 @@ func (s *replySuggestions) beginWrite(convID string, id uint64) {
 	if c == nil {
 		return
 	}
+	s.resetFallbackLocked(c)
 	c.writeID, c.awaitingStart = id, true
 	c.assistant, c.ended, c.turnOK, c.userOK, c.pending = false, false, false, false, nil
 	c.invalidated = c.acceptedID > id
@@ -153,10 +166,12 @@ func (s *replySuggestions) noteDelivered(convID string, msg msgqueue.QueuedMessa
 	if c == nil || c.writeID == 0 || c.writeID != msg.ID {
 		return
 	}
+	c.userText = replyExchangePrefix(msg.Text)
 	c.userOK = strings.TrimSpace(msg.Text) != ""
 	if c.pending != nil && c.turnOK && c.userOK && !c.invalidated {
 		s.setLocked(convID, c, *c.pending, c.pendingSID)
 	}
+	s.startFallbackLocked(convID, c)
 }
 
 // turnStarted keeps the identity and invalidations already recorded at the
@@ -174,6 +189,7 @@ func (s *replySuggestions) turnStarted(convID string) {
 	if c.awaitingStart {
 		c.awaitingStart = false
 	} else {
+		s.resetFallbackLocked(c)
 		c.writeID = 0
 		c.assistant, c.ended, c.turnOK, c.userOK, c.pending = false, false, false, false, nil
 	}
@@ -181,13 +197,27 @@ func (s *replySuggestions) turnStarted(convID string) {
 }
 
 // noteAssistantText records main-agent prose in convID's open turn. Nil-safe.
-func (s *replySuggestions) noteAssistantText(convID string) {
+func (s *replySuggestions) noteAssistantText(convID string, ev turnevent.TextChunk) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	if c := s.entry(convID, false); c != nil {
-		c.assistant = true
+		if ev.ParentToolCallID != "" || c.ended {
+			s.mu.Unlock()
+			return
+		}
+		if c.messageID != ev.MessageID {
+			c.messageID, c.assistantText, c.assistantFull = ev.MessageID, "", false
+			c.assistant = false
+		}
+		if !c.assistantFull {
+			combined := c.assistantText + ev.Text
+			c.assistantText = replyExchangePrefix(combined)
+			c.assistantFull = len(combined) > replyExchangeBytes
+		}
+		// Eligibility considers all chunks, even after bounded retention fills.
+		c.assistant = c.assistant || strings.TrimSpace(ev.Text) != ""
 	}
 	s.mu.Unlock()
 }
@@ -198,11 +228,43 @@ func (s *replySuggestions) turnEnded(convID string, ev turnevent.TurnEnd) {
 	if s == nil {
 		return
 	}
+	sessionID := ""
+	if fn := s.resolver(); fn != nil {
+		sessionID, _ = fn(convID)
+	}
 	success := ev.Reason == turnevent.TurnEndReasonEndTurn && ev.Outcome == "success" && !ev.IsError
 	s.mu.Lock()
 	if c := s.entry(convID, false); c != nil {
+		if c.ended {
+			s.mu.Unlock()
+			return
+		}
 		c.ended = true
 		c.turnOK = success && c.assistant && c.writeID != 0 && !c.invalidated
+		c.turnSID = sessionID
+		if c.turnOK && s.fallback != nil && !s.stopped {
+			ctx, cancel := context.WithCancel(s.parent)
+			c.cancel = cancel
+			generation := c.generation
+			s.workers.Add(1)
+			go func() {
+				defer s.workers.Done()
+				wait := s.waitNative
+				if wait == nil {
+					wait = waitReplyNative
+				}
+				if !wait(ctx) {
+					return
+				}
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				if c.generation != generation || ctx.Err() != nil || s.stopped {
+					return
+				}
+				c.windowDone = true
+				s.startFallbackLocked(convID, c)
+			}()
+		}
 	}
 	s.mu.Unlock()
 }
@@ -235,6 +297,10 @@ func (s *replySuggestions) suggest(convID, text string) {
 // setLocked publishes text and closes the turn to further suggestions. Caller
 // holds mu.
 func (s *replySuggestions) setLocked(convID string, c *replySuggestionConv, text, sessionID string) {
+	if s.stopped {
+		return
+	}
+	s.cancelLocked(c)
 	c.turnOK, c.pending = false, nil
 	c.sessionID = sessionID
 	c.text = &text
@@ -285,6 +351,7 @@ func (s *replySuggestions) invalidateWrite(convID string, id uint64) {
 }
 
 func (s *replySuggestions) invalidateLocked(convID string, c *replySuggestionConv) {
+	s.resetFallbackLocked(c)
 	c.invalidated, c.turnOK, c.pending = true, false, nil
 	s.clearLocked(convID, c)
 }
@@ -368,6 +435,9 @@ func (s *replySuggestions) resolver() func(string) (string, bool) {
 // forget drops a deleted conversation's state.
 func (s *replySuggestions) forget(convID string) {
 	s.mu.Lock()
+	if c := s.convs[convID]; c != nil {
+		s.resetFallbackLocked(c)
+	}
 	delete(s.convs, convID)
 	delete(s.dirty, convID)
 	s.mu.Unlock()
@@ -391,6 +461,7 @@ func (s *replySuggestions) takeDirty() []protocol.ReplySuggestionPayload {
 // conn until ctx ends. The frame carries no EventID: suggestion state is
 // control state, never part of the replay ring or the history.
 func (s *replySuggestions) Run(ctx context.Context) {
+	defer s.stopFallbacks()
 	for {
 		select {
 		case <-ctx.Done():
@@ -511,4 +582,71 @@ func (k suggestionTransitionSink) SetTransitionObserver(fn sessions.TransitionOb
 			}
 		}
 	})
+}
+
+func waitReplyNative(ctx context.Context) bool {
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (s *replySuggestions) cancelLocked(c *replySuggestionConv) {
+	if c.cancel != nil {
+		c.cancel()
+		c.cancel = nil
+	}
+}
+
+func (s *replySuggestions) resetFallbackLocked(c *replySuggestionConv) {
+	s.cancelLocked(c)
+	c.generation++
+	c.userText, c.assistantText, c.messageID = "", "", ""
+	c.assistantFull, c.attempt, c.windowDone = false, false, false
+}
+
+func (s *replySuggestions) startFallbackLocked(convID string, c *replySuggestionConv) {
+	if s.fallback == nil || s.stopped || !c.windowDone || c.attempt || !c.turnOK || !c.userOK || c.invalidated || c.pending != nil {
+		return
+	}
+	c.attempt = true
+	ctx, cancel := context.WithCancel(s.parent)
+	s.cancelLocked(c)
+	c.cancel = cancel
+	generation, user, assistant, sid := c.generation, c.userText, c.assistantText, c.turnSID
+	s.workers.Add(1)
+	go func() {
+		defer s.workers.Done()
+		defer cancel()
+		text, err := s.fallback(ctx, user, assistant)
+		if err != nil || ctx.Err() != nil {
+			return
+		}
+		if fn := s.resolver(); fn != nil {
+			current, ok := fn(convID)
+			if !ok || current != sid {
+				return
+			}
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.stopped || s.convs[convID] != c || c.generation != generation || !c.turnOK || c.invalidated || ctx.Err() != nil {
+			return
+		}
+		s.setLocked(convID, c, text, sid)
+	}()
+}
+
+func (s *replySuggestions) stopFallbacks() {
+	s.mu.Lock()
+	s.stopped = true
+	for _, c := range s.convs {
+		s.cancelLocked(c)
+	}
+	s.mu.Unlock()
+	s.workers.Wait()
 }

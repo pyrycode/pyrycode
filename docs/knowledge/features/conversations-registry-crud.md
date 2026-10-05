@@ -60,7 +60,17 @@ Installs `fn` as the registry's single removal observer, replacing any earlier o
 
 Calling outside the lock, not from within `Delete`'s critical section, is the point: it lets `fn` call back into the registry (e.g. `Get`) without deadlocking on the non-reentrant `sync.Mutex`, and it adds no lock-order edge below `r.mu` — a `saveMu → mu`-shaped hazard (see § *Save concurrency* in [`conversations-registry.md`](conversations-registry.md)) would otherwise be easy to introduce here. The cost is a small window where `Delete` has already returned `true` and mutated the in-memory slice, but `fn` has not run yet — no production caller depends on synchronous delivery.
 
-The registry's own production caller (`cmd/pyry`) wires `fn` to `(*eventring.Ring).Drop`, so a removed conversation's retained replay events stop pinning daemon memory instead of surviving until a daemon restart — see [`features/eventring-package.md`](eventring-package.md) § *Ownership & wiring*. `fn` must not block for long: the deleting goroutine — the handler's or the sweep's — waits on it.
+The registry's production caller (`cmd/pyry`) composes `replySuggestions.forget`
+and `(*eventring.Ring).Drop` in `dropRingOnConversationDelete`: removal cancels
+pending native waits or reply inference and releases both suggestion state and
+retained replay events. Installing a second observer would replace replay
+cleanup, since this is one slot, not a subscriber list. Reconnect-time pruning
+is insufficient for active background work. Test deletion and idle sweeping
+through this production callback; calling `forget` directly would pass even
+with missing wiring. See [reply cancellation and stale-result checks](streamsup-package-draining-turnevents-into-the-interactive-emitter.md#native-reply-suggestions-after-the-result-2831)
+and [`eventring` ownership](eventring-package.md). `fn` must not block for long:
+the deleting goroutine waits on it, so cancellation forgets state without joining
+workers; daemon shutdown owns the join.
 
 ## `RebindSession(oldID, newID string) bool` (#739)
 

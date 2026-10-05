@@ -618,13 +618,19 @@ func relay4409Threshold(logger *slog.Logger) int {
 // removes — by delete_conversation or by the idle sweep, both of which go
 // through Registry.Delete — has its ring entry dropped, so its retained events
 // stop pinning daemon memory. The ring is keyed by the same conversation id
-// string the registry stores. A nil registry (no conversations registry in this
+// string the registry stores. Pending reply work and suggestion state are also
+// cancelled and forgotten. A nil registry (no conversations registry in this
 // posture) leaves nothing to observe.
-func dropRingOnConversationDelete(reg *conversations.Registry, ring *eventring.Ring) {
+func dropRingOnConversationDelete(reg *conversations.Registry, ring *eventring.Ring, suggestions *replySuggestions) {
 	if reg == nil {
 		return
 	}
-	reg.SetOnDelete(func(id conversations.ConversationID) { ring.Drop(string(id)) })
+	reg.SetOnDelete(func(id conversations.ConversationID) {
+		if suggestions != nil {
+			suggestions.forget(string(id))
+		}
+		ring.Drop(string(id))
+	})
 }
 
 // boundSessionIDForActive resolves the pool session id bound to the ACTIVE
@@ -1695,7 +1701,7 @@ func startRelayV2(
 		mgr.SetReplaySource(emitter.ring, w.active.CurrentConversation)
 		// Free a removed conversation's replay events when the registry drops it
 		// (#1502); installed here because this is where the ring is born.
-		dropRingOnConversationDelete(w.convReg, emitter.ring)
+		dropRingOnConversationDelete(w.convReg, emitter.ring, suggestions)
 		replayRing = emitter.ring
 		// The durable conversation log (#2114), assigned the same way the ring is
 		// reached one line up: newInteractiveTurnEmitterV2 has 86 call sites and a

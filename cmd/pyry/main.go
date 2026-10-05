@@ -1151,6 +1151,9 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	var replySuggDelivered msgqueue.DeliveredFunc
 	if streamSink != nil {
 		replySugg = newReplySuggestions(logger)
+		replySugg.parent = ctx
+		defer replySugg.stopFallbacks()
+		replySugg.fallback = (replyFallback{binary: *claudeBin, account: account.provider()}).run
 		replySuggDelivered = replySugg.noteDelivered
 	}
 	queue, err := msgqueue.New(msgqueue.Config{

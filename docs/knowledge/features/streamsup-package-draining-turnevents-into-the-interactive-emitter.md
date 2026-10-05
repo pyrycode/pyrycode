@@ -189,9 +189,30 @@ conversation, just like other drained events, even when another conversation
 is active. Its arm opens no turn and emits no `turn_state`. Eligibility lives
 in `replySuggestions`, outside `convTurnState`: the emitter usually releases
 that state before the post-result suggestion arrives. A set requires
-`TurnEndReasonEndTurn`, `Outcome == "success"`, no error, non-empty delivered
-user text and non-empty main-agent `TextChunk` text (`ParentToolCallID == ""`),
-with no invalidation. Published text is carried verbatim and never logged.
+`TurnEndReasonEndTurn`, `Outcome == "success"`, no error, nonblank delivered
+user text and nonblank final main-agent `TextChunk` text
+(`ParentToolCallID == ""`), with no invalidation. Delivered user text must also
+be confirmed. Accepted native text is carried verbatim and never logged.
+
+**Final-exchange selection and bounded retention (#2832).** `noteAssistantText`
+assembles chunks of the final main-agent message by `MessageID`; a new message
+resets both retained text and nonblank eligibility. Earlier assistant messages
+and subagent chunks cannot supply missing final prose. `noteDelivered` retains
+only the producing message's client-safe `QueuedMessage.Text`, never composed
+stdin, full history or attachment-file contents. `replyExchangePrefix` retains
+and sends at most the first 8192 UTF-8 bytes per side, backing up to a complete
+code point. Invalid UTF-8 has no retained prefix. A clipped prefix is cloned:
+a short Go substring otherwise keeps the original exchange's entire backing
+allocation alive despite passing length assertions.
+
+**Full-text eligibility is separate from retained prefixes.** Nonblank prose
+after 8192 whitespace bytes still qualifies either side, even when it arrives
+in later chunks after retention fills. Keep only the eligibility boolean beyond
+the prefix; inference still receives the bounded prefix. Checking `TrimSpace`
+on retained text alone would suppress even valid native output. Conversely,
+an earlier nonblank message cannot make a blank final message eligible.
+`TestReplySuggestionEligibilityBeyondPrefix` covers native and fallback sources,
+later chunks, blank final messages and subagent-only prose.
 
 **Delivery order cannot identify the producing message.** `OnDelivered` can
 arrive after both `TurnEnd` and the native suggestion. `trackDelivery` wraps
@@ -202,6 +223,17 @@ host paths. A valid suggestion missing only this confirmation waits in
 `pending`. The matching late confirmation can release it, but never resets
 invalidation. A spontaneous turn has no producing message ID and cannot borrow
 text from the next CLI or channel delivery.
+
+`waitReplyNative` gives native output two seconds from `TurnEnd`. Publication
+within that window makes zero fallback calls. Once the window expires,
+`startFallbackLocked` may launch one asynchronous attempt only if the producing
+message has confirmed delivery and the turn remains eligible with no pending
+native text. Matching confirmation after expiry can enable that attempt
+immediately; it does not restart the window, credit another message or reset
+invalidation. Eligible native output arriving while fallback is pending wins
+unchanged and cancels inference. Whichever source publishes first closes the
+turn to further suggestions. Turn completion and ordinary delivery never wait
+for the timer or model call, and a failed attempt is not retried.
 
 The queue may begin writing before `EnqueueSent` returns to its adapter.
 `accepted` retains the greatest accepted ID even for an unseen conversation;
@@ -215,16 +247,65 @@ and `TestReplySuggestions_DeliveryGate` exercises success, failure and dropped
 gates through the real queue context. A failed write invalidates only its
 matching identity; a refused commit gate registers no identity.
 
-New turn activity and a new queued write drop prior pending text and clear a
-held suggestion. Accepted queued sends, accepted send-now, successful `/clear`,
+New turn activity and a new queued write cancel the native wait or inference,
+drop prior pending text and clear a held suggestion. Accepted queued sends,
+accepted send-now, successful `/clear`,
 reset/eviction transitions and `closeForConversation` on exit or teardown also
 invalidate the producing turn. Refused sends or resets preserve state. A clear
 advances the conversation's revision only when published text was held; other
 conversations remain untouched. The null stays in `current()` for reconnects,
-while deletion prunes published and unpublished entries.
+attributed to the producing session. Explicit deletion and idle sweeping cancel
+and forget published and unpublished entries through
+`dropRingOnConversationDelete`, composing `replySuggestions.forget` with
+`Ring.Drop` in the registry's single removal observer. Reconnect pruning alone
+would leave deleted conversations' waits and calls running. Tests must use
+the production callback via `Registry.Delete` and `Sweep`, then release a late
+result; calling `forget` directly misses absent wiring.
+`TestReplyFallbackRegistryRemovalCancellation` exercises both phases and
+preserves another conversation's ring and suggestion. See
+[the removal observer contract](conversations-registry-crud.md#setondeletefn-funcid-conversationid-1502).
+
+**One isolated Haiku attempt.** `replyFallback.run` uses the daemon's configured
+Claude binary and `claudeAccount.provider()` with the `haiku` alias, no
+more-expensive model fallback and one fresh print-mode turn. Fixed system
+instructions ask for a short next reply; the two bounded exchange sides are
+JSON-encoded stdin, never argv or shell text. The private temporary cwd,
+empty setting sources, safe mode and explicit discovery exclusions disable
+tools, skills, MCP, hooks, approval dialogs, session persistence, session
+prompts, CLAUDE.md, auto-memory and attachment expansion. No workspace or
+history is read. Bare mode is unsuitable here because it also skips installed
+subscription OAuth/keychain login; isolate context while preserving existing
+authentication rather than requiring an API key.
+
+A configured provider is re-read inside the deadline and replaces ambient
+OAuth/API credentials; refusal prevents the launch rather than selecting a
+different account. The ten-second attempt bound includes credential lookup,
+startup and termination: a 9800 ms context reserves termination time, group
+cancellation sends `SIGKILL`, and bounded pipe waits keep escaped descendants
+from holding the caller open. Lookup is selected against cancellation even
+if a reader ignores its context. The shared `streamrunner.Run` would add a
+five-second termination grace and treat parent cancellation as nil, so this
+private helper owns the stricter bound. Missing binary/model/authentication,
+unsupported isolation flags, child failure, cancellation or timeout produces
+no publication and no retry. See [account source cancellation](claude-account-source.md#a-subprocess-bound-has-to-be-enforced-by-returning-on-ctxdone-not-by-waiting-on-the-child).
+
+Successful JSON result text is trimmed, then `validReplyFallback` requires
+nonblank single-line valid UTF-8, no remaining control characters or U+2028/
+U+2029 separators, at most 240 Unicode code points and 1024 UTF-8 bytes.
+Oversized or otherwise invalid output is rejected rather than truncated.
+Exchange text, generated text, credentials and raw child output/errors are
+never logged. `TestReplyFallbackProcess` and
+`TestReplyFallbackProcessCancellation` exercise isolation, fresh account reads,
+refusal, output validation and process termination; `TestReplyFallbackLifecycle`
+covers final-message selection, native priority, late delivery and stale results.
 
 The owner has one leaf mutex, released before registry reads, queue gates,
-writes or pushes. Its publisher snapshots dirty conversations' current state
+writes, credential lookup, inference or pushes. Reset cancels pending work and
+advances a generation; fallback publication rechecks conversation identity,
+generation, eligibility and current session attribution. A late result cannot
+restore a clear, recreate deleted state, affect another conversation or overwrite
+a newer turn/session. Daemon shutdown cancels and joins all owned timer and
+inference workers. Its publisher snapshots dirty conversations' current state
 and fans out only to interactive connections; bursts may coalesce to the
 latest revision. The relay's revision guard prevents an overtaken snapshot
 from restoring old text. These frames carry no `EventID` and enter neither
@@ -238,5 +319,5 @@ Persistent stream `buildArgs` requests `--prompt-suggestions` on create and
 resume spawns unless `promptSuggestionsDisabled` finds the last effective
 `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` entry equal to `false`. Claude honours
 its own `promptSuggestionEnabled: false` settings disable. Missing native
-output remains silent until #2832's fallback; see
+output can now use the fallback independently of those native controls; see
 [the live-test staging and reader lessons](e2e-realclaude.md#test-infrastructure).
