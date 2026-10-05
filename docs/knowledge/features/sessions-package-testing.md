@@ -34,6 +34,13 @@ shutdown tests use five seconds for readiness and fifteen seconds for joining.
 
 ### Cancellation and completed eviction
 
+`TestPool_RunnerStoppedWaitsForProducerJoin` uses `raceRunner` to hold producer
+return after teardown begins. It proves `Config.OnRunnerStopped` stays silent
+until that gate opens, then reports the correct session before `Evict` completes.
+Observing `stateEvicted` or the early transition alone would let this test pass
+while the old producer could still emit a tail. See the
+[confirmed-stop callback contract](sessions-package-key-types-transition-observer.md#confirmed-runner-stop-configonrunnerstopped).
+
 An already-cancelled context cannot deterministically force `Session.Evict`
 to fail: its `select` may choose the completed eviction channel and return
 nil when both completion and `ctx.Done()` are ready. `Pool.Remove` calls this

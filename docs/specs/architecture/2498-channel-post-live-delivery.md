@@ -333,3 +333,33 @@ page. Completion/replay/wake remain #2809; active-turn holding, release ordering
 and its deadline remain #2811, with no turn-boundary change here. See
 [the #2810 plan](2810-durable-channel-post.md) for the implemented design,
 interruption tests and ownership security revisions.
+
+**2026-10-05 — #2811 replaces unconditional immediate delivery with turn-boundary holding.**
+Durable whole-post acceptance still returns success promptly during an active
+Claude turn; no held chunk enters served history or live frames. Idle delivery
+starts promptly without a client or relay URL. Release follows the preceding
+turn's published real completion, or accepted actual child exit/confirmed runner
+stop after preceding queued output and buffered deltas are flushed and its
+published lifecycle is closed. An early eviction request keeps holding through
+confirmed producer stop, even across completion; stale exits cannot release a
+post behind a newer turn. Retained stamped stops survive full stream queues,
+ordered by successful enqueue positions rather than queue emptiness.
+
+The consumer gate serializes acceptance, each whole post's recording/announcement
+and ordinary/reset turn reservations; in-flight send-now writes retain their
+reservation through return. Posts accepted at the boundary finish in durable
+per-conversation FIFO before successor user turns. History retries preserve
+that precedence even after a recorded prefix. Startup recovery has no live
+marks and reconciles the same durable identities/prefixes before a competing
+inbound turn can write. All chunks are recorded before any announcement, with
+distinct turn IDs, sequences from zero and byte-for-byte text.
+
+The diagnostic deadline is **five minutes from durable acceptance**. Once per
+post per process, crossing it while held emits a fixed content-free event with
+conversation/turn identities and keeps the post pending. Expiry never delivers,
+interrupts, marks idle, abandons or ends a still-live Claude turn. Pending delivery
+remains independent of channel carry. Posts remain `assistant_delta` only; a
+lone delta renders live or in a history page, without an exactly-once network
+receipt guarantee. Completion/replay/wake remain #2809; tail catch-up remains
+\#2744. See [the #2811 plan](2811-channel-post-turn-boundary.md) for the final
+producer-stop and saturation revisions.

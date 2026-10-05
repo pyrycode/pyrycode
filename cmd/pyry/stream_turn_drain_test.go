@@ -588,17 +588,9 @@ func TestStreamTurnDrainV2_ExitProducesNoEmitterTraffic(t *testing.T) {
 	assertNoPush(t, bcast.pushed)
 }
 
-// #1209 AC1: the exit drop's LEVEL and exact field set. A dropped exit is a
-// permanently wedged conversation once a producer is wired, where a dropped event
-// is a lost delta — so this one is Warn (visible at the daemon's default
-// LevelInfo) while the siblings stay Debug. The record carries the discriminant
-// and the session id and nothing else: no event content, and no "kind", there
-// being no event to name.
-//
-// No drain is started: with no reader the buffer-of-1 fill is deterministic and
-// timing-free. Note the watcher goes on the SINK's logger — the exit drop is
-// emitted from the sink closure, never from the drain.
-func TestStreamTurnSink_ExitDropWhenFull(t *testing.T) {
+// A full exit lane retains the close boundary and logs only its event and
+// session identity at Warn. No drain is started, so saturation is deterministic.
+func TestStreamTurnSink_ExitRetainedWhenFull(t *testing.T) {
 	t.Parallel()
 
 	recs := make(chan slog.Record, 8)
@@ -606,7 +598,7 @@ func TestStreamTurnSink_ExitDropWhenFull(t *testing.T) {
 	sink := newStreamTurnSink(1, slog.New(dropWatcher{recs: recs}))
 
 	sink.exitFor("sess-a")() // occupies the single slot, silently
-	sink.exitFor("sess-a")() // no room: dropped and logged
+	sink.exitFor("sess-a")() // no room: retained outside the queue and logged
 
 	var rec slog.Record
 	select {
@@ -616,7 +608,7 @@ func TestStreamTurnSink_ExitDropWhenFull(t *testing.T) {
 	}
 
 	if rec.Level != slog.LevelWarn {
-		t.Errorf("exit drop level = %v, want %v (a wedged conversation is degraded operation, not a lost delta)",
+		t.Errorf("exit drop level = %v, want %v (a full exit lane is degraded operation)",
 			rec.Level, slog.LevelWarn)
 	}
 
@@ -941,7 +933,7 @@ func TestStreamTurnSink_DroppableDropUnchanged(t *testing.T) {
 // AC5: a lost turn-closer is never silent. Loss is narrowed rather than made
 // impossible — past the reserve a TurnEnd can still be crowded out — so the
 // remaining path must be visible at the daemon's default LevelInfo, exactly as
-// TestStreamTurnSink_ExitDropWhenFull requires of the exit lane.
+// TestStreamTurnSink_ExitRetainedWhenFull requires of the exit lane.
 //
 // The record carries "kind" where the exit drop does not, and that is the same
 // content-free discipline rather than a departure from it: discriminant and
@@ -961,7 +953,7 @@ func TestStreamTurnSink_TurnEndDropWhenFull(t *testing.T) {
 	send := sink.sinkFor("sess-a")
 
 	send(turnevent.TextChunk{MessageID: "m1", Text: "occupies the slot"}) // silently
-	send(turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})       // no room: dropped and logged
+	send(turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})       // no room: retained outside the queue and logged
 
 	var rec slog.Record
 	select {
@@ -971,7 +963,7 @@ func TestStreamTurnSink_TurnEndDropWhenFull(t *testing.T) {
 	}
 
 	if rec.Level != slog.LevelWarn {
-		t.Errorf("turn-close drop level = %v, want %v (a wedged conversation is degraded operation, not a lost delta)",
+		t.Errorf("turn-close drop level = %v, want %v (a full exit lane is degraded operation)",
 			rec.Level, slog.LevelWarn)
 	}
 

@@ -38,12 +38,18 @@ unchanged emitter, so this is deliberately *not* shared fan-out infrastructure.
 **Non-blocking send, class-aware drop since #1496.** `sinkFor`'s closure runs on claude's stdout forwarder
 goroutine (the same one `os/exec` drives the Parser's `Write` from); a blocking send on a full channel would
 wedge the child. Before #1496 a full channel dropped the newest event of **any** class, `turnevent.TurnEnd`
-included — see [§ Class-aware fan-in reserve (#1496)](#class-aware-fan-in-reserve-1496) below for why that
+included — see [Class-aware fan-in reserve](streamsup-package-per-conversation-turn-busy-track-class-aware-fan-in-reserve.md) for why that
 was an ADR 025 violation and how it's fixed. Today only the droppable class is refused once the channel
 reaches `droppableCap`, and only that drop Debug-logs content-free (`event`, `kind`, `session_id` only —
 never `ev`'s assistant/thought/tool content). The channel is **never closed** (a Parser may outlive the
 drain during shutdown; the drain stops on `ctx`, not on channel close, so a send-on-closed panic is
 structurally impossible).
+
+Closing events can still exhaust the reserve: `TurnEnd` then drops with a
+content-free Warn. Actual exits and confirmed runner stops survive in retained
+state, with successful enqueue positions ordering them after preceding queued
+output and before later output. The wake channel coalesces; it does not own
+the close. See [retained stop transport](streamsup-package-per-conversation-turn-busy-track-exit-lane-on-the-turn-busy-fan.md).
 
 **Per-event conversation attribution, not an active-conversation gate (#2739).** The drain goroutine
 resolves `conversationFor(env.sessionID)` and forwards to `emitter.HandleFor(ctx, convID, ev)` under
@@ -134,6 +140,19 @@ single-Run-goroutine assumption the PTY producer relies on, `-race`-tested by fe
 Parsers concurrently. The drain also selects `emitter.flushC()` (the emitter arms its own coalescing
 timer inside `Handle`/`HandleFor` but does not select it — a driver must) and calls `flushAll` on the same
 goroutine, so there's no cross-goroutine timer race.
+
+**Published completion, not an idle snapshot, releases durable posts (#2811).**
+The drain gates tracker observation and `HandleFor` together under the
+`channelDelivery` mutex, clearing published activity only after completion has
+been handled. An accepted exit similarly calls `closeForConversation` to flush
+buffered text and close lifecycle before releasing activity. Early eviction
+holds survive completion until confirmed producer stop; stale exits preserve
+newer reservations. Emitter mutation remains on this goroutine throughout.
+Without a relay URL, `startRelay` still constructs a history-backed emitter with
+`historyOnlyBroadcaster` and starts the same drain and transition observer.
+History publication and post release therefore work without attached clients.
+See [channel-post boundaries](control-plane-channel-post-live-delivery.md)
+and [confirmed teardown](streamsup-package-per-conversation-turn-busy-track-session-teardown-clear.md).
 
 **No transcript on this path (AC3).** `stream_turn_drain.go` imports no fsnotify, resolves no `<uuid>.jsonl`
 path — structural, asserted by the test file doing no filesystem setup.

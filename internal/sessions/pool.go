@@ -137,6 +137,12 @@ type Config struct {
 	// session to its conversation on its own side of the seam.
 	TurnBusy func(SessionID) bool
 
+	// OnRunnerStopped, when non-nil, observes each completed Runner.Run call,
+	// after the producer returns and before eviction completion or reactivation.
+	// Called without pool/session locks; it must not block. Unlike the transition
+	// observer's early eviction signal, this is a producer shutdown boundary.
+	OnRunnerStopped func(SessionID)
+
 	// ActiveCap is the maximum number of concurrently active claude
 	// processes this Pool will run. Zero (the unset default) means
 	// uncapped — preserves Phase 1.2c-A's idle-only behaviour
@@ -336,6 +342,7 @@ type Pool struct {
 	// runners they in turn start — read it lock-free via Run's
 	// goroutine-start happens-before. nil disables it. See transition.go.
 	transitionObserver TransitionObserver
+	onRunnerStopped    func(SessionID) // construction-bound, read-only after New
 }
 
 // SnapshotEntry is one (id, pid) pair captured by Pool.Snapshot. The primitive
@@ -664,6 +671,7 @@ func New(cfg Config) (*Pool, error) {
 		idleTimeoutDefault: cfg.IdleTimeout,
 		turnBusy:           cfg.TurnBusy,
 		newRunner:          newRunner,
+		onRunnerStopped:    cfg.OnRunnerStopped,
 	}
 	sess.pool = p
 	if err := p.loadDaemonInstructions(); err != nil {

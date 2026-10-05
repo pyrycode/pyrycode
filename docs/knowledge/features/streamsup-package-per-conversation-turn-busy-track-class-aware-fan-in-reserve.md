@@ -33,16 +33,27 @@ one side's set and not the other can't silently reintroduce this bug. The closin
 including an unrecognized future variant, falls to droppable — the safe default, since a wrongly-reserved
 variant only costs capacity while a wrongly-droppable *closer* is the only misclassification that wedges.
 
-**Loss is narrowed, not made impossible — the residual is `Warn`, not `Debug`.** Past the reserve a
-closing-class send can still lose the race (`sinkFor` logs `stream_turn.close_sink_full`; `exitFor`,
-unchanged by this ticket, already logged `stream_turn.exit_sink_full`), both at `Warn` — content-free
-(`event`, `kind` where there's a discriminant to name, `session_id`) and visible at the daemon's default
-`LevelInfo`, where the old `Debug`-only record was not. One documented risk: closing-class sends bypass the
-watermark entirely, so a single session bursting more `TurnEnd`s than the reserve while the drain is stalled
-could in principle crowd out a *different* session's closer — assessed as a narrowed version of pre-#1496
-behaviour (today's bug crowds out everything, including the bursting session's own closer) rather than a new
-vector, and left undefended since a fix would need the per-session accounting this design exists to avoid.
+**The reserve does not guarantee a closing slot.** A burst of closing events
+can exhaust it. `TurnEnd` still drops and logs `stream_turn.close_sink_full` at
+`Warn`, with only event kind and session identity. Ordinary droppable events log
+at `Debug`. A retained exit is different: since #2811, a full-queue exit logs
+`stream_turn.exit_sink_full` but survives outside the queue, and confirmed
+runner stops always use that retained transport. See
+[exit-lane retention](streamsup-package-per-conversation-turn-busy-track-exit-lane-on-the-turn-busy-fan.md).
 
-**Reconciling the "busy forever" claim.** It now holds up to the documented 32-slot reserve rather than
-unconditionally: `turnBusyTracker`'s three closing feeds (`observe`'s `TurnEnd`, #1202's teardown clear, #1210's exit lane) are unchanged by this ticket and still jointly exhaustive over *how* a turn closes — what #1496 fixed is that the fan-in itself no longer discards the first of those three before it can be observed,
-short of exhausting the reserve. See [codebase/1496.md](../codebase/1496.md).
+**Retaining a stop needs an output barrier, not just a second queue.** The drain
+must publish every successfully enqueued predecessor before closing the old
+lifecycle, then apply the stop before later output. Successful enqueue positions
+under a leaf sink mutex supply that ordering; queue emptiness and coalesced wake
+signals do not. Losing both exit notifications after the reserve fills would
+leave durable posts and successor starts held forever. Retention is per
+session identity rather than per event, so it preserves a confirmed boundary
+without soft-overflowing child-authored event traffic.
+
+Durable posts release after published real completion or an accepted actual
+exit/confirmed runner stop that flushes and closes publication. Early pool
+eviction instead installs a hold until confirmed shutdown; it no longer
+unconditionally clears membership. See
+[session teardown](streamsup-package-per-conversation-turn-busy-track-session-teardown-clear.md).
+A live child whose `TurnEnd` was dropped may remain held until an actual exit;
+stop retention does not synthesize a missing completion or end a live turn.

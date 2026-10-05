@@ -30,20 +30,38 @@ A later history failure leaves the accepted post pending for automatic retry
 without another post or restart.
 
 Concurrent posts to one conversation deliver FIFO by durable acceptance, with
-each post's chunks contiguous relative to other posts. Each has its own turn ID,
-sequences from zero, and text whose concatenation reproduces the input
+each post's chunks contiguous relative to other posts and Claude output. Each
+has its own turn ID, sequences from zero, and text whose concatenation reproduces the input
 byte-for-byte. All chunks reach history before the first live announcement;
 announcements follow their recorded post/chunk order. A failed head keeps later
 posts in that conversation pending while other conversations can progress.
+
+An active Claude turn holds delivery, not acceptance: `channel post` returns
+success after persisting the whole post without waiting for that turn to finish.
+No held chunk enters served history or live frames. Release follows the preceding
+turn's published real completion, or an accepted actual child exit/confirmed
+runner stop after preceding queued deltas have been handled, buffered text
+flushed and the published lifecycle closed. An early pool eviction request is
+not that boundary; it holds posts and successor starts through confirmed stop,
+even if completion publishes in the meantime. Stale exits cannot close a newer
+turn. See [session teardown](streamsup-package-per-conversation-turn-busy-track-session-teardown-clear.md).
+
+Posts accepted by the release boundary finish whole-post delivery before an
+ordinary successor user turn or reset wrap-up can start. `beginDelivery` makes
+the final pending check atomic with the busy mark and write reservation under
+the same consumer mutex as acceptance, recording and announcement. Child writes
+run outside that mutex; reservations keep posts held until writes return,
+including in-flight send-now writes after a completion or carry/grace close.
+A pending history retry blocks successor starts even after a recorded prefix.
+Checking only an inbound snapshot or tracker-idle state would let a later
+acceptance or unpublished completion split the reply or post.
 
 The served text remains `assistant_delta` alone, with no `turn_state` or
 `turn_end`. A lone delta renders live or from a history page, and its fresh turn
 ID starts a fresh bubble. `TurnEndPayload` would claim Claude-authored results
 that a host post cannot supply. Completion, reconnect replay and wake belong to
-[#2809](https://github.com/pyrycode/pyrycode/issues/2809); active-turn holding,
-release ordering and its deadline belong to
-[#2811](https://github.com/pyrycode/pyrycode/issues/2811). This delivery path retains
-the existing behavior while a Claude turn is active.
+[#2809](https://github.com/pyrycode/pyrycode/issues/2809). Holding preserves the
+original Claude reply and its real completion; it supplies no post lifecycle.
 
 **The id's failure contract follows what it addresses, not what the old code called it.** `newChannelPostMessageID` fell back to `""` on an rng failure, correctly — a dedupe key nobody reads degrades harmlessly. `newChannelPostTurnID` refuses the post instead: a `turn_id` is the address a client groups chunks by, and every post minting `""` would coalesce into a single bubble with every other one, breaking the "one post is one rendering" property outright rather than degrading a field nobody reads.
 
@@ -69,6 +87,13 @@ path. `assistant_delta` remains droppable in `pushQueue.enqueue` and
 `eventring`. History recovery does not imply automatic tail catch-up, which
 belongs to [#2744](https://github.com/pyrycode/pyrycode/issues/2744).
 
+The hold diagnostic deadline is **five minutes from durable acceptance**
+(`channelPostHoldDeadline`). Crossing it while held emits
+`channel_post.hold_deadline` once per post per process, containing only fixed
+event text, conversation ID and turn ID. The post stays pending. Expiry never
+delivers, interrupts, marks idle, abandons or ends a still-live Claude turn.
+It is a diagnostic threshold, not a delivery timeout.
+
 `history.Store.Append` is per-chunk, so a recorded prefix can be visible while a
 later write retries. `channelDelivery.deliver` scans **every** newest-first
 `Page`, matching the conversation, turn ID, sequence and text, then appends only
@@ -85,10 +110,18 @@ contract; it does not promise survival of a machine crash.
 
 `runSupervisor` claims the control socket before loading pending state and
 establishes `channelDelivery.beforeInbound` before inbound delivery starts.
+Recovery starts without live activity marks, at a safe startup boundary.
 Recovered posts finish history delivery before a new user turn is delivered in
-the same conversation, ahead of carry composition and user-turn writing.
+the same conversation, ahead of carry composition and user-turn writing;
+`beginDelivery` rechecks pending work under the reservation gate so concurrent
+acceptance cannot overtake that check.
 Unaffected conversations can progress. Socket ownership lasts through post
 writer shutdown; see [Control plane lifecycle](control-plane.md#lifecycle).
+
+Holding, release and startup recovery work without any attached client or relay
+URL. In that configuration `startRelay` still runs the stream drain with a
+history-backed interactive emitter and `historyOnlyBroadcaster`; completion and
+confirmed stop close publication into history before posts can be recorded.
 
 ## Pending delivery and channel carry
 
@@ -111,6 +144,21 @@ independence and automatic retry with and without an announcer;
 `TestChannelDelivery_ConcurrentFIFO` compares durable acceptance, history and
 announcement order.
 
+`TestChannelDelivery_PublishedCompletionBeforePostAndSuccessor` holds completion
+publication to prove tracker-idle alone cannot release a post.
+`TestChannelDelivery_RetryAndReloadBlockCompetingStart` proves partial-write and
+on-disk recovery precedence over a competing inbound turn.
+`TestChannelDelivery_HoldDeadlineAndIndependentIdle` advances the diagnostic clock
+while a live turn remains busy and another conversation delivers.
+`TestChannelDelivery_InFlightSendNowHoldsAcrossClose` covers the write reservation
+beyond a carried close; `TestChannelDelivery_NoRelayPublicationAndTeardown`
+checks relay-disabled production wiring. The release-file-gated
+`TestChannelPost_E2E_HeldUntilRealCompletion` checks successful held acceptance,
+absence from live/history before release, and the intact reply followed by its
+real completion before the separate live post.
+
 See the [original fan-out design](../../specs/architecture/2498-channel-post-live-delivery.md#revisions)
 and [durable-delivery design](../../specs/architecture/2810-durable-channel-post.md)
-for the acceptance/recovery revision and ownership security review.
+for the acceptance/recovery revision and ownership security review; the
+[turn-boundary design](../../specs/architecture/2811-channel-post-turn-boundary.md)
+records the holding and confirmed-stop ordering contract.

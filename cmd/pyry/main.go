@@ -964,6 +964,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// tracker, so the pool would see no signal at all.
 	var turnBusy *turnBusyTracker
 	var sessionTurnBusy func(sessions.SessionID) bool
+	var sessionRunnerStopped func(sessions.SessionID)
 	if streamSink != nil {
 		turnBusy = newTurnBusyTracker(
 			func(sid string) (string, bool) { return conversationForSession(convReg, sid) }, logger,
@@ -973,6 +974,10 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 			convID, ok := conversationForSession(convReg, string(id))
 			return ok && turnBusy.Busy(convID)
 		}
+		// A whole runner can stop after its last child exit was already offered.
+		// Stamp a confirmed stop before the pool permits reactivation, so an early
+		// eviction hold always has a retained boundary after its queued producer tail.
+		sessionRunnerStopped = func(id sessions.SessionID) { streamSink.runnerStopped(string(id)) }
 	}
 	pool, err := sessions.New(sessions.Config{
 		Logger:                    logger,
@@ -980,6 +985,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		ClaudeSessionsDir:         claudeSessionsDir,
 		IdleTimeout:               *idleTimeout,
 		TurnBusy:                  sessionTurnBusy,
+		OnRunnerStopped:           sessionRunnerStopped,
 		ActiveCap:                 *activeCap,
 		ConversationsRegistry:     convReg,
 		ConversationsRegistryPath: convRegistryPath,
@@ -1107,6 +1113,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		return err
 	}
 	defer postDelivery.stopAccepting()
+	postDelivery.bind(turnBusy)
 	// operatorMessages is the hand-off from the history producer below to the
 	// live push of the operator's own message (#2699), built BEFORE msgqueue.New
 	// for queueChanges' reason. The ring that push appends to is born in the relay
@@ -3634,7 +3641,11 @@ func newInboundDeliver(resolve func(string) (handlers.TurnWriter, error), busy *
 		if err := busy.waitIdleForDelivery(ctx, convID, hold); err != nil {
 			return fmt.Errorf("%w: %w", errStreamTurnHold, err)
 		}
-		undo := busy.openForDelivery(convID)
+		undo, finished, err := busy.beginDelivery(ctx, convID)
+		if err != nil {
+			return err
+		}
+		defer finished()
 		if err := w.WriteUserTurn(ctx, convID, payload); err != nil {
 			// Returned VERBATIM (unwrapped): msgqueue classifies ErrNoLiveSession,
 			// ErrTrustModalPending and turncommit.ErrDropped by errors.Is, and the undo

@@ -95,6 +95,13 @@ type streamTurnEnvelope struct {
 	// OnSessionRotate BEFORE it cancels, so the dying child's exit carries the NEW id
 	// and resolves to the same conversation.
 	exitEpoch uint64
+	// queued is the position of a successfully enqueued envelope.
+	queued uint64
+}
+
+type confirmedStreamStop struct {
+	env   streamTurnEnvelope
+	after uint64
 }
 
 // streamTurnSink is the late-bound, daemon-singleton fan-in that lines up two
@@ -112,13 +119,20 @@ type streamTurnEnvelope struct {
 // post-shutdown send lands in the non-blocking drop path.
 type streamTurnSink struct {
 	ch chan streamTurnEnvelope
+	// offerMu orders successful enqueues against confirmed runner stops. It is
+	// a leaf lock: no I/O, publication or tracker operation runs underneath it.
+	offerMu     sync.Mutex
+	queued      uint64
+	stopped     map[string]confirmedStreamStop
+	stoppedWake chan struct{}
 	// droppableCap is the high-water mark the droppable class may not cross,
 	// leaving cap(ch) - droppableCap slots that only a closing-class envelope can
 	// take. Computed once at construction so the hot path is one integer compare.
 	droppableCap int
 	logger       *slog.Logger
 	// exits counts the child-exit signals offered to this fan-in and is the sole
-	// source of every envelope's exitEpoch (#1483). EXITS ONLY, never events: only
+	// source of every envelope's exitEpoch (#1483), including confirmed stops.
+	// EXITS ONLY, never events: only
 	// exit stamps are ever compared, so leaving the event path untouched keeps
 	// claude's stdout forwarder free of it and shrinks the invariant a reader has to
 	// hold to "how many exits has this fan-in accepted".
@@ -194,7 +208,7 @@ func (s *streamTurnSink) crashLoopForTag(tag func() string) func() {
 //
 // The reserve is clamped to buf/2 so a small test buffer stays workable: at
 // buf == 1 it degenerates to 0 and every slot is droppable again, which is what
-// keeps the buffer-of-1 drop fixtures (`TestStreamTurnSink_ExitDropWhenFull`)
+// keeps the buffer-of-1 drop fixtures (`TestStreamTurnSink_ExitRetainedWhenFull`)
 // meaningful. The clamp also keeps droppableCap >= ceil(buf/2) >= 1 for every
 // buf >= 1, so no buffer size can starve the droppable class outright.
 func newStreamTurnSink(buf int, logger *slog.Logger) *streamTurnSink {
@@ -206,11 +220,72 @@ func newStreamTurnSink(buf int, logger *slog.Logger) *streamTurnSink {
 	}
 	return &streamTurnSink{
 		ch:                    make(chan streamTurnEnvelope, buf),
+		stopped:               make(map[string]confirmedStreamStop),
+		stoppedWake:           make(chan struct{}, 1),
 		droppableCap:          buf - min(streamTurnSinkCloseReserve, buf/2),
 		logger:                logger,
 		lifecycleClosePending: make(map[string]struct{}),
 		lifecycleCloseWake:    make(chan struct{}, 1),
 	}
+}
+
+// offer preserves the bounded, non-blocking event policy while assigning FIFO
+// positions under the same short lock as runnerStopped.
+func (s *streamTurnSink) offer(env streamTurnEnvelope, closing bool) bool {
+	s.offerMu.Lock()
+	defer s.offerMu.Unlock()
+	if !closing && len(s.ch) >= s.droppableCap {
+		return false
+	}
+	env.queued = s.queued + 1
+	select {
+	case s.ch <- env:
+		s.queued++
+		return true
+	default:
+		if env.exit {
+			s.retainExitLocked(env)
+		}
+		return false
+	}
+}
+
+// retainExitLocked requires offerMu and keeps the newest stamp per session.
+// A child exit may acquire the lock after a later confirmed stop; that older
+// exit must never replace the stronger producer boundary.
+func (s *streamTurnSink) retainExitLocked(env streamTurnEnvelope) {
+	if old, ok := s.stopped[env.sessionID]; ok && old.env.exitEpoch >= env.exitEpoch {
+		return
+	}
+	s.stopped[env.sessionID] = confirmedStreamStop{env: env, after: s.queued}
+	select {
+	case s.stoppedWake <- struct{}{}:
+	default:
+	}
+}
+
+// runnerStopped runs only after Runner.Run joins its producer. It retains
+// one latest boundary per session without relying on queue capacity, ordered
+// behind every envelope queued before that join. Coalescing repeated stops for
+// one session moves the boundary later, after all of that session's old tails.
+// The wake is a level trigger, never the owner of the notification.
+func (s *streamTurnSink) runnerStopped(sessionID string) {
+	s.offerMu.Lock()
+	s.retainExitLocked(streamTurnEnvelope{sessionID: sessionID, exit: true, exitEpoch: s.exits.Add(1)})
+	s.offerMu.Unlock()
+}
+
+func (s *streamTurnSink) takeStopped(processed uint64) []streamTurnEnvelope {
+	s.offerMu.Lock()
+	defer s.offerMu.Unlock()
+	var ready []streamTurnEnvelope
+	for id, stop := range s.stopped {
+		if stop.after <= processed {
+			ready = append(ready, stop.env)
+			delete(s.stopped, id)
+		}
+	}
+	return ready
 }
 
 // requestLifecycleClose records a conversation whose published turn lifecycle
@@ -362,7 +437,7 @@ func (s *streamTurnSink) exitFor(sessionID string) func() {
 // early return: the Parser runs on claude's
 // stdout forwarder goroutine, so a blocking send on a full channel would wedge
 // the child. The channel IS the queue and drops rather than blocks, mirroring the
-// emitter's owns-no-queue principle. It holds no lock (channel send only).
+// emitter's owns-no-queue principle. offer takes only a short leaf lock.
 //
 // WHAT it drops is class-aware (#1496), split by what LOSING one costs rather
 // than by wire type. A droppable event is refused at the droppableCap watermark:
@@ -387,13 +462,9 @@ func (s *streamTurnSink) exitFor(sessionID string) func() {
 // tool-heavy burst. tool_* keeps its never-drop status downstream in pushQueue,
 // untouched; this reserve is additive protection at a second queue.
 //
-// The len(s.ch) read races other producers by construction, and the race is
-// BOUNDED rather than handled: each producer is a single goroutine (one
-// streamsup.Parser per live runner, on os/exec's stdout forwarder), so it has at
-// most one check-then-send in flight, and the send stays non-blocking. A slipped
-// droppable therefore takes at most one reserve slot per live runner — the term
-// streamTurnSinkCloseReserve is sized for — and can never block or admit
-// unboundedly.
+// The watermark and send are serialized by offer's leaf lock, also used to
+// position confirmed runner stops after their preceding enqueues. The send never
+// waits for channel capacity.
 //
 // The tag is read ONCE, at the top, and that read is reused for the envelope and
 // for any drop record below it. A rotation racing this closure therefore moves the
@@ -403,9 +474,7 @@ func (s *streamTurnSink) sinkForTag(tag func() string) func(turnevent.Event) {
 	return func(ev turnevent.Event) {
 		sessionID := tag()
 		if turnMarkFor(ev) == turnMarkClose {
-			select {
-			case s.ch <- streamTurnEnvelope{sessionID: sessionID, ev: ev}:
-			default:
+			if !s.offer(streamTurnEnvelope{sessionID: sessionID, ev: ev}, true) {
 				// Past the reserve a closer can still be lost, so the residual must be
 				// VISIBLE: Warn, not Debug, because the daemon's default level is
 				// LevelInfo (see the level selection in `runSupervisor`) — the same
@@ -425,16 +494,8 @@ func (s *streamTurnSink) sinkForTag(tag func() string) func(turnevent.Event) {
 			return
 		}
 
-		if len(s.ch) < s.droppableCap {
-			select {
-			case s.ch <- streamTurnEnvelope{sessionID: sessionID, ev: ev}:
-				return
-			default:
-				// The watermark read was stale and the channel filled underneath it.
-				// Falls through to the same drop as crossing the watermark: the event is
-				// lost either way, and reporting one loss two ways would only invite a
-				// reader to think they differ.
-			}
+		if s.offer(streamTurnEnvelope{sessionID: sessionID, ev: ev}, false) {
+			return
 		}
 
 		// SECURITY: content-free — the discriminant and session id only, never
@@ -463,32 +524,11 @@ func (s *streamTurnSink) sinkForTag(tag func() string) func(turnevent.Event) {
 // report wiring where there is none. That is also why no line number stands in
 // for it — the name is what must not appear, not the address.
 //
-// NON-BLOCKING for sinkFor's reason: it runs on the runner's supervision
-// goroutine and must not be wedged by a stalled drain, so a full channel drops
-// the newest.
-//
-// It sends UNWATERMARKED, against the channel's full capacity, where sinkFor
-// gates the droppable class at droppableCap. That is not a divergence but the
-// same policy: an exit envelope is closing-class (#1496), being the signal that
-// clears the mark for a child that died mid-turn, so it takes the reserved tail
-// slots exactly as a TurnEnd does. No code change was needed here to get that —
-// this closure was already written the way the closing class now requires.
-//
-// The drop is logged at Warn where sinkFor's DROPPABLE branch is Debug, and that
-// asymmetry is the whole diagnostic value of this branch. A dropped event is a
-// lost delta; a dropped exit is a conversation that stays busy forever once a
-// producer is wired, which is degraded operation and must be visible at the
-// daemon's default LevelInfo (Debug is not — see the level selection in
-// `runSupervisor`). Since #1496 sinkFor's own closing-class branch reasons the
-// same way and is likewise Warn, so the split now runs along the CLASS rather
-// than along the two closures.
-//
-// The select is deliberately NOT factored into a helper shared with sinkFor: the
-// common part is one statement while the divergent part is the entire diagnostic
-// (level, message, field set), so parameterising the divergence would cost more
-// than it saves and would obscure exactly the asymmetry above. #1496's closing
-// class does not change that — the two records still differ in message and field
-// set, this one omitting "kind" because there is no event to name.
+// Never waits for channel capacity. Exits use the closing reserve; if even that
+// is full, offer retains the stamped boundary behind its queued predecessors.
+// The content-free Warn keeps the existing event/session field contract while
+// identifying this degraded transport path. No event content or queue position
+// is logged.
 func (s *streamTurnSink) exitForTag(tag func() string) func() {
 	return func() {
 		sessionID := tag()
@@ -499,14 +539,12 @@ func (s *streamTurnSink) exitForTag(tag func() string) func() {
 		// consumes a stamp, which only inflates later ones — and inflation moves the
 		// guard toward declining, the safe direction (`clearForExit`).
 		epoch := s.exits.Add(1)
-		select {
-		case s.ch <- streamTurnEnvelope{sessionID: sessionID, exit: true, exitEpoch: epoch}:
-		default:
+		if !s.offer(streamTurnEnvelope{sessionID: sessionID, exit: true, exitEpoch: epoch}, true) {
 			// SECURITY: content-free, and no "kind" — there is no event to name.
 			// The resolved conversation id is absent because this closure holds no
 			// resolver and structurally cannot name one; the conversation-id
 			// discipline lives on the clear path (`clearForSession`).
-			s.logger.Warn("relay: stream-turn exit drop; sink full",
+			s.logger.Warn("relay: stream-turn exit retained; sink full",
 				"event", "stream_turn.exit_sink_full",
 				"session_id", sessionID)
 		}
@@ -517,7 +555,9 @@ func (s *streamTurnSink) exitForTag(tag func() string) func() {
 // interactiveTurnEmitterV2 from the fan-in sink. The Parser already emits
 // turnevent.Event, so the events reach Handle as they are, with no mapping step.
 //
-// The goroutine selects over four cases:
+// The goroutine selects over five cases:
+//   - sink.stoppedWake: consume retained confirmed stops only after their queued
+//     predecessors have been handled, using the same exit-epoch guards as exits.
 //   - sink.ch: an exit envelope (#1209) clears the producing session's turn and
 //     its matching published lifecycle; otherwise feed the per-conversation
 //     turn-busy tracker, then resolve the producing session to the conversation
@@ -563,84 +603,107 @@ func startStreamTurnDrainV2(
 	go func() {
 		defer close(done)
 		closePendingLifecycles := func() {
+			// Bound trackers never enqueue early pool-transition closes. Their
+			// confirmed producer stop is retained behind the parsed tail and closes it below.
+			if busy != nil && busy.posts != nil {
+				return
+			}
 			for _, conversationID := range sink.takeLifecycleCloses() {
+				unlock := busy.lockPostBoundary()
 				emitter.closeForConversation(ctx, conversationID)
+				busy.publishPostBoundary(conversationID, false)
+				unlock()
+			}
+		}
+		var processed uint64
+		handleEnvelope := func(env streamTurnEnvelope) {
+			unlock := busy.lockPostBoundary()
+			defer unlock()
+			if env.exit {
+				var teardownEpoch any
+				if busy != nil && busy.posts != nil {
+					if id, ok := conversationFor(env.sessionID); ok {
+						teardownEpoch, _ = busy.posts.teardown.Load(id)
+						if teardownEpoch != nil && env.exitEpoch <= teardownEpoch.(uint64) {
+							return // exit offered before this eviction, even if TurnEnd cleared busy
+						}
+					}
+				}
+				// Retain exit-epoch protection; flush and close publication before
+				// releasing posts, only when the producing exit was accepted.
+				if conversationID, cleared := busy.clearForExit(env.sessionID, env.exitEpoch); cleared {
+					emitter.closeForConversation(ctx, conversationID)
+					busy.publishPostBoundary(conversationID, false)
+					if teardownEpoch != nil {
+						// A new early transition can arrive during publication;
+						// retire only the hold this exit actually accepted.
+						busy.posts.teardown.CompareAndDelete(conversationID, teardownEpoch)
+					}
+				}
+				return
+			}
+
+			// BEFORE the resolution below, and the ordering IS the contract: an
+			// event that resolves to no conversation is dropped there, and the
+			// tracker keeps its own resolution and its own unbound-session record.
+			busy.observe(env.sessionID, env.ev)
+
+			// claude's echo of a user message (#2730) builds no frame. It goes to
+			// the send-now placement HERE, on this goroutine and before the
+			// conversation resolution: every event claude emitted ahead of it —
+			// the tool result the message followed — has already been handled,
+			// so the operator-message push it may commit lands after it, and a
+			// background conversation's echo is placed too.
+			if echo, ok := env.ev.(turnevent.UserEcho); ok {
+				sink.observeEcho(env.sessionID, echo)
+				return
+			}
+
+			// Attribution by the event's OWN session (#2739), never by the active
+			// conversation: the emitter is the only writer of history, ring, client
+			// frames and the turn-end wake, so an event dropped here is lost for
+			// good.
+			conversationID, ok := conversationFor(env.sessionID)
+			if !ok || conversationID == "" {
+				// SECURITY: content-free — discriminant + session id only.
+				logger.Debug("relay: stream-turn drop; no conversation for session",
+					"event", "stream_turn.no_conversation",
+					"kind", eventKind(env.ev),
+					"session_id", env.sessionID)
+				return
+			}
+			if turnMarkFor(env.ev) == turnMarkOpen {
+				busy.publishPostBoundary(conversationID, true)
+			}
+			emitter.HandleFor(ctx, conversationID, env.ev)
+			if turnMarkFor(env.ev) == turnMarkClose {
+				busy.publishPostBoundary(conversationID, false)
+			}
+		}
+		handleStops := func() {
+			for _, env := range sink.takeStopped(processed) {
+				handleEnvelope(env)
 			}
 		}
 		for {
+			handleStops()
 			closePendingLifecycles()
 			select {
 			case <-ctx.Done():
 				return
+			case <-sink.stoppedWake:
+				handleStops()
 			case <-sink.lifecycleCloseWake:
 				closePendingLifecycles()
 			case env := <-sink.ch:
-				// A pool teardown records its close before returning to the pool.
-				// Apply it before any later child event selected in the same cycle,
-				// preserving teardown-before-successor ordering across the two lanes.
-				closePendingLifecycles()
-				if env.exit {
-					// FIRST statement of the arm, and each thing it precedes matters.
-					// Before observe: an exit carries no event, and routing a non-event
-					// through the event path is the confusion the explicit field exists
-					// to prevent. Before the active-session gate: the gate drops every
-					// event whose producing session is not the ACTIVE conversation's, so
-					// an exit filtered there would never clear a BACKGROUND conversation
-					// — the common case for a crash. Before Handle: combined with the
-					// explicit field, that keeps Handle structurally unable to receive a
-					// non-event.
-					//
-					// Called synchronously on this goroutine, never handed to another:
-					// a deferred clear could land after a turn opened by the RESPAWNED
-					// child and report a live turn idle.
-					//
-					// clearForExit rather than clearForSession, and the split is the
-					// whole of #1483. The two callers of the clear have opposite
-					// ordering needs: this arm is ordered against the fan-in and must
-					// refuse an exit that was enqueued before the mark it would clear,
-					// while the teardown feed (the pool's transition observer) is not
-					// ordered against anything here and must clear unconditionally. So
-					// the epoch condition lives on a door the teardown feed cannot reach
-					// by name. Everything else is unchanged: one session→conversation
-					// resolution, one copy of the membership-mutation protocol
-					// (`applyBusyLocked`), and a nil-receiver no-op so a drain with no
-					// tracker is unaffected.
-					if conversationID, cleared := busy.clearForExit(env.sessionID, env.exitEpoch); cleared {
-						emitter.closeForConversation(ctx, conversationID)
-					}
-					continue
+				if busy == nil || busy.posts == nil {
+					closePendingLifecycles()
 				}
-
-				// BEFORE the resolution below, and the ordering IS the contract: an
-				// event that resolves to no conversation is dropped there, and the
-				// tracker keeps its own resolution and its own unbound-session record.
-				busy.observe(env.sessionID, env.ev)
-
-				// claude's echo of a user message (#2730) builds no frame. It goes to
-				// the send-now placement HERE, on this goroutine and before the
-				// conversation resolution: every event claude emitted ahead of it —
-				// the tool result the message followed — has already been handled,
-				// so the operator-message push it may commit lands after it, and a
-				// background conversation's echo is placed too.
-				if echo, ok := env.ev.(turnevent.UserEcho); ok {
-					sink.observeEcho(env.sessionID, echo)
-					continue
+				handleStops()
+				handleEnvelope(env)
+				if env.queued != 0 {
+					processed = env.queued
 				}
-
-				// Attribution by the event's OWN session (#2739), never by the active
-				// conversation: the emitter is the only writer of history, ring, client
-				// frames and the turn-end wake, so an event dropped here is lost for
-				// good.
-				conversationID, ok := conversationFor(env.sessionID)
-				if !ok || conversationID == "" {
-					// SECURITY: content-free — discriminant + session id only.
-					logger.Debug("relay: stream-turn drop; no conversation for session",
-						"event", "stream_turn.no_conversation",
-						"kind", eventKind(env.ev),
-						"session_id", env.sessionID)
-					continue
-				}
-				emitter.HandleFor(ctx, conversationID, env.ev)
 			case <-emitter.flushC():
 				closePendingLifecycles()
 				emitter.flushAll(ctx)
