@@ -100,7 +100,8 @@ send-now that arrived too late. Pinned by
 (`cmd/pyry/send_now_test.go`).
 
 **Since #2730, `newSendNowDeliver` also registers the write with a
-`*sendNowPlacement` before it happens** (`place.expect(convID, id, payload)`),
+`*sendNowPlacement` before it happens** (`place.write` for queue-backed
+attempts since #2820; `place.expect` for legacy callers without metadata),
 so the operator-message history entry and live `message` push for this
 delivery wait for claude's own echo of it and land where claude actually
 read it, rather than at this write. See [history-package.md §

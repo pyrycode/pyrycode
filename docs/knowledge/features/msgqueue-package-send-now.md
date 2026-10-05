@@ -15,17 +15,19 @@ func (q *Queue) SendNow(convID string, id uint64) bool
 ```
 
 `SendNowFunc` gained `id` in #2730: `Queue.SendNow` passes `m.id` straight
-through, and it is the only key the write side (`place.expect`) and the
-delivered side (`place.attach`, from `notifyDelivered`) share to agree on
-which pending entry a given write belongs to — see [history-package.md §
-Producers](history-package.md#producers-2114-2115) for what the id now
-gates.
+through. Legacy callers use it to join `place.expect` with `place.attach`
+from `notifyDelivered`. Queue-backed writes now also carry the safe
+`DeliveryMessage(ctx)` projection (#2820), so `place.write` prepares the
+commit before writing and a later callback only acknowledges it. Ordinary
+and send-now registration follows actual write order per conversation;
+matching by client `message_id` would confuse duplicate ids and equal payloads.
+See [history-package.md § Producers](history-package.md#producers-2114-2115).
 
 `Config.SendNow` is the fourth optional caller-supplied seam beside
 `OnChange`/`OnGiveUp`/`OnDelivered`/`Pending`; `nil` makes `SendNow` an
 unconditional `false` no-op, matching the package's shipped-unwired-first
 rhythm. `QueuedMessage` gained one field, `SentNow bool`, set only on the
-delivered projection of a message `SendNow` wrote — it is how a consumer that
+delivery projection of a message `SendNow` writes — it is how a consumer that
 also hangs off `OnDelivered` (the channel-carry clear, see
 [control-plane.md § Carrying a posted channel message into claude's next
 turn](control-plane.md#carrying-a-posted-channel-message-into-claudes-next-turn-2499))

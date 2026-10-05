@@ -5,9 +5,10 @@ fans envelopes out, read newest-first by walking backwards on demand. Landed
 in #2112 as a storage floor with no caller; #2114 gave it its first two —
 the interactive emitter's `emit` chokepoint and session transitions — and
 \#2115 gave it a third: the operator's own typed message, written from
-`msgqueue`'s `OnDelivered` seam rather than the delivery seam itself, since
-only that seam has the client-readable text in hand (see
-[Producers](#producers) below). `#2116` is the wire-serving consumer,
+the safe `msgqueue.QueuedMessage` projection. Stream Claude delivery commits
+at echo placement or idle fallback; Codex/no-stream delivery commits at write
+confirmation (see [Producers](#producers-2114-2115) below). `#2116` is the
+wire-serving consumer,
 `#2113` declares the cursor as an opaque wire string. Spec:
 [`specs/architecture/2112-conversation-history-log.md`](../../specs/architecture/2112-conversation-history-log.md).
 
@@ -234,22 +235,24 @@ Three call sites in `cmd/pyry` append through one seam,
 interactive emitter's `emit` chokepoint
 (`cmd/pyry/interactive_turn_v2.go`), session transitions' `broadcast`
 (`cmd/pyry/session_transition_v2.go`), and (#2115) `newOperatorMessageHistory`
-(`cmd/pyry/operator_message_history.go`), wired to `msgqueue.Config.OnDelivered`.
+(`cmd/pyry/operator_message_history.go`), used by queued stream placement and
+`msgqueue.Config.OnDelivered`.
 The first two already resolve the four values `Append` wants — conversation
 id, wire type, marshalled payload, one hoisted timestamp — for the ring
 append or the fan-out itself, so their log append needed no new mapping, only
 a nil-guarded call before the per-conn loop in each. The third resolves them
-from a `msgqueue.QueuedMessage` handed to it by a seam fired on confirmed
-delivery, not from an envelope in flight (see below).
+from a safe `msgqueue.QueuedMessage`, available before the write through
+`msgqueue.DeliveryMessage` and again at confirmation through `OnDelivered`,
+not from an envelope in flight (see below).
 
 **Why this producer reads `text`, never the delivered payload.** Since #2038
 a queued message carries two strings — `text` (client-readable) and
 `delivery` (what reaches claude's stdin, which for an attachment-bearing
 message names an on-host path `docs/protocol-mobile.md` § Error codes
 forbids serving to a paired device). `newInboundDeliver` sees only
-`delivery`, so it cannot be this producer; `msgqueue`'s `OnDelivered` seam
-carries `QueuedMessage` instead, which declares no `delivery` field, making
-the omission structural rather than a filter this producer could forget.
+`delivery` in its payload argument. `OnDelivered` and the attempt-context
+accessor `DeliveryMessage` carry `QueuedMessage` instead, which declares no
+`delivery` field, making the omission structural rather than a filter this producer could forget.
 Full detail:
 [msgqueue-package.md § Delivered notification (#2115)](msgqueue-package.md#delivered-notification-2115).
 
@@ -257,13 +260,14 @@ Full detail:
 
 **The stored entry also keeps who sent it and when they tapped Send (#2704), by the same `QueuedMessage`-only structural argument.** `DeviceName` and `ClientVersion` come straight off `msg.DeviceName`/`msg.ClientVersion` — the paired device record's name and the admitted app version off that connection's hello, both captured by `internal/relay/handlers.SendMessage` at enqueue time, not re-derived here. `ClientSentAt` is `msg.ClientSentAt.Format(time.RFC3339Nano)` when non-zero, else `""` (`omitempty` elides the key) — the daemon's own re-formatting of a value the handler already parsed out of the client's optional `client_sent_at`; this producer never sees the client's raw string, the same way it never sees an on-host attachment path. Every pre-#2704 entry, and every entry from a connection with no paired-device record, stores none of the three.
 
-**One inherited gap, specific to the third producer.** `msgqueue`'s drain
+**Confirmation-only recording is not gap-free across shutdown.** `msgqueue`'s drain
 tests `ctx.Err() != nil` before its confirmed-delivery branch, so a delivery
 that confirms in the same instant the daemon shuts down leaves the head
 queued and fires neither `q.notify` nor `OnDelivered` — the message reached
-claude's stdin but this producer never runs for it. Pre-existing `drain`
-ordering (#487/#1484), not introduced by #2115; a client reading this log
-after a restart should not assume it is gap-free across that boundary.
+claude's stdin but a producer relying only on that callback never runs for it.
+Stream placement no longer waits for the callback, but it still requires the
+drain to process an echo or fallback before shutdown. A client reading this
+log after a restart should not assume it is gap-free across that boundary.
 
 **Why the write point is the envelope, not `internal/turnevent`.** An
 earlier draft proposed writing the log from `turnevent`'s representation.
@@ -276,53 +280,47 @@ the delivered text back** under `--replay-user-messages`, as a digest-only
 `turnevent.UserEcho` — see [streamsup-package-turn-io-envelope-write-stdout-parser.md
 § Replayed user echoes](streamsup-package-turn-io-envelope-write-stdout-parser.md#replayed-user-echoes-carry-a-digest-never-the-text-2730).
 That echo carries no text at all, so it still cannot be this producer's
-source; it only times a send-now commit this producer was already going to
+source; it only times a queued commit this producer was already going to
 make — see below.) A log written purely from `turnevent` would hold
 assistant text and tool rows and none of what the operator typed.
 
-**Since #2730, a `SentNow` message's commit is held for claude's echo, not
-fired at `OnDelivered`.** Before #2730, every message this producer saw —
-ordinary or send-now — committed (built the `protocol.MessagePayload`,
-appended it to history, pushed the live `message`) the instant
-`OnDelivered` fired, which for a send-now message is the instant the stdin
-write succeeds: before claude has read it, let alone acted on it. That put
-the push and the history entry ahead of the tool result the message actually
-interrupted, for any client rendering in arrival or stamp order. The
-producer now takes a `*sendNowPlacement` (`cmd/pyry/send_now.go`) and, for a
-`SentNow` message only, hands it the built commit instead of running it:
-`place.attach(convID, msg.ID, commit)`. An ordinary message's commit is
-unaffected — `attach` on a nil placement, or on an entry nothing registered,
-runs the commit immediately, so this is a no-op for every pre-#2730 call
-site and test.
+**Echo placement must own history, live publication and replay together
+(#2730, #2820).** Committing history at an echo while handing the live push
+to `operatorMessageEmitterV2.Run` on another goroutine still lets reply
+frames overtake the user message in live arrival and replay event-id order.
+Queue-backed stream Claude writes therefore prepare their safe commit before
+writing, and `sendNowPlacement.echo` commits synchronously on the stream
+drain, through `streamTurnSink.publishOperator` and the late-bound
+`operatorMessageEmitterV2.broadcast` sharing the interactive emitter's ring.
+One placement timestamp and payload serve history, ring and every connection.
+The later `OnDelivered` callback acknowledges the managed entry; it cannot
+delay, move or repeat placement, even after the answering turn has ended.
 
-`sendNowPlacement` resolves the three-events-any-order problem the write/echo
-race creates — `newSendNowDeliver` registers the payload's digest
-(`place.expect`) *before* the stdin write, since claude's echo can arrive
-before `OnDelivered` does — and commits on whichever of the echo and the
-attach comes second. Committing on the echo puts the push and the stamp
-right after the `tool_result` the message interrupted (or as the next
-turn's opening line, when claude only read it there), which is where a
-client reading in arrival order expects it. If no echo ever arrives — the
-child exits, the turn is interrupted, or the fan-in drops the echo under
-pressure — a waiter goroutine commits once the conversation's turn goes
-idle (`turnBusyTracker.WaitIdle`), so the message is never silently
-stranded; [send-now carry's grace
-window](streamsup-package-per-conversation-turn-busy-track-send-now-carry.md)
-is what keeps that waiter from firing inside the gap a send-now write's own
-turn end may still be settling. Every path takes the entry out under one
-leaf mutex before committing, so a message commits exactly once no matter
-which of echo, attach-with-echo-already-seen, or idle-fallback wins. Full
-mechanism: [`docs/protocol-mobile.md` §
-`send_queued_now`](../../protocol-mobile.md#send_queued_now) for the wire
-contract, and `cmd/pyry/send_now.go`'s `sendNowPlacement` doc comment for the
-implementation.
+An echoed ordinary message opens its answering turn: after the preceding
+`turn_end`, if any, and before its first `turn_state`, assistant or tool frame.
+Without an echo, `sendNowPlacement.idle` commits a confirmed ordinary write
+once before the closing event releases idle; fallback commands also run on
+the drain. A late echo or callback adds nothing. Send-now retains placement
+after the interrupted tool result or at the next turn's opening, and its
+[carry grace window](streamsup-package-per-conversation-turn-busy-track-send-now-carry.md)
+keeps the idle fallback from firing between turns. Codex/no-stream and
+unregistered callers retain confirmation-at-write recording. A nil placement
+commits immediately; legacy send-now callers without queue metadata still
+use `expect`/`attach` and commit when both echo and commit are available.
 
-**`msgqueue.SendNowFunc` carries the queued id since #2730**
-(`func(ctx, convID string, id uint64, payload []byte) error`), which is what
-lets `place.expect` and this producer's `place.attach` agree on which pending
-entry a given `OnDelivered` call belongs to — the id is the only key both
-calls share, since the payload bytes alone would collide on a retried
-identical message.
+**Match final write bytes, keep only safe queued content.**
+`sendNowPlacement.write` serializes registration and the writer call per
+conversation, after attachment/channel composition. It matches a private
+digest of those final bytes, while the commit reads only `QueuedMessage`.
+Equal payloads and repeated client `message_id` values match their own echoes
+in actual write order, with distinct `queued_msg_id` values. The producing
+session resolves the conversation; another conversation's echo cannot place
+an entry here. Failed writes retire their registration, so a retry can record
+once without recording the failed attempt. The echo text, composed bytes,
+host paths and digest never become client/history payloads or log content.
+See [Queue (v2)](../../protocol-mobile.md#queue-v2) for identity and timing,
+and [the stream drain](streamsup-package-draining-turnevents-into-the-interactive-emitter.md)
+for publication and write-outcome lock ordering.
 
 **The store is nil-tolerant and a concrete pointer, never an interface** —
 the same trap `session_transition_v2.go`'s `busy` field already documents:
