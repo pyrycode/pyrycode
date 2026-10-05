@@ -109,7 +109,9 @@ func resolveClaudeAccountSource(flagValue, envValue, instanceDir string) (source
 	}
 	path := filepath.Join(instanceDir, claudeAccountFileName)
 	origin = "file " + path
-	f, err := os.Open(path)
+	// O_NONBLOCK keeps a FIFO at this path from blocking startup before the
+	// type check below refuses it.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", "", nil
 	}

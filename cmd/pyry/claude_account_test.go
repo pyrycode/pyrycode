@@ -91,6 +91,26 @@ func TestResolveClaudeAccountSource_UnreadableFile(t *testing.T) {
 	}
 }
 
+func TestResolveClaudeAccountSource_FIFORefusedWithoutBlocking(t *testing.T) {
+	dir := t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(dir, claudeAccountFileName), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := resolveClaudeAccountSource("", "", dir)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "regular file") {
+			t.Fatalf("err = %v, want regular-file refusal", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("resolving a FIFO selection file blocked")
+	}
+}
+
 func TestNewClaudeAccount_RefusesWithoutEchoingValue(t *testing.T) {
 	for _, value := range []string{plantedToken, "relative/token", "op://vault/item/" + plantedToken, "file:///" + plantedToken} {
 		dir := t.TempDir()

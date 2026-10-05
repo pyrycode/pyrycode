@@ -19,11 +19,13 @@ type accountInstance struct {
 }
 
 // writeTokenHelper writes a stand-in claude that records the account token it
-// was launched with and then holds its stdin open like a live child.
+// was launched with and then holds its stdin open like a live child. An
+// instance may launch more than one child, so each writes through its own
+// temporary name.
 func writeTokenHelper(t *testing.T, dir, seenPath string) string {
 	t.Helper()
 	path := filepath.Join(dir, "claude-helper.sh")
-	script := "#!/bin/sh\nprintf '%s' \"$CLAUDE_CODE_OAUTH_TOKEN\" > '" + seenPath + ".tmp' && mv '" + seenPath + ".tmp' '" + seenPath + "'\nexec cat >/dev/null\n"
+	script := "#!/bin/sh\nprintf '%s' \"$CLAUDE_CODE_OAUTH_TOKEN\" > '" + seenPath + ".tmp.'$$ && mv '" + seenPath + ".tmp.'$$ '" + seenPath + "'\nexec cat >/dev/null\n"
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -38,9 +40,12 @@ func startAccountInstance(t *testing.T, home string, inst *accountInstance, extr
 		t.Fatal(err)
 	}
 	inst.socket = filepath.Join(home, inst.name+".sock")
-	inst.seenPath = filepath.Join(dir, "seen-token")
-	helper := writeTokenHelper(t, dir, inst.seenPath)
-	args := append([]string{"-pyry-name", inst.name, "-pyry-socket", inst.socket, "-pyry-workdir", workdir, "-pyry-codex", "/bin/true", "-pyry-claude", helper}, extra...)
+	// The helper's own output lives outside HOME, so the leak scan over HOME
+	// sees only what the daemons wrote.
+	scratch := t.TempDir()
+	inst.seenPath = filepath.Join(scratch, "seen-token")
+	helper := writeTokenHelper(t, scratch, inst.seenPath)
+	args := append([]string{"-pyry-name", inst.name, "-pyry-socket", inst.socket, "-pyry-workdir", workdir, "-pyry-codex", stubBinary(t), "-pyry-claude", helper}, extra...)
 	inst.done = make(chan error, 1)
 	go func() { inst.done <- runSupervisor(args) }()
 	t.Cleanup(func() {
@@ -147,7 +152,6 @@ func TestClaudeAccount_TwoInstancesEachGetOwnToken(t *testing.T) {
 	secrets := map[string]bool{}
 	for _, inst := range []*accountInstance{a, b} {
 		secrets[inst.tokenPath] = true
-		secrets[inst.seenPath] = true
 		logs, err := control.Logs(ctx, inst.socket)
 		if err != nil {
 			t.Fatalf("%s: logs: %v", inst.name, err)
@@ -209,7 +213,8 @@ func TestClaudeAccount_RefusedSourceStopsStartup(t *testing.T) {
 				}
 			}
 			socket := filepath.Join(home, "refused.sock")
-			args := []string{"-pyry-name", "acct-refused", "-pyry-socket", socket, "-pyry-workdir", home, "-pyry-codex", "/bin/true", "-pyry-claude", "/bin/true"}
+			stub := stubBinary(t)
+			args := []string{"-pyry-name", "acct-refused", "-pyry-socket", socket, "-pyry-workdir", home, "-pyry-codex", stub, "-pyry-claude", stub}
 			if tc.flag != "" {
 				args = append(args, "-"+claudeAccountFlagName+"="+tc.flag)
 			}
