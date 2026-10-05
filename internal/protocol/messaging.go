@@ -202,6 +202,10 @@ type MessagePayload struct {
 	DeviceName     string   `json:"device_name,omitempty"`
 	ClientVersion  string   `json:"client_version,omitempty"`
 	ClientSentAt   string   `json:"client_sent_at,omitempty"`
+	// QueuedMsgID names the delivered queue entry within ConversationID, matching
+	// QueuedItem. Zero omits it for messages without a queue entry, including
+	// assistant messages. MessageID is client-chosen and need not be unique.
+	QueuedMsgID uint64 `json:"queued_msg_id,omitempty"`
 	// SentNow identifies a queued message delivered into a running turn. Clients
 	// use its push position; an ordinary drain's late push must not move a settled echo.
 	SentNow bool `json:"sent_now,omitempty"`

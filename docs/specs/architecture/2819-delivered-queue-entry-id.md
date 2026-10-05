@@ -46,3 +46,7 @@ Extend the real queue ordinary-delivery push test to compare its returned nonzer
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-05
+
+## Revisions
+
+- 2026-10-05: Correct the Files read symbol for `cmd/pyry/main.go`: the queue composition root is `runSupervisor`, not `runDaemon`. No design or contract change.
