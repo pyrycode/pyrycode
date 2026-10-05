@@ -546,6 +546,8 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | `request_host_system_prompt` | client → daemon | no | Reads the connected daemon's current and default host instructions through authenticated paired-client map dispatch, without a conversation/session or interactive-capability gate. See [Daemon-wide host system prompt](#daemon-wide-host-system-prompt). |
 | `set_host_system_prompt` | client → daemon | no | Sets or clears the daemon-wide host instructions through the same paired-client map dispatch; success follows durable persistence. Reset sets the returned default. See [Daemon-wide host system prompt](#daemon-wide-host-system-prompt). |
 | `host_system_prompt` | daemon → client | no | Exactly one requester-only reply to a successful read or durable write, correlated by `in_reply_to`, never broadcast; always carries current and default strings. See [Daemon-wide host system prompt](#daemon-wide-host-system-prompt). |
+| `request_claude_account` | client → daemon | no | **New in v2** (#2838). Reads the connected daemon's Claude account source through the same authenticated paired-client map dispatch as `request_host_system_prompt`, without a conversation/session or `interactive` gate. Empty payload. **Declared, not yet handled — pending #2839.** See [Claude account source](#claude-account-source). |
+| `claude_account` | daemon → client | no | **New in v2** (#2838), outbound only — `IsKnownAppType` rejects it inbound. Exactly one requester-only reply to `request_claude_account`, correlated by `in_reply_to`, never broadcast; always carries `kind`, `label`, `state` and `reason`, the last two as `""` when absent. See [Claude account source](#claude-account-source). |
 | `create_workspace_folder` | phone → binary | no | Creates a new folder on the daemon host under a client-supplied parent path (confined to `$HOME`); touches no conversation registry. Replies with `workspace_folder_created`. |
 | `workspace_folder_created` | binary → phone | no | Reply to `create_workspace_folder`, correlated by `in_reply_to`; carries the created folder's canonical (symlink-resolved) absolute path. |
 | `recent_workspaces` | phone → binary | no | Read verb (like `list_conversations`); requests the distinct set of recently-used workspace folders. Empty request payload. Replies with `recent_workspaces_list`. |
@@ -961,6 +963,102 @@ strings fit. Committed examples live under `internal/protocol/testdata/` as
 `request_host_system_prompt.json`, `set_host_system_prompt.json`,
 `set_host_system_prompt_empty.json`, `host_system_prompt.json`, and
 `host_system_prompt_empty.json`.
+
+### Claude account source
+
+**Declared over the authenticated relay (#2838); handling is pending #2839 —
+this section's wording will change once that ticket lands.**
+`request_claude_account` asks which Claude account source the connected
+daemon uses and whether it can currently read it, so a client can show a
+locked 1Password vault or a missing token to the operator instead of a
+silent, unexplained failure the next time a turn is sent. It reads the
+per-instance source `cmd/pyry/claude_account.go` already resolves (#2824,
+#2825); nothing about reading it writes anything.
+
+Both frames use the same authenticated paired-client map dispatch as
+[`request_host_system_prompt` / `set_host_system_prompt`](#daemon-wide-host-system-prompt):
+any paired client may ask, there is no conversation/session lookup and no
+`interactive` capability gate. A client refreshes by asking again — there is
+no push and no subscription.
+
+**No frame in this family carries the token, the source path, or a secret
+reference such as a 1Password `op://` item.** `ClaudeAccountPayload` has
+exactly four string keys, and a test pins that exact set independently of any
+fixture.
+
+#### `request_claude_account`
+
+Direction **client → daemon**. Reads the connected daemon's current account
+source; the payload is an empty object.
+
+| Field | Type | Meaning |
+|---|---|---|
+| None | — | Send `{}`. |
+
+```json
+{
+  "id": 300, "type": "request_claude_account", "ts": "...",
+  "payload": {}
+}
+```
+
+#### `claude_account`
+
+Direction **daemon → client**. Answers `request_claude_account` with exactly
+one unicast reply, correlated by envelope `in_reply_to`; never broadcast.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `kind` | required string | One of `machine_login` (no source configured: the daemon's inherited login), `file`, `1password` or `os_keychain`. A client **must accept an unknown value**. `os_keychain` is declared ahead of its own source (#2815) so clients can be built against it before one exists. |
+| `label` | required string | The operator-given account label, or `""` when none is set. |
+| `state` | required string | One of `ready`, `failed` or `not_configured`. |
+| `reason` | required string | A short daemon-authored failure reason, or `""` outside `state: "failed"`. |
+
+All four keys always serialize — `label` and `reason` included, as `""` when
+there is nothing to report. A client reading an absent `label` or `reason` as
+a malformed frame, rather than as "nothing to show," is the one failure mode
+this always-present rule exists to rule out.
+
+A machine-login daemon with no source configured:
+
+```json
+{
+  "id": 301, "type": "claude_account", "ts": "...", "in_reply_to": 300,
+  "payload": {
+    "kind": "machine_login", "label": "", "state": "not_configured", "reason": ""
+  }
+}
+```
+
+A labelled file source reading successfully:
+
+```json
+{
+  "id": 302, "type": "claude_account", "ts": "...", "in_reply_to": 300,
+  "payload": {
+    "kind": "file", "label": "Work account", "state": "ready", "reason": ""
+  }
+}
+```
+
+An unlabelled file source that failed to read:
+
+```json
+{
+  "id": 303, "type": "claude_account", "ts": "...", "in_reply_to": 300,
+  "payload": {
+    "kind": "file", "label": "", "state": "failed", "reason": "token file not readable"
+  }
+}
+```
+
+No error code is declared for this family: a failed read is reported in-band
+as `state: "failed"` with its `reason`, not as an `error` envelope. A
+malformed `request_claude_account` payload uses the existing
+`protocol.malformed`. Committed examples live under
+`internal/protocol/testdata/` as `request_claude_account.json`,
+`claude_account_machine_login.json`, `claude_account_file_ready.json`, and
+`claude_account_file_failed.json`.
 
 ### Renaming a workspace
 
