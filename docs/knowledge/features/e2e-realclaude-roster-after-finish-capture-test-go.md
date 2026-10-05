@@ -69,7 +69,35 @@ the first live run, not discovered after one comes back empty and gets refused a
 `TestRealClaudeStopBackgroundTaskCompletion` uses `rafcapPrompt` to explicitly
 request background execution, then waits for the FIFO task's untruncated id in
 the daemon's roster and for the FIFO rendezvous before sending the client stop
-(#2796). The FIFO remains held until terminal evidence or teardown; otherwise a
+(#2796). Roster descriptions cannot establish task identity: the
+[reproduced setup failure](https://github.com/pyrycode/pyrycode/issues/2848#issuecomment-5999232779)
+observed the exact background Bash command, an untruncated `local_bash` roster
+row and FIFO arrival, but the description omitted the literal FIFO path. The
+original predicate timed out before sending stop; the preceding passing run
+matched the description. This diagnoses task identification, with successful
+staging and no evidence of a stop product failure. Conversely, an unrelated
+task's description can contain the path without identifying the rig's command.
+
+`stopHeldTaskSetup.observe` matches the bound conversation's `ToolUsePayload`
+for `Bash`, exact `Input["command"] == "cat " + fifo` and
+`Input["run_in_background"] == "true"`, retaining its non-empty `ToolUseID`.
+`stopHeldTaskID` requires an untruncated `local_bash` task id in the latest bound
+roster. It joins that row either directly through its untruncated `ToolCallID`
+or through `BackgroundTaskStartedPayload`, whose untruncated task/tool ids link
+the row to the observed Bash call. The live roster preceded task-start metadata
+and initially lacked a tool id: retaining the latest roster allows the later
+start to complete the join. Waiting only for a newly enriched roster would
+still time out. A task start alone cannot prove roster membership; descriptions
+are diagnostic only, including when truncated.
+
+`TestStopHeldTaskID` and `TestStopHeldTaskSetup` cover summarized descriptions,
+unrelated path-bearing prose, truncated join keys, conversation isolation and
+roster/start ordering. Setup diagnostics expose counts and match booleans,
+including FIFO arrival, rather than commands, paths, descriptions or ids. Setup
+uses `perTurnReplyBudget`, rendezvous has a ten-second wait, completion has a
+45-second wait, and `tpcapHoldFIFO` retains its bounded, idempotent cleanup.
+
+The FIFO remains held until terminal evidence or teardown; otherwise a
 natural finish could make an unwired stop look successful. A control acceptance
 alone cannot pass. The completion drain accepts either `background_task_updated`
 with `status: stopped` or a subsequent roster omitting that previously held id,
@@ -83,6 +111,14 @@ guarantee about live Claude's first terminal signal. The standing test runs in
 normal `make e2e-realclaude` with credentials, without a probe flag or capture
 artifact. The [passing gate evidence](https://github.com/pyrycode/pyrycode/issues/2796#issuecomment-5986241732)
 records executed counts and skips.
+
+The identity proof's [five consecutive targeted executions](https://github.com/pyrycode/pyrycode/issues/2848#issuecomment-5999289245)
+passed with 5 executed / 5 passed / 0 failed / 0 skipped, all through roster
+omission while held. The subsequent [dispatcher full live gate](https://github.com/pyrycode/pyrycode/issues/2848#issuecomment-5999767548)
+recorded 1579 executed / 1579 passed / 0 failed / 27 skipped. Its log recorded
+this test's joined setup and FIFO arrival, then roster omission while held at
+2026-10-05T17:35:50.634Z; the test passed in 4.17 seconds. Both the targeted and
+full-suite observations preserve the same completion signal.
 
 ### Related
 
