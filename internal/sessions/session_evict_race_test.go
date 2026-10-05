@@ -165,3 +165,65 @@ func waitSpawn(t *testing.T, spawns <-chan struct{}, what string) {
 		t.Fatalf("timed out waiting for %s", what)
 	}
 }
+
+func TestPool_RunnerStoppedWaitsForProducerJoin(t *testing.T) {
+	t.Parallel()
+	rr := &raceRunner{spawns: make(chan struct{}, 4), teardown: make(chan struct{}), release: make(chan struct{})}
+	stopped := make(chan SessionID, 4)
+	pool, err := New(Config{
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RunnerFactory:   func(RunnerConfig) (Runner, error) { return rr, nil },
+		OnRunnerStopped: func(id SessionID) { stopped <- id },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- pool.Run(ctx) }()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("pool did not stop")
+		}
+	}()
+	defer func() {
+		select {
+		case <-rr.release:
+		default:
+			close(rr.release)
+		}
+	}()
+	select {
+	case <-pool.Ready():
+	case <-time.After(3 * time.Second):
+		t.Fatal("pool not ready")
+	}
+	waitSpawn(t, rr.spawns, "initial spawn")
+	evicted := make(chan error, 1)
+	go func() { evicted <- pool.Default().Evict(ctx) }()
+	select {
+	case <-rr.teardown:
+	case <-time.After(3 * time.Second):
+		t.Fatal("producer did not enter teardown")
+	}
+	select {
+	case <-stopped:
+		t.Fatal("runner stop fired before producer returned")
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(rr.release)
+	select {
+	case id := <-stopped:
+		if id != pool.BootstrapID() {
+			t.Fatal("wrong stopped producer identity")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("producer join did not publish stop")
+	}
+	if err := <-evicted; err != nil {
+		t.Fatal(err)
+	}
+}

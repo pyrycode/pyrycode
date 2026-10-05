@@ -552,9 +552,9 @@ func (t *turnBusyTracker) openForSendNow(conversationID string) (ok bool, undo f
 	}
 }
 
-// clearForSession closes any open turn on the conversation that owns sessionID,
-// UNCONDITIONALLY. Those are exactly the turns whose TurnEnd never arrives, so
-// observe alone would leave the conversation busy forever.
+// clearForSession closes any open turn on the conversation that owns sessionID
+// on the legacy unbound path. A post-bound tracker leaves this early transition
+// untouched: published completion and confirmed producer exit own its release.
 //
 // It has ONE caller since #1483: the teardown feed (#1202), driven from the pool's
 // TransitionObserver on a /clear rotation or an idle/cap eviction
@@ -602,6 +602,13 @@ func (t *turnBusyTracker) openForSendNow(conversationID string) (ok bool, undo f
 // Idempotent: an already-idle conversation is neither mutated nor re-broadcast.
 func (t *turnBusyTracker) clearForSession(sessionID string) {
 	if t == nil {
+		return
+	}
+	// With durable posts, pool transitions precede producer shutdown and cannot
+	// close publication. Real completion or the FIFO child-exit lane owns that
+	// boundary; eviction also installs a hold through holdForTeardown. An in-band
+	// /clear may keep the child alive, so it must not require a later child exit.
+	if t.posts != nil {
 		return
 	}
 

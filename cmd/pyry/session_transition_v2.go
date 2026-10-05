@@ -311,7 +311,11 @@ func startSessionTransitionStreamV2(
 			// with nothing. clearForSession is a nil-receiver no-op. Concrete pointer,
 			// never an interface — a typed-nil inside an interface is non-nil at the
 			// interface level and would route straight past that guard.
-			busy.clearForSession(sid)
+			if busy != nil && busy.posts != nil && t.Reason == sessions.ReasonEviction {
+				busy.holdForTeardown(sid)
+			} else {
+				busy.clearForSession(sid)
+			}
 		}
 	})
 

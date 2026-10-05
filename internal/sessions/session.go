@@ -800,7 +800,13 @@ func (s *Session) runActive(ctx context.Context) error {
 	defer cancelSup()
 
 	runErr := make(chan error, 1)
-	go func() { runErr <- s.sup.Run(subCtx) }()
+	go func() {
+		err := s.sup.Run(subCtx)
+		if s.pool != nil && s.pool.onRunnerStopped != nil {
+			s.pool.onRunnerStopped(s.currentID())
+		}
+		runErr <- err
+	}()
 	drainSup := func() { <-runErr }
 
 	// nil channel never selects — used as the timer placeholder when

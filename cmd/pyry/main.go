@@ -964,6 +964,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// tracker, so the pool would see no signal at all.
 	var turnBusy *turnBusyTracker
 	var sessionTurnBusy func(sessions.SessionID) bool
+	var sessionRunnerStopped func(sessions.SessionID)
 	if streamSink != nil {
 		turnBusy = newTurnBusyTracker(
 			func(sid string) (string, bool) { return conversationForSession(convReg, sid) }, logger,
@@ -973,6 +974,10 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 			convID, ok := conversationForSession(convReg, string(id))
 			return ok && turnBusy.Busy(convID)
 		}
+		// A whole runner can stop after its last child exit was already offered.
+		// Stamp a confirmed stop before the pool permits reactivation, so an early
+		// eviction hold always has a later producer boundary on the FIFO exit lane.
+		sessionRunnerStopped = func(id sessions.SessionID) { streamSink.exitFor(string(id))() }
 	}
 	pool, err := sessions.New(sessions.Config{
 		Logger:                    logger,
@@ -980,6 +985,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		ClaudeSessionsDir:         claudeSessionsDir,
 		IdleTimeout:               *idleTimeout,
 		TurnBusy:                  sessionTurnBusy,
+		OnRunnerStopped:           sessionRunnerStopped,
 		ActiveCap:                 *activeCap,
 		ConversationsRegistry:     convReg,
 		ConversationsRegistryPath: convRegistryPath,

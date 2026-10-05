@@ -563,18 +563,15 @@ func startStreamTurnDrainV2(
 	go func() {
 		defer close(done)
 		closePendingLifecycles := func() {
-			// A torn-down child's queued tail precedes its publication close.
-			// Bound post gates prevent successor writes until this close runs.
-			if busy != nil && busy.posts != nil && len(sink.ch) > 0 {
+			// Bound trackers never enqueue early pool-transition closes. Their
+			// producer exit follows the parsed tail on sink.ch and closes it below.
+			if busy != nil && busy.posts != nil {
 				return
 			}
 			for _, conversationID := range sink.takeLifecycleCloses() {
 				unlock := busy.lockPostBoundary()
 				emitter.closeForConversation(ctx, conversationID)
 				busy.publishPostBoundary(conversationID, false)
-				if busy != nil && busy.posts != nil {
-					busy.setBusy(conversationID, false, toolCallDelta{})
-				}
 				unlock()
 			}
 		}
@@ -593,11 +590,25 @@ func startStreamTurnDrainV2(
 					unlock := busy.lockPostBoundary()
 					defer unlock()
 					if env.exit {
+						var teardownEpoch any
+						if busy != nil && busy.posts != nil {
+							if id, ok := conversationFor(env.sessionID); ok {
+								teardownEpoch, _ = busy.posts.teardown.Load(id)
+								if teardownEpoch != nil && env.exitEpoch <= teardownEpoch.(uint64) {
+									return // exit offered before this eviction, even if TurnEnd cleared busy
+								}
+							}
+						}
 						// Retain exit-epoch protection; flush and close publication before
 						// releasing posts, only when the producing exit was accepted.
 						if conversationID, cleared := busy.clearForExit(env.sessionID, env.exitEpoch); cleared {
 							emitter.closeForConversation(ctx, conversationID)
 							busy.publishPostBoundary(conversationID, false)
+							if teardownEpoch != nil {
+								// A new early transition can arrive during publication;
+								// retire only the hold this exit actually accepted.
+								busy.posts.teardown.CompareAndDelete(conversationID, teardownEpoch)
+							}
 						}
 						return
 					}

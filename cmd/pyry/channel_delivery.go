@@ -53,6 +53,9 @@ type channelDelivery struct {
 	busy     *turnBusyTracker
 	active   map[string]bool
 	writes   map[string]int
+	// Pool transitions cannot wait for mu's history/publication I/O. This leaf
+	// map gates starts/posts until a later producer exit is consumed by the drain.
+	teardown sync.Map // conversation ID → exit-lane position at eviction request
 	now      func() time.Time
 }
 
@@ -217,7 +220,23 @@ func (d *channelDelivery) drain() {
 // held and pendingFor require mu. Published activity outlives an internal busy
 // clear until the drain has flushed text and closed the emitter's lifecycle.
 func (d *channelDelivery) held(id string) bool {
-	return d.active[id] || d.writes[id] > 0 || (d.busy != nil && d.busy.Busy(id))
+	_, tearingDown := d.teardown.Load(id)
+	return tearingDown || d.active[id] || d.writes[id] > 0 || (d.busy != nil && d.busy.Busy(id))
+}
+
+// holdForTeardown is the early eviction signal, not a publication close.
+// runActive invokes it before cancellation/join, so neither channel emptiness
+// nor TurnEnd can prove that the producer has stopped. The exit lane can.
+func (t *turnBusyTracker) holdForTeardown(sessionID string) {
+	id, ok := t.resolve(sessionID)
+	if !ok || id == "" {
+		return
+	}
+	var epoch uint64
+	if t.exitEpoch != nil {
+		epoch = t.exitEpoch()
+	}
+	t.posts.teardown.Store(id, epoch)
 }
 
 func (d *channelDelivery) pendingFor(id string) bool {
@@ -281,6 +300,9 @@ func (t *turnBusyTracker) beginSendNow(id string) (ok bool, undo, finished func(
 	d := t.posts
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if _, pending := d.teardown.Load(id); pending {
+		return false, func() {}, func() {}
+	}
 	ok, undo = t.openForSendNow(id)
 	if !ok {
 		return false, undo, func() {}

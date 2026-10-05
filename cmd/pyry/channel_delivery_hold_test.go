@@ -192,9 +192,9 @@ func TestChannelDelivery_ExitTeardownAndStaleExit(t *testing.T) {
 			}
 			if reason == "teardown" {
 				busy.clearForSession("sess-a")
-			} else {
-				sink.exitFor("sess-a")()
+				busy.holdForTeardown("sess-a")
 			}
+			sink.exitFor("sess-a")()
 			// Text flush and idle state precede the consumer's release.
 			var idle bool
 			for !idle {
@@ -316,10 +316,23 @@ func TestChannelDelivery_NoRelayPublicationAndTeardown(t *testing.T) {
 	for _, teardown := range []bool{false, true} {
 		testOpenPostTurn(t, busy)
 		testAccept(t, d, testConvID, "post")
-		sink.sinkFor("sess-a")(turnevent.TextChunk{MessageID: "reply", Text: "reply"})
 		if teardown {
 			trans.obs(sessions.SessionTransition{Reason: sessions.ReasonEviction, PreviousID: "sess-a", OccurredAt: time.Now()})
+			// The transition precedes cancellation and producer join in runActive.
+			// Keep the late tail behind a test gate while the consumer runs.
+			until := time.Now().Add(50 * time.Millisecond)
+			for time.Now().Before(until) {
+				d.drain()
+				if len(testDeltas(t, h, testConvID)) != 2 {
+					t.Fatal("teardown released before the producer stopped")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			// cmd.Wait joins the stdout parser before exitFor publishes this exit.
+			sink.sinkFor("sess-a")(turnevent.TextChunk{MessageID: "reply", Text: "reply"})
+			sink.exitFor("sess-a")()
 		} else {
+			sink.sinkFor("sess-a")(turnevent.TextChunk{MessageID: "reply", Text: "reply"})
 			sink.sinkFor("sess-a")(snEnd)
 		}
 		deadline := time.Now().Add(3 * time.Second)
@@ -339,5 +352,82 @@ func TestChannelDelivery_NoRelayPublicationAndTeardown(t *testing.T) {
 	}
 	if got := testDeltas(t, h, testConvID); len(got) != 4 || got[0].Text != "reply" || got[1].Text != "post" || got[2].Text != "reply" || got[3].Text != "post" {
 		t.Fatalf("no-relay ordering: %+v", got)
+	}
+}
+
+func TestChannelDelivery_TeardownCompletionGatesSuccessorUntilExit(t *testing.T) {
+	d, busy, h, sink := testBoundDelivery(t)
+	b := newChanBcast("conn")
+	e := newInteractiveTurnEmitterV2(&stubCursor{}, b, discardLogger())
+	e.hist = h
+	ctx, cancel := context.WithCancel(context.Background())
+	trans := &captureObserverSink{}
+	stopTransitions := startSessionTransitionStreamV2(ctx, trans, historyOnlyBroadcaster{}, busy.resolve, busy, nil, discardLogger())
+	cleanup := startStreamTurnDrainV2(ctx, sink, e, busy.resolve, busy, discardLogger())
+	defer func() { cancel(); cleanup(); stopTransitions() }()
+	testOpenPostTurn(t, busy)
+	sink.sinkFor("sess-a")(turnevent.ThinkingProgress{EstimatedTokens: 1})
+	collectEnvs(t, b.pushed, 2)
+	// The child's exit was offered before the pool signalled eviction. A whole
+	// Runner.Run stop still follows producer join and supplies a later stamp.
+	sink.exits.Add(1)
+	trans.obs(sessions.SessionTransition{Reason: sessions.ReasonEviction, PreviousID: "sess-a"})
+	sink.sinkFor("sess-a")(snEnd)
+	for collectEnvs(t, b.pushed, 1)[0].Type != protocol.TypeTurnEnd {
+	}
+	done := make(chan error, 1)
+	wrote := make(chan struct{}, 1)
+	w := funcWriter{write: func(context.Context, string, []byte) error { wrote <- struct{}{}; return nil }}
+	deliver := newInboundDeliver(func(string) (handlers.TurnWriter, error) { return w, nil }, busy, time.Second)
+	go func() { done <- deliver(ctx, testConvID, nil) }()
+	select {
+	case <-wrote:
+		t.Fatal("successor reserved before preceding teardown was joined")
+	case <-time.After(50 * time.Millisecond):
+	}
+	post := testAccept(t, d, testConvID, "post after preceding completion")
+	d.drain()
+	if len(testDeltas(t, h, testConvID)) != 0 {
+		t.Fatal("post escaped the pending teardown")
+	}
+	// A stale exit queued before teardown cannot end the hold even after TurnEnd.
+	sink.ch <- streamTurnEnvelope{sessionID: "sess-a", exit: true, exitEpoch: 1}
+	sink.sinkFor("sess-a")(turnevent.ThinkingProgress{EstimatedTokens: 2})
+	for collectEnvs(t, b.pushed, 1)[0].Type != protocol.TypeThinkingProgress {
+	}
+	d.drain()
+	if len(testDeltas(t, h, testConvID)) != 0 {
+		t.Fatal("stale exit released teardown")
+	}
+	sink.exitFor("sess-a")() // production OnRunnerStopped confirmed producer join
+	for {
+		env := collectEnvs(t, b.pushed, 1)[0]
+		if env.Type == protocol.TypeTurnState {
+			var p protocol.TurnStatePayload
+			_ = json.Unmarshal(env.Payload, &p)
+			if p.State == "idle" {
+				break
+			}
+		}
+	}
+	d.drain()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("joined teardown did not release successor")
+	}
+	if got := testDeltas(t, h, testConvID); len(got) != 1 || got[0].TurnID != post {
+		t.Fatal("successor overtook accepted post")
+	}
+	testAccept(t, d, testConvID, "held behind successor")
+	sink.sinkFor("sess-a")(turnevent.ThinkingProgress{EstimatedTokens: 3})
+	for collectEnvs(t, b.pushed, 1)[0].Type != protocol.TypeThinkingProgress {
+	}
+	d.drain()
+	if !busy.Busy(testConvID) || len(testDeltas(t, h, testConvID)) != 1 {
+		t.Fatal("preceding teardown cleared successor")
 	}
 }
