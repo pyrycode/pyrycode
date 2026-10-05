@@ -120,6 +120,24 @@ Spawn argv is `--input-format stream-json --output-format stream-json --verbose`
 
 The agent pipeline is likewise headless since 2026-07-25, and `pyry agent-run` has one path too — `runAgentRunStreamRunner`. The distinction worth keeping here is *carried* versus *read*: the comment at that call site in `cmd/pyry/agent_run.go` records that all five dispatcher forks still carry `PYRY_USE_STREAMJSON=1` in their `.env`, and that `agent-run` deliberately no longer reads it — a no-op rather than an error, so no fork needs editing to keep working. That comment is the in-repo source for the fork claim; this repo holds no dispatcher checkout, so the claim is not independently verified from here. "No longer read" is scoped to the production path, not to the repo: the live-claude suite still reads the variable at two sites in `internal/e2e/realclaude/background_reach_probe_test.go` — `reachRunnerPathFromEnv`, and the skip gate in `TestRealClaude_BackgroundReachability`.
 
+### Posted channel messages
+
+Host `channel.post` callbacks durably accept whole messages through private
+`channelDelivery` in `cmd/pyry`. One daemon-owned consumer shares the composition
+root's history store, reconciles and records chunks, then fans `assistant_delta`
+out to interactive clients. It runs independently of the relay configuration;
+recovered pending history delivery precedes a new user turn in that conversation.
+Claude carry is recorded separately on acceptance and is never consumed by client
+delivery or re-added by recovery.
+
+The control socket owns this writer boundary: `runSupervisor` binds it before
+pending-state load and retains it until post callbacks are sealed/joined and the
+consumer stops. Releasing it on daemon cancellation before joining writers would
+let an old snapshot overwrite a replacement daemon's accepted work. Control
+serving therefore has a separate cancellation lifetime. See
+[durable channel-post delivery](../features/control-plane-channel-post-live-delivery.md)
+and [control lifecycle](../features/control-plane.md#lifecycle).
+
 ### Restart Cycle
 
 The interactive supervise loop lives in `internal/streamsup` — `Runner.Run`.

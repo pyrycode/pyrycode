@@ -306,7 +306,7 @@ See `docs/specs/architecture/2155-channel-new-control-verb.md` for the full desi
 
 ## Channel: post a message into an existing channel (channel.post, #2497)
 
-`channel.post` records one message in a named channel's durable log without spawning claude or starting a turn: `channelPoster` (`cmd/pyry/channel.go`) resolves the label, `handleChannelPost` (`internal/control/server.go`) is the wire boundary, and `Server.SetChannelPoster` is the same late-bound-closure shape as `SetChannelCreator`. First consumer is a daily cron on pyrybox posting one open question from the vault into a `questions` channel, replacing a kept Discord bot token nothing read.
+`channel.post` durably accepts a whole message in a named channel without spawning Claude or starting a turn. `channelPoster` resolves the label and mints a turn ID; private `channelDelivery` persists the post, then its sole consumer records chunks and announces them. `handleChannelPost` is the wire boundary, and `Server.SetChannelPoster` installs the guarded callback. Success means acceptance, including when history delivery must retry.
 
 **No `Cwd` crosses this wire — the single largest security difference from `channel.new`.** The miss path always creates under the daemon's own `resolveDefaultCwd` value, reusing `channelCreator` unchanged rather than a second create path (both `runSupervisor` setters now close over one hoisted `createChannel` local). A verb with no caller-supplied path has none of `channel.new`'s `$HOME`-confinement surface to get wrong.
 
@@ -318,7 +318,7 @@ See `docs/specs/architecture/2155-channel-new-control-verb.md` for the full desi
 
 **Flag "given" is decided by `fs.Visit`, not by an empty value.** `--text ""` is a caller who chose an empty message, not an absent flag; reading it as "not given" would report a usage error (exit 2) for a content problem that `channel.post: empty message` (exit 1) already owns.
 
-**Why the poster does not route through `appendConversationHistory`.** That seam returns nothing by contract because its two stream producers have already sent their wire frame by the time it runs — a failed append must never suppress an emit that already went out. The poster's own ordering runs the other way: every chunk is appended to the durable log *before* any is announced ([#2498](control-plane-channel-post-live-delivery.md)), so the append is still the thing that must fail the post, and now for a second reason — a frame drawn for a message the log does not hold would vanish on the next connect, which is worse than never drawing it. The poster calls `history.Store.Append` (narrowed to a func, `conversationHistory.Append`) directly and maps its error through the existing `historyAppendFailure` discriminant instead; `TestChannelPoster_AppendFailureAnnouncesNothing` pins the append-then-announce order from both sides.
+**Delivery needs the result of each history write.** `appendConversationHistory` returns nothing because its stream producers have already sent their frames. `channelDelivery.deliver` instead calls the existing `conversationHistory.Append` and `Page` directly: it reconciles recorded chunks, retries missing ones, and finishes all history writes before any announcement. Whole-post acceptance failure refuses the call; later history failures remain pending. See [durable channel-post delivery](control-plane-channel-post-live-delivery.md#live-only-announcements-and-durable-recovery) for FIFO ordering and restart recovery.
 
 **The recorded entry is `protocol.AssistantDeltaPayload` under `protocol.TypeAssistantDelta`, not the `message`/role-assistant shape this verb originally wrote.** #2497 shipped the latter on the forecast that a client would read it back on its next connect; #2498 found that forecast false — desktop's `translateTimelineEvent` returns `null` for a `message` entry with `role: "assistant"` on both the live path and the served-history path, so the record was valid but never drawn. Repointing the record at `assistant_delta`, the type the current clients actually render as assistant text, is what makes "one record" and "one rendering" the same decision instead of two independently-maintained ones. See [Fanning `channel.post` out](control-plane-channel-post-live-delivery.md) for the live half this repointing was for.
 
@@ -376,14 +376,33 @@ First producer: `streamsup`'s stderr tail on the `claude exited` record, when th
 
 ## Lifecycle
 
-Two top-level goroutines, unchanged from Phase 0:
+`runSupervisor` binds `ctrl.Listen` after constructing the pool, before loading
+pending channel posts or starting queue/relay consumers. `Listen` claims instance
+ownership; `Serve` starts after the hooks are installed. Loading pending state
+before the bind would let a rejected second daemon drain the owner's snapshot
+and overwrite accepted work. The sole `channelDelivery` consumer shares the
+composition root's history store and runs even without a relay URL.
 
-1. **Main goroutine** — calls `pool.Run(ctx)`, blocks until ctx cancellation.
-2. **Control goroutine** — `go ctrl.Serve(ctx)`, accepts client connections, dispatches verbs.
+Control serving uses `controlCtx`, detached from daemon cancellation. `Serve`
+closes its listener on cancellation, so sharing the daemon context would release
+ownership while old delivery cleanup or acceptance could still persist a stale
+snapshot over a replacement daemon's new post.
 
-Shutdown: `SIGINT`/`SIGTERM` → `signal.NotifyContext` cancels the context → `pool.Run` returns `context.Canceled` → `ctrl.Close()` removes the socket file → in-flight handlers drain via `handleWG.Wait()` in `Serve`'s accept-error path.
+Shutdown cancels the daemon context, seals and joins complete post callbacks
+with `channelDelivery.stopAccepting`, and joins the delivery consumer. Only then
+does it cancel control serving, close the listener and join response handlers.
+Early-return defers preserve the same writer-before-socket-release ordering.
+`guardPoster` covers lookup/creation as well as acceptance; sealed callbacks and
+direct acceptance refuse without storage or carry work. Lock order is handler
+gate then delivery mutex; the consumer takes only the delivery mutex.
 
-That single wait is sufficient because every verb is one-shot (see § above): a handler reads its request, writes its response, and returns, so there is no per-conn goroutine that can outlive the handler and no indefinite handoff to wait out. That was not always true — #863 built a three-layer abort (a `control.Server`-side streaming-conn set, a `supervisor.Bridge.Shutdown()`, and a `sessions.Session.Run`-deferred call into it) to unblock `VerbAttach`'s indefinite per-conn handoff, whose input pump could otherwise park forever on an idle client and hang `Serve` until the service manager escalated to SIGKILL. `VerbAttach`'s handler was deleted in #1348, `supervisor.Bridge` no longer exists in the tree, and #1536 deleted the now-writer-less `control.Server` side of that abort (`streamingWG`, `streamConns`) as dead bookkeeping — `Wait` on a zero `WaitGroup` had been returning immediately and the set had been empty since #1348. See [`docs/knowledge/codebase/863.md`](codebase/863.md) for that design as history; it no longer describes the live shutdown path.
+Every control verb is one request and response, so `Serve`'s handler wait remains
+the final control join. The old streaming-attach abort is historical: its handler
+was deleted in #1348 and its unused server bookkeeping in #1536.
+`TestChannelDelivery_RejectedDaemonLeavesPendingUntouched` checks ownership
+before loading accepted or malformed state. `TestChannelDelivery_ShutdownRetainsOwnershipUntilWritersStop`
+pauses both append and acceptance persistence, proving replacement startup stays
+refused until writers finish and replacement acceptance survives reload.
 
 ## Testing
 
@@ -401,6 +420,11 @@ label-based lookup alone would stay green if the credential were written into
 the wrong registry under another name. Lock, malformed-load, and save failures
 also prove the fixed client error and inspect both daemon logs and diagnostic
 bundle logs for credential-like sentinels.
+
+Composition-root AST guards inspect `runSupervisor` itself. Moving its wiring
+into a helper hides that wiring from their assertions; the private optional
+delivery constructor lets shutdown tests pause I/O while preserving the guarded
+production symbol and its call sites.
 
 The pairing timeout tests cover both sides of the liveness contract: a silent peer must terminate at `DialTimeout` even when the caller allows longer, and an already-entered provider held past an earlier caller deadline must not keep the client blocked. The held provider is explicitly released so the synchronous server handler can drain; a green client-deadline assertion alone would not prove server shutdown remains finite.
 
@@ -438,4 +462,4 @@ search can reach it.
 - [Attachment.file: file a claude-named host file under the calling session's conversation (#2164)](control-plane-attachment-file-confine-and-store-a-claude-named-path.md) — `VerbAttachFile` confines a model-chosen filesystem path to the calling session's conversation workspace before reading it; ships live but inert (#2165 wires a caller).
 - [Sessions: CLI Router (1.1a-B2)](control-plane-sessions-cli-router-1-1a-b2.md) — `pyry sessions <verb>` is the operator-facing surface for the `sessions.*` namespace. 
 - [Client dial: transient-startup retry (#198 + #199)](control-plane-client-dial-transient-startup-retry.md) — `internal/control/dial.go` houses the dial-side surface for the control client: the `dial()` primitive every client verb routes through,…
-- [Fanning `channel.post` out: `assistant_delta` live delivery (#2498)](control-plane-channel-post-live-delivery.md) — A successful `channel.post` fans the same content it appends to a channel's durable log to every interactive-capable client as one `assistant_delta` per chunk.
+- [Durable `channel.post` delivery (#2498, #2810)](control-plane-channel-post-live-delivery.md) — Whole-post acceptance, immediate idle delivery, per-conversation FIFO, automatic retry and restart reconciliation; all history chunks precede live announcement, independently of Claude carry.

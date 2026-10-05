@@ -293,3 +293,43 @@ One addition the plan did not name: `TestChannelPoster_AppendFailureAnnouncesNot
 the inverse of the append-then-announce order. A frame drawn for a message the log
 does not hold would vanish on the next connect, which is worse than never having
 been drawn, so the order is pinned from both sides rather than one.
+
+**2026-10-05 — #2810 supersedes the acceptance and recovery contract.**
+`channelPoster` resolves the conversation and mints a fresh turn ID, then private
+`channelDelivery.accept` atomically persists the entire text, conversation/turn
+identity and timestamp before recording carry once or waking delivery. Acceptance
+failure returns a static, content-free refusal, leaves prior accepted posts
+intact, and appends, announces and carries none of the refused post. A later
+history failure leaves the accepted post pending for automatic retry and cannot
+turn success into refusal.
+
+The sole daemon-owned consumer owns chunking and uses the composition root's
+existing history store. It starts idle delivery promptly without a client, relay
+configuration or user turn, preserves whole-post FIFO by acceptance within each
+conversation, and records every chunk before announcing any. A failed head holds
+that conversation's later posts while others progress. Per-chunk history writes
+can expose a prefix during retry; reconciliation scans every newest-first page
+and appends only missing matching conversation/turn/sequence/text deltas.
+Process restart preserves identity and chunk order, including prefixes hidden
+by unrelated newer entries. Fully recorded posts awaiting cleanup are neither
+appended nor announced again. Missed live frames remain readable from history;
+there is no connect-time replay or exactly-once network receipt guarantee, and
+durability matches history's process-restart contract.
+
+Startup claims the control socket before loading pending state and establishes
+the inbound wrapper before delivery can start. Recovered posts finish history
+delivery before the same conversation's new user turn, ahead of carry
+composition; unaffected conversations can progress. Socket ownership remains
+held until complete post callbacks are sealed/joined and the delivery consumer
+stops, including early returns. Control serving has a separately cancelled
+context so its listener cannot release ownership while a writer can overwrite a
+replacement daemon's snapshot.
+
+Pending client delivery and registry-backed `channelCarry` are independent;
+retry/recovery never re-add carry, and neither cleanup consumes the other's
+state. Carry retains its best-effort persistence and bounds. Only
+`assistant_delta` is served, and a lone delta renders live or from a history
+page. Completion/replay/wake remain #2809; active-turn holding, release ordering
+and its deadline remain #2811, with no turn-boundary change here. See
+[the #2810 plan](2810-durable-channel-post.md) for the implemented design,
+interruption tests and ownership security revisions.
