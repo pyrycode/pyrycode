@@ -79,6 +79,11 @@ Pending for the documentation stage:
 - `docs/guide.md`, "Claude account source": document the optional `label` key, its 64-byte limit (UTF-8, no control characters), that it applies only when the file supplies the source, and that paired clients can read the kind, label and read state but never the token or path.
 - `docs/knowledge/features/claude-account-source.md`, "Concurrency": replace the last-finisher caveat with the ordering now guaranteed: each read takes a sequence number when it starts, and an outcome is recorded only if no later-started read has already recorded one.
 
+## Revisions
+
+- 2026-10-05, build: `encoding/json` replaces invalid UTF-8 inside a string with U+FFFD instead of failing, so `validAccountLabel` never saw the bad bytes and an invalid-UTF-8 label was accepted. `readClaudeAccountField` now refuses a value whose raw JSON bytes are not valid UTF-8, with its existing `%q must be a string` origin-only wording. This applies to every key it reads (`source`, `op_cli`, `label`); a `source` or `op_cli` with invalid bytes was previously turned into a mangled path that could only fail later, and now stops startup like any other unusable claude-account.json value.
+- 2026-10-05, build: `TypeRequestClaudeAccount` moved into the guard's `inboundTypes` table (beside `TypeRequestHostSystemPrompt`), not just relabelled in place; the guard fails a wired inbound type classified anywhere else. Added `TestClaudeAccountFrame_NotConfigured` for the no-source reply through the handler.
+
 ## Security review
 
 **Verdict:** PASS
