@@ -58,12 +58,15 @@ type replySuggestionConv struct {
 	delivered   bool // non-empty user text delivered and not yet credited to a turn
 	assistant   bool // main-agent text in the current turn
 	invalidated bool // set by every invalidation, reset only by the next queued delivery
+	turnHit     bool // an invalidation since the drain saw the current turn start
 
 	// The just-ended turn. turnOK: it ended successfully with main-agent text and
 	// nothing has invalidated it since. userOK: its delivered user text has been
 	// confirmed. The confirmation is not ordered against the stream (msgqueue
 	// fires it on its own goroutine, often after the turn's result), so a
-	// suggestion that arrives first waits in pending until it lands.
+	// suggestion that arrives first waits in pending until it lands. The same
+	// confirmation is what resets the sticky invalidated flag the turn's own
+	// accept set, so that flag is read at publication, never folded into turnOK.
 	ended          bool
 	turnOK, userOK bool
 	pending        *string
@@ -120,15 +123,15 @@ func (s *replySuggestions) noteDelivered(convID string, msg msgqueue.QueuedMessa
 		if c.ended && c.turnOK && !c.userOK {
 			// The confirmation for the turn that just ended.
 			c.userOK = true
-			if c.pending != nil {
-				s.setLocked(convID, c, *c.pending, c.pendingSID)
-			}
 		} else {
 			c.delivered = true
 		}
 	}
 	if !msg.SentNow {
 		c.invalidated = false
+	}
+	if c.pending != nil && c.userOK && !c.invalidated {
+		s.setLocked(convID, c, *c.pending, c.pendingSID)
 	}
 }
 
@@ -145,6 +148,7 @@ func (s *replySuggestions) turnStarted(convID string) {
 		return
 	}
 	c.assistant, c.ended, c.turnOK, c.userOK, c.pending = false, false, false, false, nil
+	c.turnHit = false
 	s.clearLocked(convID, c)
 }
 
@@ -170,7 +174,7 @@ func (s *replySuggestions) turnEnded(convID string, ev turnevent.TurnEnd) {
 	s.mu.Lock()
 	if c := s.entry(convID, false); c != nil {
 		c.ended = true
-		c.turnOK = success && c.assistant && !c.invalidated
+		c.turnOK = success && c.assistant && !c.turnHit
 		c.userOK = c.delivered
 		c.delivered = false
 	}
@@ -194,7 +198,10 @@ func (s *replySuggestions) suggest(convID, text string) {
 	if c == nil || !c.ended || !c.turnOK || c.pending != nil {
 		return
 	}
-	if !c.userOK {
+	if !c.userOK || c.invalidated {
+		// Wait for the delivery confirmation: it credits the user text and
+		// re-arms the turn's own accept. An accept with no delivery to follow
+		// before the next turn start leaves this unpublished.
 		c.pending, c.pendingSID = &text, sessionID
 		return
 	}
@@ -224,7 +231,7 @@ func (s *replySuggestions) invalidate(convID string) {
 	if c == nil {
 		return
 	}
-	c.invalidated, c.turnOK, c.pending = true, false, nil
+	c.invalidated, c.turnHit, c.turnOK, c.pending = true, true, false, nil
 	s.clearLocked(convID, c)
 }
 

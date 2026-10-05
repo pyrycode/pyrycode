@@ -8,9 +8,9 @@ package realclaude
 // interactive client as reply_suggestion. A later accepted send_message must clear
 // it with an explicit suggested_reply null at a higher revision.
 //
-// claude skips suggestions for short conversations and cold caches, so the run
-// drives up to suggestTurnBudget conversational turns, each ending on a question
-// to the user, and fails (never skips) when no suggestion arrives across all of
+// claude skips suggestions for short conversations, cold caches and turns whose
+// next step is not obvious, so the run drives up to suggestTurnBudget small coding
+// steps, each with an obvious follow-up, and fails (never skips) when no suggestion arrives across all of
 // them. The suggestion is claude-authored and untrusted: only its length is logged.
 
 import (
@@ -205,14 +205,16 @@ func TestInteractiveStream_NativeReplySuggestionSetThenClear(t *testing.T) {
 	nonce := time.Now().UnixNano()
 	frames := startSuggestReader(t, h)
 
+	// Coding steps with an obvious next one: claude's suggestion prompt stays
+	// silent when the next step is not obvious, so open questions to the user
+	// (the first version of this test) drew no suggestion in six turns.
 	prompts := []string{
-		fmt.Sprintf("I want to plan a small vegetable garden on a sunny 3x2 metre balcony this spring. "+
-			"Give me a short first suggestion and end your answer with one question to me. run=%d", nonce),
-		"Mostly tomatoes and herbs, and I can water once a day. What should I plant first? End with one question to me.",
-		"I have about 50 euros for containers and soil. How should I split that budget? End with one question to me.",
-		"Good idea. Which herbs grow well next to tomatoes in pots? End with one question to me.",
-		"I can start this weekend. What should my first weekend's checklist be? End with one question to me.",
-		"Thanks. How do I tell if I am overwatering? End with one question to me.",
+		fmt.Sprintf("Write a Go function that reverses a string. Reply in chat only, do not create files. Just the code, briefly. run=%d", nonce),
+		"Now add a unit test for it. Just the code.",
+		"Now make it handle unicode correctly. Just the code.",
+		"Now add a benchmark for it. Just the code.",
+		"Now add a doc comment to the function. Just the code.",
+		"Now add an example test for it. Just the code.",
 	}
 
 	w := &suggestWatch{}

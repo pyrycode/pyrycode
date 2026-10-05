@@ -121,6 +121,16 @@ func TestReplySuggestions_SetConditions(t *testing.T) {
 			e.HandleFor(ctx, testConvID, successEnd)
 			s.noteDelivered(testConvID, msgqueue.QueuedMessage{Text: "go"})
 		}, true},
+		{"own accept, delivery confirmed after the turn end", func(e *interactiveTurnEmitterV2, s *replySuggestions) {
+			// The live order on a conversation's second turn: the accept that
+			// queued this turn's message invalidates, and its delivery
+			// confirmation lands only after the result.
+			suggestedTurn(e, s, testConvID)
+			s.invalidate(testConvID)
+			e.HandleFor(ctx, testConvID, turnevent.TextChunk{MessageID: "m2", Text: "Done again."})
+			e.HandleFor(ctx, testConvID, successEnd)
+			s.noteDelivered(testConvID, msgqueue.QueuedMessage{Text: "and then?"})
+		}, true},
 		{"next queued delivery re-arms", func(e *interactiveTurnEmitterV2, s *replySuggestions) {
 			e.HandleFor(ctx, testConvID, turnevent.ThoughtChunk{Text: "earlier turn"})
 			e.HandleFor(ctx, testConvID, successEnd)
