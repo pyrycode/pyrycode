@@ -305,7 +305,9 @@ chmod 600 ~/.config/pyry/elli-claude-token
 
 **Why a derived file, not systemd's encrypted credentials, on pyrybox.** systemd's `LoadCredentialEncrypted=` depends on a TPM-backed key; pyrybox runs systemd 255, which has no TPM available, and encrypted credentials for *user* services only arrived in systemd 256. Until that's available here, an owner-only derived file on disk is the practical store, protected by ordinary file permissions rather than by the service manager. Migrating pyrybox's existing `~/pyry-workspace/.secrets/claude-env` (an `EnvironmentFile`, today inherited rather than sourced through this feature) to a derived per-instance token file is tracked as follow-up operator work, not part of this feature.
 
-**Related, not yet built.** Surfacing an instance's account source and read status to a connected client is [#2816](https://github.com/pyrycode/pyrycode/issues/2816). Reading the token from an OS secret store (Keychain, Secret Service) instead of a flat file or 1Password is [#2815](https://github.com/pyrycode/pyrycode/issues/2815).
+**Client visibility.** A paired client can ask the daemon which account source it uses and whether its latest read is working — see [`guide.md` § Claude account source](guide.md#claude-account-source) and [`protocol-mobile.md` § Claude account source](protocol-mobile.md#claude-account-source) ([#2816](https://github.com/pyrycode/pyrycode/issues/2816), [#2838](https://github.com/pyrycode/pyrycode/issues/2838), [#2839](https://github.com/pyrycode/pyrycode/issues/2839)).
+
+**Related, not yet built.** Reading the token from an OS secret store (Keychain, Secret Service) instead of a flat file or 1Password is [#2815](https://github.com/pyrycode/pyrycode/issues/2815).
 
 ## See also
 

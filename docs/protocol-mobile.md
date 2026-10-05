@@ -546,8 +546,8 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | `request_host_system_prompt` | client → daemon | no | Reads the connected daemon's current and default host instructions through authenticated paired-client map dispatch, without a conversation/session or interactive-capability gate. See [Daemon-wide host system prompt](#daemon-wide-host-system-prompt). |
 | `set_host_system_prompt` | client → daemon | no | Sets or clears the daemon-wide host instructions through the same paired-client map dispatch; success follows durable persistence. Reset sets the returned default. See [Daemon-wide host system prompt](#daemon-wide-host-system-prompt). |
 | `host_system_prompt` | daemon → client | no | Exactly one requester-only reply to a successful read or durable write, correlated by `in_reply_to`, never broadcast; always carries current and default strings. See [Daemon-wide host system prompt](#daemon-wide-host-system-prompt). |
-| `request_claude_account` | client → daemon | no | **New in v2** (#2838). Reads the connected daemon's Claude account source through the same authenticated paired-client map dispatch as `request_host_system_prompt`, without a conversation/session or `interactive` gate. Empty payload. **Declared, not yet handled — pending #2839.** See [Claude account source](#claude-account-source). |
-| `claude_account` | daemon → client | no | **New in v2** (#2838), outbound only — `IsKnownAppType` rejects it inbound. Exactly one requester-only reply to `request_claude_account`, correlated by `in_reply_to`, never broadcast; always carries `kind`, `label`, `state` and `reason`, the last two as `""` when absent. See [Claude account source](#claude-account-source). |
+| `request_claude_account` | client → daemon | no | **New in v2** (#2838, handled #2839). Reads the connected daemon's Claude account source through the same authenticated paired-client map dispatch as `request_host_system_prompt`, without a conversation/session or `interactive` gate. Empty payload. See [Claude account source](#claude-account-source). |
+| `claude_account` | daemon → client | no | **New in v2** (#2838, handled #2839), outbound only — `IsKnownAppType` rejects it inbound. Exactly one requester-only reply to `request_claude_account`, correlated by `in_reply_to`, never broadcast; always carries `kind`, `label`, `state` and `reason`, the last two as `""` when absent. See [Claude account source](#claude-account-source). |
 | `create_workspace_folder` | phone → binary | no | Creates a new folder on the daemon host under a client-supplied parent path (confined to `$HOME`); touches no conversation registry. Replies with `workspace_folder_created`. |
 | `workspace_folder_created` | binary → phone | no | Reply to `create_workspace_folder`, correlated by `in_reply_to`; carries the created folder's canonical (symlink-resolved) absolute path. |
 | `recent_workspaces` | phone → binary | no | Read verb (like `list_conversations`); requests the distinct set of recently-used workspace folders. Empty request payload. Replies with `recent_workspaces_list`. |
@@ -966,14 +966,15 @@ strings fit. Committed examples live under `internal/protocol/testdata/` as
 
 ### Claude account source
 
-**Declared over the authenticated relay (#2838); handling is pending #2839 —
-this section's wording will change once that ticket lands.**
-`request_claude_account` asks which Claude account source the connected
-daemon uses and whether it can currently read it, so a client can show a
-locked 1Password vault or a missing token to the operator instead of a
-silent, unexplained failure the next time a turn is sent. It reads the
-per-instance source `cmd/pyry/claude_account.go` already resolves (#2824,
-#2825); nothing about reading it writes anything.
+Declared over the authenticated relay (#2838) and answered by
+`handlers.RequestClaudeAccount` (#2839). `request_claude_account` asks which
+Claude account source the connected daemon uses and whether it can currently
+read it, so a client can show a locked 1Password vault or a missing token to
+the operator instead of a silent, unexplained failure the next time a turn is
+sent. It reads the per-instance source `cmd/pyry/claude_account.go` already
+resolves (#2824, #2825); nothing about reading it writes anything, and asking
+never starts a read — the reply is always the outcome of a read the daemon
+already made on its own, at startup or on its last claude launch attempt.
 
 Both frames use the same authenticated paired-client map dispatch as
 [`request_host_system_prompt` / `set_host_system_prompt`](#daemon-wide-host-system-prompt):
