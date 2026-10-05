@@ -126,6 +126,12 @@ package realclaude
 // respawn, which is why those two behaviours are reused rather than simplified
 // away.
 //
+// CORRECTED 2026-10-05 (#2843): the resend-after path is gone. It wrote a turn
+// that was slow rather than lost a second time, which made the next turn's wait
+// return on the duplicate's result. Re-run today, M2 stays RED but dies in
+// inbandSendTurn waiting for turn 2's result instead of reaching A1-A4. The
+// ErrNoLiveChild retry remains.
+//
 // # Running it
 //
 //	go test -tags e2e_realclaude -race -v -count=1 \
@@ -644,8 +650,8 @@ func TestInteractiveStream_InBandBypassRevoke_LiveChildReportsDefaultMode(t *tes
 			"answered the set_permission_mode request, so nothing shows the revocation "+
 			"reached the live child", baseline, len(responses))
 	}
-	// FIRST and LAST, never a fixed index: a resent turn adds an init line and
-	// changes no verdict, so do not assert len(modes) == 2. Instrument check C
+	// FIRST and LAST, never a fixed index: the verdict must not depend on how many
+	// init lines a turn emits, so do not assert len(modes) == 2. Instrument check C
 	// already fixed the first at "bypassPermissions" and snapshotInitModes only ever
 	// appends, so this index needs no second guard.
 	last := modes[len(modes)-1]
@@ -1195,7 +1201,7 @@ func TestInteractiveStream_InBandBypassEscalate_LiveChildReportsBypassMode(t *te
 			"reached the live child", baseline, len(responses))
 	}
 	// A2 is the one the hermetic suite cannot make. FIRST and LAST, never a fixed
-	// index: a resent turn adds an init line and changes no verdict. Instrument check
+	// index: the verdict must not depend on how many init lines a turn emits. Instrument check
 	// C already fixed the first at "default" and snapshotInitModes only appends.
 	last := modes[len(modes)-1]
 	if last != "bypassPermissions" {
