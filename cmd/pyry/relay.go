@@ -430,7 +430,8 @@ type relayWiring struct {
 	// to it: the interactive chokepoint's emitter, built inside the streamSink
 	// branch, and the session-transition stream, started unconditionally. nil is
 	// a daemon with no durable log; every write site guards for it.
-	hist *history.Store
+	hist         *history.Store
+	postDelivery *channelDelivery
 	// approvalParked is the late-bound seam carrying #1919's ApprovalParked report
 	// back to the msgqueue delivery seam (#1911), which main.go builds FIRST:
 	// msgqueue.New runs well before this function constructs the bridge that answers
@@ -1498,7 +1499,8 @@ func startRelayV2(
 	// before mgr.Run's goroutine starts below — so nothing that goroutine reads is
 	// written concurrently. Its route out is theirs: a bare func returned to the
 	// composition root, which hands it to channelPoster.
-	announcePost = newChannelPostEmitterV2(mgr, ctx, logger).announce
+	postEmitter := newChannelPostEmitterV2(mgr, ctx, logger)
+	announcePost = postEmitter.announce
 
 	// Workspace-rename announcer (#2209): the second producer of workspace_updated,
 	// a frame #2207 shipped as a reply to its requester and nothing more. Once
@@ -1743,6 +1745,17 @@ func startRelayV2(
 	// (ActiveConns → Interactive) is the delivery gate: with no interactive phone
 	// connected, the fan-out reaches nobody.
 	streamQueueStateCleanup := startQueueStateStreamV2(ctx, w.qse, mgr)
+
+	// Install both post hooks before runSupervisor starts its consumer. The
+	// same ring is registered with SetReplaySource above; durable history was
+	// already successfully recorded by channelDelivery before either hook runs.
+	if replayRing != nil {
+		postEmitter.ring = replayRing
+	}
+	postEmitter.waker = waker
+	if w.postDelivery != nil {
+		w.postDelivery.complete = postEmitter.complete
+	}
 
 	// Wire the operator-message push (#2699): each confirmed delivery's `message`
 	// envelope, the bytes the durable log stores, goes to every interactive conn

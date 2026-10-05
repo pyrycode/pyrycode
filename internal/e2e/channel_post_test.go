@@ -139,9 +139,10 @@ func TestChannelPost_E2E_RecordsAssistantEntry(t *testing.T) {
 		t.Errorf("stderr = %q, want nothing on the success path", p.Stderr)
 	}
 
-	entries := waitForHistoryEntries(t, home, id)
-	if len(entries) != 1 {
-		t.Fatalf("history holds %d entries, want exactly 1 — one message per call", len(entries))
+	waitForHistoryType(t, home, id, protocol.TypeTurnEnd, 5*time.Second)
+	entries := readHistoryEntries(home, id)
+	if len(entries) != 2 {
+		t.Fatalf("history holds %d entries, want exactly 2 — delta and completion", len(entries))
 	}
 	// assistant_delta, not the message/role-assistant entry #2497 wrote. That
 	// shape reached a client and drew nothing, on the live path and the served
@@ -194,9 +195,10 @@ func TestChannelPost_E2E_CreatesMissingChannel(t *testing.T) {
 	if !row.IsPromoted {
 		t.Error("created row is_promoted = false, want true — a post creates a channel")
 	}
-	entries := waitForHistoryEntries(t, home, row.ID)
-	if len(entries) != 1 {
-		t.Fatalf("history holds %d entries, want 1", len(entries))
+	waitForHistoryType(t, home, row.ID, protocol.TypeTurnEnd, 5*time.Second)
+	entries := readHistoryEntries(home, row.ID)
+	if len(entries) != 2 {
+		t.Fatalf("history holds %d entries, want 2", len(entries))
 	}
 }
 

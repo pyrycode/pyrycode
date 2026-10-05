@@ -66,3 +66,9 @@ Pending for documentation stage:
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-05
+
+
+## Revisions
+
+- 2026-10-05: The disconnected-device proof requires the fake relay to forward the existing peer-close notice as well as observe relay-addressed wake requests; otherwise its stale authenticated session suppresses a wake. Forward that notice without changing the production protocol and synchronize the test on daemon consumption. A heavily escaped maximum post exceeds a single served history page's existing byte bound, so the e2e uses a smaller multi-chunk post; the unit test retains maximum-size byte reconstruction and exact completion/replay/live checks. No history-page or ring bounds change.
+- Final sizing: approximately 720 written lines including the initial plan, revisions, test helpers and adjusted assertions; zero new exported types/interfaces and one exported test-harness observation method. The outbound-wake test waits for the preceding routed turn's connected-device suppression before disconnecting, so that turn cannot provide a false-positive wake.

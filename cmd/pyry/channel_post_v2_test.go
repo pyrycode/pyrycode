@@ -45,15 +45,7 @@ func TestChannelPostEmitterV2_GatesOnInteractive(t *testing.T) {
 	}
 }
 
-// TestChannelPostEmitterV2_FrameShape pins what a client decodes: the
-// assistant_delta type, the payload it was handed, no in_reply_to (nothing
-// solicited this frame, so correlating it to whatever request happened to
-// trigger the post would be a lie), and no event_id.
-//
-// The absent event_id is a DESIGN decision and not an omission: this emitter
-// owns no eventring, so it has no durable id to advertise. A client that
-// reconnects reads the post out of the conversation's durable log, which is the
-// half of delivery the record owns.
+// TestChannelPostEmitterV2_FrameShape pins the delta and its replay cursor.
 func TestChannelPostEmitterV2_FrameShape(t *testing.T) {
 	t.Parallel()
 
@@ -74,8 +66,8 @@ func TestChannelPostEmitterV2_FrameShape(t *testing.T) {
 	if env.InReplyTo != nil {
 		t.Errorf("in_reply_to = %v; nothing solicits a posted message", *env.InReplyTo)
 	}
-	if env.EventID != nil {
-		t.Errorf("event_id = %v; this emitter owns no ring and must advertise no durable id", *env.EventID)
+	if env.EventID == nil || *env.EventID == 0 {
+		t.Fatal("missing replay event id")
 	}
 	if env.TS.IsZero() {
 		t.Error("ts is zero, want a stamp taken at the announcement")

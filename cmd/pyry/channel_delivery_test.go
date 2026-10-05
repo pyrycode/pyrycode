@@ -276,8 +276,8 @@ func TestChannelDelivery_FailedHeadAndStartupPrecedence(t *testing.T) {
 }
 
 func TestChannelDelivery_ReloadInterruptions(t *testing.T) {
-	for _, prefix := range []int{0, 1, 3} {
-		t.Run(map[int]string{0: "undelivered", 1: "between-appends", 3: "before-cleanup"}[prefix], func(t *testing.T) {
+	for _, prefix := range []int{0, 1, 3, 4} {
+		t.Run(map[int]string{0: "undelivered", 1: "between-appends", 3: "before-completion", 4: "before-cleanup"}[prefix], func(t *testing.T) {
 			dir := t.TempDir()
 			h := history.New(dir)
 			id := conversations.ConversationID(testPostID(t))
@@ -286,12 +286,19 @@ func TestChannelDelivery_ReloadInterruptions(t *testing.T) {
 			text := strings.Repeat("x", 2*maxDeltaTextBytes+1)
 			turn := testAccept(t, d, id, text)
 			chunks := splitDeltaText(text, maxDeltaTextBytes)
-			for i := 0; i < prefix; i++ {
+			for i := 0; i < prefix && i < len(chunks); i++ {
 				raw, _ := json.Marshal(protocol.AssistantDeltaPayload{ConversationID: string(id), TurnID: turn, Seq: i, Text: chunks[i]})
 				if _, err := h.Append(id, protocol.TypeAssistantDelta, raw, time.Now()); err != nil {
 					t.Fatal(err)
 				}
 			}
+			if prefix == len(chunks)+1 {
+				raw, _ := json.Marshal(channelPostTurnEndPayload{string(id), turn, "end_turn", "channel_post"})
+				if _, err := h.Append(id, protocol.TypeTurnEnd, raw, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+
 			// Place the prefix beyond the newest reconciliation page.
 			for i := 0; i < 130; i++ {
 				if _, err := h.Append(id, "unrelated", json.RawMessage(`{}`), time.Now()); err != nil {
@@ -299,7 +306,12 @@ func TestChannelDelivery_ReloadInterruptions(t *testing.T) {
 				}
 			}
 			reloaded := testDelivery(t, dir, history.New(dir), func(conversations.ConversationID, string) { carries++ })
-			var live int
+			var live, completed int
+			reloaded.complete = func(p channelPostTurnEndPayload) {
+				completed++
+				raw, _ := json.Marshal(p)
+				testPostCompletion(t, raw, string(id), turn)
+			}
 			reloaded.announce = func(protocol.AssistantDeltaPayload) { live++ }
 			reloaded.drain()
 			got := testDeltas(t, history.New(dir), id)
@@ -311,8 +323,31 @@ func TestChannelDelivery_ReloadInterruptions(t *testing.T) {
 					t.Fatal("reload changed identity/text")
 				}
 			}
-			if prefix == len(chunks) && live != 0 {
+			if prefix == len(chunks)+1 && (live != 0 || completed != 0) {
 				t.Fatal("fully recorded post re-announced")
+			}
+			if prefix <= len(chunks) && (live != len(chunks) || completed != 1) {
+				t.Fatal("incomplete post was not announced after completion")
+			}
+			page, err := reloaded.hist.Page(id, "", history.MaxPageEntries)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var completionCount int
+			for _, entry := range page.Entries {
+				if entry.Type == protocol.TypeTurnEnd {
+					testPostCompletion(t, entry.Payload, string(id), turn)
+					completionCount++
+				}
+			}
+			if completionCount != 1 {
+				t.Fatal("completion duplicated or absent on reload")
+			}
+			if prefix != len(chunks)+1 {
+				if page.Entries[0].Type != protocol.TypeTurnEnd {
+					t.Fatal("completion absent")
+				}
+				testPostCompletion(t, page.Entries[0].Payload, string(id), turn)
 			}
 			again := testDelivery(t, dir, history.New(dir), nil)
 			again.drain()
@@ -329,14 +364,22 @@ func TestChannelDelivery_CleanupFailureDoesNotRepeat(t *testing.T) {
 	d := testDelivery(t, dir, h, nil)
 	id := conversations.ConversationID(testPostID(t))
 	testAccept(t, d, id, "hello")
-	var live int
+	var live, completed int
+	d.complete = func(channelPostTurnEndPayload) { completed++ }
 	d.announce = func(protocol.AssistantDeltaPayload) { live++ }
 	save := d.save
 	d.save = func([]channelDeliveryPost) error { return errors.New("cleanup") }
 	d.drain()
 	d.drain()
-	if live != 1 || len(testDeltas(t, h, id)) != 1 {
+	if live != 1 || completed != 1 || len(testDeltas(t, h, id)) != 1 {
 		t.Fatal("cleanup failure duplicated delivery")
+	}
+	reloaded := testDelivery(t, dir, history.New(dir), nil)
+	reloaded.announce = d.announce
+	reloaded.complete = d.complete
+	reloaded.drain()
+	if live != 1 || completed != 1 {
+		t.Fatal("complete pending work re-announced on restart")
 	}
 	testWaitDelivery(t, d, id)
 	d.save = save
@@ -452,7 +495,11 @@ type testBlockedPostHistory struct {
 }
 
 func (h testBlockedPostHistory) Append(id conversations.ConversationID, typ string, raw json.RawMessage, ts time.Time) (uint64, error) {
-	close(h.entered)
+	select {
+	case <-h.entered:
+	default:
+		close(h.entered)
+	}
 	<-h.release
 	return h.channelDeliveryHistory.Append(id, typ, raw, ts)
 }

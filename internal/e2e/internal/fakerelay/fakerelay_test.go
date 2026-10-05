@@ -311,6 +311,12 @@ func TestConnIDIncrementsPerPhone(t *testing.T) {
 			t.Errorf("phone %d: conn_id = %q, want %q", i, env.ConnID, want)
 		}
 		_ = ph.Close(websocket.StatusNormalClosure, "")
+		var closed protocol.RoutingEnvelope
+		readJSON(ctx, t, bin, &closed)
+		if closed.ConnID != want || closed.CloseCode != uint16(websocket.StatusNormalClosure) || string(closed.Frame) != "null" {
+			t.Fatal("phone close notice did not match the ended session")
+		}
+
 	}
 }
 
