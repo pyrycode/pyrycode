@@ -300,6 +300,18 @@ requester-only correlation. See the
 
 **This is the same shape `SendMessage`'s repeated widenings above avoid by not reusing a full signature change, generalised one step further: when the call-site count itself is the obstacle, add a new constructor that the old one delegates to, rather than touching the old one's signature at all.** The nil/no-op default (`nil` seam, `nil` registry method, or here a `nil` `SessionHarnessFunc`) is what makes the delegation exact rather than approximate — `ListConversations(reg)` is not a simplified or legacy form of the new handler, it is the literal value the new handler produces when there is no session pool to ask.
 
+`ConversationSummary.CurrentSessionID` reads the registry binding directly,
+independently of `AgentOf`'s pool lookup: a missing harness cannot erase a stored
+ID, and discovering an ID must not require a transition or a running child.
+It is always sent as a string, including `""` when unbound, on every emitted row;
+a nonempty value establishes neither liveness nor mutation success.
+`TestListConversations_CurrentSessionIDOnFirstList` uses two distinct bindings
+and an unbound row without a pool or transition, then checks both reply bytes
+and decoded-DTO serialization. A single bound row would miss accidental reuse
+of another row's ID, while decoded empty-string checks alone would miss
+`omitempty`. See [conversations-read payloads](protocol-package-types-conversations-read-payloads.md)
+and the [wire contract](../../protocol-mobile.md#application-message-types).
+
 ## `ListConversations` gains a third, required parameter: the history dependency is not optional (#2779)
 
 `ConversationSummary.LatestEntryID` (#2779, see [`protocol-package-types-conversations-read-payloads.md`](protocol-package-types-conversations-read-payloads.md)) needed a history read per row, so both constructors widened again: `ListConversationsWithAgents(reg ConversationLister, harnessFor SessionHarnessFunc, hist historyLatestReader)` is now the real signature, and `ListConversations(reg, hist)` delegates `ListConversationsWithAgents(reg, nil, hist)`. This is the exception to #2643's "nil default makes the old behaviour reachable" pattern directly above: `harnessFor`'s `nil` is a legitimate no-pool answer, but `hist`'s `nil` is not a legitimate no-history answer — a daemon that cannot read history cannot state whether a conversation has unread entries, so the handler fails the whole reply rather than quietly reporting `latest_entry_id: 0` for every row. The 18 existing external call sites (17 tests, 1 production — `cmd/pyry/relay.go`'s `w.hist`, a `*history.Store` built once in `main.go`) all had to pass the new argument; see the plan's Revisions for why that exceeded the pipeline's per-constructor call-site ceiling but was kept together anyway (single-consumer plumbing, the floor rule).
