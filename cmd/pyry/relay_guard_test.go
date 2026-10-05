@@ -385,6 +385,7 @@ var excludedTypes = map[string]string{
 	// outbound push / event — binary→phone, never dispatched inbound.
 	"TypeMessage":             "push",
 	"TypeTurnState":           "push",
+	"TypeReplySuggestion":     "push",
 	"TypeAssistantDelta":      "push",
 	"TypeToolUse":             "push",
 	"TypeToolResult":          "push",
