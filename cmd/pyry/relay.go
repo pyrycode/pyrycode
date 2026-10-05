@@ -424,6 +424,10 @@ type relayWiring struct {
 	// send against it. This leg's two consumers are the stream turn drain (which
 	// FEEDS it) and that teardown clear.
 	busy *turnBusyTracker
+	// suggestions is the native suggested-reply state (#2831), minted at the
+	// composition root beside streamSink because its delivered-text hook is a
+	// msgqueue Config field. nil leaves the ReplySuggestions seam unwired.
+	suggestions *replySuggestions
 
 	// hist is the daemon's ONE durable conversation log (#2112), minted at the
 	// composition root and threaded here because both v2 stream producers write
@@ -1088,6 +1092,28 @@ func startRelayV2(
 		runningTurnPhases = turnPhases.running
 	}
 
+	// Native suggested replies (#2831), only beside a stream sink. The accept
+	// adapters invalidate on acceptance only; with no owner the seams are the
+	// plain values they were.
+	var suggestions *replySuggestions
+	var replySuggestionsSeam func() []protocol.ReplySuggestionPayload
+	var sendEnqueuer handlers.Enqueuer = w.queue
+	var clearResetter handlers.ConversationResetter = w.activeSessionStarter
+	var queueSender relay.QueueSender = w.queue
+	if w.streamSink != nil && w.suggestions != nil && w.convReg != nil {
+		suggestions = w.suggestions
+		suggestions.bindSessions(func(convID string) (string, bool) {
+			c, ok := w.convReg.Get(conversations.ConversationID(convID))
+			return c.CurrentSessionID, ok
+		})
+		replySuggestionsSeam = suggestions.current
+		sendEnqueuer = suggestionEnqueuer{inner: w.queue, s: suggestions}
+		if w.activeSessionStarter != nil {
+			clearResetter = suggestionResetter{inner: w.activeSessionStarter, s: suggestions}
+		}
+		queueSender = suggestionQueueSender{inner: w.queue, s: suggestions}
+	}
+
 	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
 		Frames:        conn.Frames(),
 		Outbound:      conn.Send,
@@ -1164,7 +1190,7 @@ func startRelayV2(
 			// send_message must not be answered with it. An unwired starter
 			// (foreground / v1) leaves a nil seam, which still DROPS the /clear
 			// rather than delivering it — see the intercept's fail-closed note.
-			protocol.TypeSendMessage: handlers.SendMessage(w.router, w.queue, attachmentResolve, w.convReg, resolveConversationsRegistryPath(w.instanceName), announceConversationHook, w.activeSessionStarter, logger),
+			protocol.TypeSendMessage: handlers.SendMessage(w.router, sendEnqueuer, attachmentResolve, w.convReg, resolveConversationsRegistryPath(w.instanceName), announceConversationHook, clearResetter, logger),
 		},
 		// KnownConversation gates request_snapshot on registry membership (#618
 		// AC #4), mirroring the established conversations-registry validation
@@ -1327,6 +1353,9 @@ func startRelayV2(
 		RetainedBackgroundTaskRosters: w.retainedBackgroundTaskRosters,
 		// The running turn's phase (#2712), nil without a stream sink; see turnPhases.
 		RunningTurnPhases: runningTurnPhases,
+		// Each conversation's native suggested-reply state (#2831), nil without a
+		// stream sink; see suggestions.
+		ReplySuggestions: replySuggestionsSeam,
 		// The remote wire pairing minter, alongside the `pyry pair` CLI and local
 		// control provider. All three reach the same mintDevice, so a record
 		// created here is indistinguishable from one either host-operator path
@@ -1429,7 +1458,7 @@ func startRelayV2(
 		QueueRemover: w.queue,
 		// Inbound send_queued_now seam (#2729): writes a queued message into the
 		// running claude turn through msgqueue.SendNow.
-		QueueSender: w.queue,
+		QueueSender: queueSender,
 		// Inbound debug-bundle seam (#813): a paired `request_debug_bundle` frame
 		// assembles the daemon-global bundle (recent log ring + newest recording)
 		// and streams it back over the encrypted channel. The closure (built at
@@ -1680,6 +1709,7 @@ func startRelayV2(
 		emitter.usageRec = contextUsageRec
 		emitter.waker = waker
 		emitter.phases = turnPhases
+		emitter.suggestions = suggestions
 		// The drain attributes each event to the conversation its own session
 		// belongs to (#2739), never to the active one: conversationForSession over
 		// the registry, CurrentSessionID plus SessionHistory, so a just-rotated
@@ -1725,7 +1755,12 @@ func startRelayV2(
 	// COMPOSED onto the emitter in there rather than installed separately. w.busy is
 	// nil only in a wiring with no streamSink (the composition root mints the two
 	// together, and always both) and the clear is nil-safe.
-	streamTransitionsCleanup := startSessionTransitionStreamV2(ctx, w.transitions, mgr,
+	transitions := w.transitions
+	if suggestions != nil {
+		transitions = suggestionTransitionSink{inner: w.transitions, s: suggestions,
+			resolve: func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }}
+	}
+	streamTransitionsCleanup := startSessionTransitionStreamV2(ctx, transitions, mgr,
 		func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }, w.busy, w.hist, logger)
 
 	// Hand the pool the open-conn enumerator so a session's appended system prompt
@@ -1782,6 +1817,10 @@ func startRelayV2(
 	// keeps a late edge from racing a winding-down manager.
 	streamResettingCleanup := startResettingStreamV2(w.resetting, mgr)
 
+	// The native suggested-reply publisher (#2831): sends each changed
+	// conversation's current state to interactive conns. Nil-safe.
+	streamReplySuggestionsCleanup := startReplySuggestionsV2(ctx, suggestions, mgr)
+
 	return func() {
 		// Stop the producers — the structured turn stream's drain, the
 		// session-transition producer, the queue_state producer, and the session_error
@@ -1797,6 +1836,7 @@ func startRelayV2(
 		streamOperatorMessageCleanup()
 		streamSessionErrCleanup()
 		streamResettingCleanup()
+		streamReplySuggestionsCleanup()
 		<-mgrDone
 	}, surface, announce, announceConversation, announcePost, pairingMinter.MintLocalPairing, nil
 }

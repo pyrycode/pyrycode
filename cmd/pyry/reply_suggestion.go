@@ -1,0 +1,399 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"log/slog"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/pyrycode/pyrycode/internal/msgqueue"
+	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/relay"
+	"github.com/pyrycode/pyrycode/internal/relay/handlers"
+	"github.com/pyrycode/pyrycode/internal/sessions"
+	"github.com/pyrycode/pyrycode/internal/turnevent"
+)
+
+// replySuggestions owns each conversation's native suggested next reply (#2831):
+// whether the turn that just ended may publish one, the text it published, and
+// the per-conversation revision every set and clear advances. Daemon memory
+// only; a fresh handshake discards a client's cached suggestions.
+//
+// Writers are the stream drain (turn start, main-agent text, TurnEnd, the
+// suggestion, exit and teardown closes), the relay's accept paths, the msgqueue
+// delivered hook and the pool transition observer. The relay Run goroutine reads
+// it through current. Everything goes through one leaf mutex that is never held
+// across a push: a changed conversation is marked dirty and Run, this owner's own
+// goroutine, sends its CURRENT state. Coalescing to current state is what lets a
+// wake never lose a clear, and the relay's per-conn revision guard drops a frame
+// a newer revision has overtaken.
+//
+// SECURITY: the text is claude-authored and untrusted. It is never logged.
+type replySuggestions struct {
+	mu    sync.Mutex
+	convs map[string]*replySuggestionConv
+	dirty map[string]struct{}
+	wake  chan struct{}
+
+	// bcast is assigned by startReplySuggestionsV2 before Run starts, and
+	// sessionFor by bindSessions under mu. sessionFor answers a conversation's
+	// current session id, and false once the conversation is gone. It is a
+	// registry read, so it is always called with mu released.
+	bcast      interactiveBroadcaster
+	sessionFor func(convID string) (sessionID string, ok bool)
+	logger     *slog.Logger
+	nextID     uint64 // Run-goroutine only
+}
+
+// replySuggestionConv is one conversation's suggestion state.
+type replySuggestionConv struct {
+	revision  uint64
+	published bool    // a set or clear has been sent, so the state is real
+	text      *string // nil is the clear
+	sessionID string
+
+	delivered   bool // non-empty user text delivered since the last TurnEnd
+	assistant   bool // main-agent text in the current turn
+	invalidated bool // something invalidated the current turn since it started
+	eligible    bool // the last TurnEnd qualified and nothing has invalidated it
+}
+
+func newReplySuggestions(logger *slog.Logger) *replySuggestions {
+	return &replySuggestions{
+		convs:  make(map[string]*replySuggestionConv),
+		dirty:  make(map[string]struct{}),
+		wake:   make(chan struct{}, 1),
+		logger: logger,
+	}
+}
+
+// bindSessions installs the conversation-to-session resolver. startRelayV2
+// calls it once, before the drain or the relay can read the owner.
+func (s *replySuggestions) bindSessions(fn func(convID string) (string, bool)) {
+	s.mu.Lock()
+	s.sessionFor = fn
+	s.mu.Unlock()
+}
+
+// entry returns convID's state, creating it when create is set. Caller holds mu.
+func (s *replySuggestions) entry(convID string, create bool) *replySuggestionConv {
+	c := s.convs[convID]
+	if c == nil && create && convID != "" {
+		c = &replySuggestionConv{}
+		s.convs[convID] = c
+	}
+	return c
+}
+
+// noteDelivered is the msgqueue OnDelivered hook: the text claude was actually
+// given for a turn, without attachment paths. Nil-safe.
+func (s *replySuggestions) noteDelivered(convID string, msg msgqueue.QueuedMessage) {
+	if s == nil || strings.TrimSpace(msg.Text) == "" {
+		return
+	}
+	s.mu.Lock()
+	if c := s.entry(convID, true); c != nil {
+		c.delivered = true
+	}
+	s.mu.Unlock()
+}
+
+// turnStarted records that convID opened a new turn, which invalidates the
+// previous one and clears any suggestion it published. Nil-safe.
+func (s *replySuggestions) turnStarted(convID string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.entry(convID, true)
+	if c == nil {
+		return
+	}
+	c.assistant, c.invalidated, c.eligible = false, false, false
+	s.clearLocked(convID, c)
+}
+
+// noteAssistantText records main-agent prose in convID's open turn. Nil-safe.
+func (s *replySuggestions) noteAssistantText(convID string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if c := s.entry(convID, false); c != nil {
+		c.assistant = true
+	}
+	s.mu.Unlock()
+}
+
+// turnEnded decides whether convID's just-ended turn may publish a suggestion,
+// and consumes the delivered user text. Nil-safe.
+func (s *replySuggestions) turnEnded(convID string, ev turnevent.TurnEnd) {
+	if s == nil {
+		return
+	}
+	success := ev.Reason == turnevent.TurnEndReasonEndTurn && ev.Outcome == "success" && !ev.IsError
+	s.mu.Lock()
+	if c := s.entry(convID, false); c != nil {
+		c.eligible = success && c.delivered && c.assistant && !c.invalidated
+		c.delivered = false
+	}
+	s.mu.Unlock()
+}
+
+// suggest publishes text for convID when its last turn is eligible, and does
+// nothing otherwise. One suggestion per turn: eligibility is consumed. Nil-safe.
+func (s *replySuggestions) suggest(convID, text string) {
+	if s == nil {
+		return
+	}
+	sessionID := ""
+	if fn := s.resolver(); fn != nil {
+		sessionID, _ = fn(convID)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.entry(convID, false)
+	if c == nil || !c.eligible {
+		return
+	}
+	c.eligible = false
+	c.sessionID = sessionID
+	c.text = &text
+	s.publishLocked(convID, c)
+}
+
+// invalidate drops convID's current turn so a later suggestion for it is
+// ignored, and clears a held suggestion. Accepted sends, send-now, /clear,
+// resets, evictions and exits all land here. A conversation this owner has
+// never seen has nothing to invalidate. Nil-safe and safe from any goroutine.
+func (s *replySuggestions) invalidate(convID string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.entry(convID, false)
+	if c == nil {
+		return
+	}
+	c.invalidated, c.eligible = true, false
+	s.clearLocked(convID, c)
+}
+
+// clearLocked publishes the null for a conversation holding text. Caller holds mu.
+func (s *replySuggestions) clearLocked(convID string, c *replySuggestionConv) {
+	if c.text == nil {
+		return
+	}
+	c.text = nil
+	s.publishLocked(convID, c)
+}
+
+// publishLocked advances the revision and wakes Run. Caller holds mu.
+func (s *replySuggestions) publishLocked(convID string, c *replySuggestionConv) {
+	c.revision++
+	c.published = true
+	s.dirty[convID] = struct{}{}
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+// payloadLocked is c's current state as a wire payload. Caller holds mu.
+func payloadLocked(convID string, c *replySuggestionConv) protocol.ReplySuggestionPayload {
+	p := protocol.ReplySuggestionPayload{ConversationID: convID, SessionID: c.sessionID, Revision: c.revision}
+	if c.text != nil {
+		text := *c.text
+		p.SuggestedReply = &text
+	}
+	return p
+}
+
+// current is the V2SessionConfig.ReplySuggestions seam: one payload per
+// conversation with published state, the clear included, ordered by
+// conversation id. A deleted conversation is forgotten here. It runs on the
+// relay Run goroutine, so it takes only the leaf mutex and, with it released,
+// the registry read behind sessionFor; it never calls ActiveConns.
+func (s *replySuggestions) current() []protocol.ReplySuggestionPayload {
+	s.mu.Lock()
+	out := make([]protocol.ReplySuggestionPayload, 0, len(s.convs))
+	for convID, c := range s.convs {
+		if c.published {
+			out = append(out, payloadLocked(convID, c))
+		}
+	}
+	s.mu.Unlock()
+	if fn := s.resolver(); fn != nil {
+		out = slices.DeleteFunc(out, func(p protocol.ReplySuggestionPayload) bool {
+			if _, ok := fn(p.ConversationID); ok {
+				return false
+			}
+			s.forget(p.ConversationID)
+			return true
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	slices.SortFunc(out, func(a, b protocol.ReplySuggestionPayload) int {
+		return strings.Compare(a.ConversationID, b.ConversationID)
+	})
+	return out
+}
+
+// resolver returns the bound session resolver.
+func (s *replySuggestions) resolver() func(string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionFor
+}
+
+// forget drops a deleted conversation's state.
+func (s *replySuggestions) forget(convID string) {
+	s.mu.Lock()
+	delete(s.convs, convID)
+	delete(s.dirty, convID)
+	s.mu.Unlock()
+}
+
+// takeDirty snapshots the current payload of every changed conversation.
+func (s *replySuggestions) takeDirty() []protocol.ReplySuggestionPayload {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]protocol.ReplySuggestionPayload, 0, len(s.dirty))
+	for convID := range s.dirty {
+		delete(s.dirty, convID)
+		if c := s.convs[convID]; c != nil {
+			out = append(out, payloadLocked(convID, c))
+		}
+	}
+	return out
+}
+
+// Run sends each changed conversation's current state to every interactive
+// conn until ctx ends. The frame carries no EventID: suggestion state is
+// control state, never part of the replay ring or the history.
+func (s *replySuggestions) Run(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.wake:
+		}
+		pending := s.takeDirty()
+		if len(pending) == 0 {
+			continue
+		}
+		conns := s.bcast.ActiveConns(ctx)
+		for _, p := range pending {
+			payload, err := json.Marshal(p)
+			if err != nil {
+				// Strings, a uint64 and a *string cannot fail. Never echo err.
+				s.logger.Debug("relay: reply_suggestion marshal failed",
+					"event", "reply_suggestion.marshal_err",
+					"conversation_id", p.ConversationID)
+				continue
+			}
+			ts := time.Now().UTC()
+			for _, c := range conns {
+				if !c.Interactive {
+					continue
+				}
+				s.nextID++
+				env := protocol.Envelope{ID: s.nextID, Type: protocol.TypeReplySuggestion, TS: ts, Payload: payload}
+				if err := s.bcast.Push(ctx, c.ConnID, env); err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					s.logger.Debug("relay: reply_suggestion push dropped",
+						"event", "reply_suggestion.push_err",
+						"conn_id", c.ConnID,
+						"conversation_id", p.ConversationID,
+						"err", err)
+				}
+			}
+		}
+	}
+}
+
+// startReplySuggestionsV2 binds bcast and starts Run, returning a cleanup that
+// waits for it after ctx is cancelled. A nil owner starts nothing.
+func startReplySuggestionsV2(ctx context.Context, s *replySuggestions, bcast interactiveBroadcaster) func() {
+	if s == nil {
+		return func() {}
+	}
+	s.bcast = bcast
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.Run(ctx)
+	}()
+	return func() { <-done }
+}
+
+// suggestionEnqueuer invalidates a conversation's suggestion when a client's
+// send_message is accepted into its queue; a rejected send (id 0) changes
+// nothing.
+type suggestionEnqueuer struct {
+	inner handlers.Enqueuer
+	s     *replySuggestions
+}
+
+func (q suggestionEnqueuer) EnqueueSent(conversationID, messageID, text, delivery string, attachmentIDs []string, deviceName, clientVersion string, clientSentAt time.Time) uint64 {
+	id := q.inner.EnqueueSent(conversationID, messageID, text, delivery, attachmentIDs, deviceName, clientVersion, clientSentAt)
+	if id != 0 {
+		q.s.invalidate(conversationID)
+	}
+	return id
+}
+
+// suggestionQueueSender invalidates on an accepted send-now.
+type suggestionQueueSender struct {
+	inner relay.QueueSender
+	s     *replySuggestions
+}
+
+func (q suggestionQueueSender) SendNow(conversationID string, queuedMsgID uint64) bool {
+	ok := q.inner.SendNow(conversationID, queuedMsgID)
+	if ok {
+		q.s.invalidate(conversationID)
+	}
+	return ok
+}
+
+// suggestionResetter invalidates when a client's "/clear" reaches the
+// conversation reset. The send_message intercept has already accepted it.
+type suggestionResetter struct {
+	inner handlers.ConversationResetter
+	s     *replySuggestions
+}
+
+func (r suggestionResetter) StartNewSession(conversationID string) error {
+	r.s.invalidate(conversationID)
+	return r.inner.StartNewSession(conversationID)
+}
+
+// suggestionTransitionSink composes the suggestion invalidation onto the pool's
+// single-valued transition observer: a reset or eviction invalidates the
+// conversation the transition tears down, after the incumbent observer ran.
+type suggestionTransitionSink struct {
+	inner   transitionObserverSink
+	s       *replySuggestions
+	resolve func(sessionID string) (string, bool)
+}
+
+func (k suggestionTransitionSink) SetTransitionObserver(fn sessions.TransitionObserver) {
+	k.inner.SetTransitionObserver(func(t sessions.SessionTransition) {
+		fn(t)
+		if sid, ok := transitionClearsTurn(t); ok {
+			if convID, ok := k.resolve(sid); ok {
+				k.s.invalidate(convID)
+			}
+		}
+	})
+}

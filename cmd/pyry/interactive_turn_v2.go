@@ -181,6 +181,11 @@ type interactiveTurnEmitterV2 struct {
 	// reconcile view; assigned after construction for hist's call-site reason.
 	phases *turnPhaseSnapshot
 
+	// suggestions is the native suggested-reply state (#2831), fed from the turn
+	// lifecycle below. nil means no suggestions; assigned after construction for
+	// hist's call-site reason. Every method is nil-safe.
+	suggestions *replySuggestions
+
 	// The delta-coalescing timer (#609), shared by every conversation. The
 	// invariant it relies on: flushTimer is armed iff some conversation's deltaBuf
 	// is non-empty. Owned here, its channel selected by the producer (flushC).
@@ -313,6 +318,9 @@ func (e *interactiveTurnEmitterV2) HandleFor(ctx context.Context, convID string,
 		// buffered text; it only emits on the first content of a turn, when the
 		// buffer is necessarily empty.
 		e.transitionTo(ctx, convID, turnbridge.StateResponding)
+		if v.ParentToolCallID == "" && v.Text != "" {
+			e.suggestions.noteAssistantText(convID)
+		}
 		wasEmpty := e.deltaBuf.Len() == 0
 		othersBuffered := wasEmpty && e.anyBuffered()
 		e.deltaConvID = convID
@@ -394,6 +402,7 @@ func (e *interactiveTurnEmitterV2) HandleFor(ctx context.Context, convID string,
 		e.emitMapped(ctx, convID, ev)
 		e.transitionTo(ctx, convID, turnbridge.StateIdle)
 		e.endTurn()
+		e.suggestions.turnEnded(convID, v)
 		// After the fan-out: connected phones already have the turn_end; the
 		// waker reaches the ones that do not.
 		e.waker.Trigger(convID, pushWakeTurnEnd)
@@ -851,6 +860,13 @@ func (e *interactiveTurnEmitterV2) HandleFor(ctx context.Context, convID string,
 		// disagree about which conversation reported. An id the registry does not
 		// hold writes nothing and saves nothing; see record.
 		e.usageRec.record(conversations.ConversationID(convID), v)
+	case turnevent.PromptSuggestion:
+		// claude's native suggested next reply (#2831). It arrives AFTER the turn
+		// it follows has closed, so, like ContextUsage, it opens no turn and emits
+		// no turn_state. It is not an event-stream frame either: the owner decides
+		// whether the turn that just ended may publish it and sends current state
+		// on its own goroutine, outside the ring and the history.
+		e.suggestions.suggest(convID, v.Text)
 	default:
 		e.logger.Debug("relay: interactive-turn drop; unknown event",
 			"event", "interactive_turn.unknown",
@@ -879,6 +895,7 @@ func (e *interactiveTurnEmitterV2) startTurnIfNeeded(convID string) bool {
 	e.currentState = ""
 	e.inTurn = true
 	e.turnConvID = convID
+	e.suggestions.turnStarted(convID)
 	return true
 }
 
@@ -1031,6 +1048,9 @@ func (p *turnPhaseSnapshot) running() []protocol.TurnStatePayload {
 // Only conversationID's own turn is closed (#2739); another conversation's open
 // turn is a different convTurnState and is not touched.
 func (e *interactiveTurnEmitterV2) closeForConversation(ctx context.Context, conversationID string) {
+	// The producing session exited or was torn down (#2831): its turn can no
+	// longer publish, and a held suggestion clears, whether or not a turn is open.
+	e.suggestions.invalidate(conversationID)
 	st, ok := e.turns[conversationID]
 	if !ok || !st.inTurn {
 		return

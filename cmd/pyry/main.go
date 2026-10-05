@@ -1142,6 +1142,15 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		sendNowPlace.bindQueued(ctx, streamSink, conversationHistory, router.isClaude, logger)
 		streamSink.setEchoObserver(sendNowPlace.echo)
 	}
+	// Native suggested-reply state (#2831), stream path only. Minted here because
+	// its delivered-text hook is fixed in the msgqueue literal below; the relay leg
+	// binds its broadcaster and starts its Run.
+	var replySugg *replySuggestions
+	var replySuggDelivered msgqueue.DeliveredFunc
+	if streamSink != nil {
+		replySugg = newReplySuggestions(logger)
+		replySuggDelivered = replySugg.noteDelivered
+	}
 	queue, err := msgqueue.New(msgqueue.Config{
 		// Recovery precedes carry, so the pending posted text is composed onto the payload
 		// once, at the boundary with the queue, and markApprovalHolds stays adjacent to
@@ -1158,6 +1167,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		OnDelivered: deliveredFuncs(
 			newOperatorMessageHistory(conversationHistory, operatorMessageNotify(operatorMessages, logger), sendNowPlace, logger),
 			postCarry.clearDelivered,
+			replySuggDelivered,
 		),
 		// Pending exempts a head held behind an approval parked on a PERSON from the
 		// give-up bound (#1911). #1014 wired this seam to claude's startup trust modal;
@@ -1375,6 +1385,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		retainedBackgroundTaskRosters: retainedBackgroundTaskRosters(convReg, pool),
 		approvals:                     approvals,
 		streamSink:                    streamSink,
+		suggestions:                   replySugg,
 		busy:                          turnBusy,
 		hist:                          conversationHistory,
 		postDelivery:                  postDelivery,
