@@ -48,6 +48,7 @@ func newOperatorMessageHistory(store *history.Store, push func(operatorMessage),
 		payload, err := json.Marshal(protocol.MessagePayload{
 			ConversationID: convID,
 			MessageID:      msg.MessageID,
+			QueuedMsgID:    msg.ID,
 			// The role literal, matching internal/streamsup's envelope builder and
 			// internal/agentrun/streamrunner's — the repo declares no roleUser
 			// constant. AC 5: the shape a served page already decodes, so the
@@ -71,8 +72,8 @@ func newOperatorMessageHistory(store *history.Store, push func(operatorMessage),
 			SentNow:      msg.SentNow,
 		})
 		if err != nil {
-			// Defensive, matching both #2114 producers: MessagePayload is strings
-			// and a string slice and cannot fail to marshal in practice. Never echo the payload
+			// Defensive, matching both #2114 producers: MessagePayload has only
+			// JSON-safe scalar fields and a string slice. Never echo the payload
 			// or err.Error() — encoding/json quotes invalid input bytes into its
 			// error, which would put conversation content in a log line.
 			logger.Debug("relay: operator-message history drop; payload marshal",

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -284,7 +285,7 @@ func TestOperatorMessageHistory_PushesLogEntryOnceAfterRetry(t *testing.T) {
 			return nil
 		})
 
-	q.EnqueueAttached(testConvID, opMsgID, opText, opDelivery, []string{"att-a-0001"})
+	queuedID := q.EnqueueAttached(testConvID, opMsgID, opText, opDelivery, []string{"att-a-0001"})
 	waitAppended(t, done)
 
 	if len(pushes) != 1 {
@@ -292,6 +293,13 @@ func TestOperatorMessageHistory_PushesLogEntryOnceAfterRetry(t *testing.T) {
 	}
 	got := <-pushes
 	entry := onlyEntry(t, store, testConvID)
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(got.payload, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if queuedID == 0 || string(fields["queued_msg_id"]) != strconv.FormatUint(queuedID, 10) {
+		t.Fatalf("queued_msg_id = %s, want nonzero queue ID %d", fields["queued_msg_id"], queuedID)
+	}
 	if got.convID != testConvID {
 		t.Errorf("convID = %q, want %q", got.convID, testConvID)
 	}
@@ -348,10 +356,29 @@ func TestOperatorMessageHistory_SendNowCommitsAtTheEcho(t *testing.T) {
 	if err := json.Unmarshal(pushes[0].payload, &delivered); err != nil || delivered["sent_now"] != true {
 		t.Fatalf("send-now push must identify its delivery kind: sent_now=%v err=%v", delivered["sent_now"], err)
 	}
+	if delivered["queued_msg_id"] != float64(4) {
+		t.Fatalf("send-now queued_msg_id = %v, want integer 4", delivered["queued_msg_id"])
+	}
 
-	producer(testConvID, msgqueue.QueuedMessage{ID: 5, MessageID: "ordinary", Text: "plain"})
+	producer(testConvID, msgqueue.QueuedMessage{ID: 5, MessageID: opMsgID, Text: "plain"})
 	if len(pushes) != 2 {
 		t.Fatalf("an ordinary message pushed %d times in total, want it committed at once", len(pushes)-1)
+	}
+	var ordinary map[string]any
+	if err := json.Unmarshal(pushes[1].payload, &ordinary); err != nil {
+		t.Fatal(err)
+	}
+	if ordinary["message_id"] != delivered["message_id"] || ordinary["queued_msg_id"] != float64(5) {
+		t.Fatalf("same message_id must retain distinct queue IDs: send-now=%v ordinary=%v", delivered, ordinary)
+	}
+	page, err := store.Page(conversations.ConversationID(testConvID), "", 10)
+	if err != nil || len(page.Entries) != len(pushes) {
+		t.Fatalf("stored entries = %d, want %d; err=%v", len(page.Entries), len(pushes), err)
+	}
+	for _, push := range pushes {
+		if !slices.ContainsFunc(page.Entries, func(entry history.Entry) bool { return bytes.Equal(entry.Payload, push.payload) }) {
+			t.Errorf("push has no byte-identical stored entry: %s", push.payload)
+		}
 	}
 }
 
@@ -368,5 +395,8 @@ func TestOperatorMessageHistory_OrdinaryDeliveryDoesNotClaimSendNow(t *testing.T
 	}
 	if _, present := payload["sent_now"]; present {
 		t.Fatal("ordinary delivery must omit sent_now")
+	}
+	if _, present := payload["queued_msg_id"]; present {
+		t.Fatal("delivery without a queue entry must omit queued_msg_id")
 	}
 }
