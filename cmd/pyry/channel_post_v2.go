@@ -37,15 +37,14 @@ import (
 //
 // The fan-out is conversationUpdateEmitterV2.announce's, copied deliberately
 // rather than by resemblance — that is the frame with the same origin (a
-// host-side control verb, broadcast from the control-server handler goroutine),
+// host-side control verb, broadcast from the sole pending-delivery consumer),
 // so it is the one whose delivery semantics a client already reasons about. One
 // shared timestamp per frame, the #607 interactive capability gate, a monotonic
 // envelope id, and a push loop that tolerates a torn-down conn.
 //
 // LIVE-ONLY, like the conversation update and the attachment offer: no
-// outstanding-post registry and no connect-time replay. The difference from both
-// is that this frame HAS a durable half — channelPoster writes the same payload
-// to the conversation's log before calling here — and that is what makes
+// connect-time replay. Private pending delivery accepts whole posts and retries
+// history writes before calling here. That durable half is what makes
 // live-only acceptable for a type that is also the single droppable class in
 // pushQueue.enqueue and convRing.evictOldest. A client that was disconnected, or
 // whose delta was evicted under backpressure, reads the post out of history.
@@ -70,9 +69,8 @@ type channelPostEmitterV2 struct {
 	// mu is a leaf lock guarding nextID and NOTHING else: held around the
 	// counter bump alone, never across ActiveConns or a Push, so it can never
 	// nest inside the manager's own pushMu and there is no lock order to reason
-	// about. Load-bearing rather than copied, for conversationUpdateEmitterV2's
-	// reason: control.Server.Serve accepts each conn onto its own goroutine, so
-	// two crons can post concurrently.
+	// about. The sole channelDelivery consumer calls announce serially; the lock
+	// retains the emitter's counter safety for direct callers as well.
 	mu sync.Mutex
 	// nextID is the per-emitter envelope-ID counter, the shape every v2 emitter
 	// in this package uses — V2SessionManager.Push never rewrites Envelope.ID, so
@@ -89,10 +87,9 @@ func newChannelPostEmitterV2(bcast interactiveBroadcaster, ctx context.Context, 
 }
 
 // announce fans ONE assistant_delta envelope to every interactive-capable conn.
-// Runs synchronously on the control-server handler goroutine servicing
-// channel.post — the shape channelCreator's announcement already runs in — and is
-// bounded there: ActiveConns is a snapshot under the manager's own lock and Push
-// enqueues without blocking, so a wedged phone cannot hold the verb open.
+// Runs synchronously on the sole channelDelivery consumer. ActiveConns takes a
+// snapshot under the manager's own lock and Push enqueues without blocking, so a
+// wedged phone cannot hold delivery open.
 //
 // It returns nothing, and that is the contract rather than an omission: a failed
 // announcement must not turn a recorded post into a refusal. The content is in
@@ -100,7 +97,7 @@ func newChannelPostEmitterV2(bcast interactiveBroadcaster, ctx context.Context, 
 // verb still exits 0 — which is what a cron reads.
 //
 // ONE PAYLOAD PER CALL, and a post larger than maxDeltaTextBytes calls here once
-// per chunk. The split lives in channelPoster because that is the one place that
+// per chunk. The split lives in channelDelivery.deliver because it is the place that
 // also writes the chunks to the log, and a split decided in two places is two
 // places it can diverge. The per-chunk ActiveConns snapshot that follows is
 // interactiveTurnEmitterV2.flushDelta's own behaviour, not a new exposure: a conn
@@ -111,7 +108,7 @@ func newChannelPostEmitterV2(bcast interactiveBroadcaster, ctx context.Context, 
 // than a reply: nothing solicited it, so there is no request envelope for it to
 // name. Correlation is the payload's own conversation_id and turn_id.
 //
-// p is the payload as RECORDED, handed over by the poster after the durable write
+// p is the payload as RECORDED, handed over by the consumer after the durable write
 // succeeded. Announcing anything reassembled here would be a second derivation of
 // a value that must be one.
 func (e *channelPostEmitterV2) announce(p protocol.AssistantDeltaPayload) {

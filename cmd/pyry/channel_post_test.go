@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -38,6 +38,21 @@ func (s *stubAppender) append(convID conversations.ConversationID, typ string, p
 		return 0, s.returnErr
 	}
 	return uint64(len(s.calls)), nil
+}
+
+type testPosterHistory struct{ appender *stubAppender }
+
+func (h testPosterHistory) Append(id conversations.ConversationID, typ string, raw json.RawMessage, ts time.Time) (uint64, error) {
+	return h.appender.append(id, typ, raw, ts)
+}
+func (h testPosterHistory) Page(id conversations.ConversationID, _ string, _ int) (history.Page, error) {
+	page := history.Page{AtStart: true}
+	for _, e := range h.appender.calls {
+		if e.convID == id {
+			page.Entries = append(page.Entries, history.Entry{Type: e.typ, Payload: e.payload, TS: e.ts})
+		}
+	}
+	return page, nil
 }
 
 // stubCreate records what the poster asked channelCreator to create on the
@@ -121,7 +136,14 @@ func newTestPosterCarrying(t *testing.T, reg *conversations.Registry, create *st
 	if carry != nil {
 		record = carry.record
 	}
-	return channelPoster(reg, create.create, "/home/op/default", appender.append, announce, record, quietLogger())
+	d := testDelivery(t, t.TempDir(), testPosterHistory{appender}, record)
+	d.announce = announce
+	// Old refusal scenarios now exercise the atomic acceptance boundary.
+	if appender.returnErr != nil {
+		d.save = func([]channelDeliveryPost) error { return appender.returnErr }
+	}
+	post := channelPoster(reg, create.create, "/home/op/default", d.accept, quietLogger())
+	return func(name, text string) error { err := post(name, text); d.drain(); return err }
 }
 
 // stubCarry captures what the poster handed #2499's carry-forward hook.
@@ -208,8 +230,8 @@ func TestChannelPoster_PostsIntoExactMatch(t *testing.T) {
 // the push and a client paging history draw the same message.
 //
 // It also pins the ORDER. The append runs first and the announcement second,
-// because a failed append is a failed post while a failed push is not — so a
-// post that answers success has always been recorded, and a post that refuses
+// because all chunks are recorded before announcement — so a
+// first live frame always has a whole post in history. A refused acceptance
 // has pushed nothing.
 func TestChannelPoster_AnnouncesWhatItRecorded(t *testing.T) {
 	reg, _ := newChannelTestRegistry(t, t.TempDir())
@@ -245,11 +267,11 @@ func TestChannelPoster_AnnouncesWhatItRecorded(t *testing.T) {
 	}
 }
 
-// TestChannelPoster_AppendFailureAnnouncesNothing is the other half of that
+// TestChannelPoster_AcceptanceFailureAnnouncesNothing is the other half of that
 // order: a post that could not be recorded must not appear on any client's
 // screen. A frame drawn for a message the log does not hold would vanish on the
 // next connect, which is worse than never having been drawn.
-func TestChannelPoster_AppendFailureAnnouncesNothing(t *testing.T) {
+func TestChannelPoster_AcceptanceFailureAnnouncesNothing(t *testing.T) {
 	reg, _ := newChannelTestRegistry(t, t.TempDir())
 	addConversation(t, reg, "questions", true, false)
 
@@ -259,7 +281,7 @@ func TestChannelPoster_AppendFailureAnnouncesNothing(t *testing.T) {
 	post := newTestPosterAnnouncing(t, reg, create, appender, announcer)
 
 	if err := post("questions", "hello"); err == nil {
-		t.Fatal("post = nil, want a failed append to fail the post")
+		t.Fatal("post = nil, want a failed acceptance to fail the post")
 	}
 	if len(announcer.calls) != 0 {
 		t.Errorf("announced %d frame(s) for a message that was never recorded", len(announcer.calls))
@@ -427,26 +449,18 @@ func TestChannelPoster_ForwardsCreateRefusal(t *testing.T) {
 	}
 }
 
-// TestChannelPoster_AppendFailureIsAPostFailure is the reason this seam does not
-// route through appendConversationHistory. That helper returns nothing by
-// contract, so a caller cannot tell a dropped entry from a written one — correct
-// for a stream producer whose frame has already gone out, and wrong here, where
-// the durable record IS the deliverable. A cron that exits 0 having delivered
-// nothing is the failure this test exists to prevent.
-//
-// It also pins that the refusal carries none of internal/history's error text,
-// whose messages format absolute filesystem paths.
-func TestChannelPoster_AppendFailureIsAPostFailure(t *testing.T) {
+// TestChannelPoster_AcceptanceFailureIsAPostFailure pins the static refusal.
+func TestChannelPoster_AcceptanceFailureIsAPostFailure(t *testing.T) {
 	reg, _ := newChannelTestRegistry(t, t.TempDir())
 	addConversation(t, reg, "questions", true, false)
 
 	create := &stubCreate{}
-	appender := &stubAppender{returnErr: fmt.Errorf("history: open segment %q: disk on fire", "/home/op/.pyry/test/conversations/x/history/seg")}
+	appender := &stubAppender{returnErr: errors.New("pending: private path: disk on fire")}
 	post := newTestPoster(t, reg, create, appender)
 
 	err := post("questions", "hello")
 	if err == nil {
-		t.Fatal("post = nil, want a failed append to fail the post")
+		t.Fatal("post = nil, want a failed acceptance to fail the post")
 	}
 	if err.Error() != msgChannelPostRecordFailed {
 		t.Errorf("err = %q, want the static record-failed reason", err.Error())
@@ -761,7 +775,7 @@ func TestChannelPoster_RefusedPostCarriesNothing(t *testing.T) {
 	post := newTestPosterCarrying(t, reg, &stubCreate{}, &stubAppender{returnErr: errors.New("disk full")}, &stubAnnouncer{}, carry)
 
 	if err := post("questions", "a question"); err == nil {
-		t.Fatal("post reported success though the durable append failed")
+		t.Fatal("post reported success though the durable acceptance failed")
 	}
 	if len(carry.texts) != 0 {
 		t.Errorf("a refused post was carried forward: %q", carry.texts)
