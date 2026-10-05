@@ -151,14 +151,15 @@ func TestChannelDelivery_PublishedCompletionBeforePostAndSuccessor(t *testing.T)
 		if page.Entries[i].Type == protocol.TypeTurnEnd {
 			ended = true
 		}
-		if i == 0 && (!ended || page.Entries[i].Type != protocol.TypeAssistantDelta) {
+		if i == 1 && (!ended || page.Entries[i].Type != protocol.TypeAssistantDelta) {
 			t.Fatal("post did not follow real completion")
 		}
 	}
 	var p protocol.AssistantDeltaPayload
-	if err := json.Unmarshal(page.Entries[0].Payload, &p); err != nil {
+	if err := json.Unmarshal(page.Entries[1].Payload, &p); err != nil {
 		t.Fatal(err)
 	}
+	testPostCompletion(t, page.Entries[0].Payload, testConvID, post)
 	if p.TurnID != post {
 		t.Fatal("wrong post identity")
 	}

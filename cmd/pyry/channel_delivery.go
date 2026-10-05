@@ -47,6 +47,7 @@ type channelDelivery struct {
 	hist     channelDeliveryHistory
 	carry    func(conversations.ConversationID, string)
 	announce func(protocol.AssistantDeltaPayload)
+	complete func(channelPostTurnEndPayload)
 	log      *slog.Logger
 	save     func([]channelDeliveryPost) error
 	wake     chan struct{}
@@ -341,6 +342,8 @@ func (d *channelDelivery) deliver(post channelDeliveryPost) error {
 	for i, text := range chunks {
 		payloads[i] = protocol.AssistantDeltaPayload{ConversationID: string(post.ConversationID), TurnID: post.TurnID, Seq: i, Text: text}
 	}
+	completion := channelPostTurnEndPayload{ConversationID: string(post.ConversationID), TurnID: post.TurnID, StopReason: "end_turn", Producer: "channel_post"}
+	completed := false
 	recorded := make([]bool, len(chunks))
 	cursor := ""
 	for {
@@ -349,6 +352,12 @@ func (d *channelDelivery) deliver(post channelDeliveryPost) error {
 			return err
 		}
 		for _, e := range page.Entries {
+			if e.Type == protocol.TypeTurnEnd {
+				var p channelPostTurnEndPayload
+				if json.Unmarshal(e.Payload, &p) == nil && p == completion {
+					completed = true
+				}
+			}
 			if e.Type != protocol.TypeAssistantDelta {
 				continue
 			}
@@ -376,10 +385,23 @@ func (d *channelDelivery) deliver(post channelDeliveryPost) error {
 		}
 		appended = true
 	}
+	if !completed {
+		raw, err := json.Marshal(completion)
+		if err != nil {
+			return err
+		}
+		if _, err := d.hist.Append(post.ConversationID, protocol.TypeTurnEnd, raw, post.TS); err != nil {
+			return err
+		}
+		appended = true
+	}
 	if appended && d.announce != nil {
 		for _, p := range payloads {
 			d.announce(p)
 		}
+	}
+	if appended && d.complete != nil {
+		d.complete(completion)
 	}
 	return nil
 }

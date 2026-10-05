@@ -1373,6 +1373,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		streamSink:                    streamSink,
 		busy:                          turnBusy,
 		hist:                          conversationHistory,
+		postDelivery:                  postDelivery,
 		approvalParked:                approvalParked,
 	})
 	if err != nil {

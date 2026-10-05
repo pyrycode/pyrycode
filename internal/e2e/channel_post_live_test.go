@@ -29,11 +29,8 @@ import (
 // nothing at all, and reached a reconnecting one as a `message` entry whose role
 // the current clients deliberately draw as null.
 //
-// THE PHONE IS ATTACHED AND INTERACTIVE BEFORE THE POST RUNS. The frame is
-// live-only — no outstanding-post registry and no connect-time replay — so a
-// phone that handshakes afterwards is never pushed it, and this ordering is
-// load-bearing rather than incidental. The durable half is what serves that
-// phone, and it is asserted here too.
+// The phone is attached before acceptance so this proves live fan-out. The
+// disconnected-device test separately covers bounded reconnect replay.
 //
 // THE CHANNEL IS CREATED BY THE POST ITSELF, through the label-misses arm, which
 // is the shape a cron's first run actually takes. That also puts a
@@ -130,16 +127,27 @@ func TestChannelPost_E2E_ReachesAttachedClient(t *testing.T) {
 		t.Error("pushed turn_id is empty; a client coalesces on it and every post would join one bubble")
 	}
 
+	for {
+		env, ok := nextAttachmentEnvelope(t, phone, recv, time.Now().Add(frameDeadline))
+		if !ok {
+			t.Fatal("live post completion absent")
+		}
+		if env.Type == protocol.TypeTurnEnd {
+			assertHostPostEnd(t, env.Payload, row.ID, delta.TurnID)
+			break
+		}
+	}
 	// ── The durable half, in the shape that was pushed ──
 	//
 	// The two legs are produced independently — the push travels the relay and
 	// this reads the file — so the claim that they carry ONE payload is a check
-	// rather than a tautology. It is also AC#3: exactly one entry, so a client
-	// paging history after the fact draws the post once.
-	entries := waitForHistoryEntries(t, home, row.ID)
-	if len(entries) != 1 {
-		t.Fatalf("history holds %d entries, want exactly 1 — one post is one record", len(entries))
+	// rather than a tautology. One delta and its completion draw the post once.
+	waitForHistoryType(t, home, row.ID, protocol.TypeTurnEnd, 5*time.Second)
+	entries := readHistoryEntries(home, row.ID)
+	if len(entries) != 2 {
+		t.Fatalf("history holds %d entries, want exactly 2 — delta and completion", len(entries))
 	}
+	assertHostPostEnd(t, entries[1].Payload, row.ID, delta.TurnID)
 	if entries[0].Type != protocol.TypeAssistantDelta {
 		t.Errorf("entry type = %q, want %q — the record must be the shape that was pushed",
 			entries[0].Type, protocol.TypeAssistantDelta)
@@ -244,10 +252,12 @@ func TestChannelPost_E2E_HeldUntilRealCompletion(t *testing.T) {
 	// The file gate proves the turn cannot finish during this observation window.
 	time.Sleep(350 * time.Millisecond)
 	for _, e := range requestHistory(28111, true).Entries {
-		if strings.Contains(string(e.Payload), post) {
+		if strings.Contains(string(e.Payload), post) || strings.Contains(string(e.Payload), "channel_post") {
 			t.Fatal("held post entered served history")
 		}
 	}
+	seal(protocol.Envelope{ID: 28113, Type: protocol.TypeSendMessage, TS: time.Now().UTC(),
+		Payload: mustJSON(t, protocol.SendMessagePayload{ConversationID: convID, MessageID: "successor-user", Text: "next"})})
 	if err := os.WriteFile(release, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -280,12 +290,42 @@ func TestChannelPost_E2E_HeldUntilRealCompletion(t *testing.T) {
 	if reply.String() != "reply-head"+bgConvNeedle {
 		t.Fatalf("reply split or changed: %q", reply.String())
 	}
+	postEnded := false
+	for {
+		env, ok := next(time.Now().Add(15 * time.Second))
+		if !ok {
+			t.Fatal("post completion or successor absent")
+		}
+		if env.Type == protocol.TypeTurnEnd {
+			assertHostPostEnd(t, env.Payload, convID, posted.TurnID)
+			postEnded = true
+		}
+		if env.Type == protocol.TypeAssistantDelta {
+			var p protocol.AssistantDeltaPayload
+			if err := json.Unmarshal(env.Payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			if !postEnded || p.TurnID == posted.TurnID || p.TurnID == claudeTurn {
+				t.Fatal("successor preceded post completion")
+			}
+			break
+		}
+	}
 	page := requestHistory(28112, false)
 	reply.Reset()
 	ended = false
+	var postCompletions int
 	for i := len(page.Entries) - 1; i >= 0; i-- {
 		e := page.Entries[i]
 		if e.Type == protocol.TypeTurnEnd {
+			var p map[string]any
+			if err := json.Unmarshal(e.Payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			if p["turn_id"] == posted.TurnID {
+				assertHostPostEnd(t, e.Payload, convID, posted.TurnID)
+				postCompletions++
+			}
 			ended = true
 		}
 		if e.Type != protocol.TypeAssistantDelta {
@@ -301,6 +341,9 @@ func TestChannelPost_E2E_HeldUntilRealCompletion(t *testing.T) {
 		if p.TurnID == posted.TurnID && (!ended || p != posted) {
 			t.Fatal("history/live post order differs")
 		}
+	}
+	if postCompletions != 1 {
+		t.Fatal("served post completion not unique")
 	}
 	if reply.String() != "reply-head"+bgConvNeedle {
 		t.Fatal("served history split or changed the reply")

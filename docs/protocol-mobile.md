@@ -1164,9 +1164,22 @@ The daemon MUST echo only what it itself supports — the agreed set is the **in
 
 ### Interactive events (v2, capability-gated)
 
-These twenty-three envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model. All *payload* fields are always present (no omitempty) so boundary values like `seq: 0`, `is_error: false`, and `elapsed_seconds: 0` are explicit on the wire.
+These twenty-three envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model, with host-post producers described below. Claude-turn payload fields remain present (no omitempty), so boundary values like `seq: 0`, `is_error: false`, and `elapsed_seconds: 0` are explicit on the wire. Host-post `turn_end` is the four-field exception: it omits all Claude result and metric fields.
 
-**Replay cursor (`event_id`, #649).** Every frame in this stream additionally carries an envelope-level `event_id` (the optional `Envelope` field above) — the durable id the daemon assigns to each structured event as it records it in a bounded per-conversation event ring (ADR 025 § Backpressure / replay). It is **not** the same as the envelope's `id`: `id` is a per-connection counter that resets each reconnect, whereas `event_id` is connection-independent, identical across all interactive connections for a given logical event, and strictly increasing in the daemon's emit order. **Retention is per conversation; the id space is not** (#2022). One ring-wide counter assigns every id, so an id is never shared by two conversations and a conversation's own ids ascend without being contiguous — ids belonging to other conversations sit between them, and the first id a conversation is assigned is normally far above 1. **A client may therefore keep one scalar cursor**: no event the daemon emits later, in any conversation, can carry an id at or below one already seen. A client that keys its cursor per conversation is equally correct and unaffected. A phone records the latest `event_id` it has seen and, on mid-turn reconnect, advertises it as `last_event_id` in its `hello`; the daemon then replays the missed tail from the ring (or emits a `resync` marker if it fell off the bounded window). The **producer** side (the daemon stamping `event_id` outbound) landed in #649; the reconnect **consumer** (`hello.last_event_id`, ring replay, and the `resync` marker) landed in #647 — see [Reconnect replay & resync](#reconnect-replay--resync-consumer-647) below.
+**Replay cursor (`event_id`, #649).** Every frame in this stream additionally carries an envelope-level `event_id` (the optional `Envelope` field above) — the daemon-resident id assigned to each structured event in a bounded per-conversation event ring (ADR 025 § Backpressure / replay). It is **not** the same as the envelope's `id`: `id` identifies an envelope and can differ across recipients or replay, whereas `event_id` is connection-independent, identical across all interactive connections for a given logical event, and strictly increasing in the daemon's emit order. **Retention is per conversation; the id space is not** (#2022). One ring-wide counter assigns every id, so an id is never shared by two conversations and a conversation's own ids ascend without being contiguous — ids belonging to other conversations sit between them, and the first id a conversation is assigned is normally far above 1. **A client may therefore keep one scalar cursor**: no event the daemon emits later, in any conversation, can carry an id at or below one already seen. A client that keys its cursor per conversation is equally correct and unaffected. A phone records the latest `event_id` it has seen and, on mid-turn reconnect, advertises it as `last_event_id` in its `hello`; the daemon then replays the missed tail from the ring (or emits a `resync` marker if it fell off the bounded window). The **producer** side (the daemon stamping `event_id` outbound) landed in #649; the reconnect **consumer** (`hello.last_event_id`, ring replay, and the `resync` marker) landed in #647 — see [Reconnect replay & resync](#reconnect-replay--resync-consumer-647) below.
+
+Host-post deltas and completion (#2809) use the same ring registered with
+`V2SessionManager.SetReplaySource`. Their live and replay envelopes carry the
+same connection-independent event IDs; these are separate from durable history
+entry IDs. Each post is fully recorded in history before entering replay/live,
+and all its events enter the ring before its wake trigger. Replay reads retained
+events and never triggers another wake. `replayMissed` uses the daemon's active
+conversation and `hello.last_event_id`; this cursor does not select a conversation.
+The existing 1024-event per-conversation bound, preferential delta eviction and
+`resync` behavior remain. The ring survives reconnects and child respawns but
+not daemon restart; restart recovery is history-backed, with no durable replay
+across restart. A fully completed pending post is cleanup-only on reload, even
+if interruption preceded its first live push. Tail catch-up remains #2744.
 
 #### `turn_state`
 
@@ -1218,22 +1231,31 @@ active buffer, so a main/child or child/child switch flushes the earlier text an
 preserves global arrival order instead of letting per-lane buffers reorder
 interleaved prose.
 
-**Since #2498, `assistant_delta` has a second producer: a host-side control verb,
-not a supervised claude turn.** `pyry channel post` (`channelPoster`, #2497)
-records the post as one or more `assistant_delta` chunks in the conversation's
-durable log, and `channelPostEmitterV2` fans the identical payload to every
-interactive-capable conn immediately after the durable append succeeds. This
-producer mints its own `turn_id` — a fresh one per post, never derived from or
-reused by any outer turn — and emits `assistant_delta` alone: no `turn_state`,
-no `turn_end`. A client relies on the fresh, never-repeated `turn_id` to start a
-new bubble; the lane this producer opens has no closing frame, only its final
-chunk. `parent_tool_use_id` is always `""` (main lane) and `seq` restarts at `0`
-for each post, independent of any turn's own lane numbering. A synthetic
-`turn_end` was deliberately not added to give this producer a symmetric close:
-`turn_end` carries claude-authored fields this verb has nothing to report, and a
-channel is an ordinary bound conversation in which the operator can be mid-turn,
-so a synthetic end would close that turn rather than the post's own. See
-[control-plane.md § Fanning `channel.post` out](knowledge/features/control-plane-channel-post-live-delivery.md).
+**Host-side `pyry channel post` is a second producer** (#2498, completed by
+\#2809). `channelPoster` mints a fresh `turn_id` per post, never reusing an outer
+Claude turn's identity. `channelDelivery` records ordered `assistant_delta`
+chunks followed by exactly one [`turn_end`](#turn_end) with that same ID and
+`producer: "channel_post"`. `parent_tool_use_id` is always `""` and `seq` starts
+at `0` for each post. The post forms one separate completed bubble, with no
+second `message`/assistant text representation and no post `turn_state`.
+
+Acceptance can succeed during a live Claude turn, but delivery holds until its
+published real completion or confirmed producer stop after queued/buffered output
+is flushed and its lifecycle closed. No held post delta/completion reaches live
+delivery or served history; whole FIFO posts complete before successor turns.
+The five-minute diagnostic keeps holding. All post chunks and completion must
+record successfully before any shared replay recording, live fan-out or wake.
+Each event then enters the shared ring before its live fan-out, with the same
+`event_id` for every connection. Completion fan-out precedes the existing
+content-free wake path for the post's conversation, even without a connected
+client. Existing eligibility, connected-device suppression, coalescing and client
+mute/per-conversation notification rules remain.
+
+A lone delta renders live or from a served page but does not finish or notify.
+The ten historic daily posts in `7dc049bc` (2026-09-24 through 2026-10-03) retain
+recoverable text and missed alerts; they are neither migrated nor re-notified.
+Durable tail catch-up remains #2744. See
+[channel-post delivery and recovery](knowledge/features/control-plane-channel-post-live-delivery.md).
 
 #### `tool_use`
 
@@ -1389,6 +1411,25 @@ id or elapsed value as authorization, routing input, or proof of execution.
 
 #### `turn_end`
 
+Claude turns retain the `TurnEndPayload` contract below. Host posts use exactly
+this four-field completion payload in durable history, replay and live delivery
+(#2809):
+
+```json
+{"conversation_id":"<conversation>","turn_id":"<post-turn>","stop_reason":"end_turn","producer":"channel_post"}
+```
+
+`producer: "channel_post"` explicitly identifies daemon-authored host-post
+completion, not a Claude result. It closes only that post's fresh turn ID, at the
+safe boundary described under [`assistant_delta`](#assistant_delta). The three
+existing required completion strings let current clients consume it; `producer`
+is additional provenance. Every Claude-only field listed below — `outcome`,
+`is_error`, `terminal_reason`, `error_category`, both durations, cost, turn count
+and all token counts — is omitted entirely, including zero/null placeholders.
+Absent fields are not evidence that Claude reported success or zero usage.
+Claude-turn serialization and result reporting remain unchanged; Claude turns
+do not gain a `producer` field.
+
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation this turn belongs to. |
@@ -1409,7 +1450,7 @@ id or elapsed value as authorization, routing input, or proof of execution.
 
 ADR 025's base `turn_end` shape is `{conversation_id, turn_id}`; `stop_reason` is added here per the implementing ticket (#607), following the "spec follows the code" convention (ADR 025 § Consequences). The three stop-shape fields are added by #2223, `error_category` by #2224, the four duration/turn/cost numbers by #2260, and the four token counts by #2261, all under the same convention.
 
-**The four added *string and bool* fields are optional and open-set, and a client must decode an absent one to the empty value** (`""` / `false`) rather than treating absence as an error. The daemon always emits all four keys, so absence means an older binary; a value the lists above do not name means a newer `claude`. Both are ordinary, and a client that rejects an unrecognised token breaks on `claude`'s next release — `terminal_reason` and `error_category` in particular are explicitly not closed sets.
+**The four added *string and bool* fields are optional and open-set, and a client must decode an absent one to the empty value** (`""` / `false`) rather than treating absence as an error. For Claude turns, the daemon always emits all four keys, so absence means an older binary; host-post completion deliberately omits them. A value the lists above do not name means a newer `claude`. Both are ordinary, and a client that rejects an unrecognised token breaks on `claude`'s next release — `terminal_reason` and `error_category` in particular are explicitly not closed sets.
 
 **Two of the four numbers are running totals and two are per turn, and the pair that looks most alike is the pair that disagrees.** `duration_ms` and `num_turns` describe **this turn**; `duration_api_ms` and `cost_usd_total` are **session totals** that only grow. The daemon publishes all four exactly as `claude` sent them and **differences neither total into a per-turn delta**. Measured 2026-09-09 across the 32 committed captures under `internal/e2e/realclaude/testdata/` — 57 `result` lines, 21 of those files carrying more than one, `claude` 2.1.143 through 2.1.259: `duration_api_ms` and `cost_usd_total` are strictly monotonic in 21 of 21 multi-turn captures, `duration_ms` is non-monotonic in 13 of them, and `num_turns` holds constant across captures where a cumulative counter would read 2, 4, 6.
 
@@ -1417,7 +1458,7 @@ ADR 025's base `turn_end` shape is `{conversation_id, turn_id}`; `stop_reason` i
 
 **`duration_api_ms` is routinely the larger of the two durations, and reading it as this turn's API time is the realistic bug.** It exceeds `duration_ms` on **53 of the 57** observed lines — the norm, not an edge case — so a client rendering it per turn shows eleven seconds of API work for a three-second turn. **Differencing consecutive frames does not rescue that reading either**: the value already exceeds its own turn's `duration_ms` on the **first** `result` line of 19 of the 21 multi-turn captures, where a running total has accumulated nothing but that one turn. Whatever it sums, it is not bounded by the turn's wall clock. Show it as a session figure or not at all.
 
-**A `0` is a number `claude` sent, not necessarily a field the daemon failed to read**, and a client treating one as a gap mislabels a real turn. `claude` reports `duration_api_ms: 0` and `num_turns: 0` on an observed line whose `duration_ms` is `15617` and whose cost is non-zero, and an observed `usage` object reports all four token counts as zero. Absent, `null`, unreadable and an explicit `0` are **one reading**, and no field distinguishes them, because nothing a client does depends on which it is. The daemon always emits all eight numeric keys, so an absent one means an older binary.
+**A `0` is a number `claude` sent, not necessarily a field the daemon failed to read**, and a client treating one as a gap mislabels a real turn. `claude` reports `duration_api_ms: 0` and `num_turns: 0` on an observed line whose `duration_ms` is `15617` and whose cost is non-zero, and an observed `usage` object reports all four token counts as zero. Absent, `null`, unreadable and an explicit `0` are **one reading**, and no field distinguishes them, because nothing a client does depends on which it is. For Claude turns, the daemon always emits all eight numeric keys, so an absent one means an older binary. Host-post completion omits all eight because no Claude usage was reported.
 
 **`cost_usd_total` is `claude`'s estimate, and the daemon verifies none of it.** It is not a billing statement; on a subscription it is informational. **Nothing is clamped, range-checked or ordered** — [`rate_limited`](#rate_limited)'s posture — and in particular the daemon applies **no `duration_api_ms <= duration_ms` consistency check**, because it would reject 53 of the 57 observed lines. A negative arrives as `claude` sent it.
 

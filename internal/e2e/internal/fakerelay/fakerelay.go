@@ -63,11 +63,12 @@ type Server struct {
 	log  *slog.Logger
 	http *httptest.Server
 
-	mu       sync.Mutex
-	closed   bool
-	binaries map[string]*binaryConn // serverID -> binary
-	phones   map[string]*phoneConn  // connID    -> phone
-	connSeq  uint64
+	mu           sync.Mutex
+	closed       bool
+	binaries     map[string]*binaryConn // serverID -> binary
+	phones       map[string]*phoneConn  // connID    -> phone
+	connSeq      uint64
+	wakeRequests chan json.RawMessage
 
 	// rejectNextBinaryWith4409, when true, causes the next /v1/server
 	// upgrade to accept the WS handshake and immediately close with WS
@@ -130,9 +131,10 @@ func New(logger *slog.Logger) *Server {
 		panic("fakerelay: logger is required")
 	}
 	s := &Server{
-		log:      logger,
-		binaries: make(map[string]*binaryConn),
-		phones:   make(map[string]*phoneConn),
+		log:          logger,
+		wakeRequests: make(chan json.RawMessage, 16),
+		binaries:     make(map[string]*binaryConn),
+		phones:       make(map[string]*phoneConn),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/server", s.handleBinary)
@@ -150,6 +152,17 @@ func New(logger *slog.Logger) *Server {
 // "/v1/server" or "/v1/client".
 func (s *Server) URL() string {
 	return "ws" + strings.TrimPrefix(s.http.URL, "http")
+}
+
+// NextPushWake observes the actual relay-addressed request received from the
+// daemon. It never logs or interprets the token, and observation is bounded.
+func (s *Server) NextPushWake(ctx context.Context) (json.RawMessage, bool) {
+	select {
+	case raw := <-s.wakeRequests:
+		return raw, true
+	case <-ctx.Done():
+		return nil, false
+	}
 }
 
 // Close shuts down the listener and all in-flight conns. Idempotent.
@@ -357,6 +370,24 @@ func (s *Server) handlePhone(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	delete(s.phones, connID)
 	s.mu.Unlock()
+	// Report the ended phone session to the daemon, as the production relay
+	// does. Without this notice its authenticated session suppresses wakes.
+	s.mu.Lock()
+	bc := s.binaries[serverID]
+	s.mu.Unlock()
+	if bc != nil {
+		raw, err := json.Marshal(protocol.RoutingEnvelope{ConnID: connID, CloseCode: uint16(websocket.StatusNormalClosure)})
+		if err == nil {
+			noticeCtx, noticeCancel := context.WithTimeout(context.Background(), time.Second)
+			select {
+			case bc.sendCh <- raw:
+			case <-bc.done:
+			case <-noticeCtx.Done():
+			}
+			noticeCancel()
+		}
+	}
+
 	_ = conn.Close(websocket.StatusNormalClosure, "")
 	s.log.Debug("fakerelay: phone disconnected", "conn_id", connID)
 }
@@ -397,6 +428,17 @@ func (s *Server) binaryRecvPump(ctx context.Context, bc *binaryConn) error {
 		if err != nil {
 			return err
 		}
+		var addressed struct {
+			PushWake json.RawMessage `json:"push_wake"`
+		}
+		if json.Unmarshal(data, &addressed) == nil && len(addressed.PushWake) > 0 {
+			select {
+			case s.wakeRequests <- json.RawMessage(data):
+			default:
+			}
+			continue
+		}
+
 		var env protocol.RoutingEnvelope
 		if err := json.Unmarshal(data, &env); err != nil {
 			s.log.Debug("fakerelay: binary sent malformed wrapper",

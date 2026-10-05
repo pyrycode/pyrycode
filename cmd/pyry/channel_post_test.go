@@ -187,8 +187,8 @@ func TestChannelPoster_PostsIntoExactMatch(t *testing.T) {
 	if create.calls != 0 {
 		t.Errorf("create called %d time(s), want 0 — an exact match must not create", create.calls)
 	}
-	if len(appender.calls) != 1 {
-		t.Fatalf("append calls = %d, want 1 — one message per call", len(appender.calls))
+	if len(appender.calls) != 2 {
+		t.Fatalf("append calls = %d, want 2 — delta and completion", len(appender.calls))
 	}
 	got := appender.calls[0]
 	if got.convID != want {
@@ -250,8 +250,8 @@ func TestChannelPoster_AnnouncesWhatItRecorded(t *testing.T) {
 	if len(announcer.calls) != 1 {
 		t.Fatalf("announce calls = %d, want 1 — one frame per single-chunk post", len(announcer.calls))
 	}
-	if len(appender.calls) != 1 {
-		t.Fatalf("append calls = %d, want 1", len(appender.calls))
+	if len(appender.calls) != 2 {
+		t.Fatalf("append calls = %d, want 2", len(appender.calls))
 	}
 
 	var recorded protocol.AssistantDeltaPayload
@@ -303,8 +303,8 @@ func TestChannelPoster_NilAnnouncerStillRecords(t *testing.T) {
 	if err := post("questions", "hello"); err != nil {
 		t.Fatalf("post with no relay leg: %v", err)
 	}
-	if len(appender.calls) != 1 {
-		t.Errorf("append calls = %d, want 1 — a nil hook changes nothing about the record", len(appender.calls))
+	if len(appender.calls) != 2 {
+		t.Errorf("append calls = %d, want 2 — delta and completion persist without a hook", len(appender.calls))
 	}
 }
 
@@ -357,8 +357,8 @@ func TestChannelPoster_IgnoresArchivedAndUnpromoted(t *testing.T) {
 	if err := post("questions", "hello"); err != nil {
 		t.Fatalf("post: %v", err)
 	}
-	if len(appender.calls) != 1 {
-		t.Fatalf("append calls = %d, want 1", len(appender.calls))
+	if len(appender.calls) != 2 {
+		t.Fatalf("append calls = %d, want 2", len(appender.calls))
 	}
 	if got := appender.calls[0].convID; got != want {
 		t.Errorf("appended to %q, want the one live channel %q", got, want)
@@ -393,8 +393,8 @@ func TestChannelPoster_CreatesOnMiss(t *testing.T) {
 	if create.gotName != "questions" {
 		t.Errorf("create got name %q, want the requested label", create.gotName)
 	}
-	if len(appender.calls) != 1 || appender.calls[0].convID != created {
-		t.Fatalf("append calls = %+v, want one into the created row %q", appender.calls, created)
+	if len(appender.calls) != 2 || appender.calls[0].convID != created {
+		t.Fatalf("append calls = %+v, want delta and completion into the created row %q", appender.calls, created)
 	}
 }
 
@@ -494,15 +494,16 @@ func TestChannelPoster_ChunksAnOversizedPost(t *testing.T) {
 	}
 
 	const wantChunks = 3
-	if len(appender.calls) != wantChunks {
-		t.Fatalf("append calls = %d, want %d", len(appender.calls), wantChunks)
+	if len(appender.calls) != wantChunks+1 {
+		t.Fatalf("append calls = %d, want %d", len(appender.calls), wantChunks+1)
 	}
 	if len(announcer.calls) != wantChunks {
 		t.Fatalf("announce calls = %d, want %d — every recorded chunk is pushed", len(announcer.calls), wantChunks)
 	}
 
+	testPostCompletion(t, appender.calls[wantChunks].payload, announcer.calls[0].ConversationID, announcer.calls[0].TurnID)
 	var rejoined strings.Builder
-	for i, call := range appender.calls {
+	for i, call := range appender.calls[:wantChunks] {
 		if call.typ != protocol.TypeAssistantDelta {
 			t.Errorf("chunk %d type = %q, want %q", i, call.typ, protocol.TypeAssistantDelta)
 		}
