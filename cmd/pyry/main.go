@@ -356,6 +356,7 @@ var pyryFlagValues = map[string]bool{
 	"pyry-relay":               true,
 	"pyry-read-folder":         true,
 	claudeAccountFlagName:      true,
+	claudeAccountOpCLIFlagName: true,
 }
 
 // splitArgs walks args left-to-right and partitions them into pyry's own
@@ -781,7 +782,8 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	wrapUpDeadlineFlag := fs.Duration("pyry-wrapup-deadline", 0, "shorten the conversation reset's wrap-up bound (testing; 0 or >= the 90s default = production default)")
 	relayFlag := fs.String("pyry-relay", "", "relay URL override (default: $PYRY_RELAY_URL or ~/.pyry/config.json)")
 	autoUpdate := fs.Bool("pyry-auto-update", false, "install a new release by itself once the daemon is idle, then restart the managed unit")
-	accountSource := fs.String(claudeAccountFlagName, "", "Claude account token source for this instance: an absolute path to an owner-only token file (default: $"+claudeAccountSourceEnv+" or ~/.pyry/<name>/"+claudeAccountFileName+")")
+	accountSource := fs.String(claudeAccountFlagName, "", "Claude account token source for this instance: an absolute path to an owner-only token file, or an op:// 1Password reference (default: $"+claudeAccountSourceEnv+" or ~/.pyry/<name>/"+claudeAccountFileName+")")
+	accountOpCLI := fs.String(claudeAccountOpCLIFlagName, "", "1Password CLI an op:// account source runs: one executable name on PATH or one absolute path (default: $"+claudeAccountOpCLIEnv+", the op_cli key of ~/.pyry/<name>/"+claudeAccountFileName+", or op)")
 	var readFolderEntries folderList
 	fs.Var(&readFolderEntries, "pyry-read-folder", "absolute folder the markdown reader may also open; repeatable")
 	if err := fs.Parse(pyryArgs); err != nil {
@@ -886,7 +888,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// token bytes are re-read on every Claude launch attempt. An unusable source
 	// stops startup like interactive_runner and debug_capture do, while a failed
 	// read only refuses Claude launches and leaves the daemon running.
-	account, err := newClaudeAccount(*accountSource, os.Getenv(claudeAccountSourceEnv), resolveInstanceDirPath(*name), logger)
+	account, err := newClaudeAccount(*accountSource, os.Getenv(claudeAccountSourceEnv), *accountOpCLI, os.Getenv(claudeAccountOpCLIEnv), resolveInstanceDirPath(*name), logger)
 	if err != nil {
 		return err
 	}

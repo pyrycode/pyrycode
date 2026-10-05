@@ -112,7 +112,7 @@ func TestResolveClaudeAccountSource_FIFORefusedWithoutBlocking(t *testing.T) {
 }
 
 func TestNewClaudeAccount_RefusesWithoutEchoingValue(t *testing.T) {
-	for _, value := range []string{plantedToken, "relative/token", "op://vault/item/" + plantedToken, "file:///" + plantedToken} {
+	for _, value := range []string{plantedToken, "relative/token", "file:///" + plantedToken, "op://", "op://vault/item/" + plantedToken + "\n"} {
 		dir := t.TempDir()
 		for _, sel := range []struct{ flag, env, file, origin string }{
 			{flag: value, origin: "flag -pyry-claude-account-source"},
@@ -122,7 +122,7 @@ func TestNewClaudeAccount_RefusesWithoutEchoingValue(t *testing.T) {
 			if sel.file != "" {
 				writeAccountFile(t, dir, sel.file, 0o600)
 			}
-			_, err := newClaudeAccount(sel.flag, sel.env, dir, quietLogger())
+			_, err := newClaudeAccount(sel.flag, sel.env, "", "", dir, quietLogger())
 			if err == nil {
 				t.Fatalf("source from %s accepted", sel.origin)
 			}
@@ -134,7 +134,7 @@ func TestNewClaudeAccount_RefusesWithoutEchoingValue(t *testing.T) {
 }
 
 func TestNewClaudeAccount_NotConfigured(t *testing.T) {
-	a, err := newClaudeAccount("", "", t.TempDir(), quietLogger())
+	a, err := newClaudeAccount("", "", "", "", t.TempDir(), quietLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +243,7 @@ func TestReadTokenFile_HonoursCancellation(t *testing.T) {
 func configuredAccount(t *testing.T, path string) (*claudeAccount, *safeLog) {
 	t.Helper()
 	log := &safeLog{}
-	a, err := newClaudeAccount(path, "", t.TempDir(), testLogger(log))
+	a, err := newClaudeAccount(path, "", "", "", t.TempDir(), testLogger(log))
 	if err != nil {
 		t.Fatal(err)
 	}

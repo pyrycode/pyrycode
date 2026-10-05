@@ -89,3 +89,7 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-05
+
+## Revisions
+
+- 2026-10-05 (build): the helper `tokenFileFailure` is renamed `accountReadFailure` alongside `accountReadError`, since the 1Password reader returns it too. Open question settled: `WaitDelay` stays at 1 s; the deadline and cancel tests return in about 200 ms with the forked `sleep` killed through the process group.
