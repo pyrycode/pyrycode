@@ -19,9 +19,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -113,6 +117,7 @@ type suggestWatch struct {
 	sawDelta, idle bool
 	setRev         uint64 // latest non-empty suggestion's revision; 0 = none yet
 	clearRev       uint64 // revision of a clear above setRev; 0 = none yet
+	bounded        bool
 }
 
 func (w *suggestWatch) observe(t *testing.T, env protocol.Envelope) {
@@ -166,6 +171,16 @@ func (w *suggestWatch) observe(t *testing.T, env protocol.Envelope) {
 		if err := json.Unmarshal(p.SuggestedReply, &text); err != nil {
 			t.Fatalf("reply_suggestion suggested_reply is neither null nor a string: %v", err)
 		}
+		if w.bounded {
+			if !utf8.ValidString(text) || utf8.RuneCountInString(text) > 240 || len(text) > 1024 || strings.TrimSpace(text) == "" {
+				t.Fatal("fallback output outside bounds")
+			}
+			for _, r := range text {
+				if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+					t.Fatal("fallback contains control/separator")
+				}
+			}
+		}
 		t.Logf("reply_suggestion set: revision=%d length=%d session_id set=%v", p.Revision, len(text), p.SessionID != "")
 		if strings.TrimSpace(text) != "" && p.Revision > w.setRev {
 			w.setRev = p.Revision
@@ -197,6 +212,7 @@ func (w *suggestWatch) pumpUntil(t *testing.T, frames <-chan suggestFrame, timeo
 }
 
 func TestInteractiveStream_NativeReplySuggestionSetThenClear(t *testing.T) {
+	installSuggestCLI(t, true)
 	h := startPerConversationHarnessSeeded(t, func(home, workdir string) []string {
 		writeStreamInteractiveConfig(t, home)
 		seedBoundConversation(t, home, suggestConvID, livePerConvBootstrapUUID, workdir)
@@ -245,4 +261,58 @@ func TestInteractiveStream_NativeReplySuggestionSetThenClear(t *testing.T) {
 			"accepted send_message", w.setRev, suggestConvID, perTurnReplyBudget)
 	}
 	t.Logf("suggestion cleared at revision %d (set was %d)", w.clearRev, w.setRev)
+}
+
+// installSuggestCLI separates the native and fallback producers using the real
+// CLI underneath: native proof refuses every non-stream invocation; fallback
+// proof disables prompt suggestions only on the persistent stream child.
+func installSuggestCLI(t *testing.T, native bool) {
+	t.Helper()
+	real, err := exec.LookPath("claude")
+	if err != nil {
+		t.Skip("claude unavailable")
+	}
+	dir := t.TempDir()
+	mode := 0
+	if native {
+		mode = 1
+	}
+	script := fmt.Sprintf(`#!/usr/bin/python3
+import os, sys
+args = sys.argv[1:]
+stream = "--input-format" in args and "stream-json" in args
+if %d and not stream:
+    sys.exit(1)
+if not %d and stream:
+    args = [a for a in args if a != "--prompt-suggestions"]
+    os.environ["CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"] = "0"
+os.execv(%q, [%q] + args)
+`, mode, mode, real, real)
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestInteractiveStream_FallbackReplySuggestionSetThenClear(t *testing.T) {
+	installSuggestCLI(t, false)
+	h := startPerConversationHarnessSeeded(t, func(home, workdir string) []string {
+		writeStreamInteractiveConfig(t, home)
+		seedBoundConversation(t, home, suggestConvID, livePerConvBootstrapUUID, workdir)
+		return nil
+	})
+	frames := startSuggestReader(t, h)
+	w := &suggestWatch{bounded: true}
+	sealSendMessage(t, h.phone, h.initSend, 2, suggestConvID, "fallback-turn", "Suggest a simple Go testing task I can do next. One sentence, no tools.")
+	if !w.pumpUntil(t, frames, perTurnReplyBudget, func() bool { return w.idle }) {
+		t.Fatal("exchange did not complete")
+	}
+	// Includes the two-second native window and ten-second production attempt.
+	if !w.pumpUntil(t, frames, 15*time.Second, func() bool { return w.setRev != 0 }) {
+		t.Fatal("production Haiku fallback absent after completed exchange")
+	}
+	sealSendMessage(t, h.phone, h.initSend, 3, suggestConvID, "fallback-clear", "Thank you. Reply briefly.")
+	if !w.pumpUntil(t, frames, perTurnReplyBudget, func() bool { return w.clearRev > w.setRev }) {
+		t.Fatal("explicit-null clear at higher revision absent")
+	}
 }

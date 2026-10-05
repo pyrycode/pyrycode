@@ -318,8 +318,8 @@ func (e *interactiveTurnEmitterV2) HandleFor(ctx context.Context, convID string,
 		// buffered text; it only emits on the first content of a turn, when the
 		// buffer is necessarily empty.
 		e.transitionTo(ctx, convID, turnbridge.StateResponding)
-		if v.ParentToolCallID == "" && v.Text != "" {
-			e.suggestions.noteAssistantText(convID)
+		if v.ParentToolCallID == "" {
+			e.suggestions.noteAssistantText(convID, v)
 		}
 		wasEmpty := e.deltaBuf.Len() == 0
 		othersBuffered := wasEmpty && e.anyBuffered()

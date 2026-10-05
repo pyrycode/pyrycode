@@ -51,3 +51,6 @@ Pending documentation stage:
 - Threat model: untrusted suggestion content cannot execute tools or expand attachments; authenticated client input uses existing accept boundary. Client rendering remains the existing protocol responsibility.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-05
+
+## Revisions
+- 2026-10-05: use documented safe mode in addition to explicit discovery exclusions while retaining OAuth; reserve 200 ms of the ten-second bound for group termination and pipe closure. Empty final chunks reset message eligibility too.
