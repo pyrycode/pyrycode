@@ -190,12 +190,14 @@ func TestClaudeAccount_RefusedSourceStopsStartup(t *testing.T) {
 	tests := []struct {
 		name   string
 		flag   string
+		opCLI  string
 		env    string
 		file   string
 		origin string
 	}{
 		{name: "flag relative", flag: pasted, origin: "flag"},
-		{name: "env scheme", env: "op://vault/" + pasted, origin: "env"},
+		{name: "env scheme", env: "file:///" + pasted, origin: "env"},
+		{name: "flag op cli shell command", flag: "op://vault/item/field", opCLI: "op read " + pasted, origin: "flag -" + claudeAccountOpCLIFlagName},
 		{name: "file non-string", file: `{"source":["` + pasted + `"]}`, origin: "file"},
 		{name: "file invalid json", file: `{"source":"` + pasted, origin: "file"},
 	}
@@ -217,6 +219,9 @@ func TestClaudeAccount_RefusedSourceStopsStartup(t *testing.T) {
 			args := []string{"-pyry-name", "acct-refused", "-pyry-socket", socket, "-pyry-workdir", home, "-pyry-codex", stub, "-pyry-claude", stub}
 			if tc.flag != "" {
 				args = append(args, "-"+claudeAccountFlagName+"="+tc.flag)
+			}
+			if tc.opCLI != "" {
+				args = append(args, "-"+claudeAccountOpCLIFlagName, tc.opCLI)
 			}
 			err := runSupervisor(args)
 			if err == nil {

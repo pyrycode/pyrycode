@@ -125,7 +125,8 @@ These configure pyry itself and must come **before** any claude args (or after a
 | `-pyry-verbose` | `false` | Debug-level pyry logging on stderr |
 | `-pyry-name <name>` | `pyry` (or `$PYRY_NAME`) | Instance name; socket is `~/.pyry/<name>.sock` |
 | `-pyry-socket <path>` | (unset) | Explicit socket path; overrides `-pyry-name` |
-| `-pyry-claude-account-source <path>` | (unset) | This instance's Claude account token source — an absolute path to an owner-only token file. See [Claude account source](#claude-account-source) below. |
+| `-pyry-claude-account-source <path-or-op-ref>` | (unset) | This instance's Claude account token source — an absolute path to an owner-only token file, or an `op://vault/item/field` 1Password reference. See [Claude account source](#claude-account-source) below. |
+| `-pyry-claude-account-op-cli <name-or-path>` | `op` | The 1Password CLI an `op://` account source runs. One bare executable name on `PATH`, or one absolute path. See [Claude account source](#claude-account-source) below. |
 
 If a claude flag happens to start with `-pyry-`, separate the two with `--`:
 
@@ -164,6 +165,7 @@ A few runtime settings are read from the environment rather than from flags, so 
 | `PYRY_NAME` | `pyry` | Instance name, same as `-pyry-name`; the flag wins when both are set |
 | `PYRY_APPROVAL_TIMEOUT` | `10m` | How long an approval waits for a human before the daemon denies it |
 | `PYRY_CLAUDE_ACCOUNT_SOURCE` | (unset) | Same as `-pyry-claude-account-source`; the flag wins when both are set. See [Claude account source](#claude-account-source) below. |
+| `PYRY_CLAUDE_ACCOUNT_OP_CLI` | (unset) | Same as `-pyry-claude-account-op-cli`; the flag wins when both are set. See [Claude account source](#claude-account-source) below. |
 
 `PYRY_APPROVAL_TIMEOUT` is the one worth setting deliberately. When claude asks permission to use a tool, the request is parked until a client answers it, and this is how long the daemon waits before answering "no" on your behalf. Waiting is not the risky state, because the tool does not run while the request is outstanding, so the value is about how long you might reasonably take to reach your phone rather than about safety. The default is sized for answering from a phone. Shorten it if you sit at the machine and want a faster fail-closed:
 
@@ -279,11 +281,11 @@ By default a pyry instance's claude child inherits whatever `CLAUDE_CODE_OAUTH_T
 
 The source is resolved once per instance, in this order, and the first nonempty value wins:
 
-1. `-pyry-claude-account-source <path>`
+1. `-pyry-claude-account-source <path-or-op-ref>`
 2. `$PYRY_CLAUDE_ACCOUNT_SOURCE`
 3. the `source` field in `~/.pyry/<name>/claude-account.json`
 
-The JSON file is read only when both the flag and the environment variable are empty. A missing file, or a file without a `source` key, means no source is configured and launches keep whatever credentials they inherit — nothing changes. Example `~/.pyry/elli/claude-account.json`:
+The JSON file is read only when both the flag and the environment variable are empty. A missing file, or a file without a `source` key, means no source is configured and launches keep whatever credentials they inherit — nothing changes. Example `~/.pyry/elli/claude-account.json` with a token file:
 
 ```json
 {
@@ -291,9 +293,18 @@ The JSON file is read only when both the flag and the environment variable are e
 }
 ```
 
-Keys other than `source` are ignored (a later source kind will add its own key beside it). The file itself must be owned by the user running pyry and must not be group- or other-writable — it is refused otherwise, since it picks which owner-only file gets handed to a claude child.
+...or with a 1Password reference as the master copy instead:
 
-Today the only source kind is an absolute path to a token file. A relative path, a URI scheme (`op://...`), or anything else nonempty is refused and stops startup.
+```json
+{
+  "source": "op://vault/elli-claude-token/credential",
+  "op_cli": "op"
+}
+```
+
+Keys other than `source` and `op_cli` are ignored. The file itself must be owned by the user running pyry and must not be group- or other-writable — it is refused otherwise, since it picks which owner-only file is read, or which executable is run, to produce the token handed to a claude child.
+
+There are two source kinds: an absolute path to a token file, or an `op://vault/item/field` reference ([#2825](https://github.com/pyrycode/pyrycode/issues/2825)) read through the 1Password CLI. A relative path, any other URI scheme, or anything else nonempty is refused and stops startup.
 
 **The token file.** One raw token, optionally followed by a single LF or CRLF — not a `source`d shell assignment and not an `EnvironmentFile` line, just the bytes of the token itself:
 
@@ -304,11 +315,30 @@ chmod 600 ~/.config/pyry/elli-claude-token
 
 The file must be a regular file, owned by the user running pyry, with no group or other permission bits set — `0400` or `0600` are both accepted. It is refused if it's missing, unreadable, not a regular file (a directory or FIFO included), owned by someone else, loosely permissioned, empty, over 4096 bytes, or holds anything other than printable non-space ASCII once the trailing newline is stripped.
 
-**When it's read.** The daemon makes one read at startup to initialize the account, and after that re-reads the file fresh on every claude launch attempt — first launches, crash-loop restarts, and respawns alike. A rotated file (write a new one and `mv` it into place) takes effect on the very next launch; there's no caching to invalidate.
+**The 1Password reference.** When the source starts with `op://`, the daemon runs `<cli> read <reference>` — the reference as one argument, no shell, no stdin, stderr discarded — and takes the capped stdout (same 4096-byte limit and printable-ASCII shape as the token file) as the token. Nothing is ever cached: this runs on the startup read and again on every claude launch attempt, exactly like the token file.
 
-**Failure and recovery.** An unusable *source* — a bad flag/env value, or an unreadable or malformed `claude-account.json` — is a startup error: the daemon refuses to start, the same posture as a bad `interactive_runner` or `debug_capture` setting. A *read* that fails once the daemon is running (the token file got deleted, permissions loosened, and so on) only refuses that claude launch; the daemon, its control socket and the relay keep running. The next successful read clears the failure and launches resume normally. Neither case ever logs or echoes the token or the configured path — failures name only where the setting came from (flag, env, or file).
+The CLI itself is resolved independently of where the source came from, in this order, defaulting to `op`:
 
-The read is bounded to ten seconds at startup, matching the per-attempt deadline the runner itself applies. That bound covers reads that complete, not reads that hang — an open or read against a wedged FUSE or network mount is not interrupted, so don't rely on this as a hard ceiling on startup time for a token file on unusual storage. A plain local file returns essentially immediately.
+1. `-pyry-claude-account-op-cli <name-or-path>`
+2. `$PYRY_CLAUDE_ACCOUNT_OP_CLI`
+3. the `op_cli` field in `~/.pyry/<name>/claude-account.json`
+4. `op`
+
+`op_cli` is only ever looked at for an `op://` source — a file source ignores it, so an odd value left in `claude-account.json` can't break a token-file instance. The value must be either one bare executable name (letters, digits, `.`, `_`, `+`, `-`, other than `.` or `..`) looked up on `PATH`, or one absolute path, which may contain spaces — never a shell command (`op read`, `./op`, and similar are refused). Anything else is a startup error naming only where the `op_cli` setting came from.
+
+On Windows binaries reached through WSL, point `op_cli` at the Windows CLI's absolute path, e.g.:
+
+```bash
+pyry -pyry-claude-account-op-cli "/mnt/c/Program Files/1Password CLI/op.exe" -pyry-claude-account-source "op://vault/elli-claude-token/credential"
+```
+
+There is no WSL autodetection — the operator must already have WSL interop, the Windows 1Password CLI, and [1Password's desktop-app integration](https://developer.1password.com/docs/cli/app-integration/) set up and unlocked before the daemon starts. See the [`op read` reference](https://developer.1password.com/docs/cli/reference/commands/read/) for what a reference looks like and what the CLI itself requires.
+
+**When it's read.** The daemon makes one read at startup to initialize the account, and after that re-reads the source fresh on every claude launch attempt — first launches, crash-loop restarts, and respawns alike. A rotated token file (write a new one and `mv` it into place) or a rotated 1Password item takes effect on the very next launch; there's no caching to invalidate or restart to trigger.
+
+**Failure and recovery.** An unusable *source* — a bad flag/env value, an unreadable or malformed `claude-account.json`, or an invalid `op_cli` — is a startup error: the daemon refuses to start, the same posture as a bad `interactive_runner` or `debug_capture` setting. A *read* that fails once the daemon is running (the token file got deleted or permissions loosened; the 1Password CLI is missing, locked, denied, times out, or prints something unusable) only refuses that claude launch, with no fallback to a previously read token; the daemon, its control socket and the relay keep running. The next successful read clears the failure and launches resume normally. Neither case ever logs or echoes the token, the configured path, the 1Password reference, or the CLI's own stdout/stderr — failures name only where the setting came from (flag, env, or file) or report one of a small fixed set of reasons ("1Password CLI unavailable", "1Password read timed out", "1Password read failed", and similar).
+
+The read is bounded to ten seconds at startup, matching the per-attempt deadline the runner itself applies. For the token file that bound covers reads that complete, not reads that hang — an open or read against a wedged FUSE or network mount is not interrupted, so don't rely on this as a hard ceiling on startup time for a token file on unusual storage; a plain local file returns essentially immediately. For a 1Password read the bound is reliable either way: the CLI runs as a subprocess that is killed, along with anything it started, the moment the bound expires, so a hung or slow CLI never holds a claude launch past it.
 
 **What stays shared.** This only changes which account token a claude child receives. Settings, plugins, skills, memory and everything else under `CLAUDE_CONFIG_DIR` stay shared across every instance; a Claude account source is not a sandboxed configuration directory.
 
