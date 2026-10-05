@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -39,6 +40,14 @@ const (
 	claudeAccountOpCLIFlagName = "pyry-claude-account-op-cli"
 	claudeAccountOpCLIDefault  = "op"
 )
+
+// keychainPrefix marks an OS secret store source (#2815): the macOS Keychain
+// on darwin, the Secret Service on Linux. The rest is the item's service name.
+const keychainPrefix = "keychain:"
+
+// claudeAccountGOOS picks the keychain tool. Tests set it to exercise both
+// platforms' read paths on one host.
+var claudeAccountGOOS = runtime.GOOS
 
 // maxAccountTokenBytes caps one token file. A subscription OAuth token is far
 // shorter; anything larger is refused rather than read in full.
@@ -138,13 +147,26 @@ func newClaudeAccount(flagValue, envValue, opCLIFlag, opCLIEnv, instanceDir stri
 		a.reader = func(ctx context.Context) (string, streamsup.AccountTokenFailure, error) {
 			return readOpReference(ctx, cli, source)
 		}
+	case strings.HasPrefix(source, keychainPrefix):
+		name := strings.TrimPrefix(source, keychainPrefix)
+		if name == "" || hasControlByte(name) || strings.HasPrefix(name, "-") {
+			return nil, fmt.Errorf("claude account source from %s: malformed keychain item name", origin)
+		}
+		tool, args, ok := keychainCommand(claudeAccountGOOS, name)
+		if !ok {
+			return nil, fmt.Errorf("claude account source from %s: keychain sources are supported only on macOS and Linux", origin)
+		}
+		a.kind = "os_keychain"
+		a.reader = func(ctx context.Context) (string, streamsup.AccountTokenFailure, error) {
+			return runTokenCommand(ctx, tool, args, keychainReasons)
+		}
 	case filepath.IsAbs(source):
 		a.kind = "file"
 		a.reader = func(ctx context.Context) (string, streamsup.AccountTokenFailure, error) {
 			return readTokenFile(ctx, source)
 		}
 	default:
-		return nil, fmt.Errorf("claude account source from %s: unsupported source (want an absolute file path or an op:// reference)", origin)
+		return nil, fmt.Errorf("claude account source from %s: unsupported source (want an absolute file path, an op:// reference or keychain:<name>)", origin)
 	}
 	return a, nil
 }
@@ -336,28 +358,69 @@ func parseTokenBytes(data []byte) (string, streamsup.AccountTokenFailure) {
 	return string(data), ""
 }
 
-// opWaitDelay bounds how long the background Wait on a killed 1Password CLI
+// opWaitDelay bounds how long the background Wait on a killed token command
 // may wait for a descendant that escaped its process group and still holds
 // stdout. The launch itself never waits for it.
 const opWaitDelay = time.Second
 
-// readOpReference runs "<cli> read <ref>" with no shell, no stdin and stderr
-// discarded, and takes its capped stdout as the token. The CLI runs in its own
-// process group, killed as a group when ctx ends, and the read returns as
-// soon as ctx ends whether or not the CLI has exited.
+// commandReasons are the fixed status reasons one token command reports. None
+// carries the command, its arguments or its output.
+type commandReasons struct {
+	unavailable, failed, empty, invalid, timedOut, cancelled string
+}
+
+var opReasons = commandReasons{
+	unavailable: "1Password CLI unavailable",
+	failed:      "1Password read failed",
+	empty:       "1Password output empty",
+	invalid:     "1Password output invalid",
+	timedOut:    "1Password read timed out",
+	cancelled:   "1Password read cancelled",
+}
+
+var keychainReasons = commandReasons{
+	unavailable: "keychain tool unavailable",
+	failed:      "keychain read failed",
+	empty:       "keychain output empty",
+	invalid:     "keychain output invalid",
+	timedOut:    "keychain read timed out",
+	cancelled:   "keychain read cancelled",
+}
+
+// readOpReference runs "<cli> read <ref>" and takes its stdout as the token.
 func readOpReference(ctx context.Context, cli, ref string) (string, streamsup.AccountTokenFailure, error) {
+	return runTokenCommand(ctx, cli, []string{"read", ref}, opReasons)
+}
+
+// keychainCommand is the tool and argument vector that print the password of
+// the item whose service is name, on the platforms that have one.
+func keychainCommand(goos, name string) (tool string, args []string, ok bool) {
+	switch goos {
+	case "darwin":
+		return "security", []string{"find-generic-password", "-s", name, "-w"}, true
+	case "linux":
+		return "secret-tool", []string{"lookup", "service", name}, true
+	}
+	return "", nil, false
+}
+
+// runTokenCommand runs tool with args, no shell, no stdin and stderr
+// discarded, and takes its capped stdout as the token. The tool runs in its
+// own process group, killed as a group when ctx ends, and the read returns as
+// soon as ctx ends whether or not the tool has exited.
+func runTokenCommand(ctx context.Context, tool string, args []string, reasons commandReasons) (string, streamsup.AccountTokenFailure, error) {
 	if err := ctx.Err(); err != nil {
-		return opContextFailure(err)
+		return commandContextFailure(err, reasons)
 	}
 	var stdout cappedBuffer
-	cmd := exec.CommandContext(ctx, cli, "read", ref)
+	cmd := exec.CommandContext(ctx, tool, args...)
 	cmd.Stdout = &stdout
 	cmd.Env = withoutAccountToken(os.Environ())
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = opWaitDelay
 	if err := cmd.Start(); err != nil {
-		return accountReadFailure(streamsup.AccountTokenReadFailure, "1Password CLI unavailable")
+		return accountReadFailure(streamsup.AccountTokenReadFailure, reasons.unavailable)
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -365,33 +428,33 @@ func readOpReference(ctx context.Context, cli, ref string) (string, streamsup.Ac
 	select {
 	case waitErr = <-done:
 	case <-ctx.Done():
-		return opContextFailure(ctx.Err())
+		return commandContextFailure(ctx.Err(), reasons)
 	}
 	if err := ctx.Err(); err != nil {
-		return opContextFailure(err)
+		return commandContextFailure(err, reasons)
 	}
 	if waitErr != nil {
-		return accountReadFailure(streamsup.AccountTokenReadFailure, "1Password read failed")
+		return accountReadFailure(streamsup.AccountTokenReadFailure, reasons.failed)
 	}
 	data := stdout.Bytes()
 	if len(data) > maxAccountTokenBytes {
-		return accountReadFailure(streamsup.AccountTokenInvalidOutput, "1Password output invalid")
+		return accountReadFailure(streamsup.AccountTokenInvalidOutput, reasons.invalid)
 	}
 	token, failure := parseTokenBytes(data)
 	switch failure {
 	case streamsup.AccountTokenEmptyOutput:
-		return accountReadFailure(failure, "1Password output empty")
+		return accountReadFailure(failure, reasons.empty)
 	case streamsup.AccountTokenInvalidOutput:
-		return accountReadFailure(failure, "1Password output invalid")
+		return accountReadFailure(failure, reasons.invalid)
 	}
 	return token, "", nil
 }
 
-func opContextFailure(err error) (string, streamsup.AccountTokenFailure, error) {
+func commandContextFailure(err error, reasons commandReasons) (string, streamsup.AccountTokenFailure, error) {
 	if errors.Is(err, context.DeadlineExceeded) {
-		return accountReadFailure(streamsup.AccountTokenTimeout, "1Password read timed out")
+		return accountReadFailure(streamsup.AccountTokenTimeout, reasons.timedOut)
 	}
-	return accountReadFailure(streamsup.AccountTokenCancellation, "1Password read cancelled")
+	return accountReadFailure(streamsup.AccountTokenCancellation, reasons.cancelled)
 }
 
 // withoutAccountToken drops any inherited Claude token from the CLI's

@@ -1010,7 +1010,7 @@ one unicast reply, correlated by envelope `in_reply_to`; never broadcast.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `kind` | required string | One of `machine_login` (no source configured: the daemon's inherited login), `file`, `1password` or `os_keychain`. A client **must accept an unknown value**. `os_keychain` is declared ahead of its own source (#2815) so clients can be built against it before one exists. |
+| `kind` | required string | One of `machine_login` (no source configured: the daemon's inherited login), `file`, `1password` or `os_keychain` (a `keychain:<name>` source using the macOS Keychain or Linux Secret Service). A client **must accept an unknown value**. |
 | `label` | required string | The operator-given account label, or `""` when none is set. |
 | `state` | required string | One of `ready`, `failed` or `not_configured`. |
 | `reason` | required string | A short daemon-authored failure reason, or `""` outside `state: "failed"`. |
