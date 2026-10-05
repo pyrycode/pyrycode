@@ -48,6 +48,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/pyrycode/pyrycode/internal/agentrun"
 	"github.com/pyrycode/pyrycode/internal/transcript"
@@ -88,6 +89,25 @@ const (
 	defaultBackoffMax     = 30 * time.Second
 	defaultBackoffReset   = 60 * time.Second
 )
+
+// AccountTokenFailure is a safe rejection category. Unknown values are replaced
+// with a generic reason; private provider errors and output are never exposed.
+type AccountTokenFailure string
+
+const (
+	AccountTokenReadFailure   AccountTokenFailure = "read failure"
+	AccountTokenEmptyOutput   AccountTokenFailure = "empty output"
+	AccountTokenInvalidOutput AccountTokenFailure = "invalid output"
+	AccountTokenTimeout       AccountTokenFailure = "timeout"
+	AccountTokenCancellation  AccountTokenFailure = "cancellation"
+)
+
+// AccountTokenProvider reads a fresh account token for one launch attempt.
+// Readers must honour ctx cancellation and must not log tokens or private errors.
+// A non-nil error or nonempty category rejects even when token text is returned.
+// Errors and token text are private; only allowlisted categories reach diagnostics.
+// An empty category accompanying an error means AccountTokenReadFailure.
+type AccountTokenProvider func(ctx context.Context) (token string, failure AccountTokenFailure, privateErr error)
 
 // Config configures a Runner. Required fields are validated in New; zero values
 // for optional fields fall through to the documented defaults.
@@ -154,6 +174,12 @@ type Config struct {
 	// of inheriting implicitly — the same set of variables either way, since an
 	// exec.Cmd with a nil Env already inherits the parent's environment.
 	Env []string
+
+	// AccountTokenProvider optionally gates every launch, including retries and
+	// restarts, on a fresh token read with a ten-second read-only deadline. Nil
+	// preserves inherited credentials. Success replaces inherited and Env token
+	// entries without changing either source. Rejection never launches a child.
+	AccountTokenProvider AccountTokenProvider
 
 	// SessionIDEnvVar names an environment variable each spawn binds to THAT
 	// spawn's live session id — the same id its argv carries as --session-id /
@@ -2508,8 +2534,8 @@ func (r *Runner) Run(ctx context.Context) error {
 // until it exits. It reports started — whether cmd.Start actually launched
 // claude — alongside the child's exit error (nil on clean exit, an
 // *exec.ExitError on a crash, or a wrapped spawn-setup failure). started is
-// false when the spawn fails during setup (StdinPipe / cmd.Start): claude never
-// launched, so the session was never established and the caller must NOT advance
+// false when admission or spawn setup fails (token read / StdinPipe / cmd.Start).
+// Claude never launched, so the session was never established; the caller must NOT advance
 // firstRun — the next attempt has to retry with --session-id, not --resume
 // against an id that --session-id never created. The Run loop distinguishes
 // shutdown from crash via ctx.Err(), not the error value.
@@ -2520,8 +2546,8 @@ func (r *Runner) Run(ctx context.Context) error {
 //
 // env is beginSpawn's composed child environment — Config.Env plus, when
 // Config.SessionIDEnvVar is set, this spawn's live session id — and is likewise
-// carried through untouched. Empty leaves cmd.Env nil, which inherits the parent's
-// environment implicitly; the same set of variables either way.
+// combined with the inherited environment. Optional token admission then replaces
+// only the credential entry; all other snapshotted entries survive.
 //
 // workDir is beginSpawn's setup-time snapshot of the directory to chdir into,
 // carried through as a parameter rather than read off the Runner (#1475): the
@@ -2534,14 +2560,14 @@ func (r *Runner) Run(ctx context.Context) error {
 // The check has to sit here, before Run's cancel() and drainRestart, because a
 // deliberate kill also produces a non-nil waitErr.
 func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, workDir string, freshSeq uint64, spawnMode string) (started bool, stderrTail string, waitErr error) {
+	childEnv, err := r.accountTokenEnv(ctx, append(os.Environ(), env...))
+	if err != nil {
+		return false, "", err
+	}
 	cmd := exec.CommandContext(ctx, r.cfg.ClaudeBin, args...)
 	cmd.Dir = workDir
 	cmd.Stdout = r.cfg.Stdout
-	if len(env) > 0 {
-		cmd.Env = append(os.Environ(), env...)
-	} else {
-		cmd.Env = os.Environ()
-	}
+	cmd.Env = childEnv
 	var childPATH *string
 	for _, entry := range cmd.Environ() {
 		if value, ok := strings.CutPrefix(entry, "PATH="); ok {
@@ -2987,4 +3013,60 @@ func spawnEnv(base []string, name, sessionID string) []string {
 	out := make([]string, 0, len(base)+1)
 	out = append(out, base...)
 	return append(out, name+"="+sessionID)
+}
+
+// accountTokenEnv admits one attempt outside runner locks. The short-lived read
+// context is separate from the iteration context used by the admitted child.
+func (r *Runner) accountTokenEnv(ctx context.Context, env []string) ([]string, error) {
+	if r.cfg.AccountTokenProvider == nil {
+		return env, nil
+	}
+	readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	token, failure, privateErr := r.cfg.AccountTokenProvider(readCtx)
+	// Cancellation takes precedence even if a reader returns a token as success.
+	if err := readCtx.Err(); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, accountTokenError(AccountTokenTimeout)
+		}
+		return nil, accountTokenError(AccountTokenCancellation)
+	}
+	if deadline, ok := readCtx.Deadline(); ok && !time.Now().Before(deadline) {
+		return nil, accountTokenError(AccountTokenTimeout)
+	}
+	if privateErr != nil || failure != "" {
+		if failure == "" {
+			failure = AccountTokenReadFailure
+		}
+		return nil, accountTokenError(failure)
+	}
+	if strings.HasSuffix(token, "\r\n") {
+		token = strings.TrimSuffix(token, "\r\n")
+	} else {
+		token = strings.TrimSuffix(token, "\n")
+	}
+	if token == "" {
+		return nil, accountTokenError(AccountTokenEmptyOutput)
+	}
+	if strings.ContainsRune(token, 0) || strings.ContainsFunc(token, unicode.IsSpace) {
+		return nil, accountTokenError(AccountTokenInvalidOutput)
+	}
+	const prefix = "CLAUDE_CODE_OAUTH_TOKEN="
+	out := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			out = append(out, entry)
+		}
+	}
+	return append(out, prefix+token), nil
+}
+
+func accountTokenError(failure AccountTokenFailure) error {
+	switch failure {
+	case AccountTokenReadFailure, AccountTokenEmptyOutput, AccountTokenInvalidOutput,
+		AccountTokenTimeout, AccountTokenCancellation:
+		return errors.New("streamsup: account token: " + string(failure))
+	default:
+		return errors.New("streamsup: account token: rejected")
+	}
 }

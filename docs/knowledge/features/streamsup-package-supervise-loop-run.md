@@ -8,10 +8,11 @@ loop:
   iterCtx, cancel, args, forceFirst := beginSpawn(ctx, firstRun)  // ONE restartMu section: reads the
                                                         //   Restart-swapped argv AND the (possibly
                                                         //   rotated) id, consumes rotatePending,
-                                                        //   builds the argv, publishes iterCancel
+                                                        //   snapshots spawn inputs, publishes iterCancel;
+                                                        //   builds argv/env after releasing the lock
   if forceFirst → firstRun = true                       // a RestartFresh was consumed: re-arm first-run form
   log "spawning claude"                                 // AFTER the section: no log I/O under a leaf mutex
-  started, waitErr := spawnAndWait(iterCtx, args)       // blocks until child exits or a restart cancels iterCtx
+  started, stderrTail, waitErr := spawnAndWait(iterCtx, ...) // admits token, then waits for child exit
   cancel(); clearIterCancel()
   if ctx.Err() != nil → return ctx.Err()                // parent-ctx cancel = teardown, not a crash
   if started → firstRun = false                         // see the firstRun gate below
@@ -20,13 +21,63 @@ loop:
   select { <-time.After(delay) | <-ctx.Done() → return ctx.Err() | <-restartCh → relaunch now }
 ```
 
-**The single `beginSpawn` acquisition is load-bearing (#1481), not tidiness.** Reading the spawn inputs and publishing `iterCancel` are one `restartMu` section, so a racing `Restart`/`RestartFresh` — which takes that mutex exactly once — is serialised either *wholly before* it (the spawn being set up observes the swapped argv / rotated id) or *wholly after* it (it finds the just-published cancel and tears that spawn down, and `drainRestart` relaunches immediately under the new state). There is no third position, so "a live child under a pre-rotation id **and** no live iteration cancel" is unreachable. Until #1481 this was two sections with a `buildArgs` allocation and a synchronous log write between them, and `iterCancel` was still `nil` from the previous iteration across that gap: a racer landing there wrote its rotation, cancelled **nothing**, and the spawn launched a child under the pre-rotation id for that child's whole lifetime — after which the still-set `rotatePending` made the next crash-respawn `--session-id <newID>`, a fresh transcript, silently discarding every turn since the rotation. `buildArgs` had to move inside the section because `restartMu` is not reentrant (the old `liveArgs()`/`nextSpawnID()` accessors each took it, so a fused section could not call them); both are deleted, and the publish side is narrowed to a no-argument `clearIterCancel` so nothing outside `beginSpawn` can express a publish at all.
+**The single `beginSpawn` acquisition is load-bearing (#1481), not tidiness.** Reading the spawn inputs and publishing `iterCancel` are one `restartMu` section, so a racing `Restart`/`RestartFresh` — which takes that mutex exactly once — is serialised either *wholly before* it (the spawn being set up observes the swapped argv / rotated id) or *wholly after* it (it finds the just-published cancel and cancels that iteration, and `drainRestart` relaunches immediately under the new state). There is no third position, so "a live child under a pre-rotation id **and** no live iteration cancel" is unreachable. Until #1481 this was two sections with a `buildArgs` allocation and a synchronous log write between them, and `iterCancel` was still `nil` from the previous iteration across that gap: a racer landing there wrote its rotation, cancelled **nothing**, and the spawn launched a child under the pre-rotation id for that child's whole lifetime — after which the still-set `rotatePending` made the next crash-respawn `--session-id <newID>`, a fresh transcript, silently discarding every turn since the rotation. The current implementation builds argv and environment after releasing the lock, using the captured inputs with cancellation already published. The old separately locking `liveArgs()`/`nextSpawnID()` accessors are deleted, and the publish side is narrowed to a no-argument `clearIterCancel` so nothing outside `beginSpawn` can express a publish at all.
 
 Shutdown is detected via **parent-ctx cancellation**, never via the child-exit error value — `spawnAndWait`'s `waitErr` only ever means "crashed" once `ctx.Err()` has been checked and is nil. An `iterCtx`-only cancel (from `Restart`) leaves the parent `ctx.Err()` nil, so the loop falls through and relaunches instead of returning. One goroutine total (the caller's `Run`); `cmd.Wait` blocks it, and os/exec runs its own internal ctx-watcher goroutine that invokes `cmd.Cancel` off-loop — on either a parent-ctx cancel (shutdown) or an `iterCtx` cancel (restart).
 
+### Optional account token admission
+
+`Config.AccountTokenProvider` gates each launch attempt in `spawnAndWait`, including
+crash recovery, `Restart` and `RestartFresh`. It is called synchronously on the
+`Run` goroutine after `beginSpawn` publishes cancellation and releases runner
+locks, before subprocess resources are allocated. `New` does not read a token,
+and the runner keeps no token cache. A nil provider preserves environment
+inheritance and the existing launch/restart behaviour, including inherited
+`CLAUDE_CODE_OAUTH_TOKEN` and `Config.Env` overrides. Source selection, instance
+settings and file/1Password readers belong to #2824/#2825.
+
+The provider receives a context derived from `iterCtx` with a maximum ten-second
+read deadline. Readers must honour context cancellation: the runner calls them
+directly, so an uncooperative reader can hold up supervision. `Restart`,
+`RestartFresh` and shutdown cancel a pending read immediately. Cancellation or
+expiry takes precedence over any returned token, including a late success.
+The read context is cancelled when admission returns; the admitted child uses
+`iterCtx`, so the read deadline does not limit its lifetime. A deliberate restart
+relaunches with the current arguments/session and a fresh read, skipping backoff;
+shutdown returns the parent context error without admitting a child.
+
+`AccountTokenProvider` returns `(token string, failure AccountTokenFailure,
+privateErr error)`. Any non-nil private error or nonempty category rejects,
+even alongside a token. Otherwise `accountTokenEnv` removes at most one trailing
+LF or CRLF and requires nonempty text containing neither NUL nor Unicode
+whitespace. Successful admission builds a fresh environment, removes every exact
+`CLAUDE_CODE_OAUTH_TOKEN=` entry from inherited and per-spawn values, and appends
+exactly one entry with this attempt's token. Other entries, including the
+snapshotted session id, survive; neither the parent environment nor `Config.Env`
+is mutated. Rejection starts no child and never falls back to inherited credentials
+or a previously admitted token.
+
+Only daemon-authored rejection errors reach the existing `claude exited` record:
+`streamsup: account token: ` followed by `read failure`, `empty output`,
+`invalid output`, `timeout`, `cancellation` or generic `rejected` for an unknown
+category. An error with no category uses `read failure`. Private provider errors
+are never formatted or wrapped, and raw output, tokens and unknown category text
+never enter diagnostics, events or configuration dumps. Providers must also avoid
+logging tokens or private errors themselves. Ordinary refusal follows the existing
+setup-failure callback, retry/backoff and crash-episode lifecycle; cancellation
+continues through the restart/shutdown branches above.
+
 ### `firstRun` gate: only advances on a successful `cmd.Start` (fix 66cc50e)
 
-`spawnAndWait` returns `(started bool, waitErr error)`. `started` is `false` only when the spawn fails during **setup** (`cmd.StdinPipe()` or `cmd.Start()` erroring) — claude never launched, so `--session-id` never ran and the on-disk session was never established. The original implementation flipped `firstRun = false` unconditionally after every iteration; a transient setup failure (e.g. a momentarily-unavailable binary) would make the *next* attempt respawn with `--resume <id>` against a session that was never created, and claude would error ("no conversation found") on every subsequent attempt — a permanent, unrecoverable crash-loop that defeated the very retry the backoff loop exists for. Fixed by threading `started` through and gating the flip: `if started { firstRun = false }`. A setup failure now correctly retries with `--session-id` until one succeeds. Regression test drives `Run` against a non-existent binary and asserts every retry keeps `--session-id`.
+`spawnAndWait` returns `(started bool, stderrTail string, waitErr error)`. `started` is `false` when account token admission rejects or the spawn fails during **setup** (`cmd.StdinPipe()` or `cmd.Start()` erroring) — claude never launched, so that attempt never ran `--session-id` or established an on-disk session. The original implementation flipped `firstRun = false` unconditionally after every iteration; a transient setup failure (e.g. a momentarily-unavailable binary) would make the *next* attempt respawn with `--resume <id>` against a session that was never created, and claude would error ("no conversation found") on every subsequent attempt — a permanent, unrecoverable crash-loop that defeated the very retry the backoff loop exists for. Fixed by threading `started` through and gating the flip: `if started { firstRun = false }`. A setup failure now correctly retries with `--session-id` until one succeeds. Regression test drives `Run` against a non-existent binary and asserts every retry keeps `--session-id`.
+
+Credential rejection preserves the latch's current value: refusal before the first
+admitted child, or after `RestartFresh` re-arms it, retains create form; refusal
+after a successful launch retains resume form. `TestAccountTokenRejectionRecoveryAndDiagnostics`
+and `TestAccountTokenRejectionAfterAdmittedChild` pin both sides. Testing only an
+initial rejection would miss reuse of an earlier successful token on a later
+failed read. The independent `useCreateForm` transcript probe still decides the
+actual id flag when `ClaudeSessionsDir` is supplied.
 
 **A second, distinct crash-loop shape existed here: `started == true` does not mean a transcript exists.** The gate above only protects against claude never launching; on its own it does nothing for a claude that launches, is torn down before running a turn, and is respawned with `--resume <id>` against an id that was never written to disk. [#1655](session-transcript-and-resume-probe.md) measured against a live claude (2.1.220) that this second premise **HOLDS** — a `--session-id` launch with no turn leaves no `<id>.jsonl`, both while the child is alive and after a graceful `SIGTERM` exit. [ADR 032](../decisions/032-bootstrap-resume-per-spawn-existence-probe.md)'s by-id-existence rule (already applied to the PTY bootstrap path) is the fix; **#1630** carried it into this package as `useCreateForm` (above), inert until **#1631** armed it on the production path — see `mapStreamsupConfig` / `streamClaudeSessionsDir` below.
 
@@ -38,7 +89,7 @@ A package-private `crashEpisode` (`crash_loop.go`) counts consecutive fast exits
 
 **N is sized against the default backoff ladder, not picked for a round number.** The ticket's bound was "no more than 10 seconds of total backoff wait before the notice goes out." On the default ladder (500ms, doubling, 30s cap) the 4th fast exit arrives after 0.5 + 1 + 2 = 3.5s of backoff; N = 5 would be 7.5s and N = 6 would blow the bound at 15.5s. The uptime threshold (10s) is also deliberately well under `BackoffReset` (60s), so every child that stays up long enough to reset the ladder has, by construction, already ended the episode — the two thresholds can't disagree about when a crash loop is over.
 
-A spawn that fails during setup (`started == false` in `spawnAndWait`, see the `firstRun` gate above) still reaches this branch with near-zero uptime and counts as a fast exit — claude never ran, but the daemon is still failing to make progress on this conversation, which is exactly the condition a client needs to hear about.
+A spawn that fails admission or setup (`started == false` in `spawnAndWait`, see the `firstRun` gate above) still reaches this branch and counts as a fast exit when its elapsed attempt time is below the threshold — claude never ran, but the daemon is still failing to make progress on this conversation, which is exactly the condition a client needs to hear about. This elapsed time includes token reading, so a read that exhausts the ten-second deadline does not count as a fast exit.
 
 The hook's contract matches `OnChildExit`'s exactly: synchronous on the `Run` goroutine, no `Runner` lock held, must not block (the respawn wait sits right after it) and must not panic. It carries no arguments — no exit status, no stderr, no argv — so a consumer wired to it structurally cannot put child output on the wire through it, which is what lets `cmd/pyry`'s consumer (below) build a session_error frame straight from the call with a fixed, daemon-written message. See [Crash episode notification — `Config.OnCrashLoop`](streamsup-package-crash-episode-notification-oncrashloop.md) for the `cmd/pyry` wiring and the `session.child_crashing` frame it produces.
 
