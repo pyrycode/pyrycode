@@ -67,3 +67,7 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-05
+
+## Revisions
+
+- 2026-10-05: Read `cmd/pyry/channel_post_v2.go` → `channelPostEmitterV2` during wiring review and refresh its producer/recovery comments. Its fan-out contract is unchanged. Final written-work recount is approximately 770 lines, with zero exports and two updated constructor consumers.

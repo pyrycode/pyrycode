@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -47,19 +46,9 @@ const (
 	// pool not running, or its registry save failing).
 	msgChannelMintFailed = "could not start channel session"
 
-	// msgChannelPostRecordFailed covers a failure to write the message into the
-	// conversation's durable log. Static for the reason above, and with an extra
-	// one of its own: internal/history's errors format absolute filesystem paths
-	// ("open segment %q", "resolve log directory %q"), so forwarding one would
-	// put the daemon's layout on a wire the operator's own scripts read. The
-	// content-free discriminant goes to the daemon's log instead, through the
-	// historyAppendFailure the other history producers already share.
-	//
-	// Since #2498 it also covers a turn-id mint failure, which refuses BEFORE
-	// anything is written. The message is accurate on that branch too — nothing
-	// was recorded — and a second constant would split one operator-visible
-	// outcome across two spellings for a distinction only the daemon's own log
-	// can act on.
+	// msgChannelPostRecordFailed covers pending acceptance or turn-id mint failure.
+	// Storage errors stay behind this static refusal; neither paths nor content
+	// reach the control response or daemon logs.
 	msgChannelPostRecordFailed = "could not record the message"
 
 	// fmtChannelPostAmbiguous is the one refusal in this file that is not a bare
@@ -269,82 +258,15 @@ func channelCreator(
 	}
 }
 
-// channelPoster builds the dependency control.Server.SetChannelPoster installs:
-// given a channel's display label and a message body, record that content in the
-// named conversation's durable log, creating the channel first when the label
-// matches nothing.
-//
-// It takes create — channelCreator's own return value, wired from the same
-// composition-root call — rather than minting a second create path. That is what
-// keeps the confinement order, the eager persist, the bound session and the
-// announcement in one named place, and it is why a mistyped label stays
-// diagnosable: the row it creates carries channelCreator's existing
-// channel_new.created log line, which is what lets the happy path print nothing.
-//
-// appendEntry is history.Store.Append narrowed to a func, and it is narrowed for
-// the reason mint is: the poster unit-tests without an instance directory or a
-// segment layout between the test and the one property under test, which is what
-// bytes this hands the log.
-//
-// IT DOES NOT ROUTE THROUGH appendConversationHistory, and the divergence is the
-// design rather than an oversight. That seam returns nothing by contract — a
-// failed append must never suppress the caller's wire emit, which is right for
-// its two stream producers, whose frame has already gone out by then. Here the
-// order is the other way round: the durable record IS what this verb delivers and
-// it is written FIRST, so an append that failed has to be a post that failed, and
-// a post that failed pushes nothing. A cron exiting 0 having delivered nothing is
-// the exact failure that would otherwise ship.
-//
-// announce carries the recorded content to every connected client (#2498), so a
-// message a cron posts appears in an open app without a reconnect. THE SAME
-// PAYLOAD VALUE goes to both halves — the log and the wire — which is what makes
-// "one post is one rendering" a property rather than two derivations that agree
-// today. A bare func for the reason channelCreator's own announce hook is one,
-// and IT MAY BE NIL for that hook's reason exactly: startRelay returns before any
-// manager exists when no URL is configured, so that daemon has nobody to tell. A
-// nil hook records the post and answers success.
-//
-// The entry type is assistant_delta and NOT the message/role-assistant shape
-// #2497 shipped. That shape reaches a client and draws nothing — desktop's
-// translateTimelineEvent returns a row only for role "user" and null for
-// "assistant", on the live path and the served-history path both — so the record
-// was invisible on the very path it existed for. assistant_delta is what the
-// current clients draw as assistant text, and writing the shape that is pushed is
-// also what keeps a served page from carrying a second record of one post.
-//
-// SECURITY: name is caller-authored text arriving unvalidated past
-// handleChannelPost's shape checks, and it is used for exactly one thing — an
-// equality comparison against stored names. It never reaches a filesystem path
-// (the log keys on the daemon-minted conversation id), never reaches an argv,
-// and never appears in a refusal or a log line. text is conversation content and
-// the durable log is the one place it may be written, so it is never logged
-// either — appendConversationHistory's discipline, kept here by hand because
-// this path does not share its body.
-//
-// The registry enforces NO uniqueness rule on names — channelCreator's doc block
-// says so outright — which is why two or more matches need an answer rather than
-// a silent pick. List and create are two lock acquisitions and not atomic, so
-// concurrent posts naming one absent channel can each create a row; the outcome
-// is a loud ambiguity refusal on the next post rather than a silent
-// misdelivery, and bounding it would mean a uniqueness rule the registry
-// deliberately does not have.
-//
-// carry records the content as pending carry-forward state (#2499), so the next user
-// turn the daemon delivers for this conversation reaches claude with the post ahead
-// of the operator's reply. It runs AFTER the durable record and BEFORE announce: the
-// carry is a durable registry write and belongs with the other one, while announce
-// is the fire-and-forget push that is deliberately last. It returns nothing and
-// cannot fail the post, for announce's reason turned around — the post's own
-// deliverable is the log entry, which has already landed, and a cron reads the exit
-// code. Like announce it MAY BE NIL, which is the PTY posture and every unit test
-// that wires no registry; a nil hook records and answers exactly as before.
+// channelPoster resolves a named channel and durably accepts one whole post.
+// Acceptance owns private client delivery, independent of best-effort Claude
+// carry. A later history or fan-out failure cannot refuse an accepted post.
+// Names are used only for registry equality; neither names nor text are logged.
 func channelPoster(
 	reg *conversations.Registry,
 	create func(cwd, name string) (string, error),
 	defaultCwd string,
-	appendEntry func(conversations.ConversationID, string, json.RawMessage, time.Time) (uint64, error),
-	announce func(protocol.AssistantDeltaPayload),
-	carry func(conversations.ConversationID, string),
+	accept func(conversations.ConversationID, string, string) error,
 	log *slog.Logger,
 ) func(name, text string) error {
 	return func(name, text string) error {
@@ -400,107 +322,14 @@ func channelPoster(
 			return errors.New(msgChannelPostRecordFailed)
 		}
 
-		// SPLIT BEFORE MARSHALLING. control.MaxChannelPostBytes admits 64 KiB and
-		// the v2 application envelope caps at 65519 B, which encoding/json's
-		// six-bytes-per-escaped-byte expansion puts far out of reach for a
-		// single-frame post — so this is a precondition of delivery at the size the
-		// verb already accepts, not a refinement. maxDeltaTextBytes is read, never
-		// re-derived: interactiveTurnEmitterV2's own flushDelta bounds its frames
-		// with the same call, and a second constant here would be a second place
-		// the cap is decided. Every chunk is a substring, so concatenation
-		// reproduces the post byte-for-byte and the split never cuts a rune.
-		//
-		// Empty text cannot reach here — handleChannelPost refuses an empty message
-		// — and would emit nothing if it did.
-		chunks := splitDeltaText(text, maxDeltaTextBytes)
-		payloads := make([]protocol.AssistantDeltaPayload, 0, len(chunks))
-		raws := make([]json.RawMessage, 0, len(chunks))
-		for i, chunk := range chunks {
-			// The conversation id is daemon-derived in both arms above — a registry
-			// match or a freshly minted one — never a value a caller asserted. That is
-			// Store.Append's precondition, and it is the whole of this call's
-			// authorisation property: conversations.ValidID is a shape predicate, so a
-			// canonical-shaped id from a caller would resolve genuinely inside the
-			// conversation it named.
-			p := protocol.AssistantDeltaPayload{
-				ConversationID: string(convID),
-				TurnID:         turnID,
-				Seq:            i,
-				// The main lane. A post is the host's own text rather than a
-				// subagent's, so naming a parent tool call would claim an attribution
-				// nothing produced. The key carries no omitempty, so the empty string
-				// is emitted rather than omitted.
-				ParentToolUseID: "",
-				Text:            chunk,
-			}
-			raw, err := json.Marshal(p)
-			if err != nil {
-				// Defensive, matching both #2114 producers: AssistantDeltaPayload is
-				// three strings and an int and cannot fail to marshal in practice.
-				// Never echo the payload or err.Error() — encoding/json quotes invalid
-				// input bytes into its error, which would put conversation content in a
-				// log line.
-				log.Error("control: channel.post payload marshal failed",
-					"event", "channel_post.marshal_err",
-					"conversation_id", string(convID))
-				return errors.New(msgChannelPostRecordFailed)
-			}
-			payloads = append(payloads, p)
-			raws = append(raws, raw)
-		}
-
-		// Stamped ONCE for the whole post, at the confirmed write —
-		// newOperatorMessageHistory's rule, so a served page orders these entries by
-		// when they landed rather than by when anything upstream was composed. One
-		// stamp rather than one per chunk because one post is one message: a client
-		// showing a time for it should not have to pick among N. UTC matches what
-		// every other producer hoists, so entries from all of them are orderable by
-		// the stored field.
-		//
-		// EVERY CHUNK IS RECORDED BEFORE ANY IS PUSHED. A post that cannot be
-		// recorded must not appear on a screen, because a frame drawn for a message
-		// the log does not hold vanishes on the next connect. The cost is that a
-		// failure partway through a multi-chunk post leaves a PREFIX on disk and
-		// still refuses: history.Store is append-only, so this is not transactional
-		// and cannot be made so here. It is flushDelta's existing exposure, and a
-		// prefix is at least not a mixture.
-		ts := time.Now().UTC()
-		for _, raw := range raws {
-			if _, err := appendEntry(convID, protocol.TypeAssistantDelta, raw, ts); err != nil {
-				log.Warn("control: channel.post history append failed",
-					"event", "channel_post.history_append_err",
-					"conversation_id", string(convID),
-					"reason", historyAppendFailure(err))
-				return errors.New(msgChannelPostRecordFailed)
-			}
-		}
-
-		// Carry the content into claude's next turn for this conversation (#2499).
-		// AFTER the durable record, because a post that could not be recorded is a
-		// post that did not happen and must not reach claude either; the return above
-		// is what enforces that ordering. THE WHOLE TEXT, not the chunks: the split
-		// above exists because a v2 application envelope is byte-capped, and claude's
-		// stdin is not — so re-joining what was only ever split for the wire would be
-		// a round trip through a constraint this side does not have.
-		if carry != nil {
-			carry(convID, text)
-		}
-
-		// Tell every connected client (#2498). LAST, and only once the whole post is
-		// on disk. Its result is deliberately not consulted and it returns no error
-		// of its own — a failed push must not turn a recorded post into a refusal,
-		// because the content is in the durable log whether or not anyone heard, and
-		// a cron reads the exit code.
-		if announce != nil {
-			for _, p := range payloads {
-				announce(p)
-			}
+		if err := accept(convID, turnID, text); err != nil {
+			return errors.New(msgChannelPostRecordFailed)
 		}
 
 		// Neither the chunk count nor any per-chunk field is logged: across a
 		// chunked post both are proxies for the message's length, and this verb's
 		// content stays out of the daemon's log entirely.
-		log.Info("control: channel.post recorded",
+		log.Info("control: channel.post accepted",
 			"event", "channel_post.posted",
 			"conversation_id", string(convID),
 			"created", len(matches) == 0)

@@ -1076,6 +1076,11 @@ func runSupervisor(args []string) error {
 	// It takes the SAME registry and registry path every other conversation-keyed
 	// seam resolves against, both already in scope here.
 	postCarry := &channelCarry{reg: convReg, path: convRegistryPath, logger: logger}
+	// Load recovery before queue construction or any relay inbound delivery.
+	postDelivery, err := newChannelDelivery(filepath.Join(resolveInstanceDirPath(*name), "channel-delivery.json"), conversationHistory, postCarry.record, logger)
+	if err != nil {
+		return err
+	}
 	// operatorMessages is the hand-off from the history producer below to the
 	// live push of the operator's own message (#2699), built BEFORE msgqueue.New
 	// for queueChanges' reason. The ring that push appends to is born in the relay
@@ -1093,12 +1098,12 @@ func runSupervisor(args []string) error {
 		streamSink.setEchoObserver(sendNowPlace.echo)
 	}
 	queue, err := msgqueue.New(msgqueue.Config{
-		// Carry OUTERMOST, so the pending posted text is composed onto the payload
+		// Recovery precedes carry, so the pending posted text is composed onto the payload
 		// once, at the boundary with the queue, and markApprovalHolds stays adjacent to
 		// the seam that produces the hold error it marks. The composed value goes no
 		// further than newInboundDeliver's WriteUserTurn — see channelCarry on why the
 		// "clients see no change" property is structural here rather than a filter.
-		Deliver:  postCarry.carryPending(approvalParked.markApprovalHolds(newInboundDeliver(router.resolve, turnBusy, streamTurnHoldTimeout))),
+		Deliver:  postDelivery.beforeInbound(postCarry.carryPending(approvalParked.markApprovalHolds(newInboundDeliver(router.resolve, turnBusy, streamTurnHoldTimeout)))),
 		OnChange: queueStateNotify(queueChanges, logger),
 		OnGiveUp: blocked,
 		// #2115: the operator's own message reaches the durable log HERE and
@@ -1341,6 +1346,11 @@ func runSupervisor(args []string) error {
 		return fmt.Errorf("relay start: %w", err)
 	}
 	approvalSurfaces.set(approvalSurface)
+	// Delivery runs even when startRelay returned without a relay URL.
+	postDelivery.announce = announcePost
+	postDeliveryDone := make(chan struct{})
+	go func() { postDelivery.run(ctx); close(postDeliveryDone) }()
+	defer func() { cancelCause(nil); <-postDeliveryDone }()
 	// Cancel-then-join: relayCleanup joins producer drains whose Run loops
 	// return only on ctx.Done, so the daemon ctx must already be cancelled when
 	// it runs. Defers are LIFO, so the `defer cancelCause(nil)` registered at the
@@ -1445,20 +1455,7 @@ func runSupervisor(args []string) error {
 	// null-cwd path already takes it, rather than a second time here. The verb
 	// carries no cwd on its wire, so this is the only path value it can have.
 	//
-	// conversationHistory.Append rather than appendConversationHistory: the poster
-	// must be able to FAIL when the write fails, which that seam's contract
-	// deliberately does not allow. See channelPoster.
-	//
-	// announcePost (#2498) is the relay leg's posted-message fan-out, so a message
-	// a cron posts reaches every open client without a reconnect rather than
-	// waiting for its next connect. It arrives nil from startRelay's no-URL early
-	// return — announceConversation's shape one wiring up — and the poster records
-	// exactly as before when it is.
-	//
-	// postCarry.record (#2499) is the third half of the carry built above the queue:
-	// this is where a post becomes pending state, and the queue's two seams are where
-	// it is carried to claude and cleared.
-	ctrl.SetChannelPoster(channelPoster(convReg, createChannel, defaultCwd, conversationHistory.Append, announcePost, postCarry.record, logger))
+	ctrl.SetChannelPoster(channelPoster(convReg, createChannel, defaultCwd, postDelivery.accept, logger))
 	// Explicit requests always have a provider; the flag controls scheduling only.
 	// A nil tracker fails closed rather than inferring idle from missing signals.
 	au, err := newAutoUpdater(func() bool {

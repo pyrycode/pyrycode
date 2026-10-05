@@ -37,15 +37,14 @@ import (
 //
 // The fan-out is conversationUpdateEmitterV2.announce's, copied deliberately
 // rather than by resemblance — that is the frame with the same origin (a
-// host-side control verb, broadcast from the control-server handler goroutine),
+// host-side control verb, broadcast from the sole pending-delivery consumer),
 // so it is the one whose delivery semantics a client already reasons about. One
 // shared timestamp per frame, the #607 interactive capability gate, a monotonic
 // envelope id, and a push loop that tolerates a torn-down conn.
 //
 // LIVE-ONLY, like the conversation update and the attachment offer: no
-// outstanding-post registry and no connect-time replay. The difference from both
-// is that this frame HAS a durable half — channelPoster writes the same payload
-// to the conversation's log before calling here — and that is what makes
+// connect-time replay. Private pending delivery accepts whole posts and retries
+// history writes before calling here. That durable half is what makes
 // live-only acceptable for a type that is also the single droppable class in
 // pushQueue.enqueue and convRing.evictOldest. A client that was disconnected, or
 // whose delta was evicted under backpressure, reads the post out of history.
