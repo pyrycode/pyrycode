@@ -121,6 +121,28 @@
   hole for a neighbouring version's capture to fill. The same caution applies
   to any future baseline-vs-live comparison added to this package.
 
+  **CORRECTED 2026-10-05 (#2843):** `inbandSendTurn`'s resend is gone, and this
+  doc's own earlier framing of it as harmless was wrong. The helper used to
+  rewrite a turn's prompt when no result had landed within a 45 s window; its
+  own comment called a duplicate send "harmless to the verdict" because A1/A2
+  read only the first and last reported model. In a real gate run turn one
+  took ~57 s, past that window, so "one" ran twice, and the next call's wait
+  returned on the duplicate's own result rather than on the turn that call
+  wrote — a read from before `set_model`, so A1/A2 failed. The guarantee now:
+  each call writes its prompt exactly once and returns on the first result
+  after that write, since the previous call already consumed its own result
+  and nothing earlier is left queued in claude. The `ErrNoLiveChild` retry
+  stays — a write refused that way reached no child at all, mirroring
+  production's msgqueue. **Rejected:** resending only once the child that took
+  the write is gone, keyed on a `State().ChildPID` change — `streamsup`'s
+  `spawnAndWait` publishes a respawned child's stdin before it sets the new
+  `ChildPID`, so a write can land on the new child while the stale PID is
+  still reported, reintroducing the exact duplicate the fix removes. One
+  consequence: a tree that loses a write into a dying child (the #1622 M2
+  mutant's shape) now fails inside the helper with "produced no result line"
+  instead of being carried through to A1-A4 — still red, just red earlier.
+  See `docs/specs/architecture/2843-inband-send-turn-single-write.md`.
+
 - `set_permission_mode_probe_test.go` (#1595) — **does the bypass posture have
   an in-band form, the way #1581/#1582 proved the model does?** Four direct
   `exec.CommandContext("claude", …)` children (not a `sessions.Pool`, mirroring
@@ -294,3 +316,18 @@
   carve-out](streamsup-package-posture-gate-spawn-permission-mode-ack.md#the-escalation-stays-spawn-unwritable-deliberately-2066)
   for why the spawn-time write exists at all and why it stays off for a
   bypass session's *own* spawn.
+
+- `inband_send_turn_test.go` (#2843) — **pins `inbandSendTurn`'s write-once
+  guarantee (see the CORRECTED entry above) against a test double, with no
+  claude and no daemon.** `serialTurnRunner` answers turns one at a time in
+  write order the way claude's own stdin queue does, computing each answer
+  from the clock rather than a goroutine, so the double is deterministic.
+  `TestInbandSendTurn_SlowTurnIsWrittenOnce` runs a first-turn-slower-than-
+  the-old-resend-window row (46 s, past the deleted 45 s `inbandResendAfter`)
+  and an `ErrNoLiveChild`-then-recovers row, and after each of two calls
+  asserts that the answered turns equal exactly the prompts sent so far — on
+  the old helper the slow row fails with `answered turns ["one" "one"
+  "two"], want ["one" "two"]`. `t.Parallel()`, so the 46 s row overlaps the
+  package's other parallel tests. Zero production files touched. See
+  `docs/specs/architecture/2843-inband-send-turn-single-write.md` for the
+  full design.
