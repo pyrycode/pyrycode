@@ -5,7 +5,14 @@ The daemon-side **trust decision** [#607](../codebase/607.md) deferred. #607 lan
 **The authoritative supported set + the pure intersection.** The supported set is the daemon's own constant — **never** a mirror of the phone's claims:
 
 ```go
-var supportedV2Capabilities = []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList, protocol.CapabilityContextUsage, protocol.CapabilityMultiAgent}
+var supportedV2Capabilities = []string{
+    protocol.CapabilityInteractive,
+    protocol.CapabilityQuestion,
+    protocol.CapabilityModelList,
+    protocol.CapabilityContextUsage,
+    protocol.CapabilityMultiAgent,
+    protocol.CapabilityStopBackgroundTask,
+}
 
 // advertised ∩ supportedV2Capabilities, in supported-set order. Iterates the
 // SUPPORTED set (not the advertised one), so the result is a subset of supported
@@ -33,6 +40,22 @@ func negotiateCapabilities(advertised []string) []string {
 `CapabilityContextUsage = "context_usage"` (#2431) joined the supported set as a fourth, detection-only member the same way `question` and `model_list` did — its verb, `request_context_usage`, gates on `interactive` alone.
 
 **`CapabilityMultiAgent = "multi_agent"` (#2643) is the fifth member, and the first that is not pure detection.** Its neighbours only let a client tell which daemon build it is talking to; this one changes what the daemon sends. `V2Session` gained a second per-conn bool beside `interactive`, `multiAgent`, set in the same token-OK tail via the same value-specific `s.multiAgent = slices.Contains(negotiated, protocol.CapabilityMultiAgent)` — never a length check, for the reason above. `routeAppFrame` copies it onto the per-frame `*dispatch.Conn` with `conn.SetMultiAgent(s.multiAgent)` before `Route` runs, so `internal/relay/handlers.ListConversationsWithAgents` (and #2644/#2645's handlers) read the decision as `c.MultiAgent()` without reaching back into the session — see [`dispatch-package.md`](dispatch-package.md). Re-key preserves `s.multiAgent` by never touching it, the same as `interactive` and `device`/`peerStatic`; `TestV2Session_MultiAgent_ReachesHandlerAndSurvivesRekey` pins the flag across a same-static re-key. It still grants **no** interactive access — no `interactive` gate reads it, and `multi agent alone grants no interactive` in `TestV2Session_Handshake_CapabilityNegotiation` pins that — but unlike `question`/`model_list`/`context_usage`, a client that negotiates only `multi_agent` and not `interactive` still gets a *shaped* `conversations` reply (every row carries `agent`, and Codex rows are included), because that verb's own gate is `c.MultiAgent()`, not `s.interactive`. The two flags are independent booleans on both `V2Session` and `Conn`, not one capability implying the other.
+
+**Detection must not become an actuation gate.**
+`CapabilityStopBackgroundTask = "stop_background_task"` is the sixth supported
+member (#2797). Clients show a per-task stop button only when intersection
+negotiation echoes it in `hello_ack`; an omitted advertisement is never echoed.
+Keep `s.interactive` value-specific: advertising this detection string alone
+leaves the connection non-interactive. `dispatchAppFrame` still checks only the
+wired `BackgroundTaskStopper` seam and `s.interactive` for this verb, so requiring
+the detection string there would reject existing interactive clients.
+`TestV2Session_Handshake_CapabilityNegotiation` pins the detection-only
+connection's noninteractive state; `TestV2Session_StopBackgroundTask_Contract`
+exercises actuation with only `interactive` advertised. Both negotiation tables
+also assert all six capabilities in supported-set order against a reversed
+advertisement containing a duplicate and an unknown string. See the
+[wire contract](../../protocol-mobile.md#stop-background-task-v2) and
+[background-task payloads](protocol-package-background-task-event-payloads.md).
 
 **#2644 gives `multi_agent` a second gate, at the push choke point rather than a reply.** `forwardEnvelope` — the one seal path every pushed frame reaches (the push-queue drain, reconnect replay, the resync marker) — calls `withheldFromConn(s, env)` (`v2session_agentgate.go`) before sealing; a conn without `s.multiAgent` gets nothing for a frame whose `pushedConversationID` resolves, through the reused resolution rule (`handlers.agentOf` exported to `AgentOf` for this second caller), to a Codex-bound conversation. Handler replies (`forwardAppReply`) are exempt by construction, not by a check — a reply is never withheld, so a client that already learned a Codex conversation id from an accepted request still gets replies naming it.
 

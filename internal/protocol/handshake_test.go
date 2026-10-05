@@ -283,16 +283,18 @@ func TestHelloAckPayload_WorkspaceRootRoundTrip(t *testing.T) {
 // which daemon build it is talking to. Add a line here with every new capability.
 func TestCapability_Constants_MatchSpec(t *testing.T) {
 	got := map[string]string{
-		"CapabilityInteractive":  CapabilityInteractive,
-		"CapabilityQuestion":     CapabilityQuestion,
-		"CapabilityModelList":    CapabilityModelList,
-		"CapabilityContextUsage": CapabilityContextUsage,
+		"CapabilityInteractive":        CapabilityInteractive,
+		"CapabilityQuestion":           CapabilityQuestion,
+		"CapabilityModelList":          CapabilityModelList,
+		"CapabilityContextUsage":       CapabilityContextUsage,
+		"CapabilityStopBackgroundTask": CapabilityStopBackgroundTask,
 	}
 	want := map[string]string{
-		"CapabilityInteractive":  "interactive",
-		"CapabilityQuestion":     "question",
-		"CapabilityModelList":    "model_list",
-		"CapabilityContextUsage": "context_usage",
+		"CapabilityInteractive":        "interactive",
+		"CapabilityQuestion":           "question",
+		"CapabilityModelList":          "model_list",
+		"CapabilityContextUsage":       "context_usage",
+		"CapabilityStopBackgroundTask": "stop_background_task",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("capability constant count: got %d, want %d", len(got), len(want))
