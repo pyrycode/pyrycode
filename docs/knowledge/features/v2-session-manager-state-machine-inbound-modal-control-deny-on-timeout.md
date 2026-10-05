@@ -308,6 +308,26 @@ just one step earlier. `RefuseQuestion`'s unconditional resolve is the one
 place its shape does not carry over: a `Deny` needs no input, an `Allow`
 does.
 
+`AnswerQuestionDiagnostic` and `RefuseQuestionDiagnostic` report consumed
+status and the fixed reason for the first failed check; their bool-only
+wrappers call them once. Missing correlation and a lost question-registry
+one-shot remain inert on both arms. Answers additionally report a missing
+parked request, a batch lost during validation or a rejected `answerVerdict`.
+Validation precedes consumption, so rejected answers leave the batch
+answerable. The gated `questionResolverV2` adds actuator, admission-lookup
+and device checks ahead of these bridge checks; the relay alone logs the
+returned reason in its single terminal record. See
+[Diagnostic logging](v2-session-manager-state-machine-inbound-question-control-questionresolver-seam.md#diagnostic-logging)
+for the ordered codes and applicability.
+
+A permission-registry `Resolve` miss **after** the question batch was
+consumed remains successful (`resolved`) and still dismisses on either arm:
+the client must learn that the panel is dead even if the permission verdict
+was already decided. Diagnostic reporting adds no dismissal arbiter. The
+question registry's atomic `Resolve` still picks the single winner among
+answer, refusal and `retireQuestion`; only the bridge broadcasts, with answer
+and refusal dismissal detached from the relay's `Run` goroutine.
+
 **Splicing claude's own bytes and re-marshalling the daemon's parked batch
 are not interchangeable copies of the same information.** `AnswerQuestion`
 builds claude's updated tool input by extracting the `questions` value out
