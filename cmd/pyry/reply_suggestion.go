@@ -167,7 +167,7 @@ func (s *replySuggestions) noteDelivered(convID string, msg msgqueue.QueuedMessa
 		return
 	}
 	c.userText = replyExchangePrefix(msg.Text)
-	c.userOK = strings.TrimSpace(c.userText) != ""
+	c.userOK = strings.TrimSpace(msg.Text) != ""
 	if c.pending != nil && c.turnOK && c.userOK && !c.invalidated {
 		s.setLocked(convID, c, *c.pending, c.pendingSID)
 	}
@@ -209,13 +209,15 @@ func (s *replySuggestions) noteAssistantText(convID string, ev turnevent.TextChu
 		}
 		if c.messageID != ev.MessageID {
 			c.messageID, c.assistantText, c.assistantFull = ev.MessageID, "", false
+			c.assistant = false
 		}
 		if !c.assistantFull {
 			combined := c.assistantText + ev.Text
 			c.assistantText = replyExchangePrefix(combined)
 			c.assistantFull = len(combined) > replyExchangeBytes
 		}
-		c.assistant = strings.TrimSpace(c.assistantText) != ""
+		// Eligibility considers all chunks, even after bounded retention fills.
+		c.assistant = c.assistant || strings.TrimSpace(ev.Text) != ""
 	}
 	s.mu.Unlock()
 }

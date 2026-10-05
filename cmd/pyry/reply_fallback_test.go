@@ -14,6 +14,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
@@ -340,5 +342,160 @@ func TestReplyFallbackInputBounds(t *testing.T) {
 	c := s.convs[testConvID]
 	if len(c.userText) != 8192 || len(c.assistantText) != 8191 || !utf8.ValidString(c.userText) || !utf8.ValidString(c.assistantText) {
 		t.Fatal("input not bounded at first UTF-8 prefix")
+	}
+}
+
+func TestReplySuggestionEligibilityBeyondPrefix(t *testing.T) {
+	t.Parallel()
+	prefix := strings.Repeat(" ", replyExchangeBytes)
+	for _, source := range []string{"native", "fallback"} {
+		for _, side := range []string{"user", "assistant", "assistant chunks", "blank final", "subagent only"} {
+			t.Run(source+"/"+side, func(t *testing.T) {
+				e, s := newSuggestionEmitter(testConvID)
+				calls := make(chan [2]string, 1)
+				s.fallback = func(_ context.Context, user, assistant string) (string, error) {
+					calls <- [2]string{user, assistant}
+					return "Fallback", nil
+				}
+				s.waitNative = func(ctx context.Context) bool {
+					if source == "native" {
+						<-ctx.Done()
+						return false
+					}
+					return true
+				}
+				t.Cleanup(s.stopFallbacks)
+				user, assistant := "user", "answer"
+				if side == "user" {
+					user = prefix + "prose"
+				}
+				s.beginWrite(testConvID, 1)
+				s.noteDelivered(testConvID, msgqueue.QueuedMessage{ID: 1, Text: user})
+				if side != "user" {
+					assistant = prefix
+					if side != "assistant chunks" {
+						assistant += "prose"
+					} else {
+						assistant += " " // Fill retention before the nonblank chunk arrives.
+					}
+				}
+				ctx := context.Background()
+				e.HandleFor(ctx, testConvID, turnevent.TextChunk{MessageID: "final", Text: assistant})
+				if side == "assistant chunks" {
+					e.HandleFor(ctx, testConvID, turnevent.TextChunk{MessageID: "final", Text: "prose"})
+				}
+				if side == "blank final" || side == "subagent only" {
+					e.HandleFor(ctx, testConvID, turnevent.TextChunk{MessageID: "blank", Text: prefix})
+				}
+				if side == "subagent only" {
+					e.HandleFor(ctx, testConvID, turnevent.TextChunk{MessageID: "child", ParentToolCallID: "tool", Text: "prose"})
+				}
+				e.HandleFor(ctx, testConvID, successEnd)
+				if source == "native" {
+					s.suggest(testConvID, "Native unchanged\n")
+					s.stopFallbacks()
+				}
+				s.workers.Wait()
+				eligible := side != "blank final" && side != "subagent only"
+				p, ok := suggestionFor(t, s, testConvID)
+				if published := ok && p.SuggestedReply != nil; published != eligible {
+					t.Fatalf("published=%v, eligible=%v", published, eligible)
+				}
+				if eligible && source == "native" && *p.SuggestedReply != "Native unchanged\n" {
+					t.Fatal("native suggestion changed")
+				}
+				select {
+				case exchange := <-calls:
+					if source != "fallback" || !eligible || exchange != [2]string{replyExchangePrefix(user), replyExchangePrefix(assistant)} {
+						t.Fatal("unexpected fallback exchange")
+					}
+				default:
+					if source == "fallback" && eligible {
+						t.Fatal("missing fallback")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestReplyFallbackRegistryRemovalCancellation(t *testing.T) {
+	t.Parallel()
+	for _, removal := range []string{"delete", "sweep"} {
+		for _, phase := range []string{"native wait", "inference"} {
+			t.Run(removal+"/"+phase, func(t *testing.T) {
+				e, s := newSuggestionEmitter(testConvID, suggestConvB)
+				reg := &conversations.Registry{}
+				now := time.Now()
+				reg.Create(conversations.Conversation{ID: testConvID, LastUsedAt: now.Add(-365 * 24 * time.Hour)})
+				reg.Create(conversations.Conversation{ID: suggestConvB, LastUsedAt: now})
+				ring := eventring.New(2)
+				ring.Append(testConvID, "turn_state", nil, now)
+				ring.Append(suggestConvB, "turn_state", nil, now)
+				dropRingOnConversationDelete(reg, ring, s)
+				suggestedTurn(e, s, suggestConvB)
+				s.suggest(suggestConvB, "Keep this")
+				ready, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+				calls := make(chan struct{}, 1)
+				s.waitNative = func(ctx context.Context) bool {
+					if phase == "inference" {
+						return true
+					}
+					close(ready)
+					<-ctx.Done()
+					close(cancelled)
+					return false
+				}
+				s.fallback = func(ctx context.Context, _, _ string) (string, error) {
+					calls <- struct{}{}
+					close(ready)
+					<-ctx.Done()
+					close(cancelled)
+					<-release
+					return "Late fallback", nil
+				}
+				t.Cleanup(s.stopFallbacks)
+				released := false
+				t.Cleanup(func() {
+					if !released {
+						close(release)
+					}
+				})
+				suggestedTurn(e, s, testConvID)
+				select {
+				case <-ready:
+				case <-time.After(time.Second):
+					t.Fatal("worker not ready")
+				}
+				if removal == "delete" {
+					if !reg.Delete(testConvID) {
+						t.Fatal("conversation not deleted")
+					}
+				} else if n := conversations.Sweep(reg, now); n != 1 {
+					t.Fatalf("swept %d conversations", n)
+				}
+				select {
+				case <-cancelled:
+				case <-time.After(time.Second):
+					t.Fatal("registry removal did not cancel worker")
+				}
+				close(release)
+				released = true
+				s.workers.Wait()
+				if ring.NewestID(testConvID) != 0 || ring.NewestID(suggestConvB) == 0 {
+					t.Fatal("removal did not preserve replay isolation")
+				}
+				s.mu.Lock()
+				_, retained := s.convs[testConvID]
+				kept := s.convs[suggestConvB].text
+				s.mu.Unlock()
+				if retained || kept == nil || *kept != "Keep this" {
+					t.Fatal("removal did not forget only the deleted suggestion state")
+				}
+				if phase == "native wait" && len(calls) != 0 {
+					t.Fatal("deleted conversation launched inference")
+				}
+			})
+		}
 	}
 }
