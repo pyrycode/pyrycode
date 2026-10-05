@@ -1,5 +1,6 @@
 # interactive_stream_inband_model_test.go
-- `interactive_stream_inband_model_test.go` (#1582, updated #2280) — **live proof
+
+- `interactive_stream_inband_model_test.go` (#1582, updated #2280, #2803) — **live proof
   of model delivery, not a new feature under test**: #2280 changed
   `Pool.UpdateSettings` to deliver a non-empty model as a `set_model` control
   request instead of an in-band `/model` user turn, and proved the exact
@@ -54,30 +55,45 @@
   result count is hardcoded rather than captured relative to the count at that
   moment — a low-probability false-red path on a >45s first turn, left as a
   follow-up rather than fixed on this branch). See [`codebase/1582.md`](../codebase/1582.md).
-  **EXTENDED #1838** (bracketed model values, e.g. `opus[1m]`): a second phase,
-  appended after A1–A4 in the same test function rather than a new one, proves
-  that a *bracketed* value delivered in-band takes effect on a running child —
-  the piece `internal/relay`'s hermetic `TestValidModel` /
-  `TestValidModel_ByteSetIsClosed` cannot reach, since `validModel` is
-  unexported and this package cannot call it. The phase never pins a
-  bracketed string: the ticket named `opus[1m]`, measured against claude
-  2.1.220, and the capture this repo now carries (2.1.239) no longer publishes
-  that row at all, so a hardcoded target would fail on menu churn unrelated to
-  the mechanism. It instead calls `RequestInitialize` on the same live child,
-  reads the model menu claude just published off the tap, and picks the first
-  row whose `value` contains `[` and whose `resolvedModel` differs from the
-  model this phase's own baseline turn announced — the second condition is
-  what stops the phase from asserting a change that was already true. Finding
-  none, it `t.Fatalf`s and lists every `value` offered, deliberately not
-  `t.Skip`: a skip would be indistinguishable from this package's
-  absent-credentials skip in the run count, and a claude that stops publishing
-  any bracketed row retires the ticket's premise, which is worth surfacing
-  rather than swallowing. Three assertions mirror A1–A4 for the new baseline
-  (model changed; the announced model matches the chosen row's
-  `resolvedModel`, with a message distinguishing a claude-side inconsistency
-  from a defect in this change if the two disagree; one child pid across the
-  phase). See [`v2-session-manager.md`](v2-session-manager.md)'s `validModel`
-  entry for the grammar the hermetic tests pin. **Observed 2026-09-02 (#2041,
+  **Second transition (#1838, #2803):** phase 2 follows A1–A4 in the same
+  test and always proves another exact model transition in the same running
+  child. It calls `RequestInitialize` on that child and reads the published
+  menu off the tap. `inbandPickPhaseTwoTarget` prefers the first usable row
+  whose `value` contains `[`, otherwise the first published plain alphabetic
+  alias, preserving menu order within each preference. Both require nonempty
+  `value` and `resolvedModel`, with a resolution different from phase 1's final
+  announced model, which is phase 2's baseline. An empty resolution differs
+  from a nonempty baseline but cannot establish an exact expected model;
+  rejecting it prevents a false candidate. Full IDs are excluded from the
+  fallback because `sessions.familyAlias` can rewrite them before
+  [`Pool.deliverSettingsInBand`](sessions-package-key-types-pool-updatesettings.md)
+  sends them, so their menu row's resolution need not describe the delivered
+  alias. The fallback's expected resolution comes from the alias's own row in
+  this live menu.
+
+  The test logs the full menu, selected value, expected resolution and whether
+  bracketed coverage is available. With no usable target it fails with the
+  menu; it never skips or omits phase 2 for that reason. A selected bracketed
+  target is sent once: delivery or model-assertion failure never retries or
+  falls back to an alias. Both phases require a `set_model` success response
+  with the request's own correlation id (`1` and `3`; initialize uses `2`).
+  A1/A2 and B1/B2 require the announced model to change and equal the exact
+  expected resolution. A3/A4 and B3 require unchanged child PIDs, with a final
+  one-spawn check covering the entire test. B1/B2 failures retain the chosen-row
+  menu-drift diagnostics described below.
+
+  A bracket-free live pass proves in-band model delivery through two exact
+  transitions, but cannot prove live bracketed-value support. That coverage is
+  conditional on a usable bracketed row being published; absence of one is
+  upstream menu churn, not evidence that delivery failed. Hermetic bracketed
+  validation remains covered by `internal/relay`'s `TestValidModel` and
+  `TestValidModel_ByteSetIsClosed`; those tests prove the accepted grammar,
+  not what a live child applies. `TestInbandPickPhaseTwoTarget` checks selection
+  without credentials, including bracketed preference, bracket-free menus,
+  empty fields, baseline-equivalent rows, full-ID exclusion and no usable
+  target. See the relay's
+  [`validModel` entry](v2-session-manager-state-machine-inbound-set-session-settings-settingsupd.md)
+  for the grammar the hermetic tests pin. **Observed 2026-09-02 (#2041,
   filed as #2045):** a real-claude gate run flagged
   `TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel` as newly
   red on a branch that touched zero production source files, because claude's
