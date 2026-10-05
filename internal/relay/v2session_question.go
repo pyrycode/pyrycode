@@ -74,42 +74,38 @@ import (
 // QuestionAnswerPayload's doc block states the rule and this is the handler it was
 // written for. The reject record therefore carries no batch id either: the decode
 // is what failed, so a partially-populated id would attribute refused bytes to a
-// batch. On the paths where it IS trustworthy, question_batch_id is logged — that
-// same doc block marks it and answer_token explicitly safe to log, so this handler
-// neither invents a redaction rule nor assumes one exists. No answer value and no
-// raw payload byte appears on any path.
+// batch. After a successful decode, question_batch_id is an untrusted correlation
+// value escaped by structured slog fields, never authorization evidence. Receipt
+// and terminal records contain no answer token, question text, option label,
+// answer value, raw payload or decoder-error text.
 func (m *V2SessionManager) handleQuestionAnswer(s *V2Session, env protocol.Envelope) {
+	logger := m.cfg.Logger.With("frame_kind", protocol.TypeQuestionAnswer, "conn_id", s.connID)
+	logger.Info("relay: v2 question control received", "event", "v2.question.received")
+	reason := "no_resolver"
+	defer func() {
+		logger.Info("relay: v2 question control completed", "event", "v2.question.completed", "reason", reason)
+	}()
 	if m.cfg.QuestionResolver == nil {
-		m.cfg.Logger.Debug("relay: v2 question_answer inert; no resolver wired",
-			"event", "v2.question.answer.inert",
-			"conn_id", s.connID)
 		return
 	}
 	var p protocol.QuestionAnswerPayload
 	if err := json.Unmarshal(env.Payload, &p); err != nil {
-		// Rejected, not tolerated (see step 2). NEVER echo err or any payload
-		// byte — not to the phone, not into this record.
-		m.cfg.Logger.Warn("relay: v2 question_answer rejected; payload did not decode",
-			"event", "v2.question.answer.decode_err",
-			"conn_id", s.connID)
+		// Never log err or the partially decoded identifier.
+		reason = "decode_rejected"
 		return
 	}
+	logger = logger.With("question_batch_id", p.QuestionBatchID)
 
-	if m.cfg.QuestionResolver.ResolveAnswer(p, s.device) {
-		m.cfg.Logger.Info("relay: v2 question_answer resolved",
-			"event", "v2.question.answer.resolved",
-			"conn_id", s.connID,
-			"question_batch_id", p.QuestionBatchID)
-		return
+	var consumed bool
+	if resolver, ok := m.cfg.QuestionResolver.(DiagnosticQuestionResolver); ok {
+		consumed, reason = resolver.ResolveAnswerDiagnostic(p, s.device)
+	} else {
+		consumed = m.cfg.QuestionResolver.ResolveAnswer(p, s.device)
+		reason = "legacy_not_consumed"
 	}
-	// false ⇒ success of a valid request: an unknown or already-resolved batch.
-	// Nothing changed, so emitting nothing is correct — no reply, no broadcast.
-	// The discriminant is a diagnostic only; it MUST NOT drive a question_dismissed
-	// (see QuestionResolver's doc block).
-	m.cfg.Logger.Debug("relay: v2 question_answer no-op",
-		"event", "v2.question.answer.noop",
-		"conn_id", s.connID,
-		"question_batch_id", p.QuestionBatchID)
+	if consumed {
+		reason = "resolved"
+	}
 }
 
 // handleQuestionRefusal routes an inbound question_refused control frame through
@@ -124,29 +120,31 @@ func (m *V2SessionManager) handleQuestionAnswer(s *V2Session, env protocol.Envel
 // rule is the frame family's, not the shape's, and one tolerant sibling would be
 // the exception a later reader copies.
 func (m *V2SessionManager) handleQuestionRefusal(s *V2Session, env protocol.Envelope) {
+	logger := m.cfg.Logger.With("frame_kind", protocol.TypeQuestionRefused, "conn_id", s.connID)
+	logger.Info("relay: v2 question control received", "event", "v2.question.received")
+	reason := "no_resolver"
+	defer func() {
+		logger.Info("relay: v2 question control completed", "event", "v2.question.completed", "reason", reason)
+	}()
 	if m.cfg.QuestionResolver == nil {
-		m.cfg.Logger.Debug("relay: v2 question_refused inert; no resolver wired",
-			"event", "v2.question.refusal.inert",
-			"conn_id", s.connID)
 		return
 	}
 	var p protocol.QuestionRefusedPayload
 	if err := json.Unmarshal(env.Payload, &p); err != nil {
-		m.cfg.Logger.Warn("relay: v2 question_refused rejected; payload did not decode",
-			"event", "v2.question.refusal.decode_err",
-			"conn_id", s.connID)
+		// Never log err or the partially decoded identifier.
+		reason = "decode_rejected"
 		return
 	}
+	logger = logger.With("question_batch_id", p.QuestionBatchID)
 
-	if m.cfg.QuestionResolver.ResolveRefusal(p, s.device) {
-		m.cfg.Logger.Info("relay: v2 question_refused resolved",
-			"event", "v2.question.refusal.resolved",
-			"conn_id", s.connID,
-			"question_batch_id", p.QuestionBatchID)
-		return
+	var consumed bool
+	if resolver, ok := m.cfg.QuestionResolver.(DiagnosticQuestionResolver); ok {
+		consumed, reason = resolver.ResolveRefusalDiagnostic(p, s.device)
+	} else {
+		consumed = m.cfg.QuestionResolver.ResolveRefusal(p, s.device)
+		reason = "legacy_not_consumed"
 	}
-	m.cfg.Logger.Debug("relay: v2 question_refused no-op",
-		"event", "v2.question.refusal.noop",
-		"conn_id", s.connID,
-		"question_batch_id", p.QuestionBatchID)
+	if consumed {
+		reason = "resolved"
+	}
 }

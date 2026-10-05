@@ -375,7 +375,7 @@ type ModalResolver interface {
 //
 // THE BOOL IS A DIAGNOSTIC, NEVER A BROADCAST TRIGGER. It reports whether the
 // implementation consumed the batch, and the relay handler's only use for it is
-// choosing between two content-free log records — QueueRemover.Remove's exact role
+// choosing a content-free terminal log reason — QueueRemover.Remove's exact role
 // in handleDequeueMessage. The relay MUST NOT emit question_dismissed on it:
 // cmd/pyry's streamApprovalBridge.retireQuestion is that frame's sole broadcaster,
 // and a second one would be a second arbiter of whether a batch was consumed. This
@@ -419,6 +419,23 @@ type QuestionResolver interface {
 	// to choose, so the batch resolves with no selection. Same comma-ok-shaped
 	// report and same no-op posture as ResolveAnswer.
 	ResolveRefusal(p protocol.QuestionRefusedPayload, dev *devices.Device) bool
+}
+
+// DiagnosticQuestionResolver optionally extends QuestionResolver with the outcome
+// of the same resolution attempt. The handler calls a diagnostic method INSTEAD
+// OF its bool-only counterpart, never both. Existing configuration wiring and
+// bool-only implementations remain valid.
+//
+// Each method performs resolution under QuestionResolver's validation,
+// eligibility-before-consume and bounded-time obligations. consumed reports
+// whether it consumed the batch. On non-consumption, reason MUST be a stable,
+// content-free outcome code: never client text, an answer token, a payload value
+// or an error message. On consumption the handler logs "resolved" regardless of
+// reason. Neither result triggers a reply, dismissal or security audit decision.
+type DiagnosticQuestionResolver interface {
+	QuestionResolver
+	ResolveAnswerDiagnostic(p protocol.QuestionAnswerPayload, dev *devices.Device) (consumed bool, reason string)
+	ResolveRefusalDiagnostic(p protocol.QuestionRefusedPayload, dev *devices.Device) (consumed bool, reason string)
 }
 
 // MCPActuator performs one inbound MCP actuation — an mcp_reconnect or an

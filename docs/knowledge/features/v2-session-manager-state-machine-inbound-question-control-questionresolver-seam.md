@@ -16,8 +16,8 @@ relay (spec-stage security review, verdict PASS). See
 has one arbiter, `streamApprovalBridge.retireQuestion` on the `cmd/pyry` side
 (see [the question arm](v2-session-manager-state-machine-inbound-modal-control-deny-on-timeout.md#the-question-arm-1973--a-second-discriminant-ahead-of-the-permission-path)) —
 a second broadcaster here would be a second arbiter of whether a batch was
-consumed. `QuestionResolver`'s returned `bool` is a diagnostic only, consumed
-solely to pick between two content-free log records — `QueueRemover.Remove`'s
+consumed. `QuestionResolver`'s returned `bool` is a diagnostic only, used
+solely to choose a content-free terminal log reason — `QueueRemover.Remove`'s
 exact role in `handleDequeueMessage`, not `ModalResolver`'s `(dismissal, bool)`
 shape. This is the one place the `ModalResolver` precedent is deliberately not
 followed: that shape exists there *because* the manager broadcasts on it, and
@@ -108,23 +108,73 @@ payload — the batch id would be correct either way. The binding assertion is
 `question_batch_id` populated ahead of the malformed array so the case
 actually exercises the partial-decode hazard rather than an already-empty id.
 
-## Logging
+## Diagnostic logging
 
-Same discipline as modal control: `event` + `conn_id` on every path, plus
-`question_batch_id` only where the decode succeeded (never on the reject
-path — a partially-populated id would attribute refused bytes to a batch).
-The decode error itself is never wrapped, logged, or replied — `encoding/json`
-quotes offending input into its error string, and those bytes are
-remote-authored. `answer_token` is never logged (nothing correlates on it
-daemon-side). `TestV2Session_QuestionControl_LogsCarryNoPayload` scans the
-captured buffer across the inert, rejected and handed-off paths for the
-distinctive answer values and for a raw payload fragment, and separately
-pins that an escape-bearing `question_batch_id` reaches the log as `slog`'s
-`TextHandler`-escaped form rather than a raw `0x1b` byte — checked, not
-assumed, since this is the first inbound handler to log a field an attacker
-fully controls the bytes of.
+`handleQuestionAnswer` and `handleQuestionRefusal` each emit exactly two
+**Info** records: `event=v2.question.received` at handler entry, before the
+nil-resolver check, decoding or actuation, and a deferred
+`event=v2.question.completed` when the handler completes. These replace the
+previous outcome records. Both carry `frame_kind` (`question_answer` or
+`question_refused`) and `conn_id`. The receipt has no batch ID or outcome;
+the terminal adds `reason` and includes `question_batch_id` only after a
+successful decode, including an empty decoded identifier. A nil resolver
+still performs no parsing; clean `null` and `{}` still reach a wired resolver.
+
+| Terminal reason | Outcome |
+| --- | --- |
+| `no_resolver` | No resolver is configured; the payload was not decoded. |
+| `decode_rejected` | Decoding failed; neither resolver path was called. |
+| `resolved` | The selected resolver consumed the batch, for either frame kind. |
+| `legacy_not_consumed` | The bool-only resolver returned false; its specific cause is unavailable. |
+| Resolver-supplied code | The diagnostic resolver returned false; its reason is preserved. |
+
+`DiagnosticQuestionResolver` optionally extends `QuestionResolver` with
+`ResolveAnswerDiagnostic` and `ResolveRefusalDiagnostic`, each returning
+`(consumed bool, reason string)` from the same resolution attempt. After a
+successful decode, the handler selects the diagnostic method when supported,
+otherwise the original bool-only method. It calls exactly one selected method,
+never both. Consumption always produces `resolved`, regardless of a supplied
+reason. Existing bool-only implementations and
+`V2SessionConfig.QuestionResolver` wiring remain usable without migration.
+The current daemon implementation, `questionResolverV2`, uses the legacy path;
+daemon-specific reasons arrive with [#2801](https://github.com/pyrycode/pyrycode/issues/2801).
+
+Diagnostic reasons must be stable, content-free outcome codes supplied by the
+implementation, never derived from client content or error messages. The
+relay preserves them rather than sanitizing them, so that obligation belongs
+to the implementer. Structured `slog` fields escape identifiers; a decoded
+batch ID remains untrusted correlation metadata, never authorization evidence.
+A partially decoded ID is omitted because it would attribute rejected bytes
+to a batch. Records exclude question text, option labels, answer values,
+answer tokens and raw payloads. Decoder errors are never wrapped, logged or
+replied: `encoding/json` can quote remote-authored input in its error text.
+
+Receipt and completion describe handler progress and consumption; they are
+not security audit decisions or proof of phone delivery. Diagnostic methods
+retain the resolver's validation, eligibility-before-consume and bounded-time
+obligations on the single `Run` dispatch goroutine. Authentication, verdicts
+and dismissal ownership are unchanged. Relay logging emits no reply,
+dismissal or broadcast; `streamApprovalBridge.retireQuestion` remains the
+sole `question_dismissed` broadcaster. Diagnosis, the hang fix and live proof
+remain with [#2802](https://github.com/pyrycode/pyrycode/issues/2802).
 
 ## Testing
+
+`TestV2Session_QuestionControl_DiagnosticRecords` covers both frame kinds with
+legacy and diagnostic consumed/non-consumed results, nil resolvers, decode
+failures and clean `null`/`{}` payloads. Resolver callbacks observe the receipt
+before actuation, and separate legacy and diagnostic recorders catch a second
+attempt or selection of the wrong path. Assertions require exactly two Info
+records, the identifiers and terminal reasons, escaped batch IDs, absent
+content sentinels and no reply or broadcast.
+
+**Partial-decode fixtures need explicit field order.** `encoding/json` sorts
+map keys, so a map-based refusal fixture can put the failing `answer_token`
+before `question_batch_id`, losing the intended populated-ID premise. An
+ordered struct puts the batch ID before the type-mismatched token or answers.
+The diagnostic matrix uses that shape over the sealed-frame harness and
+asserts zero resolver calls and no batch ID in either record on failure.
+Checking only the received ID would leave a tolerant decode undetected.
 
 `cmd/pyry/question_resolve_v2_test.go`'s six tests prove all five ACs at the
 `admit`/delegate boundary, but one branch inside `ResolveAnswer` /
