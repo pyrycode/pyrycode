@@ -37,7 +37,16 @@ follow-on turn queues behind it until the whole run budget is spent.
 the identical stall (`turn_seconds: 360.0`, `terminated_on: "budget"`), now understood
 retroactively as the same defect rather than a property of that capture's claude version. Any
 probe in this family that holds a FIFO under a foreground call and expects the turn to close on
-release should stage the call as backgrounded first.
+release should stage the call as backgrounded first. If the proof specifically
+needs a foreground result, use a gate whose release actually returns that
+result. `composerForegroundGate` writes an arrival marker and waits for a
+rig-created release file, keeping paths shell-quoted and cleanup idempotent.
+The closed-input Composer Stop proof reproduced the FIFO stall on Claude
+2.1.280; replacing only its foreground FIFO with this file gate allowed normal
+child exit while the background FIFO remained held. `TestComposerForegroundGate`
+checks held execution, normal release and repeated-release cleanup offline.
+See [the repair evidence](https://github.com/pyrycode/pyrycode/issues/2775#issuecomment-6008658292)
+and [the cleanup attribution checks](e2e-realclaude.md#test-infrastructure).
 
 ### Ordering a roster against the terminal-status line discards the one line the ticket needs
 

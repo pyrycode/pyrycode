@@ -175,6 +175,27 @@ session or conversation count today, so nothing is known to be broken — but a
 live-suite failure that looks like a stray extra session or conversation should
 start here, not be chased as a daemon regression.
 
+Composer Stop survival needs a witness tied to the actual rig task. An interrupt
+ack or retained roster can stay green after the task has died.
+`TestRealClaudeComposerStopPreservesBackgroundTask` uses `stopHeldTaskSetup` to
+join the exact background Bash call to its task id, waits for an active
+foreground call's FIFO rendezvous, then requires a cancelled turn. Only that
+same background task's completion after rig release proves survival; reader
+presence immediately after Stop is an additional liveness check. See
+[task identity and FIFO staging](e2e-realclaude-roster-after-finish-capture-test-go.md#stop-completion-needs-a-held-task-and-all-terminal-signals)
+and [Composer Stop](streamsup-package.md#composer-stop).
+
+Closed-input cleanup needs independent attribution. Parent cancellation invokes
+the descendant reaper and could make a task-death assertion pass even if Claude
+failed to clean up. `TestRealClaudeComposerStopClosedInputKillsHeldTask` closes
+stdin while the foreground result is held, checks the background FIFO reader
+still exists, then releases only the foreground file gate. It requires normal
+Claude exit with an unexpired context and background-reader disappearance while
+the background writer remains held, all before parent cancellation. This
+excludes both parent teardown and rig EOF as causes. Both standing tests run
+under normal `make e2e-realclaude`, log the Claude version, and passed on Claude
+2.1.280 in [the dispatcher live gate](https://github.com/pyrycode/pyrycode/issues/2775#issuecomment-6008885859).
+
 ## Make target
 
 ```make
