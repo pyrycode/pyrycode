@@ -200,6 +200,10 @@ type SessionConfig struct {
 // Pool owns the set of sessions managed by one pyry process. Phase 1.0
 // constructs exactly one entry — the bootstrap session — at New().
 type Pool struct {
+	// Separate from lifecycle locks: freshness persistence never holds mu.
+	handoffMu    sync.Mutex
+	handoffStale map[conversations.ConversationID]bool
+
 	// Separate from mu: construction already holds mu when it reads instructions.
 	instructionsMu     sync.RWMutex
 	daemonInstructions string
@@ -930,9 +934,10 @@ func (p *Pool) Rename(id SessionID, newLabel string) error {
 // and only on a real change: an unknown id, a no-op update, and a persist
 // failure all skip them, so a still-correct running child is never disturbed.
 //
-// Lock order: p.mu (write), released before the live-apply. Does not take Session.lcMu
-// — Session.settings is guarded by p.mu (the only other reader is saveLocked,
-// under p.mu); spawnBase and sup are immutable post-construction.
+// Lock order: release p.mu after persistence, then take sess.spawnArgsMu before
+// re-reading prompt suppression under p.mu. Keep spawnArgsMu through either argv
+// install, with p.mu released before runner calls, and release it before in-band
+// delivery. Does not take Session.lcMu; spawnBase and sup are immutable.
 func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error {
 	p.mu.Lock()
 	sess, ok := p.sessions[id]
@@ -978,11 +983,9 @@ func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error {
 		p.mu.Unlock()
 		return err
 	}
-	// Recompose argv + capture the supervisor while under p.mu (both reads are of
-	// state that is either immutable — spawnBase, sup — or the merged value we
-	// just persisted). Release p.mu BEFORE the live-apply so no blocking work and
-	// no supervisor-internal lock is taken under it.
-	newArgs := sess.spawnArgs(merged)
+	// Capture the immutable runner and release p.mu before any runner calls.
+	// Compose argv only inside the publication lock below: a prompt refresh may
+	// suppress its file while the posture install is in flight.
 	sup := sess.sup
 	p.mu.Unlock()
 
@@ -1004,8 +1007,13 @@ func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error {
 	// named, so re-installing it is idempotent and a future branch cannot forget it.
 	// It is non-blocking and takes no Pool lock, so it is safe here, past the unlock.
 	sup.SetSpawnPermissionMode(merged.PermissionMode)
+	sess.spawnArgsMu.Lock()
+	p.mu.RLock()
+	newArgs := sess.spawnArgs(merged)
+	p.mu.RUnlock()
 	if inBandDeliverable(update) {
 		sup.SetSpawnArgs(newArgs)
+		sess.spawnArgsMu.Unlock()
 		p.deliverSettingsInBand(id, sup, update, merged)
 		return nil
 	}
@@ -1027,6 +1035,7 @@ func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error {
 	// the unlock beside the two SetSpawn* calls, and it cannot delay the Restart.
 	sup.BeginTeardown()
 	sup.Restart(newArgs)
+	sess.spawnArgsMu.Unlock()
 	return nil
 }
 

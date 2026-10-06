@@ -2,6 +2,7 @@ package sessions
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -440,11 +441,20 @@ func composeSystemPromptFor(operator string, clients []ClientIdentity, note stri
 // systemPromptText, then instructions precede clients and the handoff note.
 // The operator's text stays last; empty instructions add no separator.
 func composeSystemPromptForOn(daemon, instructions, operator string, clients []ClientIdentity, note string) string {
+	return composeSystemPromptWithFreshness(daemon, instructions, operator, clients, note, false)
+}
+
+const staleHandoffWarning = "This handoff note is stale: the latest reset did not produce a fresh handoff, so it may omit recent work.\n"
+
+func composeSystemPromptWithFreshness(daemon, instructions, operator string, clients []ClientIdentity, note string, stale bool) string {
 	if instructions != "" {
 		daemon += "\n" + instructions
 	}
 	section := clientSection(clients)
 	handoff := handoffNoteSection(note)
+	if stale && handoff != "" {
+		handoff = staleHandoffWarning + handoff
+	}
 	if section == "" && handoff == "" {
 		return composeSystemPromptOn(daemon, operator)
 	}
@@ -815,6 +825,35 @@ func writeSystemPromptFile(final, text string) (string, error) {
 	return final, nil
 }
 
+// A directory can refuse atomic replacement while its existing private file
+// remains writable. Only use this degraded rewrite before the successor starts;
+// any failure must suppress the file, since it may then hold incomplete bytes.
+func rewriteExistingSystemPrompt(final, text string) error {
+	info, err := os.Lstat(final)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("sessions: prompt is not a regular file")
+	}
+	f, err := os.OpenFile(final, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	opened, err := f.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return errors.New("sessions: prompt changed during open")
+	}
+	if _, err := f.WriteString(text); err != nil {
+		return err
+	}
+	if err := f.Truncate(int64(len(text))); err != nil {
+		return err
+	}
+	return errors.Join(f.Sync(), f.Close())
+}
+
 // conversationPrompt returns the operator-set system prompt of the conversation
 // label names, or "" when there are no bytes to append.
 //
@@ -892,22 +931,29 @@ func (p *Pool) conversationPrompt(label string) string {
 // The answer is RE-DERIVED AT EVERY COMPOSE and never retained on the Session. See
 // writeComposedPrompt on why freezing it would be wrong.
 //
-// Concurrency: takes no lock. It reads p.registryPath and no other pool state, the
-// way Pool.HandoffNote and Pool.dataDir do, and it runs in writeComposedPrompt's
-// off-lock window so no I/O executes inside the pool's critical section.
+// Concurrency: takes handoffMu to read note and freshness as one snapshot,
+// outside the lifecycle critical section in writeComposedPrompt.
 func (p *Pool) handoffNoteFor(label string) string {
+	note, _ := p.handoffNoteWithFreshness(label)
+	return note
+}
+
+func (p *Pool) handoffNoteWithFreshness(label string) (string, bool) {
 	if !conversations.ValidID(label) {
-		return ""
+		return "", false
 	}
+	p.handoffMu.Lock()
+	defer p.handoffMu.Unlock()
 	id := conversations.ConversationID(label)
-	if _, regular, err := p.HandoffNotePath(id); err != nil || !regular {
-		return ""
+	path, regular, err := p.HandoffNotePath(id)
+	if err != nil || !regular {
+		return "", false
 	}
 	note, err := p.HandoffNote(id)
 	if err != nil {
-		return ""
+		return "", false
 	}
-	return note
+	return note, p.handoffNoteIsFreshLocked(id, path)
 }
 
 // writeComposedPrompt composes sess's appended system prompt from the conversations
@@ -939,40 +985,59 @@ func (p *Pool) handoffNoteFor(label string) string {
 // carried would satisfy every single-compose assertion in this package while making
 // the feature dead for the flow it was built for.
 //
-// A write failure is logged and swallowed, deliberately. buildSession already
-// wrote this file and the write is a rename, so a failed compose leaves the
-// previous COMPLETE composition in place — never a missing or truncated one.
-// Failing an operator's message, or their rotation, on a transient disk error when
-// the fallback is one-revision-stale prompt bytes, is the worse trade. The log
-// carries the error, whose paths are already public (the argv record names this
-// file), and no fragment of the prompt and no client name: a refusal is silent, so a
-// hostile name has no line to appear in. It carries nothing about the note either, and
-// cannot: handoffNoteFor returns no error to log, precisely because the store's own
-// error names the note path. The composed-with fields are left untouched on that path,
-// so they keep describing what the file actually holds.
+// A failed atomic write preserves the previous complete composition only when
+// it contains no handoff. Otherwise rewrite the existing file, or suppress its
+// argv pair if that fails, so a successor cannot consume an unqualified older
+// note. All failure logs use fixed classifications, never path-bearing errors.
 //
-// Concurrency: sess.label is read under p.mu (RLock) and the composed-with fields are
+// Concurrency: hold sess.spawnArgsMu through composition, suppression/recovery
+// and runner publication, acquiring it before p.mu. This prevents an in-flight
+// settings install from restoring a suppressed path or undoing recovery.
+// sess.label is read under p.mu (RLock) and the composed-with fields are
 // written under p.mu (write) — the discipline Session.settings documents. The file
 // write runs between the two, off the lock, so no I/O executes inside the pool's
 // critical section. MUST be called with p.mu unheld.
 func (p *Pool) writeComposedPrompt(sess *Session, clients []ClientIdentity) {
+	sess.spawnArgsMu.Lock()
+	defer sess.spawnArgsMu.Unlock()
+
 	p.mu.RLock()
 	label := sess.label
+	hadHandoff := sess.promptHasHandoff
 	p.mu.RUnlock()
 
 	operator := p.conversationPrompt(label)
-	note := p.handoffNoteFor(label)
+	note, fresh := p.handoffNoteWithFreshness(label)
 	named := admittedClients(clients)
-	text := composeSystemPromptForOn(daemonPromptText(p.readFolders), p.DaemonInstructions(), operator, named, note)
+	text := composeSystemPromptWithFreshness(daemonPromptText(p.readFolders), p.DaemonInstructions(), operator, named, note,
+		!fresh)
 	if _, err := writeSystemPromptFile(sess.systemPromptPath, text); err != nil {
-		p.log.Warn("compose appended system prompt", "error", err)
-		return
+		p.log.Warn("compose appended system prompt", "stage", "persistence")
+		if !hadHandoff {
+			return
+		}
+		if err := rewriteExistingSystemPrompt(sess.systemPromptPath, text); err != nil {
+			p.log.Warn("compose appended system prompt", "stage", "fallback", "outcome", "suppressed")
+			p.mu.Lock()
+			sess.suppressSystemPrompt = true
+			args := sess.spawnArgs(sess.settings)
+			p.mu.Unlock()
+			sess.sup.SetSpawnArgs(args)
+			return
+		}
 	}
 
 	p.mu.Lock()
 	sess.systemPrompt = operator
 	sess.promptClients = named
+	sess.promptHasHandoff = handoffNoteSection(note) != ""
+	wasSuppressed := sess.suppressSystemPrompt
+	sess.suppressSystemPrompt = false
+	args := sess.spawnArgs(sess.settings)
 	p.mu.Unlock()
+	if wasSuppressed {
+		sess.sup.SetSpawnArgs(args)
+	}
 }
 
 // refreshSystemPromptForRotation recomposes sess's appended system prompt for a

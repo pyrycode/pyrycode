@@ -304,9 +304,26 @@ replacing an older note. `wrapUpCapture` captures the reply as a sink
 decorator chained into `newStreamRunnerFactory` beside
 `newSessionResetFollower` — see
 [Following claude's announced reset § A second instance of the placement rule](streamsup-package-announced-reset-follower.md#a-second-instance-of-the-placement-rule-wrapupcapture-2477).
-Activation or readiness failure, timeout, an unusable reply, disabled notes
-or a store error still enters rotation and completion. Failed wrap-up leaves
-the previous note standing; failure-note freshness belongs to #2906.
+Activation or readiness failure, idle timeout, delivery or completion failure,
+an unusable reply, disabled notes or a store error still enters rotation and
+completion under the same bound. Failed reset preserves the older note's
+bytes. Whenever a successor includes that usable older note, fixed
+daemon-owned text outside its untrusted fence says it is stale because the
+latest reset did not produce a fresh handoff and may omit recent work
+(#2906). This also holds after delayed activation or daemon restart before
+activation, including a failed new-note write. Unknown freshness is stale;
+without a usable older note there is no handoff section. A subsequent
+successful wrap-up replaces the note and clears the warning, scoped to that
+conversation. `resetting.handoff` still reports `written` only for a stored
+new note and `skipped` otherwise.
+
+**Partial text does not make a failed turn successful.** `wrapUpReply.waitOutcome`
+reports terminal failure independently of captured text. Ordinary reset
+rejects a terminally failed reply even when it contains usable prose, before
+`storeNote` can replace the older note. `TestConversationReset_ErrorReplyKeepsExistingContract`
+and `TestResetThenRotate_FailedHandoffIsStale` check this rejection; an
+assertion on reply text alone would accept the failed turn as fresh. Warn
+events classify the failed stage without raw errors, paths, prompts or notes.
 
 **Activation is not stream readiness.** `streamsup.Runner.WaitForPTY` is a
 no-op, and a child PID does not prove its permission posture admits turns.

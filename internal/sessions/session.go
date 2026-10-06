@@ -394,7 +394,17 @@ func composeSpawnArgs(base []string, settings SessionSettings) []string {
 // result with the kill (#842's Restart) or without one (#1581's in-band branch).
 // The result is a fresh slice that aliases neither spawnBase nor caller state.
 func (s *Session) spawnArgs(settings SessionSettings) []string {
-	return composeSpawnArgs(s.spawnBase, settings)
+	base := s.spawnBase
+	if s.suppressSystemPrompt {
+		base = slices.Clone(base)
+		for i := 0; i+1 < len(base); i++ {
+			if base[i] == "--append-system-prompt-file" && base[i+1] == s.systemPromptPath {
+				base = slices.Delete(base, i, i+2)
+				break
+			}
+		}
+	}
+	return composeSpawnArgs(base, settings)
 }
 
 // Session is one supervised claude instance plus the bridge that mediates its
@@ -456,6 +466,12 @@ type Session struct {
 	// both RunnerConfig construction sites carry the answer across the runner seam.
 	spawnBase []string
 
+	// Serializes prompt refresh/suppression with argv composition and runner
+	// publication. Acquire before Pool.mu; release Pool.mu before calling the
+	// runner, and release this lock before in-band settings delivery. No holder
+	// of Pool.mu or lcMu may acquire it. Construction installs are unpublished.
+	spawnArgsMu sync.Mutex
+
 	// settingsPath is the absolute path to the per-session --settings file
 	// carrying {"enableAllProjectMcpServers":true}, which pre-approves the
 	// project's MCP servers so claude's startup enablement modal never wedges the
@@ -488,6 +504,11 @@ type Session struct {
 	// whose file is daemon-scoped and lives on the Pool as systemPromptPath, and
 	// on any test-constructed Session that hand-builds a literal and never spawns.
 	systemPromptPath string
+
+	// Guarded by Pool.mu, like settings. An unrewriteable prompt carrying an
+	// older handoff must not reach the successor through this file's argv pair.
+	promptHasHandoff     bool
+	suppressSystemPrompt bool
 
 	// systemPrompt is the OPERATOR half of what this session was last composed
 	// with: the conversation's stored prompt at construction, refreshed by

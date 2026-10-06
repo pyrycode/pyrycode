@@ -451,7 +451,7 @@ func assertNoteFraming(t *testing.T, composed, operator string) {
 	}
 
 	outside := composed[:begin] + composed[end+len(handoffNoteEnd):]
-	known := strings.Split(systemPromptText+handoffNoteLead+operator, "\n")
+	known := strings.Split(systemPromptText+staleHandoffWarning+handoffNoteLead+operator, "\n")
 	for _, line := range strings.Split(outside, "\n") {
 		if line == "" || strings.HasPrefix(line, clientSectionLead) {
 			continue
@@ -626,7 +626,7 @@ func TestPool_Activate_ComposesHandoffNote(t *testing.T) {
 	if want := sessionPromptPathOf(dir, id); path != want {
 		t.Errorf("--append-system-prompt-file = %q, want %q", path, want)
 	}
-	want := systemPromptText + "\n" + noteSectionOf(multilineNote) + "\n" + operator
+	want := systemPromptText + "\n" + staleHandoffWarning + noteSectionOf(multilineNote) + "\n" + operator
 	assertComposedFileHolds(t, path, operator, want)
 }
 
@@ -656,7 +656,7 @@ func TestPool_Revive_ComposesHandoffNote(t *testing.T) {
 	}
 
 	path := systemPromptArgPath(t, waitArgvRaw(t, spawnDir))
-	assertComposedFileHolds(t, path, "", systemPromptText+"\n"+noteSectionOf(noteText))
+	assertComposedFileHolds(t, path, "", systemPromptText+"\n"+staleHandoffWarning+noteSectionOf(noteText))
 }
 
 // TestPool_RotateForNewSession_RederivesHandoffNote (AC #1's rotation clause and
@@ -695,7 +695,7 @@ func TestPool_RotateForNewSession_RederivesHandoffNote(t *testing.T) {
 		t.Fatalf("RotateForNewSession: %v", err)
 	}
 
-	want := systemPromptText + "\n" + noteSectionOf(noteTextAfter) + "\n" + operator
+	want := systemPromptText + "\n" + staleHandoffWarning + noteSectionOf(noteTextAfter) + "\n" + operator
 	assertComposedFileHolds(t, path, operator, want)
 }
 
