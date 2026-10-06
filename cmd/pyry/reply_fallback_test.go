@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strconv"
@@ -51,7 +53,8 @@ func TestReplyFallbackHelperProcess(t *testing.T) {
 		}
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"result": os.Getenv("PYRY_REPLY_OUTPUT"), "is_error": os.Getenv("PYRY_REPLY_ERROR") == "1"})
-	os.Exit(0)
+	code, _ := strconv.Atoi(os.Getenv("PYRY_REPLY_EXIT"))
+	os.Exit(code)
 }
 
 func TestReplyFallbackProcess(t *testing.T) {
@@ -189,6 +192,99 @@ func TestReplyFallbackProcessCancellation(t *testing.T) {
 					t.Fatal("child survived cancellation")
 				}
 				time.Sleep(time.Millisecond)
+			}
+		})
+	}
+}
+
+func TestReplyFallbackProcessEvidence(t *testing.T) {
+	for _, mode := range []string{"success", "failure", "parent cancel", "parent deadline", "own deadline"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("PYRY_REPLY_HELPER", "1")
+			t.Setenv("PYRY_REPLY_USER", "private-user-sentinel")
+			t.Setenv("PYRY_REPLY_ASSISTANT", "private-assistant-sentinel")
+			t.Setenv("PYRY_REPLY_OUTPUT", "private-generated-sentinel")
+			t.Setenv("PRIVATE_VALUE", "private-environment-sentinel")
+			ready := t.TempDir() + "/private-path-sentinel"
+			t.Setenv("PYRY_REPLY_READY", ready)
+			hold := strings.Contains(mode, "deadline") || mode == "parent cancel"
+			if hold {
+				t.Setenv("PYRY_REPLY_HANG", "1")
+			}
+			if mode == "failure" {
+				t.Setenv("PYRY_REPLY_EXIT", "7")
+			}
+			var logs bytes.Buffer
+			var child *exec.Cmd
+			f := replyFallback{logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+				account: func(context.Context) (string, streamsup.AccountTokenFailure, error) { return "selected", "", nil },
+				command: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+					child = exec.CommandContext(ctx, os.Args[0], "-test.run=^TestReplyFallbackHelperProcess$")
+					return child
+				}}
+			parent, cancel := context.WithCancel(context.Background())
+			if mode == "parent deadline" {
+				parent, cancel = context.WithTimeout(context.Background(), 2*time.Second)
+			}
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { _, err := f.run(parent, "private-user-sentinel", "private-assistant-sentinel"); done <- err }()
+			if hold {
+				deadline := time.Now().Add(5 * time.Second)
+				for {
+					if _, err := os.Stat(ready); err == nil {
+						break
+					}
+					if time.Now().After(deadline) {
+						cancel()
+						<-done
+						t.Fatal("child not ready")
+					}
+					time.Sleep(time.Millisecond)
+				}
+				if mode == "parent cancel" {
+					cancel()
+				}
+			}
+			select {
+			case err := <-done:
+				if (err == nil) != (mode == "success") {
+					t.Fatal("execution contract changed")
+				}
+			case <-time.After(12 * time.Second):
+				cancel()
+				<-done
+				t.Fatal("fallback hung")
+			}
+			var record map[string]any
+			if json.Unmarshal(logs.Bytes(), &record) != nil || record["msg"] != "reply_fallback.lifecycle" || strings.Contains(logs.String(), "private-") || strings.Contains(logs.String(), "selected") {
+				t.Fatal("missing or sensitive daemon evidence")
+			}
+			for key, want := range map[string]bool{
+				"parent_canceled": mode == "parent cancel", "parent_deadline": mode == "parent deadline",
+				"fallback_canceled": mode == "parent cancel", "fallback_deadline": strings.Contains(mode, "deadline"),
+				"own_deadline_elapsed": mode == "own deadline", "group_cancel_requested": hold,
+				"wait_completed": true, "exit_observed": true,
+			} {
+				if record[key] != want {
+					t.Fatalf("%s=%v want=%v", key, record[key], want)
+				}
+			}
+			code, signal := 0, 0
+			if mode == "failure" {
+				code = 7
+			}
+			if hold {
+				code, signal = -1, int(syscall.SIGKILL)
+			}
+			if record["pid"] != float64(child.Process.Pid) || record["exit_code"] != float64(code) || record["exit_signal"] != float64(signal) {
+				t.Fatal("wrong correlated child exit")
+			}
+			if attempt, ok := record["attempt_ms"].(float64); !ok || attempt < record["child_ms"].(float64) || record["child_ms"].(float64) < 0 {
+				t.Fatal("invalid lifecycle timing")
+			}
+			if hold && syscall.Kill(child.Process.Pid, 0) == nil {
+				t.Fatal("child survived group cancellation")
 			}
 		})
 	}

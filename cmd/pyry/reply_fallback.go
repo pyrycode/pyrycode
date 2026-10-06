@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode"
@@ -26,6 +28,7 @@ type replyFallback struct {
 	binary  string
 	account streamsup.AccountTokenProvider
 	command func(context.Context, string, ...string) *exec.Cmd
+	logger  *slog.Logger
 }
 
 func replyFallbackArgs() []string {
@@ -37,6 +40,7 @@ func replyFallbackArgs() []string {
 // run isolates a fresh print-mode exchange without bare mode, which skips OAuth
 // login. The caller's deadline bounds lookup and Wait independently of child I/O.
 func (f replyFallback) run(parent context.Context, user, assistant string) (string, error) {
+	attemptStarted := time.Now()
 	ctx, cancel := context.WithTimeout(parent, 9800*time.Millisecond) // reserve termination time inside ten seconds
 	defer cancel()
 	env := replyFallbackEnv(os.Environ())
@@ -82,19 +86,50 @@ func (f replyFallback) run(parent context.Context, user, assistant string) (stri
 	var stdout cappedBuffer
 	cmd.Stdout = &stdout // capped at the existing credential-command buffer bound
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	var groupCancelRequested atomic.Bool
+	cmd.Cancel = func() error {
+		groupCancelRequested.Store(true)
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 	cmd.WaitDelay = 100 * time.Millisecond
 	if cmd.Start() != nil {
 		return "", errReplyFallback
 	}
+	childStarted := time.Now()
+	waitCompleted := false
+	defer func() {
+		if f.logger == nil {
+			return
+		}
+		// Observe before deferred context cleanup. Contexts are sampled separately;
+		// simultaneous deadlines/cancellation do not establish a unique cause.
+		now, parentErr, fallbackErr := time.Now(), parent.Err(), ctx.Err()
+		exitObserved, exitCode, exitSignal := false, -1, 0
+		// Wait owns ProcessState; do not read it while Wait may still be running.
+		if waitCompleted && cmd.ProcessState != nil {
+			exitObserved, exitCode = true, cmd.ProcessState.ExitCode()
+			if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+				exitSignal = int(status.Signal())
+			}
+		}
+		f.logger.Info("reply_fallback.lifecycle", "pid", cmd.Process.Pid,
+			"attempt_ms", now.Sub(attemptStarted).Milliseconds(), "child_ms", now.Sub(childStarted).Milliseconds(),
+			"parent_canceled", parentErr == context.Canceled, "parent_deadline", parentErr == context.DeadlineExceeded,
+			"fallback_canceled", fallbackErr == context.Canceled, "fallback_deadline", fallbackErr == context.DeadlineExceeded,
+			"own_deadline_elapsed", now.Sub(attemptStarted) >= 9800*time.Millisecond,
+			"group_cancel_requested", groupCancelRequested.Load(), "wait_completed", waitCompleted,
+			"exit_observed", exitObserved, "exit_code", exitCode, "exit_signal", exitSignal)
+	}()
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	select {
 	case err = <-done:
+		waitCompleted = true
 	case <-ctx.Done():
 		_ = cmd.Cancel() // Best effort: the context watcher may already have killed the group.
 		select {
 		case <-done:
+			waitCompleted = true
 		case <-time.After(100 * time.Millisecond):
 		}
 		return "", errReplyFallback
