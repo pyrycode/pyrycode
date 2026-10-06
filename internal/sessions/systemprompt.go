@@ -990,11 +990,17 @@ func (p *Pool) handoffNoteWithFreshness(label string) (string, bool) {
 // argv pair if that fails, so a successor cannot consume an unqualified older
 // note. All failure logs use fixed classifications, never path-bearing errors.
 //
-// Concurrency: sess.label is read under p.mu (RLock) and the composed-with fields are
+// Concurrency: hold sess.spawnArgsMu through composition, suppression/recovery
+// and runner publication, acquiring it before p.mu. This prevents an in-flight
+// settings install from restoring a suppressed path or undoing recovery.
+// sess.label is read under p.mu (RLock) and the composed-with fields are
 // written under p.mu (write) — the discipline Session.settings documents. The file
 // write runs between the two, off the lock, so no I/O executes inside the pool's
 // critical section. MUST be called with p.mu unheld.
 func (p *Pool) writeComposedPrompt(sess *Session, clients []ClientIdentity) {
+	sess.spawnArgsMu.Lock()
+	defer sess.spawnArgsMu.Unlock()
+
 	p.mu.RLock()
 	label := sess.label
 	hadHandoff := sess.promptHasHandoff

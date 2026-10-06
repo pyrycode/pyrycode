@@ -466,6 +466,12 @@ type Session struct {
 	// both RunnerConfig construction sites carry the answer across the runner seam.
 	spawnBase []string
 
+	// Serializes prompt refresh/suppression with argv composition and runner
+	// publication. Acquire before Pool.mu; release Pool.mu before calling the
+	// runner, and release this lock before in-band settings delivery. No holder
+	// of Pool.mu or lcMu may acquire it. Construction installs are unpublished.
+	spawnArgsMu sync.Mutex
+
 	// settingsPath is the absolute path to the per-session --settings file
 	// carrying {"enableAllProjectMcpServers":true}, which pre-approves the
 	// project's MCP servers so claude's startup enablement modal never wedges the
