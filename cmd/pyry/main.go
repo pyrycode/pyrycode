@@ -2976,8 +2976,7 @@ type activeSessionStarter struct {
 	// rather than trusting a confinement that was checked before the restart.
 	//
 	// It does NOT spawn claude: Pool.Revive registers the session evicted and the
-	// child comes up on the first message's Activate, which is precisely the
-	// identity the rotation below is about to install.
+	// reset tail activates the old identity for wrap-up before rotation.
 	//
 	// Optional: nil leaves the after-restart case inert.
 	reviveBound func(convID string, oldID sessions.SessionID, recordedCwd string) (sessions.Runner, error)
@@ -3296,16 +3295,10 @@ func (a activeSessionStarter) start(conversationID string, outcome func(error)) 
 			"conversation_id", convID)
 		return nil, false
 	}
-	// #2477: a LIVE child is asked to write a handoff note for its successor before
-	// it is replaced, and that turn moves the whole tail off this goroutine. See
-	// resetThenRotate for why, and conversationReset's file header for the bound.
-	//
-	// The gate is liveness, not namedness, and the asymmetry above is not repeated
-	// here. A bare frame on a childless conversation keeps rotating exactly as #2099
-	// promised, because it takes the synchronous path below; a bare frame on a live
-	// one gets the same wrap-up a named one gets, because the operator pressed the
-	// same control and there is the same session's worth of context to lose.
-	if a.reset != nil && live {
+	// Used dormant conversations need the same handoff as live ones. The tail
+	// resumes the old identity before writing, under the shared wrap-up deadline.
+	// Never-used named conversations have already been refused above.
+	if a.reset != nil && (live || used || a.hasEverRun(oldID)) {
 		// Resolved SYNCHRONOUSLY so it stays BELOW every inert arm AND below the guard
 		// above, which is what keeps a repeated frame from driving MkdirAll — the
 		// containment resolveSpawnDir's own doc requires. The refusal it answers

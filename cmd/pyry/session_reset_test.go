@@ -815,6 +815,22 @@ func TestConversationReset_NilAndUnwiredAreInert(t *testing.T) {
 	}
 }
 
+func TestComposeWrapUpPrompt_ReturnsNoteWithoutFraming(t *testing.T) {
+	t.Parallel()
+	for _, previous := range []string{"", resetPreviousNote} {
+		t.Run(map[bool]string{false: "absent", true: "previous-note"}[previous != ""], func(t *testing.T) {
+			prompt := composeWrapUpPrompt(previous)
+			const guidance = "Return only the note's contents; do not copy any framing markers or delimiter lines from the previous note."
+			if !strings.Contains(prompt, guidance) {
+				t.Fatal("wrap-up prompt does not tell the writer to omit inadmissible note framing")
+			}
+			if previous != "" && strings.Index(prompt, guidance) > strings.Index(prompt, previous) {
+				t.Fatal("reply formatting guidance must precede the untrusted previous note")
+			}
+		})
+	}
+}
+
 // TestComposeWrapUpPrompt_OmitsTheSectionWithoutANote pins the shape of the
 // no-previous-note case: the first reset of any conversation has no predecessor,
 // which is ordinary rather than exceptional, and must compose the prompt alone —

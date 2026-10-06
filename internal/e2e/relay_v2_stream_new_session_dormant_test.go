@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -118,7 +119,9 @@ func TestRelayV2_StreamNewSessionAfterDaemonRestartResetsDormantConversation(t *
 	t.Logf("[t=%s] daemon #1 stopped; conversation B's session is now a persisted entry "+
 		"the next pool will not materialise", elapsed())
 
-	h2 := RestartStreamInteractiveWithRelay(t, home, initialUUID, relayURL)
+	stdinStem := filepath.Join(home, "restart-stdin")
+	h2 := RestartStreamInteractiveWithRelay(t, home, initialUUID, relayURL,
+		"PYRY_FAKE_CLAUDE_STDIN_LOG="+stdinStem)
 	t.Cleanup(func() { h2.Stop(t) })
 	phone2, send2, recv2 := dialPairedPhone(t, fr, home, payload.Token, pubKey, "phone-a2")
 	seal2, next2 := noiseWire(t, phone2, send2, recv2)
@@ -138,6 +141,29 @@ func TestRelayV2_StreamNewSessionAfterDaemonRestartResetsDormantConversation(t *
 			"must no longer refuse",
 		diag: func() string { return mustReadFile(t, regPath) },
 	})
+	oldSpawnSeen := false
+	for _, line := range strings.Split(h2.Stderr.String(), "\n") {
+		if strings.Contains(line, "spawning claude") &&
+			(strings.Contains(line, "--resume "+preB.ID) || strings.Contains(line, "--session-id "+preB.ID)) {
+			oldSpawnSeen = true
+		}
+	}
+	if !oldSpawnSeen {
+		t.Fatal("no predecessor spawn before rotation")
+	}
+	predecessorInput, err := os.ReadFile(stdinStem + "." + preB.ID)
+	if err != nil || !strings.Contains(string(predecessorInput), "You are the outgoing session") {
+		t.Fatalf("wrap-up was not delivered to the predecessor's own stdin: %v", err)
+	}
+	postRotationLogStart := len(h2.Stderr.String())
+	note, err := os.ReadFile(filepath.Join(home, ".pyry", "test", "handoff-notes", convB+".txt"))
+	if err != nil || !strings.Contains(string(note), "You are the outgoing session") {
+		t.Fatalf("fresh wrap-up note missing: %v", err)
+	}
+	prompt, err := os.ReadFile(filepath.Join(home, ".pyry", "test", "session-prompts", preB.ID+".txt"))
+	if err != nil || !strings.Contains(string(prompt), string(note)) {
+		t.Fatalf("successor composed prompt lacks fresh note: %v", err)
+	}
 	t.Logf("[t=%s] M4: dormant conversation B rotated %s → %s", elapsed(), preB.ID, newB)
 
 	// AC-2: the fresh binding is PERSISTED, not merely broadcast. Polled because
@@ -170,16 +196,15 @@ func TestRelayV2_StreamNewSessionAfterDaemonRestartResetsDormantConversation(t *
 	// so a bare substring search reports every correct spawn as a violation. What
 	// AC-1 forbids is the id reaching claude as an identity — and --resume is the
 	// specific shape that would reopen the retired transcript.
-	for _, line := range strings.Split(h2.Stderr.String(), "\n") {
-		if !strings.Contains(line, "spawning claude") {
-			continue
+	for _, line := range strings.Split(h2.Stderr.String()[postRotationLogStart:], "\n") {
+		if strings.Contains(line, "spawning claude") &&
+			(strings.Contains(line, "--session-id "+preB.ID) || strings.Contains(line, "--resume "+preB.ID)) {
+			t.Fatalf("retired identity spawned after rotation: %s", line)
 		}
-		for _, banned := range []string{"--session-id " + preB.ID, "--resume " + preB.ID} {
-			if strings.Contains(line, banned) {
-				t.Fatalf("M5 (AC-1): a post-reset spawn carried %q — the reset assigned a fresh identity "+
-					"and the retired transcript must not be reopened:\n%s", banned, line)
-			}
-		}
+	}
+	predecessorInput, err = os.ReadFile(stdinStem + "." + preB.ID)
+	if err != nil || strings.Contains(string(predecessorInput), needleAfter) {
+		t.Fatalf("post-reset user message reached the predecessor: %v", err)
 	}
 	t.Logf("[t=%s] M5: the first message after the reset spawned under %s", elapsed(), newB)
 

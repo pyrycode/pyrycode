@@ -73,7 +73,10 @@ func TestRun_IdleStall_AfterToolResult(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	cfg := helperRunCfg(t, "stall_after_user", &stdout, &stderr)
 	cfg.PromptBytes = []byte("noop")
-	cfg.IdleTimeout = 200 * time.Millisecond
+	// The watchdog also times startup of the race-built helper. Allow the
+	// same headroom as TestRun_SlowTool_NoFire so this reaches the tool result
+	// before testing the subsequent stall.
+	cfg.IdleTimeout = 2 * time.Second
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

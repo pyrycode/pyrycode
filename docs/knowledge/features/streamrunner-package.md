@@ -80,6 +80,14 @@ Testing note: the guard's off-case (no partial in flight) is pinned at the parse
 
 **The idle threshold also bounds process startup, not just in-stream silence (#2714).** `streamParser` starts with `awaiting` true because claude owes the first assistant turn, so `IdleTimeout` is already running before the child prints anything. A test (or a real deploy) with a sub-second `IdleTimeout` is timing the slower of "claude's first turn" and "the process finished starting" — for a test helper that's a re-exec of the race-built test binary, which can take hundreds of milliseconds longer than usual on a loaded host. `TestRun_SlowTool_NoFire` (watchdog_test.go) hit exactly this: the helper's tool-silence phase it meant to test was never reached because the 500ms `IdleTimeout` it used to carry fired during the helper's own startup, which looks identical to a real stall from outside. It now uses `IdleTimeout = 2s` against a 5s tool-silence phase — seconds of headroom for startup, and the silence still 2.5x the threshold so a watchdog that ignored event types would still fire. Any new watchdog test with a sub-second `IdleTimeout` carries the same exposure.
 
+`TestRun_IdleStall_AfterToolResult` had the same exposure at 200ms (#2905):
+a 750ms injected startup delay reproduced a lone synthetic trailer before
+any helper events. It also uses a two-second allowance while retaining the
+four-line, tool-result and idle-stall assertions. A trailer by itself proves
+the watchdog fired, not that the helper reached the state the test intends
+to exercise; retain the preceding event assertions when widening startup
+headroom.
+
 `internal/streamsup` lifted this watchdog's type-aware core in #1094 (see [streamsup-package.md](streamsup-package.md), § "Idle/stall watchdog") but that watchdog *emits* on idle rather than killing, so it was out of scope for this ticket's measurement; whether its own trailer path has an analogous splice hazard is unmeasured.
 
 ## Teardown reap: descendant process groups (`reap.go`, #924)

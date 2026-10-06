@@ -435,10 +435,12 @@ registry a restart spec exists to preserve.
 Two specs drive the [`new_session` dormant reset](v2-session-manager-state-machine-inbound-new-session-sessionstarter-seam.md#dormant-reset-previously-used-no-live-child-2521)
 end to end, sharing an `awaitConversationTransition` helper so the two routes
 required to behave identically (#2456) are asserted by one piece of code
-rather than two that can drift: `TestRelayV2_StreamNewSessionDormant...`
+rather than two that can drift:
+`TestRelayV2_StreamNewSessionAfterDaemonRestartResetsDormantConversation`
 restarts the daemon after one conversation has run, sends a **named**
-`new_session` before any message, and proves the first post-reset turn uses
-the fresh id; `TestRelayV2_StreamClearAfterDaemonRestartResetsDormantConversation`
+`new_session` before any message, and proves predecessor-owned wrap-up input,
+a stored reply and successor prompt composition before the first post-reset
+turn uses the fresh id; `TestRelayV2_StreamClearAfterDaemonRestartResetsDormantConversation`
 pins the same outcome for a typed `/clear`, restarting and clearing before
 any other message.
 
@@ -449,6 +451,26 @@ and `--append-system-prompt-file` paths are named for the id the session was
 would report every correct spawn as a violation. Match the id flags instead
 (`--session-id`, `--resume`): the id reaching claude as an identity is what
 "cannot resume the retired transcript" actually forbids.
+
+A dormant reset now legitimately resumes the old identity **before** rotation
+for wrap-up (#2905), so banning it across the complete restart log rejects
+correct behavior. A ban on retired-identity spawns must cover the rotation
+boundary: taking a log offset only after receiving the transition and
+inspecting predecessor input leaves an unobserved interval for an immediate
+erroneous respawn. The current restart test has that coverage gap; its
+predecessor stdin, fresh-identity spawn and successor prompt checks still
+provide positive evidence.
+
+**An echo fixture cannot replace a seeded fenced note with usable prose.**
+Stream fakeclaude echoes its input, so the previous note's fencing would be
+copied into the reply and rejected as nested markers by `FencedHandoffNote`.
+The fake restart case starts without a note and proves delivery through the
+identity-specific `PYRY_FAKE_CLAUDE_STDIN_LOG`, then checks the stored reply
+and actual successor prompt. Retained-pool and
+[authenticated restart coverage](e2e-realclaude-interactive-stream-announced-reset-test-go.md#dormant-restart-handoff-proof)
+prove replacing an older note. Predecessor stdin is also stronger evidence
+of delivery than requiring its assistant delta to precede the transition on
+the phone wire: those outputs drain from independent queues.
 
 **A transcript-existence probe looks like the natural "has this conversation
 ever run?" signal and is a trap in this harness specifically.** The stream
