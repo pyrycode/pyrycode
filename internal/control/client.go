@@ -197,6 +197,27 @@ func ChannelNew(ctx context.Context, socketPath, cwd, name string) (string, erro
 	return resp.ChannelNew.ConversationID, nil
 }
 
+// ConversationPost submits a user message to an existing conversation id.
+// It returns nil only for confirmed queue acceptance, not completed model output.
+// Values are forwarded unchanged; validation and id resolution belong to the
+// server and its installed submitter. Wire refusals take precedence over OK.
+func ConversationPost(ctx context.Context, socketPath, conversationID, text string) error {
+	resp, err := request(ctx, socketPath, Request{
+		Verb:             VerbConversationPost,
+		ConversationPost: &ConversationPostPayload{ConversationID: conversationID, Text: text},
+	})
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return errors.New(resp.Error)
+	}
+	if !resp.OK {
+		return errors.New("control: conversation.post response missing ok flag")
+	}
+	return nil
+}
+
 // ChannelPost asks the daemon to record text in the channel named by label,
 // creating that channel under the daemon's own default workspace when the label
 // matches nothing. It returns nil only when the daemon confirms the message

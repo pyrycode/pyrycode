@@ -160,6 +160,10 @@ const (
 	// The independent creator seam is unwired until daemon composition installs it.
 	VerbConversationNew Verb = "conversation.new"
 
+	// VerbConversationPost submits a user message to an existing conversation id.
+	// Success is queue acceptance, not completed model output.
+	VerbConversationPost Verb = "conversation.post"
+
 	// VerbChannelPost records one message in a channel conversation named by
 	// its display label. Request.ChannelPost carries the label and the
 	// content; success answers Response.OK with no result body, because the
@@ -287,6 +291,8 @@ type Request struct {
 	// omitempty, so every existing verb's encoding stays byte-identical — the
 	// property TestProtocol_SessionsRoundTripBackCompat pins.
 	ChannelPost *ChannelPostPayload `json:"channelPost,omitempty"` // populated for VerbChannelPost
+
+	ConversationPost *ConversationPostPayload `json:"conversationPost,omitempty"` // populated for VerbConversationPost
 }
 
 // PairingPayload carries the only caller-selected inputs to a local pairing
@@ -358,6 +364,15 @@ type ConversationPayload struct {
 // ConversationNewResult carries the creator's nonempty conversation id.
 type ConversationNewResult struct {
 	ConversationID string `json:"conversationID"`
+}
+
+// ConversationPostPayload addresses an existing conversation with a user message.
+// Both fields are required and forwarded unchanged to the installed submitter.
+// Text is bounded by MaxChannelPostBytes in decoded UTF-8 bytes. Control performs
+// no id resolution or creation; neither field is logged or echoed in diagnostics.
+type ConversationPostPayload struct {
+	ConversationID string `json:"conversationID"`
+	Text           string `json:"text"`
 }
 
 // MaxChannelPostBytes bounds ChannelPostPayload.Text. It is the ONE home of

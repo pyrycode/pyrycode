@@ -280,6 +280,9 @@ type Server struct {
 	// Snapshotted under mu; invocation runs outside the lock, as for channelCreator.
 	conversationCreator func(cwd, name, conversationType string, model, effort *string) (string, error)
 
+	// Snapshotted under mu; submission runs outside the lock.
+	conversationSubmitter func(conversationID, text string) error
+
 	// channelPoster, when set, services VerbChannelPost: given a channel's
 	// display label and a message body, it resolves the label to a conversation
 	// — creating one under the daemon's default workspace when nothing matches —
@@ -481,6 +484,20 @@ func (s *Server) SetChannelCreator(create func(cwd, name string) (string, error)
 func (s *Server) SetConversationCreator(create func(cwd, name, conversationType string, model, effort *string) (string, error)) {
 	s.mu.Lock()
 	s.conversationCreator = create
+	s.mu.Unlock()
+}
+
+// SetConversationSubmitter installs the independent VerbConversationPost callback.
+// Safe to call concurrently; nil clears it. It receives the caller's conversation
+// id and user message unchanged and owns existing-id resolution and queue admission.
+// A nil error means acceptance, not completed model output. It must not create a
+// conversation on a miss or log the raw caller id or message text.
+// Like SetChannelPoster, refusal text MUST be static or a static format over
+// daemon-derived values: it reaches the wire verbatim and must not echo id/text.
+// The submitter must bound its own work; the response deadline cannot cancel it.
+func (s *Server) SetConversationSubmitter(submit func(conversationID, text string) error) {
+	s.mu.Lock()
+	s.conversationSubmitter = submit
 	s.mu.Unlock()
 }
 
@@ -754,6 +771,8 @@ func (s *Server) handle(conn net.Conn) {
 		s.handleChannelNew(conn, enc, req.Channel)
 	case VerbConversationNew:
 		s.handleConversationNew(conn, enc, req.Conversation)
+	case VerbConversationPost:
+		s.handleConversationPost(conn, enc, req.ConversationPost)
 	case VerbChannelPost:
 		s.handleChannelPost(conn, enc, req.ChannelPost)
 	case VerbPairingMint:
@@ -1204,6 +1223,40 @@ func (s *Server) handleChannelNew(conn net.Conn, enc *json.Encoder, payload *Cha
 		return
 	}
 	_ = enc.Encode(Response{ChannelNew: &ChannelNewResult{ConversationID: id}})
+}
+
+// handleConversationPost validates wire shape, then submits exactly once without
+// resolving the id. As with handleChannelPost, the absent callback guard runs
+// before payload checks, invocation is unlocked, and response I/O is bounded.
+func (s *Server) handleConversationPost(conn net.Conn, enc *json.Encoder, payload *ConversationPostPayload) {
+	s.mu.Lock()
+	submit := s.conversationSubmitter
+	s.mu.Unlock()
+
+	if submit == nil {
+		_ = enc.Encode(Response{Error: "conversation.post: no conversation submitter configured"})
+		return
+	}
+	if payload == nil || payload.ConversationID == "" {
+		_ = enc.Encode(Response{Error: "conversation.post: missing conversation id"})
+		return
+	}
+	if payload.Text == "" {
+		_ = enc.Encode(Response{Error: "conversation.post: empty message"})
+		return
+	}
+	if len(payload.Text) > MaxChannelPostBytes {
+		_ = enc.Encode(Response{Error: "conversation.post: message too large"})
+		return
+	}
+
+	// Best-effort: a broken connection surfaces on Encode, as in handleChannelPost.
+	_ = conn.SetDeadline(time.Now().Add(sessionOpTimeout + sessionOpConnGrace))
+	if err := submit(payload.ConversationID, payload.Text); err != nil {
+		_ = enc.Encode(Response{Error: fmt.Sprintf("conversation.post: %v", err)})
+		return
+	}
+	_ = enc.Encode(Response{OK: true})
 }
 
 // handleChannelPost serves a VerbChannelPost request: hand the caller's label
