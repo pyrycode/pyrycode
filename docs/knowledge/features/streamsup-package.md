@@ -50,6 +50,31 @@ func (r *Runner) RestartFresh(newID string)
 - On spawn: `setStdin(stdin, freshSeq)` publishes the new handle unconditionally, then — since #1482 — releases the rotation gate only if that spawn's `freshSeq` snapshot authorises it (see "Rotation-delivery gate" below), then the unexported `onSpawn(pid)` test seam fires (nil in production).
 - On exit (crash or ctx-cancel teardown): `takeStdin()` clears the field first — so `Stdin()` reports "no live child" immediately — then closes the old handle **outside** the lock. `cmd.Wait()` has usually already closed the parent write end, so a broken-pipe / already-closed error here is expected; it's filtered through [`agentrun.ExitErrIsBenign`](agentrun-package.md) to avoid a spurious Warn (same discipline as `streamrunner`).
 
+## Composer Stop
+
+The message-box Stop button interrupts only the current turn in an interactive
+Claude session; running background agents and workflows continue. Stop an
+individual task with its explicit per-task stop button, whose
+[wire contract](../../protocol-mobile.md#stop-background-task-v2) distinguishes
+request acceptance from task completion.
+
+`marshalInitializeEnvelope` and `WriteInitialize` declare
+`request.perTaskStopAffordance: true`. The
+[spawn-time initialize path](streamsup-package-firing-the-ask-at-spawn-time.md)
+sends it to every interactive child, including replacements. This setting is
+process-wide: gating it on a client version would make shared-session behavior
+depend on connection order. Older clients also get turn-only Composer Stop;
+they need an upgrade to gain the per-task stop button.
+
+The exception is closed input. If stdin closes while a foreground tool result
+is held, Claude still cleans up held background tasks when that foreground
+result returns and the child exits normally. The declaration does not extend a
+background task's lifetime beyond that closed-input run. `streamsup` keeps
+stdin open between interactive turns, so Composer Stop does not enter this
+cleanup path. The standing live tests prove both boundaries through actual
+task liveness and completion; see
+[the live-test witnesses](e2e-realclaude.md#test-infrastructure).
+
 ## Teardown: SIGTERM → SIGKILL grace + descendant-group reap
 
 Same shape as [`streamrunner`](streamrunner-package.md#teardown-reap-descendant-process-groups-reapgo-924), copied verbatim down to the seam name:

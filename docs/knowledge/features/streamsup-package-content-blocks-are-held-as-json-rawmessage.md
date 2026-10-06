@@ -184,20 +184,22 @@ and the complete routed control path still require live evidence.
 
 **Initialize send primitive (#1689).** `(*Runner).RequestInitialize() error` writes a single
 structured `control_request` line —
-`{"type":"control_request","request_id":"<id>","request":{"subtype":"initialize"}}` — onto the live
-child's held-open stdin, the third subtype alongside `interrupt` and `set_permission_mode` above.
-`WriteInitialize(w io.Writer, requestID string) error` (`envelope.go`) mirrors
-`WriteBypassRevocation` field-for-field. Unlike `set_permission_mode`, the accepted line carries
-**no subtype-specific field** — three arm captures (#1763, re-captured 2026-08-25 against an
-authenticated child, claude 2.1.239) agree byte for byte that `request` holds only `subtype` — so
-`controlRequestInner` gained no new field and `TestMarshalInterruptEnvelope` /
-`TestMarshalBypassRevocationEnvelope` pass with their `want` literals unmodified. `request_id`
+`{"type":"control_request","request_id":"<id>","request":{"subtype":"initialize","perTaskStopAffordance":true}}`
+— onto the live child's held-open stdin. `WriteInitialize(w io.Writer, requestID string) error`
+uses `marshalInitializeEnvelope` to declare
+[turn-only Composer Stop](streamsup-package.md#composer-stop). The shared
+`controlRequestInner.PerTaskStopAffordance` boolean has `omitempty`: initialize sets it to true,
+while every other control subtype omits it and retains its exact bytes. The Claude 2.1.239
+captures from #1763 measured the historical bare subtype request; their recorded requests
+remain unchanged because they document that original response evidence, not today's writer.
+`request_id`
 comes from the same shared `nextControlID` counter as `Interrupt` and `RevokeBypass`. **Not added
 to `sessions.Runner`**, unlike `RevokeBypass`: the interface-placement rule is by consumer
 location, and #1839 (below) put the consumer inside this same file rather than inside
 `internal/sessions` — so the rule still argues against an interface method, now for the ordinary
 reason (in-package caller, no cross-package dispatch to satisfy) rather than for having no caller
-at all. This slice writes the line and stops; nothing reads the ack.
+at all. The writer writes the line and stops; the parser consumes its response as described in
+[the spawn-time initialize documentation](streamsup-package-firing-the-ask-at-spawn-time.md).
 
 **Inbound `can_use_tool` decode and its `control_response` answer complete the family (#2282).**
 `control_request` had been outbound-only through the three primitives above; the parser's

@@ -197,8 +197,9 @@ timeout, and `streamRunner.StopTask` forwards to this primitive (#2796); neither
 method widens `sessions.Runner`. The
 [mobile wire contract](../../protocol-mobile.md#stop-background-task-v2) keeps
 acceptance separate from completion: the standing live proof observed roster
-removal while the task's FIFO remained held. The initialize affordance decision
-belongs to #2775.
+removal while the task's FIFO remained held. The initialize declaration makes
+[Composer Stop turn-only](streamsup-package.md#composer-stop); explicit task
+stop remains a separate operation.
 
 `Parser.claimMCPStatusQuery` runs before the shared control-response consumers.
 The first matching response retires the query, including an error or malformed

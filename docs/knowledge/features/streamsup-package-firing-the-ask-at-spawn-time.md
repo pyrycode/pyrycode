@@ -51,14 +51,17 @@ injection table does not cover this for a new marshaller — a concatenation mut
 not inherited across siblings — so `TestMarshalInitializeEnvelope` needed its own single
 hostile-id case (an id carrying a raw newline) to catch it; confirmed as the sole detector under
 `go test -overlay` review. The revocation table's other seven rows exist to guard `mode`, a second
-fixed field `initialize`'s subtype-only inner doesn't have — a new subtype with no such second
-field needs the one hostile-id case, not the full table.
+fixed string field the historical bare `initialize` request did not have — a new subtype with no
+such second string field needs the one hostile-id case, not the full table. Today's
+initialize also carries the fixed boolean `perTaskStopAffordance: true`; it introduces no
+additional string-injection surface.
 
 **Reading the `initialize` ack's committed captures, in-package (#1810).** `capturedInitialize`/
 `capturedInitializePayload` (`initialize_capture_test.go`) read the four committed
 `internal/e2e/realclaude/testdata/initialize_control_*.json` captures of what claude actually sent
-back for the request above, selecting a capture by an **arm** (a closed set of identifiers), never a
-path — the reader mints the path from package constants and rejects any other string. This is a
+back for the historical bare initialize request, selecting a capture by an **arm** (a closed set
+of identifiers), never a path — the reader mints the path from package constants and rejects any
+other string. This is a
 second, narrower struct over the same record `internal/e2e/realclaude`'s `initControlFixtureRecord`
 already decodes (that type sits behind the `e2e_realclaude` build tag and cannot be imported), so it
 inherits none of that package's live-run scaffolding — the whole point is that this proof now runs
@@ -66,7 +69,12 @@ inside `make check` instead of behind the opt-in gate that exits 0 with zero tes
 no claude login. `capturedInitializePayload` fatals on the one arm that recorded no response
 (`control_no_request`); the wide reader hands that case back as a nil payload instead, so an
 absent-payload capture is a distinguishable *fact*, not a read failure — #1811/#1812/#1719/#1809 are
-the decodes meant to call the wrapper.
+the decodes meant to call the wrapper. These response captures retain their original request
+bytes when today's writer gains a declaration: rewriting them without recapture would claim
+evidence they never measured. `capturedInitialize` validates provenance and payload rather than
+comparing the recorded request to the current writer, and the independent `initControlLine`
+probe still measures its bare request. Current wire and spawn assertions separately pin
+[Composer Stop's initialize flag](streamsup-package.md#composer-stop).
 
 Two things worth keeping in mind for any reader built the same way: first, a reader must not itself
 check the invariant its own test exists to pin — `capturedInitialize` deliberately never compares the
