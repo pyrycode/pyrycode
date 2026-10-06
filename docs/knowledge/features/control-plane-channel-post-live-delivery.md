@@ -170,7 +170,7 @@ retroactively or re-notified by this change.
 
 ## Pending delivery and channel carry
 
-Private client delivery and [`channelCarry`](control-plane.md#carrying-a-posted-channel-message-into-claudes-next-turn-2499)
+Private client delivery and [`channelCarry`](control-plane-channel-post-carry.md#carrying-a-posted-channel-message-into-claudes-next-turn-2499)
 are independent. Newly accepted posts record carry once, after acceptance.
 Carrying or clearing text for Claude cannot consume pending client delivery,
 and client-delivery cleanup cannot consume carry. Retry and reload never call
