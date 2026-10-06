@@ -68,3 +68,9 @@ Pending documentation stage: `docs/knowledge/features/e2e-realclaude.md`, “A s
 ## Revisions
 
 - 2026-10-06: Grounding also read `docs/knowledge/features/cli-verb-dispatch.md` → `runSupervisor` shutdown and `docs/knowledge/features/streamsup-package-draining-turnevents-into-the-interactive-emitter.md` § “One isolated Haiku attempt”: existing generic error/isolation/termination contract preserved. Implementation uses explicit unknown exit values when Wait/state is unobserved. No design, execution or live-fixture change.
+
+## Fixed six-run batch declaration (2026-10-06)
+
+Instrumentation is fixed at `238a04a8579a19e6d2760bf91e084ebd157c0fd4`. This declaration adds documentation only; its resulting pushed commit is the frozen checkout for **exactly six sequential authenticated launches**, numbered 1–6, of `^TestInteractiveStream_FallbackReplySuggestionSetThenClear$` using `/work/Projects/pyrycode-agents/dispatcher/scripts/live-claude-gate.py go --tests` from this product worktree. No code or checkout changes during the batch. Record that checkout commit for every run. Reports are `/tmp/builder-2882/bounded-six/run-1.log` through `run-6.log`. No retry or replacement, including failure, skip, zero tests or interruption. Complete all six; append content-free source, lifecycle/output and wire evidence here regardless of result.
+
+Before declaration: production package race suite passed; final focused fallback race checks and tagged offline TestSuggest race checks passed; module vet, tagged vet and product build passed. Full-module verifier gate and dispatcher full live gate remain pending. No live launch has occurred in this run.
