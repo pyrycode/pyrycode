@@ -72,11 +72,12 @@ const (
 )
 
 func TestInteractiveStreamLiveness(t *testing.T) {
-	// No t.Parallel: WithWorktreeAuthenticated calls t.Setenv.
+	runParallel(t)
+	// Parallel only through runParallel; see liveHome.
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Skipf("realclaude: claude not on PATH: %v", err)
 	}
-	home := WithWorktreeAuthenticated(t) // skips cleanly when no creds
+	home := liveHome(t) // skips cleanly when no creds
 	claudeBin, err := exec.LookPath("claude")
 	if err != nil {
 		t.Fatalf("realclaude: resolve claude: %v", err)

@@ -89,6 +89,7 @@ import (
 // responding via the #1172 bounded-Bash-loop trigger, interrupts it mid-stream, and
 // proves the turn stops as cancelled while the session stays usable for the next turn.
 func TestInteractiveStreamInterruptStopsRunningTurn(t *testing.T) {
+	runParallel(t)
 	h, convID := startStreamRunningTurnHarness(t)
 
 	// AC1: put a genuinely-running live turn in flight. driveRunningTurn sends id 2
@@ -130,6 +131,7 @@ func TestInteractiveStreamInterruptStopsRunningTurn(t *testing.T) {
 // thinking phase before any assistant text or tool frame, then sends an interrupt
 // naming that conversation and requires the first terminal event to be cancelled.
 func TestInteractiveStreamInterruptStopsInitialThinkingTurn(t *testing.T) {
+	runParallel(t)
 	h, convID := startStreamRunningTurnHarness(t)
 
 	driveInitialThinkingTurn(t, h, 2, convID)

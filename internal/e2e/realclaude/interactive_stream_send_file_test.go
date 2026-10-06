@@ -98,6 +98,7 @@ const sendFileAttachBudget = 15 * time.Second
 // pre-created file, answers the resulting permission modal, and proves the daemon
 // filed the bytes under the driving conversation under a freshly minted id.
 func TestInteractiveStreamSendFile(t *testing.T) {
+	runParallel(t)
 	h, convID := startStreamModalResolutionHarness(t, permissionDaemonModel)
 
 	// A per-run nonce keeps the filename (and so the trigger) distinct across runs,

@@ -721,7 +721,7 @@ func TestRealClaude_SetModelProbe(t *testing.T) {
 	// One turn-free discovery child, before any arm spends a token. Selecting out of
 	// the run's OWN list rather than out of a table is what makes an alias-switch
 	// impossible rather than merely unlikely.
-	rows, resolved := runModeSwitchDiscovery(t, claudeBin, workdir)
+	rows, resolved := runModeSwitchDiscovery(t, claudeBin, home, workdir)
 
 	// Both resolutions are read straight off the published map, empty included. These
 	// two reach the RECORD rather than a comparison, and an empty one is the honest
