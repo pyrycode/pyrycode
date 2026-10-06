@@ -303,6 +303,8 @@ func runArgs(args []string) error {
 			return runSessions(args[2:])
 		case "channel":
 			return runChannel(args[2:])
+		case "conversation":
+			return runConversation(args[2:])
 		case "pair":
 			return runPair(args[2:])
 		case "rekey":
@@ -1156,6 +1158,11 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		replySugg.fallback = (replyFallback{binary: *claudeBin, account: account.provider(), logger: logger}).run
 		replySuggDelivered = replySugg.noteDelivered
 	}
+	// Zero keeps msgqueue's default; only an e2e_realclaude build can set it.
+	giveUpAfter, err := queueGiveUpAfter()
+	if err != nil {
+		return err
+	}
 	queue, err := msgqueue.New(msgqueue.Config{
 		// Recovery precedes carry, so the pending posted text is composed onto the payload
 		// once, at the boundary with the queue, and markApprovalHolds stays adjacent to
@@ -1193,8 +1200,9 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		// turn. Deliberately NOT through carryPending or markApprovalHolds — see
 		// newSendNowDeliver — and its OnDelivered carries SentNow so the carry's
 		// clear leaves the waiting head's composed posts alone.
-		SendNow: newSendNowDeliver(router.resolve, router.isClaude, turnBusy, sendNowPlace),
-		Logger:  logger,
+		SendNow:     newSendNowDeliver(router.resolve, router.isClaude, turnBusy, sendNowPlace),
+		GiveUpAfter: giveUpAfter,
+		Logger:      logger,
 	})
 	if err != nil {
 		return fmt.Errorf("msgqueue init: %w", err)
@@ -1490,6 +1498,9 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		return string(id), err
 	}, convRegistryPath, announceConversation, logger)
 	ctrl.SetChannelCreator(createChannel)
+	// Local creation is available even when startRelay installed no announcement hook.
+	ctrl.SetConversationCreator(conversationCreator(convReg, sessionMinter{pool, modelVocabulary}, convRegistryPath, announceConversation, logger))
+	ctrl.SetConversationSubmitter(conversationSubmitter(convReg, router.resolve, queue.Enqueue, convRegistryPath, logger))
 	// Give a new host its starting point (#2569) through that same creator, so
 	// the General channel is confined, trust-marked and bound exactly as
 	// `pyry channel new` would make it. It waits for pool.Ready: pool.Run blocks
@@ -4428,6 +4439,13 @@ Usage:
   pyry logs [flags]                              print recent supervisor logs
   pyry sessions <verb> [flags]                   manage sessions on a running
                                                   daemon (verbs: new, rm, rename, list)
+  pyry conversation new [--type chat|channel] [--name <label>]
+                        [--model MODEL] [--effort EFFORT]
+                                                create in the current directory
+                                                  (default: unnamed chat) and print id
+  pyry conversation post --id ID (--text TEXT | --file PATH)
+                                                submit a user turn to an existing
+                                                  conversation (queue acceptance)
   pyry channel new [--name <label>]              create a channel whose workspace
                                                   is the current directory, and
                                                   print its conversation id

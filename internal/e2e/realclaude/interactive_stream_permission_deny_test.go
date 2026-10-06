@@ -67,6 +67,7 @@ import (
 )
 
 func TestInteractiveStreamPermissionDeny(t *testing.T) {
+	runParallel(t)
 	h, convID := startStreamModalResolutionHarness(t, permissionDaemonModel)
 	driveInteractiveStreamPermissionDeny(t, h, convID)
 }
@@ -74,6 +75,7 @@ func TestInteractiveStreamPermissionDeny(t *testing.T) {
 // TestInteractiveStreamStdioPermissionDeny keeps the existing MCP test above
 // intact and applies its attributed reject + filesystem witness to stdio.
 func TestInteractiveStreamStdioPermissionDeny(t *testing.T) {
+	runParallel(t)
 	h, convID := startStdioModalResolutionHarness(t, permissionDaemonModel)
 	driveInteractiveStreamPermissionDeny(t, h, convID)
 }
@@ -348,6 +350,7 @@ func requireTriggerFileAbsent(t *testing.T, workdir string, nonce int64) {
 // permission produced. The respawn is waited for by pid change, so the round-trip
 // below runs against the successor rather than racing the corpse.
 func TestInteractiveStreamPermissionDenyAfterSettingsRespawn(t *testing.T) {
+	runParallel(t)
 	h, convID := startStreamModalResolutionHarness(t, permissionDaemonModel)
 
 	// A real settings change, and deliberately one that touches neither the

@@ -83,6 +83,7 @@ func sysPromptArgFromRecord(record string) string {
 // deferred since #2085). Hence the shape of the assertion — EVERY record carries
 // the flag, with a non-zero count guarding against the vacuous "all of nothing".
 func TestInteractiveSystemPromptFile_LiveSpawnArgv(t *testing.T) {
+	runParallel(t)
 	h := startPerConversationHarness(t)
 	nonce := time.Now().UnixNano()
 

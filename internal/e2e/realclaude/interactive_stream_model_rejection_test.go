@@ -22,6 +22,7 @@ const modelRejectionBudget = 30 * time.Second
 // that child's current menu, so a Claude release adding or removing rows cannot
 // turn the negative path into a false positive.
 func TestInteractiveStreamRejectsModelAbsentFromCurrentMenu(t *testing.T) {
+	runParallel(t)
 	h, convID := startStreamModalResolutionHarness(t, permissionDaemonModel)
 
 	var menuEnv protocol.Envelope

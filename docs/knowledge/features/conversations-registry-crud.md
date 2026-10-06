@@ -311,7 +311,7 @@ itself with its own test rather than discovering it as a failing assertion.
 
 ## `AppendPendingChannelPost` / `PendingChannelPosts` / `ClearPendingChannelPosts` (#2499)
 
-Hold channel-post text carried forward into a conversation's next user turn (see [control-plane.md § Carrying a posted channel message into claude's next turn](control-plane.md#carrying-a-posted-channel-message-into-claudes-next-turn-2499)) durably on `Conversation.PendingChannelPosts []string`, tag `pending_channel_posts,omitempty` — absent decodes as nothing pending, so no migration step is owed, `SetLastContextUsage`'s and `SetSystemPrompt`'s stated contract.
+Hold channel-post text carried forward into a conversation's next user turn (see [control-plane.md § Carrying a posted channel message into claude's next turn](control-plane-channel-post-carry.md#carrying-a-posted-channel-message-into-claudes-next-turn-2499)) durably on `Conversation.PendingChannelPosts []string`, tag `pending_channel_posts,omitempty` — absent decodes as nothing pending, so no migration step is owed, `SetLastContextUsage`'s and `SetSystemPrompt`'s stated contract.
 
 - **`AppendPendingChannelPost(id, text) bool`** appends under `r.mu`; `false` on a missing row **or** a full bound — the two collapsed because the caller's response is identical either way.
 - **`PendingChannelPosts(id) []string`** returns a fresh copy, never the stored slice — `WorkspaceLabel`'s reasoning transfers: handing back a collection a mutator writes under `r.mu` is an escape the signature should make impossible.

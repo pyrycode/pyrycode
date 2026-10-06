@@ -105,7 +105,7 @@ all.
 
 A send-now write bypasses `channelCarry.carryPending` entirely (see
 [control-plane.md § Carrying a posted channel message into claude's next
-turn](control-plane.md#carrying-a-posted-channel-message-into-claudes-next-turn-2499)) —
+turn](control-plane-channel-post-carry.md#carrying-a-posted-channel-message-into-claudes-next-turn-2499)) —
 it is not the composition of the backlog's waiting head, so it must not
 consume that head's composed channel-post count when `OnDelivered` fires.
 `QueuedMessage.SentNow` is the field that lets `channelCarry.clearDelivered`

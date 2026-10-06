@@ -140,6 +140,7 @@ func questionAnswerTrigger(nonce int64) string {
 }
 
 func TestInteractiveStreamQuestionAnswer(t *testing.T) {
+	runParallel(t)
 	// The #1154 harness, unchanged except for the model: it pairs the phone WITH
 	// --allow-remote-permissions (questionResolverV2.admit gates on the same
 	// MayAnswerRemotePermission() bit the modal path does), writes the stream-json

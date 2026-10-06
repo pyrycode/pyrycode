@@ -86,6 +86,25 @@ The returned ID is the commit signal. An empty ID with an error means the old bi
 
 Every open interactive `multi_agent` peer receives the three reset statuses, one clear transition and the new-agent row in that order. After commitment to Codex, a peer without `multi_agent` keeps its previous row until its next filtered conversation list. Returning to Claude restores ordinary delivery only after commitment: the rising reset phases are still withheld while the binding names Codex. The protocol's [switch outcome contract](../../protocol-mobile.md#switch_agent) gives the fixed refusal vocabulary and disconnect behavior.
 
+### Testing agent-switch handover
+
+A short wall-clock wrap-up deadline can turn a successful fake reply into the
+previous-note fallback. `wrapUpReply.waitOutcome` selects between completion
+and context cancellation; when both are ready, either can win. The 20 ms
+deadline in `TestConversationAgentSwitch_HandoverFirstSpawn` once expired during
+filesystem or scheduling latency even with a synchronous reply. Isolated
+repeats passed, but a scratch overlay adding a 100 ms syscall delay reproduced
+the lost summary (#2877).
+
+Each case now runs inside `testing/synctest.Test`, including fixture creation,
+in-process pool runners and cleanup. Its clock advances only when the bubble's
+goroutines are durably blocked, keeping machine latency out of successful
+reply cases while still expiring the deadline when the child supplies no reply.
+Keep the previous-note fallback assertion in that timeout case: removing the
+deadline or merely increasing it would weaken the proof of fallback. See
+[development verification](development-verification.md#prove-that-tests-distinguish-the-change)
+for other completion/cancellation ordering traps.
+
 ### Eviction is binding-neutral, by construction
 
 `ReasonEviction` (idle timeout or cap-policy) fires with `PreviousID = s.id` and an **empty `NewID`**: the session keeps its id, stays in the pool map, and re-activates later under the *same* id (the [idle-eviction](idle-eviction.md) "evicted is a state, not removal" contract). So `CurrentSessionID` stays valid across eviction with **no write needed**. Because `runActive` returns only `ReasonEviction`/`""` (never `ReasonClear`), an eviction never enters the rebind branch — binding-neutrality (AC#2) holds by control flow, not by a runtime guard. This matters: a naive "set `CurrentSessionID = NewID`, append `PreviousID`" applied to the empty-`NewID` eviction signal would **clear** the binding (breaking the `send_message` respawn guard at `main.go:923`) and append a colliding duplicate of the current id. The reason-branch is the real defense against that corruption; a second `oldID == ""` guard inside `RebindSession` defends the *unrelated* stray-empty-call case (it would **not** catch a mis-routed eviction, which carries a non-empty `PreviousID`).

@@ -72,7 +72,7 @@ package realclaude
 //
 // The spine down to the handshake is the sibling's with no deltas. ONE reader for the
 // whole run — the receive nonce is sequential, so a second concurrent reader would
-// desync the CipherState. No t.Parallel: WithWorktreeAuthenticated calls t.Setenv. The
+// desync the CipherState. Runs in parallel through runParallel; liveHome keeps HOME out of the process environment. The
 // setup skips cleanly (exit 0) when claude / creds are absent; the actual green requires
 // a live claude (needs-real-claude) and is read from the count of executed tests, never
 // from the exit code.
@@ -162,11 +162,12 @@ const skippedResetWindowBudget = 60 * time.Second
 const skipWindowQuiet = 8 * time.Second
 
 func TestInteractiveStreamClearWrapUpSkipped(t *testing.T) {
-	// No t.Parallel: WithWorktreeAuthenticated calls t.Setenv.
+	runParallel(t)
+	// Parallel only through runParallel; see liveHome.
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Skipf("realclaude: claude not on PATH: %v", err)
 	}
-	home := WithWorktreeAuthenticated(t) // skips cleanly when no creds
+	home := liveHome(t) // skips cleanly when no creds
 	claudeBin, err := exec.LookPath("claude")
 	if err != nil {
 		t.Fatalf("realclaude: resolve claude: %v", err)
@@ -444,9 +445,10 @@ func spawnBootstrapDaemonWithWrapUpBound(t *testing.T, home, workdir, claudeBin,
 		"--dangerously-skip-permissions",
 	}
 	cmd := exec.Command(bin, args...)
-	// os.Environ() already carries the isolated HOME and the credential
-	// (WithWorktreeAuthenticated t.Setenv's both). Add the relay switches.
-	cmd.Env = append(os.Environ(), "PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=1")
+	// HOME is set explicitly rather than inherited, so the harness also runs under
+	// t.Parallel, where nothing pins it process-wide; the credential is inherited.
+	// Add the relay switches.
+	cmd.Env = homeEnv(home, "PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=1")
 	cmd.Stderr = io.MultiWriter(os.Stderr, stderr) // DEBUG tee
 
 	if err := cmd.Start(); err != nil {

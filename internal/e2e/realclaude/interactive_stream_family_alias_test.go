@@ -46,6 +46,7 @@ const familyAliasMenuBudget = 30 * time.Second
 // distinguishes the mechanism from a coincidence. The row is selected against that
 // live baseline for the same reason.
 func TestInteractiveStreamFullIDRowFollowsItsFamily(t *testing.T) {
+	runParallel(t)
 	h, convID := startStreamModalResolutionHarness(t, permissionDaemonModel)
 
 	menu := liveModelMenu2447(t, h, convID)

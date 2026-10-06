@@ -31,14 +31,14 @@ package realclaude
 // TWO source-verified mechanics drive the whole design:
 //
 //   (1) The idle timer arms at session ACTIVATION and never resets per-turn
-//       (session.go runActive: time.NewTimer(s.idleTimeout) at activation; the only
-//       re-arm is attached>0, and relay/phone conns are not bridge-attached so
-//       attached stays 0). Turn delivery runs on a different goroutine and never
-//       touches the timer. Consequence: a short idle-timeout fires MID-plant-turn,
-//       killing claude before the token commits — so the plant turn MUST reach
-//       turn_state{idle} before the timer fires. This is why every existing stream
-//       realclaude test DISABLES idle (-pyry-idle-timeout=0); #1177 is the first to
-//       enable it, hence the coupling constraint in § Timing below.
+//       (session.go runActive: time.NewTimer(s.idleTimeout) at activation). Since
+//       #1486 a fire while the conversation has a turn open re-arms instead of
+//       evicting, so a short window no longer kills the plant turn: eviction lands
+//       at most one window after the turn ends. A fire BEFORE the plant turn opens
+//       still evicts; the plant then re-activates the session and a later eviction
+//       follows. The WARN wait therefore counts only evictions after the plant send
+//       (see resumeAfterEvictionIdle). Every other stream realclaude test DISABLES
+//       idle (-pyry-idle-timeout=0); #1177 is the first to enable it.
 //
 //   (2) Re-activation re-arms firstRun (runner.go Run: firstRun := true per Run()),
 //       but since #1631 that latch no longer decides: with a sessions directory
@@ -102,30 +102,30 @@ const (
 )
 
 // resumeAfterEvictionIdle is the -pyry-idle-timeout window D. The idle timer arms
-// at daemon start and fires at D; the plant turn is sent right after the handshake
-// and MUST reach turn_state{idle} before D (see mechanic (1) above). A cold haiku
-// plant turn (--session-id cold spawn + model load + a one-word reply) is typically
-// ~5–15s, so D=30s gives ~2× margin.
+// at activation and fires every D; a fire during the plant turn re-arms (#1486),
+// so the eviction this test waits for lands within D of the plant turn ending.
+// The window is short because it is paid in full on every run: it was 30s while a
+// fire mid-turn still killed the turn, which is no longer the case.
 //
-// Coupling constraint (analogous to the running-turn spec's L < 120s note): D must
-// exceed the wall-clock from daemon start to plant-turn completion. If the plant
-// turn REDs at its drain (drainForCompletedTurn never sees idle), the idle timer
-// evicted mid-turn — raise D. This is a standing preship liveness gate, not a
-// deterministic RED/GREEN oracle; it fails loud, never false-green.
-const resumeAfterEvictionIdle = "30s"
+// A fire before the plant turn opens is harmless to the oracle: the WARN wait
+// counts only evictions logged after the plant send, and the plant re-activates
+// the session, so a fresh eviction still precedes the resume turn. This is a
+// standing preship liveness gate, not a deterministic RED/GREEN oracle; it fails
+// loud, never false-green.
+const resumeAfterEvictionIdle = "5s"
 
 // resumeAfterEvictionWARNTimeout bounds the poll for the session.idle_eviction
-// WARN. The poll begins after the plant drain returns; the WARN fires ~D after
-// daemon start, so this must be ≥ D + eviction-processing slack to always cover
-// the remaining window.
-const resumeAfterEvictionWARNTimeout = 40 * time.Second
+// WARN. The poll begins after the plant drain returns and the WARN fires within D
+// of the turn ending, so this is D plus eviction-processing slack.
+const resumeAfterEvictionWARNTimeout = 20 * time.Second
 
 func TestInteractiveStreamResumeAfterEviction(t *testing.T) {
-	// No t.Parallel: WithWorktreeAuthenticated calls t.Setenv.
+	runParallel(t)
+	// Parallel only through runParallel; see liveHome.
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Skipf("realclaude: claude not on PATH: %v", err)
 	}
-	home := WithWorktreeAuthenticated(t) // skips cleanly when no creds
+	home := liveHome(t) // skips cleanly when no creds
 	claudeBin, err := exec.LookPath("claude")
 	if err != nil {
 		t.Fatalf("realclaude: resolve claude: %v", err)
@@ -197,6 +197,9 @@ func TestInteractiveStreamResumeAfterEviction(t *testing.T) {
 	// until turn_state{idle}, the synchronization point that guarantees the token is
 	// committed BEFORE eviction. If the idle timer evicts mid-turn this drain never
 	// sees idle and REDs at perTurnReplyBudget — loud, never a false green.
+	// Evictions already logged (a fire before the plant turn opened) prove nothing
+	// about the planted transcript, so the WARN wait below counts past them.
+	evictionsBeforePlant := countIdleEvictionWARNs(d.stderr.String(), evictResumeBootstrapUUID)
 	sealSendMessage(t, phone, initSend, 2, evictResumeConvID, "m-1",
 		fmt.Sprintf("Remember this exact token for later, but do NOT repeat it now: %s. "+
 			"Reply with just the word: ok", token))
@@ -207,7 +210,7 @@ func TestInteractiveStreamResumeAfterEviction(t *testing.T) {
 	// gate proving the bootstrap stream session was evicted BEFORE the resume turn —
 	// without it the continuity assertion is vacuous (a never-killed child trivially
 	// retains context).
-	waitForIdleEvictionWARN(t, d, evictResumeBootstrapUUID, resumeAfterEvictionWARNTimeout)
+	waitForIdleEvictionWARN(t, d, evictResumeBootstrapUUID, evictionsBeforePlant, resumeAfterEvictionWARNTimeout)
 
 	// Resume turn (AC3, AC4): ask claude for the exact token it was told to
 	// remember. drainForResumedTurnText returns the concatenated assistant_delta
@@ -264,9 +267,10 @@ func spawnBootstrapDaemonWithIdle(t *testing.T, home, workdir, claudeBin, relayU
 		"--dangerously-skip-permissions",
 	}
 	cmd := exec.Command(bin, args...)
-	// os.Environ() already carries the isolated HOME and the credential
-	// (WithWorktreeAuthenticated t.Setenv's both). Add the relay switches.
-	cmd.Env = append(os.Environ(), "PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=1")
+	// HOME is set explicitly rather than inherited, so the harness also runs under
+	// t.Parallel, where nothing pins it process-wide; the credential is inherited.
+	// Add the relay switches.
+	cmd.Env = homeEnv(home, "PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=1")
 	cmd.Stderr = io.MultiWriter(os.Stderr, stderr) // DEBUG tee + eviction-WARN source
 
 	if err := cmd.Start(); err != nil {
@@ -383,17 +387,13 @@ func drainForResumedTurnText(t *testing.T, phone *fakephone.Client, cs *noise.Ci
 // value proves it was OUR session that evicted. Mirrors the #396 reference's
 // substring poll; containsAll lives in package e2e (disjoint build tag), so the
 // all-substrings check is inlined here.
-func waitForIdleEvictionWARN(t *testing.T, d *bootstrapDaemon, bootstrapUUID string, timeout time.Duration) {
+func waitForIdleEvictionWARN(t *testing.T, d *bootstrapDaemon, bootstrapUUID string, already int, timeout time.Duration) {
 	t.Helper()
-	want := []string{
-		"event=session.idle_eviction",
-		"session_id=" + bootstrapUUID,
-		"bootstrap=true",
-	}
+	want := idleEvictionWARNFields(bootstrapUUID)
 	deadline := time.Now().Add(timeout)
 	for {
 		stderr := d.stderr.String()
-		if containsAllSubstrings(stderr, want) {
+		if countIdleEvictionWARNs(stderr, bootstrapUUID) > already {
 			t.Logf("observed session.idle_eviction WARN for %q", bootstrapUUID)
 			return
 		}
@@ -404,6 +404,27 @@ func waitForIdleEvictionWARN(t *testing.T, d *bootstrapDaemon, bootstrapUUID str
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+func idleEvictionWARNFields(bootstrapUUID string) []string {
+	return []string{
+		"event=session.idle_eviction",
+		"session_id=" + bootstrapUUID,
+		"bootstrap=true",
+	}
+}
+
+// countIdleEvictionWARNs counts the stderr lines that are the session.idle_eviction
+// WARN for bootstrapUUID.
+func countIdleEvictionWARNs(stderr, bootstrapUUID string) int {
+	want := idleEvictionWARNFields(bootstrapUUID)
+	n := 0
+	for _, line := range strings.Split(stderr, "\n") {
+		if containsAllSubstrings(line, want) {
+			n++
+		}
+	}
+	return n
 }
 
 // containsAllSubstrings reports whether s contains every substring in want.

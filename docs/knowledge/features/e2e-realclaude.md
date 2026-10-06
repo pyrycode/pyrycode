@@ -225,6 +225,29 @@ excludes both parent teardown and rig EOF as causes. Both standing tests run
 under normal `make e2e-realclaude`, log the Claude version, and passed on Claude
 2.1.280 in [the dispatcher live gate](https://github.com/pyrycode/pyrycode/issues/2775#issuecomment-6008885859).
 
+Shortened waits. A live test that has to outlast a daemon timer should shorten
+the timer, not wait it out. A daemon built with `go build -tags e2e_realclaude`
+reads `PYRY_E2E_QUEUE_GIVE_UP_AFTER`, a positive Go duration such as `3s`, as the
+message queue's give-up bound in place of its 2 minute default. An ordinary
+build, including the untagged binary `ensurePyryBuilt` produces, ignores it, so
+a test using it must build its own tagged daemon. An invalid value fails the
+daemon's start. `TestInteractiveStreamResumeAfterEviction` runs a 5 s idle
+window because, since #1486, a fire during an open turn re-arms rather than
+evicting; it counts only evictions logged after the plant send, so a fire before
+the plant turn cannot make the resume vacuous.
+
+Parallel tests. `WithWorktree` and `WithWorktreeAuthenticated` pin HOME with
+`t.Setenv`, which Go refuses to combine with `t.Parallel`. A live test may run in
+parallel only through `runParallel(t)`, and only when it changes no process-wide
+state: no `t.Setenv` or `os.Setenv` of its own or in a harness callback, and every
+child that needs the isolated HOME receives it explicitly through `homeEnv`, or
+`Env` on an in-process runner. `liveHome` returns `authenticatedHome` for such a
+test and falls back to `WithWorktreeAuthenticated` for every other caller, so
+serial tests keep their pinned HOME. Tests that read transcripts in process
+through `ReadJSONL`, install a PATH or environment shim, or count processes stay
+serial. Go runs every serial test first and the parallel ones together after,
+so the serial tail sets the floor on wall time.
+
 ## Make target
 
 ```make

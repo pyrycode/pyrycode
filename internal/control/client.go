@@ -149,6 +149,23 @@ func SessionsNew(ctx context.Context, socketPath, label string) (string, error) 
 	return resp.SessionsNew.SessionID, nil
 }
 
+// ConversationNew requests creation with caller settings and returns the id.
+// Workspace, name and settings policy belong to the installed daemon creator.
+// Every error returns an empty id; a wire refusal takes precedence over a result.
+func ConversationNew(ctx context.Context, socketPath string, payload ConversationPayload) (string, error) {
+	resp, err := request(ctx, socketPath, Request{Verb: VerbConversationNew, Conversation: &payload})
+	if err != nil {
+		return "", err
+	}
+	if resp.Error != "" {
+		return "", errors.New(resp.Error)
+	}
+	if resp.ConversationNew == nil || resp.ConversationNew.ConversationID == "" {
+		return "", errors.New("control: empty conversation.new response")
+	}
+	return resp.ConversationNew.ConversationID, nil
+}
+
 // ChannelNew asks the daemon to create a promoted conversation — a channel —
 // rooted at cwd, and returns the minted conversation id. cwd is the absolute
 // directory the caller is standing in, sent RAW: the daemon canonicalises,
@@ -178,6 +195,27 @@ func ChannelNew(ctx context.Context, socketPath, cwd, name string) (string, erro
 		return "", errors.New("control: empty channel.new response")
 	}
 	return resp.ChannelNew.ConversationID, nil
+}
+
+// ConversationPost submits a user message to an existing conversation id.
+// It returns nil only for confirmed queue acceptance, not completed model output.
+// Values are forwarded unchanged; validation and id resolution belong to the
+// server and its installed submitter. Wire refusals take precedence over OK.
+func ConversationPost(ctx context.Context, socketPath, conversationID, text string) error {
+	resp, err := request(ctx, socketPath, Request{
+		Verb:             VerbConversationPost,
+		ConversationPost: &ConversationPostPayload{ConversationID: conversationID, Text: text},
+	})
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return errors.New(resp.Error)
+	}
+	if !resp.OK {
+		return errors.New("control: conversation.post response missing ok flag")
+	}
+	return nil
 }
 
 // ChannelPost asks the daemon to record text in the channel named by label,

@@ -150,8 +150,8 @@ package realclaude
 // One daemon, one conversation created over the wire, one encrypted channel, ONE
 // reader for the whole window — the receive nonce is sequential, so a second
 // concurrent reader would desync the CipherState and surface as an unrelated
-// decrypt error many frames later. No t.Parallel: WithWorktreeAuthenticated calls
-// t.Setenv. The harness skips cleanly (exit 0) when claude or creds are absent,
+// decrypt error many frames later. Runs in parallel through runParallel; liveHome keeps HOME out of
+// the process environment. The harness skips cleanly (exit 0) when claude or creds are absent,
 // exactly like every sibling stream spec; the actual green requires a live claude
 // (needs-real-claude) and is read from the count of executed tests, never from the
 // exit code.
@@ -193,13 +193,15 @@ const hookBannerRigDir = "hookbanner-rig-2320"
 // snapshot taken the instant the banner was read would measure nothing but this
 // file's own impatience.
 //
-// About seven times the 1.5 seconds the committed capture measured for the entire
+// About three times the 1.5 seconds the committed capture measured for the entire
 // block phase, and the child is already up by the time it is waited on — the cold
 // spawn was paid for by the banner wait, which takes perTurnReplyBudget for exactly
-// that reason.
-const hookBannerRefusedSettleBudget = 10 * time.Second
+// that reason. It was 10 s, about seven times; the margin was cut because the
+// window is paid in full on every green run.
+const hookBannerRefusedSettleBudget = 5 * time.Second
 
 func TestInteractiveStreamHookBlockedBannerReachesTheClient(t *testing.T) {
+	runParallel(t)
 	// The rig is written by the seed callback, which runs after the bootstrap
 	// registry is seeded and BEFORE the daemon starts — the only point at which
 	// the minted HOME exists and nothing has spawned yet. Both halves need that
