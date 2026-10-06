@@ -105,21 +105,19 @@ type controlRequest struct {
 // Subtype MUST stay first: the set_permission_mode line is pinned byte for byte
 // against the one #1595 measured live, subtype before mode.
 //
-// The omitempty tags are load-bearing rather than cosmetic. Detail, Mode, Model,
-// ServerName, Enabled and TaskID each belong to specific control subtypes; without the
-// tags every other control line would grow fields it has no business carrying, and
-// marshalInterruptEnvelope's and marshalInitializeEnvelope's output would stop
-// matching the lines claude has been sent since #1120 and measured in #1763.
-// TestMarshalInterruptEnvelope's and TestMarshalInitializeEnvelope's byte-exact
-// wants are what hold this.
+// The omitempty tags keep subtype-specific fields off every other control line.
+// PerTaskStopAffordance belongs only to initialize; its true value declares
+// turn-only Composer Stop while explicit stop_task remains available.
+// Exact-byte envelope tests guard omission and field order across subtypes.
 type controlRequestInner struct {
-	Subtype    string  `json:"subtype"`
-	Detail     string  `json:"detail,omitempty"`     // get_context_usage only
-	Mode       string  `json:"mode,omitempty"`       // set_permission_mode only
-	Model      string  `json:"model,omitempty"`      // set_model only
-	ServerName *string `json:"serverName,omitempty"` // mcp_reconnect and mcp_toggle only
-	Enabled    *bool   `json:"enabled,omitempty"`    // mcp_toggle only; pointer preserves false
-	TaskID     *string `json:"task_id,omitempty"`    // stop_task only; pointer preserves empty string
+	Subtype               string  `json:"subtype"`
+	Detail                string  `json:"detail,omitempty"`                // get_context_usage only
+	Mode                  string  `json:"mode,omitempty"`                  // set_permission_mode only
+	Model                 string  `json:"model,omitempty"`                 // set_model only
+	ServerName            *string `json:"serverName,omitempty"`            // mcp_reconnect and mcp_toggle only
+	Enabled               *bool   `json:"enabled,omitempty"`               // mcp_toggle only; pointer preserves false
+	TaskID                *string `json:"task_id,omitempty"`               // stop_task only; pointer preserves empty string
+	PerTaskStopAffordance bool    `json:"perTaskStopAffordance,omitempty"` // initialize only
 }
 
 // marshalStopTaskEnvelope forwards taskID as string data on one physical line.
@@ -450,25 +448,20 @@ func WritePermissionMode(w io.Writer, requestID, mode string) error {
 	return nil
 }
 
-// marshalInitializeEnvelope returns the single newline-terminated initialize
-// control line, the request that makes claude report what the session knows about
-// itself — the model list (identifiers, display names, supported reasoning-effort
-// levels) and the slash-command list. #1763 captured this line live against claude
-// 2.1.239 across three arms, and all three agree field for field; the literal here
-// is that line with the locally-minted request_id substituted for the capture's
-// own probe id.
+// marshalInitializeEnvelope asks claude for the session model and command lists
+// and declares turn-only Composer Stop for every interactive child. The flag is
+// process-wide, independent of client version or connection order. Closed-input
+// runs retain Claude's task cleanup at turn completion.
 //
-// The measurement is also why controlRequestInner needs no new field: the accepted
-// request object carries subtype and nothing else, so Mode stays at its zero value
-// and omitempty drops it. Like its two siblings every field but the request_id is
-// a fixed literal, so the line has no injection surface of its own; the appended
-// '\n' is the sole raw newline, making the envelope one physical line by
-// construction (structured encoding, never string concatenation).
+// Historical initialize response captures measured the bare subtype request;
+// their recorded requests remain unchanged. Today's request adds the fixed
+// perTaskStopAffordance literal. Structured encoding keeps request_id as data
+// and the appended newline as the sole raw newline.
 func marshalInitializeEnvelope(requestID string) ([]byte, error) {
 	env := controlRequest{
 		Type:      "control_request",
 		RequestID: requestID,
-		Request:   controlRequestInner{Subtype: "initialize"},
+		Request:   controlRequestInner{Subtype: "initialize", PerTaskStopAffordance: true},
 	}
 	b, err := json.Marshal(env)
 	if err != nil {

@@ -422,7 +422,7 @@ func TestRunner_RequestInitialize_NoLiveChild(t *testing.T) {
 // RequestInitialize writes a single initialize control_request line onto the
 // held-open stdin (AC2); the echo_lines fake child echoes it back as ECHO:<line>,
 // proving the exact envelope reached the child — type control_request,
-// request.subtype initialize, and a non-empty locally-minted request_id.
+// request.subtype initialize, perTaskStopAffordance=true, and a minted request_id.
 //
 // MCP status and Interrupt follow in the same test to pin the shared local source:
 // all three control subtypes mint from one counter, so their request_ids must
@@ -481,6 +481,9 @@ func TestRunner_RequestInitialize_LiveChildDelivers(t *testing.T) {
 	}
 	if initialize.Type != "control_request" {
 		t.Errorf("echoed initialize type = %q, want control_request", initialize.Type)
+	}
+	if !initialize.Request.PerTaskStopAffordance {
+		t.Error("initialize must declare perTaskStopAffordance=true")
 	}
 	if initialize.RequestID == "" {
 		t.Error("echoed initialize request_id is empty, want a locally-minted id")
@@ -631,6 +634,16 @@ func initializeAsks(output string) []string {
 	return ids
 }
 
+func assertInitializeAffordances(t *testing.T, output string) {
+	t.Helper()
+	for _, line := range findEchoedLines(output) {
+		var cr decodedControlRequest
+		if err := json.Unmarshal([]byte(line), &cr); err == nil && cr.Request.Subtype == "initialize" && !cr.Request.PerTaskStopAffordance {
+			t.Error("spawn initialize must declare perTaskStopAffordance=true")
+		}
+	}
+}
+
 // TestRunner_RequestInitializeOnSpawn_OncePerChild pins the cardinality in both
 // directions: with the flag set a live child is asked exactly ONCE, and with the
 // zero value it is not asked at all.
@@ -693,6 +706,7 @@ func TestRunner_RequestInitializeOnSpawn_OncePerChild(t *testing.T) {
 			}
 			waitForContains(t, out, lastMarker, 3*time.Second)
 
+			assertInitializeAffordances(t, out.String())
 			ids := initializeAsks(out.String())
 			if len(ids) != tc.want {
 				t.Fatalf("child was asked %d time(s) across two turns, want %d:\n%s", len(ids), tc.want, out.String())
@@ -780,6 +794,7 @@ func TestRunner_RequestInitializeOnSpawn_ReplacementChild(t *testing.T) {
 			}
 			waitForContains(t, out, marker, 3*time.Second)
 
+			assertInitializeAffordances(t, out.String())
 			ids := initializeAsks(out.String())
 			if len(ids) != 2 {
 				t.Fatalf("saw %d ask(s) across two children, want 2:\n%s", len(ids), out.String())
