@@ -28,8 +28,17 @@ an uncommitted failure can follow wrap-up and does not promise an inert request.
 The seam carries only closed classifications, never downstream error text,
 and relay selects fixed correlated error messages. A zero outcome is a retryable
 offline failure, preventing an unset result from masquerading as success.
-Production adaptation and committed-state events remain assigned to #2871;
-the current nil seam returns retryable `server.binary_offline`. See the
+Production's `relayAgentSwitcher` adapts the daemon primitive; a nil seam still
+returns retryable `server.binary_offline`. The committed-state producer retains
+shared reset exclusion until `FlushPushes` completes. Enqueueing alone cannot
+protect the row: `agentTaggedForConn` and `withheldFromConn` read its binding
+when `Run` seals, so a later switch could otherwise change the first outcome's
+agent or recipients. `FlushPushes` inserts payload-free FIFO markers in the
+current connections' push queues and waits off `Run` for preceding pushes to
+pass gates and sealing, or for each connection to close. Transport-down and
+replay holds retain markers until recovery; later pushes cannot extend the wait,
+and daemon cancellation releases it. Markers never reach the wire or logs.
+See [switch publication and exclusion](conversation-session-binding.md#switching-to-the-other-agent-2672), the
 [presence contract](protocol-package-types-session-settings-payloads.md#agent-switch-presence-and-round-trip-testing)
 and [completion-test barriers](development-verification.md#prove-that-tests-distinguish-the-change).
 

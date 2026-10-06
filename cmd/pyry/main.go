@@ -1230,6 +1230,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// reset tail, which already runs off the dispatch goroutine, so it emits
 	// synchronously and cannot drop or reorder an edge.
 	resetting := newResettingEmitterV2(ctx, logger)
+	reset := newConversationReset(ctx, convReg, pool, turnBusy, queue, *wrapUpDeadlineFlag, logger)
 
 	// The debug-bundle producer (#813): a paired `request_debug_bundle` frame
 	// assembles the daemon-global bundle — the recent log ring plus the newest
@@ -1320,15 +1321,16 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 			// daemon ctx — never a frame's — because the reset outlives the dispatch
 			// that started it. nil on a daemon with no registry or pool, which leaves
 			// the rotation exactly as it was.
-			reset: newConversationReset(ctx, convReg, pool, turnBusy, queue, *wrapUpDeadlineFlag, logger),
+			reset: reset,
 			// #2478: the same emitter the relay leg attaches its broadcaster to, so the
 			// tail that orders the three edges and the producer that puts them on the
 			// wire are one object rather than two that could disagree.
 			resetting: resetting,
 			log:       logger,
 		},
-		defaultCwd:  defaultCwd,
-		transitions: pool,
+		agentSwitcher: relayAgentSwitcher{switcher: conversationAgentSwitcher{pool: pool, conversations: convReg, registryPath: convRegistryPath, reset: reset, history: conversationHistory, resetting: resetting, saved: modelVocabulary}},
+		defaultCwd:    defaultCwd,
+		transitions:   pool,
 		// #2148: the relay leg hands back its open-conn enumerator, and this closure
 		// — the only place that names both packages — maps it onto the pool's
 		// resolver. The two ActiveConn fields cross as untrusted text and are judged

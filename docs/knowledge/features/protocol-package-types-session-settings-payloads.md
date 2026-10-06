@@ -86,8 +86,9 @@ and `model: ""` selects the target agent's template default. Its required
 that tag would silently drop the default-model choice when re-encoding.
 The conversation-addressed [`switch_agent` contract](../../protocol-mobile.md#switch_agent)
 does not replace the session-addressed settings verb. Validation and
-asynchronous relay dispatch use `handleSwitchAgent`; production adaptation and
-committed-event publication remain assigned to #2871.
+asynchronous relay dispatch use `handleSwitchAgent`; production's
+`relayAgentSwitcher` invokes the daemon primitive and publishes its committed
+outcome under shared reset exclusion. See [switch publication](conversation-session-binding.md#switching-to-the-other-agent-2672).
 
 Required plain strings preserve keys when encoding but collapse absent, null
 and empty values when decoding. Decoding into `SwitchAgentPayload` alone would

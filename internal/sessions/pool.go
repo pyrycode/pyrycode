@@ -343,6 +343,9 @@ type Pool struct {
 	// goroutine-start happens-before. nil disables it. See transition.go.
 	transitionObserver TransitionObserver
 	onRunnerStopped    func(SessionID) // construction-bound, read-only after New
+	// switchPublisher is installed before Run and may wait for daemon-owned
+	// publication. Ordinary lifecycle observers remain nonblocking.
+	switchPublisher func(SessionTransition)
 }
 
 // SnapshotEntry is one (id, pid) pair captured by Pool.Snapshot. The primitive
