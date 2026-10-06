@@ -245,6 +245,19 @@ from a safe `msgqueue.QueuedMessage`, available before the write through
 `msgqueue.DeliveryMessage` and again at confirmation through `OnDelivered`,
 not from an envelope in flight (see below).
 
+**Carry the append result, not a second lookup or another counter (#2861).**
+`appendConversationHistory` returns the successful `Store.Append` id as an
+immutable `*uint64`, shared by every direct live recipient as
+`Envelope.HistoryEntryID`. The operator commit carries it with the safe payload
+and placement timestamp through `operatorMessage` to
+`operatorMessageEmitterV2.broadcast`; reconstructing it at broadcast would lose
+the association with that exact append. Append once before fan-out, even without
+recipients. A transition has no ring id, and an operator emitter needs no ring
+to carry this durable identity. The connection counter and ring cursor cannot
+substitute for the stored per-conversation id. See
+[envelope identities](protocol-package-types-envelope.md#replay-cursors-and-durable-read-marks)
+for read-mark use and reconnect replay's metadata absence.
+
 **Why this producer reads `text`, never the delivered payload.** Since #2038
 a queued message carries two strings — `text` (client-readable) and
 `delivery` (what reaches claude's stdin, which for an attachment-bearing
@@ -329,15 +342,24 @@ and would sail past a `== nil` guard. `Store` is not nil-receiver-safe
 (`Append` locks immediately), so `appendConversationHistory` checks
 explicitly rather than relying on a nil-receiver method, and every emitter
 test that builds an emitter with no store keeps working unchanged. A
-failing append never suppresses the wire emit or the ring append — it is a
-statement with no branch after it — and the failure is logged at `Warn`
+failing append never suppresses the wire emit or the ring append. It returns nil
+metadata; an absent store also returns nil, omitting `history_entry_id` rather
+than encoding null or zero. The failure is logged at `Warn`
 with an `errors.Is`-derived discriminant (`invalid_id` / `invalid_payload`
 / `write`), never the error's own text: `history`'s errors format absolute
 filesystem paths (`open segment %q`), and the log's own MUST-NOT-log-content
 rule would be defeated by relaying them.
 
-**Two test-shape traps worth knowing before touching either producer
+**Test-shape traps worth knowing before touching these producers
 again:**
+- **Separate the id sequences to prove provenance.** When history, ring and
+  envelope counters coincide, substituting either live counter for the stored id
+  stays green. `TestLiveProducers_HistoryEntryID` keeps history id 8, ring id 4
+  and envelope ids 101–103 distinct, then compares the stored type, payload and
+  timestamp across all three producers. Include no recipients, absent/failed
+  storage and an operator without a ring: tests only with recipients miss skipped
+  appends when nobody is connected, while requiring a ring misses the independent
+  history-to-push handoff.
 - **A shared-timestamp assertion needs three fan-out targets, not two.**
   `broadcast` used to mint `time.Now()` inside its per-conn loop; with only
   two connections, a per-conn timestamp and a correctly hoisted one are

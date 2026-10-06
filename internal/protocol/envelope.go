@@ -39,7 +39,8 @@ type Envelope struct {
 	// HistoryEntryID identifies HistoryEntry.ID, the durable per-conversation
 	// entry used by mark_conversation_read.up_to. Distinct from ID and EventID;
 	// real entries are >= 1. Nil omits the key and requires history/list fallback.
-	// Emission awaits #2861. This metadata conveys no authorization.
+	// The three history-backed direct live producers stamp a successful append's
+	// ID; reconnect replay currently omits it. This conveys no authorization.
 	HistoryEntryID *uint64 `json:"history_entry_id,omitempty"`
 
 	PayloadEncrypted bool `json:"payload_encrypted,omitempty"`

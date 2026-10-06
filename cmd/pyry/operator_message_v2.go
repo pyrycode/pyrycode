@@ -22,9 +22,10 @@ const operatorMessageQueueSize = 16
 // very values the durable log entry was written with, so the log and the wire
 // cannot differ.
 type operatorMessage struct {
-	convID  string
-	payload json.RawMessage
-	ts      time.Time
+	convID         string
+	payload        json.RawMessage
+	ts             time.Time
+	historyEntryID *uint64
 }
 
 // operatorMessageEmitterV2 pushes the operator's own delivered message, as a
@@ -110,11 +111,12 @@ func (e *operatorMessageEmitterV2) broadcast(ctx context.Context, bcast interact
 		}
 		e.nextID++
 		env := protocol.Envelope{
-			ID:      e.nextID,
-			Type:    protocol.TypeMessage,
-			TS:      m.ts,
-			Payload: m.payload,
-			EventID: eventID,
+			ID:             e.nextID,
+			Type:           protocol.TypeMessage,
+			TS:             m.ts,
+			Payload:        m.payload,
+			EventID:        eventID,
+			HistoryEntryID: m.historyEntryID,
 		}
 		if err := bcast.Push(ctx, c.ConnID, env); err != nil {
 			if ctx.Err() != nil {
