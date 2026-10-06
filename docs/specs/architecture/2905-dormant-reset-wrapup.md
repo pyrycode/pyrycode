@@ -71,3 +71,7 @@ Pending for the documentation stage: in `docs/knowledge/features/v2-session-mana
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-06
+
+## Revisions
+
+- 2026-10-06: The fake stream child echoes its prompt, so seeding an older fenced note there would yield an inadmissible nested-fence reply rather than usable wrap-up prose. Keep that restart case's note initially absent and prove predecessor-owned stdin, stored wrap-up reply and successor composition. The retained-pool tests and authenticated restart case cover replacing a seeded older note. Observe predecessor delivery through its identity-specific stdin log rather than requiring its queued assistant delta to beat the independently queued transition on the phone wire.

@@ -10,10 +10,11 @@ import (
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
 	"github.com/pyrycode/pyrycode/internal/sessions"
+	"github.com/pyrycode/pyrycode/internal/streamsup"
 )
 
 // This file holds the daemon side of the conversation reset's wrap-up turn
-// (#2477): before a new_session replaces a live claude, the outgoing session is
+// (#2477): before a new_session replaces a previously used session, the outgoing session is
 // asked to write a handoff note for its successor, and that reply becomes the
 // note #2475 already composes into the successor's system prompt.
 //
@@ -35,7 +36,7 @@ import (
 // begin below is what keeps a second frame from starting a second one.
 
 const (
-	// wrapUpDeadline bounds the WHOLE wrap-up: the idle wait, the write, and the
+	// wrapUpDeadline bounds the WHOLE wrap-up: dormant resume, readiness, idle wait, write, and
 	// reply. On expiry the reset proceeds and the previous note stands (AC 2).
 	//
 	// NINETY SECONDS IS A CEILING ON THE OPERATOR'S WAIT, not an estimate of the
@@ -131,7 +132,7 @@ type handoffNoteStore interface {
 	WriteHandoffNote(id conversations.ConversationID, text string) (string, error)
 }
 
-// resetTarget is one conversation's live child as this routine needs it: somewhere
+// resetTarget is one conversation's bound child as this routine needs it: somewhere
 // to write the turn, and the runner to interrupt and to arm the capture on.
 //
 // The WRITE is a func rather than the *sessions.Session it comes from, the
@@ -142,6 +143,9 @@ type handoffNoteStore interface {
 type resetTarget struct {
 	write  func(ctx context.Context, conversationID string, payload []byte) error
 	runner sessions.Runner
+	// activate resumes this bound identity through the pool lifecycle. Optional
+	// for test targets and callers that already own a live child.
+	activate func(context.Context) error
 }
 
 // conversationReset runs the wrap-up turn and owns the one-reset-at-a-time guard.
@@ -227,7 +231,10 @@ func newConversationReset(
 			if !ok {
 				return resetTarget{}, false
 			}
-			return resetTarget{write: sess.WriteUserTurn, runner: sess.Runner()}, true
+			return resetTarget{
+				write: sess.WriteUserTurn, runner: sess.Runner(),
+				activate: func(ctx context.Context) error { return pool.Activate(ctx, sess.ID()) },
+			}, true
 		},
 		busy:     busy,
 		notes:    pool,
@@ -350,18 +357,33 @@ func (r *conversationReset) release(convID string) {
 // WriteUserTurn below would answer the retryable ErrNoLiveChild and the wrap-up
 // could never be delivered at all.
 func (r *conversationReset) wrapUp(convID string) (wrote bool) {
-	text, ended, _ := r.wrapUpText(convID)
+	if r == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(r.baseContext(), r.bound())
+	defer cancel()
+	text, ended, _ := r.wrapUpTextContext(ctx, convID, true)
 	return ended && r.storeNote(convID, text)
 }
 
 // wrapUpText captures the reply without storing it, so a switch can add history.
 // Ordinary reset keeps the reply-only write and its existing failure behavior.
 func (r *conversationReset) wrapUpText(convID string) (string, bool, bool) {
-	if r == nil || r.resolve == nil {
+	if r == nil {
 		return "", false, false
 	}
 	ctx, cancel := context.WithTimeout(r.baseContext(), r.bound())
 	defer cancel()
+	return r.wrapUpTextContext(ctx, convID, false)
+}
+
+// wrapUpTextContext shares capture logic without changing agent-switch handover.
+// Only ordinary reset resumes dormant children; its activation, delivery readiness
+// and reply wait all consume the caller's single daemon-owned deadline.
+func (r *conversationReset) wrapUpTextContext(ctx context.Context, convID string, resume bool) (string, bool, bool) {
+	if r.resolve == nil {
+		return "", false, false
+	}
 
 	r.dropBacklog(convID)
 
@@ -380,6 +402,18 @@ func (r *conversationReset) wrapUpText(convID string) (string, bool, bool) {
 			"event", "reset.wrapup.no_capture",
 			"conversation_id", convID)
 		return "", false, false
+	}
+	dormant := resume && target.runner.State().ChildPID == 0
+	if dormant {
+		r.logger().Info("relay: resuming dormant conversation for reset wrap-up",
+			"event", "reset.wrapup.resume", "conversation_id", convID)
+		if target.activate != nil {
+			if err := target.activate(ctx); err != nil {
+				r.logger().Warn("relay: reset wrap-up could not activate the dormant conversation",
+					"event", "reset.wrapup.activation_failed", "conversation_id", convID)
+				return "", false, false
+			}
+		}
 	}
 
 	// A failed interrupt is tolerated: the idle wait below is the real gate, and the
@@ -415,7 +449,7 @@ func (r *conversationReset) wrapUpText(convID string) (string, bool, bool) {
 		return "", false, false
 	}
 	defer finished()
-	if err := target.write(ctx, convID, []byte(composeWrapUpPrompt(r.previousNote(convID)))); err != nil {
+	if err := writeResetWrapUp(ctx, target, convID, []byte(composeWrapUpPrompt(r.previousNote(convID))), dormant); err != nil {
 		undo()
 		// SECURITY: the error value is deliberately NOT recorded; see the rule in
 		// storeNote. This is the site that makes the rule necessary rather than
@@ -437,6 +471,28 @@ func (r *conversationReset) wrapUpText(convID string) (string, bool, bool) {
 		return "", false, false
 	}
 	return text, true, failed
+}
+
+// writeResetWrapUp waits out stream startup and permission-posture confirmation.
+// ErrNoLiveChild guarantees zero bytes written; every other error may follow a
+// partial write and must never be retried. Capture is already armed by the caller.
+func writeResetWrapUp(ctx context.Context, target resetTarget, convID string, prompt []byte, waitReady bool) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := target.write(ctx, convID, prompt)
+		if !waitReady || !errors.Is(err, streamsup.ErrNoLiveChild) {
+			return err
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 // baseContext answers the daemon context, or Background for a literal built
