@@ -377,6 +377,21 @@ Envelope-level fields beyond the v1 set:
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `event_id` | int | no (omitempty) | Durable event id for the replay cursor (#649), **unique daemon-wide** (#2022). Present **only** on interactive structured-stream frames (binary → phone; see [Interactive events](#interactive-events-v2-capability-gated)); absent on every other frame. Distinct from `id` (the per-conn envelope counter that resets each reconnect). Strictly increasing in the daemon's emit order across **all** conversations, and therefore ascending **but not contiguous** within any one of them — a conversation's own ids have another conversation's in between, and the first id a conversation is ever assigned is normally well above 1. Stable across reconnects; the latest one a phone observes is a valid `last_event_id` to advertise on reconnect. Always ≥ 1 when present, so absence is unambiguous (omitted, not `null`/`0`). A single scalar cursor over this id space is now correct: **no future event in any conversation can carry an id at or below one already observed**. Ids do **not** survive a daemon restart (the ring is in-memory) — that boundary is the `resync` marker's job. |
+| `history_entry_id` | uint64 | no (omitempty) | Durable per-conversation [history entry id](#a-history-entry) (`HistoryEntry.ID`), used by [`mark_conversation_read.up_to`](#marking-a-conversation-read). Distinct from connection `id` and daemon-wide ring `event_id`; real entries are ≥ 1 and survive daemon restarts. Declared by #2860; **emission awaits [#2861](https://github.com/pyrycode/pyrycode/issues/2861)**. When absent, the client **must fall back to history/list** to obtain a durable read-mark target; nil is omitted, never encoded as `null` or `0`. |
+
+`history_entry_id` identifies the stored entry for the envelope's conversation,
+using the same durable per-conversation namespace as `HistoryEntry.ID` and
+[`mark_conversation_read.up_to`](#marking-a-conversation-read). Real entries
+start at 1 and remain stable across daemon restarts. Connection `id` resets on
+reconnect, while daemon-wide ring `event_id` is an in-memory replay cursor;
+neither can substitute for a durable history entry id in a read mark.
+**Emission awaits [#2861](https://github.com/pyrycode/pyrycode/issues/2861)**:
+\#2860 declares the optional field without wiring a producer. **When the field
+is absent, clients must fall back to history/list**, using a
+[`history_page`](#conversation-history-v2) entry's `id` or the target
+conversation's [`list_conversations`](#application-message-types) `latest_entry_id`
+as appropriate to what the operator has read. An unset pointer omits the key
+entirely; legacy envelopes decode and re-encode without adding it.
 
 Encoding: line-delimited JSON over WS text frames. One outer envelope per frame. UTF-8.
 

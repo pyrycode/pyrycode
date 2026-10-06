@@ -1,6 +1,8 @@
 # `Envelope`
 
-The outer wire shape every application frame conforms to (`docs/protocol-mobile.md` § Message envelope, lines 177–201). Field order matches the spec table verbatim.
+The outer wire shape every application frame conforms to
+([`docs/protocol-mobile.md` § Wire shapes](../../protocol-mobile.md#wire-shapes),
+“Application envelope”).
 
 ```go
 type Envelope struct {
@@ -10,8 +12,11 @@ type Envelope struct {
     Payload   json.RawMessage `json:"payload"`
     InReplyTo *uint64         `json:"in_reply_to,omitempty"`
 
-    // EventID — durable, daemon-wide-unique event id (eventring); #649, #2022.
+    // EventID — in-memory replay cursor, unique daemon-wide.
     EventID *uint64 `json:"event_id,omitempty"`
+
+    // HistoryEntryID — durable per-conversation history entry id.
+    HistoryEntryID *uint64 `json:"history_entry_id,omitempty"`
 
     PayloadEncrypted bool `json:"payload_encrypted,omitempty"`
 }
@@ -19,8 +24,43 @@ type Envelope struct {
 
 - `TS` is `time.Time` (not `string`) — the dispatcher needs typed time for the binary's 7-day-back / 5-min-forward clock-skew cap (spec § Clock-skew handling) without re-parsing on every read. Marshals as RFC 3339 nano; round-trip caveat: `time.Time` carries a monotonic-clock reading stripped by JSON marshal, so tests compare via `time.Time.Equal`, never `==` or `reflect.DeepEqual` (per `docs/PROJECT-MEMORY.md:1071`).
 - `Payload` is `json.RawMessage` to enable deferred decode: the dispatcher reads `Type` from the outer envelope, then unmarshals `Payload` into the per-type struct that `Type` selects. Also lets a malformed payload of a known type fail-loud at `protocol.malformed` with the offending envelope's `id` intact, instead of failing the outer parse.
-- `InReplyTo`, `EventID`, and `PayloadEncrypted` are `omitempty`. `payload_encrypted: false` MUST be omitted on the wire (the `envelope_full.json` fixture pins this).
-- **`EventID *uint64` (#649)** is the durable, per-conversation event id from the `internal/eventring` ring (`eventring.Ring.Append`'s return) — distinct from `ID`, the per-conn envelope counter that resets each reconnect. It is stamped **only** by the interactive structured-stream emitter (`cmd/pyry/interactive_turn_v2.go`'s `emit`), so a reconnecting phone can advertise the latest one it saw as `last_event_id` (`HelloClientPayload.LastEventID`, #647); the inbound consumer that accepts and replays from it is sibling #647 (`security-sensitive`; daemon code not yet merged — see [codebase/647.md](../codebase/647.md)). **Pointer + `omitempty`, mirroring `InReplyTo` exactly:** every other `Envelope{...}` construction site (v1 messaging, dispatch, non-interactive) leaves it nil → omitted → byte-identical wire ("absent, not null/0"). Ring ids are always ≥ 1, so a non-nil pointer never encodes `0`. `TestEnvelope_EventIDOmitempty` pins the omit/round-trip shape; the unchanged `envelope_full.json` / `envelope_minimal.json` fixtures are the byte-stability regression guard. See [codebase/649.md](../codebase/649.md) and [eventring-package.md](eventring-package.md).
+- `InReplyTo`, `EventID`, `HistoryEntryID`, and `PayloadEncrypted` are `omitempty`. `payload_encrypted: false` MUST be omitted on the wire (the `envelope_full.json` fixture pins this).
+
+## Replay cursors and durable read marks
+
+`Envelope.ID` is the connection counter used for request/reply correlation; it
+resets on reconnect. `Envelope.EventID` comes from `eventring.Ring.Append` and
+is unique daemon-wide, ascending but potentially sparse within a conversation
+(#2022). It survives phone reconnects and child respawns, but not daemon
+restarts. The interactive structured-stream emitter stamps it so a returning
+client can advertise `HelloClientPayload.LastEventID` for replay. See
+[eventring](eventring-package.md) for retention and replay boundaries.
+
+`Envelope.HistoryEntryID` identifies `HistoryEntry.ID`, the durable
+per-conversation entry used by `MarkConversationReadPayload.UpTo`. Real entries
+start at 1 and survive daemon restarts. **These namespaces cannot be joined by
+numeric equality:** a ring id may belong to another conversation and resets
+with the daemon, while a history id belongs to one persisted log. Using either
+`ID` or `EventID` as a read-mark target can therefore mark the wrong position.
+See [history payloads](protocol-package-types-history-payloads.md) and
+the [read-mark contract](../../protocol-mobile.md#marking-a-conversation-read).
+
+The optional history field is declared by #2860; **emission awaits
+[#2861](https://github.com/pyrycode/pyrycode/issues/2861)**. Absence requires
+history/list fallback to obtain a durable target: a history entry's `ID`, or
+`ConversationSummary.LatestEntryID` when marking through the latest entry the
+operator has read. Declaring metadata alone establishes no producer provenance
+or authorization.
+
+Both optional ids use `*uint64` with `omitempty`: nil omits the key entirely,
+preserving legacy wire bytes. A non-nil pointer serializes its value, so the
+struct declaration alone does not enforce the real-entry minimum of 1.
+`TestEnvelope_HistoryEntryIDRoundTrip` checks raw key omission and preserves
+distinct connection, ring and history ids through encode/decode/re-encode,
+including the maximum uint64. `TestEnvelope_EventIDOmitempty` pins the replay
+field's optional shape; `TestEnvelope_RoundTrip_Full` and
+`TestEnvelope_RoundTrip_Minimal` pin nil history pointers and byte-identical
+compacted legacy fixtures.
 
 ## Testing payload absence
 

@@ -53,6 +53,9 @@ func TestEnvelope_RoundTrip_Full(t *testing.T) {
 	if env.PayloadEncrypted {
 		t.Errorf("PayloadEncrypted: got true, want false (absent in fixture)")
 	}
+	if env.HistoryEntryID != nil {
+		t.Errorf("HistoryEntryID: got %v, want nil for legacy envelope", env.HistoryEntryID)
+	}
 	if len(env.Payload) == 0 {
 		t.Errorf("Payload: empty, want non-empty")
 	}
@@ -79,6 +82,9 @@ func TestEnvelope_RoundTrip_Minimal(t *testing.T) {
 	}
 	if env.InReplyTo != nil {
 		t.Errorf("InReplyTo: got %v, want nil", env.InReplyTo)
+	}
+	if env.HistoryEntryID != nil {
+		t.Errorf("HistoryEntryID: got %v, want nil for legacy envelope", env.HistoryEntryID)
 	}
 	if env.PayloadEncrypted {
 		t.Errorf("PayloadEncrypted: got true, want false")
@@ -211,5 +217,59 @@ func TestRoutingEnvelope_CloseCodeOmitempty(t *testing.T) {
 	}
 	if back.CloseCode != 4401 {
 		t.Errorf("CloseCode round-trip: got %d, want %d", back.CloseCode, 4401)
+	}
+}
+
+func TestEnvelope_HistoryEntryIDRoundTrip(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		id   uint64
+		wire string
+	}{
+		{name: "nil"},
+		{name: "first entry", id: 1, wire: "1"},
+		{name: "full uint64", id: ^uint64(0), wire: "18446744073709551615"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			eventID := uint64(7)
+			env := Envelope{ID: 42, Type: TypeMessage, EventID: &eventID, Payload: json.RawMessage(`{}`)}
+			if tc.id != 0 {
+				env.HistoryEntryID = &tc.id
+			}
+			out, err := json.Marshal(env)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(out, &fields); err != nil {
+				t.Fatalf("unmarshal wire keys: %v", err)
+			}
+			if got := string(fields["history_entry_id"]); got != tc.wire {
+				t.Errorf("history_entry_id: got %q, want %q (empty means absent)", got, tc.wire)
+			}
+			var back Envelope
+			if err := json.Unmarshal(out, &back); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if tc.id == 0 {
+				if back.HistoryEntryID != nil {
+					t.Errorf("HistoryEntryID: got %v, want nil", back.HistoryEntryID)
+				}
+			} else if back.HistoryEntryID == nil || *back.HistoryEntryID != tc.id {
+				t.Errorf("HistoryEntryID: got %v, want pointer to %d", back.HistoryEntryID, tc.id)
+			}
+			if back.ID != 42 || back.EventID == nil || *back.EventID != eventID {
+				t.Errorf("other ids changed: ID=%d EventID=%v", back.ID, back.EventID)
+			}
+			reencoded, err := json.Marshal(back)
+			if err != nil {
+				t.Fatalf("re-marshal: %v", err)
+			}
+			if !bytes.Equal(out, reencoded) {
+				t.Errorf("round-trip bytes differ:\n got: %s\nwant: %s", reencoded, out)
+			}
+		})
 	}
 }
