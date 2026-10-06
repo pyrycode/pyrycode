@@ -9,15 +9,15 @@ import (
 
 // This file holds the inbound LIVE WORKSPACE READ (#2598): the handler behind
 // dispatchAppFrame's TypeReadWorkspaceFile case. It is handleRequestAttachment's
-// twin in everything but where the bytes come from — a markdown file read off
-// disk now, from the named conversation's recorded workspace, instead of a
+// twin in everything but where the bytes come from — a regular file read off
+// disk now, from the workspace or admitted read folders, instead of a
 // stored copy — so it answers with that handler's vocabulary unchanged: an
 // attachment_chunk stream correlated by in_reply_to, or one
 // rejectAttachmentNotFound / rejectStreamAborted.
 //
 // It is the first handler whose filesystem path a paired client names. None of
 // the confinement lives here: the path goes to the WorkspaceFileRead seam, and
-// cmd/pyry's workspaceFileReader applies the markdown-only rule, confineFile
+// cmd/pyry's workspaceFileReader applies the two-leaf secret-name rule, confineFile
 // and readChecked, collapsing every refusal into one false. What this file owns
 // is the ORDER and the ANSWER.
 //
@@ -75,7 +75,7 @@ func (m *V2SessionManager) handleReadWorkspaceFile(ctx context.Context, s *V2Ses
 
 	file, ok := m.cfg.WorkspaceFileRead(req.ConversationID, req.Path)
 	if !ok {
-		m.rejectWorkspaceFileRead(ctx, s, env.ID, rejectAttachmentNotFound, "no readable markdown file at that path in the workspace", "")
+		m.rejectWorkspaceFileRead(ctx, s, env.ID, rejectAttachmentNotFound, "no readable file at that path in the admitted roots", "")
 		return
 	}
 

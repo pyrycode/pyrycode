@@ -82,3 +82,7 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-06
+
+## Revisions
+
+- 2026-10-06: the final source search found remaining markdown-reader wording in `cmd/pyry/main.go` (`runSupervisor` and CLI read-folder help) and `internal/sessions/pool.go` (`Config.ReadFolders`). Include these directly affected descriptions so the operator-facing help agrees with the widened contract. No flag, configuration or root behavior changes. These additional files were checked against remote numeric feature branches; no overlap. Also read `docs/knowledge/features/sessions-package-key-types-writesystemprompt-systemprompttext.md` → daemon prompt composition: keep all prompt contributors and ordering unchanged. Final sizing remains below 400 written lines, zero exported types, zero consumer signature updates, four acceptance criteria and two replaced reject predicates.

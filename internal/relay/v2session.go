@@ -1242,7 +1242,7 @@ const (
 	// until the turn ends before it asks the child anything. Its wait runs off the
 	// worker (#2563), so like the MCP status read its reply is not FIFO.
 	appFrameContextUsageRequest
-	// appFrameWorkspaceFileRead is the live workspace markdown read (#2598) —
+	// appFrameWorkspaceFileRead is the live workspace file read (#2598) —
 	// the retrieval arm's shape, over a file read live rather than a stored copy.
 	appFrameWorkspaceFileRead
 	appFrameSendQueuedNow
