@@ -50,7 +50,13 @@ func TestSpawnBinarySelection(t *testing.T) {
 	if _, err := r.Stdin().Write([]byte("alive\n")); err != nil {
 		t.Fatal(err)
 	}
-	waitForContains(t, out, "ALIVE", 10*time.Second)
+	aliveDeadline := time.Now().Add(10 * time.Second)
+	for !strings.Contains(out.String(), "ALIVE") && time.Now().Before(aliveDeadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(out.String(), "ALIVE") {
+		t.Fatal("missing child liveness marker")
+	}
 	if r.State().RestartCount != 0 {
 		t.Fatal("selection killed live child")
 	}

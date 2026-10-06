@@ -22,6 +22,6 @@ func TestSpawnBinaryOrdinaryIgnoresActivation(t *testing.T) {
 	defer func() { cancel(); join() }()
 	w := waitSpawnBinaryWitness(t, out, 1)
 	if w.Args[0] != cfg.ClaudeBin || w.Cwd != cfg.WorkDir || !slices.Contains(w.Env, "SELECTION_SENTINEL=unchanged") {
-		t.Fatalf("wrong launch: %+v", w)
+		t.Fatal("wrong launch: executable, environment or working directory changed")
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+// Environment witnesses are sensitive: compare them in memory and never print
+// them or their raw output buffer in diagnostics.
 type spawnBinaryWitness struct {
 	Args, Env []string
 	Cwd       string
@@ -16,6 +18,7 @@ type spawnBinaryWitness struct {
 func waitSpawnBinaryWitness(t *testing.T, out *safeBuffer, count int) spawnBinaryWitness {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
+	var observed int
 	for time.Now().Before(deadline) {
 		lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 		var witnesses []spawnBinaryWitness
@@ -25,12 +28,13 @@ func waitSpawnBinaryWitness(t *testing.T, out *safeBuffer, count int) spawnBinar
 				witnesses = append(witnesses, w)
 			}
 		}
+		observed = len(witnesses)
 		if len(witnesses) >= count {
 			return witnesses[count-1]
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("missing executable witness %d: %s", count, out.String())
+	t.Fatalf("missing executable witness %d: observed %d", count, observed)
 	return spawnBinaryWitness{}
 }
 
