@@ -70,3 +70,36 @@ None; implementation may refine the publication callback shape while preserving 
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-06
+
+## Revisions
+
+### 2026-10-06 — verifier findings 1 and 2: complete publication under exclusion
+
+The initial design mistook synchronous enqueueing for delivery. A delayed consumer
+could announce a later committed row, and the ordinary 16-entry drop-on-full queue
+could lose the entire committed outcome. The following contracts supersede the
+original publication and concurrency paragraphs.
+
+- `Pool.SetSwitchTransitionPublisher` installs a dedicated switch-only publisher
+  before `Pool.Run`. `PublishSwitchTransition` still emits one pool signal; the
+  ordinary observer clears busy/suggestions but does not enqueue switch outcomes.
+- `sessionTransitionEmitterV2.publishSwitch` uses an unbuffered, daemon-cancellable
+  request/completion lane, drained by the existing emitter goroutine. Queue pressure
+  can delay a committed switch but cannot discard its transition, history or row.
+- Revised concurrency model: `conversationReset.begin` remains claimed through
+  inactive reset status, transition history/fanout, committed-row announcement and
+  `V2SessionManager.FlushPushes`. Internal FIFO markers wait for all preceding pushes
+  to pass Run's agent gates/tagging and sealing; later pushes do not extend the wait.
+  Connection teardown completes its markers, transport/replay holds retain them,
+  and daemon cancellation ends both publication waits. No new goroutine is added.
+- Revised security review (PASS): exclusion covers sealing, preventing a second
+  switch or ordinary reset from changing the binding used by `agentTaggedForConn`
+  and `withheldFromConn` for the first outcome. Markers carry no payload, never reach
+  the wire/logs, and requester disconnect cannot cancel the reliable publisher.
+- Regression evidence: `TestRelayAgentSwitchDelayedPublication` independently holds
+  the consumer and transport, asserts both exclusions, and decrypts both directions
+  after the return switch commits. `TestRelayAgentSwitchPublicationQueuePressure`
+  fills the ordinary queue before commitment and verifies one transition/history
+  entry followed by the row. `TestV2SessionFlushPushes` covers FIFO completion,
+  connection teardown and cancellation. The suggestion wrapper forwards the new
+  publisher; ordinary reset/eviction retain their nonblocking observer path.

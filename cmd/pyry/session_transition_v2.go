@@ -29,6 +29,15 @@ type transitionObserverSink interface {
 	SetTransitionObserver(sessions.TransitionObserver)
 }
 
+type switchTransitionPublisherSink interface {
+	SetSwitchTransitionPublisher(func(sessions.SessionTransition))
+}
+
+type switchTransitionPublication struct {
+	transition sessions.SessionTransition
+	done       chan struct{}
+}
+
 // sessionTransitionEmitterV2 fans a session_transition v2 envelope to every open
 // INTERACTIVE conn when a session transitions (#659's /clear rotation or idle/cap
 // eviction). It mirrors assistantTurnEmitterV2: a buffered `in` channel decouples
@@ -72,6 +81,9 @@ type sessionTransitionEmitterV2 struct {
 	switched func(string)
 
 	in chan sessions.SessionTransition
+	// switches is a reliable, unbuffered lane. Each sending daemon worker holds
+	// its conversation's reset exclusion until publication and sealing finish.
+	switches chan switchTransitionPublication
 
 	// nextID is the per-conn envelope-ID counter (mirrors assistantTurnEmitterV2).
 	// Read/written only on the single Run goroutine (broadcast is serial) — no
@@ -89,6 +101,7 @@ func newSessionTransitionEmitterV2(bcast interactiveBroadcaster, resolveConv fun
 		logger:      logger,
 		resolveConv: resolveConv,
 		in:          make(chan sessions.SessionTransition, sessionTransitionQueueSize),
+		switches:    make(chan switchTransitionPublication),
 	}
 }
 
@@ -99,12 +112,30 @@ func newSessionTransitionEmitterV2(bcast interactiveBroadcaster, resolveConv fun
 // buffered send (drop-on-full) keeps that goroutine moving so a wedged fan-out
 // can never stall the pool.
 func (e *sessionTransitionEmitterV2) Enqueue(t sessions.SessionTransition) {
+	if t.AgentSwitch {
+		return // the dedicated publisher owns the single switch outcome
+	}
 	select {
 	case e.in <- t:
 	default:
 		e.logger.Warn("relay: session-transition queue full; dropping signal",
 			"event", "session_transition.queue_full",
 			"reason", string(t.Reason))
+	}
+}
+
+// publishSwitch waits off Run through consumer delay and queue pressure. The
+// daemon context, never a requesting connection, owns both waits.
+func (e *sessionTransitionEmitterV2) publishSwitch(ctx context.Context, t sessions.SessionTransition) {
+	req := switchTransitionPublication{transition: t, done: make(chan struct{})}
+	select {
+	case e.switches <- req:
+	case <-ctx.Done():
+		return
+	}
+	select {
+	case <-req.done:
+	case <-ctx.Done():
 	}
 }
 
@@ -115,6 +146,17 @@ func (e *sessionTransitionEmitterV2) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case req := <-e.switches:
+			e.broadcast(ctx, req.transition)
+			// Push only enqueues. Wait until the manager has applied its agent
+			// gate/tag and sealed all preceding status/transition/row frames.
+			if b, ok := e.bcast.(interface{ FlushPushes(context.Context) error }); ok {
+				if err := b.FlushPushes(ctx); err != nil {
+					close(req.done)
+					return // daemon cancellation
+				}
+			}
+			close(req.done)
 		case t, ok := <-e.in:
 			if !ok {
 				return
@@ -308,6 +350,11 @@ func startSessionTransitionStreamV2(
 	emitter.hist = hist
 	if len(switched) > 0 {
 		emitter.switched = switched[0]
+	}
+	if publisher, ok := sink.(switchTransitionPublisherSink); ok {
+		publisher.SetSwitchTransitionPublisher(func(t sessions.SessionTransition) {
+			emitter.publishSwitch(ctx, t)
+		})
 	}
 	sink.SetTransitionObserver(func(t sessions.SessionTransition) {
 		// The incumbent runs FIRST and unconditionally. Enqueue is a documented

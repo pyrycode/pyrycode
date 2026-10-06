@@ -92,16 +92,26 @@ func (p *Pool) notifyTransition(t SessionTransition) {
 // PublishSwitchTransition emits the clear delimiter for a switch whose
 // conversation rebind was already persisted by the caller. It deliberately
 // bypasses notifyTransition's second rebind and best-effort Save path.
+// The optional publisher completes delivery before the caller releases reset
+// exclusion; only this daemon-worker path may wait, never the ordinary observer.
 func (p *Pool) PublishSwitchTransition(oldID, newID SessionID) {
-	if p.transitionObserver != nil {
-		p.transitionObserver(SessionTransition{
-			PreviousID:  oldID,
-			NewID:       newID,
-			Reason:      ReasonClear,
-			AgentSwitch: true,
-			OccurredAt:  time.Now().UTC(),
-		})
+	t := SessionTransition{
+		PreviousID: oldID, NewID: newID, Reason: ReasonClear,
+		AgentSwitch: true, OccurredAt: time.Now().UTC(),
 	}
+	if p.transitionObserver != nil {
+		p.transitionObserver(t)
+	}
+	if p.switchPublisher != nil {
+		p.switchPublisher(t)
+	}
+}
+
+// SetSwitchTransitionPublisher installs the switch-only delivery owner before
+// Run. It receives the same signal as the observer, which must not also enqueue
+// switch wire outcomes. The callback may wait, but must honor daemon cancellation.
+func (p *Pool) SetSwitchTransitionPublisher(publish func(SessionTransition)) {
+	p.switchPublisher = publish
 }
 
 // rebindConversation maintains the conversation↔session binding after a /clear

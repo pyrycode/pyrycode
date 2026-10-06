@@ -584,6 +584,12 @@ func (k suggestionTransitionSink) SetTransitionObserver(fn sessions.TransitionOb
 	})
 }
 
+func (k suggestionTransitionSink) SetSwitchTransitionPublisher(publish func(sessions.SessionTransition)) {
+	if sink, ok := k.inner.(switchTransitionPublisherSink); ok {
+		sink.SetSwitchTransitionPublisher(publish)
+	}
+}
+
 func waitReplyNative(ctx context.Context) bool {
 	timer := time.NewTimer(2 * time.Second)
 	defer timer.Stop()

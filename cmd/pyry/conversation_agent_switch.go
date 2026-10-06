@@ -114,7 +114,8 @@ func (s conversationAgentSwitcher) Switch(ctx context.Context, convID, target st
 	defer func() {
 		s.resetting.done(convID)
 		// The signal must follow the falling edge even when persistence could
-		// not roll back or old-session cleanup failed after commitment.
+		// not roll back or old-session cleanup failed after commitment. The relay
+		// publisher waits through sealing before begin's exclusion is released.
 		if committedID != "" {
 			s.pool.PublishSwitchTransition(oldID, committedID)
 		}

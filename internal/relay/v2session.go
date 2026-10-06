@@ -1681,6 +1681,13 @@ func (m *V2SessionManager) teardown(s *V2Session) bool {
 	// phone). closeWith's close envelope is sent synchronously after this,
 	// bypassing the buffer (it is terminal, not part of the ordered push stream).
 	m.pushMu.Lock()
+	if q := m.queues[s.connID]; q != nil {
+		for _, item := range q.items {
+			if item.barrier != nil {
+				close(item.barrier)
+			}
+		}
+	}
 	delete(m.queues, s.connID)
 	m.pushMu.Unlock()
 	return true
@@ -1882,9 +1889,10 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 
 	m.pushMu.Lock()
 	var (
-		connID string
-		env    protocol.Envelope
-		found  bool
+		connID  string
+		env     protocol.Envelope
+		found   bool
+		barrier chan struct{}
 	)
 	// Go randomises map-range order, giving rough fairness across the
 	// realistically-tiny open-conn count.
@@ -1896,6 +1904,7 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 			continue // replay in flight for this conn; hold its live events (#777).
 		}
 		connID = id
+		barrier = q.items[0].barrier
 		env = q.popHead()
 		found = true
 		break
@@ -1921,7 +1930,9 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 	if !found {
 		return
 	}
-	if err := m.forwardEnvelope(ctx, connID, env); err != nil {
+	if barrier != nil {
+		close(barrier)
+	} else if err := m.forwardEnvelope(ctx, connID, env); err != nil {
 		// Session vanished / not open / seal failure: drop with no app content
 		// in the log (the package's outbound-drop posture). The V2StateOpen
 		// security gate lives in forwardEnvelope.

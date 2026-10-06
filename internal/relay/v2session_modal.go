@@ -28,6 +28,8 @@ import (
 type queuedEnv struct {
 	env       protocol.Envelope
 	droppable bool // env.Type == protocol.TypeAssistantDelta
+	// barrier is an internal FIFO completion marker, never a wire envelope.
+	barrier chan struct{}
 }
 
 // pushQueue is a per-session bounded FIFO of unsealed envelopes awaiting the
