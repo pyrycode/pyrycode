@@ -1145,12 +1145,23 @@ Sent in the `noise_init` early-data payload. The `payload.token` field carries t
     "token": "f0r...",
     "device_name": "Juhana's Pixel 8",
     "client_version": "pyrycode-mobile/0.1.0",
+    "client_features": "Conversation list and interactive chat",
     "protocol_versions": ["v2"],
     "last_seen_ts": "2026-05-08T08:14:02Z",
     "last_event_id": 42
   }
 }
 ```
+
+`client_features` (optional string, added within v2 by #2897) is the client's
+untrusted, self-reported plain-text feature description. It defaults to an empty
+string: absent and empty both mean no description, and an empty value is omitted
+when marshalled. Nonempty decoded strings round-trip verbatim, including whitespace
+and control characters; this field adds no trimming, content validation or
+handshake rejection. It is unrelated to negotiated `capabilities` and does not
+advertise or grant a negotiated capability. Relay retention and prompt consumption,
+including prompt admission and attributed rendering, are pending
+[#2898](https://github.com/pyrycode/pyrycode/issues/2898).
 
 `last_seen_ts` (optional) appears in the block above because it is **still
 accepted vocabulary** — the daemon decodes it and a decoder that rejected it

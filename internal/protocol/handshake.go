@@ -122,6 +122,10 @@ type HelloServerPayload struct {
 // whether real history should exist is #2091's decision, not this type's. A
 // reconnecting phone that wants the tail it missed sends LastEventID below.
 //
+// ClientFeatures is optional, untrusted self-reported plain text in v2,
+// unrelated to negotiated Capabilities. Preserve it verbatim; empty means
+// no description. Retention and prompt admission are owned by #2898.
+//
 // Token is the in-band carrier of the device-pairing token under v2
 // (docs/protocol-mobile.md § Authentication, line 420). Empty under v1
 // (carried as RoutingEnvelope.Token instead); the omitempty keeps v1
@@ -147,6 +151,7 @@ type HelloClientPayload struct {
 	Role             string     `json:"role"`
 	DeviceName       string     `json:"device_name"`
 	ClientVersion    string     `json:"client_version"`
+	ClientFeatures   string     `json:"client_features,omitempty"`
 	ProtocolVersions []string   `json:"protocol_versions"`
 	LastSeenTS       *time.Time `json:"last_seen_ts,omitempty"`
 	Token            string     `json:"token,omitempty"`
