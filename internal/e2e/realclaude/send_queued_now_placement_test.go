@@ -33,7 +33,7 @@ import (
 const (
 	sendNowMarker      = "SENDNOW-PLACEMENT-7Q"
 	sendNowLoopSeconds = 25
-	sendNowSettle      = 5 * time.Second
+	sendNowSettle      = 3 * time.Second
 )
 
 // sendNowFrame is one recorded envelope for the driving conversation.

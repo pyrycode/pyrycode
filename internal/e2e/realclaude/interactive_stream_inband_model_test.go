@@ -966,8 +966,26 @@ type inbandResultCounter interface{ resultCount() int }
 // dying child now fails here, with no result line, rather than being carried.
 func inbandSendTurn(t *testing.T, sup sessions.Runner, rec inbandResultCounter, prompt string) {
 	t.Helper()
+	inbandSendTurnOn(t, wallClock{}, sup, rec, prompt)
+}
+
+// inbandClock is the time source inbandSendTurn polls on. Live callers use the
+// wall clock. The offline test of the helper passes a clock that advances on each
+// sleep, so a turn slower than the old 45 s resend window costs no real wait.
+type inbandClock interface {
+	Now() time.Time
+	Sleep(time.Duration)
+}
+
+type wallClock struct{}
+
+func (wallClock) Now() time.Time        { return time.Now() }
+func (wallClock) Sleep(d time.Duration) { time.Sleep(d) }
+
+func inbandSendTurnOn(t *testing.T, clk inbandClock, sup sessions.Runner, rec inbandResultCounter, prompt string) {
+	t.Helper()
 	baseline := rec.resultCount()
-	deadline := time.Now().Add(inbandTurnBudget)
+	deadline := clk.Now().Add(inbandTurnBudget)
 	written := false
 	for {
 		if !written {
@@ -984,9 +1002,9 @@ func inbandSendTurn(t *testing.T, sup sessions.Runner, rec inbandResultCounter, 
 		if rec.resultCount() > baseline {
 			return
 		}
-		if !time.Now().Before(deadline) {
+		if !clk.Now().Before(deadline) {
 			t.Fatalf("#1582: turn %q produced no result line within %s", prompt, inbandTurnBudget)
 		}
-		time.Sleep(inbandPoll)
+		clk.Sleep(inbandPoll)
 	}
 }
