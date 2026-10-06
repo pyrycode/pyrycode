@@ -98,3 +98,22 @@ to a scratch path. The dispatcher owns the full live suite and verifier gate.
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-06
+
+## Revisions
+
+- 2026-10-06: resolved the staging question using the restricted targeted live
+  launcher. With the pre-fix setup, source metadata observed one persistent
+  stream child, six results, `allowed_warning`, and zero nonempty native
+  suggestions; the named test executed and failed. With explicit native enable,
+  the same bounded coding staging produced a 34-byte source suggestion after
+  two turns, wire set revision 1 and explicit-null clear revision 2. Native and
+  fallback tests both executed and passed (2 executed, 2 passed, 0 skipped).
+  This confirms source-generation suppression rather than parser rejection or
+  daemon publication failure. No production changes or increased waits needed.
+- Source diagnostics additionally count every native suggestion event separately
+  from nonempty strings, so future empty/native-rejection cases are distinguishable.
+  The observer forwards stdout unchanged and never persists source payloads.
+- Final verification with separate event counts: one native source event with a
+  23-byte nonempty suggestion after one turn, set revision 1 and clear revision 2;
+  both live tests executed and passed with zero skips. Final sizing is about
+  325 written lines, zero exports, four helper call sites and no product rejects.
