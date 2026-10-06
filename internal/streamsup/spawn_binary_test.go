@@ -3,7 +3,6 @@ package streamsup
 import (
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -44,13 +43,4 @@ func writeSpawnBinarySelection(t *testing.T, file, bin string) {
 	if err := os.Rename(tmp, file); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func spawnBinaryAlias(t *testing.T, name string) string {
-	t.Helper()
-	bin := filepath.Join(t.TempDir(), name)
-	if err := os.Symlink(os.Args[0], bin); err != nil {
-		t.Fatal(err)
-	}
-	return bin
 }

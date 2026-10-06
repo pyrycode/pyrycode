@@ -13,6 +13,15 @@ import (
 	"time"
 )
 
+func spawnBinaryAlias(t *testing.T, name string) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), name)
+	if err := os.Symlink(os.Args[0], bin); err != nil {
+		t.Fatal(err)
+	}
+	return bin
+}
+
 func TestSpawnBinarySelection(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "selection")
 	a, b := spawnBinaryAlias(t, "child-a"), spawnBinaryAlias(t, "child-b")
