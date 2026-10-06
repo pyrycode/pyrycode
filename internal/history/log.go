@@ -330,6 +330,29 @@ func (s *Store) Append(convID conversations.ConversationID, typ string, payload 
 	return id, nil
 }
 
+// LogDir returns the absolute, existing log directory for convID without creating
+// it. It shares Append's conversation authorization precondition and rechecks ID
+// shape and exact symlink containment on every call, including a warm store.
+func (s *Store) LogDir(convID conversations.ConversationID) (string, error) {
+	if !conversations.ValidID(string(convID)) {
+		return "", fmt.Errorf("%w: conversation id %q", ErrInvalidID, string(convID))
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	dir, err := s.resolveDir(convID, false)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return "", fmt.Errorf("history: stat log directory: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("history: log path is not a directory")
+	}
+	return dir, nil
+}
+
 // LatestEntryID returns the newest durable entry id, or zero for a missing or
 // empty log. It shares Append's recovered cursor and opens no segment files
 // once that cursor is initialized. Directory containment is checked every call.
