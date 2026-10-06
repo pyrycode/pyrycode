@@ -41,7 +41,7 @@ Activated file open/read, size or absolute-path validation errors return context
 
 Write failing tests before the implementation. Tagged Runner tests observe child-owned executable identity, unchanged argv/environment/workdir, updates while a child lives, unchanged backoff/session, and atomic replacement racing launches. An untagged subprocess test sets activation input and proves the configured child still runs. Tagged table cases reject invalid/unreadable input and preserve the unset path.
 
-Live arms decrypt every frame in nonce order, collect queue and session-error state, and wait for a completed real-Claude turn. Delivery identifiers and reply content distinguish the fresh message from the dropped one. Check persisted conversation binding and daemon liveness through release. Use the production retry/backoff/give-up timing with bounded observation deadlines.
+Live arms decrypt every frame in nonce order, collect queue and session-error state, and wait for a completed real-Claude turn. Delivery identifiers and reply content distinguish the fresh message from the dropped one. Check persisted conversation binding and daemon liveness through release. Preserve production retry/backoff timing and the retained arm's default give-up window; only the dropped arm uses `PYRY_E2E_QUEUE_GIVE_UP_AFTER=3s`, with bounded observation deadlines and automatic child recovery observed before fresh enqueue.
 
 Run ordinary and tagged streamsup race tests, `go vet ./...`, `go build` for ordinary and tagged daemons, and tagged live-package compilation. Dispatcher owns the live run and full-module verifier gate; no live evidence is claimed locally.
 
@@ -52,6 +52,8 @@ None. A selection file alone supplies the external next-spawn control; a callabl
 ## Documentation handoff
 
 Pending documentation stage: in `docs/knowledge/features/e2e-realclaude.md` § **Test infrastructure**, document the actual tagged build command, `PYRY_E2E_CLAUDE_BIN_FILE` activation, absolute-path selection and atomic replacement/release contract for an external isolated driver, next-spawn semantics and ordinary-build exclusion. State that release before give-up delivers retained backlog, while release after `session.blocked` needs a fresh message and never replays dropped backlog. Mobile #1731 consumes this contract.
+
+Pending documentation stage: extend **Shortened waits** in that section to name the dropped recovery arm's `PYRY_E2E_QUEUE_GIVE_UP_AFTER=3s`, observed automatic recovery before fresh enqueue, and the retained arm's default window.
 
 ## Security review
 
@@ -82,3 +84,5 @@ Pending documentation stage: in `docs/knowledge/features/e2e-realclaude.md` § *
 - 2026-10-06 (live gate on `f3258a988a`): both recovery arms wrote the queued head into the first gated child's open stdin, reporting delivery before its forced exit. The failing shell now closes stdin before writing its child-owned readiness file, and the driver observes that file before enqueueing. Initial exit remains gated through enqueue to retain the crash notification; subsequent exits and the production retry/give-up timing remain unchanged. No new security boundary is added; readiness diagnostics are fixed text and inspect only the private file’s existence.
 
 - 2026-10-06 (live gate classification): `TestInteractiveStream_FallbackReplySuggestionSetThenClear` also failed on unchanged gate base `1b5159d8a0` and passed a second run there. It is an independent flake, filed as #2873; this ticket does not change reply-fallback behavior or its test. The repaired recovery arms executed and passed against real Claude (2 executed, 0 failed, 0 skipped). No overlap with the fetched #2866/#2869 branches requires a dependency. Final work remains below 800 lines.
+
+- 2026-10-06 (full live gate budget rework): reuse merged #2879's tagged queue knob only in the dropped subtest, clearing inherited input for the retained arm and restoring it at subtest cleanup. Await `session.blocked` and empty backlog within 30 seconds, permitting those observations before `session.child_crashing`; retention at the crash notice remains required only for the default-window arm. After release, `liveChildPID` observes a running child before fresh enqueue. Delivery IDs, transcript non-replay and identity witnesses remain intact. The existing security review still applies: only trusted test environment changes, with no new execution, file, network or concurrency boundary. No fetched feature branch overlaps these edits; approximately 790 total added lines, zero new exports or consumer changes, four acceptance criteria and unchanged reject branches remain within the limits. The completed full live gate and its counts/skip reasons remain dispatcher-owned.

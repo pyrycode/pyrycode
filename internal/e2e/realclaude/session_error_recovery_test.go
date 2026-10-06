@@ -23,7 +23,8 @@ import (
 )
 
 // TestInteractiveSessionErrorRecovery uses production crash detection, backoff
-// and the two-minute queue give-up window. Its daemon build intentionally ignores
+// and default retained-arm give-up; only the dropped arm shortens it to 3s.
+// Its daemon build intentionally ignores
 // PYRY_E2E_BIN: an ordinary prebuilt daemon cannot activate this test bridge.
 func TestInteractiveSessionErrorRecovery(t *testing.T) {
 	claudeBin, err := exec.LookPath("claude")
@@ -50,6 +51,10 @@ func TestInteractiveSessionErrorRecovery(t *testing.T) {
 
 func testSessionErrorRecovery(t *testing.T, bin, claudeBin string, drop bool) {
 	t.Helper()
+	t.Setenv("PYRY_E2E_QUEUE_GIVE_UP_AFTER", "") // retained uses the default, even if inherited
+	if drop {
+		t.Setenv("PYRY_E2E_QUEUE_GIVE_UP_AFTER", "3s")
+	}
 	home := WithWorktreeAuthenticated(t)
 	workdir := filepath.Join(home, "work")
 	if err := os.MkdirAll(workdir, 0o700); err != nil {
@@ -129,7 +134,7 @@ func testSessionErrorRecovery(t *testing.T, bin, claudeBin string, drop bool) {
 	for !state.crashing {
 		state.observe(t, readSessionErrorEnvelope(t, phone, recv, deadline))
 	}
-	if !state.queuedHeld || state.empty || state.delivered != "" || state.blocked {
+	if !drop && (!state.queuedHeld || state.empty || state.delivered != "" || state.blocked) {
 		t.Fatalf("child_crashing did not retain undelivered head: %+v", state)
 	}
 	if strings.Count(d.stderr.String(), "FAILING_CHILD") < 3 {
@@ -137,9 +142,8 @@ func testSessionErrorRecovery(t *testing.T, bin, claudeBin string, drop bool) {
 	}
 	expectedID := "held-2859"
 	if drop {
-		// Bounded by the actual production two-minute give-up, with room for its
-		// final activation attempt; never shorten that window for this proof.
-		deadline = time.Now().Add(3 * time.Minute)
+		// Allow activation retries around the 3s give-up, well below the default.
+		deadline = time.Now().Add(30 * time.Second)
 		for !state.blocked || !state.empty {
 			state.observe(t, readSessionErrorEnvelope(t, phone, recv, deadline))
 		}
@@ -151,6 +155,7 @@ func testSessionErrorRecovery(t *testing.T, bin, claudeBin string, drop bool) {
 	assertSessionErrorIdentity(t, d, home)
 	replaceSessionErrorSelection(t, file, claudeBin) // no restart/kill/control request
 	if drop {
+		liveChildPID(t, &perConvHarness{daemon: d}) // observe automatic recovery before enqueue
 		sealSendMessage(t, phone, send, 3, liveConvID, expectedID,
 			"Without using tools, reply briefly about fresh session recovery. marker=fresh-2859")
 	}
