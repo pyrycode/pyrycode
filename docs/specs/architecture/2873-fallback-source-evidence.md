@@ -1,5 +1,11 @@
 # #2873 — fallback reply source evidence
 
+## Current disposition (#2881, 2026-10-06)
+
+**Reproduced in the bounded batch at the internal-deadline/live-parent stage; real-child output and historical failure causes remain unknown.** The lifecycle evidence requirement is complete: the declared batch remains 6/5/1/0, all recorded PR runs 18/14/4/0, and the separate exact-base report at `1b5159d8a0` 2/1/1/0. Run 4 remains failed; wrapper completion and real-child output/exit remain unknown despite observed wrapper Wait/SIGKILL. The three pre-instrumentation failures remain unclassified.
+
+This current disposition supersedes the historical return-for-refinement statements below; every historical result, commit, result path, source/lifecycle observation and wire revision is retained. Output investigation continues separately in #2882. No additional targeted batch or replacement attempts are required. Acceptance concerns the evidence contract, not resolution of intermittency. Verifier checks and the dispatcher-owned full live gate remain required; this neither converts absence to a pass nor waives a failed current gate. Keep `needs-real-claude`.
+
 ## Files read
 
 - `internal/e2e/realclaude/interactive_stream_reply_suggestion_test.go` → `installSuggestCLI`, `readSuggestSource`, `suggestWatch`, fallback test: current producer isolation and set/clear contract.
@@ -162,3 +168,9 @@ Passing runs observed nonempty bounded wire set revision 1, then explicit sugges
 **Return for refinement; verifier finding 1 is not fixed.** Refine a separate content-free daemon output witness: only after observed Wait, record capped stdout byte count and fixed completeness/validation predicates correlated to PID and context observations, with race/privacy checks. Predeclare a bounded authenticated batch to distinguish no output, partial output and complete output observed by the internal deadline. Leave unobserved output unknown and retain all outcomes. Execution, deadline, cancellation, fallback policy, one-exchange staging, the 15-second observation window and #2859 release control stay unchanged; no fix belongs in this evidence slice. No further live run was made.
 
 Checks passed at the declared commit: production race suite 2285/2285/0/2 (the two skipped opt-in unit tests were `TestRunAgentRun_RealClaude` and `TestCodexApprovalLive`), local tagged observer race checks 29/29/0/0, module vet, tagged package vet and product build. The full-module verifier gate and dispatcher-owned full live gate are separate and remain pending; keep needs-real-claude. This disposition does not waive a failed current gate. Documentation handoff remains pending at the exact path/discussion above and must include this newly observed stage and remaining uncertainty.
+
+### #2881 finalization revision (2026-10-06)
+
+Plan committed before finalization at `ce8f83ee`; retain the implementation, observer synchronization repairs and complete evidence at `68155249`. Only the current disposition and PR summary/handoff/closing reference change. Production execution, deadlines, cancellation, fallback policy, one-exchange staging, the 15-second window and #2859 release control remain unchanged. No new logging layer, duplicate proof suite or output witness is added; #2882 owns the latter.
+
+Documentation handoff, pending documentation stage: in `docs/knowledge/features/e2e-realclaude.md`, extend “A suggestion frame alone cannot prove its source” with wrapper source fields, daemon lifecycle fields, PID correlation and unknown/ambiguous cases. Record unchanged staging/window, counted batches, the observed internal-deadline/live-parent stage, strict FAIL on absence and the need for counted repeated baseline comparisons. State that historical missing witnesses cannot be recovered by passing reruns, timeout alone does not establish a defect and non-reproduction does not establish a fix. Earlier documentation-only requirements remain pending.
