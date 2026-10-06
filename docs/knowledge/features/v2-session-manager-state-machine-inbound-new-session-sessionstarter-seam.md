@@ -446,6 +446,17 @@ needs a test that observes the stack mid-unwind, not one that only checks the
 final frame sequence — the failure mode is invisible on the path every other
 test already exercises.
 
+**Rotation and its late outcome precede guard release.** `asyncRunner.RestartFresh`
+signals from inside `startFreshRunner`, and `resetThenRotate` calls its outcome
+before unwinding the deferred `conversationReset.release`. Neither observation
+proves the conversation can accept another reset; a frame sent in that window
+is correctly dropped. `TestActiveSessionStarter_ResetReleasesForTheNextFrame`
+therefore waits, with a bound, until `conversationReset.begin` accepts a fresh
+claim, releases that probe claim, then sends the next frame. Delaying
+`RestartFresh` exposes the old premature-send race; removing the deferred
+release still fails the repaired test, proving the wait does not hide a stuck
+guard. See [testing asynchronous completion](development-verification.md#prove-that-tests-distinguish-the-change).
+
 ## Log-bounding: only the invalid-shape arm needs it
 
 Every arm past `conversations.ValidID` logs a string already known to be 36
