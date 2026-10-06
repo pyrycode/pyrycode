@@ -2,7 +2,7 @@
 
 `internal/control` exposes the on-disk control surface of `pyry`: a Unix domain socket (`~/.pyry/<name>.sock`, mode `0600`) speaking line-delimited JSON. Each connection is one request, one response — every verb `Server.handle` dispatches replies with one JSON `Response` and returns; no verb hands off connection ownership. (`VerbAttach` was the one verb that did, until #1348 deleted its server-side handler and #1535 deleted the now-orphaned wire type itself.)
 
-Verbs today: `status`, `stop`, `logs`, `sessions.new`, `sessions.rm`, `sessions.rename`, `sessions.list`, `sessions.has-id`, `rekey`, `mcp.approve`, `attachment.file` (#2164, ships live but inert — see [§ Attachment.file](control-plane-attachment-file-confine-and-store-a-claude-named-path.md)), `channel.new` (#2155, see [§ Channel: new verb](#channel-new-verb-channelnew-2155) below), `conversation.new` (control contract; see [Conversation: create](#conversation-create-conversationnew)), `pairing.mint` (#2388), and payload-free `update.when-idle` (`VerbUpdateWhenIdle`, #2757; see [Server Construction](#server-construction) for its decision contract). `attach` and `resize` are gone — #1535 deleted `VerbAttach`, `VerbResize`, `AttachPayload`, `ResizePayload`, and the `Request.Attach`/`Request.Resize` fields, plus the orphaned `control.SendResize` client helper, none of which had a live dispatch arm since #1348. The deletion is decode-compatible with a stale (pre-#1348) client: nothing in the repo calls `json.Decoder.DisallowUnknownFields`, and Go's `encoding/json` ignores unknown object fields by default, so a client still sending `{"verb":"attach","attach":{…}}` decodes cleanly and gets the same `unknown verb: "attach"` reply it already got post-#1348 — deleting a `Request` field only ever *widens* what the decoder accepts, never narrows it. The wire shape otherwise is held stable across phases — `VerbSessionsNew` (#75) adds a `Request.Sessions *SessionsPayload` field with `omitempty` so existing-verb wire output stays byte-identical (pinned by `TestProtocol_SessionsRoundTripBackCompat`). `VerbSessionsRm` (#98) extends `SessionsPayload` with `ID`/`JSONLPolicy` (both `omitempty`) and adds a `Response.ErrorCode` field (also `omitempty`) for typed-sentinel propagation — same back-compat guard, byte-identical existing-verb output. `VerbSessionsRename` (#90) extends `SessionsPayload` with one further `omitempty` field (`NewLabel`) and reuses the `Response.ErrorCode` envelope verbatim — no new wire constants. `VerbPairingMint` follows the same additive rule: the optional outer `Request.Pairing` and `Response.Pairing` fields preserve every older encoding, while the inner `PairingPayload` deliberately always emits both `DeviceLabel` and `AllowRemotePermissions`. Those are the only caller-selected mint inputs; `PairingResult.Pairing` is an opaque plaintext bearer credential, not a place to expose identity, key, relay, registry, expiry, or diagnostics. `VerbUpdateWhenIdle` adds no request field, and `Response.UpdateWhenIdle` is optional with `omitempty`, preserving older verb encodings too.
+Verbs today: `status`, `stop`, `logs`, `sessions.new`, `sessions.rm`, `sessions.rename`, `sessions.list`, `sessions.has-id`, `rekey`, `mcp.approve`, `attachment.file` (#2164, ships live but inert — see [§ Attachment.file](control-plane-attachment-file-confine-and-store-a-claude-named-path.md)), `channel.new` (#2155, see [§ Channel: new verb](#channel-new-verb-channelnew-2155) below), `conversation.new` (control contract; see [Conversation: create](#conversation-create-conversationnew)), `conversation.post` (see [user-message submission](#conversation-post-a-user-message-by-id-conversationpost)), `channel.post`, `pairing.mint` (#2388), and payload-free `update.when-idle` (`VerbUpdateWhenIdle`, #2757; see [Server Construction](#server-construction) for its decision contract). `attach` and `resize` are gone — #1535 deleted `VerbAttach`, `VerbResize`, `AttachPayload`, `ResizePayload`, and the `Request.Attach`/`Request.Resize` fields, plus the orphaned `control.SendResize` client helper, none of which had a live dispatch arm since #1348. The deletion is decode-compatible with a stale (pre-#1348) client: nothing in the repo calls `json.Decoder.DisallowUnknownFields`, and Go's `encoding/json` ignores unknown object fields by default, so a client still sending `{"verb":"attach","attach":{…}}` decodes cleanly and gets the same `unknown verb: "attach"` reply it already got post-#1348 — deleting a `Request` field only ever *widens* what the decoder accepts, never narrows it. The wire shape otherwise is held stable across phases — `VerbSessionsNew` (#75) adds a `Request.Sessions *SessionsPayload` field with `omitempty` so existing-verb wire output stays byte-identical (pinned by `TestProtocol_SessionsRoundTripBackCompat`). `VerbSessionsRm` (#98) extends `SessionsPayload` with `ID`/`JSONLPolicy` (both `omitempty`) and adds a `Response.ErrorCode` field (also `omitempty`) for typed-sentinel propagation — same back-compat guard, byte-identical existing-verb output. `VerbSessionsRename` (#90) extends `SessionsPayload` with one further `omitempty` field (`NewLabel`) and reuses the `Response.ErrorCode` envelope verbatim — no new wire constants. `VerbPairingMint` follows the same additive rule: the optional outer `Request.Pairing` and `Response.Pairing` fields preserve every older encoding, while the inner `PairingPayload` deliberately always emits both `DeviceLabel` and `AllowRemotePermissions`. Those are the only caller-selected mint inputs; `PairingResult.Pairing` is an opaque plaintext bearer credential, not a place to expose identity, key, relay, registry, expiry, or diagnostics. `VerbUpdateWhenIdle` adds no request field, and `Response.UpdateWhenIdle` is optional with `omitempty`, preserving older verb encodings too.
 
 ## Server Construction
 
@@ -356,6 +356,58 @@ success ids.
 
 See the [contract spec](../../specs/architecture/2883-conversation-new-contract.md).
 
+## Conversation: post a user message by id (conversation.post)
+
+`VerbConversationPost` submits a user message to an existing conversation through
+the installed callback. Production submission and CLI wiring remain pending
+[#2886](https://github.com/pyrycode/pyrycode/issues/2886).
+The request uses `Request.ConversationPost` (`ConversationPostPayload`):
+
+```json
+{"verb":"conversation.post","conversationPost":{"conversationID":"existing-id","text":"user message"}}
+```
+
+Both `conversationID` and `text` are required nonempty strings. Control forwards
+both unchanged, including whitespace-only values, exactly once on valid input.
+It performs no trimming, id resolution, registry lookup or creation on a miss.
+`control.MaxChannelPostBytes` bounds decoded text at 64 KiB (65,536 UTF-8 bytes),
+inclusive. Count bytes after JSON decoding, not JSON escape spelling or Unicode
+characters: a character-count check would accept oversized Unicode messages.
+
+`Server.SetConversationSubmitter(func(conversationID, text string) error)`
+installs an independent callback; nil clears it. After JSON decoding,
+`handleConversationPost` rejects an absent submitter before payload validation
+with `conversation.post: no conversation submitter configured`. With one
+installed, absent/null payload or missing/empty/null id returns
+`conversation.post: missing conversation id`; missing/empty/null text returns
+`conversation.post: empty message`; text above the cap returns
+`conversation.post: message too large`. None invokes the callback. Wrong JSON
+types fail in the shared decoder before dispatch.
+
+The callback owns existing-id resolution and queue admission and must not create
+on a miss. It must bound its own work: the 35-second response I/O deadline cannot
+cancel execution. Invocation runs outside `Server.mu`.
+
+Success returns only `{"ok":true}`: queue acceptance, not completed model
+output. Callback refusals, including unknown-id and full-backlog refusals,
+return only an error with the `conversation.post:` prefix, for example
+`{"error":"conversation.post: unknown conversation"}`. OK is false (omitted
+on the wire), and there is no result body. Control does not log id/text or echo
+them in validation diagnostics. Like `Server.SetChannelPoster`, the submitter
+must return static errors or static formats over daemon-derived values; callback
+refusal text reaches the wire verbatim and must never echo raw caller id/text.
+
+`ConversationPost(ctx, socketPath, conversationID, text) error` returns transport
+or refusal errors, even alongside true OK. Absent/false/null OK returns
+`control: conversation.post response missing ok flag`.
+
+This submits a **user message** by opaque id. Existing
+[Channel: post a message into an existing channel](#channel-post-a-message-into-an-existing-channel-channelpost-2497)
+publishes **host-authored assistant content** by channel label, creating a
+channel on a label miss, and [carries it into the next user turn](control-plane-channel-post-carry.md).
+`channel.post` does not start that user turn. Its API and wire encodings remain
+compatible. See the [contract spec](../../specs/architecture/2885-conversation-post-contract.md).
+
 ## Channel: post a message into an existing channel (channel.post, #2497)
 
 `channel.post` durably accepts a whole message without spawning Claude. `channelPoster` resolves the label and mints a turn ID; private `channelDelivery` persists the post. Its sole consumer records ordered deltas plus one host-post completion, then shares replay, fans out live and triggers wake. `handleChannelPost` is the wire boundary; `Server.SetChannelPoster` installs the guarded callback. Success means acceptance, including when delivery must retry.
@@ -389,22 +441,6 @@ No log line on the announce path carries `Cwd` or `Name` — both are host files
 See `docs/specs/architecture/2156-conversation-updated-host-create-fanout.md` for the full design and security review, and [protocol-package-drift-detectors.md § the `excludedTypes` classification key](protocol-package-drift-detectors.md) for how `relay_guard_test.go` records a type with two producers of different shapes.
 
 See [Fanning `channel.post` out: `assistant_delta` live delivery (#2498)](control-plane-channel-post-live-delivery.md) for the equivalent unsolicited push a successful `channel.post` makes.
-
-## Carrying a posted channel message into claude's next turn (#2499)
-
-A post now leads the next user turn the daemon delivers for that conversation's client message path, so claude sees the question and the operator's reply in the order the two happened. `channelCarry` (`cmd/pyry/channel_carry.go`) holds the pending text in memory and composes it; `conversations.Registry.AppendPendingChannelPost` / `PendingChannelPosts` / `ClearPendingChannelPosts` (see [conversations-registry-crud.md § `AppendPendingChannelPost` / `PendingChannelPosts` / `ClearPendingChannelPosts`](conversations-registry-crud.md#appendpendingchannelpost--pendingchannelposts--clearpendingchannelposts-2499)) hold it durably.
-
-**Composed at delivery, not at enqueue — a `msgqueue.DeliverFunc` decorator, not a `newInboundDeliver` parameter.** Composing at enqueue misses a post that lands while a reply is already queued, since the queue's head can sit through a whole claude turn before it is written. `newInboundDeliver` has 17 call sites (`codegraph_callers`), 16 of them tests, which is what made a signature widening the wrong shape; `carryPending` wraps it the same way `markApprovalHolds` already does in that file, so the wiring cost is one line rather than a fan-out. Check call-site count before reaching for a new parameter on an existing seam — a decorator is often both cheaper to wire and better factored.
-
-**Cleared from `OnDelivered`, the msgqueue seam that fires once per confirmed delivery — chained, not replaced.** `msgqueue.Config.OnDelivered` is a single-valued field already held by `newOperatorMessageHistory` ([msgqueue-package.md § Delivered notification](msgqueue-package.md#delivered-notification-2115)); a `deliveredFuncs(...msgqueue.DeliveredFunc) msgqueue.DeliveredFunc` combinator in `channel_carry.go` fans it to both consumers, history first and the clear second, preserving #2115's "as close to the commit as possible" ordering. A failed delivery retried at the same head recomposes on every attempt, so a post that lands during a failed attempt is carried by the retry and cleared exactly once, by the attempt that actually succeeds.
-
-**The composed text reaches claude only, structurally, not by filtering.** `OnDelivered` carries a `msgqueue.QueuedMessage`, which declares no field for the composed payload — only `Text`, the client's own — so the durable history producer and the wire cannot see the carried text even if a future edit tried to read it from there. The same barrier #2115 built for the operator-history producer.
-
-**Why the growth bound refuses the newest post instead of evicting the oldest is a concurrency-correctness finding, not a style choice** — see [conversations-registry-crud.md § `AppendPendingChannelPost`...](conversations-registry-crud.md#appendpendingchannelpost--pendingchannelposts--clearpendingchannelposts-2499).
-
-**`clearDelivered` gained a second caller it must not clear for (#2729).** `send_queued_now`'s `SendNow` write goes around `carryPending` entirely — it writes the queue's waiting-head-or-not entry it was told to, not the conversation's composed head, so it never carried a pending post. `msgqueue.QueuedMessage.SentNow` is the one field `clearDelivered` reads to tell the two deliveries apart; a send-now delivery returns immediately, leaving the composed count to be cleared by the waiting head's own eventual confirmation. See [msgqueue-package-send-now.md](msgqueue-package-send-now.md).
-
-See `docs/specs/architecture/2499-carry-posted-channel-message.md` for the full design and security review.
 
 ## Process-Global vs Per-Session
 
@@ -488,3 +524,5 @@ search can reach it.
 - [Sessions: CLI Router (1.1a-B2)](control-plane-sessions-cli-router-1-1a-b2.md) — `pyry sessions <verb>` is the operator-facing surface for the `sessions.*` namespace. 
 - [Client dial: transient-startup retry (#198 + #199)](control-plane-client-dial-transient-startup-retry.md) — `internal/control/dial.go` houses the dial-side surface for the control client: the `dial()` primitive every client verb routes through,…
 - [Durable `channel.post` delivery (#2498, #2810, #2811)](control-plane-channel-post-live-delivery.md) — Accept while busy, deliver promptly when idle or after published completion/confirmed stop, and finish FIFO posts before successor turns; retry and safe startup recovery preserve identity. Five-minute diagnostics keep holding. All history chunks precede live announcement, independently of Claude carry.
+
+- [Carrying posted channel messages into the next user turn](control-plane-channel-post-carry.md) — Delivery-time composition, confirmed-delivery clearing and send-now exclusion.

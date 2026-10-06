@@ -688,7 +688,7 @@ give-up-notification path as the injected `GiveUpFunc`.
   backlog slot, reusing `Remove`'s take-the-waiting-head-out-of-the-FIFO argument instead of a new one,
   and added `QueuedMessage.SentNow` so `channelCarry.clearDelivered` ([control-plane.md § Carrying a
   posted channel message into claude's next
-  turn](control-plane.md#carrying-a-posted-channel-message-into-claudes-next-turn-2499)) can skip a
+  turn](control-plane-channel-post-carry.md#carrying-a-posted-channel-message-into-claudes-next-turn-2499)) can skip a
   delivery it did not compose. See [§ Send-now delivery](msgqueue-package-send-now.md) above and
   [v2-session-manager-state-machine-inbound-send-queued-now-queuesender-sea.md](v2-session-manager-state-machine-inbound-send-queued-now-queuesender-sea.md)
   for the relay-side handler.
