@@ -145,6 +145,7 @@ var inboundTypes = map[string]string{
 	"TypeModalCancel":            "switch-intercepted",
 	"TypeInterrupt":              "switch-intercepted",
 	"TypeStopBackgroundTask":     "switch-intercepted",
+	"TypeSwitchAgent":            "switch-intercepted",
 	"TypeNewSession":             "switch-intercepted",
 	"TypeDequeueMessage":         "switch-intercepted",
 	"TypeSendQueuedNow":          "switch-intercepted",
@@ -260,8 +261,6 @@ var inboundTypes = map[string]string{
 // excludedTypes classifies every non-inbound Type* constant with its reason, so
 // a request verb mis-filed as reply/push/etc. is visually obvious in review.
 var excludedTypes = map[string]string{
-	"TypeSwitchAgent": "pending handler (#2870)",
-
 	// handshake — consumed on the Noise_IK v2 handshake path
 	// (v2session_handshake.go), never reaches dispatchAppFrame. Borderline
 	// (hello is phone→binary), called out explicitly per AC #4: classifying it

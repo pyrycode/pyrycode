@@ -86,7 +86,18 @@ and `model: ""` selects the target agent's template default. Its required
 that tag would silently drop the default-model choice when re-encoding.
 The conversation-addressed [`switch_agent` contract](../../protocol-mobile.md#switch_agent)
 does not replace the session-addressed settings verb. Validation and
-handling remain pending #2870/#2871.
+asynchronous relay dispatch use `handleSwitchAgent`; production adaptation and
+committed-event publication remain assigned to #2871.
+
+Required plain strings preserve keys when encoding but collapse absent, null
+and empty values when decoding. Decoding into `SwitchAgentPayload` alone would
+therefore accept an omitted model as a target-template choice. The relay decodes
+presence-aware string pointers first, rejects missing/null model, then copies
+the validated request into the DTO, preserving explicit `model: ""`.
+`TestV2Session_SwitchAgentValidation` checks those shapes through encrypted
+frames and verifies the seam receives the optional effort unchanged. Shape and
+grammar checks belong to relay; conversation resolution and target vocabulary
+membership belong to the adapter. See [relay concurrency](v2-session-manager-concurrency.md).
 
 An optional `*string` with `omitempty` distinguishes an explicit empty
 effort (clear) from unspecified effort, but collapses omitted and JSON
