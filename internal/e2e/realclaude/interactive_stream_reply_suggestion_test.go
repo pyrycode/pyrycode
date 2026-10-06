@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -345,7 +346,7 @@ if stream:
 # The print-mode parent stays in the production process group, so deadline
 # cancellation kills it and the real CLI together. No input or stderr is read.
 started = time.monotonic()
-record({"calls": 1, "start_ms": time.time_ns() // 1000000})
+record({"calls": 1, "start_ms": time.time_ns() // 1000000, "pid": os.getpid()})
 try:
     child = subprocess.Popen([real_cli] + args, stdout=subprocess.PIPE)
 except OSError:
@@ -419,6 +420,7 @@ sys.exit(code)
 // suggestSource contains only source metadata. Generated text and credentials
 // never enter its evidence file or the test's diagnostic logs.
 type suggestSource struct {
+	PID            int   `json:"pid"`
 	Streams        int   `json:"streams"`
 	Results        int   `json:"results"`
 	Events         int   `json:"events"`
@@ -475,8 +477,49 @@ func (s suggestSource) diagnostic(idle bool, setRev, clearRev uint64) string {
 	if s.StartMS != 0 && s.Completed == 0 {
 		elapsed = max(0, time.Now().UnixMilli()-s.StartMS)
 	}
-	return fmt.Sprintf("fallback source: streams=%d results=%d idle=%v calls=%d completed=%d elapsed_ms=%d exit=%s output={%s} set_revision=%d clear_revision=%d stage=%s",
-		s.Streams, s.Results, idle, s.Calls, s.Completed, elapsed, exit, output, setRev, clearRev, s.stage(setRev != 0))
+	return fmt.Sprintf("fallback source: streams=%d results=%d idle=%v calls=%d completed=%d pid=%d elapsed_ms=%d exit=%s output={%s} set_revision=%d clear_revision=%d stage=%s",
+		s.Streams, s.Results, idle, s.Calls, s.Completed, s.PID, elapsed, exit, output, setRev, clearRev, s.stage(setRev != 0))
+}
+
+// suggestLifecycle selects complete daemon records by wrapper PID. Only parsed
+// scalars are returned; captured stderr and unknown fields are never echoed.
+func suggestLifecycle(stderr string, pid int) string {
+	keys := []string{"pid", "attempt_ms", "child_ms", "parent_canceled", "parent_deadline", "fallback_canceled", "fallback_deadline", "own_deadline_elapsed", "group_cancel_requested", "wait_completed", "exit_observed", "exit_code", "exit_signal"}
+	lines := strings.Split(stderr, "\n")
+	for _, line := range lines[:len(lines)-1] {
+		fields := make(map[string]string)
+		for _, token := range strings.Fields(line) {
+			key, value, ok := strings.Cut(token, "=")
+			if ok {
+				fields[key] = value
+			}
+		}
+		if fields["msg"] != "reply_fallback.lifecycle" || pid <= 0 || fields["pid"] != strconv.Itoa(pid) {
+			continue
+		}
+		var safe []string
+		for i, key := range keys {
+			value := fields[key]
+			if i < 3 || i > 10 {
+				n, err := strconv.ParseInt(value, 10, 64)
+				if err != nil {
+					break
+				}
+				value = strconv.FormatInt(n, 10)
+			} else {
+				b, err := strconv.ParseBool(value)
+				if err != nil {
+					break
+				}
+				value = strconv.FormatBool(b)
+			}
+			safe = append(safe, key+"="+value)
+		}
+		if len(safe) == len(keys) {
+			return "daemon lifecycle (cause not inferred): " + strings.Join(safe, " ")
+		}
+	}
+	return "daemon lifecycle: unknown"
 }
 
 func readSuggestSource(t *testing.T, path string) suggestSource {
@@ -529,7 +572,12 @@ func TestInteractiveStream_FallbackReplySuggestionSetThenClear(t *testing.T) {
 	})
 	frames := startSuggestReader(t, h)
 	w := &suggestWatch{bounded: true}
-	logSource := func() { t.Log(readSuggestSource(t, evidence).diagnostic(w.idle, w.setRev, w.clearRev)) }
+	logSource := func() {
+		source := readSuggestSource(t, evidence)
+		t.Log(source.diagnostic(w.idle, w.setRev, w.clearRev))
+		t.Log(suggestLifecycle(h.daemon.stderr.String(), source.PID))
+	}
+	defer logSource()
 	sealSendMessage(t, h.phone, h.initSend, 2, suggestConvID, "fallback-turn", "Suggest a simple Go testing task I can do next. One sentence, no tools.")
 	if !w.pumpUntil(t, frames, perTurnReplyBudget, func() bool { return w.idle }) {
 		logSource()

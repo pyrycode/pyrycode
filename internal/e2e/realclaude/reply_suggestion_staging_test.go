@@ -169,7 +169,7 @@ func TestSuggestCLIFallbackEvidence(t *testing.T) {
 				t.Fatal("observer changed exit status or signal")
 			}
 			source := readSuggestSource(t, evidence)
-			if source.Calls != 1 || source.Completed != 1 || source.StartMS == 0 || source.ElapsedMS < 0 || source.ExitCode == nil || !source.OutputObserved || source.stage(false) != tc.stage {
+			if source.Calls != 1 || source.Completed != 1 || source.PID != cmd.Process.Pid || source.StartMS == 0 || source.ElapsedMS < 0 || source.ExitCode == nil || !source.OutputObserved || source.stage(false) != tc.stage {
 				t.Fatalf("unexpected invocation evidence: %s", source.diagnostic(false, 0, 0))
 			}
 			wantExit := tc.exit
@@ -188,6 +188,29 @@ func TestSuggestCLIFallbackEvidence(t *testing.T) {
 }
 
 func TestSuggestSourceUncertainEvidence(t *testing.T) {
+	const fields = "pid=42 attempt_ms=9810 child_ms=9800 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=true own_deadline_elapsed=true group_cancel_requested=true wait_completed=true exit_observed=true exit_code=-1 exit_signal=9"
+	const prefix = "time=private-time level=INFO msg=reply_fallback.lifecycle "
+	for _, tc := range []struct {
+		stderr string
+		pid    int
+		known  bool
+	}{
+		{prefix + fields + " private=private-secret-sentinel\n", 42, true},
+		{prefix + fields + "\n", 43, false},
+		{prefix + strings.Replace(fields, "exit_code=-1", "exit_code=private-output", 1) + "\n", 42, false},
+		{prefix + fields, 42, false}, // In-progress stderr record.
+		{"private-raw-stderr\n", 42, false},
+		{prefix + strings.Replace(fields, "exit_observed=true", "exit_observed=false", 1) + "\n", 42, true},
+		{prefix + strings.Replace(fields, "parent_deadline=false", "parent_deadline=true", 1) + "\n", 42, true}, // Simultaneous deadlines remain visible.
+	} {
+		got := suggestLifecycle(tc.stderr, tc.pid)
+		if strings.Contains(got, "private-") || strings.Contains(got, "unknown") == tc.known {
+			t.Fatal("unsafe or incorrectly classified daemon record")
+		}
+		if tc.known && (!strings.Contains(got, "fallback_deadline=true") || !strings.Contains(got, "group_cancel_requested=true")) {
+			t.Fatal("lost lifecycle observations")
+		}
+	}
 	for _, tc := range []struct {
 		source suggestSource
 		want   string
@@ -250,7 +273,7 @@ func TestSuggestCLIFallbackIncomplete(t *testing.T) {
 		t.Fatal("group termination failed or observer changed partial I/O")
 	}
 	source := readSuggestSource(t, evidence)
-	if source.Calls != 1 || source.Completed != 0 || source.ExitCode != nil || source.OutputObserved || source.stage(false) != "incomplete invocation (exit/output unknown)" {
+	if source.Calls != 1 || source.Completed != 0 || source.PID != cmd.Process.Pid || source.ExitCode != nil || source.OutputObserved || source.stage(false) != "incomplete invocation (exit/output unknown)" {
 		t.Fatalf("unexpected incomplete evidence: %s", source.diagnostic(false, 0, 0))
 	}
 	checkSuggestPrivacy(t, evidence, source)

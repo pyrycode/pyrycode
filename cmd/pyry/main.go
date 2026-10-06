@@ -1153,7 +1153,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		replySugg = newReplySuggestions(logger)
 		replySugg.parent = ctx
 		defer replySugg.stopFallbacks()
-		replySugg.fallback = (replyFallback{binary: *claudeBin, account: account.provider()}).run
+		replySugg.fallback = (replyFallback{binary: *claudeBin, account: account.provider(), logger: logger}).run
 		replySuggDelivered = replySugg.noteDelivered
 	}
 	queue, err := msgqueue.New(msgqueue.Config{
