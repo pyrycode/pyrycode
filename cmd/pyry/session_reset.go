@@ -363,7 +363,20 @@ func (r *conversationReset) wrapUp(convID string) (wrote bool) {
 	}
 	ctx, cancel := context.WithTimeout(r.baseContext(), r.bound())
 	defer cancel()
-	text, ended, _ := r.wrapUpTextContext(ctx, convID, true)
+	if marker, ok := r.notes.(interface {
+		MarkHandoffNoteStale(conversations.ConversationID) error
+	}); ok {
+		if err := marker.MarkHandoffNoteStale(conversations.ConversationID(convID)); err != nil {
+			r.logger().Warn("relay: reset could not persist stale handoff state",
+				"event", "reset.wrapup.freshness_failed", "conversation_id", convID)
+		}
+	}
+	text, ended, failed := r.wrapUpTextContext(ctx, convID, true)
+	if ended && failed {
+		r.logger().Warn("relay: reset wrap-up turn failed; the previous handoff note stands",
+			"event", "reset.wrapup.terminal_failed", "conversation_id", convID)
+		return false
+	}
 	return ended && r.storeNote(convID, text)
 }
 
@@ -426,7 +439,7 @@ func (r *conversationReset) wrapUpTextContext(ctx context.Context, convID string
 	}
 	if r.busy != nil {
 		if err := r.busy.WaitIdle(ctx, convID); err != nil {
-			r.logger().Debug("relay: reset wrap-up abandoned; the conversation did not go idle in time",
+			r.logger().Warn("relay: reset wrap-up abandoned; the conversation did not go idle in time",
 				"event", "reset.wrapup.not_idle",
 				"conversation_id", convID)
 			return "", false, false
@@ -447,6 +460,8 @@ func (r *conversationReset) wrapUpTextContext(ctx context.Context, convID string
 
 	undo, finished, err := r.busy.beginDelivery(ctx, convID)
 	if err != nil {
+		r.logger().Warn("relay: reset wrap-up could not claim delivery",
+			"event", "reset.wrapup.delivery_busy", "conversation_id", convID)
 		return "", false, false
 	}
 	defer finished()
@@ -459,8 +474,12 @@ func (r *conversationReset) wrapUpTextContext(ctx context.Context, convID string
 		// payload puts note bytes into a record through a channel no reviewer would
 		// think to inspect. resolveSpawnDir keeps the same posture for its
 		// confinement error: the record names the conversation and nothing else.
+		event := "reset.wrapup.write_failed"
+		if errors.Is(err, errWrapUpReadiness) {
+			event = "reset.wrapup.readiness_failed"
+		}
 		r.logger().Warn("relay: reset wrap-up prompt was not delivered",
-			"event", "reset.wrapup.write_failed",
+			"event", event,
 			"conversation_id", convID)
 		return "", false, false
 	}
@@ -474,12 +493,17 @@ func (r *conversationReset) wrapUpTextContext(ctx context.Context, convID string
 	return text, true, failed
 }
 
+var errWrapUpReadiness = errors.New("reset wrap-up readiness failed")
+
 // writeResetWrapUp waits out stream startup and permission-posture confirmation.
 // ErrNoLiveChild guarantees zero bytes written; every other error may follow a
 // partial write and must never be retried. Capture is already armed by the caller.
 func writeResetWrapUp(ctx context.Context, target resetTarget, convID string, prompt []byte, waitReady bool) error {
 	for {
 		if err := ctx.Err(); err != nil {
+			if waitReady {
+				return errors.Join(errWrapUpReadiness, err)
+			}
 			return err
 		}
 		err := target.write(ctx, convID, prompt)
@@ -490,7 +514,7 @@ func writeResetWrapUp(ctx context.Context, target resetTarget, convID string, pr
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return ctx.Err()
+			return errors.Join(errWrapUpReadiness, ctx.Err())
 		case <-timer.C:
 		}
 	}

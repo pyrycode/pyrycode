@@ -76,3 +76,13 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-06
+
+## Revisions
+
+- 2026-10-06: Replace the digest certificate with a regular hard link to the newly written inode, published before the note rename. A digest could misidentify an old note as fresh after failed replacement with identical text. Inode identity also avoids reading metadata bytes, and certificate publication failure leaves old note bytes intact. Read note and freshness under one freshness lock. Cryptographic hashing is no longer needed; certificate permissions equal the 0600 note and its directory remains 0700.
+
+- 2026-10-06: If the freshness directory refuses invalidation, persist a stale fallback in the data directory and consult it before any positive certificate. This covers a failed metadata write with an otherwise readable older certificate across pool recreation. Clear the fallback only after normal stale invalidation succeeds and before replacing the note.
+
+- 2026-10-06: `TestDaemonInstructionsNextStarts` also seeds a note without freshness metadata. Update its expected prompt to include the stale warning while keeping its instructions-ordering assertions. This is the only additional test consumer beyond the original sketch.
+
+- 2026-10-06: On metadata write refusal, first unlink the certificate to invalidate freshness without allocating bytes (including disk-full failure); if unlinking is refused, use the data-directory fallback.

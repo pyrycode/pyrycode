@@ -440,11 +440,20 @@ func composeSystemPromptFor(operator string, clients []ClientIdentity, note stri
 // systemPromptText, then instructions precede clients and the handoff note.
 // The operator's text stays last; empty instructions add no separator.
 func composeSystemPromptForOn(daemon, instructions, operator string, clients []ClientIdentity, note string) string {
+	return composeSystemPromptWithFreshness(daemon, instructions, operator, clients, note, false)
+}
+
+const staleHandoffWarning = "This handoff note is stale: the latest reset did not produce a fresh handoff, so it may omit recent work.\n"
+
+func composeSystemPromptWithFreshness(daemon, instructions, operator string, clients []ClientIdentity, note string, stale bool) string {
 	if instructions != "" {
 		daemon += "\n" + instructions
 	}
 	section := clientSection(clients)
 	handoff := handoffNoteSection(note)
+	if stale && handoff != "" {
+		handoff = staleHandoffWarning + handoff
+	}
 	if section == "" && handoff == "" {
 		return composeSystemPromptOn(daemon, operator)
 	}
@@ -892,22 +901,29 @@ func (p *Pool) conversationPrompt(label string) string {
 // The answer is RE-DERIVED AT EVERY COMPOSE and never retained on the Session. See
 // writeComposedPrompt on why freezing it would be wrong.
 //
-// Concurrency: takes no lock. It reads p.registryPath and no other pool state, the
-// way Pool.HandoffNote and Pool.dataDir do, and it runs in writeComposedPrompt's
-// off-lock window so no I/O executes inside the pool's critical section.
+// Concurrency: takes handoffMu to read note and freshness as one snapshot,
+// outside the lifecycle critical section in writeComposedPrompt.
 func (p *Pool) handoffNoteFor(label string) string {
+	note, _ := p.handoffNoteWithFreshness(label)
+	return note
+}
+
+func (p *Pool) handoffNoteWithFreshness(label string) (string, bool) {
 	if !conversations.ValidID(label) {
-		return ""
+		return "", false
 	}
+	p.handoffMu.Lock()
+	defer p.handoffMu.Unlock()
 	id := conversations.ConversationID(label)
-	if _, regular, err := p.HandoffNotePath(id); err != nil || !regular {
-		return ""
+	path, regular, err := p.HandoffNotePath(id)
+	if err != nil || !regular {
+		return "", false
 	}
 	note, err := p.HandoffNote(id)
 	if err != nil {
-		return ""
+		return "", false
 	}
-	return note
+	return note, p.handoffNoteIsFreshLocked(id, path)
 }
 
 // writeComposedPrompt composes sess's appended system prompt from the conversations
@@ -961,9 +977,10 @@ func (p *Pool) writeComposedPrompt(sess *Session, clients []ClientIdentity) {
 	p.mu.RUnlock()
 
 	operator := p.conversationPrompt(label)
-	note := p.handoffNoteFor(label)
+	note, fresh := p.handoffNoteWithFreshness(label)
 	named := admittedClients(clients)
-	text := composeSystemPromptForOn(daemonPromptText(p.readFolders), p.DaemonInstructions(), operator, named, note)
+	text := composeSystemPromptWithFreshness(daemonPromptText(p.readFolders), p.DaemonInstructions(), operator, named, note,
+		!fresh)
 	if _, err := writeSystemPromptFile(sess.systemPromptPath, text); err != nil {
 		p.log.Warn("compose appended system prompt", "error", err)
 		return

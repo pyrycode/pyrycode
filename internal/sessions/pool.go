@@ -200,6 +200,10 @@ type SessionConfig struct {
 // Pool owns the set of sessions managed by one pyry process. Phase 1.0
 // constructs exactly one entry — the bootstrap session — at New().
 type Pool struct {
+	// Separate from lifecycle locks: freshness persistence never holds mu.
+	handoffMu    sync.Mutex
+	handoffStale map[conversations.ConversationID]bool
+
 	// Separate from mu: construction already holds mu when it reads instructions.
 	instructionsMu     sync.RWMutex
 	daemonInstructions string

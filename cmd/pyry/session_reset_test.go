@@ -912,7 +912,7 @@ func TestConversationReset_ErrorReplyKeepsExistingContract(t *testing.T) {
 		f.answer(resetReplyText, false)
 		f.capture.Sink(turnevent.TurnEnd{IsError: true})
 	}})
-	if !f.reset.wrapUp(resetConvA) || f.notes.stored(resetConvA) != resetReplyText {
-		t.Fatal("ordinary reset no longer stores its completed reply alone")
+	if f.reset.wrapUp(resetConvA) || f.notes.stored(resetConvA) != resetPreviousNote {
+		t.Fatal("terminally failed reset replaced the older note with partial text")
 	}
 }

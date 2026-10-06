@@ -120,7 +120,7 @@ func TestActiveSessionStarter_RetainedDormantPoolWritesFreshNote(t *testing.T) {
 				t.Fatalf("fresh note = %q, error = %v", note, err)
 			}
 			prompt, err := os.ReadFile(filepath.Join(root, "session-prompts", string(oldID)+".txt"))
-			if err != nil || !strings.Contains(string(prompt), resetReplyText) || strings.Contains(string(prompt), resetPreviousNote) {
+			if err != nil || !strings.Contains(string(prompt), resetReplyText) || strings.Contains(string(prompt), resetPreviousNote) || strings.Contains(string(prompt), "This handoff note is stale:") {
 				t.Fatalf("successor prompt did not replace the older note: %v", err)
 			}
 		})

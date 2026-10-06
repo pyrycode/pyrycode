@@ -360,7 +360,7 @@ func TestDaemonInstructionsNextStarts(t *testing.T) {
 	client := ClientIdentity{Name: "Phone", Version: "1"}
 	p.SetClientIdentityResolver(func(context.Context) []ClientIdentity { return []ClientIdentity{client} })
 	plantNote(t, dir, convPromptID, noteText)
-	tail := "\n" + clientSectionLead + `"Phone" (version "1").` + "\n\n" + noteSectionOf(noteText) + "\n" + operator
+	tail := "\n" + clientSectionLead + `"Phone" (version "1").` + "\n\n" + staleHandoffWarning + noteSectionOf(noteText) + "\n" + operator
 	suffix = tail
 	if err := p.SetDaemonInstructions("after-mint"); err != nil {
 		t.Fatal(err)

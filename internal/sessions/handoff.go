@@ -119,6 +119,10 @@ func truncateHandoffNote(text string) string {
 // final is never "" — every caller short-circuits the persistence-disabled case
 // before reaching this — so there is no os.TempDir branch to mirror.
 func writeHandoffNoteFile(final, text string) error {
+	return writeHandoffNoteWithCertificate(final, text, "")
+}
+
+func writeHandoffNoteWithCertificate(final, text, certificate string) error {
 	dir := filepath.Dir(final)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("sessions: mkdir handoff notes dir: %w", err)
@@ -145,6 +149,20 @@ func writeHandoffNoteFile(final, text string) error {
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmpName)
 		return fmt.Errorf("sessions: close handoff note: %w", err)
+	}
+	if certificate != "" {
+		// Publish the new inode's certificate first: if replacing the note fails,
+		// the old inode cannot look fresh, even when the new text is identical.
+		link := tmpName + ".fresh"
+		if err := os.Link(tmpName, link); err != nil {
+			_ = os.Remove(tmpName)
+			return fmt.Errorf("sessions: link handoff certificate: %w", err)
+		}
+		if err := os.Rename(link, certificate); err != nil {
+			_ = os.Remove(link)
+			_ = os.Remove(tmpName)
+			return fmt.Errorf("sessions: publish handoff certificate: %w", err)
+		}
 	}
 	if err := os.Rename(tmpName, final); err != nil {
 		_ = os.Remove(tmpName)
@@ -174,11 +192,10 @@ func writeHandoffNoteFile(final, text string) error {
 // a claude-authored note can reach a log line by construction rather than by
 // discipline. Errors name paths and wrap OS errors; none carries note bytes.
 //
-// Concurrency: takes no lock. It reads p.registryPath and no other pool state,
-// the way Pool.dataDir does. Two concurrent writes for one conversation race on
-// the rename and the loser is the note, which is writeMCPSettings' accepted
-// position — a reader still sees one complete note, never a blend.
+// Concurrency: serialized by handoffMu, without acquiring lifecycle locks.
 func (p *Pool) WriteHandoffNote(id conversations.ConversationID, text string) (string, error) {
+	p.handoffMu.Lock()
+	defer p.handoffMu.Unlock()
 	final, err := handoffNotePathFor(p.registryPath, id)
 	if err != nil {
 		return "", err
@@ -186,9 +203,17 @@ func (p *Pool) WriteHandoffNote(id conversations.ConversationID, text string) (s
 	if final == "" {
 		return "", ErrHandoffNotesDisabled
 	}
-	if err := writeHandoffNoteFile(final, truncateHandoffNote(text)); err != nil {
+	if err := p.markHandoffNoteStaleLocked(id, final); err != nil {
 		return "", err
 	}
+	if err := os.Remove(handoffStaleFallbackPath(final)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("sessions: clear stale handoff fallback: %w", err)
+	}
+	text = truncateHandoffNote(text)
+	if err := writeHandoffNoteWithCertificate(final, text, handoffFreshnessPath(final)); err != nil {
+		return "", err
+	}
+	delete(p.handoffStale, id)
 	return final, nil
 }
 
@@ -220,7 +245,7 @@ func (p *Pool) WriteHandoffNote(id conversations.ConversationID, text string) (s
 // not write — yields a bounded, rune-safe answer instead of an allocation sized
 // by corruption or by whoever planted it.
 //
-// Concurrency: takes no lock; see Pool.WriteHandoffNote.
+// Concurrency: reads immutable registryPath; the atomic rename prevents partial reads.
 func (p *Pool) HandoffNote(id conversations.ConversationID) (string, error) {
 	path, err := handoffNotePathFor(p.registryPath, id)
 	if err != nil || path == "" {
@@ -265,7 +290,7 @@ func (p *Pool) HandoffNote(id conversations.ConversationID) (string, error) {
 // The answer is a point-in-time one, and nothing in the design removes a note,
 // so a caller may name the path it got. A future reaper would invalidate that.
 //
-// Concurrency: takes no lock; see Pool.WriteHandoffNote.
+// Concurrency: reads immutable registryPath; the atomic rename prevents partial reads.
 func (p *Pool) HandoffNotePath(id conversations.ConversationID) (string, bool, error) {
 	path, err := handoffNotePathFor(p.registryPath, id)
 	if err != nil || path == "" {
@@ -279,4 +304,66 @@ func (p *Pool) HandoffNotePath(id conversations.ConversationID) (string, bool, e
 		return path, false, fmt.Errorf("sessions: stat handoff note: %w", err)
 	}
 	return path, fi.Mode().IsRegular(), nil
+}
+
+// Freshness lives outside handoff-notes so note bytes and directory consumers
+// retain their existing contract. Only a matching certificate establishes fresh.
+func handoffFreshnessPath(notePath string) string {
+	return filepath.Join(filepath.Dir(filepath.Dir(notePath)), "handoff-freshness", filepath.Base(notePath))
+}
+
+// MarkHandoffNoteStale invalidates the previous note before a reset attempts
+// wrap-up, without changing its bytes. Persistence-disabled operation is inert.
+// Errors carry paths and must not be logged by the caller.
+func (p *Pool) MarkHandoffNoteStale(id conversations.ConversationID) error {
+	path, err := handoffNotePathFor(p.registryPath, id)
+	if err != nil || path == "" {
+		return err
+	}
+	p.handoffMu.Lock()
+	defer p.handoffMu.Unlock()
+	return p.markHandoffNoteStaleLocked(id, path)
+}
+
+// A fallback in the data directory survives refusal to update a certificate in
+// its own directory, without modifying either the old note or its hard link.
+func handoffStaleFallbackPath(notePath string) string {
+	return filepath.Join(filepath.Dir(filepath.Dir(notePath)), "handoff-stale-"+filepath.Base(notePath))
+}
+
+func (p *Pool) markHandoffNoteStaleLocked(id conversations.ConversationID, path string) error {
+	if p.handoffStale == nil {
+		p.handoffStale = make(map[conversations.ConversationID]bool)
+	}
+	p.handoffStale[id] = true
+	if err := writeHandoffNoteFile(handoffFreshnessPath(path), "stale"); err != nil {
+		// Unlinking needs no new note bytes: it can invalidate freshness even
+		// when allocation failed because the filesystem is full.
+		if removeErr := os.Remove(handoffFreshnessPath(path)); removeErr == nil || errors.Is(removeErr, fs.ErrNotExist) {
+			return err
+		}
+		// Keep the original error classification even when fallback persistence
+		// succeeds. Neither error is safe to put in a log.
+		fallbackErr := writeHandoffNoteFile(handoffStaleFallbackPath(path), "stale")
+		return errors.Join(err, fallbackErr)
+	}
+	return nil
+}
+
+// handoffNoteIsFreshLocked recognizes only a regular hard-link certificate for
+// the actual stored inode. No metadata bytes are opened, so FIFOs cannot block.
+// Caller holds handoffMu across reading the note and checking freshness.
+func (p *Pool) handoffNoteIsFreshLocked(id conversations.ConversationID, path string) bool {
+	if p.handoffStale[id] {
+		return false
+	}
+	if _, err := os.Lstat(handoffStaleFallbackPath(path)); !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	certificate, err := os.Lstat(handoffFreshnessPath(path))
+	if err != nil || !certificate.Mode().IsRegular() {
+		return false
+	}
+	note, err := os.Lstat(path)
+	return err == nil && note.Mode().IsRegular() && os.SameFile(note, certificate)
 }
