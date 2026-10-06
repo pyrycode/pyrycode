@@ -105,6 +105,20 @@ func helperSpawnID() string {
 //     yields a non-zero exit. Used by the #2723 exit-record tests.
 func helperChild() {
 	switch os.Getenv("GO_STREAMSUP_HELPER_MODE") {
+	case "spawn_selection_witness":
+		cwd, err := os.Getwd()
+		if err != nil {
+			os.Exit(2)
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(spawnBinaryWitness{Args: os.Args, Env: os.Environ(), Cwd: cwd})
+		sc := bufio.NewScanner(os.Stdin)
+		for sc.Scan() {
+			if sc.Text() == "crash" {
+				os.Exit(1)
+			}
+			fmt.Fprintln(os.Stdout, "ALIVE")
+		}
+		os.Exit(0)
 	case "token_witness":
 		_ = json.NewEncoder(os.Stdout).Encode(struct{ Args, Env []string }{os.Args, os.Environ()})
 		sc := bufio.NewScanner(os.Stdin)

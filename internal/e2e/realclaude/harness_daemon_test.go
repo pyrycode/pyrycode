@@ -317,6 +317,14 @@ func spawnBootstrapDaemon(t *testing.T, home, workdir, claudeBin, relayURL strin
 	extraClaudeArgs ...string) *bootstrapDaemon {
 	t.Helper()
 	bin := ensurePyryBuilt(t) // builds with real HOME (warm cache); runs with isolated HOME
+	return spawnBootstrapDaemonBinary(t, bin, home, workdir, claudeBin, relayURL, extraClaudeArgs...)
+}
+
+// spawnBootstrapDaemonBinary shares the wire harness while allowing a focused
+// test to use an explicitly tagged binary. Existing callers keep ensurePyryBuilt.
+func spawnBootstrapDaemonBinary(t *testing.T, bin, home, workdir, claudeBin, relayURL string,
+	extraClaudeArgs ...string) *bootstrapDaemon {
+	t.Helper()
 	socket := shortSocketPath(t)
 	stderr := &lockedBuffer{}
 

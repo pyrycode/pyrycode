@@ -16,6 +16,19 @@ followed by recovery with a different token and the expected resume form; an
 initial-rejection-only test cannot catch reuse of a prior successful token.
 See [account token admission and the `firstRun` gate](streamsup-package-supervise-loop-run.md#optional-account-token-admission).
 
+Executable-selection coverage must observe the path the child actually launched
+under, including while atomic file replacement races spawns; inspecting the
+selection file or `onSpawn` cannot prove that path reached `exec`.
+`TestSpawnBinarySelection` uses child-written argv/environment/cwd witnesses and
+a stdin liveness response to distinguish a future-spawn update from killing the
+current child. Full-environment witnesses can contain inherited credentials:
+compare them in memory, and report only fixed text or witness counts on assertion
+and timeout paths. An assertion or timeout dump can disclose credentials even
+when successful runs look safe. Exercise those diagnostics with a synthetic
+inherited sentinel and a minimal subprocess environment. Helpers used exclusively
+by tagged tests must share their build tag; an ordinary staticcheck run otherwise rejects
+them as unused. See [the isolated live failure/release contract](e2e-realclaude.md#test-infrastructure).
+
 For request/reply correlation that spans an `io.Writer` call, proving
 "registered before write" and "a failed write cannot emit" in separate tests
 does not prove their ordering under concurrency. A matching response can arrive

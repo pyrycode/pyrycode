@@ -26,7 +26,65 @@ Single tag, no alternation. The `e2e_install` precedent established the `e2e_<pu
 
 ## Test infrastructure
 
-`fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
+`fixtures_test.go` re-execs the test binary as a fake `pyry` through `TestMain`
+when a helper test opts into `RunOpts.UseTestBinaryAsFakePyry` and supplies
+`GO_TEST_HELPER_PROCESS=1` in `ExtraEnv`. The fake selects behaviour from
+`PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`), letting helper-contract
+tests run without real Claude or a daemon build. `ensurePyryBuilt` instead uses
+a configured `PYRY_E2E_BIN` or builds an untagged daemon; it rejects the test
+binary itself as that override. Globally setting `PYRY_E2E_BIN=os.Args[0]` made
+real-daemon callers recursively re-execute the suite, so fake selection is an
+explicit per-call choice. `TestClaudeBinaryAvailable` checks real Claude on PATH.
+
+Same-runner session-error recovery. An external driver can hold an isolated
+daemon's Claude in a crash loop and release it through a local selection file.
+Build the daemon from the repository root with:
+
+```sh
+go build -tags e2e_realclaude -o <temporary-path>/pyry ./cmd/pyry
+```
+
+Before starting that binary, set `PYRY_E2E_CLAUDE_BIN_FILE` in its environment
+to a driver-owned regular file in a private directory. Write the file with mode
+`0600` and one absolute executable path, optionally surrounded by whitespace;
+the whole file is limited to 4096 bytes. Select a failing executable initially,
+then release by selecting the real Claude executable. For each update, write a
+temporary file in the same directory and atomically rename it over the selection
+file; writing in place can expose partial input to a concurrent spawn. Missing,
+unreadable, non-regular, oversized or malformed activated input fails that spawn
+through the existing backoff path rather than falling back to real Claude.
+
+Selection applies to every streamsup Runner in that daemon. `spawnClaudeBin`
+reads one bounded snapshot outside Runner locks for each spawn; a replacement
+affects a future spawn and sends no signal or restart request. It leaves a live
+child, backoff, Runner and bound session alone. Unset activation preserves
+`Config.ClaudeBin`, and selection preserves existing argv, environment and working
+directory composition. Ordinary builds exclude the parser and ignore activation
+entirely; there is no relay, control-wire or conversation-triggered entry point.
+`TestInteractiveSessionErrorRecovery` builds its own tagged daemon and passes it
+to `spawnBootstrapDaemonBinary`, ignoring `PYRY_E2E_BIN` locally. Other
+`spawnBootstrapDaemon` callers retain `ensurePyryBuilt`'s untagged/prebuilt
+selection. See [the spawn snapshot contract](streamsup-package-supervise-loop-run.md)
+and [the design](../../specs/architecture/2859-session-error-failure-control.md).
+
+`session.child_crashing` is conversation-scoped and signals repeated fast exits
+without discarding backlog. Release before queue give-up lets the same Runner
+respawn real Claude and deliver that backlog without a client resend.
+`session.blocked` marks queue
+give-up and dropped backlog: release afterward requires a fresh message and
+never replays the dropped message. Both recovery arms retain the daemon and
+conversation's bound session. This is the external-driver contract consumed by
+[mobile #1731](https://github.com/pyrycode/pyrycode-mobile/issues/1731).
+
+A failing child's open, unread stdin pipe can accept a queued turn and make the
+queue report delivery before the child exits. Close stdin before writing a
+child-owned readiness file, and observe that file before enqueueing. Gate the
+initial exit through phone handshake and enqueue so the one-shot crash notice
+remains observable; later launches exit immediately. Child stderr is captured
+until exit and cannot establish this pre-enqueue boundary. Recovery proof also
+needs delivered message IDs, reply text followed by idle, and prompt markers in
+the completed Claude transcript: model reply wording alone cannot prove which
+prompt reached Claude or that dropped backlog stayed absent.
 
 Harness constants are not interchangeable merely because they have the same
 UUID shape. `startStreamModalResolutionHarness` seeds
@@ -318,7 +376,19 @@ reads `PYRY_E2E_QUEUE_GIVE_UP_AFTER`, a positive Go duration such as `3s`, as th
 message queue's give-up bound in place of its 2 minute default. An ordinary
 build, including the untagged binary `ensurePyryBuilt` produces, ignores it, so
 a test using it must build its own tagged daemon. An invalid value fails the
-daemon's start. `TestInteractiveStreamResumeAfterEviction` runs a 5 s idle
+daemon's start. `TestInteractiveSessionErrorRecovery/dropped` sets
+`PYRY_E2E_QUEUE_GIVE_UP_AFTER=3s` before starting its isolated daemon, observes
+`session.child_crashing`, `session.blocked` and empty backlog with bounded
+30-second waits, then releases failure and observes an automatically running
+child with `liveChildPID` before enqueueing a fresh message. Enqueueing during
+backoff could spend the fresh message's shortened give-up window before Claude
+returns. Blocked/empty can precede the crash notice at this duration, so the
+dropped arm requires all observations before release without imposing their
+order. The retained arm clears inherited override input and keeps the default
+two-minute window, requiring undelivered backlog at the crash notice and release
+before give-up. Subtest `t.Setenv` cleanup restores the environment after daemon
+teardown, preventing leakage into the retained arm or other tests.
+`TestInteractiveStreamResumeAfterEviction` runs a 5 s idle
 window because, since #1486, a fire during an open turn re-arms rather than
 evicting; it counts only evictions logged after the plant send, so a fire before
 the plant turn cannot make the resume vacuous.

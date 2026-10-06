@@ -32,6 +32,10 @@ func TestSessionsRm_E2E_Success_Default(t *testing.T) {
 	home, regPath := newRegistryHome(t)
 	claudeBin := writeSleepClaude(t, home)
 	h := StartIn(t, home, "-pyry-claude="+claudeBin)
+	// Socket binding precedes Pool.Run. Observe a supervised child before
+	// sessions.new so the setup cannot mint before the pool is running.
+	waitForRunnerStatus(t, h, 5*time.Second, "bootstrap running before sessions.new",
+		func(s *control.StatusPayload) bool { return s.Phase == "running" && s.ChildPID != 0 })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -67,6 +71,8 @@ func TestSessionsRm_E2E_Success_Prefix(t *testing.T) {
 	home, regPath := newRegistryHome(t)
 	claudeBin := writeSleepClaude(t, home)
 	h := StartIn(t, home, "-pyry-claude="+claudeBin)
+	waitForRunnerStatus(t, h, 5*time.Second, "bootstrap running before sessions.new",
+		func(s *control.StatusPayload) bool { return s.Phase == "running" && s.ChildPID != 0 })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -103,6 +109,8 @@ func TestSessionsRm_E2E_Success_Archive(t *testing.T) {
 	home, regPath := newRegistryHome(t)
 	claudeBin := writeSleepClaude(t, home)
 	h := StartIn(t, home, "-pyry-claude="+claudeBin)
+	waitForRunnerStatus(t, h, 5*time.Second, "bootstrap running before sessions.new",
+		func(s *control.StatusPayload) bool { return s.Phase == "running" && s.ChildPID != 0 })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -136,6 +144,8 @@ func TestSessionsRm_E2E_Success_Purge(t *testing.T) {
 	home, regPath := newRegistryHome(t)
 	claudeBin := writeSleepClaude(t, home)
 	h := StartIn(t, home, "-pyry-claude="+claudeBin)
+	waitForRunnerStatus(t, h, 5*time.Second, "bootstrap running before sessions.new",
+		func(s *control.StatusPayload) bool { return s.Phase == "running" && s.ChildPID != 0 })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -178,6 +188,8 @@ func TestSessionsRm_E2E_AmbiguousPrefix(t *testing.T) {
 	home, regPath := newRegistryHome(t)
 	claudeBin := writeSleepClaude(t, home)
 	h := StartIn(t, home, "-pyry-claude="+claudeBin)
+	waitForRunnerStatus(t, h, 5*time.Second, "bootstrap running before sessions.new",
+		func(s *control.StatusPayload) bool { return s.Phase == "running" && s.ChildPID != 0 })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

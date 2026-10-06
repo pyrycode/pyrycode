@@ -1,0 +1,88 @@
+# #2859 — same-runner session-error failure and release
+
+## Files read
+
+- `internal/streamsup/runner.go` → `beginSpawn`, `spawnAndWait`, `Run`: one-acquisition spawn inputs, leaf locks, automatic backoff and stable session identity.
+- `internal/streamsup/helper_test.go` → `helperChild`: subprocess-owned argv/environment witnesses and stdin-driven exits.
+- `internal/e2e/realclaude/harness_daemon_test.go` → `spawnBootstrapDaemon`, wire and registry helpers: isolated daemon lifecycle and encrypted phone traffic.
+- `internal/e2e/realclaude/fixtures.go` → `ensurePyryBuilt`, `buildEnvWithRealHome`: existing untagged/prebuilt selection must stay unchanged.
+- `internal/e2e/realclaude/interactive_stream_multiturn_continuity_test.go` → `drainForCompletedTurnText`: completion includes an idle boundary after reply text.
+- `internal/msgqueue/queue.go` → `drain`, `giveUp`: production two-minute give-up drops an undelivered head.
+- `internal/protocol/messaging.go` → `QueueStatePayload`, `SessionErrorPayload`: conversation-scoped state witnesses.
+- `docs/knowledge/features/streamsup-package.md` and its supervise-loop topic: a child-owned marker, rather than `onSpawn`, proves execution; crash callbacks are synchronous and lock-free.
+- `docs/knowledge/features/e2e-realclaude.md` § Test infrastructure: tagged harness compilation and executed live counts matter.
+- `docs/knowledge/features/msgqueue-package.md`, `development-verification.md`, `CODING-STYLE.md`: delivery proof, independent witnesses and subprocess tests.
+
+## Context
+
+Mobile #1731 needs an external failure/release bridge inside an isolated daemon without replacing its Runner. A local selection file provides that bridge without widening production factory interfaces. No decision record is needed. No other fetched feature branch touches the two existing files this design changes.
+
+Sizing: one deliverable, four acceptance criteria, approximately 600–700 written lines including plan and tests; zero new exported types/interfaces, one existing consumer refactored locally, fewer than ten rejection branches. This fits the five builder limits and the S estimate.
+
+## Design
+
+`spawnAndWait` calls a build-selected, unexported `spawnClaudeBin() (string, error)` before constructing the command. Ordinary builds return `Config.ClaudeBin` directly and never inspect activation inputs. Under `e2e_realclaude`, an unset `PYRY_E2E_CLAUDE_BIN_FILE` also returns that exact path. When set, it names a driver-owned local file containing one absolute executable path (optional surrounding whitespace), bounded to 4096 bytes. Invalid or unreadable activated input fails that spawn rather than silently running real Claude.
+
+The driver writes a private temporary file and atomically renames it over the selection file. A spawn reads one complete selection; the command keeps that immutable value. This independent executable selection needs no Runner mutation or extra mutex acquisition: `beginSpawn` retains its current one-acquisition snapshot and all existing argv/environment/workdir composition. Updating the file sends no signal, restart hint or rotation. It changes only a future spawn; normal backoff continues.
+
+Extract the existing daemon spawn body into a private helper taking an explicit daemon binary. `spawnBootstrapDaemon` continues to select its existing untagged/prebuilt binary. The new session-error test explicitly builds `go build -tags e2e_realclaude -o <temporary-path>/pyry ./cmd/pyry`, ignoring `PYRY_E2E_BIN`, then reuses that spawn helper and the encrypted wire harness.
+
+Two isolated arms start a controlled failing executable. Its initial exit is gated until the phone connects and queues a message, avoiding losing the one-shot crash notice before handshake. Further executions exit immediately. The first arm observes child-crashing plus retained backlog and selects real Claude; the second observes blocked plus empty backlog before selecting real Claude and sending a distinct fresh message. Neither restarts the daemon or Runner, changes the bound session, nor asks for a manual respawn.
+
+## Concurrency model
+
+No watcher or production goroutine is added. File replacement and one bounded read are the synchronization contract; all I/O runs outside Runner leaf locks. Tests join their Runner and daemon goroutines on cleanup. Existing daemon and phone receive lifecycles remain unchanged.
+
+## Error handling
+
+Activated file open/read, size or absolute-path validation errors return contextual spawn errors into the existing backoff path. Executable start/exit errors retain current semantics. Missing credentials skip live tests explicitly. Daemon exit, unexpected scope, blocked-before-release, dropped/retained backlog mismatches, and reply timeout fail the live proof with bounded deadlines.
+
+## Testing strategy
+
+Write failing tests before the implementation. Tagged Runner tests observe child-owned executable identity, unchanged argv/environment/workdir, updates while a child lives, unchanged backoff/session, and atomic replacement racing launches. An untagged subprocess test sets activation input and proves the configured child still runs. Tagged table cases reject invalid/unreadable input and preserve the unset path.
+
+Live arms decrypt every frame in nonce order, collect queue and session-error state, and wait for a completed real-Claude turn. Delivery identifiers and completed transcript prompt markers distinguish the fresh message from the dropped one without relying on model reply wording. Check persisted conversation binding and daemon liveness through release. Preserve production retry/backoff timing and the retained arm's default give-up window; only the dropped arm uses `PYRY_E2E_QUEUE_GIVE_UP_AFTER=3s`, with bounded observation deadlines and automatic child recovery observed before fresh enqueue.
+
+Run ordinary and tagged streamsup race tests, `go vet ./...`, `go build` for ordinary and tagged daemons, and tagged live-package compilation. Dispatcher owns the live run and full-module verifier gate; no live evidence is claimed locally.
+
+## Open questions
+
+None. A selection file alone supplies the external next-spawn control; a callable setter is unnecessary.
+
+## Documentation handoff
+
+Satisfied in [`docs/knowledge/features/e2e-realclaude.md` § Test infrastructure](../../knowledge/features/e2e-realclaude.md#test-infrastructure): the actual tagged build command, `PYRY_E2E_CLAUDE_BIN_FILE` activation, absolute-path selection and atomic replacement/release contract for an external isolated driver, next-spawn semantics and ordinary-build exclusion. Release before give-up delivers retained backlog without client resend, while release after `session.blocked` needs a fresh message and never replays dropped backlog. Mobile #1731 consumes this contract.
+
+Satisfied in **Shortened waits** in that section: the dropped recovery arm's `PYRY_E2E_QUEUE_GIVE_UP_AFTER=3s`, observed automatic recovery before fresh enqueue, and the retained arm's default window, with subtest-scoped override cleanup.
+
+## Security review
+
+**Verdict:** PASS
+
+**Findings:**
+
+- [Trust boundaries / threat model] The tagged `spawnClaudeBin` is the sole local file-to-exec boundary. Activation is trusted driver process environment; remote/conversation input cannot select it. Ordinary builds exclude that parser and ignore its input entirely. Drivers must use an isolated tagged daemon, never a production deployment.
+- [Tokens] No credentials are read, stored or logged by the control. Child environment remains the existing per-spawn account-token path; live authentication stays with the dispatcher.
+- [File operations] SHOULD FIX: driver selection files use mode 0600 inside private temporary directories and atomic same-directory rename. A 4096-byte read cap and absolute-path validation reject malformed input. Driver-owned local symlinks/executable replacement are trusted just as configured `ClaudeBin` already is.
+- [Subprocesses] `exec.CommandContext` receives one path, not shell text; preserve existing argv, environment, cwd and termination/reaping. Test fixtures may use fixed shell scripts without interpolating untrusted values.
+- [Cryptography / network and I/O] No new socket, command, cryptography or nonce handling. Wire tests reuse Noise handshake/decryption and bounded receives; selection read is bounded local I/O.
+- [Errors / logs] Selection failures carry context without logging file contents. Session-error messages remain existing fixed daemon text, with no executable or token data on the wire.
+- [Concurrency] No new lock or watcher. Read selection outside all leaf locks; atomic rename provides complete snapshots. Tests prove live child and backoff are left alone and join children on shutdown.
+- [Helper diagnostics, 2026-10-06 re-review] `helperChild`'s `spawn_selection_witness` records the inherited environment for in-memory comparison, so its decoded witness and raw stdout are sensitive. `TestSpawnBinaryOrdinaryIgnoresActivation`, `waitSpawnBinaryWitness` and the liveness wait in `TestSpawnBinarySelection` must emit only fixed failure text and witness counts. No witness or raw-buffer values may enter gate diagnostics. Validate each failure path with a distinctive synthetic inherited sentinel and a minimal subprocess environment.
+
+**Reviewer:** builder (self-review per security-review checklist)
+**Date:** 2026-10-06
+
+## Revisions
+
+- 2026-10-06: `spawnClaudeBin` also opens nonblocking and rejects non-regular selection files so a mistaken FIFO cannot stall shutdown. The external bridge remains one bounded per-spawn file snapshot. The live reply proof uses the completed Claude transcript's prompt marker rather than model reply wording, together with delivered message IDs, to distinguish retained delivery and dropped-message non-replay. Final written work remains below 800 lines.
+
+- 2026-10-06 (verifier finding 1 on `25e5863f0496`): the fake-daemon `TestSessionsRm_E2E_Success_Purge` setup treated socket binding as pool readiness. `ctrl.Listen` precedes both `ctrl.Serve` and `Pool.Run`; `Pool.Mint` persists before `supervise` can return `ErrPoolNotRunning`. A scratch daemon build delaying `Pool.Run` reproduces the exact failure; 100 ordinary repetitions alone did not. In `internal/e2e/sessions_rm_test.go`, the five scenarios that call `control.SessionsNew` now use the existing `waitForRunnerStatus` from `internal/e2e/stream_absent_transcript_respawn_test.go` to observe the bootstrap running with a child PID first. This bounded setup barrier changes no daemon behaviour or wire contract and preserves the removal assertions. Validate the named test and siblings with normal and delayed startup under the race detector. The production startup ordering is filed separately as #2866; no new security surface is added. Written work remains below 800 lines.
+
+- 2026-10-06 (verifier findings 1–2 on `50e8cc023d28`): remove full-environment witness formatting from the ordinary assertion and raw-buffer formatting from the shared witness timeout. The tagged liveness wait also used a raw-buffer-dumping helper, so replace that call with a bounded wait whose failure is content-free. Preserve all environment comparisons in memory. Extend the security review to cover helper diagnostics; verify the ordinary assertion, ordinary/tagged witness timeouts and tagged liveness timeout with synthetic-sentinel overlays. Runner behaviour and the failure/release control remain unchanged.
+
+- 2026-10-06 (live gate on `f3258a988a`): both recovery arms wrote the queued head into the first gated child's open stdin, reporting delivery before its forced exit. The failing shell now closes stdin before writing its child-owned readiness file, and the driver observes that file before enqueueing. Initial exit remains gated through enqueue to retain the crash notification; subsequent exits and the production retry/give-up timing remain unchanged. No new security boundary is added; readiness diagnostics are fixed text and inspect only the private file’s existence.
+
+- 2026-10-06 (live gate classification): `TestInteractiveStream_FallbackReplySuggestionSetThenClear` also failed on unchanged gate base `1b5159d8a0` and passed a second run there. It is an independent flake, filed as #2873; this ticket does not change reply-fallback behavior or its test. The repaired recovery arms executed and passed against real Claude (2 executed, 0 failed, 0 skipped). No overlap with the fetched #2866/#2869 branches requires a dependency. Final work remains below 800 lines.
+
+- 2026-10-06 (full live gate budget rework): reuse merged #2879's tagged queue knob only in the dropped subtest, clearing inherited input for the retained arm and restoring it at subtest cleanup. Await `session.blocked` and empty backlog within 30 seconds, permitting those observations before `session.child_crashing`; retention at the crash notice remains required only for the default-window arm. After release, `liveChildPID` observes a running child before fresh enqueue. Delivery IDs, transcript non-replay and identity witnesses remain intact. The existing security review still applies: only trusted test environment changes, with no new execution, file, network or concurrency boundary. No fetched feature branch overlaps these edits; approximately 790 total added lines, zero new exports or consumer changes, four acceptance criteria and unchanged reject branches remain within the limits. The completed full live gate and its counts/skip reasons remain dispatcher-owned.
