@@ -64,3 +64,7 @@ Pending documentation stage: `docs/knowledge/features/e2e-realclaude.md`, “A s
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-06
+
+## Revisions
+
+- 2026-10-06: Grounding also read `docs/knowledge/features/cli-verb-dispatch.md` → `runSupervisor` shutdown and `docs/knowledge/features/streamsup-package-draining-turnevents-into-the-interactive-emitter.md` § “One isolated Haiku attempt”: existing generic error/isolation/termination contract preserved. Implementation uses explicit unknown exit values when Wait/state is unobserved. No design, execution or live-fixture change.

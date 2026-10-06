@@ -104,21 +104,24 @@ func (f replyFallback) run(parent context.Context, user, assistant string) (stri
 		// Observe before deferred context cleanup. Contexts are sampled separately;
 		// simultaneous deadlines/cancellation do not establish a unique cause.
 		now, parentErr, fallbackErr := time.Now(), parent.Err(), ctx.Err()
-		exitObserved, exitCode, exitSignal := false, -1, 0
+		exitObserved := false
+		var exitCode, exitSignal any = "unknown", "unknown"
 		// Wait owns ProcessState; do not read it while Wait may still be running.
 		if waitCompleted && cmd.ProcessState != nil {
-			exitObserved, exitCode = true, cmd.ProcessState.ExitCode()
+			exitObserved, exitCode, exitSignal = true, cmd.ProcessState.ExitCode(), 0
 			if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
 				exitSignal = int(status.Signal())
 			}
 		}
-		f.logger.Info("reply_fallback.lifecycle", "pid", cmd.Process.Pid,
+		fields := []any{"pid", cmd.Process.Pid,
 			"attempt_ms", now.Sub(attemptStarted).Milliseconds(), "child_ms", now.Sub(childStarted).Milliseconds(),
 			"parent_canceled", parentErr == context.Canceled, "parent_deadline", parentErr == context.DeadlineExceeded,
 			"fallback_canceled", fallbackErr == context.Canceled, "fallback_deadline", fallbackErr == context.DeadlineExceeded,
 			"own_deadline_elapsed", now.Sub(attemptStarted) >= 9800*time.Millisecond,
 			"group_cancel_requested", groupCancelRequested.Load(), "wait_completed", waitCompleted,
-			"exit_observed", exitObserved, "exit_code", exitCode, "exit_signal", exitSignal)
+			"exit_observed", exitObserved, "exit_code", exitCode, "exit_signal", exitSignal}
+		fields = append(fields, replyFallbackOutput(&stdout, waitCompleted, err)...)
+		f.logger.Info("reply_fallback.lifecycle", fields...)
 	}()
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -128,7 +131,7 @@ func (f replyFallback) run(parent context.Context, user, assistant string) (stri
 	case <-ctx.Done():
 		_ = cmd.Cancel() // Best effort: the context watcher may already have killed the group.
 		select {
-		case <-done:
+		case err = <-done:
 			waitCompleted = true
 		case <-time.After(100 * time.Millisecond):
 		}
@@ -137,12 +140,8 @@ func (f replyFallback) run(parent context.Context, user, assistant string) (stri
 	if err != nil || ctx.Err() != nil || len(stdout.Bytes()) > maxAccountTokenBytes {
 		return "", errReplyFallback
 	}
-	var result struct {
-		Result  string `json:"result"`
-		IsError bool   `json:"is_error"`
-		Subtype string `json:"subtype"`
-	}
-	if !utf8.Valid(stdout.Bytes()) || json.Unmarshal(stdout.Bytes(), &result) != nil || result.IsError || (result.Subtype != "" && result.Subtype != "success") {
+	result, decoded := decodeReplyFallback(stdout.Bytes())
+	if !decoded || result.IsError || (result.Subtype != "" && result.Subtype != "success") {
 		return "", errReplyFallback
 	}
 	text := strings.TrimSpace(result.Result)
@@ -150,6 +149,43 @@ func (f replyFallback) run(parent context.Context, user, assistant string) (stri
 		return "", errReplyFallback
 	}
 	return text, nil
+}
+
+type replyFallbackResult struct {
+	Result  string `json:"result"`
+	IsError bool   `json:"is_error"`
+	Subtype string `json:"subtype"`
+}
+
+// decodeReplyFallback shares the production struct decoder, including null and
+// duplicate-field semantics, with the bounded post-Wait observation.
+func decodeReplyFallback(data []byte) (replyFallbackResult, bool) {
+	var result replyFallbackResult
+	decoded := utf8.Valid(data) && json.Unmarshal(data, &result) == nil
+	return result, decoded
+}
+
+// replyFallbackOutput describes retained bytes only, never EOF, real-child
+// completion, pre-deadline arrival or publication eligibility. Saturation is a
+// lower bound on received output, not its total size.
+func replyFallbackOutput(stdout *cappedBuffer, waited bool, waitErr error) []any {
+	var count, capExceeded, utf8OK, jsonOK, resultOK, textOK, waitOK, waitDelay any = "unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown"
+	if waited {
+		data := stdout.Bytes() // Wait receipt synchronizes the writer; never read otherwise.
+		count, capExceeded, utf8OK = len(data), len(data) > maxAccountTokenBytes, utf8.Valid(data)
+		waitOK, waitDelay = waitErr == nil, errors.Is(waitErr, exec.ErrWaitDelay)
+		if utf8.Valid(data) {
+			result, decoded := decodeReplyFallback(data)
+			jsonOK = decoded
+			if decoded {
+				resultOK = !result.IsError && (result.Subtype == "" || result.Subtype == "success")
+				textOK = validReplyFallback(strings.TrimSpace(result.Result))
+			}
+		}
+	}
+	return []any{"output_observed", waited, "stdout_bytes", count, "stdout_cap_exceeded", capExceeded,
+		"stdout_utf8_ok", utf8OK, "stdout_json_ok", jsonOK, "stdout_result_ok", resultOK, "stdout_text_ok", textOK,
+		"wait_ok", waitOK, "wait_delay", waitDelay}
 }
 
 func validReplyFallback(text string) bool {

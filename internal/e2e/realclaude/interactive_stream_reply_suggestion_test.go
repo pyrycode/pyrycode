@@ -470,8 +470,15 @@ func (s suggestSource) diagnostic(idle bool, setRev, clearRev uint64) string {
 		exit = fmt.Sprint(*s.ExitCode)
 	}
 	if s.OutputObserved {
-		output = fmt.Sprintf("bytes=%d utf8=%v json=%v result_success=%v text_valid=%v",
-			s.StdoutBytes, s.UTF8OK, s.JSONOK, s.ResultOK, s.TextOK)
+		jsonOK, resultOK, textOK := "unknown", "unknown", "unknown"
+		if s.UTF8OK {
+			jsonOK = strconv.FormatBool(s.JSONOK)
+		}
+		if s.UTF8OK && s.JSONOK {
+			resultOK, textOK = strconv.FormatBool(s.ResultOK), strconv.FormatBool(s.TextOK)
+		}
+		output = fmt.Sprintf("bytes=%d utf8=%v json=%s result_success=%s text_valid=%s",
+			s.StdoutBytes, s.UTF8OK, jsonOK, resultOK, textOK)
 	}
 	elapsed := s.ElapsedMS
 	if s.StartMS != 0 && s.Completed == 0 {
@@ -503,6 +510,10 @@ func suggestLifecycle(stderr string, pid int) string {
 			if i < 3 || i > 10 {
 				n, err := strconv.ParseInt(value, 10, 64)
 				if err != nil {
+					if value == "unknown" && (key == "exit_code" || key == "exit_signal") && (fields["wait_completed"] != "true" || fields["exit_observed"] != "true") {
+						safe = append(safe, key+"=unknown")
+						continue
+					}
 					break
 				}
 				value = strconv.FormatInt(n, 10)
@@ -516,6 +527,40 @@ func suggestLifecycle(stderr string, pid int) string {
 			safe = append(safe, key+"="+value)
 		}
 		if len(safe) == len(keys) {
+			// Presence and applicability gates prevent missing fields becoming zeros
+			// or successful predicates. Only normalized scalars leave this parser.
+			values := make(map[string]string)
+			for _, key := range []string{"output_observed", "wait_ok", "wait_delay", "stdout_cap_exceeded", "stdout_utf8_ok", "stdout_json_ok", "stdout_result_ok", "stdout_text_ok"} {
+				values[key] = "unknown"
+				if fields["wait_completed"] == "true" {
+					if b, err := strconv.ParseBool(fields[key]); err == nil {
+						values[key] = strconv.FormatBool(b)
+					}
+				}
+			}
+			values["stdout_bytes"] = "unknown"
+			if values["output_observed"] == "true" {
+				if n, err := strconv.ParseInt(fields["stdout_bytes"], 10, 64); err == nil && n >= 0 && n <= 4097 {
+					values["stdout_bytes"] = strconv.FormatInt(n, 10)
+				}
+			}
+			if values["stdout_bytes"] == "unknown" {
+				for _, key := range []string{"stdout_cap_exceeded", "stdout_utf8_ok", "stdout_json_ok", "stdout_result_ok", "stdout_text_ok"} {
+					values[key] = "unknown"
+				}
+			}
+			if values["stdout_utf8_ok"] != "true" {
+				values["stdout_json_ok"] = "unknown"
+			}
+			if values["stdout_json_ok"] != "true" {
+				values["stdout_result_ok"], values["stdout_text_ok"] = "unknown", "unknown"
+			}
+			if fields["wait_completed"] != "true" || fields["exit_observed"] != "true" {
+				safe[len(safe)-2], safe[len(safe)-1] = "exit_code=unknown", "exit_signal=unknown"
+			}
+			for _, key := range []string{"output_observed", "wait_ok", "wait_delay", "stdout_bytes", "stdout_cap_exceeded", "stdout_utf8_ok", "stdout_json_ok", "stdout_result_ok", "stdout_text_ok"} {
+				safe = append(safe, key+"="+values[key])
+			}
 			return "daemon lifecycle (cause not inferred): " + strings.Join(safe, " ")
 		}
 	}
@@ -532,13 +577,31 @@ func readSuggestSource(t *testing.T, path string) suggestSource {
 	var total suggestSource
 	dec := json.NewDecoder(io.LimitReader(f, 64*1024))
 	for {
-		var entry suggestSource
-		if err := dec.Decode(&entry); errors.Is(err, io.EOF) {
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); errors.Is(err, io.EOF) {
 			return total
 		} else if errors.Is(err, io.ErrUnexpectedEOF) {
 			return total // The observer may be midway through its final append.
 		} else if err != nil {
 			t.Fatal("decode source metadata failed")
+		}
+		var entry suggestSource
+		if json.Unmarshal(raw, &entry) != nil {
+			t.Fatal("decode source metadata failed")
+		}
+		if entry.Completed != 0 {
+			var capture struct {
+				Bytes    *int  `json:"stdout_bytes"`
+				Observed *bool `json:"output_observed"`
+				UTF8     *bool `json:"utf8_ok"`
+				JSON     *bool `json:"json_ok"`
+				Result   *bool `json:"result_ok"`
+				Text     *bool `json:"text_ok"`
+			}
+			if json.Unmarshal(raw, &capture) != nil {
+				t.Fatal("decode source capture metadata failed")
+			}
+			entry.OutputObserved = capture.Observed != nil && *capture.Observed && capture.Bytes != nil && *capture.Bytes >= 0 && capture.UTF8 != nil && capture.JSON != nil && capture.Result != nil && capture.Text != nil
 		}
 		total.Streams += entry.Streams
 		total.Results += entry.Results

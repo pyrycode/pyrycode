@@ -204,7 +204,7 @@ func TestSuggestSourceUncertainEvidence(t *testing.T) {
 		{prefix + strings.Replace(fields, "parent_deadline=false", "parent_deadline=true", 1) + "\n", 42, true}, // Simultaneous deadlines remain visible.
 	} {
 		got := suggestLifecycle(tc.stderr, tc.pid)
-		if strings.Contains(got, "private-") || strings.Contains(got, "unknown") == tc.known {
+		if strings.Contains(got, "private-") || (got == "daemon lifecycle: unknown") == tc.known {
 			t.Fatal("unsafe or incorrectly classified daemon record")
 		}
 		if tc.known && (!strings.Contains(got, "fallback_deadline=true") || !strings.Contains(got, "group_cancel_requested=true")) {
@@ -322,5 +322,60 @@ func TestSuggestCLISourceEvidence(t *testing.T) {
 	info, err := os.Stat(evidence)
 	if err != nil || info.Mode().Perm() != 0600 {
 		t.Fatal("source evidence must be private")
+	}
+}
+
+func TestSuggestLifecycleOutput(t *testing.T) {
+	const base = "msg=reply_fallback.lifecycle pid=42 attempt_ms=9810 child_ms=9800 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=true own_deadline_elapsed=true group_cancel_requested=true wait_completed=true exit_observed=true exit_code=-1 exit_signal=9 "
+	const output = "output_observed=true wait_ok=false wait_delay=false stdout_bytes=0 stdout_cap_exceeded=false stdout_utf8_ok=true stdout_json_ok=false stdout_result_ok=unknown stdout_text_ok=unknown"
+	for _, tc := range []struct{ name, fields, want string }{
+		{"zero", output, "stdout_bytes=0"},
+		{"missing", "output_observed=true", "stdout_bytes=unknown"},
+		{"malformed", strings.Replace(output, "stdout_bytes=0", "stdout_bytes=private-output", 1), "stdout_bytes=unknown"},
+		{"null", strings.Replace(output, "stdout_bytes=0", "stdout_bytes=<nil>", 1), "stdout_bytes=unknown"},
+		{"negative", strings.Replace(output, "stdout_bytes=0", "stdout_bytes=-1", 1), "stdout_bytes=unknown"},
+		{"decode gate", strings.ReplaceAll(output, "=unknown", "=true"), "stdout_result_ok=unknown"},
+		{"valid", strings.ReplaceAll(strings.Replace(output, "stdout_json_ok=false", "stdout_json_ok=true", 1), "=unknown", "=true"), "stdout_text_ok=true"},
+		{"saturated", strings.Replace(strings.Replace(output, "stdout_bytes=0", "stdout_bytes=4097", 1), "stdout_cap_exceeded=false", "stdout_cap_exceeded=true", 1), "stdout_bytes=4097"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := suggestLifecycle(base+tc.fields+"\n", 42)
+			if !strings.Contains(got, tc.want) || strings.Contains(got, "private-") {
+				t.Fatal("incorrect safe output observation")
+			}
+		})
+	}
+	got := suggestLifecycle(strings.Replace(base, "wait_completed=true", "wait_completed=false", 1)+output+"\n", 42)
+	if !strings.Contains(got, "stdout_bytes=unknown") || !strings.Contains(got, "exit_code=unknown") {
+		t.Fatal("unobserved Wait invented output/exit")
+	}
+}
+
+func TestSuggestSourceCapturePresence(t *testing.T) {
+	const start = "{\"calls\":1,\"pid\":42}\n"
+	const capture = `{"completed":1,"exit_code":0,"output_observed":true,"stdout_bytes":0,"utf8_ok":true,"json_ok":false,"result_ok":false,"text_ok":false}`
+	for _, tc := range []struct {
+		name, record string
+		observed     bool
+	}{
+		{"explicit zero", capture, true},
+		{"missing count", strings.Replace(capture, `"stdout_bytes":0,`, "", 1), false},
+		{"null count", strings.Replace(capture, `"stdout_bytes":0`, `"stdout_bytes":null`, 1), false},
+		{"missing predicate", strings.Replace(capture, `,"text_ok":false`, "", 1), false},
+		{"null predicate", strings.Replace(capture, `"json_ok":false`, `"json_ok":null`, 1), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "source.jsonl")
+			if err := os.WriteFile(path, []byte(start+tc.record+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			got := readSuggestSource(t, path)
+			if got.OutputObserved != tc.observed {
+				t.Fatal("missing metadata became observed capture")
+			}
+			if !tc.observed && !strings.Contains(got.diagnostic(false, 0, 0), "output={unknown}") {
+				t.Fatal("invented zero capture")
+			}
+		})
 	}
 }
