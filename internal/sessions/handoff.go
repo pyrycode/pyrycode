@@ -206,8 +206,10 @@ func (p *Pool) WriteHandoffNote(id conversations.ConversationID, text string) (s
 	if err := p.markHandoffNoteStaleLocked(id, final); err != nil {
 		return "", err
 	}
-	if err := os.Remove(handoffStaleFallbackPath(final)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return "", fmt.Errorf("sessions: clear stale handoff fallback: %w", err)
+	for _, marker := range []string{handoffStaleFallbackPath(final), handoffStaleNotePath(final)} {
+		if err := os.Remove(marker); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("sessions: clear stale handoff fallback: %w", err)
+		}
 	}
 	text = truncateHandoffNote(text)
 	if err := writeHandoffNoteWithCertificate(final, text, handoffFreshnessPath(final)); err != nil {
@@ -331,6 +333,12 @@ func handoffStaleFallbackPath(notePath string) string {
 	return filepath.Join(filepath.Dir(filepath.Dir(notePath)), "handoff-stale-"+filepath.Base(notePath))
 }
 
+// The note directory may still accept writes when both metadata locations refuse
+// them. A hidden marker preserves failure state without changing the note inode.
+func handoffStaleNotePath(notePath string) string {
+	return filepath.Join(filepath.Dir(notePath), ".stale-"+filepath.Base(notePath))
+}
+
 func (p *Pool) markHandoffNoteStaleLocked(id conversations.ConversationID, path string) error {
 	if p.handoffStale == nil {
 		p.handoffStale = make(map[conversations.ConversationID]bool)
@@ -345,6 +353,9 @@ func (p *Pool) markHandoffNoteStaleLocked(id conversations.ConversationID, path 
 		// Keep the original error classification even when fallback persistence
 		// succeeds. Neither error is safe to put in a log.
 		fallbackErr := writeHandoffNoteFile(handoffStaleFallbackPath(path), "stale")
+		if fallbackErr != nil {
+			fallbackErr = errors.Join(fallbackErr, writeHandoffNoteFile(handoffStaleNotePath(path), "stale"))
+		}
 		return errors.Join(err, fallbackErr)
 	}
 	return nil
@@ -357,8 +368,10 @@ func (p *Pool) handoffNoteIsFreshLocked(id conversations.ConversationID, path st
 	if p.handoffStale[id] {
 		return false
 	}
-	if _, err := os.Lstat(handoffStaleFallbackPath(path)); !errors.Is(err, fs.ErrNotExist) {
-		return false
+	for _, marker := range []string{handoffStaleFallbackPath(path), handoffStaleNotePath(path)} {
+		if _, err := os.Lstat(marker); !errors.Is(err, fs.ErrNotExist) {
+			return false
+		}
 	}
 	certificate, err := os.Lstat(handoffFreshnessPath(path))
 	if err != nil || !certificate.Mode().IsRegular() {

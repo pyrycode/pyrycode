@@ -394,7 +394,17 @@ func composeSpawnArgs(base []string, settings SessionSettings) []string {
 // result with the kill (#842's Restart) or without one (#1581's in-band branch).
 // The result is a fresh slice that aliases neither spawnBase nor caller state.
 func (s *Session) spawnArgs(settings SessionSettings) []string {
-	return composeSpawnArgs(s.spawnBase, settings)
+	base := s.spawnBase
+	if s.suppressSystemPrompt {
+		base = slices.Clone(base)
+		for i := 0; i+1 < len(base); i++ {
+			if base[i] == "--append-system-prompt-file" && base[i+1] == s.systemPromptPath {
+				base = slices.Delete(base, i, i+2)
+				break
+			}
+		}
+	}
+	return composeSpawnArgs(base, settings)
 }
 
 // Session is one supervised claude instance plus the bridge that mediates its
@@ -488,6 +498,11 @@ type Session struct {
 	// whose file is daemon-scoped and lives on the Pool as systemPromptPath, and
 	// on any test-constructed Session that hand-builds a literal and never spawns.
 	systemPromptPath string
+
+	// Guarded by Pool.mu, like settings. An unrewriteable prompt carrying an
+	// older handoff must not reach the successor through this file's argv pair.
+	promptHasHandoff     bool
+	suppressSystemPrompt bool
 
 	// systemPrompt is the OPERATOR half of what this session was last composed
 	// with: the conversation's stored prompt at construction, refreshed by
