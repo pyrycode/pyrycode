@@ -105,3 +105,16 @@ None.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-06
+
+## Revisions
+
+- 2026-10-06 — Verifier finding 1: `parseClientFlags` can consume a following
+  flag as a selector value before conversation option validation. `runConversation`
+  now checks only leading selector tokens, skipping explicit or separate values,
+  and rejects a dash-prefixed separate value with usage and exit 2 before cwd
+  lookup or transport. Dash-prefixed values remain available through `=value`;
+  shared parsing for other verbs is unchanged. Hermetic regression cases cover
+  both reported commands, both dash prefixes, later selectors and verb flags.
+  Successful creation checks preserve separate/inline values, empty instance
+  names and explicit socket precedence. Security review remains PASS: the new
+  guard introduces no I/O, credentials, goroutines or daemon trust-boundary changes.

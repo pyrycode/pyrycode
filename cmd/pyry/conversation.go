@@ -140,6 +140,20 @@ func conversationUsageExit(detail string) error {
 }
 
 func runConversation(args []string) error {
+	// Check leading selector values before the shared string flag parser
+	// can consume another flag as a value. Dash-prefixed values need =value.
+	for i := 0; i < len(args); i++ {
+		name, _, hasValue := parseFlagSyntax(args[i])
+		if !clientPyryValueFlags[name] {
+			break
+		}
+		if !hasValue {
+			if i+1 < len(args) && strings.HasPrefix(args[i+1], "-") {
+				return conversationUsageExit(fmt.Sprintf("flag needs an argument: -%s", name))
+			}
+			i++
+		}
+	}
 	socketPath, rest, err := parseClientFlags("pyry conversation", args)
 	if err != nil {
 		return conversationUsageExit(err.Error())

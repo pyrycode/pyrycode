@@ -95,9 +95,20 @@ func TestConversationNew_E2E(t *testing.T) {
 		t.Fatalf("refusal changed session registry: %v", err)
 	}
 	// Instance selector and explicit socket retain the shared override contract.
-	r := runVerbIn(t, h.SocketPath, home, proj, "conversation", "-pyry-name=other", "new", "--model=")
-	if r.ExitCode != 0 || !canonicalUUIDLine.Match(r.Stdout) || len(r.Stderr) != 0 {
-		t.Fatalf("selector did not reach this daemon: %+v", r)
+	for _, selectors := range [][]string{
+		{"-pyry-name=other"},
+		{"-pyry-name", "other", "-pyry-socket", h.SocketPath},
+		{"--pyry-name", "other", "--pyry-socket", h.SocketPath},
+		{"-pyry-name=-dash-name"},
+		{"--pyry-name="},
+	} {
+		t.Run(strings.Join(selectors, " "), func(t *testing.T) {
+			args := append(selectors, "new", "--model=")
+			r := runVerbIn(t, h.SocketPath, home, proj, "conversation", args...)
+			if r.ExitCode != 0 || !canonicalUUIDLine.Match(r.Stdout) || len(r.Stderr) != 0 {
+				t.Fatalf("selector did not reach this daemon: %+v", r)
+			}
+		})
 	}
 }
 
@@ -126,5 +137,30 @@ func TestConversationNew_E2E_SyntaxAndTransport(t *testing.T) {
 	r = RunBareIn(t, home, "help")
 	if r.ExitCode != 0 || !bytes.Contains(r.Stdout, []byte("pyry conversation new")) || !bytes.Contains(r.Stdout, []byte("--type chat|channel")) {
 		t.Fatalf("help = %+v", r)
+	}
+}
+
+func TestConversationNew_E2E_MissingSelectorValues(t *testing.T) {
+	home, _ := newRegistryHome(t)
+	// No daemon is listening: a transport attempt would exit 1 instead of 2.
+	for _, args := range [][]string{
+		{"-pyry-name", "-pyry-socket", "new"},
+		{"-pyry-socket", "-pyry-name=test", "new"},
+		{"--pyry-name", "--pyry-socket", "new"},
+		{"--pyry-socket", "--pyry-name=test", "new"},
+		{"-pyry-name", "--unknown", "new"},
+		{"-pyry-socket", "--", "new"},
+		{"-pyry-name", "test", "-pyry-socket", "--type=chat", "new"},
+		{"-pyry-socket=missing.sock", "-pyry-name", "--model=sonnet", "new"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			full := append([]string{"conversation"}, args...)
+			r := RunBareIn(t, home, full...)
+			if r.ExitCode != 2 || len(r.Stdout) != 0 ||
+				!bytes.Contains(r.Stderr, []byte("flag needs an argument:")) ||
+				!bytes.Contains(r.Stderr, []byte("usage: pyry conversation")) {
+				t.Fatalf("missing selector value: exit=%d stdout=%q stderr=%q", r.ExitCode, r.Stdout, r.Stderr)
+			}
+		})
 	}
 }
