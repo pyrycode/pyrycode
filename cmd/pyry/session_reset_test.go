@@ -890,3 +890,13 @@ func equalSteps(got, want []string) bool {
 	}
 	return true
 }
+
+func TestConversationReset_ErrorReplyKeepsExistingContract(t *testing.T) {
+	f := newResetFixture(t, resetOptions{previousNote: resetPreviousNote, answerOnWrite: func(f *resetFixture) {
+		f.answer(resetReplyText, false)
+		f.capture.Sink(turnevent.TurnEnd{IsError: true})
+	}})
+	if !f.reset.wrapUp(resetConvA) || f.notes.stored(resetConvA) != resetReplyText {
+		t.Fatal("ordinary reset no longer stores its completed reply alone")
+	}
+}

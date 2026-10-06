@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,7 +73,9 @@ func dormantSwitchFixture(t *testing.T, fields string) (*sessions.Pool, *convers
 	if err := reg.Save(path); err != nil {
 		t.Fatal(err)
 	}
-	return pool, reg, conversationAgentSwitcher{pool: pool, conversations: reg, registryPath: path, reset: &conversationReset{}}, path
+	emitter := newResettingEmitterV2(context.Background(), slog.Default())
+	emitter.attach(newResettingBcast(interactiveConns()...))
+	return pool, reg, conversationAgentSwitcher{pool: pool, conversations: reg, registryPath: path, reset: &conversationReset{}, resetting: emitter}, path
 }
 
 func TestConversationAgentSwitch_DormantOldSession(t *testing.T) {
@@ -143,7 +146,7 @@ func TestConversationAgentSwitch_RefusalsLeaveBinding(t *testing.T) {
 			if tc.unbound {
 				wantID = ""
 			}
-			if got.CurrentSessionID != wantID || len(got.SessionHistory) != 0 || len(pool.List()) != len(before) || len(transitions) != 0 {
+			if got.CurrentSessionID != wantID || len(got.SessionHistory) != 0 || len(pool.List()) != len(before) || len(transitions) != 0 || len(sw.resetting.bcast.(*resettingBcast).recorded()) != 0 {
 				t.Fatalf("refusal mutated row/pool: %+v, %+v", got, pool.List())
 			}
 			if _, err := pool.HarnessFor(dormantWriteTargetID); err != nil {
@@ -178,6 +181,7 @@ func TestConversationAgentSwitch_WorkspaceRefusalOmitsPaths(t *testing.T) {
 
 func TestConversationAgentSwitch_MintErrorWithIDCleansUp(t *testing.T) {
 	pool, reg, sw, _ := dormantSwitchFixture(t, "")
+	defer assertSwitchSkippedSequence(t, sw.resetting)
 	// Pool.Run has not started. MintWith persists an ID and returns it with
 	// ErrPoolNotRunning; Switch must remove that ID before answering failure.
 	id, err := sw.Switch(context.Background(), "conv-1", protocol.AgentCodex, nil, nil)
@@ -247,6 +251,7 @@ func TestConversationAgentSwitch_MintFailureOmitsWorkspace(t *testing.T) {
 func TestConversationAgentSwitch_ConversationSaveFailureRollsBack(t *testing.T) {
 	pool, reg, sw, _ := dormantSwitchFixture(t, "")
 	runPoolReady(t, pool)
+	defer assertSwitchSkippedSequence(t, sw.resetting)
 	sw.registryPath = filepath.Join(t.TempDir(), "missing", "conversations.json")
 	// A file at the parent path makes Save fail even though it creates dirs.
 	if err := os.WriteFile(filepath.Dir(sw.registryPath), []byte("block"), 0o600); err != nil {
@@ -432,5 +437,13 @@ func TestConversationAgentSwitch_AbsentEffortRequiresTargetModelSupport(t *testi
 				t.Fatalf("settings = %+v, want model %q effort %q", settings, tc.model, tc.wantEffort)
 			}
 		})
+	}
+}
+
+func assertSwitchSkippedSequence(t *testing.T, emitter *resettingEmitterV2) {
+	t.Helper()
+	edges := emitter.bcast.(*resettingBcast).recorded()
+	if len(edges) != 3 || edges[0].payload.Phase != protocol.ResetPhaseWrappingUp || edges[0].payload.Handoff != protocol.ResetHandoffPending || edges[1].payload.Phase != protocol.ResetPhaseRestarting || edges[1].payload.Handoff != protocol.ResetHandoffSkipped || !edges[0].payload.Active || !edges[1].payload.Active || edges[2].payload.Active || edges[2].payload.Phase != "" || edges[2].payload.Handoff != "" {
+		t.Fatalf("skipped reset sequence = %+v", edges)
 	}
 }

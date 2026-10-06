@@ -53,7 +53,25 @@ type Page struct{ Entries []Entry; Cursor string; AtStart bool }
 func (s *Store) Append(convID conversations.ConversationID, typ string, payload json.RawMessage, ts time.Time) (uint64, error)
 func (s *Store) Page(convID conversations.ConversationID, cursor string, limit int) (Page, error)
 func (s *Store) LatestEntryID(convID conversations.ConversationID) (uint64, error)
+func (s *Store) LogDir(convID conversations.ConversationID) (string, error)
 ```
+
+`Store.LogDir` (#2673) returns the absolute, symlink-resolved, existing log
+directory for a conversation. It validates the ID and uses
+`resolveDir(convID, false)` under the store's mutex, rechecking exact containment
+on every call; it creates nothing, caches no path and refuses a missing path or
+a path that is not a directory. A sibling-conversation redirect is refused just
+like a redirect outside the instance root (see [Directory resolution](#directory-resolution-re-resolve-every-call-dont-cache-the-answer)).
+
+Switch handover reads this daemon-owned log through `Store.Page` and uses
+`LogDir` for the incoming agent's on-demand file pointer. Payload decoding and
+completed-exchange selection belong to `cmd/pyry`, preserving this package's
+opaque-payload boundary; see [agent-switch handover](conversation-session-binding.md#switching-to-the-other-agent-2672).
+The `segment-<number>.jsonl` files are JSON Lines: a schema header
+(`{"format":"pyrycode.history","version":1}`) followed by one JSON event per
+line. An agent reading the log directory may need permission because the
+daemon's instance directory is outside its workspace; handover adds no
+permission round-trip.
 
 `limit` is **clamped** to `MaxPageEntries`, never refused above it — a page is
 "up to `limit` entries", so an over-large ask from #2116 pages rather than
@@ -65,7 +83,7 @@ scalar for one conversation's cursor to mute a different one's stream, and no
 reason to pay for a global counter recovered by reading every conversation at
 startup.
 
-**PRECONDITION on both methods, stated on both doc comments:** `convID` must
+**PRECONDITION on the store methods:** `convID` must
 be the conversation the authenticated session is already on, never one a
 client asserted on the wire. `ValidID` is a *shape* predicate only — a
 client-supplied id of canonical shape genuinely resolves inside the
