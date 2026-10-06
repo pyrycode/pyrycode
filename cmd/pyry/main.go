@@ -787,7 +787,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	accountSource := fs.String(claudeAccountFlagName, "", "Claude account token source for this instance: an absolute path to an owner-only token file, or an op:// 1Password reference (default: $"+claudeAccountSourceEnv+" or ~/.pyry/<name>/"+claudeAccountFileName+")")
 	accountOpCLI := fs.String(claudeAccountOpCLIFlagName, "", "1Password CLI an op:// account source runs: one executable name on PATH or one absolute path (default: $"+claudeAccountOpCLIEnv+", the op_cli key of ~/.pyry/<name>/"+claudeAccountFileName+", or op)")
 	var readFolderEntries folderList
-	fs.Var(&readFolderEntries, "pyry-read-folder", "absolute folder the markdown reader may also open; repeatable")
+	fs.Var(&readFolderEntries, "pyry-read-folder", "absolute folder the file reader may also open; repeatable")
 	if err := fs.Parse(pyryArgs); err != nil {
 		return err
 	}
@@ -852,7 +852,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// the registry, with the strict resolver: it neither creates a folder nor
 	// trust-marks one, and a row it cannot resolve is left as it was.
 	normaliseLegacyCwds(convReg, convRegistryPath, resolveWorkspaceDir, logger)
-	// The operator-named folders the markdown reader may open besides a
+	// The operator-named folders the file reader may open besides a
 	// conversation's workspace (#2710), resolved ONCE here so every reader request
 	// checks against the same canonical roots. A bad entry is skipped with a
 	// warning and the daemon still starts.
@@ -4502,7 +4502,7 @@ Pyry flags (must come before claude args, or after a -- separator):
                         (testing; 0 or >= the 90s default = production default.
                         It can only shorten: the ceiling is not operator-raisable)
   -pyry-relay string    relay URL (default: $PYRY_RELAY_URL or ~/.pyry/config.json)
-  -pyry-read-folder path  an absolute folder the in-app markdown reader may
+  -pyry-read-folder path  an absolute folder the in-app file reader may
                         also open besides the conversation's workspace;
                         repeat for several (a bad entry is skipped with a warning)
 

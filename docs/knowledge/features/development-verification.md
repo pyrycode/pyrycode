@@ -133,6 +133,18 @@ settings sentinel back, not `ErrSpawnDirRejected`, is what shows the membership
 check ran first (see
 [conversation-session-binding-create.md § Requested model and effort](conversation-session-binding-create.md#requested-model-and-effort-2665)).
 
+When every refusal collapses to the same boolean or wire code, a valid registry
+cannot distinguish an early filename rejection from one after lookup.
+`TestWorkspaceFileReader_SecretNames` also supplies a nil registry with a denied
+requested leaf: moving the check after `Registry.Get` becomes observable rather
+than returning the same generic refusal. See [the live reader's filename checks](v2-session-manager-state-machine-inbound-read-workspace-file-workspacefileread.md#testing-the-filename-checks).
+
+Case-variation filesystem fixtures need paths that differ by more than letter
+case. On macOS's case-insensitive filesystem, upper/lowercase names can share a
+file or symlink and fail during setup before exercising the predicate.
+`TestWorkspaceFileReader_SecretNames` uses distinct `-lower-case` and
+`-upper-case` directories while preserving the actual leaf spellings under test.
+
 A test whose premise is "past a named cap" must build its fixture by computing from
 that constant, not by restating a literal believed to be past it. A hardcoded number
 keeps passing for the wrong reason after the cap changes, or silently stops testing

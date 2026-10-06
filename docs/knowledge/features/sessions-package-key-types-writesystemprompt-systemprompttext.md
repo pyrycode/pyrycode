@@ -69,9 +69,19 @@ is what `--append-system-prompt-file` exists not to do.
 
 `daemonPromptText(folders)` (#2711) is the actual daemon-wide head every
 composition starts from, in place of the bare `systemPromptText` constant:
-the constant, plus one sentence naming the folders the in-app markdown
+the constant, plus one sentence naming the folders the live file
 reader serves besides a conversation's workspace (#2710) —
 `readFolderSentence(folders)` — after the usual newline separator.
+
+Since #2893, the sentence reads: "This daemon serves files of any type under
+`<folder list>` to a client that asks for one by absolute path, subject to the
+size limit and secret-name refusals." Each folder is backtick-quoted in input
+order, separated by commas and a final "and", and the sentence ends in a
+newline. `TestReadFolderSentence_Pinned` independently pins this wording and
+formatting. The [live-reader contract](v2-session-manager-state-machine-inbound-read-workspace-file-workspacefileread.md)
+owns the size bound and two-leaf filename denylist; the sentence does not claim
+that eligible files contain no secrets.
+
 `folders` **must** be `resolveReadFolders`'s output, the roots the reader
 actually accepts, so the sentence can never name a folder the reader would
 refuse; it names only what resolved at startup, nothing a bad entry caused

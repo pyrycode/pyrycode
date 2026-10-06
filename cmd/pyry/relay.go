@@ -178,7 +178,7 @@ type relayWiring struct {
 	// workspaceBase is the immutable service workspace base resolved at startup.
 	// Empty is supplied explicitly so the handshake cannot re-resolve HOME.
 	workspaceBase string
-	// readFolders are the operator-named folders the markdown reader may open
+	// readFolders are the operator-named folders the file reader may open
 	// besides a conversation's workspace (#2710): resolveReadFolders output,
 	// resolved once in the composition root and never written afterwards.
 	readFolders []string
@@ -1421,9 +1421,9 @@ func startRelayV2(
 		// attachments.ResolvePath, whose stated precondition is that the caller
 		// already validated the conversation id.
 		AttachmentResolve: attachmentResolve,
-		// Live workspace markdown read (#2598): a client-named path, confined to
-		// the named conversation's recorded workspace by the attach_file verb's
-		// confineFile and readChecked, markdown only, read fresh on every request
+		// Live workspace file read (#2598): a client-named path confined to the
+		// workspace or admitted read folders, with a secret-name denylist on both
+		// leaves and unchanged confineFile/readChecked, read fresh on every request
 		// and stored nowhere. The conversation id reaches it only after the
 		// KnownConversation gate above. The size bound is the attach_file verb's
 		// unpublished receiver policy.

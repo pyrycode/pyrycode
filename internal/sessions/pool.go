@@ -103,7 +103,7 @@ type Config struct {
 	// Required when ConversationsRegistry is non-nil; ignored when nil.
 	ConversationsRegistryPath string
 
-	// ReadFolders are the folders the markdown reader serves besides a
+	// ReadFolders are the folders the file reader serves besides a
 	// conversation's workspace (#2710), as cmd/pyry's resolveReadFolders
 	// returned them: only the entries that resolved, never a skipped one. Every
 	// appended system prompt names them in one sentence after systemPromptText
