@@ -20,28 +20,37 @@ primitives are identical (`confineFile`/`readChecked` in `cmd/pyry/attach_file.g
 reused unmodified per the #2164 rule: do the containment work once, in
 `cmd/pyry`, never re-derive it in `internal/relay`), but this verb adds a
 second gate `attachment.file` does not need, because `attachment.file`'s caller
-is already the same trust tier as the workspace's owner: **a fixed extension
-allowlist**, checked before either primitive runs.
+is already the same trust tier as the workspace's owner: **a secret-name
+denylist**, checked on both the requested and resolved leaves.
 
-## The markdown rule is checked twice, and neither check is redundant
+## The secret-name rule is checked twice, and neither check is redundant
 
-`workspaceFileReader` (`cmd/pyry/workspace_file.go`) checks `isMarkdownName` on
+`workspaceFileReader` (`cmd/pyry/workspace_file.go`) checks `isSecretName` on
 the **requested** leaf first, before the registry or the filesystem is
 touched — so a request for `.env` never reaches a `Stat`. It checks the same
-predicate again on the **resolved** leaf, after `confineFile` has followed
-every symlink in the path. Confinement's containment test (`withinDir`) says
-nothing about extensions; a file named `notes.md` that is actually a symlink to
-`.env` inside the same workspace passes confinement cleanly, and only the
-second check refuses it. Dropping either check reopens a hole the other cannot
-see: the first check alone lets a symlinked `.env` through under a markdown
-name, and the second check alone would touch the filesystem — including a stat
-on a path outside `$HOME`-confined territory — before refusing a request that a
-pure string check could have rejected for free.
+predicate again on the **resolved** leaf, after `confineToAnyRoot` has followed
+symlinks and proved containment. Since #2893, any regular file type is eligible:
+markdown, scripts, archives, extensionless and binary files all use the same
+bounded read.
+
+The case-insensitive denylist refuses exact `.env`, any name beginning `.env.`,
+exact `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`, and any name ending in `.key`,
+`.pem`, `.p12`, `.pfx`, `.keychain` or `.keychain-db`. `.env.example` is
+deliberately denied; `.gitignore`, `.envoy` and `id_rsa.pub` remain eligible.
+Only the leaf is checked, not parent-directory names or file contents. This is
+a filename heuristic: allowed files, including archives, may still contain
+secrets.
+
+Containment (`withinDir`) cannot replace either check. An eligible `notes.py`
+symlink to `.env` inside the same root passes containment and only the resolved
+check refuses it. A denied `private.key` symlink to an eligible `notes.py` must
+also be refused, which the resolved check alone would miss. Both checks apply
+in the workspace, configured folders and admitted working folder.
 
 This is the same shape as `attach_file`'s TOCTOU discipline (check, then open
 with `O_NOFOLLOW|O_NONBLOCK`, then `os.SameFile` against the pre-open stat) —
 **a check has to run against the thing that will actually be read, not just the
-thing the caller named** — applied one level up, to the file's *kind* rather
+thing the caller named** — applied one level up, to the file's *name* rather
 than its *identity*.
 
 ## `streamAttachmentBytes`: the same chunker, fed bytes instead of a path
@@ -57,7 +66,13 @@ path by name would throw that proof away and reintroduce the swap window
 `StreamAttachment` was split into a thin read-then-call wrapper and
 `streamAttachmentBytes(ctx, connID, attachmentID, filename string, blob []byte,
 inReplyTo uint64) error`, which both callers now share — `attachmentEnvelopes`
-+ the `Push` loop + the one debug log line, unchanged. **When a second caller
++ the `Push` loop + the one debug log line, unchanged. The bytes are streamed
+unchanged, with the resolved basename, a fresh transfer UUID and
+`http.DetectContentType` MIME sniffed from bytes, regardless of extension.
+There is no text conversion or inline/download discriminator; presentation
+belongs to the client. `readChecked` retains the supplied `maxBytes` bound
+(production `maxAttachFileBytes`, 16 MiB): exactly the bound is admitted and
+one byte over is refused. **When a second caller
 needs a function's tail but has already done its own version of the function's
 head more safely, split the function at that boundary rather than duplicating
 the tail or calling the head again.**
@@ -66,9 +81,9 @@ the tail or calling the head again.**
 
 `V2SessionConfig.WorkspaceFileRead func(conversationID, path string)
 (WorkspaceFile, bool)` mirrors `AttachmentResolve`'s shape for the identical
-reason: every refusal cause — wrong extension (either leaf), no recorded
-workspace, an empty `Cwd`, a registry miss, an out-of-tree path, a non-regular
-file, over the size bound — collapses into the same `false` inside
+reason: every refusal cause — denied name (either leaf), a registry miss,
+no admitting root, a missing or non-regular file, a checked-read failure,
+over the size bound — collapses into the same `false` inside
 `workspaceFileReader`, so `handleReadWorkspaceFile` cannot branch on what the
 wire's one `attachment.not_found` must not distinguish, and never holds a
 `confineFile`/`readChecked` error that could print a host path. The cost is the
@@ -84,10 +99,11 @@ not to re-validate membership.
 once when `cmd/pyry/relay.go` builds the `V2SessionConfig` literal — the same
 rule `fileAttacher` already follows for `attach_file`. A `change_workspace`
 between two `read_workspace_file` requests is visible on the very next one, with
-no reconnect and no re-wiring. An empty `Cwd` is refused rather than resolved,
+no reconnect and no re-wiring. An empty `Cwd` is skipped rather than resolved,
 because `confineFile("", path)` would otherwise canonicalise against the
 daemon's own process directory — the daemon's own layout, not any conversation's
-workspace.
+workspace. Absolute paths can still be admitted by an extra root when `Cwd`
+is empty or unresolvable; relative paths cannot.
 
 ## Operator-named folders widen the absolute case only (#2710)
 
@@ -107,7 +123,7 @@ grant that one file rather than being skipped.
 `workspaceFileReader` tries the workspace first, then each resolved folder in
 order (`confineToAnyRoot`), and only for a path that is already absolute — a
 relative path never reaches the folder loop, so it still resolves against the
-workspace only. Every existing rule (both-leaf markdown check, regular-file-only,
+workspace only. Every existing rule (both-leaf secret-name check, regular-file-only,
 `readChecked`'s identity proof, the single undistinguished `false`) applies
 inside a folder exactly as inside the workspace, because a folder is confined
 with the same `confineToRoot` helper `confineFile` now delegates to.
@@ -142,7 +158,7 @@ working folder (`-pyry-workdir`, or the process directory when that is unset
 `BEHAVIOR.md`, `FEEDBACK.md` and the rest from any conversation, including
 one whose workspace is a subfolder of the working folder, with no
 `-pyry-read-folder` set. The folder enters the reader exactly like a
-configured one — same `confineToAnyRoot`, same both-leaf markdown check, same
+configured one — same `confineToAnyRoot`, same both-leaf secret-name check, same
 `readChecked` identity proof, same undistinguished `false` — because it is
 folded into the one slice both consumers read; no reader code changed.
 
@@ -150,7 +166,7 @@ folded into the one slice both consumers read; no reader code changed.
 left out, and one `slog.Info` line names it with a static reason (never a
 client-named path), when it resolves to the operator's home folder, to `/`,
 or to any folder that *contains* home (`withinDir(resolved, homeReal)`) —
-otherwise starting the daemon from `$HOME` would expose every markdown file
+otherwise starting the daemon from `$HOME` would expose every eligible file
 in it. `confineWorkdirToHome` already refuses a working folder outside home
 earlier in `runSupervisor`, so only the exact-home case is reachable in the
 daemon as shipped; the broader "contains home" check holds on its own rather
@@ -168,7 +184,18 @@ prompt sentence (below) naming the folder once.
 
 `fileAttacher` does not take the folder list (see above), so `attach_file`
 still refuses a file in the working folder from a conversation whose
-workspace is elsewhere — this ticket widens only the markdown reader.
+workspace is elsewhere — the extra roots apply only to the live file reader.
+
+## Testing the filename checks
+
+A generic refusal with a valid registry cannot prove the requested-name check
+runs before lookup: moving the check later leaves the same `false`.
+`TestWorkspaceFileReader_SecretNames` also calls the reader with a nil registry
+and a denied requested leaf, making an incorrectly ordered `Registry.Get`
+observable. Direct refusals and both symlink directions prove the two checks
+independently; case variants use distinct `-lower-case` and `-upper-case`
+fixture directories so macOS's case-insensitive filesystem cannot alias them.
+See [verification practices](development-verification.md#prove-that-tests-distinguish-the-change).
 
 ## Related
 
@@ -176,4 +203,4 @@ workspace is elsewhere — this ticket widens only the markdown reader.
 - [Outbound attachment stream (#2053)](v2-session-manager-state-machine-outbound-attachment-stream-streamattachm.md) — `attachmentEnvelopes` + the `Push` loop, now factored as `streamAttachmentBytes` and shared by both callers.
 - [`attachment.file`: confine and store a claude-named path (#2164)](control-plane-attachment-file-confine-and-store-a-claude-named-path.md) — the first model-named path on this daemon, and the `confineFile`/`readChecked` primitives this verb reuses unmodified.
 - [Attachment envelope types § `read_workspace_file`](protocol-package-constants-codes-go-envelope-types-attachments.md) — `TypeReadWorkspaceFile`, `ReadWorkspaceFilePayload`, and the wire vocabulary this handler answers.
-- `docs/protocol-mobile.md` § Attachments, `#### read_workspace_file` — the published client contract: the two fields, the markdown-only rule on both leaves, the live-read (no stored copy) semantics, and the single undistinguished refusal.
+- [Mobile protocol § `read_workspace_file`](../../protocol-mobile.md#read_workspace_file) — the published client contract: the two fields, the secret-name rule on both leaves, admitted roots, the live-read (no stored copy) semantics, and the single undistinguished refusal.
