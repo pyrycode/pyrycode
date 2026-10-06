@@ -1522,7 +1522,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	}
 	ctrl.SetUpdateWhenIdleProvider(func() (control.UpdateWhenIdleResult, error) { return au.request(ctx) })
 	ctrlDone = make(chan error, 1)
-	go func() { ctrlDone <- ctrl.Serve(controlCtx) }()
+	go func() { ctrlDone <- serveControlWhenReady(ctx, pool.Ready(), controlCtx, ctrl) }()
 
 	logger.Info("pyrycode starting",
 		"version", Version,
@@ -1579,6 +1579,18 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	}
 	logger.Info("pyrycode stopped")
 	return nil
+}
+
+// serveControlWhenReady prevents requests from minting sessions before the
+// pool's supervisor handle is wired. Startup cancellation ends the wait, while
+// serving uses the detached control context to retain ownership until writers stop.
+func serveControlWhenReady(startupCtx context.Context, ready <-chan struct{}, controlCtx context.Context, ctrl *control.Server) error {
+	select {
+	case <-ready:
+		return ctrl.Serve(controlCtx)
+	case <-startupCtx.Done():
+		return startupCtx.Err()
+	}
 }
 
 // fatalCause reports the self-initiated fatal shutdown reason carried by the
