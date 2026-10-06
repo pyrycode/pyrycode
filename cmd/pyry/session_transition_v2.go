@@ -68,6 +68,9 @@ type sessionTransitionEmitterV2 struct {
 	// typed-nil inside an interface is non-nil at the interface level.
 	hist *history.Store
 
+	// switched publishes the committed row after the transition fanout.
+	switched func(string)
+
 	in chan sessions.SessionTransition
 
 	// nextID is the per-conn envelope-ID counter (mirrors assistantTurnEmitterV2).
@@ -204,6 +207,9 @@ func (e *sessionTransitionEmitterV2) broadcast(ctx context.Context, t sessions.S
 				"err", err)
 		}
 	}
+	if t.AgentSwitch && e.switched != nil {
+		e.switched(convID)
+	}
 }
 
 // toWirePayload maps a #659 session-side transition onto the protocol wire
@@ -292,6 +298,7 @@ func startSessionTransitionStreamV2(
 	busy *turnBusyTracker,
 	hist *history.Store,
 	logger *slog.Logger,
+	switched ...func(string),
 ) func() {
 	emitter := newSessionTransitionEmitterV2(bcast, resolveConv, logger)
 	// Assigned rather than passed to the constructor, which has 10 call sites —
@@ -299,6 +306,9 @@ func startSessionTransitionStreamV2(
 	// function has 4, so it takes the store as a plain parameter; nil is a
 	// daemon (or a test) with no durable log.
 	emitter.hist = hist
+	if len(switched) > 0 {
+		emitter.switched = switched[0]
+	}
 	sink.SetTransitionObserver(func(t sessions.SessionTransition) {
 		// The incumbent runs FIRST and unconditionally. Enqueue is a documented
 		// non-blocking buffered send that nothing downstream can delay, so keeping it

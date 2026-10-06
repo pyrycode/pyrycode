@@ -9,6 +9,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 )
@@ -35,7 +36,7 @@ type conversationAgentSwitcher struct {
 	saved         savedModelVocabulary
 }
 
-func (s conversationAgentSwitcher) Switch(ctx context.Context, convID, target string, model, effort *string) (sessions.SessionID, error) {
+func (s conversationAgentSwitcher) Switch(ctx context.Context, convID, target string, model, effort *string) (committedID sessions.SessionID, switchErr error) {
 	if s.pool == nil || s.conversations == nil || s.reset == nil {
 		return "", ErrAgentSwitchUnavailable
 	}
@@ -82,6 +83,9 @@ func (s conversationAgentSwitcher) Switch(ctx context.Context, convID, target st
 		}
 	}
 	if effort != nil {
+		if target == protocol.AgentCodex && !have && *effort != "" {
+			return "", relay.ErrModelVocabularyUnavailable
+		}
 		start.Effort = *effort
 		if err := validateEffortVocabulary(target, list, have, start.Model, start.Effort); err != nil {
 			return "", err
@@ -107,7 +111,14 @@ func (s conversationAgentSwitcher) Switch(ctx context.Context, convID, target st
 	}
 	s.resetting.wrappingUp(convID)
 	// LIFO closes the reset sequence before begin's exclusion is released.
-	defer s.resetting.done(convID)
+	defer func() {
+		s.resetting.done(convID)
+		// The signal must follow the falling edge even when persistence could
+		// not roll back or old-session cleanup failed after commitment.
+		if committedID != "" {
+			s.pool.PublishSwitchTransition(oldID, committedID)
+		}
+	}()
 	summary := ""
 	if old, lookupErr := s.pool.Lookup(oldID); lookupErr == nil && old.Runner().State().ChildPID != 0 {
 		text, ended, failed := s.reset.wrapUpText(convID)
@@ -134,7 +145,7 @@ func (s conversationAgentSwitcher) Switch(ctx context.Context, convID, target st
 		return "", mintErr
 	}
 	cleanup := func(cause error) (sessions.SessionID, error) {
-		return "", errors.Join(cause, s.pool.Remove(ctx, newID, sessions.RemoveOptions{}))
+		return "", errors.Join(ErrAgentSwitchUnavailable, cause, s.pool.Remove(ctx, newID, sessions.RemoveOptions{}))
 	}
 
 	committed, err := s.conversations.SwitchSession(conv.ID, string(oldID), string(newID), s.registryPath)
@@ -146,7 +157,6 @@ func (s conversationAgentSwitcher) Switch(ctx context.Context, convID, target st
 	}
 
 	removeErr := s.pool.Remove(ctx, oldID, sessions.RemoveOptions{JSONL: sessions.JSONLLeave})
-	s.pool.PublishSwitchTransition(oldID, newID)
 	if removeErr != nil {
 		return newID, fmt.Errorf("switch conversation: remove old session: %w", removeErr)
 	}

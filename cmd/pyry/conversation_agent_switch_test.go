@@ -234,6 +234,9 @@ func TestConversationAgentSwitch_MintFailureOmitsWorkspace(t *testing.T) {
 	if id != "" || !errors.Is(err, ErrAgentSwitchMintFailed) {
 		t.Fatalf("Switch = %q, %v; want path-free mint failure", id, err)
 	}
+	if got := agentSwitchOutcome(id, err); got.State != relay.AgentSwitchFailed {
+		t.Fatalf("construction outcome = %+v", got)
+	}
 	if strings.Contains(err.Error(), workspace) || strings.Contains(err.Error(), home) {
 		t.Fatalf("mint failure contains workspace path: %v", err)
 	}
@@ -323,6 +326,9 @@ func TestConversationAgentSwitch_PostCommitRemovalErrorReportsNewID(t *testing.T
 	newID, err := sw.Switch(ctx, "conv-1", protocol.AgentCodex, nil, nil)
 	if newID == "" || err == nil {
 		t.Fatalf("Switch = %q, %v; want committed ID with removal error", newID, err)
+	}
+	if got := agentSwitchOutcome(newID, err); got.State != relay.AgentSwitchCommitted {
+		t.Fatalf("cleanup outcome = %+v", got)
 	}
 	got, _ := reg.Get("conv-1")
 	if got.CurrentSessionID != string(newID) || len(got.SessionHistory) != 1 || len(transitions) != 1 {

@@ -28,6 +28,9 @@ type SessionTransition struct {
 	NewID      SessionID
 	Reason     TransitionReason
 	OccurredAt time.Time
+	// AgentSwitch marks a committed cross-agent rebind; its consumer publishes
+	// the committed conversation row after the clear delimiter.
+	AgentSwitch bool
 }
 
 // TransitionObserver is notified of clear/eviction transitions. Notifications
@@ -92,10 +95,11 @@ func (p *Pool) notifyTransition(t SessionTransition) {
 func (p *Pool) PublishSwitchTransition(oldID, newID SessionID) {
 	if p.transitionObserver != nil {
 		p.transitionObserver(SessionTransition{
-			PreviousID: oldID,
-			NewID:      newID,
-			Reason:     ReasonClear,
-			OccurredAt: time.Now().UTC(),
+			PreviousID:  oldID,
+			NewID:       newID,
+			Reason:      ReasonClear,
+			AgentSwitch: true,
+			OccurredAt:  time.Now().UTC(),
 		})
 	}
 }
