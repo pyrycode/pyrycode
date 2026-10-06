@@ -46,3 +46,6 @@ Pending for #2871/documentation stage: `docs/protocol-mobile.md` § Session sett
 - [Threat model] Paired devices can request this mutation, as the issue contract requires; capability advertisement is not extra authorization. Untrusted conversation IDs remain lookup inputs for #2871, never paths in relay.
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-06
+
+## Revisions
+- 2026-10-06: Named the reused Noise cap explicitly: transport messages are at most 65535 bytes including the AEAD tag (`docs/protocol-mobile.md` § Application-envelope size cap). Tests synchronize silent completion on its completion event; a later frame alone cannot prove a different buffered channel was consumed. Added full-buffer handoff tests to force both teardown escapes.

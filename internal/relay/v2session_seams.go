@@ -151,6 +151,49 @@ type LateSessionStarter interface {
 	StartNewSessionLate(conversationID string, outcome func(error))
 }
 
+// AgentSwitcher switches a named conversation on a relay worker, never on Run.
+// SwitchAgent may block during wrap-up. It must honor manager cancellation, be
+// safe for concurrent calls and classify admission/busy failures itself. Client
+// disconnect does not cancel ctx. The conversation ID is untrusted: implementations
+// must validate and resolve it without a cursor fallback before any path use.
+// Production adaptation and committed event publication belong to cmd/pyry.
+type AgentSwitcher interface {
+	SwitchAgent(ctx context.Context, request protocol.SwitchAgentPayload) AgentSwitchOutcome
+}
+
+// AgentSwitchState distinguishes an inert preflight refusal from an uncommitted
+// failure (which may follow wrap-up) and commitment even with cleanup failure.
+type AgentSwitchState uint8
+
+const (
+	AgentSwitchFailed AgentSwitchState = iota
+	AgentSwitchRefused
+	AgentSwitchCommitted
+)
+
+// AgentSwitchFailure contains only safe classifications, never downstream text.
+type AgentSwitchFailure uint8
+
+const (
+	AgentSwitchOtherFailure AgentSwitchFailure = iota
+	AgentSwitchConversationNotFound
+	AgentSwitchInvalidRequest
+	AgentSwitchModelNotOffered
+	AgentSwitchEffortNotOffered
+	AgentSwitchVocabularyUnavailable
+	AgentSwitchBusy
+	AgentSwitchWorkspaceRejected
+)
+
+// AgentSwitchOutcome is the switch result. A nonempty daemon session ID means
+// State MUST be AgentSwitchCommitted, even if cleanup failed. Committed outcomes
+// owe no error reply; existing state events are the adapter's responsibility.
+// The zero value is an uncommitted offline failure, never silent success.
+type AgentSwitchOutcome struct {
+	State   AgentSwitchState
+	Failure AgentSwitchFailure
+}
+
 // RotatedWithoutWorkspaceError is what a SessionStarter returns when a rotation
 // COMPLETED and the conversation's recorded workspace was refused, so the
 // successor child stayed in the directory the runner already had (#2443, over
@@ -1320,6 +1363,9 @@ type V2SessionConfig struct {
 	// cmd/pyry's activeSessionStarter, which owns the shape check and the registry
 	// resolution this package cannot perform.
 	SessionStarter SessionStarter
+
+	// AgentSwitcher handles switch_agent asynchronously. Nil replies binary_offline.
+	AgentSwitcher AgentSwitcher
 
 	// QueueRemover drops a queued message named by an inbound dequeue_message
 	// control frame (#723). Optional: nil ⇒ dequeue_message is inert (foreground
