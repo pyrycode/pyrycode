@@ -218,20 +218,28 @@ func TestSuggestCLIFallbackIncomplete(t *testing.T) {
 	cmd.Stdin = strings.NewReader("private-input-sentinel")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	var stdout, stderr bytes.Buffer
+	var stdout lockedBuffer
+	var stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	// Readiness follows the child's writes. Cancellation must close both output
-	// pipes, otherwise Wait blocks until the context catches the leak.
+	defer func() {
+		cancel()
+		if cmd.ProcessState == nil {
+			_ = cmd.Wait() // Reap the process after an early failure too.
+		}
+	}()
+	// Child readiness precedes wrapper forwarding. Wait for the forwarded bytes
+	// in the synchronized capture before cancellation; both output pipes must
+	// then close, otherwise Wait blocks until the context catches the leak.
 	for {
-		if _, err := os.Stat(ready); err == nil {
+		if _, err := os.Stat(ready); err == nil && len(stdout.String()) >= len("private-partial-output") {
 			break
 		}
 		if ctx.Err() != nil {
 			_ = cmd.Wait()
-			t.Fatal("stand-in did not reach held invocation")
+			t.Fatal("stand-in did not reach held invocation with forwarded output")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
