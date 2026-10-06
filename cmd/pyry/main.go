@@ -1156,6 +1156,11 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		replySugg.fallback = (replyFallback{binary: *claudeBin, account: account.provider()}).run
 		replySuggDelivered = replySugg.noteDelivered
 	}
+	// Zero keeps msgqueue's default; only an e2e_realclaude build can set it.
+	giveUpAfter, err := queueGiveUpAfter()
+	if err != nil {
+		return err
+	}
 	queue, err := msgqueue.New(msgqueue.Config{
 		// Recovery precedes carry, so the pending posted text is composed onto the payload
 		// once, at the boundary with the queue, and markApprovalHolds stays adjacent to
@@ -1193,8 +1198,9 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		// turn. Deliberately NOT through carryPending or markApprovalHolds — see
 		// newSendNowDeliver — and its OnDelivered carries SentNow so the carry's
 		// clear leaves the waiting head's composed posts alone.
-		SendNow: newSendNowDeliver(router.resolve, router.isClaude, turnBusy, sendNowPlace),
-		Logger:  logger,
+		SendNow:     newSendNowDeliver(router.resolve, router.isClaude, turnBusy, sendNowPlace),
+		GiveUpAfter: giveUpAfter,
+		Logger:      logger,
 	})
 	if err != nil {
 		return fmt.Errorf("msgqueue init: %w", err)

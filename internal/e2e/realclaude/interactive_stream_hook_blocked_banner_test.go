@@ -193,11 +193,12 @@ const hookBannerRigDir = "hookbanner-rig-2320"
 // snapshot taken the instant the banner was read would measure nothing but this
 // file's own impatience.
 //
-// About seven times the 1.5 seconds the committed capture measured for the entire
+// About three times the 1.5 seconds the committed capture measured for the entire
 // block phase, and the child is already up by the time it is waited on — the cold
 // spawn was paid for by the banner wait, which takes perTurnReplyBudget for exactly
-// that reason.
-const hookBannerRefusedSettleBudget = 10 * time.Second
+// that reason. It was 10 s, about seven times; the margin was cut because the
+// window is paid in full on every green run.
+const hookBannerRefusedSettleBudget = 5 * time.Second
 
 func TestInteractiveStreamHookBlockedBannerReachesTheClient(t *testing.T) {
 	// The rig is written by the seed callback, which runs after the bootstrap
