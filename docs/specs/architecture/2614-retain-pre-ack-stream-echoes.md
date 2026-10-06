@@ -74,3 +74,12 @@ None. No documentation-only acceptance criteria or live-Claude work is requested
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-06
+
+## Revisions
+
+### 2026-10-06 — Source-map correction
+
+The send-test precedent's actual symbol is `TestRelayV2_StreamSendMessageDrainsTurn`,
+correcting the name in Files read. Also read
+`docs/specs/architecture/2612-stream-modal-ack-ordering-flake.md` → Change: confirms the
+single-decrypt-point recording precedent and the sibling scope. No design change.
