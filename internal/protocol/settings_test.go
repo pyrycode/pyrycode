@@ -2,10 +2,83 @@ package protocol
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestSwitchAgentPayload_RoundTrip(t *testing.T) {
+	t.Parallel()
+	empty, high := "", "high"
+	cases := []struct {
+		name   string
+		field  string
+		effort *string
+	}{
+		{"omitted", "", nil},
+		{"null", `,"effort":null`, nil},
+		{"clear", `,"effort":""`, &empty},
+		{"nonempty", `,"effort":"high"`, &high},
+	}
+	for _, agent := range []string{"claude", "codex"} {
+		for _, model := range []string{"", "chosen-model"} {
+			for _, tc := range cases {
+				t.Run(agent+"/"+model+"/"+tc.name, func(t *testing.T) {
+					t.Parallel()
+					raw := []byte(fmt.Sprintf(`{"type":"switch_agent","id":17,"ts":"2026-10-06T10:00:00Z","payload":{"conversation_id":"conv-switch","agent":%q,"model":%q%s}}`, agent, model, tc.field))
+					var env Envelope
+					if err := json.Unmarshal(raw, &env); err != nil {
+						t.Fatalf("decode envelope: %v", err)
+					}
+					if env.Type != TypeSwitchAgent {
+						t.Fatalf("type: got %q, want %q", env.Type, TypeSwitchAgent)
+					}
+					var payload SwitchAgentPayload
+					if err := json.Unmarshal(env.Payload, &payload); err != nil {
+						t.Fatalf("decode payload: %v", err)
+					}
+					want := SwitchAgentPayload{ConversationID: "conv-switch", Agent: agent, Model: model, Effort: tc.effort}
+					if !reflect.DeepEqual(payload, want) {
+						t.Fatalf("payload: got %#v, want %#v", payload, want)
+					}
+					encoded, err := json.Marshal(payload)
+					if err != nil {
+						t.Fatalf("encode payload: %v", err)
+					}
+					env.Payload = encoded
+					encoded, err = json.Marshal(env)
+					if err != nil {
+						t.Fatalf("encode envelope: %v", err)
+					}
+					var roundTrip Envelope
+					if err := json.Unmarshal(encoded, &roundTrip); err != nil {
+						t.Fatalf("decode round-trip envelope: %v", err)
+					}
+					if roundTrip.Type != "switch_agent" || roundTrip.ID != env.ID || !roundTrip.TS.Equal(env.TS) {
+						t.Errorf("round-trip envelope metadata: got %#v", roundTrip)
+					}
+					var fields map[string]json.RawMessage
+					if err := json.Unmarshal(roundTrip.Payload, &fields); err != nil {
+						t.Fatalf("decode round-trip fields: %v", err)
+					}
+					for key, value := range map[string]string{"conversation_id": "conv-switch", "agent": agent, "model": model} {
+						if got := string(fields[key]); got != fmt.Sprintf("%q", value) {
+							t.Errorf("required %s: got %s, want %q", key, got, value)
+						}
+					}
+					if effort, present := fields["effort"]; tc.effort == nil {
+						if present {
+							t.Errorf("unspecified effort must be omitted, got %s", effort)
+						}
+					} else if !present || string(effort) != fmt.Sprintf("%q", *tc.effort) {
+						t.Errorf("effort: got %s (present=%v), want %q", effort, present, *tc.effort)
+					}
+				})
+			}
+		}
+	}
+}
 
 // TestSetSessionSettingsPayload_RoundTrip pins the presence contract of the
 // set_session_settings request: a field explicitly set to its zero value

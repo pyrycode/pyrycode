@@ -75,3 +75,25 @@ fixtures — unchanged — now also pin `PermissionMode == nil` on the absent
 half. When a new field's presence-contract reading diverges from its
 siblings', reach for a fixture of its own rather than extending the "all
 fields present" one.
+
+## Agent-switch presence and round-trip testing
+
+Do not copy `SetSessionSettingsPayload.Model`'s optional-pointer shape into
+`SwitchAgentPayload`: an agent switch names the target agent and model
+together ([ADR 039](../decisions/039-capability-belongs-to-agent-and-model-together.md)),
+and `model: ""` selects the target agent's template default. Its required
+`conversation_id`, `agent`, and `model` strings have no `omitempty`; adding
+that tag would silently drop the default-model choice when re-encoding.
+The conversation-addressed [`switch_agent` contract](../../protocol-mobile.md#switch_agent)
+does not replace the session-addressed settings verb. Validation and
+handling remain pending #2870/#2871.
+
+An optional `*string` with `omitempty` distinguishes an explicit empty
+effort (clear) from unspecified effort, but collapses omitted and JSON
+`null` into the same nil pointer. A byte-equal round-trip assertion against
+the original `null` input would therefore reject the correct omitted
+output. `TestSwitchAgentPayload_RoundTrip` instead checks the decoded DTO
+and then the re-encoded payload's keys: all required strings survive,
+omitted/null effort disappears, and empty/nonempty effort remains present
+with its value. Both agents and empty/named models need that presence
+check; decoded zero-value equality alone would miss a dropped `model` key.

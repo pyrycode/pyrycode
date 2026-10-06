@@ -165,6 +165,7 @@ func TestIsKnownAppType(t *testing.T) {
 		// request an old phone never sends and an outbound reply an old phone
 		// never receives, so IsKnownAppType must reject both.
 		{"set_session_settings-rejected", TypeSetSessionSettings, false, ErrUnknownType},
+		{"switch_agent-rejected", TypeSwitchAgent, false, ErrUnknownType},
 		{"session_settings_updated-rejected", TypeSessionSettingsUpdated, false, ErrUnknownType},
 		{"request_session_settings-rejected", TypeRequestSessionSettings, false, ErrUnknownType},
 		{"session_settings-rejected", TypeSessionSettings, false, ErrUnknownType},
@@ -335,6 +336,7 @@ var v2OnlyTypes = map[string]bool{
 	TypeNewSession: true,
 	// v2 set-session-settings vocabulary.
 	TypeSetSessionSettings:     true,
+	TypeSwitchAgent:            true,
 	TypeSessionSettingsUpdated: true,
 	// v2 read-session-settings vocabulary.
 	TypeRequestSessionSettings: true,
@@ -479,6 +481,7 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeNewSession,
 		// v2 set-session-settings vocabulary.
 		TypeSetSessionSettings, TypeSessionSettingsUpdated,
+		TypeSwitchAgent,
 		TypeRequestSessionSettings, TypeSessionSettings,
 		// v2 session-error frame.
 		TypeSessionError,

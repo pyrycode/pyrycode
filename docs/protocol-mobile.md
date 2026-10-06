@@ -636,6 +636,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`debug_bundle_done`** | binary → phone | no | **New in v2.** Outbound — completion marker after the last `debug_bundle_chunk`, carrying the exact chunk count (#812). See [Debug bundle](#debug-bundle-v2). |
 | **`request_debug_bundle`** | phone → binary | no | **New in v2.** Inbound control (bare, no payload) — a paired client requests the current session's debug bundle; the daemon streams it back as `debug_bundle_chunk*` + `debug_bundle_done` (#813). See [Debug bundle](#debug-bundle-v2). |
 | **`set_session_settings`** | phone → binary | no | **New in v2.** Inbound control — a paired client changes one session's per-session model / effort / permission mode / YOLO. Interactive-capability-gated (enforced by the handler #845). See [Session settings](#session-settings-v2). |
+| **`switch_agent`** | phone → binary | no | **New in v2.** Request contract for a `multi_agent` client's confirmed agent/model choice, addressed by `conversation_id`. Required strings: `conversation_id`, `agent`, `model`; `model: ""` selects the target agent's template default. Optional `effort`: omitted/null = unspecified and re-encoded omitted; `""` = clear and retained; nonempty = retained unchanged. **Handling pending #2870/#2871.** Does not replace `set_session_settings`. See [`switch_agent`](#switch_agent). |
 | **`session_settings_updated`** | binary → phone | no | **New in v2.** Outbound reply confirming a `set_session_settings`, correlated by `in_reply_to` (#845). See [Session settings](#session-settings-v2). |
 | **`request_session_settings`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for the run configuration of the conversation it names in `conversation_id`. A request that names no conversation names no session, and is answered with the all-zero reply. Interactive-capability-gated. See [Session settings](#session-settings-v2). |
 | **`session_settings`** | binary → phone | no | **New in v2.** Outbound reply carrying the current run configuration and optional reports, correlated by `in_reply_to` (#491). See [Session settings](#session-settings-v2). |
@@ -4908,6 +4909,46 @@ Example (a client changing only the reasoning effort — `model` and `yolo` omit
 {
   "id": 811, "type": "set_session_settings", "ts": "...",
   "payload": { "session_id": "sess-a", "effort": "high" }
+}
+```
+
+#### `switch_agent`
+
+Direction **phone → binary** (inbound v2 request, discriminator
+`switch_agent`). A `multi_agent` client uses this shape to name a confirmed
+choice from the other agent's section of the model menu. It is addressed by
+conversation, and does not replace [`set_session_settings`](#set_session_settings).
+
+**Handling pending #2870/#2871.** This declares the request contract only:
+validation and handling are deferred to #2870, production wiring to #2871.
+Decoding the payload does not validate required keys, agent/model membership,
+capabilities, or conversation ownership, and does not perform a switch.
+The type is v2-only; the v1 `IsKnownAppType` predicate rejects an unencrypted
+`switch_agent` envelope with `ErrUnknownType`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string (required) | The conversation whose agent is to change. Always serialized. |
+| `agent` | string (required) | The target agent, `"claude"` or `"codex"`. Always serialized. |
+| `model` | string (required) | The target agent's model. `""` selects that agent's template default; the key remains present even at this empty value. |
+| `effort` | string (optional) | Omitted or `null` means unspecified: both decode to the same state and re-encode with the key omitted. Explicit `""` means clear and remains present. A nonempty string round-trips unchanged. |
+
+The required string keys remain present when the decoded payload is
+re-encoded through `Envelope`, for either target agent. In contrast,
+`effort: null` is canonicalized to an omitted key; it is not preserved as a
+literal `null`.
+
+Example request shape (Codex's template default model, explicit effort clear):
+
+```json
+{
+  "id": 814, "type": "switch_agent", "ts": "...",
+  "payload": {
+    "conversation_id": "conv-a",
+    "agent": "codex",
+    "model": "",
+    "effort": ""
+  }
 }
 ```
 
