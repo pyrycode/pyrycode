@@ -3,6 +3,7 @@ package protocol
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -95,6 +96,68 @@ func TestHelloClientPayload_RoundTrip(t *testing.T) {
 	}
 	if !bytes.Equal(canonical(t, out), canonical(t, raw)) {
 		t.Errorf("round-trip bytes differ:\n got: %s\nwant: %s", out, raw)
+	}
+}
+
+func TestHelloClientPayload_ClientFeaturesRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		field string
+		want  string
+	}{
+		{name: "absent"},
+		{name: "empty", field: `,"client_features":""`},
+		{name: "description", field: `,"client_features":"  multi_agent: café 📱 <tag>&\"quoted\"\n "`, want: "  multi_agent: café 📱 <tag>&\"quoted\"\n "},
+		{name: "whitespace", field: `,"client_features":" \t\r\n "`, want: " \t\r\n "},
+		{name: "controls", field: `,"client_features":"\u0000\u001b[31m"`, want: "\x00\x1b[31m"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			raw := `{"role":"client","device_name":"phone","client_version":"v"` + tc.field +
+				`,"protocol_versions":["v2"],"capabilities":["interactive"]}`
+			var payload HelloClientPayload
+			if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+			want := HelloClientPayload{
+				Role: "client", DeviceName: "phone", ClientVersion: "v", ClientFeatures: tc.want,
+				ProtocolVersions: []string{"v2"}, Capabilities: []string{"interactive"},
+			}
+			if !reflect.DeepEqual(payload, want) {
+				t.Fatalf("decoded payload: got %#v, want %#v", payload, want)
+			}
+
+			out, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal payload: %v", err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(out, &fields); err != nil {
+				t.Fatalf("unmarshal output fields: %v", err)
+			}
+			feature, present := fields["client_features"]
+			if present != (tc.want != "") {
+				t.Fatalf("client_features present = %v, want %v; output: %s", present, tc.want != "", out)
+			}
+			if present {
+				var value string
+				if err := json.Unmarshal(feature, &value); err != nil {
+					t.Fatalf("unmarshal client_features: %v", err)
+				}
+				if value != tc.want {
+					t.Errorf("marshalled client_features: got %q, want %q", value, tc.want)
+				}
+			}
+			var back HelloClientPayload
+			if err := json.Unmarshal(out, &back); err != nil {
+				t.Fatalf("unmarshal round-trip: %v", err)
+			}
+			if !reflect.DeepEqual(back, want) {
+				t.Errorf("round-trip payload: got %#v, want %#v", back, want)
+			}
+		})
 	}
 }
 
