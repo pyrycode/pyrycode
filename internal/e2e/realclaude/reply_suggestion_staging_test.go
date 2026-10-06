@@ -169,8 +169,39 @@ func TestSuggestCLIFallbackEvidence(t *testing.T) {
 			if source.Calls != 1 || source.Completed != 1 || source.StartMS == 0 || source.ElapsedMS < 0 || source.ExitCode == nil || !source.OutputObserved || source.stage(false) != tc.stage {
 				t.Fatalf("unexpected invocation evidence: %s", source.diagnostic(false, 0, 0))
 			}
+			wantExit := tc.exit
+			if wantExit < 0 {
+				wantExit = -int(syscall.SIGTERM)
+			}
+			if *source.ExitCode != wantExit || source.StdoutBytes != len(tc.output) {
+				t.Fatal("exit or stdout byte count does not match the observed child")
+			}
+			if tc.stage != "unusable output" && (!source.UTF8OK || !source.JSONOK || !source.ResultOK || !source.TextOK) {
+				t.Fatal("valid returned output lacks production validation evidence")
+			}
 			checkSuggestPrivacy(t, evidence, source)
 		})
+	}
+}
+
+func TestSuggestSourceUncertainEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		source suggestSource
+		want   string
+	}{
+		{suggestSource{Calls: 2, Completed: 2}, "unknown (ambiguous invocation evidence)"},
+		{suggestSource{Calls: 1, Completed: 1}, "unknown (no observed child exit)"},
+	} {
+		if got := tc.source.stage(false); got != tc.want {
+			t.Fatalf("stage = %q, want %q", got, tc.want)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "source.jsonl")
+	if err := os.WriteFile(path, []byte("{\"streams\":1}\n{\"calls\":1,\"start_ms\":1}\n{\"completed\":"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readSuggestSource(t, path); got != (suggestSource{Streams: 1, Calls: 1, StartMS: 1}) {
+		t.Fatal("partial append lost completed source metadata or invented completion")
 	}
 }
 
