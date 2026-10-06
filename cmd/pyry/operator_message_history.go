@@ -34,8 +34,8 @@ import (
 // store may be nil; appendConversationHistory makes that a silent no-op, so the
 // seam stays wired unconditionally and no branch is added here.
 //
-// push hands the same payload bytes and stamp to the live push (#2699), after the
-// log append, so the wire and the log cannot differ. nil pushes nothing.
+// push hands the same payload bytes, stamp and successful append ID to the live
+// push (#2699), after the log append. nil pushes nothing.
 //
 // Queue-backed stream Claude writes prepare this safe producer before the write
 // and commit it on the stream drain at the echo or idle fallback. Their later
@@ -89,10 +89,10 @@ func newOperatorMessageHistory(store *history.Store, push func(operatorMessage),
 			// producers hoist, so entries from all three are orderable by the field
 			// the log stores.
 			ts := time.Now().UTC()
-			appendConversationHistory(store, logger, "operator_message.history_append_err",
+			historyEntryID := appendConversationHistory(store, logger, "operator_message.history_append_err",
 				convID, protocol.TypeMessage, payload, ts)
 			if push != nil {
-				push(operatorMessage{convID: convID, payload: payload, ts: ts})
+				push(operatorMessage{convID: convID, payload: payload, ts: ts, historyEntryID: historyEntryID})
 			}
 		}
 		place.attach(convID, msg.ID, commit)
