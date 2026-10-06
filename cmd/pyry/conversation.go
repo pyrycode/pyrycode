@@ -247,7 +247,7 @@ func runConversation(args []string) error {
 	if err != nil {
 		return conversationUsageExit(err.Error())
 	}
-	p.Cwd, err = os.Getwd()
+	p.Cwd, err = currentDir()
 	if err != nil {
 		return fmt.Errorf("conversation new: resolve current directory: %w", err)
 	}
@@ -259,4 +259,19 @@ func runConversation(args []string) error {
 	}
 	fmt.Println(id)
 	return nil
+}
+
+// currentDir returns the process's working directory, failing when that
+// directory no longer exists. Linux getcwd fails on a deleted directory, but
+// macOS returns the stale path, so the existence check makes both platforms
+// refuse the same way before anything is sent to the daemon.
+func currentDir() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(cwd); err != nil {
+		return "", err
+	}
+	return cwd, nil
 }

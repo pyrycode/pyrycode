@@ -74,12 +74,14 @@ func TestWorkspaceFileReader_ReadsFiles(t *testing.T) {
 	mustSymlink(t, "real.md", filepath.Join(f.ws, "alias.md"))
 	writeFile(t, f.ws, "real.py", "print(42)\n")
 	mustSymlink(t, "real.py", filepath.Join(f.ws, "script.md"))
+	// .ENVoy sits in its own directory: on a case-insensitive filesystem,
+	// such as default macOS, it would otherwise be the same file as .envoy.
 	files := map[string]string{
 		"run.sh": "#!/bin/sh\necho hello\n", "archive.zip": "PK\x03\x04\x00\xff",
 		"LICENSE": "permission granted", "binary.bin": "\x00\xff\x80\x01",
 		".gitignore": "*.log\n", ".envoy": "configuration", "id_rsa.pub": "public key",
 		"notes.md.txt": "plain text", ".envdir/notes.py": "nested",
-		".ENVoy": "configuration", "id_rsa.backup": "eligible name",
+		"upper/.ENVoy": "configuration", "id_rsa.backup": "eligible name",
 		"public.pem.md": "eligible suffix", "config.env": "eligible name",
 		"empty": "",
 	}
