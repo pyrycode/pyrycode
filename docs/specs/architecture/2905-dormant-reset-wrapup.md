@@ -12,6 +12,7 @@
 - `internal/e2e/realclaude/interactive_stream_announced_reset_test.go`, `harness_daemon_test.go`: authenticated reset window, per-session prompt and daemon startup helpers.
 - `docs/knowledge/features/v2-session-manager-state-machine-inbound-new-session-sessionstarter-seam.md`: the falling edge must precede exclusion release; a bootstrap binding cannot prove successor note composition.
 - `docs/knowledge/features/sessions-package.md`, `streamsup-package.md`, `e2e-harness.md`, `e2e-realclaude.md`, `development-verification.md`, `conversation-session-binding.md`, `CODING-STYLE.md`: lifecycle, verification and workspace contracts.
+- `internal/agentrun/streamrunner/watchdog_test.go` → `TestRun_IdleStall_AfterToolResult`, `TestRun_SlowTool_NoFire`; `docs/knowledge/features/streamrunner-package.md` § "Idle-stall watchdog: synthetic trailer newline guard": the watchdog also times helper startup, so sub-second thresholds can kill a race-built helper before its first event.
 
 ## Context
 
@@ -75,3 +76,4 @@ Pending for the documentation stage: in `docs/knowledge/features/v2-session-mana
 ## Revisions
 
 - 2026-10-06: The fake stream child echoes its prompt, so seeding an older fenced note there would yield an inadmissible nested-fence reply rather than usable wrap-up prose. Keep that restart case's note initially absent and prove predecessor-owned stdin, stored wrap-up reply and successor composition. The retained-pool tests and authenticated restart case cover replacing a seeded older note. Observe predecessor delivery through its identity-specific stdin log rather than requiring its queued assistant delta to beat the independently queued transition on the phone wire.
+- 2026-10-06: Verifier finding 1 reports a synthetic trailer without any helper events in `TestRun_IdleStall_AfterToolResult`. A scratch Go overlay delaying the helper's startup by 750 ms reproduces that exact failure with the 200 ms idle threshold. Give this test the existing sibling's two-second startup allowance; keep the four-line, tool-result and idle-stall assertions unchanged. Verify the same delayed-helper experiment passes, repeat the named race test and run the touched package checks. This changes only a test threshold, with no product contract or exported API change; total written work remains below 800 lines.
