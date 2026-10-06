@@ -374,14 +374,18 @@ try:
         result = json.loads(raw, parse_constant=reject_constant,
                             object_pairs_hook=lambda pairs: ("object", pairs))
         if isinstance(result, tuple):
-            pairs = [(k.lower(), v) for k, v in result[1]]
+            pairs = [(k.casefold(), v) for k, v in result[1]]
             # Go reports a type error even if a later duplicate is well typed.
             for k, v in pairs:
                 if ((k in ("result", "subtype") and v is not None and not isinstance(v, str)) or
                         (k == "is_error" and v is not None and not isinstance(v, bool))):
                     raise ValueError()
             # encoding/json matches these struct fields case-insensitively.
-            result = dict(pairs)
+            # JSON null leaves Go's existing string/bool struct field unchanged.
+            result = {}
+            for k, v in pairs:
+                if v is not None:
+                    result[k] = v
             text = result.get("result")
             subtype = result.get("subtype")
             text = "" if text is None else text
