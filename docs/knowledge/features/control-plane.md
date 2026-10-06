@@ -2,7 +2,7 @@
 
 `internal/control` exposes the on-disk control surface of `pyry`: a Unix domain socket (`~/.pyry/<name>.sock`, mode `0600`) speaking line-delimited JSON. Each connection is one request, one response — every verb `Server.handle` dispatches replies with one JSON `Response` and returns; no verb hands off connection ownership. (`VerbAttach` was the one verb that did, until #1348 deleted its server-side handler and #1535 deleted the now-orphaned wire type itself.)
 
-Verbs today: `status`, `stop`, `logs`, `sessions.new`, `sessions.rm`, `sessions.rename`, `sessions.list`, `sessions.has-id`, `rekey`, `mcp.approve`, `attachment.file` (#2164, ships live but inert — see [§ Attachment.file](control-plane-attachment-file-confine-and-store-a-claude-named-path.md)), `channel.new` (#2155, see [§ Channel: new verb](#channel-new-verb-channelnew-2155) below), `pairing.mint` (#2388), and payload-free `update.when-idle` (`VerbUpdateWhenIdle`, #2757; see [Server Construction](#server-construction) for its decision contract). `attach` and `resize` are gone — #1535 deleted `VerbAttach`, `VerbResize`, `AttachPayload`, `ResizePayload`, and the `Request.Attach`/`Request.Resize` fields, plus the orphaned `control.SendResize` client helper, none of which had a live dispatch arm since #1348. The deletion is decode-compatible with a stale (pre-#1348) client: nothing in the repo calls `json.Decoder.DisallowUnknownFields`, and Go's `encoding/json` ignores unknown object fields by default, so a client still sending `{"verb":"attach","attach":{…}}` decodes cleanly and gets the same `unknown verb: "attach"` reply it already got post-#1348 — deleting a `Request` field only ever *widens* what the decoder accepts, never narrows it. The wire shape otherwise is held stable across phases — `VerbSessionsNew` (#75) adds a `Request.Sessions *SessionsPayload` field with `omitempty` so existing-verb wire output stays byte-identical (pinned by `TestProtocol_SessionsRoundTripBackCompat`). `VerbSessionsRm` (#98) extends `SessionsPayload` with `ID`/`JSONLPolicy` (both `omitempty`) and adds a `Response.ErrorCode` field (also `omitempty`) for typed-sentinel propagation — same back-compat guard, byte-identical existing-verb output. `VerbSessionsRename` (#90) extends `SessionsPayload` with one further `omitempty` field (`NewLabel`) and reuses the `Response.ErrorCode` envelope verbatim — no new wire constants. `VerbPairingMint` follows the same additive rule: the optional outer `Request.Pairing` and `Response.Pairing` fields preserve every older encoding, while the inner `PairingPayload` deliberately always emits both `DeviceLabel` and `AllowRemotePermissions`. Those are the only caller-selected mint inputs; `PairingResult.Pairing` is an opaque plaintext bearer credential, not a place to expose identity, key, relay, registry, expiry, or diagnostics. `VerbUpdateWhenIdle` adds no request field, and `Response.UpdateWhenIdle` is optional with `omitempty`, preserving older verb encodings too.
+Verbs today: `status`, `stop`, `logs`, `sessions.new`, `sessions.rm`, `sessions.rename`, `sessions.list`, `sessions.has-id`, `rekey`, `mcp.approve`, `attachment.file` (#2164, ships live but inert — see [§ Attachment.file](control-plane-attachment-file-confine-and-store-a-claude-named-path.md)), `channel.new` (#2155, see [§ Channel: new verb](#channel-new-verb-channelnew-2155) below), `conversation.new` (control contract; see [Conversation: create](#conversation-create-conversationnew)), `pairing.mint` (#2388), and payload-free `update.when-idle` (`VerbUpdateWhenIdle`, #2757; see [Server Construction](#server-construction) for its decision contract). `attach` and `resize` are gone — #1535 deleted `VerbAttach`, `VerbResize`, `AttachPayload`, `ResizePayload`, and the `Request.Attach`/`Request.Resize` fields, plus the orphaned `control.SendResize` client helper, none of which had a live dispatch arm since #1348. The deletion is decode-compatible with a stale (pre-#1348) client: nothing in the repo calls `json.Decoder.DisallowUnknownFields`, and Go's `encoding/json` ignores unknown object fields by default, so a client still sending `{"verb":"attach","attach":{…}}` decodes cleanly and gets the same `unknown verb: "attach"` reply it already got post-#1348 — deleting a `Request` field only ever *widens* what the decoder accepts, never narrows it. The wire shape otherwise is held stable across phases — `VerbSessionsNew` (#75) adds a `Request.Sessions *SessionsPayload` field with `omitempty` so existing-verb wire output stays byte-identical (pinned by `TestProtocol_SessionsRoundTripBackCompat`). `VerbSessionsRm` (#98) extends `SessionsPayload` with `ID`/`JSONLPolicy` (both `omitempty`) and adds a `Response.ErrorCode` field (also `omitempty`) for typed-sentinel propagation — same back-compat guard, byte-identical existing-verb output. `VerbSessionsRename` (#90) extends `SessionsPayload` with one further `omitempty` field (`NewLabel`) and reuses the `Response.ErrorCode` envelope verbatim — no new wire constants. `VerbPairingMint` follows the same additive rule: the optional outer `Request.Pairing` and `Response.Pairing` fields preserve every older encoding, while the inner `PairingPayload` deliberately always emits both `DeviceLabel` and `AllowRemotePermissions`. Those are the only caller-selected mint inputs; `PairingResult.Pairing` is an opaque plaintext bearer credential, not a place to expose identity, key, relay, registry, expiry, or diagnostics. `VerbUpdateWhenIdle` adds no request field, and `Response.UpdateWhenIdle` is optional with `omitempty`, preserving older verb encodings too.
 
 ## Server Construction
 
@@ -303,6 +303,58 @@ Two choices worth keeping in mind for the next verb built this way:
 **A message-prefix discriminator between "server rejected" and "transport failed" isn't always worth building.** `rekeyVerdict`'s `isServerReject` (a hand-maintained message-prefix list) exists because `pyry rekey`'s acceptance criteria wanted a different stderr prefix per class. `channel.new`'s AC only asks for one stderr line and exit 1 on any failure, so `channelNewVerdict` skips the discrimination entirely rather than adding a second hand-maintained list that would go stale the first time a server message got reworded. Check what the AC actually distinguishes before copying a sibling's verdict-formatter shape wholesale.
 
 See `docs/specs/architecture/2155-channel-new-control-verb.md` for the full design and security review.
+
+## Conversation: create (conversation.new)
+
+`VerbConversationNew` is a control API with a Go client; daemon creator and CLI
+wiring remain pending in #2884. `channel.new` encodings, API and behavior remain
+compatible. The request uses `Request.Conversation` (`ConversationPayload`):
+
+```json
+{"verb":"conversation.new","conversation":{"cwd":"/workspace","type":"chat","model":"","effort":""}}
+```
+
+| Field | Contract |
+| --- | --- |
+| `cwd` | Required nonempty string; forwarded unchanged. |
+| `name` | Optional string; omission forwards an empty name. |
+| `type` | Optional `chat` or `channel`; absent/null defaults to `chat`; empty or other strings are invalid. |
+| `model`, `effort` | Optional string pointers: absent/null stays unset; explicit empty stays present, matching `protocol.CreateConversationPayload`. |
+
+`ConversationPayload.Type` is a pointer because a scalar would silently default
+an explicit empty type to chat. `TestConversationNew_Refusals` pins its rejection.
+`Type`, `Model` and `Effort` use `omitempty`: nil pointers remarshal as absent
+keys; empty settings remain present. See the
+[conversation write payloads](protocol-package-types-conversations-write-payloads.md).
+
+`Server.SetConversationCreator` installs an independent
+`func(cwd, name, conversationType string, model, effort *string) (string, error)`;
+nil clears it. `handleConversationNew` snapshots it under `Server.mu`, then
+unlocks. Without a creator it returns
+`conversation.new: no conversation creator configured` before payload checks.
+With one installed, absent/null payload or missing/empty cwd returns
+`conversation.new: missing cwd`; invalid type returns
+`conversation.new: invalid type`, without invoking the creator.
+
+Accepted input invokes the creator once with the effective type and otherwise
+unchanged values. Control performs no path handling. The creator owns workspace
+confinement, symlink resolution before trust-marking, name defaults and
+model/effort shape and membership validation; control defines no settings
+vocabulary. It must bound its own work:
+the extended `sessionOpTimeout + sessionOpConnGrace` deadline bounds response
+I/O, not synchronous creation.
+
+Success returns `{"conversationNew":{"conversationID":"created-id"}}`.
+A creator error discards any accompanying id; an empty id returns
+`conversation.new: empty conversation id`. Both omit the success payload.
+Creator refusal text reaches the wire with a `conversation.new:` prefix;
+`Server.SetConversationCreator` requires static, input-free errors, like
+`Server.SetChannelCreator`.
+`ConversationNew(ctx, socketPath, payload)` returns an empty id and error on
+transport failures, wire refusals even alongside success, or missing/empty
+success ids.
+
+See the [contract spec](../../specs/architecture/2883-conversation-new-contract.md).
 
 ## Channel: post a message into an existing channel (channel.post, #2497)
 
