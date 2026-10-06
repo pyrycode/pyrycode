@@ -277,6 +277,9 @@ type Server struct {
 	// panicking.
 	channelCreator func(cwd, name string) (string, error)
 
+	// Snapshotted under mu; invocation runs outside the lock, as for channelCreator.
+	conversationCreator func(cwd, name, conversationType string, model, effort *string) (string, error)
+
 	// channelPoster, when set, services VerbChannelPost: given a channel's
 	// display label and a message body, it resolves the label to a conversation
 	// — creating one under the daemon's default workspace when nothing matches —
@@ -464,6 +467,20 @@ func (s *Server) SetFileAttacher(attach func(sessionID, path string) (string, er
 func (s *Server) SetChannelCreator(create func(cwd, name string) (string, error)) {
 	s.mu.Lock()
 	s.channelCreator = create
+	s.mu.Unlock()
+}
+
+// SetConversationCreator installs the independent VerbConversationNew creator.
+// Safe to call concurrently; nil clears it. The creator receives the effective
+// chat/channel type and otherwise unchanged caller values, returning a nonempty id.
+// Like SetChannelCreator, every refusal message MUST be static and input-free:
+// its text reaches the wire verbatim. The creator owns workspace confinement and
+// symlink resolution before trust-marking, name defaults, and model/effort shape
+// and membership validation. It must reject empty cwd even for non-control callers
+// and bound its own work; the control response deadline cannot cancel execution.
+func (s *Server) SetConversationCreator(create func(cwd, name, conversationType string, model, effort *string) (string, error)) {
+	s.mu.Lock()
+	s.conversationCreator = create
 	s.mu.Unlock()
 }
 
@@ -735,6 +752,8 @@ func (s *Server) handle(conn net.Conn) {
 		s.handleAttachFile(conn, enc, req.AttachFile)
 	case VerbChannelNew:
 		s.handleChannelNew(conn, enc, req.Channel)
+	case VerbConversationNew:
+		s.handleConversationNew(conn, enc, req.Conversation)
 	case VerbChannelPost:
 		s.handleChannelPost(conn, enc, req.ChannelPost)
 	case VerbPairingMint:
@@ -1085,6 +1104,42 @@ func (s *Server) handleAttachFile(conn net.Conn, enc *json.Encoder, payload *Att
 		return
 	}
 	_ = enc.Encode(Response{AttachFile: &AttachFileResult{AttachmentID: id}})
+}
+
+// handleConversationNew validates only control shape, then delegates creation.
+// An unwired daemon fails closed before payload validation, as for channel.new.
+func (s *Server) handleConversationNew(conn net.Conn, enc *json.Encoder, payload *ConversationPayload) {
+	s.mu.Lock()
+	create := s.conversationCreator
+	s.mu.Unlock()
+	if create == nil {
+		_ = enc.Encode(Response{Error: "conversation.new: no conversation creator configured"})
+		return
+	}
+	if payload == nil || payload.Cwd == "" {
+		_ = enc.Encode(Response{Error: "conversation.new: missing cwd"})
+		return
+	}
+	kind := "chat"
+	if payload.Type != nil {
+		kind = *payload.Type
+	}
+	if kind != "chat" && kind != "channel" {
+		_ = enc.Encode(Response{Error: "conversation.new: invalid type"})
+		return
+	}
+	// Match handleChannelNew's response I/O bound; this does not cancel creation.
+	_ = conn.SetDeadline(time.Now().Add(sessionOpTimeout + sessionOpConnGrace))
+	id, err := create(payload.Cwd, payload.Name, kind, payload.Model, payload.Effort)
+	if err != nil {
+		_ = enc.Encode(Response{Error: fmt.Sprintf("conversation.new: %v", err)})
+		return
+	}
+	if id == "" {
+		_ = enc.Encode(Response{Error: "conversation.new: empty conversation id"})
+		return
+	}
+	_ = enc.Encode(Response{ConversationNew: &ConversationNewResult{ConversationID: id}})
 }
 
 // handleChannelNew serves a VerbChannelNew request: hand the caller's directory
