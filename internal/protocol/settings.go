@@ -77,6 +77,18 @@ type SetSessionSettingsPayload struct {
 	PermissionMode *string `json:"permission_mode,omitempty"`
 }
 
+// SwitchAgentPayload is the body of a v2 TypeSwitchAgent request. ConversationID,
+// Agent, and Model are always present; an empty Model selects the target agent's
+// template default. Effort omitted or null is unspecified and marshals omitted;
+// a present empty string clears it, while a nonempty string selects that effort.
+// Validation and handling are deferred to #2870, production wiring to #2871.
+type SwitchAgentPayload struct {
+	ConversationID string  `json:"conversation_id"`
+	Agent          string  `json:"agent"`
+	Model          string  `json:"model"`
+	Effort         *string `json:"effort,omitempty"`
+}
+
 // SessionSettingsUpdatedPayload is the body of an Envelope whose Type ==
 // TypeSessionSettingsUpdated (docs/protocol-mobile.md § Session settings).
 // Binary → phone direction; the daemon's confirmation that a
