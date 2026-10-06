@@ -303,6 +303,8 @@ func runArgs(args []string) error {
 			return runSessions(args[2:])
 		case "channel":
 			return runChannel(args[2:])
+		case "conversation":
+			return runConversation(args[2:])
 		case "pair":
 			return runPair(args[2:])
 		case "rekey":
@@ -1496,6 +1498,8 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		return string(id), err
 	}, convRegistryPath, announceConversation, logger)
 	ctrl.SetChannelCreator(createChannel)
+	// Local creation is available even when startRelay installed no announcement hook.
+	ctrl.SetConversationCreator(conversationCreator(convReg, sessionMinter{pool, modelVocabulary}, convRegistryPath, announceConversation, logger))
 	// Give a new host its starting point (#2569) through that same creator, so
 	// the General channel is confined, trust-marked and bound exactly as
 	// `pyry channel new` would make it. It waits for pool.Ready: pool.Run blocks
@@ -4434,6 +4438,10 @@ Usage:
   pyry logs [flags]                              print recent supervisor logs
   pyry sessions <verb> [flags]                   manage sessions on a running
                                                   daemon (verbs: new, rm, rename, list)
+  pyry conversation new [--type chat|channel] [--name <label>]
+                        [--model MODEL] [--effort EFFORT]
+                                                create in the current directory
+                                                  (default: unnamed chat) and print id
   pyry channel new [--name <label>]              create a channel whose workspace
                                                   is the current directory, and
                                                   print its conversation id

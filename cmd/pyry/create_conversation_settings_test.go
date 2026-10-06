@@ -41,6 +41,8 @@ func TestSessionMinter_Settings(t *testing.T) {
 		{name: "claude effort on requested model", agent: protocol.AgentClaude, model: str("sonnet"), effort: str("max"), wantModel: "sonnet", wantEffort: "max"},
 		{name: "claude model not offered", agent: protocol.AgentClaude, model: str("gpt"), wantErr: relay.ErrModelNotOffered},
 		{name: "claude explicit empty model", agent: protocol.AgentClaude, model: str(""), wantModel: "", wantEffort: "low"},
+		{name: "claude explicit empty effort", agent: protocol.AgentClaude, effort: str(""), wantModel: "opus"},
+		{name: "claude both empty", agent: protocol.AgentClaude, model: str(""), effort: str("")},
 		{name: "codex neither", agent: protocol.AgentCodex, families: true},
 		{name: "codex both", agent: protocol.AgentCodex, families: true, model: str("luna"), effort: str("ultra"), wantModel: "luna", wantEffort: "ultra"},
 		{name: "codex effort common to families", agent: protocol.AgentCodex, families: true, effort: str("medium"), wantEffort: "medium"},
