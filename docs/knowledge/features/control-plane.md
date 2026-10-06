@@ -24,7 +24,7 @@ func NewServer(
 Dependencies whose implementations need daemon composition state are installed after construction rather than widening `NewServer`. `SetPairingProvider` installs the narrow `func(deviceLabel string, allowRemotePermissions bool) (string, error)` used by `VerbPairingMint`; the provider owns every identity, key, relay, registry, and persistence input that the request cannot supply. `handlePairingMint` copies the closure under `Server.mu` and releases the lock before invoking it, so a slow provider does not serialize unrelated control verbs behind the server lock.
 
 For a relay-enabled daemon, `runSupervisor` installs that provider before
-`Server.Listen` from the same `pairingMinterV2` that `startRelayV2` constructed
+`Server.Serve` from the same `pairingMinterV2` that `startRelayV2` constructed
 for the active relay leg. The closure therefore carries the running daemon's
 already-resolved server id, relay URL, static public key, and registry path; it
 does not reload saved configuration that may describe another service. Relay
@@ -378,10 +378,19 @@ First producer: `streamsup`'s stderr tail on the `claude exited` record, when th
 
 `runSupervisor` binds `ctrl.Listen` after constructing the pool, before loading
 pending channel posts or starting queue/relay consumers. `Listen` claims instance
-ownership; `Serve` starts after the hooks are installed. Loading pending state
-before the bind would let a rejected second daemon drain the owner's snapshot
+ownership; after the hooks are installed, `serveControlWhenReady` waits for
+`Pool.Ready` before calling `Serve` (#2866). Connections may queue on the bound
+socket, but no handler enters before readiness. This is the pool's wired
+supervisor handle, rather than an observed running bootstrap child; see the
+[readiness contract](sessions-package-key-types-config-bootstrapevicted-pool-ready.md).
+Loading pending state before the bind would let a rejected second daemon drain the owner's snapshot
 and overwrite accepted work. The sole `channelDelivery` consumer shares the
 composition root's history store and runs even without a relay URL.
+
+The readiness wait uses the daemon context and returns its error on startup
+cancellation. Waiting on detached `controlCtx` would hang the startup join if
+readiness never closed. Ending that wait does not close the listener: the
+composition root retains ownership until writer cleanup reaches `ctrl.Close`.
 
 Control serving uses `controlCtx`, detached from daemon cancellation. `Serve`
 closes its listener on cancellation, so sharing the daemon context would release
@@ -404,43 +413,6 @@ before loading accepted or malformed state. `TestChannelDelivery_ShutdownRetains
 pauses both append and acceptance persistence, proving replacement startup stays
 refused until writers finish and replacement acceptance survives reload.
 
-## Testing
-
-`server_test.go`, `logs_test.go` exercise the full surface with `fakeResolver` + `fakeSession` test doubles satisfying `SessionResolver` + `Session`. `recordingResolver` records both `Lookup` and `ResolveID` arguments.
-
-`pairing_test.go` treats the bearer result as a boundary, not ordinary response data. `TestMintPairing_WireRoundTrip` compares exact raw JSON for both boolean values and the typed pairing reply, while `TestProtocol_SessionsRoundTripBackCompat` proves the new optional outer fields did not change older verb bytes. Provider tests assert exactly one call with both arguments and use distinct success-pairing and provider-error sentinels to prove that only the successful return value can contain the credential; neither sentinel may enter control logs, response errors, transport diagnostics, or any error-path result.
-
-The daemon-side pairing tests add the construction proof that an isolated
-control-server fake cannot provide: `TestLocalPairingProviderWiredFromRelayConstructionToControl`
-pins the provider from `startRelayV2` through `startRelay` to
-`runSupervisor`'s `SetPairingProvider` call. The companion two-socket test uses
-distinct identities, keys, relay URLs, and registry paths. Its cross-registry
-negative assertion searches by token hash rather than by device label; a
-label-based lookup alone would stay green if the credential were written into
-the wrong registry under another name. Lock, malformed-load, and save failures
-also prove the fixed client error and inspect both daemon logs and diagnostic
-bundle logs for credential-like sentinels.
-
-Composition-root AST guards inspect `runSupervisor` itself. Moving its wiring
-into a helper hides that wiring from their assertions; the private optional
-delivery constructor lets shutdown tests pause I/O while preserving the guarded
-production symbol and its call sites.
-
-The pairing timeout tests cover both sides of the liveness contract: a silent peer must terminate at `DialTimeout` even when the caller allows longer, and an already-entered provider held past an earlier caller deadline must not keep the client blocked. The held provider is explicitly released so the synchronous server handler can drain; a green client-deadline assertion alone would not prove server shutdown remains finite.
-
-For update providers, a concurrent status response alone cannot prove execution
-outside `Server.mu`: the status arm never takes that lock.
-`TestUpdateWhenIdle_ResponseOutlastsHandshake` also completes
-`SetUpdateWhenIdleProvider` while the provider is held, then accepts its decision
-after the five-second handshake window. This tests lock release as well as the
-longer response window. `TestUpdateWhenIdle_SilentPeerCeiling` gives the caller a
-longer deadline to prove the helper's own 70-second ceiling;
-`TestUpdateWhenIdle_CallerStopsWaiting` tests earlier deadlines and cancellation
-after provider entry. Held providers are released before draining the server,
-and custom peers are drained too. Malformed-result tests check both provider and
-wire boundaries, including error-plus-success replies; exact request/decision
-encodings and `TestProtocol_SessionsRoundTripBackCompat` pin the wire contract.
-
 ## References
 
 - [`sessions-package.md`](sessions-package.md) — the package providing `*Session`, `*Pool`, `SessionID`.
@@ -455,6 +427,7 @@ encodings and `TestProtocol_SessionsRoundTripBackCompat` pin the wire contract.
 This overview is split across the documents below. Each is kept small so
 search can reach it.
 
+- [Testing](control-plane-testing.md) — wire/provider boundaries, startup readiness, cancellation and ownership proofs.
 - [Sessions: list seam (1.1b-B1)](control-plane-sessions-list-seam-1-1b-b1.md) — The fourth `sessions.*` verb is `sessions.list` — the first read-side member of the namespace. 
 - [Sessions: has-id seam (1.3c-1)](control-plane-sessions-has-id-seam-1-3c-1.md) — The fifth `sessions.*` verb is `sessions.has-id` — a one-bit existence query. 
 - [Rekey: V2 conn re-key trigger seam (1.3d-1, #459 + #462)](control-plane-rekey-v2-conn-re-key-trigger-seam-1-3d-1.md) — `VerbRekey` lets a local operator client trigger an immediate Noise re-key on a named v2 conn through the control socket. 
