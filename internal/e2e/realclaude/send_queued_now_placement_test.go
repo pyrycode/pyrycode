@@ -33,7 +33,7 @@ import (
 const (
 	sendNowMarker      = "SENDNOW-PLACEMENT-7Q"
 	sendNowLoopSeconds = 25
-	sendNowSettle      = 5 * time.Second
+	sendNowSettle      = 3 * time.Second
 )
 
 // sendNowFrame is one recorded envelope for the driving conversation.
@@ -46,6 +46,7 @@ type sendNowFrame struct {
 }
 
 func TestRealClaude_SendQueuedNowPlacement(t *testing.T) {
+	runParallel(t)
 	h, convID := startStreamRunningTurnHarness(t)
 	queuedText := "One more thing: include the exact word " + sendNowMarker + " in your final reply."
 

@@ -341,9 +341,10 @@ func spawnBootstrapDaemonBinary(t *testing.T, bin, home, workdir, claudeBin, rel
 	}
 	args = append(args, extraClaudeArgs...)
 	cmd := exec.Command(bin, args...)
-	// os.Environ() already carries the isolated HOME and the credential
-	// (WithWorktreeAuthenticated t.Setenv's both). Add the relay switches.
-	cmd.Env = append(os.Environ(), "PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=1")
+	// HOME is set explicitly rather than inherited, so the harness also runs under
+	// t.Parallel, where nothing pins it process-wide; the credential is inherited.
+	// Add the relay switches.
+	cmd.Env = homeEnv(home, "PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=1")
 	cmd.Stderr = io.MultiWriter(os.Stderr, stderr) // DEBUG tee
 
 	if err := cmd.Start(); err != nil {

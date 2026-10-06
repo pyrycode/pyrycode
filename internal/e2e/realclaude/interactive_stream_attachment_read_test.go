@@ -161,6 +161,7 @@ const (
 const attachReadToolLogCap = 8
 
 func TestInteractiveStreamAttachmentRead(t *testing.T) {
+	runParallel(t)
 	h := startAttachmentReadHarness(t)
 	nonce := time.Now().UnixNano()
 
@@ -576,11 +577,11 @@ func nextAttachReadEnvelope(t *testing.T, h *perConvHarness, deadline time.Time)
 // and hangs the first drain, which is what that drain's deadline message names.
 func startAttachmentReadHarness(t *testing.T) *perConvHarness {
 	t.Helper()
-	// No t.Parallel: WithWorktreeAuthenticated calls t.Setenv.
+	// Parallel only through runParallel; see liveHome.
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Skipf("realclaude: claude not on PATH: %v", err)
 	}
-	home := WithWorktreeAuthenticated(t) // skips cleanly when no creds
+	home := liveHome(t) // skips cleanly when no creds
 	claudeBin, err := exec.LookPath("claude")
 	if err != nil {
 		t.Fatalf("realclaude: resolve claude: %v", err)

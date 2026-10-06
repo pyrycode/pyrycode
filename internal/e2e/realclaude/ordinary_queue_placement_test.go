@@ -12,6 +12,7 @@ import (
 )
 
 func TestRealClaude_OrdinaryQueuedPlacement(t *testing.T) {
+	runParallel(t)
 	h, convID := startStreamRunningTurnHarness(t)
 	sealSendMessage(t, h.phone, h.initSend, 2, convID, "ordinary-start", fmt.Sprintf(
 		"Use Bash once in the foreground, never background: for i in $(seq 1 15); do sleep 1; done; echo done. Then reply briefly. run=%d", time.Now().UnixNano()))

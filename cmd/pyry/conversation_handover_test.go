@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 	"unicode/utf8"
 
@@ -160,7 +161,7 @@ func (r *switchHandoverRunner) WriteUserTurn(ctx context.Context, id string, pay
 func TestConversationAgentSwitch_HandoverFirstSpawn(t *testing.T) {
 	for _, oldAgent := range []string{protocol.AgentClaude, protocol.AgentCodex} {
 		for _, mode := range []string{"live", "childless", "dormant", "evicted", "write failure", "timeout", "error reply", "cancelled reply", "hostile reply", "hostile history"} {
-			t.Run(oldAgent+"/"+mode, func(t *testing.T) {
+			testHandover := func(t *testing.T) {
 				opt := resetOptions{previousNote: resetPreviousNote, answerOnWrite: answerWith(resetReplyText), backlogItems: []msgqueue.QueuedMessage{{ID: 1}}, deadline: 20 * time.Millisecond}
 				wantSummary := resetReplyText
 				switch mode {
@@ -308,6 +309,12 @@ func TestConversationAgentSwitch_HandoverFirstSpawn(t *testing.T) {
 						t.Fatal("operational logs contain content")
 					}
 				}
+			}
+			t.Run(oldAgent+"/"+mode, func(t *testing.T) {
+				// Advance the wrap-up deadline only when the in-process runners
+				// are blocked. Disk I/O and scheduler delays must not turn a
+				// successful reply into the timeout case.
+				synctest.Test(t, testHandover)
 			})
 		}
 	}

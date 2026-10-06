@@ -69,9 +69,19 @@ is what `--append-system-prompt-file` exists not to do.
 
 `daemonPromptText(folders)` (#2711) is the actual daemon-wide head every
 composition starts from, in place of the bare `systemPromptText` constant:
-the constant, plus one sentence naming the folders the in-app markdown
+the constant, plus one sentence naming the folders the live file
 reader serves besides a conversation's workspace (#2710) —
 `readFolderSentence(folders)` — after the usual newline separator.
+
+Since #2893, the sentence reads: "This daemon serves files of any type under
+`<folder list>` to a client that asks for one by absolute path, subject to the
+size limit and secret-name refusals." Each folder is backtick-quoted in input
+order, separated by commas and a final "and", and the sentence ends in a
+newline. `TestReadFolderSentence_Pinned` independently pins this wording and
+formatting. The [live-reader contract](v2-session-manager-state-machine-inbound-read-workspace-file-workspacefileread.md)
+owns the size bound and two-leaf filename denylist; the sentence does not claim
+that eligible files contain no secrets.
+
 `folders` **must** be `resolveReadFolders`'s output, the roots the reader
 actually accepts, so the sentence can never name a folder the reader would
 refuse; it names only what resolved at startup, nothing a bad entry caused
@@ -94,9 +104,19 @@ The bootstrap file written by `sessions.New` contains only
 1. `daemonPromptText(p.readFolders)` — fixed architecture text and the
    read-folder sentence.
 2. `Pool.DaemonInstructions()` — the daemon-wide operator instructions.
-3. `clientSection(clients)` — admitted attached-client identities.
+3. `clientSection(clients)` — admitted attached-client identities and feature
+   self-reports.
 4. `handoffNoteSection(note)` — the conversation's fenced handoff note.
 5. Per-conversation operator text from `Pool.conversationPrompt(label)`.
+
+`ClientIdentity` carries `Name`, `Version` and `Features`, transcribed from
+`hello.device_name`, `hello.client_version` and `hello.client_features`.
+Descriptions are client self-reports, attributed after the name and optional
+version, never daemon capability guarantees. The
+[client admission and snapshot rules below](#naming-the-attached-client-2148)
+keep each field independently bounded, sort/deduplicate admitted triples, and
+retain the activation snapshot through active reconnects and `new_session`
+rotation; eviction/reactivation resolves current reports.
 
 Nonempty daemon instructions are included verbatim after one newline; an
 empty string adds no section or separator. Each conversation retains its own
@@ -220,17 +240,25 @@ to be enforced at the symbol whose doc states it, not borrowed from whichever
 implementation currently satisfies it** — the same trap `conversationPrompt`
 avoids by performing the check itself rather than trusting its callers.
 
-`admitClient` is the one untrusted→trusted door both fields cross through
-before either can reach the file: valid UTF-8, non-blank after trimming,
+`admitClient` is the one untrusted→trusted door all three fields cross through
+before any can reach the file: valid UTF-8, non-blank after trimming,
 within its byte bound, and every rune display-safe (no C0, no C1/DEL, no
 `"`, since the admitted value is rendered inside quotes and the delimiter
 itself must be refused for no value to close the structure around it). An
-inadmissible name drops the whole client; an inadmissible version drops only
-the version. **Refusal, not truncation or escaping** — `MaxWorkspaceLabelBytes`'
+inadmissible name drops the whole client; an inadmissible version or description
+drops only that field, independently of the other. The inclusive UTF-8-byte
+bounds are `maxClientNameBytes` (64), `maxClientVersionBytes` (32) and
+`maxClientFeaturesBytes` (512), not rune counts. Empty, whitespace-only,
+oversized and invalid-UTF-8 descriptions are silently omitted, as are reports
+containing a refused control or quote. Accepted text is verbatim; trimming
+checks only blankness. **Refusal, not truncation or escaping** —
+`MaxWorkspaceLabelBytes`'
 posture: the byte bound alone is a cost control, never a safety claim, and the
 character-set refusal is what actually holds the prompt's structure.
-`clientSection` then sorts and dedupes the admitted set and renders it as one
-daemon-authored, quoted transcription; more than `maxNamedClients` admitted
+`clientSection` then sorts by name, version and description, deduplicates
+identical admitted triples, and renders the set as one daemon-authored,
+quoted transcription. Differing descriptions remain separate even when name
+and version match; more than `maxNamedClients` distinct admitted triples
 collapses to no section at all rather than a truncated list under a sentence
 that claims completeness. The admit-sort-dedup-cap prologue is its own
 function, `admittedClients(clients) []ClientIdentity`, and `clientSection`
@@ -239,6 +267,16 @@ admitted set on `Session.promptClients` rather than only ever render one
 inline. `admittedClients` is idempotent over its own output — every predicate
 already holds and the set is already sorted and deduplicated — so re-admitting
 a carried set reproduces the section byte-for-byte.
+
+Each admitted description appends ` (self-reported features "<description>")`
+after the optional ` (version "<version>")`. `clientSectionLead` and all
+prompt bytes for absent/empty descriptions remain unchanged.
+`TestClientSectionFeaturesText_Pinned` independently pins the new rendering
+alongside the unchanged `TestClientSectionText_Pinned` and
+`TestSystemPromptText_Pinned`. Values remain inside the daemon-authored
+sentence; refusal of CR/LF, controls and quotes prevents a client from
+authoring a separate prompt line or closing its quoted span. Attribution
+does not validate a feature claim's truth or prevent semantic prompt injection.
 
 **Never resolve client identity from the relay's Run goroutine (#2436).** A
 `new_session` rotation's entire dispatch — `handleNewSession` →
@@ -254,18 +292,23 @@ path; instead `Session.promptClients` carries the admitted set the session's
 last compose produced forward into the rotation's recompose. This is licensed
 by `clientSectionLead`'s past tense above — the section already claims only
 who was attached *when this session started*, never a live per-turn fact, so
-carrying a prior resolve forward keeps the sentence true rather than making it
-stale. `promptClients` is written and read under `Pool.mu`, `systemPrompt`'s
-discipline exactly and deliberately not `lcMu`, and it stores only
+carrying a prior resolve forward preserves that attribution. Feature reports
+may become stale mid-session: reconnect leaves an active prompt unchanged,
+rotation carries the earlier admitted report, and eviction/reactivation
+resolves current clients. `promptClients` is written and read under `Pool.mu`,
+`systemPrompt`'s discipline exactly and deliberately not `lcMu`, and it stores only
 `admittedClients`' output — never a resolver's raw answer — so retention never
 becomes a second place for unadmitted remote-authored bytes to live, and is
-bounded at `maxNamedClients × (maxClientNameBytes + maxClientVersionBytes)`
-per session rather than by however many conns one client holds.
+bounded at `maxNamedClients × (maxClientNameBytes + maxClientVersionBytes +
+maxClientFeaturesBytes)` per session rather than by however many conns one
+client holds.
 
 **A resource bound and a display-validation door are different concerns and
-belong in different packages.** `internal/relay` retains `DeviceName` /
-`ClientVersion` verbatim off the wire but drops (never truncates) a value over
-`maxRetainedClientNameBytes`/`maxRetainedClientVersionBytes` — a memory/copy-cost
+belong in different packages.** `internal/relay` retains `DeviceName`,
+`ClientVersion` and `ClientFeatures` verbatim after successful token
+authentication but drops (never truncates) a value over the respective inclusive
+`maxRetainedClientNameBytes` (256), `maxRetainedClientVersionBytes` (64) or
+`maxRetainedClientFeaturesBytes` (1024) bound — a memory/copy-cost
 ceiling at the point an authenticated client can park bytes that get copied into
 every `ActiveConn` snapshot the fan-out takes per turn. `admitClient` here owns
 the character set and the *display* bound instead. The instinct to fold both
@@ -489,7 +532,7 @@ separately, just the same one with a second caller.
 
 Only paths and wrapped `os` errors are interpolated into any error string or
 log line, on every path — construction, refresh, removal. #2148 extends this
-rule to the two client-identity strings: `admitClient` is silent by
+rule to the three client-identity strings: `admitClient` is silent by
 construction, so a refused hostile name has no log line to appear in at all,
 by design rather than by omission. The one live test
 gap this surfaced: an argv-level assertion (reading claude's spawn record out

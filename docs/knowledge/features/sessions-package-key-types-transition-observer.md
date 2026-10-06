@@ -37,11 +37,13 @@ type SessionTransition struct {
     NewID      SessionID // empty for eviction (no successor)
     Reason     TransitionReason
     OccurredAt time.Time // stamped by internal/sessions at fire
+    AgentSwitch bool     // committed cross-agent rebind; dedicated publication
 }
 
 type TransitionObserver func(SessionTransition)
 
 func (p *Pool) SetTransitionObserver(obs TransitionObserver)
+func (p *Pool) SetSwitchTransitionPublisher(publish func(SessionTransition))
 ```
 
 **Package-local reason vocabulary, not the wire's.** `TransitionReason` is a
@@ -74,8 +76,13 @@ lock-order lessons):
   retired by #2137; neither is a current notification source. See
   [`sessions-package-key-types-adoptannouncedid.md`](sessions-package-key-types-adoptannouncedid.md).
 - **Agent switch** — `Pool.PublishSwitchTransition` directly fires `ReasonClear`
-  after the caller has persisted the conversation's new binding. It bypasses
-  `notifyTransition` to avoid a second rebind and best-effort save.
+  with `AgentSwitch: true` after commitment and inactive reset status. It bypasses
+  `notifyTransition` to avoid a second rebind and best-effort save. The ordinary
+  observer receives the signal for busy/suggestion clearing but does not enqueue
+  the wire outcome. `SetSwitchTransitionPublisher`, installed before `Pool.Run`,
+  owns that outcome through a dedicated daemon-cancellable lane on the existing
+  emitter goroutine. Only the switch's daemon worker may wait for publication:
+  ordinary lifecycle/parse observers retain their nonblocking contract.
 - **Eviction** — `Session.beginEvict` fires `ReasonEviction` (empty `NewID`)
   **before** the lifecycle state flip and child teardown, with no `lcMu` held,
   behind a `reason != "" && s.pool != nil` guard. `Session.endEvict` persists
@@ -101,6 +108,17 @@ goroutine would add goroutines to paths that deliberately have none and could
 reorder signals. The non-blocking burden is therefore the observer's: the
 `TransitionObserver` contract documents "MUST NOT block — hand off to a buffered
 channel"; #657 owns the non-blocking impl. See [codebase/659.md](../codebase/659.md).
+
+The ordinary 16-entry drop-on-full queue is unsuitable for committed switches:
+a dropped signal would leave a changed binding with no transition, history
+boundary or row update. The switch publisher waits through consumer delay and
+Run-owned sealing before reset exclusion releases, so queue pressure delays
+publication without discarding it. Increasing the ordinary buffer would only
+move the failure threshold. The two paths consume one switch signal without
+duplicating history or fanout; `TestRelayAgentSwitchPublicationQueuePressure`
+fills the ordinary queue before commitment and checks the one durable boundary
+and ordered row. See [switch publication](conversation-session-binding.md#switching-to-the-other-agent-2672)
+and [FIFO push completion](v2-session-manager-concurrency.md).
 
 **This pattern does not transfer to every pool setter — check whose goroutines
 read the field, not which precedent the setter resembles.** #2148's

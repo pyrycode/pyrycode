@@ -303,6 +303,8 @@ func runArgs(args []string) error {
 			return runSessions(args[2:])
 		case "channel":
 			return runChannel(args[2:])
+		case "conversation":
+			return runConversation(args[2:])
 		case "pair":
 			return runPair(args[2:])
 		case "rekey":
@@ -785,7 +787,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	accountSource := fs.String(claudeAccountFlagName, "", "Claude account token source for this instance: an absolute path to an owner-only token file, or an op:// 1Password reference (default: $"+claudeAccountSourceEnv+" or ~/.pyry/<name>/"+claudeAccountFileName+")")
 	accountOpCLI := fs.String(claudeAccountOpCLIFlagName, "", "1Password CLI an op:// account source runs: one executable name on PATH or one absolute path (default: $"+claudeAccountOpCLIEnv+", the op_cli key of ~/.pyry/<name>/"+claudeAccountFileName+", or op)")
 	var readFolderEntries folderList
-	fs.Var(&readFolderEntries, "pyry-read-folder", "absolute folder the markdown reader may also open; repeatable")
+	fs.Var(&readFolderEntries, "pyry-read-folder", "absolute folder the file reader may also open; repeatable")
 	if err := fs.Parse(pyryArgs); err != nil {
 		return err
 	}
@@ -850,7 +852,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// the registry, with the strict resolver: it neither creates a folder nor
 	// trust-marks one, and a row it cannot resolve is left as it was.
 	normaliseLegacyCwds(convReg, convRegistryPath, resolveWorkspaceDir, logger)
-	// The operator-named folders the markdown reader may open besides a
+	// The operator-named folders the file reader may open besides a
 	// conversation's workspace (#2710), resolved ONCE here so every reader request
 	// checks against the same canonical roots. A bad entry is skipped with a
 	// warning and the daemon still starts.
@@ -1153,8 +1155,13 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		replySugg = newReplySuggestions(logger)
 		replySugg.parent = ctx
 		defer replySugg.stopFallbacks()
-		replySugg.fallback = (replyFallback{binary: *claudeBin, account: account.provider()}).run
+		replySugg.fallback = (replyFallback{binary: *claudeBin, account: account.provider(), logger: logger}).run
 		replySuggDelivered = replySugg.noteDelivered
+	}
+	// Zero keeps msgqueue's default; only an e2e_realclaude build can set it.
+	giveUpAfter, err := queueGiveUpAfter()
+	if err != nil {
+		return err
 	}
 	queue, err := msgqueue.New(msgqueue.Config{
 		// Recovery precedes carry, so the pending posted text is composed onto the payload
@@ -1193,8 +1200,9 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		// turn. Deliberately NOT through carryPending or markApprovalHolds — see
 		// newSendNowDeliver — and its OnDelivered carries SentNow so the carry's
 		// clear leaves the waiting head's composed posts alone.
-		SendNow: newSendNowDeliver(router.resolve, router.isClaude, turnBusy, sendNowPlace),
-		Logger:  logger,
+		SendNow:     newSendNowDeliver(router.resolve, router.isClaude, turnBusy, sendNowPlace),
+		GiveUpAfter: giveUpAfter,
+		Logger:      logger,
 	})
 	if err != nil {
 		return fmt.Errorf("msgqueue init: %w", err)
@@ -1230,6 +1238,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// reset tail, which already runs off the dispatch goroutine, so it emits
 	// synchronously and cannot drop or reorder an edge.
 	resetting := newResettingEmitterV2(ctx, logger)
+	reset := newConversationReset(ctx, convReg, pool, turnBusy, queue, *wrapUpDeadlineFlag, logger)
 
 	// The debug-bundle producer (#813): a paired `request_debug_bundle` frame
 	// assembles the daemon-global bundle — the recent log ring plus the newest
@@ -1320,25 +1329,26 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 			// daemon ctx — never a frame's — because the reset outlives the dispatch
 			// that started it. nil on a daemon with no registry or pool, which leaves
 			// the rotation exactly as it was.
-			reset: newConversationReset(ctx, convReg, pool, turnBusy, queue, *wrapUpDeadlineFlag, logger),
+			reset: reset,
 			// #2478: the same emitter the relay leg attaches its broadcaster to, so the
 			// tail that orders the three edges and the producer that puts them on the
 			// wire are one object rather than two that could disagree.
 			resetting: resetting,
 			log:       logger,
 		},
-		defaultCwd:  defaultCwd,
-		transitions: pool,
+		agentSwitcher: relayAgentSwitcher{switcher: conversationAgentSwitcher{pool: pool, conversations: convReg, registryPath: convRegistryPath, reset: reset, history: conversationHistory, resetting: resetting, saved: modelVocabulary}},
+		defaultCwd:    defaultCwd,
+		transitions:   pool,
 		// #2148: the relay leg hands back its open-conn enumerator, and this closure
 		// — the only place that names both packages — maps it onto the pool's
-		// resolver. The two ActiveConn fields cross as untrusted text and are judged
+		// resolver. The three ActiveConn fields cross as untrusted text and are judged
 		// nowhere on this path; sessions.admitClient is the single door.
 		setClientIdentity: func(enum func(context.Context) []relay.ActiveConn) {
 			pool.SetClientIdentityResolver(func(ctx context.Context) []sessions.ClientIdentity {
 				conns := enum(ctx)
 				out := make([]sessions.ClientIdentity, 0, len(conns))
 				for _, c := range conns {
-					out = append(out, sessions.ClientIdentity{Name: c.DeviceName, Version: c.ClientVersion})
+					out = append(out, sessions.ClientIdentity{Name: c.DeviceName, Version: c.ClientVersion, Features: c.ClientFeatures})
 				}
 				return out
 			})
@@ -1488,6 +1498,9 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		return string(id), err
 	}, convRegistryPath, announceConversation, logger)
 	ctrl.SetChannelCreator(createChannel)
+	// Local creation is available even when startRelay installed no announcement hook.
+	ctrl.SetConversationCreator(conversationCreator(convReg, sessionMinter{pool, modelVocabulary}, convRegistryPath, announceConversation, logger))
+	ctrl.SetConversationSubmitter(conversationSubmitter(convReg, router.resolve, queue.Enqueue, convRegistryPath, logger))
 	// Give a new host its starting point (#2569) through that same creator, so
 	// the General channel is confined, trust-marked and bound exactly as
 	// `pyry channel new` would make it. It waits for pool.Ready: pool.Run blocks
@@ -4426,6 +4439,13 @@ Usage:
   pyry logs [flags]                              print recent supervisor logs
   pyry sessions <verb> [flags]                   manage sessions on a running
                                                   daemon (verbs: new, rm, rename, list)
+  pyry conversation new [--type chat|channel] [--name <label>]
+                        [--model MODEL] [--effort EFFORT]
+                                                create in the current directory
+                                                  (default: unnamed chat) and print id
+  pyry conversation post --id ID (--text TEXT | --file PATH)
+                                                submit a user turn to an existing
+                                                  conversation (queue acceptance)
   pyry channel new [--name <label>]              create a channel whose workspace
                                                   is the current directory, and
                                                   print its conversation id
@@ -4482,7 +4502,7 @@ Pyry flags (must come before claude args, or after a -- separator):
                         (testing; 0 or >= the 90s default = production default.
                         It can only shorten: the ceiling is not operator-raisable)
   -pyry-relay string    relay URL (default: $PYRY_RELAY_URL or ~/.pyry/config.json)
-  -pyry-read-folder path  an absolute folder the in-app markdown reader may
+  -pyry-read-folder path  an absolute folder the in-app file reader may
                         also open besides the conversation's workspace;
                         repeat for several (a bad entry is skipped with a warning)
 

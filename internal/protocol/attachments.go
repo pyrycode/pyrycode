@@ -543,9 +543,9 @@ type RequestAttachmentPayload struct {
 }
 
 // ReadWorkspaceFilePayload is the body of an Envelope whose Type ==
-// TypeReadWorkspaceFile (#2598). The frame a client sends to read one markdown
-// file LIVE from a conversation's recorded workspace — no stored copy is made
-// and none is served, so an edit between two requests shows in the second
+// TypeReadWorkspaceFile (#2598). The frame a client sends to read one regular
+// file LIVE from a conversation's workspace or admitted read folders. No stored
+// copy is made or served, so an edit between two requests shows in the second
 // answer. The answer is RequestAttachmentPayload's: an attachment_chunk stream
 // correlated by in_reply_to, whose attachment_id the daemon mints per transfer.
 //
@@ -555,11 +555,14 @@ type RequestAttachmentPayload struct {
 // before anything resolves, and naming a conversation is not authorization.
 //
 // THE PATH IS THE FIRST FILESYSTEM PATH A CLIENT NAMES ON THIS WIRE. It is
-// confined to the conversation's recorded workspace — resolved, symlinks
-// included, and refused when it lands outside — and it is served only when the
-// final component of both the requested and the resolved path ends in .md or
-// .markdown, in any case. What bounds a paired but hostile client is that
-// confinement, not the path's shape.
+// confined to the workspace or admitted read folders, including symlink
+// resolution. Relative paths use only the workspace; extra roots require an
+// absolute path. Both requested and resolved leaves must avoid the case-insensitive
+// denylist: exact .env, any .env.*, exact id_rsa/id_dsa/id_ecdsa/id_ed25519, and
+// suffixes .key/.pem/.p12/.pfx/.keychain/.keychain-db. This is a filename heuristic,
+// not content inspection or a guarantee that admitted files contain no secrets.
+// Regular files of any type retain the bounded byte stream and byte-sniffed MIME.
+// Confinement, not the path's shape, bounds a paired but hostile client.
 //
 // NEVER LOG OR ECHO THE PATH. It names host layout and its leaf is a filename,
 // which docs/protocol-mobile.md § Attachments bans from logs for a privacy

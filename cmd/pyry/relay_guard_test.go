@@ -145,6 +145,7 @@ var inboundTypes = map[string]string{
 	"TypeModalCancel":            "switch-intercepted",
 	"TypeInterrupt":              "switch-intercepted",
 	"TypeStopBackgroundTask":     "switch-intercepted",
+	"TypeSwitchAgent":            "switch-intercepted",
 	"TypeNewSession":             "switch-intercepted",
 	"TypeDequeueMessage":         "switch-intercepted",
 	"TypeSendQueuedNow":          "switch-intercepted",

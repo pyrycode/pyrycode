@@ -10,7 +10,8 @@ package realclaude
 // twice. This file pins the guarantee that replaced the resend: one successful
 // write per call, so the result that releases a call is its own turn's.
 //
-// Everything here runs OFFLINE: no claude, no daemon, no credential.
+// Everything here runs OFFLINE: no claude, no daemon, no credential. The double
+// and the helper share a stepping clock, so a 46 s turn takes no real time.
 //
 //	go test -tags e2e_realclaude -race -count=1 -v \
 //	  -run TestInbandSendTurn ./internal/e2e/realclaude/
@@ -26,6 +27,26 @@ import (
 	"github.com/pyrycode/pyrycode/internal/streamsup"
 )
 
+// steppingClock is virtual time: Sleep advances Now by the slept duration and
+// returns at once. The helper and the double read the same instance, so the
+// helper sees the double's turns land exactly as it would on the wall clock.
+type steppingClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *steppingClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *steppingClock) Sleep(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
 // queuedTurn is one written turn and the moment the double answers it.
 type queuedTurn struct {
 	prompt string
@@ -34,12 +55,13 @@ type queuedTurn struct {
 
 // serialTurnRunner answers turns one at a time in write order, the way claude
 // works through its stdin: a turn starts when it is written or when the previous
-// turn is answered, whichever is later. Answers are computed from the clock, so
-// the double runs no goroutine. Only WriteUserTurn is implemented; the embedded
+// turn is answered, whichever is later. Answers are computed from clk, so the
+// double runs no goroutine. Only WriteUserTurn is implemented; the embedded
 // nil Runner panics on anything else, which inbandSendTurn never calls.
 type serialTurnRunner struct {
 	sessions.Runner
 
+	clk    *steppingClock
 	liveAt time.Time // WriteUserTurn returns ErrNoLiveChild before this
 	first  time.Duration
 	later  time.Duration
@@ -51,7 +73,7 @@ type serialTurnRunner struct {
 func (r *serialTurnRunner) WriteUserTurn(_ context.Context, _ string, payload []byte) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	now := time.Now()
+	now := r.clk.Now()
 	if now.Before(r.liveAt) {
 		return streamsup.ErrNoLiveChild
 	}
@@ -81,7 +103,7 @@ func (r *serialTurnRunner) written() []string {
 func (r *serialTurnRunner) answered() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	now := time.Now()
+	now := r.clk.Now()
 	var out []string
 	for _, turn := range r.turns {
 		if turn.doneAt.After(now) {
@@ -109,14 +131,16 @@ func TestInbandSendTurn_SlowTurnIsWrittenOnce(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			clk := &steppingClock{now: time.Now()}
 			r := &serialTurnRunner{
-				liveAt: time.Now().Add(tc.liveIn),
+				clk:    clk,
+				liveAt: clk.Now().Add(tc.liveIn),
 				first:  tc.first,
 				later:  50 * time.Millisecond,
 			}
 			var sent []string
 			for _, prompt := range []string{"one", "two"} {
-				inbandSendTurn(t, r, r, prompt)
+				inbandSendTurnOn(t, clk, r, r, prompt)
 				sent = append(sent, prompt)
 				// The result that released this call must be this call's turn, and
 				// nothing written earlier may still be queued behind it.

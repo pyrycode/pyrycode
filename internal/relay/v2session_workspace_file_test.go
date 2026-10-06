@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/json"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -17,8 +18,8 @@ import (
 const (
 	wfTestConvID   = "5b8e2f14-9c33-4a71-b0d6-2598cafe0001" // canonical UUIDv4
 	wfTestMintedID = "6c9f3a25-0d44-4b82-a1e7-2598cafe0002" // what the fake reader "mints"
-	wfTestPath     = "ZZ2598DIR/ZZ2598NOTE.md"
-	wfTestFilename = "ZZ2598NOTE.md"
+	wfTestPath     = "ZZ2598DIR/ZZ2598NOTE.py"
+	wfTestFilename = "ZZ2598NOTE.py"
 	wfTestReqEnvID = uint64(25980)
 )
 
@@ -29,7 +30,7 @@ type readCall struct {
 }
 
 // fakeWorkspaceReader is a relay-side double for the WorkspaceFileRead seam. The
-// real reader's confinement and markdown rule are cmd/pyry's to prove; here the
+// real reader's confinement and secret-name rule are cmd/pyry's to prove; here the
 // seam answers a scripted (file, ok) so the handler's order and answers are
 // addressable one at a time.
 type fakeWorkspaceReader struct {
@@ -105,6 +106,7 @@ func TestV2Session_ReadWorkspaceFile_StreamsTheReadBytes(t *testing.T) {
 	t.Parallel()
 
 	blob := patternBlob(2*protocol.MaxAttachmentChunkBytes + 7) // 3 chunks
+	copy(blob, []byte("PK\x03\x04"))                            // archive bytes with a misleading .py filename
 	rd := &fakeWorkspaceReader{file: WorkspaceFile{AttachmentID: wfTestMintedID, Filename: wfTestFilename, Data: blob}, ok: true}
 	sess, _ := startWorkspaceReadConn(t, knownOnly(wfTestConvID), rd.read)
 
@@ -119,6 +121,9 @@ func TestV2Session_ReadWorkspaceFile_StreamsTheReadBytes(t *testing.T) {
 		t.Errorf("reassembled %d bytes, want the read file's %d — byte for byte", len(got), len(blob))
 	}
 	for _, p := range decodeChunkPayloads(t, envs) {
+		if p.MimeType != "application/zip" || p.MimeType != http.DetectContentType(blob) {
+			t.Errorf("chunk MIME = %q, want byte-sniffed application/zip", p.MimeType)
+		}
 		if p.Filename != wfTestFilename {
 			t.Errorf("chunk filename = %q, want the resolved base name %q", p.Filename, wfTestFilename)
 		}
@@ -170,7 +175,7 @@ func TestV2Session_ReadWorkspaceFile_EveryRefusalAnswersOneCode(t *testing.T) {
 			payload:  readPayload(wfTestConvID, wfTestPath),
 		},
 		{
-			// One bool covers wrong extension, empty workspace, missing file,
+			// One bool covers denied names, empty workspace, missing file,
 			// out-of-tree path, non-regular file and over the bound alike.
 			name:      "reader refuses",
 			known:     knownOnly(wfTestConvID),

@@ -62,6 +62,17 @@ For combined predicates, exercise each branch independently. A shared log site c
 prove which branch was taken if both inputs satisfy the first condition. Use an
 independent observable result of the path under test.
 
+A later frame on `Frames` cannot prove that `V2SessionManager.Run` consumed an
+asynchronous result on a separate buffered channel: either ready select arm can
+win. For a silent completion, await an observation emitted after the completion
+handler's reply decision, then take a Run barrier before counting replies.
+`TestV2Session_SwitchAgentLateOutcomes` waits for `v2.switch_agent.completed`
+before opening its barrier connection; without that wait, a forbidden late
+acknowledgement could arrive after the zero-reply assertion. To prove teardown
+escapes a completion handoff, fill its channel first so sending cannot also win;
+`TestV2Session_SwitchAgentHandoffEscapes` forces requester-close and manager-cancel
+paths separately. See [relay concurrency](v2-session-manager-concurrency.md).
+
 An already-cancelled context does not force an error when a `select` can also
 observe completion: either ready case can win. Hold completion behind a
 test-owned gate when proving the cancellation path. A runner gated during
@@ -121,6 +132,18 @@ test, not the later step. #2665's refusal cases pass `spawnDir: "/"` — which
 settings sentinel back, not `ErrSpawnDirRejected`, is what shows the membership
 check ran first (see
 [conversation-session-binding-create.md § Requested model and effort](conversation-session-binding-create.md#requested-model-and-effort-2665)).
+
+When every refusal collapses to the same boolean or wire code, a valid registry
+cannot distinguish an early filename rejection from one after lookup.
+`TestWorkspaceFileReader_SecretNames` also supplies a nil registry with a denied
+requested leaf: moving the check after `Registry.Get` becomes observable rather
+than returning the same generic refusal. See [the live reader's filename checks](v2-session-manager-state-machine-inbound-read-workspace-file-workspacefileread.md#testing-the-filename-checks).
+
+Case-variation filesystem fixtures need paths that differ by more than letter
+case. On macOS's case-insensitive filesystem, upper/lowercase names can share a
+file or symlink and fail during setup before exercising the predicate.
+`TestWorkspaceFileReader_SecretNames` uses distinct `-lower-case` and
+`-upper-case` directories while preserving the actual leaf spellings under test.
 
 A test whose premise is "past a named cap" must build its fixture by computing from
 that constant, not by restating a literal believed to be past it. A hardcoded number

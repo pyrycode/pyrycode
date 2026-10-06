@@ -27,20 +27,20 @@ func TestReadFolderSentence_Pinned(t *testing.T) {
 		{
 			"one",
 			[]string{"/Users/op/vault"},
-			"This daemon serves markdown files under `/Users/op/vault` to a client " +
-				"that asks for one by absolute path.\n",
+			"This daemon serves files of any type under `/Users/op/vault` to a client " +
+				"that asks for one by absolute path, subject to the size limit and secret-name refusals.\n",
 		},
 		{
 			"two",
 			[]string{"/Users/op/vault", "/srv/notes"},
-			"This daemon serves markdown files under `/Users/op/vault` and `/srv/notes` " +
-				"to a client that asks for one by absolute path.\n",
+			"This daemon serves files of any type under `/Users/op/vault` and `/srv/notes` " +
+				"to a client that asks for one by absolute path, subject to the size limit and secret-name refusals.\n",
 		},
 		{
 			"three, one holding a comma and the word and",
 			[]string{"/a", "/b, and c", "/d"},
-			"This daemon serves markdown files under `/a`, `/b, and c` and `/d` " +
-				"to a client that asks for one by absolute path.\n",
+			"This daemon serves files of any type under `/a`, `/b, and c` and `/d` " +
+				"to a client that asks for one by absolute path, subject to the size limit and secret-name refusals.\n",
 		},
 	}
 	for _, tc := range cases {
@@ -62,7 +62,7 @@ func TestDaemonPromptText(t *testing.T) {
 		t.Errorf("daemonPromptText(nil) =\n%q\nwant the constant\n%q", got, systemPromptText)
 	}
 	want := systemPromptText + "\n" +
-		"This daemon serves markdown files under `/v` to a client that asks for one by absolute path.\n"
+		"This daemon serves files of any type under `/v` to a client that asks for one by absolute path, subject to the size limit and secret-name refusals.\n"
 	if got := daemonPromptText([]string{"/v"}); got != want {
 		t.Errorf("daemonPromptText([/v]) =\n%q\nwant\n%q", got, want)
 	}
@@ -133,8 +133,8 @@ func TestPool_ReadFolders_NamedInEveryComposition(t *testing.T) {
 	pool.SetClientIdentityResolver(holder.resolve)
 
 	head := systemPromptText + "\n" +
-		"This daemon serves markdown files under `/Users/op/vault` and `/srv/notes` " +
-		"to a client that asks for one by absolute path.\n"
+		"This daemon serves files of any type under `/Users/op/vault` and `/srv/notes` " +
+		"to a client that asks for one by absolute path, subject to the size limit and secret-name refusals.\n"
 
 	assertFileHolds := func(what, path, want string) {
 		t.Helper()

@@ -302,6 +302,21 @@ func TestActiveSessionStarter_ResetReleasesForTheNextFrame(t *testing.T) {
 			t.Fatalf("StartNewSession #%d = %v, want nil", i+1, err)
 		}
 		runner.awaitRotation(t)
+		// RestartFresh signals before resetThenRotate's deferred release runs.
+		// Wait until the guard accepts a fresh claim before sending the next frame.
+		deadline := time.After(3 * time.Second)
+		for {
+			release, ready := s.reset.begin(starterConvB)
+			if ready {
+				release()
+				break
+			}
+			select {
+			case <-deadline:
+				t.Fatal("reset guard was not released after rotation")
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
 	}
 	if got := p.seen(); len(got) != 2 {
 		t.Errorf("the reset ran %d times (%v), want 2", len(got), got)

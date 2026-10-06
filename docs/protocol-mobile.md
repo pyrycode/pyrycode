@@ -636,6 +636,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`debug_bundle_done`** | binary → phone | no | **New in v2.** Outbound — completion marker after the last `debug_bundle_chunk`, carrying the exact chunk count (#812). See [Debug bundle](#debug-bundle-v2). |
 | **`request_debug_bundle`** | phone → binary | no | **New in v2.** Inbound control (bare, no payload) — a paired client requests the current session's debug bundle; the daemon streams it back as `debug_bundle_chunk*` + `debug_bundle_done` (#813). See [Debug bundle](#debug-bundle-v2). |
 | **`set_session_settings`** | phone → binary | no | **New in v2.** Inbound control — a paired client changes one session's per-session model / effort / permission mode / YOLO. Interactive-capability-gated (enforced by the handler #845). See [Session settings](#session-settings-v2). |
+| **`switch_agent`** | phone → binary | no | **New in v2.** Switch the named conversation to the other agent after client confirmation; requires `interactive` and `multi_agent`. Required strings: `conversation_id`, `agent`, `model`; `model: ""` selects the target agent's template default. Optional `effort`: omitted/null = carry forward only if offered by the target model; `""` = clear. Refusals are correlated errors; commitment publishes ordered `resetting` → `session_transition` → `conversation_updated` pushes, with no separate success reply. See [`switch_agent`](#switch_agent). |
 | **`session_settings_updated`** | binary → phone | no | **New in v2.** Outbound reply confirming a `set_session_settings`, correlated by `in_reply_to` (#845). See [Session settings](#session-settings-v2). |
 | **`request_session_settings`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for the run configuration of the conversation it names in `conversation_id`. A request that names no conversation names no session, and is answered with the all-zero reply. Interactive-capability-gated. See [Session settings](#session-settings-v2). |
 | **`session_settings`** | binary → phone | no | **New in v2.** Outbound reply carrying the current run configuration and optional reports, correlated by `in_reply_to` (#491). See [Session settings](#session-settings-v2). |
@@ -643,7 +644,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`attachment_chunk`** | either | no | **New in v2.** One slice of one attachment's bytes, carrying the whole transfer's metadata on every chunk (#1752). The table's first genuinely bidirectional **payload** frame — `ack`/`error`/`rekey_request` above are also `either` but carry no application payload: upload rides this one phone → binary and retrieval rides it binary → phone, and declaring exactly one type is what stops the two legs drifting. It names the conversation the bytes belong to (#2142) — **meaningful on the upload leg only**, a **lookup key validated against the daemon's registry** before it becomes a path component and never a value trusted as sent, with **naming a conversation not authorization**; the daemon files an upload under it since #2143. See [Attachments](#attachments). |
 | **`attachment_stored`** | binary → phone | no | **New in v2.** The upload leg's **success reply** — the transfer completed, its claims were checked, and the bytes are stored under the `attachment_id` the client chose (#1895). Correlated by `in_reply_to`, which names the chunk **whose arrival completed the transfer** rather than the last one sent. Carries that one id and nothing else: no host path, no directory component, no stored filename. Nothing emits it yet (#1897). See [Attachments](#attachments). |
 | **`request_attachment`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for a stored attachment, naming the conversation and the attachment and nothing else (#2052). The `conversation_id` is a **lookup key validated against the daemon's registry**, not a value trusted as sent, and naming a conversation is **not authorization**. Correlation rides `in_reply_to`, so the payload carries **no request-id key**; the answer is a stream of [`attachment_chunk`](#attachment_chunk) frames, or `attachment.not_found` / `attachment.stream_aborted`. **Nothing answers it yet** — the handler is #2054 and the stream #2053. See [Attachments](#attachments). |
-| `read_workspace_file` | phone → binary | no | **New in v2.** Inbound control — a paired client asks to read one markdown file **live** from a conversation's recorded workspace, naming the conversation and a path and nothing else (#2598). Not a retrieval of a stored attachment: nothing is ever written to the attachment store, and the daemon reads the disk again on every request, so an edit made between two requests shows in the second answer. The `conversation_id` is a **lookup key validated against the daemon's registry**, not authorization; the path is confined to that conversation's workspace **or**, for an absolute path, to a folder the operator configured on the daemon (`-pyry-read-folder`, #2710) — a relative path resolves against the workspace only — and refused unless its final component, and the resolved file's, both end in `.md` or `.markdown`. Correlation rides `in_reply_to`; the answer is a stream of [`attachment_chunk`](#attachment_chunk) frames under a daemon-minted `attachment_id`, or the single `attachment.not_found` that names no cause. See [Attachments](#attachments). |
+| `read_workspace_file` | phone → binary | no | **New in v2.** Inbound control — a paired client asks to read one regular file of any type **live**, naming the conversation and a path and nothing else (#2598, widened #2893). Nothing is written to the attachment store; each request reads the disk again. The `conversation_id` is a **lookup key validated against the daemon's registry**, not authorization. Relative paths resolve only against its recorded workspace; absolute paths may also resolve inside configured `-pyry-read-folder` roots or the admitted daemon working folder. Both requested and resolved leaves must pass the case-insensitive secret-name denylist. Correlation rides `in_reply_to`; the answer is a bounded byte-for-byte [`attachment_chunk`](#attachment_chunk) stream with byte-sniffed MIME under a fresh daemon-minted `attachment_id`, or the single `attachment.not_found` that names no cause. See [`read_workspace_file`](#read_workspace_file) for the denylist, roots, size bound and stream-abort response. |
 | **`attachment_offered`** | binary → phone | no | **New in v2.** Outbound push — a file exists on the host for this conversation, naming it with an `attachment_id` **the client did not mint** (#2082). It closes the one gap the rest of this family leaves: every other attachment frame needs an id the client already holds, so a file `claude` produced reached a client as nothing at all. **No bytes ride it** — it announces, and a client fetches with [`request_attachment`](#request_attachment), which is what *offered* rather than *sent* carries. Correlation is `conversation_id` and nothing else (no `in_reply_to`, no `turn_id`), and it is **delivered to every attached client rather than routed to one**, scoped at the consumer exactly as [`modal_shown`](#modal_shown) is. Receiving it is **not a capability**: #2054 re-validates the id against the daemon's registry regardless. Its `filename` is **`claude`-authored** — the section's first such string, so [§ Security model](#security-model)'s threat 1 lands, flowing *out of* `claude` rather than into it. **Emitted since #2166**, when the daemon stores a file `claude` produced; the offer is **live-only** — no registry, no list verb, no replay, so one missed while disconnected is not re-sent. See [Attachments](#attachments). |
 | **`request_model_list`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for a conversation's model menu at any time, naming the conversation and nothing else (#2125). It closes the window the frame's two unsolicited paths leave open: a conversation created **after** the client connected misses both the live lane and the connect-time reconcile, so its model and effort controls stay blank with nothing to wait for. The `conversation_id` is a **lookup key validated against the daemon's registry**, not a value trusted as sent. Correlation rides `in_reply_to`, so there is **no request-id key**; the answer is one [`model_list`](#model_list) — the same frame, the same payload source, **no `event_id`** — or `conversation.not_found` / the retryable `model_list.unavailable`. Interactive-capability-gated: a conn without it gets nothing at all. See [Asking for a model list on demand](#asking-for-a-model-list-on-demand). |
 | **`request_history`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for entries older than the ones it has, naming the conversation, an opaque `cursor` and a `limit` (#2113). Scroll-back over the **daemon-owned on-disk log** (#2112), which is **not** the [Mode A](#reconnect--backfill-semantics) event-ring replay: that one is catch-up across a dropped connection and is empty after a restart. The `conversation_id` is a **lookup key validated against the daemon's registry**, not a value trusted as sent. Correlation rides `in_reply_to`, so there is **no request-id key**; the answer is one [`history_page`](#history_page). Answered by the daemon since **#2116**, on the addressed conn's app-frame worker rather than inline, so a page read off disk never stalls another conn's frames. See [Conversation history](#conversation-history-v2). |
@@ -1144,12 +1145,48 @@ Sent in the `noise_init` early-data payload. The `payload.token` field carries t
     "token": "f0r...",
     "device_name": "Juhana's Pixel 8",
     "client_version": "pyrycode-mobile/0.1.0",
+    "client_features": "Conversation list and interactive chat",
     "protocol_versions": ["v2"],
     "last_seen_ts": "2026-05-08T08:14:02Z",
     "last_event_id": 42
   }
 }
 ```
+
+`client_features` (optional string, added within v2 by #2897) is the client's
+untrusted, self-reported plain-text feature description. It defaults to an empty
+string: absent and empty both mean no description, and an empty value is omitted
+when marshalled. Nonempty decoded strings round-trip verbatim, including whitespace
+and control characters; this field adds no trimming, content validation or
+handshake rejection. It is unrelated to negotiated `capabilities` and does not
+advertise or grant a negotiated capability. No protocol-version bump or capability
+negotiation is required to include it in a spawn prompt.
+
+After successful token authentication, the daemon retains the description verbatim
+through an inclusive **1024-byte** cap. Longer values become empty without rejecting
+the handshake; unauthenticated connections expose no description, and re-key keeps
+the authenticated report. Only the bounded description string is retained, never
+the hello or token; description bytes are absent from device-registry persistence
+and daemon logs.
+
+Prompt composition admits the description independently through an inclusive
+**512-UTF-8-byte** cap, measured in bytes rather than characters. Accepted text is
+verbatim, including surrounding whitespace. Empty, whitespace-only, oversized,
+invalid-UTF-8, C0 (`U+0000`–`U+001F`), DEL (`U+007F`), C1 (`U+0080`–`U+009F`) or
+double-quote-containing descriptions are silently omitted. This keeps CR/LF out of
+the single-line quoted transcription. Refusal drops only the description, leaving
+an admitted name and version intact; an invalid name still drops the whole client,
+and version admission is unchanged.
+
+For each admitted report, the prompt appends
+` (self-reported features "<description>")` after the client's quoted name and
+optional ` (version "<version>")`. It attributes what that client reported, without
+inferring features from identity or negotiated capabilities or guaranteeing the
+report's truth. Clients are resolved at session activation: reconnecting with a
+changed report leaves an active session's prompt unchanged, and `new_session`
+rotation carries the earlier admitted snapshot. Eviction/reactivation resolves
+current clients and refreshes the report. See
+[prompt composition and snapshots](knowledge/features/sessions-package-key-types-writesystemprompt-systemprompttext.md#composition-and-resolution).
 
 `last_seen_ts` (optional) appears in the block above because it is **still
 accepted vocabulary** — the daemon decodes it and a decoder that rejected it
@@ -4695,8 +4732,9 @@ figure ahead of the code that enforces it.
 #### `read_workspace_file`
 
 Direction **phone → binary** (inbound v2 control). Declared and served in one
-slice, **#2598**. Reads one markdown file **as it is on the host right now**
-from the recorded workspace of the conversation it names — a different guarantee
+slice, **#2598**, widened to any regular file type by **#2893**. Reads one file
+**as it is on the host right now** from the conversation's recorded workspace
+or admitted read folders — a different guarantee
 from every other frame in this section, all of which move a **stored** copy.
 Nothing here is ever written to the attachment store, and the daemon reads the
 file again on every request: two requests for the same path can answer with
@@ -4707,32 +4745,53 @@ different bytes, and that is the point.
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | The conversation whose workspace is read. A **lookup key validated against the daemon's registry**, never a value trusted as sent, and **naming a conversation here is not authorization** — the same rule [`request_attachment`](#request_attachment) publishes for its own `conversation_id`. |
-| `path` | string | The file to read, relative to that conversation's workspace or absolute. A relative path resolves against the workspace only, **never** against the daemon's own process directory and **never** against a configured folder. An absolute path may instead resolve inside a folder the operator named on the daemon (`-pyry-read-folder`, #2710). An escaping path — outside the workspace and outside every configured folder — answers the same undistinguished refusal as a missing one. |
+| `path` | string | The file to read, relative to that conversation's workspace or absolute. A relative path resolves against the workspace only, **never** against the daemon's own process directory or an extra root. An absolute path may instead resolve inside an operator-configured folder (`-pyry-read-folder`, #2710) or the admitted daemon working folder (#2720). An escaping path — outside every admitted root — answers the same undistinguished refusal as a missing one. |
 
 **Both fields are always present** (no `omitempty`), so a decoder may rely on
 both. A truncated or hostile payload decodes to two empty strings, which names
 no conversation and confines to nothing.
 
-**Markdown only, checked on both the name given and the name resolved to.** A
-path whose final component does not end in `.md` or `.markdown` — in any case —
-is refused before the daemon opens the registry or touches a filesystem. The
-same check runs again on the **resolved** file, after the path is confined:
-confinement follows a symlink, so a link named `notes.md` pointing at `.env`
-inside the same workspace passes containment and is still refused, because its
-target's own leaf fails the rule. Widening past markdown is out of scope for
-this frame; it would be a different verb; a paired client already reads any
-`.md` file in any conversation's workspace it names, which is the accepted
-residual — pairing is the authorization, as for every verb here, and `claude`
-can already read these files and print them. Since #2710 the same residual
-extends to every folder the operator configured on the daemon
-(`-pyry-read-folder`): a paired client can read any `.md` file under one of
-those folders too, by the same pairing-is-the-authorization reasoning — the
-folders are the operator's own configuration choice, not a client-controlled
-grant.
+**Any regular file type, subject to the secret-name denylist on both leaves.**
+Markdown, `.sh`, `.py`, `.zip`, extensionless and binary files are eligible.
+The following names are refused case-insensitively:
+
+- Exact `.env`, or any name beginning `.env.` (including `.env.example`).
+- Exact `id_rsa`, `id_dsa`, `id_ecdsa` or `id_ed25519`.
+- Any name ending in `.key`, `.pem`, `.p12`, `.pfx`, `.keychain` or `.keychain-db`.
+
+The **requested** final component is checked before reader registry/filesystem
+access. The same rule checks the **resolved** leaf after confinement and before
+reading. An eligible `notes.py` symlink to `.env` and a denied `private.key`
+symlink to an eligible `notes.py` are both refused, in every admitted root.
+Other names remain eligible, including `.gitignore`, `.envoy` and `id_rsa.pub`.
+This rule checks filenames only: it neither inspects contents nor guarantees
+that an allowed file or archive contains no secrets. The general attachment
+content-hygiene and rendering obligations still apply.
+
+**Extra roots widen only absolute paths.** The workspace is tried first, then
+extra roots in their admitted order. Operator-configured folders are
+canonicalised once at startup; relative, unresolvable or non-directory entries
+are skipped. The daemon's working folder (`-pyry-workdir`, or its startup process
+directory) is canonicalised and prepended unless already configured. It is
+omitted if home cannot be resolved or the folder is home, `/`, or contains home.
+Extra roots retain their startup canonical paths rather than being re-resolved
+per request, so a later symlink swap cannot move the admitted boundary. Pairing
+authorizes reads from these roots; naming a conversation adds no authorization,
+and configured folders are an operator choice, not a client-controlled grant.
 
 **The workspace is read at request time, not cached.** A `change_workspace`
 moved between two requests changes what the second one reads. An empty or
-unresolvable workspace is refused, the same as a missing file.
+unresolvable workspace cannot admit a workspace read; an absolute path can
+still be admitted by an extra root.
+
+**Bounded bytes, without server conversion.** The reader uses the existing
+checked read with the supplied `maxBytes` bound (production
+`maxAttachFileBytes`, currently **16 MiB**) for every file type. A file exactly
+at the bound is admitted; one byte over is refused. The original bytes stream
+through `attachment_chunk`; `filename` is the resolved basename and `mime_type`
+is sniffed from bytes by `attachmentEnvelopes` using `http.DetectContentType`,
+not inferred from the extension. There is no text conversion or wire
+inline/download discriminator; client preview and download UI are separate work.
 
 **Correlation rides `in_reply_to`, so there is no request-id key** — the same
 decision [`request_attachment`](#request_attachment) and
@@ -4743,9 +4802,9 @@ this one chunk stream and nothing else — it is never stored, never accepted
 back on any other frame, and two reads of the same file mint two different ids.
 
 **One refusal, [`attachment.not_found`](#error-codes), for every cause**: an
-unknown conversation, an empty workspace, the wrong extension on either the
-requested or the resolved leaf, a missing file, a path outside the workspace, a
-non-regular file, a file over the daemon's size bound, or an undecodable
+unknown conversation, a denied requested or resolved leaf, no admitting root,
+a missing or non-regular file, a checked-read failure, a file over the daemon's
+size bound, or an undecodable
 payload — all answer the identical static message, non-retryable, naming
 neither the path nor the reason. A failure after the stream has begun answers
 [`attachment.stream_aborted`](#error-codes) instead, exactly as
@@ -4755,7 +4814,8 @@ neither the path nor the reason. A failure after the stream has begun answers
 Authorization is pairing, enforced at the Noise IK handshake; there is no
 per-verb gate. The path is never logged and never echoed on any refusal — the
 same filename discipline this section already states for `filename` — and
-neither is the conversation id.
+neither is the conversation id, resolved filename, content, size or filesystem
+error. Refusal diagnostics use static reasons only.
 
 ```json
 {
@@ -4910,6 +4970,110 @@ Example (a client changing only the reasoning effort — `model` and `yolo` omit
   "payload": { "session_id": "sess-a", "effort": "high" }
 }
 ```
+
+#### `switch_agent`
+
+Direction **phone → binary** (inbound v2 request, discriminator
+`switch_agent`, operational since #2871). An interactive `multi_agent` client
+sends a choice from the other agent's section of the model menu after the
+operator confirms. The daemon adds no confirmation dialog. It switches only
+the named conversation, preserving its ID, metadata and message history, and
+never falls back to an active conversation. The successor session activates on
+the next message; switching does not start an idle or dormant child for handover.
+[`set_session_settings`](#set_session_settings) remains the cheap settings change
+within the current agent ([ADR 039](knowledge/decisions/039-capability-belongs-to-agent-and-model-together.md)).
+
+The connection must negotiate both `interactive` and `multi_agent`. A connection
+without `multi_agent` receives non-retryable `protocol.unsupported` before payload
+validation. A `multi_agent` connection without `interactive` is inert and receives
+no reply. The type is v2-only; the v1 `IsKnownAppType` predicate rejects an
+unencrypted `switch_agent` envelope with `ErrUnknownType`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string (required) | The daemon-owned conversation whose agent is to change. Must be a canonical lowercase UUIDv4 accepted by `conversations.ValidID`. Always serialized. |
+| `agent` | string (required) | The other agent, `"claude"` or `"codex"`; a same-agent request is refused. Always serialized. |
+| `model` | string (required) | The target agent's model. `""` selects that agent's template default; the key remains present even at this empty value. |
+| `effort` | string (optional) | Omitted or `null` means unspecified: carry the old effort only when the target model offers it, otherwise clear. Both re-encode with the key omitted. Explicit `""` clears and remains present. A nonempty string must be offered by the target agent/model and round-trips unchanged. |
+
+The required string keys remain present when the decoded payload is
+re-encoded through `Envelope`, for either target agent. In contrast,
+`effort: null` is canonicalized to an omitted key; it is not preserved as a
+literal `null`.
+
+`conversation_id` and `model` must be present, non-null strings; only `model`
+may be empty. A missing/null `agent` or a string outside the two supported agents
+is unsupported. A non-object payload, invalid JSON or a wrong field type is
+malformed. Nonempty model and effort values obey the bounded shape grammars in
+[`set_session_settings`](#set_session_settings), then the target agent's retained
+[`model_list`](#model_list) validation, including its per-model effort levels and
+agent-specific fallback. An explicit nonempty model needs available vocabulary; an empty
+model selects the target template without requiring a model-menu match. Explicit
+nonempty Codex effort requires held Codex vocabulary even with a template model.
+
+Example request (Codex's template default model, explicit effort clear):
+
+```json
+{
+  "id": 814, "type": "switch_agent", "ts": "...",
+  "payload": {
+    "conversation_id": "12345678-1234-4234-8234-123456789abc",
+    "agent": "codex",
+    "model": "",
+    "effort": ""
+  }
+}
+```
+
+**Refusals and failures.** A refusal returns one `error` with `in_reply_to` equal
+to the request envelope's `id`, using the fixed message below. Preflight refusals
+run no wrap-up, emit no reset sequence and change no binding. Competing resets
+and switches share exclusion for the named conversation.
+
+| Condition | Code | Fixed message | Retryable |
+|---|---|---|---|
+| No `multi_agent`, missing/null or unsupported agent, or workspace confinement rejection | `protocol.unsupported` | `agent switch unsupported` | false |
+| Malformed payload/field shape, missing/null/empty conversation ID, missing/null model, invalid UUIDv4, or same-agent target | `protocol.malformed` | `malformed switch_agent request` | false |
+| Missing conversation or current session binding | `conversation.not_found` | `unknown conversation` | false |
+| Target model not offered | `protocol.malformed` | `requested model is not offered` | false |
+| Target effort not offered | `protocol.malformed` | `malformed set_session_settings request` | false |
+| Vocabulary unavailable when required for target validation | `model_list.unavailable` | `model list is unavailable` | true |
+| Competing reset or switch | `server.binary_busy` | `agent switch already running` | true |
+| Unavailable switcher or uncommitted operational failure, including mint, runner construction/probe or persistence failure | `server.binary_offline` | `agent switch unavailable` | true |
+
+An uncommitted operational failure retains the usable old binding and publishes
+no transition or new row. It can happen after wrap-up wrote handover or dropped
+backlog, so an offline error does not promise that the request was inert. Every
+started reset sequence still closes with inactive status. Errors never echo
+request values, model/effort, workspace paths, handover or wrapped error text.
+
+**Committed outcome.** Each interactive `multi_agent` connection that remains
+open through the switch, including the requester, receives these pushes in order:
+
+1. `resetting`: `active: true`, `phase: "wrapping_up"`, `handoff: "pending"`.
+2. `resetting`: `active: true`, `phase: "restarting"`, `handoff: "written"` or
+   `"skipped"`, describing whether a new handover note was stored.
+3. `resetting`: `active: false`, `phase: ""`, `handoff: ""`.
+4. Exactly one [`session_transition`](#session_transition), with `reason: "clear"`,
+   the named `conversation_id` and the old/new session IDs; one durable history
+   boundary is appended.
+5. [`conversation_updated`](#conversation_updated) read from the committed row,
+   with the new `agent`.
+
+These are uncorrelated pushes, with no `session_settings_updated` or additional
+success acknowledgement. A committed binding remains a success even if old-session
+cleanup fails: the transition and row still publish once, with no refusal.
+Shared exclusion lasts through committed publication and Run-owned sealing,
+so a subsequent reset or switch cannot substitute a later row or agent. Queue
+pressure can delay publication but cannot discard the committed outcome.
+
+The switch runs under the daemon's lifetime, independently of the requester.
+Requester disconnect does not cancel it or prevent other capable connections
+from receiving its result. After commitment to Codex, connections without
+`multi_agent` receive no further pushes for that conversation and keep their
+previous row until their next `list_conversations`, which excludes it (#2644).
+On a switch back to Claude, rising reset phases remain filtered while the row is
+still bound to Codex; ordinary delivery resumes after commitment.
 
 #### `session_settings_updated`
 
@@ -5546,7 +5710,7 @@ v1 mitigations apply unchanged. **v2 adds:** the relay no longer parses or forwa
 
 **Since #2734**, "leak" narrows to a token that has not yet been bound to an install (see [Static keys — mobile side](#static-keys--mobile-side)). Once the first accepted connection binds a device's token to its Noise static key, a leaked copy of that token alone no longer suffices to authenticate as the device from a different install — the daemon refuses it exactly as it refuses an unknown token. The window this does not close: a token still unbound when it leaks — never connected, or still inside its redemption window — authenticates whoever presents it first, bound holder or not; `pyry pair list` does not surface the binding, so an operator cannot see by looking whether that race has already gone to a leaker. Losing the bound phone itself (key extraction from the Keystore) is a different threat, unchanged by this ticket.
 
-**Since #2720**, a compromised paired device can also read markdown in the daemon's own working folder, not only in a conversation's workspace and the operator's configured `-pyry-read-folder` entries — the in-app markdown reader always treats the working folder as a read root now. This is the operator's own 2026-10-03 decision (`BEHAVIOR.md`, `FEEDBACK.md` and the rest should open from every conversation with no setting needed), not a widening this threat's mitigation changes for: the same per-device revocation applies. The blast radius stays bounded to the working folder — the reader refuses the folder when it is the operator's home folder, `/`, or any folder containing home, so this does not extend to the whole home folder.
+**Since #2720**, a compromised paired device can also read eligible files in the daemon's admitted working folder, as well as conversation workspaces and configured `-pyry-read-folder` roots. **Since #2893**, [`read_workspace_file`](#read_workspace_file) admits any regular file type within the size bound, subject to the case-insensitive secret-name denylist on both requested and resolved leaves. That heuristic does not inspect content or make permitted files secret-free; the same per-device revocation applies. Automatic working-folder admission excludes home, `/`, any folder containing home, and an unresolvable home. This automatic root therefore does not expose the whole home folder; explicitly configured folders remain the operator's choice.
 
 #### 5. Implementation bugs — `severity: variable`, `mitigation: defense-in-depth` (unchanged from v1)
 
@@ -5812,6 +5976,8 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 **Date:** 2026-05-16
 
 ## Changelog
+
+- `2026-10-06`: [`switch_agent`](#switch_agent) is operational (#2870/#2871): an interactive `multi_agent` client can switch a named conversation after confirmation, with template-model selection, presence-sensitive effort and static correlated refusals. Commitment publishes three ordered reset statuses, one clear transition and the committed conversation row, including after cleanup failure or requester disconnect. Shared reset exclusion protects publication through sealing; the dedicated switch lane retains outcomes under queue pressure. Legacy connections retain their previous row after a Codex switch until their next filtered list.
 
 - `2026-10-05`: Added the native-first [`reply_suggestion`](#reply_suggestion) fallback (#2832): after a two-second native window, one isolated Haiku turn uses the last confirmed exchange and existing account authentication. Its ten-second attempt is not retried; failure stays silent. Bounded output uses the existing set/null-clear revisions and reconnect contract, with native priority and cancellation on invalidation or deletion.
 

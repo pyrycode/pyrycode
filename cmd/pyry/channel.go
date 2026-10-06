@@ -571,7 +571,7 @@ func runChannelNew(socketPath string, args []string) error {
 	// where this process was standing, and the confining validator it would
 	// otherwise reach CREATES a missing directory rather than refusing one, so
 	// there is no daemon-side check this could fall through to.
-	cwd, err := os.Getwd()
+	cwd, err := currentDir()
 	if err != nil {
 		return channelExit("new", fmt.Errorf("resolve current directory: %w", err))
 	}

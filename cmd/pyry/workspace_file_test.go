@@ -62,16 +62,32 @@ func mustSymlink(t *testing.T, target, link string) {
 	}
 }
 
-// TestWorkspaceFileReader_ReadsMarkdown: a markdown file inside the workspace
-// is read by relative and by absolute path, in any extension case, named by the
+// TestWorkspaceFileReader_ReadsFiles: eligible files inside the workspace
+// are read byte-for-byte by relative and absolute path, named by the
 // RESOLVED file's base name and keyed on a fresh canonical UUIDv4 per read.
-func TestWorkspaceFileReader_ReadsMarkdown(t *testing.T) {
+func TestWorkspaceFileReader_ReadsFiles(t *testing.T) {
 	t.Parallel()
 	f := newWorkspaceReadFixture(t, maxAttachFileBytes)
 	writeFile(t, f.ws, "notes/plan.md", "# plan")
 	writeFile(t, f.ws, "READ.MARKDOWN", "# upper")
 	writeFile(t, f.ws, "real.md", "# real")
 	mustSymlink(t, "real.md", filepath.Join(f.ws, "alias.md"))
+	writeFile(t, f.ws, "real.py", "print(42)\n")
+	mustSymlink(t, "real.py", filepath.Join(f.ws, "script.md"))
+	// .ENVoy sits in its own directory: on a case-insensitive filesystem,
+	// such as default macOS, it would otherwise be the same file as .envoy.
+	files := map[string]string{
+		"run.sh": "#!/bin/sh\necho hello\n", "archive.zip": "PK\x03\x04\x00\xff",
+		"LICENSE": "permission granted", "binary.bin": "\x00\xff\x80\x01",
+		".gitignore": "*.log\n", ".envoy": "configuration", "id_rsa.pub": "public key",
+		"notes.md.txt": "plain text", ".envdir/notes.py": "nested",
+		"upper/.ENVoy": "configuration", "id_rsa.backup": "eligible name",
+		"public.pem.md": "eligible suffix", "config.env": "eligible name",
+		"empty": "",
+	}
+	for name, body := range files {
+		writeFile(t, f.ws, name, body)
+	}
 
 	tests := []struct {
 		name, path, wantName, wantBody string
@@ -80,6 +96,14 @@ func TestWorkspaceFileReader_ReadsMarkdown(t *testing.T) {
 		{"absolute", filepath.Join(f.ws, "notes", "plan.md"), "plan.md", "# plan"},
 		{"upper-case extension", "READ.MARKDOWN", "READ.MARKDOWN", "# upper"},
 		{"in-tree markdown symlink names the target", "alias.md", "real.md", "# real"},
+		{"symlink to another file type", "script.md", "real.py", "print(42)\n"},
+	}
+	for name, body := range files {
+		for _, path := range []string{name, filepath.Join(f.ws, name)} {
+			tests = append(tests, struct{ name, path, wantName, wantBody string }{
+				name, path, filepath.Base(name), body,
+			})
+		}
 	}
 	seen := map[string]bool{}
 	for _, tt := range tests {
@@ -129,12 +153,11 @@ func TestWorkspaceFileReader_ReadsLive(t *testing.T) {
 // TestWorkspaceFileReader_Refusals: every refusal is the same false. The
 // confinement matrix itself is TestFileAttacher_Confinement's; the traversal
 // and symlink-out rows here show this path goes through confineFile, and the
-// in-tree symlink to a non-markdown file shows the RESOLVED leaf is checked too.
+// in-tree symlink to a denied name shows the RESOLVED leaf is checked too.
 func TestWorkspaceFileReader_Refusals(t *testing.T) {
 	t.Parallel()
 	f := newWorkspaceReadFixture(t, 8)
 	writeFile(t, f.ws, ".env", "SECRET=1")
-	writeFile(t, f.ws, "notes.md.txt", "not markdown")
 	writeFile(t, f.ws, "big.md", "123456789") // one byte over the bound of 8
 	writeFile(t, f.outside, "escape.md", "outside")
 	mustSymlink(t, ".env", filepath.Join(f.ws, "env.md"))
@@ -158,8 +181,7 @@ func TestWorkspaceFileReader_Refusals(t *testing.T) {
 
 	conv := string(f.convID)
 	tests := []struct{ name, conv, path string }{
-		{"wrong extension", conv, ".env"},
-		{"markdown then another extension", conv, "notes.md.txt"},
+		{"secret name", conv, ".env"},
 		{"empty path", conv, ""},
 		{"in-tree symlink named .md resolving to .env", conv, "env.md"},
 		{"traversal out of the workspace", conv, "../outside/escape.md"},
@@ -179,18 +201,67 @@ func TestWorkspaceFileReader_Refusals(t *testing.T) {
 	}
 }
 
-// TestIsMarkdownName is the extension rule on its own, which is also what makes
-// it checkable before any filesystem access: it reads nothing but the string.
-func TestIsMarkdownName(t *testing.T) {
+// Each denied name is refused directly and in both symlink directions, in the
+// workspace and extra roots. Uppercase spellings prove case independence.
+func TestWorkspaceFileReader_SecretNames(t *testing.T) {
 	t.Parallel()
-	for name, want := range map[string]bool{
-		"a.md": true, "a.MD": true, "a.Md": true, "a.markdown": true, "A.MarkDown": true,
-		".md": true, "a.b.md": true,
-		"a.txt": false, ".env": false, "a.md.txt": false, "a.mdx": false, "amd": false,
-		"a.md ": false, "a.md\x00": false, "": false, ".": false, "a.": false,
-	} {
-		if got := isMarkdownName(name); got != want {
-			t.Errorf("isMarkdownName(%q) = %v, want %v", name, got, want)
+	f := newFolderReadFixture(t, maxAttachFileBytes)
+	denied := []string{
+		".env", ".env.", ".env.example", ".env.production.md",
+		"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+		"private.key", "cert.pem", "cert.p12", "cert.pfx", "login.keychain", "login.keychain-db",
+	}
+	for _, root := range []string{f.ws, f.vault, f.notes} {
+		for _, name := range denied {
+			for variant, name := range []string{name, strings.ToUpper(name)} {
+				t.Run(filepath.Base(root)+"/"+name, func(t *testing.T) {
+					dir := filepath.Join(root, name+"-lower-case")
+					if variant == 1 {
+						dir = filepath.Join(root, name+"-upper-case")
+					}
+					writeFile(t, dir, name, "denied bytes")
+					writeFile(t, dir, "allowed.py", "print(42)")
+					mustSymlink(t, name, filepath.Join(dir, "alias.md"))
+					for _, leaf := range []string{name, "alias.md"} {
+						if _, ok := f.read(string(f.convID), filepath.Join(dir, leaf)); ok {
+							t.Errorf("served %s, want secret-name refusal", leaf)
+						}
+					}
+					if err := os.Remove(filepath.Join(dir, name)); err != nil {
+						t.Fatal(err)
+					}
+					mustSymlink(t, "allowed.py", filepath.Join(dir, name))
+					if _, ok := f.read(string(f.convID), filepath.Join(dir, name)); ok {
+						t.Error("served denied-name symlink to eligible target")
+					}
+					// A denied requested leaf must not reach Registry.Get. A nil
+					// registry makes an incorrectly ordered lookup observable.
+					if _, ok := workspaceFileReader(nil, maxAttachFileBytes)("unused", filepath.Join(dir, name)); ok {
+						t.Error("served denied requested name before registry lookup")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestWorkspaceFileReader_SizeBoundAcrossTypes(t *testing.T) {
+	t.Parallel()
+	const bound = 8
+	f := newFolderReadFixture(t, bound)
+	for _, root := range []string{f.ws, f.vault} {
+		for _, name := range []string{"note.md", "run.sh", "main.py", "archive.zip", "LICENSE", "binary.bin"} {
+			t.Run(filepath.Base(root)+"/"+name, func(t *testing.T) {
+				body := strings.Repeat("\x00\xff", bound/2)
+				path := writeFile(t, root, name, body)
+				if got, ok := f.read(string(f.convID), path); !ok || !bytes.Equal(got.Data, []byte(body)) {
+					t.Fatalf("at bound: got (%q, %v), want exact bytes admitted", got.Data, ok)
+				}
+				writeFile(t, root, name, body+"x")
+				if _, ok := f.read(string(f.convID), path); ok {
+					t.Error("served one byte over the bound")
+				}
+			})
 		}
 	}
 }
@@ -233,7 +304,7 @@ func TestWorkspaceFileReader_ConfiguredFolders(t *testing.T) {
 	f := newFolderReadFixture(t, maxAttachFileBytes)
 	writeFile(t, f.ws, "ws.md", "# workspace")
 	writeFile(t, f.vault, "daily/today.md", "# today")
-	writeFile(t, f.notes, "idea.md", "# idea")
+	writeFile(t, f.notes, "idea.py", "print(42)")
 	mustSymlink(t, f.vault, filepath.Join(filepath.Dir(f.vault), "vault-link"))
 
 	noWS, err := conversations.NewID()
@@ -248,9 +319,9 @@ func TestWorkspaceFileReader_ConfiguredFolders(t *testing.T) {
 	}{
 		{"workspace still served", conv, "ws.md", "ws.md", "# workspace"},
 		{"absolute path in the first folder", conv, filepath.Join(f.vault, "daily", "today.md"), "today.md", "# today"},
-		{"absolute path in the second folder", conv, filepath.Join(f.notes, "idea.md"), "idea.md", "# idea"},
+		{"absolute path in the second folder", conv, filepath.Join(f.notes, "idea.py"), "idea.py", "print(42)"},
 		{"folder reached through a symlinked spelling", conv, filepath.Join(filepath.Dir(f.vault), "vault-link", "daily", "today.md"), "today.md", "# today"},
-		{"empty workspace still reads a folder", string(noWS), filepath.Join(f.notes, "idea.md"), "idea.md", "# idea"},
+		{"empty workspace still reads a folder", string(noWS), filepath.Join(f.notes, "idea.py"), "idea.py", "print(42)"},
 	}
 	for _, tt := range tests {
 		got, ok := f.read(tt.conv, tt.path)
@@ -303,7 +374,7 @@ func TestWorkspaceFileReader_ConfiguredFolderRefusals(t *testing.T) {
 		{"traversal out of a folder", conv, filepath.Join(f.vault, "..", "outside", "escape.md")},
 		{"prefix sibling of a folder", conv, filepath.Join(f.vault+"-other", "x.md")},
 		{"markdown symlink to .env in the same folder", conv, filepath.Join(f.vault, "notes.md")},
-		{"wrong extension in a folder", conv, filepath.Join(f.vault, ".env")},
+		{"secret name in a folder", conv, filepath.Join(f.vault, ".env")},
 		{"directory in a folder", conv, filepath.Join(f.vault, "dir.md")},
 		{"FIFO in a folder", conv, filepath.Join(f.vault, "pipe.md")},
 		{"over the size bound in a folder", conv, filepath.Join(f.vault, "big.md")},
@@ -459,13 +530,15 @@ func newWorkdirReadFixture(t *testing.T) *workdirReadFixture {
 // TestWorkspaceFileReader_WorkdirFolder: with no configured folders, a
 // conversation in a subfolder of the working folder reads a markdown file in
 // the working folder by absolute path, and every other reader rule still holds
-// there: a markdown symlink leaving every root and a non-markdown file are the
-// same one false.
+// there: escaped paths and denied names return the same false.
 func TestWorkspaceFileReader_WorkdirFolder(t *testing.T) {
 	t.Parallel()
 	f := newWorkdirReadFixture(t)
 	writeFile(t, f.wd, "BEHAVIOR.md", "# behavior")
-	writeFile(t, f.wd, "notes.txt", "not markdown")
+	writeFile(t, f.wd, "notes.txt", "plain text")
+	writeFile(t, f.wd, ".env", "secret")
+	mustSymlink(t, ".env", filepath.Join(f.wd, "alias.py"))
+	mustSymlink(t, "notes.txt", filepath.Join(f.wd, "private.key"))
 	writeFile(t, f.outside, "secret.md", "outside")
 	mustSymlink(t, filepath.Join(f.outside, "secret.md"), filepath.Join(f.wd, "escape.md"))
 
@@ -480,9 +553,14 @@ func TestWorkspaceFileReader_WorkdirFolder(t *testing.T) {
 	if _, ok := workspaceFileReader(f.reg, maxAttachFileBytes)(conv, filepath.Join(f.wd, "BEHAVIOR.md")); ok {
 		t.Error("without the working folder the reader served it; the fixture does not discriminate")
 	}
+	if got, ok := read(conv, filepath.Join(f.wd, "notes.txt")); !ok || string(got.Data) != "plain text" {
+		t.Errorf("working-folder text: got (%q, %v), want served", got.Data, ok)
+	}
 	for name, path := range map[string]string{
 		"markdown symlink to a file outside every root": filepath.Join(f.wd, "escape.md"),
-		"non-markdown file in the working folder":       filepath.Join(f.wd, "notes.txt"),
+		"secret file in the working folder":             filepath.Join(f.wd, ".env"),
+		"eligible symlink to denied target":             filepath.Join(f.wd, "alias.py"),
+		"denied symlink to eligible target":             filepath.Join(f.wd, "private.key"),
 	} {
 		if got, ok := read(conv, path); ok {
 			t.Errorf("%s: served %q, want refused", name, got.Data)

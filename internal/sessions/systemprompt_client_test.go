@@ -477,3 +477,85 @@ func TestAdmitClientVersion(t *testing.T) {
 		})
 	}
 }
+
+func TestClientSectionFeaturesText_Pinned(t *testing.T) {
+	t.Parallel()
+	const want = "Clients attached when this session started, each shown by the name and " +
+		"version it reported for itself when it connected: \"Desktop\" (version \"1\") (self-reported features \"  Markdown é  \"), \"Phone\" (self-reported features \"Images\").\n"
+	got := clientSection([]ClientIdentity{{Name: "Phone", Features: "Images"}, {Name: "Desktop", Version: "1", Features: "  Markdown é  "}})
+	if got != want {
+		t.Errorf("section = %q, want %q", got, want)
+	}
+}
+
+func TestAdmitClient_Features(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, report string
+		accepted     bool
+	}{
+		{"empty", "", false}, {"blank", " \u00a0 ", false},
+		{"verbatim", "  Markdown é  ", true},
+		{"512 bytes", strings.Repeat("x", 512), true}, {"513 bytes", strings.Repeat("x", 513), false},
+		{"512 multibyte", strings.Repeat("é", 256), true}, {"513 multibyte", strings.Repeat("é", 256) + "x", false},
+		{"invalid UTF8", string([]byte{0xff}), false}, {"quote", `a"b`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := admitClient(ClientIdentity{Name: "Phone", Version: "1", Features: tc.report})
+			want := ClientIdentity{Name: "Phone", Version: "1"}
+			if tc.accepted {
+				want.Features = tc.report
+			}
+			if !ok || got != want {
+				t.Errorf("admitClient = (%+v, %v), want %+v", got, ok, want)
+			}
+		})
+	}
+	for r := rune(0); r <= 0x9f; r++ {
+		if r >= 0x20 && r < 0x7f {
+			continue
+		}
+		got, ok := admitClient(ClientIdentity{Name: "Phone", Version: "1", Features: "a" + string(r) + "b"})
+		if !ok || got != (ClientIdentity{Name: "Phone", Version: "1"}) {
+			t.Errorf("control U+%04X survived: %+v", r, got)
+		}
+	}
+	if _, ok := admitClient(ClientIdentity{Name: "bad\nname", Features: "Markdown"}); ok {
+		t.Fatal("features rescued invalid name")
+	}
+	got, ok := admitClient(ClientIdentity{Name: "Phone", Version: `bad"version`, Features: "Markdown"})
+	if !ok || got.Version != "" || got.Features != "Markdown" {
+		t.Fatal("version refusal dropped admitted features")
+	}
+}
+
+func TestClientSectionFeatures_Triples(t *testing.T) {
+	t.Parallel()
+	clients := []ClientIdentity{
+		{Name: "Phone", Version: "2", Features: "C"}, {Name: "Phone", Version: "1", Features: "B"},
+		{Name: "Phone", Version: "1", Features: "A"}, {Name: "Phone", Version: "1", Features: "A"},
+		{Name: "Desktop", Features: "D"},
+	}
+	want := []ClientIdentity{{Name: "Desktop", Features: "D"}, {Name: "Phone", Version: "1", Features: "A"}, {Name: "Phone", Version: "1", Features: "B"}, {Name: "Phone", Version: "2", Features: "C"}}
+	if got := admittedClients(clients); !slices.Equal(got, want) {
+		t.Errorf("triples = %+v, want %+v", got, want)
+	}
+	if got := admittedClients(want); !slices.Equal(got, want) {
+		t.Fatal("admitted snapshot is not idempotent")
+	}
+	clients = nil
+	for i := 0; i <= maxNamedClients; i++ {
+		clients = append(clients, ClientIdentity{Name: "Phone", Version: "1", Features: strings.Repeat("x", i+1)})
+	}
+	if clientSection(clients) != "" {
+		t.Fatal("over-cap distinct triples rendered")
+	}
+	if got := clientSection([]ClientIdentity{{Name: "Phone", Features: hostileName}}); strings.Count(got, "\n") != 1 || strings.HasPrefix(got, hostileName) {
+		t.Fatal("client authored a line")
+	}
+	base := []ClientIdentity{{Name: "Phone", Version: "1"}}
+	empty := []ClientIdentity{{Name: "Phone", Version: "1", Features: ""}}
+	if clientSection(base) != clientSection(empty) {
+		t.Fatal("empty description changed legacy bytes")
+	}
+}

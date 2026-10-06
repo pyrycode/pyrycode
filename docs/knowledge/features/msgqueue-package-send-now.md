@@ -30,7 +30,7 @@ rhythm. `QueuedMessage` gained one field, `SentNow bool`, set only on the
 delivery projection of a message `SendNow` writes — it is how a consumer that
 also hangs off `OnDelivered` (the channel-carry clear, see
 [control-plane.md § Carrying a posted channel message into claude's next
-turn](control-plane.md#carrying-a-posted-channel-message-into-claudes-next-turn-2499))
+turn](control-plane-channel-post-carry.md#carrying-a-posted-channel-message-into-claudes-next-turn-2499))
 tells a send-now delivery apart from an ordinary drain delivery of the same
 head.
 
@@ -117,7 +117,7 @@ inert default; and the committing-head refusal shared with `Remove`.
   (`cmd/pyry.newSendNowDeliver`) bypasses `channelCarry.carryPending` and
   `markApprovalHolds` on purpose — see
   [control-plane.md § Carrying a posted channel message into claude's next
-  turn](control-plane.md#carrying-a-posted-channel-message-into-claudes-next-turn-2499)
+  turn](control-plane-channel-post-carry.md#carrying-a-posted-channel-message-into-claudes-next-turn-2499)
   for why consuming the waiting head's composed channel-post count here would
   be a correctness bug, not a missed optimization.
 

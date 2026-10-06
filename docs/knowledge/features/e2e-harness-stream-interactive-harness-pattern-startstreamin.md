@@ -62,6 +62,28 @@ up, if at all, as `stream_turn.no_conversation` (only when the session
 resolves to no conversation at all, which seeding a UUID mismatch does not
 normally produce) rather than as a drop against the active cursor.
 
+### Proving authenticated reports reach the spawn prompt
+
+Relay retention tests and sessions composition tests can both pass while
+`runSupervisor`'s `setClientIdentity` closure drops a field between the packages.
+`TestRelayV2_ClientFeaturesSpawnSnapshot` closes that gap by authenticating a
+fake phone against a real daemon, recording the spawned child's argv and
+reading the file named by `--append-system-prompt-file`. Removing only the
+production feature mapping made its attributed-report assertion fail; a test
+that duplicated the mapping would have stayed green. Inspect the named file's
+contents, since presence of the flag alone cannot prove composition. See
+[client admission and snapshots](sessions-package-key-types-writesystemprompt-systemprompttext.md#naming-the-attached-client-2148)
+and [mutation verification](development-verification.md#prove-that-tests-distinguish-the-change).
+
+When a lifecycle proof posts several turns, finding any historical `turn_end`
+can satisfy a wait with an earlier turn and allow snapshot assertions before
+the new activation completes. Record the completion count for that conversation
+before posting, then require an additional completion before inspecting the
+spawn file. The client-report proof uses this barrier across active reconnect
+and eviction/reactivation; its turn posts are serial, so the increment belongs
+to the turn just posted. Tests with concurrent producers need a correlated
+completion instead.
+
 ### Proving direct live history identity
 
 Seeding a log and requesting history proves paging, but never exercises a live
@@ -80,6 +102,15 @@ existing decrypt helper so Noise receive nonces stay synchronized. See
 producer matrix, including absent storage and publication without a ring.
 
 ### Observing held output without closing the phone connection
+
+For failed-result assertions, inspect `TurnEndPayload.Outcome` and `IsError`:
+`StopReason` is a lifecycle classification, not Claude's result subtype.
+`resultTurnEndReason` maps `error_during_execution` to `cancelled`, so comparing
+`StopReason` to that subtype rejects correct delivery.
+`TestConversationPost_E2E_AcceptanceBeforeLaterFailure` gates the failed result
+until the CLI has returned silent queue acceptance, then checks the recorded
+outcome/error fields. This proves [acceptance semantics](control-plane.md#conversation-post-a-user-message-by-id-conversationpost)
+independently of the later model result.
 
 `fakephone.Client.ReceiveBytes` closes its WebSocket on timeout. An absence
 window on that connection therefore cannot also serve later live assertions.

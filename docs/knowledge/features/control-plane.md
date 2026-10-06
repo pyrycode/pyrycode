@@ -2,153 +2,19 @@
 
 `internal/control` exposes the on-disk control surface of `pyry`: a Unix domain socket (`~/.pyry/<name>.sock`, mode `0600`) speaking line-delimited JSON. Each connection is one request, one response — every verb `Server.handle` dispatches replies with one JSON `Response` and returns; no verb hands off connection ownership. (`VerbAttach` was the one verb that did, until #1348 deleted its server-side handler and #1535 deleted the now-orphaned wire type itself.)
 
-Verbs today: `status`, `stop`, `logs`, `sessions.new`, `sessions.rm`, `sessions.rename`, `sessions.list`, `sessions.has-id`, `rekey`, `mcp.approve`, `attachment.file` (#2164, ships live but inert — see [§ Attachment.file](control-plane-attachment-file-confine-and-store-a-claude-named-path.md)), `channel.new` (#2155, see [§ Channel: new verb](#channel-new-verb-channelnew-2155) below), `pairing.mint` (#2388), and payload-free `update.when-idle` (`VerbUpdateWhenIdle`, #2757; see [Server Construction](#server-construction) for its decision contract). `attach` and `resize` are gone — #1535 deleted `VerbAttach`, `VerbResize`, `AttachPayload`, `ResizePayload`, and the `Request.Attach`/`Request.Resize` fields, plus the orphaned `control.SendResize` client helper, none of which had a live dispatch arm since #1348. The deletion is decode-compatible with a stale (pre-#1348) client: nothing in the repo calls `json.Decoder.DisallowUnknownFields`, and Go's `encoding/json` ignores unknown object fields by default, so a client still sending `{"verb":"attach","attach":{…}}` decodes cleanly and gets the same `unknown verb: "attach"` reply it already got post-#1348 — deleting a `Request` field only ever *widens* what the decoder accepts, never narrows it. The wire shape otherwise is held stable across phases — `VerbSessionsNew` (#75) adds a `Request.Sessions *SessionsPayload` field with `omitempty` so existing-verb wire output stays byte-identical (pinned by `TestProtocol_SessionsRoundTripBackCompat`). `VerbSessionsRm` (#98) extends `SessionsPayload` with `ID`/`JSONLPolicy` (both `omitempty`) and adds a `Response.ErrorCode` field (also `omitempty`) for typed-sentinel propagation — same back-compat guard, byte-identical existing-verb output. `VerbSessionsRename` (#90) extends `SessionsPayload` with one further `omitempty` field (`NewLabel`) and reuses the `Response.ErrorCode` envelope verbatim — no new wire constants. `VerbPairingMint` follows the same additive rule: the optional outer `Request.Pairing` and `Response.Pairing` fields preserve every older encoding, while the inner `PairingPayload` deliberately always emits both `DeviceLabel` and `AllowRemotePermissions`. Those are the only caller-selected mint inputs; `PairingResult.Pairing` is an opaque plaintext bearer credential, not a place to expose identity, key, relay, registry, expiry, or diagnostics. `VerbUpdateWhenIdle` adds no request field, and `Response.UpdateWhenIdle` is optional with `omitempty`, preserving older verb encodings too.
+Verbs today: `status`, `stop`, `logs`, `sessions.new`, `sessions.rm`, `sessions.rename`, `sessions.list`, `sessions.has-id`, `rekey`, `mcp.approve`, `attachment.file` (#2164, ships live but inert — see [§ Attachment.file](control-plane-attachment-file-confine-and-store-a-claude-named-path.md)), `channel.new` (#2155, see [§ Channel: new verb](#channel-new-verb-channelnew-2155) below), `conversation.new` (see [Conversation: create](#conversation-create-conversationnew)), `conversation.post` (see [user-message submission](#conversation-post-a-user-message-by-id-conversationpost)), `channel.post`, `pairing.mint` (#2388), and payload-free `update.when-idle` (`VerbUpdateWhenIdle`, #2757; see [Server Construction](#server-construction) for its decision contract). `attach` and `resize` are gone — #1535 deleted `VerbAttach`, `VerbResize`, `AttachPayload`, `ResizePayload`, and the `Request.Attach`/`Request.Resize` fields, plus the orphaned `control.SendResize` client helper, none of which had a live dispatch arm since #1348. The deletion is decode-compatible with a stale (pre-#1348) client: nothing in the repo calls `json.Decoder.DisallowUnknownFields`, and Go's `encoding/json` ignores unknown object fields by default, so a client still sending `{"verb":"attach","attach":{…}}` decodes cleanly and gets the same `unknown verb: "attach"` reply it already got post-#1348 — deleting a `Request` field only ever *widens* what the decoder accepts, never narrows it. The wire shape otherwise is held stable across phases — `VerbSessionsNew` (#75) adds a `Request.Sessions *SessionsPayload` field with `omitempty` so existing-verb wire output stays byte-identical (pinned by `TestProtocol_SessionsRoundTripBackCompat`). `VerbSessionsRm` (#98) extends `SessionsPayload` with `ID`/`JSONLPolicy` (both `omitempty`) and adds a `Response.ErrorCode` field (also `omitempty`) for typed-sentinel propagation — same back-compat guard, byte-identical existing-verb output. `VerbSessionsRename` (#90) extends `SessionsPayload` with one further `omitempty` field (`NewLabel`) and reuses the `Response.ErrorCode` envelope verbatim — no new wire constants. `VerbPairingMint` follows the same additive rule: the optional outer `Request.Pairing` and `Response.Pairing` fields preserve every older encoding, while the inner `PairingPayload` deliberately always emits both `DeviceLabel` and `AllowRemotePermissions`. Those are the only caller-selected mint inputs; `PairingResult.Pairing` is an opaque plaintext bearer credential, not a place to expose identity, key, relay, registry, expiry, or diagnostics. `VerbUpdateWhenIdle` adds no request field, and `Response.UpdateWhenIdle` is optional with `omitempty`, preserving older verb encodings too.
 
 ## Server Construction
 
-```go
-func NewServer(
-    socketPath string,
-    sessions   SessionResolver,
-    logs       LogProvider,
-    shutdown   func(),
-    log        *slog.Logger,
-    sessioner  Sessioner,
-) *Server
-```
-
-`sessions` is the only required dependency that nil-panics at construction. Programmer error surfaces immediately, not on the first request from a future shell.
-
-`logs`, `shutdown`, and `sessioner` are optional. When nil, the corresponding verb returns an error response — used in tests that care about isolated verbs. `sessioner` is wired in production to `*sessions.Pool` in `cmd/pyry/main.go` (#116); `*sessions.Pool` satisfies `Sessioner` directly because `Pool.Create` returns `sessions.SessionID`, matching the interface signature with no adapter (contrast with `poolResolver` for the read-side `Lookup`). Pre-#116 the call site passed `nil` and `VerbSessionsNew` returned `"sessions.new: no sessioner configured"`. See `docs/specs/architecture/75-control-sessions-new.md` for the seam design.
-
-Dependencies whose implementations need daemon composition state are installed after construction rather than widening `NewServer`. `SetPairingProvider` installs the narrow `func(deviceLabel string, allowRemotePermissions bool) (string, error)` used by `VerbPairingMint`; the provider owns every identity, key, relay, registry, and persistence input that the request cannot supply. `handlePairingMint` copies the closure under `Server.mu` and releases the lock before invoking it, so a slow provider does not serialize unrelated control verbs behind the server lock.
-
-For a relay-enabled daemon, `runSupervisor` installs that provider before
-`Server.Serve` from the same `pairingMinterV2` that `startRelayV2` constructed
-for the active relay leg. The closure therefore carries the running daemon's
-already-resolved server id, relay URL, static public key, and registry path; it
-does not reload saved configuration that may describe another service. Relay
-setup failures never return a provider, and a relay-disabled daemon deliberately
-leaves the seam nil.
-
-The pairing seam is also a credential-redaction boundary. An absent provider returns exactly `pairing.mint: provider not configured`; a missing payload or any provider error returns exactly `pairing.mint: operation failed`. On the error branch, `handlePairingMint` discards both the provider's returned string and its error detail, emits no control-layer log, and leaves `Response.Pairing` absent. `MintPairing` likewise returns an empty string for every error, including the fixed `control: empty pairing.mint response` guard for a missing or empty success payload. Only a nil-error, non-empty pairing reaches the caller.
-
-Operational failure detail from the concrete provider, including a registry
-path, remains daemon-only. Its fixed success and failure events omit the
-caller-supplied label, token, token hash, and encoded pairing, so copying the log
-snapshot into a diagnostic bundle does not create another credential egress.
+See [server construction and provider wiring](control-plane-server-and-deadlines.md#server-construction).
 
 ### Update-when-idle provider
 
-`SetUpdateWhenIdleProvider(func() (UpdateWhenIdleResult, error))` installs the
-optional release-selection and scheduling provider without changing `NewServer`.
-It is safe to call concurrently; nil clears the provider. `handleUpdateWhenIdle`
-copies it under `Server.mu`, unlocks, and invokes it exactly once for the request.
-The provider owns release selection and eligibility. The payload-free request
-exposes no binary path, release URL, version override or eligibility bypass:
-
-```json
-{"verb":"update.when-idle"}
-```
-
-`Response.UpdateWhenIdle` (JSON `updateWhenIdle`) carries an
-`UpdateWhenIdleResult`: required `decision`, optional `reason`, and optional
-`releaseTag`. Success returns one of these typed decisions:
-
-| Decision | Go constant | Required detail |
-| --- | --- | --- |
-| `up-to-date` | `UpdateUpToDate` | None |
-| `not-eligible` | `UpdateNotEligible` | Nonblank `reason` explaining the refusal |
-| `will-install` | `UpdateWillInstall` | Nonblank `releaseTag` naming the selected or already-pending release |
-
-For example, an accepted scheduling decision is:
-
-```json
-{"updateWhenIdle":{"decision":"will-install","releaseTag":"v9.8.7"}}
-```
-
-Both server and client use `validateUpdateWhenIdleResult` to reject a missing or
-unknown decision, `not-eligible` without a reason, or `will-install` without a
-tag. Whitespace-only reason/tag values are rejected; valid values are preserved
-verbatim. A missing response result returns `update.when-idle: missing decision`;
-an empty or unknown discriminant returns `update.when-idle: invalid decision`.
-Missing required details return `update.when-idle: missing reason` or
-`update.when-idle: missing release tag`.
-
-An absent provider returns `Response.Error` with exactly
-`update.when-idle: provider not configured`. Any provider error returns exactly
-`update.when-idle: operation failed`, discarding both its error detail and any
-returned result. Invalid provider results also produce only an error, with no
-success payload. `UpdateWhenIdle(ctx, socketPath) (*UpdateWhenIdleResult, error)`
-returns nil on every failure, including transport and validation failures; a
-non-empty wire `error` takes precedence over any accompanying success payload.
-
-`runSupervisor` installs the production `autoUpdater.request` provider before
-the control server serves requests, with or without `-pyry-auto-update`.
-`runUpdateArgs` calls `control.UpdateWhenIdle` for `pyry update --when-idle`.
-The selected daemon owns metadata, eligibility, installation and restart;
-explicit requests share the scheduler's active attempt and pending tag. Disabling
-automatic scheduling prevents unsolicited checks/retries. See
-[update flags](pyry-update-command.md#flags) and
-[automatic update](pyry-update-command-automatic-update.md).
-
-`will-install` accepts work; it does not report a completed installation. The
-provider waits only for the bounded metadata/eligibility decision, with a
-60-second production HTTP budget, never for idle, asset download, installation
-or restart. Accepted work uses the daemon context, so disconnect or client
-timeout does not retract it. Daemon shutdown cancels the work; `runSupervisor`
-drains control handlers through `ctrlDone`, joins the scheduler, then joins
-updater workers even when scheduling is disabled.
-
-Publishing acceptance before installation alone does not prove the response was
-written: an already-idle daemon can install and request restart immediately.
-`autoUpdater.request` reads the published decision even after restart cancels
-the daemon context, `Server.Serve` drains handlers through their response writes,
-and `runSupervisor` joins that drain before exiting. For a connected caller
-within the existing response deadline, this ordering preserves acceptance
-across an update-triggered shutdown. A timing delay would not establish that
-ordering. See the [contract spec](../../specs/architecture/2757-update-when-idle-contract.md)
-and [integration spec](../../specs/architecture/2758-update-when-idle.md).
+See [the update-when-idle provider](control-plane-server-and-deadlines.md#update-when-idle-provider).
 
 ## Handshake Deadline: per-conn timeout and the session-verb extend (#865)
 
-`handle` (the per-conn goroutine `Serve` spawns) sets `conn.SetDeadline(time.Now().Add(s.handshakeTimeout))` before decoding the client's JSON request — the bound that limits how long a connected-but-silent client can pin a per-conn goroutine. `s.handshakeTimeout` defaults to `defaultHandshakeTimeout` (5s), set once in `NewServer`'s struct literal; same-package tests may shrink it via the unexported `Server.handshakeTimeout` field (written once before `Serve` starts, read-only per-conn thereafter — no lock needed, same post-construction-override shape as `SetRekeyer`).
-
-Handlers adjust the connection or write deadline after the handshake read has
-already completed. The approval and session-verb policies are:
-
-- `handleApprove` **clears** it (`conn.SetDeadline(time.Time{})`) for the length of a blocking approval wait — the conn stays open for however long the human decision takes, until `mcpApprovalTimeout` or a disconnect/shutdown watcher resolves it. (Until #1535, `handleAttach` was the other clearer, handing the conn to the bridge for the indefinite life of an attachment; that verb and its handler are gone.)
-- `handleSessionsNew` / `handleSessionsRm` **extend** it to `sessionOpTimeout + sessionOpConnGrace` (30s + 5s = 35s) immediately before calling `Pool.Create` / `Pool.Remove`. Before #865, the deadline was left at its 5s handshake value while each handler's own ctx budgeted 30s for the op — once `Create`/`Remove` ran past 5s (routine on a cold claude spawn: documented 2-15s latency), the final `enc.Encode(Response{...})` failed with a silently-discarded deadline error and the client's read got EOF, even though the mutation had actually succeeded (an operator-visible orphan on `sessions.new`, a false failure on `sessions.rm`). Extending — not clearing — keeps the 30s op ctx as the binding budget on the normal path, while a write that's still stuck at 35s hits a hard upper bound rather than hanging the conn goroutine forever.
-
-Both extend calls run strictly after `handle` has decoded the request, so the handshake-read bound is unaffected by either verb: a silent client (no request sent) is still cut off at `s.handshakeTimeout` before either handler is reached. See [`codebase/865.md`](codebase/865.md) for the fix and its regression tests.
-
-`pairing.mint` needs a different two-sided bound. `MintPairing` derives the earlier of the caller's existing deadline and `time.Now().Add(DialTimeout)` before it calls `request`, so dial retry, encode, and decode consume one operation-wide budget; changing `request` globally would incorrectly shorten callers that intentionally choose a longer deadline. Server-side, `handlePairingMint` retains `handle`'s finite request-read deadline and installs a fresh `DialTimeout` response-write deadline before entering the provider. The write is therefore bounded even if the provider returns after the original handshake window.
-
-The pairing provider closure is synchronous and has no context, so these I/O deadlines cannot cancel it after entry. A client may return on its deadline while the provider is still running; the handler attempts its already-bounded write only after the provider returns, and `Serve` continues to drain that in-flight handler during shutdown. Do not turn the deadline into a detached worker or describe it as a provider-execution timeout—the concrete provider must bound its own lock waits and local I/O.
-
-`update.when-idle` has its own 70-second policy (`updateWhenIdleTimeout`).
-`UpdateWhenIdle` derives a bounded context before dialing, so dial, request write
-and response read share one operation-wide ceiling, shortened by any earlier
-caller deadline. It sets the connection's absolute deadline and uses
-`context.AfterFunc` to wake parked I/O promptly on caller cancellation, even
-after the provider has entered. The watcher is stopped on return and the
-connection is closed. These policies are scoped to this helper; `request`,
-`requestPatient`, and other verbs retain their existing bounds.
-
-After request decoding, `handleUpdateWhenIdle` installs a fresh 70-second
-response-write bound with `SetWriteDeadline` before entering the provider. The
-five-second handshake-read limit stays in place. A valid decision can therefore
-arrive after five seconds, allowing the release metadata check's 60-second HTTP
-budget. The client ceiling starts before dial, while the server write window
-starts after decoding; neither is reset when the provider returns.
-
-These are I/O bounds, not execution bounds. The synchronous update provider has
-no context parameter and must bound its own release/metadata check. Cancellation
-or expiry ends the client's wait without stopping the provider or accepted
-installation work. If the provider returns after the write bound expires, its
-response may never reach the caller; a failed exchange cannot establish that
-scheduling was retracted. `Serve` still waits for that handler to return during
-shutdown.
+See [handshake and operation deadlines](control-plane-server-and-deadlines.md#handshake-deadline-per-conn-timeout-and-the-session-verb-extend-865).
 
 ## Resolver Seam
 
@@ -294,7 +160,7 @@ See `docs/specs/architecture/90-control-sessions-rename.md` for the full design.
 Two choices worth keeping in mind for the next verb built this way:
 
 - **The creator seam is a narrow mint-only closure, not `*sessions.Pool` itself.** `Server.channelCreator func(cwd, name string) (string, error)`, installed via `SetChannelCreator` alongside `SetFileAttacher` — a plain func behind a late-bound setter, not a `NewServer` parameter (the same "every dependency lives at the `cmd/pyry` composition root" argument as `SetFileAttacher`). The `cmd/pyry`-side implementation itself narrows further: it closes over a bare `mint func(label, spawnDir string) (string, error)` rather than the whole `*sessions.Pool`, mirroring the narrowing `sessionMinter.Create` already does for the wire `create_conversation` path (see [conversation-session-binding-create.md § The `SessionCreator` seam](conversation-session-binding-create.md#the-sessioncreator-seam-keeps-handlers-import-clean)). Taking the concrete `*Pool` would have forced every creator unit test to stand one up.
-- **The creator sits at the same layer as `sessionMinter`, so it needs neither of the two designs the ticket proposed.** `sessionMinter.Create` is `resolveSpawnDir` followed by `pool.Mint` — both callable directly from `cmd/pyry`. A verb that needs the *resolved* path back (this one derives the channel's name from it) does not have to make the minter re-resolve a second time, nor widen `handlers.SessionCreator` to return it. Check whether new work can be written at the caller's own layer before reaching for either "call twice" or "widen the interface."
+- **Resolve and trust-mark the workspace once, then reuse that answer.** The legacy `channelCreator` calls `resolveSpawnDir` directly before its bare mint closure. A caller accepting model/effort must instead use `sessionMinter.Create`, which checks membership before resolving and calls `Pool.MintWith` with one defaults snapshot. `handlers.SessionCreator` already returns the resolved cwd: `conversationCreator` uses it for both the stored workspace and the default channel name. Resolving again would repeat trust marking; bypassing the minter would lose the shared settings validation.
 
 **`resolveSpawnDir`'s empty-string arm is fail-open by contract, and every non-wire caller must re-guard it.** Per [conversation-session-binding-create.md](conversation-session-binding-create.md#the-sessioncreator-seam-keeps-handlers-import-clean), `resolveSpawnDir("")` returns `("", nil)` — success, meaning "the daemon's shared trusted workdir," with **no** confinement and **no** trust-mark. That is correct for the phone's optional-`Cwd` path but wrong for a verb where an empty cwd can only mean a bug or a stray caller: unguarded, it would silently write a row with `Cwd: ""` and a name of `"."`. `channelCreator` therefore rejects an empty cwd itself, *in addition to* `handleChannelNew`'s wire-shape check — the second guard is not redundant, it protects the seam from any future caller that doesn't come through the handler (`handleAttachFile`'s empty-`SessionID` double guard is the precedent). Confirmed by mutation: deleting the creator's own guard makes the empty-cwd test pass a `cwd` straight through instead of failing loud.
 
@@ -303,6 +169,172 @@ Two choices worth keeping in mind for the next verb built this way:
 **A message-prefix discriminator between "server rejected" and "transport failed" isn't always worth building.** `rekeyVerdict`'s `isServerReject` (a hand-maintained message-prefix list) exists because `pyry rekey`'s acceptance criteria wanted a different stderr prefix per class. `channel.new`'s AC only asks for one stderr line and exit 1 on any failure, so `channelNewVerdict` skips the discrimination entirely rather than adding a second hand-maintained list that would go stale the first time a server message got reworded. Check what the AC actually distinguishes before copying a sibling's verdict-formatter shape wholesale.
 
 See `docs/specs/architecture/2155-channel-new-control-verb.md` for the full design and security review.
+
+## Conversation: create (conversation.new)
+
+`VerbConversationNew` is the control API behind `pyry conversation new`.
+`runSupervisor` installs `conversationCreator` through
+`Server.SetConversationCreator` beside the legacy channel creator, over the same
+conversation registry, persistence path and pool, with
+`sessionMinter{pool, modelVocabulary}`. Installation is independent of relay
+configuration: creation works without a relay URL or paired client.
+`channel.new` and name-based channel-post creation keep their legacy creator.
+The request uses `Request.Conversation` (`ConversationPayload`):
+
+```json
+{"verb":"conversation.new","conversation":{"cwd":"/workspace","type":"chat","model":"","effort":""}}
+```
+
+| Field | Contract |
+| --- | --- |
+| `cwd` | Required nonempty string; forwarded unchanged. |
+| `name` | Optional string; omission forwards an empty name. |
+| `type` | Optional `chat` or `channel`; absent/null defaults to `chat`; empty or other strings are invalid. |
+| `model`, `effort` | Optional string pointers: absent/null stays unset; explicit empty stays present, matching `protocol.CreateConversationPayload`. |
+
+`ConversationPayload.Type` is a pointer because a scalar would silently default
+an explicit empty type to chat. `TestConversationNew_Refusals` pins its rejection.
+`Type`, `Model` and `Effort` use `omitempty`: nil pointers remarshal as absent
+keys; empty settings remain present. See the
+[conversation write payloads](protocol-package-types-conversations-write-payloads.md).
+
+`Server.SetConversationCreator` installs an independent
+`func(cwd, name, conversationType string, model, effort *string) (string, error)`;
+nil clears it. `handleConversationNew` snapshots it under `Server.mu`, then
+unlocks. Without a creator it returns
+`conversation.new: no conversation creator configured` before payload checks.
+With one installed, absent/null payload or missing/empty cwd returns
+`conversation.new: missing cwd`; invalid type returns
+`conversation.new: invalid type`, without invoking the creator.
+
+Accepted input invokes the creator once with the effective type and otherwise
+unchanged values. Control performs no path handling. The creator owns workspace
+confinement, symlink resolution before trust-marking, name defaults and
+model/effort shape and membership validation; control defines no settings
+vocabulary. It must bound its own work:
+the extended `sessionOpTimeout + sessionOpConnGrace` deadline bounds response
+I/O, not synchronous creation.
+
+Production `conversationCreator` checks settings shape with `relay.ValidModel`
+and `relay.ValidEffort`, then delegates Claude membership checks and minting to
+`sessionMinter.Create`. Nil settings inherit `Pool.MintDefaults`; an explicit
+empty string resets only that field to Claude's own default. Effort is checked
+against the effective model from the same defaults snapshot used for minting.
+Nonempty requested models use the retained published vocabulary; an unavailable
+menu is distinguished from a proven absent model. Settings refusals precede
+directory creation, trust marking and minting. See
+[Requested model and effort](conversation-session-binding-create.md#requested-model-and-effort-2665)
+for the shared validation contract and effort fallback rules.
+
+The minter's resolved, confined cwd is stored directly, without a second
+resolution or trust mark. Chats are unpromoted with a null name when the name
+is omitted or empty; channels are promoted and default to the resolved folder's
+base name. A nonempty name overrides either default. The row binds the minted
+session immediately, with accepted settings stored before the first message;
+creation does not activate Claude. The registry is saved eagerly, best-effort:
+a save failure is logged and creation still succeeds. When the existing relay
+announcement hook is available, it announces a registry read-back including
+the workspace label; a nil hook leaves local creation available.
+
+Success returns `{"conversationNew":{"conversationID":"created-id"}}`.
+A creator error discards any accompanying id; an empty id returns
+`conversation.new: empty conversation id`. Both omit the success payload.
+Creator refusal text reaches the wire with a `conversation.new:` prefix;
+`Server.SetConversationCreator` requires static, input-free errors, like
+`Server.SetChannelCreator`.
+`ConversationNew(ctx, socketPath, payload)` returns an empty id and error on
+transport failures, wire refusals even alongside success, or missing/empty
+success ids.
+
+`runConversation` reads the shell's cwd and calls `ConversationNew` with a
+30-second context. Success prints only the id and newline; syntax errors exit
+2, and settings, cwd, workspace or transport errors exit 1 with stderr and empty
+stdout. See [CLI parsing](cli-verb-dispatch.md#conversation-option-and-selector-parsing),
+the [control contract spec](../../specs/architecture/2883-conversation-new-contract.md)
+and [CLI spec](../../specs/architecture/2884-conversation-cli.md).
+
+## Conversation: post a user message by id (conversation.post)
+
+`VerbConversationPost` is the control API behind
+`pyry conversation post --id ID (--text TEXT | --file PATH)` for both chats and
+channels. `runSupervisor` installs `conversationSubmitter` through
+`Server.SetConversationSubmitter`, using `sessionRouter.resolve` and the ordinary
+inbound `Queue.Enqueue`.
+The request uses `Request.ConversationPost` (`ConversationPostPayload`):
+
+```json
+{"verb":"conversation.post","conversationPost":{"conversationID":"existing-id","text":"user message"}}
+```
+
+Both `conversationID` and `text` are required nonempty strings. Control forwards
+both unchanged, including whitespace-only values, exactly once on valid input.
+It performs no trimming, id resolution, registry lookup or creation on a miss.
+`control.MaxChannelPostBytes` bounds decoded text at 64 KiB (65,536 UTF-8 bytes),
+inclusive. Count bytes after JSON decoding, not JSON escape spelling or Unicode
+characters: a character-count check would accept oversized Unicode messages.
+
+`Server.SetConversationSubmitter(func(conversationID, text string) error)`
+installs an independent callback; nil clears it. After JSON decoding,
+`handleConversationPost` rejects an absent submitter before payload validation
+with `conversation.post: no conversation submitter configured`. With one
+installed, absent/null payload or missing/empty/null id returns
+`conversation.post: missing conversation id`; missing/empty/null text returns
+`conversation.post: empty message`; text above the cap returns
+`conversation.post: message too large`. None invokes the callback. Wrong JSON
+types fail in the shared decoder before dispatch.
+
+The callback owns existing-id resolution and queue admission and must not create
+on a miss. It must bound its own work: the 35-second response I/O deadline cannot
+cancel execution. Invocation runs outside `Server.mu`.
+
+Production resolves the stored binding before one enqueue of the unchanged text.
+An unknown id returns `unknown conversation` without creating a conversation or
+session. Empty or unavailable bindings return `conversation session is unavailable`
+without bootstrap fallback; the existing resolver can revive a valid missing
+session without activating it. A full queue returns `conversation queue is full`
+without changing its backlog. Only accepted admission advances `LastUsedAt`;
+registry persistence is best-effort and cannot revoke acceptance. Resolver errors
+are translated to static refusals, and a save warning contains no caller id/text
+or downstream error. See [binding resolution and revival](conversation-session-binding-routing.md).
+
+The [ordinary queue](msgqueue-package.md) owns busy-turn ordering and delivery
+retries. `newInboundDeliver` resolves again on each delivery attempt and activates
+the bound session; a freshly created conversation uses its creation-time
+model/effort. User messages, generated assistant output and completion enter the
+existing history/turn stream. With no relay URL, `startRelay` already installs
+the history-backed stream drain with `historyOnlyBroadcaster`, so neither a
+configured relay nor a paired client is needed. Binding changes or later turn
+failures cannot change an already accepted result.
+
+Success returns only `{"ok":true}`: queue acceptance, not completed model
+output. Callback refusals, including unknown-id and full-backlog refusals,
+return only an error with the `conversation.post:` prefix, for example
+`{"error":"conversation.post: unknown conversation"}`. OK is false (omitted
+on the wire), and there is no result body. Control does not log id/text or echo
+them in validation diagnostics. Like `Server.SetChannelPoster`, the submitter
+must return static errors or static formats over daemon-derived values; callback
+refusal text reaches the wire verbatim and must never echo raw caller id/text.
+
+`ConversationPost(ctx, socketPath, conversationID, text) error` returns transport
+or refusal errors, even alongside true OK. Absent/false/null OK returns
+`control: conversation.post response missing ok flag`.
+
+`runConversationPost` calls this helper once under a 30-second budget, exits 0
+with no stdout or stderr on acceptance, and does not wait for completion or
+resubmit after a transport failure. It requires a nonempty `--id` and exactly
+one supplied `--text`/`--file` flag. Usage errors exit 2; file/content, refusal
+and transport errors exit 1 with stderr only. `channelPostContent` preserves
+whitespace and bounds a single file open to the cap plus one overflow-detection
+byte. Explicit empty content is a content error, not a missing-flag error.
+Instance/socket selectors precede `post`, as they do `new`.
+
+This submits a **user message** by opaque id. Existing
+[Channel: post a message into an existing channel](#channel-post-a-message-into-an-existing-channel-channelpost-2497)
+publishes **host-authored assistant content** by channel label, creating a
+channel on a label miss, and [carries it into the next user turn](control-plane-channel-post-carry.md).
+`channel.post` does not start that user turn. Its API and wire encodings remain
+compatible. See the [contract spec](../../specs/architecture/2885-conversation-post-contract.md)
+and [CLI routing spec](../../specs/architecture/2886-conversation-post-cli.md).
 
 ## Channel: post a message into an existing channel (channel.post, #2497)
 
@@ -337,22 +369,6 @@ No log line on the announce path carries `Cwd` or `Name` — both are host files
 See `docs/specs/architecture/2156-conversation-updated-host-create-fanout.md` for the full design and security review, and [protocol-package-drift-detectors.md § the `excludedTypes` classification key](protocol-package-drift-detectors.md) for how `relay_guard_test.go` records a type with two producers of different shapes.
 
 See [Fanning `channel.post` out: `assistant_delta` live delivery (#2498)](control-plane-channel-post-live-delivery.md) for the equivalent unsolicited push a successful `channel.post` makes.
-
-## Carrying a posted channel message into claude's next turn (#2499)
-
-A post now leads the next user turn the daemon delivers for that conversation's client message path, so claude sees the question and the operator's reply in the order the two happened. `channelCarry` (`cmd/pyry/channel_carry.go`) holds the pending text in memory and composes it; `conversations.Registry.AppendPendingChannelPost` / `PendingChannelPosts` / `ClearPendingChannelPosts` (see [conversations-registry-crud.md § `AppendPendingChannelPost` / `PendingChannelPosts` / `ClearPendingChannelPosts`](conversations-registry-crud.md#appendpendingchannelpost--pendingchannelposts--clearpendingchannelposts-2499)) hold it durably.
-
-**Composed at delivery, not at enqueue — a `msgqueue.DeliverFunc` decorator, not a `newInboundDeliver` parameter.** Composing at enqueue misses a post that lands while a reply is already queued, since the queue's head can sit through a whole claude turn before it is written. `newInboundDeliver` has 17 call sites (`codegraph_callers`), 16 of them tests, which is what made a signature widening the wrong shape; `carryPending` wraps it the same way `markApprovalHolds` already does in that file, so the wiring cost is one line rather than a fan-out. Check call-site count before reaching for a new parameter on an existing seam — a decorator is often both cheaper to wire and better factored.
-
-**Cleared from `OnDelivered`, the msgqueue seam that fires once per confirmed delivery — chained, not replaced.** `msgqueue.Config.OnDelivered` is a single-valued field already held by `newOperatorMessageHistory` ([msgqueue-package.md § Delivered notification](msgqueue-package.md#delivered-notification-2115)); a `deliveredFuncs(...msgqueue.DeliveredFunc) msgqueue.DeliveredFunc` combinator in `channel_carry.go` fans it to both consumers, history first and the clear second, preserving #2115's "as close to the commit as possible" ordering. A failed delivery retried at the same head recomposes on every attempt, so a post that lands during a failed attempt is carried by the retry and cleared exactly once, by the attempt that actually succeeds.
-
-**The composed text reaches claude only, structurally, not by filtering.** `OnDelivered` carries a `msgqueue.QueuedMessage`, which declares no field for the composed payload — only `Text`, the client's own — so the durable history producer and the wire cannot see the carried text even if a future edit tried to read it from there. The same barrier #2115 built for the operator-history producer.
-
-**Why the growth bound refuses the newest post instead of evicting the oldest is a concurrency-correctness finding, not a style choice** — see [conversations-registry-crud.md § `AppendPendingChannelPost`...](conversations-registry-crud.md#appendpendingchannelpost--pendingchannelposts--clearpendingchannelposts-2499).
-
-**`clearDelivered` gained a second caller it must not clear for (#2729).** `send_queued_now`'s `SendNow` write goes around `carryPending` entirely — it writes the queue's waiting-head-or-not entry it was told to, not the conversation's composed head, so it never carried a pending post. `msgqueue.QueuedMessage.SentNow` is the one field `clearDelivered` reads to tell the two deliveries apart; a send-now delivery returns immediately, leaving the composed count to be cleared by the waiting head's own eventual confirmation. See [msgqueue-package-send-now.md](msgqueue-package-send-now.md).
-
-See `docs/specs/architecture/2499-carry-posted-channel-message.md` for the full design and security review.
 
 ## Process-Global vs Per-Session
 
@@ -427,6 +443,7 @@ refused until writers finish and replacement acceptance survives reload.
 This overview is split across the documents below. Each is kept small so
 search can reach it.
 
+- [Server construction and deadlines](control-plane-server-and-deadlines.md) — dependency installation, pairing/update providers and request/response I/O bounds.
 - [Testing](control-plane-testing.md) — wire/provider boundaries, startup readiness, cancellation and ownership proofs.
 - [Sessions: list seam (1.1b-B1)](control-plane-sessions-list-seam-1-1b-b1.md) — The fourth `sessions.*` verb is `sessions.list` — the first read-side member of the namespace. 
 - [Sessions: has-id seam (1.3c-1)](control-plane-sessions-has-id-seam-1-3c-1.md) — The fifth `sessions.*` verb is `sessions.has-id` — a one-bit existence query. 
@@ -436,3 +453,5 @@ search can reach it.
 - [Sessions: CLI Router (1.1a-B2)](control-plane-sessions-cli-router-1-1a-b2.md) — `pyry sessions <verb>` is the operator-facing surface for the `sessions.*` namespace. 
 - [Client dial: transient-startup retry (#198 + #199)](control-plane-client-dial-transient-startup-retry.md) — `internal/control/dial.go` houses the dial-side surface for the control client: the `dial()` primitive every client verb routes through,…
 - [Durable `channel.post` delivery (#2498, #2810, #2811)](control-plane-channel-post-live-delivery.md) — Accept while busy, deliver promptly when idle or after published completion/confirmed stop, and finish FIFO posts before successor turns; retry and safe startup recovery preserve identity. Five-minute diagnostics keep holding. All history chunks precede live announcement, independently of Claude carry.
+
+- [Carrying posted channel messages into the next user turn](control-plane-channel-post-carry.md) — Delivery-time composition, confirmed-delivery clearing and send-now exclusion.

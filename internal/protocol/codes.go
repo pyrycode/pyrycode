@@ -1337,6 +1337,10 @@ const (
 	TypeSessionSettingsUpdated = "session_settings_updated" // binary → phone, outbound v2 reply confirming the change
 )
 
+// TypeSwitchAgent names a phone → binary v2 agent-switch request. It remains
+// outside the v1 inboundAppTypeSet; handling is pending #2870/#2871.
+const TypeSwitchAgent = "switch_agent"
+
 // Mobile Protocol v2 read-session-settings vocabulary (#491/#1214;
 // docs/protocol-mobile.md § Session settings). The READ half of the #844
 // cluster above, which shipped write-only: set_session_settings changes the
@@ -1611,8 +1615,8 @@ const (
 )
 
 // Mobile Protocol v2 LIVE WORKSPACE READ (#2598). The frame a client sends to
-// read one markdown file as it is on the host NOW, from the recorded workspace of
-// the conversation it names. Its payload is ReadWorkspaceFilePayload
+// read one regular file as it is on the host NOW, from the recorded workspace
+// or admitted read folders of the conversation it names. Its payload is ReadWorkspaceFilePayload
 // (attachments.go), and it is answered exactly as TypeRequestAttachment is: an
 // attachment_chunk stream correlated by in_reply_to, or one
 // CodeAttachmentNotFound / CodeAttachmentStreamAborted TypeError.

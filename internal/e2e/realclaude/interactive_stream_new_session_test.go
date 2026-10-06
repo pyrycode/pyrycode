@@ -79,7 +79,7 @@ package realclaude
 // drain helper decrypts every noise_msg in arrival order). fakephone.Client buffers
 // inbound frames, so the session_transition the binary emits while the actuation
 // loop is polling the registry (not reading the phone) is still available when the
-// M3 drain reads it. No t.Parallel: WithWorktreeAuthenticated calls t.Setenv. The
+// M3 drain reads it. Runs in parallel through runParallel; liveHome keeps HOME out of the process environment. The
 // reused setup skips cleanly (exit 0) when claude / creds are absent, exactly like
 // every sibling stream spec — the actual green requires a live claude (needs-real-claude).
 
@@ -117,11 +117,12 @@ const (
 )
 
 func TestInteractiveStreamNewSessionRotatesAndSpawnsFresh(t *testing.T) {
-	// No t.Parallel: WithWorktreeAuthenticated calls t.Setenv.
+	runParallel(t)
+	// Parallel only through runParallel; see liveHome.
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Skipf("realclaude: claude not on PATH: %v", err)
 	}
-	home := WithWorktreeAuthenticated(t) // skips cleanly when no creds
+	home := liveHome(t) // skips cleanly when no creds
 	claudeBin, err := exec.LookPath("claude")
 	if err != nil {
 		t.Fatalf("realclaude: resolve claude: %v", err)

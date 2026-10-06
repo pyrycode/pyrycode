@@ -185,14 +185,101 @@ keeps the native probe specific by refusing non-stream CLI launches, so Haiku
 fallback cannot make it pass. `TestInteractiveStream_FallbackReplySuggestionSetThenClear`
 instead removes `--prompt-suggestions` and sets
 `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=0` only on the persistent child, allowing
-the real production fallback call. After a completed exchange it requires a nonempty
-reply within the fallback bounds, then an explicit-null clear at a higher
-revision after accepted input. With credentials present, absent output fails;
-it is not a successful skip. Both tests use the same wire shape, so each must
-exclude the competing producer rather than infer provenance from that frame.
+the real production fallback call. Staging stays at one completed exchange with
+a 15-second suggestion window, including the two-second native window and
+ten-second production attempt (`replyFallback.run` uses a 9.8-second internal
+deadline to reserve termination time). It requires a nonempty UTF-8 single-line
+reply for `suggestConvID`, at most 240 characters and 1024 bytes, then an explicit
+`suggested_reply: null` at a higher revision after accepted input. With credentials
+present, absent output is FAIL, never a successful skip. Both tests use the same
+wire shape, so each must exclude the competing producer rather than infer
+provenance from that frame.
 Both run under ordinary `make e2e-realclaude` without extra opt-in switches; the
 [dispatcher gate](https://github.com/pyrycode/pyrycode/issues/2856#issuecomment-6009817217)
 executed and passed both named tests.
+
+The fallback wrapper forwards real-child stdout unchanged and inherits stdin
+and stderr. Its private source file records invocation/completion counts, wrapper
+PID, start/elapsed milliseconds, observed real-child exit, stdout byte count and
+fixed UTF-8, JSON-field, result-success and bounded-text predicates. Validation
+retains at most 4097 bytes against the 4096-byte production stdout cap.
+`output_observed` gates byte counts and predicates; an incomplete invocation's
+elapsed value is time since start at observation, not a measured child duration.
+`readSuggestSource` tolerates a trailing partial append; `suggestSource.diagnostic`
+joins source metadata with persistent stream/result counts, idle state and wire
+set/clear revisions, on both success and failure. Diagnostic stages distinguish
+no invocation, incomplete invocation, unsuccessful exit, unusable output and
+usable output without a wire set; usable source output alone does not establish
+publication eligibility or acceptance before the deadline.
+
+Group cancellation can kill the wrapper before it records completion, so
+`replyFallback.run`, using the logger supplied by `runSupervisor`, also emits
+`reply_fallback.lifecycle` after a successful start. It records wrapper PID,
+attempt/child elapsed milliseconds, separate parent/fallback canceled and
+deadline flags, `own_deadline_elapsed`, `group_cancel_requested`, `wait_completed`,
+`exit_observed` and numeric exit code/signal. Snapshot before deferred context cleanup:
+cleanup itself cancels a live context and would otherwise make a successful
+attempt look canceled. Only observed Wait completion permits reading process
+state; the cancellation-request flag is atomic. `suggestLifecycle` matches the
+source wrapper PID to a complete daemon record and formats only parsed scalars.
+The daemon's exit belongs to the wrapper, not an independently witnessed real
+child. Missing, partial or malformed records, unobserved exit/output and absent
+wrapper completion remain unknown; simultaneous context observations remain
+ambiguous. Timing or a cancellation request alone cannot identify a unique cause.
+These diagnostics retain fixed labels and numeric/boolean fields, never generated
+text, raw stdout/stderr, argv, child paths, inherited environment values,
+credentials or raw errors.
+
+Offline checks cannot replace the authenticated proof. `TestReplyFallbackProcessEvidence`
+covers normal/nonzero exit, parent cancellation/deadline and actual internal
+deadline with a live parent. The `TestSuggest` checks cover isolation, exact I/O,
+uncertain metadata and privacy. In `TestSuggestCLIFallbackIncomplete`, child
+readiness precedes wrapper forwarding: wait for forwarded bytes in `lockedBuffer`
+before group cancellation, then check exact I/O after Wait. A forwarding-delay
+probe exposed a scheduling bug that undelayed passing runs missed. The Python
+observer must also mirror Go validation: broader Python whitespace stripping or
+dictionary conversion of duplicate/null JSON fields can classify rejected output
+as usable. Go leaves scalar fields unchanged on null and matches field names
+case-insensitively; the observer checks those semantics rather than assuming the
+decoders agree.
+
+The [retained source/lifecycle evidence](../../specs/architecture/2873-fallback-source-evidence.md)
+and [PR #2892](https://github.com/pyrycode/pyrycode/pull/2892) preserve every run's
+observations, revisions, commits and result paths. Counts are executed/passed/failed/skipped:
+
+| Targeted batch commit | E/P/F/S |
+| --- | --- |
+| `a35e9b89` | 3/2/1/0 |
+| `16960306` | 3/2/1/0 |
+| `aee249fc` | 3/2/1/0 |
+| `ec231249` (daemon lifecycle instrumentation) | 3/3/0/0 |
+| `d416eff6` (declared six-run batch) | 6/5/1/0 |
+| All recorded targeted PR runs | 18/14/4/0 |
+| Separate exact-base report, `1b5159d8a0` | 2/1/1/0 |
+
+**Reproduced in the bounded batch at the internal-deadline/live-parent stage;
+real-child output and historical failure causes remain unknown.** Six-run batch
+run 4 remains FAIL: PID 15945 had fallback/own deadline flags true, both parent
+flags false, group cancellation requested and observed wrapper Wait/SIGKILL
+(exit code -1, signal 9). Wrapper completion and real-child exit/output were
+unknown; no wire set appeared (set/clear revisions 0/0). The five passes had
+usable source output, set revision 1 and explicit-null clear revision 2.
+The lifecycle evidence requirement is complete; the
+[output witness investigation continues in #2882](https://github.com/pyrycode/pyrycode/issues/2882).
+Execution, deadlines, cancellation, fallback policy, staging/window and
+[#2859 release control](https://github.com/pyrycode/pyrycode/issues/2859) are unchanged.
+
+The [dispatcher full live gate](https://github.com/pyrycode/pyrycode/issues/2881#issuecomment-6017651019)
+at `81c7ac78f9` subsequently counted 1635 executed/passed, zero failed and 27
+skipped, including the fallback set/clear test. This separate gate does not
+reclassify run 4 or recover the missing witnesses in the three earlier failures
+without daemon lifecycle evidence. Passing reruns cannot recover historical
+missing witnesses; non-reproduction does not establish a fix, and timeout alone
+does not establish a production defect. Intermittent baseline attribution needs
+repeated counted comparisons with recorded commits, matching suite inputs and
+all outcomes retained, as described in
+[development verification](development-verification.md#test-execution-and-artifact-survival).
+Evidence acceptance does not resolve intermittency or waive a failed current gate.
 
 Since #2569, a fresh-home daemon now seeds a promoted `General` channel and a
 bound-but-never-spawned session on first boot (see
@@ -224,6 +311,29 @@ the background writer remains held, all before parent cancellation. This
 excludes both parent teardown and rig EOF as causes. Both standing tests run
 under normal `make e2e-realclaude`, log the Claude version, and passed on Claude
 2.1.280 in [the dispatcher live gate](https://github.com/pyrycode/pyrycode/issues/2775#issuecomment-6008885859).
+
+Shortened waits. A live test that has to outlast a daemon timer should shorten
+the timer, not wait it out. A daemon built with `go build -tags e2e_realclaude`
+reads `PYRY_E2E_QUEUE_GIVE_UP_AFTER`, a positive Go duration such as `3s`, as the
+message queue's give-up bound in place of its 2 minute default. An ordinary
+build, including the untagged binary `ensurePyryBuilt` produces, ignores it, so
+a test using it must build its own tagged daemon. An invalid value fails the
+daemon's start. `TestInteractiveStreamResumeAfterEviction` runs a 5 s idle
+window because, since #1486, a fire during an open turn re-arms rather than
+evicting; it counts only evictions logged after the plant send, so a fire before
+the plant turn cannot make the resume vacuous.
+
+Parallel tests. `WithWorktree` and `WithWorktreeAuthenticated` pin HOME with
+`t.Setenv`, which Go refuses to combine with `t.Parallel`. A live test may run in
+parallel only through `runParallel(t)`, and only when it changes no process-wide
+state: no `t.Setenv` or `os.Setenv` of its own or in a harness callback, and every
+child that needs the isolated HOME receives it explicitly through `homeEnv`, or
+`Env` on an in-process runner. `liveHome` returns `authenticatedHome` for such a
+test and falls back to `WithWorktreeAuthenticated` for every other caller, so
+serial tests keep their pinned HOME. Tests that read transcripts in process
+through `ReadJSONL`, install a PATH or environment shim, or count processes stay
+serial. Go runs every serial test first and the parallel ones together after,
+so the serial tail sets the floor on wall time.
 
 ## Make target
 

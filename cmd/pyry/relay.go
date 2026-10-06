@@ -178,7 +178,7 @@ type relayWiring struct {
 	// workspaceBase is the immutable service workspace base resolved at startup.
 	// Empty is supplied explicitly so the handshake cannot re-resolve HOME.
 	workspaceBase string
-	// readFolders are the operator-named folders the markdown reader may open
+	// readFolders are the operator-named folders the file reader may open
 	// besides a conversation's workspace (#2710): resolveReadFolders output,
 	// resolved once in the composition root and never written afterwards.
 	readFolders []string
@@ -204,6 +204,7 @@ type relayWiring struct {
 	// isolation fix (the new_session twin of activeInterrupter). Wired to
 	// V2SessionConfig.SessionStarter below.
 	activeSessionStarter relay.SessionStarter
+	agentSwitcher        relay.AgentSwitcher
 	// defaultCwd is the default workspace directory stamped onto conversations
 	// created without an explicit cwd (the CreateConversation handler).
 	defaultCwd string
@@ -1420,9 +1421,9 @@ func startRelayV2(
 		// attachments.ResolvePath, whose stated precondition is that the caller
 		// already validated the conversation id.
 		AttachmentResolve: attachmentResolve,
-		// Live workspace markdown read (#2598): a client-named path, confined to
-		// the named conversation's recorded workspace by the attach_file verb's
-		// confineFile and readChecked, markdown only, read fresh on every request
+		// Live workspace file read (#2598): a client-named path confined to the
+		// workspace or admitted read folders, with a secret-name denylist on both
+		// leaves and unchanged confineFile/readChecked, read fresh on every request
 		// and stored nowhere. The conversation id reaches it only after the
 		// KnownConversation gate above. The size bound is the attach_file verb's
 		// unpublished receiver policy.
@@ -1460,6 +1461,7 @@ func startRelayV2(
 		// *streamsup.Runner rotates the pool-side id (Pool.RotateForNewSession) and
 		// RestartFreshes into --session-id <newID> with NO /clear.
 		SessionStarter: w.activeSessionStarter,
+		AgentSwitcher:  w.agentSwitcher,
 		// Inbound dequeue_message seam (#723): an interactive `dequeue_message`
 		// frame removes a not-yet-drained queued message by id from the live
 		// daemon queue; the OnChange seam Remove fires drives the #722 producer to
@@ -1771,7 +1773,9 @@ func startRelayV2(
 			resolve: func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }}
 	}
 	streamTransitionsCleanup := startSessionTransitionStreamV2(ctx, transitions, mgr,
-		func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }, w.busy, w.hist, logger)
+		func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }, w.busy, w.hist, logger, func(id string) {
+			announceSwitchedConversation(w.convReg, id, announceConversation)
+		})
 
 	// Hand the pool the open-conn enumerator so a session's appended system prompt
 	// can name the clients attached when it spawns (#2148). Placed beside the

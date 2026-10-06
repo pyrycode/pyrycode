@@ -103,7 +103,7 @@ type Config struct {
 	// Required when ConversationsRegistry is non-nil; ignored when nil.
 	ConversationsRegistryPath string
 
-	// ReadFolders are the folders the markdown reader serves besides a
+	// ReadFolders are the folders the file reader serves besides a
 	// conversation's workspace (#2710), as cmd/pyry's resolveReadFolders
 	// returned them: only the entries that resolved, never a skipped one. Every
 	// appended system prompt names them in one sentence after systemPromptText
@@ -343,6 +343,9 @@ type Pool struct {
 	// goroutine-start happens-before. nil disables it. See transition.go.
 	transitionObserver TransitionObserver
 	onRunnerStopped    func(SessionID) // construction-bound, read-only after New
+	// switchPublisher is installed before Run and may wait for daemon-owned
+	// publication. Ordinary lifecycle observers remain nonblocking.
+	switchPublisher func(SessionTransition)
 }
 
 // SnapshotEntry is one (id, pid) pair captured by Pool.Snapshot. The primitive

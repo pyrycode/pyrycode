@@ -5443,6 +5443,33 @@ func (p *Parser) consumeLine(line []byte) {
 		// reason: default is not the next case in source order, and a fallthrough
 		// would also run the ignoredLineTypes test below.
 		p.emitUnrecognized(turnevent.UnrecognizedLineType, sl.Type, line)
+	case "command_lifecycle":
+		// On 2026-10-06, claude 2.1.280 emitted started/completed around
+		// peer-message turns in two conversations. These observed bookkeeping
+		// states produced two Unrecognized cards per message. The other four
+		// matched states (queued, cancelled, discarded, refused) are declared
+		// states from the report's schema inspection, not observed frames.
+		//
+		// Keep a separate arm outside ignoredLineTypes so new or malformed states
+		// still surface. marshalTurnEnvelope writes no command uuid on daemon
+		// user envelopes, so there is no command correlation here. Read and write
+		// no parser state: started can arrive while idle, and completed after
+		// result must neither close another turn nor reset the next one's state.
+		var lifecycle struct {
+			State string `json:"state"`
+		}
+		if err := json.Unmarshal(line, &lifecycle); err == nil {
+			switch lifecycle.State {
+			case "queued", "started", "completed", "cancelled", "discarded", "refused":
+				// Only the matched vocabulary is safe to log; identifiers, raw
+				// payload and unknown state values never reach this record.
+				p.log.Debug("streamsup: dropping command_lifecycle",
+					"site", string(turnevent.UnrecognizedLineType),
+					"type", "command_lifecycle", "state", lifecycle.State)
+				return
+			}
+		}
+		p.emitUnrecognized(turnevent.UnrecognizedLineType, sl.Type, line)
 	case "prompt_suggestion":
 		// claude's own suggested next prompt (#2829), emitted AFTER the turn's result
 		// when prompt suggestions are enabled. Its own arm rather than an
