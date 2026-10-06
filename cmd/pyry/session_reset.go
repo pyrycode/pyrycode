@@ -73,7 +73,8 @@ const (
 		"what is unfinished and the next step for each, and anything the successor should " +
 		"avoid or not repeat. Then add anything the user told you this session that you did " +
 		"not save yourself, so it survives until it is filed. Plain prose or short bullets. " +
-		"At most 400 words."
+		"At most 400 words. Return only the note's contents; do not copy any framing " +
+		"markers or delimiter lines from the previous note."
 
 	// wrapUpPreviousNoteHeading titles the previous note's section. It is the
 	// wrap-up prompt's counterpart to handoffNoteLead and deliberately shorter: the

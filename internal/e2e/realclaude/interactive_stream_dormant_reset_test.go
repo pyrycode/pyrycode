@@ -71,7 +71,9 @@ func TestInteractiveStreamDormantResetAfterRestart(t *testing.T) {
 	phone1, send1, recv1 := dial()
 	fact := fmt.Sprintf("DORMANT%X", time.Now().UnixNano())
 	sealSendMessage(t, phone1, send1, 29051, clearConvID, "plant",
-		"Remember this unfinished project's build tag: "+fact+". Do not write it to any file or use tools. Reply only ok.")
+		"We are preparing a release with build tag "+fact+". The unfinished next step is to verify the artifacts "+
+			"for that exact tag. Preserve the exact build tag in any handoff so the next session can finish the release. "+
+			"Leave the work pending; do not write it to any file or use tools. Reply only ok.")
 	drainForCompletedTurn(t, phone1, recv1, clearConvID, perTurnReplyBudget)
 	assertPerSessionPrompt(t, d1, clearSessUUID, idSettleTimeout)
 	_ = phone1.Close()
