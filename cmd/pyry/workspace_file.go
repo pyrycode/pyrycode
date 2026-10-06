@@ -13,9 +13,9 @@ import (
 )
 
 // workspaceFileReader builds the relay's WorkspaceFileRead seam (#2598): given a
-// conversation id and a path a PAIRED CLIENT named, it reads that markdown file
-// live from the conversation's recorded workspace and returns its bytes under a
-// freshly minted transfer id. Nothing is stored and nothing is cached, so every
+// conversation id and a path a PAIRED CLIENT named, it reads that regular file
+// live from the conversation's workspace or admitted read folders and returns
+// its bytes under a freshly minted transfer id. Nothing is stored and nothing is cached, so every
 // call reads the disk again.
 //
 // It is the attach_file verb's confinement applied to a client-named path, and
@@ -23,12 +23,13 @@ import (
 // (the #2164 rule — do the work here, never re-derive the containment test in
 // internal/relay). Their refusal matrix is proven in attach_file_test.go.
 //
-// THE MARKDOWN RULE IS CHECKED TWICE, and neither check is redundant. The
+// THE SECRET-NAME RULE IS CHECKED TWICE, and neither check is redundant. The
 // requested leaf is checked first, before the registry or the filesystem is
 // touched, so a request for .env never reaches a stat. The RESOLVED leaf is
 // checked after confineFile, because confinement follows symlinks: notes.md
 // linking to .env inside the same workspace passes confinement, and only the
-// second check refuses it.
+// second check refuses it. This filename heuristic does not inspect content or
+// guarantee that eligible files contain no secrets.
 //
 // COMMA-OK, EVERY REFUSAL ONE false. The wire answers every cause with the same
 // attachment.not_found, and the errors confineFile and readChecked return are
@@ -56,7 +57,7 @@ import (
 // Variadic so a caller with no folders reads exactly as before #2710.
 func workspaceFileReader(convReg *conversations.Registry, maxBytes int64, folders ...string) func(conversationID, path string) (relay.WorkspaceFile, bool) {
 	return func(conversationID, path string) (relay.WorkspaceFile, bool) {
-		if !isMarkdownName(filepath.Base(path)) {
+		if isSecretName(filepath.Base(path)) {
 			return relay.WorkspaceFile{}, false
 		}
 		conv, ok := convReg.Get(conversations.ConversationID(conversationID))
@@ -67,7 +68,7 @@ func workspaceFileReader(convReg *conversations.Registry, maxBytes int64, folder
 		if !ok {
 			return relay.WorkspaceFile{}, false
 		}
-		if !isMarkdownName(filepath.Base(resolved)) {
+		if isSecretName(filepath.Base(resolved)) {
 			return relay.WorkspaceFile{}, false
 		}
 		data, err := readChecked(resolved, checked, maxBytes)
@@ -163,7 +164,7 @@ func resolveReadFolders(entries []string, log *slog.Logger) []string {
 //
 // THE GUARD. A working folder that is the home folder, the root or any other
 // folder containing home is not added: starting the daemon from $HOME would
-// otherwise expose every markdown file in it. confineWorkdirToHome already
+// otherwise expose every eligible file in it. confineWorkdirToHome already
 // refuses a working folder outside home, so in the daemon only the first case
 // is reachable; the others hold here on their own rather than through that
 // call order. Both sides are compared as realpaths, so a symlinked home is
@@ -214,13 +215,22 @@ func (l *folderList) Set(v string) error {
 	return nil
 }
 
-// isMarkdownName reports whether a path's final component ends in .md or
-// .markdown, in any case. It reads only the string, which is what lets the
-// requested leaf be refused before any filesystem access.
-func isMarkdownName(name string) bool {
-	switch strings.ToLower(filepath.Ext(name)) {
-	case ".md", ".markdown":
+// isSecretName reports whether a leaf matches the case-insensitive secret-name
+// denylist. It reads only the string so requested names can be refused before
+// registry or filesystem access. It makes no claim about a file's contents.
+func isSecretName(name string) bool {
+	name = strings.ToLower(name)
+	if name == ".env" || strings.HasPrefix(name, ".env.") {
 		return true
+	}
+	switch name {
+	case "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519":
+		return true
+	}
+	for _, suffix := range []string{".key", ".pem", ".p12", ".pfx", ".keychain", ".keychain-db"} {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
 	}
 	return false
 }

@@ -83,7 +83,7 @@ func composeSystemPromptOn(daemon, operator string) string {
 	return daemon + "\n" + operator
 }
 
-// readFolderSentence is the line naming the folders the markdown reader serves
+// readFolderSentence is the line naming the folders the file reader serves
 // besides a conversation's workspace (#2710), or "" when there are none. It is a
 // daemon fact and no client capability, systemPromptText's rule, so it belongs
 // in the daemon-wide text rather than in any per-conversation prompt (#2711).
@@ -108,8 +108,8 @@ func readFolderSentence(folders []string) string {
 	if n := len(quoted); n > 1 {
 		list = strings.Join(quoted[:n-1], ", ") + " and " + quoted[n-1]
 	}
-	return "This daemon serves markdown files under " + list +
-		" to a client that asks for one by absolute path.\n"
+	return "This daemon serves files of any type under " + list +
+		" to a client that asks for one by absolute path, subject to the size limit and secret-name refusals.\n"
 }
 
 // daemonPromptText is the daemon-wide head of every composition: systemPromptText,

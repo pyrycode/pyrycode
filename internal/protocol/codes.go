@@ -1615,8 +1615,8 @@ const (
 )
 
 // Mobile Protocol v2 LIVE WORKSPACE READ (#2598). The frame a client sends to
-// read one markdown file as it is on the host NOW, from the recorded workspace of
-// the conversation it names. Its payload is ReadWorkspaceFilePayload
+// read one regular file as it is on the host NOW, from the recorded workspace
+// or admitted read folders of the conversation it names. Its payload is ReadWorkspaceFilePayload
 // (attachments.go), and it is answered exactly as TypeRequestAttachment is: an
 // attachment_chunk stream correlated by in_reply_to, or one
 // CodeAttachmentNotFound / CodeAttachmentStreamAborted TypeError.
