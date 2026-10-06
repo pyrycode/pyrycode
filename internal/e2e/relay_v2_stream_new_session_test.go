@@ -198,6 +198,8 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	// inner frames in capture order so the receive nonce stays in sequence. One recvA is
 	// used for the whole test (the single reader, same as the send / interrupt specs).
 	// ok=false on deadline.
+	// Record each turn's echo even when it precedes its send_message ack.
+	sawDelta, sawDeltaTwo := false, false
 	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) {
 		t.Helper()
 		for {
@@ -219,14 +221,37 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 			if inner.Type != protocol.TypeNoiseMsg {
 				continue
 			}
-			return decryptInnerEnvelope(t, inner, recvA), true
+			env := decryptInnerEnvelope(t, inner, recvA)
+			if env.Type == protocol.TypeAssistantDelta {
+				var d protocol.AssistantDeltaPayload
+				if err := json.Unmarshal(env.Payload, &d); err != nil {
+					t.Fatalf("phone A decode assistant_delta payload: %v", err)
+				}
+				if !sawDelta {
+					if d.ConversationID != knownConvID {
+						t.Errorf("assistant_delta ConversationID: got %q, want %q", d.ConversationID, knownConvID)
+					}
+					if !strings.Contains(d.Text, echoNeedleOne) {
+						t.Fatalf("M1: assistant_delta did not carry the echoed prompt; got Text=%q, want it to contain %q "+
+							"(the round-trip proof — fakeclaude echoes the sent prompt back through the daemon)", d.Text, echoNeedleOne)
+					}
+					sawDelta = true
+				} else if strings.Contains(d.Text, echoNeedleTwo) {
+					if d.ConversationID != knownConvID {
+						t.Errorf("M6: post-rotation assistant_delta ConversationID: got %q, want %q — the event was forwarded "+
+							"but stamped for the wrong conversation", d.ConversationID, knownConvID)
+					}
+					sawDeltaTwo = true
+				}
+			}
+			return env, true
 		}
 	}
 
 	// --- M1 (AC-1 precondition): pre-rotation baseline. Drive send_message #1 to the
 	// bootstrap-bound conversation, await its sealed ack (the cursor is now stamped to
-	// knownConvID), then drain until an assistant_delta whose Text carries the echoed
-	// prompt. This is #1141's send test verbatim: it proves the child is live and the
+	// knownConvID), then use the recorded assistant_delta whose Text carries the echoed
+	// prompt. As in #1141's send test, this proves the child is live and the
 	// PRE-rotation turn drains to the phone (the gate passes because the sink tag ==
 	// active == initialUUID). The echo is the non-vacuity guard — a full round-trip.
 	sealSend(protocol.Envelope{
@@ -255,30 +280,14 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 		}
 	}
 
-	sawDelta := false
 	m1Deadline := time.Now().Add(20 * time.Second)
 	for !sawDelta {
-		env, ok := nextEnv(m1Deadline)
+		_, ok := nextEnv(m1Deadline)
 		if !ok {
 			t.Fatal("M1: interactive phone A never observed an assistant_delta for the pre-rotation turn; it " +
 				"never drained end-to-end (delivery never reached the child, or the parser / drain gate / emitter " +
 				"dropped it — most likely a UUID mismatch between seedBootstrapRegistry and seedBoundConversation)")
 		}
-		if env.Type != protocol.TypeAssistantDelta {
-			continue
-		}
-		var d protocol.AssistantDeltaPayload
-		if err := json.Unmarshal(env.Payload, &d); err != nil {
-			t.Fatalf("phone A decode assistant_delta payload: %v", err)
-		}
-		if d.ConversationID != knownConvID {
-			t.Errorf("assistant_delta ConversationID: got %q, want %q", d.ConversationID, knownConvID)
-		}
-		if !strings.Contains(d.Text, echoNeedleOne) {
-			t.Fatalf("M1: assistant_delta did not carry the echoed prompt; got Text=%q, want it to contain %q "+
-				"(the round-trip proof — fakeclaude echoes the sent prompt back through the daemon)", d.Text, echoNeedleOne)
-		}
-		sawDelta = true
 	}
 	t.Logf("[t=%s] M1: observed assistant_delta echoing the pre-rotation prompt — the child is live and the turn drained", elapsed())
 
@@ -377,9 +386,9 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	// poll the stdin log until it carries the …two bytes — the FRESH child received and
 	// is serving the subsequent turn.
 	//
-	// The phone-side delta for turn #2 is M6, below. It is drained AFTER this
-	// milestone rather than instead of it: this one names which child served the
-	// turn, M6 proves the resulting event reaches the client, and the header explains
+	// The phone-side delta for turn #2 is M6, below. It is recorded throughout
+	// the ack wait and checked after this milestone: this one names which child
+	// served the turn, M6 proves the event reaches the client, and the header explains
 	// why neither implies the other.
 	sealSend(protocol.Envelope{
 		ID:   sendReqIDTwo,
@@ -572,13 +581,12 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	// PRE-rotation turn and pass against the very defect it exists to catch.
 	//
 	// Ordered after M4 deliberately: M4's poll exits on the fresh child's stdin
-	// WRITE, which precedes its echo, so this loop starts inside the window where
-	// the child has the turn and has not yet answered — the deadline covers the echo,
+	// WRITE, which precedes its echo. The echo may already have been recorded
+	// during the ack wait; otherwise the deadline covers the echo,
 	// the parse, the fan-in and the emitter's ~250ms coalescing timer.
-	sawDeltaTwo := false
 	m6Deadline := time.Now().Add(20 * time.Second)
 	for !sawDeltaTwo {
-		env, ok := nextEnv(m6Deadline)
+		_, ok := nextEnv(m6Deadline)
 		if !ok {
 			t.Fatalf("M6 (#1133): the phone never observed an assistant_delta carrying %q for the POST-ROTATION turn "+
 				"within 20s of M4. M4 is green, so the fresh child (--session-id %s) provably received that turn — "+
@@ -591,23 +599,6 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 				echoNeedleTwo, post.ID, initialUUID, post.ID,
 				daemonLogWindow(h.Stderr.Bytes(), ackTwoLogLen, daemonLogBudget))
 		}
-		if env.Type != protocol.TypeAssistantDelta {
-			continue
-		}
-		var d protocol.AssistantDeltaPayload
-		if err := json.Unmarshal(env.Payload, &d); err != nil {
-			t.Fatalf("M6: phone A decode assistant_delta payload: %v", err)
-		}
-		if !strings.Contains(d.Text, echoNeedleTwo) {
-			// Turn #1's delta, or a coalesced fragment of turn #2 that does not yet
-			// carry the needle. Neither is a failure; keep draining.
-			continue
-		}
-		if d.ConversationID != knownConvID {
-			t.Errorf("M6: post-rotation assistant_delta ConversationID: got %q, want %q — the event was forwarded "+
-				"but stamped for the wrong conversation", d.ConversationID, knownConvID)
-		}
-		sawDeltaTwo = true
 	}
 	t.Logf("[t=%s] M6: the post-rotation turn's assistant_delta reached the phone — the sink tag rotated with the runner and the drain gate forwarded instead of dropping", elapsed())
 
