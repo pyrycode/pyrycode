@@ -149,21 +149,50 @@ Reader errors are returned to the test goroutine for failure reporting.
 Native suggestions need useful staging rather than an assumption that every
 successful turn emits one. On Claude 2.1.280, six prompts ending in open
 questions produced none; small coding steps with an obvious follow-up did.
+Those steps still need explicit enable at `allowed_warning`: Claude's independent
+usage-warning guard suppresses generation even with `--prompt-suggestions`.
+`installSuggestCLI` sets `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=1` for the native
+persistent stream child, overriding an inherited disable. In the
+[#2856 source evidence](https://github.com/pyrycode/pyrycode/pull/2857#issuecomment-6009642509),
+the pre-fix child completed six results with `allowed_warning` and no nonempty
+source suggestion; explicit enable restored a native event and wire set/clear
+within the existing limits. This was absent Claude generation, before parser
+acceptance or daemon publication; longer waits or more turns would not fix it.
 `TestInteractiveStream_NativeReplySuggestionSetThenClear` drives up to six
-completed turns, fails if no native set arrives with credentials present, then
-requires an explicit null at a higher revision after a follow-up send. Short
-conversations and cold caches can stay silent. A green turn or a skipped probe
-cannot prove [native suggestion publication](streamsup-package-draining-turnevents-into-the-interactive-emitter.md#native-reply-suggestions-after-the-result-2831).
+completed turns with a 30-second suggestion window after each. It requires a
+nonempty native source suggestion from one persistent child and a nonempty
+`reply_suggestion` for `suggestConvID`, then an explicit `suggested_reply: null`
+at a higher revision after an accepted follow-up send. Missing native output
+still fails with credentials present. Short conversations and cold caches can
+stay silent. A green turn or a skipped probe cannot prove
+[native suggestion publication](streamsup-package-draining-turnevents-into-the-interactive-emitter.md#native-reply-suggestions-after-the-result-2831).
+
+Observe native stdout before parsing to locate a missing set.
+`installSuggestCLI` forwards bytes unchanged while recording metadata in a
+private temporary file: stream-child and result counts, all native suggestion
+event counts, nonempty suggestion counts and total suggestion bytes, and `allowed_warning`
+counts. `readSuggestSource` reports these after each bounded wait; generated text,
+stderr, environment values and credentials are never retained. Separate event
+and nonempty counts distinguish absent events from empty source output. A
+nonempty source suggestion without a wire set points investigation at
+`Parser.emitPromptSuggestion` and `replySuggestions` eligibility/publication.
+`TestSuggestCLIProducerIsolation` and `TestSuggestCLISourceEvidence` check enable,
+producer isolation, byte preservation and metadata redaction with a stand-in
+that never participates in the live proof.
 
 **A suggestion frame alone cannot prove its source.** `installSuggestCLI`
 keeps the native probe specific by refusing non-stream CLI launches, so Haiku
 fallback cannot make it pass. `TestInteractiveStream_FallbackReplySuggestionSetThenClear`
-instead disables suggestions only on the persistent child and allows the real
-production fallback call. After a completed exchange it requires a nonempty
+instead removes `--prompt-suggestions` and sets
+`CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=0` only on the persistent child, allowing
+the real production fallback call. After a completed exchange it requires a nonempty
 reply within the fallback bounds, then an explicit-null clear at a higher
 revision after accepted input. With credentials present, absent output fails;
 it is not a successful skip. Both tests use the same wire shape, so each must
 exclude the competing producer rather than infer provenance from that frame.
+Both run under ordinary `make e2e-realclaude` without extra opt-in switches; the
+[dispatcher gate](https://github.com/pyrycode/pyrycode/issues/2856#issuecomment-6009817217)
+executed and passed both named tests.
 
 Since #2569, a fresh-home daemon now seeds a promoted `General` channel and a
 bound-but-never-spawned session on first boot (see

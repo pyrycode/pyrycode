@@ -10,14 +10,17 @@ package realclaude
 //
 // claude skips suggestions for short conversations, cold caches and turns whose
 // next step is not obvious, so the run drives up to suggestTurnBudget small coding
-// steps, each with an obvious follow-up, and fails (never skips) when no suggestion arrives across all of
-// them. The suggestion is claude-authored and untrusted: only its length is logged.
+// steps, each with an obvious follow-up, and fails (never skips) when no suggestion
+// arrives across all of them. Explicit native enable also permits generation at
+// allowed_warning; --prompt-suggestions alone does not override that suppression.
+// The suggestion is claude-authored and untrusted: only its length is logged.
 
 import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -212,7 +215,7 @@ func (w *suggestWatch) pumpUntil(t *testing.T, frames <-chan suggestFrame, timeo
 }
 
 func TestInteractiveStream_NativeReplySuggestionSetThenClear(t *testing.T) {
-	installSuggestCLI(t, true)
+	evidence := installSuggestCLI(t, true)
 	h := startPerConversationHarnessSeeded(t, func(home, workdir string) []string {
 		writeStreamInteractiveConfig(t, home)
 		seedBoundConversation(t, home, suggestConvID, livePerConvBootstrapUUID, workdir)
@@ -245,11 +248,16 @@ func TestInteractiveStream_NativeReplySuggestionSetThenClear(t *testing.T) {
 				turns+1, suggestConvID, perTurnReplyBudget, w.sawDelta)
 		}
 		w.pumpUntil(t, frames, suggestWindow, func() bool { return w.setRev != 0 })
+		source := readSuggestSource(t, evidence)
+		t.Logf("native source: streams=%d results=%d suggestion_events=%d nonempty_suggestions=%d suggestion_bytes=%d allowed_warning=%d",
+			source.Streams, source.Results, source.Events, source.Suggestions, source.Bytes, source.Warnings)
 	}
 	if w.setRev == 0 {
-		t.Fatalf("no non-empty reply_suggestion for %q after %d completed turns (each followed by a %s window); "+
-			"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=%q in the test env", suggestConvID, turns, suggestWindow,
-			os.Getenv("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"))
+		t.Fatalf("no non-empty reply_suggestion for %q after %d completed turns (each followed by a %s window)",
+			suggestConvID, turns, suggestWindow)
+	}
+	if source := readSuggestSource(t, evidence); source.Streams != 1 || source.Suggestions == 0 {
+		t.Fatal("wire set lacks a nonempty native suggestion from one persistent stream child")
 	}
 	t.Logf("suggestion set at revision %d after %d turn(s)", w.setRev, turns)
 
@@ -266,19 +274,23 @@ func TestInteractiveStream_NativeReplySuggestionSetThenClear(t *testing.T) {
 // installSuggestCLI separates the native and fallback producers using the real
 // CLI underneath: native proof refuses every non-stream invocation; fallback
 // proof disables prompt suggestions only on the persistent stream child.
-func installSuggestCLI(t *testing.T, native bool) {
+func installSuggestCLI(t *testing.T, native bool) string {
 	t.Helper()
 	real, err := exec.LookPath("claude")
 	if err != nil {
 		t.Skip("claude unavailable")
 	}
 	dir := t.TempDir()
+	evidence := filepath.Join(dir, "source.jsonl")
+	if err := os.WriteFile(evidence, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
 	mode := 0
 	if native {
 		mode = 1
 	}
 	script := fmt.Sprintf(`#!/usr/bin/python3
-import os, sys
+import json, os, sys
 args = sys.argv[1:]
 stream = "--input-format" in args and "stream-json" in args
 if %d and not stream:
@@ -286,12 +298,86 @@ if %d and not stream:
 if not %d and stream:
     args = [a for a in args if a != "--prompt-suggestions"]
     os.environ["CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"] = "0"
+if %d and stream:
+    # Claude's native generator permits allowed_warning only with this explicit
+    # enable; the CLI flag alone leaves that independent suppression in place.
+    os.environ["CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"] = "1"
+    # Keep Claude as the launcher's PID; its stdout observer exits at EOF and
+    # belongs to the daemon's existing process group for shutdown.
+    read_fd, write_fd = os.pipe()
+    if os.fork() == 0:
+        os.close(write_fd)
+        os.close(0)
+        evidence_fd = os.open(%q, os.O_WRONLY | os.O_APPEND)
+        def record(fields):
+            os.write(evidence_fd, (json.dumps(fields) + "\n").encode())
+        record({"streams": 1})
+        with os.fdopen(read_fd, "rb") as source:
+            for line in source:
+                try:
+                    event = json.loads(line)
+                    if event.get("type") == "result":
+                        record({"results": 1})
+                    elif event.get("type") == "prompt_suggestion":
+                        record({"events": 1})
+                        suggestion = event.get("suggestion")
+                        if isinstance(suggestion, str) and suggestion.strip():
+                            record({"suggestions": 1, "bytes": len(suggestion.encode("utf-8", "surrogatepass"))})
+                    elif event.get("type") == "rate_limit_event":
+                        if event.get("rate_limit_info", {}).get("status") == "allowed_warning":
+                            record({"warnings": 1})
+                except (ValueError, AttributeError, TypeError):
+                    pass # Unrecognized output is still forwarded unchanged.
+                sys.stdout.buffer.write(line)
+                sys.stdout.buffer.flush()
+        os.close(evidence_fd)
+        os._exit(0)
+    os.close(read_fd)
+    os.dup2(write_fd, 1)
+    os.close(write_fd)
 os.execv(%q, [%q] + args)
-`, mode, mode, real, real)
+`, mode, mode, mode, evidence, real, real)
 	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return evidence
+}
+
+// suggestSource contains only source metadata. Generated text and credentials
+// never enter its evidence file or the test's diagnostic logs.
+type suggestSource struct {
+	Streams     int `json:"streams"`
+	Results     int `json:"results"`
+	Events      int `json:"events"`
+	Suggestions int `json:"suggestions"`
+	Bytes       int `json:"bytes"`
+	Warnings    int `json:"warnings"`
+}
+
+func readSuggestSource(t *testing.T, path string) suggestSource {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal("open native source evidence failed")
+	}
+	defer f.Close()
+	var total suggestSource
+	dec := json.NewDecoder(io.LimitReader(f, 64*1024))
+	for {
+		var entry suggestSource
+		if err := dec.Decode(&entry); errors.Is(err, io.EOF) {
+			return total
+		} else if err != nil {
+			t.Fatal("decode native source metadata failed")
+		}
+		total.Streams += entry.Streams
+		total.Results += entry.Results
+		total.Events += entry.Events
+		total.Suggestions += entry.Suggestions
+		total.Bytes += entry.Bytes
+		total.Warnings += entry.Warnings
+	}
 }
 
 func TestInteractiveStream_FallbackReplySuggestionSetThenClear(t *testing.T) {
