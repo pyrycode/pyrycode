@@ -64,9 +64,10 @@ func testSessionErrorRecovery(t *testing.T, bin, claudeBin string, drop bool) {
 	file := filepath.Join(home, "executable-selection")
 	gate := filepath.Join(home, "exit-gate")
 	failing := filepath.Join(home, "failing-claude")
-	// Gate only the first exit until handshake/enqueue finish. All following
-	// launches find the gate already open and exercise repeated fast child exits.
-	script := "#!/bin/sh\nprintf 'FAILING_CHILD\\n' >&2\nwhile [ ! -e \"$PYRY_E2E_EXIT_GATE\" ]; do sleep 0.02; done\nexit 1\n"
+	// Close stdin before advertising readiness: an open, unread pipe can accept
+	// a queued turn and report delivery even though the child never processes it.
+	// Gate the first exit until enqueue; later launches exit immediately.
+	script := "#!/bin/sh\nexec 0<&-\n: > \"$PYRY_E2E_EXIT_GATE.ready\"\nprintf 'FAILING_CHILD\\n' >&2\nwhile [ ! -e \"$PYRY_E2E_EXIT_GATE\" ]; do sleep 0.02; done\nexit 1\n"
 	if err := os.WriteFile(failing, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -98,10 +99,26 @@ func testSessionErrorRecovery(t *testing.T, bin, claudeBin string, drop bool) {
 	}
 	t.Cleanup(func() { _ = phone.Close() })
 	send, recv := driveHandshakeInteractive(t, phone, pubKey, payload.Token)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(gate + ".ready"); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("failing child did not close stdin before enqueue")
+		}
+		select {
+		case <-d.doneCh:
+			t.Fatal("daemon exited before failing child readiness")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 	heldText := "Without using tools, reply briefly about retained session recovery. marker=held-2859"
 	sealSendMessage(t, phone, send, 2, liveConvID, "held-2859", heldText)
 	state := &sessionErrorObservation{}
-	deadline := time.Now().Add(20 * time.Second)
+	deadline = time.Now().Add(20 * time.Second)
 	for !state.queuedHeld {
 		state.observe(t, readSessionErrorEnvelope(t, phone, recv, deadline))
 	}
