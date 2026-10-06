@@ -175,7 +175,7 @@ func (e *sessionTransitionEmitterV2) broadcast(ctx context.Context, t sessions.S
 	// records what was fanned out and never what was refused. This producer
 	// skips the #647 replay ring, so the log is the ONLY place a session
 	// boundary is retained.
-	appendConversationHistory(e.hist, e.logger, "session_transition.history_append_err",
+	historyEntryID := appendConversationHistory(e.hist, e.logger, "session_transition.history_append_err",
 		convID, protocol.TypeSessionTransition, payloadJSON, ts)
 
 	// Fresh snapshot per transition: a phone that opened its session since the
@@ -187,10 +187,11 @@ func (e *sessionTransitionEmitterV2) broadcast(ctx context.Context, t sessions.S
 		}
 		e.nextID++
 		env := protocol.Envelope{
-			ID:      e.nextID,
-			Type:    protocol.TypeSessionTransition,
-			TS:      ts,
-			Payload: payloadJSON,
+			ID:             e.nextID,
+			Type:           protocol.TypeSessionTransition,
+			TS:             ts,
+			Payload:        payloadJSON,
+			HistoryEntryID: historyEntryID,
 		}
 		if err := e.bcast.Push(ctx, c.ConnID, env); err != nil {
 			if ctx.Err() != nil {
