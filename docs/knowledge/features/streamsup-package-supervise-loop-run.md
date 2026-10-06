@@ -25,6 +25,17 @@ loop:
 
 Shutdown is detected via **parent-ctx cancellation**, never via the child-exit error value — `spawnAndWait`'s `waitErr` only ever means "crashed" once `ctx.Err()` has been checked and is nil. An `iterCtx`-only cancel (from `Restart`) leaves the parent `ctx.Err()` nil, so the loop falls through and relaunches instead of returning. One goroutine total (the caller's `Run`); `cmd.Wait` blocks it, and os/exec runs its own internal ctx-watcher goroutine that invokes `cmd.Cancel` off-loop — on either a parent-ctx cancel (shutdown) or an `iterCtx` cancel (restart).
 
+The tagged failure/release bridge selects only the executable in
+`spawnAndWait`, through `spawnClaudeBin`, after `beginSpawn` has released its
+locks. A driver atomically replaces a regular file; each spawn keeps its own
+complete snapshot. This needs neither a watcher nor another Runner mutex
+acquisition, preserving the single-acquisition argv/session/cancellation
+contract above. Nonblocking open followed by regular-file validation rejects
+a mistaken FIFO instead of stalling supervision and shutdown. Invalid activated
+input remains a spawn failure, preventing accidental release to real Claude.
+See [test infrastructure](e2e-realclaude.md#test-infrastructure) for activation,
+ordinary-build exclusion and backlog recovery semantics.
+
 ### Optional account token admission
 
 `Config.AccountTokenProvider` gates each launch attempt in `spawnAndWait`, including

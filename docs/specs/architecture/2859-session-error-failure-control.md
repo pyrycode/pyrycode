@@ -41,7 +41,7 @@ Activated file open/read, size or absolute-path validation errors return context
 
 Write failing tests before the implementation. Tagged Runner tests observe child-owned executable identity, unchanged argv/environment/workdir, updates while a child lives, unchanged backoff/session, and atomic replacement racing launches. An untagged subprocess test sets activation input and proves the configured child still runs. Tagged table cases reject invalid/unreadable input and preserve the unset path.
 
-Live arms decrypt every frame in nonce order, collect queue and session-error state, and wait for a completed real-Claude turn. Delivery identifiers and reply content distinguish the fresh message from the dropped one. Check persisted conversation binding and daemon liveness through release. Preserve production retry/backoff timing and the retained arm's default give-up window; only the dropped arm uses `PYRY_E2E_QUEUE_GIVE_UP_AFTER=3s`, with bounded observation deadlines and automatic child recovery observed before fresh enqueue.
+Live arms decrypt every frame in nonce order, collect queue and session-error state, and wait for a completed real-Claude turn. Delivery identifiers and completed transcript prompt markers distinguish the fresh message from the dropped one without relying on model reply wording. Check persisted conversation binding and daemon liveness through release. Preserve production retry/backoff timing and the retained arm's default give-up window; only the dropped arm uses `PYRY_E2E_QUEUE_GIVE_UP_AFTER=3s`, with bounded observation deadlines and automatic child recovery observed before fresh enqueue.
 
 Run ordinary and tagged streamsup race tests, `go vet ./...`, `go build` for ordinary and tagged daemons, and tagged live-package compilation. Dispatcher owns the live run and full-module verifier gate; no live evidence is claimed locally.
 
@@ -51,9 +51,9 @@ None. A selection file alone supplies the external next-spawn control; a callabl
 
 ## Documentation handoff
 
-Pending documentation stage: in `docs/knowledge/features/e2e-realclaude.md` § **Test infrastructure**, document the actual tagged build command, `PYRY_E2E_CLAUDE_BIN_FILE` activation, absolute-path selection and atomic replacement/release contract for an external isolated driver, next-spawn semantics and ordinary-build exclusion. State that release before give-up delivers retained backlog, while release after `session.blocked` needs a fresh message and never replays dropped backlog. Mobile #1731 consumes this contract.
+Satisfied in [`docs/knowledge/features/e2e-realclaude.md` § Test infrastructure](../../knowledge/features/e2e-realclaude.md#test-infrastructure): the actual tagged build command, `PYRY_E2E_CLAUDE_BIN_FILE` activation, absolute-path selection and atomic replacement/release contract for an external isolated driver, next-spawn semantics and ordinary-build exclusion. Release before give-up delivers retained backlog without client resend, while release after `session.blocked` needs a fresh message and never replays dropped backlog. Mobile #1731 consumes this contract.
 
-Pending documentation stage: extend **Shortened waits** in that section to name the dropped recovery arm's `PYRY_E2E_QUEUE_GIVE_UP_AFTER=3s`, observed automatic recovery before fresh enqueue, and the retained arm's default window.
+Satisfied in **Shortened waits** in that section: the dropped recovery arm's `PYRY_E2E_QUEUE_GIVE_UP_AFTER=3s`, observed automatic recovery before fresh enqueue, and the retained arm's default window, with subtest-scoped override cleanup.
 
 ## Security review
 

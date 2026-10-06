@@ -154,10 +154,15 @@ secret exists.
 ## Readiness Signal
 
 Poll `os.Stat` + `net.Dial` on the socket with a 5s deadline and 50ms gap.
-Once `Dial` succeeds, the control server is in `Serve` (per
-`cmd/pyry/main.go`'s `ctrl.Listen → go ctrl.Serve(ctx)` ordering), so the
-daemon is responsive even if the supervised child hasn't spawned yet —
-sufficient for the "daemon is alive" contract.
+A successful `Dial` establishes that `ctrl.Listen` bound the listener; it does
+not establish that `ctrl.Serve` has accepted a request or the pool can supervise
+a session. `serveControlWhenReady` now waits for `Pool.Ready` before serving
+requests (#2866). The session-removal fixtures additionally use
+`waitForRunnerStatus` to observe bootstrap phase `running` and a nonzero child
+PID before `control.SessionsNew`. Retrying a premature mint is unsafe:
+`Pool.MintWith` persists before `supervise` can return `ErrPoolNotRunning`, so a
+retry can leave an extra registry entry. The observed child is a bounded fixture
+barrier, not a substitute for the production serving gate.
 
 It is deliberately **not** a child-initialize readiness signal (#2281). A test
 that immediately requests retained child state can observe the hosted session
