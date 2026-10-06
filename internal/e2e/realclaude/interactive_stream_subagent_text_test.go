@@ -16,6 +16,7 @@ import (
 )
 
 func TestInteractiveStreamForwardsSubagentText(t *testing.T) {
+	runParallel(t)
 	h, convID := startStreamRunningTurnHarness(t)
 	nonce := time.Now().UnixNano()
 	sealSendMessage(t, h.phone, h.initSend, 2, convID, "m-subagent-2331",

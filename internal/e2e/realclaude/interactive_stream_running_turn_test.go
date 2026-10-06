@@ -104,6 +104,7 @@ const (
 // a bounded foreground Bash loop and proves the turn stays running (no terminal
 // idle) for runningTurnHold. Infra only — no interrupt/resume behaviour asserted.
 func TestInteractiveStreamRunningTurn(t *testing.T) {
+	runParallel(t)
 	h, convID := startStreamRunningTurnHarness(t)
 
 	// Send id 2 — the first post-handshake message (mirrors the liveness/modal specs).
@@ -132,11 +133,11 @@ func TestInteractiveStreamRunningTurn(t *testing.T) {
 // cleanly when claude / creds are absent.
 func startStreamRunningTurnHarness(t *testing.T) (*perConvHarness, string) {
 	t.Helper()
-	// No t.Parallel: WithWorktreeAuthenticated calls t.Setenv.
+	// Parallel only through runParallel; see liveHome.
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Skipf("realclaude: claude not on PATH: %v", err)
 	}
-	home := WithWorktreeAuthenticated(t) // skips cleanly when no creds
+	home := liveHome(t) // skips cleanly when no creds
 	claudeBin, err := exec.LookPath("claude")
 	if err != nil {
 		t.Fatalf("realclaude: resolve claude: %v", err)

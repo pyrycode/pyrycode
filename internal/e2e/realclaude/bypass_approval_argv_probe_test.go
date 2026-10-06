@@ -840,9 +840,10 @@ func bypassArgvFixturePath(t *testing.T, versionToken, arm string) string {
 // finding; only an instrument that measured nothing is a failure, which
 // runSetModeChild raises for itself.
 func TestRealClaude_BypassApprovalArgv_Probe(t *testing.T) {
-	claudeBin := resolveClaudeBin(t)     // t.Skip when claude is not on PATH
-	home := WithWorktreeAuthenticated(t) // t.Skip when there are no credentials
-	pyryBin := ensurePyryBuilt(t)        // the binary the mcp-config's command names
+	runParallel(t)
+	claudeBin := resolveClaudeBin(t) // t.Skip when claude is not on PATH
+	home := liveHome(t)              // t.Skip when there are no credentials
+	pyryBin := ensurePyryBuilt(t)    // the binary the mcp-config's command names
 	versionRaw, versionToken := captureClaudeVersion(t)
 	t.Logf("#2061: claude version %q (token %q)", versionRaw, versionToken)
 
@@ -916,6 +917,7 @@ func TestRealClaude_BypassApprovalArgv_Probe(t *testing.T) {
 		sock.attach(log)
 
 		cfg := setModeChildConfig{
+			home:           home,
 			model:          setModeModel,
 			promptOne:      setModePromptOne,
 			promptTwo:      setModePromptTwo,

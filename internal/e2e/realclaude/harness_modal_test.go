@@ -115,11 +115,11 @@ func raiseRealPermissionModalPayload(t *testing.T, h *perConvHarness, reqID uint
 // when claude / creds are absent.
 func startModalResolutionHarness(t *testing.T) (*perConvHarness, string) {
 	t.Helper()
-	// No t.Parallel: WithWorktreeAuthenticated calls t.Setenv.
+	// Parallel only through runParallel; see liveHome.
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Skipf("realclaude: claude not on PATH: %v", err)
 	}
-	home := WithWorktreeAuthenticated(t) // skips cleanly when no creds
+	home := liveHome(t) // skips cleanly when no creds
 	claudeBin, err := exec.LookPath("claude")
 	if err != nil {
 		t.Fatalf("realclaude: resolve claude: %v", err)
@@ -225,9 +225,10 @@ func spawnPermissionDaemon(t *testing.T, home, workdir, claudeBin, relayURL, mod
 		)
 	}
 	cmd := exec.Command(bin, args...)
-	// os.Environ() already carries the isolated HOME and the credential
-	// (WithWorktreeAuthenticated t.Setenv's both). Add the relay switches.
-	cmd.Env = append(os.Environ(), "PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=1")
+	// HOME is set explicitly rather than inherited, so the harness also runs under
+	// t.Parallel, where nothing pins it process-wide; the credential is inherited.
+	// Add the relay switches.
+	cmd.Env = homeEnv(home, "PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=1")
 	cmd.Stderr = io.MultiWriter(os.Stderr, stderr) // DEBUG tee
 
 	if err := cmd.Start(); err != nil {

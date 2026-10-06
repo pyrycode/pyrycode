@@ -50,6 +50,7 @@ import (
 // the same conversation. A timeout with no turn_state is the liveness RED this
 // rung captures.
 func TestInteractivePerConversationTurnStateLiveness(t *testing.T) {
+	runParallel(t)
 	h := startPerConversationHarness(t)
 	nonce := time.Now().UnixNano()
 

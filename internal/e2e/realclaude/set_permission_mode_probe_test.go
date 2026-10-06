@@ -842,6 +842,11 @@ type setModeChildConfig struct {
 
 	maxTurns string
 
+	// home, when set, is the child's HOME, passed explicitly so the probe can run
+	// under runParallel. Empty leaves the child inheriting the HOME its test
+	// pinned, which is what every serial caller gets.
+	home string
+
 	// fixturePath mints the arm's destination, and is what keeps two measurements
 	// in separate committed families.
 	fixturePath func(t *testing.T, versionToken, arm string) string
@@ -992,6 +997,9 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm,
 
 	cmd := exec.CommandContext(ctx, claudeBin, argv...)
 	cmd.Dir = workdir
+	if cfg.home != "" {
+		cmd.Env = homeEnv(cfg.home)
+	}
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
@@ -1335,8 +1343,9 @@ func setModeResponseIDMatches(responses []json.RawMessage, requestID string) boo
 // artifact is the fixture set plus
 // docs/knowledge/features/set-permission-mode-inband-probe.md.
 func TestRealClaude_SetPermissionMode_InBandProbe(t *testing.T) {
-	claudeBin := resolveClaudeBin(t)     // t.Skip when claude is not on PATH
-	home := WithWorktreeAuthenticated(t) // t.Skip when there are no credentials
+	runParallel(t)
+	claudeBin := resolveClaudeBin(t) // t.Skip when claude is not on PATH
+	home := liveHome(t)              // t.Skip when there are no credentials
 
 	workdir := filepath.Join(home, setModeWorkdirName)
 	if err := os.MkdirAll(workdir, 0o700); err != nil {
@@ -1352,6 +1361,7 @@ func TestRealClaude_SetPermissionMode_InBandProbe(t *testing.T) {
 	// launch flag and the requested mode, and the model is genuinely the same for
 	// each. #2041 is the measurement that needs one per arm.
 	cfg := setModeChildConfig{
+		home:        home,
 		model:       setModeModel,
 		promptOne:   setModePromptOne,
 		promptTwo:   setModePromptTwo,

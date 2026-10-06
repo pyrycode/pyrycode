@@ -95,6 +95,25 @@ func WithWorktree(t *testing.T) string {
 // re-introduce the 31 s timeout AC #4 exists to eliminate.
 func WithWorktreeAuthenticated(t *testing.T) string {
 	t.Helper()
+	dir := authenticatedHome(t)
+	t.Setenv("HOME", dir)
+	if apiKey := os.Getenv("ANTHROPIC_API_KEY"); apiKey != "" {
+		t.Setenv("ANTHROPIC_API_KEY", apiKey)
+	}
+	if oauthToken := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); oauthToken != "" {
+		t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", oauthToken)
+	}
+	return dir
+}
+
+// authenticatedHome is WithWorktreeAuthenticated without touching the process
+// environment, so a test that uses it may call t.Parallel. It returns a per-test
+// temp HOME, seeded with the operator's .claude.json on the OAuth path, and skips
+// on the same missing prerequisites. The credential stays in the outer
+// environment, where every child inherits it. HOME does not: a parallel test
+// must hand the returned directory to its children itself, through homeEnv.
+func authenticatedHome(t *testing.T) string {
+	t.Helper()
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	oauthToken := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")
 	if apiKey == "" && oauthToken == "" {
@@ -128,18 +147,32 @@ func WithWorktreeAuthenticated(t *testing.T) string {
 		}
 		claudeJSON = data
 	}
-	dir := WithWorktree(t)
-	if apiKey != "" {
-		t.Setenv("ANTHROPIC_API_KEY", apiKey)
-	}
+	dir := t.TempDir()
 	if oauthToken != "" {
-		t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", oauthToken)
 		dst := filepath.Join(dir, ".claude.json")
 		if err := os.WriteFile(dst, claudeJSON, 0o600); err != nil {
 			t.Fatalf("realclaude.WithWorktreeAuthenticated: write %s: %v", dst, err)
 		}
 	}
 	return dir
+}
+
+// homeEnv returns the process environment with HOME replaced by home, followed
+// by extra. A child spawned with it resolves its home to home whether or not the
+// test pinned HOME process-wide, which is what lets a daemon harness run under
+// t.Parallel. For a serial test that did pin it, the result is the same
+// environment it already inherited.
+func homeEnv(home string, extra ...string) []string {
+	base := os.Environ()
+	out := make([]string, 0, len(base)+1+len(extra))
+	for _, kv := range base {
+		if strings.HasPrefix(kv, "HOME=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	out = append(out, "HOME="+home)
+	return append(out, extra...)
 }
 
 // ReadJSONL parses tuidriver.SessionJSONLPath(<HOME>, workdir, sessionID)
@@ -404,4 +437,32 @@ func resolveAndOpenJSONL(workdir, sessionID string) (*os.File, string, error) {
 		return nil, path, fmt.Errorf("open %s: %w", path, err)
 	}
 	return f, path, nil
+}
+
+// parallelLiveTests holds the tests that called runParallel, so liveHome can tell
+// a parallel test from a serial one.
+var parallelLiveTests sync.Map // *testing.T -> struct{}
+
+// runParallel marks a live test parallel. Use it, not a bare t.Parallel, in a
+// test whose daemon harness goes through liveHome. Only a test that changes no
+// process-wide state qualifies: no t.Setenv or os.Setenv, directly or through a
+// harness callback, and no child or in-process read that depends on HOME beyond
+// the daemon, which receives its HOME explicitly.
+func runParallel(t *testing.T) {
+	t.Helper()
+	t.Parallel()
+	parallelLiveTests.Store(t, struct{}{})
+	t.Cleanup(func() { parallelLiveTests.Delete(t) })
+}
+
+// liveHome returns the per-test authenticated HOME for a daemon harness. A test
+// marked with runParallel gets authenticatedHome, which leaves the process
+// environment alone; any other test gets WithWorktreeAuthenticated exactly as
+// before, HOME pinned process-wide.
+func liveHome(t *testing.T) string {
+	t.Helper()
+	if _, ok := parallelLiveTests.Load(t); ok {
+		return authenticatedHome(t)
+	}
+	return WithWorktreeAuthenticated(t)
 }

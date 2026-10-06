@@ -412,7 +412,7 @@ func modeSwitchObservation(rows []modeSwitchAutoRow, model string) *modeSwitchAu
 // a genuinely different model — `haiku` and `claude-haiku-4-5` resolve alike, and a
 // measurement that switched between them would report the same id whether the change
 // applied or not.
-func runModeSwitchDiscovery(t *testing.T, claudeBin, workdir string) ([]modeSwitchAutoRow, map[string]string) {
+func runModeSwitchDiscovery(t *testing.T, claudeBin, home, workdir string) ([]modeSwitchAutoRow, map[string]string) {
 	t.Helper()
 
 	argv := []string{
@@ -428,6 +428,7 @@ func runModeSwitchDiscovery(t *testing.T, claudeBin, workdir string) ([]modeSwit
 
 	cmd := exec.CommandContext(ctx, claudeBin, argv...)
 	cmd.Dir = workdir
+	cmd.Env = homeEnv(home)
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
@@ -601,8 +602,9 @@ func modeSwitchFixturePath(t *testing.T, versionToken, arm string) string {
 // fails only where the instrument measured nothing: no child, no control_response,
 // or no init line.
 func TestRealClaude_InBandModeSwitch_Probe(t *testing.T) {
-	claudeBin := resolveClaudeBin(t)     // t.Skip when claude is not on PATH
-	home := WithWorktreeAuthenticated(t) // t.Skip when there are no credentials
+	runParallel(t)
+	claudeBin := resolveClaudeBin(t) // t.Skip when claude is not on PATH
+	home := liveHome(t)              // t.Skip when there are no credentials
 
 	workdir := filepath.Join(home, modeSwitchWorkdirName)
 	if err := os.MkdirAll(workdir, 0o700); err != nil {
@@ -612,7 +614,7 @@ func TestRealClaude_InBandModeSwitch_Probe(t *testing.T) {
 	versionRaw, versionToken := captureClaudeVersion(t)
 	t.Logf("#2041: claude version %q (token %q)", versionRaw, versionToken)
 
-	rows, _ := runModeSwitchDiscovery(t, claudeBin, workdir)
+	rows, _ := runModeSwitchDiscovery(t, claudeBin, home, workdir)
 
 	capable := modeSwitchPickModel(rows, true, modeSwitchAutoCapablePreference)
 	incapable := modeSwitchPickModel(rows, false, modeSwitchAutoIncapablePreference)
@@ -648,6 +650,7 @@ func TestRealClaude_InBandModeSwitch_Probe(t *testing.T) {
 			targetMode: modeSwitchTargetMode(name),
 		}
 		cfg := setModeChildConfig{
+			home:        home,
 			model:       model,
 			promptOne:   modeSwitchPromptOne,
 			promptTwo:   modeSwitchPromptTwo,

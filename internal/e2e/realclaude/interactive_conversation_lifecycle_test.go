@@ -65,6 +65,7 @@ import (
 const metaVerbReplyBudget = 30 * time.Second
 
 func TestInteractiveConversationLifecycle(t *testing.T) {
+	runParallel(t)
 	h := startPerConversationHarness(t)
 	// A per-run nonce seeds the rename label and the liveness message text so
 	// reruns differ — enough to defeat any accidental caching — without asserting
