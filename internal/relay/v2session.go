@@ -622,6 +622,10 @@ type V2SessionManager struct {
 	// Not closed on Run exit; an in-flight producer unblocks via its escapes.
 	newSessionDone chan newSessionResult
 
+	// switchAgentDone returns worker outcomes to the sole reply/crypto owner.
+	// Producers escape via requester teardown or Run cancellation. Never closed.
+	switchAgentDone chan switchAgentResult
+
 	// replayRing + replayCursor are the mid-turn-reconnect replay source
 	// (#647), published once after the interactive emitter (which owns the
 	// ring) is built — see SetReplaySource for why this is a late-bound setter
@@ -689,7 +693,8 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 		pushOverflow: make(chan string, wakeBufferSize),
 		bundleReady:  make(chan bundleResult, wakeBufferSize),
 
-		newSessionDone: make(chan newSessionResult, wakeBufferSize),
+		newSessionDone:  make(chan newSessionResult, wakeBufferSize),
+		switchAgentDone: make(chan switchAgentResult, wakeBufferSize),
 
 		minClientVersions: minClientVersions,
 	}, nil
@@ -734,6 +739,8 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 			// reply. The seam's goroutine performed no crypto and touched nothing
 			// Run owns.
 			m.handleNewSessionDone(runCtx, res)
+		case res := <-m.switchAgentDone:
+			m.handleSwitchAgentDone(runCtx, res)
 		case req := <-m.manualRekey:
 			req.reply <- m.handleManualRekey(runCtx, req.connID)
 		case <-m.drainCh:
@@ -983,6 +990,9 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 				return
 			}
 			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameStopBackgroundTask})
+			return
+		case protocol.TypeSwitchAgent:
+			m.handleSwitchAgent(ctx, s, probeEnv)
 			return
 		case protocol.TypeNewSession:
 			m.handleNewSession(ctx, s, probeEnv)
