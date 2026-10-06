@@ -74,3 +74,81 @@ Pending documentation stage: `docs/knowledge/features/e2e-realclaude.md`, “A s
 Instrumentation is fixed at `238a04a8579a19e6d2760bf91e084ebd157c0fd4`. This declaration adds documentation only; its resulting pushed commit is the frozen checkout for **exactly six sequential authenticated launches**, numbered 1–6, of `^TestInteractiveStream_FallbackReplySuggestionSetThenClear$` using `/work/Projects/pyrycode-agents/dispatcher/scripts/live-claude-gate.py go --tests` from this product worktree. No code or checkout changes during the batch. Record that checkout commit for every run. Reports are `/tmp/builder-2882/bounded-six/run-1.log` through `run-6.log`. No retry or replacement, including failure, skip, zero tests or interruption. Complete all six; append content-free source, lifecycle/output and wire evidence here regardless of result.
 
 Before declaration: production package race suite passed; final focused fallback race checks and tagged offline TestSuggest race checks passed; module vet, tagged vet and product build passed. Full-module verifier gate and dispatcher full live gate remain pending. No live launch has occurred in this run.
+
+## Six-run results and refinement disposition (2026-10-06)
+
+Exactly six sequential authenticated launches completed at pushed checkout `5ea02fb68bbd6465e14d03f6cdfe18a68b3af7d6`, with fixed instrumentation `238a04a8579a19e6d2760bf91e084ebd157c0fd4`. No retries, replacements, skips, zero-test launches or interruptions. The checkout stayed fixed and clean throughout. E/P/F/S is executed/passed/failed/skipped. Safe observations below survive scratch-file cleanup.
+
+### Run 1
+
+Commit: `5ea02fb68bbd6465e14d03f6cdfe18a68b3af7d6`. Result: `/tmp/builder-2882/bounded-six/run-1.log`. E/P/F/S: **1/1/0/0**.
+
+```text
+fallback source: streams=1 results=1 idle=true calls=1 completed=1 pid=59843 elapsed_ms=8220 exit=0 output={bytes=1868 utf8=true json=true result_success=true text_valid=true} set_revision=1 clear_revision=2 stage=wire set observed
+daemon lifecycle (cause not inferred): pid=59843 attempt_ms=8258 child_ms=8257 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=false own_deadline_elapsed=false group_cancel_requested=false wait_completed=true exit_observed=true exit_code=0 exit_signal=0 output_observed=true wait_ok=true wait_delay=false stdout_bytes=1868 stdout_cap_exceeded=false stdout_utf8_ok=true stdout_json_ok=true stdout_result_ok=true stdout_text_ok=true
+reply_suggestion set: revision=1 length=109 session_id set=true
+reply_suggestion clear: revision=2 session_id set=true
+```
+
+### Run 2
+
+Commit: `5ea02fb68bbd6465e14d03f6cdfe18a68b3af7d6`. Result: `/tmp/builder-2882/bounded-six/run-2.log`. E/P/F/S: **1/0/1/0**.
+
+```text
+fallback source: streams=1 results=1 idle=true calls=1 completed=0 pid=60137 elapsed_ms=12964 exit=unknown output={unknown} set_revision=0 clear_revision=0 stage=incomplete invocation (exit/output unknown)
+daemon lifecycle (cause not inferred): pid=60137 attempt_ms=9801 child_ms=9800 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=true own_deadline_elapsed=true group_cancel_requested=true wait_completed=true exit_observed=true exit_code=-1 exit_signal=9 output_observed=true wait_ok=false wait_delay=false stdout_bytes=0 stdout_cap_exceeded=false stdout_utf8_ok=true stdout_json_ok=false stdout_result_ok=unknown stdout_text_ok=unknown
+```
+
+### Run 3
+
+Commit: `5ea02fb68bbd6465e14d03f6cdfe18a68b3af7d6`. Result: `/tmp/builder-2882/bounded-six/run-3.log`. E/P/F/S: **1/1/0/0**.
+
+```text
+fallback source: streams=1 results=1 idle=true calls=1 completed=1 pid=60948 elapsed_ms=6606 exit=0 output={bytes=1815 utf8=true json=true result_success=true text_valid=true} set_revision=1 clear_revision=2 stage=wire set observed
+daemon lifecycle (cause not inferred): pid=60948 attempt_ms=6643 child_ms=6642 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=false own_deadline_elapsed=false group_cancel_requested=false wait_completed=true exit_observed=true exit_code=0 exit_signal=0 output_observed=true wait_ok=true wait_delay=false stdout_bytes=1815 stdout_cap_exceeded=false stdout_utf8_ok=true stdout_json_ok=true stdout_result_ok=true stdout_text_ok=true
+reply_suggestion set: revision=1 length=55 session_id set=true
+reply_suggestion clear: revision=2 session_id set=true
+```
+
+### Run 4
+
+Commit: `5ea02fb68bbd6465e14d03f6cdfe18a68b3af7d6`. Result: `/tmp/builder-2882/bounded-six/run-4.log`. E/P/F/S: **1/1/0/0**.
+
+```text
+fallback source: streams=1 results=1 idle=true calls=1 completed=1 pid=61574 elapsed_ms=8106 exit=0 output={bytes=1815 utf8=true json=true result_success=true text_valid=true} set_revision=1 clear_revision=2 stage=wire set observed
+daemon lifecycle (cause not inferred): pid=61574 attempt_ms=8144 child_ms=8143 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=false own_deadline_elapsed=false group_cancel_requested=false wait_completed=true exit_observed=true exit_code=0 exit_signal=0 output_observed=true wait_ok=true wait_delay=false stdout_bytes=1815 stdout_cap_exceeded=false stdout_utf8_ok=true stdout_json_ok=true stdout_result_ok=true stdout_text_ok=true
+reply_suggestion set: revision=1 length=55 session_id set=true
+reply_suggestion clear: revision=2 session_id set=true
+```
+
+### Run 5
+
+Commit: `5ea02fb68bbd6465e14d03f6cdfe18a68b3af7d6`. Result: `/tmp/builder-2882/bounded-six/run-5.log`. E/P/F/S: **1/0/1/0**.
+
+```text
+fallback source: streams=1 results=1 idle=true calls=1 completed=0 pid=61890 elapsed_ms=12969 exit=unknown output={unknown} set_revision=0 clear_revision=0 stage=incomplete invocation (exit/output unknown)
+daemon lifecycle (cause not inferred): pid=61890 attempt_ms=9801 child_ms=9800 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=true own_deadline_elapsed=true group_cancel_requested=true wait_completed=true exit_observed=true exit_code=-1 exit_signal=9 output_observed=true wait_ok=false wait_delay=false stdout_bytes=0 stdout_cap_exceeded=false stdout_utf8_ok=true stdout_json_ok=false stdout_result_ok=unknown stdout_text_ok=unknown
+```
+
+### Run 6
+
+Commit: `5ea02fb68bbd6465e14d03f6cdfe18a68b3af7d6`. Result: `/tmp/builder-2882/bounded-six/run-6.log`. E/P/F/S: **1/1/0/0**.
+
+```text
+fallback source: streams=1 results=1 idle=true calls=1 completed=1 pid=62248 elapsed_ms=6322 exit=0 output={bytes=1822 utf8=true json=true result_success=true text_valid=true} set_revision=1 clear_revision=2 stage=wire set observed
+daemon lifecycle (cause not inferred): pid=62248 attempt_ms=6360 child_ms=6359 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=false own_deadline_elapsed=false group_cancel_requested=false wait_completed=true exit_observed=true exit_code=0 exit_signal=0 output_observed=true wait_ok=true wait_delay=false stdout_bytes=1822 stdout_cap_exceeded=false stdout_utf8_ok=true stdout_json_ok=true stdout_result_ok=true stdout_text_ok=true
+reply_suggestion set: revision=1 length=62 session_id set=true
+reply_suggestion clear: revision=2 session_id set=true
+```
+
+**Batch: 6 executed, 4 passed, 2 failed, 0 skipped.** Runs 2 and 5 remain FAIL. Passing runs observed nonempty bounded UTF-8 single-line replies for `suggestConvID`, wire set revision 1 and explicit-null clear revision 2 after accepted input; session ID was present. Their daemon retained counts matched the independently completed source observations. Source diagnostics also appeared at set/clear revisions 1/0 before clear and 1/2 after clear. Failed runs observed no wire set or clear, revisions 0/0.
+
+**Lifecycle stage, independently of output validation:** runs 2 (PID 60137) and 5 (PID 61890) observed fallback/own deadline flags true with both parent flags false, group cancellation requested and wrapper Wait/SIGKILL (exit -1, signal 9). Attempt/child duration was 9801/9800 ms in both. Wrapper completion, real-child exit and real-child output remain unknown; elapsed source observations 12964/12969 ms are time since incomplete invocation start, not completed child durations. The daemon's process state belongs to the wrapper. No simultaneous context ambiguity appeared; simultaneous or missing observations remain ambiguous.
+
+**Received-output validation:** both failed runs observed Wait and a bounded snapshot of exactly zero daemon-captured stdout bytes, cap-exceeded=false, UTF-8=true for the empty snapshot, JSON-decode=false and result/text predicates unknown. Wait-success=false and WaitDelay=false. Zero capture means no bytes received by the daemon, not proof the real child produced none. No usable received completion was observed. Successful snapshots decode and validate, but decodability proves neither pipe EOF, real-child completion, pre-deadline arrival nor publication eligibility. Post-Wait bytes cannot be attributed to arrival before the deadline; saturation would be a lower bound, not total size.
+
+**Return for refinement:** strict current live proof failed twice; no resolution claim or gate waiver. Evidence-backed follow-up: plan a separate content-free witness distinguishing real-child startup/output receipt and wrapper forwarding from absent daemon receipt, using a real-child-started observation and bounded child-read/wrapper-forward counters that survive cancellation. Correlate them with the retained daemon PID/count; missing witnesses remain unknown. This can locate the zero-receipt boundary without assuming child inactivity, network/auth cause, publication rejection or pre-deadline arrival. Execution, credentials, arguments, deadlines, cancellation, fallback policy, native isolation, one-exchange staging, the 15-second window and #2859 release control remain unchanged. Execution/policy/fixture fixes remain outside this slice.
+
+The investigation question is resolved only at the observed daemon receipt boundary: the reproduced stage has zero retained daemon bytes; the underlying child's state and cause remain unknown. Historical failures in the retained #2873 spec remain failures with their original uncertainty; this batch cannot recover their missing witnesses. Historical declared batch at `d416eff6` remains 6/5/1/0, all historical targeted PR runs 18/14/4/0, and the separate exact-base report remains 2/1/1/0. Non-reproduction in a later batch would establish no fix; timeout alone establishes no defect.
+
+Checks passed: `go test -race ./cmd/pyry/...`; final focused `go test -race ./cmd/pyry -run '^TestReplyFallback'`; `go test -race -tags e2e_realclaude -count=1 -run '^TestSuggest' ./internal/e2e/realclaude/...`; `go vet ./...`; tagged live-package vet; `go build` of `cmd/pyry` into scratch. Full-module verifier gate and full dispatcher live gate remain pending; keep `needs-real-claude`. Documentation handoff remains pending at the exact path/section above and must include this counted batch and zero-receipt uncertainty.
