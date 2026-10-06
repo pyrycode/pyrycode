@@ -442,11 +442,11 @@ is elsewhere" or "N files visited, 0 matched" instead.
 
 ### `relay_v2_stream_modal_test.go` — an ack-await loop can discard the frame a later loop waits for (#2612)
 
-`TestRelayV2_StreamModalPermissionRoundTrip` (#1139) awaits the `send_message`
-ack first, skipping every non-ack envelope, then awaits `modal_shown` /
-`question_shown` in a second loop. The comment above the ack wait claimed the
-ack precedes delivery, reasoning from the fake's own dial timing. It was
-wrong about the daemon: `SendMessage`'s handler enqueues the turn into
+Before #2612, `TestRelayV2_StreamModalPermissionRoundTrip` (#1139) awaited the
+`send_message` ack first, skipping every non-ack envelope, then awaited
+`modal_shown` / `question_shown` in a second loop. The comment above the ack
+wait claimed the ack precedes delivery, reasoning from the fake's own dial
+timing. It was wrong about the daemon: `SendMessage`'s handler enqueues the turn into
 `msgqueue` *before* it replies the ack (see
 [relay-package.md](relay-package.md) § `SendMessage`, "enqueues... and acks
 on acceptance"), and `streamApprovalBridge.Surface` broadcasts `modal_shown`
@@ -466,18 +466,32 @@ every frame type a later loop in the same case will wait for** — the
 `send_message` ack is accept-into-backlog only (§ "Cursor-stamping only
 needs the ack, not the drain" above), never a delivery barrier, so nothing
 downstream of enqueue can be assumed to follow it.
-`relay_v2_stream_new_session_test.go` (M1/M4) and
-`relay_v2_stream_interrupt_test.go` have the identical inline ack-loop shape
-and were confirmed to drop non-ack frames the same way; they were left
-unchanged (different wait target — an `assistant_delta`, not a broadcast —
-and no shared helper to fix once) and flagged for a follow-up rather than
-fixed here. A new test in this family that adds a second post-ack wait
-should record that frame in `nextEnv` from the start rather than decode it
-only inside its own loop.
+A new test in this family that adds a second post-ack wait should record
+that frame in `nextEnv` from the start rather than decode it only inside its
+own loop. `TestRelayV2_StreamSendMessageDrainsTurn` (#2610, above) collects
+ack and drain milestones in one loop; sequential milestone loops also work
+when their single reader retains every awaited observation.
 
-**The trap struck a second, independent time in `relay_v2_stream_send_test.go`
-(#2610)** — see above — and that fix is the reference for the two tests still
-flagged: one loop recording every awaited milestone the instant it arrives,
-under a single wait, rather than an ack-first loop that discards whatever it
-doesn't currently want. `relay_v2_stream_interrupt_test.go` and
-`relay_v2_stream_new_session_test.go` remain unfixed and exposed.
+`TestRelayV2_StreamNewSessionRotatesAndRestartsFresh` and
+`TestRelayV2_StreamInterruptStopsRunningTurn` follow the latter pattern
+(#2614). Their `nextEnv` readers decode and validate the awaited
+`assistant_delta` before returning it to any wait loop, so an echo consumed
+during the correlated ack wait still satisfies the later milestone. Keep
+separate observations for each turn: new-session M1 requires turn one's
+echo, while M6 requires turn two's distinct text needle and the expected
+conversation id.
+Trailing turn-one deltas and fragments without turn two's needle cannot
+discharge M6. Retention must preserve payload validation, conversation/text
+assertions, matching ack ids and each existing deadline; the interrupt
+reader also continues to reject every `unrecognized_message`.
+
+**Force application-envelope ordering after decryption when testing this
+race.** Holding an already-decrypted matching ack until the echo is read
+reproduced both old tests' M1 timeouts; the retained-observation versions
+passed, including new-session M6. Decrypt each ciphertext exactly once in
+arrival order with the same receive cipher, then delay the decoded ack's
+return to the waiter. Reordering or replaying ciphertext would instead
+violate Noise nonce order and test a different failure. A longer milestone
+deadline cannot recover an echo the ack loop has already consumed. See
+[mutation verification](development-verification.md#prove-that-tests-distinguish-the-change)
+for using scratch Go overlays without changing the branch.

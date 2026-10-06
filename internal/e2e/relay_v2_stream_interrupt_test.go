@@ -147,6 +147,9 @@ func TestRelayV2_StreamInterruptStopsRunningTurn(t *testing.T) {
 	// parser. Its arrival is pinned separately, on the emitted bytes, by the fake's own
 	// TestRunStreamJSON_InterruptAckRider — a zero-assertion cannot prove its own input
 	// arrived.
+	// Keep M1's echo through the ack wait on the same single reader.
+	var convB string
+	sawDelta := false
 	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) {
 		t.Helper()
 		for {
@@ -184,6 +187,20 @@ func TestRelayV2_StreamInterruptStopsRunningTurn(t *testing.T) {
 					"the fake grew a shape the parser has no mapping for.",
 					p.Site, p.MessageType, p.Truncated, p.Raw)
 			}
+			if env.Type == protocol.TypeAssistantDelta && convB != "" && !sawDelta {
+				var d protocol.AssistantDeltaPayload
+				if err := json.Unmarshal(env.Payload, &d); err != nil {
+					t.Fatalf("phone A decode assistant_delta payload: %v", err)
+				}
+				if d.ConversationID != convB {
+					t.Errorf("assistant_delta ConversationID: got %q, want %q", d.ConversationID, convB)
+				}
+				if !strings.Contains(d.Text, echoNeedle) {
+					t.Fatalf("M1: assistant_delta did not carry the echoed prompt; got Text=%q, want it to contain %q "+
+						"(the round-trip proof — fakeclaude echoes the sent prompt back through the daemon)", d.Text, echoNeedle)
+				}
+				sawDelta = true
+			}
 			return env, true
 		}
 	}
@@ -199,7 +216,6 @@ func TestRelayV2_StreamInterruptStopsRunningTurn(t *testing.T) {
 		TS:      time.Now().UTC(),
 		Payload: mustJSON(t, protocol.CreateConversationPayload{}),
 	})
-	var convB string
 	createDeadline := time.Now().Add(15 * time.Second)
 	for convB == "" {
 		env, ok := nextEnv(createDeadline)
@@ -252,7 +268,7 @@ func TestRelayV2_StreamInterruptStopsRunningTurn(t *testing.T) {
 		}
 	}
 
-	// --- M1 (AC1): the turn is in flight. Drain until an assistant_delta for convB whose
+	// --- M1 (AC1): the turn is in flight. Use the recorded assistant_delta for convB whose
 	// Text carries the echoed prompt. The echo is the non-vacuity guard — a full
 	// phone→daemon→fake→daemon→phone round-trip, not merely "some text". A leading
 	// turn_state{responding} precedes it; ignore it until the delta is seen. Observing
@@ -260,29 +276,13 @@ func TestRelayV2_StreamInterruptStopsRunningTurn(t *testing.T) {
 	// absorbs mint + spawn + first-turn latency (WriteUserTurn returns the retryable
 	// ErrNoLiveChild between the minted child's spawn and stdin-ready; the inbound queue
 	// retries, so the turn lands once the child is live).
-	sawDelta := false
 	m1Deadline := time.Now().Add(20 * time.Second)
 	for !sawDelta {
-		env, ok := nextEnv(m1Deadline)
+		_, ok := nextEnv(m1Deadline)
 		if !ok {
 			t.Fatal("M1: never observed an assistant_delta for the minted conversation; the turn never started in flight " +
 				"(delivery never reached the minted child, or the parser / drain gate / emitter dropped it)")
 		}
-		if env.Type != protocol.TypeAssistantDelta {
-			continue
-		}
-		var d protocol.AssistantDeltaPayload
-		if err := json.Unmarshal(env.Payload, &d); err != nil {
-			t.Fatalf("phone A decode assistant_delta payload: %v", err)
-		}
-		if d.ConversationID != convB {
-			t.Errorf("assistant_delta ConversationID: got %q, want %q", d.ConversationID, convB)
-		}
-		if !strings.Contains(d.Text, echoNeedle) {
-			t.Fatalf("M1: assistant_delta did not carry the echoed prompt; got Text=%q, want it to contain %q "+
-				"(the round-trip proof — fakeclaude echoes the sent prompt back through the daemon)", d.Text, echoNeedle)
-		}
-		sawDelta = true
 	}
 	t.Logf("M1: observed assistant_delta echoing the prompt — the turn is in flight when we interrupt (AC1)")
 
