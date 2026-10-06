@@ -1217,10 +1217,8 @@ func (e *interactiveTurnEmitterV2) emit(ctx context.Context, convID, typ string,
 	// The durable half of the same record (#2114), beside the ring and under the
 	// same four values: one append per LOGICAL event, before the per-conn
 	// fan-out, so a conversation with no interactive conn open still accumulates
-	// history. A failure never suppresses the ring append or the wire emit
-	// below — appendConversationHistory returns nothing, so there is no branch
-	// to take.
-	appendConversationHistory(e.hist, e.logger, "interactive_turn.history_append_err",
+	// history. A failed append returns nil metadata; delivery still proceeds.
+	historyEntryID := appendConversationHistory(e.hist, e.logger, "interactive_turn.history_append_err",
 		convID, typ, payloadJSON, ts)
 
 	// Fresh snapshot per envelope: a conn that joined mid-turn is included next
@@ -1235,11 +1233,12 @@ func (e *interactiveTurnEmitterV2) emit(ctx context.Context, convID, typ string,
 		// only ever reads the envelope (marshal/seal). So all conns observe the
 		// identical durable id (AC-2) with no race and no per-conn allocation.
 		env := protocol.Envelope{
-			ID:      e.nextID,
-			Type:    typ,
-			TS:      ts,
-			Payload: payloadJSON,
-			EventID: &eventID,
+			ID:             e.nextID,
+			Type:           typ,
+			TS:             ts,
+			Payload:        payloadJSON,
+			EventID:        &eventID,
+			HistoryEntryID: historyEntryID,
 		}
 		if err := e.bcast.Push(ctx, c.ConnID, env); err != nil {
 			if ctx.Err() != nil {
