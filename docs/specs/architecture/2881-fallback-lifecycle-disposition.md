@@ -24,3 +24,6 @@ Pending documentation stage: in `docs/knowledge/features/e2e-realclaude.md`, ext
 - [Tokens; subprocesses; network/I/O; cryptography] No new execution, authentication, endpoint or crypto operation; `replyFallback.run` retains its real isolated bounded call and existing caps. No credentials are obtained for this finalization.
 - [Files; concurrency] Only plans and intended PR prose change; existing private observer files, cancellation/reaping, synchronized captures and pre-cleanup/Wait-guarded snapshots remain unchanged. No goroutine is added.
 - [Threat model] Evidence disposition cannot establish a unique cause from timing/cancellation or recover missing witnesses; output investigation is OUT OF SCOPE in #2882 and authenticated absence remains FAIL.
+
+## Revisions
+- 2026-10-06: The operator transferred the retained commits to `feature/2881` and opened PR #2892, closing #2875 as superseded so the dispatcher can track this child. Continue on the assigned branch and active PR; preserve the disposition, every historical result and unchanged fallback implementation. Revalidate offline checks after the dispatcher merge from main; no additional authenticated batch.
