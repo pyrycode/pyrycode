@@ -68,3 +68,7 @@ None. The production relay caller and wiring remain #2674's deliverable.
 **Date:** 2026-10-06
 
 Sizing after plan: one deliverable, approximately 740 written lines, zero new exported types/interfaces, no changed exported signatures or consumer updates, five acceptance criteria, fewer than ten new rejection branches.
+
+## Revisions
+
+- 2026-10-06: Failed/cancelled-reply tests exposed that capture completion contains no failure classification. `wrapUpText` now returns text, completion and failure separately; capture retains only `IsError` or cancelled/refused reason as a bool. Switch rejects failed replies, while ordinary `wrapUp` deliberately ignores that flag and preserves its existing reply-only behavior. The path helper also verifies the resolved path is a directory. Additional file read: `cmd/pyry/wrapup_capture.go` → `observe`, `wait`: completion previously discarded terminal failure. No additional state machine or exported type. Final written diff remains below 800 lines.

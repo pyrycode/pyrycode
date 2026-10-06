@@ -350,8 +350,15 @@ func (r *conversationReset) release(convID string) {
 // WriteUserTurn below would answer the retryable ErrNoLiveChild and the wrap-up
 // could never be delivered at all.
 func (r *conversationReset) wrapUp(convID string) (wrote bool) {
+	text, ended, _ := r.wrapUpText(convID)
+	return ended && r.storeNote(convID, text)
+}
+
+// wrapUpText captures the reply without storing it, so a switch can add history.
+// Ordinary reset keeps the reply-only write and its existing failure behavior.
+func (r *conversationReset) wrapUpText(convID string) (string, bool, bool) {
 	if r == nil || r.resolve == nil {
-		return false
+		return "", false, false
 	}
 	ctx, cancel := context.WithTimeout(r.baseContext(), r.bound())
 	defer cancel()
@@ -365,14 +372,14 @@ func (r *conversationReset) wrapUp(convID string) (wrote bool) {
 		r.logger().Debug("relay: reset wrap-up skipped; conversation has no bound session",
 			"event", "reset.wrapup.unresolved",
 			"conversation_id", convID)
-		return false
+		return "", false, false
 	}
 	capturer, ok := target.runner.(wrapUpCapturer)
 	if !ok {
 		r.logger().Debug("relay: reset wrap-up skipped; bound runner captures no reply",
 			"event", "reset.wrapup.no_capture",
 			"conversation_id", convID)
-		return false
+		return "", false, false
 	}
 
 	// A failed interrupt is tolerated: the idle wait below is the real gate, and the
@@ -380,15 +387,14 @@ func (r *conversationReset) wrapUp(convID string) (wrote bool) {
 	if err := target.runner.Interrupt(); err != nil {
 		r.logger().Debug("relay: reset wrap-up interrupt failed; waiting for idle anyway",
 			"event", "reset.wrapup.interrupt_inert",
-			"conversation_id", convID,
-			"err", err)
+			"conversation_id", convID)
 	}
 	if r.busy != nil {
 		if err := r.busy.WaitIdle(ctx, convID); err != nil {
 			r.logger().Debug("relay: reset wrap-up abandoned; the conversation did not go idle in time",
 				"event", "reset.wrapup.not_idle",
 				"conversation_id", convID)
-			return false
+			return "", false, false
 		}
 	}
 
@@ -400,13 +406,13 @@ func (r *conversationReset) wrapUp(convID string) (wrote bool) {
 		r.logger().Debug("relay: reset wrap-up skipped; a reply capture is already armed",
 			"event", "reset.wrapup.capture_busy",
 			"conversation_id", convID)
-		return false
+		return "", false, false
 	}
 	defer stop()
 
 	undo, finished, err := r.busy.beginDelivery(ctx, convID)
 	if err != nil {
-		return false
+		return "", false, false
 	}
 	defer finished()
 	if err := target.write(ctx, convID, []byte(composeWrapUpPrompt(r.previousNote(convID)))); err != nil {
@@ -421,16 +427,16 @@ func (r *conversationReset) wrapUp(convID string) (wrote bool) {
 		r.logger().Warn("relay: reset wrap-up prompt was not delivered",
 			"event", "reset.wrapup.write_failed",
 			"conversation_id", convID)
-		return false
+		return "", false, false
 	}
-	text, ended := reply.wait(ctx)
+	text, ended, failed := reply.waitOutcome(ctx)
 	if !ended {
 		r.logger().Warn("relay: reset wrap-up hit its deadline; the previous handoff note stands",
 			"event", "reset.wrapup.deadline",
 			"conversation_id", convID)
-		return false
+		return "", false, false
 	}
-	return r.storeNote(convID, text)
+	return text, true, failed
 }
 
 // baseContext answers the daemon context, or Background for a literal built

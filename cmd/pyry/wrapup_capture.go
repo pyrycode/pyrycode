@@ -125,7 +125,7 @@ func (c *wrapUpCapture) observe(ev turnevent.Event) {
 	case turnevent.TextChunk:
 		reply.append(e.Text)
 	case turnevent.TurnEnd:
-		reply.finish()
+		reply.finish(e.IsError || e.Reason == turnevent.TurnEndReasonCancelled || e.Reason == turnevent.TurnEndReasonRefusal)
 	}
 }
 
@@ -185,7 +185,8 @@ type wrapUpReply struct {
 	text strings.Builder
 	// ended records that finish already ran, so a second TurnEnd — or a finish
 	// racing one — closes done exactly once.
-	ended bool
+	ended  bool
+	failed bool // terminal failure is separate from completion for switch handover
 }
 
 // append adds one chunk, BOUNDED at sessions.MaxHandoffNoteBytes.
@@ -215,13 +216,14 @@ func (r *wrapUpReply) append(chunk string) {
 }
 
 // finish closes the reply to further accumulation and releases every waiter. Idempotent.
-func (r *wrapUpReply) finish() {
+func (r *wrapUpReply) finish(failed bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.ended {
 		return
 	}
 	r.ended = true
+	r.failed = failed
 	close(r.done)
 }
 
@@ -237,12 +239,17 @@ func (r *wrapUpReply) finish() {
 // disarm the capture, because the disarm is the caller's deferred stop and running
 // it from here would make the two orderings disagree.
 func (r *wrapUpReply) wait(ctx context.Context) (string, bool) {
+	text, ended, _ := r.waitOutcome(ctx)
+	return text, ended
+}
+
+func (r *wrapUpReply) waitOutcome(ctx context.Context) (string, bool, bool) {
 	select {
 	case <-r.done:
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		return r.text.String(), true
+		return r.text.String(), true, r.failed
 	case <-ctx.Done():
-		return "", false
+		return "", false, false
 	}
 }
