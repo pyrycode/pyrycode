@@ -180,3 +180,79 @@ Pending documentation stage: `docs/knowledge/features/e2e-realclaude.md`, “A s
 Instrumentation is fixed at `ed5730f91e20efafa586c6f00efdf2cf716a200c`. This declaration changes documentation only; its resulting pushed commit is the frozen checkout for **exactly six sequential authenticated launches**, numbered 1–6, of `^TestInteractiveStream_FallbackReplySuggestionSetThenClear$` through `/work/Projects/pyrycode-agents/dispatcher/scripts/live-claude-gate.py go --tests`, from this product worktree. No code/checkout changes during the batch, no retries or replacements, including failure, skip, zero-test launch or interruption. Complete all six and retain every outcome separately from the prior batch. Reports: `/tmp/builder-2882/surviving-six/run-1.log` through `run-6.log`; record checkout commit, E/P/F/S, source/start/read/forward, PID-correlated daemon lifecycle/output and wire revisions for each. A failed proof returns for refinement; six executed passes mean only “not reproduced in this bounded batch; historical failure cause remains unknown.”
 
 Before declaration: focused tagged `TestSuggest` race checks (including synchronized spawn/read/forward SIGKILL boundaries) passed; final source/progress/lifecycle race checks passed; production package race suite, module/tagged vet and product build passed. No new live launch has occurred. Full-module verifier and dispatcher full live gate remain pending; documentation handoff remains pending.
+
+## Surviving-witness six-run results and refinement disposition (2026-10-06)
+
+Exactly six sequential authenticated launches completed at pushed checkout `14fabda6effe427eb019c5499aa3fe38cf031215`, with fixed instrumentation `ed5730f91e20efafa586c6f00efdf2cf716a200c`. No retries, replacements, skips, zero-test launches or interruptions; checkout remained fixed and clean throughout. E/P/F/S = executed/passed/failed/skipped. The records below retain independent source progress, correlated daemon lifecycle/output and wire observations after scratch cleanup.
+
+### Surviving run 1
+
+Commit: `14fabda6effe427eb019c5499aa3fe38cf031215`. Result: `/tmp/builder-2882/surviving-six/run-1.log`. E/P/F/S: **1/0/1/0**.
+
+```text
+fallback source: streams=1 results=1 idle=true calls=1 completed=0 pid=112323 elapsed_ms=12971 exit=unknown output={unknown} set_revision=0 clear_revision=0 stage=incomplete invocation (exit/output unknown) child_pid=112324 start=true read={unknown} forward={unknown}
+daemon lifecycle (cause not inferred): pid=112323 attempt_ms=9801 child_ms=9800 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=true own_deadline_elapsed=true group_cancel_requested=true wait_completed=true exit_observed=true exit_code=-1 exit_signal=9 output_observed=true wait_ok=false wait_delay=false stdout_bytes=0 stdout_cap_exceeded=false stdout_utf8_ok=true stdout_json_ok=false stdout_result_ok=unknown stdout_text_ok=unknown
+```
+
+### Surviving run 2
+
+Commit: `14fabda6effe427eb019c5499aa3fe38cf031215`. Result: `/tmp/builder-2882/surviving-six/run-2.log`. E/P/F/S: **1/1/0/0**.
+
+```text
+reply_suggestion set: revision=1 length=50 session_id set=true
+fallback source: streams=1 results=1 idle=true calls=1 completed=1 pid=112636 elapsed_ms=7181 exit=0 output={bytes=1810 utf8=true json=true result_success=true text_valid=true} set_revision=1 clear_revision=2 stage=wire set observed child_pid=112637 start=true read={bytes=1810 saturated=false} forward={bytes=1810 saturated=false}
+daemon lifecycle (cause not inferred): pid=112636 attempt_ms=7221 child_ms=7220 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=false own_deadline_elapsed=false group_cancel_requested=false wait_completed=true exit_observed=true exit_code=0 exit_signal=0 output_observed=true wait_ok=true wait_delay=false stdout_bytes=1810 stdout_cap_exceeded=false stdout_utf8_ok=true stdout_json_ok=true stdout_result_ok=true stdout_text_ok=true
+reply_suggestion clear: revision=2 session_id set=true
+```
+
+### Surviving run 3
+
+Commit: `14fabda6effe427eb019c5499aa3fe38cf031215`. Result: `/tmp/builder-2882/surviving-six/run-3.log`. E/P/F/S: **1/0/1/0**.
+
+```text
+fallback source: streams=1 results=1 idle=true calls=1 completed=0 pid=113067 elapsed_ms=12968 exit=unknown output={unknown} set_revision=0 clear_revision=0 stage=incomplete invocation (exit/output unknown) child_pid=113068 start=true read={unknown} forward={unknown}
+daemon lifecycle (cause not inferred): pid=113067 attempt_ms=9801 child_ms=9801 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=true own_deadline_elapsed=true group_cancel_requested=true wait_completed=true exit_observed=true exit_code=-1 exit_signal=9 output_observed=true wait_ok=false wait_delay=false stdout_bytes=0 stdout_cap_exceeded=false stdout_utf8_ok=true stdout_json_ok=false stdout_result_ok=unknown stdout_text_ok=unknown
+```
+
+### Surviving run 4
+
+Commit: `14fabda6effe427eb019c5499aa3fe38cf031215`. Result: `/tmp/builder-2882/surviving-six/run-4.log`. E/P/F/S: **1/1/0/0**.
+
+```text
+reply_suggestion set: revision=1 length=51 session_id set=true
+fallback source: streams=1 results=1 idle=true calls=1 completed=1 pid=113390 elapsed_ms=7926 exit=0 output={bytes=1837 utf8=true json=true result_success=true text_valid=true} set_revision=1 clear_revision=2 stage=wire set observed child_pid=113391 start=true read={bytes=1837 saturated=false} forward={bytes=1837 saturated=false}
+daemon lifecycle (cause not inferred): pid=113390 attempt_ms=7966 child_ms=7965 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=false own_deadline_elapsed=false group_cancel_requested=false wait_completed=true exit_observed=true exit_code=0 exit_signal=0 output_observed=true wait_ok=true wait_delay=false stdout_bytes=1837 stdout_cap_exceeded=false stdout_utf8_ok=true stdout_json_ok=true stdout_result_ok=true stdout_text_ok=true
+reply_suggestion clear: revision=2 session_id set=true
+```
+
+### Surviving run 5
+
+Commit: `14fabda6effe427eb019c5499aa3fe38cf031215`. Result: `/tmp/builder-2882/surviving-six/run-5.log`. E/P/F/S: **1/1/0/0**.
+
+```text
+reply_suggestion set: revision=1 length=63 session_id set=true
+fallback source: streams=1 results=1 idle=true calls=1 completed=1 pid=113717 elapsed_ms=8477 exit=0 output={bytes=1823 utf8=true json=true result_success=true text_valid=true} set_revision=1 clear_revision=2 stage=wire set observed child_pid=113718 start=true read={bytes=1823 saturated=false} forward={bytes=1823 saturated=false}
+daemon lifecycle (cause not inferred): pid=113717 attempt_ms=8515 child_ms=8514 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=false own_deadline_elapsed=false group_cancel_requested=false wait_completed=true exit_observed=true exit_code=0 exit_signal=0 output_observed=true wait_ok=true wait_delay=false stdout_bytes=1823 stdout_cap_exceeded=false stdout_utf8_ok=true stdout_json_ok=true stdout_result_ok=true stdout_text_ok=true
+reply_suggestion clear: revision=2 session_id set=true
+```
+
+### Surviving run 6
+
+Commit: `14fabda6effe427eb019c5499aa3fe38cf031215`. Result: `/tmp/builder-2882/surviving-six/run-6.log`. E/P/F/S: **1/0/1/0**.
+
+```text
+fallback source: streams=1 results=1 idle=true calls=1 completed=0 pid=114572 elapsed_ms=12974 exit=unknown output={unknown} set_revision=0 clear_revision=0 stage=incomplete invocation (exit/output unknown) child_pid=114573 start=true read={unknown} forward={unknown}
+daemon lifecycle (cause not inferred): pid=114572 attempt_ms=9801 child_ms=9800 parent_canceled=false parent_deadline=false fallback_canceled=false fallback_deadline=true own_deadline_elapsed=true group_cancel_requested=true wait_completed=true exit_observed=true exit_code=-1 exit_signal=9 output_observed=true wait_ok=false wait_delay=false stdout_bytes=0 stdout_cap_exceeded=false stdout_utf8_ok=true stdout_json_ok=false stdout_result_ok=unknown stdout_text_ok=unknown
+```
+
+**New batch: 6 executed, 3 passed, 3 failed, 0 skipped.** Runs 1, 3 and 6 remain FAIL; no gate waiver or resolution claim. The prior #2882 batch remains 6/4/2/0, including failed runs 2 and 5. Historical #2873 declared batch at `d416eff6` remains 6/5/1/0, all historical targeted PR runs 18/14/4/0 and the separate exact-base report 2/1/1/0; historical missing witnesses cannot be recovered by this batch.
+
+**Source progress independently:** failed runs persisted successful subprocess creation for wrapper/child PID pairs 112323/112324, 113067/113068 and 114572/114573 (see exact records above). Read and forwarding remain unknown, not zero or proof those stages did not occur. Wrapper completion and real-child exit/output remain unknown. Spawn does not establish initialization or authentication. Passing runs independently witnessed read and successful write/flush prefixes; these do not establish daemon receipt, EOF, child completion, pre-deadline arrival or publication eligibility.
+
+**Daemon lifecycle and validation independently:** failed runs observed the internal deadline with both parent flags false, group cancellation, wrapper Wait/SIGKILL and zero retained daemon bytes. UTF-8=true describes the empty received snapshot; JSON=false leaves result/text unknown. No cause follows from elapsed time. Successful daemon snapshots decode and validate separately from progress witnesses; post-Wait bytes cannot be attributed to pre-deadline arrival. Saturated counts would be lower bounds, never totals. Missing or simultaneous observations remain ambiguous.
+
+**Wire proof independently:** passing runs observed the required nonempty bounded UTF-8 single-line Haiku reply for `suggestConvID` and explicit-null clear after accepted input, at revisions 1/2. Failed runs had no set/clear, revisions 0/0; authenticated absence fails.
+
+**Return for refinement:** current proof failed three times after an observed real-child spawn, with first-read/forward unknown and independently zero daemon receipt. Evidence-backed follow-up: scope an authenticated investigation of the real-child spawn-to-first-stdout-read boundary, using separately contracted content-free startup/readiness/error-class evidence to distinguish child initialization/authentication from absent observed output. Do not infer a cause from missing read witnesses, change execution/policy/live fixtures in this slice, or waive the current gate. Keep #2859 release control and existing argv/credentials/deadlines/cancellation/isolation/one-exchange staging/15-second window unchanged. A future six-pass batch could establish only non-reproduction, with historical failure cause unknown.
+
+Builder-owned checks passed: production package race suite; tagged focused `TestSuggest` race checks and final source/progress/lifecycle race checks; module/tagged vet; product build. QMD update and embedding completed after plan/evidence changes. Full-module verifier suite and dispatcher full live gate remain pending (`needs-real-claude`). Documentation stage remains responsible for the exact path/section and requirements in both handoffs above, including both counted #2882 batches and preserved failures.
