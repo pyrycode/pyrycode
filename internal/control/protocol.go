@@ -156,6 +156,10 @@ const (
 	// documentation convention, not a parser rule.
 	VerbChannelNew Verb = "channel.new"
 
+	// VerbConversationNew requests a chat or channel with optional settings.
+	// The independent creator seam is unwired until daemon composition installs it.
+	VerbConversationNew Verb = "conversation.new"
+
 	// VerbChannelPost records one message in a channel conversation named by
 	// its display label. Request.ChannelPost carries the label and the
 	// content; success answers Response.OK with no result body, because the
@@ -273,9 +277,10 @@ type Request struct {
 	Rekey    *RekeyPayload    `json:"rekey,omitempty"`    // populated for VerbRekey
 	Approve  *ApprovePayload  `json:"approve,omitempty"`  // populated for VerbMCPApprove
 
-	AttachFile *AttachFilePayload `json:"attachFile,omitempty"` // populated for VerbAttachFile
-	Channel    *ChannelPayload    `json:"channel,omitempty"`    // populated for VerbChannelNew
-	Pairing    *PairingPayload    `json:"pairing,omitempty"`    // populated for VerbPairingMint
+	AttachFile   *AttachFilePayload   `json:"attachFile,omitempty"`   // populated for VerbAttachFile
+	Channel      *ChannelPayload      `json:"channel,omitempty"`      // populated for VerbChannelNew
+	Pairing      *PairingPayload      `json:"pairing,omitempty"`      // populated for VerbPairingMint
+	Conversation *ConversationPayload `json:"conversation,omitempty"` // populated for VerbConversationNew
 
 	// ChannelPost is a field of its own rather than two more members on
 	// ChannelPayload, whose Cwd has no meaning for a post. Additive and
@@ -334,6 +339,24 @@ type ChannelPayload struct {
 // takes a session id, and a verb that answers with more than its caller needs
 // is a verb whose wire has to be kept compatible for no reason.
 type ChannelNewResult struct {
+	ConversationID string `json:"conversationID"`
+}
+
+// ConversationPayload carries caller-authored creation inputs. Cwd must be
+// nonempty; workspace validation and name defaults belong to the creator.
+// Type defaults to chat when absent/null, and otherwise must be chat or channel.
+// Model/Effort follow protocol.CreateConversationPayload: absent/null is unset,
+// while an explicit empty string remains present. The creator owns their policy.
+type ConversationPayload struct {
+	Cwd    string  `json:"cwd"`
+	Name   string  `json:"name,omitempty"`
+	Type   *string `json:"type,omitempty"`
+	Model  *string `json:"model,omitempty"`
+	Effort *string `json:"effort,omitempty"`
+}
+
+// ConversationNewResult carries the creator's nonempty conversation id.
+type ConversationNewResult struct {
 	ConversationID string `json:"conversationID"`
 }
 
@@ -489,25 +512,27 @@ type AttachFileResult struct {
 //   - Approve: verdict for VerbMCPApprove (allow or deny)
 //   - AttachFile: minted attachment id for VerbAttachFile
 //   - ChannelNew: minted conversation id for VerbChannelNew
+//   - ConversationNew: minted conversation id for VerbConversationNew
 //   - Pairing: opaque bearer string for VerbPairingMint
 //   - UpdateWhenIdle: scheduling decision for VerbUpdateWhenIdle
 //   - OK: success acknowledgment for verbs without a typed payload (e.g. VerbStop)
 //
 // Error is set when the server rejects the request.
 type Response struct {
-	Status         *StatusPayload        `json:"status,omitempty"`
-	Logs           *LogsPayload          `json:"logs,omitempty"`
-	SessionsNew    *SessionsNewResult    `json:"sessionsNew,omitempty"`   // populated for VerbSessionsNew
-	SessionsList   *SessionsListPayload  `json:"sessionsList,omitempty"`  // populated for VerbSessionsList (1.1b-B1)
-	SessionsHasID  *SessionsHasIDResult  `json:"sessionsHasID,omitempty"` // populated for VerbSessionsHasID (1.3c-1)
-	Approve        *ApproveResult        `json:"approve,omitempty"`       // populated for VerbMCPApprove
-	AttachFile     *AttachFileResult     `json:"attachFile,omitempty"`    // populated for VerbAttachFile
-	ChannelNew     *ChannelNewResult     `json:"channelNew,omitempty"`    // populated for VerbChannelNew
-	Pairing        *PairingResult        `json:"pairing,omitempty"`       // populated for VerbPairingMint
-	UpdateWhenIdle *UpdateWhenIdleResult `json:"updateWhenIdle,omitempty"`
-	OK             bool                  `json:"ok,omitempty"`
-	Error          string                `json:"error,omitempty"`
-	ErrorCode      ErrorCode             `json:"errorCode,omitempty"` // typed sentinel token (1.1d-B1)
+	Status          *StatusPayload         `json:"status,omitempty"`
+	Logs            *LogsPayload           `json:"logs,omitempty"`
+	SessionsNew     *SessionsNewResult     `json:"sessionsNew,omitempty"`     // populated for VerbSessionsNew
+	SessionsList    *SessionsListPayload   `json:"sessionsList,omitempty"`    // populated for VerbSessionsList (1.1b-B1)
+	SessionsHasID   *SessionsHasIDResult   `json:"sessionsHasID,omitempty"`   // populated for VerbSessionsHasID (1.3c-1)
+	Approve         *ApproveResult         `json:"approve,omitempty"`         // populated for VerbMCPApprove
+	AttachFile      *AttachFileResult      `json:"attachFile,omitempty"`      // populated for VerbAttachFile
+	ChannelNew      *ChannelNewResult      `json:"channelNew,omitempty"`      // populated for VerbChannelNew
+	ConversationNew *ConversationNewResult `json:"conversationNew,omitempty"` // populated for VerbConversationNew
+	Pairing         *PairingResult         `json:"pairing,omitempty"`         // populated for VerbPairingMint
+	UpdateWhenIdle  *UpdateWhenIdleResult  `json:"updateWhenIdle,omitempty"`
+	OK              bool                   `json:"ok,omitempty"`
+	Error           string                 `json:"error,omitempty"`
+	ErrorCode       ErrorCode              `json:"errorCode,omitempty"` // typed sentinel token (1.1d-B1)
 }
 
 // SessionsNewResult carries the result of a successful sessions.new
