@@ -1159,9 +1159,34 @@ string: absent and empty both mean no description, and an empty value is omitted
 when marshalled. Nonempty decoded strings round-trip verbatim, including whitespace
 and control characters; this field adds no trimming, content validation or
 handshake rejection. It is unrelated to negotiated `capabilities` and does not
-advertise or grant a negotiated capability. Relay retention and prompt consumption,
-including prompt admission and attributed rendering, are pending
-[#2898](https://github.com/pyrycode/pyrycode/issues/2898).
+advertise or grant a negotiated capability. No protocol-version bump or capability
+negotiation is required to include it in a spawn prompt.
+
+After successful token authentication, the daemon retains the description verbatim
+through an inclusive **1024-byte** cap. Longer values become empty without rejecting
+the handshake; unauthenticated connections expose no description, and re-key keeps
+the authenticated report. Only the bounded description string is retained, never
+the hello or token; description bytes are absent from device-registry persistence
+and daemon logs.
+
+Prompt composition admits the description independently through an inclusive
+**512-UTF-8-byte** cap, measured in bytes rather than characters. Accepted text is
+verbatim, including surrounding whitespace. Empty, whitespace-only, oversized,
+invalid-UTF-8, C0 (`U+0000`–`U+001F`), DEL (`U+007F`), C1 (`U+0080`–`U+009F`) or
+double-quote-containing descriptions are silently omitted. This keeps CR/LF out of
+the single-line quoted transcription. Refusal drops only the description, leaving
+an admitted name and version intact; an invalid name still drops the whole client,
+and version admission is unchanged.
+
+For each admitted report, the prompt appends
+` (self-reported features "<description>")` after the client's quoted name and
+optional ` (version "<version>")`. It attributes what that client reported, without
+inferring features from identity or negotiated capabilities or guaranteeing the
+report's truth. Clients are resolved at session activation: reconnecting with a
+changed report leaves an active session's prompt unchanged, and `new_session`
+rotation carries the earlier admitted snapshot. Eviction/reactivation resolves
+current clients and refreshes the report. See
+[prompt composition and snapshots](knowledge/features/sessions-package-key-types-writesystemprompt-systemprompttext.md#composition-and-resolution).
 
 `last_seen_ts` (optional) appears in the block above because it is **still
 accepted vocabulary** — the daemon decodes it and a decoder that rejected it
