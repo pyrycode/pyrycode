@@ -38,10 +38,10 @@ import (
 // transcription, which is what makes a future capability claim a visible,
 // deliberate diff rather than drift.
 //
-// The client's own name and version are deliberately absent — the handshake's
-// device_name carries a hostname rather than a product name, and the daemon does
-// not retain the field at all. That is #2148's, and it is why this ticket ships
-// the half that cannot rot.
+// Client names, versions and feature descriptions appear separately as attributed
+// self-reports resolved at activation. They are a spawn snapshot, may become stale
+// mid-session, and are not daemon capability guarantees. Rotation carries the
+// admitted snapshot; eviction/reactivation resolves the current reports.
 const systemPromptText = "You are running as a supervised child of the pyry daemon. " +
 	"Your replies are not displayed in a terminal: they leave this process as a " +
 	"structured stream and are rendered for the operator by a separate client " +
@@ -125,21 +125,22 @@ func daemonPromptText(folders []string) string {
 }
 
 // ClientIdentity is one attached client's self-reported identity: the
-// device_name and client_version it put in its own hello.
+// device_name, client_version and client_features it put in its own hello.
 //
-// BOTH FIELDS ARE REMOTE-AUTHORED AND UNVALIDATED. Nothing between the wire and
+// ALL THREE FIELDS ARE REMOTE-AUTHORED AND UNVALIDATED. Nothing between the wire and
 // admitClient inspects them — internal/relay retains them verbatim on purpose,
 // because validating there would bind a wire type to a rendering decision it does
 // not own (the argument composeSystemPrompt makes for leaving #2149's
 // Registry.SetSystemPrompt the single door for operator bytes). A holder of this
 // type holds untrusted text until admitClient has passed it.
 //
-// Either field may be empty: neither client sends a product name today
+// Any field may be empty: neither client sends a product name today
 // (pyrycode-desktop reports a hostname, pyrycode-mobile a device model), and a
 // client is free to report nothing at all.
 type ClientIdentity struct {
-	Name    string
-	Version string
+	Name     string
+	Version  string
+	Features string
 }
 
 // ClientIdentityResolver answers which clients are attached right now. It is the
@@ -153,8 +154,8 @@ type ClientIdentity struct {
 // there is deliberately no error return, so nothing here can fail a spawn.
 type ClientIdentityResolver func(ctx context.Context) []ClientIdentity
 
-// maxClientNameBytes and maxClientVersionBytes bound what one client may
-// contribute to the composed prompt. UTF-8 BYTES, NOT RUNES, matching every
+// maxClientNameBytes, maxClientVersionBytes and maxClientFeaturesBytes bound
+// what one client may contribute to the composed prompt. UTF-8 BYTES, NOT RUNES, matching every
 // bound in internal/protocol. An over-bound value is REFUSED, never truncated:
 // a truncation would invent a value the client did not report.
 //
@@ -170,12 +171,13 @@ type ClientIdentityResolver func(ctx context.Context) []ClientIdentity
 // different arithmetic: the value is a span inside one sentence that is prepended
 // to EVERY turn of the session and charged in tokens each time. 64 covers a
 // macOS hostname (`Juhanas-MacBook.local`, 21) and an Android Build.MODEL with
-// room to spare; 32 covers a semver with a long pre-release tag. Worst case for
-// the whole section is maxNamedClients × (64 + 32) plus framing — the same order
-// as systemPromptText itself, which is the most this feature may cost.
+// room to spare; 32 covers a semver with a long pre-release tag; 512 allows a
+// compact feature description. Worst case for the whole section is
+// maxNamedClients × (64 + 32 + 512) plus framing.
 const (
-	maxClientNameBytes    = 64
-	maxClientVersionBytes = 32
+	maxClientNameBytes     = 64
+	maxClientVersionBytes  = 32
+	maxClientFeaturesBytes = 512
 )
 
 // maxNamedClients caps how many clients the section may name. Past it the section
@@ -208,9 +210,10 @@ const clientIdentityTimeout = 250 * time.Millisecond
 // clientSectionLead opens the section naming the attached clients. It is a
 // TRANSCRIPTION OF A SELF-REPORT and nothing else — "the name and version it
 // reported for itself" — so systemPromptText's constraint holds here unchanged:
-// it asserts nothing about what any client can render or do, because such a claim
-// rots the day that client ships a change. TestClientSectionText_Pinned pins it
-// against an independent copy for exactly that reason.
+// any feature description is likewise explicitly attributed as self-reported,
+// never a daemon guarantee of what the client can render or do.
+// TestClientSectionText_Pinned pins the lead against an independent copy, and
+// TestClientSectionFeaturesText_Pinned pins the attributed description framing.
 //
 // It is also the structural half of the trust boundary. Client bytes are placed
 // AFTER this lead, inside quotes, on the same line — never at the start of a
@@ -303,17 +306,19 @@ func admissibleClientField(v string, maxBytes int) (string, bool) {
 // prompt. Everything upstream of it — the relay's retention, ActiveConn, the
 // cmd/pyry closure — carries the bytes and judges nothing.
 //
-// The two fields are judged independently, and the NAME is what gates the client:
-// an inadmissible name drops the whole identity, because a version alone names
-// nobody, while an inadmissible version drops only itself and leaves the client
-// named. A refusal is silent — no log line, at any level, so a hostile name has
+// The three fields are judged independently, and the NAME gates the client:
+// an inadmissible name drops the whole identity, because a version or description
+// alone names nobody. An inadmissible version or description drops only itself.
+// Features use a 512-UTF-8-byte inclusive bound and the same character rules.
+// A refusal is silent — no log line, at any level, so hostile client text has
 // no line to appear in, which is the package's existing rule for prompt bytes.
 func admitClient(c ClientIdentity) (ClientIdentity, bool) {
 	name, ok := admissibleClientField(c.Name, maxClientNameBytes)
 	if !ok {
 		return ClientIdentity{}, false
 	}
-	return ClientIdentity{Name: name, Version: AdmitClientVersion(c.Version)}, true
+	features, _ := admissibleClientField(c.Features, maxClientFeaturesBytes)
+	return ClientIdentity{Name: name, Version: AdmitClientVersion(c.Version), Features: features}, true
 }
 
 // AdmitClientVersion returns v verbatim when admissibleClientField admits it as
@@ -333,8 +338,8 @@ func AdmitClientVersion(v string) string {
 // Neither the sort nor the dedup is cosmetic. V2SessionManager.ActiveConns returns
 // Go's randomized map-iteration order, so an unsorted set would rewrite the prompt
 // file with different bytes on every refresh of an unchanged conn set. Dedup
-// collapses one client holding two conns — a reconnect whose previous conn is not
-// yet reaped — into the one client it is.
+// collapses identical name/version/feature triples, including two connections
+// reporting the same identity. Different descriptions remain separate entries.
 //
 // Over-cap collapsing to nil rather than to a subset is maxNamedClients' rule, and
 // the whole-or-nothing reading belongs here because this is where the count is known.
@@ -357,7 +362,10 @@ func admittedClients(clients []ClientIdentity) []ClientIdentity {
 		if c := strings.Compare(a.Name, b.Name); c != 0 {
 			return c
 		}
-		return strings.Compare(a.Version, b.Version)
+		if c := strings.Compare(a.Version, b.Version); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Features, b.Features)
 	})
 	named = slices.Compact(named)
 	if len(named) == 0 || len(named) > maxNamedClients {
@@ -366,8 +374,8 @@ func admittedClients(clients []ClientIdentity) []ClientIdentity {
 	return named
 }
 
-// clientSection renders the section naming clients, or "" when admittedClients
-// finds nothing to render.
+// clientSection renders names, optional versions and attributed feature reports,
+// or "" when admittedClients finds nothing to render.
 //
 // It admits its own input rather than trusting the caller to have done it, which is
 // what keeps composeSystemPromptFor total over hostile values for every caller —
@@ -390,6 +398,9 @@ func clientSection(clients []ClientIdentity) string {
 		b.WriteString(`"` + c.Name + `"`)
 		if c.Version != "" {
 			b.WriteString(` (version "` + c.Version + `")`)
+		}
+		if c.Features != "" {
+			b.WriteString(` (self-reported features "` + c.Features + `")`)
 		}
 	}
 	b.WriteString(".\n")

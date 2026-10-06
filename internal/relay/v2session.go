@@ -301,10 +301,10 @@ type V2Session struct {
 	// *dispatch.Conn by routeAppFrame, so a handler reads it as c.MultiAgent().
 	multiAgent bool
 
-	// clientName and clientVersion are the device_name and client_version the
-	// phone reported for ITSELF in its hello (#2148), retained so the session's
-	// appended system prompt can name the client attached to it. Set exactly once
-	// in handleNoiseInit's token-OK path BEFORE s.state advances to V2StateOpen,
+	// clientName, clientVersion and clientFeatures are the device_name,
+	// client_version and client_features the phone reported for ITSELF in its hello,
+	// retained so the appended prompt can attribute that report to the client. Set
+	// exactly once in handleNoiseInit's token-OK path BEFORE V2StateOpen,
 	// so an unauthenticated peer's strings are never enumerable; "" is the
 	// fail-closed default for every other path. Re-key preserves them by never
 	// touching them, like device/peerStatic/interactive. Read by handleActiveConns
@@ -316,8 +316,9 @@ type V2Session struct {
 	// decision in two places that can disagree. What IS enforced below is a
 	// resource bound, which is a different concern and belongs at the point of
 	// retention — see maxRetainedClientNameBytes.
-	clientName    string
-	clientVersion string
+	clientName     string
+	clientVersion  string
+	clientFeatures string
 
 	// peerStatic is the initiator's 32-byte X25519 static public key
 	// captured at the initial handshake (immediately after
@@ -2071,24 +2072,26 @@ func (m *V2SessionManager) mergedForConn(s *V2Session, env protocol.Envelope) pr
 	return env
 }
 
-// maxRetainedClientNameBytes and maxRetainedClientVersionBytes bound what one
-// conn may park on its V2Session from its own hello (#2148). An over-bound value
+// maxRetainedClientNameBytes, maxRetainedClientVersionBytes and
+// maxRetainedClientFeaturesBytes bound what one conn may park on its V2Session
+// from its own hello. An over-bound value
 // is retained as "" — dropped, never truncated, so no value is invented that the
 // client did not send.
 //
 // This is a RESOURCE bound, not a display policy, and the distinction is why it
 // coexists with internal/sessions' much tighter admitClient rather than
 // duplicating it. Unlike MintPairingPayload.DeviceName, which UnmarshalJSON
-// refuses over protocol.MaxDeviceNameBytes, HelloClientPayload bounds neither
-// field at decode; the only ceiling is the ~64KB application-envelope cap. Without
-// this, one authenticated conn could park ~64KB per string for the session's
+// refuses over protocol.MaxDeviceNameBytes, HelloClientPayload bounds none of
+// these fields at decode; the only ceiling is the ~64KB application-envelope cap.
+// Without this, one authenticated conn could park ~64KB per string for the session's
 // lifetime AND have it copied into every ActiveConn snapshot — which the
 // structured fan-out takes several times per turn, for every open conn. The
 // values are deliberately loose: they are picked to make that amplification
 // bounded, not to decide what a prompt may say.
 const (
-	maxRetainedClientNameBytes    = 256
-	maxRetainedClientVersionBytes = 64
+	maxRetainedClientNameBytes     = 256
+	maxRetainedClientVersionBytes  = 64
+	maxRetainedClientFeaturesBytes = 1024
 )
 
 // retainedClientField returns v when it is within bound, "" otherwise. Length is
@@ -2103,19 +2106,20 @@ func retainedClientField(v string, maxBytes int) string {
 // ActiveConn is one open v2 session in the capability-aware enumeration: its
 // routing conn-id, the negotiated interactive-capability decision recorded at
 // handshake, and what the client reported about itself there. It holds no
-// *V2Session, CipherState, key, or plaintext, so the snapshot is safe to hand to
-// a consumer goroutine. The downstream structured-stream fan-out selects
+// *V2Session, CipherState, key, or credential material, so the snapshot is safe
+// to hand to a consumer goroutine. The downstream structured-stream fan-out selects
 // interactive vs non-interactive conns on the Interactive flag.
 //
-// DeviceName and ClientVersion are REMOTE-AUTHORED, UNVALIDATED display strings
+// DeviceName, ClientVersion and ClientFeatures are REMOTE-AUTHORED, UNVALIDATED strings
 // (#2148) — the only fields here that are not daemon-authored routing or decision
-// data, which is why they carry an obligation the other two do not. A consumer
+// data, which is why they carry an obligation the routing fields do not. A consumer
 // MUST NOT log them, interpolate them into an error message, or render them
 // without applying its own gate; internal/sessions' admitClient is the gate the
 // one consumer that renders them uses. A consumer MUST ALSO NOT format this
 // struct wholesale — "%+v", slog.Any — which would emit them into the daemon log
-// by accident. Both are "" for a client that reported nothing and for one whose
-// value exceeded maxRetainedClientNameBytes.
+// by accident. Each is "" when absent or over its retention bound: 256 bytes
+// for name, 64 for version and 1024 for features, inclusive. They are never
+// persisted to the device registry as a group; features are memory-only.
 //
 // DeviceTokenHash is the TokenHash of the device the handshake AUTHENTICATED
 // (s.device), which is what "this conn belongs to that device" must be decided on
@@ -2126,6 +2130,7 @@ type ActiveConn struct {
 	Interactive     bool
 	DeviceName      string
 	ClientVersion   string
+	ClientFeatures  string
 	DeviceTokenHash string
 }
 
@@ -2178,12 +2183,11 @@ func (m *V2SessionManager) ActiveConns(ctx context.Context) []ActiveConn {
 // same goroutine).
 //
 // The returned slice is freshly allocated and owned by the caller, and holds no
-// *V2Session and no key or plaintext bytes. It is NOT uniformly daemon-authored
+// *V2Session and no key or credential material. It is NOT uniformly daemon-authored
 // routing data, though: alongside the conn-id and the negotiated interactive
-// bool it carries DeviceName and ClientVersion, which the client authored about
-// itself and which nothing in this package validates. See ActiveConn's doc for
-// the obligation that places on a consumer — in particular that neither field
-// may be logged and that the struct must never be formatted wholesale.
+// bool it carries DeviceName, ClientVersion and ClientFeatures, authored by the
+// client and not display-validated in this package. See ActiveConn's doc for
+// the obligation that places on a consumer — none of these fields may be logged and that the struct must never be formatted wholesale.
 //
 // Order is Go's randomized map-iteration order — an unordered set by design:
 // the AC requires no ordering and the broadcast consumer fans out
@@ -2194,10 +2198,11 @@ func (m *V2SessionManager) handleActiveConns() []ActiveConn {
 	for connID, s := range m.sessions {
 		if s.state == V2StateOpen {
 			ac := ActiveConn{
-				ConnID:        connID,
-				Interactive:   s.interactive,
-				DeviceName:    s.clientName,
-				ClientVersion: s.clientVersion,
+				ConnID:         connID,
+				Interactive:    s.interactive,
+				DeviceName:     s.clientName,
+				ClientVersion:  s.clientVersion,
+				ClientFeatures: s.clientFeatures,
 			}
 			// s.device is bound before V2StateOpen on the accept path; the guard
 			// only keeps a hand-built session from panicking the snapshot.

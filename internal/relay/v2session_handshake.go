@@ -491,7 +491,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// session becomes enumerable, for s.interactive's reason: an unauthenticated
 	// peer's strings must never be observable through ActiveConns.
 	//
-	// The two fields are copied BY VALUE and helloPayload is not retained. That is
+	// The three fields are copied BY VALUE and helloPayload is not retained. That is
 	// deliberate: the same payload carries Token, plaintext credential material
 	// HelloClientPayload marks MUST-NOT-log, and parking the struct on the session
 	// would keep the token alive for the session's lifetime and one %+v from a log
@@ -499,6 +499,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// character set is internal/sessions' decision, not this package's.
 	s.clientName = retainedClientField(helloPayload.DeviceName, maxRetainedClientNameBytes)
 	s.clientVersion = retainedClientField(helloPayload.ClientVersion, maxRetainedClientVersionBytes)
+	s.clientFeatures = retainedClientField(helloPayload.ClientFeatures, maxRetainedClientFeaturesBytes)
 	s.state = V2StateOpen
 	// Create the per-session push buffer now that the session is authenticated
 	// and enumerable. queue-exists ⟺ V2StateOpen; an off-Run Push finds this
