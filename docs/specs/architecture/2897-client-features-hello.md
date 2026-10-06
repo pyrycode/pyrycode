@@ -44,3 +44,24 @@ Add a table-driven `TestHelloClientPayload_ClientFeaturesRoundTrip` before imple
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-06
+
+## Revisions
+
+- 2026-10-06 — Verifier finding 1 on `7eb54069`: repair only
+  `TestActiveSessionStarter_ResetReleasesForTheNextFrame` in
+  `cmd/pyry/new_session_reset_test.go`. `asyncRunner.RestartFresh` signals its
+  rotation before `activeSessionStarter.resetThenRotate` returns and runs its
+  deferred `conversationReset.release`; a second frame in that window is correctly
+  dropped. After each rotation, poll `conversationReset.begin` until it accepts a
+  fresh claim, release that probe claim, then send the next frame. The bounded wait
+  still fails if the guard is never released. The production reset and hello
+  contracts stay unchanged; the original security review still applies.
+  `cmd/pyry/main.go` (`resetThenRotate`, `start`) and `cmd/pyry/session_reset.go`
+  (`begin`, `release`) establish this ordering; the new-session seam overview and
+  `development-verification.md` § Prove that tests distinguish the change warn
+  against treating an early asynchronous observation as completion. Check the
+  named regression 50 times normally and with a delayed `RestartFresh` overlay;
+  remove the tail's deferred release in another overlay to prove the repaired test
+  still rejects a stuck guard. Run race tests for `cmd/pyry` and `internal/protocol`,
+  vet, build, staticcheck and the three static guards; the dispatcher owns the
+  full-module and fake-daemon gates. No feature-branch overlap touches this test.
