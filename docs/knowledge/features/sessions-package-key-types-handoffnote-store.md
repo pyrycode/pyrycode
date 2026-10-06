@@ -7,6 +7,7 @@ var ErrHandoffNotesDisabled error
 func (p *Pool) WriteHandoffNote(id conversations.ConversationID, text string) (string, error)
 func (p *Pool) HandoffNote(id conversations.ConversationID) (string, error)
 func (p *Pool) HandoffNotePath(id conversations.ConversationID) (path string, exists bool, err error)
+func (p *Pool) MarkHandoffNoteStale(id conversations.ConversationID) error
 ```
 
 The on-disk contract a conversation reset's wrap-up reply is written through:
@@ -164,23 +165,52 @@ not a second predicate. A reply this predicate refuses (a forged fence
 marker, blank after trimming) leaves the previous note standing, the same
 outcome every other wrap-up failure produces — see [Inbound new_session § The
 wrap-up turn](v2-session-manager-state-machine-inbound-new-session-sessionstarter-seam.md#the-wrap-up-turn-and-the-replys-tense-2477)
-for the coordinator and its full failure table. What is stored is the raw
+for the coordinator and failure handling. Since #2906, ordinary reset also
+rejects terminal failure even when partial assistant text would pass admission.
+Failed reset preserves older note bytes, while any injected usable older note
+is labelled stale and potentially incomplete outside its fence, including
+after delayed activation or daemon restart before activation. A successful
+wrap-up replaces the note and clears the warning; another conversation's
+freshness is unaffected. `written` still means a new note was stored, while
+failure or disabled persistence reports `skipped`. What is stored is the raw
 admitted reply, never the fenced rendering — the fence belongs to whichever
 prompt is being composed, and this store's contract stays "holds the note
 verbatim."
 
-**Not every failure on this path belongs in that "previous note stands"
-table, though — a failed read of the previous note is a different kind of
-failure from the rest.** The wrap-up prompt reads the existing note back
+**A failed previous-note read does not prevent a successful replacement.**
+The wrap-up prompt reads the existing note back
 (through `HandoffNote`) so its own writer can prune it; if that read fails,
 the wrap-up still runs and still produces a new note, just without the old
-one to prune against. Every *other* row in the failure table — idle timeout,
+one to prune against. Other wrap-up failures — idle timeout,
 empty reply, an admission refusal, a write error — means nothing new is
 stored and the existing note is untouched. The two cases were nearly
 collapsed into one table during review: a read failure is not a write
 failure, and a test asserting "the previous note stands" would pass for the
 wrong reason if it were fed a read failure that actually still produced a
 fresh note.
+
+**Freshness certifies a completed replacement (#2906).**
+`MarkHandoffNoteStale` invalidates freshness before ordinary reset attempts
+wrap-up, and `WriteHandoffNote` invalidates it before replacement. A fresh
+certificate at `handoff-freshness/<conversation-id>.txt` is a regular hard
+link to the new note inode, published before the note rename. A content digest
+could mistakenly certify the retained old file after a failed replacement
+with identical text; `os.SameFile` distinguishes the completed replacement.
+Certificate publication failure leaves older note bytes intact. Missing,
+unsafe, unreadable or mismatched metadata means stale, never fresh.
+
+Invalidation first tries an atomic stale certificate, then unlinks the
+certificate if that write fails; unlinking needs no new file bytes. If both
+fail, it writes a stale marker in the data directory, then tries a hidden
+marker in the note directory if necessary. The note subdirectory may still
+be writable when both other directories refuse writes. Both markers take
+precedence over a positive certificate and survive pool recreation; an
+in-memory override alone would disappear on restart. A successful write
+clears them only after normal invalidation succeeds and before replacement.
+`Pool.handoffMu` serializes invalidation, replacement and the prompt's paired
+note/freshness read without acquiring lifecycle locks. Metadata errors can
+name host paths, so the reset logs only `reset.wrapup.freshness_failed`, never
+the error value. Size limits, safe reads and shared admission remain unchanged.
 
 See [`writeMCPSettings`](sessions-package-key-types-writemcpsettings-session-settingspath.md)
 and [`writeSystemPrompt`](sessions-package-key-types-writesystemprompt-systemprompttext.md#carrying-the-conversations-handoff-note-2475)

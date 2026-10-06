@@ -8,6 +8,7 @@ func writeSystemPrompt(registryPath string, id SessionID, text string) (string, 
 func (p *Pool) conversationPrompt(label string) string
 func (p *Pool) attachedClients(ctx context.Context) []ClientIdentity
 func (p *Pool) handoffNoteFor(label string) string
+func (p *Pool) handoffNoteWithFreshness(label string) (string, bool)
 func (p *Pool) refreshSystemPrompt(ctx context.Context, sess *Session)
 func (p *Pool) refreshSystemPromptForRotation(sess *Session)
 func (p *Pool) writeComposedPrompt(sess *Session, clients []ClientIdentity)
@@ -342,9 +343,10 @@ the consuming write path.
 
 ## Carrying the conversation's handoff note (#2475)
 
-The conversation's handoff note is resolved by `(*Pool).handoffNoteFor(label)`
-and rendered by `handoffNoteSection(note)`. It follows the client section and
-precedes the operator's bytes in the
+The conversation's handoff note is resolved with its freshness by
+`(*Pool).handoffNoteWithFreshness(label)` and rendered by
+`handoffNoteSection(note)`. `handoffNoteFor` remains the text-only wrapper.
+The note follows the client section and precedes the operator's bytes in the
 [five-contributor order](#composition-and-resolution). The note was filed as
 a *pointer* (one line naming the note's absolute path); #2474 measured that a
 `Read` outside the workspace is
@@ -369,6 +371,20 @@ re-imposed here: `maxClientNameBytes`' ceiling is reasoned for a transcribed
 self-report of marginal value, not for a note whose whole purpose is the
 successor's context, so a second, smaller bound would silently undercut the
 feature.
+
+Since #2906, failed reset preserves older stored note bytes, but any usable
+older note injected into a successor carries `staleHandoffWarning` before its
+untrusted fence: the latest reset did not produce a fresh handoff, so the
+note may omit recent work. This applies to immediate rotation, delayed
+activation and daemon restart before activation, including failed replacement
+of the note. The paired note/freshness read holds `Pool.handoffMu`; only a
+matching regular hard-link certificate with no stale override or marker
+establishes freshness. Missing, unsafe or unreadable metadata is stale.
+Without an admitted note there is neither a handoff section nor a warning.
+A subsequent successful wrap-up stores a fresh note and removes the warning
+on recomposition; freshness is scoped to the conversation. See the
+[store's write-side contract](sessions-package-key-types-handoffnote-store.md#the-wrap-ups-write-side-2477)
+for invalidation, replacement and restart persistence.
 
 **A refusal predicate has to be checked against what it actually admits, not
 against its stated intent — and disagreement between two predicates in the
@@ -469,9 +485,34 @@ installed argv reads whatever the file then holds. An already-active session
 is skipped (Juhana's
 ruling in code: setting a prompt does not restart a running child), which also
 keeps a disk write off `Activate`'s LRU-touch hot path. A refresh write failure
-is logged and swallowed rather than failing the spawn — the file was already
-written at `buildSessionAs` and the write is atomic, so the fallback is one
-revision of stale-but-complete bytes, never a missing or truncated file.
+is logged with a fixed `persistence` classification and swallowed rather
+than failing the spawn. A prior composition without a handoff retains its
+complete file. A prior composition containing a handoff requires a different
+fallback: its old bytes could present the note without the latest stale
+warning. `writeComposedPrompt` tries `rewriteExistingSystemPrompt`, which
+checks that the existing file is regular and unchanged across open, then
+rewrites, truncates and syncs it without needing directory write permission.
+This degraded fallback is not atomic. If it also fails, the pool suppresses
+the daemon-owned `--append-system-prompt-file` pair before the successor
+starts, logs fixed `fallback` / `suppressed` classifications and keeps it
+suppressed through settings recompositions until a successful refresh
+restores it. Inspect the file and installed argv the successor actually
+consumes: a successful note invalidation alone cannot prove safe framing.
+
+**Serialize argv composition through publication (#2906).** Both
+`Pool.writeComposedPrompt` and `Pool.UpdateSettings` hold the per-session
+`spawnArgsMu` through suppression/recovery and runner argv installation.
+Both settings branches compose argv after installing the spawn posture and
+hold the mutex through `SetSpawnArgs` or `Restart`, releasing it before
+in-band delivery. Otherwise a settings update could capture argv before
+suppression and publish it afterward, restoring the unsafe prompt path;
+the inverse interleaving could undo recovery. Lock order is `spawnArgsMu`
+then `Pool.mu`, with `Pool.mu` released before runner calls and no lifecycle
+or pool-lock holder acquiring `spawnArgsMu`. Sequential settings assertions
+missed this race: `TestPool_StaleHandoffConcurrentSettingsInstall` pauses
+both settings branches at posture and argv publication and checks
+suppression and recovery. `TestPool_StaleHandoffPromptRefreshRefusal`
+checks the actual file fallback and installed argv.
 
 The assertion that actually catches a regression here is "mint with no
 prompt, `SetSystemPrompt` on the registry, then `Activate` — the file the argv
@@ -531,8 +572,9 @@ separately, just the same one with a second caller.
 ## No log line ever carries prompt bytes
 
 Only paths and wrapped `os` errors are interpolated into any error string or
-log line, on every path — construction, refresh, removal. #2148 extends this
-rule to the three client-identity strings: `admitClient` is silent by
+construction/removal log line. Refresh failures use fixed persistence and
+fallback classifications without raw errors or host paths (#2906). #2148
+extends this rule to the three client-identity strings: `admitClient` is silent by
 construction, so a refused hostile name has no log line to appear in at all,
 by design rather than by omission. The one live test
 gap this surfaced: an argv-level assertion (reading claude's spawn record out
