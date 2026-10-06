@@ -111,7 +111,7 @@ func TestHelloClientPayload_ClientFeaturesRoundTrip(t *testing.T) {
 		{name: "empty", field: `,"client_features":""`},
 		{name: "description", field: `,"client_features":"  multi_agent: café 📱 <tag>&\"quoted\"\n "`, want: "  multi_agent: café 📱 <tag>&\"quoted\"\n "},
 		{name: "whitespace", field: `,"client_features":" \t\r\n "`, want: " \t\r\n "},
-		{name: "controls", field: `,"client_features":"\u0000\u001b[31m"`, want: "\x00\x1b[31m"},
+		{name: "controls", field: `,"client_features":"\u0000\u0007"`, want: "\x00\x07"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
