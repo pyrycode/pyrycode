@@ -303,6 +303,14 @@ document was over the 50000-byte cap). Covers `Create`, `Get`, `List`, `Update`,
 
 `internal/conversations/registry_test.go`, same-package, table-driven, `t.Parallel()` everywhere except permission-mutating tests, stdlib only.
 
+A missing parent directory does not force a `Registry.Save` failure:
+`writeRegistrySnapshot` creates it with `os.MkdirAll`. Use a regular file as a
+parent component to force a real write error, and assert the error path's
+observable effects. For [conversation submission](control-plane.md#conversation-post-a-user-message-by-id-conversationpost),
+that means acceptance and advanced last-used survive, while the static warning
+contains no caller content. A fixture that only names an absent directory can
+stay green without exercising this best-effort failure path.
+
 Mirroring `devices`:
 
 - `TestRegistry_LoadMissingFile` / `TestRegistry_LoadEmptyFile` / `TestRegistry_LoadMalformedJSON` (asserts wrapped `registry: parse` prefix).

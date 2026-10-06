@@ -25,13 +25,14 @@ Server-side, `internal/control` deleted the wire surface these verbs rode (`Verb
 ## Conversation option and selector parsing
 
 Go's `flag.FlagSet` accepts a following flag token as a string value. A guard
-in `parseConversationNewArgs` alone cannot catch missing values for the leading
-instance/socket selectors: `parseClientFlags` runs first and can consume
+in `parseConversationNewArgs` or `parseConversationPostArgs` alone cannot catch
+missing values for the leading instance/socket selectors: `parseClientFlags`
+runs first and can consume
 `-pyry-socket` as the value of `-pyry-name`, then attempt transport with exit 1
 instead of the required syntax exit 2. `runConversation` checks leading
 selectors before shared parsing, skips their separate or inline values, and
 leaves conversation options to their own parser. Dash-prefixed values require
-`=value`; selectors precede `new`.
+`=value`; selectors precede `new` or `post`.
 
 `TestConversationNew_E2E_MissingSelectorValues` runs the CLI with no daemon
 listening and requires exit 2, usage on stderr and empty stdout. This makes an

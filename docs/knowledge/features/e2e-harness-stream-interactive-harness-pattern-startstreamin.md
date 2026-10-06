@@ -81,6 +81,15 @@ producer matrix, including absent storage and publication without a ring.
 
 ### Observing held output without closing the phone connection
 
+For failed-result assertions, inspect `TurnEndPayload.Outcome` and `IsError`:
+`StopReason` is a lifecycle classification, not Claude's result subtype.
+`resultTurnEndReason` maps `error_during_execution` to `cancelled`, so comparing
+`StopReason` to that subtype rejects correct delivery.
+`TestConversationPost_E2E_AcceptanceBeforeLaterFailure` gates the failed result
+until the CLI has returned silent queue acceptance, then checks the recorded
+outcome/error fields. This proves [acceptance semantics](control-plane.md#conversation-post-a-user-message-by-id-conversationpost)
+independently of the later model result.
+
 `fakephone.Client.ReceiveBytes` closes its WebSocket on timeout. An absence
 window on that connection therefore cannot also serve later live assertions.
 For a file-gated turn, request a served-history page and consume frames through
