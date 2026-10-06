@@ -352,18 +352,31 @@ try:
 except OSError:
     record({"completed": 1, "elapsed_ms": int((time.monotonic() - started) * 1000)})
     sys.exit(1)
+record({"progress": "spawn", "pid": os.getpid(), "child_pid": child.pid})
+def progress(stage, count):
+    record({"progress": stage, "pid": os.getpid(), "child_pid": child.pid,
+            "bytes": min(4097, count), "saturated": count >= 4097})
 retained = bytearray()
 size = 0
+forwarded = 0
 while True:
     chunk = os.read(child.stdout.fileno(), 8192)
     if not chunk:
         break
-    size += len(chunk)
+    first_read = size == 0
+    size = min(4097, size + len(chunk))
+    if first_read:
+        progress("read", size)
     retained.extend(chunk[:max(0, 4097 - len(retained))])
-    sys.stdout.buffer.write(chunk)
+    acknowledged = sys.stdout.buffer.write(chunk)
     sys.stdout.buffer.flush()
+    first_forward = forwarded == 0
+    forwarded = min(4097, forwarded + acknowledged)
+    if first_forward and acknowledged > 0:
+        progress("forward", forwarded)
 code = child.wait()
 fields = {"completed": 1, "elapsed_ms": int((time.monotonic() - started) * 1000),
+          "pid": os.getpid(), "child_pid": child.pid,
           "exit_code": code, "stdout_bytes": size, "output_observed": True,
           "utf8_ok": False, "json_ok": False, "result_ok": False, "text_ok": False}
 try:
@@ -374,6 +387,8 @@ try:
             raise ValueError()
         result = json.loads(raw, parse_constant=reject_constant,
                             object_pairs_hook=lambda pairs: ("object", pairs))
+        if result is None:
+            result = ("object", [])
         if isinstance(result, tuple):
             pairs = [(k.casefold(), v) for k, v in result[1]]
             # Go reports a type error even if a later duplicate is well typed.
@@ -420,6 +435,10 @@ sys.exit(code)
 // suggestSource contains only source metadata. Generated text and credentials
 // never enter its evidence file or the test's diagnostic logs.
 type suggestSource struct {
+	ChildPID                                            int  `json:"child_pid"`
+	Started, ReadKnown, ForwardKnown, ProgressAmbiguous bool `json:"-"`
+	ReadBytes, ForwardBytes                             int  `json:"-"`
+
 	PID            int   `json:"pid"`
 	Streams        int   `json:"streams"`
 	Results        int   `json:"results"`
@@ -484,8 +503,26 @@ func (s suggestSource) diagnostic(idle bool, setRev, clearRev uint64) string {
 	if s.StartMS != 0 && s.Completed == 0 {
 		elapsed = max(0, time.Now().UnixMilli()-s.StartMS)
 	}
+	start, read, forward := "unknown", "unknown", "unknown"
+	if s.Started {
+		start = "true"
+	}
+	if s.ReadKnown {
+		read = fmt.Sprintf("bytes=%d saturated=%v", s.ReadBytes, s.ReadBytes == 4097)
+	}
+	if s.ForwardKnown {
+		forward = fmt.Sprintf("bytes=%d saturated=%v", s.ForwardBytes, s.ForwardBytes == 4097)
+	}
+	if s.ProgressAmbiguous {
+		start, read, forward = "ambiguous", "ambiguous", "ambiguous"
+	}
+	childPID := "unknown"
+	if s.Started {
+		childPID = strconv.Itoa(s.ChildPID)
+	}
+	progress := fmt.Sprintf(" child_pid=%s start=%s read={%s} forward={%s}", childPID, start, read, forward)
 	return fmt.Sprintf("fallback source: streams=%d results=%d idle=%v calls=%d completed=%d pid=%d elapsed_ms=%d exit=%s output={%s} set_revision=%d clear_revision=%d stage=%s",
-		s.Streams, s.Results, idle, s.Calls, s.Completed, s.PID, elapsed, exit, output, setRev, clearRev, s.stage(setRev != 0))
+		s.Streams, s.Results, idle, s.Calls, s.Completed, s.PID, elapsed, exit, output, setRev, clearRev, s.stage(setRev != 0)) + progress
 }
 
 // suggestLifecycle selects complete daemon records by wrapper PID. Only parsed
@@ -539,8 +576,8 @@ func suggestLifecycle(stderr string, pid int) string {
 				}
 			}
 			values["stdout_bytes"] = "unknown"
-			if values["output_observed"] == "true" {
-				if n, err := strconv.ParseInt(fields["stdout_bytes"], 10, 64); err == nil && n >= 0 && n <= 4097 {
+			if values["output_observed"] == "true" && values["wait_ok"] != "unknown" && values["wait_delay"] != "unknown" && values["stdout_cap_exceeded"] != "unknown" && values["stdout_utf8_ok"] != "unknown" && values["stdout_json_ok"] != "unknown" {
+				if n, err := strconv.ParseInt(fields["stdout_bytes"], 10, 64); err == nil && n >= 0 && n <= 4097 && values["stdout_cap_exceeded"] == strconv.FormatBool(n == 4097) {
 					values["stdout_bytes"] = strconv.FormatInt(n, 10)
 				}
 			}
@@ -567,9 +604,19 @@ func suggestLifecycle(stderr string, pid int) string {
 	return "daemon lifecycle: unknown"
 }
 
+func (s *suggestSource) invalidateProgress() {
+	s.Started, s.ReadKnown, s.ForwardKnown = false, false, false
+	s.ChildPID, s.ReadBytes, s.ForwardBytes = 0, 0, 0
+	s.ProgressAmbiguous = true
+	s.OutputObserved, s.ExitCode = false, nil
+}
+
 func readSuggestSource(t *testing.T, path string) suggestSource {
 	t.Helper()
 	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return suggestSource{}
+	}
 	if err != nil {
 		t.Fatal("open native source evidence failed")
 	}
@@ -583,13 +630,58 @@ func readSuggestSource(t *testing.T, path string) suggestSource {
 		} else if errors.Is(err, io.ErrUnexpectedEOF) {
 			return total // The observer may be midway through its final append.
 		} else if err != nil {
-			t.Fatal("decode source metadata failed")
+			total.invalidateProgress()
+			return total
 		}
 		var entry suggestSource
 		if json.Unmarshal(raw, &entry) != nil {
-			t.Fatal("decode source metadata failed")
+			total.invalidateProgress()
+			continue
+		}
+		var witness struct {
+			Stage     *string `json:"progress"`
+			PID       *int    `json:"pid"`
+			Child     *int    `json:"child_pid"`
+			Bytes     *int    `json:"bytes"`
+			Saturated *bool   `json:"saturated"`
+		}
+		if json.Unmarshal(raw, &witness) != nil {
+			total.invalidateProgress()
+			continue
+		}
+		if witness.Stage != nil {
+			valid := !total.ProgressAmbiguous && total.Calls == 1 && witness.PID != nil && *witness.PID == total.PID && witness.Child != nil && *witness.Child > 0
+			if *witness.Stage == "spawn" {
+				valid = valid && !total.Started && !total.ReadKnown && !total.ForwardKnown
+				if valid {
+					total.Started, total.ChildPID = true, *witness.Child
+				}
+			} else {
+				valid = valid && total.Started && *witness.Child == total.ChildPID && witness.Bytes != nil && *witness.Bytes > 0 && *witness.Bytes <= 4097 && witness.Saturated != nil && *witness.Saturated == (*witness.Bytes == 4097)
+				switch *witness.Stage {
+				case "read":
+					valid = valid && !total.ReadKnown && !total.ForwardKnown
+					if valid {
+						total.ReadKnown, total.ReadBytes = true, *witness.Bytes
+					}
+				case "forward":
+					valid = valid && total.ReadKnown && !total.ForwardKnown && *witness.Bytes <= total.ReadBytes
+					if valid {
+						total.ForwardKnown, total.ForwardBytes = true, *witness.Bytes
+					}
+				default:
+					valid = false
+				}
+			}
+			if !valid {
+				total.invalidateProgress()
+			}
+			continue
 		}
 		if entry.Completed != 0 {
+			if entry.Completed != 1 || total.Completed != 0 {
+				total.invalidateProgress()
+			}
 			var capture struct {
 				Bytes    *int  `json:"stdout_bytes"`
 				Observed *bool `json:"output_observed"`
@@ -601,7 +693,7 @@ func readSuggestSource(t *testing.T, path string) suggestSource {
 			if json.Unmarshal(raw, &capture) != nil {
 				t.Fatal("decode source capture metadata failed")
 			}
-			entry.OutputObserved = capture.Observed != nil && *capture.Observed && capture.Bytes != nil && *capture.Bytes >= 0 && capture.UTF8 != nil && capture.JSON != nil && capture.Result != nil && capture.Text != nil
+			entry.OutputObserved = total.Started && entry.PID == total.PID && entry.ChildPID == total.ChildPID && capture.Observed != nil && *capture.Observed && capture.Bytes != nil && *capture.Bytes >= 0 && *capture.Bytes <= 4097 && capture.UTF8 != nil && capture.JSON != nil && capture.Result != nil && capture.Text != nil
 		}
 		total.Streams += entry.Streams
 		total.Results += entry.Results
@@ -619,6 +711,9 @@ func readSuggestSource(t *testing.T, path string) suggestSource {
 		}
 		if entry.Completed != 0 {
 			total.Completed += entry.Completed
+			if !total.Started || entry.PID != total.PID || entry.ChildPID != total.ChildPID {
+				entry.ExitCode, entry.OutputObserved = nil, false
+			}
 			total.ElapsedMS, total.ExitCode, total.StdoutBytes = entry.ElapsedMS, entry.ExitCode, entry.StdoutBytes
 			total.OutputObserved, total.UTF8OK, total.JSONOK = entry.OutputObserved, entry.UTF8OK, entry.JSONOK
 			total.ResultOK, total.TextOK = entry.ResultOK, entry.TextOK
