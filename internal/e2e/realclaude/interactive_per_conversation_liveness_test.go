@@ -89,6 +89,7 @@ const perTurnReplyBudget = 120 * time.Second
 // per-conversation conversation (create_conversation with a null cwd → the daemon
 // workdir) must stream its reply. This is the plainest reproduction of #996.
 func TestInteractivePerConversationLiveness_Default(t *testing.T) {
+	runParallel(t)
 	h := startPerConversationHarness(t)
 	nonce := time.Now().UnixNano()
 
@@ -103,6 +104,7 @@ func TestInteractivePerConversationLiveness_Default(t *testing.T) {
 // create_conversation with that path as cwd) must stream its reply. It exercises
 // the per-Cwd session directory the by-id resolver tails for a non-default cwd.
 func TestInteractivePerConversationLiveness_WorkspaceFolder(t *testing.T) {
+	runParallel(t)
 	h := startPerConversationHarness(t)
 	nonce := time.Now().UnixNano()
 
@@ -128,6 +130,7 @@ func TestInteractivePerConversationLiveness_WorkspaceFolder(t *testing.T) {
 // wins the re-subscribe race by an even wider margin, and this gate remains a
 // standing liveness gate rather than a #996 oracle.
 func TestInteractivePerConversationLiveness_ActiveSwitch(t *testing.T) {
+	runParallel(t)
 	h := startPerConversationHarness(t)
 	nonce := time.Now().UnixNano()
 
@@ -183,11 +186,11 @@ func startPerConversationHarness(t *testing.T) *perConvHarness {
 // add returns nil, which is what every caller before #2320 does.
 func startPerConversationHarnessSeeded(t *testing.T, seed func(home, workdir string) []string) *perConvHarness {
 	t.Helper()
-	// No t.Parallel: WithWorktreeAuthenticated calls t.Setenv.
+	// Parallel only through runParallel; see liveHome.
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Skipf("realclaude: claude not on PATH: %v", err)
 	}
-	home := WithWorktreeAuthenticated(t) // skips cleanly when no creds
+	home := liveHome(t) // skips cleanly when no creds
 	claudeBin, err := exec.LookPath("claude")
 	if err != nil {
 		t.Fatalf("realclaude: resolve claude: %v", err)

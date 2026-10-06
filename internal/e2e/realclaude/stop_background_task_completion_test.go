@@ -17,6 +17,7 @@ import (
 // TestRealClaudeStopBackgroundTaskCompletion requires terminal evidence while the
 // rig still holds the FIFO. A control acceptance alone cannot satisfy this test.
 func TestRealClaudeStopBackgroundTaskCompletion(t *testing.T) {
+	runParallel(t)
 	h, convID := startStreamRunningTurnHarness(t)
 	fifo := filepath.Join(h.workdir, "stop-task.fifo")
 	arrived, release := tpcapHoldFIFO(t, fifo)

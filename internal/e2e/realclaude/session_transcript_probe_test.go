@@ -170,13 +170,15 @@ type probeChild struct {
 // "Log in goroutine after test has completed", destroying the record this ticket
 // exists to produce on exactly the outcome that is hardest to reproduce.
 //
-// cmd.Env stays nil so the child inherits WithWorktree's t.Setenv-pinned HOME and
-// WithWorktreeAuthenticated's credential re-pin. Assigning cmd.Env drops the pinned
-// HOME (the child writes into the operator's real projects tree and the empirical
-// scan finds nothing) AND drops the credential.
-func startProbeChild(ctx context.Context, claudeBin, cwd string, argv []string) (*probeChild, error) {
+// The child's HOME is home, set explicitly through homeEnv so the probe also runs
+// under runParallel, where nothing pins HOME process-wide. A child that inherited
+// the operator's HOME would write into the real projects tree and the empirical
+// scan would find nothing. The credential is inherited with the rest of the
+// environment.
+func startProbeChild(ctx context.Context, claudeBin, home, cwd string, argv []string) (*probeChild, error) {
 	cmd := exec.CommandContext(ctx, claudeBin, argv...)
 	cmd.Dir = cwd
+	cmd.Env = homeEnv(home)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("stdin pipe: %w", err)
@@ -427,11 +429,12 @@ type transcriptProbeRecord struct {
 // --- the live measurement ------------------------------------------------------------
 
 func TestRealClaude_TurnlessSessionIDTranscript(t *testing.T) {
-	// No t.Parallel: WithWorktreeAuthenticated calls t.Setenv.
+	runParallel(t)
+	// Parallel through runParallel; see liveHome.
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Skipf("realclaude: claude not on PATH: %v", err)
 	}
-	home := WithWorktreeAuthenticated(t) // skips cleanly when no creds
+	home := liveHome(t) // skips cleanly when no creds
 	claudeBin, err := exec.LookPath("claude")
 	if err != nil {
 		t.Fatalf("#1655: resolve claude: %v", err)
@@ -474,7 +477,7 @@ func TestRealClaude_TurnlessSessionIDTranscript(t *testing.T) {
 	}
 	controlCtx, cancelControl := context.WithTimeout(context.Background(), transcriptProbeControlBudget)
 	defer cancelControl()
-	control, err := startProbeChild(controlCtx, claudeBin, childCwd, controlArgv)
+	control, err := startProbeChild(controlCtx, claudeBin, home, childCwd, controlArgv)
 	if err != nil {
 		t.Fatalf("#1655[control]: %v — the positive control is what makes an absence readable", err)
 	}
@@ -530,7 +533,7 @@ func TestRealClaude_TurnlessSessionIDTranscript(t *testing.T) {
 	}
 	turnlessCtx, cancelTurnless := context.WithTimeout(context.Background(), transcriptProbeTurnlessBudget)
 	defer cancelTurnless()
-	turnless, err := startProbeChild(turnlessCtx, claudeBin, childCwd, turnlessArgv)
+	turnless, err := startProbeChild(turnlessCtx, claudeBin, home, childCwd, turnlessArgv)
 	if err != nil {
 		t.Fatalf("#1655[turnless]: %v", err)
 	}

@@ -86,6 +86,7 @@ func seedPromptedConversations(t *testing.T, home, cwd, prompt string) {
 // word in it, so claude cannot arrive at it by chance and the control arm's
 // absence assertion is not a coincidence.
 func TestInteractiveConversationSystemPrompt_ReachesTheReply(t *testing.T) {
+	runParallel(t)
 	marker := fmt.Sprintf("PYRYMARK%d", time.Now().UnixNano()%1000000)
 	prompt := "You are in a test harness. Append the token " + marker +
 		" on its own line at the end of every reply you write, verbatim and unaltered."

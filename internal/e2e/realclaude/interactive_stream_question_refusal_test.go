@@ -180,6 +180,7 @@ func questionRefusalTrigger(nonce int64) string {
 }
 
 func TestInteractiveStreamQuestionRefusal(t *testing.T) {
+	runParallel(t)
 	// The #1154 harness under the #1987 model: it pairs the phone WITH
 	// --allow-remote-permissions (questionResolverV2.admit gates a refusal on the
 	// same MayAnswerRemotePermission() bit the answer path does — without it the
