@@ -94,7 +94,83 @@ func conversationCreator(reg *conversations.Registry, minter handlers.SessionCre
 	}
 }
 
-const conversationUsage = "usage: pyry conversation [-pyry-name=<instance>] [-pyry-socket=<path>] new [--type chat|channel] [--name LABEL] [--model MODEL] [--effort EFFORT]"
+// conversationSubmitter admits user turns through the ordinary inbound queue.
+// Resolution validates the binding but leaves activation and retries to delivery.
+func conversationSubmitter(reg *conversations.Registry, resolve func(string) (handlers.TurnWriter, error), enqueue func(string, string) uint64, registryPath string, log *slog.Logger) func(string, string) error {
+	return func(id, text string) error {
+		if _, err := resolve(id); err != nil {
+			if errors.Is(err, conversations.ErrConversationNotFound) {
+				return errors.New("unknown conversation")
+			}
+			return errors.New("conversation session is unavailable")
+		}
+		if enqueue(id, text) == 0 {
+			return errors.New("conversation queue is full")
+		}
+		if reg.Update(conversations.ConversationID(id), func(c *conversations.Conversation) {
+			c.LastUsedAt = time.Now().UTC()
+		}) {
+			if err := reg.Save(registryPath); err != nil {
+				// Acceptance is final; persistence cannot revoke it. Keep caller
+				// input and arbitrary downstream errors out of diagnostics.
+				log.Warn("control: conversation.post last-used persist failed", "event", "conversation_post.last_used_persist_failed")
+			}
+		}
+		return nil
+	}
+}
+
+const conversationUsage = "usage: pyry conversation [-pyry-name=<instance>] [-pyry-socket=<path>] new [--type chat|channel] [--name LABEL] [--model MODEL] [--effort EFFORT]\n" +
+	"       pyry conversation [-pyry-name=<instance>] [-pyry-socket=<path>] post --id ID (--text TEXT | --file PATH)"
+
+func parseConversationPostArgs(args []string) (id, text, file string, err error) {
+	fs := flag.NewFlagSet("pyry conversation post", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	idFlag := fs.String("id", "", "existing conversation id")
+	textFlag := fs.String("text", "", "user message content")
+	fileFlag := fs.String("file", "", "read user message from file")
+	for i, arg := range args {
+		name, _, hasValue := parseFlagSyntax(arg)
+		if fs.Lookup(name) != nil && !hasValue && i+1 < len(args) && strings.HasPrefix(args[i+1], "-") {
+			return "", "", "", fmt.Errorf("flag needs an argument: --%s", name)
+		}
+	}
+	if err := fs.Parse(args); err != nil {
+		return "", "", "", err
+	}
+	if fs.NArg() > 0 {
+		return "", "", "", errors.New("unexpected positional argument")
+	}
+	if *idFlag == "" {
+		return "", "", "", errors.New("--id is required")
+	}
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if set["text"] == set["file"] {
+		return "", "", "", errors.New("exactly one of --text or --file is required")
+	}
+	return *idFlag, *textFlag, *fileFlag, nil
+}
+
+func runConversationPost(socketPath string, args []string) error {
+	id, text, file, err := parseConversationPostArgs(args)
+	if err != nil {
+		return conversationUsageExit(err.Error())
+	}
+	body, err := channelPostContent(text, file)
+	if err != nil {
+		return fmt.Errorf("conversation post: %w", err)
+	}
+	if body == "" {
+		return errors.New("conversation post: empty message")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := control.ConversationPost(ctx, socketPath, id, body); err != nil {
+		return fmt.Errorf("conversation post: %w", err)
+	}
+	return nil
+}
 
 func parseConversationNewArgs(args []string) (control.ConversationPayload, error) {
 	fs := flag.NewFlagSet("pyry conversation new", flag.ContinueOnError)
@@ -160,6 +236,9 @@ func runConversation(args []string) error {
 	}
 	if len(rest) == 0 {
 		return conversationUsageExit("missing subcommand")
+	}
+	if rest[0] == "post" {
+		return runConversationPost(socketPath, rest[1:])
 	}
 	if rest[0] != "new" {
 		return conversationUsageExit(fmt.Sprintf("unknown verb %q", rest[0]))

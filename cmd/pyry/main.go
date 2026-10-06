@@ -1500,6 +1500,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	ctrl.SetChannelCreator(createChannel)
 	// Local creation is available even when startRelay installed no announcement hook.
 	ctrl.SetConversationCreator(conversationCreator(convReg, sessionMinter{pool, modelVocabulary}, convRegistryPath, announceConversation, logger))
+	ctrl.SetConversationSubmitter(conversationSubmitter(convReg, router.resolve, queue.Enqueue, convRegistryPath, logger))
 	// Give a new host its starting point (#2569) through that same creator, so
 	// the General channel is confined, trust-marked and bound exactly as
 	// `pyry channel new` would make it. It waits for pool.Ready: pool.Run blocks
@@ -4442,6 +4443,9 @@ Usage:
                         [--model MODEL] [--effort EFFORT]
                                                 create in the current directory
                                                   (default: unnamed chat) and print id
+  pyry conversation post --id ID (--text TEXT | --file PATH)
+                                                submit a user turn to an existing
+                                                  conversation (queue acceptance)
   pyry channel new [--name <label>]              create a channel whose workspace
                                                   is the current directory, and
                                                   print its conversation id

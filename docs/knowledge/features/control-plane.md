@@ -255,9 +255,11 @@ and [CLI spec](../../specs/architecture/2884-conversation-cli.md).
 
 ## Conversation: post a user message by id (conversation.post)
 
-`VerbConversationPost` submits a user message to an existing conversation through
-the installed callback. Production submission and CLI wiring remain pending
-[#2886](https://github.com/pyrycode/pyrycode/issues/2886).
+`VerbConversationPost` is the control API behind
+`pyry conversation post --id ID (--text TEXT | --file PATH)` for both chats and
+channels. `runSupervisor` installs `conversationSubmitter` through
+`Server.SetConversationSubmitter`, using `sessionRouter.resolve` and the ordinary
+inbound `Queue.Enqueue`.
 The request uses `Request.ConversationPost` (`ConversationPostPayload`):
 
 ```json
@@ -285,6 +287,25 @@ The callback owns existing-id resolution and queue admission and must not create
 on a miss. It must bound its own work: the 35-second response I/O deadline cannot
 cancel execution. Invocation runs outside `Server.mu`.
 
+Production resolves the stored binding before one enqueue of the unchanged text.
+An unknown id returns `unknown conversation` without creating a conversation or
+session. Empty or unavailable bindings return `conversation session is unavailable`
+without bootstrap fallback; the existing resolver can revive a valid missing
+session without activating it. A full queue returns `conversation queue is full`
+without changing its backlog. Only accepted admission advances `LastUsedAt`;
+registry persistence is best-effort and cannot revoke acceptance. Resolver errors
+are translated to static refusals, and a save warning contains no caller id/text
+or downstream error. See [binding resolution and revival](conversation-session-binding-routing.md).
+
+The [ordinary queue](msgqueue-package.md) owns busy-turn ordering and delivery
+retries. `newInboundDeliver` resolves again on each delivery attempt and activates
+the bound session; a freshly created conversation uses its creation-time
+model/effort. User messages, generated assistant output and completion enter the
+existing history/turn stream. With no relay URL, `startRelay` already installs
+the history-backed stream drain with `historyOnlyBroadcaster`, so neither a
+configured relay nor a paired client is needed. Binding changes or later turn
+failures cannot change an already accepted result.
+
 Success returns only `{"ok":true}`: queue acceptance, not completed model
 output. Callback refusals, including unknown-id and full-backlog refusals,
 return only an error with the `conversation.post:` prefix, for example
@@ -298,12 +319,22 @@ refusal text reaches the wire verbatim and must never echo raw caller id/text.
 or refusal errors, even alongside true OK. Absent/false/null OK returns
 `control: conversation.post response missing ok flag`.
 
+`runConversationPost` calls this helper once under a 30-second budget, exits 0
+with no stdout or stderr on acceptance, and does not wait for completion or
+resubmit after a transport failure. It requires a nonempty `--id` and exactly
+one supplied `--text`/`--file` flag. Usage errors exit 2; file/content, refusal
+and transport errors exit 1 with stderr only. `channelPostContent` preserves
+whitespace and bounds a single file open to the cap plus one overflow-detection
+byte. Explicit empty content is a content error, not a missing-flag error.
+Instance/socket selectors precede `post`, as they do `new`.
+
 This submits a **user message** by opaque id. Existing
 [Channel: post a message into an existing channel](#channel-post-a-message-into-an-existing-channel-channelpost-2497)
 publishes **host-authored assistant content** by channel label, creating a
 channel on a label miss, and [carries it into the next user turn](control-plane-channel-post-carry.md).
 `channel.post` does not start that user turn. Its API and wire encodings remain
-compatible. See the [contract spec](../../specs/architecture/2885-conversation-post-contract.md).
+compatible. See the [contract spec](../../specs/architecture/2885-conversation-post-contract.md)
+and [CLI routing spec](../../specs/architecture/2886-conversation-post-cli.md).
 
 ## Channel: post a message into an existing channel (channel.post, #2497)
 
