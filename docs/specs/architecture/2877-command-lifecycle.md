@@ -62,3 +62,13 @@ None. Refinement explicitly permits synthesized same-shape pairs and specifies a
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-06
+
+## Revisions
+
+### 2026-10-06 — verifier finding 1: deterministic handover fixture
+
+- Additional files read: `cmd/pyry/conversation_handover_test.go` → `TestConversationAgentSwitch_HandoverFirstSpawn`, `switchHandoverRunner`; `cmd/pyry/session_reset_test.go` → `newResetFixture`, `answerWith`; `cmd/pyry/session_reset.go` → `wrapUpText`; `cmd/pyry/wrapup_capture.go` → `waitOutcome`; `cmd/pyry/conversation_handover.go` → `storeHandover`; `cmd/pyry/session_revive_test.go` → `runPoolReady`.
+- The fixture used a 20 ms wall-clock deadline for successful replies as well as timeout cases. A scratch-only overlay adding a 100 ms syscall delay before capture reproduced `summary absent` and the `reset.wrapup.deadline` fallback; the unmodified fixture passed 100 isolated repeats, so an isolated pass does not exclude this timing failure.
+- Run each existing handover case inside `testing/synctest.Test`. Its controlled clock advances only when the in-process fixture goroutines are durably blocked, so filesystem and scheduling latency cannot expire the reply deadline. Keep all existing assertions, including actual deadline fallback when the child supplies no reply, and keep pool cleanup within the test's clock scope.
+- Validate the same delayed overlay against the repair, repeat the entire named test with race detection, and run race checks for `cmd/pyry` and `internal/streamsup`, plus module vet and binary build. The full-module gate remains the verifier's responsibility.
+- Security review remains PASS: this revision changes only the test clock; production parsing, trust boundaries and logging contracts are unchanged. No exported types, consumer updates, additional product criteria or reject branches; total written work remains below 800 lines.
