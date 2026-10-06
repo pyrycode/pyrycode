@@ -204,6 +204,7 @@ type relayWiring struct {
 	// isolation fix (the new_session twin of activeInterrupter). Wired to
 	// V2SessionConfig.SessionStarter below.
 	activeSessionStarter relay.SessionStarter
+	agentSwitcher        relay.AgentSwitcher
 	// defaultCwd is the default workspace directory stamped onto conversations
 	// created without an explicit cwd (the CreateConversation handler).
 	defaultCwd string
@@ -1460,6 +1461,7 @@ func startRelayV2(
 		// *streamsup.Runner rotates the pool-side id (Pool.RotateForNewSession) and
 		// RestartFreshes into --session-id <newID> with NO /clear.
 		SessionStarter: w.activeSessionStarter,
+		AgentSwitcher:  w.agentSwitcher,
 		// Inbound dequeue_message seam (#723): an interactive `dequeue_message`
 		// frame removes a not-yet-drained queued message by id from the live
 		// daemon queue; the OnChange seam Remove fires drives the #722 producer to
@@ -1771,7 +1773,9 @@ func startRelayV2(
 			resolve: func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }}
 	}
 	streamTransitionsCleanup := startSessionTransitionStreamV2(ctx, transitions, mgr,
-		func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }, w.busy, w.hist, logger)
+		func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }, w.busy, w.hist, logger, func(id string) {
+			announceSwitchedConversation(w.convReg, id, announceConversation)
+		})
 
 	// Hand the pool the open-conn enumerator so a session's appended system prompt
 	// can name the clients attached when it spawns (#2148). Placed beside the

@@ -636,7 +636,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`debug_bundle_done`** | binary → phone | no | **New in v2.** Outbound — completion marker after the last `debug_bundle_chunk`, carrying the exact chunk count (#812). See [Debug bundle](#debug-bundle-v2). |
 | **`request_debug_bundle`** | phone → binary | no | **New in v2.** Inbound control (bare, no payload) — a paired client requests the current session's debug bundle; the daemon streams it back as `debug_bundle_chunk*` + `debug_bundle_done` (#813). See [Debug bundle](#debug-bundle-v2). |
 | **`set_session_settings`** | phone → binary | no | **New in v2.** Inbound control — a paired client changes one session's per-session model / effort / permission mode / YOLO. Interactive-capability-gated (enforced by the handler #845). See [Session settings](#session-settings-v2). |
-| **`switch_agent`** | phone → binary | no | **New in v2.** Request contract for a `multi_agent` client's confirmed agent/model choice, addressed by `conversation_id`. Required strings: `conversation_id`, `agent`, `model`; `model: ""` selects the target agent's template default. Optional `effort`: omitted/null = unspecified and re-encoded omitted; `""` = clear and retained; nonempty = retained unchanged. **Handling pending #2870/#2871.** Does not replace `set_session_settings`. See [`switch_agent`](#switch_agent). |
+| **`switch_agent`** | phone → binary | no | **New in v2.** Switch the named conversation to the other agent after client confirmation; requires `interactive` and `multi_agent`. Required strings: `conversation_id`, `agent`, `model`; `model: ""` selects the target agent's template default. Optional `effort`: omitted/null = carry forward only if offered by the target model; `""` = clear. Refusals are correlated errors; commitment publishes ordered `resetting` → `session_transition` → `conversation_updated` pushes, with no separate success reply. See [`switch_agent`](#switch_agent). |
 | **`session_settings_updated`** | binary → phone | no | **New in v2.** Outbound reply confirming a `set_session_settings`, correlated by `in_reply_to` (#845). See [Session settings](#session-settings-v2). |
 | **`request_session_settings`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for the run configuration of the conversation it names in `conversation_id`. A request that names no conversation names no session, and is answered with the all-zero reply. Interactive-capability-gated. See [Session settings](#session-settings-v2). |
 | **`session_settings`** | binary → phone | no | **New in v2.** Outbound reply carrying the current run configuration and optional reports, correlated by `in_reply_to` (#491). See [Session settings](#session-settings-v2). |
@@ -4915,42 +4915,106 @@ Example (a client changing only the reasoning effort — `model` and `yolo` omit
 #### `switch_agent`
 
 Direction **phone → binary** (inbound v2 request, discriminator
-`switch_agent`). A `multi_agent` client uses this shape to name a confirmed
-choice from the other agent's section of the model menu. It is addressed by
-conversation, and does not replace [`set_session_settings`](#set_session_settings).
+`switch_agent`, operational since #2871). An interactive `multi_agent` client
+sends a choice from the other agent's section of the model menu after the
+operator confirms. The daemon adds no confirmation dialog. It switches only
+the named conversation, preserving its ID, metadata and message history, and
+never falls back to an active conversation. The successor session activates on
+the next message; switching does not start an idle or dormant child for handover.
+[`set_session_settings`](#set_session_settings) remains the cheap settings change
+within the current agent ([ADR 039](knowledge/decisions/039-capability-belongs-to-agent-and-model-together.md)).
 
-**Handling pending #2870/#2871.** This declares the request contract only:
-validation and handling are deferred to #2870, production wiring to #2871.
-Decoding the payload does not validate required keys, agent/model membership,
-capabilities, or conversation ownership, and does not perform a switch.
-The type is v2-only; the v1 `IsKnownAppType` predicate rejects an unencrypted
-`switch_agent` envelope with `ErrUnknownType`.
+The connection must negotiate both `interactive` and `multi_agent`. A connection
+without `multi_agent` receives non-retryable `protocol.unsupported` before payload
+validation. A `multi_agent` connection without `interactive` is inert and receives
+no reply. The type is v2-only; the v1 `IsKnownAppType` predicate rejects an
+unencrypted `switch_agent` envelope with `ErrUnknownType`.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `conversation_id` | string (required) | The conversation whose agent is to change. Always serialized. |
-| `agent` | string (required) | The target agent, `"claude"` or `"codex"`. Always serialized. |
+| `conversation_id` | string (required) | The daemon-owned conversation whose agent is to change. Must be a canonical lowercase UUIDv4 accepted by `conversations.ValidID`. Always serialized. |
+| `agent` | string (required) | The other agent, `"claude"` or `"codex"`; a same-agent request is refused. Always serialized. |
 | `model` | string (required) | The target agent's model. `""` selects that agent's template default; the key remains present even at this empty value. |
-| `effort` | string (optional) | Omitted or `null` means unspecified: both decode to the same state and re-encode with the key omitted. Explicit `""` means clear and remains present. A nonempty string round-trips unchanged. |
+| `effort` | string (optional) | Omitted or `null` means unspecified: carry the old effort only when the target model offers it, otherwise clear. Both re-encode with the key omitted. Explicit `""` clears and remains present. A nonempty string must be offered by the target agent/model and round-trips unchanged. |
 
 The required string keys remain present when the decoded payload is
 re-encoded through `Envelope`, for either target agent. In contrast,
 `effort: null` is canonicalized to an omitted key; it is not preserved as a
 literal `null`.
 
-Example request shape (Codex's template default model, explicit effort clear):
+`conversation_id` and `model` must be present, non-null strings; only `model`
+may be empty. A missing/null `agent` or a string outside the two supported agents
+is unsupported. A non-object payload, invalid JSON or a wrong field type is
+malformed. Nonempty model and effort values obey the bounded shape grammars in
+[`set_session_settings`](#set_session_settings), then the target agent's retained
+[`model_list`](#model_list) validation, including its per-model effort levels and
+agent-specific fallback. An explicit nonempty model needs available vocabulary; an empty
+model selects the target template without requiring a model-menu match. Explicit
+nonempty Codex effort requires held Codex vocabulary even with a template model.
+
+Example request (Codex's template default model, explicit effort clear):
 
 ```json
 {
   "id": 814, "type": "switch_agent", "ts": "...",
   "payload": {
-    "conversation_id": "conv-a",
+    "conversation_id": "12345678-1234-4234-8234-123456789abc",
     "agent": "codex",
     "model": "",
     "effort": ""
   }
 }
 ```
+
+**Refusals and failures.** A refusal returns one `error` with `in_reply_to` equal
+to the request envelope's `id`, using the fixed message below. Preflight refusals
+run no wrap-up, emit no reset sequence and change no binding. Competing resets
+and switches share exclusion for the named conversation.
+
+| Condition | Code | Fixed message | Retryable |
+|---|---|---|---|
+| No `multi_agent`, missing/null or unsupported agent, or workspace confinement rejection | `protocol.unsupported` | `agent switch unsupported` | false |
+| Malformed payload/field shape, missing/null/empty conversation ID, missing/null model, invalid UUIDv4, or same-agent target | `protocol.malformed` | `malformed switch_agent request` | false |
+| Missing conversation or current session binding | `conversation.not_found` | `unknown conversation` | false |
+| Target model not offered | `protocol.malformed` | `requested model is not offered` | false |
+| Target effort not offered | `protocol.malformed` | `malformed set_session_settings request` | false |
+| Vocabulary unavailable when required for target validation | `model_list.unavailable` | `model list is unavailable` | true |
+| Competing reset or switch | `server.binary_busy` | `agent switch already running` | true |
+| Unavailable switcher or uncommitted operational failure, including mint, runner construction/probe or persistence failure | `server.binary_offline` | `agent switch unavailable` | true |
+
+An uncommitted operational failure retains the usable old binding and publishes
+no transition or new row. It can happen after wrap-up wrote handover or dropped
+backlog, so an offline error does not promise that the request was inert. Every
+started reset sequence still closes with inactive status. Errors never echo
+request values, model/effort, workspace paths, handover or wrapped error text.
+
+**Committed outcome.** Each interactive `multi_agent` connection that remains
+open through the switch, including the requester, receives these pushes in order:
+
+1. `resetting`: `active: true`, `phase: "wrapping_up"`, `handoff: "pending"`.
+2. `resetting`: `active: true`, `phase: "restarting"`, `handoff: "written"` or
+   `"skipped"`, describing whether a new handover note was stored.
+3. `resetting`: `active: false`, `phase: ""`, `handoff: ""`.
+4. Exactly one [`session_transition`](#session_transition), with `reason: "clear"`,
+   the named `conversation_id` and the old/new session IDs; one durable history
+   boundary is appended.
+5. [`conversation_updated`](#conversation_updated) read from the committed row,
+   with the new `agent`.
+
+These are uncorrelated pushes, with no `session_settings_updated` or additional
+success acknowledgement. A committed binding remains a success even if old-session
+cleanup fails: the transition and row still publish once, with no refusal.
+Shared exclusion lasts through committed publication and Run-owned sealing,
+so a subsequent reset or switch cannot substitute a later row or agent. Queue
+pressure can delay publication but cannot discard the committed outcome.
+
+The switch runs under the daemon's lifetime, independently of the requester.
+Requester disconnect does not cancel it or prevent other capable connections
+from receiving its result. After commitment to Codex, connections without
+`multi_agent` receive no further pushes for that conversation and keep their
+previous row until their next `list_conversations`, which excludes it (#2644).
+On a switch back to Claude, rising reset phases remain filtered while the row is
+still bound to Codex; ordinary delivery resumes after commitment.
 
 #### `session_settings_updated`
 
@@ -5853,6 +5917,8 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 **Date:** 2026-05-16
 
 ## Changelog
+
+- `2026-10-06`: [`switch_agent`](#switch_agent) is operational (#2870/#2871): an interactive `multi_agent` client can switch a named conversation after confirmation, with template-model selection, presence-sensitive effort and static correlated refusals. Commitment publishes three ordered reset statuses, one clear transition and the committed conversation row, including after cleanup failure or requester disconnect. Shared reset exclusion protects publication through sealing; the dedicated switch lane retains outcomes under queue pressure. Legacy connections retain their previous row after a Codex switch until their next filtered list.
 
 - `2026-10-05`: Added the native-first [`reply_suggestion`](#reply_suggestion) fallback (#2832): after a two-second native window, one isolated Haiku turn uses the last confirmed exchange and existing account authentication. Its ten-second attempt is not retried; failure stays silent. Bounded output uses the existing set/null-clear revisions and reconnect contract, with native priority and cancellation on invalidation or deletion.
 
