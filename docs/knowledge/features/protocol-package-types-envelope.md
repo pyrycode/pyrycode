@@ -45,12 +45,22 @@ with the daemon, while a history id belongs to one persisted log. Using either
 See [history payloads](protocol-package-types-history-payloads.md) and
 the [read-mark contract](../../protocol-mobile.md#marking-a-conversation-read).
 
-The optional history field is declared by #2860; **emission awaits
-[#2861](https://github.com/pyrycode/pyrycode/issues/2861)**. Absence requires
-history/list fallback to obtain a durable target: a history entry's `ID`, or
+The three direct live producers attach the successful `Store.Append` result:
+`interactiveTurnEmitterV2.emit`, `sessionTransitionEmitterV2.broadcast`, and
+`newOperatorMessageHistory`'s commit handed to `operatorMessageEmitterV2.broadcast`
+(#2861). The result is shared across recipients alongside the stored payload and
+timestamp. Session transitions have no ring id; an operator push with no ring
+still carries its history id. See [history producers](history-package.md#producers-2114-2115)
+for append placement and the operator handoff.
+
+Older daemons, absent or failed history storage, non-history-backed frames and
+current reconnect replay omit the history key. Replay reconstructs an envelope
+from `eventring.Event`, which retains no history metadata; direct emission does
+not establish a replay guarantee. Absent or failed storage still permits live
+delivery and existing ring recording. Absence requires history/list fallback to
+obtain a durable target: a history entry's `ID`, or
 `ConversationSummary.LatestEntryID` when marking through the latest entry the
-operator has read. Declaring metadata alone establishes no producer provenance
-or authorization.
+operator has read. The metadata conveys no authorization.
 
 Both optional ids use `*uint64` with `omitempty`: nil omits the key entirely,
 preserving legacy wire bytes. A non-nil pointer serializes its value, so the

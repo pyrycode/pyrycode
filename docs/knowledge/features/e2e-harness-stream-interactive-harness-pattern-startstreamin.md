@@ -62,6 +62,23 @@ up, if at all, as `stream_turn.no_conversation` (only when the session
 resolves to no conversation at all, which seeding a UUID mismatch does not
 normally produce) rather than as a drop against the active cursor.
 
+### Proving direct live history identity
+
+Seeding a log and requesting history proves paging, but never exercises a live
+producer's metadata handoff. `TestRelayV2_LiveHistoryEntryID` seeds only prior
+entries, drives `send_message` through the daemon, receives the direct operator
+push, then requests history. Require exactly one served entry matching the live
+type, payload bytes and `TS.Equal` before comparing its `id` to the envelope's
+`history_entry_id`; checking only inside a match branch stays green when the
+entry is missing.
+
+Offset the persisted history sequence from the fresh ring and envelope counters,
+and assert the ids differ. Equal counters would let the wrong namespace pass as
+durable provenance. Consume intervening frames in arrival order through the
+existing decrypt helper so Noise receive nonces stay synchronized. See
+[history producers](history-package.md#producers-2114-2115) for the complementary
+producer matrix, including absent storage and publication without a ring.
+
 ### Observing held output without closing the phone connection
 
 `fakephone.Client.ReceiveBytes` closes its WebSocket on timeout. An absence
