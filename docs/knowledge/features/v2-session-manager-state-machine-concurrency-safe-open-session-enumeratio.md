@@ -21,7 +21,8 @@ out := make([]ActiveConn, 0, len(m.sessions))
 for connID, s := range m.sessions {
     if s.state == V2StateOpen {
         out = append(out, ActiveConn{ConnID: connID, Interactive: s.interactive,
-            DeviceName: s.clientName, ClientVersion: s.clientVersion}) // #2148
+            DeviceName: s.clientName, ClientVersion: s.clientVersion,
+            ClientFeatures: s.clientFeatures}) // identity (#2148), description (#2898)
     }
 }
 return out
@@ -31,16 +32,18 @@ return out
 
 **Returns `[]ActiveConn`, not `([]ActiveConn, error)`.** A snapshot has no failure mode the caller can act on; the only non-completion (ctx cancelled, or `Run` already exited with `Frames` closed and no receiver on `m.snapshot`) returns `nil` — equivalent to "no open sessions" for the broadcast consumer, which fans out to nobody this round and re-enumerates on the next assistant turn. `nil` and an empty non-nil slice are both `len 0` and interchangeable. The result is an **unordered set** (Go's randomized map-iteration order); the handler does not sort (no AC requires it; the broadcast consumer fans out order-independently — paying O(n log n) on the single dispatch goroutine would buy nothing). `handleActiveConns` emits no log line and reads no secret-bearing field, handed only to the in-process consumer, never to a wire.
 
-**Since #2148, `ActiveConn` also carries `DeviceName` and `ClientVersion`** —
+**`ActiveConn` also carries `DeviceName`, `ClientVersion` and `ClientFeatures`**
+(identity since #2148, feature self-report since #2898) —
 appended fields, since the type's 129 keyed literals (all in tests) would
 otherwise all need touching. The doc's previous claim that the return "holds
 only non-secret conn-id routing keys + the negotiated `interactive` bool" is
-now false and is corrected here rather than left to rot: these two are
+now false and is corrected here rather than left to rot: all three are
 remote-authored, unvalidated display strings, retained verbatim in
 `handleNoiseInit`'s token-OK tail (before `V2StateOpen`, so an unauthenticated
 peer's strings are never enumerable) but bounded at that retention site —
-`maxRetainedClientNameBytes` / `maxRetainedClientVersionBytes`, over-bound
-dropped to `""` rather than truncated — because this snapshot is what the
+`maxRetainedClientNameBytes` (256), `maxRetainedClientVersionBytes` (64) and
+`maxRetainedClientFeaturesBytes` (1024), inclusive byte caps with over-bound
+values dropped to `""` rather than truncated — because this snapshot is what the
 fan-out copies several times per turn across every open conn, and an
 authenticated client parking ~64KB per string here would multiply that copy
 cost. That bound is deliberately **not** the same door as
@@ -48,8 +51,12 @@ cost. That bound is deliberately **not** the same door as
 [the system-prompt client-naming section](sessions-package-key-types-writesystemprompt-systemprompttext.md#naming-the-attached-client-2148)):
 this one caps memory and copy cost at the point of retention; character-set
 and display-safety validation happen once, downstream, at the single door
-that renders the values into a prompt. A consumer of this struct MUST NOT log
-either field, interpolate them into an error, or format the struct wholesale
+that renders the values into a prompt. Retention refusal never rejects the
+handshake, re-key leaves these strings untouched, and the hello/token is never
+retained with the description. Feature bytes reach the transient prompt file,
+never device-registry persistence. A consumer of this struct MUST NOT log
+any of these fields, interpolate them into an error, or format the struct
+wholesale
 (`%+v`, `slog.Any`) — doing so would leak them by accident. No such wholesale
 format exists among today's ~8 fan-out consumers in `cmd/pyry` (checked
 against every one when the fields landed); a new one is the thing to watch

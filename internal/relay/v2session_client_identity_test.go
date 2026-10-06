@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -19,14 +20,19 @@ import (
 // is repo-wide by design, and allowlisting a file would exempt it wholesale.
 var csiRun = string(rune(0x1b)) + "[31m"
 
-// buildHelloIdentityEarlyData is buildHelloEarlyData with the two self-reported
-// identity fields under the test's control — the inputs #2148 retains.
-func buildHelloIdentityEarlyData(t *testing.T, token, deviceName, clientVersion string) []byte {
+// buildHelloIdentityEarlyData is buildHelloEarlyData with the three self-reported
+// fields under the test's control — authenticated identity and feature reports.
+func buildHelloIdentityEarlyData(t *testing.T, token, deviceName, clientVersion string, features ...string) []byte {
 	t.Helper()
+	var description string
+	if len(features) > 0 {
+		description = features[0]
+	}
 	payload, err := json.Marshal(protocol.HelloClientPayload{
 		Role:             "client",
 		DeviceName:       deviceName,
 		ClientVersion:    clientVersion,
+		ClientFeatures:   description,
 		ProtocolVersions: []string{"v2"},
 		Token:            token,
 	})
@@ -49,7 +55,7 @@ func buildHelloIdentityEarlyData(t *testing.T, token, deviceName, clientVersion 
 // clientVersion, and returns the manager. A real handshake rather than an
 // injected V2Session literal is the point: the retention this ticket adds lives in
 // handleNoiseInit's token-OK tail, so a literal would assert nothing about it.
-func openWithIdentity(t *testing.T, token, deviceName, clientVersion string) *V2SessionManager {
+func openWithIdentity(t *testing.T, token, deviceName, clientVersion string, features ...string) *V2SessionManager {
 	t.Helper()
 	respPriv, respPub := genV2Keypair(t)
 	initPriv, _ := genV2Keypair(t)
@@ -69,7 +75,7 @@ func openWithIdentity(t *testing.T, token, deviceName, clientVersion string) *V2
 	if err != nil {
 		t.Fatalf("NewInitiator: %v", err)
 	}
-	initMsg, err := initiator.WriteInit(buildHelloIdentityEarlyData(t, token, deviceName, clientVersion))
+	initMsg, err := initiator.WriteInit(buildHelloIdentityEarlyData(t, token, deviceName, clientVersion, features...))
 	if err != nil {
 		t.Fatalf("WriteInit: %v", err)
 	}
@@ -135,7 +141,7 @@ func TestV2Session_ActiveConns_RetainsClientIdentity(t *testing.T) {
 // never observable through the enumeration. The same gate s.interactive relies on.
 func TestV2Session_ActiveConns_RejectedTokenLeavesNoIdentity(t *testing.T) {
 	t.Parallel()
-	mgr := openWithIdentity(t, "not-the-paired-token", "Attacker-Device", "9.9.9")
+	mgr := openWithIdentity(t, "not-the-paired-token", "Attacker-Device", "9.9.9", "UNAUTHENTICATED-FEATURES")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -161,5 +167,64 @@ func TestV2Session_ActiveConns_DeviceTokenHashIsAuthenticatedDevice(t *testing.T
 	}
 	if got, want := conns[0].DeviceTokenHash, devices.HashToken(v2TestToken); got != want {
 		t.Errorf("ActiveConn.DeviceTokenHash = %q, want the authenticated device's hash %q", got, want)
+	}
+}
+
+func TestV2Session_ActiveConns_RetainsClientFeatures(t *testing.T) {
+	t.Parallel()
+	for _, report := range []string{"", "  verbatim é  ", "line\n\"quoted\"", strings.Repeat("x", 1024), strings.Repeat("x", 1025), strings.Repeat("é", 512), strings.Repeat("é", 512) + "x"} {
+		t.Run(fmt.Sprintf("%d bytes %q", len(report), report[:min(len(report), 16)]), func(t *testing.T) {
+			t.Parallel()
+			mgr := openWithIdentity(t, v2TestToken, "Phone", "1", report)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			conns := mgr.ActiveConns(ctx)
+			if len(conns) != 1 {
+				t.Fatal("bounded report must not reject authentication")
+			}
+			want := report
+			if len(want) > 1024 {
+				want = ""
+			}
+			if conns[0].ClientFeatures != want {
+				t.Errorf("features = %q, want %q", conns[0].ClientFeatures, want)
+			}
+		})
+	}
+}
+
+func TestV2Session_ActiveConns_RekeyPreservesClientFeatures(t *testing.T) {
+	t.Parallel()
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	frames := make(chan protocol.RoutingEnvelope)
+	rec := &v2Recorder{}
+	mgr, stop := startManager(t, V2SessionConfig{Frames: frames, Outbound: rec.outbound, StaticPriv: respPriv, Devices: v2PairedRegistry(t, v2TestToken), ServerID: v2TestServerID, Logger: silentLogger()})
+	defer stop()
+	const report = "REKEY-FEATURES-2898: renders markdown"
+	for i := 0; i < 2; i++ {
+		initiator, err := noise.NewInitiator(initPriv, respPub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var early []byte
+		if i == 0 {
+			early = buildHelloIdentityEarlyData(t, v2TestToken, "Phone", "1", report)
+		}
+		init, err := initiator.WriteInit(early)
+		if err != nil {
+			t.Fatal(err)
+		}
+		frames <- wrapInnerFrame(t, v2TestConnID, protocol.TypeNoiseInit, init)
+		envs := waitForEnvelopes(t, rec, i+1)
+		if _, _, _, err := initiator.ReadResp(decodeRespFrame(t, envs[i])); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		conns := mgr.ActiveConns(ctx)
+		cancel()
+		if len(conns) != 1 || conns[0].ClientFeatures != report {
+			t.Fatal("authenticated report lost across rekey")
+		}
 	}
 }

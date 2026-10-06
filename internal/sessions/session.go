@@ -505,8 +505,8 @@ type Session struct {
 	// The same discipline settings follows, and deliberately NOT lcMu.
 	systemPrompt string
 
-	// promptClients is the ADMITTED client set the session's appended prompt was
-	// last composed with (#2148's section), carried so a `new_session` rotation can
+	// promptClients is the ADMITTED name/version/feature triple set the appended
+	// prompt was last composed with (#2148's section), carried so a `new_session` rotation can
 	// recompose without resolving (#2436). The rotation dispatch runs on the relay
 	// manager's own Run goroutine, which is the goroutine Pool.attachedClients needs
 	// an answer from, so a resolve there cannot be answered — refreshSystemPrompt's
@@ -518,7 +518,9 @@ type Session struct {
 	// admittedClients, nil whenever nothing would render. Retaining the resolver's
 	// raw answer instead would park unadmitted remote-authored bytes on a long-lived
 	// struct, and would bound the retention by however many conns a client holds
-	// rather than by maxNamedClients × (maxClientNameBytes + maxClientVersionBytes).
+	// rather than by maxNamedClients × (maxClientNameBytes + maxClientVersionBytes +
+	// maxClientFeaturesBytes). Features are independently admitted through the
+	// inclusive 512-UTF-8-byte bound; this activation snapshot may become stale.
 	//
 	// Written under Pool.mu (write) and read under Pool.mu (RLock) — systemPrompt's
 	// discipline exactly, and deliberately NOT lcMu. The slice is IMMUTABLE once
