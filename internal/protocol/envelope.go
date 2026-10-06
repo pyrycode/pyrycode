@@ -36,6 +36,12 @@ type Envelope struct {
 	// Set only by the interactive emitter (#649); consumed by #647.
 	EventID *uint64 `json:"event_id,omitempty"`
 
+	// HistoryEntryID identifies HistoryEntry.ID, the durable per-conversation
+	// entry used by mark_conversation_read.up_to. Distinct from ID and EventID;
+	// real entries are >= 1. Nil omits the key and requires history/list fallback.
+	// Emission awaits #2861. This metadata conveys no authorization.
+	HistoryEntryID *uint64 `json:"history_entry_id,omitempty"`
+
 	PayloadEncrypted bool `json:"payload_encrypted,omitempty"`
 }
 
