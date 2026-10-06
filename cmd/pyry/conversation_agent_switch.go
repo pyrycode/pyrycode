@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 	"github.com/pyrycode/pyrycode/internal/sessions"
@@ -29,6 +30,8 @@ type conversationAgentSwitcher struct {
 	conversations *conversations.Registry
 	registryPath  string
 	reset         *conversationReset
+	history       *history.Store
+	resetting     *resettingEmitterV2
 	saved         savedModelVocabulary
 }
 
@@ -102,6 +105,19 @@ func (s conversationAgentSwitcher) Switch(ctx context.Context, convID, target st
 		}
 		return "", ErrAgentSwitchWorkspaceUnavailable
 	}
+	s.resetting.wrappingUp(convID)
+	// LIFO closes the reset sequence before begin's exclusion is released.
+	defer s.resetting.done(convID)
+	summary := ""
+	if old, lookupErr := s.pool.Lookup(oldID); lookupErr == nil && old.Runner().State().ChildPID != 0 {
+		text, ended, failed := s.reset.wrapUpText(convID)
+		if ended && !failed {
+			summary = text
+		}
+	}
+	wrote := s.storeHandover(convID, summary)
+	s.resetting.restarting(convID, wrote)
+
 	newID, err := s.pool.MintWith(convID, spawnDir, target, start)
 	if err != nil {
 		// A runner construction error can contain the accepted workspace path.
