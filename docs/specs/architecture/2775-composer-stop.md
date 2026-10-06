@@ -75,3 +75,8 @@ Pending for the documentation stage: in `docs/knowledge/features/streamsup-packa
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-06
+
+## Revisions
+
+- 2026-10-06 — Live gate repair: `TestRealClaudeComposerStopClosedInputKillsHeldTask` reached held-call setup on Claude 2.1.280 but timed out after releasing the foreground FIFO. The owning topic, `docs/knowledge/features/e2e-realclaude-roster-after-finish-capture-test-go.md` § “A foreground-held FIFO never returns its tool result, even after the command exits”, documents this rig trap. Replace only the closed-input foreground FIFO with `composerForegroundGate`: a shell command writes an arrival marker and waits for a release file in the isolated workdir. Match its exact Bash input, observe arrival, close stdin, verify the background FIFO reader still exists, then create the foreground release file. Normal child exit and background-reader disappearance remain mandatory before parent cancellation; the background writer remains held. `TestComposerForegroundGate` proves held execution, normal release, and repeated-release cleanup offline. Production initialization and the interactive interrupt scenario are unchanged.
+- Security review of the repair: PASS. The file gate uses rig-generated paths in the private workdir, shell-quotes paths (including single quotes), creates the release marker with mode 0600, and exposes no payload or credentials in diagnostics. The existing child deadline, reaper on failure, and joined `Wait` goroutine still bound cleanup. No new production trust boundary, credential, network, or cryptographic behavior is introduced.

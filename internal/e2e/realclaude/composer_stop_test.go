@@ -6,9 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -129,10 +131,9 @@ func TestRealClaudeComposerStopClosedInputKillsHeldTask(t *testing.T) {
 		t.Fatal("create closed-input workdir")
 	}
 	background := filepath.Join(workdir, "background.fifo")
-	foreground := filepath.Join(workdir, "foreground.fifo")
 	backgroundArrived, releaseBackground := tpcapHoldFIFO(t, background)
 	defer releaseBackground()
-	foregroundArrived, releaseForeground := tpcapHoldFIFO(t, foreground)
+	foregroundCommand, foregroundStarted, releaseForeground := composerForegroundGate(t, workdir)
 	defer releaseForeground()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*perTurnReplyBudget)
 	defer cancel()
@@ -172,16 +173,16 @@ func TestRealClaudeComposerStopClosedInputKillsHeldTask(t *testing.T) {
 	if err := streamsup.WriteInitialize(stdin, "composer-closed-input"); err != nil {
 		t.Fatal("write initialize")
 	}
-	prompt := fmt.Sprintf("First use Bash with run_in_background=true to run exactly: cat %s. Then use Bash in the foreground with timeout=120000 and run_in_background=false to run exactly: cat %s. Do not add flags, redirections or other commands. Wait for the foreground result, then reply with one short word. run=%d", background, foreground, time.Now().UnixNano())
+	prompt := fmt.Sprintf("First use Bash with run_in_background=true to run exactly: cat %s. Then use Bash in the foreground with timeout=120000 and run_in_background=false to run exactly: %s. Do not change either command. Wait only for the foreground result, then reply with one short word without checking or waiting for the background task. run=%d", background, foregroundCommand, time.Now().UnixNano())
 	if err := streamsup.WriteTurn(ctx, stdin, []byte(prompt)); err != nil {
 		t.Fatal("write closed-input turn")
 	}
 	composerRendezvous(t, backgroundArrived)
-	composerRendezvous(t, foregroundArrived)
+	composerFileRendezvous(t, foregroundStarted, done)
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		lines, _ := recorder.snapshot()
-		if composerHasBashCall(lines, background, true) && composerHasBashCall(lines, foreground, false) {
+		if composerHasBashCall(lines, background, true) && composerHasBashCommand(lines, foregroundCommand, false) {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -194,7 +195,6 @@ func TestRealClaudeComposerStopClosedInputKillsHeldTask(t *testing.T) {
 		}
 	}
 	composerRequireReader(t, background, fifoLiveReaderPresent)
-	composerRequireReader(t, foreground, fifoLiveReaderPresent)
 	if err := stdin.Close(); err != nil {
 		t.Fatal("close input before held-result release")
 	}
@@ -205,7 +205,6 @@ func TestRealClaudeComposerStopClosedInputKillsHeldTask(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 	}
 	composerRequireReader(t, background, fifoLiveReaderPresent)
-	composerRequireReader(t, foreground, fifoLiveReaderPresent)
 	releaseForeground()
 	select {
 	case <-done:
@@ -262,6 +261,10 @@ func composerRequireReader(t *testing.T, fifo, want string) {
 }
 
 func composerHasBashCall(lines []dropcapCaptured, fifo string, background bool) bool {
+	return composerHasBashCommand(lines, "cat "+fifo, background)
+}
+
+func composerHasBashCommand(lines []dropcapCaptured, command string, background bool) bool {
 	for _, line := range lines {
 		if line.Type != "assistant" {
 			continue
@@ -281,12 +284,49 @@ func composerHasBashCall(lines []dropcapCaptured, fifo string, background bool) 
 			continue
 		}
 		for _, c := range p.Message.Content {
-			if c.Type == "tool_use" && c.Name == "Bash" && c.Input.Command == "cat "+fifo && c.Input.RunInBackground == background {
+			if c.Type == "tool_use" && c.Name == "Bash" && c.Input.Command == command && c.Input.RunInBackground == background {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// composerForegroundGate avoids Claude's foreground FIFO result stall. The
+// arrival file witnesses execution; only the rig can create the release file.
+func composerForegroundGate(t *testing.T, workdir string) (command, started string, release func()) {
+	t.Helper()
+	started = filepath.Join(workdir, "foreground-started")
+	released := filepath.Join(workdir, "foreground-released")
+	quote := func(path string) string { return "'" + strings.ReplaceAll(path, "'", "'\"'\"'") + "'" }
+	command = fmt.Sprintf("printf ready > %s; while [ ! -f %s ]; do sleep 0.1; done", quote(started), quote(released))
+	release = func() {
+		if err := os.WriteFile(released, nil, 0o600); err != nil {
+			t.Error("release foreground file gate")
+		}
+	}
+	t.Cleanup(release)
+	return command, started, release
+}
+
+func composerFileRendezvous(t *testing.T, started string, done <-chan struct{}) {
+	t.Helper()
+	deadline := time.NewTimer(perTurnReplyBudget)
+	defer deadline.Stop()
+	for {
+		if _, err := os.Stat(started); err == nil {
+			return
+		} else if !os.IsNotExist(err) {
+			t.Fatal("inspect foreground arrival file")
+		}
+		select {
+		case <-done:
+			t.Fatal("child exited before foreground arrival")
+		case <-deadline.C:
+			t.Fatal("foreground file gate never opened")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
 }
 
 func TestComposerHasBashCall(t *testing.T) {
@@ -308,5 +348,47 @@ func TestComposerHasBashCall(t *testing.T) {
 				t.Fatalf("matched=%t, want=%t", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestComposerForegroundGate(t *testing.T) {
+	workdir := filepath.Join(t.TempDir(), "space ' gate")
+	if err := os.Mkdir(workdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command, started, release := composerForegroundGate(t, workdir)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd.Stdout = io.Discard
+	cmd.WaitDelay = time.Second
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	var waitErr error
+	go func() {
+		waitErr = cmd.Wait()
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	composerFileRendezvous(t, started, done)
+	select {
+	case <-done:
+		t.Fatal("foreground command exited before release")
+	case <-time.After(200 * time.Millisecond):
+	}
+	release()
+	release() // Repeated release and cleanup must remain harmless.
+	select {
+	case <-done:
+		if waitErr != nil || ctx.Err() != nil {
+			t.Fatalf("foreground release did not produce normal exit: %v", waitErr)
+		}
+	case <-ctx.Done():
+		t.Fatal("foreground command did not exit on release")
 	}
 }
