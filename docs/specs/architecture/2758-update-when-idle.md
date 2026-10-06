@@ -59,7 +59,7 @@ Satisfied by the documentation stage; behavior checked against the implementatio
 The update overview now links its **Automatic update (#2716)** section to
 [`pyry-update-command-automatic-update.md`](../../knowledge/features/pyry-update-command-automatic-update.md).
 The original [Flags](../../knowledge/features/pyry-update-command.md#flags) and
-[Update-when-idle provider](../../knowledge/features/control-plane.md#update-when-idle-provider)
+[Update-when-idle provider](../../knowledge/features/control-plane-server-and-deadlines.md#update-when-idle-provider)
 sections remain at their handed-off paths. Retry-publication and replacement-counting
 lessons are recorded under [Concurrency](../../knowledge/features/pyry-update-command.md#concurrency)
 and [Tests](../../knowledge/features/pyry-update-command-tests.md#tests).

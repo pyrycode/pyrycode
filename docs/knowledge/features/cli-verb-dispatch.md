@@ -22,6 +22,26 @@ Server-side, `internal/control` deleted the wire surface these verbs rode (`Verb
 - **Proving a removed-verb arm's absence is caught before it does damage, not after.** Deleting an arm makes `runArgs` fall through to `runSupervisor`, whose first substantive step (`confineWorkdirToHome`) rejects a cwd outside `$HOME`. A test that wants "arm deleted ⇒ red, with zero side effects" needs `t.Setenv("HOME", t.TempDir())` even though that line does nothing in the passing, shipped-code run — it only fires once the arm is mutated away. An unexplained line like that reads as dead code to the next editor; comment why it stays.
 - **A help-text absence check must not be a bare substring match.** `strings.Contains(helpText, "acp")` is vacuously true forever, because the surviving `pyry mcp-approve` entry contains the letters `acp`. Split each line on whitespace and match the token that follows a leading `pyry` field instead — and assert a couple of *surviving* entries are still found first, so a broken predicate can't report an absence unconditionally.
 
+## Conversation option and selector parsing
+
+Go's `flag.FlagSet` accepts a following flag token as a string value. A guard
+in `parseConversationNewArgs` alone cannot catch missing values for the leading
+instance/socket selectors: `parseClientFlags` runs first and can consume
+`-pyry-socket` as the value of `-pyry-name`, then attempt transport with exit 1
+instead of the required syntax exit 2. `runConversation` checks leading
+selectors before shared parsing, skips their separate or inline values, and
+leaves conversation options to their own parser. Dash-prefixed values require
+`=value`; selectors precede `new`.
+
+`TestConversationNew_E2E_MissingSelectorValues` runs the CLI with no daemon
+listening and requires exit 2, usage on stderr and empty stdout. This makes an
+accidental transport attempt distinguishable from syntax rejection; a generic
+nonzero-exit assertion would stay green with the bug. Keep successful selector
+cases too: separate/inline values, an empty instance name and explicit socket
+precedence must still reach the intended daemon. See the
+[conversation creation contract](control-plane.md#conversation-create-conversationnew)
+and [CLI spec](../../specs/architecture/2884-conversation-cli.md#revisions).
+
 ## Daemon shutdown and exit status
 
 An ordinary SIGTERM, SIGINT, or `pyry stop` makes `runSupervisor` log

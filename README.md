@@ -85,9 +85,21 @@ systemctl --user enable --now pyry
 
 The supervised `claude` has no terminal of its own, and since #1348 there is no way to borrow it: `pyry attach` was removed along with the terminal path it read from. Watch a live session from the desktop or mobile client instead.
 
-`pyry status`, `pyry logs`, `pyry stop`, and `pyry channel new` work from any shell, talking to the daemon over its Unix socket at `~/.pyry/pyry.sock`.
+`pyry status`, `pyry logs`, `pyry stop`, `pyry channel new`, and `pyry conversation new` work from any shell, talking to the daemon over its Unix socket at `~/.pyry/pyry.sock`.
 
 `pyry channel new`, run inside a project folder, creates a **channel** — a long-lived conversation — whose workspace is that folder, and prints its conversation id. It exists because a client's workspace picker only offers folders that have already hosted a conversation, so a folder that merely exists on the host could not be chosen from a phone at all; your shell is already standing in the right place. `--name <label>` overrides the default name (the folder's own). The folder must be under `$HOME`.
+
+`pyry conversation new [--type chat|channel] [--name LABEL] [--model MODEL] [--effort EFFORT]` creates a Claude conversation without requiring a configured relay or paired client. The default type is an unpromoted **chat** in the client's Chats section; `--type channel` creates a promoted channel. Its workspace is the shell's current folder, resolved through symlinks and confined to `$HOME`. An omitted or empty name leaves chats unnamed and gives channels the resolved folder's base name; a nonempty `--name` names either type. Creation binds a session immediately; Claude starts on the first message.
+
+The daemon checks model/effort syntax. Nonempty models must appear in its retained published model menu; nonempty efforts use the effective model's allowed levels, including the same fallback rules as paired clients. An explicitly requested nonempty model is refused if the menu is unavailable. Omitted settings inherit the daemon's mint defaults; `--model=` or `--effort=` resets only that field to Claude's own default. Success prints only the new conversation id followed by a newline:
+
+```bash
+cd "$HOME/projects/example"
+chat_id=$(pyry conversation new --name "Planning" --model= --effort=)
+channel_id=$(pyry conversation new --type channel)
+```
+
+Instance/socket selectors precede `new`, for example `pyry conversation -pyry-name=work new`. Bad syntax exits 2; settings, workspace, cwd lookup or daemon/transport failures exit 1 with an error on stderr and no id on stdout.
 
 For the full walkthrough — multi-instance, troubleshooting, hooks under service-mode `PATH`, boot persistence — see [**`docs/guide.md`**](docs/guide.md) and [**`docs/deployment.md`**](docs/deployment.md).
 
