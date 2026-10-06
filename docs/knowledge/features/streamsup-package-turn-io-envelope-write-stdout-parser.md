@@ -365,6 +365,40 @@ only installed observer, and it matches an echo to a pending send-now write
 by digest equality alone; an ordinary message's opener echo matches no
 pending entry and is silently dropped.
 
+## Command lifecycle bookkeeping is consumed by state (#2877)
+
+On 2026-10-06, Claude 2.1.280 was reported emitting `command_lifecycle`
+`started`/`completed` pairs around peer-message turns in two conversations,
+producing two Unrecognized cards per message. Only those two states were
+observed; `queued`, `cancelled`, `discarded` and `refused` come from the
+report's declared schema inspection. The [refinement evidence](https://github.com/pyrycode/pyrycode/issues/2877#issuecomment-6014442517)
+contains one verbatim frame; the parser's two peer-message pairs use permitted
+same-shape placeholder identifiers, not a new live capture.
+
+`consumeLine` gives this type a separate arm outside `ignoredLineTypes`,
+following [consume-by-matching](streamsup-package-tool-progress-consumed-by-matching.md).
+It decodes only the top-level string `state`: `queued`, `started`, `completed`,
+`cancelled`, `discarded` or `refused` emits no event and one Debug record with
+exactly `site=line_type`, `type=command_lifecycle` and the matched `state`.
+Identifiers, raw JSON and other payload values never enter that record.
+Dropping the whole type would hide a new or malformed state from the parser-gap
+sentinel. Missing, null, non-string, empty or unknown states instead produce
+exactly one `turnevent.Unrecognized` with `Site=UnrecognizedLineType` and
+`Kind=command_lifecycle`. `emitUnrecognized` retains the existing raw diagnostic
+and `truncateRaw`'s 16 KiB cap with UTF-8 scrubbing; its Debug log contains only
+site, type, byte count and truncation status, never the rejected state or decode
+error. Matching neither trims nor changes the state string's case.
+
+These frames read and write no parser lifecycle state. `started` may arrive
+while idle and `completed` after `result`; neither opens or closes a turn,
+clears a retry latch or resets the next turn's accumulators. Existing turn
+events already represent the peer-message turn, and `marshalTurnEnvelope`
+writes no command uuid on daemon user envelopes, so the bookkeeping identifiers
+establish no daemon command correlation. `TestParser_CommandLifecycleStateNeutral`
+checks all six states while idle, in an open turn and between turns, snapshots
+parser state and compares subsequent normal events with a control parser.
+An open-turn-only assertion would miss an accidental opener from idle.
+
 ## Claude's native prompt suggestion becomes one neutral event (#2829)
 
 Claude can emit a top-level `prompt_suggestion` line after a turn's `result`
