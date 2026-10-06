@@ -385,8 +385,9 @@ func reescalateFixturePath(t *testing.T, versionToken, arm string) string {
 // unmeasurable one is a finding, and only an instrument that measured nothing is a
 // failure — which runSetModeChild raises for itself.
 func TestRealClaude_BypassReescalation_Probe(t *testing.T) {
-	claudeBin := resolveClaudeBin(t)     // t.Skip when claude is not on PATH
-	home := WithWorktreeAuthenticated(t) // t.Skip when there are no credentials
+	runParallel(t)
+	claudeBin := resolveClaudeBin(t) // t.Skip when claude is not on PATH
+	home := liveHome(t)              // t.Skip when there are no credentials
 
 	workdir := filepath.Join(home, reescalateWorkdirName)
 	if err := os.MkdirAll(workdir, 0o700); err != nil {
@@ -401,6 +402,7 @@ func TestRealClaude_BypassReescalation_Probe(t *testing.T) {
 	// is set on the controls too — that is what gives them the turn 3 the
 	// measurement arm's read is classified against.
 	cfg := setModeChildConfig{
+		home:        home,
 		model:       setModeModel,
 		promptOne:   setModePromptOne,
 		promptTwo:   setModePromptTwo,

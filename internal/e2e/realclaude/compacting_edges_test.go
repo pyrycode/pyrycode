@@ -212,8 +212,9 @@ func cedgeAwaitCompactTurn(c *cedgeCollector, wantEnds, sentAt int, quiet, budge
 // `/compact` as ordinary message text. Keeping it identical is what makes a red here
 // diagnosable against that capture rather than a second unexplained variable.
 func TestRealClaude_CompactingEdges(t *testing.T) {
+	runParallel(t)
 	claudeBin := resolveClaudeBin(t)
-	home := WithWorktreeAuthenticated(t) // t.Skip when no credentials
+	home := liveHome(t) // t.Skip when no credentials
 
 	// A fresh EMPTY directory, deliberately not a git repo: no branch names and no
 	// file contents can reach claude's context, and therefore none can reach a
@@ -237,6 +238,8 @@ func TestRealClaude_CompactingEdges(t *testing.T) {
 		SessionID: cedgeSessionID,
 		Args:      ccapArgs,
 		Stdout:    parser,
+		// HOME explicitly, so the child keeps its isolated home under runParallel.
+		Env: []string{"HOME=" + home},
 	})
 	if err != nil {
 		t.Fatalf("#2227: streamsup.New: %v", err)

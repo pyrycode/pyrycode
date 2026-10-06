@@ -191,14 +191,14 @@ type resumeProbeRecord struct {
 // Never fails the test for the child's behaviour — did-not-exit is a recorded
 // outcome, not a hang. Fatals only when startProbeChild fails, which is a broken
 // instrument rather than a measurement.
-func runResumeArm(t *testing.T, claudeBin, cwd, sessionID string, deadline time.Duration) resumeArm {
+func runResumeArm(t *testing.T, claudeBin, home, cwd, sessionID string, deadline time.Duration) resumeArm {
 	t.Helper()
 	argv := resumeProbeArgs(sessionID)
 	arm := resumeArm{SessionID: sessionID, Argv: argv, DeadlineMs: deadline.Milliseconds()}
 
 	ctx, cancel := context.WithTimeout(context.Background(), resumeProbeArmBudget)
 	defer cancel()
-	c, err := startProbeChild(ctx, claudeBin, cwd, argv)
+	c, err := startProbeChild(ctx, claudeBin, home, cwd, argv)
 	if err != nil {
 		t.Fatalf("#1656[resume %s]: %v — no child, no answer to record", sessionID, err)
 	}
@@ -289,11 +289,12 @@ func resumeStubSentence(found bool) string {
 // --- the live measurement --------------------------------------------------------
 
 func TestRealClaude_ResumeAbsentTranscript(t *testing.T) {
-	// No t.Parallel: WithWorktreeAuthenticated calls t.Setenv.
+	runParallel(t)
+	// Parallel through runParallel; see liveHome.
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Skipf("realclaude: claude not on PATH: %v", err)
 	}
-	home := WithWorktreeAuthenticated(t) // skips cleanly when no creds
+	home := liveHome(t) // skips cleanly when no creds
 	claudeBin, err := exec.LookPath("claude")
 	if err != nil {
 		t.Fatalf("#1656: resolve claude: %v", err)
@@ -336,7 +337,7 @@ func TestRealClaude_ResumeAbsentTranscript(t *testing.T) {
 	}
 	establishCtx, cancelEstablish := context.WithTimeout(context.Background(), resumeProbeEstablishBudget)
 	defer cancelEstablish()
-	establish, err := startProbeChild(establishCtx, claudeBin, childCwd, establishArgv)
+	establish, err := startProbeChild(establishCtx, claudeBin, home, childCwd, establishArgv)
 	if err != nil {
 		t.Fatalf("#1656[establish]: %v — without a real transcript there is no control, "+
 			"and without a control a non-zero exit attributes to nothing", err)
@@ -397,7 +398,7 @@ func TestRealClaude_ResumeAbsentTranscript(t *testing.T) {
 	}
 
 	// --- 4. the absent arm ------------------------------------------------------
-	rec.AbsentArm = runResumeArm(t, claudeBin, childCwd, resumeProbeAbsentID, resumeProbeArmDeadline)
+	rec.AbsentArm = runResumeArm(t, claudeBin, home, childCwd, resumeProbeAbsentID, resumeProbeArmDeadline)
 
 	// --- 5. post-read <C> -------------------------------------------------------
 	//
@@ -412,7 +413,7 @@ func TestRealClaude_ResumeAbsentTranscript(t *testing.T) {
 	// Same builder, same workdir, same deadline. It runs LAST so that nothing
 	// between the pre-read and the absent arm can create <C>; AC 2's rule is
 	// order-independent, so this costs nothing.
-	rec.ControlArm = runResumeArm(t, claudeBin, childCwd, resumeProbePresentID, resumeProbeArmDeadline)
+	rec.ControlArm = runResumeArm(t, claudeBin, home, childCwd, resumeProbePresentID, resumeProbeArmDeadline)
 
 	// --- verdict and record -------------------------------------------------------
 	rec.Verdict, rec.VerdictSentence = classifyResumeAbsent(rec.ControlArm.outcome(), rec.AbsentArm.outcome())

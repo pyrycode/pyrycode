@@ -85,12 +85,14 @@ const (
 // raise a real permission modal, answer allow_once, and prove the turn resumes
 // to completion. Answer-only — the cancel phase (#1030 Phase B) is out of scope.
 func TestInteractiveStreamModalResolution(t *testing.T) {
+	runParallel(t)
 	h, convID := startStreamModalResolutionHarness(t, permissionDaemonModel)
 	driveInteractiveStreamModalResolution(t, h, convID)
 }
 
 // Preserve the existing stdio allow/resume proof independently of ask context.
 func TestInteractiveStreamStdioModalAllow(t *testing.T) {
+	runParallel(t)
 	h, convID := startStdioModalResolutionHarness(t, permissionDaemonModel)
 	driveInteractiveStreamModalResolution(t, h, convID)
 }
@@ -183,6 +185,7 @@ const cancelledApprovalTurnEndBudget = 60 * time.Second
 // permission path that ended the turn by ALLOWING the Write would satisfy every
 // other assertion here.
 func TestInteractiveStreamStdioCancelDeniesParkedPermission(t *testing.T) {
+	runParallel(t)
 	const (
 		witness = "pyrycode-cancel-denied-witness.txt"
 		// "do not retry" keeps the turn from raising a second permission modal
@@ -292,11 +295,11 @@ func startObservedPermissionHarness(t *testing.T, model string, stdioPermissionP
 
 func startObservedPermissionHarnessWithOperatorBypass(t *testing.T, model string, stdioPermissionPrompt bool, configure func(string) string, operatorBypass bool) (*perConvHarness, string, func()) {
 	t.Helper()
-	// No t.Parallel: WithWorktreeAuthenticated calls t.Setenv.
+	// Parallel only through runParallel; see liveHome.
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Skipf("realclaude: claude not on PATH: %v", err)
 	}
-	home := WithWorktreeAuthenticated(t) // skips cleanly when no creds
+	home := liveHome(t) // skips cleanly when no creds
 	claudeBin, err := exec.LookPath("claude")
 	if err != nil {
 		t.Fatalf("realclaude: resolve claude: %v", err)

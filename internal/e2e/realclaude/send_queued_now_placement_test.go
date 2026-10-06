@@ -46,6 +46,7 @@ type sendNowFrame struct {
 }
 
 func TestRealClaude_SendQueuedNowPlacement(t *testing.T) {
+	runParallel(t)
 	h, convID := startStreamRunningTurnHarness(t)
 	queuedText := "One more thing: include the exact word " + sendNowMarker + " in your final reply."
 

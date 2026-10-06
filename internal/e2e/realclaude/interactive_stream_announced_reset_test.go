@@ -101,7 +101,7 @@ package realclaude
 // interactive_stream_new_session_test.go (#1174) with no deltas. One daemon, one
 // seeded bound conversation, one encrypted channel, ONE reader for the whole run —
 // the receive nonce is sequential, so a second concurrent reader would desync the
-// CipherState. No t.Parallel: WithWorktreeAuthenticated calls t.Setenv. The reused
+// CipherState. Runs in parallel through runParallel; liveHome keeps HOME out of the process environment. The reused
 // setup skips cleanly (exit 0) when claude / creds are absent, exactly like every
 // sibling stream spec; the actual green requires a live claude (needs-real-claude),
 // and is read from the count of executed tests, never from the exit code.
@@ -185,11 +185,12 @@ const (
 const clearResetWindowBudget = 150 * time.Second
 
 func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
-	// No t.Parallel: WithWorktreeAuthenticated calls t.Setenv.
+	runParallel(t)
+	// Parallel only through runParallel; see liveHome.
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Skipf("realclaude: claude not on PATH: %v", err)
 	}
-	home := WithWorktreeAuthenticated(t) // skips cleanly when no creds
+	home := liveHome(t) // skips cleanly when no creds
 	claudeBin, err := exec.LookPath("claude")
 	if err != nil {
 		t.Fatalf("realclaude: resolve claude: %v", err)

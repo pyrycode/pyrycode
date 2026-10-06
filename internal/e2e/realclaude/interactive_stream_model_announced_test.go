@@ -147,9 +147,10 @@ const (
 const announcedSpawnAlias = "haiku"
 
 func TestInteractiveStreamModelAnnouncedFrame(t *testing.T) {
-	// No t.Parallel: WithWorktreeAuthenticated calls t.Setenv.
-	claudeBin := resolveClaudeBin(t)     // t.Skip when claude is not on PATH
-	home := WithWorktreeAuthenticated(t) // t.Skip when there are no credentials
+	runParallel(t)
+	// Parallel only through runParallel; see liveHome.
+	claudeBin := resolveClaudeBin(t) // t.Skip when claude is not on PATH
+	home := liveHome(t)              // t.Skip when there are no credentials
 
 	// Isolated workdir under the authenticated HOME. Load-bearing twice: it
 	// guarantees the fresh-daemon state (empty claude sessions dir) AND sidesteps
@@ -369,9 +370,10 @@ func spawnBootstrapDaemonVerbose(t *testing.T, home, workdir, claudeBin, relayUR
 		"--dangerously-skip-permissions",
 	}
 	cmd := exec.Command(bin, args...)
-	// os.Environ() already carries the isolated HOME and the credential
-	// (WithWorktreeAuthenticated t.Setenv's both). Add the relay switches.
-	cmd.Env = append(os.Environ(), "PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=1")
+	// HOME is set explicitly rather than inherited, so the harness also runs under
+	// t.Parallel, where nothing pins it process-wide; the credential is inherited.
+	// Add the relay switches.
+	cmd.Env = homeEnv(home, "PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=1")
 	// DEBUG tee + AC-4's haystack. At -pyry-verbose the buffer grows with the
 	// daemon's own Debug-level records for the life of one turn — bounded in
 	// practice by the turn, the same buffer spawnBootstrapDaemonWithIdle already
