@@ -2565,7 +2565,11 @@ func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, workDir s
 	if err != nil {
 		return false, "", err
 	}
-	cmd := exec.CommandContext(ctx, r.cfg.ClaudeBin, args...)
+	claudeBin, err := r.spawnClaudeBin()
+	if err != nil {
+		return false, "", err
+	}
+	cmd := exec.CommandContext(ctx, claudeBin, args...)
 	cmd.Dir = workDir
 	cmd.Stdout = r.cfg.Stdout
 	cmd.Env = childEnv

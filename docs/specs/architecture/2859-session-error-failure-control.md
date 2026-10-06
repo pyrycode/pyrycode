@@ -69,3 +69,7 @@ Pending documentation stage: in `docs/knowledge/features/e2e-realclaude.md` § *
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-06
+
+## Revisions
+
+- 2026-10-06: `spawnClaudeBin` also opens nonblocking and rejects non-regular selection files so a mistaken FIFO cannot stall shutdown. The external bridge remains one bounded per-spawn file snapshot. The live reply proof uses the completed Claude transcript's prompt marker rather than model reply wording, together with delivered message IDs, to distinguish retained delivery and dropped-message non-replay. Final written work remains below 800 lines.
