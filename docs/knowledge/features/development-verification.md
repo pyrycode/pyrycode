@@ -209,9 +209,14 @@ identifier against the capture file itself before writing the assertion, and ass
 the value actually fed, not the prose's claim about it.
 
 Record enough redacted context to diagnose an empty capture. Count other line types,
-subtypes, tool outcomes and timing without retaining secret-bearing inputs. A witness
-controlled by the test rig is stronger than a model being asked to wait. Ensure its
-release path cannot hang when no reader starts.
+subtypes, tool outcomes and timing without retaining secret-bearing inputs. On an
+assertion failure, retain the relevant redacted response and selected result fields:
+a temporary transcript path loses its evidence when fixture cleanup runs. A passing
+rerun cannot establish what the failed response said. The
+[allowed-tools refusal test](e2e-realclaude-allowed-tools-enforcement-test-go.md#refusal-wording-and-diagnostic-evidence)
+needed this distinction to separate a missed explicit refusal from a missing signal.
+A witness controlled by the test rig is stronger than a model being asked to wait.
+Ensure its release path cannot hang when no reader starts.
 
 Read the evidence and the expression behind a conclusive flag. A boolean can omit the
 very observation that changes its interpretation. Reusing a decoder does not validate
