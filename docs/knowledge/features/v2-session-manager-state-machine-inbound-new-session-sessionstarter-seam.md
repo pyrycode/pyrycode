@@ -73,8 +73,9 @@ that didn't exist, never a fall-through to the bootstrap session):
    never falling through to `Pool.Lookup("")`'s bootstrap session (the #678
    isolation point). The non-distinction is deliberate, not an oversight — it
    is also what denies a hostile paired client an existence oracle.
-4. **named** conversation whose runner reports `State().ChildPID == 0` → inert
-   (`v2.new_session.no_live_child`). Named-only: see below.
+4. **named**, never-used conversation whose runner reports
+   `State().ChildPID == 0` → inert (`v2.new_session.no_live_child`). A
+   previously used childless conversation proceeds to wrap-up: see below.
 
 Every refusal logs at **debug**, because the id is client-supplied — matching
 `handleDequeueMessage`'s posture for its own client-named `conversation_id`,
@@ -136,28 +137,18 @@ one rather than leaving it to rot as an untested branch.
 
 ### The no-live-child guard is named-only — a known, accepted asymmetry
 
-AC-3 requires the bare (cursor) frame to keep rotating an evicted conversation
-exactly as it did before #2099; AC-4 requires a *named* childless conversation
-to be inert. A guard applied to both paths would buy the second at the cost of
-the first, so `named && runner.State().ChildPID == 0` is scoped to the frame
-half this ticket introduced. `TestActiveSessionStarter_UnnamedFollowsTheCursor`
-drives a runner with **no** live child specifically to pin the bare path still
-rotates it; both directions are mutant-verified (dropping the guard reddens
-only the AC-4 row; dropping the `named &&` conjunct reddens only this pin).
+The named-only refusal now applies to **never-used** conversations. Since
+\#2521, `Pool.EverActivated` distinguishes those from conversations that ran
+and later lost their child. Since #2905, both named and cursor resets of
+previously used childless conversations resume the predecessor for wrap-up
+before rotation, including after daemon restart. Neither route needs a
+wake-up user message. The bare frame retains its compatibility behavior for
+a never-used childless conversation; a named frame remains inert.
 
-The accepted cost: `Pool.Lookup` is plain map membership, so an **idle-evicted**
-session stays in `p.sessions` with its conversation still bound — the same
-`ChildPID == 0` shape as a never-messaged one. A bare frame on that
-conversation still rotates it and it comes back up under the fresh id; the
-identical conversation addressed by **name** is now inert. Both halves are
-individually published (`docs/protocol-mobile.md` § New session states the
-inert set, and separately promises the absent-field path is the pre-#2099
-behaviour verbatim), but the document does not say the two disagree on this
-one state, and pyrycode-desktop#1087 / pyrycode-mobile#625 always name their
-conversation — so on a chat idle long enough to evict, **New session** becomes
-a silent no-op with no reply to explain it, where the bare frame would have
-worked. Flagged at PR review (verdict PASS; a should-fix for the ticket owner,
-not a defect) and left as shipped rather than re-litigated here.
+The earlier guard read only `ChildPID == 0`, so it also refused named resets
+of idle-evicted conversations while the bare frame rotated them. The durable
+usage discriminator removed that asymmetry for used conversations. Liveness
+alone cannot decide whether there is history to hand off.
 
 **Answered by #2103, for `interrupt`: no asymmetry arises there, and no guard was
 added.** `new_session`'s guard exists because `RestartFresh` on a childless runner
@@ -194,7 +185,7 @@ the nanosecond for a never-activated session, since `buildSession` stamps
 both from one `now` — or, when the pool holds no session, the identical pair
 off the `Pool.dormant` entry. Both fields are already persisted, so the
 reading survives a restart with no schema change. `activeSessionStarter`
-gates the row-5 refusal on it (`named && !live && !used && !hasEverRun(oldID)`)
+gates the row-4 refusal on it (`named && !live && !used && !hasEverRun(oldID)`)
 and gains two seams for the after-restart case: `resolveDormant` reads the
 conversation's persisted binding without consulting the pool (repeating
 `resolveBoundSession`'s empty-id / unbound refusal — the #678 isolation
@@ -225,9 +216,11 @@ conversation id and nothing else. The #2085 never-used refusal is otherwise
 green unedited, which is the proof the refusal was narrowed rather than
 removed.
 
-**The named-only asymmetry documented above still applies unchanged**: a
-bare (cursor) frame on a childless conversation rotates without ever
-consulting `everRan`, exactly as before #2521.
+**Named and cursor resets of used conversations share the same wrap-up
+path (#2905).** Revival registers the predecessor without spawning it;
+`conversationReset.wrapUp` then activates that identity before delivery.
+A bare frame on a never-used childless conversation retains the synchronous
+rotation path; a named frame remains inert.
 
 **A discriminator read from two sources is only as durable as the move
 between them — the reading did not survive a *revive*, only a *restart*.**
@@ -286,22 +279,55 @@ session that has had no turn, operator-driven rather than client-replayable.
 
 ## The wrap-up turn, and the reply's tense (#2477)
 
-A named or cursor conversation with a **live child** now gets a wrap-up turn
-before `startFreshRunner` runs at all: the daemon drops the conversation's
-queued backlog (`msgqueue.Queue.Snapshot` + `Remove`, tolerating a refused
-committing head — see [msgqueue-package.md § Introspection, removal, and
-change notification](msgqueue-package.md#introspection-removal-and-change-notification-719)),
-interrupts and waits idle, delivers a fixed daemon-owned prompt as an
-ordinary user turn bounded at 90 seconds, and writes that turn's assistant
-text as the conversation's handoff note
-([`Pool.WriteHandoffNote`](sessions-package-key-types-handoffnote-store.md))
-before rotating. The reply is captured by `wrapUpCapture`, a sink decorator
-chained into `newStreamRunnerFactory` beside `newSessionResetFollower` — see
-[Following claude's announced reset § A second instance of the placement
-rule](streamsup-package-announced-reset-follower.md#a-second-instance-of-the-placement-rule-wrapupcapture-2477).
-Every failure along this path — idle timeout, an empty or blank reply, a
-reply the store's own admission refuses, `ErrHandoffNotesDisabled`, any store
-error — leaves the previous note standing and never fails the reset.
+A named or cursor reset of a **previously used conversation** runs a wrap-up
+turn before `startFreshRunner`: a live child receives it directly, and a
+dormant predecessor is resumed under its existing identity first (#2905).
+This includes a retained childless runner and a persisted binding absent
+from the pool after daemon restart. `reviveDormantBound` validates and
+materialises the latter through `Pool.Revive`; `conversationReset.wrapUp`
+then calls `Pool.Activate`. No wake-up user message is needed. Never-used
+named conversations remain inert, and a named reset neither rotates another
+conversation nor moves the active cursor. Binding validation and workspace
+confinement still precede this path.
+
+The daemon drops the conversation's queued backlog (`msgqueue.Queue.Snapshot`
+plus `Remove`, tolerating a refused committing head — see
+[msgqueue-package.md § Introspection, removal, and change notification](msgqueue-package.md#introspection-removal-and-change-notification-719)),
+activates a childless predecessor, interrupts and waits idle, then delivers
+the fixed daemon-owned prompt as an ordinary user turn. Activation, delivery
+readiness, idle wait and reply capture share **one daemon-cancelled deadline
+capped at 90 seconds**; resuming does not start a second allowance. A usable
+completed reply is stored through
+[`Pool.WriteHandoffNote`](sessions-package-key-types-handoffnote-store.md)
+before rotation recomposes the successor's actual appended system prompt,
+replacing an older note. `wrapUpCapture` captures the reply as a sink
+decorator chained into `newStreamRunnerFactory` beside
+`newSessionResetFollower` — see
+[Following claude's announced reset § A second instance of the placement rule](streamsup-package-announced-reset-follower.md#a-second-instance-of-the-placement-rule-wrapupcapture-2477).
+Activation or readiness failure, timeout, an unusable reply, disabled notes
+or a store error still enters rotation and completion. Failed wrap-up leaves
+the previous note standing; failure-note freshness belongs to #2906.
+
+**Activation is not stream readiness.** `streamsup.Runner.WaitForPTY` is a
+no-op, and a child PID does not prove its permission posture admits turns.
+For a resumed reset, `writeResetWrapUp` retries only `streamsup.ErrNoLiveChild`,
+which guarantees zero bytes written, with cancellable polling inside the
+shared deadline. Capture is armed before delivery; a successful write is
+never repeated, and any other write error stops wrap-up because it may follow
+a partial write. `wrapUpText`, used by `conversationAgentSwitcher`, retains
+its reply-only handover contract and does not activate dormant children.
+The resume attempt logs at Info as `reset.wrapup.resume`, carrying only the
+event and validated conversation id; failure records omit raw errors,
+filesystem paths, prompt and note content.
+
+**Previous-note framing can contaminate a valid reply.** Live Claude copied
+the old note's BEGIN/END markers even with plain-prose guidance, so
+`FencedHandoffNote` correctly refused a reply that contained useful content.
+`wrapUpPromptText` explicitly asks for contents without framing markers or
+delimiter lines, before the previous note is appended. Keep strict admission:
+formatting guidance prevents the observed failure without treating copied
+boundaries as trusted note text. `TestComposeWrapUpPrompt_ReturnsNoteWithoutFraming`
+pins both the guidance and its position.
 
 **The 90-second bound is a testing seam that can only shorten (#2486).**
 `-pyry-wrapup-deadline` (`cmd/pyry/main.go`) feeds `conversationReset.deadline`,

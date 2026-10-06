@@ -85,6 +85,31 @@
     the whole window; a second concurrent reader desyncs the `CipherState` and the failure
     surfaces as an unrelated decrypt error many frames later.
 
+## Dormant restart handoff proof
+
+A reset-first restart test must keep its distinguishing fact exclusive to the
+predecessor's conversation. If the older seeded note or a post-restart user
+message supplies it, a stale handoff can pass. `TestInteractiveStreamDormantResetAfterRestart`
+plants an exact release tag before shutdown, seeds an older note lacking it,
+then sends `new_session` as the first action on the target after restart.
+After authentication, written reset edges, the newly stored note containing
+the tag, and its inclusion in the successor's actual appended system prompt
+are mandatory evidence; absence fails rather than skips. The case runs in
+ordinary `make e2e-realclaude` without another opt-in flag.
+
+**A fresh usable note does not prove preservation of an arbitrary planted
+fact.** A bare remember-this-fact setup produced a note describing an
+unstarted conversation and omitted the tag. Stage concrete unfinished work
+whose next step requires the exact fact, with predecessor-only guidance to
+preserve it. The restart case leaves artifact verification pending for that
+release tag and forbids tools or file writes during the plant, so the note
+must recover it from predecessor context. Keep both fresh-note and actual
+prompt assertions; `handoff: written` alone cannot establish either content
+preservation or successor composition. The
+[wrap-up prompt](v2-session-manager-state-machine-inbound-new-session-sessionstarter-seam.md#the-wrap-up-turn-and-the-replys-tense-2477)
+explicitly requests unframed contents because copying the old note's markers
+makes even a fact-bearing reply inadmissible.
+
 **Related:**
 [interactive_stream_hook_blocked_banner_test.go](e2e-realclaude-interactive-stream-hook-blocked-banner-test-go.md)
 copies this file's window-primitive shape (`resetWindow`-style single-reader drain) for a turn
