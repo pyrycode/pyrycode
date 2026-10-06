@@ -62,6 +62,17 @@ For combined predicates, exercise each branch independently. A shared log site c
 prove which branch was taken if both inputs satisfy the first condition. Use an
 independent observable result of the path under test.
 
+A later frame on `Frames` cannot prove that `V2SessionManager.Run` consumed an
+asynchronous result on a separate buffered channel: either ready select arm can
+win. For a silent completion, await an observation emitted after the completion
+handler's reply decision, then take a Run barrier before counting replies.
+`TestV2Session_SwitchAgentLateOutcomes` waits for `v2.switch_agent.completed`
+before opening its barrier connection; without that wait, a forbidden late
+acknowledgement could arrive after the zero-reply assertion. To prove teardown
+escapes a completion handoff, fill its channel first so sending cannot also win;
+`TestV2Session_SwitchAgentHandoffEscapes` forces requester-close and manager-cancel
+paths separately. See [relay concurrency](v2-session-manager-concurrency.md).
+
 An already-cancelled context does not force an error when a `select` can also
 observe completion: either ready case can win. Hold completion behind a
 test-owned gate when proving the cancellation path. A runner gated during
