@@ -16,7 +16,7 @@ type ThoughtChunk struct {
 	MessageID string
 	// ParentToolCallID names the spawning Agent/Task call, or is empty for main-thread thinking.
 	ParentToolCallID string
-	Text            string
+	Text             string
 }
 
 // ToolStart announces a new tool invocation.
