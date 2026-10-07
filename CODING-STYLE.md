@@ -102,6 +102,23 @@ Follow stdlib conventions:
 
 Why this is a build gate and not just guidance: comments are the one thing no test covers, so a wrong one is silent. Before the 2026-08-10 cleanup this package carried ~800 line citations, 22 of them already dead, and pure renumbering accounted for 35-49% of the added lines in some commits — enough to exhaust two developer budgets. See `cmd/cite-guard`.
 
+## Comments: Contract, Not History
+
+- **A comment says what is true now.** State the contract: what the code does, what it guarantees, what a caller must and must not do, invariants and security properties, and the reason a reader would otherwise get wrong. Write it as if the code had always been this way.
+- **History belongs in git and in ADRs, not in the comment.** Do not record earlier wording, earlier values, how a bug was found, the ticket that changed something, or an argument that was weighed and declined. No `AMENDED 2026-09-08 (#2232)`, no "this paragraph used to read", no "since #1825 added the fourth term". When a change makes a comment wrong, rewrite the comment to the new truth instead of appending a correction under it.
+- **A derivation is not a contract.** When a value needs a measurement or a trade-off to justify it, state the result and the constraint it protects in a few lines. Put the measurement in the commit message or PR body, and a design argument worth keeping in full in an ADR under `docs/knowledge/decisions/`. A comment on a constant that runs past about 15 lines is carrying a design document.
+- **A ticket number or ADR is allowed as a pointer a reader still needs,** such as the capture a test replays or the decision that explains a live constraint. It is never the explanation itself.
+- **When you edit code under a long historical comment, shrink that comment to its contract in the same change.** Do not add to it.
+- **Comments a test reads are code.** Some guard tests parse source or match comment text. Check before you trim one.
+
+## File Size
+
+- **Keep a Go file under about 1500 lines.** Split by responsibility inside the same package, one file per family of behaviour, and split the matching test file the same way. A file under about 300 lines is fine for a genuinely separate concern.
+- **Add to the file that owns the behaviour, or start a new one for a new family.** Do not grow a file past the limit because the dispatcher lives there. A file that every ticket touches is a merge conflict for every pair of tickets.
+- **Some tests read a symbol from a named file.** Five `cmd/pyry` tests read `runSupervisor` from `cmd/pyry/main.go`. `relay_guard_test.go` also reads `dispatchAppFrame` from `internal/relay/v2session.go` and every `Type*` constant from `internal/protocol/codes.go`. substrate-guard allowlists only `internal/e2e/internal/fakeclaude/main.go`. Moving those symbols means changing the guard in the same change.
+
+Why: on 2026-10-07 the ten largest non-test files held 35833 lines, of which 23879 were full-line comments and 10549 were code. One 256-byte constant, `maxSlashCommandDescription`, carried 125 lines of comment, most of it the history of how the number was argued. Every agent that touched the parser paid to read that prose, every edit made search re-embed the whole file, and most tickets conflicted on the same file. Those files were split by responsibility the same day.
+
 ## Git Conventions
 
 - **Commit messages:** imperative mood, concise subject line. E.g., "Extract backoff timer into testable type".
