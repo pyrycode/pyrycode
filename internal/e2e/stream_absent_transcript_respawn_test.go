@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun"
+	"github.com/pyrycode/pyrycode/internal/canonicalpath"
 	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 )
@@ -55,7 +55,7 @@ func TestE2E_StreamNeverEstablishedSession_RespawnsWithCreateForm(t *testing.T) 
 	// the derivation. It cannot disturb the daemon: childEnv strips HOME from the
 	// inherited environment and re-appends home unconditionally.
 	t.Setenv("HOME", home)
-	resolved, err := agentrun.ResolveWorkdir(home)
+	resolved, err := canonicalpath.Resolve(home)
 	if err != nil {
 		t.Fatalf("resolve daemon workdir %s: %v", home, err)
 	}
