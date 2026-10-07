@@ -32,7 +32,7 @@ The public wrapper is two lines: `os.UserHomeDir()` then delegate to unexported 
 
 ## Key shape — realpath, on-disk case, not abspath
 
-`projects` map keys are the **`filepath.EvalSymlinks`-resolved, on-disk-cased** absolute path. The macOS `/var → /private/var` symlink means a non-resolved key never matches claude's lookup. The helper delegates to `agentrun.ResolveWorkdir`, which does `filepath.Abs`, then `filepath.EvalSymlinks`, then (#910) canonicalises each path component to its on-disk spelling — the single pyrycode-wide source of truth for "claude's realpath rule." `internal/sessions/rotation/watcher.go` uses the same helper for path comparison against platform-probe results.
+`projects` map keys are the **`filepath.EvalSymlinks`-resolved, on-disk-cased** absolute path. The macOS `/var → /private/var` symlink means a non-resolved key never matches claude's lookup. The helper delegates to `agentrun.ResolveWorkdir`, which does `filepath.Abs`, then `filepath.EvalSymlinks`, then (#910) canonicalises each path component to its on-disk spelling. [`canonicalpath.Resolve`](canonicalpath-package.md#path-and-error-contract) exposes the same filesystem path and error contract independently of agentrun. Trust still calls the old implementation during migrations #2912–#2916; #2917 owns its removal. Canonicalisation supplies the key spelling; this package retains responsibility for trust writes and consumers retain confinement policy.
 
 **Why case matters:** `EvalSymlinks` alone preserves the *input* case of a non-symlink component, but claude canonicalises its cwd to the on-disk case before its own trust lookup. Before #910, a workdir configured with the wrong case on a case-insensitive filesystem (macOS APFS) made this helper pre-mark a `projects` key claude never reads — the trust modal rendered anyway and `ptyrunner.Run` aborted with `ErrTrustModalDetected` (the 2026-05-29 incident on #208). See [`codebase/910.md`](../codebase/910.md).
 
@@ -182,7 +182,7 @@ In production the workspace root is a repository, so a child spawned in `<root>/
 - [agentrun-package.md](agentrun-package.md) — surrounding parent package; `ResolveWorkdir` (the realpath rule) lives there.
 - [ptyrunner-package.md](ptyrunner-package.md) — the original spawn primitive this trust state was written for; deleted in #1348. Historical only — its runtime `HasTrustModal` safety net has no successor on the surviving stream-json spawn paths (see § "No lock" above).
 - [devices-registry.md](devices-registry.md) — the canonical atomic-write recipe this package mirrors.
-- [rotation-watcher.md](rotation-watcher.md) — existing user of the same `EvalSymlinks`-via-`ResolveWorkdir` pattern.
+- [canonicalpath-package.md](canonicalpath-package.md) — shared filesystem resolver for consumer migrations.
 - [`codebase/475.md`](../codebase/475.md) — build notes (file inventory, patterns, lessons).
 - [`docs/specs/architecture/475-agentrun-trust-helper.md`](../../specs/architecture/475-agentrun-trust-helper.md) — architect spec.
 - [`codebase/392.md`](../codebase/392.md) — the deletion this ticket reverses.
