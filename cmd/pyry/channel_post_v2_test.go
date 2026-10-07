@@ -69,6 +69,10 @@ func TestChannelPostEmitterV2_FrameShape(t *testing.T) {
 	if env.EventID == nil || *env.EventID == 0 {
 		t.Fatal("missing replay event id")
 	}
+	events, gap := e.ring.After(testConvID, 0)
+	if gap || len(events) != 1 || events[0].HistoryEntryID != 0 || env.HistoryEntryID != nil {
+		t.Fatalf("channel post acquired history metadata: events=%+v envelope=%+v", events, env)
+	}
 	if env.TS.IsZero() {
 		t.Error("ts is zero, want a stamp taken at the announcement")
 	}

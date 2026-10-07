@@ -274,7 +274,18 @@ recipients. A transition has no ring id, and an operator emitter needs no ring
 to carry this durable identity. The connection counter and ring cursor cannot
 substitute for the stored per-conversation id. See
 [envelope identities](protocol-package-types-envelope.md#replay-cursors-and-durable-read-marks)
-for read-mark use and reconnect replay's metadata absence.
+for read-mark use and reconnect replay's retained identity.
+
+**History must finish before ring publication (#2909).**
+`interactiveTurnEmitterV2.emit` obtains the append result before
+`Ring.AppendWithHistoryID` publishes the complete event; publishing first and
+adding metadata later lets concurrent replay observe an incomplete record.
+`operatorMessageEmitterV2.broadcast` passes the already-committed id through the
+same ring seam without another history write. Both paths retain the id even with
+no live recipients. Replay uses that original identity and never appends history;
+absent/failed storage leaves zero ring metadata and an omitted wire key. Channel
+posts retain their missing-id behavior, and transitions remain outside the ring.
+See [ring publication](eventring-package.md#concurrency).
 
 **Why this producer reads `text`, never the delivered payload.** Since #2038
 a queued message carries two strings — `text` (client-readable) and

@@ -179,6 +179,14 @@ Explicitly assert decoded field values. Distinct fixture values detect accidenta
 field swaps. To distinguish an absent key from a present null or empty string,
 inspect the JSON produced by marshalling the decoded DTO too; decoded zero
 values alone cannot prove a required key was emitted.
+
+For optional pointer fields, check omission on the original wire bytes too:
+both a missing key and JSON `null` decode to nil, and re-marshalling hides an
+incorrect explicit null. For encrypted delivery, expose the authenticated
+decrypted bytes rather than assert only the decoded envelope.
+`TestV2Session_Reconnect_HistoryEntryID` uses this seam to pin omitted history
+metadata and distinct durable/ring ids; see [envelope identities](protocol-package-types-envelope.md#replay-cursors-and-durable-read-marks).
+
 The current protocol test helper uses `json.Compact`, which removes whitespace but
 preserves key order; do not describe it as sorting keys. It also does not normalise
 string escaping — `encoding/json.Marshal` escapes a literal `<`, `>` or `&` byte to

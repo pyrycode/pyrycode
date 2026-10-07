@@ -102,7 +102,7 @@ func (e *operatorMessageEmitterV2) broadcast(ctx context.Context, bcast interact
 	defer e.mu.Unlock()
 	var eventID *uint64
 	if ring != nil {
-		id := ring.Append(m.convID, protocol.TypeMessage, m.payload, m.ts)
+		id := ring.AppendWithHistoryID(m.convID, protocol.TypeMessage, m.payload, m.ts, m.historyEntryID)
 		eventID = &id
 	}
 	for _, c := range bcast.ActiveConns(ctx) {

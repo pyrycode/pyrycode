@@ -43,11 +43,11 @@ import (
 // it. Keeping it a named constant makes that tuning one edit.
 const MaxEventsPerConversation = 1024
 
-// Event is one retained structured event: the durable id plus the three
+// Event is one retained structured event: the ring id, optional history id and
 // replay-relevant fields of the envelope it came from. The per-conn envelope ID
 // is deliberately NOT stored — it is meaningless for replay across connections
 // (#647 reconstructs a fresh protocol.Envelope per reconnecting conn from the
-// stored Type/TS/Payload).
+// stored Type/TS/Payload and optional HistoryEntryID).
 //
 // Payload is treated as immutable: the appender owns the bytes and does not
 // mutate them after Append, and After returns the reference without copying the
@@ -57,6 +57,10 @@ type Event struct {
 	Type    string          // protocol.Type* wire type
 	Payload json.RawMessage // the already-marshalled envelope payload
 	TS      time.Time       // the logical event's timestamp
+
+	// HistoryEntryID is the successful append's durable per-conversation id.
+	// Zero means absent; it is independent of the in-memory ring ID above.
+	HistoryEntryID uint64
 }
 
 // Ring is a bounded, per-conversation store of recent Events keyed by a durable
@@ -134,6 +138,14 @@ func New(maxPerConversation int) *Ring {
 // payload is stored by reference and must not be mutated by the caller after
 // the call returns.
 func (r *Ring) Append(convID, typ string, payload json.RawMessage, ts time.Time) uint64 {
+	return r.AppendWithHistoryID(convID, typ, payload, ts, nil)
+}
+
+// AppendWithHistoryID behaves like Append, retaining the optional history id
+// together with the event before it becomes readable by After. The id's value
+// is copied; nil or zero means no history metadata. As with payload, callers
+// must not mutate historyEntryID during the call.
+func (r *Ring) AppendWithHistoryID(convID, typ string, payload json.RawMessage, ts time.Time, historyEntryID *uint64) uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -150,7 +162,11 @@ func (r *Ring) Append(convID, typ string, payload json.RawMessage, ts time.Time)
 	if len(c.events) >= r.maxPerConv {
 		c.evictOldest()
 	}
-	c.events = append(c.events, Event{ID: id, Type: typ, Payload: payload, TS: ts})
+	event := Event{ID: id, Type: typ, Payload: payload, TS: ts}
+	if historyEntryID != nil {
+		event.HistoryEntryID = *historyEntryID
+	}
+	c.events = append(c.events, event)
 	return id
 }
 
