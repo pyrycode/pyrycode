@@ -69,7 +69,7 @@
     copy goroutine under `-race`. A mutex-guarded `boundedBuffer` is needed
     regardless of the separate ingest-cap requirement — a plain capped
     buffer still races on this read.
-  - **`agentrun.ResolveWorkdir` returns `(string, error)`, not a bare
+  - **`canonicalpath.Resolve` returns `(string, error)`, not a bare
     string.** It wraps `fs.ErrNotExist`; a caller that drops the error can
     set `cmd.Dir` on a workdir that no longer exists and silently invalidate
     any directory comparison built on it.
