@@ -16,8 +16,8 @@ package realclaude
 //
 // finGatherReadings takes pyry's reap-log
 // stderr and the pinned process-group set as PARAMETERS, and proves that both
-// the finding and a genuine negative come out of its own composition. Every row
-// that proves it is driven from a synthetic stdout, a synthetic stderr and
+// the finding and a genuine negative come out of its own composition. Its original
+// composition rows are driven from a synthetic stdout, a synthetic stderr and
 // HAND-PASSED PGID INTEGERS. Hand-passed integers prove the composition; they do
 // not prove the parameters can be FILLED. A live probe fills pinned from a real
 // pinScanArgv over a real process table, taking each matched row's .PGID
@@ -82,10 +82,10 @@ package realclaude
 //
 // # Liveness is filled for the first time, and Step 6 sits above Step 7
 //
-// readings.Liveness holds one pinReadState per MATCHED pid. In every prior fin*
-// file the match set is empty, so Liveness is empty and Step 6
-// (trailOutcomeVoidLivenessInstrument) is unreachable. Here it is non-empty for
-// the first time, and Step 6 is consulted BEFORE Step 7 — so the finding arm is
+// readings.Liveness holds one pinReadState per MATCHED pid. This staging first
+// filled the fin* family's liveness; TestFinGatherReturnsNoCapturedBytes now also
+// reuses finStageHeldGroup to sweep populated healthy reads. Step 6
+// (trailOutcomeVoidLivenessInstrument) is consulted BEFORE Step 7 — so the finding arm is
 // immune (Step 2 returns first) while every other arm would be diverted to a
 // run-void-* by a single pinStateInstrumentFailed. finStageAssertLiveness
 // therefore runs on every arm.
@@ -104,23 +104,15 @@ package realclaude
 // non-empty for the first time in the family and .Command on those rows is
 // verbatim argv off the operator's own process table.
 //
-// It may also never print a WHOLE trailRunReadings or a whole
-// finAttributeRecord — %v or %+v on either value. Name scalar fields. This
-// deliberately diverges from the neighbouring file, which licenses the whole
-// struct (that file's header, § Failure messages) "and only because
-// TestFinGatherReturnsNoCapturedBytes proves it": THAT PROOF DOES NOT COVER THIS
-// FILE'S VALUES. Every row in the blocker's file runs at MatchCount == 0, so
-// readings.Liveness is empty on every value it marshals, and this file is the
-// first to fill it — introducing pinStateOutcome's three string fields (Detail,
-// StateColumn, ToolStderr) the proof never examined. Those fields are in fact
-// safe, because pinStateArgs is `-p <pid> -o pid=,ppid=,stat=` with
-// `pinStateColumns`' enforcing never-add-`command` prohibition — but that is an
-// argument from the SHIPPED COLUMN LIST and not from the cited test, which is
-// exactly why the licence is not inherited wholesale. Naming scalars costs
-// nothing here: every assertion in this file is about a .Value, a count or a
-// pgid. Closing finGatherExemptKeys' pre-placed tool_stderr exemption against a
-// FILLED Liveness needs a staged-subject row in the blocker's own
-// no-captured-bytes test, which this ticket may not edit; filed as a follow-up.
+// Name scalar fields rather than printing a whole trailRunReadings or
+// finAttributeRecord. TestFinGatherReturnsNoCapturedBytes now covers populated
+// healthy liveness using this file's finStageHeldGroup: Detail and StateColumn
+// come from pinStateColumns' restricted `pid=,ppid=,stat=` read. Healthy reads
+// leave ToolStderr empty, so its omitempty key is exercised separately by the
+// synthetic TestFinGatherForbiddenKeyWalkDescends diagnostic fixture. That
+// establishes finGatherExemptKeys' exact-key allowance, not redaction of arbitrary
+// diagnostic strings. The sweep's printing licence extends only to its tested
+// publication boundary; neither proof changes whole-carried diagnostics.
 //
 // Enforced structurally rather than by discipline: finStageSubject carries []int
 // and needle paths, so scan.Matches never escapes finStageHeldGroup, and inside

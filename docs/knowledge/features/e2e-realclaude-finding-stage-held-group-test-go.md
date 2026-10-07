@@ -20,10 +20,21 @@
   `trailOutcomeNoRowMatched` because a real command carries the needle),
   plus #1268's two hardcodings trapped at the **`Admit`** layer against a
   same-staging control, each varying exactly one dimension. First `fin*`
-  file whose scan matches live rows, so `readings.Liveness` is non-empty
-  for the first time — the neighbour's whole-struct-print licence
-  (`finding_run_gather_test.go:105-113`) is deliberately not inherited,
-  since its proof ran with `Liveness` empty on every row. Purely additive,
+  file whose scan matches live rows. Since #1300,
+  `TestFinGatherReturnsNoCapturedBytes` also reuses `finStageHeldGroup` to
+  cover populated healthy liveness alongside its retained no-subject case.
+  Before sweeping all three `finGatherReadings` returns, the held case
+  requires a successful scan, positive `MatchCount`, one running read per
+  match, and non-empty `Detail` and `StateColumn` from `pinReadState`'s
+  restricted `pinStateColumns`. Healthy reads leave `ToolStderr` empty;
+  `TestFinGatherForbiddenKeyWalkDescends` separately marshals a non-empty,
+  source-authored diagnostic to exercise `finGatherExemptKeys`' exact
+  `tool_stderr` allowance, while rejecting `tool_stderr_tail` at the same
+  depth. Neither proof establishes redaction of arbitrary diagnostic
+  strings or changes whole-carried diagnostics. Name scalar fields in this
+  staging helper's failures; the neighbour's whole-struct printing licence
+  extends only to its [tested publication boundary](e2e-realclaude-finding-run-gather-test-go.md#publication-boundary).
+  The original staging work was purely additive,
   one new file, 617 lines, zero production change; both new tests PASS,
   never SKIP. See [`codebase/1282.md`](../codebase/1282.md) for the full
   implementation and the grade-mutations-per-line lesson.
