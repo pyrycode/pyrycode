@@ -2694,11 +2694,9 @@ func TestParser_ThinkingProgressMapsFromCapture(t *testing.T) {
 	// Swept by REFLECTION so a field added later is covered without anyone
 	// remembering to extend a list.
 	//
-	// ThinkingProgress has NO string fields today, so the string sweep is trivially
-	// green and the floor is stated on the INT fields instead: the event must carry
-	// exactly the two measured numbers. A later ticket adding a string field raises
-	// the string count and makes the sweep do real work; a sweep that visits zero
-	// fields and passes is the failure this floor exists to catch.
+	// ParentToolCallID is a string used for classification, so the string sweep
+	// must still exclude unrelated session and line identities. The integer floor
+	// separately pins the two measured numbers.
 	rv := reflect.ValueOf(events[0])
 	var ints, strs int
 	for i := 0; i < rv.NumField(); i++ {

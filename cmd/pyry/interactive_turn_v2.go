@@ -294,6 +294,9 @@ func (e *interactiveTurnEmitterV2) HandleFor(ctx context.Context, convID string,
 
 	switch v := ev.(type) {
 	case turnevent.ThoughtChunk:
+		if v.ParentToolCallID != "" {
+			return
+		}
 		if !e.startTurnIfNeeded(convID) {
 			return
 		}
@@ -537,7 +540,10 @@ func (e *interactiveTurnEmitterV2) HandleFor(ctx context.Context, convID string,
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
 	case turnevent.ThinkingProgress:
-		// Claude's live thinking reading is enough to open an interruptible turn,
+		if v.ParentToolCallID != "" {
+			return
+		}
+		// Claude's main-thread thinking reading is enough to open an interruptible turn,
 		// even before a partial ThoughtChunk, assistant text, or tool call arrives.
 		// The result line closes every subtype through the shared TurnEnd arm, while
 		// pool teardown and child exit cover a child that emits no result, so this

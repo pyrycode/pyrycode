@@ -321,7 +321,10 @@ func TestStreamTurnDrainV2_AttributedTextExcludesThinkingAndSignature(t *testing
 		`{"type":"text","text":"` + visibleText + `"}]}}`
 	feedLines(sink, "sess-a", attributed, resultLine)
 
-	got := collectEnvs(t, bcast.pushed, 5)
+	got := collectEnvs(t, bcast.pushed, 4)
+	if want := []string{protocol.TypeTurnState, protocol.TypeAssistantDelta, protocol.TypeTurnEnd, protocol.TypeTurnState}; !slices.Equal(envTypes(got), want) {
+		t.Fatalf("attributed text envelope types = %v, want %v", envTypes(got), want)
+	}
 	var delta protocol.AssistantDeltaPayload
 	foundDelta := false
 	for _, env := range got {

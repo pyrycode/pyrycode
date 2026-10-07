@@ -23,14 +23,29 @@ through the same function, so the two agree on which conversations exist; `obser
 its own unbound-session accounting stays independent of the drain's `stream_turn.no_conversation` drop,
 each diagnosing its own lane rather than one silently standing in for the other.
 
-The opener set is a **whitelist**: `ThoughtChunk`/`ThinkingProgress`/`TextChunk`/`ToolStart`/`ToolUpdate`
+The opener set is a **whitelist**: empty-parent `ThoughtChunk`/`ThinkingProgress`/`TextChunk`/`ToolStart`/`ToolUpdate`
 add the conversation, `TurnEnd` (either stop reason — `resultTurnEndReason` sends both through one parser
 arm) deletes it, and everything else (`Stall`/`ApiRetry`/`Compacting`/`Unrecognized`, and any future
 variant) is a no-op. `ThoughtChunk` includes the empty event produced by a valid partial-message
 `thinking_delta`; `ThinkingProgress` is the independent numeric observation. Either is authoritative
-server evidence that the model has entered an interruptible turn, unlike a client's optimistic message
-echo. Unattributed thinking events keep this behavior regardless of the rest of this section: pyrycode
-has no attribution field for them today, so a subagent's thinking still opens the main mark.
+server evidence that the main model has entered an interruptible turn when its parent is empty,
+unlike a client's optimistic message echo. Empty-parent thinking remains an opener, including
+the first thinking event of a notification-started main turn; the task notification itself is
+lifecycle-neutral, and the main `TurnEnd` still closes that turn.
+
+**Parent-attributed thinking affects neither the main busy mark nor its published lifecycle (#2936).**
+`emitAssistant`, `emitStreamEvent`, and `emitThinkingProgress` copy the emitting line's validated
+`parent_tool_use_id` into `ThoughtChunk.ParentToolCallID` or `ThinkingProgress.ParentToolCallID`.
+Attribution is line-local: missing, invalid, or over-cap values become empty through `parentToolUseID`;
+they never inherit a previous line's parent. Partial thinking stays content-free, and numeric progress
+keeps its values and rate bound. `turnMarkFor` returns `turnMarkNone` before tracker mutation, so
+parented thinking cannot reopen an idle mark, change an open one, or retire
+[Send now carry or release grace](streamsup-package-per-conversation-turn-busy-track-send-now-carry.md).
+The tracker retains no thinking content, parent id, or timestamp. Independently,
+`interactiveTurnEmitterV2.HandleFor` ignores parented thinking before starting a turn, flushing
+buffered text, changing phase, or publishing `thinking_progress`. Fixing only busy classification
+would leave clients showing a synthetic thinking turn: these are separate state stores.
+See the [wire contract](../../protocol-mobile.md#thinking_progress).
 
 **Since #2781, `TextChunk`/`ToolStart`/`ToolUpdate` are openers only when they carry no existing
 `ParentToolCallID`.** A subagent's own text and tool activity is marked with the spawning call's id by
@@ -41,9 +56,9 @@ change an already-open one, or add a child's tool call to `inflight`. A child `T
 `ToolCallID` collides with the spawning call's own id is still inert: the collision is attributed to the
 child, not the parent, and does not remove the retained top-level call. The top-level Agent/Task call that
 spawns a subagent is itself an empty-parent `ToolStart`/`ToolUpdate` pair, so it keeps opening the turn and
-keeps being retained in `inflight` until its own top-level result or the main `TurnEnd` — a background
-agent still reads as busy, and only its child's unattributed chatter stops being mistaken for that
-busy-ness. Before this, a subagent's events arriving after the main `TurnEnd` reopened the mark with
+keeps being retained in `inflight` until its own top-level result or the main `TurnEnd`. The spawning
+call still marks the main turn busy; parent-attributed child chatter cannot prolong that mark after
+the main turn ends. Before this, a subagent's events arriving after the main `TurnEnd` reopened the mark with
 nothing left to close it, holding every later queued message for that conversation; an interrupt made the
 hold permanent because interrupting the child produces no further top-level `TurnEnd`.
 

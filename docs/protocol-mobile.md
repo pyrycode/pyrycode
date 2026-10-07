@@ -1454,7 +1454,7 @@ Each value is the input's own value: a JSON string arrives decoded (a path is a 
 
 **Nesting is unbounded and needs no extra field.** The value is `claude`'s own, read verbatim with no branch on depth, so a call made by a subagent that a subagent spawned names the **inner** `Agent` call; following ids rebuilds the whole tree. A client that has not seen the parent row — it arrived before the client connected, or was replayed away — renders the row at top level.
 
-**It is a grouping hint, not a capability**, and takes the same rule as the `input` values above: model-authored text the daemon neither resolved nor checked names a call this client has seen. Render the row under a matching parent, render it at top level when nothing matches, and never dereference it as anything else. **Nothing in the daemon branches on the value.**
+**It is a grouping hint, not a capability**, and takes the same rule as the `input` values above: model-authored text the daemon neither resolved nor checked names a call this client has seen. Render the row under a matching parent, render it at top level when nothing matches, and never dereference it as anything else. The daemon uses the presence of parent attribution to exclude subagent activity from main-turn busy tracking; it does not resolve the id to authorize an operation.
 
 **Empty has exactly one meaning, and that is what makes the bound safe.** The daemon caps the value at **256 bytes** and **empties rather than cuts** one that exceeds it or that `claude` sent as a non-string — because a cut join key matches no `tool_use_id` while still looking like one, and would file a row under the wrong parent. So an emptied id degrades to top-level rendering, the behaviour before this field existed. There is deliberately no report naming which emptiness it is; unlike [`tool_denied`](#tool_denied)'s emptied fields, this one has no second meaning for a report to disambiguate.
 
@@ -2393,15 +2393,23 @@ It carries **no reasoning text**. The frame says only *that* claude is reasoning
 and roughly how much; the content of claude's thinking is never forwarded on this
 wire (ADR 025). A client that tries to render it as text has nothing to render.
 
+The daemon publishes this progress and `turn_state: thinking` only for main-thread
+thinking (empty parent attribution). Parent-attributed subagent thinking neither
+publishes main-thread progress nor starts or changes the main turn's identity or
+phase. Empty-parent thinking still opens a main turn, including one started by a
+task notification. Parent attribution is internal classification metadata; the
+wire payload shape above is unchanged and contains no parent field.
+
 Five things a client will otherwise get wrong. Each is measured, not inferred,
 and the numbers below come from one committed capture of a single turn.
 
 **1. It is conversation-scoped, not turn-scoped.** There is no `turn_id`, and
-receiving one **neither opens nor closes a turn** — it drives no turn lifecycle
-at all. It is a *reading*, not a state transition: the turn's thinking state is
+a client must use `turn_state` to track lifecycle rather than opening or closing
+a turn on this frame. It is a *reading*, not a state transition: the thinking state is
 already reported by `turn_state: thinking`. The daemon emits these during an
-inference request that may not have produced any assistant content yet, so a turn
-opened on one would have no guaranteed end.
+inference request that may not have produced any assistant content yet. Main-thread
+thinking opens the daemon's turn lifecycle before publishing the reading; a main
+result closes it, while child exit and pool teardown close an abandoned turn.
 
 **2. The frames are rate-bounded and do not enumerate claude's lines.** The
 daemon emits at most one frame per **64 tokens of accumulated delta**, so strictly

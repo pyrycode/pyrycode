@@ -262,14 +262,15 @@ ID and open-block state; a valid `content_block_start` records one index and
 block type. Each `content_block_delta/text_delta` for that matching open text
 block emits a `turnevent.TextChunk` immediately with the current message ID.
 A `thinking_delta` for the matching open thinking block emits a
-`turnevent.ThoughtChunk` with the message id and an empty `Text`. The decode
+`turnevent.ThoughtChunk` with the message id, the emitting line's validated
+`ParentToolCallID`, and an empty `Text`. The decode
 target deliberately has no field for Claude's thinking bytes, so JSON decoding
 discards them before the event exists; neither the event, a mapper, nor a log can
 recover them. `turnbridge.MapEvent` still has no `ThoughtChunk` wire mapping;
-only the lifecycle state is published. A recognised but unattributed thinking
-delta is dropped silently
+only empty-parent thinking publishes lifecycle state. A recognised thinking
+delta without a matching message and open thinking block is dropped silently
 rather than routed through `Unrecognized`, whose raw diagnostic would otherwise
-create a reasoning-text lane. Repeated deltas may repeat this empty opener:
+create a reasoning-text lane. Repeated empty-parent deltas may repeat this opener:
 downstream state transitions de-duplicate publication and the busy tracker stores
 membership rather than a count, so the parser needs no extra lifecycle latch.
 
@@ -279,9 +280,9 @@ assistant `tool_use` block as the tool event's owner. Unknown, undecodable, or
 unattributed inner events other than the recognised thinking case emit one
 `Unrecognized`; text deltas are never accumulated or logged.
 
-The empty `ThoughtChunk` and a rate-bounded `ThinkingProgress` are independent
-live evidence that an interactive turn is running. Either starts the existing
-turn identity and publishes `turn_state: thinking`; the progress path publishes
+An empty-parent `ThoughtChunk` and a rate-bounded, empty-parent `ThinkingProgress`
+are independent live evidence that a main interactive turn is running. Either
+starts the turn identity and publishes `turn_state: thinking`; the progress path publishes
 that state before its numeric reading. Later text or tool use joins the same turn
 rather than minting another one. A client's optimistic message echo is not an
 opener. See [per-conversation turn-busy tracking](streamsup-package-per-conversation-turn-busy-tracking.md)

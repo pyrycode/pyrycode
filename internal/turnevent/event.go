@@ -45,7 +45,9 @@ type TextChunk struct {
 // ThoughtChunk is streaming reasoning ("thinking") text, grouped by message.
 type ThoughtChunk struct {
 	MessageID string
-	Text      string
+	// ParentToolCallID names the spawning Agent/Task call, or is empty for main-thread thinking.
+	ParentToolCallID string
+	Text            string
 }
 
 // ToolStart announces a new tool invocation.
@@ -954,13 +956,15 @@ type BackgroundTaskProgress struct {
 // and NOT the daemon's conversation identity, and uuid, claude's per-line message
 // id, which nothing in the daemon reads.
 //
-// It opens and closes no turn. Unlike every sibling above it carries no
-// claude-authored TEXT at all — both fields are claude's own integers — so it
-// needs no producer-side byte caps and has no TruncatedFields: nothing is ever
-// cut, and a permanently-nil field would claim a bound that does not exist. Like
-// every variant here it carries no conversation identity — the bridge injects
-// that.
+// Main-thread progress opens the daemon's turn; parent-attributed progress does
+// not change that lifecycle or publish main-thread progress. The two numeric
+// fields need no byte caps. ParentToolCallID follows TextChunk's bounded parent
+// attribution contract and is used for classification only. No fields are cut,
+// so there is no TruncatedFields. Like every variant here it carries no
+// conversation identity — the bridge injects that.
 type ThinkingProgress struct {
+	// ParentToolCallID names the spawning Agent/Task call, or is empty for main-thread thinking.
+	ParentToolCallID string
 	// EstimatedTokens is claude's estimate of the tokens it has spent thinking, as
 	// of the emitting line.
 	//

@@ -2893,7 +2893,8 @@ type streamLine struct {
 // top-level segmentation, and an unsafe inner shape remains available to the existing
 // capped Unrecognized path.
 type streamEventLine struct {
-	Event json.RawMessage `json:"event"`
+	Event           json.RawMessage `json:"event"`
+	ParentToolUseID json.RawMessage `json:"parent_tool_use_id"`
 }
 
 type streamEventInner struct {
@@ -3343,8 +3344,9 @@ type systemBackgroundTaskEntry struct {
 // any of them.
 //
 // The field set is exactly what the committed capture shows and nothing invented:
-// all 33 captured records carry the identical key set, and these are the two of
-// them the mapping reads. The other two, uuid and session_id, are deliberately
+// all 33 captured records carry the identical key set, and these are the two numeric
+// values the mapping reads. Parent attribution is also read when present on a
+// forwarded subagent line. The other two, uuid and session_id, are deliberately
 // absent — see turnevent.ThinkingProgress's doc. Absent from the DECODE TARGET is
 // a stronger guarantee than the test's reflection sweep, because a field that is
 // never declared cannot leak.
@@ -3355,8 +3357,9 @@ type systemBackgroundTaskEntry struct {
 // value, or one too large for int, fails the whole decode and takes the
 // undecodable path, exactly as systemTaskUpdatedLine.TaskID does.
 type systemThinkingTokensLine struct {
-	EstimatedTokens      int `json:"estimated_tokens"`
-	EstimatedTokensDelta int `json:"estimated_tokens_delta"`
+	EstimatedTokens      int             `json:"estimated_tokens"`
+	EstimatedTokensDelta int             `json:"estimated_tokens_delta"`
+	ParentToolUseID      json.RawMessage `json:"parent_tool_use_id"`
 }
 
 // systemStatusLine is the decoded payload of one system/status line — the subtype
@@ -5619,7 +5622,10 @@ func (p *Parser) emitStreamEvent(line []byte) {
 				p.streamBlockIndex != *event.Index || p.streamBlockType != "thinking" {
 				return
 			}
-			p.emit(turnevent.ThoughtChunk{MessageID: p.streamMessageID})
+			p.emit(turnevent.ThoughtChunk{
+				MessageID:        p.streamMessageID,
+				ParentToolCallID: parentToolUseID(outer.ParentToolUseID),
+			})
 		case "signature_delta", "input_json_delta":
 			return
 		default:
@@ -7214,8 +7220,10 @@ func (p *Parser) emitThinkingProgress(line []byte) bool {
 	// The line's OWN values, not the accumulated total: the event stays a pure
 	// function of the line that produced it, and the accumulator's residue is a
 	// documented consumer hazard on turnevent.ThinkingProgress rather than a
-	// number invented here. No caps — two ints cannot blow the envelope.
+	// number invented here. The two ints need no caps; parent attribution uses
+	// the existing bounded validator.
 	p.emit(turnevent.ThinkingProgress{
+		ParentToolCallID:     parentToolUseID(tl.ParentToolUseID),
 		EstimatedTokens:      tl.EstimatedTokens,
 		EstimatedTokensDelta: tl.EstimatedTokensDelta,
 	})
@@ -9546,7 +9554,7 @@ func (p *Parser) emitAssistant(msg *streamMessage, line []byte) {
 				Text:             block.Text,
 			})
 		case "thinking":
-			p.emit(turnevent.ThoughtChunk{MessageID: msg.ID, Text: block.Thinking})
+			p.emit(turnevent.ThoughtChunk{MessageID: msg.ID, Text: block.Thinking, ParentToolCallID: parent})
 		case "tool_use":
 			p.emit(turnevent.ToolStart{
 				ToolCallID:       block.ID,
