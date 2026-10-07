@@ -38,7 +38,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun"
+	"github.com/pyrycode/pyrycode/internal/canonicalpath"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/transcript"
 )
@@ -449,10 +449,10 @@ func TestRealClaude_TurnlessSessionIDTranscript(t *testing.T) {
 		t.Fatalf("#1655: mkdir workdir: %v", err)
 	}
 	// The child's cwd gets the SAME canonicalisation production applies: streamsup
-	// resolves Config.WorkDir through agentrun.ResolveWorkdir and only then assigns
+	// resolves Config.WorkDir through canonicalpath.Resolve and only then assigns
 	// cmd.Dir. The literal path would make the directory comparison below measure
 	// the test's cwd choice instead of production's.
-	childCwd, err := agentrun.ResolveWorkdir(workdir)
+	childCwd, err := canonicalpath.Resolve(workdir)
 	if err != nil {
 		t.Fatalf("#1655: resolve workdir %s: %v", workdir, err)
 	}
@@ -508,8 +508,8 @@ func TestRealClaude_TurnlessSessionIDTranscript(t *testing.T) {
 	rec.TranscriptDirMatch = dir == recomputed
 	// A divergence is a RECORDED OUTCOME, not a test failure: it is the finding the
 	// follow-up that supplies this directory on the daemon's production path needs.
-	// ResolveWorkdir applies canonicalCase where DefaultClaudeSessionsDir applies
-	// EvalSymlinks alone, which is the plausible source.
+	// canonicalpath.Resolve applies canonicalCase where DefaultClaudeSessionsDir
+	// applies EvalSymlinks alone, which is the plausible source.
 	if !rec.TranscriptDirMatch {
 		t.Logf("#1655: transcript dir DIVERGENCE — empirical %s vs recomputed %s (cwd %s)",
 			dir, recomputed, childCwd)
