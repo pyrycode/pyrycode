@@ -128,8 +128,9 @@ gap the environment can never close (a `/clear` rotation without a respawn).
 **`streamClaudeSessionsDir(workdir string) string` (#1631) arms `useCreateForm` on the production path.**
 Three arms: `workdir == ""` → `""` (unreachable at both pool sites, both carry a confined realpath, but
 named explicitly rather than left to fall through); `agentrun.ResolveWorkdir(workdir)` erroring → `""`
-(introduces no new failure — `streamsup.New` calls the same function on the same value and would have
-failed to construct a runner at all); otherwise → `sessions.DefaultClaudeSessionsDir(resolved)` verbatim.
+(introduces no new failure — `streamsup.New` uses `canonicalpath.Resolve` with the same path/error
+contract and would have failed to construct a runner at all); otherwise →
+`sessions.DefaultClaudeSessionsDir(resolved)` verbatim.
 `""` on any arm means "no probe" — `useCreateForm`'s empty-directory mode above, i.e. pre-#1631 argv.
 
 **Derived per runner, not once per pool — this is the load-bearing decision, not an implementation
@@ -148,7 +149,8 @@ future third construction site could forget the second field and silently ship a
 derivation can't drift that way because there's only one derivation site.
 
 **Why `agentrun.ResolveWorkdir`, not `resolveClaudeSessionsDir` or a bare `sessions.DefaultClaudeSessionsDir`.**
-`streamsup.New` sets the child's `cmd.Dir` to `agentrun.ResolveWorkdir(WorkDir)`, and claude encodes its
+`streamsup.New` sets the child's `cmd.Dir` to `canonicalpath.Resolve(WorkDir)`, whose path semantics match
+`agentrun.ResolveWorkdir` during the caller migration, and claude encodes its
 own resolved cwd into the projects folder name — so the probe must key on the *same* resolution as the
 child's actual cwd, not a same-looking sibling. [#1655](session-transcript-and-resume-probe.md) measured
 the empirical transcript directory against exactly this composition and found them equal. The delta

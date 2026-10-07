@@ -7,7 +7,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun"
+	"github.com/pyrycode/pyrycode/internal/canonicalpath"
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/relay"
 )
@@ -118,7 +118,7 @@ func confineToAnyRoot(workspace string, folders []string, path string) (string, 
 
 // resolveReadFolders turns the operator's -pyry-read-folder entries into the
 // roots workspaceFileReader accepts, once, at daemon startup. Each entry goes
-// through agentrun.ResolveWorkdir, the recipe confineFile applies to the
+// through canonicalpath.Resolve, the recipe confineFile applies to the
 // workspace, so a folder and a requested path are canonicalised alike.
 //
 // An entry is skipped with one warning, and the daemon still starts, when it is
@@ -126,7 +126,7 @@ func confineToAnyRoot(workspace string, folders []string, path string) (string, 
 // not in the recipe: a file root would make withinDir(file, file) true and grant
 // that one file, which nobody configuring a folder meant. The warning names the
 // entry — operator configuration, not a client-named path — and a static
-// reason; ResolveWorkdir's own error is dropped. log may be nil.
+// reason; canonicalpath.Resolve's own error is dropped. log may be nil.
 func resolveReadFolders(entries []string, log *slog.Logger) []string {
 	var folders []string
 	for _, entry := range entries {
@@ -134,7 +134,7 @@ func resolveReadFolders(entries []string, log *slog.Logger) []string {
 		var resolved string
 		if !filepath.IsAbs(entry) {
 			reason = "not an absolute path"
-		} else if r, err := agentrun.ResolveWorkdir(entry); err != nil {
+		} else if r, err := canonicalpath.Resolve(entry); err != nil {
 			reason = "does not resolve"
 		} else if info, err := os.Stat(r); err != nil || !info.IsDir() {
 			reason = "not a directory"
@@ -169,17 +169,17 @@ func resolveReadFolders(entries []string, log *slog.Logger) []string {
 // is reachable; the others hold here on their own rather than through that
 // call order. Both sides are compared as realpaths, so a symlinked home is
 // still caught. When home does not resolve the folder is not added either, because
-// the guard cannot be checked; an empty home counts, since ResolveWorkdir
+// the guard cannot be checked; an empty home counts, since canonicalpath.Resolve
 // would read "" as the process directory. Each case logs one line naming the
 // folder — operator configuration, not a client-named path. log may be nil.
 func withWorkdirReadFolder(folders []string, workdir, home string, log *slog.Logger) []string {
 	reason := ""
-	resolved, err := agentrun.ResolveWorkdir(workdir)
+	resolved, err := canonicalpath.Resolve(workdir)
 	if err != nil {
 		reason = "does not resolve"
 	} else if home == "" {
 		reason = "home folder does not resolve"
-	} else if homeReal, err := agentrun.ResolveWorkdir(home); err != nil {
+	} else if homeReal, err := canonicalpath.Resolve(home); err != nil {
 		reason = "home folder does not resolve"
 	} else if resolved == homeReal {
 		reason = "is the home folder"
