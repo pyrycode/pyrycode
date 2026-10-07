@@ -105,6 +105,13 @@ An open-turn assertion can prove the event did not transition or close that turn
 still stays green if the handler opens a new turn from idle. The idle case must assert
 the lifecycle fields and that no synthetic lifecycle frame was emitted.
 
+Confidentiality assertions do not prove lifecycle neutrality. A frame can reveal
+no thinking text yet incorrectly publish `turn_state: thinking` for a subagent.
+`TestStreamTurnDrainV2_AttributedTextExcludesThinkingAndSignature` also pins the
+allowed envelope types: its earlier expectation admitted the unwanted thinking
+frame while every secrecy assertion passed. Check frame types/order and state
+alongside secret exclusion; see [main-turn classification](streamsup-package-per-conversation-turn-busy-tracking.md).
+
 A verifier can use Go's `-overlay` option with replacement files outside the worktree
 to test a mutation without editing the branch. Assert that each replacement applied.
 Run the named test being evaluated so a neighbouring assertion cannot mask its weakness.

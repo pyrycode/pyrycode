@@ -137,13 +137,13 @@ infallible has to preserve that property with the same care a first design
 would, not just match the JSON shape.
 
 **Assistant parent attribution remains line-local.** `emitAssistant` decodes
-the parent once and copies it into every `TextChunk` and `ToolStart` from that
+the parent once and copies it into every `TextChunk`, `ThoughtChunk`, and `ToolStart` from that
 line; it does not latch the id in `Parser`. That distinction prevents a later
 main-thread or nested assistant line from inheriting an earlier Agent call.
 Absent, null, non-string, and over-cap values all become empty through the same
-converter, while a valid id is preserved byte-for-byte. `ThoughtChunk` remains
-unattributed, and the field stays dormant at the current single-lane delivery
-boundary because subagent-text forwarding is still disabled.
+converter, while a valid id is preserved byte-for-byte. Forwarded subagent text
+uses parent-keyed delivery lanes; parent-attributed thinking is excluded from
+the [main busy mark and published lifecycle](streamsup-package-per-conversation-turn-busy-tracking.md).
 
 **#2260 adds a fourth target, `resultTurnTotalsLine`, for four numbers claude
 had always sent on this line and the daemon had never decoded** —
