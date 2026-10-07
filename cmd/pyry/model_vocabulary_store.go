@@ -6,8 +6,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 
+	"github.com/pyrycode/pyrycode/internal/modelfamily"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
@@ -212,6 +214,16 @@ func (s *modelVocabularyStore) Load() {
 			TruncatedFields:  nilIfEmpty(m.TruncatedFields),
 		})
 	}
+	// A file written before the parser reduced claude's list holds pinned rows
+	// beside their family rows (pyrybox's of 2026-10-05 did). Reduce it the same
+	// way, so a cold daemon offers one row per family before any child reports.
+	// A row whose value was cut is not read as pinned: its text is not the id.
+	list.Models = modelfamily.Reduce(list.Models, func(m turnevent.ModelOption) string {
+		if slices.Contains(m.TruncatedFields, "value") {
+			return ""
+		}
+		return m.Value
+	})
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.list = list

@@ -65,7 +65,7 @@
   announced model, which is phase 2's baseline. An empty resolution differs
   from a nonempty baseline but cannot establish an exact expected model;
   rejecting it prevents a false candidate. Full IDs are excluded from the
-  fallback because `sessions.familyAlias` can rewrite them before
+  fallback because `modelfamily.Alias` rewrites them before
   [`Pool.deliverSettingsInBand`](sessions-package-key-types-pool-updatesettings.md)
   sends them, so their menu row's resolution need not describe the delivered
   alias. The fallback's expected resolution comes from the alias's own row in

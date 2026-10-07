@@ -1645,8 +1645,15 @@ type MCPTogglePayload struct {
 // session_id is deliberately absent for BackgroundTaskStartedPayload's reason:
 // claude's session identity is not the daemon's conversation identity.
 //
-// Models is in claude's own order, truncated from the tail by the producer. The
-// key is always present on the wire and never null — see MarshalJSON.
+// Models is claude's list reduced to ONE ROW PER FAMILY, in claude's own order,
+// truncated from the tail by the producer. Claude Code publishes its family rows
+// (default, opus, fable, sonnet, haiku) followed by pinned rows (claude-opus-5,
+// claude-opus-4-7 and more); a pyry session follows the latest model of a family,
+// so the producer drops each pinned row whose family row is present and keeps only
+// the newest pinned row of a family that has none (internal/modelfamily.Reduce).
+// That runs where streamsup first reads the list, before the entry cap, so
+// DroppedModels below counts rows cut from the reduced list. The key is always
+// present on the wire and never null; see MarshalJSON.
 //
 // DroppedModels is how many entries the producer cut beyond its entry cap that
 // this frame does NOT carry; 0 when nothing was dropped, so the list's true size
@@ -1772,9 +1779,14 @@ type RequestModelListPayload struct {
 // which model a family currently means, instead of inferring it from an
 // announcement after the fact.
 //
-// Value is the argument you pass, and it is NOT a dated identifier: an alias
-// (sonnet), a bracketed variant (opus[1m]), or default. A client cannot derive a
-// family by splitting it on "-".
+// Value is the argument you pass. After the producer's family reduction (see
+// ModelListPayload.Models) it is a family name on every row of a family claude
+// publishes one for: an alias (sonnet), a bracketed variant (opus[1m]), or
+// default. Only a family claude publishes no family row for keeps one pinned id,
+// its newest (claude-fable-5[1m] in a 2.1.239 capture). A client still cannot
+// derive a family by splitting Value on "-"; a multi_agent client reads Family. A
+// pinned id a client sends anyway is resolved to its family by the daemon before
+// it is checked against this list or stored.
 //
 // Value round-trips, and a client author reading only this struct has to be told
 // what shape does. The only inbound path that accepts a model is
@@ -1842,7 +1854,8 @@ type RequestModelListPayload struct {
 //
 // Agent and Family are set only on the merged list a multi_agent client receives
 // (#2651): Agent is AgentClaude or AgentCodex, and Family is a Codex entry's family
-// name or a Claude entry's own Value. Both are omitempty, and that is what keeps
+// name or the family alias of a Claude entry's Value, which is the Value itself on
+// a family row. Both are omitempty, and that is what keeps
 // every other client's frame byte-identical to the one it read before they existed:
 // no producer on an older client's path sets them, so neither key reaches it.
 type ModelOption struct {

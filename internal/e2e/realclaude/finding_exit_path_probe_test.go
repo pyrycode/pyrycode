@@ -54,7 +54,7 @@ package realclaude
 //
 // It HOLDS verbatim argv (h.Pin.Rows[i].Command, h.Pin.ClaudeCommand) and forwards
 // both to finRecordBuild UNEXAMINED AND UNFORMATTED, which reduces the rows to three
-// integers each and the claude argv to one of tdnRunnerFromArgv's three constants.
+// integers each and the claude argv to one of tdnRunnerFromArgv's fixed readings.
 // Neither is read, logged or interpolated here. The one log channel this file adds
 // carries two values with passing byte sweeps and nothing else — see § the fifth
 // criterion's channel, at finExitRunProbe.
@@ -368,18 +368,14 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 		// discriminator whose own doc says it bounds nothing. That is a MIS-REPORT,
 		// not a cost.
 		Trailer: finTrailerBuild(outcome, sighting),
-		// The REAL delta. reachRunnerPathFromEnv reads ambient os.Getenv first and
-		// only then lets the delta override, so an empty or partial delta would make
-		// this a reading of the operator's shell rather than of this run.
-		RunnerFromEnv: reachRunnerPathFromEnv(h.EnvDelta),
 		// WHOLE AND UNEXAMINED. An EMPTY value is ADMISSIBLE and is not a staging
 		// failure: tdnClaudeCommand returns "" when zero OR SEVERAL rows carry the
 		// claude needle, so emptiness is ambiguity about which row was claude's,
 		// never a claim that the run took the other path. It reaches
 		// tdnRunnerFromArgv inside the builder and lands on the shipped
-		// indeterminate verdict — the THIRD ANSWER, never a disagreement. Not gated
+		// indeterminate reading — the THIRD ANSWER. Not gated
 		// on, not defaulted, not repaired with a second argv read. The builder
-		// computes both the argv label and the agreement; this rig computes neither.
+		// computes the observed argv reading for the record.
 		//
 		// SO THIS FUNCTION REDUCES THE SAME ARGV TWICE since #1452 — once at its
 		// own call site for the gather's gate, and once inside finRecordBuild for

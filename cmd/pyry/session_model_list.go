@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/modelfamily"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/turnbridge"
@@ -199,9 +200,13 @@ func resolveBoundMergedModelList(convReg *conversations.Registry, pool *sessions
 // order, each tagged with its agent and family.
 //
 // Claude's half comes through retainedModelVocabulary, so which Claude list answers
-// is decided exactly as it is for an older client. A Claude entry's family is its own
-// Value. Codex's half is the store's newest version per family (#2627), whose Value
-// is the family and which carries no display name, so the family stands in for it.
+// is decided exactly as it is for an older client. That list is already one row per
+// family: Claude Code publishes pinned rows beside its family rows, and the parser
+// reduces them away where the list is first read (modelfamily.Reduce), as the
+// saved file's load does. A Claude entry's family is its Value's family alias,
+// which is the Value itself on every family row. Codex's half is the store's newest
+// version per family (#2627), whose Value is the family and which carries no display
+// name, so the family stands in for it.
 //
 // dropped is Claude's DroppedModels, the count cut from Claude's list and nothing
 // else; 0 when Claude holds no list. ok is false exactly when neither agent holds an
@@ -218,14 +223,17 @@ func mergedModelOptions(pool *sessions.Pool, saved savedModelVocabulary, boundSe
 }
 
 // claudeModelOptions tags Claude's wire entries for a multi_agent client: agent
-// claude, family its own Value. It returns a fresh slice and never writes through
-// models, so a caller holding a shared payload keeps it intact. One of the two
-// tagging halves mergedModelOptions and pushedModelOptions share (#2652), so a
-// reply and a push cannot tag the same entry differently.
+// claude, family the family alias of its Value. Claude's list arrives reduced to
+// one row per family, so that is the Value itself on a family row ("opus"), and
+// the family on the one pinned row a family with no family row keeps
+// ("claude-fable-5[1m]" is family "fable[1m]"). It returns a fresh slice and never
+// writes through models, so a caller holding a shared payload keeps it intact. One
+// of the two tagging halves mergedModelOptions and pushedModelOptions share
+// (#2652), so a reply and a push cannot tag the same entry differently.
 func claudeModelOptions(models []protocol.ModelOption) []protocol.ModelOption {
 	out := make([]protocol.ModelOption, 0, len(models))
 	for _, m := range models {
-		m.Agent, m.Family = protocol.AgentClaude, m.Value
+		m.Agent, m.Family = protocol.AgentClaude, modelfamily.Alias(m.Value)
 		out = append(out, m)
 	}
 	return out

@@ -40,6 +40,12 @@ func TestSessionMinter_Settings(t *testing.T) {
 		{name: "claude effort not on default model", agent: protocol.AgentClaude, effort: str("max"), wantErr: relay.ErrEffortNotOffered},
 		{name: "claude effort on requested model", agent: protocol.AgentClaude, model: str("sonnet"), effort: str("max"), wantModel: "sonnet", wantEffort: "max"},
 		{name: "claude model not offered", agent: protocol.AgentClaude, model: str("gpt"), wantErr: relay.ErrModelNotOffered},
+		// A pinned id is checked and stored as its family: the menu offers opus, not
+		// claude-opus-5, and the session follows the latest opus.
+		{name: "claude pinned opus 5", agent: protocol.AgentClaude, model: str("claude-opus-5"), wantModel: "opus", wantEffort: "low"},
+		{name: "claude pinned opus 4.7", agent: protocol.AgentClaude, model: str("claude-opus-4-7"), wantModel: "opus", wantEffort: "low"},
+		{name: "claude pinned opus 4.8", agent: protocol.AgentClaude, model: str("claude-opus-4-8"), effort: str("high"), wantModel: "opus", wantEffort: "high"},
+		{name: "claude pinned effort checked against the family", agent: protocol.AgentClaude, model: str("claude-opus-4-7"), effort: str("max"), wantErr: relay.ErrEffortNotOffered},
 		{name: "claude explicit empty model", agent: protocol.AgentClaude, model: str(""), wantModel: "", wantEffort: "low"},
 		{name: "claude explicit empty effort", agent: protocol.AgentClaude, effort: str(""), wantModel: "opus"},
 		{name: "claude both empty", agent: protocol.AgentClaude, model: str(""), effort: str("")},
@@ -48,6 +54,8 @@ func TestSessionMinter_Settings(t *testing.T) {
 		{name: "codex effort common to families", agent: protocol.AgentCodex, families: true, effort: str("medium"), wantEffort: "medium"},
 		{name: "codex effort not common", agent: protocol.AgentCodex, families: true, effort: str("ultra"), wantErr: relay.ErrEffortNotOffered},
 		{name: "codex claude model", agent: protocol.AgentCodex, families: true, model: str("opus"), wantErr: relay.ErrModelNotOffered},
+		// Codex handling is unchanged: a Claude-shaped id is not resolved for it.
+		{name: "codex pinned claude model", agent: protocol.AgentCodex, families: true, model: str("claude-opus-5"), wantErr: relay.ErrModelNotOffered},
 		{name: "codex no families", agent: protocol.AgentCodex, model: str("luna"), wantErr: relay.ErrModelVocabularyUnavailable},
 	}
 	for _, tc := range cases {

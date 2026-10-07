@@ -194,14 +194,9 @@ type trailReasonResult struct {
 // # The two steps that decide, in order
 //
 //   - The reading is REDUCED with finRecordRunnerLabel and never re-parsed or
-//     prefix-matched. This is the case finRecordRunnerAgreement's doc explicitly
-//     allows (`finRecordRunnerAgreement`): a reduced label compared
-//     against a KNOWN-EXPECTED literal, not two unknowns prefix-matched. The two
-//     runner labels are bare string literals, following the five shipped
-//     comparison sites (two each in `TestFinLiveStageEnvDeltaNamesTheRunner` and
-//     `TestFinLiveStageStreamEnvDeltaNamesTheRunner`, plus one in
-//     `TestFinRecordRunnerAgreement`); this ticket introduces no constants for
-//     them.
+//     prefix-matched. Each reduced label is compared against a known runner
+//     literal; this preserves the independent indeterminate path. The two runner
+//     labels remain bare string literals, as in `TestFinRecordRunnerFromArgv`.
 //   - Presence comes from the KEY NAMES ALONE. Taking it from decodedReason != ""
 //     would merge "absent" and "present-and-empty" on the owes-one path, because
 //     their decoded values are identically "" — the exact collapse #1357's
