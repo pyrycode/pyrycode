@@ -1,39 +1,34 @@
-// Package turnevent defines the neutral, daemon-owned outbound turn-event
-// model for Phase 2 structured streaming (EPIC #596).
+// Package turnevent defines the daemon-owned, neutral model of outbound turn
+// events, plus the inbound commands in permission.go.
 //
-// These are pure value types — no transport, no I/O, standard library only.
-// They are the stable internal contract that the event-stream bridge (#608)
-// maps tui-driver Events() INTO and that the v2 wire types (#607) map OUT of.
-// The mobile wire (now) and the future pyry acp adapter (#600) are thin
-// adapters over this one model: it is shaped ~90% like ACP so the ACP adapter
-// is near pass-through, but it is owned by us — so churn in the external ACP
-// spec stays inside the ACP adapter and never reaches the daemon core or the
-// mobile wire. Same containment logic the tui-driver substrate seal applies to
-// claude's screen.
+// The types are pure values: no transport, no I/O, standard library only
+// (TestImportBoundary_StdlibOnly). Producers map claude's stream-json output
+// (internal/streamsup) and Codex app-server output (internal/codexsup) into this
+// model, and turnbridge.MapEvent maps it onto the internal/protocol wire types.
+// The model is shaped closely on ACP so an ACP adapter can stay thin, but the
+// daemon owns it, so ACP spec churn stays in that adapter and never reaches the
+// daemon core or the mobile wire.
 //
-// This is the outbound turn-event core only. No Events() draining and no
-// envelope mapping live here. Inbound commands (Prompt, Cancel, …) and the
-// internal-only BusyState event are out of scope and get a home in a later
-// ticket. The internal-only Stall event now lives here (mobile-sent,
-// ACP-dropped); see its type doc.
+// No variant carries the daemon's conversation identity; the consumer injects it
+// when mapping to the wire. Where a variant carries claude's session_id or uuid,
+// its doc says so; otherwise both are deliberately absent, because claude's
+// session is not the daemon's conversation. See
+// docs/knowledge/features/turnevent-package.md.
 package turnevent
 
-// Event is the sealed sum type of outbound turn events: TextChunk,
-// ThoughtChunk, ToolStart, ToolUpdate, ToolProgress, TurnEnd, BackgroundTaskStarted,
-// BackgroundTaskUpdated, BackgroundTaskRoster, BackgroundTaskProgress,
-// ThinkingProgress, ContextUsage, MCPStatus, the
-// internal-only status peers Stall, ApiRetry, and Compacting, the compaction
-// boundary CompactionBoundary, and the diagnostic marker Unrecognized.
-// The unexported marker
-// keeps the variant set
-// closed to this package, so external ACP-spec churn cannot inject a variant.
-// The bridge (#608) ranges a stream of Event and the wire adapter (#607)
-// type-switches to map each kind.
+// Event is the sealed sum type of outbound turn events. The isTurnEvent markers
+// below and in permission.go list every variant, and the unexported marker keeps
+// the set closed to this package.
+//
+// Consumers type-switch on it: turnbridge.MapEvent, and cmd/pyry's turnMarkFor,
+// eventKind and interactiveTurnEmitterV2.Handle. Only turnMarkFor is checked for
+// totality (TestTurnMarkFor_TotalOverEveryVariant reads these markers), so a new
+// variant means checking every switch by hand; see turnevent-package.md § The
+// three sum-type seams.
 type Event interface{ isTurnEvent() }
 
-// UnrecognizedSite names WHERE in the stream-json line mapping a payload was
-// found that the parser has no mapping for. String-backed so the producer's call
-// site is enum-safe and the value crosses the wire unchanged.
+// UnrecognizedSite names where in the producer's mapping an unmapped payload was
+// found. String-backed so the value crosses the wire unchanged.
 type UnrecognizedSite string
 
 const (
@@ -47,7 +42,7 @@ const (
 	// tool_result.
 	UnrecognizedUserBlock UnrecognizedSite = "user_block"
 	// UnrecognizedUndecodable is a line or block that failed to JSON-decode at
-	// all. Kind is empty for this site — there is no type to report.
+	// all. Kind is empty for this site: there is no type to report.
 	UnrecognizedUndecodable UnrecognizedSite = "undecodable"
 	// UnrecognizedCodexMethod is a Codex app-server notification whose method
 	// codexsup's translator neither maps nor ignores. Kind is the method.
@@ -57,82 +52,64 @@ const (
 	UnrecognizedCodexItem UnrecognizedSite = "codex_item"
 )
 
-// Unrecognized is a diagnostic marker: the stream-json parser met a payload it
-// has no mapping for and dropped it. It exists so genuinely unknown claude
-// output becomes VISIBLE the moment it arrives, instead of vanishing into a
-// debug log the production daemon does not print.
+// Unrecognized is a diagnostic marker: a producer met a payload it has no
+// mapping for and dropped it. It exists so unknown claude or Codex output is
+// visible when it arrives, not lost in a debug log production does not print.
 //
-// It is deliberately NOT the parser's tolerate-and-drop path. Every UNMAPPED
-// system subtype stays silent; only output outside that measured set reaches
-// here. A row per turn would make the feature worthless noise, so the
-// known-ignored list is the whole design.
-//
-// CORRECTED 2026-08-09 (#1404): rate_limit_event is no longer named among the
-// silent set, because it is no longer ON the known-ignored list — it has its own
-// arm in the parser's main switch (→ RateLimited above). A rate_limit_event line
-// the parser's gate does not map is still silent, but now because that arm
-// CONSUMES it rather than because a list says to, which makes this lane
-// unreachable for the type by matching rather than by list membership.
-//
-// CORRECTED 2026-08-07 (#1380): system is no longer ignored WHOLESALE, so this
-// no longer reads "system/*, rate_limit_event … exactly as before". The system
-// subtypes streamsup maps become their own variants instead — BackgroundTaskStarted
-// is the first. That changed what is SENT, not what is DRAWN, so the 2026-07-27
-// noise measurement behind the drop rule stands. streamsup's ignoredLineTypes
-// carries the full statement and its emitSystemSubtype is the one enumeration of
-// the mapped set; a prose pointer, not an import, because turnevent must not
-// depend on streamsup.
+// It is not the tolerate-and-drop path. Line types on the measured known-ignored
+// list (streamsup's ignoredLineTypes) stay silent, and the system subtypes
+// streamsup maps (emitSystemSubtype) become their own variants; only output
+// outside both sets lands here. A row per turn would make the signal noise, so
+// the known-ignored list is the design. These are prose pointers because
+// turnevent must not import streamsup.
 //
 // Raw is a plain string, not json.RawMessage, because the producer truncates it
-// at construction: a truncated blob is no longer valid JSON, so typing it as raw
-// JSON would be a lie. Truncated says whether that happened. Like every variant
-// here it carries no conversation identity — the bridge injects that.
+// at construction and a truncated blob is no longer valid JSON.
 type Unrecognized struct {
 	// Site is where the drop happened.
 	Site UnrecognizedSite
 	// Kind is the message or block `type` that had no mapping. Empty when Site
-	// is UnrecognizedUndecodable (nothing decoded, so no type was ever read).
+	// is UnrecognizedUndecodable.
 	Kind string
-	// Raw is the offending JSON, already truncated by the producer.
+	// Raw is the offending JSON, already cut to the producer's
+	// maxUnrecognizedRaw.
 	Raw string
-	// Truncated reports whether Raw was cut to fit the producer's cap.
+	// Truncated reports whether Raw was cut.
 	Truncated bool
 }
 
-// The events are pure value types, so each marker is implemented on a value
-// receiver: TextChunk{}, not only &TextChunk{}, satisfies Event.
 // UserEcho is claude replaying a user message at the point it read it, under
-// --replay-user-messages (#2730). Every turn's opening message echoes this way,
-// and so does a message written into a running turn, right after the tool result
-// it followed. It carries only the SHA-256 of the echoed text, never the text:
-// that text is the DELIVERY payload, which for an attachment-bearing message names
-// on-host paths, so no consumer of this stream can put it on the wire or in a log.
-// The daemon matches the digest against what it wrote to place the operator's own
-// message push.
+// --replay-user-messages: every turn's opening message, and a message written
+// into a running turn, right after the tool result it followed. The daemon
+// matches the digest against what it wrote to place the operator's own message
+// push.
 //
-// It opens and closes no turn, and no client frame is built from it.
+// It carries only the SHA-256 of the echoed text, never the text. That text is
+// the delivery payload, which for an attachment-bearing message names on-host
+// paths, so no consumer of this stream can put it on the wire or in a log. It
+// opens and closes no turn, and no client frame is built from it.
 type UserEcho struct {
 	TextSHA256 [32]byte
 }
 
-// PromptSuggestion is claude's own suggested next prompt (#2829), read off a
-// top-level prompt_suggestion line, which claude emits after the turn's result
-// when prompt suggestions are enabled. Reusing it saves the daemon a model call
-// of its own.
+// PromptSuggestion is claude's own suggested next prompt, read off a top-level
+// prompt_suggestion line that claude emits after the turn's result when prompt
+// suggestions are enabled. Reusing it saves the daemon a model call of its own.
 //
-// Text is claude-authored and UNTRUSTED. The producer has checked its shape —
-// a non-blank string of at most 1024 valid UTF-8 bytes holding no line break —
-// and carries it verbatim, with no trimming or other repair. It has NOT vetted
-// the content: control characters and bidi marks other than line breaks pass
-// through, and the text is model output, not an operator's words.
+// Text is claude-authored and untrusted. The producer checks its shape (a
+// non-blank string of at most maxPromptSuggestionBytes valid UTF-8 bytes with no
+// line break) and carries it verbatim, with no trimming or repair. It does not
+// vet the content: control characters and bidi marks other than line breaks
+// pass through, and the text is model output, not the operator's words.
 //
-// It opens and closes no turn and names no turn: claude's uuid and session_id
-// on the line establish no daemon turn attribution, so neither is carried. The
-// bridge supplies the session, like every variant here.
+// It opens and closes no turn and names none: claude's uuid and session_id on
+// the line establish no daemon turn, so neither is carried.
 type PromptSuggestion struct {
 	Text string
 }
 
+// The events are pure value types, so each marker is implemented on a value
+// receiver: TextChunk{}, not only &TextChunk{}, satisfies Event.
 func (TextChunk) isTurnEvent()              {}
 func (ThoughtChunk) isTurnEvent()           {}
 func (ToolStart) isTurnEvent()              {}
