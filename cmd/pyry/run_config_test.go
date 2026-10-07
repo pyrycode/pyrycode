@@ -336,9 +336,11 @@ func TestResolveBoundRunSettings_DormantRealPool(t *testing.T) {
 	if !ok {
 		t.Fatalf("resolveBoundRunSettings(conv-dormant) ok = false, want true — a bound session the daemon has a persisted record of must resolve")
 	}
+	// The entry saved the pinned claude-opus-4-8; it reads back as its family, so
+	// the menu's one opus row matches what the session will run.
 	want := boundRunSettings{
 		sessionID: dormantID,
-		model:     "claude-opus-4-8",
+		model:     "opus",
 		effort:    "high",
 	}
 	if got != want {

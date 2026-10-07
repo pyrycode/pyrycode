@@ -442,10 +442,6 @@ func finStreamExitRunProbe(t *testing.T, artifactDir string) {
 		// trailWaitForTrailer, which by now would match on its first poll and report
 		// trailBoundFromStart — a MIS-REPORT, not a cost.
 		Trailer: finTrailerBuild(outcome, sighting),
-		// The REAL delta. reachRunnerPathFromEnv reads ambient os.Getenv first and
-		// only then lets the delta override, so an empty or partial delta would make
-		// this a reading of the operator's shell rather than of this run.
-		RunnerFromEnv: reachRunnerPathFromEnv(h.EnvDelta),
 		// WHOLE AND UNEXAMINED. It reaches tdnRunnerFromArgv INSIDE the builder, so
 		// THE SAME ARGV IS REDUCED TWICE — once at the gather's call site above and
 		// once here — and the two are deliberately NOT hoisted into one:

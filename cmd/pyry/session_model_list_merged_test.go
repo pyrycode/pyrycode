@@ -273,3 +273,20 @@ func TestCodexDisplayName(t *testing.T) {
 		}
 	}
 }
+
+// TestClaudeModelOptions_FamilyIsTheValuesFamily: a family row's family is its
+// own value, and the one pinned row a family with no family row keeps is tagged
+// with its family, not its pinned id.
+func TestClaudeModelOptions_FamilyIsTheValuesFamily(t *testing.T) {
+	t.Parallel()
+	got := claudeModelOptions([]protocol.ModelOption{{Value: "opus"}, {Value: "default"}, {Value: "claude-fable-5[1m]"}})
+	want := []string{"opus", "default", "fable[1m]"}
+	for i, m := range got {
+		if m.Agent != protocol.AgentClaude || m.Family != want[i] {
+			t.Errorf("row %d (%q): agent %q family %q, want %q and %q", i, m.Value, m.Agent, m.Family, protocol.AgentClaude, want[i])
+		}
+	}
+	if got[2].Value != "claude-fable-5[1m]" {
+		t.Errorf("the row's value was rewritten to %q; only Family is the alias", got[2].Value)
+	}
+}

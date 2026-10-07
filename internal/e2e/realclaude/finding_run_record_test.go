@@ -67,8 +67,8 @@ package realclaude
 // trailer observation is never re-read, the outcome union is never re-derived,
 // and pyry's stderr is never re-parsed — tdnClassifyReapLog owns that read and
 // the fan-out is its consumer. tdnRunnerFromArgv is the argv read, with
-// tdnFixturePtyArgv and tdnFixtureStreamArgv its shipped fixtures;
-// reachRunnerPathFromEnv is the env read. trailReapLine renders the synthetic
+// tdnFixturePtyArgv and tdnFixtureStreamArgv its shipped fixtures.
+// trailReapLine renders the synthetic
 // reap stderr, trailNeedle is the plant, and reachMaxCommandBytes /
 // reachCapCommand are the single-sourced cap.
 //
@@ -150,8 +150,8 @@ type finRecordProc struct {
 // # The Detail's content rule, pinned rather than left to judgement
 //
 // In trailRunOutcome.Detail's shape and finAttributeRecord.Detail's, it MAY
-// name: the exit code, the row and liveness COUNTS, the three runner readings
-// and their agreement verdict, the attribution's selected admissibility value,
+// name: the exit code, the row and liveness COUNTS, the observed argv runner
+// label, the attribution's selected admissibility value,
 // and the carried outcome. It may NEVER quote: an argv; a pinStateOutcome's
 // Detail or ToolStderr; an entry's Admit.Detail; the embedded
 // finTrailerRecord.Detail or finAttributeRecord.Detail; or pyry's stderr.
@@ -182,30 +182,21 @@ type finRecordProc struct {
 // shipped and had to fix. The long-form argument belongs in a comment, which no
 // cap applies to.
 type finRecordRun struct {
-	ExitCode        int                `json:"exit_code"`
-	Rows            []finRecordProc    `json:"matched_rows,omitempty"`
-	Liveness        []pinStateOutcome  `json:"liveness,omitempty"`
-	Attribution     finAttributeRecord `json:"attribution"`
-	Trailer         finTrailerRecord   `json:"trailer"`
-	RunnerFromEnv   string             `json:"runner_from_env"`
-	RunnerFromArgv  string             `json:"runner_from_argv"`
-	RunnerAgreement string             `json:"runner_agreement"`
-	ClaudeVersion   string             `json:"claude_version"`
-	Detail          string             `json:"detail"`
+	ExitCode       int                `json:"exit_code"`
+	Rows           []finRecordProc    `json:"matched_rows,omitempty"`
+	Liveness       []pinStateOutcome  `json:"liveness,omitempty"`
+	Attribution    finAttributeRecord `json:"attribution"`
+	Trailer        finTrailerRecord   `json:"trailer"`
+	RunnerFromArgv string             `json:"runner_from_argv"`
+	ClaudeVersion  string             `json:"claude_version"`
+	Detail         string             `json:"detail"`
 }
 
 // --- the builder's input ---------------------------------------------------------
 
 // finRecordInputs is one run's readings.
 //
-// NAMED FIELDS RATHER THAN POSITIONAL PARAMETERS, which departs from
-// finAttributeFanOut and finTrailerBuild for one reason: four of the eight
-// inputs are strings, and two of them — RunnerFromEnv and ClaudeCommand — are
-// adjacent, same-typed, and on OPPOSITE SIDES OF THE ARGV PROHIBITION.
-// Transposing them positionally would write verbatim claude argv into
-// runner_from_env and publish it, with nothing going red. Named fields make that
-// transposition a compile error. Same doctrine as finRecordProc: prefer the
-// shape that cannot be got wrong over the discipline that must not be.
+// Named fields keep each reading explicit at the probe and fixture call sites.
 //
 // THERE IS NO trailObservation FIELD AND NO trailScanResult FIELD, and that
 // absence is the whole of AC2's structural half — it is what puts
@@ -224,12 +215,8 @@ type finRecordInputs struct {
 	Liveness    []pinStateOutcome
 	Attribution finAttributeRecord
 	Trailer     finTrailerRecord
-	// RunnerFromEnv is what the rig itself set, so it can only ever report the
-	// rig's own INTENT. Recorded as documentation, not as corroboration — see
-	// finRecordBuild.
-	RunnerFromEnv string
 	// ClaudeCommand is the claude child's own argv. READ, reduced to one of
-	// tdnRunnerFromArgv's three constant answers, and NEVER RETAINED anywhere in
+	// tdnRunnerFromArgv's fixed answers, and NEVER RETAINED anywhere in
 	// the record.
 	ClaudeCommand string
 	// ClaudeVersion is caller-supplied and capped on the way in — see
@@ -239,71 +226,20 @@ type finRecordInputs struct {
 
 // --- the runner-path verdict -----------------------------------------------------
 
-// The three-valued agreement verdict. indeterminate is a THIRD ANSWER and not a
-// disagreement: it says the argv was not read, not that the run took the other
-// path. Collapsing it into disagree would publish a claim about the runner that
-// no reading supports.
-const (
-	finRecordRunnerAgrees        = "agree"
-	finRecordRunnerDisagrees     = "disagree"
-	finRecordRunnerIndeterminate = "indeterminate"
-)
+// The independent third runner label remains shared with trailer helpers.
+// It names a reading that cannot establish either runner.
+const finRecordRunnerIndeterminate = "indeterminate"
 
 // finRecordRunnerLabel returns the leading token before the parenthesised
 // reason.
 //
-// THE DEGENERATE PATH FAILS TOWARD disagree. Given a reading with no " (", the
-// whole string comes back. Both shipped producers always emit a parenthesised
-// reason — TestTdnRunnerFromArgv's parenthesised-reason check asserts it — so
-// this path is defensive only, and the safe direction is that two whole strings
-// compare unequal (disagree) rather than collapsing to a false agreement.
+// A reading with no parenthesised reason is returned whole, preserving
+// unnamed labels for the trailer helpers' independent indeterminate semantics.
 func finRecordRunnerLabel(reading string) string {
 	if i := strings.Index(reading, " ("); i >= 0 {
 		return reading[:i]
 	}
 	return reading
-}
-
-// finRecordRunnerAgreement compares two runner readings BY LABEL ALONE.
-//
-// # Why not the whole strings
-//
-// The two readings do not share a vocabulary, and that decides how they are
-// compared. The env read answers "ptyrunner (interactive TUI, the agent-run
-// default)" (`reachRunnerPathFromEnv`) while an AGREEING argv read
-// answers "ptyrunner (claude argv carries --session-id)"
-// (`tdnRunnerFromArgv`). The two full strings are therefore
-// NEVER EQUAL, not even when both name the same runner — so a record comparing
-// them whole would report a disagreement on every run, and AC3's disagreement
-// row would pass while discriminating nothing.
-//
-// # The indeterminate arm is checked FIRST
-//
-// Ordering it first is what makes "a third answer, never a disagreement"
-// structural rather than incidental. Only the ARGV side can be indeterminate:
-// reachRunnerPathFromEnv returns exactly two values by construction, so there is
-// deliberately no dead arm for an indeterminate env reading.
-//
-// # Exact equality, not a prefix match
-//
-// TestTdnRunnerFromArgv's own comparison uses strings.HasPrefix against a
-// KNOWN-EXPECTED label, which is correct there. Here both operands are unknown
-// at compile time. Over the closed space {ptyrunner, streamrunner,
-// indeterminate} the two happen to agree, but prefix-matching two unknowns is
-// the wrong primitive for the claim and should not be copied across.
-func finRecordRunnerAgreement(fromEnv, fromArgv string) string {
-	// The argv label and the verdict share one constant deliberately:
-	// tdnRunnerFromArgv's own third answer IS "indeterminate", on each of the
-	// three arms that reach it, so a second spelling of the same word would be a
-	// fork waiting to drift.
-	argv := finRecordRunnerLabel(fromArgv)
-	if argv == finRecordRunnerIndeterminate {
-		return finRecordRunnerIndeterminate
-	}
-	if argv == finRecordRunnerLabel(fromEnv) {
-		return finRecordRunnerAgrees
-	}
-	return finRecordRunnerDisagrees
 }
 
 // --- the builder -----------------------------------------------------------------
@@ -320,11 +256,8 @@ func finRecordRunnerAgreement(fromEnv, fromArgv string) string {
 //
 // # The runner path is recorded AS OBSERVED, not as intended
 //
-// reachRunnerPathFromEnv reads the env the rig itself set, so it can only ever
-// report the rig's own intent. It is carried into the RECORD as documentation
-// rather than as corroboration — stated in the artifact and not only in a
-// comment, exactly as #1230's record does in the runner-path note runReachProbe
-// writes — so a reader is not misled into counting two agreeing reads.
+// Only the observed claude argv determines the published runner reading.
+// PYRY_USE_STREAMJSON no longer selects a runner after #1348.
 //
 // The evidential read is tdnRunnerFromArgv and never reachRunnerPathFromArgv:
 // the latter keys on --append-system-prompt-file and calls it "the
@@ -356,7 +289,6 @@ func finRecordBuild(in finRecordInputs) finRecordRun {
 		Liveness:      in.Liveness,
 		Attribution:   in.Attribution,
 		Trailer:       in.Trailer,
-		RunnerFromEnv: in.RunnerFromEnv,
 		ClaudeVersion: reachCapCommand(in.ClaudeVersion),
 	}
 
@@ -369,17 +301,15 @@ func finRecordBuild(in finRecordInputs) finRecordRun {
 	// THE SECOND. Every arm of tdnRunnerFromArgv returns a CONSTANT; no input byte
 	// reaches its return, so the argv is reduced here and retained nowhere.
 	rec.RunnerFromArgv = tdnRunnerFromArgv(in.ClaudeCommand)
-	rec.RunnerAgreement = finRecordRunnerAgreement(rec.RunnerFromEnv, rec.RunnerFromArgv)
 
 	// Counts, labels and closed-set values only — never a row, never a pid list,
 	// never an input struct under %v, and never an embedded sub-record's Detail.
-	// The LABELS rather than the full readings, because the record already
-	// publishes both readings whole and the reasons would only spend the cap.
+	// The LABEL rather than the full reading, because the record already
+	// publishes the reading whole and repeating its reason would spend the cap.
 	rec.Detail = trailDetail("pyry exited %d; %d matched row(s) and %d liveness read(s); runner "+
-		"%s by env and %s by claude argv, which %s; attribution selected %s; trailer outcome %s",
+		"%s by claude argv; attribution selected %s; trailer outcome %s",
 		rec.ExitCode, len(rec.Rows), len(rec.Liveness),
-		finRecordRunnerLabel(rec.RunnerFromEnv), finRecordRunnerLabel(rec.RunnerFromArgv),
-		rec.RunnerAgreement, rec.Attribution.Selected.Value, rec.Trailer.Outcome)
+		finRecordRunnerLabel(rec.RunnerFromArgv), rec.Attribution.Selected.Value, rec.Trailer.Outcome)
 	return rec
 }
 
@@ -435,7 +365,7 @@ func finRecordEnvDelta() []string {
 // fixtures tdnFixturePtyArgv and tdnFixtureStreamArgv show, which is why it
 // cannot name a runner — and it is what makes the indeterminate row below bite:
 // against reachRunnerPathFromArgv this argv answers "ptyrunner", which would
-// agree with the env reading and publish a runner claim no reading supports.
+// publish a runner claim no reading supports.
 const finRecordFixtureNeitherArgv = `/opt/node/bin/node /opt/claude/cli.js ` +
 	`--append-system-prompt-file /tmp/wd/system.txt --model claude-haiku-4-5`
 
@@ -503,7 +433,6 @@ func TestFinRecordCarriesEveryMatchedRow(t *testing.T) {
 		},
 		Attribution:   finRecordProofAttribution(),
 		Trailer:       finRecordSeenTrailer(),
-		RunnerFromEnv: reachRunnerPathFromEnv(finRecordEnvDelta()),
 		ClaudeCommand: tdnFixturePtyArgv,
 		ClaudeVersion: "2.1.220 (Claude Code)",
 	}
@@ -660,7 +589,6 @@ func TestFinRecordLivenessIsConsumedAsHanded(t *testing.T) {
 		Rows:          finRecordMatchedRows(""),
 		Attribution:   finRecordVoidAttribution(),
 		Trailer:       finRecordAbsentTrailer(),
-		RunnerFromEnv: reachRunnerPathFromEnv(finRecordEnvDelta()),
 		ClaudeCommand: tdnFixturePtyArgv,
 		ClaudeVersion: "2.1.220 (Claude Code)",
 	}
@@ -754,7 +682,6 @@ func TestFinRecordEmbedsTrailerRecordWhole(t *testing.T) {
 			Rows:          finRecordMatchedRows(""),
 			Attribution:   finRecordProofAttribution(),
 			Trailer:       sub,
-			RunnerFromEnv: reachRunnerPathFromEnv(finRecordEnvDelta()),
 			ClaudeCommand: tdnFixturePtyArgv,
 		})
 
@@ -801,100 +728,87 @@ func TestFinRecordEmbedsTrailerRecordWhole(t *testing.T) {
 	})
 }
 
-// TestFinRecordRunnerAgreement drives all three verdicts END TO END through
-// finRecordBuild rather than through the comparison helper alone — the record is
-// what AC3 is about.
-func TestFinRecordRunnerAgreement(t *testing.T) {
-	fromEnv := reachRunnerPathFromEnv(finRecordEnvDelta())
-	// The premise: an empty delta would make this a reading of the operator's
-	// shell, and every row below would then be measuring the environment rather
-	// than the record.
-	if got := finRecordRunnerLabel(fromEnv); got != "ptyrunner" {
-		t.Fatalf("env reading: got %q from delta %v, want a ptyrunner label — the delta names "+
-			"PYRY_USE_STREAMJSON explicitly precisely so this cannot depend on the ambient "+
-			"environment", fromEnv, finRecordEnvDelta())
+// TestFinRecordRunnerFromArgv checks the observed reading through the builder
+// and both written artifacts, including the removal of the obsolete comparison.
+func TestFinRecordRunnerFromArgv(t *testing.T) {
+	t.Parallel()
+	for _, typ := range []reflect.Type{reflect.TypeOf(finRecordRun{}), reflect.TypeOf(finRecordInputs{})} {
+		for _, name := range []string{"RunnerFromEnv", "RunnerAgreement"} {
+			if _, ok := typ.FieldByName(name); ok {
+				t.Errorf("%s still declares %s", typ.Name(), name)
+			}
+		}
 	}
 
-	tests := []struct {
-		name    string
-		argv    string
-		want    string
-		wantVia string
+	for _, tc := range []struct {
+		name  string
+		argv  string
+		label string
 	}{
-		{
-			name:    "a streamrunner argv against a ptyrunner env shows the disagreement",
-			argv:    tdnFixtureStreamArgv,
-			want:    finRecordRunnerDisagrees,
-			wantVia: "streamrunner",
-		},
-		{
-			// THE ROW THAT FAILS AGAINST A WHOLE-STRING COMPARISON. Both readings
-			// name ptyrunner and the two strings still differ, because each appends
-			// its own parenthesised reason.
-			name:    "a ptyrunner argv against a ptyrunner env agrees on the label",
-			argv:    tdnFixturePtyArgv,
-			want:    finRecordRunnerAgrees,
-			wantVia: "ptyrunner",
-		},
-		{
-			// indeterminate is a THIRD ANSWER. Against reachRunnerPathFromArgv this
-			// same argv answers "ptyrunner" — which would agree with the env and
-			// publish a runner claim no reading supports — so this row is also the
-			// pin on which argv read the record uses.
-			name:    "an argv carrying neither marker is indeterminate, not a disagreement",
-			argv:    finRecordFixtureNeitherArgv,
-			want:    finRecordRunnerIndeterminate,
-			wantVia: finRecordRunnerIndeterminate,
-		},
-	}
-
-	for _, tc := range tests {
+		{"stream", tdnFixtureStreamArgv, "streamrunner"},
+		{"historical PTY", tdnFixturePtyArgv, "ptyrunner"},
+		{"both markers", tdnFixturePtyArgv + " --input-format stream-json", "indeterminate"},
+		{"neither marker", finRecordFixtureNeitherArgv, "indeterminate"},
+		{"empty argv", "", "indeterminate"},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := finRecordBuild(finRecordInputs{
-				ExitCode:      0,
-				Rows:          finRecordMatchedRows(""),
-				Attribution:   finRecordProofAttribution(),
-				Trailer:       finRecordSeenTrailer(),
-				RunnerFromEnv: fromEnv,
-				ClaudeCommand: tc.argv,
-			})
-
-			if rec.RunnerAgreement != tc.want {
-				t.Errorf("agreement: got %q, want %q from env %q and argv reading %q",
-					rec.RunnerAgreement, tc.want, rec.RunnerFromEnv, rec.RunnerFromArgv)
+			argv := tc.argv
+			if argv != "" {
+				argv += " " + trailNeedle
 			}
-			if got := finRecordRunnerLabel(rec.RunnerFromArgv); got != tc.wantVia {
-				t.Errorf("argv label: got %q, want %q", got, tc.wantVia)
+			want := tdnRunnerFromArgv(argv)
+			rec := finRecordBuild(finRecordInputs{ClaudeCommand: argv})
+			if rec.RunnerFromArgv != want {
+				t.Errorf("runner reading: got %q, want %q", rec.RunnerFromArgv, want)
 			}
-			// The record shows BOTH readings rather than a single reduced label:
-			// #1230's rule is that the env read is documentation and the argv read
-			// carries the evidential signal, and a reader can only tell them apart
-			// while both are present.
-			if rec.RunnerFromEnv == "" || rec.RunnerFromArgv == "" {
-				t.Errorf("runner readings: env %q, argv %q — a record publishing one label "+
-					"cannot show a disagreement at all", rec.RunnerFromEnv, rec.RunnerFromArgv)
+			if finRecordRunnerLabel(rec.RunnerFromArgv) != tc.label || !strings.Contains(rec.RunnerFromArgv, " (") {
+				t.Errorf("reading %q must name %s with its reason", rec.RunnerFromArgv, tc.label)
 			}
-			// The argv read is one of tdnRunnerFromArgv's three answers and carries
-			// its reason, so a reader sees what the label was read off.
-			if !strings.Contains(rec.RunnerFromArgv, "(") {
-				t.Errorf("argv reading %q has no parenthesised reason", rec.RunnerFromArgv)
-			}
-			// THE REDUCTION IS THE POINT: the argv is read and never retained.
-			if strings.Contains(rec.RunnerFromArgv, tc.argv) ||
-				strings.Contains(rec.RunnerFromEnv, tc.argv) {
-				t.Errorf("a runner field carries the argv verbatim: env %q, argv %q",
-					rec.RunnerFromEnv, rec.RunnerFromArgv)
+			wantRunner := "runner " + tc.label + " by claude argv"
+			if !strings.Contains(rec.Detail, wantRunner) {
+				t.Errorf("detail %q does not describe %q", rec.Detail, wantRunner)
 			}
 
-			if tc.want == finRecordRunnerAgrees {
-				// Stated as an assertion rather than in prose: this is WHY the
-				// comparison is on the label alone. A record comparing the two full
-				// strings would report a disagreement here, and on every real run.
-				if rec.RunnerFromEnv == rec.RunnerFromArgv {
-					t.Fatalf("the two readings are byte-equal (%q), so this row no longer "+
-						"discriminates between a label comparison and a whole-string one — the "+
-						"two producers append their own parenthesised reasons and are never "+
-						"expected to agree verbatim", rec.RunnerFromEnv)
+			dir := t.TempDir()
+			finWriteArtifacts(t, dir, rec)
+			files := finWriteReadDir(t, dir)
+			if len(files) != 2 || files[finWriteRecordFile] == nil || files[finWriteNoteFile] == nil {
+				t.Fatal("writer must emit run.json and run.md")
+			}
+			for name, content := range files {
+				for _, forbidden := range []string{"runner_from_env", "runner_agreement", "by env", "two runner readings", "disagree"} {
+					if bytes.Contains(content, []byte(forbidden)) {
+						t.Errorf("%s still publishes %q", name, forbidden)
+					}
+				}
+				if bytes.Contains(content, []byte(trailNeedle)) {
+					t.Errorf("%s contains captured argv bytes", name)
+				}
+				blob := string(content)
+				if name == finWriteNoteFile {
+					_, fenced, ok := strings.Cut(blob, "```json\n")
+					if !ok {
+						t.Fatal("Markdown has no JSON fence")
+					}
+					var summary string
+					blob, summary, ok = strings.Cut(fenced, "```")
+					if !ok || !strings.Contains(summary, wantRunner) {
+						t.Errorf("Markdown summary does not describe %q", wantRunner)
+					}
+					if blob != string(files[finWriteRecordFile]) {
+						t.Error("Markdown embedded JSON differs from run.json")
+					}
+				}
+				var rendered map[string]json.RawMessage
+				if err := json.Unmarshal([]byte(blob), &rendered); err != nil {
+					t.Fatalf("decode %s: %v", name, err)
+				}
+				var reading string
+				if err := json.Unmarshal(rendered["runner_from_argv"], &reading); err != nil {
+					t.Fatalf("decode %s runner reading: %v", name, err)
+				}
+				if reading != want {
+					t.Errorf("%s runner reading: got %q, want %q", name, reading, want)
 				}
 			}
 		})
@@ -936,14 +850,14 @@ func TestFinRecordCarriesNoCapturedBytes(t *testing.T) {
 		argv        string
 	}{
 		{
-			name:        "an agreeing runner reading over a proof attribution",
+			name:        "a historical PTY reading over a proof attribution",
 			exitCode:    0,
 			attribution: finRecordProofAttribution(),
 			trailer:     finRecordSeenTrailer(),
 			argv:        tdnFixturePtyArgv,
 		},
 		{
-			name:        "a disagreeing runner reading over a void attribution",
+			name:        "a streamrunner reading over a void attribution",
 			exitCode:    pinExitStatusUnknown,
 			attribution: finRecordVoidAttribution(),
 			trailer:     finRecordAbsentTrailer(),
@@ -1004,7 +918,6 @@ func TestFinRecordCarriesNoCapturedBytes(t *testing.T) {
 				Liveness:      []pinStateOutcome{{Verdict: pinStateRunning, PID: finRecordWrapperPID}},
 				Attribution:   tc.attribution,
 				Trailer:       tc.trailer,
-				RunnerFromEnv: reachRunnerPathFromEnv(finRecordEnvDelta()),
 				ClaudeCommand: claudeCommand,
 				ClaudeVersion: "2.1.220 (Claude Code)",
 			})
@@ -1143,7 +1056,6 @@ func TestFinRecordPublishesTheTrailerKeyNamesTheReaderRead(t *testing.T) {
 		Attribution: finRecordProofAttribution(),
 		Trailer: finTrailerBuild(trailOutcomeVoidBudgetFired,
 			finTrailerSighting(scan, 250*time.Millisecond, trailBoundFromMiss)),
-		RunnerFromEnv: reachRunnerPathFromEnv(finRecordEnvDelta()),
 		ClaudeCommand: tdnFixturePtyArgv,
 	})
 
@@ -1159,7 +1071,6 @@ func TestFinRecordPublishesTheTrailerKeyNamesTheReaderRead(t *testing.T) {
 		Attribution: finRecordProofAttribution(),
 		Trailer: finTrailerBuild(trailOutcomeVoidNoTrailer,
 			finTrailerSighting(finTrailerAbsentScan(), 0, trailBoundNone)),
-		RunnerFromEnv: reachRunnerPathFromEnv(finRecordEnvDelta()),
 		ClaudeCommand: tdnFixturePtyArgv,
 	})
 

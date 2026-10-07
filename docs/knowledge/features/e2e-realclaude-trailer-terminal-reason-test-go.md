@@ -84,22 +84,23 @@
   verdicts (`[]pinStateOutcome`, carried whole), the reap-log attribution
   (`finAttributeRecord`, #1280) and the trailer sub-record
   (`finTrailerRecord`, #1290), both embedded whole rather than re-derived,
-  and the runner path. The runner path is recorded **as observed**: the
-  env reading (`reachRunnerPathFromEnv`) is carried as documentation, not
-  corroboration, alongside an independent argv reading
-  (`tdnRunnerFromArgv`), reduced to a three-valued `RunnerAgreement` —
-  `agree` / `disagree` / `indeterminate` — decided on the **label** each
-  reading's leading token, never the whole string, because the two
-  producers append their own free-text reasons and the full strings are
-  therefore never equal even when both name the same runner.
-  `finRecordInputs` uses named fields rather than positional parameters
-  specifically because two adjacent same-typed strings
-  (`RunnerFromEnv`/`ClaudeCommand`) sit on opposite sides of the argv
-  prohibition, and it carries neither a `trailObservation` nor a
+  and the runner path. `finRecordBuild` publishes only `runner_from_argv`,
+  the full `tdnRunnerFromArgv(ClaudeCommand)` reading **including its reason**.
+  `runner_from_env` and `runner_agreement` were removed by #1480:
+  `PYRY_USE_STREAMJSON` stopped selecting a runner in #1348, so comparing
+  that obsolete setting with observed argv falsely diagnosed normal stream
+  runs as disagreements. `finRecordRun` has neither `RunnerFromEnv` nor
+  `RunnerAgreement`, and `finRecordInputs` accepts no env runner reading.
+  Stream and historical PTY argv name their respective runners; both-marker,
+  neither-marker and empty argv retain their distinct indeterminate reasons,
+  with no default to streamrunner. `finRecordRunnerLabel` reduces the full
+  reading for the record Detail and the independent trailer/gate helpers.
+  `finRecordInputs` carries neither a `trailObservation` nor a
   `trailScanResult` field, which is what keeps the discriminated-optional
-  trailer pointer out of reach. Purely additive, one new file, 1061 lines,
-  zero production change, zero consumer call sites; five top-level tests,
-  all offline. One code-review SHOULD FIX left non-blocking: the
+  trailer pointer out of reach. `TestFinRecordRunnerFromArgv` exercises all
+  five argv cases through the builder and artifact writer without Claude or
+  credentials, replacing `TestFinRecordRunnerAgreement`. One code-review
+  SHOULD FIX left non-blocking: the
   attribution sub-record's "carried whole" claim is pinned by a single
   nested scalar rather than `reflect.DeepEqual` (the trailer half's
   pattern), so a future partial-carriage regression there would pass
@@ -112,10 +113,14 @@
   built record and nothing else — no raw process-table bytes, no second
   `[]byte` parameter — and writes exactly two files: `run.json`
   (`json.MarshalIndent`) and `run.md` (a fixed safety-claim constant, the
-  same bytes fenced, one summary line built from derived scalars only). The
-  signature *is* the design: `writeReachArtifacts` (`background_reach_probe_
-  test.go:823`) is the cautionary precedent it deliberately does not
-  reuse — that writer's unexported `rawPS` field produces a second file,
+  same bytes fenced, one summary line built from derived scalars only). Both
+  JSON carriers keep the full `runner_from_argv` reading and its reason and
+  omit `runner_from_env` and `runner_agreement` entirely. The Markdown summary
+  describes that single observed reading as `runner <label> by claude argv`,
+  with no env comparison or agreement verdict. The signature *is* the design:
+  `writeReachArtifacts` in `background_reach_probe_test.go` is the cautionary
+  precedent it deliberately does not reuse — that writer's unexported `rawPS`
+  field produces a second file,
   `reach.ps.txt`, carrying the verbatim process table beside a clean
   `reach.json`; `finRecordRun` has no unexported field, so there is nothing
   raw in this writer's reach to write. Four tests measure what was
@@ -132,11 +137,18 @@
   mutations (one inside the Detail format, one adding an undeclared third
   file) both observed RED before the sweep shipped; a recursive
   forbidden-key scan with two exact-key exemptions (`tool_stderr`, carried
-  whole and permitted; `runner_from_argv`, a closed three-constant set with
+  whole and permitted; `runner_from_argv`, five fixed readings with
   no input byte in reach); and a structural + behavioural pair proving
   `resultTrailer` has no `result` member and that the four decoded trailer
   scalars cross into the artifact verbatim while the needle beside them does
-  not. The sweep shipped with a fourth channel, a trailer-scan-line plant
+  not. A declared-field census alone stays green when obsolete fields remain
+  in the record type: it proves rendering matches the schema, not that the
+  schema retired a field. `TestFinRecordRunnerFromArgv` separately asserts
+  removed Go fields are absent from the record/input types and scans both
+  written files for the removed JSON keys and comparison prose. It also checks
+  the full reading in both JSON carriers, identical embedded JSON, the Markdown
+  summary, and argv-needle containment. The sweep shipped with a fourth
+  channel, a trailer-scan-line plant
   landing **inside** `reachCapCommand`'s 512-byte cap (pad `0`, needle at
   byte 104–146) — `trailNeedle`'s own comment claims it is placed past the
   cap, which this ticket measured to be false against the fixture the

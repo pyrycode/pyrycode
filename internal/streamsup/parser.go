@@ -13,6 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/pyrycode/pyrycode/internal/modelfamily"
 	"github.com/pyrycode/pyrycode/internal/transcript"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
@@ -8545,6 +8546,21 @@ func (p *Parser) emitModelList(line []byte) {
 		return
 	}
 
+	// ONE ROW PER FAMILY, reduced HERE, where claude's list is first read and
+	// BEFORE the count bound below. Claude Code publishes its family rows (default,
+	// opus, fable, sonnet, haiku) and then pinned rows (claude-opus-5,
+	// claude-opus-4-7 and more); a pyry session follows the latest model of a
+	// family, so modelfamily.Reduce drops every pinned row whose family row is
+	// present and keeps only the newest pinned row of a family that has none.
+	// Reducing first means the cap below counts families rather than pinned
+	// versions, and every reader of this event (the retained holds, the saved
+	// model_list.json, validation of an incoming pick, the Claude-only and merged
+	// lists and the pushed updates) sees the same rows. It drops whole rows and
+	// rewrites none, so #1600's verbatim rule still holds for every value that
+	// survives. It reads the RAW value, before any text cap. It never empties a
+	// non-empty list, so it cannot move a rung's classification.
+	entries = modelfamily.Reduce(entries, func(e modelOptionLine) string { return e.Value })
+
 	// Never nil and never empty: the rung above returned on both. The COUNT bound
 	// runs before the loop, and truncation is FROM THE TAIL: claude's order is
 	// preserved because no ranking is invented, its ordering semantics being
@@ -8660,7 +8676,8 @@ func (p *Parser) emitModelList(line []byte) {
 		models = append(models, turnevent.ModelOption{
 			// claude's values VERBATIM: no lowercasing, no alias expansion, no
 			// date-stamping, no family mapping, no lookup against any published model
-			// list (#1600's rule). The cap is the only judgement made about them here.
+			// list (#1600's rule). The cap is the only judgement made about them here;
+			// the family reduction above chose which rows survive and changed none.
 			ResolvedModel: resolvedModel,
 			Value:         value,
 			DisplayName:   displayName,

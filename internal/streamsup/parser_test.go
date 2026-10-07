@@ -5370,6 +5370,18 @@ func TestParser_InitializeControlResponseDecodesTheCapturedModels(t *testing.T) 
 					sawFiveEffortLevels, sawEffortLevelsAbsent)
 			}
 
+			// One row per family (modelfamily.Reduce). The capture publishes haiku AND
+			// the pinned claude-haiku-4-5, so the pinned row is not decoded.
+			// claude-fable-5[1m] stays, because no fable[1m] row is published and it is
+			// its family's only row. Written out rather than derived through Reduce, so a
+			// change to the rule reddens here instead of moving the expectation with it.
+			want = slices.DeleteFunc(want, func(entry map[string]any) bool {
+				return capturedModelString(t, entry, "value") == "claude-haiku-4-5"
+			})
+			if len(want) != 5 {
+				t.Fatalf("after dropping the pinned claude-haiku-4-5 row the capture leaves %d entries, want 5", len(want))
+			}
+
 			events := collectEvents(capturedInitializeLine(t, arm))
 			// TWO events, not one: every responding arm carries a commands array beside
 			// its models one, so the rung emits the SlashCommandList too (#1877). The
@@ -5386,7 +5398,7 @@ func TestParser_InitializeControlResponseDecodesTheCapturedModels(t *testing.T) 
 				t.Fatalf("event[0] = %T, want turnevent.ModelList", events[0])
 			}
 			if len(list.Models) != len(want) {
-				t.Fatalf("ModelList carries %d entries, want %d — one per array element, in claude's own order",
+				t.Fatalf("ModelList carries %d entries, want %d: one per family row, in claude's own order",
 					len(list.Models), len(want))
 			}
 			// The zero-drop path, which is the only one the LIVE shape exercises: six
@@ -5709,7 +5721,7 @@ func TestParser_InitializeControlResponseCountsTheCapturedCommands(t *testing.T)
 			wantAttrs := map[string]string{
 				"type":             "control_response",
 				"reason":           "model_list",
-				"models":           "6",
+				"models":           "5", // six captured, the pinned claude-haiku-4-5 reduced away beside haiku
 				"dropped":          "0",
 				"levels_dropped":   "0",
 				"commands":         strconv.Itoa(len(want)),
@@ -8333,6 +8345,56 @@ func TestParser_ModelListFieldsAreCapped(t *testing.T) {
 	}
 }
 
+// TestParser_ModelListReducesToOneRowPerFamilyBeforeTheCap replays the list
+// pyrybox's daemon held on 2026-10-05 (Claude Code 2.1.289): twelve entries, of
+// which model_list.json saved ten and the cap cut two. The pinned rows are reduced
+// away BEFORE the cap counts, so the five families fit, nothing is reported
+// dropped, and every surviving row is claude's own, in claude's order.
+func TestParser_ModelListReducesToOneRowPerFamilyBeforeTheCap(t *testing.T) {
+	t.Parallel()
+	entries := []map[string]any{
+		modelEntryFixture("claude-opus-5-5", "default", "Default (recommended)"),
+		modelEntryFixture("claude-opus-5-5", "opus", "Opus 5.5"),
+		modelEntryFixture("claude-fable-5-1", "fable", "Fable 5.1"),
+		modelEntryFixture("claude-sonnet-5-5", "sonnet", "Sonnet 5.5"),
+		modelEntryFixture("claude-haiku-4-5-20251001", "haiku", "Haiku 4.5"),
+		modelEntryFixture("claude-sonnet-5", "claude-sonnet-5", "Sonnet 5"),
+		modelEntryFixture("claude-opus-5", "claude-opus-5", "Opus 5"),
+		modelEntryFixture("claude-fable-5", "claude-fable-5", "Fable 5"),
+		modelEntryFixture("claude-opus-4-8", "claude-opus-4-8", "Opus 4.8"),
+		modelEntryFixture("claude-opus-4-7", "claude-opus-4-7", "Opus 4.7"),
+		// The two rows the cap cut were never saved, so any two pinned rows stand in.
+		modelEntryFixture("claude-sonnet-4-6", "claude-sonnet-4-6", "Sonnet 4.6"),
+		modelEntryFixture("claude-haiku-4-5", "claude-haiku-4-5", "Haiku 4.5"),
+	}
+	if len(entries) <= modelListEntriesCapFixture {
+		t.Fatalf("the fixture carries %d entries; it must exceed the cap of %d to prove the reduction runs first",
+			len(entries), modelListEntriesCapFixture)
+	}
+	events := collectEvents(modelListLineFixture(t, "success", entries))
+	if len(events) != 1 {
+		t.Fatalf("event count: got %d, want 1 turnevent.ModelList: %#v", len(events), events)
+	}
+	list, ok := events[0].(turnevent.ModelList)
+	if !ok {
+		t.Fatalf("event[0] = %T, want turnevent.ModelList", events[0])
+	}
+	var values, displays []string
+	for _, m := range list.Models {
+		values = append(values, m.Value)
+		displays = append(displays, m.DisplayName)
+	}
+	if want := []string{"default", "opus", "fable", "sonnet", "haiku"}; !slices.Equal(values, want) {
+		t.Errorf("values: got %q, want %q", values, want)
+	}
+	if want := []string{"Default (recommended)", "Opus 5.5", "Fable 5.1", "Sonnet 5.5", "Haiku 4.5"}; !slices.Equal(displays, want) {
+		t.Errorf("display names: got %q, want %q", displays, want)
+	}
+	if list.DroppedModels != 0 {
+		t.Errorf("DroppedModels: got %d, want 0; the cap must count families, not pinned versions", list.DroppedModels)
+	}
+}
+
 // TestParser_ModelListEntryCountIsBounded is #1812's central pin: the number of
 // entries is bounded AT CONSTRUCTION and the overflow is reported as a COUNT, so
 // the list's true size stays recoverable as len(Models) + DroppedModels.
@@ -8997,7 +9059,9 @@ func TestParser_ModelListIsLoggedContentFree(t *testing.T) {
 	// ack — an empty models array and no commands at all.
 	wantReasons := []string{"model_list", "model_list", "model_list", "nak", "nak",
 		"undecodable", "undecodable", "ack", "commands_only"}
-	wantCounts := []string{"1", "1", "6", "0", "0", "0", "0", "0", "0"}
+	// The captured line logs 5, not its 6 entries: the record counts the rows
+	// emitted, and the pinned claude-haiku-4-5 is reduced away beside haiku.
+	wantCounts := []string{"1", "1", "5", "0", "0", "0", "0", "0", "0"}
 	// The captured line's count comes from the capture's own bytes, so a re-capture
 	// moves the expectation with the fixture rather than reddening a transcribed number.
 	//
