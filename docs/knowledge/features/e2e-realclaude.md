@@ -22,9 +22,36 @@ All files in the directory carry exactly:
 
 Single tag, no alternation. The `e2e_install` precedent established the `e2e_<purpose>` naming.
 
+## Source-citation checks
+
+`TestSourceCitationPackage` discovers every direct Go source file and checks
+parsed line/block comments and decoded string literals for numeric Go-source
+citations. Use symbol references and enclosing-symbol descriptions instead,
+following [the citation convention](../../../CODING-STYLE.md#comments--citing-other-code).
+The check rejects filename, bare and camel-case symbol citations without
+resolving targets; missing files and reversed ranges still fail. Findings name
+the citing file, source position and offending text.
+
+Run the check and its regressions from the repository root:
+
+```sh
+go test -tags e2e_realclaude -race -count=1 -v -run '^TestSourceCitation' ./internal/e2e/realclaude
+```
+
+These tests run without Claude, credentials, a daemon or network. `make check`
+does not run this tagged check; the full tagged suite includes live tests.
+Colon matching needs positive controls for Go slices, JSON fragments and listen
+addresses, which occur in probe text but are ordinary data.
+
 ## What's there today
 
 ## Test infrastructure
+
+Source citation edits can break exact comparisons with historical capture prose.
+`TestDropcapFixtureIsACapture` normalizes only the two filename/position labels
+recognized by `dropcapHistoricalCitationLabels` before comparing recorded prose
+with current constants. Keep committed capture bytes intact and every other
+prose byte exact: broad normalization would hide changes to the capture's claims.
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` through `TestMain`
 when a helper test opts into `RunOpts.UseTestBinaryAsFakePyry` and supplies
