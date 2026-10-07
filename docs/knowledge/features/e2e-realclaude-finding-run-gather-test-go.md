@@ -163,3 +163,34 @@
   [`codebase/1458.md`](../codebase/1458.md) and
   [`codebase/1462.md`](../codebase/1462.md) for the full implementation and
   the mutation-tested lessons.
+
+## Publication boundary
+
+Attribution can establish `trailAdmitProof` even when liveness gathering is
+missing: `trailClassifyRun` returns on that proof before the check for failed
+liveness instruments, and does not check alignment between `MatchCount` and
+`Liveness`. A finding verdict therefore cannot establish that a captured-byte
+sweep visited per-pid reads. `TestFinGatherReturnsNoCapturedBytes` retains its
+no-subject case and
+uses [the isolated FIFO-held subject](e2e-realclaude-finding-stage-held-group-test-go.md)
+for populated healthy coverage. `finGatherAssertNoCapturedBytes` requires a
+successful scan, positive matches, one running read per match through
+`finStageAssertLiveness`, and non-empty `Detail` and `StateColumn` before
+sweeping readings, attribution record and sighting. Both cases require a
+usable gate, attributed anchored reap line, retained stdout needle and constant
+`ClaudeState`; the held case attributes its actual staged group. Removing the
+liveness fill still allowed attribution but failed the explicit read-count
+premise ([#1300 verifier evidence](https://github.com/pyrycode/pyrycode/pull/2918#issuecomment-6037253362)).
+
+Healthy `pinReadState` reads use `pinStateColumns` (`pid=,ppid=,stat=`) and leave
+`ToolStderr` empty, so `omitempty` hides `tool_stderr` from that sweep. Optional
+key coverage needs a separate presence premise:
+`TestFinGatherForbiddenKeyWalkDescends` marshals a nested `pinStateOutcome`
+with non-empty source-authored `ToolStderr`, asserts the key survived, and
+checks that `finGatherExemptKeys` admits it while rejecting `tool_stderr_tail`
+at the same depth. Removing the exemption fails this case; a prefix exemption
+would incorrectly admit the neighbour. These checks exercise healthy liveness
+and the exact diagnostic-key allowance, without proving arbitrary diagnostic
+strings are redacted. Whole-carried diagnostics keep their existing publication
+contract, and the stdout/stderr needles stay in the trailer's `result` and the
+anchored reap line rather than in those diagnostics.
