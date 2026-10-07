@@ -18,3 +18,7 @@ Replace the four `agentrun.ResolveWorkdir` calls and imports with `canonicalpath
 ## Testing strategy
 
 Use existing `TestTurnlessTranscriptVerdict`, `TestResumeAbsentVerdict` and `TestResumeProbeArgsIsRespawnShape` under `-race -tags e2e_realclaude`; compile the entire tagged package through that run and tagged vet. Confirm no old-resolver references remain in the package and review the diff for preserved evidence. Run `go vet ./...` and `go build` with output outside the worktree. The verifier owns `make check` and the full-module suite. The dispatcher owns the pending live-Claude gate: report executed/passed counts and skip reasons, require both `marked_root_expands_external_import` and `unapproved_root_drops_external_import` in `TestClaudeMdExternalIncludes_SubfolderChildGetsRootImports` to execute and pass, and reject all-skipped success. Keep `needs-real-claude` on the issue.
+
+## Revisions
+
+- 2026-10-07: Package-wide source verification found three legacy resolver mentions in comments in other files. The absence check targets executable `agentrun.ResolveWorkdir` calls, as the ticket requires; unrelated comment updates remain outside this four-file migration. Reading `docs/knowledge/features/canonicalpath-package.md` also confirmed the path and error contract above. No behavior or design changed.

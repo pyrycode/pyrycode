@@ -34,8 +34,8 @@ import (
 
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun"
 	"github.com/pyrycode/pyrycode/internal/agentrun/trust"
+	"github.com/pyrycode/pyrycode/internal/canonicalpath"
 )
 
 // The sentinel lives ONLY in the imported file, never in CLAUDE.md itself.
@@ -205,9 +205,9 @@ func TestClaudeMdExternalIncludes_SubfolderChildGetsRootImports(t *testing.T) {
 	// Same realpath rule the helper applies, so the hand-written key is the one
 	// claude actually looks up (the macOS /var → /private/var symlink and the
 	// on-disk-case fold both matter here).
-	controlRealpath, err := agentrun.ResolveWorkdir(controlRoot)
+	controlRealpath, err := canonicalpath.Resolve(controlRoot)
 	if err != nil {
-		t.Fatalf("ResolveWorkdir(%q): %v", controlRoot, err)
+		t.Fatalf("canonicalpath.Resolve(%q): %v", controlRoot, err)
 	}
 	writeUnapprovedEntry(t, home, controlRealpath)
 

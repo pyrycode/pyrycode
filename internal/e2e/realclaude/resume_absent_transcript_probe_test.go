@@ -44,7 +44,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun"
+	"github.com/pyrycode/pyrycode/internal/canonicalpath"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 )
 
@@ -311,9 +311,9 @@ func TestRealClaude_ResumeAbsentTranscript(t *testing.T) {
 		t.Fatalf("#1656: mkdir workdir: %v", err)
 	}
 	// The child's cwd gets the SAME canonicalisation production applies: streamsup
-	// resolves Config.WorkDir through agentrun.ResolveWorkdir and only then assigns
+	// resolves Config.WorkDir through canonicalpath.Resolve and only then assigns
 	// cmd.Dir.
-	childCwd, err := agentrun.ResolveWorkdir(workdir)
+	childCwd, err := canonicalpath.Resolve(workdir)
 	if err != nil {
 		t.Fatalf("#1656: resolve workdir %s: %v", workdir, err)
 	}
@@ -358,8 +358,8 @@ func TestRealClaude_ResumeAbsentTranscript(t *testing.T) {
 	// than recording a verdict" — streamNewSessionTranscriptDir Fatals with a full
 	// projects-tree listing on timeout. DefaultClaudeSessionsDir is only ever the
 	// compared-against value: it applies EvalSymlinks where the child's cwd went
-	// through ResolveWorkdir's canonicalCase (the #989 hazard), so a recomputation
-	// risks asserting absence against a folder claude never wrote.
+	// through canonicalpath.Resolve's canonicalCase (the #989 hazard), so a
+	// recomputation risks asserting absence against a folder claude never wrote.
 	dir := streamNewSessionTranscriptDir(t, home, resumeProbePresentID, resumeProbeDirBudget)
 	established := statByID(dir, resumeProbePresentID)
 	rec.EstablishArm.TranscriptPath = established.Path
