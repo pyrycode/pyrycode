@@ -1,30 +1,28 @@
-# `internal/agentrun` — workdir helpers and shared types for `pyry agent-run`
+# `internal/agentrun` — shared process helpers for `pyry agent-run`
 
-> **Post-#392, post-#508, post-#1519 surface.** The parent `internal/agentrun` package hosts three small exported helpers: `ResolveWorkdir`, `ExitErrIsBenign` (#527), and `ReapDescendantGroups` (#923, lifted from `ptyrunner`). `IsNewLogicalTurn` (#574) was deleted in #1519 along with its only two callers, `budget` and `streamjson`, both orphaned since #1348 deleted `ptyrunner` (their only production importer). The PTY driver (`Drive` / `DriveConfig`), the per-spawn settings writer (`WriteSettings` / `SettingsFilename`), and the original sibling-file `MarkWorkdirTrusted` were all deleted in [#392](https://github.com/pyrycode/pyrycode/issues/392) when stream-json subprocess mode replaced PTY drive; the workdir-encoder wrapper `EncodeProjectDir` was deleted in [#508](../codebase/508.md) after the encoder fully migrated to [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver). The 2026-05-19 pivot back to PTY drive ([codebase/471.md](../codebase/471.md)) resurrected the spawn primitive, the trust pre-write, and the settings writer as **sibling subpackages** ([`ptyrunner`](ptyrunner-package.md), [`trust`](agentrun-trust-subpackage.md), [`settings`](agentrun-settings-subpackage.md)). See § "Subpackages" below. [#2911](https://github.com/pyrycode/pyrycode/issues/2911), split from #516, introduces [`canonicalpath.Resolve`](canonicalpath-package.md) with the same filesystem semantics. `ResolveWorkdir` remains for test migrations #2915–#2916; trust, streamsup and CLI consumers use the shared resolver directly after #2912–#2914; [#2917](https://github.com/pyrycode/pyrycode/issues/2917) owns removal (§ Consumers).
+The stdlib-only parent package exports two process helpers: `ExitErrIsBenign`
+classifies expected teardown errors, and `ReapDescendantGroups` kills Claude's
+detached descendant process groups. `streamrunner` and `streamsup` share them
+without importing each other's runner implementation.
 
-Stdlib-only helper for `pyry agent-run`. The parent package's residual responsibilities are **filesystem path canonicalisation** — the macOS `/var → /private/var` realpath rule still used by e2e test helpers; `agentrun/trust`, `streamsup` and `cmd/pyry` now obtain the same path spelling from `canonicalpath.Resolve` — a **shared benign-teardown-error predicate** consumed by every spawn-and-teardown subpackage to suppress the OS's "process already gone" responses to its own SIGTERM/SIGKILL/close from the WARN surface, and (#923) the **claude descendant-process-group reaper** (`ReapDescendantGroups`) — colocated here, not appended to `exitclass.go`, so a future second consumer (`streamrunner`, #924) can call it without importing a sibling `agentrun` subpackage. The **shared logical-turn-boundary predicate** (`IsNewLogicalTurn`, #574) that `budget`'s `--max-turns` enforcement and `streamjson`'s `num_turns` reporting used to share was deleted in #1519 along with both callers. The dashed `~/.claude/projects/<encoded>/` directory-name encoding lives in [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver), not here.
-
-> **Post-#924:** `streamrunner` is now the reaper's second consumer (`ptyrunner` was the first). See § "Subpackages" and [`codebase/924.md`](../codebase/924.md).
+Filesystem path canonicalisation belongs to
+[`internal/canonicalpath`](canonicalpath-package.md). `ResolveWorkdir` and its
+redundant tests were removed in
+[#2917](https://github.com/pyrycode/pyrycode/issues/2917) after all consumers
+migrated to `canonicalpath.Resolve`. Trust writes remain in
+[`agentrun/trust`](agentrun-trust-subpackage.md), and dashed JSONL directory-name
+encoding remains in [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver).
 
 ## Public API
 
 ```go
-// ResolveWorkdir returns the resolved absolute path of workdir, canonicalised
-// the way claude canonicalises its own cwd before reading ~/.claude.json's
-// projects map: filepath.Abs, then filepath.EvalSymlinks, then each path
-// component rewritten to its on-disk spelling (#910). Canonicalises a file
-// leaf correctly too, not just a directory, despite the workdir-shaped name
-// (canonicalCase folds a leaf against its parent directory either way) —
-// confirmed by #2164, whose confinement check depends on it.
-func ResolveWorkdir(workdir string) (string, error)
-
 // ExitErrIsBenign reports whether err is the OS-level "process already gone"
 // or "self-signalled exit" shape that surfaces during expected teardown of
 // an agent-run child. Returns false for nil and for any other error.
 // Benign classes: syscall.ESRCH, syscall.EPIPE, os.ErrClosed,
 // *exec.ExitError with ExitCode() in {143, 137}, and *exec.ExitError where
 // the child was signal-killed by SIGTERM or SIGKILL. Wrapped errors are
-// unwrapped via errors.Is / errors.As. Consumed by ptyrunner / streamrunner
+// unwrapped via errors.Is / errors.As. Consumed by streamsup / streamrunner
 // to gate the teardown-path error-log sites (#527).
 func ExitErrIsBenign(err error) bool
 
@@ -41,7 +39,8 @@ func ExitErrIsBenign(err error) bool
 func ReapDescendantGroups(rootPid int, logger *slog.Logger)
 ```
 
-`ResolveWorkdir` has the same shape as `internal/install.ResolveWorkDir` — the name overlap is package-scoped (`install.ResolveWorkDir` validates a CLI flag → absolute path; `agentrun.ResolveWorkdir` resolves an absolute path → realpath; orthogonal jobs).
+Path consumers call [`canonicalpath.Resolve`](canonicalpath-package.md#public-api)
+directly; the parent package has no path-resolution API.
 
 ## Subpackages
 
@@ -49,26 +48,42 @@ func ReapDescendantGroups(rootPid int, logger *slog.Logger)
 | --- | --- | --- |
 | `internal/agentrun/trust` | [agentrun-trust-subpackage.md](agentrun-trust-subpackage.md) | Pre-mark workdirs trusted in `~/.claude.json` so PTY-driven claude skips the workspace-trust modal (#475; slimmed resurrection of #341 / #392). |
 | `internal/agentrun/settings` | [agentrun-settings-subpackage.md](agentrun-settings-subpackage.md) | Write the per-spawn deny-default permissions JSON (`{"permissions":{"allow":[...],"defaultMode":"deny"}}`) to `os.TempDir()` so PTY-driven claude enforces the same tool whitelist `-p --allowedTools` had natively (#476; slimmed resurrection of #339 / #392). |
-| `internal/agentrun/ptyrunner` | [ptyrunner-package.md](ptyrunner-package.md) | Interactive-TUI spawn primitive driven by `tui-driver` — the production spawn after #470 lands the cutover (#471). |
-| `internal/agentrun/streamrunner` | [streamrunner-package.md](streamrunner-package.md) | Stream-json subprocess spawn primitive — the operator rollback path (`PYRY_USE_STREAMJSON=1`) kept indefinitely per the #914/2026-05-19 decision, now also (#924) a `ReapDescendantGroups` consumer alongside `ptyrunner`. |
+| `internal/agentrun/ptyrunner` (deleted in #1348) | [ptyrunner-package.md](ptyrunner-package.md) | Historical interactive-TUI spawn primitive driven by `tui-driver` (#471). |
+| `internal/agentrun/streamrunner` | [streamrunner-package.md](streamrunner-package.md) | Stream-json subprocess spawn primitive for `pyry agent-run`; consumes the parent's process helpers. |
 | `internal/agentrun/jsonl` | [jsonl-reader.md](jsonl-reader.md) | Pure JSONL line reader + deterministic end-of-turn detector (#348). Post-[#512](../codebase/512.md) consumed only by `selfcheck` (`jsonl.NewReader` directly over its own pipe) and `e2e/realclaude/fixtures.go` (parses captured fixtures); both will migrate in a follow-up that finally deletes the package. |
 
-Imports of `internal/agentrun` after [#508](../codebase/508.md), [#527](../codebase/527.md), and [#574](../codebase/574.md):
+Current production imports of `internal/agentrun`:
 
 - `trust` imports `internal/canonicalpath` directly for the `projects[...]` key shape; it no longer imports this parent package.
-- `ptyrunner`, `streamrunner` each import for `ExitErrIsBenign` — the shared teardown-error predicate at their respective `Session.Close` / `Terminate` / `Kill` / `stdin.Close` error-log sites (#527).
-- `ptyrunner` and (post-#924) `streamrunner` both import for `ReapDescendantGroups` — each through its own local `reapDescendantGroupsFn` seam (`reap.go`), re-pointed at the shared function; `ptyrunner`'s three teardown call sites and `streamrunner`'s single `cmd.Cancel` call site were unaffected by the lift/wire split. See [ptyrunner-package.md](ptyrunner-package.md#teardown-reap-descendant-process-groups-reapgo-565-864-923) and [streamrunner-package.md](streamrunner-package.md#teardown-reap-descendant-process-groups-reapgo-924).
+- `streamrunner` and `streamsup` import `ExitErrIsBenign` to classify expected teardown errors, and `ReapDescendantGroups` through their local `reapDescendantGroupsFn` seams for cancellation. See [streamrunner teardown](streamrunner-package.md#teardown-reap-descendant-process-groups-reapgo-924) and [streamsup dependency direction](streamsup-package.md#dependency-direction-ac1).
 - `settings` does not import the parent package; it has no workdir input (writes to `os.TempDir()`) and is stdlib-only.
 
-The `ptyrunner`, `streamrunner`, and pre-#512 `jsonl/tail` subpackages used to import the parent for `EncodeProjectDir` but now call [`tui-driver/pkg/tuidriver.SessionJSONLPath`](https://github.com/pyrycode/tui-driver) (or `EncodeCwd`) directly — the canonicalisation lives inside tui-driver. The `jsonl/tail` subpackage was deleted in [#512](../codebase/512.md) (`ptyrunner.Run` drains `tuidriver.TailJSONL` inline).
+Historically, `ptyrunner`, `streamrunner`, and pre-#512 `jsonl/tail` imported the
+parent for `EncodeProjectDir`. #508 removed that wrapper in favour of direct
+[`tui-driver/pkg/tuidriver.SessionJSONLPath`](https://github.com/pyrycode/tui-driver)
+or `EncodeCwd` calls. #512 later deleted `jsonl/tail`, and #1348 deleted
+`ptyrunner`; neither is a current consumer.
 
 ## Key shape
 
-`projects` map keys are the **resolved, on-disk-cased** absolute path. The macOS `/var → /private/var` symlink means a non-resolved key never matches claude's lookup. `ResolveWorkdir` does `filepath.Abs`, then `filepath.EvalSymlinks`, then (#910) rewrites each path component to its actual on-disk spelling via an unexported `canonicalCase` walk. The case step exists because `EvalSymlinks` alone preserves the **input** case of any component that isn't itself a symlink — on a case-insensitive filesystem (default macOS APFS), a workdir configured with the wrong case (e.g. `.../WorkSpace` vs on-disk `.../Workspace`) survived `EvalSymlinks` unchanged and produced a `projects` key claude's on-disk-cased cwd never matches, silently parking every dispatch on the workspace-trust modal (2026-05-29 incident on #208; see [`codebase/910.md`](../codebase/910.md)). `canonicalCase`'s per-component rule prefers an exact-case match over any case-fold — the sibling-safety guarantee on a case-sensitive filesystem — and folds only on a *unique* `strings.EqualFold` match; it is best-effort and cannot fail (an unreadable ancestor just keeps the input component). [`canonicalpath.Resolve`](canonicalpath-package.md#path-and-error-contract) now provides the same path and error contract independently of agentrun. The old implementation remains during consumer migration; neither resolver writes trust state or enforces confinement.
+`projects` map keys are the **resolved, on-disk-cased** absolute path supplied by
+[`canonicalpath.Resolve`](canonicalpath-package.md#path-and-error-contract).
+It applies `filepath.Abs`, `filepath.EvalSymlinks`, then a best-effort component
+case walk. The macOS `/var → /private/var` alias requires symlink resolution;
+plain `EvalSymlinks` can also preserve input case on case-insensitive filesystems.
+A configured `WorkSpace` spelling for an on-disk `Workspace` therefore once
+produced a trust key Claude never matched, parking dispatch on the trust modal
+(see [the case-correction incident](../codebase/910.md)).
+
+Exact-case matches take precedence; only a unique `strings.EqualFold` match
+changes spelling. This protects case-differing siblings on case-sensitive
+filesystems. Unreadable ancestors preserve the input component. These semantics
+and their tests belong to canonicalpath; trust writes and confinement checks
+remain the consumers' responsibility.
 
 ## Encoder lives in tui-driver
 
-`canonicalpath.Resolve` produces the resolved abs path (`/private/var/folders/...`) trust now uses as the `projects[...]` key inside `~/.claude.json`; the remaining `ResolveWorkdir` consumers use the same path semantics. The dashed directory-name segment claude uses under `~/.claude/projects/<encoded-cwd>/<sid>.jsonl` is produced by [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver). The two encodings are distinct (same logical input, different transforms for different consumers) but they no longer share a wrapper here — pre-[#508](../codebase/508.md) `EncodeProjectDir` chained `ResolveWorkdir` then `EncodeCwd`, which resolved symlinks twice (linux) or did `EvalSymlinks`-then-`F_GETPATH` (darwin). #508 deleted the wrapper; callers that need the dashed name now use `tuidriver.EncodeCwd(workdir)` directly (or `tuidriver.SessionJSONLPath(home, workdir, sessionID)` for the full path), and `tuidriver.EncodeCwd`'s internal `canonicalisePath` handles the realpath rule once (darwin: `F_GETPATH` via fd; linux: `filepath.EvalSymlinks`).
+`canonicalpath.Resolve` produces the resolved abs path (`/private/var/folders/...`) trust uses as the `projects[...]` key inside `~/.claude.json`. The dashed directory-name segment claude uses under `~/.claude/projects/<encoded-cwd>/<sid>.jsonl` is produced by [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver). The two encodings are distinct (same logical input, different transforms for different consumers) but they no longer share a wrapper here — pre-[#508](../codebase/508.md) `EncodeProjectDir` chained the former `ResolveWorkdir` then `EncodeCwd`, which resolved symlinks twice (linux) or did `EvalSymlinks`-then-`F_GETPATH` (darwin). #508 deleted the wrapper; callers that need the dashed name now use `tuidriver.EncodeCwd(workdir)` directly (or `tuidriver.SessionJSONLPath(home, workdir, sessionID)` for the full path), and `tuidriver.EncodeCwd`'s internal `canonicalisePath` handles the realpath rule once (darwin: `F_GETPATH` via fd; linux: `filepath.EvalSymlinks`).
 
 The substitution rule (canonicalised in `tuidriver.EncodeCwd` as of 2026-05-19) is **every byte outside `[a-zA-Z0-9]` → `-`** (per-byte, no run collapse — idempotent on already-encoded strings because `-` itself is non-alnum and maps to `-`). The rule is verified empirically against claude's on-disk behaviour. The #347 ticket body specified only `/` → `-`; the architect spec amended to `/` AND `.` from direct observation (workdir segments like `/.pyrycode-worktrees/` encoding to `--pyrycode-worktrees-`); [#501](../codebase/501.md) generalised the rule to the full character class after the narrow encoder caused a 55 s wedge in real-claude e2e tests for any workdir containing `_` or ` ` (Go test temp dirs whose names include underscores). Shipping anything narrower than the full per-byte rule produces keys that never match claude's directory names for non-trivial inputs.
 
@@ -79,8 +94,8 @@ The substitution rule (canonicalised in `tuidriver.EncodeCwd` as of 2026-05-19) 
 - `internal/agentrun/trust` — migrated to `canonicalpath.Resolve` for the `projects[...]` key and returned spawn path; no longer a consumer of this parent package. See [agentrun-trust-subpackage.md](agentrun-trust-subpackage.md).
 - `internal/streamsup` — `New` and `Runner.SetSpawnWorkDir` use `canonicalpath.Resolve` for initial and replacement workdirs. The parent-package dependency remains for `ExitErrIsBenign` and `ReapDescendantGroups`; see [streamsup dependency direction](streamsup-package.md#dependency-direction-ac1).
 - `internal/agentrun/settings` — does **not** import this parent package; writes its tempfile to `os.TempDir()` and is stdlib-only. See [agentrun-settings-subpackage.md](agentrun-settings-subpackage.md).
-- `internal/agentrun/ptyrunner` — does not import this parent post-[#508](../codebase/508.md). Receives its `Config.WorkDir` from the caller; the trust pre-write supplies the resolved value via `trust.MarkWorkdirTrusted`'s return.
-- JSONL watcher (`internal/agentrun/jsonl/tail`) — **deleted by [#512](../codebase/512.md)**. `ptyrunner.Run` drains [`tuidriver.TailJSONL`](https://github.com/pyrycode/tui-driver) inline; the canonicalisation rule and the dashed-name encoding live inside tui-driver.
+- `internal/agentrun/streamrunner` — consumes both retained process helpers; uses the caller's `Config.WorkDir` directly. The selfcheck caller supplies the resolved value returned by `trust.MarkWorkdirTrusted`.
+- JSONL watcher (`internal/agentrun/jsonl/tail`) — **deleted by [#512](../codebase/512.md)**, when the former `ptyrunner.Run` began draining [`tuidriver.TailJSONL`](https://github.com/pyrycode/tui-driver) inline; the canonicalisation rule and the dashed-name encoding live inside tui-driver.
 - `cmd/pyry`'s `fileAttacher` (`attach_file.go`, #2164) — `confineFile` and `confineToRoot` use `canonicalpath.Resolve` for the confinement root (a conversation's recorded `Cwd`) and model-chosen target. Both ends retain the same on-disk-case spelling; `withinDir` enforces containment and `readChecked` checks file identity. See [control-plane-attachment-file-confine-and-store-a-claude-named-path.md](control-plane-attachment-file-confine-and-store-a-claude-named-path.md).
 
 `cmd/pyry` also resolves configured read folders through `resolveReadFolders`,
@@ -91,12 +106,23 @@ after #2914; no `ResolveWorkdir` references remain in `cmd/pyry`. Configured roo
 stay fixed at startup, and relative file requests remain workspace-rooted; see
 [read roots](v2-session-manager-state-machine-inbound-read-workspace-file-workspacefileread.md#operator-named-folders-widen-the-absolute-case-only-2710).
 
-No production consumers of `ResolveWorkdir` remain. Outside its own package tests,
-five test calls remain: one in `internal/e2e` and four in
-`internal/e2e/realclaude`, pending #2915 and #2916. Trust and streamsup have already
-migrated; their resolver calls are not part of this remaining count.
+The fake-daemon and real-Claude test helpers also use `canonicalpath.Resolve`
+after #2915–#2916. All Go calls to `ResolveWorkdir` are gone; the parent remains
+in use for process teardown, including real-Claude reaper tests.
 
 ## History — deleted surfaces
+
+`ResolveWorkdir`, `canonicalCase` and `matchEntry` were removed with the redundant
+workdir tests in [#2917](https://github.com/pyrycode/pyrycode/issues/2917), after
+\#2911 introduced [`canonicalpath.Resolve`](canonicalpath-package.md) and
+\#2912–#2916 migrated the production and test consumers. Canonicalpath retains all
+seven original workdir scenarios and portable case-selection tests. The parent
+retains `ExitErrIsBenign` and `ReapDescendantGroups` unchanged.
+
+`EncodeProjectDir` was removed in [#508](../codebase/508.md) after dashed-name
+encoding migrated to tui-driver. `IsNewLogicalTurn` was removed in #1519 with
+its only two callers, `budget` and `streamjson`, orphaned since #1348 deleted
+`ptyrunner`.
 
 Three surfaces lived in this package historically and were removed in #392 when stream-json subprocess mode replaced PTY drive:
 
@@ -115,9 +141,10 @@ The 2026-05-19 pivot back to PTY drive (#329 tracking) drives all three resurrec
 
 ## Related
 
+- [canonicalpath-package.md](canonicalpath-package.md) — shared filesystem path resolution, its error contract and portable case-selection tests.
 - [agentrun-trust-subpackage.md](agentrun-trust-subpackage.md) — `internal/agentrun/trust`, the workspace-trust pre-write (#475).
 - [agentrun-settings-subpackage.md](agentrun-settings-subpackage.md) — `internal/agentrun/settings`, the per-spawn deny-default permissions JSON writer (#476).
-- [ptyrunner-package.md](ptyrunner-package.md) — `internal/agentrun/ptyrunner`, the interactive-TUI spawn primitive (#471).
+- [ptyrunner-package.md](ptyrunner-package.md) — historical interactive-TUI spawn primitive (#471, deleted in #1348).
 - [streamrunner-package.md](streamrunner-package.md) — `internal/agentrun/streamrunner`, the stream-json spawn primitive (#390).
 - [jsonl-reader.md](jsonl-reader.md) — `internal/agentrun/jsonl` (#348), the pure JSONL line reader + deterministic end-of-turn detector. Post-[#512](../codebase/512.md) consumed only by `selfcheck` and `e2e/realclaude/fixtures.go`; the tail-watcher consumer is gone.
 - [pyry-agent-run-command.md](pyry-agent-run-command.md) — the verb that consumes the subpackages.

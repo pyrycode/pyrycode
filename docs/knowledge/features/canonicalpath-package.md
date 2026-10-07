@@ -43,7 +43,8 @@ wrapped with `%w`. Use `errors.Is` to check the underlying identity, including
 `fs.ErrNotExist` for a missing path or broken symlink and `fs.ErrPermission` for
 denied traversal. A missing or inaccessible process cwd can make relative or
 empty input fail during `filepath.Abs`. The existing
-`agentrun: resolve workdir %q: %w` error context is retained during migration.
+`agentrun: resolve workdir %q: %w` error context remains for compatibility with
+the former resolver, even after its removal.
 
 Plain `filepath.EvalSymlinks` is insufficient for the on-disk-case contract: on a
 case-insensitive filesystem it can preserve the caller's spelling of components
@@ -60,15 +61,18 @@ confinement policy when using the result.
 ## Migration
 
 [Trust marking](agentrun-trust-subpackage.md#key-shape--realpath-on-disk-case-not-abspath)
-uses `canonicalpath.Resolve` directly. The old `agentrun.ResolveWorkdir`
-implementation, API and tests remain alongside this package pending removal.
+uses `canonicalpath.Resolve` directly, as do streamsup, CLI confinement/read-root
+and transcript helpers, and fake-daemon test helpers.
 The four real-Claude consumers now use the shared resolver for the turnless and
 absent-resume probes' child cwd, the retained/dropped session-recovery workspace,
 and the external-includes control arm's filesystem-form `projects` key
 ([#2916](https://github.com/pyrycode/pyrycode/issues/2916)).
-Consumer migrations #2912–#2916 are tracked by
-[#2911](https://github.com/pyrycode/pyrycode/issues/2911), with removal of the old
-implementation in [#2917](https://github.com/pyrycode/pyrycode/issues/2917).
+Consumer migrations #2912–#2916 completed the extraction introduced in
+[#2911](https://github.com/pyrycode/pyrycode/issues/2911).
+[#2917](https://github.com/pyrycode/pyrycode/issues/2917) removed the old
+`agentrun.ResolveWorkdir` implementation, API and redundant tests. The parent
+agentrun package retains only its process helpers, `ExitErrIsBenign` and
+`ReapDescendantGroups`; see [agentrun's public API](agentrun-package.md#public-api).
 The shared resolver preserves the old semantics without moving trust writes or
 confinement policy into this package.
 
