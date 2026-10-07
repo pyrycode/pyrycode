@@ -153,7 +153,7 @@ func tdnClassifyReapLog(stderr []byte, heldPGID int) tdnReapOutcome {
 		// pgid — the same shape as pinReadState's pid <= 0 guard, and the same
 		// reason.
 		out.Verdict = tdnReapInstrumentFailed
-		out.Detail = tdnDetail("held pgid %d is not one the reaper can ever report: reap.go:52 "+
+		out.Detail = tdnDetail("held pgid %d is not one the reaper can ever report: ReapDescendantGroups "+
 			"skips pgid <= 1 before it kills anything, so no answer about it could be read "+
 			"out of the line", heldPGID)
 		return out
@@ -194,7 +194,7 @@ func tdnClassifyReapLog(stderr []byte, heldPGID int) tdnReapOutcome {
 	if out.LineCount == 0 {
 		out.Verdict = tdnReapNoLine
 		out.Detail = tdnDetail("no line carrying %q appears in %d bytes of stderr. This is "+
-			"AMBIGUOUS and collapsing it into either reading is a defect: reap.go:64 guards the "+
+			"AMBIGUOUS and collapsing it into either reading is a defect: ReapDescendantGroups guards the "+
 			"emit on len(reaped) > 0, so silence means the reaper ran and reaped nothing, or "+
 			"that it never fired at all", tdnReapMessage, len(stderr))
 		return out

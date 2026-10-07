@@ -378,7 +378,7 @@ func TestFinBoundKeyNamesAllocatesItsOwnBackingArray(t *testing.T) {
 			}
 			if &got[0] == &in[0] {
 				t.Errorf("the result shares its backing array with the input. finTrailerBuild copies " +
-					"this field by PLAIN SLICE ASSIGNMENT (finding_trailer_evidence_test.go:333) and " +
+					"this field by PLAIN SLICE ASSIGNMENT (finTrailerBuild KeyNames assignment) and " +
 					"says in its own comment that the assignment is safe only because this clause " +
 					"holds — so a pass-through puts two carriers on one array while `go test -race` " +
 					"runs this package's tests in parallel")

@@ -873,7 +873,7 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 		// certifies the instant the rest of the decision is about.
 	case trailGateBudgetFired:
 		return decide(trailOutcomeVoidBudgetFired, "the trailer certifies terminal reason %q, so "+
-			"the Terminate hook reaped INSIDE the hook (runner.go:492-503) BEFORE the trailer was "+
+			"the Terminate hook reaped INSIDE the hook (historical ptyrunner.Run) BEFORE the trailer was "+
 			"written and no attribution on that path could prove aliveness-at-trailer, at either "+
 			"instant. A STRUCTURAL void, not a negative: reporting a scan-side answer here would "+
 			"imply a better instrument could have proved something", readings.Gate.Reason)
@@ -1064,7 +1064,7 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 	// restating them here would spend cap on a duplicate and, at the cap, cut off
 	// the argument the Detail exists to make.
 	if readings.Admit.Value == trailAdmitProof {
-		// The other evidence class. Its Detail is left EXACTLY as it was, and the
+		// The other evidence class. Only its source citations change; the
 		// reason stands without a byte argument: the route travels in the Route
 		// field, which publishes it without spending any of trailDetail's cap, so
 		// prose naming it would buy nothing at a cost.
@@ -1076,7 +1076,7 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 		// pass by having the echo truncated away. What survives at this arm is
 		// weaker and asks only that the Detail FIT: TestTrailClassifyRun's per-row
 		// reachTruncationMarker check. Measured for #1428 under `go test -overlay`,
-		// this arm publishes 444 B against reachMaxCommandBytes' 512 — growing its
+		// that version published 444 B against reachMaxCommandBytes' 512 — growing its
 		// format string by all 68 spare bytes reddens NOTHING, because
 		// reachCapCommand returns a command of exactly the cap unchanged, and 69
 		// reddens that check in four TestTrailClassifyRun sub-tests. The 68 the old
@@ -1086,8 +1086,8 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 		// for #1428 and left as a follow-up.
 		out.Route = trailRouteReapLog
 		return decide(trailOutcomeRunningAtTrailer, "pyry's own reap log names the held group on "+
-			"exactly one anchored line under certified terminal reason %q, and emitter.Close() "+
-			"wrote the trailer (runner.go:479-485) before the reap defer (:398) SIGKILLed it. The "+
+			"exactly one anchored line under certified terminal reason %q. In historical ptyrunner.Run, "+
+			"emitter.Close() wrote the trailer before the reap defer SIGKILLed it. The "+
 			"group was alive strictly AFTER the trailer was written, and therefore alive when it "+
 			"was written. The point-in-time readings recorded alongside this answer are "+
 			"corroboration and are EXPECTED to be late, so they do not move it",
@@ -1363,7 +1363,7 @@ func trailRunPresentOwesNoneReadings() trailRunReadings {
 func trailRunCases() []trailRunCase {
 	// The one row built end to end by the REAL producers, so the happy path stays
 	// pinned to what the shipped functions emit rather than to a hand-typed
-	// approximation of them — the same reason TestTrailGate routes four rows
+	// approximation of them — the same reason TestTrailGate routes six rows
 	// through trailScan.
 	realGate := trailGate(trailGateInput{Scan: trailScan([]byte(trailFixtureTrailer + "\n")),
 		RunnerPath: trailRunnerUnread()})

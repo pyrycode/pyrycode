@@ -230,7 +230,7 @@ func trailReasonAgainstPath(runnerReading string, keyNames []string, decodedReas
 				Value: trailReasonAbsentOwesNone,
 				Detail: trailDetail("%s: the argv reduced to streamrunner and terminal_reason is "+
 					"off the line. That path passes claude's bytes through unchanged "+
-					"(streamrunner/runner.go:177-179), so a healthy run's trailer is claude's own "+
+					"(streamrunner.Run stdout pass-through), so a healthy run's trailer is claude's own "+
 					"result line and owes no terminal_reason", trailReasonAbsentOwesNone),
 			}
 		}
@@ -240,7 +240,7 @@ func trailReasonAgainstPath(runnerReading string, keyNames []string, decodedReas
 				"terminal_reason, and the line carries one anyway. The claim is only that the "+
 				"line is NOT that path's documented healthy shape, and never that pyry wrote it "+
 				"— the path passes claude's bytes through unchanged "+
-				"(streamrunner/runner.go:177-179), so claude can produce the same reading. Empty "+
+				"(streamrunner.Run stdout pass-through), so claude can produce the same reading. Empty "+
 				"or named, both land here", trailReasonPresentOwesNone),
 		}
 	case "ptyrunner":
@@ -248,7 +248,7 @@ func trailReasonAgainstPath(runnerReading string, keyNames []string, decodedReas
 			return trailReasonResult{
 				Value: trailReasonAbsentOwesOne,
 				Detail: trailDetail("%s: the argv reduced to ptyrunner, which owes a "+
-					"terminal_reason — every trailer there is pyry's own and emitter.go:383-391 "+
+					"terminal_reason — every trailer there is pyry's own and historical streamjson.Emitter.Close "+
 					"substitutes the recorded detail or \"unclassified\" before marshalling — and "+
 					"the field is off the line entirely", trailReasonAbsentOwesOne),
 			}
@@ -257,7 +257,7 @@ func trailReasonAgainstPath(runnerReading string, keyNames []string, decodedReas
 			return trailReasonResult{
 				Value: trailReasonBlankOwesOne,
 				Detail: trailDetail("%s: the argv reduced to ptyrunner and terminal_reason is on "+
-					"the line but decodes empty. emitter.go:383-391 substitutes \"unclassified\" "+
+					"the line but decodes empty. historical streamjson.Emitter.Close substituted \"unclassified\" "+
 					"rather than marshal an empty one, so that chokepoint's guarantee is violated",
 					trailReasonBlankOwesOne),
 			}

@@ -420,8 +420,8 @@ func TestTrailScanResultReachesNoRawMessageMap(t *testing.T) {
 
 	if finRecordInputReaches(carrier, forbidden, map[reflect.Type]bool{}) {
 		t.Errorf("%s is reachable from trailScanResult: its values are the RAW BYTES of the "+
-			"line, so a %%v on the map — or on any struct transitively holding it, as this "+
-			"package already does at finding_run_record_test.go:775 — prints the whole assistant "+
+			"line, so a %%v on the map — or on any struct transitively holding it, using the diagnostic pattern in "+
+			"TestFinRecordEmbedsTrailerRecordWhole — prints the whole assistant "+
 			"`result` field. trailKeyNames discards the map inside itself and returns []string, "+
 			"which is what keeps this true by construction", forbidden)
 	}

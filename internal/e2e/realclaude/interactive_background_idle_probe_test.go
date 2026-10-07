@@ -200,9 +200,9 @@ const (
 // an earlier turn or another conversation. Carried in the artefact so the
 // published evidence states it, rather than leaving it to the reader.
 const bgIdleStructuralArgument = "turn_state{idle} reaches the wire from exactly one site — " +
-	"cmd/pyry/interactive_turn_v2.go:216, inside the turnevent.TurnEnd arm, which is entered " +
-	"only when inTurn is true (:209) and which immediately calls endTurn(). inTurn is set only " +
-	"by startTurnIfNeeded (:267), which every content arm calls together with a " +
+	"interactiveTurnEmitterV2.HandleFor, inside the turnevent.TurnEnd arm, which is entered " +
+	"only when inTurn is true (the HandleFor guard) and which immediately calls endTurn(). inTurn is set only " +
+	"by interactiveTurnEmitterV2.startTurnIfNeeded, which every content arm calls together with a " +
 	"transitionTo(thinking|responding), so no idle can reach the wire without a preceding " +
 	"non-idle turn_state for the same conversation, in the same record. One turn is driven, " +
 	"into one conversation seeded fresh in a per-test authenticated HOME, over one phone that " +
@@ -224,12 +224,12 @@ const bgIdleStructuralArgument = "turn_state{idle} reaches the wire from exactly
 const (
 	bgIdleRunnerPath        = "stream-json"
 	bgIdleRunnerAttribution = "RIG-AUTHORED, no non-authored corroboration recorded: " +
-		"writeStreamInteractiveConfig (interactive_stream_liveness_test.go:155) wrote " +
+		"writeStreamInteractiveConfig (interactive_stream_liveness_test.go) wrote " +
 		`{"interactive_runner":"stream-json"} into <home>/.pyry/config.json before the daemon ` +
-		"spawned. selectInteractiveRunner (cmd/pyry/main.go:667) never logs its choice, so " +
+		"spawned. selectInteractiveRunner (cmd/pyry) never logs its choice, so " +
 		"citing the config value merely echoes the rig. The daemon starting at all is NOT " +
-		"corroboration either: an unrecognised value fails fast (main.go:675, no silent PTY " +
-		"fallback), but both \"pty\" and \"stream-json\" start fine, so a clean start proves " +
+		"corroboration either: an unrecognised value fails fast (selectInteractiveRunner unknown-value arm). " +
+		"At capture time, before #1348 removed PTY, both runner paths started, so a clean start proved " +
 		"only that the value parsed."
 )
 

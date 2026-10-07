@@ -69,6 +69,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -164,7 +165,7 @@ var dropcapExpectedSubtypes = []string{
 var dropcapArgs = []string{"--model", dropcapModel, "--dangerously-skip-permissions"}
 
 const dropcapSpawnShapeDelta = "This is the YOLO interactive shape. Production's stream path adds, via " +
-	"withApprovalArgs (cmd/pyry/streamsup_runner.go:116) and internal/sessions.claudeSettingsArgs, a " +
+	"withApprovalArgs (cmd/pyry/streamsup_runner.go) and internal/sessions.claudeSettingsArgs, a " +
 	"--permission-prompt-tool / --mcp-config pair on NON-yolo spawns plus a per-session --settings. " +
 	"This capture passes none of them: it uses --dangerously-skip-permissions, a real production shape " +
 	"(the YOLO session bit, internal/sessions/session.go) and precisely the arm on which withApprovalArgs " +
@@ -185,7 +186,7 @@ const dropcapRedactionRationale = "The primary defence is by construction: the w
 	"and os.Environ() is never read into the record. On top of that, dropcapRedactor substitutes a " +
 	"declared table of path/identifier classes into EVERY string that enters the record, and " +
 	"dropcapScanner is a fail-closed deny-scan over the whole marshalled record. " +
-	"bgIdleRedact (interactive_background_idle_probe_test.go:824) is NOT sufficient here: it substitutes " +
+	"bgIdleRedact (interactive_background_idle_probe_test.go) is NOT sufficient here: it substitutes " +
 	"one value (the operator's home) into a SUMMARY that turnbridge/outbound.go had already capped at 200 " +
 	"runes, so the exposure was structurally bounded before redaction ran. Here the input is an uncapped " +
 	"raw payload that can carry cwd, tool output, file contents, branch names and prompt text, and it " +
@@ -2077,13 +2078,15 @@ func TestDropcapFixtureIsACapture(t *testing.T) {
 				}
 			}
 
-			// The rig-authored frame prose is a verbatim copy of the constants that
+			// The rig-authored frame prose matches the constants that
 			// produced it — pinned, not assumed. AC3/AC4 put the provenance, the
 			// spawn-shape delta, the redaction rationale (including what is
 			// deliberately KEPT) and the limitations in the RECORD, so a constant
 			// that gains a sentence while the committed record keeps the old one
 			// leaves the fixture making a claim the code no longer makes. This
-			// fails until the two agree.
+			// fails until the two agree. Historical capture contents retain numeric
+			// source positions; normalize only the two citation labels replaced by
+			// #1424, leaving all surrounding prose and captured payloads exact.
 			//
 			// Which also fixes the way they are allowed to be made to agree. These
 			// three fields are compile-time literals, never claude's bytes, so
@@ -2097,7 +2100,7 @@ func TestDropcapFixtureIsACapture(t *testing.T) {
 				{"redaction_rationale", rec.RedactionRationale, dropcapRedactionRationale},
 				{"limitations", rec.Limitations, dropcapLimitations},
 			} {
-				if kv[1] != kv[2] {
+				if dropcapHistoricalCitationLabels.ReplaceAllString(kv[1], "($1)") != kv[2] {
 					t.Errorf("%s in the committed capture is not the constant that writes it. "+
 						"Either the fixture predates a change to the constant, or it was edited "+
 						"away from it; propagate the constant into the fixture (or re-capture)",
@@ -2123,3 +2126,9 @@ func TestDropcapFixtureIsACapture(t *testing.T) {
 		})
 	}
 }
+
+// Historical capture prose predates symbol citations. Only these two filename
+// labels changed; this leaves the explanation and every payload byte intact.
+var dropcapHistoricalCitationLabels = regexp.MustCompile(
+	`\((cmd/pyry/streamsup_runner\.go|interactive_background_idle_probe_test\.go):[0-9]+(?:-[0-9]+)?\)`,
+)

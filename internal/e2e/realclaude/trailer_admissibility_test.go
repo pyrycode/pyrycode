@@ -612,8 +612,8 @@ func trailGate(in trailGateInput) trailGateResult {
 			Value: trailGateOutOfContract,
 			Detail: trailDetail("state %s carries a trailer whose terminal_reason is empty — the "+
 				"key IS on the line and its value is blank. Certifying it would reintroduce, one "+
-				"layer up, the defect the nil Trailer pointer was chosen to prevent. Today's pyry "+
-				"cannot render a blank one — emitter.go:383-391 is a chokepoint substituting the "+
+				"layer up, the defect the nil Trailer pointer was chosen to prevent. The historical PTY path "+
+				"could not render a blank one — streamjson.Emitter.Close substituted the "+
 				"recorded detail or \"unclassified\" before marshalling — so for this shape, and "+
 				"not for an absent key, NO LIVE REPRO EXISTS", trailSeen),
 			RunnerPath: in.RunnerPath,
@@ -625,7 +625,7 @@ func trailGate(in trailGateInput) trailGateResult {
 			Value:  trailGateBudgetFired,
 			Reason: reason,
 			Detail: trailDetail("terminal_reason is %q, so the run was budget-fired and the "+
-				"Terminate hook reaped INSIDE the hook (runner.go:492-503), BEFORE the trailer "+
+				"Terminate hook reaped INSIDE the hook (historical ptyrunner.Run), BEFORE the trailer "+
 				"was written. A reap-log attribution on this path is void, not negative. The "+
 				"reason is certified anyway, because the predicate needs it to name that void",
 				reason),
@@ -725,7 +725,7 @@ func trailGate(in trailGateInput) trailGateResult {
 			Detail: trailDetail("%s: terminal_reason is on the line and the path owes none, so the "+
 				"line is not that path's healthy shape and nothing is certified. NEVER that pyry "+
 				"wrote it — the path passes claude's bytes through unchanged "+
-				"(streamrunner/runner.go:177-179), so claude produces the same reading. About what "+
+				"(streamrunner.Run stdout pass-through), so claude produces the same reading. About what "+
 				"the trailer CARRIED, never whether a process was alive. A READING of the trailer "+
 				"rather than a defect in it", trailReasonPresentOwesNone),
 			RunnerPath: in.RunnerPath,
@@ -737,7 +737,7 @@ func trailGate(in trailGateInput) trailGateResult {
 		Reason: reason,
 		Detail: trailDetail("the trailer is usable and carries terminal_reason %q, which is not "+
 			"%q — so emitter.Close() wrote the trailer before the reap defer on this path "+
-			"(runner.go:479-485, :398) and a reap-log attribution can be proof", reason,
+			"(historical ptyrunner.Run defer ordering) and a reap-log attribution can be proof", reason,
 			trailBudgetTerminalReason),
 		RunnerPath: in.RunnerPath,
 	}
@@ -851,7 +851,7 @@ func trailAdmitAttribution(reap tdnReapOutcome, certified string) trailAdmitResu
 		return trailAdmitResult{
 			Value: trailAdmitVoidBudgetFired,
 			Detail: trailDetail("the certified terminal reason is %q, so the reap ran inside the "+
-				"Terminate hook (runner.go:492-503) BEFORE the trailer was written. No reap line "+
+				"Terminate hook (historical ptyrunner.Run) BEFORE the trailer was written. No reap line "+
 				"on that path could prove aliveness-at-trailer, whatever the record's verdict %s "+
 				"says. This void is STRUCTURAL and outranks the reap-side ones, which are "+
 				"incidental: reporting one of those here would imply that fixing the instrument "+
@@ -871,7 +871,7 @@ func trailAdmitAttribution(reap tdnReapOutcome, certified string) trailAdmitResu
 		return trailAdmitResult{
 			Value: trailAdmitVoidNoLine,
 			Detail: trailDetail("no anchored reap line appears at all. AMBIGUOUS by construction "+
-				"— reap.go:64 guards the emit on len(reaped) > 0, so silence means the reaper ran "+
+				"— ReapDescendantGroups guards the emit on len(reaped) > 0, so silence means the reaper ran "+
 				"and reaped nothing OR that it never fired — which makes this a void and NEVER "+
 				"evidence that group %d had exited", reap.HeldPGID),
 		}
@@ -892,8 +892,8 @@ func trailAdmitAttribution(reap tdnReapOutcome, certified string) trailAdmitResu
 		return trailAdmitResult{
 			Value: trailAdmitProof,
 			Detail: trailDetail("the reaper named group %d on exactly one anchored line (%v) and "+
-				"the certified terminal reason %q is not %q. emitter.Close() wrote the trailer "+
-				"(runner.go:479-485) before the reap defer (:398) SIGKILLed the group, so the "+
+				"the certified terminal reason %q is not %q. In historical ptyrunner.Run, "+
+				"emitter.Close() wrote the trailer before the reap defer SIGKILLed the group, so the "+
 				"group was alive strictly AFTER the trailer was written — and therefore alive "+
 				"when it was written", reap.HeldPGID, reap.PGIDs, certified,
 				trailBudgetTerminalReason),
@@ -1480,7 +1480,7 @@ func TestTrailGate(t *testing.T) {
 		}
 		if !strings.Contains(emptyReason.Detail, "not for an absent key, NO LIVE REPRO EXISTS") {
 			t.Errorf("empty-reason detail: got %q, want the no-live-repro claim SCOPED to this "+
-				"shape — emitter.go:383-391 is a chokepoint so pyry cannot render a blank "+
+				"shape — historical streamjson.Emitter.Close prevented a blank "+
 				"terminal_reason, but that says nothing about an ABSENT one, which every "+
 				"healthy PYRY_USE_STREAMJSON=1 run produces. Unscoped, the claim sends a "+
 				"reader hunting for a run that does not exist while mis-describing the one "+
@@ -1533,7 +1533,7 @@ func TestTrailGate(t *testing.T) {
 			t.Errorf("absent-reason detail: got %q, want it NOT to claim no live repro exists — "+
 				"that claim is TRUE of a present-and-empty terminal_reason and FALSE of an "+
 				"absent one, whose live repro is every healthy PYRY_USE_STREAMJSON=1 run "+
-				"(streamrunner passes claude's bytes through unchanged, runner.go:177-179). "+
+				"(streamrunner passes claude's bytes through unchanged, streamrunner.Run stdout pass-through). "+
 				"This is the assertion that catches the old prose copy-pasted onto the new arm",
 				absentReason.Detail)
 		}
@@ -1955,7 +1955,7 @@ func TestTrailGateNamesThePresenceCaseOnAPathThatOwesNone(t *testing.T) {
 				// own output reaches the same reading, so the arm may never say pyry
 				// wrote the line.
 				"NEVER that pyry wrote it",
-				"streamrunner/runner.go:177-179",
+				"streamrunner.Run stdout pass-through",
 				// What the record is about, stated so a reader cannot take it for a
 				// statement about a live process.
 				"never whether a process was alive",
