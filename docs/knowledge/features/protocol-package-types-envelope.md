@@ -53,10 +53,16 @@ timestamp. Session transitions have no ring id; an operator push with no ring
 still carries its history id. See [history producers](history-package.md#producers-2114-2115)
 for append placement and the operator handoff.
 
-Older daemons, absent or failed history storage, non-history-backed frames and
-current reconnect replay omit the history key. Replay reconstructs an envelope
-from `eventring.Event`, which retains no history metadata; direct emission does
-not establish a replay guarantee. Absent or failed storage still permits live
+History-backed interactive-turn and operator-message ring events retain the
+original successful append's id before publication (#2909), even with no live
+recipient. `drainReplayOnce` restores a non-nil `Envelope.HistoryEntryID` only
+from a nonzero retained `Event.HistoryEntryID`; authenticated, sealed replay
+preserves that id, payload and timestamp and appends no new history. Channel-post
+ring events still have no history id, and session transitions stay outside ring
+replay. See [replay](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md).
+
+Older daemons, absent or failed history storage, and non-history-backed frames
+(live or replayed) omit the history key. Absent or failed storage still permits live
 delivery and existing ring recording. Absence requires history/list fallback to
 obtain a durable target: a history entry's `ID`, or
 `ConversationSummary.LatestEntryID` when marking through the latest entry the
@@ -71,6 +77,13 @@ including the maximum uint64. `TestEnvelope_EventIDOmitempty` pins the replay
 field's optional shape; `TestEnvelope_RoundTrip_Full` and
 `TestEnvelope_RoundTrip_Minimal` pin nil history pointers and byte-identical
 compacted legacy fixtures.
+
+Check optional-key omission on the actual wire bytes. Decoding a missing key and
+JSON `null` into `*uint64` produces nil in both cases; re-marshalling then erases
+the distinction. `TestV2Session_Reconnect_HistoryEntryID` inspects the decrypted
+authenticated replay JSON and compares durable id 8 with ring id 2 and a fresh
+history read, so a missing key, `null`, zero or a substituted ring id cannot
+satisfy the same assertions. See [protocol boundary tests](development-verification.md#protocol-boundaries).
 
 ## Testing payload absence
 

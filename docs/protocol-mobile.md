@@ -377,7 +377,7 @@ Envelope-level fields beyond the v1 set:
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `event_id` | int | no (omitempty) | In-memory event id for the replay cursor (#649), **unique daemon-wide** (#2022). Present on ring-backed interactive structured-stream frames and operator messages (binary → phone), including their reconnect replay; absent on session transitions and frames without ring recording. See [Interactive events](#interactive-events-v2-capability-gated). Distinct from `id` (the per-conn envelope counter that resets each reconnect). Strictly increasing in the daemon's emit order across **all** conversations, and therefore ascending **but not contiguous** within any one of them — a conversation's own ids have another conversation's in between, and the first id a conversation is ever assigned is normally well above 1. Stable across reconnects; the latest one a phone observes is a valid `last_event_id` to advertise on reconnect. Always ≥ 1 when present, so absence is unambiguous (omitted, not `null`/`0`). A single scalar cursor over this id space is now correct: **no future event in any conversation can carry an id at or below one already observed**. Ids do **not** survive a daemon restart (the ring is in-memory) — that boundary is the `resync` marker's job. |
-| `history_entry_id` | uint64 | no (omitempty) | Durable per-conversation [history entry id](#a-history-entry) (`HistoryEntry.ID`), used by [`mark_conversation_read.up_to`](#marking-a-conversation-read). Present after a successful history append on direct live interactive-turn, session-transition and operator-message envelopes (#2861). Distinct from connection `id` and daemon-wide ring `event_id`; real entries are ≥ 1 and survive daemon restarts. When absent, the client **must fall back to history/list** to obtain a durable read-mark target; the key is omitted, never encoded as `null` or `0`. |
+| `history_entry_id` | uint64 | no (omitempty) | Durable per-conversation [history entry id](#a-history-entry) (`HistoryEntry.ID`), used by [`mark_conversation_read.up_to`](#marking-a-conversation-read). Present after a successful history append on direct live interactive-turn, session-transition and operator-message envelopes (#2861); reconnect replay of history-backed ring events carries that original append's id (#2909). Distinct from connection `id` and daemon-wide ring `event_id`; real entries are ≥ 1 and survive daemon restarts. Older daemons, absent/failed storage and non-history-backed events omit the key entirely, never `null` or `0`; clients **must fall back to history/list** for a durable read-mark target. |
 
 `history_entry_id` identifies the stored entry for the envelope's conversation,
 using the same durable per-conversation namespace as `HistoryEntry.ID` and
@@ -395,11 +395,17 @@ recipients receive the same history id, payload and timestamp. Session transitio
 have no ring `event_id`, and operator messages can carry `history_entry_id` even
 without a ring.
 
+Since #2909, interactive-turn and operator-message ring events retain that
+original successful append's id before becoming readable for replay, including
+when no interactive recipient was connected. Authenticated reconnect replay
+carries the retained `history_entry_id` with the original payload and timestamp;
+it adds no history entry. Channel-post ring events still carry no history id,
+and session transitions remain outside ring replay.
+
 **The field is absent on older daemons, with absent or failed history storage,
-on non-history-backed frames and on current reconnect replay.** An absent store
+and on non-history-backed frames, including their replay.** An absent store
 or failed append still permits live delivery and existing ring recording.
-Reconnect replay reconstructs envelopes from the in-memory ring without history
-metadata. **When the field is absent, clients must fall back to history/list**,
+**When the field is absent, clients must fall back to history/list**,
 using a
 [`history_page`](#conversation-history-v2) entry's `id` or the target
 conversation's [`list_conversations`](#application-message-types) `latest_entry_id`
@@ -5393,12 +5399,15 @@ timeline reducer it already runs for the live stream.
 **A direct live envelope's `history_entry_id` is this entry's `id` (#2861).**
 After a successful append, interactive-turn emission, session-transition
 broadcast and operator-message history commit/publication attach that same
-per-conversation id to every interactive recipient's direct envelope. Use it as
+per-conversation id to every interactive recipient's direct envelope. Reconnect
+replay of history-backed interactive-turn and operator-message ring events
+carries the original append's id too (#2909), without appending another entry.
+Channel posts still omit it; session transitions are not ring-replayed. Use it as
 [`mark_conversation_read.up_to`](#marking-a-conversation-read) when the operator
 has read through that entry. It is independent of the envelope's connection
 `id` and ring `event_id`; neither is a durable read-mark target. Older daemons,
-absent or failed history storage, non-history-backed frames and current reconnect
-replay omit `history_entry_id` entirely, never as `null` or `0`. Live delivery and
+absent or failed history storage, and non-history-backed frames (live or replayed)
+omit `history_entry_id` entirely, never as `null` or `0`. Live delivery and
 existing ring recording proceed even when history cannot be appended. In those
 cases, obtain a target from a served entry's `id` or the conversation's
 `list_conversations.latest_entry_id`, as appropriate to what the operator has read.
@@ -5471,16 +5480,19 @@ the newest page, and it receives the live stream. **The two must meet with no ga
 and no duplicate**, and an entry appended between the ask and the answer arrives
 on both.
 
-**When present, join the live `history_entry_id` to the page entry's `id`, within
-the same conversation.** The three direct live producer paths above share the
+**When present, join the live or replayed `history_entry_id` to the page entry's
+`id`, within the same conversation.** The three direct live producer paths above share the
 successful append's id with their envelopes, so this join uses durable identity.
+History-backed ring replay retains that same id, payload and timestamp, even for
+an event emitted with no connected recipient; replay creates no new history entry.
 The pair (`conversation_id`, `history_entry_id`) also identifies the same entry
 across devices and daemon restarts.
 
 **Without `history_entry_id`, fall back to (`type`, `ts`).** An entry in a page
-and its twin on the live lane carry the same `type` and the same `ts`, so a client
-reconciles on that pair within the conversation. This remains needed for older
-daemons and current reconnect replay. An absent or failed history append may
+and its twin on the live or replay lane carry the same `type` and the same `ts`,
+so a client reconciles on that pair within the conversation. This remains needed
+for older daemons and non-history-backed frames, including channel-post replay.
+An absent or failed history append may
 leave no stored twin to join at all; obtain a durable read-mark target from
 history/list rather than substituting either live counter.
 

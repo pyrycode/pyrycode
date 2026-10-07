@@ -49,7 +49,9 @@ or emits a `resync` marker if the position aged out of the bounded ring.
   - **replay** `(events, false)` → store the tail on the Run-owned
     `s.replayQueue []eventring.Event` and signal `m.replayCh` (cap-1,
     non-blocking); return. `drainReplayOnce` then forwards **one** event per `Run`
-    pass — ascending, each carrying its original `EventID`, sealed under the fresh
+    pass — ascending, each carrying its original `EventID` and, for a
+    history-backed ring event, the original successful append's `HistoryEntryID`
+    (#2909), sealed under the fresh
     session keys via `forwardEnvelope`, advancing `s.replayThrough = ev.ID` per
     frame. **Why paced, not inline (#777):** the old inline loop sealed + forwarded
     the *entire* tail (up to `MaxEventsPerConversation = 1024` events) in one `Run`
@@ -64,6 +66,12 @@ or emits a `resync` marker if the position aged out of the bounded ring.
     reach the wire before live ids (> `newest`). The seal stays single-writer:
     every `s.send.Encrypt` is still on `Run`, only the *interleaving* of forwards
     with the select changed (see [codebase/777.md](../codebase/777.md)).
+    Replay writes no history. `drainReplayOnce` sets `Envelope.HistoryEntryID`
+    only for nonzero scalar metadata retained by `Ring.AppendWithHistoryID`;
+    absent/failed storage and non-history-backed events omit the wire key,
+    including channel posts. Session transitions remain outside ring replay.
+    This metadata is a durable read-mark position, never a replay cursor or an
+    authorization capability. See [envelope identities](protocol-package-types-envelope.md#replay-cursors-and-durable-read-marks).
   - **caught-up** `(nil, false)` → `afterID == NewestID(convID)` exactly, or an
     unknown conversation advertising `afterID == 0`. No replay frames; the
     watermark is clamped to `min(afterID, NewestID(convID))` (#663, read before

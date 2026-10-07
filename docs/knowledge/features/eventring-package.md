@@ -8,9 +8,9 @@ that reconnects mid-turn catches up from the ring without a gap, or is told to
 resync. Landed in #646 (EPIC #596 Phase 2 structured streaming, ADR 025
 § Backpressure / replay).
 
-This slice is the **storage primitive only** — it ships with **no reconnect
-wiring**. The per-connection `last_event_id` tracking and the on-reconnect query
-are #647 (`security-sensitive`), which *consumes* `After`.
+The ring is the storage primitive; the per-connection `last_event_id` tracking
+and on-reconnect query live in the [replay consumer](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md),
+which consumes `After` after authenticated reconnect.
 
 - Decision anchor: [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md)
   § Backpressure / replay ("replays from a bounded per-conversation event ring,
@@ -30,12 +30,12 @@ path:
   every reconnected session. A replay key must be **connection-independent**,
   assigned **once per logical event**, and survive a reconnect. So the ring keeps
   its own counter, unique daemon-wide since #2022; `nextID` is **not** overloaded.
-- **The ring is the only replay source.** `internal/conversations` holds metadata
-  only (id, session history, archive state — no message content); there is no
-  message-history store, and the v1 `backfill_since` wire flow that could have read
-  from one was dead code (zero emitters, zero handlers) and was removed in #967 (see
-  [codebase/967.md](../codebase/967.md)). Replay can only come from an in-memory ring
-  the daemon maintains as it fans events out.
+- **The ring is the reconnect replay source.** `internal/conversations` holds
+  metadata only (id, session history, archive state — no message content).
+  [History](history-package.md) persists a separate per-conversation log, served
+  through `request_history`, rather than driving ring replay. Carrying its
+  original append id in a ring event joins the two without another history write
+  or lookup; the ring id remains an independent replay cursor.
 
 ## Durability boundary (in scope vs out)
 
@@ -64,20 +64,22 @@ type Event struct {
     Type    string          // protocol.Type* wire type
     Payload json.RawMessage // the already-marshalled envelope payload
     TS      time.Time       // the logical event's timestamp
+    HistoryEntryID uint64   // successful durable history append id; zero means absent
 }
 
 type Ring struct { /* sync.Mutex + ring-wide nextID counter + map[convID]*convRing */ }
 
 func New(maxPerConversation int) *Ring                                  // panics if < 1
 func (r *Ring) Append(convID, typ string, payload json.RawMessage, ts time.Time) uint64
+func (r *Ring) AppendWithHistoryID(convID, typ string, payload json.RawMessage, ts time.Time, historyEntryID *uint64) uint64
 func (r *Ring) After(convID string, afterID uint64) (events []Event, gap bool)
 func (r *Ring) Drop(convID string)                                      // frees one conversation's entry; unknown id is a no-op (#1502)
 func (r *Ring) NewestID(convID string) uint64                           // nextID-1, or 0 if unknown (#663)
 ```
 
 `Drop` (#1502) deletes `convID`'s entry outright — the only mutation this package
-exposes besides `Append`. It exists so daemon memory does not grow with every
-conversation that has ever streamed: without it, a removed conversation's up-to-
+exposes besides the append methods. It exists so daemon memory does not grow with
+every conversation that has ever streamed: without it, a removed conversation's up-to-
 1024 retained events (several MB with coalesced `assistant_delta` payloads) stay
 pinned until the daemon restarts. The ring-wide `nextID` counter (#2022) is left
 untouched, so a later `Append` for the same conversation id — the entry can be
@@ -113,11 +115,15 @@ watermark has already passed. The per-connection guard
 
 `Ring` deliberately does **not** store `protocol.Envelope`: the envelope's `ID`
 is the per-conn `nextID`, meaningless for replay across connections. It stores the
-durable id plus the three replay-relevant fields (`Type`, `Payload`, `TS`). #647
+ring id, optional durable `HistoryEntryID`, and `Type`, `Payload`, `TS`. The relay
 reconstructs a fresh `protocol.Envelope` per reconnecting conn (new per-conn `ID`,
-the stored `Type`/`TS`/`Payload`). `Payload` is treated as **immutable** — the
-appender owns the bytes and never mutates them after `Append`; `After` returns the
-reference without copying.
+the stored `Type`/`TS`/`Payload`, original `EventID` and nonzero `HistoryEntryID`).
+`Append` delegates to `AppendWithHistoryID` with nil metadata, keeping existing
+callers source-compatible. Nil or zero means absent, so replay omits
+`history_entry_id` entirely rather than encoding null or zero. The metadata does
+not change ring ids, timestamps, retention or ordering. `Payload` is treated as
+**immutable** — the appender owns the bytes and never mutates them after either
+append method; `After` returns the reference without copying.
 
 ## Where the durable id is assigned (the load-bearing point)
 
@@ -130,7 +136,9 @@ the single `json.Marshal`, before the `ActiveConns` loop:
   timestamp per logical event, shared by every conn and by the ring (previously
   each conn got its own `time.Now()`; the change is intentional and strictly more
   correct: one logical event = one timestamp).
-- `eventID := e.ring.Append(convID, typ, payloadJSON, ts)` records the event
+- `appendConversationHistory` first obtains the successful durable history id
+  (or nil for absent/failed storage). Then
+  `e.ring.AppendWithHistoryID(convID, typ, payloadJSON, ts, historyEntryID)` records the event
   **unconditionally — independent of how many conns are interactive, including
   zero**, because the ring is the replay source for phones that are *absent right
   now* and reconnect later. The returned id was **discarded in #646**; **#649
@@ -142,6 +150,10 @@ the single `json.Marshal`, before the `ActiveConns` loop:
   envelope, `Push` — with one addition (#649): `EventID: &eventID` on the envelope
   literal (`&eventID` is a loop-invariant local shared by reference across the
   fan-out, so all conns get the identical durable id with no per-conn allocation).
+  `HistoryEntryID` likewise comes from the same single append, never the ring or
+  connection counter. Operator publication retains its already-committed history
+  id through `AppendWithHistoryID`; channel posts keep `Append` with no history
+  metadata. Session transitions do not enter the ring.
 
 All six v2 wire types flow through `emit()`, so the ring records the complete set.
 
@@ -254,12 +266,12 @@ where no conversations registry exists.
 ## Concurrency
 
 - **The ring is the only shared object on the structured path; it is internally
-  synchronised by one `sync.Mutex`.** Both `Append` (write) and `After` (read)
-  take the lock. It is a **leaf lock** — held only around the map lookup + slice
+  synchronised by one `sync.Mutex`.** `AppendWithHistoryID` (including `Append`)
+  and `After` take the lock. It is a **leaf lock** — held only around the map lookup + slice
   ops, never across a channel op or another lock, never nested.
 - **The emitter's single-`Run`-goroutine, unguarded-counter invariant is preserved
   unchanged** ([codebase/632.md](../codebase/632.md) / [codebase/633.md](../codebase/633.md)).
-  `Append` is called only from `emit()`, which runs only on the single drain
+  Interactive `emit()` runs only on the single drain
   goroutine `startStreamTurnDrainV2` spawns; all the emitter's *other* fields stay unguarded and
   single-goroutine. The cross-goroutine sharing the future query path needs lives
   **inside the ring's mutex**, not in the emitter — the Technical-Notes
@@ -267,10 +279,17 @@ where no conversations registry exists.
   lock-free; the ring is a self-contained mutex-guarded object.
 - **No goroutine is spawned** — the ring is passive; the emitter remains a passive
   state machine.
-- In #646 only `Append` runs in production (no reconnect caller yet). `After` is
-  built, unit-tested (incl. a `-race` append-vs-query test), and the mutex is in
-  place from day one so #647 can wire `After` from the manager's goroutine without
-  touching this slice.
+- **Publish metadata with the event, never after it (#2909).** Replay reads from
+  the manager's `Run` goroutine while producers append. Finish the history append
+  first, then snapshot the optional pointer to scalar `Event.HistoryEntryID`
+  under the ring mutex before the event becomes readable. A later metadata write
+  would let replay race ahead without the id; retaining a pointer would let
+  producer mutation change an already-published event. Callers must not mutate
+  the pointer during append, but may afterward. `After` returns event values, so
+  editing a returned history id cannot mutate retention. Payload bytes remain
+  shared and immutable. `TestAppendWithHistoryID_RetainsSnapshot` checks pointer
+  mutation after append, copied reads and retention, including nil/zero metadata.
+  See [history producers](history-package.md#producers-2114-2115).
 - **Accepted benign race on `Drop` (#1502):** an emitter `Append` for the
   just-dropped conversation can be in flight (a turn still streaming at the
   moment of deletion) and land after `Drop` releases the lock, recreating a small
