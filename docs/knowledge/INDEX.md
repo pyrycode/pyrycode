@@ -28,7 +28,9 @@ Read the relevant decision when changing that boundary.
 ## Finding a document
 
 [The full catalog](CATALOG.md) retains the detailed document inventory.
-Search it or use QMD with the `pyrycode-docs` collection.
+Search it or use QMD: `pyrycode-current` for current feature and decision questions,
+`pyrycode-docs` for historical ticket reasoning. See the
+[collection setup and isolation guidance](../shared-knowledge.md#read).
 Historical ticket notes under `codebase/` and old plans under `../specs/` describe
 past trees. Check current code before reusing their conclusions.
 
