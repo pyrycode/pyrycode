@@ -172,7 +172,7 @@ var tdnEnvDelta = []string{"BASH_DEFAULT_TIMEOUT_MS=5000"}
 // included. A SIGTERM to its GROUP or a SIGKILL would measure a leak pyry's real
 // teardown never produces.
 const tdnTeardownPath = "operator SIGTERM to the `pyry agent-run` pid " +
-	"(signal.NotifyContext, cmd/pyry/agent_run.go:258) — not the budget-hit teardown " +
+	"(signal.NotifyContext, runAgentRun) — not the budget-hit teardown " +
 	"and not the watchdog teardown"
 
 // TestRealClaude_TeardownLiveness stages one live turn, waits for claude to
@@ -458,12 +458,12 @@ func tdnSeedNotes(rec *tdnRecord) {
 		"earned rather than merely clean: the FIFO's write end is held ACROSS the " +
 		"teardown and the after-snapshot, so the command could not have finished on its " +
 		"own; and a pgid appearing in the reaper's line proves kill(2) SUCCEEDED, because " +
-		"reap.go:56-62 skips ESRCH before the append — which rules out the command having " +
+		"ReapDescendantGroups skips ESRCH before the append — which rules out the command having " +
 		"died alongside claude rather than by the reaper's hand")
 	rec.note("NOT measured by this run: the terminal/PTY path FOR TEARDOWN; " +
 		"internal/streamsup's daemon lifecycle; and runner-independence, which is an " +
-		"ARGUMENT from the shared reapDescendantGroupsFn seam (ptyrunner runner.go:314," +
-		"398,499; streamrunner runner.go:201; streamsup runner.go:567 all call " +
+		"ARGUMENT from the shared reapDescendantGroupsFn seam (historical ptyrunner.Run cancellation hook," +
+		"reap defer and budget hook; streamrunner.Run and streamsup.Runner.spawnAndWait call " +
 		"agentrun.ReapDescendantGroups) and NOT a measurement — this record's " +
 		"runner_from_argv names the one runner that actually ran")
 	rec.note("runner_from_env is DOCUMENTATION, not corroboration: it reads the effective " +
@@ -732,14 +732,14 @@ func tdnDecideAfter(rec *tdnRecord) {
 		rec.decide(tdnDispositionReaperKilled, "every pinned pid is dead after pyry exited "+
 			"(%s), the FIFO's write end was held across the teardown so the command could "+
 			"not have finished on its own, and the reaper reported killing pgid %d — which "+
-			"proves kill(2) succeeded, because reap.go:56-62 skips ESRCH before the append. "+
+			"proves kill(2) succeeded, because ReapDescendantGroups skips ESRCH before the append. "+
 			"The reaper's reach covers backgrounded commands",
 			tdnVerdictSummary(rec.After.Liveness), rec.HeldPGID)
 	case tdnReapNoLine:
 		rec.decide(tdnDispositionDeadUnattributed, "every pinned pid is dead after pyry "+
 			"exited (%s) and the held FIFO rules out its having finished on its own, but no "+
 			"reap line appears in pyry's stderr. That silence is AMBIGUOUS BY CONSTRUCTION — "+
-			"reap.go:64 guards the emit on len(reaped) > 0, so it means the reaper ran and "+
+			"ReapDescendantGroups guards the emit on len(reaped) > 0, so it means the reaper ran and "+
 			"reaped nothing OR that it never fired — and is recorded as such, never as \"the "+
 			"reaper never ran\". The reaper's hand is NOT established by this run",
 			tdnVerdictSummary(rec.After.Liveness))

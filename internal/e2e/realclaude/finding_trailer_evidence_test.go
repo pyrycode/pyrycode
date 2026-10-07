@@ -484,8 +484,8 @@ func TestFinTrailerRecordCarriesTheBoundAndItsDiscriminator(t *testing.T) {
 			staleness: 250 * time.Millisecond,
 			boundFrom: trailBoundNone,
 			wantState: trailAborted,
-			synthetic: "both trailBoundNone return sites — the aborted arm at " +
-				"result_trailer_observation_test.go:289-290 and the deadline arm at :295 — leave " +
+			synthetic: "both trailBoundNone return sites in trailWaitForTrailer — the " +
+				"aborted and deadline arms — leave " +
 				"Staleness at zero, so NO RUN PRODUCES THIS PAIRING. The row is kept as a " +
 				"contract check on a builder pure over its inputs, and it is what kills a " +
 				"Bounded derived from Staleness != 0 on the no-bound discriminator",
@@ -677,7 +677,7 @@ func TestFinTrailerSightingScalarsComeFromTheFullLineDecode(t *testing.T) {
 	} {
 		if f.got != f.want {
 			t.Errorf("%s: got %q, want %q — terminal_reason is LAST on the pinned wire order "+
-				"(emitter.go:456-468) and ~2 KiB past the cap here, so a carrier filled from the "+
+				"(historical streamjson.trailer) and ~2 KiB past the cap here, so a carrier filled from the "+
 				"capped Line could not have recovered it", f.name, f.got, f.want)
 		}
 	}

@@ -479,7 +479,7 @@ func tdnAliveThroughout(t *testing.T, pid int, window time.Duration) {
 	for {
 		if !tdnAlive(pid) {
 			t.Fatalf("spared process %d died within %s of the reap: its group's absence from the "+
-				"reap line is evidence of the reap.go:52 exclusion only while the process is still "+
+				"reap line is evidence of the ReapDescendantGroups exclusion only while the process is still "+
 				"there to be excluded", pid, window)
 		}
 		if !time.Now().Before(deadline) {
@@ -563,7 +563,7 @@ func TestTdnRealReapCapture(t *testing.T) {
 				tree.RootPID, absent.Verdict, absent.Detail, tdnReapHeldPGIDAbsent)
 		}
 		if slices.Contains(absent.PGIDs, tree.RootPID) {
-			t.Errorf("the reap line names the spared group %d among %v — reap.go:52 excludes "+
+			t.Errorf("the reap line names the spared group %d among %v — ReapDescendantGroups excludes "+
 				"pgid == rootPid before it kills anything", tree.RootPID, absent.PGIDs)
 		}
 

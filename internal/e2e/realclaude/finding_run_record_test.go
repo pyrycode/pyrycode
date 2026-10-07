@@ -562,7 +562,7 @@ func TestFinRecordCarriesEveryMatchedRow(t *testing.T) {
 		if !published[out.PID] {
 			t.Errorf("liveness[%d] is about pid %d, which appears in no published row: a verdict "+
 				"a reader cannot tie to a row states nothing. pinStateOutcome already carries PID "+
-				"and PPID (process_pin_liveness_test.go:245-253), so the tie needs no new field — "+
+				"and PPID (pinStateOutcome), so the tie needs no new field — "+
 				"but only while the pids land inside the row set", i, out.PID)
 		}
 	}

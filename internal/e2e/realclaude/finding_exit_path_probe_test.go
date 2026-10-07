@@ -478,13 +478,13 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 			"RUNNING — its own reap log names a pinned group, and emitter.Close() wrote the "+
 			"trailer before the reap defer reached that group, so it was alive when the trailer "+
 			"was written. THE EXIT CODE ALONE CANNOT SEPARATE A COMPLETED RUN FROM A "+
-			"BUDGET-TERMINATED ONE — both exit 0 (cmd/pyry/agent_run.go:271-277) — so the "+
+			"BUDGET-TERMINATED ONE — both exit 0 (runAgentRun clean/cancelled return) — so the "+
 			"discriminator used is the trailer's terminal_reason, read as %q.",
 			rec.Trailer.TerminalReason)
 	default:
 		t.Logf("#1337 FINDING: this run establishes no such claim — it reached %s, not %s. THE "+
 			"EXIT CODE ALONE CANNOT SEPARATE A COMPLETED RUN FROM A BUDGET-TERMINATED ONE — both "+
-			"exit 0 (cmd/pyry/agent_run.go:271-277) — so the discriminator used is the trailer's "+
+			"exit 0 (runAgentRun clean/cancelled return) — so the discriminator used is the trailer's "+
 			"terminal_reason, read as %q, over %d post-trailer match(es).",
 			outcome, trailOutcomeRunningAtTrailer, rec.Trailer.TerminalReason, readings.MatchCount)
 	}

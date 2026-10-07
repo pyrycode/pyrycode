@@ -326,7 +326,7 @@ func finStageHeldGroup(t *testing.T, body func(finStageSubject)) {
 	if distinct[0] == syscall.Getpgrp() {
 		t.Fatalf("the scan reports the staged rows in process group %d, which is this test "+
 			"process's own group; want a group of their own — a command sharing the test's group "+
-			"is one internal/agentrun/reap.go:52 can never report, and keying the attribution on "+
+			"is one ReapDescendantGroups can never report, and keying the attribution on "+
 			"it would make %q reachable from the very hardcoding this file traps",
 			distinct[0], trailAdmitProof)
 	}
@@ -564,7 +564,7 @@ func TestFinStageRigHardcodingsCannotReachTheFinding(t *testing.T) {
 
 		if noLine.Admit.Value != trailAdmitVoidNoLine {
 			t.Fatalf("the attribution over trailRigGather's nil stderr literal "+
-				"(trail_run_rig_test.go:159-171) reads %q; want %q — tdnClassifyReapLog over nil "+
+				"(trailRigGather attribution leg) reads %q; want %q — tdnClassifyReapLog over nil "+
 				"can only reach tdnReapNoLine, and a gather wired to that un-passable input reports "+
 				"a clean negative on every run, forever, with no symptom in the answer: %s",
 				noLine.Admit.Value, trailAdmitVoidNoLine, noLine.Admit.Detail)

@@ -237,7 +237,7 @@ func TestFinContainArtifactCarriesNoTrailerValue(t *testing.T) {
 	if at <= reachMaxCommandBytes {
 		t.Fatalf("`result`'s needle sits at offset %d of %d bytes, inside the %d-byte cap: this "+
 			"check's plant must land PAST it, or it catches only what the shipped in-cap row at "+
-			"finding_artifact_write_test.go:1084 already catches and nothing re-admitting the FULL "+
+			"TestFinWriteArtifactPublishesNoVerbatimModelOutput already catches and nothing re-admitting the FULL "+
 			"line", at, len(line), reachMaxCommandBytes)
 	}
 
@@ -494,8 +494,8 @@ func TestFinContainCarriersReachNoRawMessageMap(t *testing.T) {
 		// one" is proved by this single call rather than aspirational.
 		if finRecordInputReaches(carrier.typ, forbidden, map[reflect.Type]bool{}) {
 			t.Errorf("%s is reachable from %s: its values are the RAW BYTES of the line, so a %%v on "+
-				"the map — or on any struct transitively holding it, as this package already does at "+
-				"finding_run_record_test.go:775 — prints the whole assistant `result` field into a "+
+				"the map — or on any struct transitively holding it, using the struct-formatting pattern in "+
+				"TestFinRecordEmbedsTrailerRecordWhole — prints the whole assistant `result` field into a "+
 				"failure message. trailKeyNames discards that map inside itself and returns []string, "+
 				"which is what keeps this true by construction", forbidden, carrier.name)
 		}

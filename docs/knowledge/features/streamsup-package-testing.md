@@ -6,6 +6,14 @@ Table-driven stdlib `testing`, `go test -race`. Fake-child harness dispatches fr
 
 Scenarios: `buildArgs` shape (pure, table — fixed prefix present, `-p` absent, `--session-id` vs `--resume`, id byte-identical across first-spawn/respawn, `base` order preserved and not mutated); held-open stdin (echo round-trip + `GOT_EOF` absent while alive); backoff ladder (lifted `supervisor.backoff_test.go` verbatim against the copied `backoffTimer`); restart-on-crash (≥2 spawns observed via `onSpawn`); resume-id-stable-across-restart (captured argv: spawn 1 has `--session-id <id>`, spawn 2 has `--resume <id>`, same id); teardown SIGTERM+grace (`Run` returns within `< killGrace`, "got SIGTERM" on stderr); teardown reaps descendant groups (`reapDescendantGroupsFn` swap, non-parallel); the `firstRun`-gate regression test (non-existent binary, every retry keeps `--session-id`).
 
+Signal teardown tests need readiness after handler installation: a fixed startup
+sleep or `onSpawn` can precede `signal.Notify`. `helperChild`'s `block_sigterm`
+mode emits `READY` after installing the handler; `TestRunner_TeardownSIGTERM`
+waits for that marker and measures teardown from cancellation. Its delayed-exec
+case exposed the missing-SIGTERM failure despite repeated passing baseline runs.
+Register cancellation and bounded joining before waiting for readiness so a
+failed wait still stops the runner.
+
 An actual child launch witness and the parent's stdin publication are separate
 observations: the child can write its environment/argv record before the parent
 has published its handle. Before commanding a child to crash, wait for both the

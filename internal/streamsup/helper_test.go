@@ -140,6 +140,7 @@ func helperChild() {
 	case "block_sigterm":
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGTERM)
+		fmt.Fprintln(os.Stdout, "READY")
 		go func() { _, _ = io.Copy(io.Discard, os.Stdin) }()
 		select {
 		case <-sigCh:

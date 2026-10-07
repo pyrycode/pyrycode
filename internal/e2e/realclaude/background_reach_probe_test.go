@@ -691,8 +691,8 @@ func reachMeasure(rec *reachRecord, resultRaw []byte, pyryExited <-chan struct{}
 		}
 	}
 	if !rec.ClaudeIsGroupLeader {
-		rec.note("FINDING: claude's pgid (%d) is NOT its pid (%d), so reap.go:52's "+
-			"`pgid == rootPid` does not exclude what reap.go:45-47 claims it does — "+
+		rec.note("FINDING: claude's pgid (%d) is NOT its pid (%d), so ReapDescendantGroups's "+
+			"`pgid == rootPid` does not exclude what ReapDescendantGroups' guard comment claims it does — "+
 			"claude's own group is not the group that comparison names",
 			rec.ClaudePGID, claudePID)
 	}
@@ -706,12 +706,12 @@ func reachMeasure(rec *reachRecord, resultRaw []byte, pyryExited <-chan struct{}
 	case allSurvive:
 		rec.decide(reachReachableTargeted, "every process holding the run's FIFO is a "+
 			"transitive child of claude's pid %d and its pgid survives all three of "+
-			"reap.go:52's exclusions. THIS ESTABLISHES ONLY THAT THE REAPER WOULD "+
+			"ReapDescendantGroups's exclusions. THIS ESTABLISHES ONLY THAT THE REAPER WOULD "+
 			"TARGET THE GROUP. Whether it actually dies, and by whose hand, is "+
 			"#1231's to answer and is not claimed here", claudePID)
 	default:
 		rec.decide(reachReachableExcluded, "the held process is a transitive child of "+
-			"claude's pid %d, but at least one pgid is excluded by reap.go:52's own "+
+			"claude's pid %d, but at least one pgid is excluded by ReapDescendantGroups's own "+
 			"arithmetic, so the reaper would NOT kill it. See exclusion_arithmetic "+
 			"for which comparison fires and against which integer", claudePID)
 	}
