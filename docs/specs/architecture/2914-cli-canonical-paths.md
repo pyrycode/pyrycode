@@ -50,3 +50,7 @@ Pending for the documentation stage: in `docs/knowledge/features/v2-session-mana
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-07
+
+## Revisions
+
+- 2026-10-07: The Files read entry overstates existing configured-folder tests: they cover configured-root results and refusals, but do not simulate a post-startup root swap. The fixed-root contract is preserved by leaving `confineToAnyRoot` and its direct `confineToRoot` delegation unchanged; no root re-resolution is introduced.

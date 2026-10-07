@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun"
+	"github.com/pyrycode/pyrycode/internal/canonicalpath"
 	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
@@ -411,9 +411,9 @@ func (a streamRunner) ModelWindows() (modelWindowReport, bool) { return a.window
 // so the usage reader (sessionTranscriptDir → snapshotUsageFor) and that probe read
 // one field of one struct and cannot name different folders for one session.
 // Re-deriving here from a workdir would agree today and is the shape that drifts:
-// ResolveWorkdir applies canonicalCase and symlink resolution, which the confining
-// validators do not, so a differently-spelled workdir would name a folder claude
-// never writes — the failure streamClaudeSessionsDir's own doc enumerates.
+// canonicalpath.Resolve applies canonicalCase and symlink resolution, which the
+// confining validators do not, so a differently-spelled workdir would name a
+// folder claude never writes — the failure streamClaudeSessionsDir's own doc enumerates.
 //
 // It FORWARDED A STORED COPY until #1475, when a new_session rotation gained the
 // ability to move the session's spawn directory. A copy taken at construction
@@ -449,8 +449,8 @@ func (a streamRunner) ClaudeSessionsDir() string { return a.r.ClaudeSessionsDir(
 // sessions.DefaultClaudeSessionsDir is the sessions package's, and the mapper
 // exists precisely so streamsup imports neither it nor this one.
 //
-// The runner applies ResolveWorkdir to workDir under its own contract, and
-// streamClaudeSessionsDir applies it to the same input on the way to the projects
+// The runner resolves workDir with the same recipe as canonicalpath.Resolve, and
+// streamClaudeSessionsDir applies that resolver on the way to the projects
 // folder, so the pair the runner installs is derived from one resolution of one
 // path. A degraded derivation answers "" — the inert probe state — rather than a
 // wrong folder, which is streamClaudeSessionsDir's documented contract.
@@ -591,7 +591,7 @@ func mapStreamState(s streamsup.State) sessions.State {
 //
 // There is NO silent PTY fallback: a streamsup.New error (empty SessionID —
 // impossible at the pool sites per #1108; missing binary via exec.LookPath;
-// absent WorkDir via agentrun.ResolveWorkdir) is wrapped and returned with a nil
+// absent WorkDir via canonical path resolution) is wrapped and returned with a nil
 // runner. Substituting supervisor.New here would silently diverge the primary
 // interactive session (which `pyry attach` drives) from the operator's stated
 // stream-json intent. The error surfaces through the pool's existing
@@ -1091,16 +1091,16 @@ func mapStreamsupConfig(cfg sessions.RunnerConfig) streamsup.Config {
 // bootstrap workdir.
 //
 // The composition is pinned to the transform streamsup.New itself applies: it
-// sets the child's cmd.Dir to agentrun.ResolveWorkdir(WorkDir), and claude
-// encodes its own resolved cwd into the projects folder name, so the probe must
+// sets the child's cmd.Dir using the same recipe as canonicalpath.Resolve, and
+// claude encodes its own resolved cwd into the projects folder name, so the probe must
 // key on the SAME resolution. #1655 measured the empirical directory — located by
 // finding the transcript claude actually wrote — against
 // sessions.DefaultClaudeSessionsDir of a cwd resolved that way, and found them
 // equal.
 //
 // Do NOT substitute resolveClaudeSessionsDir or a bare DefaultClaudeSessionsDir.
-// Neither applies canonicalCase, which ResolveWorkdir does and claude does, and
-// neither confineWorkdirToHome (bootstrap) nor resolveSpawnDir (phone)
+// Neither applies canonicalCase, which canonicalpath.Resolve does and claude
+// does, and neither confineWorkdirToHome (bootstrap) nor resolveSpawnDir (phone)
 // canonicalises case — so on a case-insensitive filesystem a wrong-cased workdir
 // would yield a directory claude never writes. That reads "absent" for a session
 // whose transcript exists, spawns --session-id against a live transcript, which
@@ -1111,14 +1111,14 @@ func mapStreamsupConfig(cfg sessions.RunnerConfig) streamsup.Config {
 // Every "" arm is pre-#1631 behaviour rather than a new failure mode. An empty
 // workdir is unreachable at both pool sites (both carry a confined realpath) but
 // must not fall through to the process cwd the way resolveClaudeSessionsDir
-// deliberately does; a workdir ResolveWorkdir rejects never produced a runner at
-// all, since streamsup.New calls the same function on the same value and returns
-// an error; and an unresolvable $HOME degrades inside DefaultClaudeSessionsDir.
+// deliberately does; a workdir canonicalpath.Resolve rejects never produced a
+// runner at all, since streamsup.New applies the same recipe to the same value
+// and returns an error; an unresolvable $HOME degrades inside DefaultClaudeSessionsDir.
 func streamClaudeSessionsDir(workdir string) string {
 	if workdir == "" {
 		return ""
 	}
-	resolved, err := agentrun.ResolveWorkdir(workdir)
+	resolved, err := canonicalpath.Resolve(workdir)
 	if err != nil {
 		return ""
 	}
