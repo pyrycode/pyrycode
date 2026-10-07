@@ -169,16 +169,16 @@ func finWriteArtifacts(t *testing.T, dir string, rec finRecordRun) {
 	}
 	blob = append(blob, '\n')
 
-	// Counts, an enumerated agreement verdict, an admissibility value and a
+	// Counts, the observed argv runner label, an admissibility value and a
 	// carried outcome — the same content rule finRecordRun.Detail states
 	// (`finRecordRun`). Never an input, never a Detail, and
 	// never a %v verb applied to a struct or a slice.
 	note := fmt.Sprintf("# pyry agent-run background-reach probe: one run's record\n\n"+
 		"%s\n\n```json\n%s```\n\n"+
-		"Summary: pyry exited %d; %d matched row(s) and %d liveness read(s); the two runner "+
-		"readings %s; attribution selected %s; trailer outcome %s.\n",
+		"Summary: pyry exited %d; %d matched row(s) and %d liveness read(s); runner "+
+		"%s by claude argv; attribution selected %s; trailer outcome %s.\n",
 		finWriteSafetyClaim, blob, rec.ExitCode, len(rec.Rows), len(rec.Liveness),
-		rec.RunnerAgreement, rec.Attribution.Selected.Value, rec.Trailer.Outcome)
+		finRecordRunnerLabel(rec.RunnerFromArgv), rec.Attribution.Selected.Value, rec.Trailer.Outcome)
 
 	for _, f := range []struct {
 		name    string
@@ -275,7 +275,7 @@ func finWritePlantedReapLog() []byte {
 // This is the trap that would make an over-broad plant list red against a CORRECT
 // build. The record carries several inputs verbatim BY DESIGN — Liveness whole
 // including its Detail, StateColumn and ToolStderr; Attribution whole; Trailer
-// whole including the four decoded scalars; RunnerFromEnv; ClaudeVersion (capped)
+// whole including the four decoded scalars; ClaudeVersion (capped)
 // — and finRecordRun's doc states it under "What is carried whole" while
 // TestFinRecordEmbedsTrailerRecordWhole pins it. A needle in any of those WILL
 // appear in the artifact, correctly. The three plants are therefore exactly the
@@ -284,7 +284,7 @@ func finWritePlantedReapLog() []byte {
 //  1. each matched row's Command — verbatim argv, reduced by finRecordBuild's
 //     row loop to finRecordProc's three integers
 //  2. ClaudeCommand — reduced, also in finRecordBuild, to one of
-//     tdnRunnerFromArgv's three constants
+//     tdnRunnerFromArgv's fixed readings
 //  3. the reap stderr — pyry's own captured bytes (`tdnReapOutcome`),
 //     dropped by finAttributeFanOut
 //
@@ -355,7 +355,6 @@ func finWriteInputs() finRecordInputs {
 		Trailer: finTrailerBuild(trailOutcomeVoidBudgetFired,
 			finTrailerSighting(finWritePlantedTrailerScan(), 250*time.Millisecond,
 				trailBoundFromMiss)),
-		RunnerFromEnv: reachRunnerPathFromEnv(finRecordEnvDelta()),
 		ClaudeCommand: tdnFixturePtyArgv + " " + trailNeedle,
 		ClaudeVersion: "2.1.220 (Claude Code)",
 	}
@@ -426,7 +425,7 @@ func finWriteReadDir(t *testing.T, dir string) map[string][]byte {
 // # Both walks are recursive, for the reason the deferral gave
 //
 // The TYPE walk to finWriteObservedPaths' VALUE walk. finRecordRun has four
-// struct- or slice-valued fields, so a top-level scan inspects ten keys, misses
+// struct- or slice-valued fields, so a top-level scan inspects eight keys, misses
 // every nested one, and reads as a structural guarantee it is not providing —
 // "vacuous coverage is worse than none" (`TestFinRecordCarriesNoCapturedBytes`).
 // Same shape as finRecordInputReaches, which answers a different question and
@@ -936,7 +935,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 // rendered artifact is argv-, line- or stderr-shaped, walked RECURSIVELY.
 //
 // The walk must be recursive because a top-level scan on finRecordRun inspects
-// ten keys and misses every nested one — the reason
+// eight keys and misses every nested one — the reason
 // `TestFinRecordCarriesNoCapturedBytes` gives for deferring this scan to this
 // ticket: "vacuous coverage is worse than none". The forbidden list is the union
 // of the two flat scans this family already ships
