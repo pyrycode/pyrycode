@@ -53,6 +53,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/debugbundle"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/install"
+	"github.com/pyrycode/pyrycode/internal/modelfamily"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
 	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -1006,6 +1007,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		ConversationsRegistry:     convReg,
 		ConversationsRegistryPath: convRegistryPath,
 		ReadFolders:               readFolders,
+		DefaultModel:              sessions.ClaudeSettingsModel,
 		SweepInterval:             *convSweepInterval,
 		RunnerFactory:             runnerFactory,
 		Bootstrap: sessions.SessionConfig{
@@ -1705,12 +1707,15 @@ type sessionMinter struct {
 // session will start on: the requested one, else the mint's. That model and the
 // minted one are the same snapshot of Pool.MintDefaults, so an operator change
 // racing the create cannot validate against one model and mint on another.
+//
+// A requested Claude model is resolved to its family first (followFamily), so a
+// pinned id is checked, stored and spawned as the family the menu offers.
 func (m sessionMinter) Create(_ context.Context, label, spawnDir, agent string, settings handlers.CreateSettings) (string, string, error) {
 	// Only model and effort are ever copied, so no create can mint a posture.
 	base := m.p.MintDefaults(agent)
 	start := sessions.SessionSettings{Model: base.Model, Effort: base.Effort}
 	if settings.Model != nil {
-		start.Model = *settings.Model
+		start.Model = followFamily(agent, *settings.Model)
 	}
 	if settings.Effort != nil {
 		start.Effort = *settings.Effort
@@ -1810,6 +1815,12 @@ func (a settingsUpdaterAdapter) UpdateSettings(id string, u relay.SettingsUpdate
 		if err != nil {
 			return relay.ErrSessionUnknown
 		}
+		// A pinned Claude pick is checked and stored as its family, the row the
+		// menu offers. u is this call's copy, so the caller's frame is untouched.
+		if checkModel {
+			family := followFamily(harness, *u.Model)
+			u.Model = &family
+		}
 		list, have := agentModelVocabulary(a.p, a.saved, harness, id)
 		if checkModel {
 			if err := validateModelVocabulary(list, have, *u.Model); err != nil {
@@ -1897,6 +1908,19 @@ func (a settingsUpdaterAdapter) storedModel(id sessions.SessionID) (string, erro
 		return "", relay.ErrSessionUnknown
 	}
 	return s.Model, nil
+}
+
+// followFamily resolves a Claude model to its family alias, so a session follows
+// the latest model of a family whichever spelling the client sent: claude-opus-5
+// and claude-opus-4-7 both become opus. It runs before a model is validated
+// against the menu, which offers one row per family, and before it is stored.
+// Any other agent's model passes through unchanged (#2647). An empty agent is
+// claude, as it is to the pool.
+func followFamily(agent, model string) string {
+	if agent != "" && agent != sessions.HarnessClaude {
+		return model
+	}
+	return modelfamily.Alias(model)
 }
 
 // validateModelVocabulary classifies one non-empty client model against the same

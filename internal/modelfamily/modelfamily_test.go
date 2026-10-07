@@ -1,14 +1,17 @@
-package sessions
+package modelfamily
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
-// TestFamilyAlias is #2447's AC 1: the exact list of values the rule rewrites and
+// TestAlias is #2447's AC 1: the exact list of values the rule rewrites and
 // the exact list it must leave alone, in one table, because the rule is only
 // meaningful as a pair of lists. Every rewritten row is a value claude has been
 // observed to publish as a row value; every unchanged row is a shape that would
 // have been rewritten by a looser rule, so the table doubles as the record of
 // which loosenings were rejected.
-func TestFamilyAlias(t *testing.T) {
+func TestAlias(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
@@ -24,6 +27,14 @@ func TestFamilyAlias(t *testing.T) {
 		{"haiku exact id", "claude-haiku-4-5", "haiku"},
 		{"haiku exact id with a date segment", "claude-haiku-4-5-20251001", "haiku"},
 		{"sonnet exact id", "claude-sonnet-5", "sonnet"},
+		// Every pinned row in pyrybox's saved list of 2026-10-05, and the form a
+		// resolved_model takes. An id with no minor version is the one that
+		// started a new channel on Opus 5.
+		{"opus with a minor version", "claude-opus-4-8", "opus"},
+		{"older opus with a minor version", "claude-opus-4-7", "opus"},
+		{"fable exact id", "claude-fable-5", "fable"},
+		{"resolved opus id", "claude-opus-5-5", "opus"},
+		{"opus with a variant group", "claude-opus-5-5[1m]", "opus[1m]"},
 
 		// Unchanged. A bare alias already follows its family, so rewriting it
 		// would be a no-op at best; the rest are shapes the rule must not touch.
@@ -46,24 +57,24 @@ func TestFamilyAlias(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := familyAlias(tc.in)
+			got := Alias(tc.in)
 			if got != tc.want {
-				t.Errorf("familyAlias(%q) = %q, want %q", tc.in, got, tc.want)
+				t.Errorf("Alias(%q) = %q, want %q", tc.in, got, tc.want)
 			}
-			// Per row, the property claudeSettingsArgs depends on and cannot
+			// Per row, the property sessions' claudeSettingsArgs depends on and cannot
 			// state for itself: it guards on a non-empty stored Model and then
 			// appends this output as the element AFTER --model, so an empty
 			// return would compose an empty model value onto the argv. Two arms
 			// make that unreachable today; this is what reddens if a third is
 			// ever added beside them.
 			if tc.in != "" && got == "" {
-				t.Errorf("familyAlias(%q) returned empty; --model would carry an empty value", tc.in)
+				t.Errorf("Alias(%q) returned empty; --model would carry an empty value", tc.in)
 			}
 		})
 	}
 }
 
-// TestFamilyAlias_RewrittenOutputIsNarrowerThanItsInput is the machine-checked
+// TestAlias_RewrittenOutputIsNarrowerThanItsInput is the machine-checked
 // form of #2447's security argument, in the shape of internal/relay's
 // TestValidModel_ByteSetIsClosed: it walks all 256 byte values through three
 // positions of a rewritable template and asserts that whatever comes back is
@@ -77,7 +88,7 @@ func TestFamilyAlias(t *testing.T) {
 // never validated), so "the input was already safe" would be a false premise.
 // A rewritten value's first byte being a letter is the whole of the bar that
 // stops a value posing as a claude flag on the argv sink.
-func TestFamilyAlias_RewrittenOutputIsNarrowerThanItsInput(t *testing.T) {
+func TestAlias_RewrittenOutputIsNarrowerThanItsInput(t *testing.T) {
 	t.Parallel()
 	// One injection site per structural position the rule reads: the family
 	// segment, a version segment, and the variant group's interior. %c is a byte
@@ -95,16 +106,16 @@ func TestFamilyAlias_RewrittenOutputIsNarrowerThanItsInput(t *testing.T) {
 			t.Parallel()
 			for i := 0; i < 256; i++ {
 				in := tpl.build(byte(i))
-				got := familyAlias(in)
+				got := Alias(in)
 				if got == in {
 					continue // the identity arm passes today's behaviour through
 				}
 				if !strictAliasShape(got) {
-					t.Errorf("familyAlias(%q) = %q, which is neither its input nor a "+
+					t.Errorf("Alias(%q) = %q, which is neither its input nor a "+
 						"letters-plus-optional-group value; byte %#x escaped the rewrite arm", in, got, i)
 				}
 				if len(got) > len(in) {
-					t.Errorf("familyAlias(%q) = %q, longer than its input; the upstream 64-byte bound no longer holds", in, got)
+					t.Errorf("Alias(%q) = %q, longer than its input; the upstream 64-byte bound no longer holds", in, got)
 				}
 			}
 		})
@@ -112,7 +123,7 @@ func TestFamilyAlias_RewrittenOutputIsNarrowerThanItsInput(t *testing.T) {
 }
 
 // strictAliasShape reports whether s matches [A-Za-z]+("[" [A-Za-z0-9._-]+ "]")?
-// — the only shape familyAlias may emit when it rewrites. Written out here rather
+// is the only shape Alias may emit when it rewrites. Written out here rather
 // than reusing the production helpers so the test states the property
 // independently instead of asking the code whether it agrees with itself.
 func strictAliasShape(s string) bool {
@@ -153,4 +164,73 @@ func indexByteInString(s string, b byte) int {
 		}
 	}
 	return -1
+}
+
+// TestReduce_PyryboxSavedList is the list pyrybox's daemon saved on 2026-10-05
+// (model_list.json, Claude Code 2.1.289), row values in claude's order. Five
+// family rows, then five pinned rows that each belong to a family already on the
+// list. The menu must show one row per family, so all five pinned rows go.
+func TestReduce_PyryboxSavedList(t *testing.T) {
+	t.Parallel()
+	saved := []string{
+		"default", "opus", "fable", "sonnet", "haiku",
+		"claude-sonnet-5", "claude-opus-5", "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7",
+	}
+	got := Reduce(saved, func(v string) string { return v })
+	want := []string{"default", "opus", "fable", "sonnet", "haiku"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Reduce(saved list) = %q, want %q", got, want)
+	}
+}
+
+func TestReduce(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"empty", nil, []string{}},
+		{"family rows only", []string{"default", "opus", "sonnet"}, []string{"default", "opus", "sonnet"}},
+		// A family with no family row keeps its newest pinned row, wherever it sits.
+		{"only pinned rows keep the newest", []string{"claude-opus-4-7", "claude-opus-5", "claude-opus-4-8"}, []string{"claude-opus-5"}},
+		{"a minor version beats its own major", []string{"claude-opus-5", "claude-opus-5-5"}, []string{"claude-opus-5-5"}},
+		{"segments compare as numbers", []string{"claude-opus-4-10", "claude-opus-4-9"}, []string{"claude-opus-4-10"}},
+		{"a dated id beats the undated one", []string{"claude-haiku-4-5", "claude-haiku-4-5-20251001"}, []string{"claude-haiku-4-5-20251001"}},
+		{"duplicates keep the first", []string{"claude-opus-5", "claude-opus-5"}, []string{"claude-opus-5"}},
+		// Families are reduced independently, and claude's order is kept.
+		{"two families with no family row", []string{"default", "claude-fable-5", "claude-opus-4-7", "claude-fable-5-1", "claude-opus-4-8"}, []string{"default", "claude-fable-5-1", "claude-opus-4-8"}},
+		// The variant group is part of the family.
+		{"a group row drops its group's pinned rows", []string{"opus", "opus[1m]", "claude-opus-5-5[1m]", "claude-opus-5-5"}, []string{"opus", "opus[1m]"}},
+		{"a plain family row keeps the group's pinned rows", []string{"opus", "claude-opus-5[1m]", "claude-opus-5-5[1m]"}, []string{"opus", "claude-opus-5-5[1m]"}},
+		// Shapes Alias does not touch are kept as they are.
+		{"legacy and unknown shapes are kept", []string{"opus", "claude-3-5-sonnet-20241022", "claude-fable", "opusplan"}, []string{"opus", "claude-3-5-sonnet-20241022", "claude-fable", "opusplan"}},
+		// A Codex list passes through untouched.
+		{"codex values are never reduced", []string{"terra", "gpt-5.6-terra", "gpt-5.5-terra", "sol"}, []string{"terra", "gpt-5.6-terra", "gpt-5.5-terra", "sol"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := Reduce(tc.in, func(v string) string { return v })
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("Reduce(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestReduce_KeepsRowsWhole checks Reduce filters rows rather than rebuilding
+// them, and leaves its input alone.
+func TestReduce_KeepsRowsWhole(t *testing.T) {
+	t.Parallel()
+	type row struct{ value, display string }
+	in := []row{{"opus", "Opus 5.5"}, {"claude-opus-5", "Opus 5"}, {"claude-sonnet-5", "Sonnet 5"}}
+	got := Reduce(in, func(r row) string { return r.value })
+	want := []row{{"opus", "Opus 5.5"}, {"claude-sonnet-5", "Sonnet 5"}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Reduce = %+v, want %+v", got, want)
+	}
+	if in[1].value != "claude-opus-5" || len(in) != 3 {
+		t.Fatalf("Reduce modified its input: %+v", in)
+	}
 }
