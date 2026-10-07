@@ -76,34 +76,34 @@ func claudeSettingsArgs(s SessionSettings) []string
 Pure helper, unexported. `Model != ""` → `--model <x>`; `Effort != ""` →
 `--effort <x>`; then the posture.
 
-**Since #2447, the `--model` value is a family alias, not the stored
-`s.Model` verbatim.** `claudeSettingsArgs` passes `s.Model` through the
-unexported `familyAlias` (`modelfamily.go`) first: an exact Anthropic model id
-shaped `claude-<family>-<digits...>`, with an optional trailing bracket group
-kept as-is, rewrites to `<family><group>` (`claude-fable-5-1[1m]` →
-`fable[1m]`); a bare alias (`sonnet`, `opus[1m]`, `default`) or anything not
-shaped like that — including `""` — passes through unchanged. This is a
-deliberate divergence between what pyry stores and what it sends claude, not
-a bug: `SessionSettings.Model` keeps the row the user picked, byte for byte —
-`saveLocked`, `Pool.SettingsFor`, and `cmd/pyry`'s run-config snapshot all
-still read that value untouched — so the model menu's exact-equality match
-and `validateModelVocabulary`'s membership check both keep working against
-the picked row. Only the argv sees the alias (`Pool.UpdateSettings`'s
-`deliverSettingsInBand` applies the same rewrite to the in-band `set_model`
-request, below). A session that picked a full-id row therefore keeps
-following that family's newest release after every claude update, with no
-user action.
+**The `--model` value is always a family alias (#2447, widened 2026-10-07).**
+A pyry session follows the latest model of its family, so
+`claudeSettingsArgs` passes `s.Model` through `modelfamily.Alias`
+(`internal/modelfamily`) first: an exact Claude id shaped
+`claude-<family>-<digits...>`, with an optional trailing bracket group kept
+as is, rewrites to `<family><group>` (`claude-opus-5` → `opus`,
+`claude-opus-4-7` → `opus`, `claude-fable-5-1[1m]` → `fable[1m]`). A bare
+alias (`sonnet`, `opus[1m]`, `default`), a Codex model, or anything not
+shaped like that, including `""`, passes through unchanged.
 
-**Intended, not accidental:** the published menu offers both `haiku` (→
-`claude-haiku-4-5-20251001`) and `claude-haiku-4-5` as distinct rows. A
-session on the second is sent the alias `haiku` and so runs whatever `haiku`
-currently resolves to — the same model the first row would run — while the
-menu keeps highlighting "Haiku 4.5". That is the operator's decision applied
-consistently across every family, not a case to special-case away.
+**What is stored is the family too.** Until 2026-10-07 the stored value was
+the picked row, byte for byte, because the menu carried pinned rows beside
+the family rows. The menu is now one row per family (`modelfamily.Reduce`,
+applied where `internal/streamsup` first reads claude's list and when the
+saved `model_list.json` loads), so `canonicalSettings` resolves `Model` to its
+family at every construction and read, and `Pool.UpdateSettings` and
+`Pool.UpdateDormantSettings` store the family. `cmd/pyry` resolves a pinned
+Claude pick before validating it against the menu (`followFamily`).
 
-`familyAlias`'s docblock names #2447 and is the one place in this package a
-model string is parsed at all; the standing rule that model values are
-opaque and never parsed for matching, indexing or keying otherwise holds.
+**A session with no model of its own is covered too.** With no `--model`,
+claude starts on its own default, which Claude Code reads from
+`ANTHROPIC_MODEL` or the `model` key of its settings files and which can be
+pinned: on 2026-10-07 a new channel started on Opus 5 because
+`~/.claude/settings.json` held `"model": "claude-opus-5"`. `Config.DefaultModel`
+(wired to `ClaudeSettingsModel` in `cmd/pyry`) answers that default per
+working directory; when it is pinned, `composeSpawnArgs` names its family on
+the argv. An operator `--model` in the template is resolved to its family in
+the composed copy as well.
 
 **Since #2065 the escalation flag is unconditional, and the posture slot is no
 longer mutually exclusive.** Every argv this function composes carries
