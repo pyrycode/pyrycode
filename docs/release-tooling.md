@@ -90,11 +90,13 @@ provides; a pinned older image would surface here.
 
 ## Live-claude suite — read the count, not the exit code
 
-`make e2e-realclaude` drives real `claude` over the subscription. It has two
-failure modes that report success, and from outside they look the same as a
-clean run:
+`make e2e-realclaude` drives real `claude` with either `ANTHROPIC_API_KEY`
+or `CLAUDE_CODE_OAUTH_TOKEN`. The authenticated fixtures isolate HOME without
+reading or copying the operator's onboarding file, and skip only for missing
+credentials. Two failure modes can look like a clean run:
 
-- **No credentials.** Every live test skips and the run exits 0.
+- **No credentials.** Tests requiring authentication skip and the run can exit 0
+  while proving no live response; offline fixture contracts can still pass.
 - **The package does not build.** Zero tests run and the run still exits 0
   through any shell wrapper.
 
@@ -109,22 +111,45 @@ all. `-count=1` forces every invocation to execute for real; it does not
 change what the count-not-exit-code check below needs to catch, since a
 build failure still exits 0 with nothing run.
 
-So the only trustworthy reading is the number of tests that executed. Count the
-`=== RUN` lines. A healthy full run is in the 700s as of August 2026, was 521 on
-2026-08-09, and reads zero when the build is broken.
+Read final named results and report leaf-test counts: executed, passed, failed
+and skipped. Executed means passed plus failed; exclude skipped tests and parent
+containers from that count. `=== RUN` lines only show starts, including tests
+that immediately skip. A parent can report PASS while all its children skip,
+so neither starts nor passing container results establish live acceptance.
+Zero starts diagnoses a build failure, but a nonzero count does not prove an
+assistant responded.
+
+For named text results, run the same tagged suite with verbose output and
+caching disabled (the normal `make e2e-realclaude` recipe also uses `-count=1`):
 
 ```sh
-export CLAUDE_CODE_OAUTH_TOKEN=...      # subscription login; without it everything skips
-make e2e-realclaude 2>&1 | tee /tmp/e2e.log
-grep -c '^=== RUN' /tmp/e2e.log         # this is the number that matters
-grep -cE '^\s*--- FAIL' /tmp/e2e.log
+# Export either supported credential before running.
+go test -tags e2e_realclaude -count=1 -timeout 30m -v ./internal/e2e/realclaude/... 2>&1 | tee /tmp/e2e.log
+grep -c '^=== RUN' /tmp/e2e.log         # starts only, including skipped tests
+grep -E '^[[:space:]]*--- (PASS|FAIL|SKIP): TestWithWorktreeAuthenticated_RealAssistant/' /tmp/e2e.log
 ```
 
-**About a dozen tests skip by design.** Some are opt-in evidence probes behind
-their own environment flags, and each says so in its own skip message. The MCP
-smoke tests need `ANTHROPIC_API_KEY`, the metered API credential, which is a
-different thing from the subscription login. Read the skip reasons; the skip
-count alone cannot distinguish design from breakage.
+Per-test `go test -json` output is also suitable for counting final leaf results.
+Keep failures, skip reasons and any same-tree rerun results in the report rather
+than replacing the initial run's counts with the rerun's exit code.
+
+**Authentication evidence requires a real assistant response.** Check the named
+non-skipped results for `TestWithWorktreeAuthenticated_RealAssistant/inherited`,
+`/oauth_only_missing` and `/oauth_only_read_error`. Each proof asserts a
+successful real `pyry agent-run` stream-json run, a nonempty session ID, absence
+of synthetic/authentication-failed markers and an assistant JSONL end-of-turn
+event with nonempty text. The OAuth-only arms clear the API key and use
+disposable operator HOMEs where `.claude.json` is missing or fails a file read,
+without touching actual operator configuration. They run in the normal gate
+whenever OAuth is available; an OAuth-unavailable SKIP does not prove that auth
+path. See [operator authentication](knowledge/features/e2e-realclaude-operator-authentication.md)
+and [fixture contracts](knowledge/features/e2e-realclaude-smoke-test-go.md).
+
+**Some tests skip by design.** Evidence probes can have their own environment
+flags or skip once their fixture exists. MCP smoke tests need
+`ANTHROPIC_API_KEY`, the metered API credential, which differs from the
+subscription login. Read each skip reason; the skip count alone cannot
+distinguish design from breakage.
 
 **`make check` does not compile this package.** It is behind the
 `e2e_realclaude` build tag, so the standard gate is blind to it and can be
