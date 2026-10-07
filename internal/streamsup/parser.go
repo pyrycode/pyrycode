@@ -7219,7 +7219,8 @@ func (p *Parser) emitThinkingProgress(line []byte) bool {
 	// The line's OWN values, not the accumulated total: the event stays a pure
 	// function of the line that produced it, and the accumulator's residue is a
 	// documented consumer hazard on turnevent.ThinkingProgress rather than a
-	// number invented here. No caps — two ints cannot blow the envelope.
+	// number invented here. The two ints need no caps; parent attribution uses
+	// the existing bounded validator.
 	p.emit(turnevent.ThinkingProgress{
 		ParentToolCallID:     parentToolUseID(tl.ParentToolUseID),
 		EstimatedTokens:      tl.EstimatedTokens,
