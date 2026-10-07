@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun"
+	"github.com/pyrycode/pyrycode/internal/canonicalpath"
 )
 
 func writeJSON(t *testing.T, path string, root any, mode fs.FileMode) []byte {
@@ -48,9 +48,9 @@ func TestMarkWorkdirTrusted_CreatesFileWhenMissing(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()
 	wd := t.TempDir()
-	wantRealpath, err := agentrun.ResolveWorkdir(wd)
+	wantRealpath, err := canonicalpath.Resolve(wd)
 	if err != nil {
-		t.Fatalf("ResolveWorkdir(%q): %v", wd, err)
+		t.Fatalf("canonicalpath.Resolve(%q): %v", wd, err)
 	}
 
 	gotRealpath, err := markWorkdirTrustedIn(home, wd)
@@ -91,9 +91,9 @@ func TestMarkWorkdirTrusted_AddsToExistingFileWithoutProjects(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()
 	wd := t.TempDir()
-	realpath, err := agentrun.ResolveWorkdir(wd)
+	realpath, err := canonicalpath.Resolve(wd)
 	if err != nil {
-		t.Fatalf("ResolveWorkdir: %v", err)
+		t.Fatalf("canonicalpath.Resolve: %v", err)
 	}
 
 	dataPath := filepath.Join(home, ".claude.json")
@@ -132,9 +132,9 @@ func TestMarkWorkdirTrusted_PreservesSiblingProjects(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()
 	wd := t.TempDir()
-	realpath, err := agentrun.ResolveWorkdir(wd)
+	realpath, err := canonicalpath.Resolve(wd)
 	if err != nil {
-		t.Fatalf("ResolveWorkdir: %v", err)
+		t.Fatalf("canonicalpath.Resolve: %v", err)
 	}
 
 	dataPath := filepath.Join(home, ".claude.json")
@@ -180,9 +180,9 @@ func TestMarkWorkdirTrusted_IdempotentPreservesExtraEntryFields(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()
 	wd := t.TempDir()
-	realpath, err := agentrun.ResolveWorkdir(wd)
+	realpath, err := canonicalpath.Resolve(wd)
 	if err != nil {
-		t.Fatalf("ResolveWorkdir: %v", err)
+		t.Fatalf("canonicalpath.Resolve: %v", err)
 	}
 
 	dataPath := filepath.Join(home, ".claude.json")
@@ -225,9 +225,9 @@ func TestMarkWorkdirTrusted_SetsExternalIncludeFlagsOverExistingFalse(t *testing
 	t.Parallel()
 	home := t.TempDir()
 	wd := t.TempDir()
-	realpath, err := agentrun.ResolveWorkdir(wd)
+	realpath, err := canonicalpath.Resolve(wd)
 	if err != nil {
-		t.Fatalf("ResolveWorkdir: %v", err)
+		t.Fatalf("canonicalpath.Resolve: %v", err)
 	}
 
 	dataPath := filepath.Join(home, ".claude.json")
@@ -335,6 +335,83 @@ func TestMarkWorkdirTrusted_WorkdirMissingReturnsError(t *testing.T) {
 	}
 }
 
+func TestMarkWorkdirTrusted_ResolutionPrecedesConfigAccess(t *testing.T) {
+	t.Parallel()
+	homeFile := filepath.Join(t.TempDir(), "home-file")
+	if err := os.WriteFile(homeFile, nil, 0o600); err != nil {
+		t.Fatalf("write home file: %v", err)
+	}
+	missing := filepath.Join(t.TempDir(), "missing")
+
+	// Config stat through a regular file fails with ENOTDIR, so ErrNotExist
+	// proves path resolution ran before config access, not merely before writing.
+	got, err := markWorkdirTrustedIn(homeFile, missing)
+	if got != "" || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("markWorkdirTrustedIn = (%q, %v), want empty path and fs.ErrNotExist", got, err)
+	}
+}
+
+func TestMarkWorkdirTrusted_RelativeAndExactCaseKeys(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	workspace := filepath.Join(base, "Workspace")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatalf("mkdir Workspace: %v", err)
+	}
+	sibling := filepath.Join(base, "workspace")
+	siblingErr := os.Mkdir(sibling, 0o755)
+	if siblingErr != nil && !errors.Is(siblingErr, fs.ErrExist) {
+		t.Fatalf("mkdir workspace: %v", siblingErr)
+	}
+	realBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		t.Fatalf("resolve fixture base: %v", err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get cwd: %v", err)
+	}
+	relative, err := filepath.Rel(cwd, workspace)
+	if err != nil {
+		t.Fatalf("relative workspace: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name, input, leaf string
+		needsSibling      bool
+	}{
+		{name: "relative", input: relative, leaf: "Workspace"},
+		{name: "exact mixed case", input: workspace, leaf: "Workspace"},
+		{name: "case-differing sibling", input: sibling, leaf: "workspace", needsSibling: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.needsSibling && siblingErr != nil {
+				t.Skip("case-insensitive filesystem: case-differing siblings cannot coexist")
+			}
+			home := t.TempDir()
+			want := filepath.Join(realBase, tc.leaf)
+			got, err := markWorkdirTrustedIn(home, tc.input)
+			if err != nil || got != want {
+				t.Fatalf("markWorkdirTrustedIn(%q) = (%q, %v), want (%q, nil)", tc.input, got, err, want)
+			}
+			projects, ok := readJSON(t, filepath.Join(home, ".claude.json"))["projects"].(map[string]any)
+			if !ok || len(projects) != 1 {
+				t.Fatalf("projects = %v, want exactly one canonical key", projects)
+			}
+			entry, ok := projects[want].(map[string]any)
+			if !ok {
+				t.Fatalf("projects missing canonical key %q: %v", want, projects)
+			}
+			for _, flag := range []string{"hasTrustDialogAccepted", "hasClaudeMdExternalIncludesApproved", "hasClaudeMdExternalIncludesWarningShown"} {
+				if entry[flag] != true {
+					t.Errorf("projects[%q][%q] = %v, want true", want, flag, entry[flag])
+				}
+			}
+		})
+	}
+}
+
 func TestMarkWorkdirTrusted_WorkdirSymlinkResolvesToRealpath(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()
@@ -349,9 +426,9 @@ func TestMarkWorkdirTrusted_WorkdirSymlinkResolvesToRealpath(t *testing.T) {
 		t.Fatalf("markWorkdirTrustedIn: %v", err)
 	}
 
-	wantRealpath, err := agentrun.ResolveWorkdir(target)
+	wantRealpath, err := canonicalpath.Resolve(target)
 	if err != nil {
-		t.Fatalf("ResolveWorkdir(target): %v", err)
+		t.Fatalf("canonicalpath.Resolve(target): %v", err)
 	}
 	if gotRealpath != wantRealpath {
 		t.Fatalf("realpath = %q, want %q (NOT %q)", gotRealpath, wantRealpath, link)
@@ -396,9 +473,9 @@ func TestMarkWorkdirTrusted_CaseMismatchWritesOnDiskKey(t *testing.T) {
 		t.Fatalf("realpath base = %q, want %q (on-disk case)", filepath.Base(gotRealpath), "Workspace")
 	}
 
-	wantRealpath, err := agentrun.ResolveWorkdir(wrongCase)
+	wantRealpath, err := canonicalpath.Resolve(wrongCase)
 	if err != nil {
-		t.Fatalf("ResolveWorkdir: %v", err)
+		t.Fatalf("canonicalpath.Resolve: %v", err)
 	}
 	if gotRealpath != wantRealpath {
 		t.Fatalf("realpath = %q, want %q", gotRealpath, wantRealpath)
@@ -502,9 +579,9 @@ func TestMarkWorkdirTrusted_EntryNotObjectFails(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()
 	wd := t.TempDir()
-	realpath, err := agentrun.ResolveWorkdir(wd)
+	realpath, err := canonicalpath.Resolve(wd)
 	if err != nil {
-		t.Fatalf("ResolveWorkdir: %v", err)
+		t.Fatalf("canonicalpath.Resolve: %v", err)
 	}
 
 	dataPath := filepath.Join(home, ".claude.json")
@@ -540,9 +617,9 @@ func TestMarkWorkdirTrusted_PublicSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarkWorkdirTrusted: %v", err)
 	}
-	wantRealpath, err := agentrun.ResolveWorkdir(wd)
+	wantRealpath, err := canonicalpath.Resolve(wd)
 	if err != nil {
-		t.Fatalf("ResolveWorkdir: %v", err)
+		t.Fatalf("canonicalpath.Resolve: %v", err)
 	}
 	if gotRealpath != wantRealpath {
 		t.Fatalf("realpath = %q, want %q", gotRealpath, wantRealpath)

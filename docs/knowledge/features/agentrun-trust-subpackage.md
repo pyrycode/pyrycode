@@ -20,7 +20,7 @@ Introduced [#475](https://github.com/pyrycode/pyrycode/issues/475) as a **slimme
 func MarkWorkdirTrusted(workdir string) (realpath string, err error)
 ```
 
-No exported types, no constructor, one function. Returns the resolved realpath so a caller can pass it straight to the spawned claude's `cmd.Dir` (or equivalent) without a second `agentrun.ResolveWorkdir` call, keeping the marked key and the child's cwd byte-identical. See § Consumers for who calls this today.
+No exported types, no constructor, one function. Returns the resolved realpath so a caller can pass it straight to the spawned claude's `cmd.Dir` (or equivalent) without a second `canonicalpath.Resolve` call, keeping the marked key and the child's cwd byte-identical. See § Consumers for who calls this today.
 
 ## Internal test seam
 
@@ -28,11 +28,13 @@ The public wrapper is two lines: `os.UserHomeDir()` then delegate to unexported 
 
 ## Why a subpackage instead of `internal/agentrun/trust.go`
 
-\#341 lived as a sibling file under `internal/agentrun/`. The subpackage layout (`internal/agentrun/trust/`) was chosen for #475 to mirror the sibling spawn primitives `internal/agentrun/ptyrunner/` and `internal/agentrun/streamrunner/`. The parent `internal/agentrun` package now hosts only workdir helpers (`ResolveWorkdir`, `EncodeProjectDir`) that all three subpackages import; spawn concerns and trust concerns are package-scoped, not file-scoped.
+\#341 lived as a sibling file under `internal/agentrun/`. The subpackage layout (`internal/agentrun/trust/`) was chosen for #475 to mirror the sibling spawn primitives `internal/agentrun/ptyrunner/` and `internal/agentrun/streamrunner/`. Spawn concerns and trust concerns are package-scoped, not file-scoped. Trust imports the shared `internal/canonicalpath` resolver directly, without depending on the parent `internal/agentrun` package.
 
 ## Key shape — realpath, on-disk case, not abspath
 
-`projects` map keys are the **`filepath.EvalSymlinks`-resolved, on-disk-cased** absolute path. The macOS `/var → /private/var` symlink means a non-resolved key never matches claude's lookup. The helper delegates to `agentrun.ResolveWorkdir`, which does `filepath.Abs`, then `filepath.EvalSymlinks`, then (#910) canonicalises each path component to its on-disk spelling. [`canonicalpath.Resolve`](canonicalpath-package.md#path-and-error-contract) exposes the same filesystem path and error contract independently of agentrun. Trust still calls the old implementation during migrations #2912–#2916; #2917 owns its removal. Canonicalisation supplies the key spelling; this package retains responsibility for trust writes and consumers retain confinement policy.
+`projects` map keys are the **`filepath.EvalSymlinks`-resolved, on-disk-cased** absolute path. The macOS `/var → /private/var` symlink means a non-resolved key never matches claude's lookup. `markWorkdirTrustedIn` delegates to [`canonicalpath.Resolve`](canonicalpath-package.md#path-and-error-contract): `filepath.Abs`, then `filepath.EvalSymlinks`, then best-effort correction of each component to its on-disk spelling. Relative input resolves against the process cwd; empty input means the cwd. The helper writes all three approval flags under that exact result and returns it unchanged for the child's spawn directory. Canonicalisation supplies the key spelling; this package retains responsibility for trust writes and consumers retain confinement policy.
+
+Exact-case entries take precedence over case-folded matches, so case-differing siblings are never substituted for one another. Only a unique `strings.EqualFold` match corrects spelling; unreadable ancestors or absent/ambiguous matches retain the component without adding an error. Wrong-case paths on a case-sensitive filesystem can fail during symlink resolution before case correction. Resolution reads metadata rather than acquiring a stable handle, so filesystem replacement between resolution and spawn remains possible.
 
 **Why case matters:** `EvalSymlinks` alone preserves the *input* case of a non-symlink component, but claude canonicalises its cwd to the on-disk case before its own trust lookup. Before #910, a workdir configured with the wrong case on a case-insensitive filesystem (macOS APFS) made this helper pre-mark a `projects` key claude never reads — the trust modal rendered anyway and `ptyrunner.Run` aborted with `ErrTrustModalDetected` (the 2026-05-29 incident on #208). See [`codebase/910.md`](../codebase/910.md).
 
@@ -85,7 +87,7 @@ Three terminal classes:
 2. **Malformed input** (unparseable JSON, `projects` not an object, `projects[realpath]` not an object) — wrapped error; the file is left untouched (pinned via `bytes.Equal` pre/post in `TestMarkWorkdirTrusted_MalformedJSONFails`, `TestMarkWorkdirTrusted_ProjectsNotObjectFails`, and `TestMarkWorkdirTrusted_EntryNotObjectFails`). The helper refuses to silently destroy state it doesn't understand.
 3. **I/O failure** (read, stat, chmod, encode, fsync, close, rename) — wrapped error with the step name.
 
-**Workdir-missing short-circuits via `ResolveWorkdir` BEFORE any `~/.claude.json` access** — pinned by `TestMarkWorkdirTrusted_WorkdirMissingReturnsError`. The error wraps `fs.ErrNotExist` (via `errors.Is`) and `~/.claude.json` is not created. Each caller surfaces the failure in its own idiom (see § Consumers): `runSupervisor` fails the daemon's startup outright, `resolveSpawnDir` returns it plain so the handler classifies it as a retryable per-conversation spawn failure, and `selfcheck.SelfCheckDenyDefault` wraps it into its `Result` error.
+**Resolution through `canonicalpath.Resolve` precedes any `~/.claude.json` stat or read.** A resolution failure returns an empty path and adds `agentrun/trust: %w` context, retaining `errors.Is` identity, including `fs.ErrNotExist` and `fs.ErrPermission`. A missing workdir is an error even when an absent config would otherwise be created; `TestMarkWorkdirTrusted_WorkdirMissingReturnsError` pins the missing-path identity and absence of a new config. `TestMarkWorkdirTrusted_ResolutionPrecedesConfigAccess` independently proves the ordering using a missing workdir and an invalid home directory. Each caller surfaces the failure in its own idiom (see § Consumers): `runSupervisor` fails the daemon's startup outright, `resolveSpawnDir` returns it plain so the handler classifies it as a retryable per-conversation spawn failure, and `selfcheck.SelfCheckDenyDefault` wraps it into its `Result` error.
 
 No retries. The caller chooses.
 
@@ -105,21 +107,21 @@ pass-through view (preserve fields verbatim) and emits nothing to logs.
 
 ## Concurrency model
 
-No goroutines spawned. Purely sequential within an invocation: stat → read → mutate → write. No `context.Context` parameter — the operation is fast-bounded (local filesystem read + write). If a future caller needs cancellable-acquire, add a context-taking sibling without changing this signature.
+No goroutines spawned. Purely sequential within an invocation: resolve → stat → read → mutate → write. No `context.Context` parameter — the operation is fast-bounded (local filesystem read + write). If a future caller needs cancellable-acquire, add a context-taking sibling without changing this signature.
 
 Cross-process concurrent invocations are explicitly **not** serialised — see § "No lock" above.
 
 ## Dependency direction
 
 - Stdlib: `bytes`, `encoding/json`, `errors`, `fmt`, `io/fs`, `os`, `path/filepath`.
-- Internal: `github.com/pyrycode/pyrycode/internal/agentrun` (for `ResolveWorkdir` only).
+- Internal: `github.com/pyrycode/pyrycode/internal/canonicalpath` (for `Resolve` only); no dependency on the parent `internal/agentrun` package.
 - External: none.
 
 ## Testing
 
 `internal/agentrun/trust/trust_test.go` — same-package, stdlib `testing` only, no testify.
 
-Each behavioural test uses `home := t.TempDir()` + `wd := t.TempDir()` and calls `markWorkdirTrustedIn(home, wd)`. Every behavioural test below calls `t.Parallel()` except `TestMarkWorkdirTrusted_PublicSmoke`, which cannot (see below). Two helpers — `writeJSON(t, path, root, mode)` (encode + write + chmod for fixtures) and `readJSON(t, path)` (decode with `UseNumber` for assertions) — keep test bodies focused.
+Behavioural tests use temporary home/workdir fixtures and call `markWorkdirTrustedIn` directly. Every behavioural test below calls `t.Parallel()` except `TestMarkWorkdirTrusted_PublicSmoke`, which cannot (see below). Two helpers — `writeJSON(t, path, root, mode)` (encode + write + chmod for fixtures) and `readJSON(t, path)` (decode with `UseNumber` for assertions) — keep test bodies focused. Shared-resolver expectations use `canonicalpath.Resolve`; independent path/key checks below keep those expectations from hiding a resolver regression.
 
 Test cases:
 
@@ -130,14 +132,19 @@ Test cases:
 - `TestMarkWorkdirTrusted_SetsExternalIncludeFlagsOverExistingFalse` — [#2451](https://github.com/pyrycode/pyrycode/issues/2451)'s AC-1 check: target entry pre-set with all three flags explicitly `false` plus an `mcpServers` sibling key, and a second project entry also at `false`. After the call: the target carries all three flags `true` with `mcpServers` intact; the sibling project entry is untouched, still `false`. One test covers every clause — flags set, an existing `false` overwritten, sibling keys preserved.
 - `TestMarkWorkdirTrusted_MalformedJSONFails` — pre-existing file containing `"not json"` → non-nil error; file bytes unchanged.
 - `TestMarkWorkdirTrusted_WorkdirMissingReturnsError` — workdir does not exist → `errors.Is(err, fs.ErrNotExist)`; `~/.claude.json` not created.
-- `TestMarkWorkdirTrusted_WorkdirSymlinkResolvesToRealpath` — `os.Symlink(target, link)`, call with `link` → returned realpath equals `agentrun.ResolveWorkdir(target)` (NOT `link`); `projects` has one entry under the resolved key.
+- `TestMarkWorkdirTrusted_ResolutionPrecedesConfigAccess` — missing workdir plus a regular file supplied as home → empty return and `errors.Is(err, fs.ErrNotExist)`. Premature config stat would return `ENOTDIR` instead.
+- `TestMarkWorkdirTrusted_RelativeAndExactCaseKeys` — relative input, exact mixed-case input and a case-differing sibling each return the independently constructed absolute realpath; the sole `projects` key matches it and carries all three approval flags. Only the sibling arm skips when the filesystem cannot hold both spellings.
+- `TestMarkWorkdirTrusted_WorkdirSymlinkResolvesToRealpath` — `os.Symlink(target, link)`, call with `link` → returned realpath equals `canonicalpath.Resolve(target)` rather than `link`; `projects` has one entry under the resolved key.
+- `TestMarkWorkdirTrusted_CaseMismatchWritesOnDiskKey` — wrong-case input returns and writes the on-disk `Workspace` spelling; explicitly skips on case-sensitive filesystems. Shared [resolver tests](canonicalpath-package.md#testing) separately cover macOS aliases and portable exact/unique/ambiguous case selection.
 - `TestMarkWorkdirTrusted_PreservesNumericPrecision` — pre-existing `lastLoginNanos: 1763123456789012345` → value round-trips through `json.Number.String()` byte-identically.
 - `TestMarkWorkdirTrusted_PreservesFileMode` — pre-existing file at `0o644` → post-rename mode still `0o644`.
 - `TestMarkWorkdirTrusted_ProjectsNotObjectFails` — pre-existing `{"projects": "not an object"}` → non-nil error; file untouched.
 - `TestMarkWorkdirTrusted_EntryNotObjectFails` — pre-existing `{"projects": {<realpath>: "not an object"}}` → non-nil error; file untouched.
 - `TestMarkWorkdirTrusted_PublicSmoke` (non-parallel) — `t.Setenv("HOME", t.TempDir())` → `MarkWorkdirTrusted(wd)` succeeds and writes the expected entry; pins `os.UserHomeDir` plumbing without duplicating the full behavioural matrix.
 
-**Live tier:** `TestClaudeMdExternalIncludes_SubfolderChildGetsRootImports` in `internal/e2e/realclaude/claude_md_external_includes_test.go` (`//go:build e2e_realclaude`, run by `make e2e-realclaude`) is the only test that proves AC-2 of [#2451](https://github.com/pyrycode/pyrycode/issues/2451) — that a real child spawned in a workspace subfolder gets the root CLAUDE.md with every import expanded — since that requires a real claude child and its transcript. Two-arm differential: a marked arm (`trust.MarkWorkdirTrusted` on the workspace root) whose import must expand, and a control arm (root hand-written to the pre-fix state: trusted, includes unapproved) whose import must not. See § "The external-includes gate is keyed on the git root..." above for why both fixture roots must be real git repositories and why each arm also requires a CLAUDE.md-only sentinel as a vacuity guard.
+Checking only that a missing workdir created no config cannot prove resolution preceded config access: an early stat/read could leave the same end state. The ordering fixture supplies a regular file as home so premature config access fails with `ENOTDIR`, distinguishable from the missing workdir's `fs.ErrNotExist`. Assert both the empty return and underlying error identity. See [verification practices](development-verification.md#prove-that-tests-distinguish-the-change).
+
+**Live tier:** `TestClaudeMdExternalIncludes_SubfolderChildGetsRootImports` in `internal/e2e/realclaude/claude_md_external_includes_test.go` (`//go:build e2e_realclaude`, run by `make e2e-realclaude`) is the only test that proves AC-2 of [#2451](https://github.com/pyrycode/pyrycode/issues/2451) — that a real child spawned in a workspace subfolder gets the root CLAUDE.md with every import expanded — since that requires a real claude child and its transcript. Two-arm differential: a marked arm (`trust.MarkWorkdirTrusted` on the workspace root) whose import must expand, and a control arm (root hand-written to the pre-fix state: trusted, includes unapproved) whose import must not. See § "The external-includes gate is keyed on the git root..." above for why both fixture roots must be real git repositories and why each arm also requires a CLAUDE.md-only sentinel as a vacuity guard. Require both `marked_root_expands_external_import` and `unapproved_root_drops_external_import` to execute and pass at the dispatcher-owned live gate; skips or a suite exit code alone do not prove either arm ran.
 
 ## What this helper deliberately does NOT do
 
@@ -179,10 +186,10 @@ In production the workspace root is a repository, so a child spawned in `<root>/
 
 ## Related
 
-- [agentrun-package.md](agentrun-package.md) — surrounding parent package; `ResolveWorkdir` (the realpath rule) lives there.
+- [agentrun-package.md](agentrun-package.md) — surrounding parent package and remaining `ResolveWorkdir` consumers during migration.
 - [ptyrunner-package.md](ptyrunner-package.md) — the original spawn primitive this trust state was written for; deleted in #1348. Historical only — its runtime `HasTrustModal` safety net has no successor on the surviving stream-json spawn paths (see § "No lock" above).
 - [devices-registry.md](devices-registry.md) — the canonical atomic-write recipe this package mirrors.
-- [canonicalpath-package.md](canonicalpath-package.md) — shared filesystem resolver for consumer migrations.
+- [canonicalpath-package.md](canonicalpath-package.md) — shared filesystem resolver used for trust keys and returned spawn paths.
 - [`codebase/475.md`](../codebase/475.md) — build notes (file inventory, patterns, lessons).
 - [`docs/specs/architecture/475-agentrun-trust-helper.md`](../../specs/architecture/475-agentrun-trust-helper.md) — architect spec.
 - [`codebase/392.md`](../codebase/392.md) — the deletion this ticket reverses.
