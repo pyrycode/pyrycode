@@ -110,6 +110,8 @@ func TestTurnBusyTracker_ParentAttributedEvents(t *testing.T) {
 		name string
 		ev   turnevent.Event
 	}{
+		{"thought", turnevent.ThoughtChunk{ParentToolCallID: "main"}},
+		{"thinking progress", turnevent.ThinkingProgress{ParentToolCallID: "main", EstimatedTokensDelta: 64}},
 		{"text", turnevent.TextChunk{ParentToolCallID: "main", Text: "child"}},
 		{"tool start", turnevent.ToolStart{ParentToolCallID: "main", ToolCallID: "child"}},
 		{"colliding tool start", turnevent.ToolStart{ParentToolCallID: "main", ToolCallID: "main"}},

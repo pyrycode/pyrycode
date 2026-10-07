@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,8 +23,25 @@ import (
 // may hold queued conversation messages, even after repeated client interrupts.
 // The interrupt-result rider would hide the defect and must stay unset.
 func TestRelayV2_StreamParentActivityDoesNotHoldQueuedProbe(t *testing.T) {
-	for _, interrupts := range []int{0, 1, 2} {
-		t.Run(fmt.Sprintf("interrupts=%d", interrupts), func(t *testing.T) {
+	cases := []struct {
+		name       string
+		interrupts int
+		thinking   string
+	}{
+		{name: "interrupts=0"},
+		{name: "interrupts=1", interrupts: 1},
+		{name: "interrupts=2", interrupts: 2},
+		{name: "thinking-assistant", thinking: `{"type":"assistant","parent_tool_use_id":"toolu_2781_agent","message":{"id":"thought","content":[{"type":"thinking","thinking":"private subagent thought"}]}}`},
+		{name: "thinking-delta", thinking: strings.Join([]string{
+			`{"type":"stream_event","event":{"type":"message_start","message":{"id":"thought"}}}`,
+			`{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}}`,
+			`{"type":"stream_event","parent_tool_use_id":"toolu_2781_agent","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"private subagent thought"}}}`,
+		}, "\n")},
+		{name: "thinking-progress", thinking: `{"type":"system","subtype":"thinking_tokens","parent_tool_use_id":"toolu_2781_agent","estimated_tokens":128,"estimated_tokens_delta":128}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			interrupts := tc.interrupts
 			const (
 				session = "27810000-0000-4000-8000-000000000001"
 				conv    = "27810000-0000-4000-8000-000000000002"
@@ -45,6 +61,11 @@ func TestRelayV2_StreamParentActivityDoesNotHoldQueuedProbe(t *testing.T) {
 			}, "\n") + "\n"
 			// No child tool result, subagent completion or main result follows.
 			second := `{"type":"assistant","parent_tool_use_id":"` + parent + `","message":{"id":"child","role":"assistant","content":[{"type":"text","text":"background work"},{"type":"tool_use","id":"` + child + `","name":"Bash","input":{"command":"still working"}}]}}` + "\n"
+			if tc.thinking != "" {
+				// The later tool_use is a processing barrier on the same FIFO
+				// drain: observing it proves thinking reached both consumers.
+				second = tc.thinking + "\n" + second
+			}
 			for path, body := range map[string]string{firstPath: first, secondPath: second} {
 				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 					t.Fatalf("write replay: %v", err)

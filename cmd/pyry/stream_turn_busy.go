@@ -317,7 +317,15 @@ const (
 // closers are the enumerated arm, not the fall-through.
 func turnMarkFor(ev turnevent.Event) turnMark {
 	switch e := ev.(type) {
-	case turnevent.ThoughtChunk, turnevent.ThinkingProgress:
+	case turnevent.ThoughtChunk:
+		if e.ParentToolCallID != "" {
+			return turnMarkNone
+		}
+		return turnMarkOpen
+	case turnevent.ThinkingProgress:
+		if e.ParentToolCallID != "" {
+			return turnMarkNone
+		}
 		return turnMarkOpen
 	case turnevent.TextChunk:
 		if e.ParentToolCallID != "" {

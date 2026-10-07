@@ -72,3 +72,7 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-07
+
+## Revisions
+
+- 2026-10-07: The scoped race run found `TestStreamTurnDrainV2_AttributedTextExcludesThinkingAndSignature` still expected the now-forbidden parent thinking state. Update its expected four envelopes and pin their types while retaining its confidentiality assertions. This is an inherited expectation change under the planned lifecycle contract, with no production design change. Also update the event and parser-test commentary that assumed numeric progress had no parent field.
