@@ -6,9 +6,9 @@ package realclaude
 // pinned process-group set, with an offline proof that the finding AND a genuine
 // negative both come out of its own composition.
 //
-// Everything here runs offline: synthetic stdout, synthetic stderr, no subject
-// process, no staged process group, no live claude, no credentials, no daemon,
-// no turn, no t.Skip.
+// Everything here runs offline: synthetic stdout and stderr, with an isolated
+// FIFO-held shell/cat group in TestFinGatherReturnsNoCapturedBytes only; no live
+// claude, credentials, daemon, turn or t.Skip.
 //
 //	go test -race -tags e2e_realclaude -run '^TestFinGather' -v ./internal/e2e/realclaude/
 //
@@ -51,9 +51,10 @@ package realclaude
 // trailOutcomeRunningAtTrailer on Admit.Value == trailAdmitProof BEFORE Step 4
 // (ArgvScanErrored), Step 5 (RowsScanned == 0), Step 7 (MatchCount > 0) or
 // Step 8 are consulted. That is what makes this file's rows cheap: with no
-// subject staged EVERY row runs at MatchCount == 0, and the finding and the
-// negative still separate. Stretching a hold past the reap to force a
-// post-trailer match would destroy the very ordering the proof rests on.
+// subject staged the original composition rows run at MatchCount == 0, and the
+// finding and negative still separate. The publication sweep also stages a held
+// subject to exercise healthy liveness; its reap line is synthetic, so it makes
+// no claim about live teardown ordering.
 //
 // # An empty match set under a certifying gate IS the documented healthy negative
 //
@@ -129,7 +130,11 @@ package realclaude
 // TestFinGatherReturnsNoCapturedBytes proves it of all three — the licence
 // extends exactly as far as that sweep does, which is why #1309 extended the two
 // together. That test is what licenses the rest of this file's messages rather
-// than being one AC among five.
+// than being one AC among five. Its populated-liveness case covers healthy
+// per-pid Detail and StateColumn. Healthy reads omit ToolStderr; the synthetic
+// TestFinGatherForbiddenKeyWalkDescends case exercises that optional key's exact
+// exemption separately. Neither case proves arbitrary diagnostic strings are
+// redacted: whole-carried diagnostics retain their existing publication contract.
 
 import (
 	"bytes"
@@ -156,8 +161,8 @@ const (
 	//     TestFinGatherRecordPublishesTheMeasuredMissBound each leave the buffer
 	//     empty on purpose and append the trailer past two poll ticks, so each
 	//     one's trailer arrives well inside the wait and each loop costs roughly
-	//     600ms — THESE TWO ARE THIS FILE'S ONLY WALL CLOCK, and what the miss
-	//     bound costs;
+	//     600ms — these are the only deliberately delayed trailer polls, and what
+	//     the miss bound costs; the held-subject sweep also waits for its FIFO;
 	//   - the non-certifying row seeds an over-long line, which trailWaitForTrailer
 	//     returns from IMMEDIATELY (trailWaitForTrailer's trailAborted arm)
 	//     because abortion is monotone.
@@ -1528,16 +1533,40 @@ func TestFinGatherCarriesTheClaudeVerdictAsHandedIn(t *testing.T) {
 // marshalled keys are Go field names and Gate, Admit, Liveness and the record's
 // Entries[] are all nested — a flat top-level scan examines none of their keys,
 // which is exactly the gap #1280's transplant left open.
+//
+// Both no-subject and FIFO-held cases sweep all three returns. The held case
+// requires populated healthy liveness before sweeping; optional ToolStderr is
+// absent on those reads and receives synthetic key coverage in
+// TestFinGatherForbiddenKeyWalkDescends, not a diagnostic redaction claim here.
 func TestFinGatherReturnsNoCapturedBytes(t *testing.T) {
+	t.Run("no subject", func(t *testing.T) {
+		finGatherAssertNoCapturedBytes(t, finStageSubject{
+			Needles: finGatherNeedles(t),
+			Pinned:  []int{finGatherNamedPGID},
+			Group:   finGatherNamedPGID,
+		}, false)
+	})
+	t.Run("held subject with healthy liveness", func(t *testing.T) {
+		finStageHeldGroup(t, func(subject finStageSubject) {
+			finGatherAssertNoCapturedBytes(t, subject, true)
+		})
+	})
+}
+
+// finGatherAssertNoCapturedBytes shares the premises and three-return sweep
+// between an absent subject and finStageHeldGroup's actual staged subject.
+func finGatherAssertNoCapturedBytes(t *testing.T, subject finStageSubject, held bool) {
+	t.Helper()
+
 	var stdout probeSyncBuffer
 	seed := finGatherSeed(t, &stdout, finGatherNeedleTrailer)
-	stderr := []byte(trailReapLine(1, fmt.Sprintf("[%d] %s", finGatherNamedPGID, trailNeedle)) + "\n")
+	stderr := []byte(trailReapLine(1, fmt.Sprintf("[%d] %s", subject.Group, trailNeedle)) + "\n")
 
 	readings, record, sighting := finGatherReadings(finGatherInputs{
 		Stdout:     &stdout,
-		Needles:    finGatherNeedles(t),
+		Needles:    subject.Needles,
 		Stderr:     stderr,
-		Pinned:     []int{finGatherNamedPGID},
+		Pinned:     subject.Pinned,
 		PyryExited: true,
 		// A CONSTANT FROM pinReadState's CLOSED SET rather than "": it makes the
 		// header's ClaudeState exclusion structural in the fixture instead of a
@@ -1574,7 +1603,34 @@ func TestFinGatherReturnsNoCapturedBytes(t *testing.T) {
 	if readings.Admit.Value != trailAdmitProof {
 		t.Fatalf("the attribution reads %q; want %s — the premise is that the needle rides an "+
 			"ANCHORED line the classifier read in full and attributed to group %d",
-			readings.Admit.Value, trailAdmitProof, finGatherNamedPGID)
+			readings.Admit.Value, trailAdmitProof, subject.Group)
+	}
+	if readings.ClaudeState != pinStateRunning {
+		t.Fatalf("claude verdict reads %q; want the source-authored running constant", readings.ClaudeState)
+	}
+	if readings.ArgvScanErrored || readings.RowsScanned <= 0 {
+		t.Fatalf("argv scan errored=%t, rows=%d; want a successful nonempty scan",
+			readings.ArgvScanErrored, readings.RowsScanned)
+	}
+	if !held {
+		if readings.MatchCount != 0 || len(readings.Liveness) != 0 {
+			t.Fatalf("no-subject case matched %d rows with %d liveness reads; want none",
+				readings.MatchCount, len(readings.Liveness))
+		}
+	} else {
+		if readings.MatchCount <= 0 {
+			t.Fatal("held subject matched no rows; populated-liveness sweep would be vacuous")
+		}
+		finStageAssertLiveness(t, readings)
+		for _, read := range readings.Liveness {
+			if read.Verdict != pinStateRunning || read.Detail == "" || read.StateColumn == "" {
+				t.Fatalf("pid %d reads verdict=%q, detail=%q, state=%q; want a populated healthy read",
+					read.PID, read.Verdict, read.Detail, read.StateColumn)
+			}
+			if read.ToolStderr != "" {
+				t.Fatalf("healthy read for pid %d carries tool stderr; optional-key coverage belongs to the synthetic walker case", read.PID)
+			}
+		}
 	}
 
 	// --- the checks, over ALL THREE returns ---
@@ -3759,9 +3815,11 @@ func finGatherExemptKeys() map[string]string {
 		// pinStateOutcome.ToolStderr. #1271 admits pinStateOutcome into the
 		// readings WHOLE (trailRunReadings.Liveness) because it carries no
 		// command column by construction — pinStateColumns is `pid=,ppid=,stat=`
-		// with an enforcing test. Named here rather than left to fire later: this
-		// file's rows match nothing, so Liveness is empty today and the first row
-		// that filled it would go red on a shipped field.
+		// with an enforcing test. The held-subject sweep covers healthy Detail
+		// and StateColumn, but healthy reads leave ToolStderr empty and omitempty
+		// removes its key. TestFinGatherForbiddenKeyWalkDescends marshals a nonempty
+		// source-authored diagnostic to exercise this exact exemption separately.
+		// This admits the shipped key, not arbitrary diagnostic text as redacted.
 		"tool_stderr": "pinStateOutcome's own ps-stderr field, admitted whole by #1271",
 	}
 }
@@ -3860,4 +3918,39 @@ func TestFinGatherForbiddenKeyWalkDescends(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("optional diagnostic key in nested pinStateOutcome", func(t *testing.T) {
+		// Source-authored diagnostic text, never captured subprocess bytes. Healthy
+		// pinReadState reads omit this key, so the gather sweep cannot exercise it.
+		const diagnostic = "ps diagnostic fixture"
+		encoded, err := json.Marshal(trailRunReadings{
+			Liveness: []pinStateOutcome{{
+				Verdict: pinStateInstrumentFailed, Detail: "synthetic diagnostic-key coverage",
+				PID: 7930, ToolStderr: diagnostic,
+			}},
+		})
+		if err != nil {
+			t.Fatalf("marshalling nested pinStateOutcome: %v", err)
+		}
+		if !bytes.Contains(encoded, []byte(`"tool_stderr":"`+diagnostic+`"`)) {
+			t.Fatal("nonempty ToolStderr was omitted; exemption coverage would be vacuous")
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			t.Fatalf("decoding nested pinStateOutcome: %v", err)
+		}
+		if got := finGatherForbiddenKeyPaths("fixture", decoded); len(got) != 0 {
+			t.Fatalf("walk rejected the shipped tool_stderr diagnostic key: %v", got)
+		}
+
+		// Add the forbidden neighbour beside the real marshalled key, at exactly
+		// the same depth. Accepting a prefix would incorrectly admit both keys.
+		state := decoded["Liveness"].([]any)[0].(map[string]any)
+		state["tool_stderr_tail"] = diagnostic
+		got := finGatherForbiddenKeyPaths("fixture", decoded)
+		want := `fixture.Liveness[0].tool_stderr_tail ("stderr"-shaped)`
+		if len(got) != 1 || got[0] != want {
+			t.Fatalf("walk reported %v; want exactly %q beside exempt tool_stderr", got, want)
+		}
+	})
 }
