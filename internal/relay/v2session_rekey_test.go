@@ -1,0 +1,1198 @@
+package relay
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"runtime"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/pyrycode/pyrycode/internal/control"
+	"github.com/pyrycode/pyrycode/internal/dispatch"
+	"github.com/pyrycode/pyrycode/internal/noise"
+	"github.com/pyrycode/pyrycode/internal/protocol"
+)
+
+// --- re-key responder tests (#453) ---
+
+// TestV2Session_RekeyResponder_HappyPath_RoundTripUnderNewKeys drives a
+// paired-device handshake to open, then feeds a fresh noise_init from
+// the SAME initiator static (peer-continuity invariant). The manager
+// must run the IK responder again, atomically swap s.send / s.recv, and
+// emit a noise_resp. A subsequent application frame round-trips under
+// the NEW CipherStates (encrypted send via initSend2, decrypted reply
+// via initRecv2). State stays V2StateOpen; s.device and s.peerStatic
+// are preserved.
+func TestV2Session_RekeyResponder_HappyPath_RoundTripUnderNewKeys(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, initPub := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	const replyText = "rekey-round-trip-payload"
+	echoPayload, err := json.Marshal(map[string]string{"text": replyText})
+	if err != nil {
+		t.Fatalf("marshal echo payload: %v", err)
+	}
+	handlers := map[string]dispatch.Handler{
+		protocol.TypeListConversations: func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error {
+			return c.Reply(ctx, env, protocol.TypeConversations, echoPayload)
+		},
+	}
+
+	frames := make(chan protocol.RoutingEnvelope, 3)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+		Handlers:   handlers,
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	// Fresh initiator reusing the SAME initPriv (peer-continuity
+	// invariant). Empty early-data per spec § Re-key.
+	initiator2, err := noise.NewInitiator(initPriv, respPub)
+	if err != nil {
+		t.Fatalf("NewInitiator2: %v", err)
+	}
+	initMsg2, err := initiator2.WriteInit(nil)
+	if err != nil {
+		t.Fatalf("WriteInit2: %v", err)
+	}
+	frames <- wrapInnerFrame(t, v2TestConnID, protocol.TypeNoiseInit, initMsg2)
+
+	envs := waitForEnvelopes(t, rec, 2)
+	if len(envs) != 2 {
+		t.Fatalf("envs after rekey: got %d, want exactly 2 (initial noise_resp + rekey noise_resp)", len(envs))
+	}
+	rekeyResp := envs[1]
+	if rekeyResp.CloseCode != 0 {
+		t.Errorf("rekey noise_resp CloseCode = %d, want 0", rekeyResp.CloseCode)
+	}
+	if rekeyResp.Frame == nil {
+		t.Fatal("rekey noise_resp Frame is nil")
+	}
+	respRaw := decodeRespFrame(t, rekeyResp)
+	earlyAck, initSend2, initRecv2, err := initiator2.ReadResp(respRaw)
+	if err != nil {
+		t.Fatalf("initiator2.ReadResp: %v", err)
+	}
+	if len(earlyAck) != 0 {
+		t.Errorf("rekey noise_resp early-data len = %d, want 0 (spec § Re-key)", len(earlyAck))
+	}
+
+	// Round-trip under the NEW CipherStates: AEAD-seal a request under
+	// initSend2, expect a sealed reply that decrypts cleanly under
+	// initRecv2.
+	const reqID uint64 = 99
+	frames <- sealAppFrame(t, initSend2, protocol.Envelope{
+		ID:      reqID,
+		Type:    protocol.TypeListConversations,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(`{}`),
+	})
+
+	envs = waitForEnvelopes(t, rec, 3)
+	if len(envs) != 3 {
+		t.Fatalf("envs after round-trip: got %d, want exactly 3", len(envs))
+	}
+	reply := envs[2]
+	if reply.CloseCode != 0 {
+		t.Errorf("reply CloseCode = %d, want 0", reply.CloseCode)
+	}
+	inner := decryptAppFrame(t, reply, initRecv2)
+	if inner.Type != protocol.TypeConversations {
+		t.Errorf("inner.Type = %q, want %q", inner.Type, protocol.TypeConversations)
+	}
+	if inner.InReplyTo == nil || *inner.InReplyTo != reqID {
+		t.Errorf("inner.InReplyTo = %v, want pointer to %d", inner.InReplyTo, reqID)
+	}
+	var gotPayload map[string]string
+	if err := json.Unmarshal(inner.Payload, &gotPayload); err != nil {
+		t.Fatalf("decode reply payload: %v", err)
+	}
+	if gotPayload["text"] != replyText {
+		t.Errorf("reply payload text = %q, want %q", gotPayload["text"], replyText)
+	}
+
+	// State / preserved-snapshot assertions: stop the manager so reads of
+	// mgr.sessions are race-free.
+	sess.stop()
+	s := sess.mgr.sessions[v2TestConnID]
+	if s == nil {
+		t.Fatalf("session for %q missing after rekey", v2TestConnID)
+	}
+	if got := s.State(); got != V2StateOpen {
+		t.Errorf("state after rekey = %v, want V2StateOpen", got)
+	}
+	if s.device == nil || s.device.Name != v2TestDevName {
+		t.Errorf("device snapshot lost across rekey: %+v", s.device)
+	}
+	if !bytes.Equal(s.peerStatic, initPub) {
+		t.Errorf("peerStatic mutated across rekey: got %x, want %x", s.peerStatic, initPub)
+	}
+}
+
+// TestV2Session_RekeyResponder_DifferentPeerStatic_4426 drives a
+// paired-device handshake to open, then feeds a fresh noise_init from a
+// DIFFERENT initiator static. The peer-continuity check must reject at
+// WS close 4426 with reason rekey_peer_static_mismatch and MUST NOT
+// include device_name on the reject log line (anti-enumeration
+// discipline — this is the security-load-bearing test for Threat #3's
+// "no impersonation succeeds" residual-risk claim).
+func TestV2Session_RekeyResponder_DifferentPeerStatic_4426(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	logger, logBuf := bufferLogger()
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     logger,
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	// Fresh initiator with a DIFFERENT static keypair.
+	otherInitPriv, _ := genV2Keypair(t)
+	initiator2, err := noise.NewInitiator(otherInitPriv, respPub)
+	if err != nil {
+		t.Fatalf("NewInitiator2: %v", err)
+	}
+	initMsg2, err := initiator2.WriteInit(nil)
+	if err != nil {
+		t.Fatalf("WriteInit2: %v", err)
+	}
+	frames <- wrapInnerFrame(t, v2TestConnID, protocol.TypeNoiseInit, initMsg2)
+
+	envs := waitForEnvelopes(t, rec, 2)
+	if len(envs) != 2 {
+		t.Fatalf("envs after mismatch: got %d, want exactly 2 (initial noise_resp + close)", len(envs))
+	}
+	closing := envs[1]
+	if closing.CloseCode != uint16(StatusHandshakeFailure) {
+		t.Errorf("close_code = %d, want %d", closing.CloseCode, StatusHandshakeFailure)
+	}
+	if closing.Frame != nil {
+		t.Errorf("Frame = %s, want nil (close-only at 4426)", string(closing.Frame))
+	}
+
+	// Stop the manager so the log buffer is fully flushed before the
+	// substring assertions read it.
+	sess.stop()
+
+	if _, ok := sess.mgr.sessions[v2TestConnID]; ok {
+		t.Errorf("sessions[%q] still present after rekey reject; closeWith should have deleted it", v2TestConnID)
+	}
+
+	out := logBuf.String()
+	for _, want := range []string{
+		"event=v2.handshake.reject.ik_failure",
+		"reason=rekey_peer_static_mismatch",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log missing %q; got:\n%s", want, out)
+		}
+	}
+	// Anti-enumeration discipline: device_name MUST NOT appear in the
+	// mismatch reject line. The only other log line written by this test
+	// is the initial v2.handshake.accept (which DOES include
+	// device_name), so a global presence check would false-positive. We
+	// extract the line containing the reject event and assert on that
+	// substring alone.
+	rejectLine := ""
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "event=v2.handshake.reject.ik_failure") {
+			rejectLine = line
+			break
+		}
+	}
+	if rejectLine == "" {
+		t.Fatalf("reject log line not found; got:\n%s", out)
+	}
+	if strings.Contains(rejectLine, "device_name") {
+		t.Errorf("reject log line includes device_name; anti-enumeration discipline violated.\nline: %s", rejectLine)
+	}
+}
+
+// TestV2Session_RekeyResponder_OldKeyFrameAfterSwap_4421 drives a
+// paired-device handshake to open, captures the initiator's pre-rekey
+// initSend, completes a re-key (so the manager's s.recv is now the
+// fresh CipherState), then feeds a noise_msg sealed under the OLD
+// initSend. The existing #446 tampered-frame branch must close the conn
+// at 4421 — no new code; this AC pins inherited behaviour against the
+// post-swap state.
+func TestV2Session_RekeyResponder_OldKeyFrameAfterSwap_4421(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	frames := make(chan protocol.RoutingEnvelope, 3)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	// Stash a ciphertext sealed under the OLD initSend BEFORE the
+	// re-key. This is the stale frame that must fail AEAD against the
+	// fresh s.recv after the swap.
+	staleEnv := protocol.Envelope{
+		ID:      55,
+		Type:    protocol.TypeListConversations,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(`{}`),
+	}
+	staleFrame := sealAppFrame(t, sess.initSend, staleEnv)
+
+	// Drive the re-key with the same static (peer-continuity passes).
+	initiator2, err := noise.NewInitiator(initPriv, respPub)
+	if err != nil {
+		t.Fatalf("NewInitiator2: %v", err)
+	}
+	initMsg2, err := initiator2.WriteInit(nil)
+	if err != nil {
+		t.Fatalf("WriteInit2: %v", err)
+	}
+	frames <- wrapInnerFrame(t, v2TestConnID, protocol.TypeNoiseInit, initMsg2)
+	waitForEnvelopes(t, rec, 2)
+
+	// Now feed the stale frame. The manager's s.recv is the fresh
+	// CipherState; the stale ciphertext was sealed under the pre-rekey
+	// counterpart key. AEAD decrypt fails → #446 tampered-frame branch
+	// closes at 4421 with no Frame.
+	frames <- staleFrame
+
+	envs := waitForEnvelopes(t, rec, 3)
+	if len(envs) != 3 {
+		t.Fatalf("envs after stale frame: got %d, want exactly 3 (initial resp + rekey resp + close)", len(envs))
+	}
+	closing := envs[2]
+	if closing.CloseCode != uint16(StatusProtocolMismatch) {
+		t.Errorf("close_code = %d, want %d (#446 tampered-frame branch on new s.recv)",
+			closing.CloseCode, StatusProtocolMismatch)
+	}
+	if closing.Frame != nil {
+		t.Errorf("Frame = %s, want nil (close-only at 4421)", string(closing.Frame))
+	}
+
+	sess.stop()
+	if _, ok := sess.mgr.sessions[v2TestConnID]; ok {
+		t.Errorf("sessions[%q] still present after 4421 close; closeWith should have deleted it", v2TestConnID)
+	}
+}
+
+// --- v2 control-envelope tests (#454) ---
+
+// syncLogBuffer is a goroutine-safe sink for slog text output. The
+// manager's dispatch goroutine writes; the test goroutine reads. Mirrors
+// internal/conversations/sweep_loop_test.go's syncBuffer.
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncLogBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncLogBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+// bufferLogger returns a slog.TextHandler-backed logger that writes into
+// a goroutine-safe buffer at Debug level. The buffer is suitable for
+// substring assertions on event/level/field key=value text.
+func bufferLogger() (*slog.Logger, *syncLogBuffer) {
+	buf := &syncLogBuffer{}
+	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})), buf
+}
+
+// waitForLogContains polls buf until it contains substr or the deadline
+// expires. Synchronisation knob for tests that send a frame the manager
+// processes without emitting an outbound envelope (e.g. rekey_request,
+// which is informational).
+func waitForLogContains(t *testing.T, buf *syncLogBuffer, substr string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(buf.String(), substr) {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("waitForLogContains: %q not found in log; got:\n%s", substr, buf.String())
+}
+
+// TestV2Session_OpenState_RekeyRequest_ScheduledIntercepted drives a
+// paired-device handshake to open and feeds an AEAD-sealed rekey_request
+// envelope. The v2 control-envelope discriminator MUST route the frame
+// away from the application handler chain (handlerCalled stays false),
+// emit no outbound envelope, and leave the session in V2StateOpen.
+func TestV2Session_OpenState_RekeyRequest_ScheduledIntercepted(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	var handlerCalled atomic.Bool
+	handlers := map[string]dispatch.Handler{
+		protocol.TypeListConversations: func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error {
+			handlerCalled.Store(true)
+			return nil
+		},
+	}
+
+	logger, logBuf := bufferLogger()
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     logger,
+		Handlers:   handlers,
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	frames <- sealAppFrame(t, sess.initSend, protocol.Envelope{
+		ID:      42,
+		Type:    protocol.TypeRekeyRequest,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(`{"reason":"scheduled"}`),
+	})
+
+	// The discriminator emits no outbound envelope, so synchronise on the
+	// log line the recognised-reason branch writes.
+	waitForLogContains(t, logBuf, "event=v2.rekey.request.received")
+
+	// Exactly one outbound envelope (the handshake's noise_resp); no
+	// reply, no close.
+	envs := rec.snapshot()
+	if len(envs) != 1 {
+		t.Fatalf("envs after rekey_request: got %d, want exactly 1 (noise_resp only)", len(envs))
+	}
+	if envs[0].CloseCode != 0 {
+		t.Errorf("noise_resp CloseCode = %d, want 0", envs[0].CloseCode)
+	}
+	if handlerCalled.Load() {
+		t.Error("application handler invoked on rekey_request; control envelope MUST be intercepted before dispatch.Route")
+	}
+
+	sess.stop()
+	s := sess.mgr.sessions[v2TestConnID]
+	if s == nil {
+		t.Fatalf("session for %q missing after rekey_request", v2TestConnID)
+	}
+	if got := s.State(); got != V2StateOpen {
+		t.Errorf("state after rekey_request = %v, want V2StateOpen", got)
+	}
+}
+
+// TestV2Session_OpenState_RekeyRequest_UnknownReasonTolerated drives to
+// open then sends rekey_request with an unrecognised reason. The
+// manager must log at WARN with the raw reason string, emit no
+// outbound frame, and leave the session in V2StateOpen.
+func TestV2Session_OpenState_RekeyRequest_UnknownReasonTolerated(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	logger, logBuf := bufferLogger()
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     logger,
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	frames <- sealAppFrame(t, sess.initSend, protocol.Envelope{
+		ID:      42,
+		Type:    protocol.TypeRekeyRequest,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(`{"reason":"lunar-eclipse"}`),
+	})
+
+	waitForLogContains(t, logBuf, "event=v2.rekey.request.received")
+
+	out := logBuf.String()
+	for _, want := range []string{"level=WARN", "event=v2.rekey.request.received", "reason=lunar-eclipse"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log missing %q; got:\n%s", want, out)
+		}
+	}
+
+	envs := rec.snapshot()
+	if len(envs) != 1 {
+		t.Fatalf("envs after unknown-reason rekey_request: got %d, want exactly 1 (noise_resp only)", len(envs))
+	}
+	if envs[0].CloseCode != 0 {
+		t.Errorf("noise_resp CloseCode = %d, want 0", envs[0].CloseCode)
+	}
+
+	sess.stop()
+	s := sess.mgr.sessions[v2TestConnID]
+	if s == nil {
+		t.Fatalf("session for %q missing after unknown-reason rekey_request", v2TestConnID)
+	}
+	if got := s.State(); got != V2StateOpen {
+		t.Errorf("state after unknown-reason rekey_request = %v, want V2StateOpen", got)
+	}
+}
+
+// TestV2Session_OpenState_RekeyRequest_RecognisedReasons parameterises
+// across the three recognised payload.reason values from
+// docs/protocol-mobile.md § Re-key. Each must log at INFO with the
+// matching reason field, emit no outbound frame, and leave the session
+// in V2StateOpen.
+func TestV2Session_OpenState_RekeyRequest_RecognisedReasons(t *testing.T) {
+	t.Parallel()
+
+	reasons := []string{"scheduled", "manual", "compromise"}
+	for _, reason := range reasons {
+		reason := reason
+		t.Run(reason, func(t *testing.T) {
+			t.Parallel()
+
+			respPriv, respPub := genV2Keypair(t)
+			initPriv, _ := genV2Keypair(t)
+			reg := v2PairedRegistry(t, v2TestToken)
+
+			logger, logBuf := bufferLogger()
+			frames := make(chan protocol.RoutingEnvelope, 2)
+			rec := &v2Recorder{}
+			sess := driveToOpen(t, V2SessionConfig{
+				Frames:     frames,
+				Outbound:   rec.outbound,
+				StaticPriv: respPriv,
+				Devices:    reg,
+				ServerID:   v2TestServerID,
+				Logger:     logger,
+			}, frames, rec, respPub, initPriv)
+			t.Cleanup(sess.stop)
+
+			payload, err := json.Marshal(map[string]string{"reason": reason})
+			if err != nil {
+				t.Fatalf("marshal payload: %v", err)
+			}
+			frames <- sealAppFrame(t, sess.initSend, protocol.Envelope{
+				ID:      42,
+				Type:    protocol.TypeRekeyRequest,
+				TS:      time.Now().UTC(),
+				Payload: payload,
+			})
+
+			waitForLogContains(t, logBuf, "event=v2.rekey.request.received")
+
+			out := logBuf.String()
+			for _, want := range []string{"level=INFO", "event=v2.rekey.request.received", "reason=" + reason} {
+				if !strings.Contains(out, want) {
+					t.Errorf("log missing %q; got:\n%s", want, out)
+				}
+			}
+
+			envs := rec.snapshot()
+			if len(envs) != 1 {
+				t.Fatalf("envs after %s rekey_request: got %d, want exactly 1 (noise_resp only)", reason, len(envs))
+			}
+			if envs[0].CloseCode != 0 {
+				t.Errorf("noise_resp CloseCode = %d, want 0", envs[0].CloseCode)
+			}
+
+			sess.stop()
+			s := sess.mgr.sessions[v2TestConnID]
+			if s == nil {
+				t.Fatalf("session for %q missing after %s rekey_request", v2TestConnID, reason)
+			}
+			if got := s.State(); got != V2StateOpen {
+				t.Errorf("state after %s rekey_request = %v, want V2StateOpen", reason, got)
+			}
+		})
+	}
+}
+
+// --- re-key initiator tests (#450) ---
+
+// waitForOutboundCount polls rec.snapshot() until at least n envelopes
+// are recorded or the supplied deadline expires. Same shape as
+// waitForEnvelopes but with a caller-supplied deadline (used by the
+// reply-timeout test that has to wait a bounded window for the close
+// envelope without the 2s default tripping a stale-rekey false positive).
+func waitForOutboundCount(t *testing.T, rec *v2Recorder, n int, deadline time.Duration) []protocol.RoutingEnvelope {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	for time.Now().Before(end) {
+		envs := rec.snapshot()
+		if len(envs) >= n {
+			return envs
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("waitForOutboundCount: only got %d, want >= %d", len(rec.snapshot()), n)
+	return nil
+}
+
+// TestV2Session_RekeyInitiator_Emit_ReArmViaResponder pins AC #5
+// bullets 1 + 2: after rekeyInterval elapses the manager emits a
+// rekey_request envelope sealed under s.send with payload.reason ==
+// "scheduled"; after a full re-key cycle completes via handleRekeyInit
+// the timer re-arms and a SECOND rekey_request is emitted under the
+// post-swap s.send. Joint test because the natural production caller
+// of rekeyComplete is handleRekeyInit, not a test goroutine bypass.
+func TestV2Session_RekeyInitiator_Emit_ReArmViaResponder(t *testing.T) {
+	// Not t.Parallel: mutates package-level rekeyInterval /
+	// rekeyReplyTimeout vars which the dispatch goroutines of other
+	// parallel tests read at session-open / emit time.
+	prevInterval := rekeyInterval
+	rekeyInterval = 20 * time.Millisecond
+	t.Cleanup(func() { rekeyInterval = prevInterval })
+	prevReply := rekeyReplyTimeout
+	rekeyReplyTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { rekeyReplyTimeout = prevReply })
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	frames := make(chan protocol.RoutingEnvelope, 3)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	// First emit: wait for the rekeyInterval to elapse and a second
+	// outbound envelope to appear (initial noise_resp + first emit).
+	envs := waitForEnvelopes(t, rec, 2)
+	if len(envs) < 2 {
+		t.Fatalf("envs after first interval: got %d, want >= 2", len(envs))
+	}
+	emit1 := envs[1]
+	if emit1.CloseCode != 0 {
+		t.Errorf("first emit CloseCode = %d, want 0", emit1.CloseCode)
+	}
+	inner1 := decryptAppFrame(t, emit1, sess.initRecv)
+	if inner1.Type != protocol.TypeRekeyRequest {
+		t.Errorf("first emit inner type = %q, want %q", inner1.Type, protocol.TypeRekeyRequest)
+	}
+	var payload1 struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(inner1.Payload, &payload1); err != nil {
+		t.Fatalf("decode first emit payload: %v", err)
+	}
+	if payload1.Reason != "scheduled" {
+		t.Errorf("first emit reason = %q, want %q", payload1.Reason, "scheduled")
+	}
+
+	// Drive a successful re-key via handleRekeyInit (fresh initiator,
+	// same initPriv so peer-static continuity holds, empty early-data
+	// per spec § Re-key). This re-bases the 1-hour cadence via
+	// rekeyComplete.
+	initiator2, err := noise.NewInitiator(initPriv, respPub)
+	if err != nil {
+		t.Fatalf("NewInitiator2: %v", err)
+	}
+	initMsg2, err := initiator2.WriteInit(nil)
+	if err != nil {
+		t.Fatalf("WriteInit2: %v", err)
+	}
+	frames <- wrapInnerFrame(t, v2TestConnID, protocol.TypeNoiseInit, initMsg2)
+
+	envs = waitForEnvelopes(t, rec, 3)
+	if len(envs) < 3 {
+		t.Fatalf("envs after rekey: got %d, want >= 3", len(envs))
+	}
+	rekeyResp := envs[2]
+	if rekeyResp.CloseCode != 0 {
+		t.Errorf("rekey noise_resp CloseCode = %d, want 0", rekeyResp.CloseCode)
+	}
+	respRaw := decodeRespFrame(t, rekeyResp)
+	_, _, initRecv2, err := initiator2.ReadResp(respRaw)
+	if err != nil {
+		t.Fatalf("initiator2.ReadResp: %v", err)
+	}
+
+	// Second emit: rekeyComplete re-armed the timer; after another
+	// rekeyInterval the manager emits a fresh rekey_request — under
+	// the POST-SWAP s.send, decoded under initRecv2.
+	envs = waitForEnvelopes(t, rec, 4)
+	if len(envs) < 4 {
+		t.Fatalf("envs after second interval: got %d, want >= 4", len(envs))
+	}
+	emit2 := envs[3]
+	if emit2.CloseCode != 0 {
+		t.Errorf("second emit CloseCode = %d, want 0", emit2.CloseCode)
+	}
+	inner2 := decryptAppFrame(t, emit2, initRecv2)
+	if inner2.Type != protocol.TypeRekeyRequest {
+		t.Errorf("second emit inner type = %q, want %q", inner2.Type, protocol.TypeRekeyRequest)
+	}
+	var payload2 struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(inner2.Payload, &payload2); err != nil {
+		t.Fatalf("decode second emit payload: %v", err)
+	}
+	if payload2.Reason != "scheduled" {
+		t.Errorf("second emit reason = %q, want %q", payload2.Reason, "scheduled")
+	}
+
+	// State after stop: session still open, awaitingRekeyReply still
+	// true (second emit was sent, no second responder cycle).
+	sess.stop()
+	s := sess.mgr.sessions[v2TestConnID]
+	if s == nil {
+		t.Fatalf("session for %q missing after second emit", v2TestConnID)
+	}
+	if got := s.State(); got != V2StateOpen {
+		t.Errorf("state after second emit = %v, want V2StateOpen", got)
+	}
+	if !s.awaitingRekeyReply {
+		t.Errorf("awaitingRekeyReply = false after second emit, want true (no responder cycle ran)")
+	}
+}
+
+// TestV2Session_RekeyInitiator_ReplyTimeout_4426 pins AC #5 bullet 3:
+// after the timer-driven emit, if no fresh noise_init arrives within
+// rekeyReplyTimeout the manager closes the conn at
+// StatusHandshakeFailure (4426) with a noise.rekey_failed log line.
+func TestV2Session_RekeyInitiator_ReplyTimeout_4426(t *testing.T) {
+	// Not t.Parallel: mutates package-level rekeyInterval /
+	// rekeyReplyTimeout vars which the dispatch goroutines of other
+	// parallel tests read at session-open / emit time.
+	prevInterval := rekeyInterval
+	rekeyInterval = 20 * time.Millisecond
+	t.Cleanup(func() { rekeyInterval = prevInterval })
+	prevReply := rekeyReplyTimeout
+	rekeyReplyTimeout = 40 * time.Millisecond
+	t.Cleanup(func() { rekeyReplyTimeout = prevReply })
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	logger, logBuf := bufferLogger()
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     logger,
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	// Wait for the close envelope: initial noise_resp + emit + close.
+	envs := waitForOutboundCount(t, rec, 3, 500*time.Millisecond)
+	if len(envs) < 3 {
+		t.Fatalf("envs after reply timeout: got %d, want >= 3", len(envs))
+	}
+	emit := envs[1]
+	if emit.CloseCode != 0 {
+		t.Errorf("emit CloseCode = %d, want 0", emit.CloseCode)
+	}
+	closing := envs[2]
+	if closing.CloseCode != uint16(StatusHandshakeFailure) {
+		t.Errorf("close_code = %d, want %d", closing.CloseCode, StatusHandshakeFailure)
+	}
+	if closing.Frame != nil {
+		t.Errorf("Frame = %s, want nil (close-only at 4426)", string(closing.Frame))
+	}
+
+	// Stop so the log buffer fully flushes before substring checks.
+	sess.stop()
+
+	if _, ok := sess.mgr.sessions[v2TestConnID]; ok {
+		t.Errorf("sessions[%q] still present after reply-timeout close; closeWith should have deleted it", v2TestConnID)
+	}
+
+	out := logBuf.String()
+	for _, want := range []string{
+		"event=noise.rekey_failed",
+		"close_code=4426",
+		"conn_id=" + v2TestConnID,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log missing %q; got:\n%s", want, out)
+		}
+	}
+	// noise.rekey_failed line MUST NOT carry an err= field — no
+	// flynn-noise error text leaks via the timeout branch (architect
+	// security review).
+	failLine := ""
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "event=noise.rekey_failed") {
+			failLine = line
+			break
+		}
+	}
+	if failLine == "" {
+		t.Fatalf("noise.rekey_failed log line not found; got:\n%s", out)
+	}
+	if strings.Contains(failLine, "err=") {
+		t.Errorf("noise.rekey_failed line carries err= field; no flynn-noise error text should leak.\nline: %s", failLine)
+	}
+}
+
+// TestV2Session_RekeyInitiator_TimerCleanup_NoGoroutineLeak pins
+// AC #5 bullet 4: armed timer-callback goroutines do not outlive Run.
+// Two phases — close via manager-exit (timers armed but never fired)
+// and close via reply-timeout fire (rekeyReplyTimer fired the close).
+// In both cases, runtime.NumGoroutine returns to its pre-test baseline
+// within a small jitter window after Run exits.
+func TestV2Session_RekeyInitiator_TimerCleanup_NoGoroutineLeak(t *testing.T) {
+	// Not t.Parallel(): runtime.NumGoroutine is global, parallel tests
+	// would race the baseline reads.
+
+	t.Run("close_via_manager_exit", func(t *testing.T) {
+		prevInterval := rekeyInterval
+		rekeyInterval = 50 * time.Millisecond
+		t.Cleanup(func() { rekeyInterval = prevInterval })
+		prevReply := rekeyReplyTimeout
+		rekeyReplyTimeout = 100 * time.Millisecond
+		t.Cleanup(func() { rekeyReplyTimeout = prevReply })
+
+		before := runtime.NumGoroutine()
+
+		respPriv, respPub := genV2Keypair(t)
+		initPriv, _ := genV2Keypair(t)
+		reg := v2PairedRegistry(t, v2TestToken)
+
+		frames := make(chan protocol.RoutingEnvelope, 2)
+		rec := &v2Recorder{}
+		sess := driveToOpen(t, V2SessionConfig{
+			Frames:     frames,
+			Outbound:   rec.outbound,
+			StaticPriv: respPriv,
+			Devices:    reg,
+			ServerID:   v2TestServerID,
+			Logger:     silentLogger(),
+		}, frames, rec, respPub, initPriv)
+
+		// Stop immediately — rekeyTimer is armed but has not yet
+		// fired. Run-derived runCtx cancel must unblock any pending
+		// callback goroutine. (Sleeping briefly here is unnecessary:
+		// armRekeyTimer's callback hasn't been spawned yet because
+		// time.AfterFunc spawns the goroutine only when the timer
+		// fires.)
+		sess.stop()
+
+		// Give time.AfterFunc-spawned goroutines (if any fired during
+		// the brief handshake window) a tick to unblock and exit.
+		runtime.Gosched()
+		runtime.GC()
+		time.Sleep(20 * time.Millisecond)
+
+		after := runtime.NumGoroutine()
+		if after > before+1 {
+			t.Errorf("goroutine leak: before=%d, after=%d (delta=%d)", before, after, after-before)
+		}
+	})
+
+	t.Run("close_via_reply_timeout", func(t *testing.T) {
+		prevInterval := rekeyInterval
+		rekeyInterval = 20 * time.Millisecond
+		t.Cleanup(func() { rekeyInterval = prevInterval })
+		prevReply := rekeyReplyTimeout
+		rekeyReplyTimeout = 40 * time.Millisecond
+		t.Cleanup(func() { rekeyReplyTimeout = prevReply })
+
+		before := runtime.NumGoroutine()
+
+		respPriv, respPub := genV2Keypair(t)
+		initPriv, _ := genV2Keypair(t)
+		reg := v2PairedRegistry(t, v2TestToken)
+
+		frames := make(chan protocol.RoutingEnvelope, 2)
+		rec := &v2Recorder{}
+		sess := driveToOpen(t, V2SessionConfig{
+			Frames:     frames,
+			Outbound:   rec.outbound,
+			StaticPriv: respPriv,
+			Devices:    reg,
+			ServerID:   v2TestServerID,
+			Logger:     silentLogger(),
+		}, frames, rec, respPub, initPriv)
+
+		// Wait for the close envelope (initial noise_resp + emit +
+		// close) so both timers have fired.
+		_ = waitForOutboundCount(t, rec, 3, 500*time.Millisecond)
+		sess.stop()
+
+		runtime.Gosched()
+		runtime.GC()
+		time.Sleep(20 * time.Millisecond)
+
+		after := runtime.NumGoroutine()
+		if after > before+1 {
+			t.Errorf("goroutine leak: before=%d, after=%d (delta=%d)", before, after, after-before)
+		}
+	})
+}
+
+// TestV2Session_RekeyManual_HappyPath_EmitsManualReason drives a v2
+// handshake to open, calls (*V2SessionManager).Rekey, and asserts the
+// resulting emit is a TypeRekeyRequest envelope sealed under s.send
+// with payload.reason == "manual" and a matching log line.
+func TestV2Session_RekeyManual_HappyPath_EmitsManualReason(t *testing.T) {
+	// Not t.Parallel: mutates package-level rekeyInterval / rekeyReplyTimeout
+	// vars. Long values so the scheduled timer cannot fire during the
+	// test window (only the manual emit should produce a second envelope).
+	prevInterval := rekeyInterval
+	rekeyInterval = 10 * time.Second
+	t.Cleanup(func() { rekeyInterval = prevInterval })
+	prevReply := rekeyReplyTimeout
+	rekeyReplyTimeout = 10 * time.Second
+	t.Cleanup(func() { rekeyReplyTimeout = prevReply })
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	logger, logBuf := bufferLogger()
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     logger,
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := sess.mgr.Rekey(ctx, v2TestConnID); err != nil {
+		t.Fatalf("Rekey: %v", err)
+	}
+
+	envs := waitForEnvelopes(t, rec, 2)
+	if len(envs) != 2 {
+		t.Fatalf("envs after manual rekey: got %d, want exactly 2 (noise_resp + manual emit)", len(envs))
+	}
+	emit := envs[1]
+	if emit.CloseCode != 0 {
+		t.Errorf("manual emit CloseCode = %d, want 0", emit.CloseCode)
+	}
+	inner := decryptAppFrame(t, emit, sess.initRecv)
+	if inner.Type != protocol.TypeRekeyRequest {
+		t.Errorf("manual emit inner type = %q, want %q", inner.Type, protocol.TypeRekeyRequest)
+	}
+	var payload struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(inner.Payload, &payload); err != nil {
+		t.Fatalf("decode manual emit payload: %v", err)
+	}
+	if payload.Reason != "manual" {
+		t.Errorf("manual emit reason = %q, want %q", payload.Reason, "manual")
+	}
+
+	waitForLogContains(t, logBuf, "event=v2.rekey.emit")
+	out := logBuf.String()
+	for _, want := range []string{
+		"event=v2.rekey.emit",
+		"reason=manual",
+		"conn_id=" + v2TestConnID,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log missing %q; got:\n%s", want, out)
+		}
+	}
+}
+
+// TestV2Session_RekeyManual_UnknownConn_ReturnsErrConnNotFound calls
+// Rekey for a conn_id the manager has never seen and asserts the
+// returned error matches both relay.ErrConnNotFound and
+// control.ErrConnNotFound (the wire-mapping invariant the dispatcher's
+// errors.Is depends on) and that no outbound side-effect occurred.
+func TestV2Session_RekeyManual_UnknownConn_ReturnsErrConnNotFound(t *testing.T) {
+	t.Parallel()
+
+	respPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	frames := make(chan protocol.RoutingEnvelope)
+	rec := &v2Recorder{}
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	})
+	t.Cleanup(stop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := mgr.Rekey(ctx, "this-conn-does-not-exist")
+	if err == nil {
+		t.Fatalf("Rekey on unknown conn: err = nil, want non-nil")
+	}
+	if !errors.Is(err, ErrConnNotFound) {
+		t.Errorf("errors.Is(err, relay.ErrConnNotFound) = false; err = %v", err)
+	}
+	if !errors.Is(err, control.ErrConnNotFound) {
+		t.Errorf("errors.Is(err, control.ErrConnNotFound) = false; err = %v (wire-mapping invariant broken)", err)
+	}
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Errorf("rec.snapshot() len = %d, want 0 (no outbound side-effect on unknown conn)", len(got))
+	}
+}
+
+// TestV2Session_RekeyManual_AlreadyAwaitingReply_ReturnsErrSessionNotOpen
+// drives to open, fires a successful manual Rekey, then fires a SECOND
+// Rekey on the same conn while the first reply window is still open.
+// The second call must return ErrSessionNotOpen without producing a
+// second outbound emit.
+func TestV2Session_RekeyManual_AlreadyAwaitingReply_ReturnsErrSessionNotOpen(t *testing.T) {
+	// Not t.Parallel: mutates package-level rekeyInterval / rekeyReplyTimeout.
+	prevInterval := rekeyInterval
+	rekeyInterval = 10 * time.Second
+	t.Cleanup(func() { rekeyInterval = prevInterval })
+	prevReply := rekeyReplyTimeout
+	rekeyReplyTimeout = 5 * time.Second
+	t.Cleanup(func() { rekeyReplyTimeout = prevReply })
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := sess.mgr.Rekey(ctx, v2TestConnID); err != nil {
+		t.Fatalf("first Rekey: %v", err)
+	}
+	// Wait for the manual emit so awaitingRekeyReply is observably true
+	// on the dispatch goroutine before the second call lands.
+	envs := waitForEnvelopes(t, sess.rec, 2)
+	if len(envs) != 2 {
+		t.Fatalf("envs after first Rekey: got %d, want 2 (noise_resp + manual emit)", len(envs))
+	}
+
+	err := sess.mgr.Rekey(ctx, v2TestConnID)
+	if err == nil {
+		t.Fatalf("second Rekey: err = nil, want ErrSessionNotOpen")
+	}
+	if !errors.Is(err, ErrSessionNotOpen) {
+		t.Errorf("errors.Is(err, relay.ErrSessionNotOpen) = false; err = %v", err)
+	}
+	if got := sess.rec.snapshot(); len(got) != 2 {
+		t.Errorf("rec.snapshot() len = %d, want 2 (no second manual emit)", len(got))
+	}
+
+	sess.stop()
+	s := sess.mgr.sessions[v2TestConnID]
+	if s == nil {
+		t.Fatalf("session for %q missing after second Rekey", v2TestConnID)
+	}
+	if got := s.State(); got != V2StateOpen {
+		t.Errorf("state after second Rekey = %v, want V2StateOpen", got)
+	}
+	if !s.awaitingRekeyReply {
+		t.Errorf("awaitingRekeyReply = false after second Rekey, want true")
+	}
+}
+
+// TestV2Session_RekeyManual_RebasesScheduledTimer pins the AC's "manual
+// emit at T re-bases the scheduled timer so the next scheduled emit
+// lands at T+rekeyInterval relative to the manual emit, not at the
+// original tick boundary." Sequence: drive to open at T≈0, sleep a
+// fraction of rekeyInterval so the original and re-based boundaries
+// separate cleanly, fire manual Rekey, drive a successful responder
+// cycle so rekeyComplete arms a fresh scheduled timer, assert no extra
+// emit lands at the original boundary, then assert the re-based
+// boundary produces a fresh scheduled emit.
+func TestV2Session_RekeyManual_RebasesScheduledTimer(t *testing.T) {
+	// Not t.Parallel: mutates package-level rekeyInterval / rekeyReplyTimeout.
+	//
+	// rekeyInterval is 300ms; the manual rekey is delayed by ~200ms after
+	// open so the original boundary (openedAt+300ms) is clearly before the
+	// re-based boundary (rekeyCompleteAt+300ms ≈ openedAt+500ms). A
+	// tighter cadence would make the two boundaries indistinguishable
+	// under scheduler jitter.
+	prevInterval := rekeyInterval
+	rekeyInterval = 300 * time.Millisecond
+	t.Cleanup(func() { rekeyInterval = prevInterval })
+	prevReply := rekeyReplyTimeout
+	rekeyReplyTimeout = 2 * time.Second
+	t.Cleanup(func() { rekeyReplyTimeout = prevReply })
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	frames := make(chan protocol.RoutingEnvelope, 3)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	openedAt := time.Now()
+
+	// Delay the manual rekey so the original scheduled boundary (T+300ms)
+	// is clearly distinguishable from the re-based boundary (T_manual+300ms).
+	sleepUntil(openedAt.Add(200 * time.Millisecond))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := sess.mgr.Rekey(ctx, v2TestConnID); err != nil {
+		t.Fatalf("Rekey: %v", err)
+	}
+
+	// Wait for the manual emit (envelope #2).
+	envs := waitForEnvelopes(t, rec, 2)
+	if len(envs) < 2 {
+		t.Fatalf("envs after manual rekey: got %d, want >= 2", len(envs))
+	}
+	emit := envs[1]
+	inner := decryptAppFrame(t, emit, sess.initRecv)
+	if inner.Type != protocol.TypeRekeyRequest {
+		t.Fatalf("manual emit inner type = %q, want %q", inner.Type, protocol.TypeRekeyRequest)
+	}
+	var manualPayload struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(inner.Payload, &manualPayload); err != nil {
+		t.Fatalf("decode manual emit payload: %v", err)
+	}
+	if manualPayload.Reason != "manual" {
+		t.Fatalf("manual emit reason = %q, want %q", manualPayload.Reason, "manual")
+	}
+
+	// Drive a successful responder cycle. Fresh initiator, same initPriv
+	// so peer-static continuity holds; empty early-data per spec.
+	initiator2, err := noise.NewInitiator(initPriv, respPub)
+	if err != nil {
+		t.Fatalf("NewInitiator2: %v", err)
+	}
+	initMsg2, err := initiator2.WriteInit(nil)
+	if err != nil {
+		t.Fatalf("WriteInit2: %v", err)
+	}
+	frames <- wrapInnerFrame(t, v2TestConnID, protocol.TypeNoiseInit, initMsg2)
+
+	// Wait for the responder reply (envelope #3) and read it so the
+	// post-swap initiator CipherStates exist for the fourth-envelope
+	// decode below.
+	envs = waitForEnvelopes(t, rec, 3)
+	if len(envs) < 3 {
+		t.Fatalf("envs after responder cycle: got %d, want >= 3", len(envs))
+	}
+	rekeyResp := envs[2]
+	respRaw := decodeRespFrame(t, rekeyResp)
+	_, _, initRecv2, err := initiator2.ReadResp(respRaw)
+	if err != nil {
+		t.Fatalf("initiator2.ReadResp: %v", err)
+	}
+	rekeyCompleteAt := time.Now()
+
+	// Original-boundary check: sleep past openedAt + rekeyInterval, then
+	// confirm no fourth envelope landed. The original timer was stopped
+	// in handleManualRekey before its 300ms fire, and the rebased timer
+	// is armed at rekeyCompleteAt which is ~200ms+ε after open — its
+	// 300ms fire lands at ~500ms+ε, comfortably after this check at
+	// 350ms.
+	sleepUntil(openedAt.Add(rekeyInterval + 50*time.Millisecond))
+	if got := rec.snapshot(); len(got) != 3 {
+		t.Fatalf("envelope count at original scheduled boundary: got %d, want 3 (stale scheduled emit leaked)", len(got))
+	}
+
+	// New-boundary check: rekeyComplete armed a fresh scheduled timer.
+	// Wait until rekeyCompleteAt + rekeyInterval + jitter and assert the
+	// fourth envelope is a TypeRekeyRequest with reason="scheduled".
+	deadline := rekeyCompleteAt.Add(rekeyInterval + 500*time.Millisecond)
+	for time.Now().Before(deadline) {
+		if len(rec.snapshot()) >= 4 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	envs = rec.snapshot()
+	if len(envs) < 4 {
+		t.Fatalf("envs at re-based scheduled boundary: got %d, want >= 4 (re-based timer did not fire)", len(envs))
+	}
+	scheduledEmit := envs[3]
+	scheduledInner := decryptAppFrame(t, scheduledEmit, initRecv2)
+	if scheduledInner.Type != protocol.TypeRekeyRequest {
+		t.Errorf("scheduled emit inner type = %q, want %q", scheduledInner.Type, protocol.TypeRekeyRequest)
+	}
+	var scheduledPayload struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(scheduledInner.Payload, &scheduledPayload); err != nil {
+		t.Fatalf("decode scheduled emit payload: %v", err)
+	}
+	if scheduledPayload.Reason != "scheduled" {
+		t.Errorf("scheduled emit reason = %q, want %q", scheduledPayload.Reason, "scheduled")
+	}
+}
