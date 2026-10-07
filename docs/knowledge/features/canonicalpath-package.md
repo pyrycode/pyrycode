@@ -59,10 +59,12 @@ confinement policy when using the result.
 
 ## Migration
 
-The old `agentrun.ResolveWorkdir` implementation, API, tests and callers temporarily
-remain unchanged alongside this package. Consumer migrations #2912–#2916 are
-tracked by [#2911](https://github.com/pyrycode/pyrycode/issues/2911), with removal
-of the old implementation in [#2917](https://github.com/pyrycode/pyrycode/issues/2917).
+[Trust marking](agentrun-trust-subpackage.md#key-shape--realpath-on-disk-case-not-abspath)
+uses `canonicalpath.Resolve` directly. The old `agentrun.ResolveWorkdir`
+implementation, API and tests remain alongside this package for the remaining
+consumers. Consumer migrations #2912–#2916 are tracked by
+[#2911](https://github.com/pyrycode/pyrycode/issues/2911), with removal of the old
+implementation in [#2917](https://github.com/pyrycode/pyrycode/issues/2917).
 The shared resolver preserves the old semantics without moving trust writes or
 confinement policy into this package.
 
