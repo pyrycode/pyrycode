@@ -59,6 +59,7 @@ Search with QMD using its current tool schema. Start with [the short index](INDE
 ## Features
 
 - [Development verification](features/development-verification.md): shared source-reading, protocol, capture and test-evidence practices.
+- [Current QMD collection setup](features/qmd-current-setup.md): scope reconciliation, YAML alias preservation and isolated installed-QMD verification.
 
 A package overview is capped at 50000 bytes. Past that it is split into
 sibling documents named `<package>-<section>.md`, and the overview keeps its
