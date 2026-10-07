@@ -2,14 +2,14 @@
 
 Stream-json sibling of [`internal/supervisor`](../architecture/system-overview.md) (the PTY path): supervises a **long-lived, multi-turn** headless `claude` child instead of hosting a screen. Where [`streamrunner`](streamrunner-package.md) spawns claude for one turn, writes the envelope, closes stdin, and exits, `streamsup` spawns claude **once per crash cycle**, holds its stdin open across many turns, and restarts it with the supervisor's backoff ladder on crash. Process lifecycle (#1087), the turn I/O boundary — envelope write + stdout→turnevent parser (#1088) —, the send-side turncommit gate (#1093), the receive-side idle/stall watchdog (#1094), satisfying the `sessions.Runner` seam (`State`/`WriteUserTurn`/`WaitForPTY`/`Restart` + a live-restart seam, #1097), the `newStreamRunnerFactory` constructor that builds a `streamRunner` from a `supervisor.Config` (#1109), the drain that fans its parsed turnevents into the unchanged `interactiveTurnEmitterV2` (#1098), the interrupt send primitive (#1120), the fresh-restart-under-a-new-id mechanism (`RestartFresh`, #1124), the live permission-approval-flag injection onto the factory's spawn (`withApprovalArgs`, #1168), and the spawn-time posture write held behind an ack-correlated turn gate (`PostureGate`, #2064) have shipped. **It is now live in production**: the `interactive_runner: "stream-json"` config toggle (#1081) selects `newStreamRunnerFactory` as `sessions.Config.RunnerFactory` and wires its drain at the relay leg — see [config-package.md](config-package.md) and [codebase/1081.md](../codebase/1081.md).
 
-**No transcript *tailing* lives in this package.** That is the entire point of the stream-json path: it structurally removes the `<uuid>.jsonl` bind-latency race the PTY path fought (#528/#996/#989). The only filesystem canonicalisation `streamsup` performs is resolving `WorkDir` via `agentrun.ResolveWorkdir` before spawn (macOS `/tmp` → `/private/tmp`, the #989 symlink hazard) — no fsnotify, no JSONL path opened, watched, or read anywhere; the #1088 parser reinforces this by opening/watching/resolving no path at all. Since #1630 the package does touch a transcript path in one narrow way: an at-most-one-per-spawn `os.Stat` by id, gated on `Config.ClaudeSessionsDir` being set (see `useCreateForm` below) — an *existence* check, never a read, and never a directory scan.
+**No transcript *tailing* lives in this package.** That is the entire point of the stream-json path: it structurally removes the `<uuid>.jsonl` bind-latency race the PTY path fought (#528/#996/#989). The only filesystem canonicalisation `streamsup` performs is resolving initial and replacement workdirs via [`canonicalpath.Resolve`](canonicalpath-package.md#path-and-error-contract) before spawn: absolute, symlink-resolved paths with best-effort on-disk casing (macOS `/tmp` → `/private/tmp`, the #989 symlink hazard). Transcript directories remain caller-supplied and are installed verbatim. The #1088 parser opens, watches and resolves no path. Since #1630 the package does touch a transcript path in one narrow way: an at-most-one-per-spawn `os.Stat` by id, gated on `Config.ClaudeSessionsDir` being set (see `useCreateForm` below) — an *existence* check, never a read, and never a directory scan.
 
 ## Public API
 
 ```go
 type Config struct {
     ClaudeBin      string        // required; resolved path to claude
-    WorkDir        string        // required; resolved via agentrun.ResolveWorkdir in New
+    WorkDir        string        // required; resolved via canonicalpath.Resolve in New
     SessionID      string        // required; caller-minted claude session UUID
     ClaudeSessionsDir string     // optional; empty disables the #1630 by-id probe (see below)
     Args           []string      // pass-through argv (e.g. --model <m>); New clones it
@@ -39,9 +39,14 @@ func (r *Runner) SetSpawnArgs(args []string) // #1580 — Restart's swap half, n
 // concrete, off sessions.Runner (#1077) — see "Fresh-restart under a new id" below
 func (r *Runner) Interrupt() error
 func (r *Runner) RestartFresh(newID string)
+func (r *Runner) SetSpawnWorkDir(workDir, claudeSessionsDir string) error
 ```
 
-`New` validates `ClaudeBin`/`WorkDir`/`SessionID` non-empty, `exec.LookPath`s the binary, resolves `WorkDir` (a missing dir → wrapped `fs.ErrNotExist`), and applies backoff defaults. `Stdin()` returns `io.Writer`, not `io.WriteCloser` — deliberately, so a consumer (the #1088 turn writer) cannot close a handle the runner owns; it returns nil whenever no child is currently live (before first spawn, mid-restart, during teardown).
+`New` validates `ClaudeBin`/`WorkDir`/`SessionID` non-empty, `exec.LookPath`s the binary, resolves `WorkDir` via `canonicalpath.Resolve` (a missing dir → wrapped `fs.ErrNotExist`), and applies backoff defaults. Resolver errors retain their `errors.Is` identity through the runner's `%w` wrappers.
+
+`SetSpawnWorkDir` uses the same resolver before acquiring `restartMu`, then installs the resolved workdir and the supplied transcript directory together for the next spawn; resolution failure leaves both untouched. It leaves a live child running where it is. Keep the empty-input guards before resolution: the shared resolver accepts `""` as the process cwd, but `New` rejects it and `SetSpawnWorkDir` warns and returns nil without changing either directory. Removing those guards would silently select the daemon cwd. See [the directory-pair contract](streamsup-package-satisfying-sessions-runner.md).
+
+`Stdin()` returns `io.Writer`, not `io.WriteCloser` — deliberately, so a consumer (the #1088 turn writer) cannot close a handle the runner owns; it returns nil whenever no child is currently live (before first spawn, mid-restart, during teardown).
 
 ## Held-open stdin — the deliberate inversion from `streamrunner`
 
@@ -93,7 +98,7 @@ cmd.WaitDelay = killGrace // 5 * time.Second
 
 ## Dependency direction (AC1)
 
-Imports only stdlib and the shared parent `internal/agentrun` (`ResolveWorkdir`, `ExitErrIsBenign`, `ReapDescendantGroups`). Must not import `internal/supervisor` (the PTY helper) nor any sibling `agentrun` subpackage (`streamrunner`, `ptyrunner`, …). The `backoffTimer` is **copied verbatim** into `backoff.go` rather than imported from `internal/supervisor`, specifically to preserve this boundary — the two are expected to stay byte-identical; the lifted `backoff_test.go` ladder table guards both independently. Verify with:
+Uses [`canonicalpath.Resolve`](canonicalpath-package.md) for filesystem-path resolution and retains the shared parent [`internal/agentrun`](agentrun-package.md) for `ExitErrIsBenign` and `ReapDescendantGroups`. The package also imports the shared `transcript`, `turncommit` and `turnevent` packages. Must not import `internal/supervisor` (the PTY helper) nor any sibling `agentrun` subpackage (`streamrunner`, `ptyrunner`, …). The `backoffTimer` is **copied verbatim** into `backoff.go` rather than imported from `internal/supervisor`, specifically to preserve this boundary — the two are expected to stay byte-identical; the lifted `backoff_test.go` ladder table guards both independently. Verify with:
 
 ```bash
 go list -deps ./internal/streamsup/... | grep pyrycode/internal/supervisor   # expect: empty

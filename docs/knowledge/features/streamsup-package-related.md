@@ -2,7 +2,8 @@
 
 - [streamrunner-package.md](streamrunner-package.md) — the single-turn stream-json sibling this package inverts (held-open vs. close-after-one-turn); shares the reap seam shape, `ExitErrIsBenign` discipline, and the envelope shape/line-buffering mechanics the turn I/O slice mirrors.
 - [turnbridge-package.md](turnbridge-package.md) — `mapper.go`, the content-extraction logic the #1088 parser mirrors (not imports) for assistant text/thinking/tool_use and tool_result mapping.
-- [agentrun-package.md](agentrun-package.md) — the shared parent supplying `ResolveWorkdir`, `ExitErrIsBenign`, `ReapDescendantGroups`.
+- [canonicalpath-package.md](canonicalpath-package.md) — the shared filesystem resolver supplying `Resolve` for initial and replacement workdirs.
+- [agentrun-package.md](agentrun-package.md) — the shared parent supplying `ExitErrIsBenign` and `ReapDescendantGroups` process helpers.
 - [ptyrunner-package.md](ptyrunner-package.md) — the PTY-path analogue this package's spawn/teardown shape and #1087's "ptyrunner-skeleton analogue" framing both reference.
 - `backoffTimer` in `internal/streamsup/backoff.go` — the exponential-backoff-with-stability-reset ladder `Run` applies between crashes; see [system-overview.md § Backoff Strategy](../architecture/system-overview.md).
 - [`codebase/1087.md`](../codebase/1087.md) — the process-lifecycle slice.

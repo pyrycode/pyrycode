@@ -121,10 +121,12 @@ folder, find no transcript there (claude wrote it under the new one), choose cre
 respawn loop rather than one wasted spawn, because a non-empty `ClaudeSessionsDir` makes `useCreateForm`
 decide outright instead of latching on `firstRun`.
 
-`agentrun.ResolveWorkdir` runs **above** the lock on every install — `restartMu` is a leaf, and
-`ResolveWorkdir` stats the path and resolves symlinks — so a resolve failure writes **neither** field:
+[`canonicalpath.Resolve`](canonicalpath-package.md#path-and-error-contract) runs **above** the lock on
+every install — `restartMu` is a leaf, and the resolver reads filesystem metadata and resolves
+symlinks — so a resolve failure writes **neither** field:
 fail-closed on the directory the runner already had, never half-applied. An empty `workDir` is a
 Warn-logged no-op, the same last-resort guard `RestartFresh`'s empty-id check already models.
+The supplied transcript directory is installed verbatim; deriving it belongs to the caller.
 `ClaudeSessionsDir()` reads the live field under `restartMu` alone, the same treatment `liveSessionID`
 gets.
 
