@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun"
+	"github.com/pyrycode/pyrycode/internal/canonicalpath"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
@@ -60,7 +60,7 @@ func testSessionErrorRecovery(t *testing.T, bin, claudeBin string, drop bool) {
 	if err := os.MkdirAll(workdir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	resolved, err := agentrun.ResolveWorkdir(workdir)
+	resolved, err := canonicalpath.Resolve(workdir)
 	if err != nil {
 		t.Fatal(err)
 	}

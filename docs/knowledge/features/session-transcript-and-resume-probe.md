@@ -52,8 +52,10 @@ reading is the one it consumes.**
 
 ## The directory comparison
 
-`child_cwd` (what `agentrun.ResolveWorkdir` resolved the test workdir to, mirroring what
-`streamsup` sets `cmd.Dir` to):
+`child_cwd` is the canonical test workdir, mirroring what `streamsup` sets `cmd.Dir`
+to. Both probes now resolve it through `canonicalpath.Resolve`; the historical
+capture below used `agentrun.ResolveWorkdir`, which had the same absolute,
+symlink-resolved, best-effort on-disk-case contract:
 
 ```
 /private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_TurnlessSessionIDTranscript3529494245/001/session-transcript-probe-work
@@ -67,20 +69,29 @@ Empirical directory (`streamNewSessionTranscriptDir`, found by locating the cont
 /var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_TurnlessSessionIDTranscript3529494245/001/.claude/projects/-private-var-folders-k0-gc07w9ws319b07n0plnw6y8r0000gn-T-TestRealClaude-TurnlessSessionIDTranscript3529494245-001-session-transcript-probe-work
 ```
 
-`agentrun.ResolveWorkdir` applies `canonicalCase` on top of `EvalSymlinks`, where
+[`canonicalpath.Resolve`](canonicalpath-package.md) applies `canonicalCase` on top of
+`EvalSymlinks`, where
 `sessions.DefaultClaudeSessionsDir` applies `EvalSymlinks` alone — this run's path carried no
 case difference, so the asymmetry didn't manifest. A divergence, if one is ever recorded on a
 different filesystem/case-sensitivity combination, is the finding the follow-up that supplies
 this directory on the daemon's production path needs — see the ADR's Related section.
 
 **#1631 landed that follow-up**, pinning the production derivation to exactly this composition
-(`agentrun.ResolveWorkdir` then `sessions.DefaultClaudeSessionsDir`) rather than either candidate
-alone — see [streamsup-package.md](streamsup-package.md) § `mapStreamsupConfig` /
+(`canonicalpath.Resolve` then `sessions.DefaultClaudeSessionsDir`, originally using
+`agentrun.ResolveWorkdir`) rather than either candidate alone — see
+[streamsup-package.md](streamsup-package.md) § `mapStreamsupConfig` /
 `streamClaudeSessionsDir`. The `canonicalCase` asymmetry itself is still unmeasured: its own
 discriminator test runs on an ordinary tmpdir path with no case difference, so it pins "derived per
-runner" but not "derived via `ResolveWorkdir` rather than a cheaper sibling". A divergence recorded
-here in the future is still
-the finding that would justify a dedicated case-difference fixture.
+runner" but not "derived via `canonicalpath.Resolve` rather than a cheaper sibling".
+A divergence recorded here in the future is still the finding that would justify a
+dedicated case-difference fixture.
+
+In both probes, `streamNewSessionTranscriptDir` locates the control/establish
+transcript before any absence reading. Its empirical directory is authoritative;
+`sessions.DefaultClaudeSessionsDir(child_cwd)` is only the comparison value. A
+recomputed folder that Claude never wrote could make an absence verdict pass
+without evidence. Directory divergence is recorded rather than failed, while
+failure to locate the real control transcript fails the probe.
 
 ## Verbatim output
 
