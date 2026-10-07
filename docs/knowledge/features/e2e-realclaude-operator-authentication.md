@@ -1,13 +1,13 @@
 # Operator authentication
 
-`make e2e-realclaude` only exercises the trust-boundary tests if the spawned `claude` subprocess can reach Anthropic's API. The `WithWorktreeAuthenticated` fixture (documented under [What's there today](#whats-there-today)) accepts two env vars; tests skip with a named-variable diagnostic only when **both** are unset.
+`make e2e-realclaude` only exercises the trust-boundary tests if the spawned `claude` subprocess can reach Anthropic's API. The [authenticated fixtures](e2e-realclaude-smoke-test-go.md) accept two env vars; their credential gate skips with a named-variable diagnostic only when **both** are unset or empty.
 
 ### Two auth paths
 
 - `ANTHROPIC_API_KEY` — Anthropic API-key path (the "console" path: API users with billing on `console.anthropic.com`).
 - `CLAUDE_CODE_OAUTH_TOKEN` — Max-plan OAuth path (the "subscription" path: paid `claude.ai` Max plan, no API key issued by default).
 
-Either is sufficient. The fixture's exact env-var lookup, `t.Setenv` re-pinning, and `HOME` isolation rules live in the `WithWorktreeAuthenticated` paragraph below — start here for the operator setup, drop into that paragraph if you need fixture internals.
+Either is sufficient. The fixture's exact env-var lookup, `t.Setenv` re-pinning, and `HOME` isolation rules live in the [fixture reference](e2e-realclaude-smoke-test-go.md) — start here for the operator setup, drop into that paragraph if you need fixture internals.
 
 ### Max-plan operator setup (macOS)
 
@@ -21,13 +21,32 @@ security find-generic-password -s 'Claude Code-credentials' -w | jq -r '.claudeA
 
 The first invocation against this Keychain item triggers a macOS confirmation dialog ("`security` wants to use your confidential information stored in `Claude Code-credentials` in your keychain"). Click **Always Allow** to suppress the prompt on subsequent runs from the same binary, or **Allow** if you prefer to be prompted each time.
 
-#### Second prerequisite: `~/.claude.json` with `hasCompletedOnboarding=true` ([#496](https://github.com/pyrycode/pyrycode/issues/496))
+#### Stream-json authentication needs no onboarding file
 
-The OAuth token alone is insufficient for the interactive (PTY) tests in the suite — `ptyrunner_byte_equivalence_test.go` and any future ptyrunner consumer. The env-var route authenticates `claude -p` (headless / `claude -p` subprocess used by streamrunner) but NOT interactive `claude`: on a fresh `$HOME`, interactive `claude` always renders the onboarding theme picker before processing any prompt, regardless of which auth env vars are set. ptyrunner reads the picker's prompt glyph as "ready", delivers the bracketed-paste prompt into the picker's input field, `claude` never proceeds, and the 31 s ptyrunner deadline fires — the failure shape that produced 19/19 FAIL on 2026-05-21 before this layer of the validation-gate-on-Max-only-Mac peel was closed (layer 1 was [#487](https://github.com/pyrycode/pyrycode/issues/487)'s `defaultMode:"deny"` rejection).
+Current stream-json tests accept either nonempty `ANTHROPIC_API_KEY` or
+`CLAUDE_CODE_OAUTH_TOKEN`, including environments with both credentials.
+`authenticatedHome` returns an isolated temporary HOME without requiring,
+reading or copying the operator's `~/.claude.json`.
+`WithWorktreeAuthenticated` also pins HOME and re-pins nonempty credentials;
+`authenticatedHome` leaves the process environment unchanged for parallel
+consumers, which pass HOME explicitly to their children. These fixtures skip
+only when both supported credentials are unset or empty. Real Claude decides
+credential validity; invalid credentials fail the live proof.
 
-The fixture closes this on the OAuth path by copying the operator's real `~/.claude.json` into the per-test `$HOME` tempdir verbatim at mode `0o600`. The file carries `hasCompletedOnboarding=true` after any successful `claude` invocation under the operator's user account; with both the token AND that flag in place, interactive `claude` skips the picker and accepts the prompt normally. If `~/.claude.json` is unreadable, every real-claude test skips with a named-prerequisites diagnostic — tests do NOT time out at 31 s.
+The former onboarding-file gate served the PTY theme picker. After the PTY
+runner was removed in [#1348](https://github.com/pyrycode/pyrycode/issues/1348),
+retaining that gate could skip authenticated stream-json tests merely because
+an unrelated operator file was absent or unreadable, leaving the suite at exit
+0. [#1479](https://github.com/pyrycode/pyrycode/issues/1479) removes that stale
+prerequisite. Completing interactive onboarding is unnecessary for these tests.
 
-If `~/.claude.json` is missing on the operator's machine (fresh install, never invoked `claude` directly), run `claude` once directly under your user account, accept the onboarding defaults (theme picker, terms acknowledgement), exit, and re-run `make e2e-realclaude`. The first invocation writes `~/.claude.json` with `hasCompletedOnboarding=true`; the suite picks it up automatically on the next run.
+`TestWithWorktreeAuthenticated_RealAssistant` proves the inherited-credential
+path and OAuth-only paths with missing and read-failing `.claude.json` in
+disposable operator HOMEs. The OAuth-only cases remove the API key and run in
+the normal live gate whenever the OAuth token is available. A named non-skipped
+pass requires a nonempty session ID and real assistant JSONL end-of-turn text;
+test starts or a synthetic authentication envelope cannot prove a working
+login. See [the evidence runbook](../../release-tooling.md#live-claude-suite--read-the-count-not-the-exit-code).
 
 ### Token rotation and two sourcing patterns
 
@@ -64,7 +83,7 @@ These were eliminated during the 2026-05-20 recon for [#489](https://github.com/
 
 - Copying `~/.claude.json` into a fresh `$HOME` does NOT authenticate. The subprocess reports `apiKeySource:"none"` and emits "Not logged in".
 - Copying the entire `~/.claude/` directory (often >1 GB) into a fresh `$HOME` ALSO does NOT authenticate. The directory holds no OAuth credential; Keychain is the only source on macOS.
-- Lifting the suite's `$HOME`-pinning so the subprocess inherits the operator's real `~/.claude/` is NOT a workaround. The pinning isolates per-test JSONL namespaces under `~/.claude/projects/<encoded-cwd>/<sid>.jsonl`; lifting it re-introduces a cross-test JSONL race. See the "Why `HOME` stays pinned" rationale in the `WithWorktreeAuthenticated` paragraph below. The env-var path is the only fix that keeps `$HOME` pinned.
+- Lifting the suite's `$HOME`-pinning so the subprocess inherits the operator's real `~/.claude/` is NOT a workaround. The pinning isolates per-test JSONL namespaces under `~/.claude/projects/<encoded-cwd>/<sid>.jsonl`; lifting it re-introduces a cross-test JSONL race. See the [HOME isolation rationale](e2e-realclaude-smoke-test-go.md). The env-var path keeps `$HOME` pinned.
 
 ### Out of scope for this section
 
