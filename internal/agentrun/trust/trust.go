@@ -38,7 +38,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun"
+	"github.com/pyrycode/pyrycode/internal/canonicalpath"
 )
 
 // MarkWorkdirTrusted ensures, on ~/.claude.json's
@@ -68,7 +68,7 @@ func MarkWorkdirTrusted(workdir string) (string, error) {
 // markWorkdirTrustedIn is the test seam — tests pass t.TempDir() as homeDir
 // directly so they can run in parallel (t.Setenv("HOME", ...) forbids it).
 func markWorkdirTrustedIn(homeDir, workdir string) (string, error) {
-	realpath, err := agentrun.ResolveWorkdir(workdir)
+	realpath, err := canonicalpath.Resolve(workdir)
 	if err != nil {
 		return "", fmt.Errorf("agentrun/trust: %w", err)
 	}

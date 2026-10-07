@@ -53,12 +53,28 @@ func TestWithWorktree_ReturnsExistingHomeIsolatedDir(t *testing.T) {
 	}
 }
 
-// TestWithWorktreeAuthenticated_RealAssistant exercises the fixture end-to-end:
-// with ANTHROPIC_API_KEY present in the outer env, a minimal `pyry agent-run`
-// invocation produces a JSONL fixture with at least one real assistant event.
-// When the credential is absent the helper itself calls t.Skip, so the suite
-// stays green on contributor machines without API keys.
+// TestWithWorktreeAuthenticated_RealAssistant requires a real session and
+// assistant response. OAuth-only cases run in the normal live gate whenever
+// that credential is available, using disposable operator HOMEs.
 func TestWithWorktreeAuthenticated_RealAssistant(t *testing.T) {
+	t.Run("inherited", testAuthenticatedAssistant)
+	for _, shape := range []string{"missing", "read_error"} {
+		t.Run("oauth_only_"+shape, func(t *testing.T) {
+			if os.Getenv("CLAUDE_CODE_OAUTH_TOKEN") == "" {
+				t.Skip("OAuth-only authentication proof requires CLAUDE_CODE_OAUTH_TOKEN")
+			}
+			t.Setenv("HOME", testOperatorHome(t, shape))
+			t.Setenv("ANTHROPIC_API_KEY", "")
+			if err := os.Unsetenv("ANTHROPIC_API_KEY"); err != nil {
+				t.Fatalf("unset API key for OAuth-only proof: %v", err)
+			}
+			testAuthenticatedAssistant(t)
+		})
+	}
+}
+
+func testAuthenticatedAssistant(t *testing.T) {
+	t.Helper()
 	workdir := WithWorktreeAuthenticated(t)
 
 	result := RunPyryAgentRun(t, RunOpts{
@@ -95,6 +111,7 @@ func TestWithWorktreeAuthenticated_RealAssistant(t *testing.T) {
 	jsonlPath := jsonlPathFor(workdir, result.SessionID)
 	for _, ev := range events {
 		if ev.Kind == "assistant" && ev.EndOfTurn && ev.TextChars > 0 {
+			t.Log("authentication evidence: nonempty session ID and real assistant JSONL end-of-turn text")
 			return
 		}
 	}
@@ -112,8 +129,14 @@ func TestWithWorktreeAuthenticated_SkipsAndNamesBothEnvVarsWhenNeitherSet(t *tes
 	if os.Getenv("PYRY_REALCLAUDE_AUTH_SKIP_INNER") == "1" {
 		t.Setenv("ANTHROPIC_API_KEY", "")
 		t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
-		WithWorktreeAuthenticated(t)
-		t.Fatalf("WithWorktreeAuthenticated returned without skipping; want t.Skip when both creds unset")
+		t.Run("authenticatedHome", func(t *testing.T) {
+			authenticatedHome(t)
+			t.Fatal("authenticatedHome returned without skipping with neither credential")
+		})
+		t.Run("WithWorktreeAuthenticated", func(t *testing.T) {
+			WithWorktreeAuthenticated(t)
+			t.Fatal("WithWorktreeAuthenticated returned without skipping with neither credential")
+		})
 		return
 	}
 	cmd := exec.Command(os.Args[0],
@@ -124,8 +147,10 @@ func TestWithWorktreeAuthenticated_SkipsAndNamesBothEnvVarsWhenNeitherSet(t *tes
 	if err != nil {
 		t.Fatalf("inner test exited non-zero (t.Skip should be success): %v\n%s", err, out)
 	}
-	if !bytes.Contains(out, []byte("--- SKIP: TestWithWorktreeAuthenticated_SkipsAndNamesBothEnvVarsWhenNeitherSet")) {
-		t.Fatalf("inner test did not skip; output:\n%s", out)
+	for _, fixture := range []string{"authenticatedHome", "WithWorktreeAuthenticated"} {
+		if !bytes.Contains(out, []byte("--- SKIP: "+t.Name()+"/"+fixture)) {
+			t.Fatalf("%s did not skip; output:\n%s", fixture, out)
+		}
 	}
 	wants := []string{
 		"ANTHROPIC_API_KEY",
@@ -140,114 +165,115 @@ func TestWithWorktreeAuthenticated_SkipsAndNamesBothEnvVarsWhenNeitherSet(t *tes
 	}
 }
 
-// TestWithWorktreeAuthenticated_OAuthTokenOnly_RepinsAndPreservesAbsentApiKey
-// drives the OAuth-only branch in-process. No subprocess, no network. The
-// token value is a synthetic literal — claude is never invoked here. We
-// verify (a) the helper proceeds past the skip gate when only the OAuth
-// token is set, (b) the token survives the WithWorktree HOME re-pin via
-// t.Setenv, (c) the helper does NOT t.Setenv the absent
-// ANTHROPIC_API_KEY (preserve original outer-env shape), and (d) the
-// captured ~/.claude.json bytes are seeded verbatim into <tempHome>/.claude.json
-// at mode 0o600 (#496 contract — interactive PTY claude needs this file to
-// skip the onboarding theme picker).
-func TestWithWorktreeAuthenticated_OAuthTokenOnly_RepinsAndPreservesAbsentApiKey(t *testing.T) {
-	const token = "test-oauth-token-not-real"
-	// Pre-seed a fake operator HOME with a recognisable .claude.json before
-	// the fixture is invoked. The _marker field makes the verbatim-copy
-	// assertion below diagnostic.
-	opHome := t.TempDir()
-	want := []byte(`{"hasCompletedOnboarding":true,"installMethod":"npm-global","_marker":"#496-test"}` + "\n")
-	if err := os.WriteFile(filepath.Join(opHome, ".claude.json"), want, 0o600); err != nil {
-		t.Fatalf("WriteFile fake operator .claude.json: %v", err)
+// TestAuthenticatedHome_CredentialIsolation uses synthetic credentials only.
+// The outer returned check makes an unexpected fixture skip fail the contract.
+func TestAuthenticatedHome_CredentialIsolation(t *testing.T) {
+	credentials := []struct {
+		name, apiKey, oauthToken string
+		apiEmpty, oauthEmpty     bool
+	}{
+		{name: "oauth_only", oauthToken: "test-oauth-token-not-real"},
+		{name: "api_only", apiKey: "test-api-key-not-real"},
+		{name: "both", apiKey: "test-api-key-not-real", oauthToken: "test-oauth-token-not-real"},
+		{name: "oauth_with_empty_api", oauthToken: "test-oauth-token-not-real", apiEmpty: true},
+		{name: "api_with_empty_oauth", apiKey: "test-api-key-not-real", oauthEmpty: true},
 	}
-	t.Setenv("HOME", opHome)
-	t.Setenv("ANTHROPIC_API_KEY", "")
-	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", token)
-	// Unset the API key entirely so we can distinguish absent from set-empty.
-	if err := os.Unsetenv("ANTHROPIC_API_KEY"); err != nil {
-		t.Fatalf("Unsetenv ANTHROPIC_API_KEY: %v", err)
+	fixtures := []struct {
+		name string
+		call func(*testing.T) string
+		pins bool
+	}{
+		{"authenticatedHome", authenticatedHome, false},
+		{"WithWorktreeAuthenticated", WithWorktreeAuthenticated, true},
 	}
-
-	dir := WithWorktreeAuthenticated(t)
-
-	info, err := os.Stat(dir)
-	if err != nil {
-		t.Fatalf("stat %s: %v", dir, err)
-	}
-	if !info.IsDir() {
-		t.Fatalf("%s is not a directory", dir)
-	}
-	if got := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); got != token {
-		t.Fatalf("CLAUDE_CODE_OAUTH_TOKEN = %q, want %q", got, token)
-	}
-	if _, present := os.LookupEnv("ANTHROPIC_API_KEY"); present {
-		t.Fatalf("ANTHROPIC_API_KEY present in env; helper must not Setenv an absent var")
-	}
-	if got := os.Getenv("HOME"); got != dir {
-		t.Fatalf("HOME = %q, want %q", got, dir)
-	}
-	seeded := filepath.Join(dir, ".claude.json")
-	got, err := os.ReadFile(seeded)
-	if err != nil {
-		t.Fatalf("ReadFile seeded .claude.json: %v", err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("seeded .claude.json bytes differ\n got: %q\nwant: %q", got, want)
-	}
-	seededInfo, err := os.Stat(seeded)
-	if err != nil {
-		t.Fatalf("Stat seeded .claude.json: %v", err)
-	}
-	if mode := seededInfo.Mode().Perm(); mode != 0o600 {
-		t.Fatalf("seeded .claude.json mode = %#o, want %#o", mode, 0o600)
+	for _, fixture := range fixtures {
+		for _, cred := range credentials {
+			for _, shape := range []string{"missing", "read_error", "readable"} {
+				name := fixture.name + "/" + cred.name + "/" + shape
+				returned := false
+				t.Run(name, func(t *testing.T) {
+					operatorHome := testOperatorHome(t, shape)
+					t.Setenv("HOME", operatorHome)
+					t.Setenv("ANTHROPIC_API_KEY", cred.apiKey)
+					t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", cred.oauthToken)
+					for _, v := range []struct {
+						name, value string
+						empty       bool
+					}{
+						{"ANTHROPIC_API_KEY", cred.apiKey, cred.apiEmpty},
+						{"CLAUDE_CODE_OAUTH_TOKEN", cred.oauthToken, cred.oauthEmpty},
+					} {
+						if v.value == "" && !v.empty {
+							if err := os.Unsetenv(v.name); err != nil {
+								t.Fatalf("unset %s: %v", v.name, err)
+							}
+						}
+					}
+					before := strings.Join(os.Environ(), "\n")
+					dir := fixture.call(t)
+					returned = true
+					if dir == operatorHome {
+						t.Fatal("fixture reused operator HOME")
+					}
+					if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+						t.Fatalf("fixture HOME is not an existing directory: %v", err)
+					}
+					if _, err := os.Stat(filepath.Join(dir, ".claude.json")); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("fixture seeded operator configuration: %v", err)
+					}
+					if !fixture.pins && strings.Join(os.Environ(), "\n") != before {
+						t.Fatal("authenticatedHome mutated process environment")
+					}
+					wantHome := operatorHome
+					if fixture.pins {
+						wantHome = dir
+					}
+					if os.Getenv("HOME") != wantHome {
+						t.Fatal("fixture violated HOME pinning contract")
+					}
+					for _, v := range []struct {
+						name, value string
+						empty       bool
+					}{
+						{"ANTHROPIC_API_KEY", cred.apiKey, cred.apiEmpty},
+						{"CLAUDE_CODE_OAUTH_TOKEN", cred.oauthToken, cred.oauthEmpty},
+					} {
+						got, present := os.LookupEnv(v.name)
+						if got != v.value || present != (v.value != "" || v.empty) {
+							t.Fatalf("fixture changed value or presence of %s", v.name)
+						}
+					}
+				})
+				if !returned {
+					t.Errorf("%s did not return; authenticated fixtures must not skip for operator configuration", name)
+				}
+			}
+		}
 	}
 }
 
-// TestWithWorktreeAuthenticated_SkipsWhenOAuthSetButNoClaudeJSON re-execs
-// the test binary with CLAUDE_CODE_OAUTH_TOKEN set but the operator HOME
-// pinned to an empty tempdir (no .claude.json). t.Skipf ends the inner
-// goroutine via runtime.Goexit() with no in-process return value, so
-// asserting on the skip-message text requires the outer/inner subprocess
-// pattern. Uses sentinel PYRY_REALCLAUDE_NOJSON_INNER=1 (distinct from
-// PYRY_REALCLAUDE_AUTH_SKIP_INNER=1 because that sentinel clears BOTH env
-// vars; this test needs the OAuth token SET) and falls through TestMain
-// because GO_TEST_HELPER_PROCESS is unset.
-func TestWithWorktreeAuthenticated_SkipsWhenOAuthSetButNoClaudeJSON(t *testing.T) {
-	if os.Getenv("PYRY_REALCLAUDE_NOJSON_INNER") == "1" {
-		opHome := t.TempDir()
-		t.Setenv("HOME", opHome)
-		t.Setenv("ANTHROPIC_API_KEY", "")
-		if err := os.Unsetenv("ANTHROPIC_API_KEY"); err != nil {
-			t.Fatalf("Unsetenv ANTHROPIC_API_KEY: %v", err)
+// A directory fails os.ReadFile even when tests run as root; chmod alone does not.
+func testOperatorHome(t *testing.T, shape string) string {
+	t.Helper()
+	home := t.TempDir()
+	path := filepath.Join(home, ".claude.json")
+	switch shape {
+	case "missing":
+	case "read_error":
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
 		}
-		t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "test-oauth-token-not-real")
-		WithWorktreeAuthenticated(t)
-		t.Fatalf("WithWorktreeAuthenticated returned without skipping; want t.Skip when .claude.json missing")
-		return
-	}
-	cmd := exec.Command(os.Args[0],
-		"-test.run=^TestWithWorktreeAuthenticated_SkipsWhenOAuthSetButNoClaudeJSON$",
-		"-test.v")
-	cmd.Env = append(os.Environ(), "PYRY_REALCLAUDE_NOJSON_INNER=1")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("inner test exited non-zero (t.Skip should be success): %v\n%s", err, out)
-	}
-	if !bytes.Contains(out, []byte("--- SKIP: TestWithWorktreeAuthenticated_SkipsWhenOAuthSetButNoClaudeJSON")) {
-		t.Fatalf("inner test did not skip; output:\n%s", out)
-	}
-	wants := []string{
-		"CLAUDE_CODE_OAUTH_TOKEN",
-		".claude.json",
-		"onboarding",
-		"hasCompletedOnboarding=true",
-		"claude",
-	}
-	for _, w := range wants {
-		if !bytes.Contains(out, []byte(w)) {
-			t.Fatalf("skip message missing required substring %q\noutput:\n%s", w, out)
+		if _, err := os.ReadFile(path); err == nil {
+			t.Fatal("operator configuration witness must fail a file read")
 		}
+	case "readable":
+		if err := os.WriteFile(path, []byte(`{"hasCompletedOnboarding":true,"marker":"operator-only"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	default:
+		t.Fatalf("unknown operator HOME shape %q", shape)
 	}
+	return home
 }
 
 func TestReadJSONL_HappyPath(t *testing.T) {

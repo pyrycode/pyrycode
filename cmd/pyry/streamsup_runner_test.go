@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun"
+	"github.com/pyrycode/pyrycode/internal/canonicalpath"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
@@ -285,7 +285,7 @@ func TestMapStreamsupConfig_PerSession(t *testing.T) {
 // would be right for the bootstrap runner and wrong for exactly the
 // phone-created ones. Asserting the two mapped values DIFFER is what fails that
 // shape; asserting each equals the recomputed
-// DefaultClaudeSessionsDir(ResolveWorkdir(thatWorkDir)) is what fails a
+// DefaultClaudeSessionsDir(canonicalpath.Resolve(thatWorkDir)) is what fails a
 // per-runner derivation built on the wrong transform (the composition is
 // #1655's measured one, not a preference). Real t.TempDir()s, because the
 // derivation stats the path.
@@ -294,9 +294,9 @@ func TestMapStreamsupConfig_ClaudeSessionsDir(t *testing.T) {
 
 	want := func(t *testing.T, workdir string) string {
 		t.Helper()
-		resolved, err := agentrun.ResolveWorkdir(workdir)
+		resolved, err := canonicalpath.Resolve(workdir)
 		if err != nil {
-			t.Fatalf("agentrun.ResolveWorkdir(%q) error = %v, want nil", workdir, err)
+			t.Fatalf("canonicalpath.Resolve(%q) error = %v, want nil", workdir, err)
 		}
 		return sessions.DefaultClaudeSessionsDir(resolved)
 	}

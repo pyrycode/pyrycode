@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun"
 	"github.com/pyrycode/pyrycode/internal/attachments"
+	"github.com/pyrycode/pyrycode/internal/canonicalpath"
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 )
@@ -234,7 +234,7 @@ func conversationForCurrentSession(convReg *conversations.Registry, sid string) 
 //
 // The recipe, and why each step is the one chosen:
 //
-//   - Both root and target go through agentrun.ResolveWorkdir — Abs,
+//   - Both root and target go through canonicalpath.Resolve — Abs,
 //     EvalSymlinks, then on-disk case folding. The case fold is not cosmetic:
 //     APFS is case-insensitive by default, so two differently-cased spellings
 //     of one directory compare unequal textually while naming the same place.
@@ -253,9 +253,9 @@ func conversationForCurrentSession(convReg *conversations.Registry, sid string) 
 //     appears, and no deadline on the control conn interrupts a blocking open.
 //
 // Every refusal is one of the static sentences above; no filesystem error is
-// wrapped, since agentrun.ResolveWorkdir's names the path it failed on.
+// wrapped, since canonicalpath.Resolve's error names the path it failed on.
 func confineFile(root, path string) (string, os.FileInfo, error) {
-	canonicalRoot, err := agentrun.ResolveWorkdir(root)
+	canonicalRoot, err := canonicalpath.Resolve(root)
 	if err != nil {
 		return "", nil, errAttachUnresolved
 	}
@@ -263,7 +263,7 @@ func confineFile(root, path string) (string, os.FileInfo, error) {
 }
 
 // confineToRoot is confineFile's recipe after the root is resolved: canonicalRoot
-// must already be agentrun.ResolveWorkdir output. It exists for a root resolved
+// must already be canonicalpath.Resolve output. It exists for a root resolved
 // ONCE rather than per call — the reader's operator-named folders (#2710) — so
 // that a folder whose path is swapped for a symlink after startup cannot move
 // the boundary. Re-resolving here would follow the swap.
@@ -271,7 +271,7 @@ func confineToRoot(canonicalRoot, path string) (string, os.FileInfo, error) {
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(canonicalRoot, path)
 	}
-	resolved, err := agentrun.ResolveWorkdir(path)
+	resolved, err := canonicalpath.Resolve(path)
 	if err != nil {
 		return "", nil, errAttachNoFile
 	}

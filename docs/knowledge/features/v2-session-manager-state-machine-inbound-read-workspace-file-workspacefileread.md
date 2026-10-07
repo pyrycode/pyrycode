@@ -111,12 +111,13 @@ The operator can name extra absolute folders on the daemon command line with a
 repeatable `-pyry-read-folder` flag, such as an Obsidian vault most of the
 links `claude` sends point into. `resolveReadFolders` (`cmd/pyry/workspace_file.go`)
 canonicalises the list **once, at daemon startup**, with the same
-`agentrun.ResolveWorkdir` recipe `confineFile` applies to the workspace. An
+[`canonicalpath.Resolve`](canonicalpath-package.md#path-and-error-contract)
+recipe `confineFile` applies to the workspace. An
 entry is skipped with one `slog.Warn` — naming the operator's own entry and a
-static reason, never `ResolveWorkdir`'s own path-bearing error — when it is
+static reason, never `canonicalpath.Resolve`'s own path-bearing error — when it is
 not absolute, does not resolve, or does not name a directory; the daemon
 still starts. The directory check is not in the confinement recipe `confineFile`
-already had: a configured **file** resolves fine through `ResolveWorkdir`, and
+already had: a configured **file** resolves fine through `canonicalpath.Resolve`, and
 `withinDir(file, file)` is true, so without it a mistyped entry would quietly
 grant that one file rather than being skipped.
 
@@ -143,6 +144,12 @@ resolved list to name the folders in the session prompt, which is why the
 list is resolved once in the daemon's composition root rather than inside the
 reader.
 
+Configured-folder result and refusal tests do not replace a root after startup.
+`TestConfineFile_SwapBetweenCheckAndRead` proves checked-file identity, a different
+boundary; it would stay green if folder roots were re-resolved per request.
+For startup-root stability, check that `confineToAnyRoot` passes the stored root
+directly to `confineToRoot`, which resolves only the target.
+
 `fileAttacher` (the `attach_file` verb) never sees the folder list — its
 signature takes none, and `confineFile`'s own behaviour and callers are
 unchanged by the split — so it keeps its workspace-only rule regardless of
@@ -154,7 +161,7 @@ what is configured.
 `runSupervisor`, after `resolveReadFolders`, and prepends the daemon's own
 working folder (`-pyry-workdir`, or the process directory when that is unset
 — `workdirReal`) to the same slice, canonicalised with the same
-`agentrun.ResolveWorkdir` recipe. This is what lets a client open
+`canonicalpath.Resolve` recipe. This is what lets a client open
 `BEHAVIOR.md`, `FEEDBACK.md` and the rest from any conversation, including
 one whose workspace is a subfolder of the working folder, with no
 `-pyry-read-folder` set. The folder enters the reader exactly like a
@@ -171,7 +178,7 @@ in it. `confineWorkdirToHome` already refuses a working folder outside home
 earlier in `runSupervisor`, so only the exact-home case is reachable in the
 daemon as shipped; the broader "contains home" check holds on its own rather
 than depending on that call order, per the plan's security review. An
-unresolvable home (including an empty one, since `agentrun.ResolveWorkdir("")`
+unresolvable home (including an empty one, since `canonicalpath.Resolve("")`
 would otherwise mean the process directory) also leaves the folder out. Both
 sides are compared as realpaths, so a symlinked home or working folder is
 still caught.
