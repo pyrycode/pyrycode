@@ -33,11 +33,12 @@ asked to reuse (ships live but inert until #2165 wires a caller).
 
 The root (`conv.Cwd`) and the target (the model-chosen path, joined against the root first
 if relative — never against the daemon's own process directory) both go through
-`agentrun.ResolveWorkdir` before comparison: `Abs` → `EvalSymlinks` → on-disk case fold.
+[`canonicalpath.Resolve`](canonicalpath-package.md#path-and-error-contract)
+before comparison: `Abs` → `EvalSymlinks` → on-disk case fold.
 **Both ends, not just the target.** APFS is case-insensitive by default, so a raw string
 compare between two differently-cased spellings of the same directory is unsound in either
 direction — canonicalising only the target and comparing it against a raw `conv.Cwd` would
-have reintroduced the exact class of bug #910 fixed for `ResolveWorkdir`'s original
+have reintroduced the exact class of bug #910 fixed for the original workdir resolver's
 consumer. The boundary test itself is `withinDir` (`cmd/pyry/main.go`), reused rather than
 re-derived — it already carries the #118/#221 fix (a `filepath.Rel`-based test, not a
 prefix compare, so `/home/userfoo` isn't read as inside `/home/user`). Mutation-tested: swap
@@ -45,14 +46,13 @@ prefix compare, so `/home/userfoo` isn't read as inside `/home/user`). Mutation-
 confinement table reddens — evidence the other eight rows were exercising something other
 than string-prefix containment.
 
-**`agentrun.ResolveWorkdir` canonicalises a file leaf correctly, not just a directory,
-despite its workdir-shaped name.** `canonicalCase` walks path components and `ReadDir`s
+**`canonicalpath.Resolve` canonicalises a file leaf as well as a directory.**
+Its `canonicalCase` walk visits path components and `ReadDir`s
 the accumulated *prefix* for each, so a leaf file component is folded against its parent
-directory exactly as a leaf directory would be — confirmed rather than assumed (open
-question in the spec, resolved in Phase B). Nothing about the function needed to change;
-the name is just narrower than its actual contract. See
-[agentrun-package.md § Consumers](agentrun-package.md) — this is now a second production
-caller alongside `internal/agentrun/trust`.
+directory exactly as a leaf directory would be. Resolving a path does not establish
+containment or file identity: `withinDir` and `readChecked` retain those checks.
+See [resolver consumer boundaries](canonicalpath-package.md#path-and-error-contract)
+and [agentrun consumers](agentrun-package.md#consumers).
 
 ## TOCTOU: the file that is read is the file that was checked
 
@@ -158,5 +158,5 @@ offer is live-only (no registry, no replay).
 - [attachments-package.md](attachments-package.md) — `EnsureDir`, `Store`, `ResolvePath`,
   and the filename-sanitisation/never-log discipline this verb's error mapping extends to
   host paths.
-- [agentrun-package.md](agentrun-package.md) — `ResolveWorkdir`, now with a second
-  production caller.
+- [canonicalpath-package.md](canonicalpath-package.md) — shared file and directory
+  resolution; callers own confinement and identity checks.

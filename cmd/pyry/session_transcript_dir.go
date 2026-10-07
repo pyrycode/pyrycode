@@ -39,7 +39,7 @@ import (
 // folder for every reading after a workspace move, restoring the pre-#2423
 // reading on exactly the conversations that moved.
 // A second streamClaudeSessionsDir call here would agree today and is
-// exactly the shape that drifts: agentrun.ResolveWorkdir applies canonicalCase
+// exactly the shape that drifts: canonicalpath.Resolve applies canonicalCase
 // and symlink resolution, which neither confineWorkdirToHome nor resolveSpawnDir
 // does, so re-deriving from a differently-spelled workdir names a folder claude
 // never writes.

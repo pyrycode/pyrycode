@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun"
+	"github.com/pyrycode/pyrycode/internal/canonicalpath"
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/relay"
 )
@@ -402,9 +402,9 @@ func TestResolveReadFolders(t *testing.T) {
 	file := writeFile(t, root, "file.md", "not a folder")
 	link := filepath.Join(root, "link")
 	mustSymlink(t, vault, link)
-	canonicalVault, err := agentrun.ResolveWorkdir(vault)
+	canonicalVault, err := canonicalpath.Resolve(vault)
 	if err != nil {
-		t.Fatalf("ResolveWorkdir: %v", err)
+		t.Fatalf("canonicalpath.Resolve: %v", err)
 	}
 
 	var buf bytes.Buffer
@@ -449,9 +449,9 @@ func TestWithWorkdirReadFolder(t *testing.T) {
 	mustSymlink(t, home, homeLink)
 	canonical := func(p string) string {
 		t.Helper()
-		r, err := agentrun.ResolveWorkdir(p)
+		r, err := canonicalpath.Resolve(p)
 		if err != nil {
-			t.Fatalf("ResolveWorkdir: %v", err)
+			t.Fatalf("canonicalpath.Resolve: %v", err)
 		}
 		return r
 	}
