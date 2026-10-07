@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/modelfamily"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -109,6 +110,16 @@ type Config struct {
 	// appended system prompt names them in one sentence after systemPromptText
 	// (#2711). Nil, the zero value, composes every prompt byte for byte as before.
 	ReadFolders []string
+
+	// DefaultModel answers the model claude starts on, for a child spawned in
+	// workDir, when its argv names none: Claude Code's own model setting. A
+	// session with no model of its own would otherwise run whatever that setting
+	// pins. When the answer is a pinned Claude id, the argv names its family
+	// instead (composeSpawnArgs), so such a session still follows the latest model
+	// of a family. cmd/pyry wires ClaudeSettingsModel. Nil, the zero value,
+	// resolves nothing and composes every argv as before; every test pool leaves
+	// it nil so the host's own settings file cannot reach a test's argv.
+	DefaultModel func(workDir string) string
 
 	// SweepInterval, when > 0, overrides the conversations sweep tick
 	// interval Pool.Run passes to conversations.RunSweepLoop. Zero (the
@@ -274,6 +285,10 @@ type Pool struct {
 	// readFolders mirrors Config.ReadFolders. Read-only after New, so no lock;
 	// every compose passes it through daemonPromptText (#2711).
 	readFolders []string
+
+	// defaultModel mirrors Config.DefaultModel. Read-only after New, so no lock;
+	// called only off p.mu, by buildSessionAs.
+	defaultModel func(workDir string) string
 
 	// convSweepInterval is the resolved interval Pool.Run passes to
 	// conversations.RunSweepLoop. Set in New from cfg.SweepInterval, with
@@ -577,7 +592,9 @@ func New(cfg Config) (*Pool, error) {
 	// the base untouched for operator-bypass provenance.
 	base := append(slices.Clone(cfg.Bootstrap.ClaudeArgs), "--settings", settingsPath)
 	base = append(base, "--append-system-prompt-file", systemPromptPath)
-	bootstrapArgs := composeSpawnArgs(base, settings)
+	// Resolved here, off every lock, because it reads Claude Code's settings files.
+	defaultFamily := resolveDefaultFamily(cfg.DefaultModel, cfg.Bootstrap.WorkDir)
+	bootstrapArgs := composeSpawnArgs(base, settings, defaultFamily)
 	// p is late-bound: the &Pool{} literal below assigns it, and the
 	// ResolveSessionID closure only reads it at spawn time (supervisor.Run),
 	// long after New returns — identical timing to the pidFn holder above.
@@ -653,6 +670,7 @@ func New(cfg Config) (*Pool, error) {
 		activateCh:   make(chan struct{}, 1),
 		evictCh:      make(chan struct{}, 1),
 	}
+	sess.defaultFamily = defaultFamily
 	if lcState == stateActive {
 		sess.activeCh = closedChan()
 		sess.evictedCh = make(chan struct{})
@@ -672,6 +690,7 @@ func New(cfg Config) (*Pool, error) {
 		convReg:            cfg.ConversationsRegistry,
 		convRegistryPath:   cfg.ConversationsRegistryPath,
 		readFolders:        slices.Clone(cfg.ReadFolders),
+		defaultModel:       cfg.DefaultModel,
 		convSweepInterval:  sweepInterval,
 		activeCap:          cfg.ActiveCap,
 		sessionTpl:         cfg.Bootstrap,
@@ -951,7 +970,9 @@ func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error {
 	}
 	merged := sess.settings
 	if update.Model != nil {
-		merged.Model = *update.Model
+		// Stored as its family, as canonicalSettings stores every read: the menu
+		// offers one row per family, and the session follows that family.
+		merged.Model = modelfamily.Alias(*update.Model)
 	}
 	if update.Effort != nil {
 		merged.Effort = *update.Effort
@@ -1144,7 +1165,7 @@ func (p *Pool) UpdateDormantSettings(id SessionID, update SettingsUpdate) error 
 	}
 	model, effort := entry.Model, entry.Effort
 	if update.Model != nil {
-		model = *update.Model
+		model = modelfamily.Alias(*update.Model)
 	}
 	if update.Effort != nil {
 		effort = *update.Effort
@@ -1351,14 +1372,15 @@ type effortSetter interface {
 //     running turn. The in-flight window itself — a revoke arriving while a tool
 //     call is already dispatched — is not measured live; only the turn boundary is.
 //
-// THE MODEL SENT IS THE FAMILY ALIAS, NOT THE FRAME'S VALUE (#2447). A mid-session
-// pick of a row claude publishes as an exact id — Fable's, or "Haiku 4.5" — would
-// otherwise hold the session on a model claude has superseded, so familyAlias
-// rewrites it on the way out. This site and claudeSettingsArgs are its complete
-// caller set and cannot disagree: Pool.UpdateSettings has already assigned
-// update.Model into merged before releasing p.mu, so the live child and the argv
-// installed for the next spawn name the same model. What is STORED stays the row
-// as picked — the menu matches it by exact equality.
+// THE MODEL SENT IS THE FAMILY ALIAS, NOT THE FRAME'S VALUE (#2447). A session
+// follows the latest model of its family, so a pinned id is rewritten to its family
+// on the way out. cmd/pyry resolves a pinned pick to its family before validating
+// and storing it, so this call is the sink's own guarantee rather than the only
+// one. It cannot disagree with the argv: claudeSettingsArgs applies the same
+// modelfamily.Alias to the merged settings Pool.UpdateSettings installed before
+// releasing p.mu. An empty model never arrives here: inBandDeliverable sends it to
+// the restart branch, whose argv names the default model's family when that
+// default is pinned (composeSpawnArgs).
 //
 // Fire-and-forget: every write error is logged and swallowed, which is the
 // contract Restart has had on this path since #842. The settings are already
@@ -1397,7 +1419,7 @@ func (p *Pool) deliverSettingsInBand(id SessionID, sup Runner, update SettingsUp
 		}
 	}
 	if update.Model != nil {
-		if err := sup.SetModel(familyAlias(*update.Model)); err != nil {
+		if err := sup.SetModel(modelfamily.Alias(*update.Model)); err != nil {
 			notDelivered("model", err)
 		}
 	}
@@ -2512,11 +2534,17 @@ func (p *Pool) buildSessionAs(id SessionID, label, spawnDir string, settings Ses
 	// recompose — a backoff restart, the #842 live settings-restart — each of
 	// which re-execs whatever bytes the file then holds.
 	base = append(base, "--append-system-prompt-file", promptPath)
-	args := composeSpawnArgs(base, settings)
 	workDir := tpl.WorkDir
 	if spawnDir != "" {
 		workDir = spawnDir
 	}
+	// Claude Code's own default model only matters to a claude child; another
+	// harness runs at its own defaults (#2647).
+	var defaultFamily string
+	if harness == HarnessClaude {
+		defaultFamily = resolveDefaultFamily(p.defaultModel, workDir)
+	}
+	args := composeSpawnArgs(base, settings, defaultFamily)
 
 	supCfg := RunnerConfig{
 		ClaudeBin: tpl.ClaudeBin,
@@ -2572,6 +2600,7 @@ func (p *Pool) buildSessionAs(id SessionID, label, spawnDir string, settings Ses
 		threadID:         threadID,
 		settings:         settings,
 		spawnBase:        base,
+		defaultFamily:    defaultFamily,
 		settingsPath:     settingsPath,
 		systemPromptPath: promptPath,
 		systemPrompt:     operatorPrompt,
