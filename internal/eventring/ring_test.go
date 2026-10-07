@@ -570,3 +570,50 @@ func TestDrop(t *testing.T) {
 		t.Errorf("Append(kept) = id %d, want > %d", id, reID)
 	}
 }
+
+func TestAppendWithHistoryID_RetainsSnapshot(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		id    uint64
+		nilID bool
+	}{
+		{name: "successful append", id: 81},
+		{name: "absent append", nilID: true},
+		{name: "zero id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ring := New(2)
+			ring.Append("A", protocol.TypeAssistantDelta, nil, time.Unix(1, 0))
+			payload := json.RawMessage(`{"text":"retained"}`)
+			ts := time.Unix(2, 0).UTC()
+			id := tc.id
+			metadata := &id
+			if tc.nilID {
+				metadata = nil
+			}
+			if got := ring.AppendWithHistoryID("A", protocol.TypeTurnEnd, payload, ts, metadata); got != 2 {
+				t.Fatalf("ring id=%d, want 2", got)
+			}
+			id = 999 // Mutating the caller's value must not change retained metadata.
+			ring.Append("A", protocol.TypeTurnState, nil, time.Unix(3, 0))
+			events, gap := ring.After("A", 1)
+			if gap || len(events) != 2 {
+				t.Fatalf("events=%+v gap=%v", events, gap)
+			}
+			event := events[0]
+			if event.ID != 2 || event.HistoryEntryID != tc.id || event.Type != protocol.TypeTurnEnd || string(event.Payload) != string(payload) || !event.TS.Equal(ts) {
+				t.Fatalf("retained event=%+v", event)
+			}
+			if events[1].ID != 3 || events[1].HistoryEntryID != 0 {
+				t.Fatalf("legacy Append event=%+v", events[1])
+			}
+			events[0].HistoryEntryID = 777
+			again, _ := ring.After("A", 1)
+			if again[0].HistoryEntryID != tc.id {
+				t.Fatal("After result mutated retained metadata")
+			}
+		})
+	}
+}

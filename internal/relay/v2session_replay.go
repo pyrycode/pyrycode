@@ -343,6 +343,9 @@ func (m *V2SessionManager) drainReplayOnce(ctx context.Context) {
 		Payload: ev.Payload,
 		EventID: &id, // required: the phone advances its cursor from this.
 	}
+	if ev.HistoryEntryID != 0 {
+		replay.HistoryEntryID = &ev.HistoryEntryID
+	}
 	if err := m.forwardEnvelope(ctx, s.connID, replay); err != nil {
 		// Session vanished / seal failure: log at debug and abandon this conn's
 		// remaining tail — the package's outbound-drop posture (mirrors the old

@@ -123,6 +123,9 @@ func TestLiveProducers_HistoryEntryID(t *testing.T) {
 					if event.ID != 4 || event.Type != wantType {
 						t.Fatalf("ring event=%+v", event)
 					}
+					if event.HistoryEntryID != entry.ID {
+						t.Fatalf("ring history id=%d, want %d", event.HistoryEntryID, entry.ID)
+					}
 					if stored {
 						assertLogMatchesRing(t, []history.Entry{entry}, events)
 					}

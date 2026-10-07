@@ -10,8 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/eventring"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -95,6 +97,19 @@ func waitConnOpen(t *testing.T, mgr *V2SessionManager, connID string) {
 // frames) and that the noise_resp carried no close code.
 func reconnectScenario(t *testing.T, respPriv, respPub, initPriv []byte, ring *eventring.Ring, cursor func() string, lastEventID *uint64, wantEnvs int) []protocol.Envelope {
 	t.Helper()
+	raw := reconnectScenarioRaw(t, respPriv, respPub, initPriv, ring, cursor, lastEventID, wantEnvs)
+	forwarded := make([]protocol.Envelope, len(raw))
+	for i, frame := range raw {
+		if err := json.Unmarshal(frame, &forwarded[i]); err != nil {
+			t.Fatalf("decode replay: %v", err)
+		}
+	}
+	return forwarded
+}
+
+// reconnectScenarioRaw exposes decrypted wire bytes for optional-key assertions.
+func reconnectScenarioRaw(t *testing.T, respPriv, respPub, initPriv []byte, ring *eventring.Ring, cursor func() string, lastEventID *uint64, wantEnvs int) []json.RawMessage {
+	t.Helper()
 	frames := make(chan protocol.RoutingEnvelope, 1)
 	rec := &v2Recorder{}
 	mgr, stop := startManager(t, V2SessionConfig{
@@ -135,9 +150,13 @@ func reconnectScenario(t *testing.T, respPriv, respPub, initPriv []byte, ring *e
 	if err != nil {
 		t.Fatalf("ReadResp: %v", err)
 	}
-	forwarded := make([]protocol.Envelope, 0, len(envs)-1)
+	forwarded := make([]json.RawMessage, 0, len(envs)-1)
 	for _, env := range envs[1:] {
-		forwarded = append(forwarded, decryptAppFrame(t, env, initRecv))
+		plain, err := initRecv.Decrypt(decodeNoiseMsg(t, env))
+		if err != nil {
+			t.Fatalf("decrypt replay: %v", err)
+		}
+		forwarded = append(forwarded, plain)
 	}
 	return forwarded
 }
@@ -1409,5 +1428,74 @@ func TestV2Session_Reconnect_MidReplayDrop_ResumesOnReconnect(t *testing.T) {
 	gotLive := decryptAppFrame(t, envs[replayN+1], initRecv)
 	if gotLive.EventID == nil || *gotLive.EventID != idLive {
 		t.Fatalf("final frame EventID = %v, want %d (live must follow the held replay)", gotLive.EventID, idLive)
+	}
+}
+
+func TestV2Session_Reconnect_HistoryEntryID(t *testing.T) {
+	t.Parallel()
+	for _, backed := range []bool{true, false} {
+		t.Run(fmt.Sprintf("history-backed=%v", backed), func(t *testing.T) {
+			t.Parallel()
+			const convID = "29090000-0000-4000-8000-000000000001"
+			storeDir := t.TempDir()
+			store := history.New(storeDir)
+			for range 7 {
+				if _, err := store.Append(conversations.ConversationID(convID), protocol.TypeMessage, json.RawMessage(`{}`), time.Now().UTC()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ring := eventring.New(16)
+			last := ring.Append(convID, protocol.TypeTurnState, json.RawMessage(`{}`), time.Now().UTC())
+			payload := json.RawMessage(`{"text":"missed while disconnected"}`)
+			ts := time.Now().UTC()
+			var historyID *uint64
+			if backed {
+				id, err := store.Append(conversations.ConversationID(convID), protocol.TypeAssistantDelta, payload, ts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				historyID = &id
+			}
+			eventID := ring.AppendWithHistoryID(convID, protocol.TypeAssistantDelta, payload, ts, historyID)
+			respPriv, respPub := genV2Keypair(t)
+			initPriv, _ := genV2Keypair(t)
+			raw := reconnectScenarioRaw(t, respPriv, respPub, initPriv, ring, func() string { return convID }, &last, 2)
+			if len(raw) != 1 {
+				t.Fatalf("replay frames=%d, want 1", len(raw))
+			}
+			var env protocol.Envelope
+			if err := json.Unmarshal(raw[0], &env); err != nil {
+				t.Fatal(err)
+			}
+			if env.EventID == nil || *env.EventID != eventID || env.Type != protocol.TypeAssistantDelta || string(env.Payload) != string(payload) || !env.TS.Equal(ts) {
+				t.Fatalf("replayed envelope=%+v", env)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(raw[0], &fields); err != nil {
+				t.Fatal(err)
+			}
+			page, err := history.New(storeDir).Page(conversations.ConversationID(convID), "", 16)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantEntries := 7
+			if backed {
+				wantEntries++
+			}
+			if len(page.Entries) != wantEntries || !page.AtStart {
+				t.Fatalf("replay wrote history: entries=%d at_start=%v", len(page.Entries), page.AtStart)
+			}
+			if backed {
+				entry := page.Entries[0]
+				if entry.ID == eventID || entry.ID != 8 || env.HistoryEntryID == nil || *env.HistoryEntryID != entry.ID || string(fields["history_entry_id"]) != "8" {
+					t.Fatalf("replay history id=%v wire=%s stored=%d ring=%d", env.HistoryEntryID, fields["history_entry_id"], entry.ID, eventID)
+				}
+				if string(entry.Payload) != string(env.Payload) || !entry.TS.Equal(env.TS) {
+					t.Fatal("replay differs from stored payload/timestamp")
+				}
+			} else if _, present := fields["history_entry_id"]; present {
+				t.Fatalf("unbacked replay carried history_entry_id=%s", fields["history_entry_id"])
+			}
+		})
 	}
 }

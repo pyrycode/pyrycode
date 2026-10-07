@@ -1213,13 +1213,15 @@ func (e *interactiveTurnEmitterV2) emit(ctx context.Context, convID, typ string,
 	// phone can advertise it as last_event_id (consumed by #647). The ring's own
 	// mutex handles the future cross-goroutine read; the emitter takes no lock.
 	ts := time.Now().UTC()
-	eventID := e.ring.Append(convID, typ, payloadJSON, ts)
 	// The durable half of the same record (#2114), beside the ring and under the
 	// same four values: one append per LOGICAL event, before the per-conn
 	// fan-out, so a conversation with no interactive conn open still accumulates
 	// history. A failed append returns nil metadata; delivery still proceeds.
 	historyEntryID := appendConversationHistory(e.hist, e.logger, "interactive_turn.history_append_err",
 		convID, typ, payloadJSON, ts)
+	// Publish the complete event only after the history result is known: replay
+	// can read the ring concurrently, including before any recipient is open.
+	eventID := e.ring.AppendWithHistoryID(convID, typ, payloadJSON, ts, historyEntryID)
 
 	// Fresh snapshot per envelope: a conn that joined mid-turn is included next
 	// emit; a dropped conn is absent here, or surfaces as a Push error below.
