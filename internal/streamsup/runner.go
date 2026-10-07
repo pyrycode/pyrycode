@@ -25,8 +25,9 @@
 // Dependency direction: the package must not import
 // github.com/pyrycode/pyrycode/internal/supervisor (the PTY helper) nor any of
 // the internal/agentrun subpackages (streamrunner, trust, …). It imports
-// the internal/agentrun root package (ReapDescendantGroups, ResolveWorkdir,
-// ExitErrIsBenign) — the shared parent, not a sibling. Verify with:
+// the internal/agentrun root package (ReapDescendantGroups, ExitErrIsBenign)
+// for process helpers and internal/canonicalpath (Resolve) for filesystem-path
+// resolution. Verify with:
 //
 //	go list -deps ./internal/streamsup/... | grep pyrycode/internal/supervisor
 //
@@ -51,6 +52,7 @@ import (
 	"unicode"
 
 	"github.com/pyrycode/pyrycode/internal/agentrun"
+	"github.com/pyrycode/pyrycode/internal/canonicalpath"
 	"github.com/pyrycode/pyrycode/internal/transcript"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
@@ -117,7 +119,7 @@ type Config struct {
 	ClaudeBin string
 
 	// WorkDir is the child process's working directory. Required. New resolves
-	// it via agentrun.ResolveWorkdir (macOS /tmp → /private/tmp, the #989
+	// it via canonicalpath.Resolve (macOS /tmp → /private/tmp, the #989
 	// symlink hazard); the resolved path is what cmd.Dir is set to and is the
 	// only path canonicalisation this package performs.
 	WorkDir string
@@ -835,7 +837,7 @@ type Runner struct {
 	spawnMode string
 
 	// workDir is the directory each spawn chdirs into (spawnAndWait's cmd.Dir), a
-	// resolved absolute path (agentrun.ResolveWorkdir). Seeded from cfg.WorkDir in
+	// resolved absolute path (canonicalpath.Resolve). Seeded from cfg.WorkDir in
 	// New and replaced by SetSpawnWorkDir; the mutable analogue of that immutable
 	// field exactly as sessionID is of cfg.SessionID.
 	//
@@ -946,7 +948,7 @@ func New(cfg Config) (*Runner, error) {
 	if cfg.SpawnPermissionMode != "" && cfg.PostureGate == nil {
 		return nil, errors.New("streamsup: SpawnPermissionMode requires PostureGate")
 	}
-	workDir, err := agentrun.ResolveWorkdir(cfg.WorkDir)
+	workDir, err := canonicalpath.Resolve(cfg.WorkDir)
 	if err != nil {
 		return nil, fmt.Errorf("streamsup: resolve workdir: %w", err)
 	}
@@ -2084,12 +2086,14 @@ func (r *Runner) setArgsLocked(args []string) {
 // THE RESOLVE SITS ABOVE THE LOCK, and both halves of that placement are
 // load-bearing. Above, because restartMu is a leaf — nothing under it may take
 // another lock or do synchronous I/O, the invariant setArgsLocked states — and
-// ResolveWorkdir stats the path and resolves symlinks. Present at all, because
-// New applies the same function to cfg.WorkDir: skipping it would break
-// workDir's "resolved absolute path" invariant and, worse, desynchronise the pair
-// — the caller derives claudeSessionsDir through ResolveWorkdir too, including
-// the canonicalCase step resolveSpawnDir does not apply, so a raw workDir here
-// would name a directory whose transcript folder is the resolved one's.
+// canonicalpath.Resolve reads filesystem metadata and resolves symlinks.
+// Present at all, because New applies the same function to cfg.WorkDir: skipping
+// it would break workDir's "resolved absolute path" invariant and, worse,
+// desynchronise the pair
+// — the caller derives claudeSessionsDir using the same filesystem-path
+// semantics, including on-disk casing, so a raw workDir here would name a
+// directory whose transcript folder is the resolved one's. The supplied
+// transcript directory is installed verbatim, never resolved here.
 //
 // A resolve failure writes NEITHER field: the pair is fail-closed on the
 // directory the runner already had, never half-applied. That is the same
@@ -2109,7 +2113,7 @@ func (r *Runner) SetSpawnWorkDir(workDir, claudeSessionsDir string) error {
 		r.log.Warn("streamsup: SetSpawnWorkDir called with empty dir; ignoring")
 		return nil
 	}
-	resolved, err := agentrun.ResolveWorkdir(workDir)
+	resolved, err := canonicalpath.Resolve(workDir)
 	if err != nil {
 		return fmt.Errorf("streamsup: resolve spawn workdir: %w", err)
 	}
