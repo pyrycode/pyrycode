@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -121,12 +122,21 @@ func TestRelayV2_StreamRejectsModelAbsentFromPublishedMenu(t *testing.T) {
 		t.Fatalf("decode advertised model list: %v", err)
 	}
 
-	if len(menu.Models) != len(captured) {
-		t.Fatalf("advertised model count = %d, want all %d rows from #2279's committed capture", len(menu.Models), len(captured))
+	// The daemon advertises one row per family, so the capture's pinned
+	// claude-haiku-4-5 is reduced away beside its haiku row. Written out rather
+	// than derived through modelfamily.Reduce, so a change to the rule reddens here.
+	advertised := slices.DeleteFunc(slices.Clone(captured), func(m capturedModel2281) bool {
+		return m.Value == "claude-haiku-4-5"
+	})
+	if len(advertised) != len(captured)-1 {
+		t.Fatalf("#2279's capture no longer carries the pinned claude-haiku-4-5 row this expectation removes: %+v", captured)
 	}
-	offered := make(map[string]bool, len(captured))
+	if len(menu.Models) != len(advertised) {
+		t.Fatalf("advertised model count = %d, want the %d family rows of #2279's committed capture", len(menu.Models), len(advertised))
+	}
+	offered := make(map[string]bool, len(advertised))
 	for i, option := range menu.Models {
-		want := captured[i]
+		want := advertised[i]
 		if option.Value != want.Value || option.ResolvedModel != want.ResolvedModel {
 			t.Errorf("advertised model %d = (%q, %q), want captured (%q, %q)",
 				i, option.Value, option.ResolvedModel, want.Value, want.ResolvedModel)

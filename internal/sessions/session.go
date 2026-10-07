@@ -5,8 +5,11 @@ import (
 	"errors"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/pyrycode/pyrycode/internal/modelfamily"
 )
 
 // lifecycleState is the per-session two-state machine introduced in 1.2c-A:
@@ -266,12 +269,21 @@ func canonicalPermissionMode(mode string, yolo bool) string {
 	return permissionModeDefault
 }
 
-// canonicalSettings returns s with its permission posture normalised. Applied at
-// both construction sites so a Pool-held Session never carries the empty mode,
-// and so the unset posture Pool.mintSettings and Pool.revivedSettings both leave
-// behind becomes the default one rather than an unspelled one.
+// canonicalSettings returns s with its permission posture normalised and its
+// model resolved to its family. Applied at both construction sites, the
+// materialise re-read and the dormant read, so a Pool-held Session never carries
+// the empty mode, and so the unset posture Pool.mintSettings and
+// Pool.revivedSettings both leave behind becomes the default one rather than an
+// unspelled one.
+//
+// The model half exists because a session follows the latest model of its family
+// and the menu offers one row per family. A setting saved before that rule, such
+// as claude-opus-5, is held as opus from its first read, so the menu matches its
+// family row and the next save writes the family back. Only a Claude id is ever
+// rewritten (see modelfamily.Alias), so a Codex model passes through unchanged.
 func canonicalSettings(s SessionSettings) SessionSettings {
 	s.PermissionMode = canonicalPermissionMode(s.PermissionMode, s.YOLO)
+	s.Model = modelfamily.Alias(s.Model)
 	return s
 }
 
@@ -304,15 +316,13 @@ type SettingsUpdate struct {
 // deterministic order (model, effort, posture) for testability. Empty Model or
 // Effort emits no flag (inherit the template).
 //
-// THE --model VALUE IS THE FAMILY ALIAS, NOT THE STORED ONE (#2447), and the two
-// differ by design. Not every row claude publishes is an alias — Fable and the
-// "Haiku 4.5" row are published as exact ids — so composing the stored value
-// verbatim pinned a session to a model claude had since superseded. familyAlias
-// rewrites an exact id to its family here and at Pool.deliverSettingsInBand, and
-// nowhere else: the stored value is left as picked so the model menu keeps
-// matching its row by exact equality and cmd/pyry's validateModelVocabulary keeps
-// finding it in the published list. Read familyAlias for why its output cannot
-// weaken what internal/relay's validModel buys this argv sink.
+// THE --model VALUE IS THE FAMILY ALIAS (#2447). A session follows the latest
+// model of its family, so a pinned id such as claude-opus-4-7 or claude-opus-5 is
+// rewritten to opus here, at Pool.deliverSettingsInBand, and at composeSpawnArgs
+// for a model the session does not hold itself. canonicalSettings already stores
+// the family, so this call is the sink's own guarantee rather than the only one.
+// Read modelfamily.Alias for why its output cannot weaken what internal/relay's
+// validModel buys this argv sink.
 //
 // THE ESCALATION FLAG IS UNCONDITIONAL (#2065). Every child the daemon spawns —
 // bootstrap, minted and revived — launches with --dangerously-skip-permissions,
@@ -357,7 +367,7 @@ type SettingsUpdate struct {
 func claudeSettingsArgs(s SessionSettings) []string {
 	var args []string
 	if s.Model != "" {
-		args = append(args, "--model", familyAlias(s.Model))
+		args = append(args, "--model", modelfamily.Alias(s.Model))
 	}
 	if s.Effort != "" {
 		args = append(args, "--effort", s.Effort)
@@ -371,9 +381,27 @@ func claudeSettingsArgs(s SessionSettings) []string {
 
 // composeSpawnArgs is the final composition boundary shared by initial launches
 // and live recomposition. It preserves the first bypass flag in argv order and
-// drops later exact copies without mutating base. Other arguments are untouched.
-func composeSpawnArgs(base []string, settings SessionSettings) []string {
-	args := append(slices.Clone(base), claudeSettingsArgs(settings)...)
+// drops later exact copies without mutating base.
+//
+// It also makes sure no model reaches claude pinned, whatever its source:
+//
+//   - The session's own model goes through claudeSettingsArgs.
+//   - An operator --model in base is resolved to its family in the composed copy.
+//   - With neither, claude would start on its own default, which Claude Code reads
+//     from ANTHROPIC_MODEL or its settings files and which can be pinned. That is
+//     how a new channel started on Opus 5 on 2026-10-07: no model was chosen, and
+//     ~/.claude/settings.json held "model": "claude-opus-5". defaultFamily is that
+//     default's family, resolved off the lock at construction by
+//     resolveDefaultFamily, and is named on the argv in its place. It is "" when
+//     the default is not pinned, which leaves the argv as it was.
+//
+// Other arguments are untouched.
+func composeSpawnArgs(base []string, settings SessionSettings, defaultFamily string) []string {
+	args := slices.Clone(base)
+	if !followOperatorModel(args) && settings.Model == "" {
+		settings.Model = defaultFamily
+	}
+	args = append(args, claudeSettingsArgs(settings)...)
 	seenBypass := false
 	result := args[:0]
 	for _, arg := range args {
@@ -386,6 +414,39 @@ func composeSpawnArgs(base []string, settings SessionSettings) []string {
 		result = append(result, arg)
 	}
 	return result
+}
+
+// followOperatorModel resolves every --model value in args to its family, in
+// place, and reports whether args names a model at all. Both the two-token and the
+// --model=value spellings are read.
+func followOperatorModel(args []string) bool {
+	named := false
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--model" && i+1 < len(args) {
+			args[i+1] = modelfamily.Alias(args[i+1])
+			named = true
+			i++
+		} else if v, ok := strings.CutPrefix(args[i], "--model="); ok {
+			args[i] = "--model=" + modelfamily.Alias(v)
+			named = true
+		}
+	}
+	return named
+}
+
+// resolveDefaultFamily answers the family of the model claude would start on in
+// workDir when its argv names none, or "" when that default is not a pinned
+// Claude id. defaultModel is Config.DefaultModel; nil resolves nothing. It reads
+// files, so callers run it off every lock, at construction.
+func resolveDefaultFamily(defaultModel func(workDir string) string, workDir string) string {
+	if defaultModel == nil {
+		return ""
+	}
+	model := defaultModel(workDir)
+	if family := modelfamily.Alias(model); family != model {
+		return family
+	}
+	return ""
 }
 
 // spawnArgs composes the full claude spawn argv for the given settings through
@@ -404,7 +465,7 @@ func (s *Session) spawnArgs(settings SessionSettings) []string {
 			}
 		}
 	}
-	return composeSpawnArgs(base, settings)
+	return composeSpawnArgs(base, settings, s.defaultFamily)
 }
 
 // Session is one supervised claude instance plus the bridge that mediates its
@@ -465,6 +526,13 @@ type Session struct {
 	// argv cannot answer it. operatorBypass reads this field for exactly that, and
 	// both RunnerConfig construction sites carry the answer across the runner seam.
 	spawnBase []string
+
+	// defaultFamily is the family of Claude Code's own default model when that
+	// default is a pinned id, else "". composeSpawnArgs names it on the argv when
+	// neither the settings nor spawnBase name a model. Resolved once at
+	// construction, off the lock, because it reads Claude Code's settings files;
+	// immutable afterwards, so read without a lock.
+	defaultFamily string
 
 	// Serializes prompt refresh/suppression with argv composition and runner
 	// publication. Acquire before Pool.mu; release Pool.mu before calling the

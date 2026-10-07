@@ -74,7 +74,7 @@ func (s conversationAgentSwitcher) Switch(ctx context.Context, convID, target st
 
 	start := s.pool.MintDefaults(target)
 	if model != nil {
-		start.Model = *model
+		start.Model = followFamily(target, *model)
 	}
 	list, have := agentModelVocabulary(s.pool, s.saved, target, "")
 	if model != nil && *model != "" {

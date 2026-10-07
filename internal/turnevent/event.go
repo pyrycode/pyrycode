@@ -1624,10 +1624,14 @@ type ModelOption struct {
 // like every variant here this one carries no conversation identity at all — the
 // bridge injects that.
 type ModelList struct {
-	// Models is the inventory in claude's own order, unchanged: no ranking is
-	// invented, its ordering semantics being unobserved. Never empty — the
-	// producer's gate does not emit on an empty array, because a ModelList naming no
-	// model cannot serve the purpose this variant exists for.
+	// Models is the inventory in claude's own order, reduced to one row per family:
+	// the producer drops each pinned row whose family row is present and keeps only
+	// the newest pinned row of a family that has none (internal/modelfamily.Reduce,
+	// applied before the entry cap below), because a pyry session follows the
+	// latest model of a family. No ranking is invented and no surviving row is
+	// changed. Never empty: the producer's gate does not emit on an empty array,
+	// because a ModelList naming no model cannot serve the purpose this variant
+	// exists for, and the reduction never empties a list.
 	//
 	// Each entry's three strings are bounded by the producer AT CONSTRUCTION
 	// (streamsup's maxModelResolved / maxModelValue / maxModelDisplayName), so an
@@ -1649,8 +1653,9 @@ type ModelList struct {
 	// nothing and needs no cap: it carries none of claude's bytes.
 	Models []ModelOption
 	// DroppedModels is how many entries claude sent beyond the producer's cap that
-	// this event does NOT carry; 0 when nothing was dropped. The list's true size is
-	// len(Models) + DroppedModels.
+	// this event does NOT carry; 0 when nothing was dropped. The reduced list's true
+	// size is len(Models) + DroppedModels; pinned rows the family reduction removed
+	// are not counted, since they were removed by rule rather than cut for size.
 	//
 	// The count dimension reports HERE rather than in a top-level TruncatedFields
 	// naming "models", and that is why this variant has no top-level

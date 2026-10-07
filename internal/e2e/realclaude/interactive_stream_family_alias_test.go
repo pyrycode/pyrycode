@@ -14,46 +14,40 @@ import (
 
 const familyAliasMenuBudget = 30 * time.Second
 
-// TestInteractiveStreamFullIDRowFollowsItsFamily is #2447's live arm: a real
-// claude, asked for a family alias, runs the model that family currently means.
+// TestInteractiveStreamPinnedModelFollowsItsFamily is the live arm of the family
+// rule (#2447, widened 2026-10-07): a real claude, sent a pinned model id, runs the
+// model that id's family currently means.
 //
-// The whole ticket rests on a claim only a live child can answer. Pyry now rewrites
-// a stored exact model id to its family alias at the two sinks where it hands a
-// model to claude, so a session that picked the published Fable row keeps up with
-// Fable releases instead of pinning to the version it picked. If a real claude did
-// not honour the alias — did not accept "fable[1m]" as a model, or resolved it to
-// something else — the rewrite would silently change WHICH MODEL RUNS, which is
-// strictly worse than the staleness it fixes.
+// Two claims only a live child can answer. First, the menu a real claude publishes
+// reaches the client as one row per family: Claude Code 2.1.289 publishes pinned
+// rows (claude-opus-5, claude-opus-4-7) beside its family rows, and the daemon must
+// have reduced them away. Second, a pinned id a client sends anyway is accepted and
+// run as its family. If a real claude did not honour the alias pyry sends, the
+// rewrite would silently change WHICH MODEL RUNS, which is strictly worse than the
+// staleness it fixes.
 //
-// A control response cannot answer it. The set_model_v2.1.259_refuse capture shows
-// claude replying success even for claude-no-such-model-2279, so the acknowledgement
-// proves only that the request was parsed. The model_announced frame is the only
-// witness that names what actually served the turn, which is why this test spends
-// two turns rather than reading a reply.
+// A control response cannot answer the second. The set_model_v2.1.259_refuse
+// capture shows claude replying success even for claude-no-such-model-2279, so the
+// acknowledgement proves only that the request was parsed. The model_announced
+// frame is the only witness that names what actually served the turn, which is why
+// this test spends two turns rather than reading a reply.
 //
-// NOTHING IS HARD-CODED. The row is chosen from the menu this run's own child
-// published, and the comparand is that same row's resolved_model, read from the same
-// reply. A claude release that renames a family, ships a new Fable, or changes what
-// an alias resolves to therefore moves the expectation with the measurement instead
-// of turning the assertion into a false pass — the failure mode a literal here would
-// reintroduce, and the one interactive_stream_model_rejection_test.go's
-// live-derived candidate exists to avoid on the negative path.
-//
-// The baseline turn is the instrument check, not decoration. Without it, a tree that
-// ignored the settings change entirely would still pass whenever the picked row
-// happened to resolve to the model the daemon already ran; asserting that the
-// announced model MOVED, and moved to the picked row's resolution, is what
-// distinguishes the mechanism from a coincidence. The row is selected against that
-// live baseline for the same reason.
-func TestInteractiveStreamFullIDRowFollowsItsFamily(t *testing.T) {
+// NOTHING IS HARD-CODED. The family row is chosen from the menu this run's own
+// child published, the pinned id is that row's own resolution with its last
+// version segment dropped (claude-fable-5-1 becomes claude-fable-5, an older
+// model of the same family), and the comparand is the row's resolved_model. Sent
+// verbatim, that id would run the older model or fail; resolved to its family it
+// runs the row's model. The baseline turn is the instrument check: asserting that
+// the announced model MOVED, and moved to the row's resolution, is what tells the
+// mechanism from a coincidence.
+func TestInteractiveStreamPinnedModelFollowsItsFamily(t *testing.T) {
 	runParallel(t)
 	h, convID := startStreamModalResolutionHarness(t, permissionDaemonModel)
 
 	menu := liveModelMenu2447(t, h, convID)
+	assertOneRowPerFamily2447(t, menu)
 
-	// Baseline: what serves a turn before anything is changed. Read from this
-	// run's own child rather than from inbandModelTargets, so a stale table
-	// cannot decide whether the measurement below is non-vacuous.
+	// Baseline: what serves a turn before anything is changed.
 	sealSendMessage(t, h.phone, h.initSend, 1000, convID, "m-2447-baseline",
 		fmt.Sprintf("Reply with one short word and nothing else. run=%d", time.Now().UnixNano()))
 	baseline, seen := drainForAnnouncedModel(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
@@ -64,27 +58,26 @@ func TestInteractiveStreamFullIDRowFollowsItsFamily(t *testing.T) {
 		t.Fatal("#2447: the baseline model_announced frame named no model")
 	}
 
-	row := pickRewritableRow2447(t, menu, baseline.Model)
-	t.Logf("#2447: baseline model %q; picked published row value %q (display %q) resolving to %q",
-		baseline.Model, row.Value, row.DisplayName, row.ResolvedModel)
+	row, pinned := pickFamilyRow2447(t, menu, baseline.Model)
+	t.Logf("#2447: baseline model %q; family row %q (display %q) resolving to %q; sending the pinned id %q",
+		baseline.Model, row.Value, row.DisplayName, row.ResolvedModel, pinned)
 
 	// Model ONLY. A present effort or permission mode would still route in-band,
-	// but naming one more field than the ticket changes would let an unrelated
+	// but naming one more field than the rule changes would let an unrelated
 	// rejection end the run before the model is ever delivered.
-	picked := row.Value
 	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
 		ID:   1001,
 		Type: protocol.TypeSetSessionSettings,
 		TS:   time.Now().UTC(),
 		Payload: mustJSON(t, protocol.SetSessionSettingsPayload{
 			SessionID: streamModalBootstrapUUID,
-			Model:     &picked,
+			Model:     &pinned,
 		}),
 	})
 	accepted := drainForCorrelatedEnvelope2281(t, h.phone, h.initRecv, 1001, familyAliasMenuBudget)
 	if accepted.Type != protocol.TypeSessionSettingsUpdated {
-		t.Fatalf("#2447: set_session_settings(%q) reply = %q %s, want %q — the daemon refused a value it published itself",
-			picked, accepted.Type, accepted.Payload, protocol.TypeSessionSettingsUpdated)
+		t.Fatalf("#2447: set_session_settings(%q) reply = %q %s, want %q: the daemon refused a pinned id whose family it offers",
+			pinned, accepted.Type, accepted.Payload, protocol.TypeSessionSettingsUpdated)
 	}
 
 	sealSendMessage(t, h.phone, h.initSend, 1002, convID, "m-2447-after-pick",
@@ -95,17 +88,16 @@ func TestInteractiveStreamFullIDRowFollowsItsFamily(t *testing.T) {
 	}
 
 	if announced.Model == baseline.Model {
-		t.Errorf("#2447 A1: the child reported model %q both before and after picking %q; "+
-			"the settings change reached no live child at all", baseline.Model, picked)
+		t.Errorf("#2447 A1: the child reported model %q both before and after sending %q; "+
+			"the settings change reached no live child at all", baseline.Model, pinned)
 	}
 	if announced.Model != row.ResolvedModel {
-		t.Errorf("#2447 A2: after picking the published row %q the child reported model %q, want %q — "+
-			"that row's own resolved_model from this run's menu.\n"+
-			"If A1 passed, the delivery worked and claude resolved the family alias pyry sent ELSEWHERE. "+
-			"That voids the ticket's design rather than being a stale expectation here: a rewrite that "+
-			"changes which model runs must not ship. Report what was measured (picked %q, alias family, "+
-			"announced %q) and route the ticket back.",
-			picked, announced.Model, row.ResolvedModel, picked, announced.Model)
+		t.Errorf("#2447 A2: after sending the pinned id %q the child reported model %q, want %q, "+
+			"the %q row's own resolved_model from this run's menu.\n"+
+			"If A1 passed, the delivery worked but claude ran something other than the family's current model: "+
+			"either pyry sent the pinned id verbatim, or claude resolved the alias elsewhere. Report what was "+
+			"measured (sent %q, family %q, announced %q).",
+			pinned, announced.Model, row.ResolvedModel, row.Value, pinned, row.Value, announced.Model)
 	}
 }
 
@@ -166,59 +158,87 @@ func liveModelMenu2447(t *testing.T, h *perConvHarness, convID string) []protoco
 	return menu.Models
 }
 
-// pickRewritableRow2447 returns the published row this test drives: one whose
-// value pyry rewrites to a family alias, preferring a fable-family row (the
-// ticket's named case) and falling back to any other so a Fable rename cannot void
-// the instrument. Rows resolving to the model already running are skipped — the
-// measurement below asserts that the announced model MOVED.
+// assertOneRowPerFamily2447 fails when the menu still offers a pinned row beside
+// its own family row, which is what the daemon's reduction exists to remove.
+func assertOneRowPerFamily2447(t *testing.T, menu []protocol.ModelOption) {
+	t.Helper()
+	values := make(map[string]bool, len(menu))
+	for _, row := range menu {
+		values[row.Value] = true
+	}
+	for _, row := range menu {
+		if family, ok := rewritableFamily2447(row.Value); ok && values[family] {
+			t.Errorf("#2447: the menu offers the pinned row %q beside its family row %q; it must be one row per family. Menu: %+v",
+				row.Value, family, menu)
+		}
+	}
+}
+
+// pickFamilyRow2447 returns a family row to drive and the older pinned id to send
+// for it. The row's value is a bare family name, and its resolved_model is
+// claude-<that family>-<major>-<minor>, so dropping the minor names an older model
+// of the same family. A fable row is preferred, falling back to any other, and a
+// row resolving to the model already running is skipped: the measurement asserts
+// that the announced model MOVED.
 //
-// The shape test is written out here rather than called from internal/sessions,
-// and that is the point: familyAlias is unexported, and a live arm that asked the
-// production code which rows it rewrites would agree with itself by construction.
-//
-// No row at all is FATAL, never a skip. Every row being a bare alias would mean
-// claude stopped publishing the exact-id rows this whole ticket exists for — a
-// fact someone must see, and a skip reads as a pass in a suite whose health is
-// judged by its executed count.
-func pickRewritableRow2447(t *testing.T, menu []protocol.ModelOption, baseline string) protocol.ModelOption {
+// No row at all is FATAL, never a skip: a skip reads as a pass in a suite whose
+// health is judged by its executed count.
+func pickFamilyRow2447(t *testing.T, menu []protocol.ModelOption, baseline string) (protocol.ModelOption, string) {
 	t.Helper()
 	var fallback *protocol.ModelOption
+	var fallbackPinned string
 	for i := range menu {
 		row := menu[i]
-		family, ok := rewritableFamily2447(row.Value)
-		if !ok || row.ResolvedModel == "" || row.ResolvedModel == baseline {
+		pinned, ok := olderPinnedID2447(row)
+		if !ok || row.ResolvedModel == baseline {
 			continue
 		}
-		if family == "fable" {
-			return row
+		if row.Value == "fable" {
+			return row, pinned
 		}
 		if fallback == nil {
-			fallback = &menu[i]
+			fallback, fallbackPinned = &menu[i], pinned
 		}
 	}
 	if fallback != nil {
-		t.Logf("#2447: no usable fable-family row; falling back to %q", fallback.Value)
-		return *fallback
+		t.Logf("#2447: no usable fable row; falling back to %q", fallback.Value)
+		return *fallback, fallbackPinned
 	}
-	t.Fatalf("#2447: no published row carries an exact model id that pyry would rewrite, resolves to something, "+
-		"and differs from the running model %q. Either claude stopped publishing exact-id rows — which is the "+
-		"ticket's premise gone and a fact to record rather than absorb — or every such row already resolves to "+
-		"what is running. Menu: %+v", baseline, menu)
-	return protocol.ModelOption{}
+	t.Fatalf("#2447: no family row resolves to a claude-<family>-<major>-<minor> id that differs from the running "+
+		"model %q, so no older pinned id can be derived. Menu: %+v", baseline, menu)
+	return protocol.ModelOption{}, ""
+}
+
+// olderPinnedID2447 derives an older pinned id from a family row: the row's value
+// must be the family named by its resolved_model, which must carry exactly two
+// version segments; the result drops the second. claude-fable-5-1 under the fable
+// row gives claude-fable-5.
+func olderPinnedID2447(row protocol.ModelOption) (string, bool) {
+	family, ok := rewritableFamily2447(row.ResolvedModel)
+	if !ok || family != row.Value {
+		return "", false
+	}
+	parts := strings.Split(row.ResolvedModel, "-")
+	if len(parts) != 4 {
+		return "", false
+	}
+	return strings.Join(parts[:3], "-"), true
 }
 
 // rewritableFamily2447 reports the family a value would be rewritten to, and
-// whether pyry rewrites it at all. It restates internal/sessions' rule
-// independently: after any trailing bracket group is split off, the base must
-// divide on "-" into "claude", a family of letters, and at least one further
-// segment with every remaining segment all-digits.
+// whether pyry rewrites it at all. It restates internal/modelfamily's rule
+// independently, so this live arm does not ask the production code which values
+// it rewrites and agree with itself by construction: after any trailing bracket
+// group is split off, the base must divide on "-" into "claude", a family of
+// letters, and at least one further segment with every remaining segment all
+// digits. The group is carried onto the family, as the rule does.
 func rewritableFamily2447(value string) (string, bool) {
-	base := value
+	base, group := value, ""
 	if i := strings.IndexByte(value, '['); i >= 0 {
 		if i == 0 || value[len(value)-1] != ']' {
 			return "", false
 		}
-		base = value[:i]
+		base, group = value[:i], value[i:]
 	}
 	parts := strings.Split(base, "-")
 	if len(parts) < 3 || parts[0] != "claude" {
@@ -232,5 +252,5 @@ func rewritableFamily2447(value string) (string, bool) {
 			return "", false
 		}
 	}
-	return parts[1], true
+	return parts[1] + group, true
 }

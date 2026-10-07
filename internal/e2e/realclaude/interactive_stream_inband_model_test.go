@@ -130,7 +130,7 @@ package realclaude
 // bracketed-value support; internal/relay's hermetic validation remains covered.
 //
 // Neither the selected value nor its expected resolution is pinned: menus can
-// change even within one binary version. Plain aliases also avoid familyAlias's
+// change even within one binary version. Plain aliases also avoid modelfamily.Alias's
 // full-ID rewrite in Pool.deliverSettingsInBand, so the fallback compares against
 // the resolution of the exact alias row the child just published. Failure to
 // deliver or apply a selected bracketed target never triggers an alias retry.

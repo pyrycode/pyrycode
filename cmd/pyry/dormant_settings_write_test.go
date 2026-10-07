@@ -141,6 +141,40 @@ func TestSettingsUpdaterAdapter_DormantModelMembership(t *testing.T) {
 	}
 }
 
+// TestSettingsUpdaterAdapter_PinnedModelLandsAsItsFamily: a client holding an
+// older menu, or one that types an id, sends a pinned Claude model. The menu now
+// offers one row per family, so the pick is resolved to its family before the
+// membership check, and the family is what both a live and a dormant session
+// store.
+func TestSettingsUpdaterAdapter_PinnedModelLandsAsItsFamily(t *testing.T) {
+	t.Parallel()
+	for _, pinned := range []string{"claude-opus-5", "claude-opus-4-7", "claude-opus-4-8"} {
+		t.Run(pinned, func(t *testing.T) {
+			t.Parallel()
+			pool, plan := newDormantWritePool(t, `"model":"sonnet","effort":"low",`)
+			plan.arm(dormantWriteBootID, turnevent.ModelList{Models: []turnevent.ModelOption{{Value: "opus", EffortLevels: claudeLevels}, {Value: "sonnet", EffortLevels: claudeLevels}}})
+			adapter := settingsUpdaterAdapter{p: pool}
+
+			picked := pinned
+			if err := adapter.UpdateSettings(dormantWriteTargetID, relay.SettingsUpdate{Model: &picked}); err != nil {
+				t.Fatalf("UpdateSettings(dormant, %q) = %v, want nil", pinned, err)
+			}
+			if got := dormantSettings(t, pool); got.Model != "opus" {
+				t.Errorf("dormant model = %q, want opus", got.Model)
+			}
+			if err := adapter.UpdateSettings(dormantWriteBootID, relay.SettingsUpdate{Model: &picked}); err != nil {
+				t.Fatalf("UpdateSettings(live, %q) = %v, want nil", pinned, err)
+			}
+			if got, err := pool.SettingsFor(dormantWriteBootID); err != nil || got.Model != "opus" {
+				t.Errorf("live model = %q, %v; want opus", got.Model, err)
+			}
+			if picked != pinned {
+				t.Errorf("the caller's frame was rewritten to %q", picked)
+			}
+		})
+	}
+}
+
 // TestSettingsUpdaterAdapter_DormantPostureRefused (AC 5, at the wire seam): a
 // frame naming yolo or permission_mode for a dormant session is refused as
 // relay.ErrSessionUnknown — which the handler replies as session.not_found, the
