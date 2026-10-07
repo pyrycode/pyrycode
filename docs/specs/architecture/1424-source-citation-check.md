@@ -123,3 +123,16 @@ and explicitly state that `make check` does not run it.
   two parenthesized filename/position labels before comparison; every other
   prose byte stays exact, and committed capture contents remain untouched.
   This small comparator change stays in the existing test file.
+- 2026-10-07: Verifier finding 1 names `TestRunner_TeardownSIGTERM` in
+  `internal/streamsup/runner_test.go`, whose fixed 150 ms startup wait can cancel
+  before the child installs its handler. The original named test passed 20
+  race-enabled repetitions and the complete streamsup package passed once;
+  a delayed-exec subcase reproduced the missing SIGTERM message before repair.
+  The test will wait for `helperChild`'s `block_sigterm` readiness marker emitted
+  after `signal.Notify`, then measure elapsed time from cancellation. Keep the
+  existing cancellation, prompt-exit and stderr assertions. Register cancellation
+  and a bounded join as cleanup before waiting so a readiness failure still
+  stops the runner. The helper change is a single marker in
+  `internal/streamsup/helper_test.go`; `Runner.spawnAndWait` remains read-only.
+  This test-only extension answers the explicit rework finding and adds no
+  production behavior, dependency or shared e2e harness change.

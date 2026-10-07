@@ -780,41 +780,73 @@ func TestRunner_SpawnSetupFailureRetainsSessionID(t *testing.T) {
 
 func TestRunner_TeardownSIGTERM(t *testing.T) {
 	t.Parallel()
-	out, stderr := &safeBuffer{}, &safeBuffer{}
-	cfg := helperRunCfg(t, "block_sigterm", out, stderr)
+	for _, delayed := range []bool{false, true} {
+		name := "immediate_start"
+		if delayed {
+			name = "delayed_start"
+		}
+		t.Run(name, func(t *testing.T) {
+			out, stderr := &safeBuffer{}, &safeBuffer{}
+			cfg := helperRunCfg(t, "block_sigterm", out, stderr)
+			if delayed {
+				// Delay exec beyond the former startup wait to exercise cancellation
+				// while the child has yet to install its signal handler.
+				cfg.ClaudeBin = filepath.Join(t.TempDir(), "slow-claude")
+				cfg.Env = append(cfg.Env, "GO_STREAMSUP_TEST_BINARY="+os.Args[0])
+				shim := "#!/bin/sh\nsleep 0.3\nexec \"$GO_STREAMSUP_TEST_BINARY\" \"$@\"\n"
+				if err := os.WriteFile(cfg.ClaudeBin, []byte(shim), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
 
-	r, err := New(cfg)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+			r, err := New(cfg)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	start := time.Now()
-	go func() { done <- r.Run(ctx) }()
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			stopped := make(chan struct{})
+			go func() {
+				done <- r.Run(ctx)
+				close(stopped)
+			}()
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case <-stopped:
+				case <-time.After(10 * time.Second):
+					t.Error("Run did not stop during cleanup")
+				}
+			})
 
-	time.Sleep(150 * time.Millisecond) // let the child come up and block
-	cancel()
+			// READY is emitted after signal.Notify, so cancellation cannot race
+			// the child's signal-handler installation even when startup is slow.
+			waitForContains(t, out, "READY", 5*time.Second)
+			start := time.Now()
+			cancel()
 
-	var runErr error
-	select {
-	case runErr = <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("Run did not return within 10s of cancel")
-	}
-	elapsed := time.Since(start)
+			var runErr error
+			select {
+			case runErr = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("Run did not return within 10s of cancel")
+			}
+			elapsed := time.Since(start)
 
-	if !errors.Is(runErr, context.Canceled) {
-		t.Errorf("Run returned %v, want context.Canceled", runErr)
-	}
-	// A handled SIGTERM exits promptly; falling through to the SIGKILL grace
-	// window would push elapsed past killGrace (5s).
-	if elapsed > 6*time.Second {
-		t.Errorf("Run took %v; SIGTERM likely fell through to SIGKILL grace", elapsed)
-	}
-	if !strings.Contains(stderr.String(), "got SIGTERM") {
-		t.Errorf("stderr missing %q; SIGTERM may not have reached the child\nstderr: %q",
-			"got SIGTERM", stderr.String())
+			if !errors.Is(runErr, context.Canceled) {
+				t.Errorf("Run returned %v, want context.Canceled", runErr)
+			}
+			// A handled SIGTERM exits promptly; falling through to the SIGKILL grace
+			// window would push elapsed past killGrace (5s).
+			if elapsed > 6*time.Second {
+				t.Errorf("Run took %v; SIGTERM likely fell through to SIGKILL grace", elapsed)
+			}
+			if !strings.Contains(stderr.String(), "got SIGTERM") {
+				t.Errorf("stderr missing %q; SIGTERM may not have reached the child\nstderr: %q",
+					"got SIGTERM", stderr.String())
+			}
+		})
 	}
 }
 
