@@ -93,6 +93,15 @@ func testQMDWrite(t *testing.T, path, content string) {
 	}
 }
 
+func testQMDJSON(t *testing.T, value any) string {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
 func (f *qmdFixture) readConfig() map[string]any {
 	f.t.Helper()
 	// Parse supported YAML independently of the setup command; JSON seeds are YAML too.
@@ -115,7 +124,7 @@ func (f *qmdFixture) membership(collection string) []string {
 }
 
 func TestQMDCurrentSetup(t *testing.T) {
-	for _, scenario := range []string{"fresh", "wrong-root", "wrong-pattern"} {
+	for _, scenario := range []string{"fresh", "wrong-root", "wrong-pattern", "ignore-wrong-scope", "ignore-correct-scope", "anchored-current", "aliased-current"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newQMDFixture(t)
 			t.Logf("installed version: %s", bytes.TrimSpace(f.run(f.qmd, "--version")))
@@ -136,8 +145,13 @@ func TestQMDCurrentSetup(t *testing.T) {
 				testQMDWrite(t, filepath.Join(f.root, "docs", path), "# Excluded explanation\n\n"+word+"\n")
 			}
 			testQMDWrite(t, filepath.Join(f.root, "notes", "operator.md"), "# Operator\n\nquasaroperator\n")
+			canonical, err := filepath.EvalSymlinks(knowledge)
+			if err != nil {
+				t.Fatal(err)
+			}
 			collections := map[string]any{
 				"pyrycode-docs": map[string]any{"path": filepath.Join(f.root, "docs"), "pattern": "**/*",
+					"ignore":  []string{"unrelated/**"},
 					"context": map[string]any{"/": "Broad collection", "/knowledge/features": "Feature path"}},
 				"operator-notes": map[string]any{"path": filepath.Join(f.root, "notes"), "pattern": "**/*.md",
 					"includeByDefault": false, "context": map[string]any{"/": "Other collection", "/operator.md": "Leaf context"}},
@@ -150,32 +164,57 @@ func TestQMDCurrentSetup(t *testing.T) {
 				collections["pyrycode-current"] = map[string]any{"path": path, "pattern": pattern,
 					"includeByDefault": false, "context": map[string]any{
 						"/": "Current collection", "/features": "Current features", "/features/nested": "Nested path"}}
+				current := collections["pyrycode-current"].(map[string]any)
+				switch scenario {
+				case "ignore-wrong-scope":
+					current["path"], current["pattern"] = filepath.Join(f.root, "docs"), "**/*"
+					current["ignore"] = []string{"**/features/**"}
+				case "ignore-correct-scope":
+					current["path"] = canonical
+					current["pattern"], current["ignore"] = currentMask, []string{"features/**"}
+				case "anchored-current", "aliased-current":
+					current["path"] = filepath.Join(f.root, "docs")
+				}
 			}
 			seed := map[string]any{"collections": collections, "global_context": "Global context: ää\nsecond line",
 				"models": map[string]any{"embed": "custom-preserved-model"}}
-			data, err := json.MarshalIndent(seed, "", "  ")
-			if err != nil {
-				t.Fatal(err)
+			testQMDWrite(t, f.config, testQMDJSON(t, seed))
+			if scenario == "anchored-current" || scenario == "aliased-current" {
+				anchor, alias := "pyrycode-current", "pyrycode-docs"
+				if scenario == "aliased-current" {
+					anchor, alias = alias, anchor
+				}
+				// Real YAML sharing, accepted and indexed by QMD before reconciliation.
+				yaml := "collections:\n  " + anchor + ": &shared " + testQMDJSON(t, collections["pyrycode-current"]) +
+					"\n  " + alias + ": *shared\n  operator-notes: " + testQMDJSON(t, collections["operator-notes"]) +
+					"\nglobal_context: " + testQMDJSON(t, seed["global_context"]) +
+					"\nmodels: " + testQMDJSON(t, seed["models"]) + "\n"
+				testQMDWrite(t, f.config, yaml)
 			}
-			testQMDWrite(t, f.config, string(data))
+			seed = f.readConfig()
+			collections = seed["collections"].(map[string]any)
 			f.run(f.qmd, "update")
 			contexts := f.run(f.qmd, "context", "list")
+			otherMembership := map[string][]string{}
+			for _, collection := range []string{"pyrycode-docs", "operator-notes"} {
+				otherMembership[collection] = f.membership(collection)
+			}
 			if scenario == "wrong-pattern" && len(f.membership("pyrycode-current")) <= len(included) {
 				t.Fatal("incorrect scope control did not index excluded documents")
+			}
+			if strings.HasPrefix(scenario, "ignore-") {
+				before := f.membership("pyrycode-current")
+				if len(before) == 0 || strings.Contains(strings.Join(before, "\n"), "/features/") {
+					t.Fatalf("ignore control did not exclude feature documents: %v", before)
+				}
 			}
 			f.run(f.node, f.script, "--repo", f.root)
 			if scenario == "fresh" {
 				collections["pyrycode-current"] = map[string]any{}
 			}
 			current := collections["pyrycode-current"].(map[string]any)
-			canonical, err := filepath.EvalSymlinks(knowledge)
-			if err != nil {
-				t.Fatal(err)
-			}
 			current["path"], current["pattern"] = canonical, currentMask
-			if got := f.readConfig(); !reflect.DeepEqual(got, seed) {
-				t.Fatalf("configuration preservation: got %#v, want %#v", got, seed)
-			}
+			delete(current, "ignore")
 			first, err := os.ReadFile(f.config)
 			if err != nil {
 				t.Fatal(err)
@@ -186,6 +225,11 @@ func TestQMDCurrentSetup(t *testing.T) {
 				t.Fatalf("rerun changed configuration: %v", err)
 			}
 			f.run(f.qmd, "update")
+			for collection, before := range otherMembership {
+				if after := f.membership(collection); !reflect.DeepEqual(before, after) {
+					t.Fatalf("%s membership changed: before %v, after %v", collection, before, after)
+				}
+			}
 			if after := f.run(f.qmd, "context", "list"); !bytes.Equal(contexts, after) {
 				t.Fatalf("CLI contexts changed:\nbefore %s\nafter %s", contexts, after)
 			}
@@ -218,6 +262,9 @@ func TestQMDCurrentSetup(t *testing.T) {
 				if results := search(word, "pyrycode-docs"); len(results) != 1 || results[0].File != "qmd://pyrycode-docs/"+path {
 					t.Fatalf("broad positive control %q: %v", word, results)
 				}
+			}
+			if got := f.readConfig(); !reflect.DeepEqual(got, seed) {
+				t.Fatalf("configuration preservation: got %#v, want %#v", got, seed)
 			}
 			t.Log("PASS: setup, rerun, collection/context preservation, 4 included searches, 5 excluded searches and 5 broad positive controls")
 		})

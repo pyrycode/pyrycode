@@ -78,3 +78,31 @@ Pending for documentation stage:
 - `docs/shared-knowledge.md`, Read: document the shipped setup invocation and `--repo`, `QMD_CONFIG_DIR` and `INDEX_PATH` isolation options. State: “Use `pyrycode-current` for current feature and decision questions; use `pyrycode-docs` for historical ticket reasoning.” Explain running `qmd update` followed by `qmd embed` against the configured index. State that shared-host automatic provisioning and role defaults await adoption by the agents-repository maintainer.
 - `docs/knowledge/INDEX.md`, Finding a document: link the above guidance.
 - Agents-repository maintainer handoff: adopt `node "$PYRYCODE_REPO/cmd/qmd-current/setup.mjs"` in automatic provisioning; this branch does not edit that repository or its live configuration.
+
+## Revisions
+
+### 2026-10-07 — verifier findings 1 and 2
+
+The original two-field edit retained `ignore` exclusions, so even the correct root
+and pattern could omit feature Markdown. Reconciliation now sets the canonical
+root and pattern and removes the current collection's `ignore` field. Other
+settings, collections and all contexts remain unchanged. The no-write rerun also
+requires the absence of `ignore`.
+
+Editing an anchored YAML mapping also changed collections that aliased it. Resolve
+the configuration through the installed YAML parser and copy the collection registry
+and current collection before editing, then serialize the resulting document.
+This detaches the edited mappings while preserving all other resolved values;
+an alias used as the current collection is supported too. Configuration formatting
+may change on reconciliation; an unchanged rerun remains byte-stable. Atomic
+replacement and validation-before-write remain the same.
+
+Installed-QMD regressions cover exclusions with both incorrect and already-correct
+scope, a current mapping anchored for the broad collection, and a current collection
+that aliases the broad mapping. Index before and after correction, compare every
+other collection's membership, and retain the full configuration/context and search
+assertions. The four new scenarios first failed against the prior implementation
+with missing feature documents, lost broad history, or a rejected collection alias.
+The revision remains one deliverable under 800 written lines, with zero exported
+types and consumer updates, three acceptance criteria and fewer than ten failure
+branches. No concurrent feature branch touches these files.

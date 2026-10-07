@@ -42,22 +42,28 @@ function setup(args) {
   if (document.errors.length) throw new Error(`Invalid ${configPath}: ${document.errors[0].message}`);
   if (document.contents === null) document.contents = document.createNode({});
   if (!YAML.isMap(document.contents)) throw new Error(`Expected a mapping in ${configPath}`);
-  if (!document.has('collections')) document.set('collections', document.createNode({}));
-  if (!YAML.isMap(document.get('collections', true))) {
+  const config = document.toJS();
+  if (!document.has('collections')) config.collections = {};
+  const collections = config.collections;
+  if (!collections || typeof collections !== 'object' || Array.isArray(collections)) {
     throw new Error(`Expected a collections mapping in ${configPath}`);
   }
-  const key = ['collections', 'pyrycode-current'];
-  if (!document.hasIn(key)) document.setIn(key, document.createNode({}));
-  if (!YAML.isMap(document.getIn(key, true))) {
+  const current = Object.hasOwn(collections, 'pyrycode-current') ? collections['pyrycode-current'] : {};
+  if (!current || typeof current !== 'object' || Array.isArray(current)) {
     throw new Error(`Expected a pyrycode-current mapping in ${configPath}`);
   }
   const pattern = '{features,decisions}/**/*.md';
-  if (document.getIn([...key, 'path']) === root && document.getIn([...key, 'pattern']) === pattern) {
+  if (current.path === root && current.pattern === pattern && !Object.hasOwn(current, 'ignore')) {
     console.log(`pyrycode-current already configured: ${root}`);
     return;
   }
-  document.setIn([...key, 'path'], root);
-  document.setIn([...key, 'pattern'], pattern);
+  // Resolved YAML aliases can share objects. Copy both edited mappings so other
+  // collections and aliases retain their original values, including contexts.
+  const reconciled = { ...current, path: root, pattern };
+  delete reconciled.ignore;
+  document.contents = document.createNode({
+    ...config, collections: { ...collections, 'pyrycode-current': reconciled },
+  });
 
   mkdirSync(configDir, { recursive: true });
   const scratch = mkdtempSync(join(configDir, '.pyrycode-current-'));
