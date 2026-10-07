@@ -470,10 +470,8 @@ func TestFinLiveStageEnvDeltaNamesTheRunner(t *testing.T) {
 	// VACUOUS: no test in this package t.Setenvs PYRY_USE_STREAMJSON (the
 	// PYRY_USE_STREAMJSON=1 at `probeRows` is a spawned
 	// row's CHILD env, not the test process's), so wherever the variable is unset
-	// the claim passes identically with an EMPTY delta. The nearest shipped
-	// precedent, TestFinRecordRunnerAgreement, argues this independence in its
-	// failure message and never sets the ambient, so it does not prove it —
-	// it is deliberately not copied as-is. That the variable is not always unset
+	// the claim passes identically with an EMPTY delta. Setting the ambient is
+	// what proves the delta overrides it. That the variable is not always unset
 	// is the point: `reachRunnerPathFromEnv` records it exported
 	// in an operator's shell on 2026-07-25, where it silently invalidated a #1223
 	// gate.
