@@ -66,3 +66,8 @@ Pending documentation stage: update `docs/knowledge/features/history-package-pro
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-08
+
+## Revisions
+
+- 2026-10-08: ordering tests required per-source accepted-output watermarks rather than the whole queue's tail for transition facts; confirmation placements retain the whole-queue fence. Channel holds survive removal from the pending queue until publication finishes. Evictions additionally wait for a consumed producer stop, retaining late parsed tails and the actual eviction cause. Confirmation-only dispatch is activated only with runtime history, preserving older test entry surfaces. Untagged legacy callers retain their single source fallback; production callbacks capture the last output source independently of a rotated routing tag.
+- 2026-10-08: a successor denial can open a turn without a running phase, so runtime cleanup checks retained open turns rather than phase projection before releasing the publication gate. Sealed predecessor events bypass busy and idle-placement mutation while retaining their legacy provenance. Tests cover late predecessor endings and stale same-session exits.

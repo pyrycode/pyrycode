@@ -495,6 +495,7 @@ func startRelay(
 			bcast := historyOnlyBroadcaster{}
 			emitter := newInteractiveTurnEmitterV2(w.active, bcast, logger)
 			emitter.hist = w.hist
+			installRuntimeHistory(w.streamSink, emitter, w.busy)
 			resolve := func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }
 			drain := startStreamTurnDrainV2(ctx, w.streamSink, emitter, resolve, w.busy, logger)
 			transitions := startSessionTransitionStreamV2WithHarness(ctx, w.transitions, bcast, resolve, w.sessionHarness, w.busy, w.hist, logger)
@@ -1744,6 +1745,7 @@ func startRelayV2(
 		if w.operatorMessages != nil {
 			w.streamSink.setOperatorPublisher(func(m operatorMessage) { w.operatorMessages.broadcast(ctx, mgr, emitter.ring, m) })
 		}
+		installRuntimeHistory(w.streamSink, emitter, w.busy)
 		streamDrainCleanup = startStreamTurnDrainV2(ctx, w.streamSink, emitter, conversationFor, w.busy, logger)
 	}
 	// The terminal-mode arm that stood here is gone with #1348. It read claude's

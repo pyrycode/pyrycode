@@ -108,9 +108,11 @@ type assistantDeltaLane struct {
 // transport-sentinel err. Thought text is dropped by MapEvent and never
 // forwarded — thinking surfaces only as a turn_state transition.
 type interactiveTurnEmitterV2 struct {
-	sup    cursorReader
-	bcast  interactiveBroadcaster
-	logger *slog.Logger
+	runtimeFacts  bool
+	runtimeSealed map[string]bool
+	sup           cursorReader
+	bcast         interactiveBroadcaster
+	logger        *slog.Logger
 
 	// Each conversation and producing source retains its own convTurnState in
 	// turns. The embedded pointer selects the current call's state, so promoted
@@ -196,6 +198,8 @@ type interactiveTurnEmitterV2 struct {
 // convTurnState retains one producing session's lifecycle and buffered text
 // within a conversation. Selection, flushing and closing retain that source.
 type convTurnState struct {
+	runtimeTools   map[string]string
+	runtimeEpoch   uint64
 	conversationID string
 	source         history.SessionProvenance
 	inTurn         bool                 // whether a turn is currently open
@@ -314,6 +318,13 @@ func (e *interactiveTurnEmitterV2) HandleFor(ctx context.Context, convID string,
 	}
 	key := e.selectConversation(convID, captured)
 	defer e.releaseConversation(key)
+	if e.runtimeFacts && e.runtimeSealed[runtimeSourceKey(convID, captured.SessionID)] {
+		if _, thought := ev.(turnevent.ThoughtChunk); !thought {
+			e.emitMapped(ctx, convID, ev)
+		}
+		return
+	}
+	e.trackRuntimeTool(ev)
 
 	switch v := ev.(type) {
 	case turnevent.ThoughtChunk:
@@ -918,6 +929,9 @@ func (e *interactiveTurnEmitterV2) startTurnIfNeeded(convID string) bool {
 	e.currentState = ""
 	e.inTurn = true
 	e.turnConvID = convID
+	if e.runtimeFacts {
+		e.recordRuntimeFact(historyTurnOpened, runtimeHistoryFact{ConversationID: convID, TurnID: e.turnID, OccurredAt: time.Now().UTC()})
+	}
 	e.suggestions.turnStarted(convID)
 	return true
 }
@@ -1053,6 +1067,7 @@ func (e *interactiveTurnEmitterV2) transitionTo(ctx context.Context, convID stri
 // and counters survive until session teardown. Callers flush and project idle
 // through transitionTo first; that projection owns the conversation snapshot.
 func (e *interactiveTurnEmitterV2) endTurn() {
+	e.runtimeTools = nil
 	e.inTurn = false
 	e.turnID = ""
 	e.turnConvID = ""

@@ -104,7 +104,7 @@ func newCodexRunnerFactory(h codexHarness) sessions.RunnerFactory {
 		model, effort := codexTurnSettings(cfg.ClaudeArgs)
 		// #2663 chains the wrap-up reply capture where newStreamRunnerFactory
 		// does, on the producer's side of the fan-in send; see wrapUpCapture.
-		wrapUp := newWrapUpCapture(h.sink.sinkForTag(tag.ID, "codex"))
+		wrapUp := newWrapUpCapture(h.sink.sinkForSessionTag(tag, "codex"))
 		return newCodexRunner(codexRunnerConfig{
 			Binary:         bin,
 			Home:           h.home,
@@ -112,7 +112,7 @@ func newCodexRunnerFactory(h codexHarness) sessions.RunnerFactory {
 			Tag:            tag,
 			Sink:           wrapUp.Sink,
 			WrapUp:         wrapUp,
-			OnExit:         h.sink.exitForTag(tag.ID),
+			OnExit:         h.sink.exitForSessionTag(tag),
 			Model:          model,
 			Effort:         effort,
 			PermissionMode: cfg.PermissionMode,

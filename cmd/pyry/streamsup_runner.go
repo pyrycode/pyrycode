@@ -778,7 +778,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 		// placement it DOES need is being on the parser's side of the channel, which
 		// the chain's own doc states is what the retentions get from, and only from,
 		// sitting here.
-		follow := newSessionResetFollower(tag, cfg.AdoptAnnouncedReset, sink.sinkForTag(tag.ID, "claude"), cfg.Logger)
+		follow := newSessionResetFollower(tag, cfg.AdoptAnnouncedReset, sink.sinkForSessionTag(tag, "claude"), cfg.Logger)
 		contextUsage := newTurnEndContextUsageRequester(follow.Sink, cfg.Logger)
 		// #2450 chains the vocabulary persister at the head of the same run of
 		// non-retaining decorators, for the reason the two above it sit here: it needs
@@ -808,7 +808,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 		}
 		parser, held := newSessionParser(parserSink, cfg.Logger)
 		scfg.Stdout = parser
-		exitSink := sink.exitForTag(tag.ID)
+		exitSink := sink.exitForSessionTag(tag)
 		// The hold outlives respawns; invalidate joins before either exit path
 		// reports the child gone. Retention never infers task completion.
 		onChildExit := func() {

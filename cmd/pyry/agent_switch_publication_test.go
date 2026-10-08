@@ -5,6 +5,7 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/json"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -179,6 +180,7 @@ func TestRelayAgentSwitchDelayedPublication(t *testing.T) {
 		}
 	}
 	page, err := store.Page(switchConvID, "", 100)
+	page.Entries = slices.DeleteFunc(page.Entries, func(e history.Entry) bool { return !legacyHistoryType(e.Type) })
 	if err != nil || len(page.Entries) != 2 {
 		t.Fatalf("history cardinality=%d, err=%v", len(page.Entries), err)
 	}
@@ -239,6 +241,7 @@ func TestRelayAgentSwitchPublicationQueuePressure(t *testing.T) {
 		t.Fatalf("missing ordered outcome: %+v", bcast.pushes)
 	}
 	page, err := e.hist.Page(switchConvID, "", 100)
+	page.Entries = slices.DeleteFunc(page.Entries, func(e history.Entry) bool { return !legacyHistoryType(e.Type) })
 	if err != nil || len(page.Entries) != 1 {
 		t.Fatalf("history cardinality=%d, err=%v", len(page.Entries), err)
 	}

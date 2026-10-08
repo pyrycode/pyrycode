@@ -136,8 +136,9 @@ type activeSessionStarter struct {
 	// Conversation.Cwd, unvalidated, exactly as ChangeWorkspace stored it (#1475).
 	// It is raw on purpose: re-confining it is spawnDirFor's job and must happen at
 	// the spawn site, not at the resolve.
-	resolveBound func(convID string) (runner sessions.Runner, oldID sessions.SessionID, recordedCwd string, ok bool)
-	rotate       func(oldID sessions.SessionID) (sessions.SessionID, error)
+	resolveBound      func(convID string) (runner sessions.Runner, oldID sessions.SessionID, recordedCwd string, ok bool)
+	rotate            func(oldID sessions.SessionID) (sessions.SessionID, error)
+	rotateWithHandoff func(sessions.SessionID, *string) (sessions.SessionID, error)
 
 	// spawnDirFor re-confines a recorded workspace to $HOME at rotation time,
 	// answering the directory the successor must spawn in — production wires
@@ -286,7 +287,15 @@ func (a activeSessionStarter) resetThenRotate(release func(), outcome func(error
 	wroteNote := a.reset.wrapUp(convID)
 	a.resetting.restarting(convID, wroteNote)
 	defer a.resetting.done(convID)
-	if err := startFreshRunner(runner, oldID, spawnDir, a.rotate, a.log); err != nil {
+	rotate := a.rotate
+	if a.rotateWithHandoff != nil {
+		outcome := "skipped"
+		if wroteNote {
+			outcome = "written"
+		}
+		rotate = func(id sessions.SessionID) (sessions.SessionID, error) { return a.rotateWithHandoff(id, &outcome) }
+	}
+	if err := startFreshRunner(runner, oldID, spawnDir, rotate, a.log); err != nil {
 		a.logger().Warn("relay: v2 new_session could not rotate after the wrap-up turn",
 			"event", "v2.new_session.rotate_failed",
 			"conversation_id", convID,

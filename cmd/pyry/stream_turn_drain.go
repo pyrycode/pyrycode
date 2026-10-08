@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
@@ -77,7 +78,9 @@ const streamTurnSinkCloseReserve = 32
 // "Handle cannot receive a non-event" stays a type-level fact rather than a
 // runtime branch.
 type streamTurnEnvelope struct {
-	sessionID string
+	sourceEpoch uint64
+	occurredAt  time.Time
+	sessionID   string
 	// source is captured from the runner's kind and this event's routing tag.
 	// Its zero value keeps callers without a known producer untagged.
 	source history.SessionProvenance
@@ -122,7 +125,13 @@ type confirmedStreamStop struct {
 // must be structurally impossible. The drain stops on ctx, not on close; any
 // post-shutdown send lands in the non-blocking drop path.
 type streamTurnSink struct {
-	ch chan streamTurnEnvelope
+	runtimeEnabled    atomic.Bool
+	runtimeHolds      map[string]int    // guarded by offerMu, including in-flight publication
+	runtimeLastQueued map[string]uint64 // accepted output positions per source
+	runtimeStopSeen   map[string]uint64 // consumed producer exits, guarded by offerMu
+	runtimePending    []runtimeBoundary // guarded by offerMu
+	runtimeWake       chan struct{}
+	ch                chan streamTurnEnvelope
 	// offerMu orders successful enqueues against confirmed runner stops. It is
 	// a leaf lock: no I/O, publication or tracker operation runs underneath it.
 	offerMu     sync.Mutex
@@ -226,6 +235,7 @@ func newStreamTurnSink(buf int, logger *slog.Logger) *streamTurnSink {
 		logger = slog.Default()
 	}
 	return &streamTurnSink{
+		runtimeWake:           make(chan struct{}, 1),
 		ch:                    make(chan streamTurnEnvelope, buf),
 		placementCommands:     make(chan func(), operatorMessageQueueSize),
 		stopped:               make(map[string]confirmedStreamStop),
@@ -246,9 +256,18 @@ func (s *streamTurnSink) offer(env streamTurnEnvelope, closing bool) bool {
 		return false
 	}
 	env.queued = s.queued + 1
+	if !env.exit {
+		env.sourceEpoch = s.exits.Load()
+	}
 	select {
 	case s.ch <- env:
 		s.queued++
+		if s.runtimeLastQueued == nil {
+			s.runtimeLastQueued = make(map[string]uint64)
+		}
+		if !env.exit {
+			s.runtimeLastQueued[env.sessionID] = env.queued
+		}
 		return true
 	default:
 		if env.exit {
@@ -279,7 +298,7 @@ func (s *streamTurnSink) retainExitLocked(env streamTurnEnvelope) {
 // The wake is a level trigger, never the owner of the notification.
 func (s *streamTurnSink) runnerStopped(sessionID string) {
 	s.offerMu.Lock()
-	s.retainExitLocked(streamTurnEnvelope{sessionID: sessionID, exit: true, exitEpoch: s.exits.Add(1)})
+	s.retainExitLocked(streamTurnEnvelope{sessionID: sessionID, exit: true, exitEpoch: s.exits.Add(1), occurredAt: runtimeExitTime()})
 	s.offerMu.Unlock()
 }
 
@@ -361,7 +380,10 @@ func (s *streamTurnSink) takeLifecycleCloses() []string {
 // conversation's stream for the life of the runner. Rotate refuses
 // it here because the invariant belongs to this value; RestartFresh's own empty-id
 // refusal means production never reaches the guard.
-type streamSessionTag struct{ id atomic.Pointer[string] }
+type streamSessionTag struct {
+	id         atomic.Pointer[string]
+	lastSource atomic.Pointer[history.SessionProvenance]
+}
 
 // newStreamSessionTag returns a tag seeded with the runner's construction-time
 // session id — the value that used to be captured directly by the two lane
@@ -590,6 +612,10 @@ func startStreamTurnDrainV2(
 	go func() {
 		defer close(done)
 		closePendingLifecycles := func() {
+			if emitter.runtimeFacts {
+				sink.takeLifecycleCloses() // runtime facts own source-specific cleanup
+				return
+			}
 			// Bound trackers never enqueue early pool-transition closes. Their
 			// confirmed producer stop is retained behind the parsed tail and closes it below.
 			if busy != nil && busy.posts != nil {
@@ -607,6 +633,32 @@ func startStreamTurnDrainV2(
 			unlock := busy.lockPostBoundary()
 			defer unlock()
 			if env.exit {
+				if emitter.runtimeFacts {
+					if sink.noteRuntimeStop(env) {
+						return
+					}
+					id, ok := conversationFor(env.sessionID)
+					if ok && id != "" {
+						sourceID := env.source.SessionID
+						if sourceID == "" {
+							sourceID = env.sessionID
+						}
+						at := env.occurredAt
+						if at.IsZero() {
+							at = runtimeExitTime()
+						}
+						emitter.closeRuntimeSource(ctx, id, sourceID, "child_exit", at, false, env.exitEpoch)
+						if !emitter.hasRuntimeTurn(id) {
+							sink.observePlacementIdle(env.sessionID)
+							busy.clearForExit(env.sessionID, env.exitEpoch)
+							busy.publishPostBoundary(id, false)
+							if busy != nil && busy.posts != nil {
+								busy.posts.teardown.Delete(id)
+							}
+						}
+					}
+					return
+				}
 				var teardownEpoch any
 				if busy != nil && busy.posts != nil {
 					if id, ok := conversationFor(env.sessionID); ok {
@@ -629,6 +681,16 @@ func startStreamTurnDrainV2(
 					}
 				}
 				return
+			}
+			if emitter.runtimeFacts {
+				if id, ok := conversationFor(env.sessionID); ok && emitter.runtimeSealed[runtimeSourceKey(id, env.source.SessionID)] {
+					if echo, ok := env.ev.(turnevent.UserEcho); ok {
+						sink.observeEcho(env.sessionID, echo)
+					} else {
+						emitter.HandleFor(ctx, id, env.ev, env.source)
+					}
+					return // sealed predecessors cannot change successor busy/placement state
+				}
 			}
 
 			// BEFORE the resolution below, and the ordering IS the contract: an
@@ -667,6 +729,9 @@ func startStreamTurnDrainV2(
 				busy.publishPostBoundary(conversationID, true)
 			}
 			emitter.HandleFor(ctx, conversationID, env.ev, env.source)
+			if emitter.runtimeFacts {
+				emitter.runtimeEpoch = env.sourceEpoch
+			}
 			if turnMarkFor(env.ev) == turnMarkClose {
 				busy.publishPostBoundary(conversationID, false)
 			}
@@ -677,6 +742,7 @@ func startStreamTurnDrainV2(
 			}
 		}
 		for {
+			sink.publishRuntimeBoundaries(ctx, emitter, busy, processed)
 			handleStops()
 			closePendingLifecycles()
 			select {
@@ -686,6 +752,8 @@ func startStreamTurnDrainV2(
 				handleStops()
 			case <-sink.lifecycleCloseWake:
 				closePendingLifecycles()
+			case <-sink.runtimeWake:
+				sink.publishRuntimeBoundaries(ctx, emitter, busy, processed)
 			case commit := <-sink.placementCommands:
 				commit()
 			case env := <-sink.ch:

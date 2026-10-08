@@ -246,6 +246,9 @@ func (d *channelDelivery) drain() {
 // held and pendingFor require mu. Published activity outlives an internal busy
 // clear until the drain has flushed text and closed the emitter's lifecycle.
 func (d *channelDelivery) held(id string) bool {
+	if d.busy != nil && d.busy.runtimeSink != nil && d.busy.runtimeSink.boundaryPending(id) {
+		return true
+	}
 	_, tearingDown := d.teardown.Load(id)
 	return tearingDown || d.active[id] || d.writes[id] > 0 || (d.busy != nil && d.busy.Busy(id))
 }

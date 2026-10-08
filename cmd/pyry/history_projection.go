@@ -38,6 +38,13 @@ func historyVisibilityMetadata(typ string, raw json.RawMessage) history.Metadata
 
 func historyEntryShown(typ string, raw json.RawMessage) bool {
 	switch typ {
+	case historyTurnOpened:
+		return false
+	case historyToolInterrupted, historyTurnInterrupted:
+		return true
+	case historySessionDivider:
+		var p runtimeHistoryFact
+		return json.Unmarshal(raw, &p) != nil || p.Cause != "idle_sleep"
 	case protocol.TypeTurnState, protocol.TypeStall, protocol.TypeApiRetry,
 		protocol.TypeCompacting, protocol.TypeToolProgress, protocol.TypeThinkingProgress,
 		protocol.TypeBackgroundTaskRoster, protocol.TypeBackgroundTaskProgress,
