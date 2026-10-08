@@ -85,15 +85,40 @@ as is, rewrites to `<family><group>` (`claude-opus-5` → `opus`,
 `claude-opus-4-7` → `opus`, `claude-fable-5-1[1m]` → `fable[1m]`). A bare
 alias (`sonnet`, `opus[1m]`, `default`), a Codex model, or anything not
 shaped like that, including `""`, passes through unchanged.
+This is the execution spelling: a pinned-only published menu row may still
+be the identity returned to the phone by settings readback.
 
 **What is stored is the family too.** Until 2026-10-07 the stored value was
 the picked row, byte for byte, because the menu carried pinned rows beside
-the family rows. The menu is now one row per family (`modelfamily.Reduce`,
+the family rows. The menu is now one row per family/variant (`modelfamily.Reduce`,
 applied where `internal/streamsup` first reads claude's list and when the
 saved `model_list.json` loads), so `canonicalSettings` resolves `Model` to its
 family at every construction and read, and `Pool.UpdateSettings` and
-`Pool.UpdateDormantSettings` store the family. `cmd/pyry` resolves a pinned
-Claude pick before validating it against the menu (`followFamily`).
+`Pool.UpdateDormantSettings` store the family. An offered alias wins over
+its pinned rows; otherwise the newest pinned row represents that exact
+family/variant. Bracket groups remain part of the family key: `fable` and
+`fable[1m]` are distinct choices.
+
+**Published-row identity is resolved separately (#3017).** In `cmd/pyry`,
+`offeredModel` maps a requested or stored Claude model to the uncut retained
+row for its family/variant. `settingsUpdaterAdapter.UpdateSettings` validates
+that row's model and effort before `followFamily` canonicalizes the pool write.
+Thus `claude-fable-5-1[1m]` is selectable when no `fable[1m]` row exists, while
+storage and execution use `fable[1m]`. A pinned input remains accepted when the
+matching alias is offered. Codex identifiers match exactly; an empty model
+override remains inherited.
+
+`runSettingsFor` projects the stored family back onto that session's current
+offered row for live and dormant conversation-bound readback, using the same
+bound/bootstrap/saved vocabulary priority as publication and validation.
+Unchanged vocabulary keeps the exact published selection across repeated
+reads and reopening; a vocabulary refresh may change the returned row without
+changing the stored family. Without a usable matching row, readback retains
+the canonical model. `effortLevelsFor` uses the same projection for effort-only
+writes and reported capabilities: accepting the pin alone would still return
+the wrong model and use the broad effort fallback after canonical storage.
+See [the wire contract](../../protocol-mobile.md#session_settings) and
+[regression coverage](sessions-package-testing.md#published-model-selection).
 
 **A session with no model of its own is covered too.** With no `--model`,
 claude starts on its own default, which Claude Code reads from
