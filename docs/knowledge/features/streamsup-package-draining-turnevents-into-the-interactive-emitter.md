@@ -84,19 +84,46 @@ for its 182 pre-existing unit-test call sites, which drive one conversation thro
 production never calls it.
 
 **The emitter's turn state is per conversation (#2739), not scalar.** `interactiveTurnEmitterV2` embeds a
-`*convTurnState` (`inTurn`, `turnID`, `turnConvID`, `seq`, `currentState`, `childLanes`, and the
+`*convTurnState` (`inTurn`, `turnID`, `turnConvID`, `seq`, `currentState`, `childLanes`,
+`launcherTurns`, `childToolTurns`, and the
 `deltaBuf`/`deltaMsgID`/`deltaParent`/`deltaConvID` coalescing group) and keeps `turns map[string]*convTurnState`,
-one entry per conversation with a turn open or text buffered. `selectConversation(convID)` re-points the
-embedded pointer at that conversation's own state, creating it on first sight — called at the top of
-`HandleFor` and of `closeForConversation`, only from the drain goroutine. Because the state is embedded
+one entry per conversation with a turn open, text buffered or child attribution retained.
+`selectConversation(convID)` re-points the embedded pointer at that conversation's own state,
+creating it on first sight at the top of `HandleFor`. `closeForConversation` selects an existing
+entry directly. Both run only on the drain goroutine. Because the state is embedded
 rather than copied into a map of structs, every method below keeps reading `e.inTurn`, `e.seq`,
 `e.deltaBuf` and meaning "the selected conversation's" — the same ~100 test assertions that read those
 fields after driving one conversation through `Handle` keep compiling unchanged; moving the fields into
-the map directly would have forced rewriting every one of them. `releaseConversation(convID)`, deferred at
-the end of `HandleFor`, deletes the entry once it holds no open turn and no buffered text, so `turns`
-stays bounded to conversations with work in flight rather than growing for the daemon's life.
-`closeForConversation` (the drain's lifecycle-close and child-exit paths) selects only the named
-conversation's state and returns its turn to idle without touching any other conversation's.
+the map directly would have forced rewriting every one of them. `endTurn` clears only main lifecycle
+fields: child text lane IDs/sequences and launcher/tool origins survive main closure and later turns.
+`releaseConversation(convID)`, deferred at the end of `HandleFor` and called after flushes, deletes
+the entry only when it holds no open turn, buffered text or retained child attribution.
+`closeForConversation` (the drain's session-exit and conversation-teardown paths) flushes pending
+content, returns an open main turn to idle, then clears child attribution for only that conversation.
+It also clears retained attribution when already idle, emitting no idle transition or synthetic
+`turn_end`. Other conversations' state is untouched.
+
+**Child attribution must be independent of main lifecycle (#2960).** Guarding only
+`startTurnIfNeeded` would still lose child identities at `endTurn` or idle release,
+and could reattribute ongoing background work to a later main turn. Parent-bearing
+`TextChunk`, `ToolStart` and `ToolUpdate` bypass main opening and phase transitions;
+known child `ToolProgress` and `ToolCallDenied` resolve through `childToolTurns`
+without gaining a parent wire field. `rememberLauncher` retains observed `Agent`/`Task`
+origins, including nested launchers. `emitChildTool` fixes each child call's origin
+on first observation, using the launcher's retained origin or `ensureDeltaLane`'s
+parent-keyed fallback when unknown. Child prose uses its own lane ID and sequence.
+All keys belong to the producing conversation, never the active cursor, and
+publication still uses the common `emit` history/ring/fan-out path. See the
+[wire attribution contract](../../protocol-mobile.md#tool_use) and
+[ADR 042's agent boundary](../decisions/042-daemon-built-thread.md#sessions-agents-messages-read-marks).
+
+**Child-only tests must deliver text without fabricating a main result.** Ending
+a child-only fixture with `TurnEnd` can hide a synthetic main turn by closing it.
+Use an explicit flush or the real coalescing timer, then assert no main lifecycle
+frames or phase changes. `TestInteractiveTurnEmitterV2_BackgroundChildAcrossMainEnd`
+also checks repeated flushes and exact ordered live/ring/history payload equality;
+`TestStreamTurnDrainV2_AttributedTextExcludesThinkingAndSignature` receives only the
+timer-delivered child delta and joins the drain before reading its state.
 
 **The coalescing timer is shared across every conversation, and must flush all of them.** `flushTimer` is
 armed, per the invariant its own doc comment states, iff *some* conversation's `deltaBuf` is non-empty —
