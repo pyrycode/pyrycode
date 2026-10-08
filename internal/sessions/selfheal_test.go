@@ -6,14 +6,7 @@ import (
 	"testing"
 )
 
-// TestRotateBootstrapForSelfHeal covers the supervisor-driven crash-loop
-// self-heal rotation primitive (#1165): it mints a fresh daemon id, re-keys the
-// CURRENT bootstrap entry to it (preserving the *Session pointer), flips
-// BootstrapID, and re-persists the registry — but, unlike RotateForNewSession,
-// it does NOT fire a client transition, which would mislead clients into
-// thinking the user ran /clear. It also used to differ by not priming the
-// freshly-allocated skip-set, but #2137 retired the rotation watcher that the set
-// existed for, so that half of the asymmetry is gone from both methods.
+// TestRotateBootstrapForSelfHeal verifies identity persistence and the internal recovery fact.
 func TestRotateBootstrapForSelfHeal(t *testing.T) {
 	t.Parallel()
 
@@ -68,7 +61,7 @@ func TestRotateBootstrapForSelfHeal(t *testing.T) {
 		}
 	})
 
-	t.Run("does not fire a client transition", func(t *testing.T) {
+	t.Run("fires recovery without a legacy reason", func(t *testing.T) {
 		pool := helperPool(t, false)
 		rec := &transitionRecorder{}
 		pool.SetTransitionObserver(rec.observe)
@@ -76,8 +69,8 @@ func TestRotateBootstrapForSelfHeal(t *testing.T) {
 		if _, err := pool.RotateBootstrapForSelfHeal(); err != nil {
 			t.Fatalf("RotateBootstrapForSelfHeal: %v", err)
 		}
-		if signals := rec.snapshot(); len(signals) != 0 {
-			t.Errorf("observer fired %d times, want 0 — self-heal is a supervisor-internal crash-recovery rotation and must NOT emit ReasonClear (that would mislead clients into thinking the user ran /clear): %+v", len(signals), signals)
+		if signals := rec.snapshot(); len(signals) != 1 || signals[0].Cause != CauseRecovery || signals[0].Reason != "" {
+			t.Errorf("recovery facts = %+v", signals)
 		}
 	})
 }

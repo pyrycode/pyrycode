@@ -48,9 +48,19 @@ never the wire-payload types, never decoding a payload, the same posture
 does; the root is a constructor argument, never resolved inside the package.
 
 ```go
-type Entry struct{ ID uint64; Type string; Payload json.RawMessage; TS time.Time }
+type SessionProvenance struct{ Kind string; SessionID string }
+type Metadata struct{ Session *SessionProvenance; Shown *bool }
+type Entry struct {
+    ID uint64
+    Type string
+    Payload json.RawMessage
+    TS time.Time
+    Session *SessionProvenance
+    Shown *bool
+}
 type Page struct{ Entries []Entry; Cursor string; AtStart bool }
 func (s *Store) Append(convID conversations.ConversationID, typ string, payload json.RawMessage, ts time.Time) (uint64, error)
+func (s *Store) AppendWithMetadata(convID conversations.ConversationID, typ string, payload json.RawMessage, ts time.Time, metadata Metadata) (uint64, error)
 func (s *Store) Page(convID conversations.ConversationID, cursor string, limit int) (Page, error)
 func (s *Store) LatestEntryID(convID conversations.ConversationID) (uint64, error)
 func (s *Store) LatestDisplayableEntryID(convID conversations.ConversationID) (uint64, error)
@@ -74,6 +84,37 @@ line. An agent reading the log directory may need permission because the
 daemon's instance directory is outside its workspace; handover adds no
 permission round-trip.
 
+`AppendWithMetadata` persists `Entry.Session` and `Entry.Shown` alongside `id`,
+`type`, `payload` and `ts`, outside the opaque payload. `session` is an object
+with `kind` and optional `session_id`; `shown` is a JSON boolean. Nil fields
+are omitted, never written as null, and explicit `shown: false` is retained.
+The header stays version 1: older entries decode with nil metadata without
+rewriting their bytes or inventing sessions. `Store.Page` returns the metadata
+across segments and after reopening. The unchanged `Append` signature delegates
+to this same locked path with empty `Metadata`, writing absent metadata.
+
+Session provenance has three meanings:
+
+| Stored `session` | Meaning |
+| --- | --- |
+| `{"kind":"claude","session_id":"..."}` or `{"kind":"codex","session_id":"..."}` | Known producing child; its session ID must be nonempty. |
+| `{"kind":"none"}` | Explicitly no producing child, such as a daemon-authored fact without a bound child; `SessionID` must be empty and is omitted. |
+| Key absent (`Session == nil`) | Unknown provenance, including legacy entries; absence does not assert that no child produced the fact. |
+
+Other kinds and inconsistent session IDs return ID zero and
+`ErrInvalidMetadata` before directory creation, without disclosing metadata in
+the error. Session IDs are opaque strings, never paths or authorization.
+Visibility is independent of provenance: `Shown == nil` uses the legacy type
+rule, while explicit true or false overrides it (see
+[the unread watermark](#unread-state-uses-a-separate-lazily-recovered-watermark-2954)).
+Callers must not mutate payload or metadata during an append; the store retains
+neither caller pointers nor payload bytes after the call, only scalar cache
+values. These storage facts support
+[ADR 042's history-backed thread](../decisions/042-daemon-built-thread.md);
+the existing producers now declare visibility and filter legacy delivery
+(see [Producers](#producers-2114-2115) and [Reader](#reader-2116)). Session
+attribution belongs to #2966.
+
 `limit` is **clamped** to `MaxPageEntries`, never refused above it — a page is
 "up to `limit` entries", so an over-large ask from #2116 pages rather than
 fails and can never be broken by the ceiling. Entry ids are a
@@ -83,6 +124,16 @@ names its own conversation and is refused on any other, so there is no shared
 scalar for one conversation's cursor to mute a different one's stream, and no
 reason to pay for a global counter recovered by reading every conversation at
 startup.
+
+Both append paths allocate IDs starting at `1`, strictly increasing per
+conversation and below `2^53`. `MaxEntryID = 2^53 - 1` is the final successful
+allocation, keeping newly minted IDs exact for JSON clients using IEEE-754
+numbers. Once the last durable ID reaches that bound, further appends return
+ID zero and `ErrIDExhausted` before encoding, segment rolling or writing. They
+leave segment files and raw/displayable watermarks unchanged, never wrapping
+or reusing an ID. Reopening preserves refusal, including logs whose recovered
+last ID is already at or above the bound; raw queries and pages still return
+those stored IDs unchanged. Exhaustion affects only that conversation.
 
 **PRECONDITION on the store methods:** `convID` must
 be the conversation the authenticated session is already on, never one a
@@ -135,7 +186,8 @@ process lifetime. A symlink planted after the first resolve would redirect
 every later append and read for as long as the daemon runs. Re-resolving costs
 a handful of `lstat`s and is cheaper than the argument for keeping the cache
 would have to be. `convLog` therefore caches only the append cursor (active
-segment number, its size, the next entry id) — never the path.
+segment number, its size, the last durable entry id) and the filtered watermark
+— never the path.
 
 Containment is a full-path **equality** check against the resolved instance
 directory, not a `filepath.Rel`-style "is it under the root" test — equality
@@ -217,8 +269,8 @@ shape) rather than a specific trigger for it.
 
 No goroutine is spawned and there is no `Close` — the store is passive, like
 `Ring`. One `sync.Mutex` guards the per-conversation state map, the read
-counters, and both `Append` and `Page` end to end, held only around bounded
-file I/O and never across a channel op or another lock. Reads take the lock
+counters, and both append paths and `Page`'s storage work, held only around
+bounded file I/O and never across a channel op or another lock. Reads take the lock
 rather than racing appends: the alternative (lock-free reads plus a
 torn-trailing-line tolerance on the read path) buys a shorter hold at the cost
 of reasoning about partial-write visibility across every filesystem the daemon
@@ -256,7 +308,7 @@ interactive emitter's `emit` chokepoint
 (`cmd/pyry/session_transition_v2.go`), and (#2115) `newOperatorMessageHistory`
 (`cmd/pyry/operator_message_history.go`), used by queued stream placement and
 `msgqueue.Config.OnDelivered`.
-The first two already resolve the four values `Append` wants — conversation
+The first two already resolve the four event values — conversation
 id, wire type, marshalled payload, one hoisted timestamp — for the ring
 append or the fan-out itself, so their log append needed no new mapping, only
 a nil-guarded call before the per-conn loop in each. The third resolves them
@@ -264,9 +316,82 @@ from a safe `msgqueue.QueuedMessage`, available before the write through
 `msgqueue.DeliveryMessage` and again at confirmation through `OnDelivered`,
 not from an envelope in flight (see below).
 
+Relay correlation identity is the authenticated pairing's bound Noise public
+key (`dispatch.Conn.Auth().StaticKey`), in its existing lowercase-hex form,
+separate from display name and the verbatim app message id (#2971).
+Names can change or coincide; distinct keys distinguish senders with equal
+names and app ids, while renaming or reconnecting the same install preserves
+identity. Missing authentication or an empty key yields empty identity, with
+no fallback to name, connection id, token or token hash. Client-authored fields
+cannot override it, and identity and credentials stay out of logs.
+`handlers.SendMessage` offers this metadata through the optional
+`EnqueueIdentified` path; legacy-only queues still receive `EnqueueSent`.
+The production `suggestionEnqueuer` wrapper and daemon/history adoption belong
+to [#2972](https://github.com/pyrycode/pyrycode/issues/2972). This seam adds no
+deduplication, new wire field or sender identity to legacy event payloads.
+See [relay sender metadata](relay-package-handlers.md#send_message-grows-a-ninth-seam-sender-identity-and-tap-time-2704)
+and [ADR 042's item model](../decisions/042-daemon-built-thread.md#item-model).
+
+Channel posts are a fourth writer: `channelDelivery.deliver` bypasses the
+common seam and calls `AppendWithMetadata` through `channelDeliveryHistory`
+for each assistant delta and its `channelPostTurnEndPayload`. It uses the
+same `historyVisibilityMetadata` classifier: post text is shown, completion
+is hidden. Its raw-page deduplication and requirement that all writes succeed
+before publication remain intact; see
+[channel delivery and recovery](control-plane-channel-post-live-delivery.md#live-announcements-bounded-replay-and-durable-recovery).
+
+### Legacy eligibility and explicit visibility (#2965)
+
+`legacyHistoryType` is a fixed allowlist of the existing producer vocabulary
+from `turnbridge.MapEvent`/`MapState`, operator messages and session transitions.
+A new history-only type is excluded by default from every connection's legacy
+history, live fan-out and reconnect replay, whether its stored `Shown` is nil,
+false or true. Visibility controls the
+[unread watermark](#unread-state-uses-a-separate-lazily-recovered-watermark-2954),
+not permission to reach a transport. Conversely, an eligible legacy event still
+reaches its existing recipients and history pages when `Shown` is false,
+including normal turn ends, info banners and live status readings. This preserves
+[ADR 042's compatibility boundary](../decisions/042-daemon-built-thread.md#compatibility):
+old apps treat unknown history entries as read-mark barriers.
+
+`interactiveTurnEmitterV2.emit` appends once before checking this allowlist,
+including when no clients are connected. An excluded fact returns before
+`Ring.AppendWithHistoryID` or recipient enumeration, so it cannot enter live
+delivery or reconnect replay, even if storage is absent or fails. Successful
+appends remain readable through raw `Store.Page` after reopening. Raw storage
+accepts arbitrary types; the transport vocabulary is closed independently.
+
+All four existing writers now use `AppendWithMetadata` with explicit
+`Metadata.Shown`, classified from the already-marshalled payload by
+`historyEntryShown`. They leave `Metadata.Session` absent and add neither
+`shown` nor `session` to legacy wire payloads. Stored payloads, timestamps,
+durable IDs and existing recipient gates keep their original meaning.
+
+| Entry | Explicit visibility for new writes |
+| --- | --- |
+| `turn_end` | Hidden only when `StopReason == "end_turn"`, `IsError == false`, `Outcome` is absent/empty or `success`, `TerminalReason` is absent/empty or `completed`, and `ErrorCategory` is absent/empty. All other ends are shown: cancellation, limits, unknown stop reasons, `end_turn` with `error_max_turns`, or `success` with `is_error: true`. Channel-post completion satisfies the hidden case. |
+| `banner` | Hidden only for `Level == "info"` with `StopsTurn == false`; stopping info banners, other levels and unknown levels are shown. |
+| Live readings | Hidden: `turn_state`, `stall`, `api_retry`, `compacting`, `tool_progress`, `thinking_progress`, `background_task_roster`, `background_task_progress`, `rate_limited`, `context_usage`, `model_announced`, `session_facts`, `mcp_status`, `model_list`, `slash_command_list`. |
+| `background_task_updated` | Hidden for patch-only updates; shown when `Status` or `Summary` is nonempty. |
+| Content | Shown: `message`, `assistant_delta`, `tool_use`, `tool_result`, `tool_denied`, `background_task_started`, `compaction_boundary`, `model_refusal_fallback`, `model_refusal_no_fallback`, `unrecognized_message`. |
+| `session_transition` | `clear` is shown; `idle_evict` is hidden. |
+| New history-only types | Hidden by default in the common append seam, and ineligible for legacy delivery independently of explicit visibility supplied by another producer. |
+
+**Task-update status is an open terminal-notification contract.** Any nonempty
+status counts as shown, including unfamiliar values; restricting the classifier
+to known terminal words would silently hide future completion facts. Conditional
+legacy payloads that fail decoding conservatively classify as shown; classification
+does not rewrite or reject their payloads.
+
+Previously stored entries are neither rewritten nor reclassified. Their absent
+visibility retains the store's legacy type fallback, which excludes only
+`turn_state`, `stall`, `api_retry`, `compacting` and `session_transition`.
+Explicit visibility governs the same unread watermark in warm and reopened
+stores. Raw pages still include hidden entries and retain their durable IDs.
+
 **Carry the append result, not a second lookup or another counter (#2861).**
-`appendConversationHistory` returns the successful `Store.Append` id as an
-immutable `*uint64`, shared by every direct live recipient as
+`appendConversationHistory` returns the successful `Store.AppendWithMetadata`
+id as an immutable `*uint64`, shared by every direct live recipient as
 `Envelope.HistoryEntryID`. The operator commit carries it with the safe payload
 and placement timestamp through `operatorMessage` to
 `operatorMessageEmitterV2.broadcast`; reconstructing it at broadcast would lose
@@ -297,7 +422,7 @@ forbids serving to a paired device). `newInboundDeliver` sees only
 accessor `DeliveryMessage` carry `QueuedMessage` instead, which declares no
 `delivery` field, making the omission structural rather than a filter this producer could forget.
 Full detail:
-[msgqueue-package.md § Delivered notification (#2115)](msgqueue-package.md#delivered-notification-2115).
+[msgqueue-package.md § Delivered notification (#2115)](msgqueue-package-lifecycle.md#delivered-notification-2115).
 
 **The stored entry keeps its attachment ids too, by the same structural argument (#2596).** `QueuedMessage.AttachmentIDs` is the ids a `send_message` named, as `internal/relay/handlers.resolveAttachments` resolved them — deduplicated, each past the canonical-shape check — copied onto the queue record independently of `delivery`. This producer sets `protocol.MessagePayload.AttachmentIDs` straight from `msg.AttachmentIDs`; since it still reads only `QueuedMessage`, which has no `delivery` field, no on-host path is reachable here no matter what changes upstream. A message that named none stores nothing (`omitempty` elides the key), so every pre-#2596 entry a client already decoded is untouched.
 
@@ -369,12 +494,12 @@ for publication and write-outcome lock ordering.
 the same trap `session_transition_v2.go`'s `busy` field already documents:
 a typed-nil store boxed into an interface is non-nil at the interface level
 and would sail past a `== nil` guard. `Store` is not nil-receiver-safe
-(`Append` locks immediately), so `appendConversationHistory` checks
+on either append path, so `appendConversationHistory` checks
 explicitly rather than relying on a nil-receiver method, and every emitter
 test that builds an emitter with no store keeps working unchanged. A
-failing append never suppresses the wire emit or the ring append. It returns nil
-metadata; an absent store also returns nil, omitting `history_entry_id` rather
-than encoding null or zero. The failure is logged at `Warn`
+failing append never suppresses an eligible legacy wire emit or ring append.
+It returns nil identity; an absent store also returns nil, omitting
+`history_entry_id` rather than encoding null or zero. The failure is logged at `Warn`
 with an `errors.Is`-derived discriminant (`invalid_id` / `invalid_payload`
 / `write`), never the error's own text: `history`'s errors format absolute
 filesystem paths (`open segment %q`), and the log's own MUST-NOT-log-content
@@ -382,6 +507,16 @@ rule would be defeated by relaying them.
 
 **Test-shape traps worth knowing before touching these producers
 again:**
+
+- **Check actual writes, transport and unread recovery together.**
+  `TestHistoryProjection_InteractiveMetadata` drives `emit` across the full
+  classification, comparing raw metadata with unchanged wire/ring payloads,
+  identities and recipient gates. `TestHistoryProjection_OtherProducerMetadata`
+  drives clear/idle transitions, operator text and channel delivery. Both verify
+  unread watermarks in warm and reopened stores; the interactive cases also
+  preserve an older entry's absent visibility. A classifier-only test would
+  miss a writer still using `Append`, and a correct raw metadata assertion alone
+  would miss hidden eligible events disappearing from legacy delivery.
 - **Separate the id sequences to prove provenance.** When history, ring and
   envelope counters coincide, substituting either live counter for the stored id
   stays green. `TestLiveProducers_HistoryEntryID` keeps history id 8, ring id 4
@@ -409,23 +544,33 @@ again:**
 
 `LatestEntryID` returns the raw newest durable entry id per conversation,
 including status entries. The obvious-looking alternative — a dedicated counter
-bumped at `Append` — was rejected before it was written: `convLog.nextID` already *is*
-that counter, recovered by `load` on first touch, so a second one would be two
+bumped at append — was rejected before it was written: `convLog.lastID` already
+*is* that counter, recovered by `load` on first touch, so a second one would be two
 sources of truth for the same fact, with no way to keep them from drifting the
 first time one write path forgets to update both.
 
 `LatestEntryID` instead validates the id, re-resolves the directory (uncreated —
 a missing conversation reads `0`, never an error), and calls the same `load`
-`Append` calls, under the same `s.mu`. Once `load` has run once for a
-conversation (`convLog.loaded`), every subsequent call — from either method —
-returns `c.nextID - 1` with **no segment file opened**: recovery ran exactly
-once, at first touch, and both the append path and this read path share its
-result from then on. `nextID` starts at `1` (see `load` above), so the
-subtraction cannot underflow. On a cold cursor the first `LatestEntryID` call
-pays exactly `load`'s existing bounded tail-walk — empty, header-only and
-incomplete trailing segments are rolled past exactly as they are for an
-append, never scanning the whole log — so this method adds no new recovery
-logic, only a second caller of the existing kind.
+both append paths call, under the same `s.mu`. Once `load` has run once for a
+conversation (`convLog.loaded`), subsequent raw lookups return `c.lastID` with
+**no segment file opened**: recovery ran at first touch, and both append paths
+and this read path share its result. `lastID` starts at `0` for an empty log.
+On a cold cursor the first `LatestEntryID` call pays `load`'s existing tail-walk,
+reading one bounded segment at a time and stopping at the newest segment with
+an entry. Empty, header-only and incomplete trailing segments are walked past
+as they are for an append; this method adds no new recovery logic.
+
+**Guard allocation without doing arithmetic during recovery.** `load` retains
+the last decoded ID directly. A next-ID cursor would still overflow on a
+recovered `math.MaxUint64` even if append allocation checked the `2^53` bound;
+the wrapped cursor could then permit reused IDs. `lastID` preserves raw reads
+of oversized legacy IDs and lets both append paths refuse `lastID >= MaxEntryID`
+before adding one, with no second counter. `TestAppendIDExhaustion` checks the
+final successful ID, repeated refusals, stable watermarks and byte-for-byte
+segment snapshots for warm and reopened stores.
+`TestRecoveredOversizedIDRefusesAppend` also covers stored IDs above the bound
+through `math.MaxUint64`, including an incomplete trailing segment that
+exhaustion must not roll past by writing.
 
 Containment is **not** cached across calls, on the same reasoning as
 *Directory resolution* above: `resolveDir(convID, false)` re-resolves and
@@ -435,26 +580,35 @@ the cursor loaded is still caught on the next lookup.
 ### Unread state uses a separate, lazily recovered watermark (#2954)
 
 `LatestDisplayableEntryID` supplies both `ListConversationsWithAgents`'s
-`latest_entry_id` and `MarkConversationRead`'s clamp. It excludes exactly
-`turn_state`, `stall`, `api_retry`, `compacting`, and `session_transition`;
-every other stored type counts, including unknown and empty types. Missing,
-empty and status-only logs return `0`. A durable idle status after the last
+`latest_entry_id` and `MarkConversationRead`'s clamp. `displayableEntry` first
+uses explicit `Entry.Shown`: true counts even a normally excluded status type,
+and false excludes even a normally counted type. With `Shown == nil`,
+`displayableType` excludes exactly `turn_state`, `stall`, `api_retry`,
+`compacting`, and `session_transition`; every other stored type counts,
+including unknown and empty types. Missing, empty and entirely hidden logs
+return `0`. A durable idle status with absent visibility after the last
 reply must not keep unread set forever. Both handlers must use this same
 watermark for `latest_entry_id > read_up_to` to clear after marking that reply
 read; see the [wire contract](../../protocol-mobile.md#marking-a-conversation-read).
-Status entries still appear in `Page`, consume durable IDs and advance the raw
-cursor; filtering creates no second ID space and decodes no payloads.
+Hidden entries still appear in `Page` and `LatestEntryID`, consume durable IDs
+and advance the raw cursor; filtering creates no second ID space and decodes
+no payloads. Payload fields named `shown` or `session` have no effect on these
+metadata rules.
 
 After `load`, the first filtered lookup walks `listSegments` newest-first and
 each `readSegment`'s entries backwards until a qualifying entry is found.
-Reopening already-written logs therefore works even when trailing statuses
-span segments. The existing decoder tolerates empty/incomplete tails and torn
-final lines. The scan holds at most one segment's entries at a time and caches
-only successful results, including status-only zero, under `Store.mu`.
-Subsequent lookups open no segments. A successful displayable append sets and
-initializes the cache; a status append leaves it unchanged. A failed segment
-write clears `convLog.loaded`, and the next `load` invalidates the filtered
-cache before recovering from disk. A failed scan is not cached, so repair can
+Reopening already-written logs therefore works even when mixed legacy and
+metadata entries have trailing hidden entries spanning segments. The existing
+decoder tolerates empty/incomplete tails and torn final lines. The scan holds
+at most one segment's entries at a time and caches only successful results,
+including entirely hidden zero, under `Store.mu`.
+Both append cache updates and cold recovery use `displayableEntry`, so explicit
+visibility has the same effect in warm and reopened stores. Subsequent lookups
+open no segments. A successful displayable append through either API sets and
+initializes the cache; a hidden append leaves it unchanged, including leaving
+an uninitialized cache cold so older visible entries can still be recovered.
+A failed segment write clears `convLog.loaded`, and the next `load` invalidates
+the filtered cache before recovering from disk. A failed scan is not cached, so repair can
 be followed by a retry. ID validation and directory containment are checked
 on every filtered call, even with a warm cache; the query creates no directory.
 
@@ -467,13 +621,39 @@ that raw recovery succeeds while filtered recovery fails on such a segment,
 then succeeds after repair. `TestLatestDisplayableEntryIDRecovery` also checks
 the raw watermark, complete status-bearing pages and subsequent ID allocation
 alongside filtered recovery, so a correct unread value alone cannot hide a
-storage regression.
+storage regression. `TestMetadataVisibility` exercises absent/true/false for
+all five excluded types plus counted, unknown and empty types;
+`TestMetadataVisibilityRecoveryAcrossSegments` checks mixed logs, trailing
+hidden entries, cached zero and raw/page retention across actual segments.
 
 ## Reader (#2116)
 
-The first caller of `Store.Page` outside this package's own tests is
-`internal/relay`'s `request_history` handler, adapted at
-`cmd/pyry/relay.go` via `newHistoryPager`. That adapter classifies
+`internal/relay`'s `request_history` handler reads through `newHistoryPager`,
+wired at `cmd/pyry/relay.go`. The adapter filters exactly one bounded raw
+`Store.Page` result with `legacyHistoryType`; it never scans ahead to fill a
+page after excluding new history-only types. Filtering ignores `Entry.Shown`,
+so hidden eligible legacy events still appear, while new types stay excluded
+with absent, false or true visibility. Neither metadata field is projected
+onto `protocol.HistoryEntry`; eligible entries retain their original durable
+ID, timestamp and payload bytes, newest-first.
+
+The adapter forwards that raw page's opaque `Cursor` and `AtStart` unchanged.
+An empty filtered page with `AtStart == false` retains a usable cursor to the
+next older raw page. Consecutive empty pages and an entirely filtered log are
+valid walks; **consumers terminate on `AtStart`, never on an empty entry list**.
+A terminal page has `AtStart == true` and an empty cursor. Treating an empty
+list as exhaustion loses older eligible content; scanning ahead instead would
+turn one bounded request into work proportional to the hidden history.
+
+`TestHistoryProjection_BoundedWalk` compares each projected page with its raw
+page in warm and reopened stores, using mixed and entirely excluded logs,
+consecutive empty pages and nil/false/true visibility. It verifies cursor
+preservation, termination and exactly-once delivery of eligible IDs, timestamps
+and payloads. `TestHistoryProjection_UnknownEmitIsDurableOnly` checks one raw
+append and no ring/live publication with and without connected clients.
+
+Cursor validation stays in `Store.Page`: the adapter passes cursors through
+unparsed and retains the existing error outcomes. It classifies
 `Store.Page`'s sentinels with `errors.Is` — the same pattern
 `historyAppendFailure` (above) established for the write side — into
 `historyPageFailure`, a read-path twin in the same file: `invalid_cursor`,
@@ -493,7 +673,7 @@ enum rather than a bare error.
 
 ```
 internal/history/
-├── log.go       Store, New, Append, Page, sentinels, per-conversation cache, directory resolution
+├── log.go       Store, New, Append, AppendWithMetadata, Page, metadata types, sentinels, per-conversation cache, directory resolution
 ├── segment.go   segment naming/ordering, versioned header, entry-line codec, whole-segment read
 └── cursor.go    cursor mint + parse + validation
 ```

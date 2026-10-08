@@ -12,34 +12,16 @@ import (
 	"github.com/pyrycode/pyrycode/internal/relay"
 )
 
-// appendConversationHistory records one already-marshalled envelope in convID's
-// durable log (#2112's Store, of which #2114 is the first production caller).
-// All three live producers use this seam: interactive emit, session-transition
-// broadcast and the operator-message commit. Their content-free failure logging
-// and successful append ID provenance stay in one place.
-//
-// store may be nil, and a nil store is a no-op that logs nothing: a daemon wired
-// without a log, and every emitter test that constructs an emitter without one,
-// emit exactly as they did before this seam existed. *history.Store is
-// CONCRETE, never an interface — the trap startSessionTransitionStreamV2 already
-// records for busy: a typed-nil inside an interface is non-nil at the interface
-// level and would route straight past a guard like this one. Store is not
-// nil-receiver-safe either (Append takes its mutex immediately), which is why the
-// guard lives here at the one call site rather than inside a method.
-//
-// The returned ID identifies the served history entry. Nil means no successful
-// append and omits history_entry_id on the wire. Callers continue live delivery
-// and ring recording in either case.
-//
-// SECURITY: payload is conversation content and the log is the one place it may
-// be written, so the failure line carries only event, conversation_id and a
-// content-free reason. It deliberately does NOT carry err — see
-// historyAppendFailure.
+// appendConversationHistory records one marshalled event with explicit visibility.
+// The concrete store pointer avoids typed-nil interfaces. Nil or failed storage
+// returns nil identity; eligible legacy events still publish and enter replay.
+// Failure logs carry only the event, canonical conversation ID and a content-free
+// reason, because payloads and filesystem paths must never reach telemetry.
 func appendConversationHistory(store *history.Store, logger *slog.Logger, event, convID, typ string, payload json.RawMessage, ts time.Time) *uint64 {
 	if store == nil {
 		return nil
 	}
-	id, err := store.Append(conversations.ConversationID(convID), typ, payload, ts)
+	id, err := store.AppendWithMetadata(conversations.ConversationID(convID), typ, payload, ts, historyVisibilityMetadata(typ, payload))
 	if err != nil {
 		// Warn, not Debug: the neighbouring per-conn drops lose one frame to one
 		// conn, while this loses an event from the durable record permanently —
@@ -56,44 +38,15 @@ func appendConversationHistory(store *history.Store, logger *slog.Logger, event,
 	return &id
 }
 
-// newHistoryPager adapts *history.Store to the relay's HistoryPage seam (#2116):
-// the READ half of the append seam above, over the SAME store, so a served page
-// and the entries this process just appended cannot come from two stores that
-// mint duplicate ids for one conversation.
+// newHistoryPager serves the legacy projection of exactly one bounded raw page.
+// It preserves the opaque cursor and AtStart even when filtering removes every
+// entry: consumers terminate on AtStart, not on an empty entry list.
 //
-// store may be nil, and a nil store answers HistoryPageUnavailable rather than
-// leaving the seam itself nil. The distinction is deliberate: a NIL SEAM makes
-// the verb inert — the frame is consumed and not one byte of it is parsed — which
-// is the posture for a daemon build with no history at all, while a wired seam
-// over an absent store is a daemon that HAS the verb and cannot answer right now.
-// The second is retryable and the first is silence, and conflating them would
-// either parse remote bytes on a daemon that has no log or answer silence to a
-// client whose daemon merely failed to open one.
-//
-// SENTINELS ARE CLASSIFIED HERE, NOT ABOVE, which is the whole reason this
-// adapter exists: internal/relay imports internal/history nowhere, and the
-// outcome discriminant is the only thing that crosses. errors.Is rather than
-// string matching, the shape historyAppendFailure already uses for the write path.
-//
-// ErrInvalidCursor IS THE ONE CLIENT FAULT and it already carries all three of the
-// merged causes — history.parseCursor raises it for a cursor that does not decode
-// and for one minted for another conversation, and Store.Page's own cursorRefusal
-// raises it for one naming a segment not in this log — so the merge the wire
-// requires is structural rather than assembled here.
-//
-// ErrInvalidID and ErrInvalidPageSize fall to the default arm and are UNREACHABLE
-// BY CONSTRUCTION: the handler's KnownConversation gate fires before this is
-// called and the registry holds canonical ids only, and the handler never passes
-// a limit below one. Answering them as a daemon problem rather than as the
-// client's malformed request is the fail-safe direction — a daemon bug must not
-// be reported to a client as its own fault.
-//
-// SECURITY: the error NEVER crosses the seam, because internal/history's messages
-// format absolute filesystem paths ("open segment %q", "resolve log directory
-// %q"). It is not silently discarded either — unlike attachmentResolve's, whose
-// message carries a raw client string and therefore cannot be logged at all. Here
-// the discriminant is content-free, and an operator has to be able to see that a
-// segment has gone corrupt while a client must not.
+// A nil store returns HistoryPageUnavailable; unlike a nil pager seam, this is
+// an active verb with a retryable failure. Store validates cursors unchanged.
+// Invalid cursors are client faults; other errors become generic unavailable
+// outcomes. Only content-free discriminants reach logs, never errors containing
+// filesystem paths, payloads or cursors.
 func newHistoryPager(store *history.Store, logger *slog.Logger) relay.HistoryPager {
 	return func(convID, cursor string, limit int) relay.HistoryPageResult {
 		if store == nil {
@@ -121,6 +74,9 @@ func newHistoryPager(store *history.Store, logger *slog.Logger) relay.HistoryPag
 		// the rule protocol.RequestHistoryPayload.Limit states in as many words.
 		entries := make([]protocol.HistoryEntry, 0, len(page.Entries))
 		for _, e := range page.Entries {
+			if !legacyHistoryType(e.Type) {
+				continue
+			}
 			// Key for key, and the PAYLOAD BYTES ARE COPIED BY REFERENCE, UNCHANGED:
 			// not re-decoded, not re-encoded, not sanitised. That is what makes a
 			// served page reducible through the client's existing live-lane reducer,

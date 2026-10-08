@@ -30,15 +30,16 @@ type testPostHistory struct {
 	failAt   int
 }
 
-func (h *testPostHistory) Append(id conversations.ConversationID, typ string, raw json.RawMessage, ts time.Time) (uint64, error) {
+func (h *testPostHistory) AppendWithMetadata(id conversations.ConversationID, typ string, raw json.RawMessage, ts time.Time, metadata history.Metadata) (uint64, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.attempts++
 	if id == h.fail && (h.failAt == 0 || h.attempts == h.failAt) {
 		return 0, errors.New("posted-secret storage error")
 	}
-	return h.Store.Append(id, typ, raw, ts)
+	return h.Store.AppendWithMetadata(id, typ, raw, ts, metadata)
 }
+
 // stubBinary writes a minimal executable script to a temp dir and returns
 // its path. Tests use this as a stand-in claude/codex binary when they only
 // need a path that exists and exits successfully. /bin/true is not portable:
@@ -509,14 +510,14 @@ type testBlockedPostHistory struct {
 	release chan struct{}
 }
 
-func (h testBlockedPostHistory) Append(id conversations.ConversationID, typ string, raw json.RawMessage, ts time.Time) (uint64, error) {
+func (h testBlockedPostHistory) AppendWithMetadata(id conversations.ConversationID, typ string, raw json.RawMessage, ts time.Time, metadata history.Metadata) (uint64, error) {
 	select {
 	case <-h.entered:
 	default:
 		close(h.entered)
 	}
 	<-h.release
-	return h.channelDeliveryHistory.Append(id, typ, raw, ts)
+	return h.channelDeliveryHistory.AppendWithMetadata(id, typ, raw, ts, metadata)
 }
 
 func TestChannelDelivery_ShutdownRetainsOwnershipUntilWritersStop(t *testing.T) {

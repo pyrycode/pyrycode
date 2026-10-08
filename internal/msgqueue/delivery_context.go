@@ -18,7 +18,7 @@ func DeliveryMessage(ctx context.Context) (QueuedMessage, bool) {
 
 func (m queued) message(sentNow bool) QueuedMessage {
 	return QueuedMessage{ID: m.id, MessageID: m.messageID, Text: m.text, TS: m.ts,
-		AttachmentIDs: slices.Clone(m.attachmentIDs), DeviceName: m.deviceName,
+		AttachmentIDs: slices.Clone(m.attachmentIDs), DeviceID: m.deviceID, DeviceName: m.deviceName,
 		ClientVersion: m.clientVersion, ClientSentAt: m.clientSentAt, SentNow: sentNow}
 }
 

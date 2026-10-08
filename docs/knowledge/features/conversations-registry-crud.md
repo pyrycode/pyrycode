@@ -76,14 +76,28 @@ workers; daemon shutdown owns the join.
 
 Re-points the conversation **currently bound** to `oldID` at `newID`, recording `oldID` in the history trail. Locate the entry whose `CurrentSessionID == oldID`, set `CurrentSessionID = newID` and `SessionHistory = append(SessionHistory, oldID)`, return `true`. On miss, return `false` and mutate nothing. The scan and mutation are a **single critical section under `r.mu`** — no find-then-update window a concurrent `Create`/`Delete` could redirect (the same no-TOCTOU posture as `Update`/`Promote`).
 
-This is the **write side** of the conversation↔session binding maintenance: the pool's `/clear` rotation path calls it after `RotateID` re-keys the session map, so the binding stays current beyond the first rotation. See [`features/conversation-session-binding.md`](conversation-session-binding.md) § *Maintaining the binding across rotation* for the full data flow and the eviction-neutrality argument. The matching reverse **read** lookup (session id → conversation id) is deferred to the downstream consumer #741, which adds its own scan rather than sharing one (PROJECT-MEMORY "Resist over-DRY on duplicated registry primitives").
+The boolean API delegates to `RebindSessionOwner(oldID, newID string)
+(ConversationID, bool)`, which returns the owner atomically with that same
+mutation; a miss returns `("", false)`. Pool reset, Claude clear and recovery
+capture the result while still holding `Pool.mu`, before persistence and
+notification. Looking up ownership afterward could attribute a delayed fact
+to a late foreign binding or reorder A→B→C rebinding. See
+[the serialized rotation flow](conversation-session-binding.md#the-rebind-serialized-with-the-pool-mutation).
+
+`SessionOwner(sessionID string) (ConversationID, bool)` captures the first
+**current** owner without mutation. Empty and historical IDs return
+`("", false)`. This is the eviction lookup: it must not match historical
+ownership or infer a bootstrap owner. The daemon's legacy
+`conversationForSession` lookup deliberately also searches `SessionHistory`
+and serves a different contract. `TestRegistryCapturedSessionOwner` pins the
+current-only lookup and compatibility of the boolean rebind API.
 
 Contract:
 
 - **Match key is `CurrentSessionID`, not `ID`.** Unlike every other CRUD method, this scans by the *bound session id*. A session id binds exactly one conversation (set once at creation), so **first match wins and stops**, mirroring `Get`/`Update`; pathological duplicates rebind the first only — deterministic and documented.
-- **Empty `oldID` returns `false` before scanning.** An unbound conversation carries `CurrentSessionID == ""` (the unset sentinel), so a stray empty-id call must never sweep the first unbound row into a rebind. This is a **data-integrity guard at the primitive boundary**, not the eviction defense — that lives at the call site, which only rebinds on a `/clear` rotation (where `newID` is non-empty and distinct). Precondition (caller-guaranteed on the rotation path): `oldID` and `newID` non-empty and distinct.
+- **Empty `oldID` returns `false` before scanning.** An unbound conversation carries `CurrentSessionID == ""` (the unset sentinel), so a stray empty-id call must never sweep the first unbound row into a rebind. This is a **data-integrity guard at the primitive boundary**, not the eviction defense — that lives at the call site, which rebinds only reset, Claude clear and recovery rotations (where `newID` is non-empty and distinct). Precondition (caller-guaranteed on the rotation path): `oldID` and `newID` non-empty and distinct.
 - **`SessionHistory` is oldest-first, append-in-place.** `append(SessionHistory, oldID)` — the retired id goes on the **end**, satisfying the field's documented "rotation appends in place" contract ([`features/conversations-package.md`](conversations-package.md)). #739 is the first production caller to write this field.
-- **No implicit `Save`.** Disk persistence stays with the caller, matching the `Create`/`Update`/`Promote`/`Delete` convention. The rotation caller (`Pool.rebindConversation`) `Save`s only on a `true` return, treats a `Save` error as non-fatal (the in-memory rebind is already usable), and skips `Save` entirely on a miss so the file mtime stays stable.
+- **No implicit `Save`.** Disk persistence stays with the caller, matching the `Create`/`Update`/`Promote`/`Delete` convention. `Pool.persistTransitionBinding` saves off pool/session locks only when ownership was captured, treats a save failure as non-fatal and still notifies the successful in-memory mutation. A miss skips save even if a foreign binding appears before notification.
 
 ## `SetArchived(id ConversationID, archived bool, now time.Time) bool` (#880, stamped by #2698)
 
