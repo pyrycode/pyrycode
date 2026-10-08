@@ -128,8 +128,9 @@ type confirmedStreamStop struct {
 // must be structurally impossible. The drain stops on ctx, not on close; any
 // post-shutdown send lands in the non-blocking drop path.
 type streamTurnSink struct {
-	runtimeNextProducer uint64            // guarded by offerMu
-	runtimeProducers    map[string]uint64 // latest activation per routing ID, guarded by offerMu
+	runtimeNextProducer uint64                       // guarded by offerMu
+	runtimeProducers    map[string]uint64            // latest activation per routing ID, guarded by offerMu
+	runtimeProducerTags map[string]*streamSessionTag // registered routing owners, guarded by offerMu
 	runtimeEnabled      atomic.Bool
 	runtimeHolds        map[string]int               // guarded by offerMu, including in-flight publication
 	runtimeLastQueued   map[streamProducerKey]uint64 // accepted output positions per source
@@ -360,39 +361,13 @@ func (s *streamTurnSink) takeLifecycleCloses() []string {
 	return conversationIDs
 }
 
-// streamSessionTag is the LIVE session tag one stream runner's two fan-in lanes
-// read (#1133). It exists because the two ends of that tag have different
-// lifetimes: the Parser and the child-exit callback are bound once, at runner
-// construction, while the pool session the runner serves rotates under them on
-// every stream-mode new_session. Before this type the tag was the runner's
-// construction-time id captured in a closure, so a rotation left every later event
-// tagged with an id the conversation was no longer bound to and the drain's
-// then active-session gate dropped all of them until the daemon restarted.
-//
-// It has TWO writers since #2135, and is read once per event by sinkForTag /
-// exitForTag. The first is streamsup.Config.OnSessionRotate, which the runner
-// fires from RestartFresh — the daemon-DRIVEN rotation, where a child is replaced.
-// The second is sessionResetFollower, which moves the tag when claude announces a
-// reset of its own: no child is replaced there and RestartFresh is never reached,
-// so a tag written only through the first writer would go stale on every in-process
-// /clear. This sentence used to name OnSessionRotate as the only writer and is
-// corrected here, in the change that falsified it, because nothing reddens when a
-// comment goes stale.
-//
-// ATOMIC, NOT A MUTEX, and that is a design decision rather than a micro-
-// optimisation. The reader is claude's stdout forwarder goroutine on the per-event
-// path; the writer is the daemon's new_session dispatch, inside a runner method
-// whose own mutex is a documented LEAF (nothing under it may take another lock).
-// A mutex here would put a lock on both of those paths and create an ordering
-// question to keep answered; a single atomic word has no ordering to state.
-//
-// The tag can never hold "": an empty tag resolves to no conversation —
-// conversationForSession refuses an empty id, so an unbound conversation's empty
-// CurrentSessionID can never match it — so an emptied tag would black-hole that
-// conversation's stream for the life of the runner. Rotate refuses
-// it here because the invariant belongs to this value; RestartFresh's own empty-id
-// refusal means production never reaches the guard.
+// streamSessionTag carries a runner's live routing ID across daemon rotations
+// and announced clears. Event and exit readers use atomic snapshots. Once bound
+// to a sink, tag writes take its short acceptance lock so boundaries capture the
+// registered incarnation even before the new routing ID produces output. Empty
+// IDs are refused because they cannot resolve to a conversation.
 type streamSessionTag struct {
+	runtimeSink    atomic.Pointer[streamTurnSink]
 	incarnation    atomic.Uint64
 	id             atomic.Pointer[string]
 	lastSource     atomic.Pointer[history.SessionProvenance]
@@ -420,38 +395,45 @@ func (t *streamSessionTag) Rotate(newID string) {
 	if newID == "" {
 		return
 	}
+	s := t.runtimeSink.Load()
+	if s != nil {
+		s.offerMu.Lock()
+		defer s.offerMu.Unlock()
+	}
 	if oldID := t.ID(); oldID != newID {
 		t.retiringSource.CompareAndSwap(nil, &oldID)
 	}
 	t.id.Store(&newID)
+	if s != nil {
+		s.registerRuntimeProducerLocked(t, newID)
+	}
 }
 
-// CompareAndSwap moves the tag onto newID only while it still holds oldID, and
-// answers whether the move happened. It is Rotate's conditional sibling and the
-// asymmetry between them is the point (#2176): a writer that DROVE the rotation —
-// the daemon-driven path reaching Rotate through Config.OnSessionRotate — re-keyed
-// the registry itself and is the authority, so it stores unconditionally. A writer
-// that merely FOLLOWS a rotation claude announced holds an id it read earlier and
-// must not overwrite a driver that won in between, so it comes through here.
-//
-// An empty newID is refused rather than stored, keeping Rotate's invariant that the
-// tag never holds "".
-//
-// The swap compares the loaded POINTER, not the string at swap time, which is
-// strictly stronger than a value CAS: a competing store that installs an equal
-// string in a different allocation fails here. That direction of failure is the safe
-// one — the follower declines and the competing writer's id stands — and it is not
-// ABA-exploitable in the other direction, since every store above allocates a fresh
-// *string and a live pointer cannot be reused underneath us.
+// CompareAndSwap follows an announced clear only while the tag still holds
+// oldID. A competing daemon rotation remains authoritative. Successful swaps
+// register the routing alias without marking a retiring child. Empty new IDs
+// are refused. Pointer comparison also refuses an equal-string replacement
+// observed after the snapshot; every tag write allocates a fresh pointer.
 func (t *streamSessionTag) CompareAndSwap(oldID, newID string) bool {
 	if newID == "" {
 		return false
+	}
+	s := t.runtimeSink.Load()
+	if s != nil {
+		s.offerMu.Lock()
+		defer s.offerMu.Unlock()
 	}
 	p := t.id.Load()
 	if *p != oldID {
 		return false
 	}
-	return t.id.CompareAndSwap(p, &newID)
+	if !t.id.CompareAndSwap(p, &newID) {
+		return false
+	}
+	if s != nil {
+		s.registerRuntimeProducerLocked(t, newID)
+	}
+	return true
 }
 
 // sinkFor returns the per-Parser sink closure for a runner whose session id never

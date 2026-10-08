@@ -32,12 +32,28 @@ type streamProducerKey struct {
 func (s *streamTurnSink) beginRuntimeProducer(tag *streamSessionTag) {
 	s.offerMu.Lock()
 	defer s.offerMu.Unlock()
+	tag.runtimeSink.Store(s)
 	s.runtimeNextProducer++
 	tag.incarnation.Store(s.runtimeNextProducer)
+	s.registerRuntimeProducerLocked(tag, tag.ID())
+}
+
+// registerRuntimeProducerLocked retains routing aliases before their first
+// output. offerMu serializes registration, tag writes and boundary capture.
+// An announced reset may tentatively select another live tag's ID before the
+// pool refuses it; that destination's actual producer must remain authoritative.
+func (s *streamTurnSink) registerRuntimeProducerLocked(tag *streamSessionTag, id string) {
+	if owner := s.runtimeProducerTags[id]; owner != nil && owner != tag && owner.ID() == id {
+		return
+	}
 	if s.runtimeProducers == nil {
 		s.runtimeProducers = make(map[string]uint64)
 	}
-	s.runtimeProducers[tag.ID()] = s.runtimeNextProducer
+	if s.runtimeProducerTags == nil {
+		s.runtimeProducerTags = make(map[string]*streamSessionTag)
+	}
+	s.runtimeProducers[id] = tag.incarnation.Load()
+	s.runtimeProducerTags[id] = tag
 }
 
 // queueBoundary uses the same short lock as output acceptance. The notification
