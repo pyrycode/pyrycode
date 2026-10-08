@@ -79,6 +79,9 @@ func TestLatestDisplayableEntryIDRecovery(t *testing.T) {
 				if got, err := s.LatestDisplayableEntryID(convA); err != nil || got != want {
 					t.Fatalf("recovered = %d, %v; want %d", got, err, want)
 				}
+				if got, err := s.LatestEntryID(convA); err != nil || got != raw {
+					t.Fatalf("recovered raw = %d, %v; want %d", got, err, raw)
+				}
 				if _, opened := s.readStats(); opened < len(segs) {
 					t.Fatalf("recovery opened %d segments; expected traversal of %d", opened, len(segs))
 				}
