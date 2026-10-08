@@ -99,7 +99,7 @@ func referenceBoundaries(runes []rune) []bool {
 			i = end - 1
 			continue
 		}
-		split := unicode.IsSpace(r) || (r == '|' && tables[line] && ticks == 0 && len(closing) == 0 && (i == 0 || runes[i-1] != '\\'))
+		split := unicode.IsSpace(r) || (r == '|' && tables[line] && ticks == 0 && len(closing) == 0 && !markdownEscaped(runes, i))
 		if (r == ',' || r == ';') && afterCode && i+1 < len(runes) && runes[i+1] == '`' {
 			split = true
 		}
@@ -111,7 +111,7 @@ func referenceBoundaries(runes []rune) []bool {
 			line++
 		}
 		afterCode = false
-		if ticks == 0 {
+		if ticks == 0 && strings.ContainsRune("[]{}()<>", r) && !markdownEscaped(runes, i) {
 			switch r {
 			case '[':
 				closing = append(closing, ']')
@@ -161,7 +161,7 @@ func separateLinks(body string) string {
 	var out strings.Builder
 	start := 0
 	for i := 0; i < len(runes); i++ {
-		if runes[i] != '[' {
+		if runes[i] != '[' || markdownEscaped(runes, i) {
 			continue
 		}
 		prefix := i
@@ -191,6 +191,9 @@ func separateLinks(body string) string {
 func matchingDelimiter(body []rune, start int, open, close rune) int {
 	depth := 0
 	for i := start; i < len(body); i++ {
+		if (body[i] == open || body[i] == close) && markdownEscaped(body, i) {
+			continue
+		}
 		switch body[i] {
 		case open:
 			depth++
@@ -202,4 +205,14 @@ func matchingDelimiter(body []rune, start int, open, close rune) int {
 		}
 	}
 	return -1
+}
+
+// An odd run of backslashes escapes Markdown punctuation; paired backslashes
+// represent literal backslashes and leave the following delimiter structural.
+func markdownEscaped(body []rune, index int) bool {
+	backslashes := 0
+	for i := index - 1; i >= 0 && body[i] == '\\'; i-- {
+		backslashes++
+	}
+	return backslashes%2 != 0
 }

@@ -93,3 +93,11 @@ repository root after source moves/deletions; findings do not fail `make check`.
   complete inline code citations and Unicode whitespace before link labels.
   Add parser and temporary-tree regressions for both findings. The inventory
   format, filesystem behavior and documentation handoff remain as designed.
+
+- 2026-10-08, verifier finding 1 at `7f988fcc`: use the same odd/even
+  backslash rule for link balancing and token-boundary delimiters. Escaped
+  brackets stay literal and cannot alter the stack across lines; even runs of
+  backslashes leave delimiters structural. Keep excluded references whole.
+  Add parser and temporary-tree regressions for both escaped label brackets
+  and an escaped opening bracket before a table, plus escape-parity and
+  exclusion controls. Output and filesystem contracts remain unchanged.

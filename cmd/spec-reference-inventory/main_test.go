@@ -75,6 +75,16 @@ func TestReferences(t *testing.T) {
 		{"table without outer pipes", "Source|Path\n---|---\nfile|internal/a.go\nlink|[internal/b.go](cmd/a.go)", []string{"cmd/a.go", "internal/a.go", "internal/b.go"}},
 		{"Unicode space before link", "x\u2003[internal/a.go](cmd/a.go)", []string{"cmd/a.go", "internal/a.go"}},
 		{"Unicode space in label", "[source\u00a0internal/a.go](cmd/a.go)", []string{"cmd/a.go", "internal/a.go"}},
+		{"escaped opening bracket in label", `[source \[ internal/a.go](cmd/a.go)`, []string{"cmd/a.go", "internal/a.go"}},
+		{"escaped closing bracket in label", `[source \] internal/a.go](cmd/a.go)`, []string{"cmd/a.go", "internal/a.go"}},
+		{"escaped bracket before table", "Literal \\[ example.\n|source|internal/a.go|", []string{"internal/a.go"}},
+		{"odd backslashes in label", `[source \\\[ internal/a.go](cmd/a.go)`, []string{"cmd/a.go", "internal/a.go"}},
+		{"even backslashes in label", `[source \\[ internal/a.go]](cmd/a.go)`, []string{"cmd/a.go", "internal/a.go"}},
+		{"escaped pipe in table", `|source|other/path\|internal/a.go|`, nil},
+		{"even backslashes before table pipe", `|source\\|internal/a.go|`, []string{"internal/a.go"}},
+		{"escaped bracket in excluded link shape", `internal/\[source](cmd/a.go)`, nil},
+		{"escaped bracket in excluded table glob", `|source|internal/[foo\]|internal/a.go]|`, nil},
+		{"escaped bracket in excluded inline glob", "`internal/[foo\\]|internal/a.go]`", nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -102,6 +112,36 @@ func TestInventoryMarkdownBoundaries(t *testing.T) {
 	}
 	if out.String() != want {
 		t.Fatalf("inventory = %q, want %q", out.String(), want)
+	}
+}
+
+func TestInventoryMarkdownEscapes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, body string
+		want       []string
+	}{
+		{"opening bracket", `[source \[ internal/a.go](cmd/a.go)`, []string{"cmd/a.go", "internal/a.go"}},
+		{"closing bracket", `[source \] internal/a.go](cmd/a.go)`, []string{"cmd/a.go", "internal/a.go"}},
+		{"bracket before table", "Literal \\[ example.\n|source|internal/a.go|", []string{"internal/a.go"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			testWrite(t, root, "internal/a.go", "package a\n")
+			testWrite(t, root, "cmd/a.go", "package main\n")
+			testWrite(t, root, specsDir+"/a.md", tt.body)
+			var want, out bytes.Buffer
+			for _, path := range tt.want {
+				want.WriteString(specsDir + "/a.md\t" + path + "\texisting\n")
+			}
+			if err := run(root, &out); err != nil {
+				t.Fatal(err)
+			}
+			if out.String() != want.String() {
+				t.Fatalf("inventory = %q, want %q", out.String(), want.String())
+			}
+		})
 	}
 }
 
