@@ -113,6 +113,7 @@ func newCodexRunnerFactory(h codexHarness) sessions.RunnerFactory {
 			Sink:           wrapUp.Sink,
 			WrapUp:         wrapUp,
 			OnExit:         h.sink.exitForSessionTag(tag),
+			beginProducer:  func() { h.sink.beginRuntimeProducer(tag) },
 			Model:          model,
 			Effort:         effort,
 			PermissionMode: cfg.PermissionMode,
@@ -329,6 +330,7 @@ type codexRunnerConfig struct {
 	Tag               *streamSessionTag
 	Sink              func(turnevent.Event)
 	OnExit            func()
+	beginProducer     func()
 	Model, Effort     string
 	PermissionMode    string
 	Backoff           time.Duration
@@ -457,6 +459,9 @@ func (r *codexRunner) WaitForPTY(context.Context) error { return nil }
 // the shutdown return, as streamsup's OnChildExit does. A deliberate restart
 // relaunches at once; a crash or a failed start backs off.
 func (r *codexRunner) Run(ctx context.Context) error {
+	if r.cfg.beginProducer != nil {
+		r.cfg.beginProducer()
+	}
 	r.updateState(func(s *sessions.State) {
 		s.Phase = sessions.PhaseStarting
 		s.StartedAt = time.Now()

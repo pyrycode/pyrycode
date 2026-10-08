@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -198,6 +199,7 @@ type interactiveTurnEmitterV2 struct {
 // convTurnState retains one producing session's lifecycle and buffered text
 // within a conversation. Selection, flushing and closing retain that source.
 type convTurnState struct {
+	runtimeIncarnation  uint64
 	runtimeTools        map[string]string
 	runtimeEpoch        uint64
 	runtimeClosedTurnID string
@@ -241,16 +243,19 @@ func newInteractiveTurnEmitterV2(sup cursorReader, bcast interactiveBroadcaster,
 
 // selectConversation selects convID's producing source, creating its state on
 // first sight, and returns the retention key. Only the drain goroutine calls it.
-func (e *interactiveTurnEmitterV2) selectConversation(convID string, source history.SessionProvenance) string {
+func (e *interactiveTurnEmitterV2) selectConversation(convID string, source history.SessionProvenance, incarnation uint64) string {
 	key := convID
 	if source.Kind != "" {
-		// Conversation IDs and fixed producer kinds cannot contain this delimiter;
-		// the remaining suffix is the complete opaque daemon routing ID.
+		// Conversation IDs and fixed producer kinds cannot contain this delimiter.
+		// Runtime producers append their daemon-local incarnation after the routing ID.
 		key += "\x00" + source.Kind + "\x00" + source.SessionID
+	}
+	if e.runtimeFacts && incarnation != 0 {
+		key += "\x00" + strconv.FormatUint(incarnation, 10)
 	}
 	st, ok := e.turns[key]
 	if !ok {
-		st = &convTurnState{conversationID: convID, source: source}
+		st = &convTurnState{conversationID: convID, source: source, runtimeIncarnation: incarnation}
 		e.turns[key] = st
 	}
 	e.convTurnState = st
@@ -261,7 +266,7 @@ func (e *interactiveTurnEmitterV2) selectConversation(convID string, source hist
 // closure and is released by closeForConversation at session exit or teardown.
 // The selection itself is left alone; the next HandleFor reselects.
 func (e *interactiveTurnEmitterV2) releaseConversation(key string) {
-	if st := e.turns[key]; st != nil && st.runtimeClosedTurnID != "" && e.runtimeSealed[runtimeSourceKey(st.conversationID, st.source.SessionID)] {
+	if st := e.turns[key]; st != nil && st.runtimeClosedTurnID != "" && e.runtimeSealed[runtimeSourceKey(st.conversationID, st.source.SessionID, st.runtimeIncarnation)] {
 		return
 	}
 	if st, ok := e.turns[key]; ok && !st.inTurn && st.deltaBuf.Len() == 0 &&
@@ -301,29 +306,33 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 // state retain their source, and another conversation's state stays untouched.
 // Only the single drain goroutine may call it.
 func (e *interactiveTurnEmitterV2) HandleFor(ctx context.Context, convID string, ev turnevent.Event, source ...history.SessionProvenance) {
+	var captured history.SessionProvenance
+	if len(source) > 0 {
+		captured = source[0]
+	}
+	e.handleForSource(ctx, convID, ev, captured, 0)
+}
+
+func (e *interactiveTurnEmitterV2) handleForSource(ctx context.Context, convID string, ev turnevent.Event, captured history.SessionProvenance, incarnation uint64) {
 	if convID == "" {
 		e.logger.Debug("relay: interactive-turn drop; no cursor",
 			"event", "interactive_turn.no_cursor",
 			"kind", eventKind(ev))
 		return
 	}
-	var captured history.SessionProvenance
-	if len(source) > 0 {
-		captured = source[0]
-	}
 	// Preserve this conversation's arrival order when sources interleave. Flush
 	// the preceding source before selecting the next, without discarding either
 	// source's lifecycle or child lane identities.
 	for key, st := range e.turns {
-		if st.conversationID == convID && st.source != captured && st.deltaBuf.Len() > 0 {
+		if st.conversationID == convID && (st.source != captured || st.runtimeIncarnation != incarnation) && st.deltaBuf.Len() > 0 {
 			e.convTurnState = st
 			e.flushDelta(ctx)
 			e.releaseConversation(key)
 		}
 	}
-	key := e.selectConversation(convID, captured)
+	key := e.selectConversation(convID, captured, incarnation)
 	defer e.releaseConversation(key)
-	if e.runtimeFacts && e.runtimeSealed[runtimeSourceKey(convID, captured.SessionID)] {
+	if e.runtimeFacts && e.runtimeSealed[runtimeSourceKey(convID, captured.SessionID, incarnation)] {
 		switch v := ev.(type) {
 		case turnevent.ThoughtChunk:
 		case turnevent.TextChunk:

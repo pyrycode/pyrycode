@@ -78,6 +78,9 @@ const streamTurnSinkCloseReserve = 32
 // "Handle cannot receive a non-event" stays a type-level fact rather than a
 // runtime branch.
 type streamTurnEnvelope struct {
+	// incarnation identifies a Runner.Run activation, independently of the
+	// routing ID reactivation reuses. It never crosses history or wire seams.
+	incarnation uint64
 	sourceEpoch uint64
 	occurredAt  time.Time
 	sessionID   string
@@ -125,18 +128,20 @@ type confirmedStreamStop struct {
 // must be structurally impossible. The drain stops on ctx, not on close; any
 // post-shutdown send lands in the non-blocking drop path.
 type streamTurnSink struct {
-	runtimeEnabled    atomic.Bool
-	runtimeHolds      map[string]int    // guarded by offerMu, including in-flight publication
-	runtimeLastQueued map[string]uint64 // accepted output positions per source
-	runtimeStopSeen   map[string]uint64 // consumed producer exits, guarded by offerMu
-	runtimePending    []runtimeBoundary // guarded by offerMu
-	runtimeWake       chan struct{}
-	ch                chan streamTurnEnvelope
+	runtimeNextProducer uint64            // guarded by offerMu
+	runtimeProducers    map[string]uint64 // latest activation per routing ID, guarded by offerMu
+	runtimeEnabled      atomic.Bool
+	runtimeHolds        map[string]int               // guarded by offerMu, including in-flight publication
+	runtimeLastQueued   map[streamProducerKey]uint64 // accepted output positions per source
+	runtimeStopSeen     map[streamProducerKey]uint64 // consumed producer exits, guarded by offerMu
+	runtimePending      []runtimeBoundary            // guarded by offerMu
+	runtimeWake         chan struct{}
+	ch                  chan streamTurnEnvelope
 	// offerMu orders successful enqueues against confirmed runner stops. It is
 	// a leaf lock: no I/O, publication or tracker operation runs underneath it.
 	offerMu     sync.Mutex
 	queued      uint64
-	stopped     map[string]confirmedStreamStop
+	stopped     map[streamProducerKey]confirmedStreamStop
 	stoppedWake chan struct{}
 	// droppableCap is the high-water mark the droppable class may not cross,
 	// leaving cap(ch) - droppableCap slots that only a closing-class envelope can
@@ -238,7 +243,7 @@ func newStreamTurnSink(buf int, logger *slog.Logger) *streamTurnSink {
 		runtimeWake:           make(chan struct{}, 1),
 		ch:                    make(chan streamTurnEnvelope, buf),
 		placementCommands:     make(chan func(), operatorMessageQueueSize),
-		stopped:               make(map[string]confirmedStreamStop),
+		stopped:               make(map[streamProducerKey]confirmedStreamStop),
 		stoppedWake:           make(chan struct{}, 1),
 		droppableCap:          buf - min(streamTurnSinkCloseReserve, buf/2),
 		logger:                logger,
@@ -263,10 +268,16 @@ func (s *streamTurnSink) offer(env streamTurnEnvelope, closing bool) bool {
 	case s.ch <- env:
 		s.queued++
 		if s.runtimeLastQueued == nil {
-			s.runtimeLastQueued = make(map[string]uint64)
+			s.runtimeLastQueued = make(map[streamProducerKey]uint64)
 		}
 		if !env.exit {
-			s.runtimeLastQueued[env.sessionID] = env.queued
+			s.runtimeLastQueued[streamProducerKey{env.sessionID, env.incarnation}] = env.queued
+			if env.incarnation != 0 {
+				if s.runtimeProducers == nil {
+					s.runtimeProducers = make(map[string]uint64)
+				}
+				s.runtimeProducers[env.sessionID] = max(s.runtimeProducers[env.sessionID], env.incarnation)
+			}
 		}
 		return true
 	default:
@@ -277,14 +288,15 @@ func (s *streamTurnSink) offer(env streamTurnEnvelope, closing bool) bool {
 	}
 }
 
-// retainExitLocked requires offerMu and keeps the newest stamp per session.
+// retainExitLocked requires offerMu and keeps the newest stamp per incarnation.
 // A child exit may acquire the lock after a later confirmed stop; that older
 // exit must never replace the stronger producer boundary.
 func (s *streamTurnSink) retainExitLocked(env streamTurnEnvelope) {
-	if old, ok := s.stopped[env.sessionID]; ok && old.env.exitEpoch >= env.exitEpoch {
+	key := streamProducerKey{env.sessionID, env.incarnation}
+	if old, ok := s.stopped[key]; ok && old.env.exitEpoch >= env.exitEpoch {
 		return
 	}
-	s.stopped[env.sessionID] = confirmedStreamStop{env: env, after: s.queued}
+	s.stopped[key] = confirmedStreamStop{env: env, after: s.queued}
 	select {
 	case s.stoppedWake <- struct{}{}:
 	default:
@@ -292,13 +304,13 @@ func (s *streamTurnSink) retainExitLocked(env streamTurnEnvelope) {
 }
 
 // runnerStopped runs only after Runner.Run joins its producer. It retains
-// one latest boundary per session without relying on queue capacity, ordered
+// one latest boundary per producer incarnation without relying on queue capacity, ordered
 // behind every envelope queued before that join. Coalescing repeated stops for
-// one session moves the boundary later, after all of that session's old tails.
+// one incarnation moves the boundary later, after all of that producer's old tails.
 // The wake is a level trigger, never the owner of the notification.
 func (s *streamTurnSink) runnerStopped(sessionID string) {
 	s.offerMu.Lock()
-	s.retainExitLocked(streamTurnEnvelope{sessionID: sessionID, exit: true, exitEpoch: s.exits.Add(1), occurredAt: runtimeExitTime()})
+	s.retainExitLocked(streamTurnEnvelope{sessionID: sessionID, incarnation: s.runtimeProducers[sessionID], exit: true, exitEpoch: s.exits.Add(1), occurredAt: runtimeExitTime()})
 	s.offerMu.Unlock()
 }
 
@@ -381,6 +393,7 @@ func (s *streamTurnSink) takeLifecycleCloses() []string {
 // it here because the invariant belongs to this value; RestartFresh's own empty-id
 // refusal means production never reaches the guard.
 type streamSessionTag struct {
+	incarnation    atomic.Uint64
 	id             atomic.Pointer[string]
 	lastSource     atomic.Pointer[history.SessionProvenance]
 	retiringSource atomic.Pointer[string]
@@ -480,9 +493,16 @@ func (s *streamTurnSink) sinkForTag(tag func() string, kind ...string) func(turn
 	if len(kind) > 0 {
 		producerKind = kind[0]
 	}
+	return s.sinkForProducer(tag, producerKind, nil)
+}
+
+func (s *streamTurnSink) sinkForProducer(tag func() string, producerKind string, incarnation func() uint64) func(turnevent.Event) {
 	return func(ev turnevent.Event) {
 		sessionID := tag()
 		env := streamTurnEnvelope{sessionID: sessionID, ev: ev}
+		if incarnation != nil {
+			env.incarnation = incarnation()
+		}
 		if producerKind != "" {
 			env.source = history.SessionProvenance{Kind: producerKind, SessionID: sessionID}
 		}
@@ -651,7 +671,7 @@ func startStreamTurnDrainV2(
 						if at.IsZero() {
 							at = runtimeExitTime()
 						}
-						emitter.closeRuntimeSource(ctx, id, sourceID, "child_exit", at, false, env.exitEpoch)
+						emitter.closeRuntimeSource(ctx, id, sourceID, "child_exit", at, false, env.exitEpoch, env.incarnation)
 						if !emitter.hasRuntimeTurn(id) {
 							if _, cleared := busy.clearForExit(env.sessionID, env.exitEpoch); !cleared && busy != nil {
 								return
@@ -689,11 +709,11 @@ func startStreamTurnDrainV2(
 				return
 			}
 			if emitter.runtimeFacts {
-				if id, ok := conversationFor(env.sessionID); ok && emitter.runtimeSealed[runtimeSourceKey(id, env.source.SessionID)] {
+				if id, ok := conversationFor(env.sessionID); ok && emitter.runtimeSealed[runtimeSourceKey(id, env.source.SessionID, env.incarnation)] {
 					if echo, ok := env.ev.(turnevent.UserEcho); ok {
 						sink.observeEcho(env.sessionID, echo)
 					} else {
-						emitter.HandleFor(ctx, id, env.ev, env.source)
+						emitter.handleForSource(ctx, id, env.ev, env.source, env.incarnation)
 					}
 					return // sealed predecessors cannot change successor busy/placement state
 				}
@@ -734,7 +754,7 @@ func startStreamTurnDrainV2(
 			if turnMarkFor(env.ev) == turnMarkOpen {
 				busy.publishPostBoundary(conversationID, true)
 			}
-			emitter.HandleFor(ctx, conversationID, env.ev, env.source)
+			emitter.handleForSource(ctx, conversationID, env.ev, env.source, env.incarnation)
 			if emitter.runtimeFacts {
 				emitter.runtimeEpoch = env.sourceEpoch
 			}

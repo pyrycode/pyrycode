@@ -11,11 +11,33 @@ import (
 )
 
 type runtimeBoundary struct {
-	exitAfter uint64
-	fact      sessions.SessionTransition
-	after     uint64
-	publish   func()
-	done      chan struct{}
+	incarnation uint64
+	exitAfter   uint64
+	fact        sessions.SessionTransition
+	after       uint64
+	publish     func()
+	done        chan struct{}
+}
+
+// streamProducerKey distinguishes activations that reuse a routing session ID.
+// It is daemon-local bookkeeping, never durable provenance or a wire identity.
+type streamProducerKey struct {
+	sessionID   string
+	incarnation uint64
+}
+
+// beginRuntimeProducer runs before a runner starts its producer goroutines.
+// Reactivation retains the routing tag but receives a fresh incarnation. Old
+// envelopes and captured boundaries keep the incarnation they already held.
+func (s *streamTurnSink) beginRuntimeProducer(tag *streamSessionTag) {
+	s.offerMu.Lock()
+	defer s.offerMu.Unlock()
+	s.runtimeNextProducer++
+	tag.incarnation.Store(s.runtimeNextProducer)
+	if s.runtimeProducers == nil {
+		s.runtimeProducers = make(map[string]uint64)
+	}
+	s.runtimeProducers[tag.ID()] = s.runtimeNextProducer
 }
 
 // queueBoundary uses the same short lock as output acceptance. The notification
@@ -23,9 +45,10 @@ type runtimeBoundary struct {
 // wait for history, fanout, the publication gate or the drain.
 func (s *streamTurnSink) queueBoundary(t sessions.SessionTransition, publish func(), done chan struct{}) {
 	s.offerMu.Lock()
+	incarnation := s.runtimeProducers[string(t.PreviousID)]
 	after := s.queued
 	if t.PreviousID != "" {
-		after = s.runtimeLastQueued[string(t.PreviousID)]
+		after = s.runtimeLastQueued[streamProducerKey{string(t.PreviousID), incarnation}]
 	}
 	if t.OccurredAt.IsZero() {
 		t.OccurredAt = time.Now().UTC()
@@ -34,7 +57,7 @@ func (s *streamTurnSink) queueBoundary(t sessions.SessionTransition, publish fun
 		s.runtimeHolds = make(map[string]int)
 	}
 	s.runtimeHolds[t.ConversationID]++
-	s.runtimePending = append(s.runtimePending, runtimeBoundary{fact: t, after: after, publish: publish, done: done, exitAfter: s.exits.Load()})
+	s.runtimePending = append(s.runtimePending, runtimeBoundary{fact: t, after: after, publish: publish, done: done, exitAfter: s.exits.Load(), incarnation: incarnation})
 	s.offerMu.Unlock()
 	select {
 	case s.runtimeWake <- struct{}{}:
@@ -66,10 +89,11 @@ func (s *streamTurnSink) takeBoundaries(processed uint64) []runtimeBoundary {
 	blocked := make(map[string]bool)
 	anyBlocked := false
 	for _, b := range s.runtimePending {
+		key := streamProducerKey{string(b.fact.PreviousID), b.incarnation}
 		needsStop := b.fact.Cause == sessions.CauseIdleSleep || b.fact.Cause == sessions.CauseCapacityEviction || b.fact.Reason == sessions.ReasonEviction
-		stopped := !needsStop || s.runtimeStopSeen[string(b.fact.PreviousID)] > b.exitAfter
+		stopped := !needsStop || s.runtimeStopSeen[key] > b.exitAfter
 		if needsStop {
-			b.after = max(b.after, s.runtimeLastQueued[string(b.fact.PreviousID)])
+			b.after = max(b.after, s.runtimeLastQueued[key])
 		}
 		if b.after <= processed && stopped && !blocked[b.fact.ConversationID] && !(b.fact.ConversationID == "" && anyBlocked) {
 			ready = append(ready, b)
@@ -104,7 +128,7 @@ func (s *streamTurnSink) publishRuntimeBoundaries(ctx context.Context, e *intera
 			if cause == "" {
 				cause = "unknown"
 			}
-			e.closeRuntimeSource(ctx, t.ConversationID, string(t.PreviousID), cause, t.OccurredAt, true, 0)
+			e.closeRuntimeSource(ctx, t.ConversationID, string(t.PreviousID), cause, t.OccurredAt, true, 0, b.incarnation)
 		}
 		b.publish()
 		if t.ConversationID != "" && !e.hasRuntimeTurn(t.ConversationID) {
@@ -136,17 +160,20 @@ func runtimeExitTime() time.Time { return time.Now().UTC() }
 // Runtime producer callbacks retain the actual last output source independently
 // of the routing tag, which RestartFresh rotates before the old child's exit.
 func (s *streamTurnSink) sinkForSessionTag(tag *streamSessionTag, kind string) func(turnevent.Event) {
-	return s.sinkForTag(func() string {
+	if tag.incarnation.Load() == 0 {
+		s.beginRuntimeProducer(tag)
+	}
+	return s.sinkForProducer(func() string {
 		id := tag.ID()
 		source := history.SessionProvenance{Kind: kind, SessionID: id}
 		tag.lastSource.Store(&source)
 		return id
-	}, kind)
+	}, kind, tag.incarnation.Load)
 }
 
 func (s *streamTurnSink) exitForSessionTag(tag *streamSessionTag) func() {
 	return func() {
-		env := streamTurnEnvelope{sessionID: tag.ID(), exit: true, exitEpoch: s.exits.Add(1), occurredAt: runtimeExitTime()}
+		env := streamTurnEnvelope{sessionID: tag.ID(), incarnation: tag.incarnation.Load(), exit: true, exitEpoch: s.exits.Add(1), occurredAt: runtimeExitTime()}
 		if source := tag.lastSource.Load(); source != nil {
 			env.source = *source
 		}
@@ -163,15 +190,16 @@ func (s *streamTurnSink) noteRuntimeStop(env streamTurnEnvelope) bool {
 	s.offerMu.Lock()
 	defer s.offerMu.Unlock()
 	if s.runtimeStopSeen == nil {
-		s.runtimeStopSeen = make(map[string]uint64)
+		s.runtimeStopSeen = make(map[streamProducerKey]uint64)
 	}
 	id := env.source.SessionID
 	if id == "" {
 		id = env.sessionID
 	}
-	s.runtimeStopSeen[id] = max(s.runtimeStopSeen[id], env.exitEpoch)
+	key := streamProducerKey{id, env.incarnation}
+	s.runtimeStopSeen[key] = max(s.runtimeStopSeen[key], env.exitEpoch)
 	for _, b := range s.runtimePending {
-		if (string(b.fact.PreviousID) == id || (env.source.SessionID == "" && string(b.fact.NewID) == env.sessionID)) && b.fact.ConversationID != "" {
+		if b.incarnation == env.incarnation && (string(b.fact.PreviousID) == id || (env.source.SessionID == "" && string(b.fact.NewID) == env.sessionID)) && b.fact.ConversationID != "" {
 			return true
 		}
 	}

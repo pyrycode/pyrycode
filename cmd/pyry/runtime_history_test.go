@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -254,6 +255,164 @@ func TestRuntimeHistoryEvictionTailCause(t *testing.T) {
 			want := strings.Join([]string{protocol.TypeAssistantDelta, historyToolInterrupted, historyTurnInterrupted, historySessionDivider}, ",")
 			if strings.Join(order, ",") != want {
 				t.Fatalf("closure order: %v", order)
+			}
+		})
+	}
+}
+
+func TestRuntimeHistoryEvictionReactivation(t *testing.T) {
+	for _, cause := range []sessions.LifecycleCause{sessions.CauseIdleSleep, sessions.CauseCapacityEviction} {
+		for _, kind := range []string{"claude", "codex"} {
+			t.Run(string(cause)+"/"+kind, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				store := history.New(t.TempDir())
+				sink := newStreamTurnSink(32, discardLogger())
+				resolve := stubBusyResolve(map[string]string{"a": testConvID})
+				busy := newTurnBusyTracker(resolve, discardLogger(), withExitEpoch(sink.exitEpoch))
+				e := newInteractiveTurnEmitterV2(nil, historyOnlyBroadcaster{}, discardLogger())
+				e.hist = store
+				installRuntimeHistory(sink, e, busy)
+				var placements atomic.Int32
+				idleObserver := func(string) { placements.Add(1) }
+				sink.placementIdle.Store(&idleObserver)
+				trans := newSessionTransitionEmitterV2(historyOnlyBroadcaster{}, resolve, discardLogger())
+				trans.hist, trans.runtimeSink, trans.runtimeContext = store, sink, ctx
+				old := newStreamSessionTag("a")
+				produce := sink.sinkForSessionTag(old, kind)
+				oldIncarnation := old.incarnation.Load()
+				produce(turnevent.ThoughtChunk{})
+				produce(turnevent.ToolStart{ToolCallID: "unfinished", Title: "Read"})
+				trans.Enqueue(sessions.SessionTransition{ConversationID: testConvID, PreviousID: "a", PreviousAgent: kind, Cause: cause, Reason: sessions.ReasonEviction})
+				produce(turnevent.TextChunk{Text: "old-tail"})
+				sink.exitForSessionTag(old)()
+				sink.runnerStopped("a")
+				oldExitEpoch := sink.exitEpoch()
+				// Replacement output is already queued when the old boundary is
+				// consumed. Its unchanged routing ID must not imply retirement.
+				sink.beginRuntimeProducer(old) // the production Run reactivation hook
+				replacement := produce         // the same parser and routing tag are reused
+				replacement(turnevent.ThoughtChunk{})
+				replacement(turnevent.ToolStart{ToolCallID: "successor-tool", Title: "Write"})
+				replacement(turnevent.TextChunk{Text: "replacement"})
+				fence := make(chan struct{})
+				sink.dispatchPlacement(ctx, func() { close(fence) })
+				cleanup := startStreamTurnDrainV2(ctx, sink, e, resolve, busy, discardLogger())
+				defer func() { cancel(); cleanup() }()
+				select {
+				case <-fence:
+				case <-time.After(5 * time.Second):
+					t.Fatal("reactivation fence timed out")
+				}
+				if !busy.Busy(testConvID) {
+					t.Fatal("replacement did not mark conversation busy")
+				}
+				idleBefore := placements.Load()
+				// Facts already captured from the predecessor may arrive after its
+				// divider. They retain that turn address and cannot end new work.
+				source := history.SessionProvenance{Kind: kind, SessionID: "a"}
+				for _, ev := range []turnevent.Event{turnevent.TextChunk{Text: "delayed-old"}, turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}} {
+					if !sink.offer(streamTurnEnvelope{sessionID: "a", source: source, incarnation: oldIncarnation, ev: ev}, true) {
+						t.Fatal("late predecessor event refused")
+					}
+				}
+				if !sink.offer(streamTurnEnvelope{sessionID: "a", source: source, incarnation: oldIncarnation, exit: true, exitEpoch: oldExitEpoch}, true) {
+					t.Fatal("stale exit refused")
+				}
+				fence = make(chan struct{})
+				sink.dispatchPlacement(ctx, func() { close(fence) })
+				select {
+				case <-fence:
+				case <-time.After(5 * time.Second):
+					t.Fatal("predecessor fence timed out")
+				}
+				if !busy.Busy(testConvID) || placements.Load() != idleBefore {
+					t.Fatalf("predecessor released successor: busy=%v placements=%d, want %d", busy.Busy(testConvID), placements.Load(), idleBefore)
+				}
+				replacement(turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+				fence = make(chan struct{})
+				sink.dispatchPlacement(ctx, func() { close(fence) })
+				select {
+				case <-fence:
+				case <-time.After(5 * time.Second):
+					t.Fatal("completion fence timed out")
+				}
+				var openings []string
+				var interrupted, toolsInterrupted, dividers, idle int
+				var lateTurn, completedTurn string
+				for _, entry := range historyEntries(t, store, testConvID) {
+					switch entry.Type {
+					case historyTurnOpened:
+						var p runtimeHistoryFact
+						_ = json.Unmarshal(entry.Payload, &p)
+						openings = append(openings, p.TurnID)
+						if entry.Shown == nil || *entry.Shown || entry.Session == nil || entry.Session.SessionID != "a" || entry.Session.Kind != kind {
+							t.Fatalf("opening lost visibility/source: %+v", entry)
+						}
+					case historyTurnInterrupted:
+						interrupted++
+					case historyToolInterrupted:
+						toolsInterrupted++
+						var p runtimeHistoryFact
+						_ = json.Unmarshal(entry.Payload, &p)
+						if p.ToolCallID != "unfinished" || p.Cause != string(cause) {
+							t.Fatalf("interrupted successor or wrong cause: %+v", p)
+						}
+					case historySessionDivider:
+						dividers++
+					case protocol.TypeAssistantDelta:
+						var p protocol.AssistantDeltaPayload
+						_ = json.Unmarshal(entry.Payload, &p)
+						if p.Text == "delayed-old" {
+							lateTurn = p.TurnID
+						}
+					case protocol.TypeTurnEnd:
+						var p protocol.TurnEndPayload
+						_ = json.Unmarshal(entry.Payload, &p)
+						completedTurn = p.TurnID
+					case protocol.TypeTurnState:
+						var p protocol.TurnStatePayload
+						_ = json.Unmarshal(entry.Payload, &p)
+						if p.State == "idle" {
+							idle++
+						}
+					}
+				}
+				if len(openings) != 2 || openings[0] == openings[1] || interrupted != 1 || toolsInterrupted != 1 || dividers != 1 || idle != 2 || busy.Busy(testConvID) {
+					t.Fatalf("openings=%v interrupted=%d tools=%d dividers=%d idle=%d busy=%v", openings, interrupted, toolsInterrupted, dividers, idle, busy.Busy(testConvID))
+				}
+				if lateTurn != openings[0] || completedTurn != openings[1] {
+					t.Fatalf("late turn=%s completed turn=%s, want %v", lateTurn, completedTurn, openings)
+				}
+			})
+		}
+	}
+}
+
+func TestRuntimeHistoryRunnerReactivationIncarnation(t *testing.T) {
+	for _, kind := range []string{"claude", "codex"} {
+		t.Run(kind, func(t *testing.T) {
+			sink := newStreamTurnSink(16, discardLogger())
+			factory := newStreamRunnerFactory(sink, "", nil, streamApprovalConfig{})
+			if kind == "codex" {
+				factory = newCodexRunnerFactory(codexHarness{sink: sink, bin: fakeCodexBin(t), home: t.TempDir()})
+			}
+			runner, err := factory(sessions.RunnerConfig{SessionID: "a", ClaudeBin: os.Args[0], WorkDir: t.TempDir(), Logger: discardLogger()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			previous := sink.runtimeProducers["a"]
+			for i := 0; i < 2; i++ {
+				if err := runner.Run(ctx); !errors.Is(err, context.Canceled) {
+					t.Fatalf("Run: %v", err)
+				}
+				current := sink.runtimeProducers["a"]
+				if current <= previous {
+					t.Fatalf("Run reused producer incarnation %d after %d", current, previous)
+				}
+				previous = current
 			}
 		})
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/sessions"
@@ -62,7 +63,9 @@ func (e *interactiveTurnEmitterV2) recordRuntimeFact(typ string, p runtimeHistor
 	appendConversationHistory(e.hist, e.logger, "runtime_history.append_err", p.ConversationID, typ, raw, p.OccurredAt, e.source)
 }
 
-func runtimeSourceKey(convID, sessionID string) string { return convID + "\x00" + sessionID }
+func runtimeSourceKey(convID, sessionID string, incarnation uint64) string {
+	return convID + "\x00" + sessionID + "\x00" + strconv.FormatUint(incarnation, 10)
+}
 
 func (e *interactiveTurnEmitterV2) hasRuntimeTurn(convID string) bool {
 	for _, st := range e.turns {
@@ -75,17 +78,22 @@ func (e *interactiveTurnEmitterV2) hasRuntimeTurn(convID string) bool {
 
 // closeRuntimeSource is the composable pre-divider closure point. It is called
 // only by the stream drain, under the existing publication gate. An exit closes
-// preceding work but does not seal the routing ID for a replacement child.
-func (e *interactiveTurnEmitterV2) closeRuntimeSource(ctx context.Context, convID, sessionID, cause string, at time.Time, seal bool, exitEpoch uint64) {
+// preceding work; a boundary seals only the captured producer incarnation,
+// leaving reactivation under the same routing ID free to open a fresh turn.
+func (e *interactiveTurnEmitterV2) closeRuntimeSource(ctx context.Context, convID, sessionID, cause string, at time.Time, seal bool, exitEpoch uint64, producer ...uint64) {
+	var incarnation uint64
+	if len(producer) > 0 {
+		incarnation = producer[0]
+	}
 	if seal {
 		if e.runtimeSealed == nil {
 			e.runtimeSealed = make(map[string]bool)
 		}
-		e.runtimeSealed[runtimeSourceKey(convID, sessionID)] = true
+		e.runtimeSealed[runtimeSourceKey(convID, sessionID, incarnation)] = true
 	}
 	var keys []string
 	for key, st := range e.turns {
-		if st.conversationID == convID && (st.source.SessionID == sessionID || st.source.Kind == "") && (exitEpoch == 0 || st.runtimeEpoch < exitEpoch) {
+		if st.conversationID == convID && st.runtimeIncarnation == incarnation && (st.source.SessionID == sessionID || st.source.Kind == "") && (exitEpoch == 0 || st.runtimeEpoch < exitEpoch) {
 			keys = append(keys, key)
 		}
 	}
