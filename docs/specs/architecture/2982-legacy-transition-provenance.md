@@ -70,3 +70,7 @@ Pending documentation stage: in `docs/knowledge/features/history-package-produce
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-08
+
+## Revisions
+
+- 2026-10-08: Expanded the proof to include real pool removal and registry replacement, warm/reopened legacy pages and visible watermarks, and both switch handoff and sealing delays. Written work is approximately 570 lines including replaced lines and this plan; all five sizing limits still hold. No design or interface contract changed.

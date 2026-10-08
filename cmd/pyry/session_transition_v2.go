@@ -38,35 +38,22 @@ type switchTransitionPublication struct {
 	done       chan struct{}
 }
 
-// sessionTransitionEmitterV2 fans a session_transition v2 envelope to every open
-// INTERACTIVE conn when a session transitions (#659's /clear rotation or idle/cap
-// eviction). It mirrors assistantTurnEmitterV2: a buffered `in` channel decouples
-// the pool's off-lock observer callback (Enqueue, non-blocking per #659's
-// MUST-NOT-BLOCK contract) from the Run goroutine that performs the blocking
-// ActiveConns snapshot and the per-conn Push. The interactive-only capability
-// filter is the delivery gate — a phone that never negotiated interactive
-// receives only the coarse v1 fan-out, never this event.
+// sessionTransitionEmitterV2 fans legacy boundaries to open interactive conns.
+// A bounded queue decouples ordinary off-lock pool callbacks from fanout; a
+// dedicated publication lane retains committed switches through sealing.
 //
-// SECURITY: the only fields logged at any level are content-free discriminants —
-// `event`, `reason`, `conn_id`, and Push's transport-sentinel `err`. The
-// marshaled payload is NEVER logged (no payloadJSON, no err.Error() on the
-// marshal path). The payload's `conversation_id` (#741) is a routing key treated
-// as sensitive alongside the session ids and `workspace_cwd`: it is resolved from
-// the maintained registry binding, stamped onto the wire, and never logged — the
-// unresolved-drop log carries `reason` only (no ids). Session ids are non-secret
-// routing identifiers (session_id is already a standard log field across
-// internal/sessions); the discipline is kept verbatim so a future field addition
-// can't quietly start leaking through a log line.
+// SECURITY: emitter logs carry only event/reason/conn_id discriminants and Push's
+// transport sentinel. Payloads, ownership and agent/session facts are never
+// logged. Ownership comes from captured facts or the exact-session registry
+// resolver; an unresolved event is dropped without guessing a routing key.
 type sessionTransitionEmitterV2 struct {
 	bcast  interactiveBroadcaster
 	logger *slog.Logger
 
-	// resolveConv maps a session id to its owning conversation id (#741),
-	// injected so this file never imports internal/conversations — toWirePayload
-	// stays registry-free and pure. The bool is false when no conversation owns
-	// the id (race: session torn down); broadcast drops the whole event in that
-	// case rather than emit a guessed or empty routing key.
+	// resolveConv supplies ownership only when the transition has none captured.
 	resolveConv func(string) (string, bool)
+	// resolveAgent is an exact-session lookup used only at handoff, never drain.
+	resolveAgent func(string) (string, bool)
 
 	// hist is the durable conversation log (#2114). This producer deliberately
 	// skips the #647 replay ring, so the log is the ONLY place a session
@@ -115,6 +102,7 @@ func (e *sessionTransitionEmitterV2) Enqueue(t sessions.SessionTransition) {
 	if t.AgentSwitch {
 		return // the dedicated publisher owns the single switch outcome
 	}
+	t = e.capture(t)
 	select {
 	case e.in <- t:
 	default:
@@ -127,7 +115,7 @@ func (e *sessionTransitionEmitterV2) Enqueue(t sessions.SessionTransition) {
 // publishSwitch waits off Run through consumer delay and queue pressure. The
 // daemon context, never a requesting connection, owns both waits.
 func (e *sessionTransitionEmitterV2) publishSwitch(ctx context.Context, t sessions.SessionTransition) {
-	req := switchTransitionPublication{transition: t, done: make(chan struct{})}
+	req := switchTransitionPublication{transition: e.capture(t), done: make(chan struct{})}
 	select {
 	case e.switches <- req:
 	case <-ctx.Done():
@@ -137,6 +125,31 @@ func (e *sessionTransitionEmitterV2) publishSwitch(ctx context.Context, t sessio
 	case <-req.done:
 	case <-ctx.Done():
 	}
+}
+
+// capture retains exact-session facts before either publication lane can delay.
+// A nonempty captured fact is authoritative, including an unsupported agent:
+// unavailable provenance must not be replaced with a later binding or default.
+func (e *sessionTransitionEmitterV2) capture(t sessions.SessionTransition) sessions.SessionTransition {
+	p, ok := toWirePayload(t)
+	if !ok || p.NewSessionID == "" {
+		return t
+	}
+	if t.ConversationID == "" && e.resolveConv != nil {
+		if id, found := e.resolveConv(p.NewSessionID); found {
+			t.ConversationID = id
+		}
+	}
+	agent := &t.NextAgent
+	if t.Reason == sessions.ReasonEviction {
+		agent = &t.PreviousAgent
+	}
+	if *agent == "" && e.resolveAgent != nil {
+		if kind, found := e.resolveAgent(p.NewSessionID); found {
+			*agent = kind
+		}
+	}
+	return t
 }
 
 // Run drains the queue until ctx is cancelled or in is closed. Mirrors
@@ -166,15 +179,9 @@ func (e *sessionTransitionEmitterV2) Run(ctx context.Context) {
 	}
 }
 
-// broadcast maps one transition to a wire payload, resolves and stamps the
-// owning conversation_id (#741), marshals it once, then fans a session_transition
-// envelope to every currently-open INTERACTIVE conn. An unknown reason is dropped
-// (toWirePayload ok=false) so a future #659 reason can never emit a malformed
-// envelope. An unresolvable binding (race: the session was torn down before this
-// drained) drops the whole event — no guessed or empty routing key reaches the
-// wire (AC#3) — and Run survives to the next transition. A per-conn Push error is
-// logged at DEBUG and the loop continues — a dropped conn must not abort the
-// others (AC#2); ctx-cancel mid-fan-out returns early.
+// broadcast appends and fans out a legacy boundary using captured ownership and
+// agent facts. Unknown reasons and unresolved ownership drop; individual Push
+// failures do not abort other recipients unless the daemon context is cancelled.
 func (e *sessionTransitionEmitterV2) broadcast(ctx context.Context, t sessions.SessionTransition) {
 	payload, ok := toWirePayload(t)
 	if !ok {
@@ -183,13 +190,13 @@ func (e *sessionTransitionEmitterV2) broadcast(ctx context.Context, t sessions.S
 			"reason", string(t.Reason))
 		return
 	}
-	// Resolve the owning conversation once per transition, before the per-conn
-	// loop — the same conversation_id applies to every conn. payload.NewSessionID
-	// is the live binding id for both reasons (the rotated id post-#739-rebind for
-	// clear; the evicted id mirrored onto new_session_id for idle_evict). An
-	// unresolvable binding drops the whole event rather than leak a guessed key.
-	convID, ok := e.resolveConv(payload.NewSessionID)
-	if !ok {
+	convID := payload.ConversationID
+	if convID == "" && e.resolveConv != nil {
+		if id, found := e.resolveConv(payload.NewSessionID); found {
+			convID = id
+		}
+	}
+	if convID == "" {
 		e.logger.Debug("relay: session-transition drop; unresolvable conversation",
 			"event", "session_transition.unresolved_conversation",
 			"reason", payload.Reason)
@@ -221,7 +228,7 @@ func (e *sessionTransitionEmitterV2) broadcast(ctx context.Context, t sessions.S
 	// skips the #647 replay ring, so the log is the ONLY place a session
 	// boundary is retained.
 	historyEntryID := appendConversationHistory(e.hist, e.logger, "session_transition.history_append_err",
-		convID, protocol.TypeSessionTransition, payloadJSON, ts)
+		convID, protocol.TypeSessionTransition, payloadJSON, ts, transitionProvenance(t))
 
 	// Fresh snapshot per transition: a phone that opened its session since the
 	// last event is included here; one that dropped is absent, or surfaces as a
@@ -254,6 +261,18 @@ func (e *sessionTransitionEmitterV2) broadcast(ctx context.Context, t sessions.S
 	}
 }
 
+func transitionProvenance(t sessions.SessionTransition) history.SessionProvenance {
+	p, ok := toWirePayload(t)
+	kind := t.NextAgent
+	if t.Reason == sessions.ReasonEviction {
+		kind = t.PreviousAgent
+	}
+	if !ok || p.NewSessionID == "" || (kind != "claude" && kind != "codex") {
+		return history.SessionProvenance{}
+	}
+	return history.SessionProvenance{Kind: kind, SessionID: p.NewSessionID}
+}
+
 // toWirePayload maps a #659 session-side transition onto the protocol wire
 // payload. It is the pure, unit-testable seam: internal/sessions must not import
 // internal/protocol (import cycle), so the TransitionReason → wire reason mapping
@@ -269,6 +288,7 @@ func toWirePayload(t sessions.SessionTransition) (protocol.SessionTransitionPayl
 	switch t.Reason {
 	case sessions.ReasonClear:
 		return protocol.SessionTransitionPayload{
+			ConversationID:    t.ConversationID,
 			PreviousSessionID: string(t.PreviousID),
 			NewSessionID:      string(t.NewID),
 			Reason:            "clear",
@@ -277,6 +297,7 @@ func toWirePayload(t sessions.SessionTransition) (protocol.SessionTransitionPayl
 		}, true
 	case sessions.ReasonEviction:
 		return protocol.SessionTransitionPayload{
+			ConversationID:    t.ConversationID,
 			PreviousSessionID: string(t.PreviousID),
 			NewSessionID:      string(t.PreviousID), // no successor; mirror the evicted id (#336)
 			Reason:            "idle_evict",
@@ -342,11 +363,24 @@ func startSessionTransitionStreamV2(
 	logger *slog.Logger,
 	switched ...func(string),
 ) func() {
+	return startSessionTransitionStreamV2WithHarness(ctx, sink, bcast, resolveConv, nil, busy, hist, logger, switched...)
+}
+
+// startSessionTransitionStreamV2WithHarness adds exact-session capture while
+// retaining the original wrapper for callers without an agent lookup.
+func startSessionTransitionStreamV2WithHarness(
+	ctx context.Context,
+	sink transitionObserverSink,
+	bcast interactiveBroadcaster,
+	resolveConv func(string) (string, bool),
+	resolveAgent func(string) (string, bool),
+	busy *turnBusyTracker,
+	hist *history.Store,
+	logger *slog.Logger,
+	switched ...func(string),
+) func() {
 	emitter := newSessionTransitionEmitterV2(bcast, resolveConv, logger)
-	// Assigned rather than passed to the constructor, which has 10 call sites —
-	// exactly the size table's ceiling on simultaneous call-site updates. THIS
-	// function has 4, so it takes the store as a plain parameter; nil is a
-	// daemon (or a test) with no durable log.
+	emitter.resolveAgent = resolveAgent
 	emitter.hist = hist
 	if len(switched) > 0 {
 		emitter.switched = switched[0]
@@ -357,11 +391,8 @@ func startSessionTransitionStreamV2(
 		})
 	}
 	sink.SetTransitionObserver(func(t sessions.SessionTransition) {
-		// The incumbent runs FIRST and unconditionally. Enqueue is a documented
-		// non-blocking buffered send that nothing downstream can delay, so keeping it
-		// ahead of the clear leaves every transition that reaches the emitter today
-		// still reaching it, timed identically relative to this goroutine's progress
-		// — including its own drop-on-full decision.
+		// Capture and enqueue before the turn-busy clear. Queue pressure never
+		// waits on fanout, and committed switches use the dedicated publisher.
 		emitter.Enqueue(t)
 		if sid, ok := transitionClearsTurn(t); ok {
 			// busy may be nil: the tracker is constructed only on the stream path
