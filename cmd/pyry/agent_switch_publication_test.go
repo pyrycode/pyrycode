@@ -26,6 +26,23 @@ func awaitSwitchPublication(t *testing.T, done <-chan struct{}) {
 	}
 }
 
+type delayedTransitionBroadcaster struct {
+	*relay.V2SessionManager
+	entered, release chan struct{}
+	delayed          atomic.Bool
+}
+
+func (b *delayedTransitionBroadcaster) ActiveConns(ctx context.Context) []relay.ActiveConn {
+	if b.delayed.CompareAndSwap(false, true) {
+		close(b.entered)
+		select {
+		case <-b.release:
+		case <-ctx.Done():
+		}
+	}
+	return b.V2SessionManager.ActiveConns(ctx)
+}
+
 func TestRelayAgentSwitchDelayedPublication(t *testing.T) {
 	pool, reg, sw := relaySwitchFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -64,20 +81,13 @@ func TestRelayAgentSwitchDelayedPublication(t *testing.T) {
 	}
 	sw.resetting.attach(mgr)
 	entered, release := make(chan struct{}), make(chan struct{})
-	var delayed atomic.Bool
 	store := history.New(t.TempDir())
 	announced := make(chan struct{}, 2)
 	announce := newConversationUpdateEmitterV2(mgr, ctx, discardLogger()).announce
-	stop := startSessionTransitionStreamV2(ctx, pool, mgr, func(id string) (string, bool) {
-		if delayed.CompareAndSwap(false, true) {
-			close(entered)
-			select {
-			case <-release:
-			case <-ctx.Done():
-			}
-		}
+	bcast := &delayedTransitionBroadcaster{V2SessionManager: mgr, entered: entered, release: release}
+	stop := startSessionTransitionStreamV2WithHarness(ctx, pool, bcast, func(id string) (string, bool) {
 		return conversationForSession(reg, id)
-	}, nil, store, discardLogger(), func(id string) {
+	}, sessionHarness(pool), nil, store, discardLogger(), func(id string) {
 		announceSwitchedConversation(reg, id, announce)
 		announced <- struct{}{}
 	})
@@ -171,6 +181,12 @@ func TestRelayAgentSwitchDelayedPublication(t *testing.T) {
 	page, err := store.Page(switchConvID, "", 100)
 	if err != nil || len(page.Entries) != 2 {
 		t.Fatalf("history cardinality=%d, err=%v", len(page.Entries), err)
+	}
+	current, _ := reg.Get(switchConvID)
+	for i, want := range []history.SessionProvenance{{Kind: "claude", SessionID: current.CurrentSessionID}, {Kind: "codex", SessionID: codexID}} {
+		if got := page.Entries[i].Session; got == nil || *got != want {
+			t.Fatalf("committed switch provenance=%+v, want %+v", got, want)
+		}
 	}
 }
 

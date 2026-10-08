@@ -497,7 +497,7 @@ func startRelay(
 			emitter.hist = w.hist
 			resolve := func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }
 			drain := startStreamTurnDrainV2(ctx, w.streamSink, emitter, resolve, w.busy, logger)
-			transitions := startSessionTransitionStreamV2(ctx, w.transitions, bcast, resolve, w.busy, w.hist, logger)
+			transitions := startSessionTransitionStreamV2WithHarness(ctx, w.transitions, bcast, resolve, w.sessionHarness, w.busy, w.hist, logger)
 			return func() { drain(); transitions() }, nil, nil, nil, nil, nil, nil
 		}
 		// No relay leg ⇒ no stream-approval bridge, none of the three fan-out
@@ -1772,8 +1772,8 @@ func startRelayV2(
 		transitions = suggestionTransitionSink{inner: w.transitions, s: suggestions,
 			resolve: func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }}
 	}
-	streamTransitionsCleanup := startSessionTransitionStreamV2(ctx, transitions, mgr,
-		func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }, w.busy, w.hist, logger, func(id string) {
+	streamTransitionsCleanup := startSessionTransitionStreamV2WithHarness(ctx, transitions, mgr,
+		func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }, w.sessionHarness, w.busy, w.hist, logger, func(id string) {
 			announceSwitchedConversation(w.convReg, id, announceConversation)
 		})
 
