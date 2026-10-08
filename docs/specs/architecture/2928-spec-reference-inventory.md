@@ -82,3 +82,14 @@ all exclusions from this ticket. Include exactly: “A missing historical path i
 a review candidate, not proof of a false current-state claim; preserve historical
 citations and check current code and knowledge docs.” Explain rerunning from the
 repository root after source moves/deletions; findings do not fail `make check`.
+
+## Revisions
+
+- 2026-10-08, verifier findings 1 and 2: replace flat pipe splitting and the
+  link regex with shared rune-aware token boundaries and balanced link labels.
+  Table pipes delimit cells only outside code spans and bracketed components;
+  outer-pipe rows and delimiter-led tables cover both table forms. Keep embedded
+  pipes and link shapes in excluded references whole. Recognize commas between
+  complete inline code citations and Unicode whitespace before link labels.
+  Add parser and temporary-tree regressions for both findings. The inventory
+  format, filesystem behavior and documentation handoff remain as designed.

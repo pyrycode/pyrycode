@@ -50,6 +50,31 @@ func TestReferences(t *testing.T) {
 		{"quoted placeholders", "internal/\"pkg\"/file.go internal/`pkg`/file.go", nil},
 		{"embedded link shape", "internal/[pkg](cmd/tool/main.go)/file.go", nil},
 		{"embedded link without extension", "internal/[pkg](cmd/tool/main.go)", nil},
+		{"pipe glob in inline code", "`internal/[foo|internal/a.go]`", nil},
+		{"pipe glob in prose", "internal/[foo|internal/a.go]", nil},
+		{"pipe glob in table", "| source | `internal/[foo|internal/a.go]` |", nil},
+		{"pipe brace glob", "internal/{foo|internal/a.go}", nil},
+		{"pipe placeholder", "internal/<foo|internal/a.go>", nil},
+		{"pipe URL in inline code", "`https://example.test/foo|internal/a.go`", nil},
+		{"pipe longer path in inline code", "`other/path|internal/a.go`", nil},
+		{"pipe glob with link shape", "internal/[foo|[internal/a.go](cmd/a.go)]", nil},
+		{"inline pipe glob with link shape", "`internal/[foo|[internal/a.go](cmd/a.go)]`", nil},
+		{"inline pipe URL with link shape", "`https://example.test/foo|[internal/a.go](cmd/a.go)`", nil},
+		{"pipe URL in prose", "https://example.test/foo|internal/a.go", nil},
+		{"pipe glob outside table", "internal/*|internal/a.go", nil},
+		{"pipe longer path outside table", "other/path|internal/a.go", nil},
+		{"nested link label", "[source [internal/a.go]](cmd/a.go)", []string{"cmd/a.go", "internal/a.go"}},
+		{"deeply nested link label", "[source [[internal/a.go]]](cmd/a.go#entry)", []string{"cmd/a.go", "internal/a.go"}},
+		{"nested glob in label", "[source internal/[foo|internal/a.go]](cmd/a.go)", []string{"cmd/a.go"}},
+		{"nested embedded link", "internal/[source [internal/a.go]](cmd/a.go)", nil},
+		{"adjacent inline citations", "`internal/a.go`,`internal/b.go`", []string{"internal/a.go", "internal/b.go"}},
+		{"adjacent double backticks", "``internal/a.go``,``internal/b.go``", []string{"internal/a.go", "internal/b.go"}},
+		{"adjacent inline glob", "`internal/[foo|internal/a.go]`,`internal/b.go`", []string{"internal/b.go"}},
+		{"inline table cells", "|`internal/a.go`|`cmd/a.go`|", []string{"cmd/a.go", "internal/a.go"}},
+		{"table link cells", "|[source [internal/a.go]](cmd/a.go)|", []string{"cmd/a.go", "internal/a.go"}},
+		{"table without outer pipes", "Source|Path\n---|---\nfile|internal/a.go\nlink|[internal/b.go](cmd/a.go)", []string{"cmd/a.go", "internal/a.go", "internal/b.go"}},
+		{"Unicode space before link", "x\u2003[internal/a.go](cmd/a.go)", []string{"cmd/a.go", "internal/a.go"}},
+		{"Unicode space in label", "[source\u00a0internal/a.go](cmd/a.go)", []string{"cmd/a.go", "internal/a.go"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -57,6 +82,26 @@ func TestReferences(t *testing.T) {
 				t.Fatalf("references = %#v, want %#v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestInventoryMarkdownBoundaries(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	testWrite(t, root, "internal/a.go", "package a\n")
+	testWrite(t, root, "cmd/a.go", "package main\n")
+	testWrite(t, root, specsDir+"/a.md", "| source | `internal/[foo|internal/false.go]` |\n")
+	testWrite(t, root, specsDir+"/b.md", "[source [internal/a.go]](cmd/a.go)\n"+
+		"`internal/a.go`,`internal/missing.go`\nx\u2003[internal/a.go](cmd/a.go)\n")
+	want := specsDir + "/b.md\tcmd/a.go\texisting\n" +
+		specsDir + "/b.md\tinternal/a.go\texisting\n" +
+		specsDir + "/b.md\tinternal/missing.go\tmissing\n"
+	var out bytes.Buffer
+	if err := run(root, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != want {
+		t.Fatalf("inventory = %q, want %q", out.String(), want)
 	}
 }
 
