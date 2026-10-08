@@ -130,7 +130,7 @@ after documentation changes and include those changes in the commit.
 
 **Past the cap, split it.** Cut at `##` headings, and where a `##` section is itself over the cap cut it at its `###` headings. Each child is named `<package>-<section>.md` and lives beside its parent. **The parent keeps its own path**, its title and its intro, and its body becomes a map linking to the children: every agent prompt names the parent path and hundreds of documents link to it. A section under 3000 bytes stays in the parent rather than becoming a file of its own.
 
-`make docs-guard`, wired into `make check`, fails the build on an over-cap document and on a line that parses as a heading because a wrapped paragraph put a ticket reference first.
+`make docs-guard`, delegated to pyrycode-agents and run by the verifier, fails the build on an over-cap document and on a line that parses as a heading because a wrapped paragraph put a ticket reference first.
 
 Why this rule exists, measured 2026-08-25: the old classifier keyed on the title's first character, ticket entries titled with a decoration in front of the number were read as permanent lessons, and 216 curation passes and about 34 hours of blocked dispatch went into hand-trimming a file that should never have held them.
 ## Testing

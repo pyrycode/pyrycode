@@ -215,6 +215,7 @@ func TestWorkspaceFileReader_SecretNames(t *testing.T) {
 		for _, name := range denied {
 			for variant, name := range []string{name, strings.ToUpper(name)} {
 				t.Run(filepath.Base(root)+"/"+name, func(t *testing.T) {
+					t.Parallel()
 					dir := filepath.Join(root, name+"-lower-case")
 					if variant == 1 {
 						dir = filepath.Join(root, name+"-upper-case")

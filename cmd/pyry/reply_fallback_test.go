@@ -98,10 +98,7 @@ func TestReplyFallbackProcess(t *testing.T) {
 		name, out string
 		invalid   bool
 	}{
-		{"trim", "  Run the tests. \n", false}, {"blank", " \n", true},
-		{"multiline", "a\nb", true}, {"control", "a\x1bb", true},
-		{"separator", "a\u2028b", true}, {"paragraph", "a\u2029b", true},
-		{"oversize", strings.Repeat("a", 241), true}, {"output cap", strings.Repeat("a", 8192), true}, {"unicode bound", strings.Repeat("😀", 240), false},
+		{"trim", "  Run the tests. \n", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("PYRY_REPLY_OUTPUT", tc.out)
@@ -141,6 +138,42 @@ func TestReplyFallbackProcess(t *testing.T) {
 	}
 	if validReplyFallback(string([]byte{0xff})) || validReplyFallback(strings.Repeat("😀", 257)) {
 		t.Fatal("invalid UTF-8/bytes accepted")
+	}
+}
+
+// Fixture variables belong to the child, so output scenarios can run concurrently.
+func replyFallbackTestCommand(ctx context.Context, env []string) *exec.Cmd {
+	args := append([]string(nil), env...)
+	args = append(args, os.Args[0], "-test.run=^TestReplyFallbackHelperProcess$")
+	return exec.CommandContext(ctx, "/usr/bin/env", args...)
+}
+
+func TestReplyFallbackProcessOutput(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, out string
+		invalid   bool
+	}{
+		{"trim", "  Run the tests. \n", false}, {"blank", " \n", true},
+		{"multiline", "a\nb", true}, {"control", "a\x1bb", true},
+		{"separator", "a\u2028b", true}, {"paragraph", "a\u2029b", true},
+		{"oversize", strings.Repeat("a", 241), true}, {"output cap", strings.Repeat("a", 8192), true}, {"unicode bound", strings.Repeat("😀", 240), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := []string{"PYRY_REPLY_HELPER=1", "PYRY_REPLY_USER=user", "PYRY_REPLY_ASSISTANT=final only", "PYRY_REPLY_OUTPUT=" + tc.out}
+			f := replyFallback{
+				account: func(context.Context) (string, streamsup.AccountTokenFailure, error) { return "selected", "", nil },
+				command: func(ctx context.Context, _ string, _ ...string) *exec.Cmd { return replyFallbackTestCommand(ctx, env) },
+			}
+			got, err := f.run(context.Background(), "user", "final only")
+			if (err != nil) != tc.invalid {
+				t.Fatalf("invalid=%v err=%v", tc.invalid, err)
+			}
+			if err == nil && got != strings.TrimSpace(tc.out) {
+				t.Fatal("reply changed")
+			}
+		})
 	}
 }
 
@@ -198,28 +231,27 @@ func TestReplyFallbackProcessCancellation(t *testing.T) {
 }
 
 func TestReplyFallbackProcessEvidence(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"success", "failure", "parent cancel", "parent deadline", "own deadline"} {
 		t.Run(mode, func(t *testing.T) {
-			t.Setenv("PYRY_REPLY_HELPER", "1")
-			t.Setenv("PYRY_REPLY_USER", "private-user-sentinel")
-			t.Setenv("PYRY_REPLY_ASSISTANT", "private-assistant-sentinel")
-			t.Setenv("PYRY_REPLY_OUTPUT", "private-generated-sentinel")
-			t.Setenv("PRIVATE_VALUE", "private-environment-sentinel")
+			t.Parallel()
 			ready := t.TempDir() + "/private-path-sentinel"
-			t.Setenv("PYRY_REPLY_READY", ready)
+			env := []string{"PYRY_REPLY_HELPER=1", "PYRY_REPLY_USER=private-user-sentinel",
+				"PYRY_REPLY_ASSISTANT=private-assistant-sentinel", "PYRY_REPLY_OUTPUT=private-generated-sentinel",
+				"PRIVATE_VALUE=private-environment-sentinel", "PYRY_REPLY_READY=" + ready}
 			hold := strings.Contains(mode, "deadline") || mode == "parent cancel"
 			if hold {
-				t.Setenv("PYRY_REPLY_HANG", "1")
+				env = append(env, "PYRY_REPLY_HANG=1")
 			}
 			if mode == "failure" {
-				t.Setenv("PYRY_REPLY_EXIT", "7")
+				env = append(env, "PYRY_REPLY_EXIT=7")
 			}
 			var logs bytes.Buffer
 			var child *exec.Cmd
 			f := replyFallback{logger: slog.New(slog.NewJSONHandler(&logs, nil)),
 				account: func(context.Context) (string, streamsup.AccountTokenFailure, error) { return "selected", "", nil },
 				command: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-					child = exec.CommandContext(ctx, os.Args[0], "-test.run=^TestReplyFallbackHelperProcess$")
+					child = replyFallbackTestCommand(ctx, env)
 					return child
 				}}
 			parent, cancel := context.WithCancel(context.Background())

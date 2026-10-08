@@ -33,7 +33,7 @@ temporary repository-shaped corpus, from an unrelated working directory.
 invocation. Run the repeatable verification with installed QMD and Node:
 
 ```sh
-go test -race -count=1 -v ./cmd/qmd-current/...
+../pyrycode-agents/bin/pyrycode-tool test -run QMDCurrent -v
 ```
 
 Compare `qmd ls` membership with the exact direct and nested feature/decision
@@ -55,3 +55,10 @@ the real corpus and verifies malformed configuration remains intact on failure.
 Missing QMD skips the integration tests explicitly; inspect executed tests and
 skip reasons before claiming verification. Collection membership and keyword
 search checks need no embeddings or live-Claude execution.
+
+## Tool ownership
+
+The implementation and integration tests live in `pyrycode-agents/tools/pyrycode/cmd/qmd-current`.
+The product command is a compatibility launcher and is excluded from Go unit tests.
+The agents command defaults to the caller's current directory.
+Pass `--repo` when running it from outside the product checkout.
