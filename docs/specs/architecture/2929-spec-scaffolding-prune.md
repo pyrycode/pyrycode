@@ -65,3 +65,18 @@ None. Historical PR closing links may be missing; affected documents remain unch
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-08
+
+## Revisions
+
+2026-10-08: The completed sketch's acquisition CLI pushed written work beyond the ceiling. Replace the optional `-collect-evidence` CLI and acquisition-test portions above with the ticket's verified-snapshot route. The shipped command only previews/applies offline snapshots. Batched acquisition occurs separately; the durable snapshot records repository, retrieval time, positive PR associations and exact query provenance. All pruning contracts stay the same. Scanning unversioned temporary trees leaves checkout identity empty; the corpus artifact requires and records a real checkout commit.
+
+Acquire reusable metadata with these two paginated reads, then flatten issue nodes into snapshot issue records and append merged PR records only through closing links in this repository. Verify both final outer pages have `hasNextPage: false`, no API errors, no duplicate issue numbers, and every nested link `totalCount` equals its returned node count; reject an incomplete acquisition. Snapshot provenance records the queries, page counts and source-response hashes.
+
+```sh
+gh api graphql --paginate -f query='query($endCursor:String){repository(owner:"pyrycode",name:"pyrycode"){issues(first:100,after:$endCursor){nodes{number state} pageInfo{hasNextPage endCursor}}}}' > /tmp/issues-pages.json
+gh api graphql --paginate -f query='query($endCursor:String){repository(owner:"pyrycode",name:"pyrycode"){pullRequests(first:100,states:MERGED,after:$endCursor){nodes{number mergedAt closingIssuesReferences(first:100){totalCount nodes{number repository{nameWithOwner}}}} pageInfo{hasNextPage endCursor}}}}' > /tmp/pr-pages.json
+```
+
+The nested closing-link connection uses `totalCount`, because `gh --paginate` can stop at a nested `pageInfo` instead of the outer PR cursor. Another conservative clarification: no removal range may overlap a retained question section, including containing scaffolding. Future merge timestamps relative to snapshot retrieval and conflicting duplicate PR records are contradictory evidence.
+
+Reproduce preview from repository root with `go run ./cmd/spec-scaffolding-prune -evidence cmd/spec-scaffolding-prune/testdata/2929-evidence.json`. Approval format is a JSON array of `{ "document": "docs/specs/architecture/707-example.md", "sha256": "full document SHA-256", "heading": 2 }`; heading ordinals are one-based among all parsed headings, and only exact question sections can match. Initial backfill uses no approvals. Generated corpus artifacts are reviewed data, not hermetic golden fixtures.
