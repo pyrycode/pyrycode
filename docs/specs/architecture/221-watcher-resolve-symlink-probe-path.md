@@ -7,6 +7,8 @@ size: XS
 
 ## Context
 
+The filesystem rotation watcher was retired by #2137; stream conversation_reset announcements replace path probing. See [rotation replacement](../../knowledge/features/rotation-watcher.md#where-the-replacement-lives).
+
 The rotation watcher uses fsnotify CREATE + a per-PID `lsof`-style probe to detect `/clear`-style UUID rotations. The match gate at `internal/sessions/rotation/watcher.go:179` compares the probe-returned path against `expected = filepath.Join(w.resolvedDir, base)`.
 
 `resolvedDir` is canonicalised once at construction time (`watcher.go:108-113`, `filepath.EvalSymlinks` with fallback to the unresolved dir). The probe's return value, however, is whatever the kernel/`lsof` reports, which on macOS can be the symlink form (`/var/folders/...`) when the canonical form is `/private/var/folders/...`. The comparison then mismatches and the rotation event is silently dropped.
@@ -134,10 +136,6 @@ The polling/sleep shape is consistent with `TestWatcher_ProbePathMismatch` at `w
 - `TestWatcher_DetectsRotation` — canonical/canonical path; unaffected.
 - `TestWatcher_DetectsRotationThroughSymlink` — symlinked-dir/canonical-probe; the watched-dir resolution still happens in `New`, so this keeps working without change.
 - `TestWatcher_ProbePathMismatch` — genuine mismatch (different filename); `EvalSymlinks` will succeed and the `!=` check will still reject it.
-
-## Open questions
-
-None. The asymmetry analysis is in the ticket body; the fix shape is a textbook canonicalise-both-sides; the fallback contract is explicit in the AC.
 
 ## Out of scope
 

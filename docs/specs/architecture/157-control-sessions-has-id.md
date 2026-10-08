@@ -338,14 +338,6 @@ a row for the SessionsList shape (so #87's invariant continues to
 hold) and confirms (rather than re-adds) the omitempty pins. The
 existing rows pass unmodified.
 
-## Open questions
-
-None. Field reuse, no-new-interface choice, error envelope (unused),
-and validation shape are all settled by precedent (#87, #98) and the
-AC. If the existing `fakeResolver` shape proves awkward for the
-present/absent split, extend it inside the test file rather than
-reshaping the production seam.
-
 ## Out of scope
 
 - The 1.3c-2 foreground auto-attach detection that consumes this verb.

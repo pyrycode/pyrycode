@@ -2,6 +2,8 @@
 
 ## Context
 
+Revoke now locks the entire Load/Remove/Save sequence with devices.WithLock; its not-found sentinel leaves that region before os.Exit. See [current revoke behavior](../../knowledge/features/pyry-pair-command.md).
+
 Ticket #214 turned `runPair` into a sub-verb dispatcher (`runPair` peels `args[0]`, switches to `runPairList` or falls through to `runPairDefault`). This ticket appends a third leaf — the destructive `revoke` sub-verb — under the same dispatcher.
 
 The work is wiring on top of existing primitives:

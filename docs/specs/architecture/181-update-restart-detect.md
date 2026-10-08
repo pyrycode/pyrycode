@@ -137,6 +137,3 @@ The UID-templating verification falls naturally out of the `launchd_only` and `b
 
 No mocking, no filesystem, no goroutines. The whole test file is ~50 lines.
 
-## Open questions
-
-None. The acceptance criteria are exhaustive; the tie-breaker is specified; the tests follow directly from the AC. Wiring (the actual probe + exec) is the next ticket and is explicitly out of scope.

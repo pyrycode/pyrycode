@@ -8,6 +8,8 @@ this is a one-shot CLI verb that touches the on-disk registry directly.
 
 ## Context
 
+Bare pyry pair now selects a running service and requests pairing.mint; it does not mint from offline saved identity or accept --relay overrides. See [current issuance order](../../knowledge/features/pyry-pair-command.md#pyry-pair-bare--operation-order).
+
 Phase 3 wiring ticket. Every primitive is already in the repo and
 unit-tested in its own ticket; nothing new is being designed here. The
 design decisions worth pinning are (a) which on-disk paths the verb

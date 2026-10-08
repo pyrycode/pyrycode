@@ -16,6 +16,8 @@ implicit) live in `internal/devices`.
 
 ## Context
 
+Validate now takes a peer static key and returns ValidateResult, checking redemption deadlines and key binding before acceptance. See [current authentication contract](../../knowledge/features/devices-registry-validate.md).
+
 #208 delivered the hashing primitives. #209 delivered the `Registry`
 with `Add` / `Remove` / `List` / `FindByTokenHash` / `Load` / `Save`.
 Neither exposes a single entry point that composes "hash the wire

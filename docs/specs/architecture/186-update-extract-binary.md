@@ -196,6 +196,3 @@ The `binary_present_returned_unchanged` case asserts byte-equality (`bytes.Equal
 
 No mocking, no filesystem, no goroutines. The whole test file is ~80 lines including the two helpers.
 
-## Open questions
-
-None. The acceptance criteria are exhaustive; the matching rule (`filepath.Base` exact) is specified; sentinel-error vocabulary mirrors `checksum.go`. Atomic replace is explicitly a separate ticket and is not addressed here.

@@ -369,18 +369,6 @@ Rationale for testing the resolver: it has a small forking branch (`os.UserHomeD
 
 The error chain `cmd/pyry: loading conversations: registry: parse <path>: <json error>` is built mechanically from a single `fmt.Errorf("loading conversations: %w", err)` line. Stdlib testing of `fmt.Errorf("...: %w", ...)` is testing the stdlib. The wrap string `"loading conversations: "` is a one-line value worth eyeball-checking in review and worth not duplicating into a test that exists only to assert it.
 
-## Open questions
-
-None. Every AC corresponds to an unambiguous code path:
-
-- Path resolution → mirror of `resolveRegistryPath`, pinned line-by-line.
-- Load + wrap → 5 lines, contract pinned by `Load`'s doc-comment.
-- Plumbing → 2 Config fields + 2 Pool fields, pinned by the sessions registry's parallel.
-- Errgroup wiring → 1 `g.Go` call modelled on the rotation watcher's, pinned by line 755.
-- Nil-reg gate → `if p.convReg != nil`, pinned by AC.
-- Test interval injection → package-level seam pinned by `newProbe` precedent at pool.go:29.
-- Integration test → `helperPoolWithSleepArgs`-shaped Pool with `/bin/sleep 3600` bootstrap, file-on-disk assertion, pinned by `TestRunSweepLoop_TicksAndCancels`'s polling shape from #242.
-
 ## Out of scope (do not implement here)
 
 - Adding `--no-conversations` / `--ephemeral` flags to disable the conversations registry. None exist today; the AC explicitly says auto-archive runs regardless of `--no-resume`/`--ephemeral` (which themselves don't exist as separate flags either — `-pyry-resume=false` is the only related toggle, and it controls claude's `--continue`, not pyry's persistence layer).

@@ -2,6 +2,8 @@
 
 ## Context
 
+Attach/resize and foreground auto-attach were retired by #1348; this design is historical. See [current control-plane behavior](../../knowledge/features/control-plane.md).
+
 The `Bridge.Resize(rows, cols uint16) error` seam landed in #136 along with handshake-time application. Two pieces of the live-resize story remain:
 
 1. **Wire** — the control protocol has no message that carries `(rows, cols)` from client to server while attached.

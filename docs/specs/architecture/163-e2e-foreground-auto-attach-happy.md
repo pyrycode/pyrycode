@@ -26,6 +26,8 @@ cross-check at the end of *Files to read first*.)
 
 ## Context
 
+Attach/resize and foreground auto-attach were retired by #1348; this design is historical. See [current control-plane behavior](../../knowledge/features/control-plane.md).
+
 Phase 1.3c-2 (#158) shipped the foreground auto-attach gate. Today
 it is exercised only by unit tests in `cmd/pyry/auto_attach_test.go`,
 which stop at the `SessionsHasID` decision and don't cross the

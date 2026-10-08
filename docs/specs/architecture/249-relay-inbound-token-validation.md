@@ -2,6 +2,8 @@
 
 ## Context
 
+AuthenticateFirstFrame was deleted by #1040; current phone authentication uses Noise_IK and the devices token/key predicate. See [current authentication ownership](../../knowledge/features/relay-package.md).
+
 Phase 3 Track C composes A5 (`devices.Registry.Validate`, shipped 2026-05-09 as #210) with the v1 handshake/control payload structs (`protocol.HelloAckPayload`, `protocol.ErrorPayload`, shipped as #271). The relay performs no token validation per spec § Authentication phone→relay→binary; the binary owns the entire trust check. The relay forwards every phone frame to the binary in a `RoutingEnvelope`; the binary validates on receipt of the phone's first frame for a given `conn_id`.
 
 This ticket adds `internal/relay/auth.go` as a sibling to `connection.go` and exposes a single pure function: given the first frame's routing envelope, the device token (as an explicit argument, carrier-agnostic), and a handle to the devices registry, return a structured outcome the relay-conn layer (sibling future ticket) will act on — send the response envelope back, and (on reject) close the phone WS with code `4401`.

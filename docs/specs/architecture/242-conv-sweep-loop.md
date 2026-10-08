@@ -225,10 +225,6 @@ After the first tick, the registry is empty (the in-memory delete happened). On 
 - Concurrent invocation of `RunSweepLoop` against the same registry — out of scope; sibling #243 will spawn at most one. If a future ticket wants two loops on the same registry, it owns its own coverage.
 - e2e via the daemon — explicitly the sibling #243's territory.
 
-## Open questions
-
-None. Every AC is satisfied by an unambiguous code path; every design choice is anchored in an existing precedent (rotation watcher loop shape, sessions logger conventions, sweep-primitive splitting rationale).
-
 ## Out of scope (do not implement here)
 
 - Loading `conversations.json` at daemon startup (sibling #243, in `cmd/pyry/main.go`).
