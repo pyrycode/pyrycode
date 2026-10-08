@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -265,10 +266,12 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// workspace_root, the same ack an unknown token gets.
 	newlyBound := false
 	if tokenResult == devices.ValidateAccepted && versionReject.reason == "" {
-		switch m.cfg.Devices.BindStaticKey(device.TokenHash, s.peerStatic) {
-		case devices.BindNewlyBound:
-			newlyBound = true
-		case devices.BindMatched:
+		switch binding := m.cfg.Devices.BindStaticKey(device.TokenHash, s.peerStatic); binding {
+		case devices.BindNewlyBound, devices.BindMatched:
+			newlyBound = binding == devices.BindNewlyBound
+			// Validate's snapshot may predate the binding, even when another
+			// connection with this same key bound it before BindStaticKey ran.
+			device.StaticKey = hex.EncodeToString(s.peerStatic)
 		case devices.BindKeyMismatch:
 			tokenResult = devices.ValidateKeyMismatch
 			keyMismatchReason = "bind_race_lost"

@@ -71,3 +71,7 @@ Pending for the documentation stage: in `docs/knowledge/features/history-package
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-08
+
+## Revisions
+
+- 2026-10-08: while implementing the snapshot fix, identified that `Validate` can return an unbound snapshot and another connection with the same key can bind before `BindStaticKey`, yielding `BindMatched`. Refresh the local key on both successful binding outcomes, using the authenticated peer key without a second registry lookup. Refusal behavior is unchanged.

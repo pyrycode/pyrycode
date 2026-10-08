@@ -2,8 +2,10 @@ package relay
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdh"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -13,8 +15,71 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/devices"
+	"github.com/pyrycode/pyrycode/internal/dispatch"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
+
+func TestV2Session_StaticKey_DispatchedSnapshot(t *testing.T) {
+	t.Parallel()
+	reg, path := unboundFixture(t, time.Time{})
+	respPriv, respPub := genV2Keypair(t)
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	rec := &v2Recorder{}
+	seen := make(chan devices.Device, 1)
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames: frames, Outbound: rec.outbound, StaticPriv: respPriv,
+		Devices: reg, DevicesPath: path, ServerID: v2TestServerID, Logger: silentLogger(),
+		Handlers: map[string]dispatch.Handler{
+			protocol.TypeSendMessage: func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error {
+				if auth := c.Auth(); auth != nil {
+					seen <- *auth
+				}
+				return c.Reply(ctx, env, protocol.TypeAck, json.RawMessage(`{}`))
+			},
+		},
+	})
+	t.Cleanup(stop)
+	for i, name := range []string{v2TestDevName, "renamed pairing"} {
+		if i == 1 {
+			if !reg.UpdatePushRegistration(devices.HashToken(v2TestToken), "android", "", name) {
+				t.Fatal("rename pairing failed")
+			}
+			if err := reg.Save(path); err != nil {
+				t.Fatal(err)
+			}
+		}
+		connID := fmt.Sprintf("identity-%d", i)
+		send, recv := openModalConn(t, mgr, frames, rec, respPub, connID, []string{protocol.CapabilityInteractive})
+		frames <- sealAppFrameConn(t, send, connID, protocol.Envelope{
+			ID: 7, Type: protocol.TypeSendMessage, TS: time.Now().UTC(), Payload: json.RawMessage(`{}`),
+		})
+		select {
+		case got := <-seen:
+			if got.StaticKey != v2TestInstallKey(t) || got.Name != name {
+				t.Errorf("dispatch key/name = (%q, %q), want (%q, %q)", got.StaticKey, got.Name, v2TestInstallKey(t), name)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("send handler never saw authenticated device")
+		}
+		msgs := waitForConnNoiseMsg(t, rec, connID, 1)
+		if env := decryptAppFrame(t, msgs[0], recv); env.Type != protocol.TypeAck {
+			t.Errorf("reply = %q, want ack", env.Type)
+		}
+	}
+}
+
+func TestV2Session_StaticKey_UnknownTokenBindsNothing(t *testing.T) {
+	t.Parallel()
+	reg, path := unboundFixture(t, time.Time{})
+	before := reg.List()
+	out := runHelloFrom(t, V2SessionConfig{Devices: reg, DevicesPath: path}, v2TestInstallPriv, "UNKNOWN_TOKEN", "v2-test")
+	if out.open || out.closeCode != uint16(StatusUnauthorized) {
+		t.Fatalf("unknown token open/close = %v/%d", out.open, out.closeCode)
+	}
+	if !reflect.DeepEqual(reg.List(), before) || diskDevice(t, path).StaticKey != "" {
+		t.Error("unknown token changed unbound pairing")
+	}
+}
 
 // installKey returns a distinct install's static private key and the hex of its
 // public key, as Device.StaticKey stores it.
