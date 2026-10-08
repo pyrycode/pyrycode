@@ -24,6 +24,7 @@ const (
 type runtimeHistoryFact struct {
 	ConversationID      string    `json:"conversation_id"`
 	TurnID              string    `json:"turn_id,omitempty"`
+	TurnOpenedEntryID   uint64    `json:"turn_opened_entry_id,omitempty"`
 	ToolCallID          string    `json:"tool_call_id,omitempty"`
 	Tool                string    `json:"tool,omitempty"`
 	Cause               string    `json:"cause,omitempty"`

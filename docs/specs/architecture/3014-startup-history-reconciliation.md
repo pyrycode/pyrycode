@@ -79,3 +79,8 @@ None. Unknown legacy provenance stays absent; no transcript lookup is permitted.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-08
+
+## Revisions
+
+- 2026-10-08: reused untagged turn IDs across legacy delimiters require recovery to identify the original opening independently of the scope where its closure is appended. Add optional `runtimeHistoryFact.TurnOpenedEntryID`, referencing the earliest recorded main opening evidence. Startup closures retain this durable identity; the backward fold applies it across delimiter scopes without inventing provenance. Runtime facts omit it. This adds one local production field, keeping total work below 800 lines.
+- 2026-10-08: legacy denials lack parent attribution. Track parent-attributed turn evidence to exclude child-only denial candidates while allowing an identifiable denial-only main turn. Validate registry IDs before logging them, since `Registry.Load` does not validate their shape. Failure tests distinguish actual read/write failures from this invalid-ID rejection.

@@ -575,6 +575,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// instance directory is resolved lazily, per Append. It is read again below by
 	// relayWiring.hist, which the #2114 producers reach it through.
 	conversationHistory := history.New(resolveInstanceDirPath(*name))
+	reconcileStartupHistory(conversationHistory, convReg, logger, time.Now().UTC())
 	// #2499's carry-forward, the fifth value in this block built BEFORE
 	// msgqueue.New: it wraps the delivery seam AND hangs off OnDelivered, so both
 	// of its queue-facing halves are set in the literal below. Its third half is
