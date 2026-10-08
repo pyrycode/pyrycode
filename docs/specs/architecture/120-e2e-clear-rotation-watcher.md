@@ -5,6 +5,14 @@ status: spec
 size: S
 ---
 
+## Historical review (#2987)
+
+Historical rotation design: #2137 removed the fsnotify/open-descriptor watcher and its
+rotation test. Current conversation_reset handling uses sessionResetFollower and
+Pool.AdoptAnnouncedID. See [rotation retirement and
+replacement](../../knowledge/features/rotation-watcher.md). The current enumeration
+command is pyry sessions list, not pyry list.
+
 ## Context
 
 `internal/sessions/rotation` watches `~/.claude/projects/<encoded-cwd>/` for new

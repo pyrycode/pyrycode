@@ -339,12 +339,6 @@ PROJECT-MEMORY.md gets a one-paragraph entry under "Codebase (Phase
 1.1d-A1, ticket #94)" summarising the surface and the
 delete-then-evict invariant.
 
-## Open questions
-
-None — design is fully specified. Edge cases above cover the
-ctx-cancellation and concurrent-caller cases the implementer would
-otherwise have to invent answers for.
-
 ## Out of scope (reaffirmed)
 
 - JSONL on-disk disposition (`RemoveOptions`, `JSONLPolicy`, archive,

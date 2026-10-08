@@ -12,15 +12,11 @@ bootstrap now spawns with an explicit, daemon-owned `--session-id
 [sessions-package.md § `Pool.BootstrapID`](sessions-package.md) and
 [streamsup-package-buildargs-the-id-flag-inversion-that-keeps.md](streamsup-package-buildargs-the-id-flag-inversion-that-keeps.md).
 
-**`/clear` reconciliation still works, unchanged in mechanism** — it just no
-longer runs at startup. `Pool.RotateID` (below) is still the seam the live
-fsnotify watcher (`rotation-watcher.md`) calls when claude rotates its UUID
-on `/clear`; the difference is that `ResolveSessionID` reads the *current*
-`p.bootstrap` fresh at every spawn, so a rotation `RotateID` already
-persisted is picked up on the next restart automatically — no separate
-startup scan needed. `mostRecentJSONL` (below) was deleted in #1149, when
-`newTranscriptResolver`'s AC5 no-lsof fallback was rewritten onto
-`internal/transcript.Newest` instead.
+Startup newest-JSONL adoption was retired by #839. Live fsnotify/open-descriptor
+reconciliation was retired by #2137. Current `conversation_reset` announcements
+are followed by `sessionResetFollower`, which re-keys through `Pool.AdoptAnnouncedID`;
+`Pool.RotateID` remains an exported historical/test seam with no production caller.
+See [rotation retirement and replacement](rotation-watcher.md).
 
 The rest of this document (path layout, `RotateID` seam, `mostRecentJSONL`
 semantics) is preserved as historical/reference material for the parts that
@@ -92,7 +88,9 @@ func (p *Pool) RotateID(oldID, newID SessionID) error
 - Bumps the rotated session's `last_active_at` to `time.Now().UTC()` (the JSONL the registry now points at is, by definition, the most-recently-active one we observed). `created_at` is preserved — conceptually this is the same conversational session continuing under a new claude UUID.
 - Updates `p.bootstrap` if `oldID` was the bootstrap.
 
-This is the single mutation point reused by Phase 1.2b-B's live-detection goroutine. The lock contract is identical, so no design change is needed when that ticket lands.
+The retired watcher reused this seam.
+Current announced resets use `Pool.AdoptAnnouncedID`; `Pool.RotateID` has no
+production caller.
 
 ## `mostRecentJSONL` semantics
 
@@ -122,22 +120,11 @@ The forward-looking guarantee this section originally flagged — "fresh session
 
 ## `ClaudeSessionsDir` wiring in `cmd/pyry` (current)
 
-`runSupervisor` resolves the directory and passes it through `Config.ClaudeSessionsDir`:
-
-```go
-ClaudeSessionsDir: resolveClaudeSessionsDir(*workdir),
-```
-
-Post-#839, this field no longer gates a startup reconcile — it gates the live
-rotation watcher (`rotation-watcher.md`) and the #838 growth-confirm probe
-resolver. `resolveClaudeSessionsDir` resolves an empty workdir to the process
-cwd (matching claude), `filepath.Abs`'s the result, then calls
-`sessions.DefaultClaudeSessionsDir`. If `os.UserHomeDir()` fails, it returns
-`""` and both the watcher and the probe resolver are disabled — startup
-proceeds with the deterministic `--session-id` bootstrap behaviour
-regardless.
-
-`encodeWorkdir` is unexported. The encoding is a claude-CLI implementation detail and stays inside `internal/sessions`; `cmd/pyry` only sees the resolved path.
+`ClaudeSessionsDir` is transcript-path configuration; it does not enable startup
+adoption or a live rotation watcher. Both mechanisms are retired. Current reset
+following uses the session's `conversation_reset` stream announcement; see
+[rotation retirement and replacement](rotation-watcher.md).
+`DefaultClaudeSessionsDir` resolves symlinks before encoding the workdir.
 
 ## Error handling (historical — pre-#839 startup scan)
 

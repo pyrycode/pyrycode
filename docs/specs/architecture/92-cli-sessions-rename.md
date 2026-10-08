@@ -36,6 +36,13 @@ and non-UUID input falls through to the server's
 sibling of #99's prefix-resolution work) lifts
 `resolveSessionIDViaList` into a shared helper at that point.
 
+## Historical review (#2987)
+
+The full-UUID-only restriction is superseded by #93: pyry sessions rename resolves a
+unique prefix client-side through resolveSessionIDViaList before sending the canonical
+ID. See [current rename
+contract](../../knowledge/features/sessions-package-key-types-pool-rename-1-1c.md).
+
 ## Context
 
 `sessions.rename` (the wire verb and `Pool.Rename` seam) shipped in

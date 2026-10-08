@@ -1,5 +1,13 @@
 # #133 — `pyry attach` forwards SIGWINCH to daemon
 
+## Historical review (#2987)
+
+Historical terminal design: #1348 removed internal/supervisor and the attach/bridge
+path; #1535 removed the attach/resize wire types. Current sessions use
+Runner/RunnerFactory, and pyry attach returns a removal error. See [current runner
+ownership](../../knowledge/features/sessions-package-key-types-runner-interface-runnerfactory.md)
+and [control plane](../../knowledge/features/control-plane.md).
+
 ## Context
 
 `Bridge.Resize` (#136) and the `VerbResize` wire+server-applier (#137) shipped together: the daemon already accepts a resize message on a fresh control connection, swaps cols/rows, clamps to `uint16`, and applies via the seam. The remaining gap is the **trigger** on the client side. `pyry attach` (`internal/control/attach_client.go`) installs no SIGWINCH handler today, so the supervised `claude` only ever sees the handshake's initial geometry; if the user resizes their terminal mid-session, the child renders against stale dimensions until they detach and reattach.

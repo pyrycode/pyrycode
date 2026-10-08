@@ -162,10 +162,6 @@ go test -tags=e2e -race -run='TestStop_E2E|TestStatus_E2E_Stopped|TestLogs_E2E|T
 
 Verify each test passes once and produces the expected stdout/stderr in `-v` mode (sanity check that the assertions actually exercise the surfaces).
 
-## Open questions
-
-None. Implementation is mechanical against the existing harness.
-
 ## Out of scope (explicit)
 
 - `pyry attach` e2e (interactive PTY, separate work).

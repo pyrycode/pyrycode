@@ -222,11 +222,6 @@ How we know the harness extension is correct:
 - Byte-equal assertion on the registry catches the worst-case regression
   (silent overwrite). It does not depend on JSON parsing the corrupt input.
 
-# Open questions
-
-None. The harness shape is constrained by the ticket; the production path is
-already in place.
-
 # Out of scope
 
 - Adding analogous "expect failed start" helpers for other startup-failure
