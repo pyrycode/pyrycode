@@ -23,12 +23,12 @@ and send-now registration follows actual write order per conversation;
 matching by client `message_id` would confuse duplicate ids and equal payloads.
 See [history-package.md § Producers](history-package.md#producers-2114-2115).
 
-`Config.SendNow` is the fourth optional caller-supplied seam beside
-`OnChange`/`OnGiveUp`/`OnDelivered`/`Pending`; `nil` makes `SendNow` an
+`Config.SendNow` is an optional caller-supplied seam beside
+the queue's observers and `Pending`; `nil` makes `SendNow` an
 unconditional `false` no-op, matching the package's shipped-unwired-first
 rhythm. `QueuedMessage` gained one field, `SentNow bool`, set only on the
-delivery projection of a message `SendNow` writes — it is how a consumer that
-also hangs off `OnDelivered` (the channel-carry clear, see
+delivery and terminal projections of a message `SendNow` writes — it is how a
+consumer that also hangs off `OnDelivered` (the channel-carry clear, see
 [control-plane.md § Carrying a posted channel message into claude's next
 turn](control-plane-channel-post-carry.md#carrying-a-posted-channel-message-into-claudes-next-turn-2499))
 tells a send-now delivery apart from an ordinary drain delivery of the same
@@ -63,10 +63,11 @@ drain is actively `committing`, where it lands second instead. No `notify`
 fires on this path: the backlog is back exactly as it was, so there is no
 change to report. A drain that had exited on an empty FIFO is respawned.
 
-On success: `notify` fires (the `queue_state` without this item), then
-`notifyDelivered(convID, m, sentNow: true)` — the one call site that threads a
-`true` through where every other caller of the shared `notifyDelivered`
-passes `false`.
+On success, the queue claims `TerminalDelivered` with `SentNow: true` and fires
+`notify` for the backlog change. Once acceptance completes, `OnDelivered` runs
+before `OnTerminal`, each with its own copied projection. Failed/refused
+send-now attempts emit no terminal outcome; a reinserted message retains its
+original acceptance. See [lifecycle ordering](msgqueue-package-lifecycle.md#delivered-notification-2115).
 
 ## `headTaken` — the drain must read a refused head's own re-insertion as a drop, not a failure
 

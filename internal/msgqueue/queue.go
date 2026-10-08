@@ -149,6 +149,9 @@ type GiveUpFunc func(convID, reason string)
 // rather than restated. The delivery seam cannot serve this purpose at all: it
 // receives only the payload bytes, which ARE the composed value.
 //
+// With OnAccepted configured, notification waits for acceptance to complete and
+// can run on the enqueue caller if confirmation arrived during that callback.
+//
 // TS is the ENQUEUE timestamp, not the confirmation time. A consumer that stamps
 // a durable record must mint its own: a message can sit in the backlog for a
 // long time, and stamping at enqueue orders it behind entries carrying later
@@ -205,6 +208,10 @@ type Config struct {
 	// OnDelivered is the optional delivered-notification seam; nil ⇒ disabled.
 	// It fires once per CONFIRMED delivery, carrying the item just delivered.
 	OnDelivered DeliveredFunc
+	// OnAccepted observes each accepted enqueue before terminal/OnDelivered callbacks.
+	OnAccepted AcceptedFunc
+	// OnTerminal observes the single resolved outcome of an accepted message.
+	OnTerminal TerminalFunc
 	// Pending classifies a delivery error as a legitimate hold rather than a
 	// failure. While it returns true the drain retries the head WITHOUT counting
 	// the elapsed window toward GiveUpAfter and RESETS the give-up streak, so a
@@ -238,7 +245,7 @@ type Config struct {
 // operator's turn. They are client-authored and untrusted like MessageID, and
 // the same provenance argument applies: they return to the trust domain that
 // authored them, which is not licence to project the delivery payload. Only the
-// DELIVERED projection (OnDelivered) sets the field; Snapshot and SnapshotAll
+// lifecycle/delivery projections set the field; Snapshot and SnapshotAll
 // leave it nil, since queue_state does not carry it.
 //
 // DeviceName, ClientVersion and ClientSentAt (#2704) say who sent the message
@@ -246,9 +253,9 @@ type Config struct {
 // the history producer can store them on the operator's turn. ClientSentAt is a
 // time the handler already parsed and normalised to UTC, never the client's raw
 // bytes, and zero when the client sent none. Like AttachmentIDs, only the
-// delivered projection sets them, and nothing here reads or logs them.
+// lifecycle/delivery projections set them, and nothing here reads or logs them.
 //
-// SentNow (#2729) is true only on the delivered projection of a message SendNow
+// SentNow (#2729) is true on delivery and terminal projections of a message SendNow
 // wrote into a running turn rather than the drain at idle. It is what lets an
 // OnDelivered consumer that pairs with the drain's own delivery seam — the
 // channel carry's clear — tell a delivery it did not compose apart from one it did.
@@ -258,6 +265,9 @@ type QueuedMessage struct {
 	Text          string
 	TS            time.Time
 	AttachmentIDs []string
+	// DeviceID is opaque sender identity, empty for legacy enqueue callers.
+	// It grants no authority and is never used for deduplication.
+	DeviceID      string
 	DeviceName    string
 	ClientVersion string
 	ClientSentAt  time.Time
@@ -298,9 +308,11 @@ type queued struct {
 	delivery      string
 	ts            time.Time
 	attachmentIDs []string
+	deviceID      string
 	deviceName    string
 	clientVersion string
 	clientSentAt  time.Time
+	lifecycle     *messageLifecycle // shared by FIFO and outstanding attempts; guarded by q.mu
 }
 
 // convQueue is one conversation's FIFO plus its id counter and the drain-state
@@ -339,8 +351,10 @@ type Queue struct {
 	onChange    ChangeFunc    // nil ⇒ change notification disabled
 	onGiveUp    GiveUpFunc    // nil ⇒ give-up notification disabled
 	onDelivered DeliveredFunc // nil ⇒ delivered notification disabled
-	pending     PendingFunc   // nil ⇒ no delivery error is treated as a hold
-	sendNow     SendNowFunc   // nil ⇒ SendNow is inert
+	onAccepted  AcceptedFunc
+	onTerminal  TerminalFunc
+	pending     PendingFunc // nil ⇒ no delivery error is treated as a hold
+	sendNow     SendNowFunc // nil ⇒ SendNow is inert
 	log         *slog.Logger
 
 	mu      sync.Mutex
@@ -383,6 +397,8 @@ func New(cfg Config) (*Queue, error) {
 		onChange:    cfg.OnChange,
 		onGiveUp:    cfg.OnGiveUp,
 		onDelivered: cfg.OnDelivered,
+		onAccepted:  cfg.OnAccepted,
+		onTerminal:  cfg.OnTerminal,
 		pending:     cfg.Pending,
 		sendNow:     cfg.SendNow,
 		log:         log,
@@ -480,6 +496,16 @@ func (q *Queue) EnqueueAttached(convID, messageID, text, delivery string, attach
 // never aliases the caller's slice. An empty list is stored as nil. The ids are
 // never logged, like every other string on the record.
 func (q *Queue) EnqueueSent(convID, messageID, text, delivery string, attachmentIDs []string, deviceName, clientVersion string, clientSentAt time.Time) uint64 {
+	return q.EnqueueIdentified(convID, messageID, text, delivery, attachmentIDs, "", deviceName, clientVersion, clientSentAt)
+}
+
+// EnqueueIdentified is EnqueueSent with opaque stable device identity separate
+// from display name. Identity is copied verbatim, never logged, authenticated or
+// deduplicated here. OnAccepted runs synchronously off-lock before this returns;
+// terminal and OnDelivered callbacks for this message wait for it to complete.
+// deviceID identifies the sender independently of deviceName; it must not contain
+// credentials. Every legacy enqueue method supplies an empty deviceID.
+func (q *Queue) EnqueueIdentified(convID, messageID, text, delivery string, attachmentIDs []string, deviceID, deviceName, clientVersion string, clientSentAt time.Time) uint64 {
 	var ids []string
 	if len(attachmentIDs) > 0 {
 		ids = slices.Clone(attachmentIDs)
@@ -504,11 +530,15 @@ func (q *Queue) EnqueueSent(convID, messageID, text, delivery string, attachment
 	}
 	id := c.nextID
 	c.nextID++
-	c.items = append(c.items, queued{id: id, messageID: messageID, text: text, delivery: delivery, ts: time.Now(), attachmentIDs: ids,
-		deviceName: deviceName, clientVersion: clientVersion, clientSentAt: clientSentAt})
+	m := queued{id: id, messageID: messageID, text: text, delivery: delivery, ts: time.Now(), attachmentIDs: ids,
+		deviceID: deviceID, deviceName: deviceName, clientVersion: clientVersion, clientSentAt: clientSentAt,
+		lifecycle: &messageLifecycle{accepted: q.onAccepted == nil}}
+	c.items = append(c.items, m)
 
 	q.maybeSpawnDrainLocked(convID, c)
 	q.mu.Unlock()
+
+	q.accept(convID, m)
 
 	// Fire the change seam after releasing q.mu: a re-entrant OnChange can call
 	// Snapshot/Remove/Enqueue without deadlocking against the lock.
@@ -536,7 +566,7 @@ func (q *Queue) Snapshot(convID string) []QueuedMessage {
 	}
 	out := make([]QueuedMessage, len(c.items))
 	for i := range c.items {
-		out[i] = QueuedMessage{ID: c.items[i].id, MessageID: c.items[i].messageID, Text: c.items[i].text, TS: c.items[i].ts}
+		out[i] = QueuedMessage{ID: c.items[i].id, MessageID: c.items[i].messageID, Text: c.items[i].text, TS: c.items[i].ts, DeviceID: c.items[i].deviceID}
 	}
 	return out
 }
@@ -567,7 +597,7 @@ func (q *Queue) SnapshotAll() map[string][]QueuedMessage {
 		}
 		msgs := make([]QueuedMessage, len(c.items))
 		for i := range c.items {
-			msgs[i] = QueuedMessage{ID: c.items[i].id, MessageID: c.items[i].messageID, Text: c.items[i].text, TS: c.items[i].ts}
+			msgs[i] = QueuedMessage{ID: c.items[i].id, MessageID: c.items[i].messageID, Text: c.items[i].text, TS: c.items[i].ts, DeviceID: c.items[i].deviceID}
 		}
 		out[convID] = msgs
 	}
@@ -620,12 +650,21 @@ func (q *Queue) Remove(convID string, id uint64) bool {
 	// the head gone. A non-head removal (idx >= 1) never touches the in-flight head.
 	cancel := c.deliverCancel
 	isHead := idx == 0
+	m := c.items[idx]
+	m.lifecycle.removed = true
+	observe := false
+	if !m.lifecycle.attempt {
+		observe = q.resolveLocked(m, TerminalRemoved, false)
+	}
 	c.items = append(c.items[:idx], c.items[idx+1:]...)
 	c.shrinkLocked()
 	q.mu.Unlock()
 
 	if isHead && cancel != nil {
 		cancel()
+	}
+	if observe {
+		q.notifyTerminal(convID, m)
 	}
 	q.notify(convID)
 	return true
@@ -692,8 +731,13 @@ func (q *Queue) SendNow(convID string, id uint64) bool {
 		q.reinsert(convID, m)
 		return false
 	}
+	q.mu.Lock()
+	observe := q.resolveLocked(m, TerminalDelivered, true)
+	q.mu.Unlock()
 	q.notify(convID)
-	q.notifyDelivered(convID, m, true)
+	if observe {
+		q.notifyTerminal(convID, m)
+	}
 	return true
 }
 
@@ -845,6 +889,7 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 			return
 		}
 		head := c.items[0]
+		head.lifecycle.attempt = true
 		// Per-attempt cancelable ctx so dropping this head while it waits for claude
 		// to go idle unblocks the delivery at once (#487). committing starts false —
 		// the head is droppable until the seam claims it via commitGate — and
@@ -864,6 +909,20 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 		q.mu.Lock()
 		c.deliverCancel = nil
 		c.committing = false
+		head.lifecycle.attempt = false
+		// Resolve under the same lock as attempt completion: removal must never
+		// publish a drop in the gap before a confirmed result is processed.
+		// Advance in this lock hold too, before acceptance can publish a deferred
+		// OnDelivered callback that re-enters Snapshot.
+		observe := false
+		advanced := false
+		shutdown := ctx.Err() != nil
+		if err == nil && !shutdown {
+			advanced = c.advanceLocked(head.id)
+			observe = q.resolveLocked(head, TerminalDelivered, false)
+		} else if err != nil && head.lifecycle.removed {
+			observe = q.resolveLocked(head, TerminalRemoved, false)
+		}
 		// A drop during the idle-gate wait removed this head from the FIFO (and
 		// canceled the delivery above), so it is neither advanced nor retried. A
 		// send-now take of this head cancelled the attempt the same way, so it is a
@@ -873,7 +932,10 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 		c.headTaken = false
 		q.mu.Unlock()
 
-		if ctx.Err() != nil {
+		if shutdown {
+			if observe {
+				q.notifyTerminal(convID, head)
+			}
 			// Shutdown raced the delivery. Leave the head queued (the in-memory
 			// daemon-restart loss boundary) and exit so Run's wg.Wait unblocks.
 			q.mu.Lock()
@@ -883,20 +945,19 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 		}
 
 		if err == nil {
-			q.mu.Lock()
-			advanced := c.advanceLocked(head.id)
-			q.mu.Unlock()
-
-			// The write is confirmed, so this message HAS been said (#2115). Fire the
-			// delivered seam first — before the backlog notification below — so a
-			// durable record of it is written as close to the commit as possible.
+			// The write is confirmed, so this message HAS been said (#2115). If
+			// acceptance completed, fire delivery observers before the backlog
+			// notification; otherwise the enqueue caller publishes them when its
+			// acceptance callback returns.
 			//
 			// Deliberately NOT guarded by advanced, unlike q.notify: that guard is
 			// about the BACKLOG, and a Remove landing after the commit cancels nothing
 			// that already happened — the text reached claude's stdin and will be
 			// answered. This is also the only branch that fires it: a head dropped
 			// before it committed, or abandoned by giveUp, was never written.
-			q.notifyDelivered(convID, head, false)
+			if observe {
+				q.notifyTerminal(convID, head)
+			}
 
 			// A confirmed-delivered head left the backlog. Reset the give-up clock so
 			// the next head starts with a fresh bound. Fire after unlock, and only if
@@ -910,6 +971,10 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 				q.notify(convID)
 			}
 			continue
+		}
+
+		if observe {
+			q.notifyTerminal(convID, head)
 		}
 
 		if dropped {
@@ -1000,7 +1065,9 @@ func (q *Queue) giveUp(convID string, c *convQueue, head queued, elapsed time.Du
 	// without racing a still-true draining flag.
 	q.mu.Lock()
 	abandoned := c.advanceLocked(head.id)
+	observe := false
 	if abandoned {
+		observe = q.resolveLocked(head, TerminalGiveUp, false)
 		c.draining = false
 	}
 	q.mu.Unlock()
@@ -1019,6 +1086,9 @@ func (q *Queue) giveUp(convID string, c *convQueue, head queued, elapsed time.Du
 	// notify fires because the backlog shrank (the dropped head), keeping the
 	// wired queue_state view correct; notifyGiveUp carries the give-up event to
 	// its (currently nil) consumer. Both fire strictly after q.mu is released.
+	if observe {
+		q.notifyTerminal(convID, head)
+	}
 	q.notify(convID)
 	q.notifyGiveUp(convID, reason)
 	return true
