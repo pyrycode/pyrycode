@@ -30,6 +30,7 @@ type channelDeliveryPost struct {
 	TurnID         string                       `json:"turn_id"`
 	Text           string                       `json:"text"`
 	TS             time.Time                    `json:"ts"`
+	Session        *history.SessionProvenance   `json:"session,omitempty"`
 	delivered      bool                         // cleanup can fail after delivery; never repeat its announcement
 	diagnosed      bool                         // content-free hold warning, once per process
 }
@@ -54,6 +55,9 @@ type channelDelivery struct {
 	busy     *turnBusyTracker
 	active   map[string]bool
 	writes   map[string]int
+
+	// Installed before publication; only new acceptance reads current facts.
+	sessionFor func(conversations.ConversationID) *history.SessionProvenance
 	// Pool transitions cannot wait for mu's history/publication I/O. This leaf
 	// map gates starts/posts until a later producer exit is consumed by the drain.
 	teardown sync.Map // conversation ID → exit-lane position at eviction request
@@ -85,11 +89,25 @@ func newChannelDelivery(path string, hist channelDeliveryHistory, carry func(con
 		return nil, errors.New("channel delivery load failed")
 	}
 	for _, p := range d.posts {
-		if !conversations.ValidID(string(p.ConversationID)) || !conversations.ValidID(p.TurnID) || len(p.Text) == 0 || len(p.Text) > control.MaxChannelPostBytes || p.TS.IsZero() {
+		if !conversations.ValidID(string(p.ConversationID)) || !conversations.ValidID(p.TurnID) || len(p.Text) == 0 || len(p.Text) > control.MaxChannelPostBytes || p.TS.IsZero() || !validChannelPostSession(p.Session) {
 			return nil, errors.New("channel delivery state invalid")
 		}
 	}
 	return d, nil
+}
+
+func validChannelPostSession(session *history.SessionProvenance) bool {
+	if session == nil {
+		return true
+	}
+	switch session.Kind {
+	case "none":
+		return session.SessionID == ""
+	case protocol.AgentClaude, protocol.AgentCodex:
+		return session.SessionID != ""
+	default:
+		return false
+	}
 }
 
 func (d *channelDelivery) persist(posts []channelDeliveryPost) error {
@@ -121,7 +139,14 @@ func (d *channelDelivery) accept(id conversations.ConversationID, turnID, text s
 	if d.stopped {
 		return errors.New(msgChannelPostRecordFailed)
 	}
-	candidate := append(append([]channelDeliveryPost(nil), d.posts...), channelDeliveryPost{ConversationID: id, TurnID: turnID, Text: text, TS: time.Now().UTC()})
+	post := channelDeliveryPost{ConversationID: id, TurnID: turnID, Text: text, TS: time.Now().UTC()}
+	if d.sessionFor != nil {
+		if session := d.sessionFor(id); session != nil {
+			snapshot := *session
+			post.Session = &snapshot
+		}
+	}
+	candidate := append(append([]channelDeliveryPost(nil), d.posts...), post)
 	if err := d.save(candidate); err != nil {
 		d.log.Warn("control: channel.post acceptance failed", "event", "channel_post.accept_err", "conversation_id", string(id))
 		return errors.New(msgChannelPostRecordFailed)
@@ -380,7 +405,9 @@ func (d *channelDelivery) deliver(post channelDeliveryPost) error {
 		if err != nil {
 			return err
 		}
-		if _, err := d.hist.AppendWithMetadata(post.ConversationID, protocol.TypeAssistantDelta, raw, post.TS, historyVisibilityMetadata(protocol.TypeAssistantDelta, raw)); err != nil {
+		metadata := historyVisibilityMetadata(protocol.TypeAssistantDelta, raw)
+		metadata.Session = post.Session
+		if _, err := d.hist.AppendWithMetadata(post.ConversationID, protocol.TypeAssistantDelta, raw, post.TS, metadata); err != nil {
 			return err
 		}
 		appended = true
@@ -390,7 +417,9 @@ func (d *channelDelivery) deliver(post channelDeliveryPost) error {
 		if err != nil {
 			return err
 		}
-		if _, err := d.hist.AppendWithMetadata(post.ConversationID, protocol.TypeTurnEnd, raw, post.TS, historyVisibilityMetadata(protocol.TypeTurnEnd, raw)); err != nil {
+		metadata := historyVisibilityMetadata(protocol.TypeTurnEnd, raw)
+		metadata.Session = post.Session
+		if _, err := d.hist.AppendWithMetadata(post.ConversationID, protocol.TypeTurnEnd, raw, post.TS, metadata); err != nil {
 			return err
 		}
 		appended = true
