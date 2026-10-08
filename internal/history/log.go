@@ -193,6 +193,9 @@ type convLog struct {
 	seg      uint64 // active segment number, 0 before the first append
 	segBytes int64  // size of the active segment on disk
 	nextID   uint64 // the next entry id for this conversation
+
+	latestDisplayableID     uint64
+	latestDisplayableLoaded bool
 }
 
 // Store is the per-conversation log rooted at one instance directory. The zero
@@ -322,6 +325,9 @@ func (s *Store) Append(convID conversations.ConversationID, typ string, payload 
 
 	id := c.nextID
 	c.nextID++
+	if displayableType(typ) {
+		c.latestDisplayableID, c.latestDisplayableLoaded = id, true
+	}
 	if seg != c.seg {
 		c.seg, c.segBytes = seg, written
 	} else {
@@ -377,6 +383,67 @@ func (s *Store) LatestEntryID(convID conversations.ConversationID) (uint64, erro
 		return 0, err
 	}
 	return c.nextID - 1, nil
+}
+
+// LatestDisplayableEntryID returns the newest durable entry id excluding
+// turn_state, stall, api_retry, compacting, and session_transition. All other
+// types count, including unknown types; missing, empty and status-only logs
+// return zero. Payloads remain opaque. It shares Append's authorization
+// precondition and rechecks directory containment on every call.
+//
+// The first lookup walks backwards until it finds a qualifying entry. Successful
+// results are cached under the append cursor's lock and maintained by Append.
+func (s *Store) LatestDisplayableEntryID(convID conversations.ConversationID) (uint64, error) {
+	if !conversations.ValidID(string(convID)) {
+		return 0, fmt.Errorf("%w: conversation id %q", ErrInvalidID, string(convID))
+	}
+	if s == nil {
+		return 0, fmt.Errorf("history: store is unavailable")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	dir, err := s.resolveDir(convID, false)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	c, err := s.load(convID, dir)
+	if err != nil {
+		return 0, err
+	}
+	if c.latestDisplayableLoaded {
+		return c.latestDisplayableID, nil
+	}
+	segs, err := listSegments(dir)
+	if err != nil {
+		return 0, err
+	}
+	for i := len(segs) - 1; i >= 0; i-- {
+		entries, _, _, err := s.readSegment(filepath.Join(dir, segs[i].name))
+		if err != nil {
+			return 0, err
+		}
+		for k := len(entries) - 1; k >= 0; k-- {
+			if displayableType(entries[k].entry.Type) {
+				c.latestDisplayableID, c.latestDisplayableLoaded = entries[k].entry.ID, true
+				return c.latestDisplayableID, nil
+			}
+		}
+	}
+	c.latestDisplayableID, c.latestDisplayableLoaded = 0, true
+	return 0, nil
+}
+
+func displayableType(typ string) bool {
+	switch typ {
+	case "turn_state", "stall", "api_retry", "compacting", "session_transition":
+		return false
+	default:
+		return true
+	}
 }
 
 // Page returns up to limit of convID's entries, newest-first, ending at cursor's
@@ -542,6 +609,7 @@ func (s *Store) load(convID conversations.ConversationID, dir string) (*convLog,
 	if c.loaded {
 		return c, nil
 	}
+	c.latestDisplayableLoaded = false
 
 	segs, err := listSegments(dir)
 	if err != nil {

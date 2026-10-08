@@ -36,7 +36,7 @@ type fakeLatestHistory struct {
 	asked  []conversations.ConversationID
 }
 
-func (h *fakeLatestHistory) LatestEntryID(id conversations.ConversationID) (uint64, error) {
+func (h *fakeLatestHistory) LatestDisplayableEntryID(id conversations.ConversationID) (uint64, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.asked = append(h.asked, id)

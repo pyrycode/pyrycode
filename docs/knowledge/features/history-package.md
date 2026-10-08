@@ -53,6 +53,7 @@ type Page struct{ Entries []Entry; Cursor string; AtStart bool }
 func (s *Store) Append(convID conversations.ConversationID, typ string, payload json.RawMessage, ts time.Time) (uint64, error)
 func (s *Store) Page(convID conversations.ConversationID, cursor string, limit int) (Page, error)
 func (s *Store) LatestEntryID(convID conversations.ConversationID) (uint64, error)
+func (s *Store) LatestDisplayableEntryID(convID conversations.ConversationID) (uint64, error)
 func (s *Store) LogDir(convID conversations.ConversationID) (string, error)
 ```
 
@@ -406,10 +407,9 @@ again:**
 
 ## `LatestEntryID` shares `Append`'s cursor instead of a second counter (#2779)
 
-`list_conversations` needs the newest durable entry id per conversation, for the
-`latest_entry_id` row [`docs/protocol-mobile.md`](../../protocol-mobile.md#conversations)
-reports. The obvious-looking alternative — a dedicated counter bumped at
-`Append` — was rejected before it was written: `convLog.nextID` already *is*
+`LatestEntryID` returns the raw newest durable entry id per conversation,
+including status entries. The obvious-looking alternative — a dedicated counter
+bumped at `Append` — was rejected before it was written: `convLog.nextID` already *is*
 that counter, recovered by `load` on first touch, so a second one would be two
 sources of truth for the same fact, with no way to keep them from drifting the
 first time one write path forgets to update both.
@@ -430,7 +430,44 @@ logic, only a second caller of the existing kind.
 Containment is **not** cached across calls, on the same reasoning as
 *Directory resolution* above: `resolveDir(convID, false)` re-resolves and
 re-checks every call, even once the cursor is warm, so a symlink planted after
-the cursor loaded is still caught on the next `list_conversations` reply.
+the cursor loaded is still caught on the next lookup.
+
+### Unread state uses a separate, lazily recovered watermark (#2954)
+
+`LatestDisplayableEntryID` supplies both `ListConversationsWithAgents`'s
+`latest_entry_id` and `MarkConversationRead`'s clamp. It excludes exactly
+`turn_state`, `stall`, `api_retry`, `compacting`, and `session_transition`;
+every other stored type counts, including unknown and empty types. Missing,
+empty and status-only logs return `0`. A durable idle status after the last
+reply must not keep unread set forever. Both handlers must use this same
+watermark for `latest_entry_id > read_up_to` to clear after marking that reply
+read; see the [wire contract](../../protocol-mobile.md#marking-a-conversation-read).
+Status entries still appear in `Page`, consume durable IDs and advance the raw
+cursor; filtering creates no second ID space and decodes no payloads.
+
+After `load`, the first filtered lookup walks `listSegments` newest-first and
+each `readSegment`'s entries backwards until a qualifying entry is found.
+Reopening already-written logs therefore works even when trailing statuses
+span segments. The existing decoder tolerates empty/incomplete tails and torn
+final lines. The scan holds at most one segment's entries at a time and caches
+only successful results, including status-only zero, under `Store.mu`.
+Subsequent lookups open no segments. A successful displayable append sets and
+initializes the cache; a status append leaves it unchanged. A failed segment
+write clears `convLog.loaded`, and the next `load` invalidates the filtered
+cache before recovering from disk. A failed scan is not cached, so repair can
+be followed by a retry. ID validation and directory containment are checked
+on every filtered call, even with a warm cache; the query creates no directory.
+
+**Do not recover the filtered watermark inside raw cursor recovery.** A raw
+lookup only needs the newest segment with an entry; finding displayable
+content may traverse older segments behind statuses. Combining the recoveries
+would make `LatestEntryID` inherit corruption errors from older segments it
+previously never opened. `TestLatestDisplayableEntryIDRecoveryError` checks
+that raw recovery succeeds while filtered recovery fails on such a segment,
+then succeeds after repair. `TestLatestDisplayableEntryIDRecovery` also checks
+the raw watermark, complete status-bearing pages and subsequent ID allocation
+alongside filtered recovery, so a correct unread value alone cannot hide a
+storage regression.
 
 ## Reader (#2116)
 
@@ -471,8 +508,8 @@ internal/history/
   the root-as-argument style, the resolve-and-compare-for-equality containment
   check, and the 0o700/0o600 modes this package copies verbatim.
 - [relay-package-handlers.md](relay-package-handlers.md) § `ListConversations` —
-  `LatestEntryID`'s consumer: the `historyLatestReader` interface `*Store`
-  satisfies, and what happens on the wire when a lookup fails.
+  `LatestDisplayableEntryID`'s consumers: the `historyLatestReader` interface
+  `*Store` satisfies for list and mark-read, and lookup-failure wire behavior.
 - [`conversations-package.md`](conversations-package.md) § `ReadUpTo` — the
   durable read mark stated in this package's same per-conversation id space,
   landed in the same ticket (#2779).
