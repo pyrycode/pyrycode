@@ -292,7 +292,7 @@ confinement still precede this path.
 
 The daemon drops the conversation's queued backlog (`msgqueue.Queue.Snapshot`
 plus `Remove`, tolerating a refused committing head — see
-[msgqueue-package.md § Introspection, removal, and change notification](msgqueue-package.md#introspection-removal-and-change-notification-719)),
+[msgqueue-package.md § Introspection, removal, and change notification](msgqueue-package-api.md#introspection-removal-and-change-notification-719)),
 activates a childless predecessor, interrupts and waits idle, then delivers
 the fixed daemon-owned prompt as an ordinary user turn. Activation, delivery
 readiness, idle wait and reply capture share **one daemon-cancelled deadline

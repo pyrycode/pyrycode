@@ -19,7 +19,7 @@ are inbound message-dispatch **policy** on an internet-exposed surface (`#704` i
   the connect-time reconcile — are structurally incapable of projecting one; a
   future consumer that wants the path on the wire has to widen the exported
   type to get it, rather than merely forgetting a filter. `Enqueue` is
-  `EnqueueDelivery(convID, text, text)`, so none of its ~108 existing call
+  `EnqueueDelivery(convID, "", text, text)`, so none of its ~108 existing call
   sites needed touching.
 - **`messageID` (#2092) is untrusted like `text`, but travels the opposite
   direction on purpose.** It is the client's own id for the `send_message` that
@@ -38,13 +38,22 @@ are inbound message-dispatch **policy** on an internet-exposed surface (`#704` i
   `resolveAttachments`' canonical-shape check (`internal/relay/handlers`),
   deduplicated on first occurrence, so every id stored here names an
   attachment that existed in the message's own conversation. The queue does
-  not re-validate them — it stores and, on delivery, hands them back to the
-  same trust domain that authored them (`internal/history`'s producer, and
+  not re-validate them — it stores and, on lifecycle/delivery observation, hands
+  them back to the same trust domain that authored them (`internal/history`'s producer, and
   from there any paired device), exactly as `messageID` does. That return
   path is **not** licence to project `delivery`: `attachmentIDs` is a
   separate argument to `EnqueueAttached`, copied onto the record independently
   of `delivery`, and the on-host path stays reachable only inside the opaque
   `delivery` payload above.
+- **`deviceID` (#2970) is opaque identity metadata, separate from display name.**
+  `EnqueueIdentified` copies it verbatim into lifecycle/delivery projections and
+  both snapshots; legacy enqueue callers supply empty identity. The queue never
+  logs it, authenticates it or uses it for authorization or deduplication.
+  Identity provenance belongs upstream (#2971); this API does not make an
+  arbitrary caller-supplied identity trusted. Lifecycle projections omit
+  composed delivery bytes and resolved attachment paths; attachment ids are
+  cloned on entry and for every observer, so one observer cannot corrupt a later
+  fact. See [the API](msgqueue-package-api.md#exported-surface).
 - **`deviceName` / `clientVersion` / `clientSentAt` (#2704) are untrusted in origin but already past their one validating function by the time they reach `EnqueueSent`.** `deviceName` and `clientVersion` are the daemon's own read of the paired-device record and the admitted hello version respectively — not raw client bytes the queue itself filters. `clientSentAt` is the one genuinely client-authored value of the three (`send_message`'s optional `client_sent_at`), but it arrives as a `time.Time` already produced by `internal/relay/handlers.parseClientSentAt`: the engine stores and later returns a parsed instant, never the client's original string, and has no code path that could regress that even if it wanted to — there is no raw-bytes field on `QueuedMessage` to misuse. Same return path as `attachmentIDs`: `OnDelivered` hands all three to `internal/history`'s producer, and from there to every paired device via `request_history` / the live `message` push.
 - **`convID` is a map key only.** Validating/resolving it to a real session is the
   **caller's** job, upstream of `Enqueue` (the `SessionRouter` / `ValidateConversation`

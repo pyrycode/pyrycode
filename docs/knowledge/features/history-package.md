@@ -347,7 +347,7 @@ forbids serving to a paired device). `newInboundDeliver` sees only
 accessor `DeliveryMessage` carry `QueuedMessage` instead, which declares no
 `delivery` field, making the omission structural rather than a filter this producer could forget.
 Full detail:
-[msgqueue-package.md § Delivered notification (#2115)](msgqueue-package.md#delivered-notification-2115).
+[msgqueue-package.md § Delivered notification (#2115)](msgqueue-package-lifecycle.md#delivered-notification-2115).
 
 **The stored entry keeps its attachment ids too, by the same structural argument (#2596).** `QueuedMessage.AttachmentIDs` is the ids a `send_message` named, as `internal/relay/handlers.resolveAttachments` resolved them — deduplicated, each past the canonical-shape check — copied onto the queue record independently of `delivery`. This producer sets `protocol.MessagePayload.AttachmentIDs` straight from `msg.AttachmentIDs`; since it still reads only `QueuedMessage`, which has no `delivery` field, no on-host path is reachable here no matter what changes upstream. A message that named none stores nothing (`omitempty` elides the key), so every pre-#2596 entry a client already decoded is untouched.
 
