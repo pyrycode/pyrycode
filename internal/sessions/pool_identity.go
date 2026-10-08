@@ -44,28 +44,11 @@ func (p *Pool) RotateID(oldID, newID SessionID) error {
 	return p.saveLocked()
 }
 
-// RotateBootstrapForSelfHeal mints a fresh daemon id, re-keys the CURRENT
-// bootstrap entry to it, and persists — all under a single p.mu (write) hold, so
-// a (practically impossible during a crash-loop) concurrent /clear cannot skew
-// old vs new. It is the supervisor's crash-loop self-heal seam (#1165): when the
-// bootstrap child fast-crashes non-zero N times in a row on the same pinned id (a
-// deterministic wedge no backoff clears), the supervisor calls this via its
-// Config.SelfHeal closure to get the daemon off the wedged id. The next spawn's
-// ResolveSessionID pull (BootstrapID()) resolves the rotated id automatically —
-// no push into the spawn path, matching the #839 pull-not-push decoupling.
-//
-// Unlike RotateForNewSession it does NOT fire a client transition: a ReasonClear
-// would mislead clients into thinking the user ran /clear (client notification of
-// a self-heal is out of scope). Both methods used to differ on a second axis too
-// — whether they primed the freshly-allocated skip-set that suppressed a
-// spurious rotation-watcher CREATE — but #2137 retired the watcher and deleted
-// the skip-set with it, so that asymmetry no longer exists on either side.
-//
-// Returns the minted id. ErrSessionNotFound if the bootstrap entry is somehow
-// absent (TOCTOU). A saveLocked failure is logged at Warn and swallowed — the
-// in-memory rotation is authoritative for the running daemon (which is what
-// self-heal needs: get this process onto the fresh id now); persistence is
-// best-effort, matching RotateID / RotateForNewSession.
+// RotateBootstrapForSelfHeal rekeys the current bootstrap onto a minted ID,
+// captures/rebinds its owner and emits an internal recovery fact off-lock. It has
+// no production caller or automatic recovery policy. Recovery has no legacy
+// reason, so it creates no client delimiter or legacy history boundary.
+// Persistence is best effort; missing bootstrap entries emit nothing.
 func (p *Pool) RotateBootstrapForSelfHeal() (SessionID, error) {
 	newID, err := NewID()
 	if err != nil {
@@ -73,12 +56,13 @@ func (p *Pool) RotateBootstrapForSelfHeal() (SessionID, error) {
 	}
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	old := p.bootstrap
 	if _, ok := p.sessions[old]; !ok {
+		p.mu.Unlock()
 		return "", ErrSessionNotFound
 	}
 	p.rekeyLocked(old, newID)
+	t := p.rotationTransitionLocked(old, newID, CauseRecovery, "")
 	if err := p.saveLocked(); err != nil {
 		p.log.Warn("sessions: self-heal rotate persist failed",
 			"event", "rotate_self_heal.persist_failed",
@@ -86,6 +70,9 @@ func (p *Pool) RotateBootstrapForSelfHeal() (SessionID, error) {
 			"previous_session_id", string(old),
 			"err", err)
 	}
+	p.mu.Unlock()
+	p.persistTransitionBinding(t)
+	p.notifyTransition(t)
 	return newID, nil
 }
 

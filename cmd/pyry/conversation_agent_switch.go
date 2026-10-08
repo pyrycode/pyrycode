@@ -117,7 +117,9 @@ func (s conversationAgentSwitcher) Switch(ctx context.Context, convID, target st
 		// not roll back or old-session cleanup failed after commitment. The relay
 		// publisher waits through sealing before begin's exclusion is released.
 		if committedID != "" {
-			s.pool.PublishSwitchTransition(oldID, committedID)
+			s.pool.PublishSwitchTransition(oldID, committedID, sessions.SwitchTransitionMetadata{
+				ConversationID: convID, PreviousAgent: oldAgent, NextAgent: target,
+			})
 		}
 	}()
 	summary := ""

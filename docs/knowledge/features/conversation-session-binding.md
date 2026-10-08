@@ -25,36 +25,44 @@ Split out to [`conversation-session-binding-routing.md`](conversation-session-bi
 
 The create path writes `CurrentSessionID` at conversation creation, but a bound session's id is not stable for life: a `/clear` rotation re-keys it in place. Through #738 the registry was never told, so after the first rotation the conversation still pointed at the retired id and reverse lookup missed. #739 maintains that binding for the downstream consumer #741 ([§ below](#reading-the-binding-to-stamp-conversation_id-741)). The [announced reset](sessions-package-key-types-adoptannouncedid.md) and daemon-driven `new_session` paths now drive rotations; the [rotation watcher](rotation-watcher.md) is retired.
 
-### The rebind, driven from the transition chokepoint
+### The rebind, serialized with the pool mutation
 
-`notifyTransition` (`internal/sessions/transition.go`) is the off-lock chokepoint **both** transition reasons pass through. #739 adds a reason-branch that rebinds **before** the observer fan-out:
+`RotateForNewSession`, `AdoptAnnouncedID` and successful
+`RotateBootstrapForSelfHeal` rekey and capture/rebind the current conversation
+under the same `Pool.mu` hold. `Pool.rotationTransitionLocked` calls
+`Registry.RebindSessionOwner`, which scans `CurrentSessionID == oldID`, moves
+that binding to `newID` and appends `oldID` under the registry mutex, returning
+the owner with the mutation. The existing `RebindSession` boolean API delegates
+to it. See [the registry contract](conversations-registry-crud.md#rebindsessionoldid-newid-string-bool-739).
 
-```go
-func (p *Pool) notifyTransition(t SessionTransition) {
-    if t.Reason == ReasonClear {
-        p.rebindConversation(t.PreviousID, t.NewID)   // /clear only
-    }
-    if p.transitionObserver != nil {
-        p.transitionObserver(t)                        // #657/#659 emitter; #741 reads the binding later
-    }
-}
+An off-lock rebind in `notifyTransition` was insufficient: reset prompt
+composition can delay A→B notification while B→C completes. The binding must
+already move with each pool mutation so final C cannot be lost, and each fact
+must retain its captured owner even if a foreign conversation binds A before
+delivery. `notifyTransition` now only invokes the observer; it never resolves
+ownership or mutates a binding. The deterministic interleaving is covered by
+[the lifecycle provenance test](sessions-package-testing.md#lifecycle-fact-provenance-and-persistence).
+
+The rotation flow is:
+
+```text
+reset / Claude clear / internal recovery
+    → Pool.mu: rekey(old,new), capture UTC time
+        → Registry.mu: capture owner + rebind(old,new)
+        → best-effort sessions registry save
+    → unlock Pool.mu
+    → persistTransitionBinding: conversation Save on captured ownership only
+    → prompt recomposition for operator reset
+    → notifyTransition: completed fact to observer
 ```
 
-`Pool.rebindConversation` calls the new `conversations.Registry.RebindSession(oldID, newID)` write primitive (scan by `CurrentSessionID == oldID` under `r.mu`, set `CurrentSessionID = newID`, `append(SessionHistory, oldID)`, first-match-and-stop — see [conversations-registry.md](conversations-registry.md#rebindsessionoldid-newid-string-bool-739)) and, **only on a hit**, persists `conversations.json` via the registry's atomic `Save`. It is a no-op when no registry is wired (`p.convReg == nil`, the case for test pools) or when no conversation owns the rotated id (AC#4 — `Save` skipped, file mtime stable). A `Save` error is logged at `Warn` and swallowed: the in-memory rebind is already applied and usable, so durability is best-effort (matching `create_conversation`'s eager persist and `RotateID`'s non-fatal save). #739 is the first production caller to **write** `SessionHistory` — it was a documented-but-unwritten field until now.
-
-Data flow on a `/clear` rotation:
-
-```
-announced reset or new_session → pool re-key(old,new)
-    → RotateID / AdoptAnnouncedID / RotateForNewSession
-    → notifyTransition({Clear, old, new})    [no pool locks held]
-        → rebindConversation(old,new)        [ReasonClear branch]
-            → convReg.RebindSession(old,new) [conversations.Registry.mu: scan + mutate]
-            → convReg.Save(path)             [on hit only; atomic temp+fsync+rename]
-        → transitionObserver({Clear,old,new})[#741 resolves session→conversation later, against the CURRENT binding]
-```
-
-**Why drive from `notifyTransition`, not a new observer.** The transition signal has a **single** observer slot (`SetTransitionObserver`, "set once"), already owned by the `session_transition_v2.go` producer (installed before `Pool.Run`) — a second observer is impossible. Placing the rebind at the common chokepoint, rebind *then* observer, makes the #741 ordering **structural**: the in-memory rebind (and its `Save`) complete synchronously before the observer hands the signal to its buffered channel, so #741 never resolves against a half-applied binding.
+`persistTransitionBinding` skips conversation save when no registry or owner
+was captured; a later binding cannot turn a miss into a hit. Either registry
+save failing logs a warning and leaves authoritative in-memory changes and
+notification intact. Recovery is internally observable with an empty legacy
+reason, so it produces no wire delimiter or legacy history boundary; self-heal
+has no production caller. `RotateID` remains silent and does not rebind.
+See [the full lifecycle vocabulary](sessions-package-key-types-transition-observer.md).
 
 ### Switching to the other agent (#2672)
 
@@ -74,7 +82,7 @@ The bounded combination must pass `sessions.FencedHandoffNote` before `conversat
 
 With the supplied `resettingEmitterV2`, successful validation starts an active `wrapping_up` / `pending` edge, followed before minting by active `restarting` / `written` or `skipped` according to whether a new note was stored. Every exit after the rising edge emits inactive status with empty phase and handoff before releasing `conversationReset.begin`'s exclusion, including mint/rebind failures. Validation refusals run no wrap-up and emit no reset sequence. These edges describe handover preparation even when the old session has no child.
 
-`Registry.SwitchSession` compares the expected old binding and persists the new ID plus one history append as one operation. The pool also persists the minted successor and removal of the old live or dormant entry, so the new binding and session survive restart. Removal uses `JSONLLeave` to retain transcripts. After inactive reset status, the switch publishes exactly one `ReasonClear` transition with the old and new IDs. It uses `PublishSwitchTransition` because `notifyTransition` would rebind a second time and its ordinary rotation save error is swallowed. Removing a live old session can also produce an eviction from child teardown; `notifyTransition` suppresses that event after the ID has left the pool. Subsequent messages route through the new binding.
+`Registry.SwitchSession` compares the expected old binding and persists the new ID plus one history append as one operation. The pool also persists the minted successor and removal of the old live or dormant entry, so the new binding and session survive restart. Removal uses `JSONLLeave` to retain transcripts. After inactive reset status, the switch publishes exactly one `ReasonClear` transition with the old and new IDs. It uses `PublishSwitchTransition` to publish the committed outcome without another rebind or save. `Switch` supplies its known conversation ID and actual previous/next agents through `SwitchTransitionMetadata` before old-session removal loses that information; post-commit cleanup failure still publishes the same captured fact. Removing a live old session can also reach eviction teardown; `notifyEviction` suppresses that event after the ID has left the pool. Subsequent messages route through the new binding.
 
 The returned ID is the commit signal. An empty ID with an error means the old binding remains and cleanup of any minted successor is attempted, including when mint returned an ID alongside its error. A nonempty ID means the new binding committed even if removing the old entry failed; the clear transition still publishes, and cleanup may need follow-up. A failed conversation save restores the old in-memory binding and removes the appended session-history ID before return. The registry holds its mutation lock through persistence or rollback so a competing binding change cannot invalidate that result.
 
@@ -107,11 +115,21 @@ for other completion/cancellation ordering traps.
 
 ### Eviction is binding-neutral, by construction
 
-`ReasonEviction` (idle timeout or cap-policy) fires with `PreviousID = s.id` and an **empty `NewID`**: the session keeps its id, stays in the pool map, and re-activates later under the *same* id (the [idle-eviction](idle-eviction.md) "evicted is a state, not removal" contract). So `CurrentSessionID` stays valid across eviction with **no write needed**. Because `runActive` returns only `ReasonEviction`/`""` (never `ReasonClear`), an eviction never enters the rebind branch — binding-neutrality (AC#2) holds by control flow, not by a runtime guard. This matters: a naive "set `CurrentSessionID = NewID`, append `PreviousID`" applied to the empty-`NewID` eviction signal would **clear** the binding (breaking the `send_message` respawn guard at `main.go:923`) and append a colliding duplicate of the current id. The reason-branch is the real defense against that corruption; a second `oldID == ""` guard inside `RebindSession` defends the *unrelated* stray-empty-call case (it would **not** catch a mis-routed eviction, which carries a non-empty `PreviousID`).
+`ReasonEviction` retains separate `CauseIdleSleep` and
+`CauseCapacityEviction` facts, each with an empty `NewID`: eviction preserves
+the session ID and pool entry for reactivation under the same ID. `notifyEviction`
+captures membership, ID and `Registry.SessionOwner` under the pool lock without
+rebinding; it releases the lock before callback delivery and suppresses removed
+entries. `SessionOwner` matches current bindings only. Applying the rotation
+write to an empty successor would clear `CurrentSessionID` and append a duplicate
+of the still-current session to history. Keeping eviction out of the mutation
+path prevents that corruption; `RebindSession`'s empty-old-ID guard alone would
+not, since eviction carries a nonempty previous ID. See
+[idle eviction](idle-eviction.md) and [captured facts](sessions-package-key-types-transition-observer.md).
 
 ### Confidentiality (security-sensitive)
 
-The binding maintained here is the attribution a downstream mobile-facing consumer (#741) uses to route a session-boundary event to a conversation, so a mis-write is a cross-conversation leak that **originates here**. The rebind is driven **entirely by server-internal state** — the daemon's own rotation watcher and pool-managed session UUIDs; no untrusted phone input flows in. Mis-attribution is prevented by deterministic byte-exact first-match (each session id binds exactly one conversation), and the persisted file is updated atomically (mutate exactly the matched row → whole-snapshot temp+fsync+rename, no torn write). The only log line is a `Save`-failure `Warn` carrying non-secret session-id routing fields. Spec verdict: **PASS**. See [codebase/739.md](../codebase/739.md).
+The binding maintained here is the attribution a downstream mobile-facing consumer (#741) uses to route a session-boundary event to a conversation, so a mis-write is a cross-conversation leak that **originates here**. The rebind is driven **entirely by server-internal state** — pool-managed reset/recovery UUIDs and the child's validated reset announcement. Rotation captures the matching current owner under the pool lock, and switch publication receives its owner and actual agents from the daemon-owned row; it never guesses them from a removed session or bootstrap. Mis-attribution is prevented by deterministic byte-exact first-match (each session id binds exactly one conversation), and the persisted file is updated atomically (mutate exactly the matched row → whole-snapshot temp+fsync+rename, no torn write). The only log line is a `Save`-failure `Warn` carrying non-secret session-id routing fields. Spec verdict: **PASS**. See [codebase/739.md](../codebase/739.md).
 
 ## Reading the binding to stamp `conversation_id` (#741)
 
@@ -119,7 +137,7 @@ The binding maintained here is the attribution a downstream mobile-facing consum
 
 ### The duplicated read scan
 
-`conversationForSession(convReg, sid) (string, bool)` (`cmd/pyry/relay.go`) is the read counterpart to #739's `RebindSession` write. It scans `convReg.List()` and matches a conversation iff `c.CurrentSessionID == sid` **or** `slices.Contains(c.SessionHistory, sid)`, returning `string(c.ID), true` on the first match (the single-owner invariant — a session id binds exactly one conversation for life — makes the first match the only match). An empty `sid` short-circuits to `("", false)`, mirroring `RebindSession`'s empty-`oldID` guard: an unbound conversation carries `CurrentSessionID == ""` and must never be swept in by a stray empty lookup. The registry exposes **no** by-session-id read method, so the scan is duplicated cmd-side rather than extracted into a shared primitive (PROJECT-MEMORY "Resist over-DRY on duplicated registry primitives") — this producer is its only consumer. It is race-safe against a concurrent `RebindSession`: `List()` copies the slice header under the registry mutex, and a concurrent append writes at/above `len` (or reallocates), never overwriting an index the captured `[0,len)` read touches.
+`conversationForSession(convReg, sid) (string, bool)` (`cmd/pyry/relay.go`) is the read counterpart to #739's `RebindSession` write. It scans `convReg.List()` and matches a conversation iff `c.CurrentSessionID == sid` **or** `slices.Contains(c.SessionHistory, sid)`, returning `string(c.ID), true` on the first match (the single-owner invariant — a session id binds exactly one conversation for life — makes the first match the only match). An empty `sid` short-circuits to `("", false)`, mirroring `RebindSession`'s empty-`oldID` guard: an unbound conversation carries `CurrentSessionID == ""` and must never be swept in by a stray empty lookup. The registry's `SessionOwner` read is current-binding-only and cannot replace this historical lookup. Internal lifecycle facts already carry their captured `ConversationID`; adopting that provenance into history is #2968, while this legacy emitter retains its existing resolver behavior. It is race-safe against a concurrent `RebindSession`: `List()` copies the slice header under the registry mutex, and a concurrent append writes at/above `len` (or reallocates), never overwriting an index the captured `[0,len)` read touches.
 
 ### Resolve-and-stamp in `broadcast`, by `payload.NewSessionID`
 

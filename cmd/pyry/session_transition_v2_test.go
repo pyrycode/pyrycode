@@ -632,3 +632,36 @@ func TestSessionTransitionBroadcast_ResolvesByNewSessionID(t *testing.T) {
 		t.Fatalf("resolver called with sid=%q, want the mirrored new_session_id %q", gotSID, "sess-evicted")
 	}
 }
+
+func TestLifecycleFactsLegacyProjection(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		cause  sessions.LifecycleCause
+		reason sessions.TransitionReason
+		wire   string
+	}{
+		{sessions.CauseOperatorReset, sessions.ReasonClear, "clear"},
+		{sessions.CauseClaudeClear, sessions.ReasonClear, "clear"},
+		{sessions.CauseAgentSwitch, sessions.ReasonClear, "clear"},
+		{sessions.CauseIdleSleep, sessions.ReasonEviction, "idle_evict"},
+		{sessions.CauseCapacityEviction, sessions.ReasonEviction, "idle_evict"},
+		{sessions.CauseRecovery, "", ""},
+		{sessions.CauseWorkspaceChange, "", ""},
+	} {
+		t.Run(string(tc.cause), func(t *testing.T) {
+			f := sessions.SessionTransition{Cause: tc.cause, Reason: tc.reason, PreviousID: "A", NewID: "B", ConversationID: "captured-owner", OccurredAt: occurred}
+			got, ok := toWirePayload(f)
+			if ok != (tc.wire != "") || got.Reason != tc.wire {
+				t.Fatalf("legacy projection = %+v, %v", got, ok)
+			}
+			if _, clears := transitionClearsTurn(f); clears != ok {
+				t.Fatalf("turn clear = %v, wire = %v", clears, ok)
+			}
+			if !ok {
+				// No routing, history append or push is reached for recovery.
+				emitter := newSessionTransitionEmitterV2(nil, func(string) (string, bool) { t.Fatal("resolved recovery"); return "", false }, discardLogger())
+				emitter.broadcast(context.Background(), f)
+			}
+		})
+	}
+}

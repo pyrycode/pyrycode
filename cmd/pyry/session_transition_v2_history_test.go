@@ -72,6 +72,11 @@ func TestSessionTransitionEmitterV2_DroppedTransitionsWriteNothing(t *testing.T)
 		trans   sessions.SessionTransition
 	}{
 		{
+			name:    "internal recovery",
+			resolve: constResolver(testConvID, true),
+			trans:   sessions.SessionTransition{PreviousID: "sess-a", NewID: "sess-b", Cause: sessions.CauseRecovery, ConversationID: testConvID, OccurredAt: occurred},
+		},
+		{
 			name:    "unknown reason",
 			resolve: constResolver(testConvID, true),
 			trans: sessions.SessionTransition{

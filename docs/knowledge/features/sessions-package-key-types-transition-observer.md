@@ -1,19 +1,23 @@
 # Transition observer (#659)
 
 The injectable, in-process signal a `cmd/pyry`-side consumer (#657) wires to map
-session boundaries onto the v2 `session_transition` wire event — **without**
+legacy session boundaries onto the v2 `session_transition` wire event, while
+retaining richer internal lifecycle facts — **without**
 `internal/sessions` importing `internal/protocol` / `internal/relay` (the import
 cycle that forces the producer to the `cmd/pyry` boundary). All the machinery
 lives in `transition.go`.
 
 **Update-only, not an ID-discovery feed.** Creation (`sessions.New`,
-`Pool.Mint` / `CreateIn`, `GetOrCreateIn`) emits no transition, and the push does
-not cover every session ID change. `Pool.RotateBootstrapForSelfHeal` silently
-rekeys the bootstrap session, but is an uncalled primitive with no production
-caller today. Its silence is pinned by `TestRotateBootstrapForSelfHeal`'s
-“does not fire a client transition” subtest. Listening alone therefore leaves a
-fresh conversation's client without a session ID and cannot keep IDs current
-in every case.
+`Pool.Mint` / `CreateIn`, `GetOrCreateIn`) emits no transition. Equal-ID/no-op
+and refused mutations, daemon shutdown, crashes retaining the session ID and
+removal teardown also emit no session-change fact. `Pool.RotateID` remains a
+silent compatibility primitive. Listening alone therefore cannot discover a
+fresh conversation's session ID.
+
+Successful `Pool.RotateBootstrapForSelfHeal` emits an internal recovery fact,
+but no legacy wire delimiter or history boundary. Self-heal remains uncalled
+in production; it adds no automatic recovery policy. Workspace change is
+lifecycle vocabulary only, with no producer.
 
 Clients discover or re-read IDs through
 [`request_session_settings`](../../protocol-mobile.md#request_session_settings):
@@ -25,32 +29,66 @@ live or persisted dormant binding rather than a shared bootstrap fallback.
 See the [wire contract](../../protocol-mobile.md#session_transition).
 
 ```go
-type TransitionReason string
-
-const (
-    ReasonClear    TransitionReason = "clear"    // /clear rotation: id changed in place
-    ReasonEviction TransitionReason = "eviction" // idle OR cap; no successor id
-)
+type TransitionReason string // legacy delimiter vocabulary
+type LifecycleCause string  // distinct internal causes; empty means unknown
 
 type SessionTransition struct {
-    PreviousID SessionID
-    NewID      SessionID // empty for eviction (no successor)
-    Reason     TransitionReason
-    OccurredAt time.Time // stamped by internal/sessions at fire
-    AgentSwitch bool     // committed cross-agent rebind; dedicated publication
+    PreviousID          SessionID
+    NewID               SessionID // empty for eviction (no successor)
+    Reason              TransitionReason
+    OccurredAt          time.Time // nonzero UTC occurrence time
+    AgentSwitch         bool      // dedicated committed-switch publication
+    Cause               LifecycleCause
+    ConversationID      string
+    PreviousAgent       string
+    NextAgent           string
+    ResetHandoffOutcome *string
+}
+
+type SwitchTransitionMetadata struct {
+    ConversationID string
+    PreviousAgent  string
+    NextAgent      string
 }
 
 type TransitionObserver func(SessionTransition)
 
 func (p *Pool) SetTransitionObserver(obs TransitionObserver)
 func (p *Pool) SetSwitchTransitionPublisher(publish func(SessionTransition))
+func (p *Pool) RotateForNewSessionWithHandoff(oldID SessionID, outcome *string) (SessionID, error)
+func (p *Pool) PublishSwitchTransition(oldID, newID SessionID, metadata ...SwitchTransitionMetadata)
 ```
 
-**Package-local reason vocabulary, not the wire's.** `TransitionReason` is a
-`string` type owned by this package; #657 maps it onto the wire
-`{clear, idle_evict, workspace_change}`. Mirrors the standing "refusal-to-wire-code
-mapping is the consumer's job, not the primitive's" convention — the cycle-free
-boundary stays at `internal/sessions`.
+**Internal causes and legacy delimiters are separate contracts.** The reason
+and `AgentSwitch` flag retain their existing meanings; both observer setters
+and existing rotation signatures remain compatible. The daemon's
+`toWirePayload` maps only `ReasonClear` and `ReasonEviction`, rejecting empty
+or unknown reasons before routing, history append or wire fan-out.
+
+| Lifecycle cause | Producer | Legacy reason → wire delimiter |
+|---|---|---|
+| `CauseOperatorReset` (`operator_reset`) | `RotateForNewSession` / `RotateForNewSessionWithHandoff` | `ReasonClear` → `clear` |
+| `CauseClaudeClear` (`claude_clear`) | `AdoptAnnouncedID` | `ReasonClear` → `clear` |
+| `CauseAgentSwitch` (`agent_switch`) | `PublishSwitchTransition` | `ReasonClear`, `AgentSwitch: true` → `clear` |
+| `CauseRecovery` (`recovery`) | `RotateBootstrapForSelfHeal` | Empty reason; no legacy delimiter or history boundary |
+| `CauseWorkspaceChange` (`workspace_change`) | None | No event produced |
+| `CauseIdleSleep` (`idle_sleep`) | `Session.runActive` idle timer | `ReasonEviction` → `idle_evict` |
+| `CauseCapacityEviction` (`capacity_eviction`) | `Session.runActive` cap signal | `ReasonEviction` → `idle_evict` |
+
+**Captured provenance, with explicit unknowns.** `ConversationID` is captured
+from the current binding at rotation or eviction, or supplied by the caller
+that committed a switch. Empty ownership and agent fields mean unknown;
+never fill them from bootstrap, labels, historical session lookup or an
+agent/session ID. Empty session IDs mean an absent prior or successor session.
+`OccurredAt` records the rotation mutation, eviction decision or switch
+publication in UTC, rather than later consumer processing time.
+
+`RotateForNewSession` delegates to `RotateForNewSessionWithHandoff` with nil.
+The additive method copies an optional caller-supplied outcome string so later
+caller mutation cannot rewrite the fact. `ResetHandoffOutcome` is a
+classification, never handoff text; nil means unknown. Real daemon reset
+outcomes, history adoption of these richer facts and daemon-start facts remain
+follow-up work in #2968 under [ADR 042](../decisions/042-daemon-built-thread.md).
 
 **Func type, not interface.** Matches the package's closure-injection precedent
 (`RunnerConfig.AdoptAnnouncedReset`).
@@ -64,42 +102,56 @@ goroutine-start happens-before edge — the same "read-only after New" conventio
 `convReg` / `activeCap`. A set-after-`Run` call is a programming error the race
 detector flags. `nil` (the zero value) disables signalling.
 
-**Current notification paths, all off-lock** (the `#41`/`#155`/`#169`
-lock-order lessons):
+**Binding mutation precedes notification.** Rotation producers rekey under
+`Pool.mu`, then `rotationTransitionLocked` calls
+`Registry.RebindSessionOwner` under that same pool lock to capture the owner,
+move `CurrentSessionID` and append the retired ID to `SessionHistory`.
+Lock order is pool then registry; `rekeyLocked` releases `Session.lcMu`
+before registry access. Conversation persistence and callback fan-out run
+after unlocking. Pool registry persistence retains its existing locked save;
+either save failing is best effort and cannot suppress a successful in-memory
+change. `notifyTransition` only delivers the completed fact, without rebinding.
 
-- **Clear** — `Pool.RotateForNewSession` drives a daemon-minted rotation;
-  `Pool.AdoptAnnouncedID` follows the child's reset announcement. Both rekey and
-  attempt persistence before firing `ReasonClear` off-`Pool.mu`.
-  `AdoptAnnouncedID` suppresses equal-ID announcements; refused rotations fire
-  nothing. `notifyTransition` rebinds the owning conversation before fan-out so
-  the consumer can resolve the new ID. The fsnotify watcher and `onRotate` were
-  retired by #2137; neither is a current notification source. See
-  [`sessions-package-key-types-adoptannouncedid.md`](sessions-package-key-types-adoptannouncedid.md).
-- **Agent switch** — `Pool.PublishSwitchTransition` directly fires `ReasonClear`
-  with `AgentSwitch: true` after commitment and inactive reset status. It bypasses
-  `notifyTransition` to avoid a second rebind and best-effort save. The ordinary
-  observer receives the signal for busy/suggestion clearing but does not enqueue
-  the wire outcome. `SetSwitchTransitionPublisher`, installed before `Pool.Run`,
-  owns that outcome through a dedicated daemon-cancellable lane on the existing
-  emitter goroutine. Only the switch's daemon worker may wait for publication:
-  ordinary lifecycle/parse observers retain their nonblocking contract.
-- **Eviction** — `Session.beginEvict` fires `ReasonEviction` (empty `NewID`)
-  **before** the lifecycle state flip and child teardown, with no `lcMu` held,
-  behind a `reason != "" && s.pool != nil` guard. `Session.endEvict` persists
-  after the child stops. The idle path (`<-timerCh`, firing only once
-  `Config.TurnBusy` — nil or reporting no open turn — no longer defers it, #1486) and the cap path
-  (`<-s.evictCh`) both return `ReasonEviction`; the defensive spontaneous-exit
-  (`<-runErr`) and shutdown (`<-ctx.Done()`) paths return `""` / `ctx.Err()` and
-  fire nothing — the wire has no "crashed"/shutdown reason.
-  `notifyTransition` suppresses eviction for a session already removed from the
-  pool, preventing teardown from adding a second boundary beside an agent switch.
+Rebinding at notification time would let delayed reset prompt composition put
+an A→B notification behind B→C and leave a stale binding or capture a late
+foreign owner. Serializing binding updates with rekey leaves the binding at C
+and both facts retain the original conversation and their own session pairs,
+even when delivery order differs from mutation order. A miss stays unowned
+through later delivery and skips conversation persistence. See
+[the binding flow](conversation-session-binding.md#maintaining-the-binding-across-rotation-739)
+and [the deterministic test](sessions-package-testing.md#lifecycle-fact-provenance-and-persistence).
 
-`Pool.notifyTransition` (unexported) is the shared fan-out for rotation and
-eviction. Its eviction membership check takes and releases `Pool.mu` before
-the nil-guarded observer callback; the observer runs with no `Pool.mu`/`Session.lcMu`/`capMu`
-held. **Idle and cap collapse to one `ReasonEviction`** (evidence-based — #656's
-wire has no separate cap reason); the `string` type leaves room for a future
-`ReasonCapEviction` with zero signature churn.
+**Current notification paths, with callbacks off all pool/session/capacity locks:**
+
+- **Operator reset and Claude clear** — `RotateForNewSession` captures one
+  operator-reset fact and recomposes the prompt before fan-out;
+  `AdoptAnnouncedID` captures one Claude-clear fact. Equal-ID announcements
+  and refused rotations fire nothing. Both retain `ReasonClear`. The fsnotify
+  watcher and `onRotate` were retired by #2137; neither is a current source.
+  See [announced reset](sessions-package-key-types-adoptannouncedid.md).
+- **Agent switch** — `conversationAgentSwitcher.Switch` supplies the known
+  conversation and actual previous/target agents through
+  `SwitchTransitionMetadata`, retaining them across old-session removal.
+  `PublishSwitchTransition` delivers one committed-switch fact after inactive
+  reset status, including when post-commit cleanup fails, without another
+  rebind or save. Existing two-argument callers leave metadata unknown even
+  if the pool could look it up; empty/equal session pairs emit nothing.
+  The ordinary observer clears busy/suggestions but skips wire enqueue;
+  `SetSwitchTransitionPublisher` owns the single ordered outcome through the
+  existing emitter goroutine's daemon-cancellable lane. Only that dedicated
+  publisher may wait; ordinary observers must return without waiting.
+- **Recovery** — successful `RotateBootstrapForSelfHeal` captures and rebinds
+  the owner like other rotations, then notifies internally with `CauseRecovery`
+  and an empty reason. Legacy consumers produce no wire event, history boundary
+  or turn clear. There is no production caller.
+- **Idle sleep and capacity eviction** — `Session.beginEvict` calls
+  `notifyEviction` before the lifecycle state flip and child teardown.
+  It captures the session ID, membership and current owner under the pool lock
+  without rebinding; `NewID` stays empty and the legacy reason stays
+  `ReasonEviction`. The idle timer waits until `Config.TurnBusy` permits sleep;
+  cap eviction can force teardown mid-turn. Removed entries are suppressed so
+  teardown cannot duplicate a switch boundary. Spontaneous exit and shutdown
+  remain silent. `Session.endEvict` persists after the child stops.
 
 **Synchronous, no new goroutine.** Fires run on the goroutine that already owns
 the transition (lifecycle for eviction; the runner's parse goroutine or the
