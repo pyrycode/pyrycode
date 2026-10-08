@@ -112,8 +112,9 @@ neither caller pointers nor payload bytes after the call, only scalar cache
 values. These storage facts support
 [ADR 042's history-backed thread](../decisions/042-daemon-built-thread.md);
 the existing producers now declare visibility and filter legacy delivery
-(see [Producers](#producers-2114-2115) and [Reader](#reader-2116)). Session
-attribution belongs to #2966.
+(see [Producers](#producers-2114-2115) and [Reader](#reader-2116)). Channel posts
+capture session attribution at acceptance (#2984); the other producers still
+leave it absent.
 
 `limit` is **clamped** to `MaxPageEntries`, never refused above it — a page is
 "up to `limit` entries", so an over-large ask from #2116 pages rather than
@@ -336,9 +337,38 @@ Channel posts are a fourth writer: `channelDelivery.deliver` bypasses the
 common seam and calls `AppendWithMetadata` through `channelDeliveryHistory`
 for each assistant delta and its `channelPostTurnEndPayload`. It uses the
 same `historyVisibilityMetadata` classifier: post text is shown, completion
-is hidden. Its raw-page deduplication and requirement that all writes succeed
-before publication remain intact; see
+is hidden. All history writes must succeed before publication; see
 [channel delivery and recovery](control-plane-channel-post-live-delivery.md#live-announcements-bounded-replay-and-durable-recovery).
+
+`channelDelivery.accept` captures session provenance once, after `channelPoster`
+resolves or creates the conversation (#2984). `channelPostSession` reads the
+resolved conversation afresh through `Registry.Get`, so an earlier name-match
+row cannot supply a stale binding. A nonempty `Conversation.CurrentSessionID`
+is the daemon session routing ID; `Pool.HarnessFor` supplies its `claude` or
+`codex` kind from live or dormant state without starting or reviving a child.
+This ID is distinct from the conversation ID and Codex thread ID; client
+payloads supply none of these provenance facts. See
+[session binding](conversation-session-binding.md) and
+[the pool's agent lookup](sessions-package-key-types-pool-settingsfor.md#poolharnessfor-2629).
+
+A known empty binding captures explicit `none` with no session ID. Missing
+conversation or agent facts, an unavailable lookup, lookup errors and
+unsupported agents leave provenance absent/unknown, without refusing the post
+or defaulting to Claude. Acceptance copies the snapshot into
+`channelDeliveryPost.Session` and persists it with the pending post. Every newly
+appended delta chunk and completion uses that same snapshot through deferred
+delivery, partial-write retry and restart, even after rebinding or switching
+agents. Loading validates a captured kind/ID pair but never looks up the current
+binding: older pending records stay absent, and explicit `none` stays `none`.
+Raw `Store.Page` exposes the saved metadata in warm and reopened stores; legacy
+history remains untagged and is never inferred or rewritten.
+
+**Reconcile payloads independently of metadata.** A stored untagged prefix can
+coexist with a pending post's captured snapshot. Requiring provenance equality
+would duplicate that prefix. `channelDelivery.deliver` matches chunk and
+completion payloads across every raw page, appends only missing entries with
+the saved provenance and leaves existing entries unchanged. A fully recorded
+post requires cleanup only, with no repeated announcement.
 
 ### Legacy eligibility and explicit visibility (#2965)
 
@@ -363,9 +393,10 @@ accepts arbitrary types; the transport vocabulary is closed independently.
 
 All four existing writers now use `AppendWithMetadata` with explicit
 `Metadata.Shown`, classified from the already-marshalled payload by
-`historyEntryShown`. They leave `Metadata.Session` absent and add neither
-`shown` nor `session` to legacy wire payloads. Stored payloads, timestamps,
-durable IDs and existing recipient gates keep their original meaning.
+`historyEntryShown`. Channel posts also use their saved `Metadata.Session`;
+the other three writers leave it absent. Neither `shown` nor `session` is added
+to legacy wire payloads. Stored payloads, timestamps, durable IDs and existing
+recipient gates keep their original meaning.
 
 | Entry | Explicit visibility for new writes |
 | --- | --- |
@@ -517,6 +548,13 @@ again:**
   preserve an older entry's absent visibility. A classifier-only test would
   miss a writer still using `Append`, and a correct raw metadata assertion alone
   would miss hidden eligible events disappearing from legacy delivery.
+- **Recovery must not fill in missing provenance.**
+  `TestChannelDelivery_SessionLegacyRecovery` loads pending records with absent,
+  explicit `none` and bound snapshots alongside an untagged stored prefix. It
+  rejects any recovery lookup and checks that the prefix survives unchanged.
+  `TestChannelDelivery_SessionRetryRecovery` fails delta/completion writes and
+  rebinds before retry or restart, checking original attribution, unchanged
+  chunk identity and publication only after all writes succeed.
 - **Separate the id sequences to prove provenance.** When history, ring and
   envelope counters coincide, substituting either live counter for the stored id
   stays green. `TestLiveProducers_HistoryEntryID` keeps history id 8, ring id 4
