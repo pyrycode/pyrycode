@@ -21,6 +21,11 @@ var thematicBreak = regexp.MustCompile(`^ {0,3}(?:\*(?:[ \t]*\*){2,}|-(?:[ \t]*-
 var containerStart = regexp.MustCompile(`^ {0,3}(?:>|(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]|$))`)
 var containerText = regexp.MustCompile(`^ {0,3}(?:>[ \t]*|(?:[-+*]|[0-9]{1,9}[.)])[ \t]+)\S`)
 var referenceStart = regexp.MustCompile(`^ {0,3}\[[^]]+\]:`)
+var listMarker = regexp.MustCompile(`^(?:[-+*]|([0-9]{1,9})[.)])([ \t]*)`)
+
+// A reference definition that is complete on one line: a label without
+// brackets or escapes, a destination and an optional closed title.
+var singleLineReference = regexp.MustCompile(`^ {0,3}\[([^\[\]\\]*)\]:[ \t]*(?:<[^<>\\]*>|[^ \t<>()\\\x00-\x1f]+)(?:[ \t]+(?:"[^"\\]*"|'[^'\\]*'|\([^()\\]*\)))?[ \t]*$`)
 
 // HTML blocks end at their closing delimiter (types 1–5) or a blank line
 // (types 6–7). Only type 7 cannot interrupt a paragraph.
@@ -34,6 +39,47 @@ var htmlBlocks = []struct{ start, end *regexp.Regexp }{
 	{regexp.MustCompile("^<(?:(?:[A-Za-z][A-Za-z0-9-]*)(?:[ \\t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \\t]*=[ \\t]*(?:[^ \\t\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*[ \\t]*/?|/[A-Za-z][A-Za-z0-9-]*[ \\t]*)>[ \\t]*$"), regexp.MustCompile(`^[ \t]*$`)},
 }
 
+// stripContainers removes leading block quote and list item markers. code
+// reports container content that starts an indented code block.
+func stripContainers(line string) (content string, stripped, code bool) {
+	content = line
+	for {
+		rest := strings.TrimLeft(content, " \t")
+		if strings.HasPrefix(rest, ">") {
+			content, stripped = strings.TrimPrefix(rest[1:], " "), true
+			if after := strings.TrimLeft(content, " "); strings.TrimSpace(after) != "" && len(content)-len(after) >= 4 {
+				return content, true, true
+			}
+			continue
+		}
+		m := listMarker.FindStringSubmatch(rest)
+		if m == nil || (m[2] == "" && len(rest) > len(m[0])) {
+			return content, stripped, false
+		}
+		content, stripped = rest[len(m[0]):], true
+		if len(m[2]) >= 5 && strings.TrimSpace(content) != "" {
+			return content, true, true
+		}
+	}
+}
+
+// singleReference reports a complete one-line reference definition that no
+// following line can extend with a title.
+func singleReference(line, next string) bool {
+	m := singleLineReference.FindStringSubmatch(line)
+	if m == nil || strings.TrimSpace(m[1]) == "" || len(m[1]) > 999 {
+		return false
+	}
+	next = strings.TrimLeft(next, " \t")
+	return next == "" || !strings.ContainsAny(next[:1], "\"'(")
+}
+
+// parse returns the ticket identity, a reason when the document must stay
+// unchanged, and the top-level headings. Constructs whose CommonMark block
+// boundaries this parser does not model (fences, HTML or headings inside
+// containers, lines less indented than an open fence, paragraphs that may be
+// reference definitions) yield an "unsupported Markdown" reason instead of guessed
+// section bounds.
 func parse(name string, data []byte) (int, string, []heading) {
 	lines := strings.SplitAfter(string(data), "\n")
 	offset, first, ticket, identity := 0, 0, 0, ""
@@ -45,6 +91,12 @@ func parse(name string, data []byte) (int, string, []heading) {
 		}
 	}
 	text := func(i int) string { return strings.TrimSuffix(strings.TrimSuffix(lines[i], "\n"), "\r") }
+	nextText := func(i int) string {
+		if i+1 < len(lines) {
+			return text(i + 1)
+		}
+		return ""
+	}
 	if strings.TrimPrefix(text(0), "\ufeff") == "---" {
 		found, closed := false, false
 		for i := 1; i < len(lines); i++ {
@@ -75,9 +127,19 @@ func parse(name string, data []byte) (int, string, []heading) {
 	}
 	var headings []heading
 	var htmlEnd *regexp.Regexp
-	fenceChar, fenceSize := byte(0), 0
+	fenceChar, fenceSize, fenceIndent := byte(0), 0, 0
 	paragraph := -1
 	lazyContainer := false
+	// containerOpen holds from a container start until a column-0 line that
+	// must close it. ambiguous marks the last column-0 line that may be a lazy
+	// continuation of container content the parser does not track.
+	containerOpen, previousIndented, previousBlank, ambiguous := false, false, true, -1
+	unsupported := ""
+	unsupportedAt := func(i int, construct string) {
+		if unsupported == "" {
+			unsupported = "unsupported Markdown: " + construct + " at line " + strconv.Itoa(i+1)
+		}
+	}
 	offsets := make([]int, len(lines))
 	for i, line := range lines {
 		offsets[i] = offset
@@ -87,11 +149,25 @@ func parse(name string, data []byte) (int, string, []heading) {
 		line := text(i)
 		trimmed := strings.TrimLeft(line, " ")
 		indent := len(line) - len(trimmed)
+		blank := strings.TrimSpace(line) == ""
+		column0 := !blank && line[0] != ' ' && line[0] != '\t'
+		wasIndented, wasBlank := previousIndented, previousBlank
+		previousIndented, previousBlank = !blank && !column0, blank
+		if htmlEnd == nil && fenceChar == 0 && containerStart.MatchString(line) {
+			containerOpen = true
+		} else if column0 && (wasBlank || atx.MatchString(line) || thematicBreak.MatchString(line) || strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~")) {
+			containerOpen = false
+		}
 		if htmlEnd != nil {
 			if htmlEnd.MatchString(line) {
 				htmlEnd = nil
 			}
 			continue
+		}
+		// An indented fence may sit in a list item, which a less indented
+		// line would close along with the fence.
+		if fenceChar != 0 && indent < fenceIndent && strings.TrimSpace(line) != "" {
+			unsupportedAt(i, "line less indented than its open fence")
 		}
 		if indent <= 3 && len(trimmed) > 0 && (trimmed[0] == '`' || trimmed[0] == '~') {
 			width := 0
@@ -106,7 +182,7 @@ func parse(name string, data []byte) (int, string, []heading) {
 				continue
 			}
 			if width >= 3 && (trimmed[0] == '~' || !strings.Contains(trimmed[width:], "`")) {
-				fenceChar, fenceSize = trimmed[0], width
+				fenceChar, fenceSize, fenceIndent = trimmed[0], width, indent
 				paragraph = -1
 				lazyContainer = false
 				continue
@@ -115,9 +191,44 @@ func parse(name string, data []byte) (int, string, []heading) {
 		if fenceChar != 0 {
 			continue
 		}
+		content, contained, containedCode := stripContainers(line)
+		inner := strings.TrimLeft(content, " \t")
+		if containerOpen && column0 && wasIndented {
+			ambiguous = i
+			if htmlBlocks[6].start.MatchString(line) {
+				unsupportedAt(i, "HTML that may continue container content")
+			}
+		}
+		if containerOpen && (indent >= 4 || strings.HasPrefix(trimmed, "\t")) && (strings.HasPrefix(inner, "```") || strings.HasPrefix(inner, "~~~")) {
+			unsupportedAt(i, "fence indented under a container")
+		}
+		if contained && strings.Contains(line[:len(line)-len(inner)], "\t") {
+			unsupportedAt(i, "tab in container indentation")
+		}
+		if contained && (strings.HasPrefix(inner, "```") || strings.HasPrefix(inner, "~~~")) {
+			unsupportedAt(i, "fence inside a container")
+		}
+		if (contained || !column0) && atx.MatchString(inner) {
+			unsupportedAt(i, "indented or contained heading")
+		}
+		if contained && htmlStart(inner) {
+			unsupportedAt(i, "HTML block inside a container")
+		}
+		if contained && referenceStart.MatchString(inner) {
+			unsupportedAt(i, "reference definition inside a container")
+		}
+		if paragraph >= 0 && !lazyContainer && strings.HasPrefix(strings.TrimLeft(lines[paragraph], " "), "[") && htmlBlocks[6].start.MatchString(trimmed) {
+			unsupportedAt(i, "HTML after a paragraph that may be a reference definition")
+		}
+		if setext.MatchString(inner) && ((contained && strings.Contains(line[:len(line)-len(content)], ">")) || (!column0 && lazyContainer)) {
+			unsupportedAt(i, "contained Setext underline")
+		}
 		if indent <= 3 {
 			for kind, block := range htmlBlocks {
-				if (kind < 6 || paragraph < 0) && block.start.MatchString(trimmed) {
+				if (kind < 6 || (paragraph < 0 && !lazyContainer)) && block.start.MatchString(trimmed) {
+					if indent > 0 {
+						unsupportedAt(i, "indented HTML block")
+					}
 					htmlEnd = block.end
 					paragraph = -1
 					lazyContainer = false
@@ -142,6 +253,9 @@ func parse(name string, data []byte) (int, string, []heading) {
 			}
 			h.start = offsets[paragraph]
 			h.title = strings.TrimSpace(strings.Join(lines[paragraph:i], ""))
+			if opening := lines[paragraph]; opening[0] == ' ' || opening[0] == '\t' || opening[0] == '[' || ambiguous >= paragraph {
+				unsupportedAt(paragraph, "Setext paragraph that is indented or may hold a reference definition")
+			}
 		}
 		if h.depth > 0 {
 			headings = append(headings, h)
@@ -150,14 +264,27 @@ func parse(name string, data []byte) (int, string, []heading) {
 		} else if strings.TrimSpace(line) == "" || thematicBreak.MatchString(line) {
 			paragraph = -1
 			lazyContainer = false
-		} else if containerStart.MatchString(line) {
+		} else if containerStart.MatchString(line) && !(paragraph >= 0 && !lazyContainer && !interrupts(line)) {
 			paragraph = -1
-			lazyContainer = containerText.MatchString(line)
-		} else if lazyContainer || indent >= 4 || strings.HasPrefix(trimmed, "\t") || (paragraph < 0 && referenceStart.MatchString(line)) {
+			if lazyContainer && (containedCode || htmlStart(inner)) {
+				unsupportedAt(i, "container line that may continue a container paragraph")
+			}
+			lazyContainer = containerText.MatchString(line) && !containedCode && !thematicBreak.MatchString(inner) && !htmlStart(inner)
+		} else if lazyContainer {
 			paragraph = -1
-		} else if paragraph < 0 {
+		} else if paragraph >= 0 {
+			// Indented lines, reference-like lines and list items that
+			// cannot interrupt a paragraph continue it.
+		} else if indent >= 4 || strings.HasPrefix(trimmed, "\t") {
+			paragraph = -1
+		} else if referenceStart.MatchString(line) && singleReference(line, nextText(i)) {
+			paragraph = -1
+		} else {
 			paragraph = i
 		}
+	}
+	if identity == "" {
+		identity = unsupported
 	}
 	for i := range headings {
 		headings[i].end = len(data)
@@ -169,6 +296,29 @@ func parse(name string, data []byte) (int, string, []heading) {
 		}
 	}
 	return ticket, identity, headings
+}
+
+// interrupts reports whether a list item or block quote start may interrupt
+// a paragraph: block quotes always, list items only when nonempty and, for
+// ordered lists, numbered 1.
+func interrupts(line string) bool {
+	rest := strings.TrimLeft(line, " ")
+	if strings.HasPrefix(rest, ">") {
+		return true
+	}
+	m := listMarker.FindStringSubmatch(rest)
+	if m == nil || strings.TrimSpace(rest[len(m[0]):]) == "" {
+		return false
+	}
+	return m[1] == "" || m[1] == "1"
+}
+func htmlStart(content string) bool {
+	for _, block := range htmlBlocks {
+		if block.start.MatchString(content) {
+			return true
+		}
+	}
+	return false
 }
 func trivial(body []byte) bool {
 	switch strings.ToLower(strings.TrimSpace(string(body))) {

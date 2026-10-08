@@ -356,3 +356,87 @@ func TestCrossIssuePRIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestUnsupportedMarkdownStaysUnchanged(t *testing.T) {
+	t.Parallel()
+	question := "Open questions\n---\nMulti-phone and ACP deferred.\n# Design\nkeep\n"
+	for _, tc := range []struct{ name, body string }{
+		{"multiline reference destination", "# Files to read first\nread\n\n[ref]:\n  /url\n" + question},
+		{"next-line reference title", "# Files to read first\nread\n\n[ref]: /url\n  \"title\"\n" + question},
+		{"invalid reference definition", "[ref]: invalid destination\nFiles to read first\n---\nDesign bytes\n"},
+		{"multiline reference label", "# Files to read first\nread\n\n[a\nb]: /u\n" + question},
+		{"reference then HTML", "# Files to read first\nread\n\n[ref]:\n  /url\n<span>\n# Design\nkeep\n"},
+		{"tilde list fence", "- ~~~\n  ## Files to read first\n  code example\n  ~~~\n\n## Design\nkeep\n"},
+		{"backtick list fence", "- ```\n  ## Files to read first\n  code example\n  ```\n\n## Design\nkeep\n"},
+		{"nested list fence", "## Files to read first\nread\n- a\n  - ~~~\n    ## Design\n    ~~~\n\n## Keep\nkeep\n"},
+		{"block quote fence", "## Files to read first\nread\n> ```\n> ## Design\n> ```\n\n## Keep\nkeep\n"},
+		{"deep list fence", "## Files to read first\n- a\n\n     ```\n     ## Design\n     ```\n## Keep\nkeep\n"},
+		{"fence closed by its container", "## Files to read first\n- a\n\n  ```\n## Design\n  ```\nkeep\n"},
+		{"tab fence in list", "## Files to read first\n1. one\n\t```\n## Design\nkeep\n"},
+		{"list item heading", "## Files to read first\n- a\n\n  ## Design\nkeep\n"},
+		{"block quote heading", "## Files to read first\n> ## Design\nkeep\n"},
+		{"block quote Setext", "## Files to read first\n> Design\n> ---\nkeep\n"},
+		{"list Setext", "## Files to read first\n- Design\n  ---\nkeep\n"},
+		{"lazy line after indented list content", "## Files to read first\n- a\n\n    more\nOpen questions\n---\nACP deferred.\n## Keep\nkeep\n"},
+		{"HTML after indented list content", "## Files to read first\n- a\n\n    more\n<span>\n## Design\nkeep\n"},
+		{"block quote HTML", "## Files to read first\n> <span>\n> - item\nDesign\n-\nkeep\n"},
+		{"block quote code continuation", "## Files to read first\n> quote\n>     code\n<span>\n## Design\nkeep\n"},
+		{"tab after block quote", "## Files to read first\n>\tquote\nOpen questions\n---\nACP deferred.\n## Keep\nkeep\n"},
+		{"indented HTML block", "## Files to read first\n- a\n\n  <!--\n## Design\n-->\nkeep\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, newline := range []string{"\n", "\r\n"} {
+				body := strings.ReplaceAll(tc.body, "\n", newline)
+				root, path := testTree(t, "707-spec.md", body)
+				preview := testRun(t, root, testEvidence(), nil, false)
+				doc := preview.Documents[0]
+				if !strings.HasPrefix(doc.Reason, "unsupported Markdown: ") || preview.EligibleDocuments != 0 || preview.ProposedRemovalSections != 0 {
+					t.Fatalf("ambiguous boundaries not retained and reported: %+v", preview)
+				}
+				for _, sec := range doc.Sections {
+					if sec.Action != "retain" || sec.Reason != doc.Reason {
+						t.Fatalf("section not retained with document reason: %+v", sec)
+					}
+				}
+				testRun(t, root, testEvidence(), nil, true)
+				if testRead(t, root, path) != body {
+					t.Fatal("apply changed a document with unsupported Markdown")
+				}
+			}
+		})
+	}
+}
+
+func TestCommonMarkParagraphBoundaries(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, in, kept string }{
+		{"space continuation", "## Files to read first\nread\n\n", "Design\n    continued\n---\nDurable design bytes\n"},
+		{"tab continuation", "## Files to read first\nread\n\n", "Design\n\tcontinued\n---\nDurable design bytes\n"},
+		{"ordered item that cannot interrupt", "## Files to read first\nx\n\n", "Design\n2. step\n---\nkeep\n"},
+		{"empty item that cannot interrupt", "## Files to read first\nx\n\n", "Design\n*\n---\nkeep\n"},
+		{"lazy HTML-like text", "## Files to read first\n- item\n<span>\n", "## Design\nkeep\n"},
+		{"single-line reference", "## Files to read first\n[ref]: <a b> 'T'\n", "Design\n---\nkeep\n"},
+		{"fully indented list fence", "## Files to read first\n- a\n\n  ```\n  ## not a heading\n  ```\n", "## Design\nkeep\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, newline := range []string{"\n", "\r\n"} {
+				in := strings.ReplaceAll(tc.in, "\n", newline)
+				kept := strings.ReplaceAll(tc.kept, "\n", newline)
+				root, path := testTree(t, "707-spec.md", in+kept)
+				preview := testRun(t, root, testEvidence(), nil, false)
+				sections := preview.Documents[0].Sections
+				if preview.Documents[0].Reason != "eligible" || len(sections) != 1 || sections[0].Start != 0 || sections[0].End != len(in) || sections[0].Action != "remove" {
+					t.Fatalf("wrong removal bounds: %+v", preview)
+				}
+				testRun(t, root, testEvidence(), nil, true)
+				if got := testRead(t, root, path); got != kept {
+					t.Fatalf("got %q want %q", got, kept)
+				}
+				testRun(t, root, testEvidence(), nil, true)
+				if got := testRead(t, root, path); got != kept {
+					t.Fatal("repeated apply changed the document")
+				}
+			}
+		})
+	}
+}
