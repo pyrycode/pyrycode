@@ -80,7 +80,11 @@ the existing producers now declare visibility and filter legacy delivery
 (see [Producers](history-package-producers.md#producers-2114-2115) and [Reader](history-package.md#reader-2116)). Channel posts
 capture session attribution at acceptance (#2984); interactive Claude/Codex
 output captures its producing runner before fan-in (#2981). Session transitions
-and operator messages still leave provenance absent.
+capture source facts at the observer/publication handoff (#2982). Delivered
+operator messages capture the successful receiving session at the final writer
+call and retain it through delayed placement or confirmation
+([operator provenance](history-package-producers.md#operator-delivery-provenance-2983));
+legacy and unknown provenance stay absent.
 
 `limit` is **clamped** to `MaxPageEntries`, never refused above it — a page is
 "up to `limit` entries", so an over-large ask from #2116 pages rather than
