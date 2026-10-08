@@ -118,6 +118,9 @@ type interactiveTurnEmitterV2 struct {
 	// the drain goroutine selects or mutates these states.
 	*convTurnState
 	turns map[string]*convTurnState
+	// nextPhaseOrder orders main-phase activity across retained producing sources.
+	// The conversation projects the most recently active source's running phase.
+	nextPhaseOrder uint64
 
 	// nextID is the session-monotonic envelope-ID counter. It is NEVER reset
 	// across turns (mirrors #589's policy; the basis for #611 mid-turn-reconnect
@@ -175,7 +178,7 @@ type interactiveTurnEmitterV2 struct {
 
 	// phases is the cross-goroutine view of the open turn's last-sent phase
 	// (#2712), read by the relay's connect-time turn-phase reconcile on its Run
-	// goroutine. Kept current in transitionTo and endTurn only. nil means no
+	// goroutine. Kept current in transitionTo only. nil means no
 	// reconcile view; assigned after construction for hist's call-site reason.
 	phases *turnPhaseSnapshot
 
@@ -199,7 +202,8 @@ type convTurnState struct {
 	turnID         string               // current turn's id, minted at turn start
 	turnConvID     string               // the conversation this state belongs to while a turn is open
 	seq            int                  // per-turn assistant-delta counter; 0 at each turn boundary
-	currentState   turnbridge.TurnState // last-emitted turn_state, for transition de-dup
+	currentState   turnbridge.TurnState // this source's main phase
+	phaseOrder     uint64               // order of this source's last main-phase event
 	childLanes     map[string]*assistantDeltaLane
 	launcherTurns  map[string]string // Agent/Task call ID to its originating turn
 	childToolTurns map[string]string // child tool ID to its fixed originating turn
@@ -893,8 +897,8 @@ func (e *interactiveTurnEmitterV2) HandleFor(ctx context.Context, convID string,
 	}
 }
 
-// startTurnIfNeeded opens a turn if one is not already open: mint a fresh turn
-// id, reset seq, and clear currentState so the first state transition emits. On
+// startTurnIfNeeded opens a source's turn if one is not already open: mint a
+// fresh turn id, reset seq, and clear its phase until main-phase activity. On
 // a turn-id mint failure (crypto/rand — defensive) it WARN-logs and leaves the
 // turn closed so the next event retries. Returns whether a turn is open.
 func (e *interactiveTurnEmitterV2) startTurnIfNeeded(convID string) bool {
@@ -996,42 +1000,73 @@ func (e *interactiveTurnEmitterV2) advanceDeltaSeq(parentID string) {
 	e.childLanes[parentID].seq++
 }
 
-// transitionTo emits a turn_state envelope for state, de-duped against the
-// last-emitted state. State-change-based emission is a superset of "first
-// content -> responding" and naturally handles interleaving (thinking -> text
-// -> thinking re-emits each transition).
+// runningPhase selects the most recently active source with a running main
+// phase. Open turns that have never sent a phase and background children do not
+// contribute to the conversation's projection.
+func (e *interactiveTurnEmitterV2) runningPhase(convID string) *convTurnState {
+	var latest *convTurnState
+	for _, st := range e.turns {
+		if st.conversationID == convID && st.inTurn && st.currentState != "" && st.currentState != turnbridge.StateIdle &&
+			(latest == nil || st.phaseOrder > latest.phaseOrder) {
+			latest = st
+		}
+	}
+	return latest
+}
+
+// transitionTo retains the selected source's phase and publishes changes to
+// the conversation's projection. Ending one source cannot idle another running
+// source; a restored phase is emitted with its own retained provenance.
 func (e *interactiveTurnEmitterV2) transitionTo(ctx context.Context, convID string, state turnbridge.TurnState) {
-	if e.currentState == state {
-		return
+	var previous turnbridge.TurnState
+	if st := e.runningPhase(convID); st != nil {
+		previous = st.currentState
 	}
 	e.currentState = state
+	if state != turnbridge.StateIdle {
+		e.nextPhaseOrder++
+		e.phaseOrder = e.nextPhaseOrder
+	}
+	selected := e.convTurnState
+	projected := e.runningPhase(convID)
+	if projected == nil {
+		state = turnbridge.StateIdle
+		projected = selected
+	} else {
+		state = projected.currentState
+	}
+	if previous == state {
+		return
+	}
 	// Publish BEFORE emit: emit appends to the ring and then asks the relay's Run
 	// goroutine for its conns, so a connecting conn's reconcile, which runs on Run
 	// after replayMissed, either reads this phase or receives the live frame
 	// behind whatever it read (#2712).
 	e.phases.publish(convID, state)
 	typ, payload := turnbridge.BuildTurnState(convID, state)
+	e.convTurnState = projected
 	e.emit(ctx, convID, typ, payload)
+	e.convTurnState = selected
 }
 
-// endTurn closes the selected conversation's main turn. Background child
-// identities and counters survive until session teardown. Callers flush first.
+// endTurn closes the selected source's main turn. Background child identities
+// and counters survive until session teardown. Callers flush and project idle
+// through transitionTo first; that projection owns the conversation snapshot.
 func (e *interactiveTurnEmitterV2) endTurn() {
-	convID := e.turnConvID
 	e.inTurn = false
 	e.turnID = ""
 	e.turnConvID = ""
 	e.seq = 0
 	e.currentState = ""
-	e.phases.clear(convID)
+	e.phaseOrder = 0
 }
 
 // turnPhaseSnapshot is each open turn's last-sent phase, shared from the
 // emitter's drain goroutine to the relay's Run goroutine for the connect-time
 // turn-phase reconcile (#2712). The emitter's lifecycle fields stay unguarded and
 // drain-only; this is the one synchronised copy, written where the emitter sends
-// a transition or closes a turn. It holds one entry per conversation with a
-// running turn (#2739), since the emitter keeps one turn per conversation. A
+// a projected transition. It holds one entry per conversation with a running
+// phase, even when multiple producing sources retain open turns. A
 // conversation absent from it has no turn with a sent phase, which is also what
 // an open turn reads as before its first transition: a phase never sent is never
 // re-asserted.
@@ -1100,17 +1135,31 @@ func (p *turnPhaseSnapshot) running() []protocol.TurnStatePayload {
 // without inventing a turn_end result the child never emitted. The caller is the
 // stream drain, so lifecycle and delta fields retain their single-writer rule.
 //
-// Only conversationID's own turn is closed (#2739); another conversation's open
-// turn is a different convTurnState and is not touched.
+// All of conversationID's producing sources are closed; another conversation's
+// retained states are not touched.
 func (e *interactiveTurnEmitterV2) closeForConversation(ctx context.Context, conversationID string) {
 	// The producing session exited or was torn down (#2831): its turn can no
 	// longer publish, and a held suggestion clears, whether or not a turn is open.
 	e.suggestions.invalidate(conversationID)
+	var keys []string
 	for key, st := range e.turns {
-		if st.conversationID != conversationID {
-			continue
+		if st.conversationID == conversationID {
+			keys = append(keys, key)
 		}
-		e.convTurnState = st
+	}
+	// Close older phases first so a conversation-wide teardown does not briefly
+	// restore an older source's phase before publishing the final idle.
+	slices.SortFunc(keys, func(a, b string) int {
+		if e.turns[a].phaseOrder < e.turns[b].phaseOrder {
+			return -1
+		}
+		if e.turns[a].phaseOrder > e.turns[b].phaseOrder {
+			return 1
+		}
+		return strings.Compare(a, b)
+	})
+	for _, key := range keys {
+		e.convTurnState = e.turns[key]
 		e.flushDelta(ctx)
 		if e.inTurn {
 			e.transitionTo(ctx, conversationID, turnbridge.StateIdle)

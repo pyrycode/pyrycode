@@ -218,8 +218,8 @@ func TestInteractiveProvenanceRetainedState(t *testing.T) {
 							}
 						}
 					}
-					if !idle[old] || !idle[successor] {
-						t.Fatalf("idle sources = %v", idle)
+					if len(idle) != 1 || !idle[successor] {
+						t.Fatalf("conversation idle sources = %v, want final source %v", idle, successor)
 					}
 					latest, err := store.LatestDisplayableEntryID(testConvID)
 					if err != nil {
