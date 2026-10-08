@@ -91,35 +91,22 @@ type TurnWriter interface {
 	WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error
 }
 
-// Enqueuer is the inbound backlog the send_message handler appends to instead
-// of delivering synchronously. *msgqueue.Queue satisfies it. The interface is
-// defined here, consumer-side, so handlers/ stays free of an internal/msgqueue
-// import (mirrors SessionRouter and TurnWriter). Enqueue is non-blocking and
-// returns the stable per-conversation id assigned to the message (>= 1), or 0 if
-// the conversation's backlog is at capacity and the message was rejected (reject,
-// never drop) — the handler maps a 0 to a retryable "backlog full" reply.
-//
-// Since #2038 the method is EnqueueDelivery rather than Enqueue: a message
-// naming attachments is DELIVERED as a composed prompt naming their on-host paths
-// while the text a client reads back stays the user's own words. Passing both
-// halves here — rather than widening what is queued — is what keeps a host path
-// off the wire on both queue_state arms without any consumer having to remember
-// to strip it.
-// Since #2092 it also takes the client's own messageID, relayed verbatim onto the
-// queued record so a client can merge the queued row with the optimistic echo it
-// already drew. The handler neither validates, normalises nor mints it — an empty
-// id is legal and stays empty.
-// Since #2596 it is EnqueueAttached and also takes the resolved attachment ids,
-// stored beside text so the history log keeps them on the operator's turn. The
-// ids travel as their own argument, never derived from delivery, which is the
-// half that names on-host paths.
-// Since #2704 it is EnqueueSent and also takes who sent the message — the
-// pairing record's device name and the app version this connection's hello
-// reported — and the client's tap time, already parsed and normalised to UTC by
-// parseClientSentAt (zero when absent or unparseable). Positional, because a
-// struct for them would have to live in a package both sides import.
+// Enqueuer accepts a message into the inbound backlog without blocking. It
+// returns the assigned per-conversation id, or zero when the backlog is full.
+// Text is client-readable; delivery may include host attachment paths and must
+// stay off the wire. Attachment ids are already resolved, messageID is verbatim,
+// and sender metadata comes from the authenticated connection snapshot.
+// ClientSentAt is parsed and normalized to UTC, or zero when unavailable.
+// The interface lives here so handlers need not import internal/msgqueue.
 type Enqueuer interface {
 	EnqueueSent(conversationID, messageID, text, delivery string, attachmentIDs []string, deviceName, clientVersion string, clientSentAt time.Time) uint64
+}
+
+// identifiedEnqueuer optionally accepts stable authenticated device identity
+// separately from the display name. Zero rejects without a legacy-API retry.
+// Identity must contain no credentials and must never be logged.
+type identifiedEnqueuer interface {
+	EnqueueIdentified(conversationID, messageID, text, delivery string, attachmentIDs []string, deviceID, deviceName, clientVersion string, clientSentAt time.Time) uint64
 }
 
 // AttachmentResolver resolves one attachment id named by a send_message to the
@@ -471,34 +458,22 @@ func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolve
 			return replyError(ctx, c, env, protocol.CodeAttachmentNotFound, msgSendMessageAttachmentNotFound, false)
 		}
 
-		// Enqueue is non-blocking: it appends to the conversation's in-memory FIFO
-		// and returns the stable id immediately. The ack now means "accepted into
-		// the backlog", not "delivered/committed". payload.Text is NEVER logged,
-		// and neither is the composed prompt — it carries host paths.
-		//
-		// The two halves are what keeps #2038 AC 4 true: p.Text is what queue_state
-		// reports back on both the enqueue push and the connect-time reconcile,
-		// while the composed prompt goes only to claude.
-		//
-		// p.MessageID rides along verbatim (#2092) — the client's own id for this
-		// message, which queue_state names on the item so the client can merge it
-		// with its optimistic echo instead of drawing the message twice. It is
-		// passed exactly as it arrived: nothing here validates, trims, normalises
-		// or substitutes it, and "" stays "".
-		//
-		// attachmentIDs rides along too (#2596): the ids resolveAttachments just
-		// checked, once each in first-listed order, so the stored history entry can
-		// name them. Ids only — the paths stay inside the composed prompt.
-		//
-		// The sender rides along as well (#2704), for the stored operator turn:
-		// the pairing record's name — never the hello's self-reported device_name,
-		// which a client can set to anything — and the version this connection's
-		// hello reported, which the handshake admitted through
-		// sessions.AdmitClientVersion onto the snapshot. The tap time is the
-		// daemon's parse of client_sent_at, never its raw bytes.
-		deviceName, clientVersion := connSender(c)
-		id := queue.EnqueueSent(p.ConversationID, p.MessageID, p.Text, composeAttachmentPrompt(p.Text, paths), attachmentIDs,
-			deviceName, clientVersion, parseClientSentAt(p.ClientSentAt))
+		// Acceptance is non-blocking and acknowledges backlog ownership. Keep
+		// client-readable text separate from delivery, which may carry host paths.
+		// The message id stays verbatim; attachment ids are resolved and deduplicated.
+		// Sender identity and name come only from the authenticated pairing, and
+		// the version is this hello's admitted value. None comes from payload fields.
+		deviceID, deviceName, clientVersion := connSender(c)
+		delivery := composeAttachmentPrompt(p.Text, paths)
+		clientSentAt := parseClientSentAt(p.ClientSentAt)
+		var id uint64
+		if identified, ok := queue.(identifiedEnqueuer); ok {
+			id = identified.EnqueueIdentified(p.ConversationID, p.MessageID, p.Text, delivery, attachmentIDs,
+				deviceID, deviceName, clientVersion, clientSentAt)
+		} else {
+			id = queue.EnqueueSent(p.ConversationID, p.MessageID, p.Text, delivery, attachmentIDs,
+				deviceName, clientVersion, clientSentAt)
+		}
 		if id == 0 {
 			// The conversation's backlog is at its per-conversation cap (#869).
 			// Reject, never drop: nothing was enqueued and the existing backlog is
@@ -566,17 +541,15 @@ func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolve
 	}
 }
 
-// connSender returns who sent a message on c (#2704): the pairing record's name
-// and the app version this connection's hello reported, both "" on a conn with
-// no device record. The snapshot's ClientVersion is the CURRENT hello's admitted
-// value, not the record's previous one — the handshake sets it before the conn
-// opens.
-func connSender(c *dispatch.Conn) (deviceName, clientVersion string) {
+// connSender returns the authenticated pairing's stable public key and name,
+// and this hello's admitted app version. Missing authentication yields empty
+// values; a missing key has no fallback to names, connection ids or credentials.
+func connSender(c *dispatch.Conn) (deviceID, deviceName, clientVersion string) {
 	auth := c.Auth()
 	if auth == nil {
-		return "", ""
+		return "", "", ""
 	}
-	return auth.Name, auth.ClientVersion
+	return auth.StaticKey, auth.Name, auth.ClientVersion
 }
 
 // parseClientSentAt turns the client's optional client_sent_at into the tap time

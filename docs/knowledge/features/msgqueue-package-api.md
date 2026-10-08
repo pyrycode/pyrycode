@@ -128,7 +128,7 @@ Queue ids identify an acceptance only within its conversation and daemon run;
 they reset when the daemon restarts. The queue remains memory-only. A durable
 history writer must link terminal facts to its own acceptance record instead of
 treating the queue id as a global durable key. Production lifecycle wiring and
-that writer are owned by #2971/#2972 under
+that writer are owned by #2972 under
 [ADR 042](../decisions/042-daemon-built-thread.md).
 
 ## Introspection, removal, and change notification (#719)

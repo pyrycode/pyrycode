@@ -316,6 +316,22 @@ from a safe `msgqueue.QueuedMessage`, available before the write through
 `msgqueue.DeliveryMessage` and again at confirmation through `OnDelivered`,
 not from an envelope in flight (see below).
 
+Relay correlation identity is the authenticated pairing's bound Noise public
+key (`dispatch.Conn.Auth().StaticKey`), in its existing lowercase-hex form,
+separate from display name and the verbatim app message id (#2971).
+Names can change or coincide; distinct keys distinguish senders with equal
+names and app ids, while renaming or reconnecting the same install preserves
+identity. Missing authentication or an empty key yields empty identity, with
+no fallback to name, connection id, token or token hash. Client-authored fields
+cannot override it, and identity and credentials stay out of logs.
+`handlers.SendMessage` offers this metadata through the optional
+`EnqueueIdentified` path; legacy-only queues still receive `EnqueueSent`.
+The production `suggestionEnqueuer` wrapper and daemon/history adoption belong
+to [#2972](https://github.com/pyrycode/pyrycode/issues/2972). This seam adds no
+deduplication, new wire field or sender identity to legacy event payloads.
+See [relay sender metadata](relay-package-handlers.md#send_message-grows-a-ninth-seam-sender-identity-and-tap-time-2704)
+and [ADR 042's item model](../decisions/042-daemon-built-thread.md#item-model).
+
 Channel posts are a fourth writer: `channelDelivery.deliver` bypasses the
 common seam and calls `AppendWithMetadata` through `channelDeliveryHistory`
 for each assistant delta and its `channelPostTurnEndPayload`. It uses the
