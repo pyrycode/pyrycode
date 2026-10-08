@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 	"github.com/pyrycode/pyrycode/internal/sessions"
@@ -71,7 +72,11 @@ func (r sessionRouter) resolve(conversationID string) (handlers.TurnWriter, erro
 	if err != nil {
 		return nil, err
 	}
-	return boundSession{pool: r.pool, sess: sess, id: id}, nil
+	kind, err := r.pool.HarnessFor(sess.ID())
+	if err != nil {
+		return nil, err
+	}
+	return boundSession{pool: r.pool, sess: sess, id: id, kind: kind}, nil
 }
 
 // revive re-materialises a conversation's dropped session so the caller gets the
@@ -123,6 +128,16 @@ type boundSession struct {
 	pool *sessions.Pool
 	sess *sessions.Session
 	id   sessions.SessionID
+	kind string // construction-fixed kind of the resolved writer
+}
+
+// operatorProvenance reads the receiving writer's live routing ID, which may
+// have rotated since resolution. The conversation binding is not its source.
+func (b boundSession) operatorProvenance() history.SessionProvenance {
+	if b.kind != sessions.HarnessClaude && b.kind != protocol.AgentCodex {
+		return history.SessionProvenance{}
+	}
+	return history.SessionProvenance{Kind: b.kind, SessionID: string(b.sess.ID())}
 }
 
 func (b boundSession) Activate(ctx context.Context) error {
