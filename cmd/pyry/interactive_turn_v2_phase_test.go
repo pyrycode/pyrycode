@@ -6,6 +6,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
@@ -231,5 +232,97 @@ func TestTurnPhaseSnapshot_ReadDoesNotDisturbEmission(t *testing.T) {
 	}
 	if !slices.Equal(with, without) {
 		t.Fatalf("turn_state with snapshot reads = %v, want %v (same as without)", with, without)
+	}
+}
+
+func TestInteractiveProvenancePhaseProjection(t *testing.T) {
+	t.Parallel()
+	for _, agents := range []struct{ old, successor string }{
+		{"claude", "claude"}, {"codex", "codex"},
+		{"claude", "codex"}, {"codex", "claude"},
+	} {
+		for _, finish := range []string{"old ends", "successor ends", "conversation closes"} {
+			t.Run(agents.old+"/"+agents.successor+"/"+finish, func(t *testing.T) {
+				t.Parallel()
+				e, _, bcast, snap := phaseEmitter(t)
+				t.Cleanup(func() { e.flushTimer.Stop() })
+				dir := t.TempDir()
+				e.hist = history.New(dir)
+				ctx := context.Background()
+				old := history.SessionProvenance{Kind: agents.old, SessionID: "old"}
+				successor := history.SessionProvenance{Kind: agents.successor, SessionID: "successor"}
+				e.HandleFor(ctx, testConvID, turnevent.ThoughtChunk{Text: "old thinking"}, old)
+				e.HandleFor(ctx, testConvID, turnevent.TextChunk{Text: "successor text"}, successor)
+				ending, remaining := old, successor
+				wantPhase := "responding"
+				wantStates := []string{"thinking", "responding"}
+				wantPhaseSources := []history.SessionProvenance{old, successor}
+				if finish == "successor ends" {
+					ending, remaining = successor, old
+					wantPhase = "thinking"
+					wantStates = append(wantStates, "thinking")
+					wantPhaseSources = append(wantPhaseSources, old)
+				}
+				if finish == "conversation closes" {
+					e.closeForConversation(ctx, testConvID)
+					wantStates = append(wantStates, "idle")
+					wantPhaseSources = append(wantPhaseSources, successor)
+				} else {
+					e.HandleFor(ctx, testConvID, turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}, ending)
+					if got := phaseOf(t, snap); got != testConvID+"/"+wantPhase {
+						t.Errorf("after %s: reconnect phase = %q, want %s", finish, got, wantPhase)
+					}
+					// Continue in the retained source's same phase: per-source dedup must
+					// not conceal a lost or incorrectly projected conversation phase.
+					var continued turnevent.Event = turnevent.TextChunk{Text: "successor continues"}
+					if remaining == old {
+						continued = turnevent.ThoughtChunk{Text: "old continues"}
+					}
+					e.HandleFor(ctx, testConvID, continued, remaining)
+					if got := phaseOf(t, snap); got != testConvID+"/"+wantPhase {
+						t.Errorf("after continuing: reconnect phase = %q, want %s", got, wantPhase)
+					}
+					if got := turnStateValues(t, bcast.pushes); !slices.Equal(got, wantStates) {
+						t.Errorf("live phases after continuing = %v, want %v", got, wantStates)
+					}
+					e.HandleFor(ctx, testConvID, turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}, remaining)
+					wantStates = append(wantStates, "idle")
+					wantPhaseSources = append(wantPhaseSources, remaining)
+				}
+				if got := phaseOf(t, snap); got != "" {
+					t.Errorf("after all sources close: reconnect phase = %q, want none", got)
+				}
+				if got := turnStateValues(t, bcast.pushes); !slices.Equal(got, wantStates) {
+					t.Errorf("complete live phases = %v, want %v", got, wantStates)
+				}
+				for _, store := range []*history.Store{e.hist, history.New(dir)} {
+					entries := historyEntries(t, store, testConvID)
+					var ends []history.SessionProvenance
+					var phases []history.SessionProvenance
+					for _, entry := range entries {
+						if entry.Type == protocol.TypeTurnEnd {
+							if entry.Session == nil {
+								t.Fatal("turn end lost producing source")
+							}
+							ends = append(ends, *entry.Session)
+						}
+						if entry.Type == protocol.TypeTurnState {
+							if entry.Session == nil {
+								t.Fatal("projected phase lost producing source")
+							}
+							phases = append(phases, *entry.Session)
+						}
+					}
+					if finish != "conversation closes" && !slices.Equal(ends, []history.SessionProvenance{ending, remaining}) {
+						t.Errorf("turn end sources = %v, want %v then %v", ends, ending, remaining)
+					}
+					if !slices.Equal(phases, wantPhaseSources) {
+						t.Errorf("phase sources = %v, want %v", phases, wantPhaseSources)
+					}
+					replayed, _ := e.ring.After(testConvID, 0)
+					assertLogMatchesRing(t, entries, replayed)
+				}
+			})
+		}
 	}
 }

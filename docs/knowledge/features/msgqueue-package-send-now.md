@@ -21,7 +21,7 @@ from `notifyDelivered`. Queue-backed writes now also carry the safe
 commit before writing and a later callback only acknowledges it. Ordinary
 and send-now registration follows actual write order per conversation;
 matching by client `message_id` would confuse duplicate ids and equal payloads.
-See [history-package.md § Producers](history-package.md#producers-2114-2115).
+See [history-package.md § Producers](history-package-producers.md#producers-2114-2115).
 
 `Config.SendNow` is an optional caller-supplied seam beside
 the queue's observers and `Pending`; `nil` makes `SendNow` an

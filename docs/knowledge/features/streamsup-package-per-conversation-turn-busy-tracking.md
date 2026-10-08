@@ -114,8 +114,8 @@ past the nil guard into a nil-map read — the `screenSnapshotterOrNil` hazard).
 Opening on thinking exposed a second state store that an ordinary busy-clear
 test does not exercise: `turnBusyTracker` is per-conversation delivery state,
 and `interactiveTurnEmitterV2` holds its own per-conversation published
-lifecycle (one `convTurnState` per conversation since #2739, formerly a single
-scalar set of fields for whichever conversation was active). Clearing only the
+lifecycle (retained by conversation and producing source since #2981, formerly
+one `convTurnState` per conversation after #2739). Clearing only the
 former on child exit leaves clients reporting `thinking` and can let a respawn
 reuse a stale turn identity even though delivery is no longer busy. Every
 abandonment path must therefore close both views.
@@ -124,7 +124,10 @@ A decoded `result` is the ordinary shared closer: every subtype produces one
 `TurnEnd`; `error_during_execution` becomes cancelled, and success or another
 error keeps its existing terminal reason. The tracker consumes that event before
 the event's conversation is resolved for `HandleFor`, while the emitter publishes
-`turn_end`, then `turn_state: idle`, and clears that conversation's turn identity.
+`turn_end` with its producing source and clears that source's turn identity.
+The conversation phase preserves or restores another running source, publishing
+`turn_state: idle` only when none remains; see
+[phase projection](streamsup-package-draining-turnevents-into-the-interactive-emitter.md).
 
 The no-result paths close on the drain that already owns emitter mutation. A
 child-exit envelope is FIFO behind that child's events; `clearForExit` returns a

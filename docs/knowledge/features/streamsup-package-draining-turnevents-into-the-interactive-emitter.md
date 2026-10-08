@@ -11,6 +11,7 @@ un-map back to a `tuidriver.Event` for `turnbridge` to re-map.
 ```go
 type streamTurnEnvelope struct {
     sessionID string
+    source    history.SessionProvenance
     ev        turnevent.Event
 }
 
@@ -18,6 +19,7 @@ type streamTurnSink struct { /* one buffered chan streamTurnEnvelope */ }
 
 func newStreamTurnSink(buf int, logger *slog.Logger) *streamTurnSink
 func (s *streamTurnSink) sinkFor(sessionID string) func(turnevent.Event) // non-blocking send; frozen-tag form, delegates to sinkForTag
+func (s *streamTurnSink) sinkForTag(tag func() string, kind ...string) func(turnevent.Event)
 
 func startStreamTurnDrainV2(
     ctx context.Context,
@@ -30,7 +32,7 @@ func startStreamTurnDrainV2(
 ```
 
 **Fan-in, not fan-out.** N per-session Parsers (each fixed at runner construction, one per
-`newStreamRunnerFactory` invocation) push `{sessionID, ev}` onto the one buffered channel (256 slots, the
+`newStreamRunnerFactory` invocation) push `{sessionID, source, ev}` onto the one buffered channel (256 slots, the
 `pushQueueCap` precedent); `startStreamTurnDrainV2` spawns the sole reader goroutine. There is no
 session-keyed registry and no subscribe/unsubscribe — the per-conn fan-out stays entirely inside the
 unchanged emitter, so this is deliberately *not* shared fan-out infrastructure.
@@ -52,12 +54,20 @@ output and before later output. The wake channel coalesces; it does not own
 the close. See [retained stop transport](streamsup-package-per-conversation-turn-busy-track-exit-lane-on-the-turn-busy-fan.md).
 
 **Per-event conversation attribution, not an active-conversation gate (#2739).** The drain goroutine
-resolves `conversationFor(env.sessionID)` and forwards to `emitter.HandleFor(ctx, convID, ev)` under
+resolves `conversationFor(env.sessionID)` and forwards to `emitter.HandleFor(ctx, convID, ev, env.source)` under
 **that** conversation's id — never the cursor's. Only an event whose session resolves to no conversation
 at all is dropped, logged content-free as `stream_turn.no_conversation` (`kind` + `session_id` only).
 Every conversation's events reach its own history, ring and clients, whichever conversation currently
 holds the daemon's cursor; a background conversation's connection receives its own frames exactly as the
 active one does.
+
+**Capture history provenance before fan-in (#2981).** Claude and Codex factories
+pass their fixed kind to `sinkForTag`. Its single tag read supplies both routing
+and `source`, so rotation after enqueue cannot substitute the successor. The
+drain passes this captured value only after the existing resolution gate.
+Omitted kinds keep provenance absent; no cursor, conversation binding at append
+time, Codex thread ID or subprocess field supplies the source. See
+[history producers](history-package-producers.md#producers-2114-2115).
 
 **A side effect, decided on rather than filtered out: a child's startup frames now reach history too.**
 A frame like `mcp_status` or `model_list` describes the child, not a turn (`HandleFor`'s arms for both
@@ -76,30 +86,33 @@ This replaced an earlier design, until #2739: the drain compared the producing s
 before `Handle` was ever called (logged `stream_turn.not_active`, Debug) — so a background conversation's
 turn tail was lost for good. The emitter's own `Handle` paired that gate with a follow-active switch
 (#1062): a cursor move closed the *prior* conversation's turn outright. #2739 removed both halves. The
-emitter now keeps one `convTurnState` per conversation (see below) rather than one scalar set of
+emitter now keeps `convTurnState` by conversation and producing source (see below) rather than one scalar set of
 lifecycle fields, so a conversation's turn stays open, and its buffered delta stays buffered, regardless
 of which conversation the cursor points at or how many other conversations' events arrive in between.
 `Handle(ctx, ev)` is kept as a thin wrapper — `e.HandleFor(ctx, e.sup.CurrentConversation(), ev)` — purely
 for its 182 pre-existing unit-test call sites, which drive one conversation through a stub cursor;
 production never calls it.
 
-**The emitter's turn state is per conversation (#2739), not scalar.** `interactiveTurnEmitterV2` embeds a
+**The emitter retains state per conversation and producing source (#2739, #2981).** `interactiveTurnEmitterV2` embeds a
 `*convTurnState` (`inTurn`, `turnID`, `turnConvID`, `seq`, `currentState`, `childLanes`,
 `launcherTurns`, `childToolTurns`, and the
 `deltaBuf`/`deltaMsgID`/`deltaParent`/`deltaConvID` coalescing group) and keeps `turns map[string]*convTurnState`,
-one entry per conversation with a turn open, text buffered or child attribution retained.
-`selectConversation(convID)` re-points the embedded pointer at that conversation's own state,
-creating it on first sight at the top of `HandleFor`. `closeForConversation` selects an existing
-entry directly. Both run only on the drain goroutine. Because the state is embedded
+one entry per conversation/kind/session ID with a turn open, text buffered or child attribution retained.
+Absent-source callers retain the conversation-only key. `source` is retained by value.
+`selectConversation(convID, source)` re-points the embedded pointer at that source's own state,
+creating it on first sight at the top of `HandleFor`. `closeForConversation` selects
+each retained source for the conversation. Both run only on the drain goroutine.
+Because the state is embedded
 rather than copied into a map of structs, every method below keeps reading `e.inTurn`, `e.seq`,
-`e.deltaBuf` and meaning "the selected conversation's" — the same ~100 test assertions that read those
+`e.deltaBuf` and meaning "the selected source's" — the same ~100 test assertions that read those
 fields after driving one conversation through `Handle` keep compiling unchanged; moving the fields into
 the map directly would have forced rewriting every one of them. `endTurn` clears only main lifecycle
 fields: child text lane IDs/sequences and launcher/tool origins survive main closure and later turns.
-`releaseConversation(convID)`, deferred at the end of `HandleFor` and called after flushes, deletes
+`releaseConversation(key)`, deferred at the end of `HandleFor` and called after flushes, deletes
 the entry only when it holds no open turn, buffered text or retained child attribution.
 `closeForConversation` (the drain's session-exit and conversation-teardown paths) flushes pending
-content, returns an open main turn to idle, then clears child attribution for only that conversation.
+content, closes every retained main turn and clears child attribution for only that conversation.
+Older main phases close first, preserving the conversation projection until one final idle.
 It also clears retained attribution when already idle, emitting no idle transition or synthetic
 `turn_end`. Other conversations' state is untouched.
 
@@ -112,7 +125,7 @@ without gaining a parent wire field. `rememberLauncher` retains observed `Agent`
 origins, including nested launchers. `emitChildTool` fixes each child call's origin
 on first observation, using the launcher's retained origin or `ensureDeltaLane`'s
 parent-keyed fallback when unknown. Child prose uses its own lane ID and sequence.
-All keys belong to the producing conversation, never the active cursor, and
+All keys belong to the producing conversation and session, never the active cursor, and
 publication still uses the common `emit` history/ring/fan-out path. See the
 [wire attribution contract](../../protocol-mobile.md#tool_use) and
 [ADR 042's agent boundary](../decisions/042-daemon-built-thread.md#sessions-agents-messages-read-marks).
@@ -125,12 +138,21 @@ also checks repeated flushes and exact ordered live/ring/history payload equalit
 `TestStreamTurnDrainV2_AttributedTextExcludesThinkingAndSignature` receives only the
 timer-delivered child delta and joins the drain before reading its state.
 
+**Source changes must flush preceding text (#2981).** Keeping separate source
+buffers without flushing at a source change would join old-source text across
+an intervening successor event and reorder timer output. `HandleFor` flushes
+another source's pending text in the same conversation before selecting the
+incoming source, retaining lifecycle and child identities. At most one source
+per conversation holds text; reused main/child message and parent IDs cannot
+coalesce across sessions. Timer and lifecycle flushes select the retained source
+before emitting, preserving its provenance.
+
 **The coalescing timer is shared across every conversation, and must flush all of them.** `flushTimer` is
 armed, per the invariant its own doc comment states, iff *some* conversation's `deltaBuf` is non-empty —
 not iff the selected one's is. Arming re-arms only from an empty→non-empty transition when no other
 conversation already holds buffered text (`anyBuffered()`), so the latency window always runs from the
 oldest unflushed chunk across every conversation, not from whichever one buffered most recently.
-`flushDelta` (reached from `Handle`'s per-kind arms, flushing the selected conversation only) stops the
+`flushDelta` (reached from `Handle`'s per-kind arms, flushing the selected source only) stops the
 timer only once `anyBuffered()` is false — if it stopped unconditionally, a second conversation's text
 would sit buffered forever once the first one's flush ran. The drain's `flushC()` case does not call
 `flushDelta` directly; it calls `flushAll(ctx)`, which flushes every conversation with buffered text (each
@@ -146,6 +168,18 @@ sets or (on `StateIdle`) deletes a conversation's entry, `clear` deletes it unco
 `running()` returns one `protocol.TurnStatePayload` per entry, sorted by conversation id for determinism,
 so a freshly-connected conn is reconciled on every conversation with a turn running, not only the last one
 touched.
+
+**Conversation phase is a projection across retained sources (#2981).**
+`runningPhase` chooses the running source with the most recent main-phase
+activity; child-only activity and an open turn with no phase do not contribute.
+`transitionTo` updates ownership even on repeated same-phase activity, then
+deduplicates the projected conversation phase. A delayed predecessor end keeps
+the successor's phase and reconnect snapshot. Ending the owner restores the
+latest remaining running phase with that source's captured provenance; only
+ending the last running phase publishes idle and removes the snapshot.
+`endTurn` clears only the selected source, while `turn_end` keeps that source's
+provenance. Deduplicating per source alone would let a predecessor end erase
+a successor's snapshot that later responding chunks never repair.
 
 **Fixed (#1133): a session rotation no longer drops a turn's worth of delivery.** Until #1133, `sinkFor`'s
 session tag was captured once, at runner construction, by `newStreamRunnerFactory` (see [Constructing a
@@ -180,7 +214,7 @@ ordinary no-echo commits precede the closing event's idle release, while
 send-now retains its carry grace. `startRelayV2` binds synchronous operator
 publication to the shared replay ring before starting the drain.
 The history-only drain needs no live publisher. See
-[history producers](history-package.md#producers-2114-2115) for safe content
+[history producers](history-package-producers.md#producers-2114-2115) for safe content
 and the history/live/replay ordering guarantee.
 
 **Published completion, not an idle snapshot, releases durable posts (#2811).**

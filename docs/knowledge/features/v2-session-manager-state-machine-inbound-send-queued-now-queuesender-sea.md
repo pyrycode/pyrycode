@@ -105,6 +105,6 @@ attempts since #2820; `place.expect` for legacy callers without metadata),
 so the operator-message history entry and live `message` push for this
 delivery wait for claude's own echo of it and land where claude actually
 read it, rather than at this write. See [history-package.md §
-Producers](history-package.md#producers-2114-2115) for the commit-deferral
+Producers](history-package-producers.md#producers-2114-2115) for the commit-deferral
 mechanism and [streamsup-package-turn-io-envelope-write-stdout-parser.md](streamsup-package-turn-io-envelope-write-stdout-parser.md)
 for the echo the spawn now produces.
