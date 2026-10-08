@@ -47,6 +47,25 @@ Search a short fragment when a quoted comment may wrap across lines, then read t
 named declaration. Check that cited symbols still exist and still support the claim.
 Keep historical citations in historical documents unchanged.
 
+Use the [source reference inventory](../../specs/README.md#source-reference-inventory)
+after source moves or deletions to locate historical architecture-spec paths
+absent from the current checkout. A missing path identifies a review candidate,
+not a false current-state claim; an existing path alone does not validate the
+historical claim either. Check current code and knowledge docs before reuse.
+
+Reference extraction must validate whole tokens: splitting quotes inside a path
+can turn a quoted placeholder into a root-directory citation, while stripping
+periods after a slash can turn traversal or ellipsis placeholders into accepted
+directories. Link extraction and tokenization must share boundaries; protecting
+pipes only during tokenization still lets link-shaped glob components yield
+false interior paths. In `cmd/spec-reference-inventory`, `separateLinks` and
+`referenceBoundaries` share delimiter rules, including `markdownEscaped`'s
+odd/even backslash parity. Balancing escaped brackets as syntax can omit both
+link references and table citations on later lines. Keep accepted-context
+regressions alongside whole-reference exclusions: `TestReferences`,
+`TestInventoryMarkdownBoundaries` and `TestInventoryMarkdownEscapes` cover nested
+labels, adjacent code citations, Unicode whitespace and escaped delimiters.
+
 When correcting a behavioural claim, search prose as well as symbols. Counts, key
 lists, test headers and comments can encode the same claim without sharing its words.
 Run dependent tests and compile relevant build-tagged packages. A green assertion
