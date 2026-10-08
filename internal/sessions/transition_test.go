@@ -156,6 +156,7 @@ func TestRotateForNewSession(t *testing.T) {
 func TestPool_TransitionObserver_IdleEvictionFires(t *testing.T) {
 	t.Parallel()
 	pool := helperPoolIdle(t, 100*time.Millisecond)
+	reg, _ := seedBoundConvRegistry(t, pool, "eviction-owner", pool.BootstrapID())
 	rec := &transitionRecorder{}
 	pool.SetTransitionObserver(rec.observe)
 
@@ -175,6 +176,12 @@ func TestPool_TransitionObserver_IdleEvictionFires(t *testing.T) {
 		t.Fatalf("observer fired %d times, want 1: %+v", len(got), got)
 	}
 	tr := got[0]
+	if tr.Cause != CauseIdleSleep || tr.ConversationID != "eviction-owner" {
+		t.Fatalf("lifecycle fact = %+v", tr)
+	}
+	if c, _ := reg.Get("eviction-owner"); c.CurrentSessionID != string(tr.PreviousID) || len(c.SessionHistory) != 0 {
+		t.Fatalf("eviction rebound = %+v", c)
+	}
 	if tr.Reason != ReasonEviction {
 		t.Errorf("Reason = %q, want %q", tr.Reason, ReasonEviction)
 	}
@@ -203,6 +210,7 @@ func TestPool_TransitionObserver_IdleEvictionFires(t *testing.T) {
 func TestPool_TransitionObserver_CapEvictionFires(t *testing.T) {
 	t.Parallel()
 	pool := helperPoolCap(t, 2)
+	reg, _ := seedBoundConvRegistry(t, pool, "eviction-owner", pool.BootstrapID())
 	rec := &transitionRecorder{}
 	pool.SetTransitionObserver(rec.observe)
 
@@ -252,6 +260,12 @@ func TestPool_TransitionObserver_CapEvictionFires(t *testing.T) {
 		t.Fatalf("observer fired %d times, want 1: %+v", len(got), got)
 	}
 	tr := got[0]
+	if tr.Cause != CauseCapacityEviction || tr.ConversationID != "eviction-owner" {
+		t.Fatalf("lifecycle fact = %+v", tr)
+	}
+	if c, _ := reg.Get("eviction-owner"); c.CurrentSessionID != string(tr.PreviousID) || len(c.SessionHistory) != 0 {
+		t.Fatalf("eviction rebound = %+v", c)
+	}
 	if tr.Reason != ReasonEviction {
 		t.Errorf("Reason = %q, want %q", tr.Reason, ReasonEviction)
 	}

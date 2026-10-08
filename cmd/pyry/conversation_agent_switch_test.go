@@ -61,6 +61,22 @@ func TestConversationAgentSwitch_RebindsAndRetainsHistory(t *testing.T) {
 	if saved.CurrentSessionID != string(newID) {
 		t.Fatalf("saved binding = %+v", saved)
 	}
+	if f := transitions[0]; f.Cause != sessions.CauseAgentSwitch || f.ConversationID != "conv-1" || f.PreviousAgent != protocol.AgentClaude || f.NextAgent != protocol.AgentCodex || !f.AgentSwitch || f.PreviousID != oldID || f.NewID != newID || f.ResetHandoffOutcome != nil {
+		t.Fatalf("switch fact = %+v", f)
+	}
+
+	// Switch back to prove the facts name actual agents in both directions.
+	backID, err := sw.Switch(context.Background(), "conv-1", protocol.AgentClaude, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(transitions) != 2 {
+		t.Fatalf("return switch facts = %+v", transitions)
+	}
+	if f := transitions[1]; f.PreviousAgent != protocol.AgentCodex || f.NextAgent != protocol.AgentClaude || f.PreviousID != newID || f.NewID != backID || f.ConversationID != "conv-1" || f.Cause != sessions.CauseAgentSwitch {
+		t.Fatalf("return switch fact = %+v", f)
+	}
+
 }
 
 func dormantSwitchFixture(t *testing.T, fields string) (*sessions.Pool, *conversations.Registry, conversationAgentSwitcher, string) {
@@ -334,6 +350,10 @@ func TestConversationAgentSwitch_PostCommitRemovalErrorReportsNewID(t *testing.T
 	if got.CurrentSessionID != string(newID) || len(got.SessionHistory) != 1 || len(transitions) != 1 {
 		t.Fatalf("committed state = %+v; transitions = %+v", got, transitions)
 	}
+	if f := transitions[0]; f.Cause != sessions.CauseAgentSwitch || f.ConversationID != "conv-1" || f.PreviousAgent != protocol.AgentClaude || f.NextAgent != protocol.AgentCodex || !f.AgentSwitch || f.PreviousID != oldID || f.NewID != newID || f.ResetHandoffOutcome != nil {
+		t.Fatalf("switch fact = %+v", f)
+	}
+
 }
 
 func TestConversationAgentSwitch_RequestedSettingsAndBypassRevocation(t *testing.T) {
