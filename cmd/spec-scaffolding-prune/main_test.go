@@ -236,3 +236,123 @@ func TestNestedQuestionsAndDiscovery(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 }
+
+func TestSetextQuestionBlockBoundaries(t *testing.T) {
+	t.Parallel()
+	for _, block := range []string{
+		"***\n", "---\n", " _ _ _\n", "- - -\n", ">\n", "-\n", "*\n", "+\n", "1.\n", "2)\n",
+		"[ref]: /url\n", "<!-- comment -->\n", "<?instruction?>\n", "<!DOCTYPE html>\n", "<![CDATA[text]]>\n",
+		"<script>text</script>\n", "<div>\ntext\n</div>\n\n", "<custom>\ntext\n</custom>\n\n",
+		"    code\n", "\tcode\n", "```\ntext\n```\n", "~~~\ntext\n~~~\n",
+	} {
+		t.Run(block, func(t *testing.T) {
+			for _, newline := range []string{"\n", "\r\n"} {
+				body := strings.ReplaceAll("# Files to read first\nread\n\n"+block+"Open questions\n---\nMulti-phone and ACP deferred.\n# Design\nkeep", "\n", newline)
+				root, path := testTree(t, "707-spec.md", body)
+				preview := testRun(t, root, testEvidence(), nil, false)
+				sections := preview.Documents[0].Sections
+				start := strings.Index(body, "Open questions")
+				end := strings.Index(body, "# Design")
+				if len(sections) != 2 || sections[1].Heading != 2 || sections[1].Title != "Open questions" || sections[1].Start != start || sections[1].End != end || preview.DeferredQuestionSections != 1 || preview.ProposedRemovalSections != 0 {
+					t.Fatalf("incorrect Setext recognition/overlap protection: %+v", preview)
+				}
+				if testRead(t, root, path) != body {
+					t.Fatal("preview changed document")
+				}
+				testRun(t, root, testEvidence(), nil, true)
+				if testRead(t, root, path) != body {
+					t.Fatal("apply removed deferred questions or neighboring bytes")
+				}
+				approved := approval{Document: path, SHA256: hash([]byte(body)), Heading: 2}
+				testRun(t, root, testEvidence(), []approval{approved}, true)
+				if testRead(t, root, path) != body[end:] {
+					t.Fatal("approved removal changed neighboring bytes")
+				}
+			}
+		})
+	}
+}
+
+func TestNonHeadingQuestionText(t *testing.T) {
+	t.Parallel()
+	for _, prefix := range []string{
+		"Multi-line\n", "> quoted\n", "- item\n", "1. item\n",
+		"<div>\n", "<!--\n", "<script>\n", "text\n<custom>\n", "text\n[ref]: /url\n",
+	} {
+		t.Run(prefix, func(t *testing.T) {
+			body := prefix + "Open questions\n---\nNone."
+			root, path := testTree(t, "707-spec.md", body)
+			got := testRun(t, root, testEvidence(), nil, true)
+			if got.ProposedRemovalSections != 0 || testRead(t, root, path) != body {
+				t.Fatalf("non-heading text was removed: %+v", got)
+			}
+		})
+	}
+}
+
+func TestFrontmatterTicketWhitespace(t *testing.T) {
+	t.Parallel()
+	for _, key := range []string{"  ticket:", "ticket :", "\tticket\t:"} {
+		for _, tc := range []struct{ value, reason string }{
+			{"708", "conflicting ticket identities"}, {"nope", "malformed frontmatter ticket"},
+			{"", "malformed frontmatter ticket"}, {"+707", "malformed frontmatter ticket"},
+			{"707\nticket: 707", "malformed frontmatter ticket"}, {"707\n" + key + " 707", "malformed frontmatter ticket"},
+		} {
+			t.Run(key+tc.value, func(t *testing.T) {
+				body := "---\n" + key + " " + tc.value + "\n---\n## Files to read first\nread\n"
+				root, path := testTree(t, "707-spec.md", body)
+				for _, apply := range []bool{false, true} {
+					got := testRun(t, root, testEvidence(), nil, apply)
+					if got.EligibleDocuments != 0 || got.ProposedRemovalSections != 0 || got.Documents[0].Reason != tc.reason || testRead(t, root, path) != body {
+						t.Fatalf("unsafe ticket fallback: %+v", got)
+					}
+				}
+			})
+		}
+		body := "---\n" + key + " 707\n---\n## Files to read first\nread\n## Design\nkeep"
+		root, path := testTree(t, "707-spec.md", body)
+		if got := testRun(t, root, testEvidence(), nil, true); got.EligibleDocuments != 1 || testRead(t, root, path) != "---\n"+key+" 707\n---\n## Design\nkeep" {
+			t.Fatalf("agreement not recognized: %+v", got)
+		}
+	}
+}
+
+func TestCrossIssuePRIdentity(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, timestamp, repo string }{
+		{"shared PR", "2026-09-01T00:00:00Z", repository},
+		{"equivalent timestamp", "2026-09-01T01:00:00+01:00", repository},
+		{"conflicting time", "2026-09-02T00:00:00Z", repository},
+		{"malformed time", "invalid", repository},
+		{"conflicting repository", "2026-09-01T00:00:00Z", "other/repo"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := "## Files to read first\nread\n## Design\nkeep\n"
+			root, path := testTree(t, "707-spec.md", body)
+			other := specsDir + "/708-spec.md"
+			if err := os.WriteFile(filepath.Join(root, other), []byte(body), 0640); err != nil {
+				t.Fatal(err)
+			}
+			ev := testEvidence()
+			pr := ev.Issues[0].PRs[0]
+			pr.MergedAt, pr.Repository = tc.timestamp, tc.repo
+			ev.Issues = append(ev.Issues, issue{Number: 708, State: "CLOSED", PRs: []merge{pr}})
+			valid := tc.name == "shared PR" || tc.name == "equivalent timestamp"
+			for _, apply := range []bool{false, true} {
+				got := testRun(t, root, ev, nil, apply)
+				if (got.EligibleDocuments == 2 && got.ProposedRemovalSections == 2) != valid {
+					t.Fatalf("incorrect shared PR eligibility: %+v", got)
+				}
+				for _, doc := range got.Documents {
+					want := body
+					if valid && apply {
+						want = "## Design\nkeep\n"
+					}
+					if testRead(t, root, doc.Document) != want || (!valid && !strings.Contains(doc.Reason, "contradictory")) {
+						t.Fatalf("incorrect shared PR write/reason: %+v (first %s)", doc, path)
+					}
+				}
+			}
+		})
+	}
+}
