@@ -65,6 +65,27 @@ makes shutdown wait on runners whose release cannot run until the join's
 15-second timeout expires. This applies even when a fatal assertion ends the
 test early. See [development verification](development-verification.md#prove-that-tests-distinguish-the-change).
 
+### Lifecycle fact provenance and persistence
+
+`TestLifecycleDelayedResetProvenance` holds `Session.spawnArgsMu` so reset
+prompt composition waits after A→B rekey but before notification, then adopts
+B→C. Delaying the observer itself would miss the old out-of-order rebind bug:
+rebinding had already happened by observer entry. Assert the final C binding,
+both original-owner facts with their own pairs and mutation timestamps, and
+the unowned variant where a late foreign binding to A stays untouched.
+See [the observer ordering contract](sessions-package-key-types-transition-observer.md).
+
+Both session and conversation registry writers create missing parent
+directories, so a nonexistent-directory fixture does not exercise save
+failure. `TestLifecycleRotationFacts` uses a regular file as the parent and
+checks both persistence-failure log events before asserting that reset, clear
+and recovery still notify. Its callbacks acquire pool, session and capacity
+locks and inspect the guarded registration, identity and active state:
+meaningful checks prove off-lock delivery and avoid staticcheck's SA2001
+empty-critical-section rejection. `TestLifecycleEvictionCapturedOwner`
+checks the same lock availability before the eviction state flip and retains
+the captured owner after registry deletion.
+
 ### Why no `TestHelperProcess` re-exec helper
 
 The parent spec considered duplicating `internal/supervisor`'s `TestHelperProcess` re-exec pattern into the sessions package (~20 lines) per the project's "duplicate, don't export test surface" convention. The blocker: `supervisor.Config.helperEnv` is unexported and is the only way to pass test-only env to the spawned child without polluting the parent test process's `os.Environ()`. External packages cannot set it.
