@@ -149,6 +149,14 @@ cite-guard:
 docs-guard:
 	$(GO) run ./cmd/docs-guard
 
+# Lists the cmd/ and internal/ paths cited by docs/specs/architecture/*.md and
+# whether each still exists, see cmd/spec-reference-inventory (#2928). Read
+# only. Not part of check: a missing historical path is a review candidate,
+# not a failure. The inventory goes to stdout, so the recipe echoes nothing.
+.PHONY: spec-reference-inventory
+spec-reference-inventory:
+	@$(GO) run ./cmd/spec-reference-inventory
+
 .PHONY: build
 build:
 	$(GO) build -o $(BIN) ./cmd/pyry
