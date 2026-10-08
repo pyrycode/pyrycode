@@ -75,6 +75,74 @@ func TestStartupHistoryLegacyScopes(t *testing.T) {
 	}
 }
 
+func TestStartupHistoryReferenceIsolation(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name               string
+		partial, delimiter bool
+	}{{"turn_reference", false, true}, {"tool_reference", true, true}, {"late_legacy_facts", false, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store := history.New(dir)
+			reg := &conversations.Registry{}
+			reg.Create(conversations.Conversation{ID: conversations.ConversationID(testConvID)})
+			put := func(typ, tool string) {
+				testStartupAppend(t, store, testConvID, typ, "reused", tool, "Bash", "", nil)
+			}
+			put(historyTurnOpened, "")
+			put(protocol.TypeToolUse, "call")
+			if tc.delimiter {
+				put(protocol.TypeSessionTransition, "")
+			}
+			at := time.Unix(2, 0).UTC()
+			if tc.partial {
+				// Only the old tool interruption survived the earlier startup.
+				p := runtimeHistoryFact{ConversationID: testConvID, TurnID: "reused", ToolCallID: "call", TurnOpenedEntryID: 1, Cause: "daemon_restart", OccurredAt: at}
+				appendStartupHistoryFact(store, discardLogger(), historyToolInterrupted, p, history.SessionProvenance{})
+			} else {
+				reconcileStartupHistory(store, reg, discardLogger(), at)
+			}
+			openingID := uint64(len(historyEntries(t, store, testConvID)) + 1)
+			if tc.delimiter {
+				put(historyTurnOpened, "")
+			} else {
+				put(protocol.TypeAssistantDelta, "")
+			}
+			put(protocol.TypeToolUse, "call")
+			before := historyEntries(t, store, testConvID)
+			reconcileStartupHistory(history.New(dir), reg, discardLogger(), at.Add(time.Second))
+			all := historyEntries(t, store, testConvID)
+			if !reflect.DeepEqual(before, all[:len(before)]) {
+				t.Fatal("historical prefix changed")
+			}
+			want := []string{fmt.Sprintf("%s:%d:call", historyToolInterrupted, openingID), fmt.Sprintf("%s:%d:", historyTurnInterrupted, openingID), historySessionDivider + ":0:"}
+			if tc.partial {
+				want = append([]string{historyTurnInterrupted + ":1:"}, want...)
+			} else if !tc.delimiter {
+				want = want[2:]
+			}
+			var got []string
+			for _, e := range all[len(before):] {
+				var p runtimeHistoryFact
+				if err := json.Unmarshal(e.Payload, &p); err != nil {
+					t.Fatal(err)
+				}
+				got = append(got, fmt.Sprintf("%s:%d:%s", e.Type, p.TurnOpenedEntryID, p.ToolCallID))
+				if e.Type != historySessionDivider && (e.Session != nil || p.TurnID != "reused") {
+					t.Fatalf("legacy attribution changed: %+v, %+v", e, p)
+				}
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("closures = %v, want %v", got, want)
+			}
+			reconcileStartupHistory(history.New(dir), reg, discardLogger(), at.Add(2*time.Second))
+			if tail := historyEntries(t, store, testConvID)[len(all):]; len(tail) != 1 || tail[0].Type != historySessionDivider {
+				t.Fatalf("repeated start duplicated closure: %+v", tail)
+			}
+		})
+	}
+}
+
 func TestStartupHistoryDiscovery(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

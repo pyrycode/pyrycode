@@ -106,6 +106,24 @@ func readStartupMainWork(store *history.Store, convID conversations.Conversation
 			default:
 				continue
 			}
+			toolID := p.ToolUseID
+			if entry.Type == historyToolInterrupted {
+				toolID = p.ToolCallID
+			}
+			// Explicit recovery references affect only the original opening,
+			// never a reused identity in the scope where recovery was appended.
+			if p.TurnOpenedEntryID != 0 && (entry.Type == historyTurnInterrupted || entry.Type == historyToolInterrupted) {
+				if ends {
+					closedOpenings[p.TurnOpenedEntryID] = true
+				}
+				if toolEnds && toolID != "" {
+					if finishedOpenings[p.TurnOpenedEntryID] == nil {
+						finishedOpenings[p.TurnOpenedEntryID] = make(map[string]bool)
+					}
+					finishedOpenings[p.TurnOpenedEntryID][toolID] = true
+				}
+				continue
+			}
 			st := turns[key]
 			if st == nil {
 				st = &startupMainTurn{key: key, tools: make(map[string]string), finished: make(map[string]bool)}
@@ -120,28 +138,11 @@ func readStartupMainWork(store *history.Store, convID conversations.Conversation
 				st.open, st.openingID = true, entry.ID
 			}
 			st.ended = st.ended || ends
-			toolID := p.ToolUseID
-			if entry.Type == historyToolInterrupted {
-				toolID = p.ToolCallID
-			}
 			if (toolEnds || entry.Type == protocol.TypeToolResult) && toolID != "" {
 				st.finished[toolID] = true
 			}
 			if entry.Type == protocol.TypeToolUse && toolID != "" && p.Name != "Agent" && p.Name != "Task" {
 				st.tools[toolID] = p.Name
-			}
-			// An explicit opening reference joins recovery across a legacy
-			// delimiter without guessing a session or conflating reused turn IDs.
-			if p.TurnOpenedEntryID != 0 {
-				if ends {
-					closedOpenings[p.TurnOpenedEntryID] = true
-				}
-				if toolEnds && toolID != "" {
-					if finishedOpenings[p.TurnOpenedEntryID] == nil {
-						finishedOpenings[p.TurnOpenedEntryID] = make(map[string]bool)
-					}
-					finishedOpenings[p.TurnOpenedEntryID][toolID] = true
-				}
 			}
 		}
 		if page.AtStart {
