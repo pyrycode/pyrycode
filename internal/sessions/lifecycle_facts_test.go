@@ -32,6 +32,7 @@ func TestLifecycleRotationFacts(t *testing.T) {
 			for _, failSave := range []bool{false, true} {
 				t.Run(map[bool]string{false: "persisted", true: "save failure"}[failSave], func(t *testing.T) {
 					pool := helperPool(t, false)
+					sess := pool.Default()
 					old := pool.BootstrapID()
 					reg, _ := seedBoundConvRegistry(t, pool, "owner", old)
 					var logs bytes.Buffer
@@ -48,11 +49,23 @@ func TestLifecycleRotationFacts(t *testing.T) {
 					pool.SetTransitionObserver(func(f SessionTransition) {
 						// Acquiring each lock here proves callbacks execute off all three.
 						pool.mu.Lock()
+						registered := pool.sessions[f.NewID]
 						pool.mu.Unlock()
-						pool.Default().lcMu.Lock()
-						pool.Default().lcMu.Unlock()
+						if registered != sess {
+							t.Error("rotated session is not registered at its new ID")
+						}
+						sess.lcMu.Lock()
+						id := sess.id
+						sess.lcMu.Unlock()
+						if id != f.NewID {
+							t.Errorf("session ID before callback = %q, want %q", id, f.NewID)
+						}
 						pool.capMu.Lock()
+						infos := pool.List()
 						pool.capMu.Unlock()
+						if len(infos) != 1 || infos[0].ID != f.NewID || infos[0].LifecycleState != stateActive {
+							t.Errorf("active sessions before callback = %+v", infos)
+						}
 						c, _ := reg.Get("owner")
 						if c.CurrentSessionID != string(f.NewID) {
 							t.Errorf("binding before callback = %q, fact = %+v", c.CurrentSessionID, f)
@@ -184,11 +197,23 @@ func TestLifecycleEvictionCapturedOwner(t *testing.T) {
 	rec := &transitionRecorder{}
 	pool.SetTransitionObserver(func(f SessionTransition) {
 		pool.mu.Lock()
+		registered := pool.sessions[f.PreviousID]
 		pool.mu.Unlock()
+		if registered != sess {
+			t.Error("evicting session is no longer registered")
+		}
 		sess.lcMu.Lock()
+		id := sess.id
 		sess.lcMu.Unlock()
+		if id != f.PreviousID {
+			t.Errorf("session ID before callback = %q, want %q", id, f.PreviousID)
+		}
 		pool.capMu.Lock()
+		infos := pool.List()
 		pool.capMu.Unlock()
+		if len(infos) != 1 || infos[0].ID != f.PreviousID || infos[0].LifecycleState != stateActive {
+			t.Errorf("sessions before eviction state change = %+v", infos)
+		}
 		rec.observe(f)
 	})
 	sess.beginEvict(ReasonEviction, CauseIdleSleep)
