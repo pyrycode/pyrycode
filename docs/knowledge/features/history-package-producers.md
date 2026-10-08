@@ -112,6 +112,50 @@ completion payloads across every raw page, appends only missing entries with
 the saved provenance and leaves existing entries unchanged. A fully recorded
 post requires cleanup only, with no repeated announcement.
 
+### Legacy transition provenance (#2982)
+
+Capture source facts at the observer/publication handoff, before either
+publication lane can delay. `sessionTransitionEmitterV2.Enqueue` captures
+ordinary transitions; `publishSwitch` captures committed switches on their
+dedicated lane. Both use `capture` to fill missing conversation ownership and
+agent facts by exact session ID. Nonempty captured `ConversationID`,
+`NextAgent` and `PreviousAgent` facts take precedence over lookup results.
+Both relay and history-only installations use
+`startSessionTransitionStreamV2WithHarness` with `relayWiring.sessionHarness`,
+backed by `Pool.HarnessFor` for live or dormant sessions without starting a
+child. Conversation-level agent lookup could instead read a replacement binding.
+
+| Legacy boundary | Producing session and agent |
+| --- | --- |
+| `clear` (`ReasonClear`), including committed switches | Successor `NewID` and `NextAgent` |
+| `idle_evict` (`ReasonEviction`) | Evicted `PreviousID` and `PreviousAgent`; no successor exists |
+
+These are daemon session routing IDs, distinct from conversation IDs and
+agent-native IDs. `transitionProvenance` supplies `history.SessionProvenance`
+through `appendConversationHistory` only for a nonempty session ID paired with
+actual `claude` or `codex` facts. Missing IDs, unavailable lookups and unknown or
+unsupported agent facts leave provenance absent while eligible legacy delivery
+continues. A nonempty unsupported captured agent is not replaced by a lookup.
+Delayed `broadcast` never looks up an agent or substitutes a replacement
+session for provenance, even if an unavailable lookup later becomes available;
+it neither defaults to Claude nor invents `none`.
+
+A nonempty captured `ConversationID` is authoritative for both history and
+live routing after another rotation, pool removal or registry replacement.
+`toWirePayload` retains that owner. Only when ownership is absent may
+`broadcast` use the existing exact-session conversation resolver; if ownership
+remains unresolved, it drops the event without guessing a conversation.
+See [captured lifecycle facts and switch publication](sessions-package-key-types-transition-observer.md)
+and [ADR 042's session provenance](../decisions/042-daemon-built-thread.md#sessions-agents-messages-read-marks).
+
+Raw `Store.Page` exposes captured metadata in warm and reopened stores; old
+untagged entries remain untouched. Visibility stays `clear` shown and
+`idle_evict` hidden. Legacy live/page payload meanings, durable identities,
+unread watermarks and recipient gates retain their behavior, including eviction's
+mirrored wire session IDs. Nil/failed storage still allows eligible fan-out with
+absent history identity. Ordinary enqueue remains nonblocking and drops on full;
+committed switches retain their transition/history, row and sealing order.
+
 ### Legacy eligibility and explicit visibility (#2965)
 
 `legacyHistoryType` is a fixed allowlist of the existing producer vocabulary
@@ -135,8 +179,9 @@ accepts arbitrary types; the transport vocabulary is closed independently.
 
 All four existing writers now use `AppendWithMetadata` with explicit
 `Metadata.Shown`, classified from the already-marshalled payload by
-`historyEntryShown`. Interactive output and channel posts also use captured
-`Metadata.Session`; session transitions and operator messages leave it absent.
+`historyEntryShown`. Interactive output, channel posts and session transitions
+also use captured `Metadata.Session` when source facts are available; operator
+messages leave it absent.
 Neither `shown` nor `session` is added to legacy wire payloads. Stored payloads, timestamps, durable IDs and existing
 recipient gates keep their original meaning.
 
@@ -281,6 +326,16 @@ rule would be defeated by relaying them.
 **Test-shape traps worth knowing before touching these producers
 again:**
 
+- **Delay a path the captured event still reaches.**
+  Captured conversation ownership bypasses the old resolver, so holding that
+  resolver no longer delays switch publication. `TestRelayAgentSwitchDelayedPublication`
+  holds broadcaster `ActiveConns` snapshotting and transport sealing separately
+  to keep both consumer-delay and reset-exclusion witnesses. A delay on an
+  unused resolver would leave the ordering test without its intended witness.
+  `TestSessionTransitionHandoff_CapturesBeforeDelay` replaces lookup facts after
+  enqueue; `TestSessionTransitionHandoff_RemovedExactSession` removes the actual
+  pool entry and replaces the registry owner. Check raw provenance and live
+  routing together: correct session metadata alone would miss misfiled history.
 - **Check retained sources and conversation phases together.**
   `TestInteractiveProvenanceRetainedState` reuses main/child IDs across sources,
   interleaves another conversation and checks ordered text and provenance after

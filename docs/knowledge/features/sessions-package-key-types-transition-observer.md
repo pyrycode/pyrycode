@@ -83,6 +83,12 @@ agent/session ID. Empty session IDs mean an absent prior or successor session.
 `OccurredAt` records the rotation mutation, eviction decision or switch
 publication in UTC, rather than later consumer processing time.
 
+The daemon's legacy emitter fills missing exact-session agent facts at the
+observer/publication handoff, before delayed delivery. Captured ownership remains
+authoritative for history and live routing; missing source facts stay untagged.
+Clear provenance names the successor, while eviction provenance names the
+evicted session. See [legacy transition provenance](history-package-producers.md#legacy-transition-provenance-2982).
+
 `RotateForNewSession` delegates to `RotateForNewSessionWithHandoff` with nil.
 The additive method copies an optional caller-supplied outcome string so later
 caller mutation cannot rewrite the fact. `ResetHandoffOutcome` is a
