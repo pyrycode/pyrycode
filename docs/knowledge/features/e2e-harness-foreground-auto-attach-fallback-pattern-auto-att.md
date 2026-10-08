@@ -1,5 +1,7 @@
 # Foreground Auto-Attach Fallback Pattern (`auto_attach_fallback_test.go`, #164)
 
+Historical harness: #1348 retired foreground auto-attach and these fallback helpers/tests. Preserve this page for past test reasoning; use [the current offline harness](e2e-harness.md) for present test architecture.
+
 The happy-path test (#163) pins that auto-attach fires when the daemon
 hosts the requested UUID. #164 pins the inverse: each of `tryAutoAttach`'s
 fall-through arms lands the foreground binary in **supervisor mode** —

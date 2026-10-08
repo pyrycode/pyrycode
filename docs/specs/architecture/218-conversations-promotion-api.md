@@ -2,6 +2,8 @@
 
 ## Context
 
+Promote and Update acquire the registry mutex separately; two calls are not one atomic mutation. See [current callback and locking contract](../../knowledge/features/conversations-registry-crud.md).
+
 Phase 3 ships promotion as the user-visible action that turns a throwaway discussion (ephemeral, auto-archive-eligible) into a named channel (long-lived, exempt from auto-archive). This ticket lands the in-memory primitive on `*conversations.Registry`. CLI (`pyry conv promote`) and wire-protocol (`promote_conversation` frame) bindings come in later tickets and call this primitive.
 
 Boundary: the primitive flips `IsPromoted` and sets `Name`. It does not move `Cwd`, does not call `Save`, does not log. The caller owns persistence (consistent with `Create` and `Update`), and the caller owns the cwd-move UX flow (which the mobile payload hints at via an optional `cwd` field, but is layered on top of this primitive in a separate ticket).

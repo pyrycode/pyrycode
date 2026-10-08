@@ -1,5 +1,7 @@
 # Stdio-Attach Harness Pattern (`attach_stdio.go`, `attach_stdio_test.go`, #161)
 
+Historical harness: #1348 retired `pyry attach` and these stdio-attach helpers/tests. Preserve this page for past test reasoning; use [the current offline harness](e2e-harness.md) for present test architecture.
+
 The PTY harness (`AttachHarness`, #125) drives `pyry attach` against a
 controlling terminal. SDK consumers (Claudian, `@anthropic-ai/claude-agent-sdk`)
 spawn `pyry attach --stdio` over plain pipes — no PTY anywhere on the client

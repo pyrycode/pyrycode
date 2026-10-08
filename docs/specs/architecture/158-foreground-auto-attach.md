@@ -32,6 +32,8 @@ coverage of the dispatch is split into siblings #163 (happy path) and
 
 ## Context
 
+Attach/resize and foreground auto-attach were retired by #1348; this design is historical. See [current control-plane behavior](../../knowledge/features/control-plane.md).
+
 Today's foreground pyry always spawns a supervised claude. Phase 1
 shipped multi-session pools (#27, #28, #29, etc.); Phase 1.3a added
 `--stdio` byte-forwarding (#154); Phase 1.3b added `--create-if-missing`

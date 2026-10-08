@@ -18,6 +18,8 @@ main as of 2026-05-09 (commit `bc87a7c`). Imports stdlib +
 
 ## Context
 
+Render now includes a static-key fingerprint between the encoded payload and instruction line. See [current pairing display](../../knowledge/features/pair-package.md#render--display).
+
 Phase 3 needs `pyry pair` to print a QR symbol AND a paste-fallback
 string in one shot, so the user can pair via either path: scanning
 with the phone camera (fast, but sometimes fails on small terminal
@@ -320,11 +322,6 @@ no input characters) extends here: test failures must not echo the
 fixed test-file value (not a real device token), but writing the
 discipline into tests exercises the muscle for when this code path
 runs against real tokens in the future `pyry pair` integration test.
-
-## Open questions
-
-None. AC, dependency choice, level/half-block selection, and output
-copy are all pinned by this spec.
 
 ## Security review
 

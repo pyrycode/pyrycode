@@ -6,6 +6,8 @@
 
 ## Context
 
+The persist-before-wake ordering remains, but persist failures now warn and retry rather than terminate the lifecycle. See [current session behavior](../../knowledge/features/sessions-package-key-types-session.md).
+
 `internal/sessions/session.go:transitionTo` flips `lcState` and closes the per-direction "transition complete" channel (`evictedCh` on evict, `activeCh` on activate) under `lcMu`, then **releases `lcMu` and calls `s.pool.persist()` after the close**:
 
 ```go

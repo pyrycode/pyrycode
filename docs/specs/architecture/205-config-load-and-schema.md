@@ -370,12 +370,6 @@ when the bug bites) is expensive.
 `go test -race ./internal/config/...` must pass. Trivially does — no
 goroutines.
 
-## Open questions
-
-None. The package is a stdlib-shaped JSON loader; the design space is
-fully constrained by AC. Developer should write the file + tests and
-ship.
-
 ## Acceptance check (for the developer)
 
 Walk down the AC list before pushing:

@@ -699,16 +699,6 @@ Implementation: `New(cfg)`; immediately call `Send([]byte("x"))`; assert `ErrNot
 - Per-message-deflate compression. Not in the wire spec for v1.
 - A `Send(ctx, frame)` variant. Send already proxies to a channel — adding ctx would make `Send` itself blockable until ctx cancellation, which the unbuffered channel already provides via `<-c.closeCh` on the receive side. Skip.
 
-## Open questions
-
-None. Every AC corresponds to an unambiguous code path:
-
-- New `internal/transport/wssclient.go` exposes `Client`, `Config`, `Connect`/`Send`/`Receive`/`Close`. → File structure above.
-- WS native ping/pong (30s ping, 30s pong timeout, 1011 close). → `pingLoop` + `serve` reconnect path.
-- Exponential backoff with ±20% jitter, 1s/2s/4s/8s/16s/30s cap, reset to attempt 1 after ≥60s. → `backoff` pure function + `Connect`'s uptime check.
-- Tests: dial-and-fail-with-backoff; dial-and-succeed-and-reset; idle-pings-fired-at-30s; dead-connection-detected-after-pong-timeout; close-on-context-cancel. → Six named tests above.
-- Smoke test against httptest WS echo server. → `TestSmoke_HttptestEchoServer`.
-
 ## Security review
 
 This ticket carries the `security-sensitive` label. The pass below follows `agents/architect/security-review.md`'s checklist applied to the transport-layer scope (outbound WSS, generic over payload, no auth/crypto state, no file I/O).

@@ -2,6 +2,8 @@
 
 ## Context
 
+Current Fetcher.get bounds bodies at 512 MiB; its default HTTP transport rejects file URLs rather than reading local files. See [current fetcher contract](../../knowledge/features/update-package.md#http-fetcher).
+
 This is the network-I/O slice of `pyry update`, paired with the pure-function tickets:
 
 - #179 (`ParseLatestRelease`, `CompareVersions`) — already merged; consumes the JSON bytes this fetcher returns.

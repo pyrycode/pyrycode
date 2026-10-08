@@ -2,6 +2,8 @@
 
 ## Context
 
+The binary-relay hello/hello_ack ceremony was retired by #582; the connection is established at WebSocket upgrade. See [current relay lifecycle](../../knowledge/features/relay-package.md).
+
 Phase 3 Track C — composes the v1 envelope/payload types (#246, #255, #256, #271), the generic WSS client with backoff (#247), and the server-id store (A2 / #207). This ticket is where the binary actually announces itself to the relay and starts the long-lived connection that all phone traffic flows through.
 
 The stack shape is:
