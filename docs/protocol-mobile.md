@@ -1370,7 +1370,7 @@ Besides riding the live event stream, this frame is also re-asserted on connect 
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation this turn belongs to. |
-| `turn_id` | string | Identifies this assistant lane within the outer turn. The empty-parent main lane uses the outer turn id; each distinct non-empty parent gets its own stable, different id. |
+| `turn_id` | string | Identifies this assistant lane. The empty-parent main lane uses the main turn id; each distinct non-empty parent gets its own stable, nonempty child id, even with no main turn open. |
 | `seq` | int | Per-lane, non-negative delta-ordering counter; starts at 0 independently for every lane. |
 | `parent_tool_use_id` | string | The parent `Agent` call's `tool_use_id`. **Empty means the main thread.** |
 | `text` | string | Incremental assistant text, coalesced (not per token). |
@@ -1395,11 +1395,15 @@ boundary](knowledge/decisions/025-mobile-remote-head-interactive-session.md): th
 phone receives typed display events, never claude's private reasoning or signature
 material.
 
-Lane identities and counters live only for the current outer turn. Its single
-`turn_end` carries the main turn id, closes the child lanes too, and follows any
-pending prose; an active-conversation switch likewise flushes before discarding
-every lane. The next outer turn lazily creates fresh ids and starts each lane at
-`seq: 0`. Order deltas by `seq` **within one `turn_id`**, not across the conversation.
+The main `turn_end` carries the main turn id and follows any pending prose.
+Background child lanes can continue afterwards with their own stable IDs and
+increasing sequences, without opening a main turn or publishing `turn_state`.
+A later main turn gets a fresh main ID and starts its sequence at `0`; it does
+not reset or reattribute ongoing child lanes. Child lane identities and counters
+are scoped to the producing conversation and retained until session exit or
+conversation teardown, which flushes pending prose before releasing them.
+Moving the active-conversation cursor does not discard them. Order deltas by
+`seq` **within one `turn_id`**, not across the conversation.
 Coalescing also stays lane-local: adjacent text is combined only while both
 `parent_tool_use_id` and claude's internal message id match. The daemon keeps one
 active buffer, so a main/child or child/child switch flushes the earlier text and
@@ -1437,7 +1441,7 @@ Durable tail catch-up remains #2744. See
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation this turn belongs to. |
-| `turn_id` | string | Identifies the turn the tool call belongs to. |
+| `turn_id` | string | Main turn ID, or a child's retained originating ID / parent-keyed fallback described below. |
 | `tool_use_id` | string | Correlates this call with its later `tool_result`. |
 | `parent_tool_use_id` | string | The `Agent`/`Task` call that spawned the subagent making this call. **Empty means the main thread.** |
 | `name` | string | Tool name. |
@@ -1458,6 +1462,20 @@ Each value is the input's own value: a JSON string arrives decoded (a path is a 
 
 **Nesting is unbounded and needs no extra field.** The value is `claude`'s own, read verbatim with no branch on depth, so a call made by a subagent that a subagent spawned names the **inner** `Agent` call; following ids rebuilds the whole tree. A client that has not seen the parent row — it arrived before the client connected, or was replayed away — renders the row at top level.
 
+**Child tool attribution survives main completion** (#2960). When the daemon
+observed the spawning `Agent`/`Task` call, child tool frames retain that call's
+originating main `turn_id`, including after its `turn_end` and during later main
+turns. Nested launchers inherit their child call's origin. If the daemon did not
+observe the launcher, it uses a stable, nonempty child ID keyed by the parent
+within the producing conversation, shared with that parent's assistant lane.
+The first attribution observed for a child tool call stays fixed; it never
+borrows a later main turn's ID. Child `tool_use` and `tool_result`, and
+[`tool_progress`](#tool_progress) and [`tool_denied`](#tool_denied) for a known
+child call, agree on this ID without opening or closing a main turn, changing
+its phase, or publishing `turn_state`. Parent-bearing frames preserve
+`parent_tool_use_id` verbatim. Attribution is released at session exit or
+conversation teardown, even when the main turn is already idle.
+
 **It is a grouping hint, not a capability**, and takes the same rule as the `input` values above: model-authored text the daemon neither resolved nor checked names a call this client has seen. Render the row under a matching parent, render it at top level when nothing matches, and never dereference it as anything else. The daemon uses the presence of parent attribution to exclude subagent activity from main-turn busy tracking; it does not resolve the id to authorize an operation.
 
 **Empty has exactly one meaning, and that is what makes the bound safe.** The daemon caps the value at **256 bytes** and **empties rather than cuts** one that exceeds it or that `claude` sent as a non-string — because a cut join key matches no `tool_use_id` while still looking like one, and would file a row under the wrong parent. So an emptied id degrades to top-level rendering, the behaviour before this field existed. There is deliberately no report naming which emptiness it is; unlike [`tool_denied`](#tool_denied)'s emptied fields, this one has no second meaning for a report to disambiguate.
@@ -1469,11 +1487,17 @@ Each value is the input's own value: a JSON string arrives decoded (a path is a 
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation this turn belongs to. |
-| `turn_id` | string | Identifies the turn the result belongs to. |
+| `turn_id` | string | Main turn ID, or the child attribution retained for this call. See [`tool_use`](#tool_use). |
 | `tool_use_id` | string | Matches the `tool_use` this result completes. |
 | `parent_tool_use_id` | string | The `Agent`/`Task` call that spawned the subagent whose call this result completes. **Empty means the main thread.** § [`tool_use`](#tool_use) states the field in full. |
 | `is_error` | bool | Whether the tool invocation failed. |
 | `result_summary` | string | Human-readable précis of the result (not the raw output). |
+
+For a child call, `turn_id` retains the originating main ID or the parent-keyed
+unknown-origin fallback described under [`tool_use`](#tool_use), even after main
+completion. A result observed before the call's `tool_use` fixes the same
+attribution for subsequent frames. It preserves `parent_tool_use_id` and does
+not open a main turn or change its phase.
 
 **Bounds.** `result_summary` is capped at **10000 runes** (runes, not bytes). A result the daemon shortened ends in `…`; a result that legitimately ends in `…` is indistinguishable from a cut one, which is an accepted cost of the marker. **`is_error` does not change the bound** — an error result is truncated at exactly the same 10000 runes a success result is, so a client must not expect a failing tool's output to arrive whole.
 
@@ -1486,7 +1510,7 @@ The number is fixed by the envelope, not by taste. `encoding/json` escapes HTML 
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation this turn belongs to. |
-| `turn_id` | string | The turn that made the refused call. |
+| `turn_id` | string | Main turn ID, or the child attribution retained for this call. See [`tool_use`](#tool_use). |
 | `tool_use_id` | string | **The join key.** Byte-identical to the `tool_use` and `tool_result` frames for the same call. |
 | `tool_name` | string | **Open set.** `claude`'s name for the tool it refused — `Bash` in every captured denial. Bounded and **dropped, not cut**. |
 | `decision_reason_type` | string | **Open set.** `claude`'s word for *what* denied the call — `classifier`, `asyncAgent`, `mode`, `rule` are documented. **Empty in every captured denial.** Bounded and **dropped, not cut**. |
@@ -1507,6 +1531,14 @@ would need the daemon to hold cross-line state keyed by `tool_use_id`. And the
 result-line recovery that follows this frame reports denials for calls whose
 `tool_result` has **already shipped** - a field on a sent frame cannot be set afterwards.
 Join the two rows on `tool_use_id`, which a client already has.
+
+For a known child call, `turn_id` retains the originating main ID or the
+parent-keyed unknown-origin fallback described under [`tool_use`](#tool_use),
+across main completion and later turns. This frame carries no
+`parent_tool_use_id`; join by `tool_use_id` to recover the call's grouping.
+A known child denial opens no main turn and publishes no `turn_state`.
+If the daemon has no child attribution for the tool ID, the existing main-turn
+opening behavior remains.
 
 **The two report arrays make three states decidable, and that is the whole reason there
 are two of them.** For any field named in either:
@@ -1555,7 +1587,7 @@ is not something this frame offers.
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation this turn belongs to. |
-| `turn_id` | string | The turn containing the open tool call. |
+| `turn_id` | string | Main turn ID, or the child attribution retained for this call. See [`tool_use`](#tool_use). |
 | `tool_use_id` | string | **The join key.** Byte-identical to the `tool_use`, `tool_result`, and `tool_denied` frames for the same call. |
 | `elapsed_seconds` | int | `claude`'s signed elapsed-seconds reading, forwarded verbatim. |
 
@@ -1565,6 +1597,13 @@ not open a second row. It is a progress report, not a terminal frame:
 no `session_id`, `uuid`, tool name, sequence number, or parent id because the existing
 tool row already supplies the display identity and this report needs only enough
 addressing to join it.
+
+For a known child call, `turn_id` retains the originating main ID or the
+parent-keyed unknown-origin fallback described under [`tool_use`](#tool_use),
+across main completion and later turns. Progress keeps its existing fields and
+joins by `tool_use_id`; it opens no main turn and publishes no `turn_state`.
+If the daemon has no child attribution for the tool ID, the existing main-turn
+opening behavior remains.
 
 The daemon forwards each heartbeat independently at `claude`'s cadence. It does not
 compute elapsed time, retain the latest reading, rate-limit, deduplicate, clamp, or
