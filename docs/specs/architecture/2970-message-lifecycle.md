@@ -46,7 +46,7 @@ None. Exact API spelling and callback scheduling are specified above; production
 
 ## Documentation handoff
 
-Pending for documentation stage: in `docs/knowledge/features/msgqueue-package.md`, “Exported surface”, “Delivered notification (#2115)” and “Concurrency model”, document the additive identity/lifecycle API, empty identity for legacy callers, copied safe projections, acceptance-before-terminal ordering, the three outcomes and delivery winning a removal race. Retain the documented shutdown observation gap and distinguish per-run queue IDs from durable acceptance linkage owned by the history writer.
+Satisfied in [the package overview](../../knowledge/features/msgqueue-package.md), whose “Exported surface”, “Delivered notification (#2115)” and “Concurrency model” sections link to [the API](../../knowledge/features/msgqueue-package-api.md) and [lifecycle/concurrency](../../knowledge/features/msgqueue-package-lifecycle.md). These document the additive identity/lifecycle API, empty identity for legacy callers, copied safe projections, acceptance-before-terminal ordering, the three outcomes and delivery winning a removal race. The shutdown observation gap is retained, and per-run queue IDs are distinguished from durable acceptance linkage owned by the history writer.
 
 ## Security review
 
