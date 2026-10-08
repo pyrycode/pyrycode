@@ -827,15 +827,10 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		// #2646: the capability list is read off an adapter over the same pool and
 		// store as settings above, so it reports exactly what that one checks.
 		capabilities: settingsUpdaterAdapter{pool, modelVocabulary}.Capabilities,
-		runSettings: func(convID string) (boundRunSettings, bool) {
-			return resolveBoundRunSettings(convReg, runSettingsPool{Pool: pool}, convID)
-		},
+		runSettings:  runSettingsFor(convReg, pool, modelVocabulary),
 		// The registry half and the live-session half of one conversation's
 		// system-prompt picture (#2152), resolved together over the same registry and
-		// pool. An inline closure like runSettings above rather than a named adapter
-		// like modelListFor below, and for the reason that pair differs: this value is
-		// cmd/pyry-typed, so no internal/protocol annotation is needed here and none
-		// would compile — this file does not import that package.
+		// pool. The closure returns cmd/pyry's own primitive-typed state.
 		promptState: func(convID string) (conversationPromptState, bool) {
 			return resolveConversationPrompt(convReg, pool, convID)
 		},

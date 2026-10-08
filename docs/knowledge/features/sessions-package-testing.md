@@ -65,6 +65,21 @@ makes shutdown wait on runners whose release cannot run until the join's
 15-second timeout expires. This applies even when a fatal assertion ends the
 test early. See [development verification](development-verification.md#prove-that-tests-distinguish-the-change).
 
+### Published model selection
+
+An adapter acceptance test alone misses a model-selection failure: canonical
+family storage can leave readback naming an alias absent from the menu and
+effort-only writes accepting the broad fallback. In `cmd/pyry`,
+`TestPublishedModelSelection_SettingsRoundTrip` composes actual publication,
+the settings adapter and encrypted conversation-bound reads. It checks the
+published value after canonical storage, repeated reads and reopening, for
+both live and dormant sessions, plus an effort-only refusal and unchanged
+sibling settings. The acknowledgement's bytes must contain only `session_id`;
+model confirmation comes from the subsequent settings reply.
+`TestPublishedModelSelection_VocabularyRefresh` checks that replacing the
+vocabulary changes readback identity while storage still follows the family.
+See [stored and published model identities](sessions-package-key-types-sessionsettings-claudesettingsargs.md).
+
 ### Lifecycle fact provenance and persistence
 
 `TestLifecycleDelayedResetProvenance` holds `Session.spawnArgsMu` so reset
