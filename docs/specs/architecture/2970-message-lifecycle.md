@@ -66,3 +66,7 @@ Pending for documentation stage: in `docs/knowledge/features/msgqueue-package.md
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-08
+
+## Revisions
+
+- 2026-10-08: Build review made confirmed FIFO advance part of the attempt-completion/outcome-claim critical section. Acceptance can finish concurrently and publish a deferred `OnDelivered`, so advancing afterward could expose the confirmed item in its re-entrant snapshot. Shutdown is decided in that same section before advance; the documented confirmed-write gap remains. Final written work is about 766 lines, with three new exported types and no consumer migrations, within all sizing limits.
