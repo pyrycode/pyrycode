@@ -653,8 +653,10 @@ func startStreamTurnDrainV2(
 						}
 						emitter.closeRuntimeSource(ctx, id, sourceID, "child_exit", at, false, env.exitEpoch)
 						if !emitter.hasRuntimeTurn(id) {
+							if _, cleared := busy.clearForExit(env.sessionID, env.exitEpoch); !cleared && busy != nil {
+								return
+							}
 							sink.observePlacementIdle(env.sessionID)
-							busy.clearForExit(env.sessionID, env.exitEpoch)
 							busy.publishPostBoundary(id, false)
 							if busy != nil && busy.posts != nil {
 								busy.posts.teardown.Delete(id)

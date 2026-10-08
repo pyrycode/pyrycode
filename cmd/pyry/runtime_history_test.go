@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -470,5 +471,33 @@ func TestRuntimeHistoryExitCapturesRetiredSource(t *testing.T) {
 	exit()
 	if env := <-sink.ch; env.source.SessionID != "b" {
 		t.Fatalf("replacement exit: %+v", env)
+	}
+}
+
+func TestRuntimeHistoryStaleExitCannotPlaceSuccessorDelivery(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sink := newStreamTurnSink(8, discardLogger())
+	resolve := stubBusyResolve(map[string]string{"a": testConvID})
+	busy := newTurnBusyTracker(resolve, discardLogger(), withExitEpoch(sink.exitEpoch))
+	e := newInteractiveTurnEmitterV2(nil, historyOnlyBroadcaster{}, discardLogger())
+	installRuntimeHistory(sink, e, busy)
+	sink.sinkForTag(func() string { return "a" }, "claude")(turnevent.ThoughtChunk{})
+	sink.exitFor("a")()
+	busy.openForDelivery(testConvID)
+	var idle atomic.Int32
+	observer := func(string) { idle.Add(1) }
+	sink.placementIdle.Store(&observer)
+	fence := make(chan struct{})
+	sink.dispatchPlacement(ctx, func() { close(fence) })
+	cleanup := startStreamTurnDrainV2(ctx, sink, e, resolve, busy, discardLogger())
+	defer func() { cancel(); cleanup() }()
+	select {
+	case <-fence:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stale-exit fence timed out")
+	}
+	if idle.Load() != 0 || !busy.Busy(testConvID) {
+		t.Fatalf("successor placement: idle=%d busy=%v", idle.Load(), busy.Busy(testConvID))
 	}
 }
