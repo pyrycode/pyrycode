@@ -7,6 +7,8 @@ size: S
 
 # Context
 
+Attach/resize and foreground auto-attach were retired by #1348; this design is historical. See [current control-plane behavior](../../knowledge/features/control-plane.md).
+
 ## Why this slice exists
 
 #154 landed `pyry attach --stdio` for SDK consumers. Unit tests (in

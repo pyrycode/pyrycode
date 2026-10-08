@@ -138,10 +138,6 @@ Promoted-entry name field can be left as the zero `*string` (nil) — `ShouldArc
 - Concurrent invocation of `Sweep`. The daemon-wiring ticket may add it; here `Sweep` runs on the caller's goroutine and the existing `TestRegistry_ConcurrentReadWrite` already exercises `Registry`'s mutex discipline.
 - Persistence. `Sweep` doesn't call `Save`; no disk side-effects to verify. The doc comment is the contract.
 
-## Open questions
-
-None. The acceptance criteria are unambiguous and the surrounding code (registry methods, predicate, test fixtures) is fully landed.
-
 ## Out of scope (do not implement here)
 
 - Daemon-side ticker goroutine, load-on-tick, save-after-sweep — separate ticket.

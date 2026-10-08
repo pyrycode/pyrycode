@@ -6,6 +6,8 @@
 
 ## Context
 
+Attach/resize and foreground auto-attach were retired by #1348; this design is historical. See [current control-plane behavior](../../knowledge/features/control-plane.md).
+
 ### Problem
 
 Claudian (Obsidian plugin built on `@anthropic-ai/claude-agent-sdk`) spawns

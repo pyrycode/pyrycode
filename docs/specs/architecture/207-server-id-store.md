@@ -383,11 +383,6 @@ Residual risks documented (existing-loose parent-dir perms, concurrent-pyry
 misconfig). Both are out of this loader's authority and explicitly noted in
 the doc-comment or this spec.
 
-## Open questions
-
-None. The AC fully constrains the shape; the only judgment call (placement
-in `internal/identity` vs sibling) is resolved above with explicit rationale.
-
 ## Out of scope
 
 - **Path resolution.** `~/.pyry/server-id` resolution from config lives

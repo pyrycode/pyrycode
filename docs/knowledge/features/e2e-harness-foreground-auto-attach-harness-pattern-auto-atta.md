@@ -1,5 +1,7 @@
 # Foreground Auto-Attach Harness Pattern (`auto_attach.go`, `auto_attach_happy_test.go`, #163)
 
+Historical harness: #1348 retired foreground auto-attach and these helpers/tests. Preserve this page for past test reasoning; use [the current offline harness](e2e-harness.md) for present test architecture.
+
 The stdio-attach harness drives `pyry attach --stdio <uuid>`. Phase
 1.3c-2 (#158) added a *second* dispatch path to `control.AttachStdio`:
 the foreground binary path, where `pyry --session-id <uuid> …` (no

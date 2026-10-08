@@ -167,12 +167,6 @@ tt.want)` failure message.
   `errors.Is` walks the wrapper chain end-to-end against a real kernel
   error.
 
-## Open questions
-
-None. The PO ticket is fully scoped, the seam is clean, the predicate
-shape is forced by the AC. Developer should write the function, write
-the table, ship.
-
 ## Acceptance check (for the developer)
 
 Before pushing, walk down the AC list and tick each box mentally

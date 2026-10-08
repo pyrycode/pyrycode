@@ -1,0 +1,486 @@
+# Historical specs review: batch 02 (#2988)
+
+## Files read
+
+- `docs/specs/README.md` → historical authority boundary, inventory grammar and content-bound approvals.
+- `docs/knowledge/features/development-verification.md` § Check searches and citations → absence controls, preserving historical citations and unresolved deferrals.
+- `cmd/spec-reference-inventory/main.go` → `run`: unique document/target records and checkout existence checks.
+- `cmd/spec-reference-inventory/references.go` → reference extraction contract.
+- `cmd/spec-scaffolding-prune/main.go` → `run`, `approval`, `report`: full-byte hashes, heading identities, offline preview and diagnostics.
+- `cmd/spec-scaffolding-prune/markdown.go` → `parse`: conservative section boundaries and unsupported-document retention.
+- `cmd/spec-scaffolding-prune/evidence.go` → `eligibility`: closed issue plus merged closing-link evidence.
+- `cmd/spec-scaffolding-prune/testdata/2929-evidence.json` → reusable evidence; no metadata refresh or live capture.
+- The 46 issue-manifest specs → review only the snapshot candidates and their surrounding decisions.
+- Owning feature documents and current declarations → verify each disposition before authorizing a notice or removal; detailed evidence map follows in the ledger.
+
+## Context
+
+Historical specs preserve useful reasoning but can advertise retired attach, authentication or persistence designs. Missing references and substantive question bodies are candidates, not proof of errors. Review the exact #2988 manifest at scope commit `bf3129a42d38d257a3085f05dde5079a275c84a6` against reviewed-current commit `f2a41c4b5bf2e72437eb1dc97b47b8178ff86429`.
+
+This is one deliverable: an evidence-backed batch review with documentation authorization. No product behavior, detector or harness changes. No new decision record is anticipated.
+
+## Design
+
+Keep all committed artifacts in this plan, respecting the builder's allowed-file boundary. Add a document ledger, a missing-reference-pair ledger and per-question dispositions, followed by separately extractable JSON approvals and a compact scoped preview. Exact paths and heading ordinals identify findings; repeated headings are distinct identities.
+
+Recover the scope inventory from an archive of the scope tree. Use the shipped inventory and pruning commands on current bytes; retain full corpus outputs only under `/tmp/builder-2988/`. Compare scope/current full bytes and map changed identities if needed. Preserve purely historical references. For misleading prose, give exact notice wording and an insertion heading outside all removal ranges. Retain questions containing useful decisions or unresolved requirements unless those contents are demonstrably duplicated elsewhere or obsolete.
+
+Extract the approvals JSON to scratch, preview with the existing evidence, then filter the generated report to the manifest. Preserve generated checkout/evidence provenance, full-document hashes, actions, reasons and byte ranges. Batch counts must not inherit corpus counts. Nothing invokes apply.
+
+Sizing before commit: four acceptance criteria; zero exported types/interfaces, consumer changes or state-machine reject branches. Estimated total written work below 700 lines including ledger, JSON, validation notes, PR and documentation notices. Only this new plan path will change; fetched branches #2873 and #2882 do not touch it. Review snapshot code remains fixed even if origin/main advances.
+
+## Concurrency model
+
+Read-only offline commands; no added goroutines, runtime state or shutdown paths.
+
+## Error handling
+
+Unsupported/ineligible documents receive no approvals. Stale, duplicate or unmatched approvals fail review validation. Insufficient evidence yields an explicit unresolved disposition identifying the unknown requirement, retained visible questions and an issue comment. No historical citation substitution or inferred resolution from merge alone.
+
+## Testing strategy
+
+Validate exact manifest equality and uniqueness: 46 documents, 33 scope missing document/target pairs across 16 documents, and 46 scoped question occurrences. Compare archived/current hashes and heading identities. Validate cited current declarations, evidence eligibility, approval-to-removal bijection, empty approval diagnostics and scoped preview reproducibility. Run the existing two command packages' race tests; no new tests or production edits. Full-module tests remain the verifier's gate.
+
+## Open questions
+
+- Resolve each candidate through current declarations and owning knowledge; record any remaining unknowns individually in the ledger and on #2988.
+- Decide which question bodies contain unique useful decisions or still-deferred requirements and must remain visible.
+
+## Documentation handoff
+
+Pending for the documentation stage: apply only exact notices and approved question removals recorded in the completed ledger at its exact architecture paths/headings. Preserve all historical citations and bodies outside approved ranges, including useful unresolved questions. After notices or intervening edits, re-identify the approved sections and regenerate full-byte hashes, heading ordinals and offline preview before removal. Corpus-report entries outside these 46 documents confer no authority.
+
+For any evidence-backed durable correction, record the exact owning `docs/knowledge/features/` or `docs/knowledge/decisions/` path, heading and replacement wording here and in the PR. If none is found, make no knowledge correction. Never edit `docs/knowledge/codebase/`, `docs/lessons.md` or `docs/PROJECT-MEMORY.md`. Unresolved requirements stay on #2988, with no implementation added.
+
+## Revisions
+
+2026-10-08: Review evidence and approvals use checkout `3ca4ac9c6bce7f27ef26f0e3f685f9186a057209`, the plan-only child of the original reviewed source commit `f2a41c4b5bf2e72437eb1dc97b47b8178ff86429`. No source or manifest bytes changed. JSON artifacts are embedded below because this role may write only its own architecture plan; extraction yields the exact tool input. The two planning questions are resolved by the per-occurrence dispositions below; retained requirement unknowns are handoffs on #2988, not blockers.
+## Review provenance and coverage
+
+Scope: `bf3129a42d38d257a3085f05dde5079a275c84a6`. Reviewed-current: `3ca4ac9c6bce7f27ef26f0e3f685f9186a057209`. All 46 manifest documents are byte-identical between these commits; all 46 question ordinals are unchanged. No disappeared/changed sections require remapping. All 33 scope missing pairs remain missing, across the same 16 documents. Eligibility is positive for all 46; no unsupported Markdown findings in this batch.
+
+H = historical and still useful; S = superseded/misleading; U = unresolved. Document disposition prioritizes S when a notice is needed; question classifications are independent. Question ordinals below count all parsed headings, not only questions. Each listed occurrence has its own row, including its exact title. Missing-pair rows identify every distinct citation heading, including ordinals for repeated titles.
+
+Counts use batch units: 46 reviewed documents; 21 proposed annotated documents; 46 preserved historical document bodies outside approved question ranges; 16 approved question occurrences in 16 documents; 30 retained question occurrences in 30 documents; 11 documents with unresolved requirements. Annotation and unresolved counts overlap (6 documents); missing-reference and question populations overlap (all 16 missing-reference documents have questions). After all proposed actions, 12 documents receive neither notice nor removal. These are proposed actions, not corpus edits or an apply report.
+
+Validation: manifest/document/question sets are exactly equal, with zero omitted or duplicate entries; 33 unique scope document/target pairs are covered once. Every approval matches exactly one eligible removal with the reviewed full-document hash and ordinal; diagnostics are empty. Extraction, shipped preview and scoped projection are reproducible without GitHub or live Claude.
+## Current evidence map
+
+Paths below were read for the named declarations/sections; each ledger row cites its evidence key. Current declarations support the stated contracts, not merely the existence of their files.
+
+- **A** — `docs/knowledge/features/control-plane.md` § intro; attach/resize retirement: internal/control/protocol.go → Request/VerbSessionsHasID; cmd/pyry/main.go → run; internal/sessions/get_or_create.go → GetOrCreate. #1348 removed attach/auto-attach; #1535 removed orphaned wire types. Historical e2e harness overviews still describe removed helpers; their retirement notices are handed off below.
+- **B** — `docs/knowledge/features/control-plane-client-dial-transient-startup-retry.md` § dial retry contract: internal/control/client.go → SessionsHasID; internal/control/server.go → handle; internal/control/dial.go → isTransientStartupError/dialWithRetry; cmd/pyry/control_client.go → parseClientFlags/runStatus/runLogs/runStop. Current tests: TestIsTransientStartupError/TestDialWithRetry.
+- **C** — `docs/knowledge/features/sessions-package-key-types-session.md` § Session: internal/sessions/session.go → transitionTo/beginEvict/endEvict/Run/Activate/Evict; internal/sessions/pool.go → New/Run; internal/sessions/session_persist_test.go → TestSession_PersistFailure_IsNonFatal. Persistence failures now warn and retry; no fatal lifecycle unwind.
+- **D** — `docs/knowledge/features/install-script.md` § Smoke check (#203): cmd/pyry/install_service.go → runInstallService; internal/install/install.go → ResolveWorkDir; install.sh → service_present_darwin/service_present_linux/smoke_check. Active-only detection and captured restart output are implemented.
+- **E** — `docs/knowledge/features/update-package.md` § Behaviour; GoReleaser drift: internal/update/version.go → CompareVersions/ParseLatestRelease/ParseRelease/Eligible; checksum.go → AssetName/ParseChecksumsFile/VerifySHA256; restart.go → DetectRestartCommand; fetch.go → Fetcher.get; install.go → ExtractBinary; replace.go → AtomicReplace; cmd/pyry/update.go → doUpdate/installRelease/defaultProbeRestart. Read pyry-update-command.md and pyry-update-command-architecture.md for current signed installation flow.
+- **F** — `docs/knowledge/features/identity-package.md` § LoadOrCreate — first-run bootstrap: internal/config/config.go → Config/DefaultConfig/Load (also config-package.md); internal/identity/server_id.go → ServerID/NewServerID/ParseServerID; store.go → LoadOrCreate/writeServerID. Defaults overlay and no-overwrite-on-corruption survive.
+- **G** — `docs/knowledge/features/devices-registry-validate.md` § Validate — the WS-perimeter auth predicate: internal/devices/device.go → Device/HashToken/VerifyToken; registry.go → Add/List/Save/FindByTokenHash/Reload; auth.go → Validate/ValidateResult. Read devices-package.md and devices-registry.md: value fields and explicit Save remain; auth now checks peer static key/redemption.
+- **H** — `docs/knowledge/features/pair-package.md` § Surface; Decode — validation; Render — display: internal/pair/payload.go → Payload/Encode/Decode; render.go → Render/Fingerprint. #432 added required ServerStaticPubkey and fingerprint. Stdlib encoding/json.Unmarshal rejects trailing non-whitespace; the streaming decoder needs a second EOF check.
+- **I** — `docs/knowledge/features/pyry-pair-command.md` § pyry pair (bare) — operation order; pyry pair revoke <name>: cmd/pyry/pair.go → runPairDefault/selectPairingService/runPairList/renderPairList/runPairRevoke/mintDevice; internal/devices/lock.go → WithLock; internal/relay/v2session_handshake.go → handleNoiseInit/reload path. Current CLI uses control.MintPairing; revoke locks Load/Remove/Save.
+- **J** — `docs/knowledge/features/conversations-registry-crud.md` § Update; Delete: internal/conversations/conversation.go → Conversation; id.go → ValidID; registry.go → Save/List/Update/Promote/Delete; archive.go → ShouldArchive; sweep.go → Sweep; sweep_loop.go → RunSweepLoop; internal/sessions/pool.go → Run. Read conversations-package.md and conversations-registry.md for type and persistence contracts.
+- **K** — `docs/knowledge/features/rotation-watcher.md` § Where the replacement lives: Merged #2137 removed internal/sessions/rotation; cmd/pyry/session_reset_follow.go → sessionResetFollower.follow/rekeyPool; internal/sessions/transition.go → AdoptAnnouncedID. Read streamsup-package-announced-reset-follower.md for stream-announced reset replacement.
+- **L** — `docs/knowledge/features/relay-package.md` § What it is; Auth: internal/transport/wssclient.go → Client.Connect/Connected/backoff/pingLoop; internal/relay/connection.go → Connection.run/classifyTransportErr/SendPushWake; auth.go → StatusUnauthorized/MsgInvalidToken; v2session_handshake.go → handleNoiseInit; handlers/register_push_token.go → RegisterPushToken; cmd/pyry/relay.go → startRelay. #582 removed binary-relay hello; #1040 removed AuthenticateFirstFrame; #319 changed handler seam. Read relay-package-handlers.md and relay-package-push-wake.md.
+
+## Document and question disposition ledger
+
+Approve means only the exact Q section is authorized; everything else stays. A retained useful resolved decision is H, not unresolved solely because the heading says Open questions.
+
+| Exact document | Document | Question identity / classification | Proposed action, evidence and useful/deferred content |
+|---|---|---|---|
+| `docs/specs/architecture/137-resize-wire-message.md` | S | `Open questions` @16 / H | Retain; evidence A. Keep geometry sentinel, no-retry, ack and burst-latency reasoning; all describe the retired attach transport. |
+| `docs/specs/architecture/154-attach-stdio-mode.md` | S | `Open questions` @25 / H | Retain; evidence A. Keep reader/writer testability and stderr-suppression choices; flag decision and CLI wiring remain useful historical design. |
+| `docs/specs/architecture/155-attach-create-if-missing.md` | S | `Open questions` @44 / H | Retain; evidence A. Keep take-path label policy, timeout rationale and refactor alternatives; GetOrCreate survives, attach and rotation skip-set do not. |
+| `docs/specs/architecture/157-control-sessions-has-id.md` | H | `Open questions` @15 / H | Approve removal; evidence B. Approve boilerplate: field reuse, false serialization and resolver seam are in Design; SessionsHasID still returns the typed Has field. |
+| `docs/specs/architecture/158-foreground-auto-attach.md` | S | `Open questions` @15 / H | Retain; evidence A. Keep silent-fallback/debugging policy as historical reasoning; automatic foreground attach was removed. |
+| `docs/specs/architecture/161-e2e-stdio-attach-harness.md` | S | `Open questions` @17 / H | Retain; evidence A. Keep banner draining, single-client scope, cleanup discipline and temporary-home choices as reusable test reasoning. |
+| `docs/specs/architecture/162-e2e-stdio-attach-no-pty.md` | S | `Open questions` @16 / H | Retain; evidence A. Keep terminal-device matcher rationale, probe-race tradeoff and one-consumer helper choice; retired assertions are historical. |
+| `docs/specs/architecture/163-e2e-foreground-auto-attach-happy.md` | S | `Open questions` @14 / H | Retain; evidence A. Keep nonce/process-tree diagnostic choices; replacement execution path does not validate the old pgrep assertion. |
+| `docs/specs/architecture/164-e2e-foreground-auto-attach-fallback.md` | S | `Open questions` @20 / H | Retain; evidence A. Keep separate-socket explanation and failure diagnostics; fallback/PTY fixture behavior is retired. |
+| `docs/specs/architecture/167-client-flag-passthrough.md` | H | `Open questions` @15 / H | Retain; evidence B. Keep inline extra-arg rejection and verb-specific error wording choices; runStatus, runLogs and runStop still reject leftovers. |
+| `docs/specs/architecture/169-evict-activate-persist-ordering.md` | S | `Open questions` @15 / H | Retain; evidence C. Keep channel reuse and lock ordering; persist-before-wake survives, fatal-persist recovery claim is superseded. |
+| `docs/specs/architecture/177-install-service-cwd-workdir.md` | H | `Open questions` @10 / H | Retain; evidence D. Keep nonexistent-workdir warn/continue, tilde-cleaning and literal cwd/symlink decisions; ResolveWorkDir and runInstallService agree. |
+| `docs/specs/architecture/179-update-version-parsing.md` | U | `Open questions` @16 / U | Retain; evidence E. Keep prerelease ordering and optional Comparison.String deferrals. doUpdate handles dev; ParseRelease/Eligible now inspect release flags. Full SemVer prerelease precedence remains unknown. |
+| `docs/specs/architecture/180-update-checksum.md` | U | `Open questions` @16 / U | Retain; evidence E. Keep asset-template coupling, whole-buffer hashing and digest-validation decisions. Unknown: streaming threshold or a release-template drift gate; existing ParseChecksumsFile still does not validate hex length. |
+| `docs/specs/architecture/181-update-restart-detect.md` | H | `Open questions` @14 / H | Approve removal; evidence E. Approve boilerplate: RestartProbe tie-breaker is in Design and DetectRestartCommand; actual probing/exec landed in cmd/pyry/update.go. |
+| `docs/specs/architecture/182-update-http-fetcher.md` | S | `Open questions` @16 / U | Retain; evidence E. Keep non-2xx diagnostics, User-Agent, URL-policy and constructor choices. Unknown: whether operator evidence warrants error-body text or user URL support. Default HTTP transport does not read file URLs. |
+| `docs/specs/architecture/186-update-extract-binary.md` | H | `Open questions` @14 / H | Approve removal; evidence E. Approve boilerplate: exact basename/regular-file matching and errors are in Design and ExtractBinary; AtomicReplace landed separately. |
+| `docs/specs/architecture/187-update-atomic-replace.md` | S | `Open questions` @15 / U | Retain; evidence E. Keep directory-fsync, no-replace and streaming deferrals. Explicit Chmod already defeats umask interference. Unknown: whether power-loss durability or concurrent target creation enters the supported threat model. |
+| `docs/specs/architecture/189-update-subcommand-wiring.md` | H | `Open questions` @24 / H | Retain; evidence E. Keep --check spelling, Homebrew hint choice and deferred asset-list UX. doUpdate now verifies signed checksums; the old flow is historical, not an unsigned-update authority. |
+| `docs/specs/architecture/190-update-daemon-restart-wiring.md` | U | `Open questions` @16 / U | Retain; evidence E. Keep progress formatting, --check/--no-restart interaction and named-daemon limitation. defaultProbeRestart still probes canonical names; unknown: named-instance restart requirements for the immediate update path. |
+| `docs/specs/architecture/198-transient-startup-error-predicate.md` | H | `Open questions` @14 / H | Approve removal; evidence B. Approve pure scaffolding: predicate branches are in Design and isTransientStartupError, covered by TestIsTransientStartupError. |
+| `docs/specs/architecture/199-dial-with-retry.md` | H | `Open questions` @17 / H | Approve removal; evidence B. Approve pure scaffolding: retry budget/interval and injected dial are in Design and dialWithRetry; current timing slack changed without changing the contract. |
+| `docs/specs/architecture/202-supervise-bootstrap-evicted-warm-start-hang.md` | H | `Open questions` @16 / H | Approve removal; evidence C. Approve no-known-questions scaffolding: New still ignores bootstrap persisted eviction; BootstrapEvicted is an explicit separate embedding override. |
+| `docs/specs/architecture/203-install-smoke-check.md` | U | `Open questions` @13 / U | Retain; evidence D. Keep manager-output capture and active-only restart decision; install.sh implements both. Unknown: whether nondefault service names need installation-script detection; no PYRY_NAME detection is implemented there. |
+| `docs/specs/architecture/205-config-load-and-schema.md` | H | `Open questions` @19 / H | Approve removal; evidence F. Approve pure scaffolding: default overlay and error contract live in Design and config.Load; loader.go was a proposed filename, implemented as config.go. |
+| `docs/specs/architecture/206-server-id-type-and-generation.md` | H | `Open questions` @12 / H | Approve removal; evidence F. Approve scaffolding: the three UUID-generation divergences remain in Design and identity.ServerID/NewServerID/ParseServerID. |
+| `docs/specs/architecture/207-server-id-store.md` | H | `Open questions` @16 / H | Approve removal; evidence F. Approve scaffolding: placement rationale and corruption/no-overwrite decision remain in Design and identity.LoadOrCreate. |
+| `docs/specs/architecture/208-pair-device-entry-and-token-hashing.md` | H | `Open questions` @16 / H | Retain; evidence G. Keep string hash API and secure-erase rejection. UI token prefix is rendered inline by renderPairList; lack of TokenHashPrefix method is not an unfulfilled user feature. |
+| `docs/specs/architecture/209-pair-devices-registry-crud.md` | U | `Open questions` @25 / U | Retain; evidence G. Keep duplicate-name, explicit Save, value-copy, hash-lookup, parent-fsync and schema-envelope reasoning. Unknown: schema migration/version policy and duplicate device-name policy; Add remains void and names may duplicate. |
+| `docs/specs/architecture/210-pair-token-validation-predicate.md` | S | `Open questions` @18 / H | Retain; evidence G. Keep hash-once, no-context/logging, lock visibility and read-only lookup reasoning. The old bool result and unconditional token acceptance contract are superseded by redemption/key checks. |
+| `docs/specs/architecture/211-pair-qr-payload-encoding.md` | S | `Open questions` @14 / H | Approve removal; evidence H. Approve generic scaffolding; wire/field decisions remain in Design and pair.Payload/Decode. Correct the trailing-JSON rationale in a visible notice, preserving the historical sentence. |
+| `docs/specs/architecture/212-pair-qr-render.md` | S | `Open questions` @15 / H | Approve removal; evidence H. Approve generic scaffolding; half-block/M level and writer-error handling remain in Design and Render. Current display adds the static-key fingerprint. |
+| `docs/specs/architecture/213-pair-command.md` | S | `Open questions` @18 / U | Retain; evidence I. Keep per-instance, duplicate-name, daemon-staleness and phone-keychain notes. Service-owned issuance and handshake Reload settle staleness; unknown: disambiguation of duplicate labels before revoke-by-name. |
+| `docs/specs/architecture/214-pair-list.md` | H | `Open questions` @15 / H | Retain; evidence I. Keep dispatcher/helper factoring and help-text decisions; runPair dispatches list/revoke/preflight and renderPairList remains pure. |
+| `docs/specs/architecture/215-pair-revoke.md` | S | `Open questions` @16 / H | Retain; evidence I. Keep direct-exit and dispatcher decisions as historical reasoning. The no-file-lock deferral is resolved by WithLock; sentinel carries not-found out before os.Exit. |
+| `docs/specs/architecture/216-conversation-type.md` | H | `Open questions` @14 / H | Retain; evidence J. Keep string/session-type decoupling rationale; conversations.ValidID landed in id.go. Hypothetical package unification is not an outstanding requirement. |
+| `docs/specs/architecture/217-conversations-registry-crud.md` | H | `Open questions` @17 / H | Retain; evidence J. Keep Save ordering and Update snapshot tradeoff; Save sorts LastUsedAt/ID, Update returns bool and its locked callback can snapshot without a second Get. |
+| `docs/specs/architecture/218-conversations-promotion-api.md` | S | `Open questions` @13 / U | Retain; evidence J. Keep empty-name sentinel and promote/timestamp UX decisions. Promote and Update lock separately, so an outside coordinator alone cannot guarantee joint atomicity. Unknown: whether a combined timestamp operation or empty promoted-name UX is required. |
+| `docs/specs/architecture/221-watcher-resolve-symlink-probe-path.md` | S | `Open questions` @12 / H | Approve removal; evidence K. Approve boilerplate: canonicalization/fallback reasoning remains in Design; #2137 retired the watcher, stream announcements replace path probing. |
+| `docs/specs/architecture/237-conv-sweep-primitive.md` | H | `Open questions` @13 / H | Approve removal; evidence J. Approve boilerplate: ShouldArchive/Sweep/Delete contracts remain in Design and current code; manual archive exclusion is an additive later rule. |
+| `docs/specs/architecture/242-conv-sweep-loop.md` | H | `Open questions` @20 / H | Approve removal; evidence J. Approve boilerplate: tick/conditional Save/log/cancel semantics remain in Design and RunSweepLoop. |
+| `docs/specs/architecture/243-conv-daemon-wiring.md` | H | `Open questions` @28 / H | Approve removal; evidence J. Approve repeated wiring checklist: path/load, Config fields, sweep errgroup and nil-registry gate remain in Design/current Pool.Run. Rotation-watcher sibling is retired; sweep wiring is live. |
+| `docs/specs/architecture/247-wssclient-with-auto-reconnect-backoff.md` | H | `Open questions` @30 / H | Approve removal; evidence L. Approve repeated transport checklist: ping, backoff, lifetime and echo scenarios remain in Design and transport.Client; deferred connected signal landed for #248. |
+| `docs/specs/architecture/248-relay-outbound-handshake.md` | S | `Open questions` @16 / H | Retain; evidence L. Keep binary-version source and fatal-conflict shutdown decision; startRelay passes version and nonzero shutdown cause. #582 removed binary-relay hello/hello_ack. |
+| `docs/specs/architecture/249-relay-inbound-token-validation.md` | S | `Open questions` @13 / U | Retain; evidence L. Keep resolved carrier choice and deferred revocation tombstone requirement. AuthenticateFirstFrame was deleted by #1040; CodeAuthTokenRevoked alone does not prove tombstone-backed distinction. Unknown: whether that distinction is still required. |
+| `docs/specs/architecture/250-register-push-token-handler.md` | S | `Open questions` @17 / U | Retain; evidence L. Keep dispatcher, retry-after and push-delivery deferrals. Dispatcher signature and push wake now exist; unknown: whether observed save-failure retries warrant a RetryAfter advisory, currently nil. |
+
+## Missing-reference disposition ledger
+
+All pairs are H: preserve the exact historical citation. Missing names reflect retired code, source moves, or proposed file layouts; none authorizes changing an old path into a modern one. The corresponding evidence key and explanation locate the surviving contract or retirement; notices address misleading behavior separately. All current statuses are missing.
+
+| Exact document | Scope missing target | Exact citation heading identities | Disposition / current evidence |
+|---|---|---|---|
+| `docs/specs/architecture/137-resize-wire-message.md` | `internal/control/attach_client.go` | `Caveat rewrites` @10 | H; A: retired attach fixture/interface. |
+| `docs/specs/architecture/137-resize-wire-message.md` | `internal/control/resize_test.go` | `Testing strategy` @15 | H; A: source layout/retired owner; preserve original planned citation. |
+| `docs/specs/architecture/154-attach-stdio-mode.md` | `cmd/pyry/main_test.go` | `` CLI flag wiring (`TestAttach_StdioFlagDispatch`, `cmd/pyry/main_test.go`) `` @23 | H; A: historical test layout; current tests split by CLI concern. |
+| `docs/specs/architecture/154-attach-stdio-mode.md` | `internal/control/attach_stdio_client.go` | `Files touched` @11 | H; A: retired attach fixture/interface. |
+| `docs/specs/architecture/154-attach-stdio-mode.md` | `internal/control/attach_stdio_client_test.go` | `Files touched` @11; `Testing strategy` @15 | H; A: retired attach fixture/interface. |
+| `docs/specs/architecture/155-attach-create-if-missing.md` | `cmd/pyry/main_test.go` | `Files touched` @18; `` `cmd/pyry/main_test.go` `` @41 | H; A: historical test layout; current tests split by CLI concern. |
+| `docs/specs/architecture/155-attach-create-if-missing.md` | `internal/control/attach_client.go` | `Files touched` @18 | H; A: retired attach fixture/interface. |
+| `docs/specs/architecture/155-attach-create-if-missing.md` | `internal/control/attach_stdio_client.go` | `Files touched` @18 | H; A: retired attach fixture/interface. |
+| `docs/specs/architecture/155-attach-create-if-missing.md` | `internal/control/attach_test.go` | `Files touched` @18; `` `internal/control/attach_test.go` (extend) `` @35 | H; A: retired attach fixture/interface. |
+| `docs/specs/architecture/158-foreground-auto-attach.md` | `cmd/pyry/auto_attach_test.go` | `Testing strategy` @14; `Production / test diff sizing` @18 | H; A: retired attach fixture/interface. |
+| `docs/specs/architecture/158-foreground-auto-attach.md` | `internal/control/attach_stdio_client.go` | `` #158 — Foreground pyry auto-attaches when daemon hosts `--session-id` `` @1 | H; A: retired attach fixture/interface. |
+| `docs/specs/architecture/158-foreground-auto-attach.md` | `internal/control/attach_stdio_client_test.go` | `Testing strategy` @14 | H; A: retired attach fixture/interface. |
+| `docs/specs/architecture/161-e2e-stdio-attach-harness.md` | `internal/control/attach_stdio_client_test.go` | `Why this slice exists` @2; `` Why the harness lives in `internal/e2e/` not `internal/control/` `` @3; `Testing strategy` @14 | H; A: retired attach fixture/interface. |
+| `docs/specs/architecture/161-e2e-stdio-attach-harness.md` | `internal/control/attach_test.go` | `Open questions` @17 | H; A: retired attach fixture/interface. |
+| `docs/specs/architecture/161-e2e-stdio-attach-harness.md` | `internal/e2e/attach_stdio.go` | `` NEW `internal/e2e/attach_stdio.go` `` @9 | H; A: retired attach fixture/interface. |
+| `docs/specs/architecture/161-e2e-stdio-attach-harness.md` | `internal/e2e/attach_stdio_test.go` | `` NEW `internal/e2e/attach_stdio_test.go` `` @10 | H; A: retired attach fixture/interface. |
+| `docs/specs/architecture/162-e2e-stdio-attach-no-pty.md` | `internal/control/attach_stdio_client.go` | `Why this slice exists` @2; `` NEW `internal/e2e/attach_stdio_no_pty_test.go` `` @8 | H; A: retired attach fixture/interface. |
+| `docs/specs/architecture/162-e2e-stdio-attach-no-pty.md` | `internal/e2e/attach_stdio_no_pty_test.go` | `` NEW `internal/e2e/attach_stdio_no_pty_test.go` `` @8 | H; A: retired attach fixture/interface. |
+| `docs/specs/architecture/163-e2e-foreground-auto-attach-happy.md` | `cmd/pyry/auto_attach_test.go` | `Context` @2; `Testing strategy` @13 | H; A: retired attach fixture/interface. |
+| `docs/specs/architecture/163-e2e-foreground-auto-attach-happy.md` | `internal/e2e/auto_attach.go` | `Files added` @4; `Production / test diff sizing` @17 | H; A: retired attach fixture/interface. |
+| `docs/specs/architecture/163-e2e-foreground-auto-attach-happy.md` | `internal/e2e/auto_attach_happy_test.go` | `Files added` @4; `Production / test diff sizing` @17 | H; A: retired attach fixture/interface. |
+| `docs/specs/architecture/164-e2e-foreground-auto-attach-fallback.md` | `cmd/pyry/auto_attach_test.go` | `Context` @2; `Why ENOENT in all three tests` @7; `` `TestE2E_ForegroundAutoAttach_FallsThroughWhenSessionMissing` `` @12; `` `TestE2E_ForegroundAutoAttach_RespectsEnvOverride` `` @14; `Testing strategy` @19; `Production / test diff sizing` @22 | H; A: retired attach fixture/interface. |
+| `docs/specs/architecture/164-e2e-foreground-auto-attach-fallback.md` | `internal/e2e/auto_attach.go` | `Files` @4; `` `startForegroundSupervised` — surface `` @8; `Production / test diff sizing` @22 | H; A: retired attach fixture/interface. |
+| `docs/specs/architecture/164-e2e-foreground-auto-attach-fallback.md` | `internal/e2e/auto_attach_fallback_test.go` | `Files` @4; `Tests` @11; `Production / test diff sizing` @22 | H; A: retired attach fixture/interface. |
+| `docs/specs/architecture/167-client-flag-passthrough.md` | `internal/e2e/attach_stdio_test.go` | `4. Remove the e2e skip` @7; `New tests` @12; `E2E removal` @13 | H; B: retired attach fixture/interface. |
+| `docs/specs/architecture/189-update-subcommand-wiring.md` | `cmd/pyry/update_test_helpers.go` | `What the tests deliberately don't cover` @22 | H; E: planned helper filename; helpers now in update_test.go. |
+| `docs/specs/architecture/202-supervise-bootstrap-evicted-warm-start-hang.md` | `internal/supervisor/` | `Diagnosis` @3 | H; C: #1348 retirement; runner interfaces/streamsup own runtime. |
+| `docs/specs/architecture/205-config-load-and-schema.md` | `internal/config/loader.go` | `Package placement` @4 | H; F: planned loader filename; Load implemented in config.go. |
+| `docs/specs/architecture/212-pair-qr-render.md` | `internal/sessions/rotation/watcher.go` | `Package placement` @4 | H; H: #2137 retirement; stream-announced reset replaces watcher. |
+| `docs/specs/architecture/221-watcher-resolve-symlink-probe-path.md` | `internal/sessions/rotation/watcher.go` | `Context` @2; `` Production change (`internal/sessions/rotation/watcher.go`, ~5 lines) `` @4 | H; K: #2137 retirement; stream-announced reset replaces watcher. |
+| `docs/specs/architecture/221-watcher-resolve-symlink-probe-path.md` | `internal/sessions/rotation/watcher_test.go` | `Testing strategy` @8 | H; K: #2137 retirement; stream-announced reset replaces watcher. |
+| `docs/specs/architecture/243-conv-daemon-wiring.md` | `cmd/pyry/main_test.go` | `` `TestResolveConversationsRegistryPath` — `cmd/pyry` unit pin `` @25 | H; J: historical test layout; current tests split by CLI concern. |
+| `docs/specs/architecture/249-relay-inbound-token-validation.md` | `internal/relay/auth_test.go` | `Testing strategy` @12 | H; L: #1040 deletion with v1 predicate; Noise tests own current auth. |
+
+## Exact notice handoff
+
+Pending documentation stage: insert each quoted notice as a standalone paragraph immediately under that document's first `Context` heading, before existing prose. Its ordinal is specified below. Every insertion is outside its Q removal range. Findings cite their exact original heading; preserve that heading and body. No notice is an authorization to rewrite historical citations.
+
+| Exact document | Misleading finding heading | Insertion heading | Exact visible wording |
+|---|---|---|---|
+| `docs/specs/architecture/137-resize-wire-message.md` | `Context` @2 | `Context` @2 | Attach/resize and foreground auto-attach were retired by #1348; this design is historical. See [current control-plane behavior](../../knowledge/features/control-plane.md). |
+| `docs/specs/architecture/154-attach-stdio-mode.md` | `Context` @2 | `Context` @2 | Attach/resize and foreground auto-attach were retired by #1348; this design is historical. See [current control-plane behavior](../../knowledge/features/control-plane.md). |
+| `docs/specs/architecture/155-attach-create-if-missing.md` | `Context` @2 | `Context` @2 | Attach/resize and foreground auto-attach were retired by #1348; this design is historical. See [current control-plane behavior](../../knowledge/features/control-plane.md). |
+| `docs/specs/architecture/158-foreground-auto-attach.md` | `Context` @2 | `Context` @2 | Attach/resize and foreground auto-attach were retired by #1348; this design is historical. See [current control-plane behavior](../../knowledge/features/control-plane.md). |
+| `docs/specs/architecture/161-e2e-stdio-attach-harness.md` | `Context` @1 | `Context` @1 | Attach/resize and foreground auto-attach were retired by #1348; this design is historical. See [current control-plane behavior](../../knowledge/features/control-plane.md). |
+| `docs/specs/architecture/162-e2e-stdio-attach-no-pty.md` | `Context` @1 | `Context` @1 | Attach/resize and foreground auto-attach were retired by #1348; this design is historical. See [current control-plane behavior](../../knowledge/features/control-plane.md). |
+| `docs/specs/architecture/163-e2e-foreground-auto-attach-happy.md` | `Context` @2 | `Context` @2 | Attach/resize and foreground auto-attach were retired by #1348; this design is historical. See [current control-plane behavior](../../knowledge/features/control-plane.md). |
+| `docs/specs/architecture/164-e2e-foreground-auto-attach-fallback.md` | `Context` @2 | `Context` @2 | Attach/resize and foreground auto-attach were retired by #1348; this design is historical. See [current control-plane behavior](../../knowledge/features/control-plane.md). |
+| `docs/specs/architecture/169-evict-activate-persist-ordering.md` | `` Rewritten `transitionTo` `` @5 | `Context` @2 | The persist-before-wake ordering remains, but persist failures now warn and retry rather than terminate the lifecycle. See [current session behavior](../../knowledge/features/sessions-package-key-types-session.md). |
+| `docs/specs/architecture/182-update-http-fetcher.md` | `Open questions` @16 | `Context` @2 | Current Fetcher.get bounds bodies at 512 MiB; its default HTTP transport rejects file URLs rather than reading local files. See [current fetcher contract](../../knowledge/features/update-package.md#http-fetcher). |
+| `docs/specs/architecture/187-update-atomic-replace.md` | `Open questions` @15 | `Context` @2 | AtomicReplace explicitly applies Chmod, so the requested mode survives umask settings; power-loss and no-replace questions remain deferred. See [current replacement contract](../../knowledge/features/update-package.md#atomic-in-place-replace). |
+| `docs/specs/architecture/210-pair-token-validation-predicate.md` | `Exported surface` @5 | `Context` @2 | Validate now takes a peer static key and returns ValidateResult, checking redemption deadlines and key binding before acceptance. See [current authentication contract](../../knowledge/features/devices-registry-validate.md). |
+| `docs/specs/architecture/211-pair-qr-payload-encoding.md` | `Trailing-garbage check` @7 | `Context` @2 | The current payload also requires server_static_pubkey. json.Unmarshal rejects trailing non-whitespace; Decoder.Decode needs a separate EOF check. See [current pairing format and validation](../../knowledge/features/pair-package.md). |
+| `docs/specs/architecture/212-pair-qr-render.md` | `Exported surface` @5 | `Context` @2 | Render now includes a static-key fingerprint between the encoded payload and instruction line. See [current pairing display](../../knowledge/features/pair-package.md#render--display). |
+| `docs/specs/architecture/213-pair-command.md` | `Operation order` @7 | `Context` @2 | Bare pyry pair now selects a running service and requests pairing.mint; it does not mint from offline saved identity or accept --relay overrides. See [current issuance order](../../knowledge/features/pyry-pair-command.md#pyry-pair-bare--operation-order). |
+| `docs/specs/architecture/215-pair-revoke.md` | `Open questions` @16 | `Context` @2 | Revoke now locks the entire Load/Remove/Save sequence with devices.WithLock; its not-found sentinel leaves that region before os.Exit. See [current revoke behavior](../../knowledge/features/pyry-pair-command.md). |
+| `docs/specs/architecture/218-conversations-promotion-api.md` | `Open questions` @13 | `Context` @2 | Promote and Update acquire the registry mutex separately; two calls are not one atomic mutation. See [current callback and locking contract](../../knowledge/features/conversations-registry-crud.md). |
+| `docs/specs/architecture/221-watcher-resolve-symlink-probe-path.md` | `Context` @2 | `Context` @2 | The filesystem rotation watcher was retired by #2137; stream conversation_reset announcements replace path probing. See [rotation replacement](../../knowledge/features/rotation-watcher.md#where-the-replacement-lives). |
+| `docs/specs/architecture/248-relay-outbound-handshake.md` | `Context` @2 | `Context` @2 | The binary-relay hello/hello_ack ceremony was retired by #582; the connection is established at WebSocket upgrade. See [current relay lifecycle](../../knowledge/features/relay-package.md). |
+| `docs/specs/architecture/249-relay-inbound-token-validation.md` | `Context` @2 | `Context` @2 | AuthenticateFirstFrame was deleted by #1040; current phone authentication uses Noise_IK and the devices token/key predicate. See [current authentication ownership](../../knowledge/features/relay-package.md). |
+| `docs/specs/architecture/250-register-push-token-handler.md` | `Handler signature` @6 | `Context` @2 | RegisterPushToken is now a dispatch.Handler factory using authenticated connection state and devices.WithLock; push wake is implemented through the relay. See [current handlers](../../knowledge/features/relay-package-handlers.md) and [push wake](../../knowledge/features/relay-package-push-wake.md). |
+
+## Unresolved requirement handoff
+
+Retain these questions visibly and record these precise unknowns on #2988. No implementation is authorized. Fulfilled or obsolete pieces are called out in the Q ledger; the following residue is the reason approval is withheld.
+- `` docs/specs/architecture/179-update-version-parsing.md` § `Open questions `` @16: Keep prerelease ordering and optional Comparison.String deferrals. doUpdate handles dev; ParseRelease/Eligible now inspect release flags. Full SemVer prerelease precedence remains unknown.
+- `` docs/specs/architecture/180-update-checksum.md` § `Open questions `` @16: Keep asset-template coupling, whole-buffer hashing and digest-validation decisions. Unknown: streaming threshold or a release-template drift gate; existing ParseChecksumsFile still does not validate hex length.
+- `` docs/specs/architecture/182-update-http-fetcher.md` § `Open questions `` @16: Keep non-2xx diagnostics, User-Agent, URL-policy and constructor choices. Unknown: whether operator evidence warrants error-body text or user URL support. Default HTTP transport does not read file URLs.
+- `` docs/specs/architecture/187-update-atomic-replace.md` § `Open questions `` @15: Keep directory-fsync, no-replace and streaming deferrals. Explicit Chmod already defeats umask interference. Unknown: whether power-loss durability or concurrent target creation enters the supported threat model.
+- `` docs/specs/architecture/190-update-daemon-restart-wiring.md` § `Open questions `` @16: Keep progress formatting, --check/--no-restart interaction and named-daemon limitation. defaultProbeRestart still probes canonical names; unknown: named-instance restart requirements for the immediate update path.
+- `` docs/specs/architecture/203-install-smoke-check.md` § `Open questions `` @13: Keep manager-output capture and active-only restart decision; install.sh implements both. Unknown: whether nondefault service names need installation-script detection; no PYRY_NAME detection is implemented there.
+- `` docs/specs/architecture/209-pair-devices-registry-crud.md` § `Open questions `` @25: Keep duplicate-name, explicit Save, value-copy, hash-lookup, parent-fsync and schema-envelope reasoning. Unknown: schema migration/version policy and duplicate device-name policy; Add remains void and names may duplicate.
+- `` docs/specs/architecture/213-pair-command.md` § `Open questions `` @18: Keep per-instance, duplicate-name, daemon-staleness and phone-keychain notes. Service-owned issuance and handshake Reload settle staleness; unknown: disambiguation of duplicate labels before revoke-by-name.
+- `` docs/specs/architecture/218-conversations-promotion-api.md` § `Open questions `` @13: Keep empty-name sentinel and promote/timestamp UX decisions. Promote and Update lock separately, so an outside coordinator alone cannot guarantee joint atomicity. Unknown: whether a combined timestamp operation or empty promoted-name UX is required.
+- `` docs/specs/architecture/249-relay-inbound-token-validation.md` § `Open questions `` @13: Keep resolved carrier choice and deferred revocation tombstone requirement. AuthenticateFirstFrame was deleted by #1040; CodeAuthTokenRevoked alone does not prove tombstone-backed distinction. Unknown: whether that distinction is still required.
+- `` docs/specs/architecture/250-register-push-token-handler.md` § `Open questions `` @17: Keep dispatcher, retry-after and push-delivery deferrals. Dispatcher signature and push wake now exist; unknown: whether observed save-failure retries warrant a RetryAfter advisory, currently nil.
+
+## Durable correction handoff
+
+Pending documentation stage: in `docs/knowledge/features/pair-package.md` § `` `Decode` — validation ``, replace only the false sentence “`json.Unmarshal` silently consumes only the first JSON value; trailing bytes are lost.” with: “`json.Unmarshal` rejects trailing non-whitespace. A single `Decoder.Decode` reads one JSON value, so this streaming decoder requires a second decode returning `io.EOF` to reject trailing content.” Preserve the surrounding seven-step validation contract. Evidence: `internal/pair/payload.go` → `Decode`, stdlib `encoding/json` → `Unmarshal`/`checkValid`, and the offline probe rejecting both `{}garbage` and `{}{"another":1}`. This is the only authorized behavioral sentence correction; historical #211 prose stays behind its notice. No frozen archives change.
+
+Additional durable status corrections, pending documentation stage (outside the 46-document spec count): insert the exact paragraph below immediately after the existing title heading of each listed knowledge document. Preserve its historical reasoning. Current-code evidence is #1348's CLI/attach retirement and the absent harness helpers, with the current `cmd/pyry/main.go` → `run` and `internal/control/protocol.go` → `Request` as positive search controls.
+
+| Exact knowledge path | Exact insertion heading | Exact required wording |
+|---|---|---|
+| `docs/knowledge/features/e2e-harness-stdio-attach-harness-pattern-attach-stdio-go-att.md` | ``Stdio-Attach Harness Pattern (`attach_stdio.go`, `attach_stdio_test.go`, #161)`` | Historical harness: #1348 retired `pyry attach` and these stdio-attach helpers/tests. Preserve this page for past test reasoning; use [the current offline harness](e2e-harness.md) for present test architecture. |
+| `docs/knowledge/features/e2e-harness-foreground-auto-attach-harness-pattern-auto-atta.md` | ``Foreground Auto-Attach Harness Pattern (`auto_attach.go`, `auto_attach_happy_test.go`, #163)`` | Historical harness: #1348 retired foreground auto-attach and these helpers/tests. Preserve this page for past test reasoning; use [the current offline harness](e2e-harness.md) for present test architecture. |
+| `docs/knowledge/features/e2e-harness-foreground-auto-attach-fallback-pattern-auto-att.md` | ``Foreground Auto-Attach Fallback Pattern (`auto_attach_fallback_test.go`, #164)`` | Historical harness: #1348 retired foreground auto-attach and these fallback helpers/tests. Preserve this page for past test reasoning; use [the current offline harness](e2e-harness.md) for present test architecture. |
+
+## Approvals
+
+Extract this JSON array verbatim for `-approvals`; it binds full reviewed bytes. Regenerate identities and preview after notices or intervening edits, authorizing only the same 16 sections.
+
+```json
+[
+{"document":"docs/specs/architecture/157-control-sessions-has-id.md","sha256":"a63372157401161ad60e36007a6aca2408fd7ea069ffbb08dd5b28bf439fe87b","heading":15},
+{"document":"docs/specs/architecture/181-update-restart-detect.md","sha256":"20d7a80a4eecb14fc8948d6a2919879099e0412b7ba3c60486d2e3b44bf808da","heading":14},
+{"document":"docs/specs/architecture/186-update-extract-binary.md","sha256":"d14db71deca117965cb5bc615b715d3ec66ee7ccc690b6ee01dc20645ebca32c","heading":14},
+{"document":"docs/specs/architecture/198-transient-startup-error-predicate.md","sha256":"0921aed35aae941b67d24a946fccdf558e2da6ea29253cf451f04f87949c5804","heading":14},
+{"document":"docs/specs/architecture/199-dial-with-retry.md","sha256":"3ac95b1d81100d683d4a02edc806eb3bde771aaf28bc77c2fab45e5770fd3b02","heading":17},
+{"document":"docs/specs/architecture/202-supervise-bootstrap-evicted-warm-start-hang.md","sha256":"eadebea49c2fbd96a46ba36e38d2aee0185b7e82214b7d264a6992f1e6478456","heading":16},
+{"document":"docs/specs/architecture/205-config-load-and-schema.md","sha256":"3d6c3e47adfc3f4be10c8fea7fde267fb9c2c18e661e6795dbcf0fea60847b4b","heading":19},
+{"document":"docs/specs/architecture/206-server-id-type-and-generation.md","sha256":"217221562b80957bda0e8d5772b73787efccb50c609f8cbd5e3f39e540a8d02e","heading":12},
+{"document":"docs/specs/architecture/207-server-id-store.md","sha256":"d665af446422db86476292ee41ba2237daa62eeb88438855bc77cef3f02be637","heading":16},
+{"document":"docs/specs/architecture/211-pair-qr-payload-encoding.md","sha256":"42443a800f346915da716283d1bdfd2ffc059e45f3069eeff693b007c346ebe1","heading":14},
+{"document":"docs/specs/architecture/212-pair-qr-render.md","sha256":"af81678a857490bffa1ddb4bad2d398c4d25fc5f967c9286757e6fc3faec3363","heading":15},
+{"document":"docs/specs/architecture/221-watcher-resolve-symlink-probe-path.md","sha256":"c15abfb04d0977c8800007316ba119fd319f77bbd6036293fde49a6b9fd91e91","heading":12},
+{"document":"docs/specs/architecture/237-conv-sweep-primitive.md","sha256":"8b71334c5392a5d070bd9e40dd7400a0bc2d67841061219ebb72ce65f5931b61","heading":13},
+{"document":"docs/specs/architecture/242-conv-sweep-loop.md","sha256":"b06e3864310b8cca297f987440c32d89bb02247fbe14874eb2772540ea9b12a5","heading":20},
+{"document":"docs/specs/architecture/243-conv-daemon-wiring.md","sha256":"a6e3ed48f3f09d079dfdf943687eae58c7ab81a980e4e76eaa8b54f35d34eda7","heading":28},
+{"document":"docs/specs/architecture/247-wssclient-with-auto-reconnect-backoff.md","sha256":"fff3b1f36fd6446c10c454ceee92bd1612c840b9d9b6b33da2c9897b181a53d1","heading":30}
+]
+```
+
+## Scoped preview excerpt
+
+Generated by the shipped offline command with the Approvals array and existing evidence. Only manifest documents and batch counts are retained; metadata/provenance and per-document actions/ranges are preserved from the report. Empty tool diagnostics (`null`) are normalized to `[]`. This is a preview excerpt, not an apply report.
+
+```json
+{
+"checkout_commit":"3ca4ac9c6bce7f27ef26f0e3f685f9186a057209",
+"evidence_sha256":"68c4e1fe74e3c04a2f8b4a5756c86c4f270760b79f9806fb0a2d6ae36e0c3a9a",
+"scope_commit":"bf3129a42d38d257a3085f05dde5079a275c84a6",
+"scope":"ticket-2988-batch-only-preview",
+"evidence":{"repository":"pyrycode/pyrycode","retrieved_at":"2026-10-08T11:43:30Z","provenance":"GitHub GraphQL via gh api graphql --paginate; repository.issues(first:100); repository.pullRequests(first:100,states:MERGED).closingIssuesReferences(first:100); 17 complete issue pages / 13 complete PR pages; all nested totalCount verified; query text in plan Revisions. issues-pages.json SHA256=bee202bfd534960d60d466d9e0cd43b09c1ab9aa94a79900fd0f971f5b91fa53 pr-pages.json SHA256=e1e091f28fe71df146da5c9fa952eae439a7d18996966b724e6706051fe52933","snapshot_path":"cmd/spec-scaffolding-prune/testdata/2929-evidence.json"},
+"scanned_documents":46,
+"eligible_documents":46,
+"proposed_removal_sections":16,
+"deferred_question_sections":30,
+"documents":[
+{"document":"docs/specs/architecture/137-resize-wire-message.md","sha256":"3ffb420c7cd6bc6a380dc82fa17997abcc67933791b1d58b44daa7d7759804c0","ticket":137,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":19366,"end_byte":20668,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/154-attach-stdio-mode.md","sha256":"319b6f65b77b88f41d70a4954b12bddbca8db8b2964ab7a09e8b4c3ad4ef127a","ticket":154,"reason":"eligible","sections":[{"heading":25,"title":"Open questions","start_byte":16924,"end_byte":18567,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/155-attach-create-if-missing.md","sha256":"803da288108d1d57fd1d144d150e53f907d0b487a779a2bbf1a7fc261987b2e4","ticket":155,"reason":"eligible","sections":[{"heading":44,"title":"Open questions","start_byte":27425,"end_byte":29653,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/157-control-sessions-has-id.md","sha256":"a63372157401161ad60e36007a6aca2408fd7ea069ffbb08dd5b28bf439fe87b","ticket":157,"reason":"eligible","sections":[{"heading":15,"title":"Open questions","start_byte":16936,"end_byte":17254,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/158-foreground-auto-attach.md","sha256":"fc84588a5de5f28d07dbfcd4e057c36fede22f985c4c02f84760d4bb1043526f","ticket":158,"reason":"eligible","sections":[{"heading":15,"title":"Open questions","start_byte":23264,"end_byte":23915,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/161-e2e-stdio-attach-harness.md","sha256":"38cc1ee06a894ff35b910373b60fd9a6c8947d5e5f88dbb02ae7fa4a070388cf","ticket":161,"reason":"eligible","sections":[{"heading":17,"title":"Open questions","start_byte":25159,"end_byte":26572,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/162-e2e-stdio-attach-no-pty.md","sha256":"d946d2ef2d8d28677c1823ca85707991f7b80e115b12d0e4f3092855217d7569","ticket":162,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":13720,"end_byte":14985,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/163-e2e-foreground-auto-attach-happy.md","sha256":"67be1fcab038468589ea993983ef01eae38ce8b90117583257503a9770351b47","ticket":163,"reason":"eligible","sections":[{"heading":14,"title":"Open questions","start_byte":14693,"end_byte":15693,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/164-e2e-foreground-auto-attach-fallback.md","sha256":"89348ec381f8856e95b9c89de6db018a9d2534c43a8adf0679d5309b683c1f99","ticket":164,"reason":"eligible","sections":[{"heading":20,"title":"Open questions","start_byte":19251,"end_byte":20447,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/167-client-flag-passthrough.md","sha256":"188ee9890a22212038be55f9659f7088309a405b914e6bb326d9f6865dbba6ae","ticket":167,"reason":"eligible","sections":[{"heading":15,"title":"Open questions","start_byte":15745,"end_byte":16375,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/169-evict-activate-persist-ordering.md","sha256":"f6108c841cc0d9dcf9bf783c1b7c6a66d9deb89e5de41620a3386d017638b937","ticket":169,"reason":"eligible","sections":[{"heading":15,"title":"Open questions","start_byte":14405,"end_byte":15228,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/177-install-service-cwd-workdir.md","sha256":"fe7d9a39bc23bd21f7f731c5d78ffd25a361d6ad1626aef98bdf8676508d557f","ticket":177,"reason":"eligible","sections":[{"heading":10,"title":"Open questions","start_byte":7895,"end_byte":8697,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/179-update-version-parsing.md","sha256":"6322e545c38f6c0a4bd2cec9e8e5c3ad730ee8abecc170fac0227122cf9df0ef","ticket":179,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":14009,"end_byte":15335,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/180-update-checksum.md","sha256":"e9360d15753e81a9533c8af462ce594a3afc40eee74708cc63fd576863f8827c","ticket":180,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":17255,"end_byte":18610,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/181-update-restart-detect.md","sha256":"20d7a80a4eecb14fc8948d6a2919879099e0412b7ba3c60486d2e3b44bf808da","ticket":181,"reason":"eligible","sections":[{"heading":14,"title":"Open questions","start_byte":6812,"end_byte":7030,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/182-update-http-fetcher.md","sha256":"126f10e76dcec742f3632069d0cba457846182214ca0da15b802dac961e37445","ticket":182,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":18308,"end_byte":20106,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/186-update-extract-binary.md","sha256":"d14db71deca117965cb5bc615b715d3ec66ee7ccc690b6ee01dc20645ebca32c","ticket":186,"reason":"eligible","sections":[{"heading":14,"title":"Open questions","start_byte":10616,"end_byte":10860,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/187-update-atomic-replace.md","sha256":"0a34ad363d227543d69ae669e5349e075782a8cbefc33ea17d465f25ae06bc96","ticket":187,"reason":"eligible","sections":[{"heading":15,"title":"Open questions","start_byte":16807,"end_byte":18148,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/189-update-subcommand-wiring.md","sha256":"08f328987f41ac5f002e3f4ae9b1739574c42a3a858fbf7e75b4c7aeb1faf851","ticket":189,"reason":"eligible","sections":[{"heading":24,"title":"Open questions","start_byte":21783,"end_byte":22648,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/190-update-daemon-restart-wiring.md","sha256":"79ba330aacffb1ab24095bfd08b6e14d35bc2ef146f630151daae59186a692a3","ticket":190,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":12033,"end_byte":13091,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/198-transient-startup-error-predicate.md","sha256":"0921aed35aae941b67d24a946fccdf558e2da6ea29253cf451f04f87949c5804","ticket":198,"reason":"eligible","sections":[{"heading":14,"title":"Open questions","start_byte":6848,"end_byte":7025,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/199-dial-with-retry.md","sha256":"3ac95b1d81100d683d4a02edc806eb3bde771aaf28bc77c2fab45e5770fd3b02","ticket":199,"reason":"eligible","sections":[{"heading":17,"title":"Open questions","start_byte":13280,"end_byte":13499,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/202-supervise-bootstrap-evicted-warm-start-hang.md","sha256":"eadebea49c2fbd96a46ba36e38d2aee0185b7e82214b7d264a6992f1e6478456","ticket":202,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":15368,"end_byte":15549,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/203-install-smoke-check.md","sha256":"308bebb7b532b2889956010db6cae49e2d265cbec7d744609b4addcf99dd89f3","ticket":203,"reason":"eligible","sections":[{"heading":13,"title":"Open questions","start_byte":11928,"end_byte":13996,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/205-config-load-and-schema.md","sha256":"3d6c3e47adfc3f4be10c8fea7fde267fb9c2c18e661e6795dbcf0fea60847b4b","ticket":205,"reason":"eligible","sections":[{"heading":19,"title":"Open questions","start_byte":14711,"end_byte":14876,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/206-server-id-type-and-generation.md","sha256":"217221562b80957bda0e8d5772b73787efccb50c609f8cbd5e3f39e540a8d02e","ticket":206,"reason":"eligible","sections":[{"heading":12,"title":"Open questions","start_byte":9448,"end_byte":9648,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/207-server-id-store.md","sha256":"d665af446422db86476292ee41ba2237daa62eeb88438855bc77cef3f02be637","ticket":207,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":17934,"end_byte":18107,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/208-pair-device-entry-and-token-hashing.md","sha256":"958f364fa09043890423195eab8e8563fcd2865e2cce5b82583c8efe94265349","ticket":208,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":10574,"end_byte":11587,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/209-pair-devices-registry-crud.md","sha256":"7d9a6ba3136f82e86b525779057ba72d4923834e2eacbb5e63076be7e21e8532","ticket":209,"reason":"eligible","sections":[{"heading":25,"title":"Open questions","start_byte":16813,"end_byte":19380,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/210-pair-token-validation-predicate.md","sha256":"0df383f33a19667e6b6ce4c58a46daa036ab369a808511d89a89a5223e6b7d98","ticket":210,"reason":"eligible","sections":[{"heading":18,"title":"Open questions","start_byte":15518,"end_byte":19332,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/211-pair-qr-payload-encoding.md","sha256":"42443a800f346915da716283d1bdfd2ffc059e45f3069eeff693b007c346ebe1","ticket":211,"reason":"eligible","sections":[{"heading":14,"title":"Open questions","start_byte":12931,"end_byte":13114,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/212-pair-qr-render.md","sha256":"af81678a857490bffa1ddb4bad2d398c4d25fc5f967c9286757e6fc3faec3363","ticket":212,"reason":"eligible","sections":[{"heading":15,"title":"Open questions","start_byte":15704,"end_byte":15826,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/213-pair-command.md","sha256":"caf907a7e1577367eac71d7c58a274945f40c3e5f6910aaf7f830b4451bcc530","ticket":213,"reason":"eligible","sections":[{"heading":18,"title":"Open questions","start_byte":18818,"end_byte":20432,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/214-pair-list.md","sha256":"5d14b18cdb25fa3a2d9eab8f15fabc228bcda054d0cf1c3a3d86eef6a4f4e254","ticket":214,"reason":"eligible","sections":[{"heading":15,"title":"Open questions","start_byte":11927,"end_byte":12975,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/215-pair-revoke.md","sha256":"698ee34178db235e192d959391d189a912ee9a4d4eea26ba28478bdeadfe03db","ticket":215,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":15362,"end_byte":16404,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/216-conversation-type.md","sha256":"7aabfcdcec87a6018d28852d00a95a0b6b4d905818b346d65ee9863e10c7308f","ticket":216,"reason":"eligible","sections":[{"heading":14,"title":"Open questions","start_byte":7662,"end_byte":8316,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/217-conversations-registry-crud.md","sha256":"2213bae5ca6d3a2f3c2c16e04f72c1a9e3572c5cb022a5848ca4cd5a3d5f199e","ticket":217,"reason":"eligible","sections":[{"heading":17,"title":"Open questions","start_byte":11322,"end_byte":12208,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/218-conversations-promotion-api.md","sha256":"39b3bdd8b7374a1333c5fac19cb1b3fc867008d6fd89b50ea3b3fd52ec27f78c","ticket":218,"reason":"eligible","sections":[{"heading":13,"title":"Open questions","start_byte":12442,"end_byte":13828,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/221-watcher-resolve-symlink-probe-path.md","sha256":"c15abfb04d0977c8800007316ba119fd319f77bbd6036293fde49a6b9fd91e91","ticket":221,"reason":"eligible","sections":[{"heading":12,"title":"Open questions","start_byte":7461,"end_byte":7631,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/237-conv-sweep-primitive.md","sha256":"8b71334c5392a5d070bd9e40dd7400a0bc2d67841061219ebb72ce65f5931b61","ticket":237,"reason":"eligible","sections":[{"heading":13,"title":"Open questions","start_byte":8317,"end_byte":8470,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/242-conv-sweep-loop.md","sha256":"b06e3864310b8cca297f987440c32d89bb02247fbe14874eb2772540ea9b12a5","ticket":242,"reason":"eligible","sections":[{"heading":20,"title":"Open questions","start_byte":17851,"end_byte":18082,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/243-conv-daemon-wiring.md","sha256":"a6e3ed48f3f09d079dfdf943687eae58c7ab81a980e4e76eaa8b54f35d34eda7","ticket":243,"reason":"eligible","sections":[{"heading":28,"title":"Open questions","start_byte":23605,"end_byte":24352,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/247-wssclient-with-auto-reconnect-backoff.md","sha256":"fff3b1f36fd6446c10c454ceee92bd1612c840b9d9b6b33da2c9897b181a53d1","ticket":247,"reason":"eligible","sections":[{"heading":30,"title":"Open questions","start_byte":39679,"end_byte":40415,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/248-relay-outbound-handshake.md","sha256":"a90ee8a429fdc0c737d14aa59ed041fe60836b6246999dfb09b0920a7d00470e","ticket":248,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":34822,"end_byte":35312,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/249-relay-inbound-token-validation.md","sha256":"57d349bb673bfb2844dc0087aca9e1649845ecfe131ca517745d7714a4df3509","ticket":249,"reason":"eligible","sections":[{"heading":13,"title":"Open questions","start_byte":12909,"end_byte":13279,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/250-register-push-token-handler.md","sha256":"ea986fe97b462d65d91802a0d6b146fc34e1c39e0dd208e1238f831105d21e87","ticket":250,"reason":"eligible","sections":[{"heading":17,"title":"Open questions","start_byte":20410,"end_byte":21277,"action":"retain","reason":"unapproved nontrivial question"}]}
+],
+"approval_diagnostics":[]
+}
+```
+
+## Validation results
+
+- PASS: exact 46-document manifest and supplied 46 heading ordinals; 46/46 scope/current bytes equal; 33 unique missing pairs across 16 documents unchanged; no omitted/duplicate ledger entries.
+- PASS: extracted JSON approvals fed back into the shipped preview; all 46 selected report documents equal the committed excerpt, including full-document hashes, byte ranges, actions and reasons. Checkout and evidence provenance/hash match; 16 approvals bijectively match 16 eligible removals; zero approval diagnostics.
+- PASS: `go test -race ./cmd/spec-reference-inventory/... ./cmd/spec-scaffolding-prune/...`, `go vet ./...`, and `go build ./cmd/pyry` (binary output directed to scratch).
+- PASS: stdlib probe rejects both trailing-JSON examples and default HTTP transport rejects a file URL. Git history identifies `8832ca65` (#1348) as deletion of the stdio/auto-attach fixtures, positively supporting the three knowledge retirement notices.
+- PASS: `git diff --check`. No corpus apply, product edits, new tests/harness, whole-module race suite or live-Claude execution. The verifier owns its full-module gate; the documentation stage owns the 21 notices, 16 authorized question removals, and four precise knowledge corrections above.
+
+To reproduce the review preview, extract the JSON fence under `Approvals` to a scratch file and run `go run ./cmd/spec-scaffolding-prune -evidence cmd/spec-scaffolding-prune/testdata/2929-evidence.json -approvals /tmp/builder-2988/extracted-approvals.json`. Select only the 46 `document` paths in the ledger before comparing with `Scoped preview excerpt`; recompute batch counts rather than retaining corpus totals. The reported checkout will differ on a later commit, but reviewed document bytes must still match before any authorization is reused.
+
+Written-work recount: this plan is under 350 lines; scratch review/validation helpers plus PR/handoff text keep total written work below 800 lines. Zero production/test file changes, exported types, consumer updates or state-machine reject branches; four acceptance criteria remain one batch-review deliverable.
+
+
+## Documentation application (2026-10-08)
+
+Satisfied the Exact notice handoff at all 21 named architecture paths and
+Context headings, including the verifier's page-level link correction for #218.
+Removed only the 16 approved Open questions sections at the paths below. All 30
+retained sections, including the 11 unresolved requirements already recorded on
+[#2988](https://github.com/pyrycode/pyrycode/issues/2988#issuecomment-6063361954),
+stay visible. Historical citations and all other historical bodies are preserved.
+The builder's Approvals and Scoped preview excerpt above describe its original
+review; the refreshed artifacts below authorize the same sections after notices.
+
+Satisfied the Durable correction handoff: the exact sentence replacement in
+`docs/knowledge/features/pair-package.md` under `Decode` — validation, and the
+exact title-adjacent retirement paragraphs in:
+
+- `docs/knowledge/features/e2e-harness-stdio-attach-harness-pattern-attach-stdio-go-att.md`
+- `docs/knowledge/features/e2e-harness-foreground-auto-attach-harness-pattern-auto-atta.md`
+- `docs/knowledge/features/e2e-harness-foreground-auto-attach-fallback-pattern-auto-att.md`
+
+No document was added or removed, so CATALOG.md and INDEX.md need no change.
+Frozen archives remain untouched. Actual batch counts: 46 reviewed specs, 21
+annotated specs, 16 removed question occurrences in 16 specs, 30 retained question
+occurrences in 30 specs, 11 specs with unresolved requirements, and 46 preserved
+historical bodies outside approved removals. Notice/removal populations overlap
+in three specs; 34 specs changed and 12 remain unchanged. The scope's 33 missing
+reference pairs across 16 specs retain their historical citations. Knowledge
+corrections (four pages) and this plan are outside those spec counts.
+
+### Refreshed removal approvals
+
+After inserting notices, the shipped parser re-identified all 46 question
+sections with unchanged titles, ordinals and exact section bytes. Only the hashes
+for #211, #212 and #221 changed among the 16 approvals. The following approvals
+bind the pre-removal working bytes on the checkout identified in the preview.
+The preview matched each approval to exactly one eligible removal with zero
+diagnostics; its other corpus entries granted no authority. Removal used only
+these 16 scoped byte ranges, without invoking corpus-wide apply.
+
+```json
+[
+{"document":"docs/specs/architecture/157-control-sessions-has-id.md","sha256":"a63372157401161ad60e36007a6aca2408fd7ea069ffbb08dd5b28bf439fe87b","heading":15},
+{"document":"docs/specs/architecture/181-update-restart-detect.md","sha256":"20d7a80a4eecb14fc8948d6a2919879099e0412b7ba3c60486d2e3b44bf808da","heading":14},
+{"document":"docs/specs/architecture/186-update-extract-binary.md","sha256":"d14db71deca117965cb5bc615b715d3ec66ee7ccc690b6ee01dc20645ebca32c","heading":14},
+{"document":"docs/specs/architecture/198-transient-startup-error-predicate.md","sha256":"0921aed35aae941b67d24a946fccdf558e2da6ea29253cf451f04f87949c5804","heading":14},
+{"document":"docs/specs/architecture/199-dial-with-retry.md","sha256":"3ac95b1d81100d683d4a02edc806eb3bde771aaf28bc77c2fab45e5770fd3b02","heading":17},
+{"document":"docs/specs/architecture/202-supervise-bootstrap-evicted-warm-start-hang.md","sha256":"eadebea49c2fbd96a46ba36e38d2aee0185b7e82214b7d264a6992f1e6478456","heading":16},
+{"document":"docs/specs/architecture/205-config-load-and-schema.md","sha256":"3d6c3e47adfc3f4be10c8fea7fde267fb9c2c18e661e6795dbcf0fea60847b4b","heading":19},
+{"document":"docs/specs/architecture/206-server-id-type-and-generation.md","sha256":"217221562b80957bda0e8d5772b73787efccb50c609f8cbd5e3f39e540a8d02e","heading":12},
+{"document":"docs/specs/architecture/207-server-id-store.md","sha256":"d665af446422db86476292ee41ba2237daa62eeb88438855bc77cef3f02be637","heading":16},
+{"document":"docs/specs/architecture/211-pair-qr-payload-encoding.md","sha256":"d76720a664aebb5901b1c1b4645fcf3b6f3751b63041b23426aa63da5b44724a","heading":14},
+{"document":"docs/specs/architecture/212-pair-qr-render.md","sha256":"6045c06632004ce566f7c14690acc6740a44871fb2533d8ffa1bad44821e8e60","heading":15},
+{"document":"docs/specs/architecture/221-watcher-resolve-symlink-probe-path.md","sha256":"82cbeb2b2eef064a537b3adabf1b0f6bd0add8ae416e36fd0253078e506c03e5","heading":12},
+{"document":"docs/specs/architecture/237-conv-sweep-primitive.md","sha256":"8b71334c5392a5d070bd9e40dd7400a0bc2d67841061219ebb72ce65f5931b61","heading":13},
+{"document":"docs/specs/architecture/242-conv-sweep-loop.md","sha256":"b06e3864310b8cca297f987440c32d89bb02247fbe14874eb2772540ea9b12a5","heading":20},
+{"document":"docs/specs/architecture/243-conv-daemon-wiring.md","sha256":"a6e3ed48f3f09d079dfdf943687eae58c7ab81a980e4e76eaa8b54f35d34eda7","heading":28},
+{"document":"docs/specs/architecture/247-wssclient-with-auto-reconnect-backoff.md","sha256":"fff3b1f36fd6446c10c454ceee92bd1612c840b9d9b6b33da2c9897b181a53d1","heading":30}
+]
+```
+
+### Refreshed batch-only preview
+
+Generated offline against post-notice, pre-removal working bytes. Counts below
+are batch-only; original evidence metadata and generated document/section records
+are preserved. This records the removal preview, not a corpus-wide apply report.
+
+```json
+{
+"checkout_commit":"fd2962702ee2fc2c4b4a95f434ac0d01e2604019",
+"evidence_sha256":"68c4e1fe74e3c04a2f8b4a5756c86c4f270760b79f9806fb0a2d6ae36e0c3a9a",
+"scope_commit":"bf3129a42d38d257a3085f05dde5079a275c84a6",
+"scope":"ticket-2988-batch-only-pre-removal-preview",
+"working_tree":"Exact notices inserted; all approved questions still present.",
+"evidence":{"repository":"pyrycode/pyrycode","retrieved_at":"2026-10-08T11:43:30Z","provenance":"GitHub GraphQL via gh api graphql --paginate; repository.issues(first:100); repository.pullRequests(first:100,states:MERGED).closingIssuesReferences(first:100); 17 complete issue pages / 13 complete PR pages; all nested totalCount verified; query text in plan Revisions. issues-pages.json SHA256=bee202bfd534960d60d466d9e0cd43b09c1ab9aa94a79900fd0f971f5b91fa53 pr-pages.json SHA256=e1e091f28fe71df146da5c9fa952eae439a7d18996966b724e6706051fe52933","snapshot_path":"cmd/spec-scaffolding-prune/testdata/2929-evidence.json"},
+"scanned_documents":46,
+"eligible_documents":46,
+"proposed_removal_sections":16,
+"deferred_question_sections":30,
+"documents":[
+{"document":"docs/specs/architecture/137-resize-wire-message.md","sha256":"bf293d912a6cc090c9fec96838d28aa6c26f973733e8d704c5de08f5f73360c2","ticket":137,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":19539,"end_byte":20841,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/154-attach-stdio-mode.md","sha256":"34365f03e0796ed875ac34cb1284f2b44a8049ac42617ff4238d5c798064063b","ticket":154,"reason":"eligible","sections":[{"heading":25,"title":"Open questions","start_byte":17097,"end_byte":18740,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/155-attach-create-if-missing.md","sha256":"ded45e193df9c11de19b4c44123f383454eb8d8807020114170ea56f440a6204","ticket":155,"reason":"eligible","sections":[{"heading":44,"title":"Open questions","start_byte":27598,"end_byte":29826,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/157-control-sessions-has-id.md","sha256":"a63372157401161ad60e36007a6aca2408fd7ea069ffbb08dd5b28bf439fe87b","ticket":157,"reason":"eligible","sections":[{"heading":15,"title":"Open questions","start_byte":16936,"end_byte":17254,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/158-foreground-auto-attach.md","sha256":"deb1cc0206f0105a51d92a4c2bdfadc4de90d4c600c92b335e66c8283d7bdc99","ticket":158,"reason":"eligible","sections":[{"heading":15,"title":"Open questions","start_byte":23437,"end_byte":24088,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/161-e2e-stdio-attach-harness.md","sha256":"7dde3d8c5bb64cdb1f8a36e126b387efd970f98342bb25bda8db970509ccb62a","ticket":161,"reason":"eligible","sections":[{"heading":17,"title":"Open questions","start_byte":25332,"end_byte":26745,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/162-e2e-stdio-attach-no-pty.md","sha256":"60ec60740bbc2bbc1863a9b6a0f2a0bd1b61cc102c7cd403878cb621614af6d1","ticket":162,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":13893,"end_byte":15158,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/163-e2e-foreground-auto-attach-happy.md","sha256":"b361f00a75bd6cf0b67a7b9e2afdb070dff5e682e52c45d341d09771d66e7ed0","ticket":163,"reason":"eligible","sections":[{"heading":14,"title":"Open questions","start_byte":14866,"end_byte":15866,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/164-e2e-foreground-auto-attach-fallback.md","sha256":"e94ed9cfd58277248864a6591e1a274bc45f4c8bcabf2576764d9172ca30f433","ticket":164,"reason":"eligible","sections":[{"heading":20,"title":"Open questions","start_byte":19424,"end_byte":20620,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/167-client-flag-passthrough.md","sha256":"188ee9890a22212038be55f9659f7088309a405b914e6bb326d9f6865dbba6ae","ticket":167,"reason":"eligible","sections":[{"heading":15,"title":"Open questions","start_byte":15745,"end_byte":16375,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/169-evict-activate-persist-ordering.md","sha256":"f0a12f3363cb6dbc323451eba5f2e3afe8f74b8b6d3c7a881d90085db1ef03ef","ticket":169,"reason":"eligible","sections":[{"heading":15,"title":"Open questions","start_byte":14621,"end_byte":15444,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/177-install-service-cwd-workdir.md","sha256":"fe7d9a39bc23bd21f7f731c5d78ffd25a361d6ad1626aef98bdf8676508d557f","ticket":177,"reason":"eligible","sections":[{"heading":10,"title":"Open questions","start_byte":7895,"end_byte":8697,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/179-update-version-parsing.md","sha256":"6322e545c38f6c0a4bd2cec9e8e5c3ad730ee8abecc170fac0227122cf9df0ef","ticket":179,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":14009,"end_byte":15335,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/180-update-checksum.md","sha256":"e9360d15753e81a9533c8af462ce594a3afc40eee74708cc63fd576863f8827c","ticket":180,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":17255,"end_byte":18610,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/181-update-restart-detect.md","sha256":"20d7a80a4eecb14fc8948d6a2919879099e0412b7ba3c60486d2e3b44bf808da","ticket":181,"reason":"eligible","sections":[{"heading":14,"title":"Open questions","start_byte":6812,"end_byte":7030,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/182-update-http-fetcher.md","sha256":"b475b942cfba288f15f5230de420c236acb49bac6c6e607c0328b5bb9838b2e5","ticket":182,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":18522,"end_byte":20320,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/186-update-extract-binary.md","sha256":"d14db71deca117965cb5bc615b715d3ec66ee7ccc690b6ee01dc20645ebca32c","ticket":186,"reason":"eligible","sections":[{"heading":14,"title":"Open questions","start_byte":10616,"end_byte":10860,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/187-update-atomic-replace.md","sha256":"d09a42189f30ce60b9a11b91e9d74793780599755def354714dca19be90e5812","ticket":187,"reason":"eligible","sections":[{"heading":15,"title":"Open questions","start_byte":17052,"end_byte":18393,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/189-update-subcommand-wiring.md","sha256":"08f328987f41ac5f002e3f4ae9b1739574c42a3a858fbf7e75b4c7aeb1faf851","ticket":189,"reason":"eligible","sections":[{"heading":24,"title":"Open questions","start_byte":21783,"end_byte":22648,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/190-update-daemon-restart-wiring.md","sha256":"79ba330aacffb1ab24095bfd08b6e14d35bc2ef146f630151daae59186a692a3","ticket":190,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":12033,"end_byte":13091,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/198-transient-startup-error-predicate.md","sha256":"0921aed35aae941b67d24a946fccdf558e2da6ea29253cf451f04f87949c5804","ticket":198,"reason":"eligible","sections":[{"heading":14,"title":"Open questions","start_byte":6848,"end_byte":7025,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/199-dial-with-retry.md","sha256":"3ac95b1d81100d683d4a02edc806eb3bde771aaf28bc77c2fab45e5770fd3b02","ticket":199,"reason":"eligible","sections":[{"heading":17,"title":"Open questions","start_byte":13280,"end_byte":13499,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/202-supervise-bootstrap-evicted-warm-start-hang.md","sha256":"eadebea49c2fbd96a46ba36e38d2aee0185b7e82214b7d264a6992f1e6478456","ticket":202,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":15368,"end_byte":15549,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/203-install-smoke-check.md","sha256":"308bebb7b532b2889956010db6cae49e2d265cbec7d744609b4addcf99dd89f3","ticket":203,"reason":"eligible","sections":[{"heading":13,"title":"Open questions","start_byte":11928,"end_byte":13996,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/205-config-load-and-schema.md","sha256":"3d6c3e47adfc3f4be10c8fea7fde267fb9c2c18e661e6795dbcf0fea60847b4b","ticket":205,"reason":"eligible","sections":[{"heading":19,"title":"Open questions","start_byte":14711,"end_byte":14876,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/206-server-id-type-and-generation.md","sha256":"217221562b80957bda0e8d5772b73787efccb50c609f8cbd5e3f39e540a8d02e","ticket":206,"reason":"eligible","sections":[{"heading":12,"title":"Open questions","start_byte":9448,"end_byte":9648,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/207-server-id-store.md","sha256":"d665af446422db86476292ee41ba2237daa62eeb88438855bc77cef3f02be637","ticket":207,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":17934,"end_byte":18107,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/208-pair-device-entry-and-token-hashing.md","sha256":"958f364fa09043890423195eab8e8563fcd2865e2cce5b82583c8efe94265349","ticket":208,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":10574,"end_byte":11587,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/209-pair-devices-registry-crud.md","sha256":"7d9a6ba3136f82e86b525779057ba72d4923834e2eacbb5e63076be7e21e8532","ticket":209,"reason":"eligible","sections":[{"heading":25,"title":"Open questions","start_byte":16813,"end_byte":19380,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/210-pair-token-validation-predicate.md","sha256":"339caad3829dcb2b72828c6bc34c1dcf85daed34b791b1ca91d5ca0d6cffe748","ticket":210,"reason":"eligible","sections":[{"heading":18,"title":"Open questions","start_byte":15743,"end_byte":19557,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/211-pair-qr-payload-encoding.md","sha256":"d76720a664aebb5901b1c1b4645fcf3b6f3751b63041b23426aa63da5b44724a","ticket":211,"reason":"eligible","sections":[{"heading":14,"title":"Open questions","start_byte":13166,"end_byte":13349,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/212-pair-qr-render.md","sha256":"6045c06632004ce566f7c14690acc6740a44871fb2533d8ffa1bad44821e8e60","ticket":212,"reason":"eligible","sections":[{"heading":15,"title":"Open questions","start_byte":15889,"end_byte":16011,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/213-pair-command.md","sha256":"0b364e6d6b31d5c1e1a7b77f30ce4a51fe81353287783ffbec2602a7a1a60686","ticket":213,"reason":"eligible","sections":[{"heading":18,"title":"Open questions","start_byte":19074,"end_byte":20688,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/214-pair-list.md","sha256":"5d14b18cdb25fa3a2d9eab8f15fabc228bcda054d0cf1c3a3d86eef6a4f4e254","ticket":214,"reason":"eligible","sections":[{"heading":15,"title":"Open questions","start_byte":11927,"end_byte":12975,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/215-pair-revoke.md","sha256":"8ecb569480e58bdca1363af402d93ffb7525210d8676844563613bc984e9389d","ticket":215,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":15576,"end_byte":16618,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/216-conversation-type.md","sha256":"7aabfcdcec87a6018d28852d00a95a0b6b4d905818b346d65ee9863e10c7308f","ticket":216,"reason":"eligible","sections":[{"heading":14,"title":"Open questions","start_byte":7662,"end_byte":8316,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/217-conversations-registry-crud.md","sha256":"2213bae5ca6d3a2f3c2c16e04f72c1a9e3572c5cb022a5848ca4cd5a3d5f199e","ticket":217,"reason":"eligible","sections":[{"heading":17,"title":"Open questions","start_byte":11322,"end_byte":12208,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/218-conversations-promotion-api.md","sha256":"67cdcbfb4012d74af3e4dc251f629173606e90f86792970dfb216dffd5a58590","ticket":218,"reason":"eligible","sections":[{"heading":13,"title":"Open questions","start_byte":12642,"end_byte":14028,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/221-watcher-resolve-symlink-probe-path.md","sha256":"82cbeb2b2eef064a537b3adabf1b0f6bd0add8ae416e36fd0253078e506c03e5","ticket":221,"reason":"eligible","sections":[{"heading":12,"title":"Open questions","start_byte":7680,"end_byte":7850,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/237-conv-sweep-primitive.md","sha256":"8b71334c5392a5d070bd9e40dd7400a0bc2d67841061219ebb72ce65f5931b61","ticket":237,"reason":"eligible","sections":[{"heading":13,"title":"Open questions","start_byte":8317,"end_byte":8470,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/242-conv-sweep-loop.md","sha256":"b06e3864310b8cca297f987440c32d89bb02247fbe14874eb2772540ea9b12a5","ticket":242,"reason":"eligible","sections":[{"heading":20,"title":"Open questions","start_byte":17851,"end_byte":18082,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/243-conv-daemon-wiring.md","sha256":"a6e3ed48f3f09d079dfdf943687eae58c7ab81a980e4e76eaa8b54f35d34eda7","ticket":243,"reason":"eligible","sections":[{"heading":28,"title":"Open questions","start_byte":23605,"end_byte":24352,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/247-wssclient-with-auto-reconnect-backoff.md","sha256":"fff3b1f36fd6446c10c454ceee92bd1612c840b9d9b6b33da2c9897b181a53d1","ticket":247,"reason":"eligible","sections":[{"heading":30,"title":"Open questions","start_byte":39679,"end_byte":40415,"action":"remove","reason":"content-bound individual approval"}]},
+{"document":"docs/specs/architecture/248-relay-outbound-handshake.md","sha256":"2ebd8b00f66262a6295e91edfae69464ea91ff92717dd98f534ff0bd91b0efae","ticket":248,"reason":"eligible","sections":[{"heading":16,"title":"Open questions","start_byte":35012,"end_byte":35502,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/249-relay-inbound-token-validation.md","sha256":"dba4fe6c4130d1792eccbd9e840e387b36aa516c74ef5fface3ac1948ad04531","ticket":249,"reason":"eligible","sections":[{"heading":13,"title":"Open questions","start_byte":13118,"end_byte":13488,"action":"retain","reason":"unapproved nontrivial question"}]},
+{"document":"docs/specs/architecture/250-register-push-token-handler.md","sha256":"7be47df49ca3d4e54467f8b20617564fb00c20ffe99f6c22968a560bd8adff1a","ticket":250,"reason":"eligible","sections":[{"heading":17,"title":"Open questions","start_byte":20711,"end_byte":21578,"action":"retain","reason":"unapproved nontrivial question"}]}
+],
+"approval_diagnostics":[]
+}
+```
+
+### Documentation validation
+
+- PASS: reproduced the builder's 46 scoped records and evidence hash before edits.
+- PASS: refreshed approvals and preview fences equal the generated scoped artifacts;
+  all 16 approvals map to exactly one eligible removal and diagnostics are empty.
+- PASS: final shipped preview has exactly 30 retained questions across this batch;
+  each retains its original bytes. All 46 surviving historical bodies equal their
+  baselines plus exact notices minus only the approved ranges.
+- PASS: final reference inventory preserves all 33 scope missing document/target
+  pairs across the same 16 specs. No omitted or duplicate scope entries.
+- PASS: four knowledge edits match the exact handoff; new notice links and anchors
+  resolve. No new/deleted documents, frozen edits, code edits or test edits.
+- PASS: `make docs-guard`; whitespace check with `blank-at-eof` excluded. Ordinary
+  `git diff --check` reports only pre-existing blank separators now at EOF in
+  #181 and #186; these bytes are outside the approved ranges and are preserved.
+
+To reproduce the refreshed preview, use the recorded checkout commit in a scratch
+checkout, insert the exact notices (including #218's corrected link), extract the
+Refreshed removal approvals fence, and run the shipped offline preview before
+removing sections. Final document hashes intentionally differ after removal;
+these pre-removal approvals must not authorize any later section.

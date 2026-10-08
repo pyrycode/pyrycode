@@ -16,6 +16,8 @@ type (already on main, #206) and stdlib only otherwise.
 
 ## Context
 
+The current payload also requires server_static_pubkey. json.Unmarshal rejects trailing non-whitespace; Decoder.Decode needs a separate EOF check. See [current pairing format and validation](../../knowledge/features/pair-package.md).
+
 Phase 3 (mobile + relay) needs `pyry pair` to print a QR code and a paste-
 fallback string carrying three values the phone needs: which server-id to
 target on the relay, which relay to target, and which bearer token to
@@ -254,12 +256,6 @@ the case-axis is wide.
 
 No PTY, no fixtures, no `t.TempDir`. Pure-function tests run under `go
 test -race ./...` in milliseconds.
-
-## Open questions
-
-None. Everything the developer needs is pinned by ticket AC, by
-`docs/protocol-mobile.md`, or by `internal/config` / `internal/identity`
-patterns already on main.
 
 ## Security review
 

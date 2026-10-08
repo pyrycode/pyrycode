@@ -346,12 +346,6 @@ If the developer sees real flakes in CI under `-race`, raise the slack
 to 100ms — `-race` slows everything ~2x and the dial loop with N=3
 attempts at 10ms intervals is dangerously close to the noise floor.
 
-## Open questions
-
-None. Sizes XS, the seam is clear, the timings are deterministic
-modulo CI slack, and the predicate from #198 does the heavy lifting.
-Developer should write the move + helper + three tests and ship.
-
 ## Acceptance check (for the developer)
 
 Walk down the AC list before pushing:

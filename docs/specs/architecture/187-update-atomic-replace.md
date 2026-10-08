@@ -2,6 +2,8 @@
 
 ## Context
 
+AtomicReplace explicitly applies Chmod, so the requested mode survives umask settings; power-loss and no-replace questions remain deferred. See [current replacement contract](../../knowledge/features/update-package.md#atomic-in-place-replace).
+
 Third I/O slice of the `pyry update` work, sibling to:
 
 - #186 — in-memory tar extraction → produces `newData []byte` (the new pyry binary's bytes)

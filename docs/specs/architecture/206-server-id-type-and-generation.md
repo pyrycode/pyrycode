@@ -229,12 +229,6 @@ package docs. No documentation note required.
 
 All tests `t.Parallel()`. No fixtures, no helpers — table-driven and short.
 
-## Open questions
-
-None worth deferring. The shape is fully constrained by the AC and the
-existing `sessions/id.go` precedent. The three documented divergences are
-all forced by the AC's signatures.
-
 ## Out of scope
 
 - Persistence — sibling ticket loads the raw string from disk and feeds

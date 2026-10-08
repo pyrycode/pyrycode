@@ -2,6 +2,8 @@
 
 ## Context
 
+RegisterPushToken is now a dispatch.Handler factory using authenticated connection state and devices.WithLock; push wake is implemented through the relay. See [current handlers](../../knowledge/features/relay-package-handlers.md) and [push wake](../../knowledge/features/relay-package-push-wake.md).
+
 Phase 3 Track C — the binary's inbound handler for the phone's `register_push_token` frame. Composes A4 (devices.json registry, #209), A5 (`Validate`, #210), C1 (envelope types, #275), C4 (#249 — first-frame auth returning a matched `Device`), and #282 (Device gains `Platform` and `PushToken`). Per `docs/protocol-mobile.md` § Phone background behaviour (line 144), `register_push_token` is load-bearing for the mobile UX: a backgrounded phone closes its WS and is woken via APNs/FCM using the persisted token.
 
 The phone re-registers on every WS connect (~100 bytes, self-heals registry drift). The binary MUST de-duplicate: identical `(platform, token, device_name)` triple → no disk write, ack only. Without dedupe, every WS connect rewrites `devices.json`, amplifying flash wear and i/o churn for what's typically a no-op.

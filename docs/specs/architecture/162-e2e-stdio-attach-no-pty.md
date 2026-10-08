@@ -7,6 +7,8 @@ size: XS
 
 # Context
 
+Attach/resize and foreground auto-attach were retired by #1348; this design is historical. See [current control-plane behavior](../../knowledge/features/control-plane.md).
+
 ## Why this slice exists
 
 #161 (now closed) landed `startStdioAttach` and the byte-flow proof-

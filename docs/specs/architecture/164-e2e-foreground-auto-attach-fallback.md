@@ -24,6 +24,8 @@ Test-only ticket. Zero production-code edits.
 
 ## Context
 
+Attach/resize and foreground auto-attach were retired by #1348; this design is historical. See [current control-plane behavior](../../knowledge/features/control-plane.md).
+
 #158 shipped the foreground auto-attach gate. #163 covered its
 success branch end-to-end. The fall-through branches are exercised
 only by the unit tests in `cmd/pyry/auto_attach_test.go` today —

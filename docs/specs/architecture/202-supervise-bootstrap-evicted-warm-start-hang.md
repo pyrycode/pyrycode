@@ -209,10 +209,6 @@ The reporter's repro is the natural manual smoke test:
 
 Out of scope here — the regression test in CI is the merge-gating signal.
 
-## Open questions
-
-None known. The fix is local, the test reproduces the bug structurally, and the diagnosis is grounded in the actual code paths and the persisted-state contract.
-
 ## Out of scope
 
 - The friendlier `pyry status` rendering for un-initialised supervisors (ticket-body technical note). Belongs to a separate UX ticket; not load-bearing for this fix.
