@@ -591,6 +591,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		return err
 	}
 	defer postDelivery.stopAccepting()
+	postDelivery.sessionFor = channelPostSession(convReg, pool.HarnessFor)
 	postDelivery.bind(turnBusy)
 	// operatorMessages is the hand-off from the history producer below to the
 	// live push of the operator's own message (#2699), built BEFORE msgqueue.New
