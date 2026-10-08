@@ -1230,10 +1230,8 @@ func (e *interactiveTurnEmitterV2) emitMappedAt(ctx context.Context, convID stri
 	e.emit(ctx, convID, typ, payload)
 }
 
-// emit is the one place envelopes reach the wire (the ~25-LOC #589 echo,
-// capability-gated). It marshals the payload once, snapshots the open conns
-// fresh, filters to interactive grants, and Pushes one sealed envelope per conn
-// with a per-conn monotonic env.ID.
+// emit records one fact and publishes eligible legacy events. It marshals once,
+// snapshots connections per event and preserves the interactive recipient gate.
 func (e *interactiveTurnEmitterV2) emit(ctx context.Context, convID, typ string, payload any) {
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
@@ -1247,22 +1245,15 @@ func (e *interactiveTurnEmitterV2) emit(ctx context.Context, convID, typ string,
 		return
 	}
 
-	// Assign the durable, daemon-wide-unique event id and record it for replay
-	// ONCE per logical event, before the per-conn fan-out — so the same event
-	// carries the same id regardless of conn count, and is retained even when no
-	// phone is interactive right now (the ring is the replay source for absent
-	// phones that reconnect later). One timestamp per logical event, shared by
-	// every conn (hoisted out of the loop). The returned id is stamped on each
-	// conn's envelope below — #649 surfaces it on the wire so a reconnecting
-	// phone can advertise it as last_event_id (consumed by #647). The ring's own
-	// mutex handles the future cross-goroutine read; the emitter takes no lock.
+	// One timestamp and history append per logical event, including with no
+	// recipients. Eligible events enter the replay ring only after the append
+	// result is known; absent or failed storage does not prevent their delivery.
 	ts := time.Now().UTC()
-	// The durable half of the same record (#2114), beside the ring and under the
-	// same four values: one append per LOGICAL event, before the per-conn
-	// fan-out, so a conversation with no interactive conn open still accumulates
-	// history. A failed append returns nil metadata; delivery still proceeds.
 	historyEntryID := appendConversationHistory(e.hist, e.logger, "interactive_turn.history_append_err",
 		convID, typ, payloadJSON, ts)
+	if !legacyHistoryType(typ) {
+		return // durable facts never enter the legacy ring or live fan-out
+	}
 	// Publish the complete event only after the history result is known: replay
 	// can read the ring concurrently, including before any recipient is open.
 	eventID := e.ring.AppendWithHistoryID(convID, typ, payloadJSON, ts, historyEntryID)

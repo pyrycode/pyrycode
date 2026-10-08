@@ -42,7 +42,7 @@ func (s *stubAppender) append(convID conversations.ConversationID, typ string, p
 
 type testPosterHistory struct{ appender *stubAppender }
 
-func (h testPosterHistory) Append(id conversations.ConversationID, typ string, raw json.RawMessage, ts time.Time) (uint64, error) {
+func (h testPosterHistory) AppendWithMetadata(id conversations.ConversationID, typ string, raw json.RawMessage, ts time.Time, _ history.Metadata) (uint64, error) {
 	return h.appender.append(id, typ, raw, ts)
 }
 func (h testPosterHistory) Page(id conversations.ConversationID, _ string, _ int) (history.Page, error) {
