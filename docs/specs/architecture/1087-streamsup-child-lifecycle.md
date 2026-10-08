@@ -13,44 +13,6 @@ structurally kills the #528/#996/#989 bind-latency family. The only filesystem r
 allowed is resolving the workdir realpath for spawn hygiene (below); no fsnotify, no
 JSONL-path resolution, no `<uuid>.jsonl` anything.
 
-## Files to read first
-
-- `internal/agentrun/streamrunner/runner.go:134-252` — **the spawn/teardown template.**
-  `exec.CommandContext` + `cmd.Cancel` (reap → SIGTERM) + `cmd.WaitDelay` (SIGKILL
-  fallback) + `StdinPipe`. Lift this shape wholesale. **Critical inversion:** line 223
-  `stdin.Close()` — streamrunner closes stdin after one write; streamsup must **not**
-  (the child is multi-turn; #1088 writes onto the held-open handle).
-- `internal/agentrun/streamrunner/runner.go:1-24` — package doc: the "must not import
-  `internal/supervisor` nor sibling agentrun subpackages" rule + the `go list -deps`
-  verification snippet. Mirror both in `streamsup`'s package doc (satisfies AC1).
-- `internal/agentrun/streamrunner/reap.go:1-16` — the `reapDescendantGroupsFn` seam var
-  (points at `agentrun.ReapDescendantGroups`, swappable in tests). Copy verbatim.
-- `internal/agentrun/reap.go:18-67` — `ReapDescendantGroups` contract (what the seam
-  calls; do **not** re-implement — import `internal/agentrun` and call it).
-- `internal/agentrun/workdir.go:33-43` — `ResolveWorkdir`: resolve `WorkDir` before spawn
-  (macOS `/tmp`→`/private/tmp`, the #989 symlink hazard). Wraps `fs.ErrNotExist`.
-- `internal/agentrun/exitclass.go:23` — `ExitErrIsBenign`: classify benign
-  broken-pipe/already-exited errors when closing the old stdin on restart (avoids a
-  spurious WARN; see streamrunner runner.go:224).
-- `internal/supervisor/backoff.go:1-46` — `backoffTimer` (exponential + stability reset).
-  **Copy verbatim** into `internal/streamsup/backoff.go` (cannot import `supervisor`).
-- `internal/supervisor/backoff_test.go:8-152` — the backoff ladder table test. Lift it —
-  it is the AC3 assertion.
-- `internal/supervisor/supervisor.go:706-829` — `Run` loop + `buildClaudeArgs`: the
-  restart / backoff / resume / ctx-cancel-shutdown structure to mirror. Adapt
-  `--continue`/`--session-id` → the `--session-id`-then-`--resume` shape below, and the
-  PTY/`tuidriver.Spawn` host → a plain `exec.Cmd` (streamrunner's shape).
-- `internal/agentrun/streamrunner/runner_test.go:36-55,127-206` — `helperRunCfg` +
-  `reapRecorder`/`swapReapSeam`/`assertReapedLivePid`. Lift the harness and the reap-seam
-  test pattern.
-- `internal/agentrun/streamrunner/helper_test.go:28-154` — `TestStreamRunnerHelperProcess`
-  fake-child pattern (env-keyed modes). Adapt modes for this slice (block-on-stdin /
-  echo-stdin / exit-to-force-restart / SIGTERM-handler).
-- QMD `pyrycode-docs` → `second-brain/.../streamrunner-interactive-spike-findings.md`
-  (T1 spike, #1075) — the live-verified protocol constraints. Key facts baked into this
-  spec: no `-p`; per-turn `system` init; **plain `--resume <id>` reuses the on-disk id and
-  does not fork** (§3); resolve workdir realpath (§3); idle session persists (§6).
-
 ## Context
 
 The PTY interactive path (`internal/supervisor` → tui-driver) binds a conversation to a

@@ -2,33 +2,6 @@
 
 Slice A of #451's split. This slice lays the control-socket wire contract (verb const + payload + dispatcher) and the `Rekeyer` seam that slice B (#460) plugs into. **No operator-facing subcommand, no consumer, no `cmd/pyry` change** — the `control.Rekey` client helper is callable but unused in production until slice B lands.
 
-## Files to read first
-
-Production code:
-
-- `internal/control/protocol.go:13-80` — existing `Verb*` constants in the `sessions.*` family; mirror this shape for `VerbRekey`.
-- `internal/control/protocol.go:97-115` — `ErrorCode` + `ErrCodeSessionNotFound` taxonomy; the new `ErrCodeConnNotFound` is the analogue from AC1.
-- `internal/control/protocol.go:117-189` — `Request` envelope + `SessionsPayload` / `ResizePayload` (single-purpose, omitempty); template for the new `RekeyPayload` and the new `Rekey *RekeyPayload` field on `Request`.
-- `internal/control/server.go:33-149` — interface-at-consumer pattern (`Session`, `SessionResolver`, `Remover`, `Renamer`, `Lister`, `Sessioner`); the new `Rekeyer` is its own free-standing interface (NOT embedded into `Sessioner` — see § Design rationale).
-- `internal/control/server.go:151-221` — `Server` struct + `NewServer` constructor; **`NewServer`'s signature is frozen** (AC2). Add the `rekeyer` field guarded by the existing `s.mu`.
-- `internal/control/server.go:372-425` — `handle` dispatcher; add one `case VerbRekey:` branch in the same shape as the surrounding cases.
-- `internal/control/server.go:499-528` — `handleSessionsRm`: the canonical pattern for typed-sentinel→`ErrorCode` mapping via `errors.Is`. Copy this shape verbatim.
-- `internal/control/server.go:547-565` — `handleSessionsRename`: the shorter no-ctx-timeout variant of the same pattern (no `context.WithTimeout`, no `JSONLPolicy` decoding). `handleRekey` follows this variant — see § "Why no server-side timeout" below.
-- `internal/control/client.go:122-185` — `SessionsRm` / `SessionsRename` client helpers; copy the typed-error reconstruction shape (`switch resp.ErrorCode { case … }` → sentinel) for `Rekey`.
-- `internal/control/client.go:247-270` — `request` helper; nothing to add, just confirm `Rekey` flows through it like every other client verb.
-
-Tests / fixtures:
-
-- `internal/control/sessions_new_test.go:18-143` — `fakeSessioner` shape (mu-guarded recorded calls, `returnErr` field, copy-on-read accessors). The new `fakeRekeyer` follows the same shape but stands alone (not embedded into `fakeSessioner` — see § Design rationale).
-- `internal/control/sessions_new_test.go:145-174` — `startServerWithSessioner`: pattern for the new `startServerWithRekeyer` helper.
-- `internal/control/sessions_rm_test.go:20-216` — full handler-test suite (success / typed sentinel / untyped error / no-sessioner / missing id / bad arg); mirror for the rekey suite (success / `ErrConnNotFound` mapped to `ErrCodeConnNotFound` / no-rekeyer / missing-`connID` / ctx-timeout).
-- `internal/control/sessions_rm_test.go:218-344` — `TestSessionsRm_PassesArgsOnWire` + `TestSessionsRm_DecodesEmptyResponseAsError`; mirror for `Rekey`.
-
-Convention references:
-
-- `docs/PROJECT-MEMORY.md:20` — "Refusal-to-wire-code mapping is the consumer's job, NOT the primitive's." The `Rekeyer` returns a Go sentinel; the dispatcher maps to the wire `ErrorCode`. This shape is exactly what `handleSessionsRm` does for `sessions.ErrSessionNotFound` → `ErrCodeSessionNotFound`.
-- `docs/protocol-mobile.md` § Re-key (line 234) — names `payload.reason = "manual"` as *"operator-triggered via `pyry rekey <conn_id>`"*. Out of scope for this slice (slice B emits `rekey_request` envelopes; slice A only triggers); cited for context.
-
 ## Context
 
 Slice A of the split of #451. The original ticket sketched the verb + plumbing + V2 manager wiring in one piece; the architect's edit-fan-out review found that the end-to-end design touched 6 production files and would have required changing `control.NewServer`'s signature across all of its call sites (1 production + 10 test files). Splitting the wire-contract from the verb-and-manager work keeps both slices well under the file-count and refactor-fan-out red lines and lets each slice ship and test independently.

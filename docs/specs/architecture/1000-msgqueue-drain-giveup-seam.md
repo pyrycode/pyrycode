@@ -2,18 +2,6 @@
 
 **Size:** S · **Security-sensitive:** no (engine-side seam ships unwired; see § Security posture) · **Split from:** #991 · **Blocks:** #1001 (wire + producer)
 
-## Files to read first
-
-- `internal/msgqueue/queue.go:74-110` — `DeliverFunc` + `ChangeFunc` + `Config`. The seam style to mirror for the new `GiveUpFunc`/`OnGiveUp`; and the `DeliverFunc` contract (payload is opaque transit, never surfaced in errors) that makes `err.Error()` safe to interpolate into the give-up reason.
-- `internal/msgqueue/queue.go:158-186` — `New`: the default-resolution + field-copy pattern (`RetryInterval`/`max`/`log`). Mirror it for `GiveUpAfter` and `OnGiveUp`.
-- `internal/msgqueue/queue.go:329-336` — `notify` helper (fires off-lock, nil-safe). Mirror it as `notifyGiveUp`.
-- `internal/msgqueue/queue.go:381-436` — `drain`. The retry leg (`if err != nil { … will retry … continue }`, lines 409-424) is the exact edit site; `advanceLocked` (440-443) drops a head; `sleepCtx` (463-472) is the ctx-aware wait; the `NEVER log head.text` constraint is at line 412.
-- `internal/msgqueue/queue.go:38-48` — package `SECURITY` header (untrusted phone text is opaque, never logged). AC4 is preservation of this.
-- `internal/supervisor/supervisor.go:585-592` — backoff defaults: `BackoffInitial=500ms`, `BackoffMax=30s`, `BackoffReset=60s`. The **max backoff window** the give-up bound must exceed (AC2). Note: these are unexported defaults filled in `New`, not exported consts — so a cross-package numeric pin in a msgqueue test is not cleanly available (see § Testing strategy).
-- `internal/msgqueue/queue_test.go:20-117` — `fakeDeliver` (`failTimes`, `gates`, `entered`/`completed`, `recvWithin`, `equalStrings`). Extend with a toggleable permanent-failure mode; reuse the sync-without-sleeps pattern.
-- `internal/msgqueue/queue_test.go:260-308` — `TestQueue_LosslessRetry_SurvivesRespawn`, the transient-clears baseline the AC2 "no give-up" test extends. **Place the new give-up tests adjacent to this function (mid-file)**, not at end-of-file — see § Test placement.
-- `cmd/pyry/main.go:807-828` + `cmd/pyry/queue_state_v2.go:14-27` — read-only reference: how `OnChange` routes seam → channel → producer. This is the pattern #1001 replicates for `OnGiveUp`. **#1000 does NOT touch `cmd/pyry`.**
-
 ## Context
 
 `internal/msgqueue`'s `drain` retries a persistently-failing FIFO head every `RetryInterval` **forever** (`queue.go:409-424`): any non-nil `Deliver` error logs `msgqueue: delivery failed, will retry` and `continue`s indefinitely. A claude child that parks at startup (unanswerable dialog, wedged readiness gate, network stall) therefore loops on a head that never drains and never fails — the client is left with a message that neither runs nor errors.

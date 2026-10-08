@@ -2,14 +2,6 @@
 
 **Ticket:** [#917](https://github.com/pyrycode/pyrycode/issues/917) · **Size:** S · **Security-sensitive:** no (behavior-preserving refactor; no new design surface — see § Security)
 
-## Files to read first
-
-- `cmd/pyry/relay.go:179-348` — `startRelay`: the 20-param positional signature, the `serverID`/`registry`/`conn` locals it produces, the v1/v2 branch, and the `startRelayV2` pass-through call at line 243. This is the primary edit site.
-- `cmd/pyry/relay.go:350-635` — `startRelayV2`: the second 20-param signature and its function doc comment (lines 350-373), which holds the `claudeSessionsDir` gating knowledge and the `StaticPriv` security contract. **Keep both doc-comment blocks on the functions — they are function docs, not param docs; do not delete them when you shorten the signatures.**
-- `cmd/pyry/main.go:872` — the single production call site inside `runSupervisor`; the one-line positional call that becomes a named-field struct literal. Read `main.go:820-870` for how the last few args (`qse`, `debugBundler`, `snapshotSettings`, `settingsUpdaterAdapter{pool}`) are built just above the call.
-- `internal/relay/relay.go` (type `Config`), `internal/dispatch` (type `Config`), `internal/msgqueue` (type `Config`) — the codebase's existing `Config`-struct-as-named-fields idiom the new struct mirrors. No need to read deeply; just confirm the named-field-literal style before writing the struct literal.
-- Not needed: no test file references `startRelay`/`startRelayV2` (confirmed by grep — only comment mentions in `assistant_turn.go`, `session_transition_v2.go`, and `main.go`, none of which call the functions). AC4's "no test edits" is structural.
-
 ## Context
 
 `startRelay` and `startRelayV2` have each grown to ~20 positional parameters as every daemon seam (settings, snapshot usage, debug bundler, queue emitter, …) appended one more arg — forwarded by position from `startRelay` → `startRelayV2` and from the single `runSupervisor` call site. Two directory-path strings (`claudeSessionsDir`, `defaultCwd`) sit adjacent in the list; transposing them compiles clean and produces a subtle runtime misbehaviour (the JSONL resolver scans the wrong dir). Two adjacent bools (`allowInsecure`, `v2Enabled`) and three bare-string identifiers (`instanceName`, `relayURL`, `version`) have the same transposition hazard.

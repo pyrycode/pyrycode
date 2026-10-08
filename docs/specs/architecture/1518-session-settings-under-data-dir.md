@@ -4,30 +4,6 @@
 `internal/sessions/pool.go`), one function signature change with 5 call sites (2 production, 3 in
 `settings_test.go`), no new exported types. Projected ~70 production LOC + ~300 test LOC.
 
-## Files to read first
-
-Symbols, not line numbers — resolve each with `codegraph_node` / `codegraph_search`.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/sessions/settings.go` | `writeMCPSettings`, `mcpSettingsFile` | The whole file. This is the function being rewritten; its doc comment states both halves of the contradiction the ticket fixes. |
-| `internal/sessions/pool.go` | `New` | Write site 1. Note `bootstrapID` is in hand before the write, `p` is late-bound (does **not** exist yet), and there are **two** error returns after the write — the `newRunner` failure *and* the `p.saveLocked()` failure. |
-| `internal/sessions/pool.go` | `buildSession` | Write site 2. `id` is a parameter. One error return after the write (`p.newRunner`). |
-| `internal/sessions/pool.go` | `dataDir` | The `filepath.Dir(registryPath)` derivation this change mirrors, plus the `""`-means-persistence-disabled convention. |
-| `internal/sessions/pool.go` | `Remove` | The minted-session removal of `sess.settingsPath`, and the "leaked tempfile in os.TempDir is harmless" comment that this change falsifies. |
-| `internal/sessions/pool.go` | `Run` | The bootstrap-teardown `defer`, carrying the same now-false comment. |
-| `internal/sessions/pool.go` | `disposeJSONLLocked` | The `archived-sessions` precedent: `filepath.Join(dataDir, ...)` + `os.MkdirAll(dir, 0o700)` on demand. Match its shape. |
-| `internal/sessions/pool.go` | `CreateIn` | The `saveLocked`-failure rollback that discards a freshly built session — a post-`buildSession` orphan site (see § Error handling). |
-| `internal/sessions/get_or_create.go` | `materialise` | The same-id race path. Its discard branches must **not** remove the settings file — see § Error handling, "the trap". |
-| `internal/sessions/registry.go` | `saveRegistryLocked` | The house atomic-write recipe (`MkdirAll` → `CreateTemp` in the same dir → encode → `Sync` → `Close` → `Rename`). Copy the shape. |
-| `internal/sessions/registry.go` | `pickBootstrap`, `loadRegistry` | Proof that a warm-start bootstrap id is decoded from disk with **no** shape validation, and that `loadRegistry` treats a malformed registry as a hard error. Both facts drive the `ValidID` gate below. |
-| `internal/sessions/id.go` | `ValidID`, `NewID` | The canonical UUIDv4 shape check. 36 chars, lowercase hex, dashes at 8/13/18/23 — contains no `/` and no `.`, which is what makes it usable as a filename. Note there is a second `ValidID` in `internal/conversations`; the package-local one is the one you want. |
-| `internal/sessions/session.go` | `settingsPath` field | Its doc already promises an **absolute** path. Keep that promise (see § Design, step 3). |
-| `internal/sessions/settings_test.go` | `TestWriteMCPSettings_ShapeAndContent`, `TestWriteMCPSettings_DistinctPaths` | The two tests that break on the signature change, and the shape assertions to preserve. |
-| `internal/sessions/pool_mcp_settings_test.go` | `helperPoolArgvRecorder`, `settingsArgPath`, `assertMCPSettingsFile`, `TestPool_Remove_CleansUpMintedSettingsFile`, `TestPool_Run_CleansUpBootstrapSettingsFile` | Reusable helpers, and the two teardown tests that must stay green **unmodified**. |
-| `internal/sessions/runner_test.go` | `fakeRunner`, `testRunnerFactory`, `TestRunnerFactory_InvokedAtEveryConstructionSite` | The no-`RegistryPath` pool construction (AC #2's protected path) and the factory-injection pattern AC #5's tests reuse. |
-| `cmd/pyry/main.go` | `resolveRegistryPath` | Its documented `$HOME`-unresolvable fallback returns a **CWD-relative** path. This is why absolutisation is not hypothetical. |
-
 ## Context
 
 `writeMCPSettings` writes the per-session `--settings` file into `os.TempDir()`, while its own doc

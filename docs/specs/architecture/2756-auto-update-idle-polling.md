@@ -48,10 +48,6 @@ Reuse the signed fixture and existing rollback/signature/quiet-window tests. Inj
 
 Run focused tests red before implementation, then race tests for `./cmd/pyry/...`, `go vet ./...`, and `go build -o /tmp/builder-2756/pyry ./cmd/pyry`. The verifier owns the full-module gate.
 
-## Open questions
-
-None.
-
 ## Documentation handoff
 
 Pending for the documentation stage:

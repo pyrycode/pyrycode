@@ -5,31 +5,6 @@ consumer is found. **Zero production code, zero test code, zero file changes in 
 
 ---
 
-## Files to read first
-
-Read these before searching. The first two are the keystone for AC1 — they are what turns
-"outside the session workdir" from a one-sample coincidence into a structural claim.
-
-| Path | What to extract |
-|---|---|
-| [#1223 comment 5109558101](https://github.com/pyrycode/pyrycode/issues/1223#issuecomment-5109558101) | **Primary source.** The verbatim `tool_result` envelope (output path, `cwd`, `sessionId`, `backgroundTaskId`), the workdir listing, the session-JSONL path, and the "workdir == HOME under `WithWorktreeAuthenticated`" statement. Every AC1 value comes from here. Do not re-derive. |
-| `internal/sessions/reconcile.go:14-33` | `encodeWorkdir` — replaces **every** non-alphanumeric with `-`, empirically verified against claude. This is the AC1 keystone; see § AC1. |
-| `internal/sessions/reconcile.go:49-62` | `DefaultClaudeSessionsDir` — `EvalSymlinks` **before** encode. Confirms the encoder's input is the *resolved* cwd (`/private/var/...`, not `/var/...`). |
-| `internal/transcript/transcript.go:97-124` | `GuardProbedPath` + its doc comment. AC3's mandated known-positive control. Note the "confidentiality boundary" framing and that it is stat-free. |
-| `internal/transcript/transcript.go:55-63` | `sessionFileStem` — the `.jsonl`-suffix + `ValidStem` clause. The **second, independent** reason the guard rejects a `tasks/<id>.output` path. |
-| `internal/transcript/transcript.go:145-175` | `Newest` — `os.ReadDir` over a directory claude populates, with name validation. An AC2/AC3 near-miss worth recording explicitly. |
-| `internal/transcript/transcript.go:190-215` | `Probed` — the one untrusted→trusted path crossing pyry declares. AC3. |
-| `internal/debugbundle/bundle.go:128-150` | `newestRecording` — AC2's mandated known-positive control. Globs `*.cast`. |
-| `internal/debugbundle/bundle.go:53-64` | `DefaultRecordingsDir` — `$HOME`-rooted (`~/.local/share/pyry-recordings`). Confirms the *previous* ticket body's "walks the session workdir" claim was wrong. |
-| `internal/agentrun/ptyrunner/runner.go:685-710` | `pruneOldRecordings` — globs then `os.Remove`s by age. **Use as the known-positive control for AC4's pyry-removal search** (see § AC4). |
-| `internal/agentrun/selfcheck/selfcheck.go:68-77` | The `SentinelPath` discipline: "MUST remain a path this package constructed — never file contents or captured claude output". The stance AC3 is testing for violations of. |
-| `internal/agentrun/trust/trust.go:11-13` | "MUST NOT log file contents at any layer." Constrains what the AC5 comment may quote. |
-| `internal/agentrun/workdir.go:1-30` | `ResolveWorkdir` — a canonicaliser keyed into `~/.claude.json`. Enumerates nothing, owns no directory. Confirms the body's third bullet. |
-| `cmd/pyry/interactive_turn_stream_v2.go:178-200` | `resolveLatestSessionJSONL` — newest-by-mtime over a dir **pyry computed**, explicitly not a second cwd-encoder. An AC3 near-miss: record why it is not a hit. |
-| `internal/sessions/rotation/probe_linux.go:20-35` | `/proc/<pid>/fd` enumeration — paths the OS reports *about* claude. An AC3 candidate class distinct from "claude's own bytes". |
-
----
-
 ## Context
 
 When claude's Bash timeout expires it moves the command to the background and writes its output

@@ -6,32 +6,6 @@ Line numbers are as of `ac25ad8`. **Locate by symbol, never by line.**
 
 ---
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/finding_artifact_write_test.go` — **the whole file (970 lines)** | The only file this ticket edits. Read it end to end before the first edit: every site below is surgery on prose that argues for itself, and §7's "do not touch" list is as load-bearing as the edits. |
-| `…/finding_artifact_write_test.go:35-59` | The file header's **forbidden-symbol rule**: every exec-bearing helper is referenced by file:line **and never by name**, so the grep reports on this file's CODE and cannot be defeated by its own prose. §6 explains why this survives the ticket's otherwise-prefer-symbols instruction. |
-| `…/finding_artifact_write_test.go:165-192` | `finWriteTrailerPad` (`:167-185`) and `finWritePlantedTrailerScan` (`:187-192`) — AC4's two kept symbols. Note `:178-180`'s precedent cite (AC5's second correction) and `:180-184`'s measured offsets. |
-| `…/finding_artifact_write_test.go:207-291` | `finWriteInputs` — the header claim (`:208`), the carried-whole list (`:216-222`), the numbered plant list (`:224-230`), and the marked call site (`:278-286`) carrying the dangling `#1321's to revisit` deferral. |
-| `…/finding_artifact_write_test.go:622-667` | `TestFinWriteArtifactsCarryNoCapturedBytes`' doc: the header claim (`:624-626`), "# Why zero" (`:628-636`), "# Why the trailer plant lands INSIDE the cap" (`:638-642`, retired), "# The mandated mutations" (`:644-667`, untouched). |
-| `…/finding_artifact_write_test.go:668-794` | The test body. Channels 1–2 (`:675-685`), channel 3 (`:687-703`, retired/relocated), channel 4 (`:705-726`), the **pre-build sub-record clean check** (`:728-747`, AC2's landing site), the write (`:749-751`), the **headroom walk** (`:753-780`, untouchable), the sweep (`:782-793`). |
-| `…/finding_artifact_write_test.go:904-946` | The pairing subtest — AC3's second survivor. `:919-923` is the wire-values comment; `:941-945` is AC5's first stale cite. |
-| `…/finding_trailer_evidence_test.go:814-849` | **#1325's `RETIRED BY #1325` note — the template for this ticket's note.** Shape to copy: what died, why it was a test of nothing, where the claim now holds *by symbol*, what remains and why, and "NOT REPADDED past the cap" stated explicitly. |
-| `…/finding_trailer_evidence_test.go:318-328` | `finTrailerSighting` — **the sub-builder that now drops the line.** Reads `scan.State`, `scan.Trailer`'s four scalars; never `scan.Line`. This is the whole factual basis of the retirement. |
-| `…/finding_trailer_evidence_test.go:484-581` | `TestFinTrailerSightingScalarsComeFromTheFullLineDecode` — AC5's first correction target. Pad **2000** (`:539`), precondition that `terminal_reason` is cut from `Line` (`:543-547`). **Same file as the stale cite points at** — see §8. |
-| `…/finding_trailer_evidence_test.go:872-905` | #1325's shipped comment naming *this file's* Detail walk — "asserts it found at least six with the trailer's among them, and applies this identical `room < len(trailNeedle)` test per path". This is why AC5 freezes the headroom walk. |
-| `…/finding_run_gather_test.go:1077-1192` | `TestFinGatherReturnsNoCapturedBytes` — **where the retired claim now holds.** The in-cap precondition asserted **in code** is `:1138-1146` (the shape §3's relocated guard mirrors); the carrier is swept as the third return at `:1158-1191`, argued at `:1164-1172`. |
-| `…/finding_run_gather_test.go:1477-1524` | `finGatherOverCapPad`'s doc — its **two** references to `finWriteTrailerPad` (`:1494`, `:1521`). **Read-only.** AC4 keeps them valid by not deleting the constant. |
-| `…/result_trailer_observation_test.go:176-188` | `trailScan` sets `Line: reachCapCommand(string(scanner.Bytes()))`. This one line is the proof behind §3's collapse of two equivalent guards into one. |
-| `…/result_trailer_observation_test.go:297-313` | `trailNeedle` (42 bytes) and `trailPaddedTrailer` — the needle is spliced into `result` at **every** pad, which is what keeps AC3's pairing check non-vacuous with no cap guard of its own. |
-| `…/tool_loop_test.go:194-203` | `resultTrailer` — **no `result` member.** Why the four decoded scalars cannot carry the needle at any pad. |
-| `docs/specs/architecture/1325-narrow-trailer-evidence-to-the-carrier.md:215-219` | #1325's Open Question 2 hands this ticket the complete list of stale facts at `:941-945`: symbol renamed, line range stale since #1320, and "pad 200" wrong. |
-
-**Do not edit** `finding_trailer_evidence_test.go` (#1325's, merged), `finding_run_gather_test.go` or `finding_run_record_test.go` (#1324's, merged).
-
----
-
 ## Context
 
 `finTrailerBuild` takes a `finSighting` since #1320. The carrier holds eight scalars — no `.Line`, no `*resultTrailer`. The needle planted in `finWritePlantedTrailerScan()`'s line is therefore consumed at **fixture-construction** time: `finTrailerSighting` copies four scalars off the decode and never reads `scan.Line`. Nothing the trailer channel plants ever enters `finRecordInputs`, so the writer under test performs no reduction there.

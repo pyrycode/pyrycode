@@ -11,30 +11,6 @@ constants that the four blocked slices answer with instead of each inventing its
 
 ---
 
-## Files to read first
-
-Cite by symbol, never by line — everything below is a symbol or a `§` heading, and
-`codegraph_search` resolves the Go names on demand.
-
-| Read | Symbol / section | What to extract |
-|---|---|---|
-| `internal/protocol/attachments.go` | `AttachmentChunkPayload` | **The entire source material for the field table.** Eight field contracts, the SECURITY block's inbound-claim / outbound-authored asymmetry, `NEVER ALLOCATE FROM A CLAIM`, the no-`conversation_id` reasoning, and the "no completion frame because `total_chunks` rides every chunk" property. |
-| `internal/protocol/attachments.go` | `MaxAttachmentChunkBytes` | The bound AC 1 publishes: **45000 raw, pre-base64 bytes of `Data`** — not base64 characters, not payload bytes, not envelope bytes. Also the envelope-cap arithmetic and the fact that this is a producer-side contract with **no validator in the package**. |
-| `internal/protocol/attachments.go` | `MaxAttachmentIDBytes`, `MaxAttachmentFilenameBytes`, `MaxAttachmentMimeTypeBytes` | The three metadata byte bounds a client must obey for its own frames to fit. Note `MaxAttachmentIDBytes`' own warning that a length ceiling is **not** a safety property. |
-| `internal/protocol/codes.go` | `TypeAttachmentChunk` | The block that **fixes two names this ticket may not choose**: the section heading `§ Attachments` and the `attachment.*` prefix. It also delegates reject #6 (a retrieval abandoned mid-stream) here by name, as a `TypeError` correlated via `in_reply_to`. |
-| `internal/protocol/codes.go` | `CodeSessionBlocked` | The existing `Code*` block: the `Code<Category><Reason>` naming convention, the one-line-group-comment style, and "grouped by category in spec-table order". The new group goes at the **end** of that const block. |
-| `internal/protocol/compat_test.go` | `TestErrorCode_Constants_MatchSpec` | The two hand-maintained maps AC 5 extends, plus the `len(cases) != len(want)` guard. **Neither map enumerates anything** — a new constant that skips both leaves the test green, which is why AC 5 exists. |
-| `docs/protocol-mobile.md` | § Debug bundle (v2) | The shape precedent, and the closest neighbour: a field table per frame, a **Reassembly & integrity** paragraph, and a **Content hygiene** paragraph. Note `debug_bundle_chunk`'s `seq` succession rule — this frame's rule is deliberately *weaker* and the contrast has to be published. |
-| `docs/protocol-mobile.md` | § Error codes | The table AC 4 extends: `Code \| Retryable \| Notes`. Existing rows show the house voice for the Notes column. |
-| `docs/protocol-mobile.md` | § Application message types | The per-type table. `attachment_chunk` has **no row yet** — see "Edits beyond the ACs" below. |
-| `docs/protocol-mobile.md` | § Application-envelope size cap | The paragraph AC 2 corrects. Its closing sentence is the false claim. |
-| `docs/protocol-mobile.md` | § Scope → "Out of scope (v2)" | The **second** stale attachment claim, same class as AC 2's. |
-| `docs/protocol-mobile.md` | § Changelog | House convention: every section addition gets a dated entry. **Read one for the voice, not the length** — see the size fence below. |
-| `internal/relay/v2bundlestream.go` | `ReassembleBundle`, `StreamBundle` | The receiver and sender references #1741 and #1746 are told to follow. The rules published here must not contradict them. |
-| `docs/knowledge/features/protocol-package.md` | `codes.go` row of the file table | Where a new const group is recorded. **Its "13 Code\* string constants" count is already stale (there are 14).** Do not trust it as an inventory; do not fix it either — `features/` belongs to the documentation phase. |
-
----
-
 ## Context
 
 `docs/protocol-mobile.md` is the only artifact the mobile and desktop clients code

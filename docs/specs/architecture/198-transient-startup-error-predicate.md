@@ -6,33 +6,6 @@ that consumes this predicate lands in #199.
 
 **Status:** ready for development.
 
-## Files to read first
-
-The developer's turn-1 data load. Each entry is paged in deliberately —
-don't grep for them.
-
-- `internal/control/client.go:248-285` — existing `request()` and `dial()`
-  helpers. `dial()` wraps the underlying `net.Dialer.DialContext` error with
-  `fmt.Errorf("dial %s: %w", socketPath, err)`. **Critical:** the predicate
-  must traverse through that `%w` wrap, plus the inner `*net.OpError` ⇢
-  `*os.PathError`/`*os.SyscallError` ⇢ `syscall.Errno` chain. `errors.Is`
-  does this automatically; verify the test exercises the wrapped shape.
-- `internal/control/client_test.go` — existing test layout in this package.
-  Table-driven, stdlib `testing` only, no `testify`. Mirror the conventions
-  here for `dial_test.go`.
-- `internal/control/server.go:248-258` — comment notes that "ECONNREFUSED
-  returns instantly" on a missing/closed unix-socket peer. Useful framing
-  for the test docstrings; no code to extract.
-- `CODING-STYLE.md` § "Errors" — confirms the project convention:
-  `errors.Is` / `errors.As` only, never string-matching on `err.Error()`.
-  AC #5 restates this; CODING-STYLE is the source.
-- `docs/lessons.md:284` — unrelated `ENOENT` lesson (about installer
-  pre-flight Stat). Skim once to confirm there is no prior predicate this
-  ticket should consolidate with; there isn't.
-
-That's the read budget. Don't expand it — the function is ten lines and a
-table.
-
 ## Context
 
 After `launchctl kickstart -k` (manual restart) or `pyry update`'s

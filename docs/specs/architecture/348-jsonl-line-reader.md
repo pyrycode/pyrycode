@@ -1,17 +1,5 @@
 # 348 — `agent-run/jsonl`: line reader + deterministic end-of-turn detector
 
-## Files to read first
-
-- `internal/agentrun/trust.go:1-21` — package doc header and import block. The new subpackage is `internal/agentrun/jsonl/` — a sibling subdirectory, NOT a new top-level package. Mirror the "no logging of file contents at any layer" trust-boundary stance verbatim in the new package's doc comment.
-- `internal/agentrun/drive.go:14-47` — `DriveConfig` shape: zero-value-defaults pattern (`if cfg.X == 0 { cfg.X = default }`) applied in the constructor body. Mirror.
-- `internal/sessions/rotation/watcher.go:78-115` — `New(cfg Config) (*Watcher, error)` constructor shape: required-field validation, logger defaulting, struct return. The reader's constructor follows the same shape but `*Reader, error` is not warranted (no fallible setup); use `*Reader` directly. Reference for the Config-struct pattern only.
-- `docs/lessons.md:52` — "Don't trust ticket bodies on filesystem layout — observe." Already applied by sibling #347. Cited here only to anchor the rule that the dashed-path concern is upstream of this ticket; this reader does not touch paths at all.
-- `CODING-STYLE.md:46-86` — interface/testing conventions: small interfaces, `t.Parallel()`, table-driven, stdlib `testing` only, same-package tests.
-- Real fixture files (NOT inside the worktree until copied into `testdata/`):
-  - `~/.claude/projects/-Users-juhanailmoniemi-Workspace-Projects--pyrycode-worktrees-architect-15/6fc6d062-1972-4457-9bfd-6b47c7e77e11.jsonl` — clean single `end_turn`, 64 lines, 25 assistant entries. Use as `testdata/clean.jsonl`.
-  - `~/.claude/projects/-Users-juhanailmoniemi-Workspace-Projects--pyrycode-worktrees-architect-83/054ce738-371c-4dac-81c7-b4f9993df20f.jsonl` — double `end_turn` (first transitional with 0 text, second with text), 18 lines, 6 assistant entries. Use as `testdata/double_end_turn.jsonl`. The exact file the ticket cites.
-  - `~/.claude/projects/-Users-juhanailmoniemi-Workspace-Projects--pyrycode-worktrees-code-review-161/08ad9c51-b394-4720-9f4c-a16ea130834e.jsonl` — no `end_turn` (max_turns / interrupted), 53 lines, 34 assistant entries. Use as `testdata/no_end_turn.jsonl`. The exact file the ticket cites.
-
 ## Context
 
 `pyry agent-run` (#338, already shipped) drives a single claude turn and exits. The next layer — sibling #349's fsnotify watcher — needs to react to claude's session JSONL output to detect end-of-turn and enforce a max-turn budget. Today there is no JSONL parser in the codebase.

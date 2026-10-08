@@ -4,42 +4,6 @@ One new exported pure function in `internal/attachments`, one new test file. No
 existing file changes. No production caller lands with this slice — #1773 is the
 first, and #1744 wires the dispatch site above it.
 
-## Files to read first
-
-Read these in order; the first four are the whole design surface.
-
-- `cmd/pyry/main.go` → `sanitizeName` — **the shape to follow.** The rune-wise
-  allowlist, the `_` replacement, the empty-result fallback, and above all the
-  comment explaining why the `.`/`..` check runs on the *built result* rather
-  than the input. Not importable (unexported, package `main`); copy the shape,
-  not the code.
-- `cmd/pyry/args_test.go` → `TestSanitizeName` — the table shape this ticket's
-  table mirrors, including how it names subtests off the input.
-- `internal/protocol/attachments.go` → `MaxAttachmentFilenameBytes` — the bound,
-  and its doc comment's reasoning (POSIX `NAME_MAX`, one path component). Read
-  the block comment at the top of the `const` group too: it states that all four
-  bounds are **producer-side contracts with no validator**, which is why this
-  function truncates rather than rejects.
-- `internal/protocol/attachments.go` → `AttachmentChunkPayload` — the SECURITY
-  block. Extract three things: `Filename` is "a display string and a sanitiser
-  input, never a path"; `Filename` is under the same **never-log** rule as
-  `Data`; and `AttachmentID` gets a canonical-shape **check**, not this
-  treatment.
-- `internal/attachments/accumulator.go` → the package comment at the top of the
-  file — "In-memory only… the package makes zero log calls." This slice must not
-  break either clause. **Do not add a second package comment and do not add a
-  `doc.go`**; see § Non-goals.
-- `docs/knowledge/features/attachments-package.md` § "Mutation-testing lessons
-  (measured across #1769 and #1770)" — this package's testing bar. In
-  particular the first lesson: *a row aimed at a property has to use the input
-  that is indistinguishable from the property's absence*, or the row looks like
-  coverage while leaving the mutant alive. § "What a successful `Assemble` does
-  not mean" names this ticket by number and says what a green `Assemble` does
-  **not** license.
-- `docs/protocol-mobile.md` § Attachments, the `filename` row of the frame table
-  and the "**Trust and content hygiene**" paragraph — the published contract
-  this function implements one half of.
-
 ## Context
 
 `AttachmentChunkPayload.Filename` arrives attacker-chosen on the upload leg. The

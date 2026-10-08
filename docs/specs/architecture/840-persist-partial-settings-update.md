@@ -12,19 +12,6 @@ This ticket adds exactly that persistence primitive: **a `Pool` method that merg
 
 `Pool.Rename` is the concrete precedent — same shape, same locking, same sentinel — with a partial merge over `SessionSettings` substituted for the single label swap.
 
-## Files to read first
-
-- `internal/sessions/pool.go:552-566` — **`Pool.Rename`**: the exact template. Lock `Pool.mu` (write) → lookup → no-op short-circuit → save previous → mutate → `saveLocked` → roll back on save error → return. **What to extract:** copy this control flow verbatim, substituting a `SessionSettings` merge for the label swap.
-- `internal/sessions/pool.go:33` — **`ErrSessionNotFound`** sentinel. **What to extract:** reuse it for the unknown-id branch (AC4); do NOT introduce a new error type.
-- `internal/sessions/session.go:61-95` — **`SessionSettings`** value type + **`claudeSettingsArgs`** helper. **What to extract:** the three fields to merge over; `SessionSettings` is a comparable struct (string/string/bool), so a `==` no-op check works. `claudeSettingsArgs` is the downstream consumer that turns the persisted settings into argv (relevant only for AC5's round-trip proof — no change here).
-- `internal/sessions/session.go:106-120` — **`Session.settings`** field + its "immutable post-New … #826b's setter must revisit synchronization" doc comment. **What to extract:** `settings` is a **`Pool.mu`-guarded** field (same discipline as `label`, NOT `lcMu`-guarded). This comment (and the type-level comment at 61-69) become stale this ticket — see § Design step 3.
-- `internal/sessions/pool.go:1204-1245` — **`saveLocked`**: serializes `s.settings.{Model,Effort,YOLO}` into `registryEntry` under the held `Pool.mu`. The inline comment at line 1223 ("`s.settings` is immutable post-New") becomes stale. **What to extract:** the persist path the setter reuses (no change to `saveLocked`'s body); the comment to correct.
-- `internal/sessions/pool_rename_test.go:14-90` — **`TestPool_Rename_RoundTrip` / `TestPool_Rename_EmptyClears`** + `helperPoolPersistent` (`pool_test.go:149`). **What to extract:** the unit-test idiom for a `Pool.mu`-guarded persisted setter — `helperPoolPersistent` → mutate via the method → `loadRegistry` → assert on-disk. Mirror this for the merge / unknown-id / no-op / persistence cases.
-- `internal/sessions/pool_settings_test.go:124-157` — **`TestPool_BootstrapWarmStart_AppliesSettingsToArgv`** + the `helperPoolArgvRecorder` / `runPoolInBackground` / `waitArgv` recorder harness (top of file, lines 17-122). **What to extract:** the end-to-end spawn-argv idiom for AC5 — a template child that records its own appended argv.
-- `internal/sessions/pool_settings_test.go:265-314` — **`TestPool_BootstrapSettings_SurviveNewPersistReload`**. **What to extract:** the persist→`loadRegistry`→assert pattern; AC5's persistence half plus the "second `New` reads it back" restart proof reuse this exactly.
-- `docs/lessons.md:79` — **§ "Lock order with callback into the host"**: the documented `Pool.mu → Session.lcMu` order. **What to extract:** `saveLocked` re-acquires each session's `lcMu` internally; the setter must NOT hold any `lcMu` across `saveLocked` (it holds none — `settings` is `Pool.mu`-guarded). Same as `Rename`.
-- `docs/knowledge/decisions/030-plain-bool-failsafe-persisted-flag.md` — the plain-`bool` YOLO fail-safe rationale from #833. **What to extract:** the persisted-layer fail-safe (absence/corruption → OFF) this ticket must not weaken; the presence contract here is the setter-layer complement (§ Security review).
-
 ## Design
 
 Two moving parts, both in `internal/sessions`. No new file for production code — the type goes beside `SessionSettings` in `session.go`, the method beside `Rename` in `pool.go`.

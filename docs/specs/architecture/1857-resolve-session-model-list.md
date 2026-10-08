@@ -3,26 +3,6 @@
 **Size:** s (re-checked against this spec in § Scope check)
 **Labels:** `enhancement`, `size:s`, `security-sensitive`
 
-## Files to read first
-
-Read these before writing anything. This is the turn-1 data load; the design below assumes you have read all of it.
-
-- `cmd/pyry/main.go` → `resolveBoundRunner`, `resolveBoundSession`, `resolveBoundRunSettings` — **the three existing twins.** Extract: the exact five-line refusal body (`Get` → `!ok || CurrentSessionID == ""` → `Lookup` → `err != nil`), and the doc-comment posture each carries. `resolveBoundRunner`'s doc states why the empty-`CurrentSessionID` guard is the isolation enforcement point; `resolveBoundSession`'s doc states why the duplication between twins is *accepted* rather than folded. This ticket adds the fourth twin and inherits both.
-- `cmd/pyry/main.go` → `interruptRunner` — the type-assertion-off-`Session.Runner` idiom, including its "optional capability, a runner without it is inert (never a panic)" framing. Copy the shape.
-- `cmd/pyry/session_model_hold.go` → `sessionModelHold.ModelList` — the accessor being composed. Extract: it returns a **deep copy**, it is **nil-receiver-safe**, and the bool is the only spelling of "nothing reported". Also read the type's `SECURITY:` paragraph — the no-logger-by-construction posture this spec preserves.
-- `cmd/pyry/streamsup_runner.go` → `streamRunner.ModelList` — the per-session runner's one-line delegate, and the doc explaining why the method is deliberately **off** the `sessions.Runner` interface. Do not widen that interface.
-- `internal/turnbridge/outbound.go` → `MapEvent`, `TurnContext` — extract the `turnevent.ModelList` arm (what it fills, what it ignores) and that the function returns `payload any`.
-- `internal/protocol/interactive.go` → `ModelListPayload`, `ModelListPayload.MarshalJSON` — extract the three wire fields and the nil-`Models` normalisation, so you do not re-normalise here.
-- `internal/sessions/pool.go` → `Pool.Lookup` — extract the one hazard sentence: **an empty id resolves to the bootstrap session**, not to an error. That is the whole reason for the second guard.
-- `cmd/pyry/queue_state_v2.go` → `outstandingQueues` — the nearest analogue: an adapter composing an existing enumeration with an existing mapping into marshal-ready payloads. Match its scale and its "pure read, mints nothing, logs nothing" framing.
-- `cmd/pyry/session_router_test.go` → `newRouterTestPool`, `stubRunner`, `TestSessionRouter_Route` — the test scaffolding to reuse: a real `*sessions.Pool` built without spawning claude, a minimal runner double, and the precedent for pinning the empty-binding guard against a real pool.
-- `cmd/pyry/interactive_turn_v2_test.go` → `modelAnnouncedFixture`, `TestInteractiveTurnEmitterV2_ModelAnnouncedEventKindNamesTheVariant` — the established shape for a log-leak negative, and the measured reason a **conspicuous sentinel** is used instead of a realistic value like `"model"`.
-- `internal/relay/v2session_seams.go` → `RunConfigFor` — read its `SECURITY:` paragraph. It is the posture this spec adopts verbatim for the untrusted id and for the "reported id comes out of the daemon's own record" rule.
-- `docs/knowledge/features/turnbridge-package.md` § the `ModelList` row of the mapping table — extract: `TurnID`/`Seq` are ignored for this variant, `DroppedModels` is carried and never recomputed, and the note about `EffortLevels`/`TruncatedFields` sharing a backing array with the source event.
-- `docs/knowledge/features/sessions-package.md` — the pool's lookup and bootstrap semantics in prose.
-
-**Citation rule:** this spec names symbols, never line numbers, and your code comments must do the same. `make cite-guard` fails any `//`-comment citation resolving to a declaration, at any depth, with **no range exemption and no depth exemption**. Write ``the guard in `resolveBoundRunner` ``, never ``main.go:1277`` and never ``main.go:1277-1290``.
-
 ## Context
 
 The daemon already asks each spawned child for its `initialize` reply (#1839), decodes the model menu, and retains it for the session's life (#1840). #1848 maps a `turnevent.ModelList` onto the wire shape and #1849 emits it on the live turn lane. What is missing is a way to answer, for a list **already held**, "which model menu does this conversation's session hold, as something a wire path can send".

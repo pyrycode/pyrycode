@@ -3,24 +3,6 @@
 **Size:** XS (comment-only; 2 production source files + 1 test file, ~60 lines of prose rewritten, 0 behaviour change)
 **Security-sensitive:** yes — see § Security review.
 
-## Files to read first
-
-Read in this order. The two `turnevent` field docs are the *source of the wording*; everything else is a site or a fact those sites must state correctly.
-
-| Path | Symbol | What to extract |
-| --- | --- | --- |
-| `internal/turnevent/event.go` | `ModelOption.EffortLevels` | **The canonical effort-levels wording.** The paragraph opening "AN ABSENT KEY, A JSON null AND A PUBLISHED EMPTY ARRAY ARE ONE READING, AND IT IS SPELLED nil (#1828)". Re-use this phrasing; do not re-derive the argument. |
-| `internal/turnevent/event.go` | `ModelOption.SupportsAutoMode` | **The canonical bool wording.** "AN ABSENT KEY, A JSON null AND AN EXPLICIT false ARE ONE READING — false" (#1819), plus *why*: the field is a permission GRANT, the safe direction is asymmetric, and the unsafe inverse is granting on silence. This paragraph is the security check for site 3 and site 4. |
-| `internal/protocol/interactive.go` | `ModelOption.MarshalJSON` | **Site 1.** The doc's third paragraph ends with the `#1690` deferral. Note the trailing `#1693` clause — #1693 is OPEN and stays. |
-| `internal/protocol/interactive.go` | `SlashCommand.MarshalJSON` | **Site 2.** The doc's second paragraph ends with the `#1719`/`#1690` clause. Note the trailing `#1720` clause — #1720 is OPEN and stays. |
-| `internal/protocol/interactive.go` | `ModelOption` (the struct doc) | The wire type's own `SupportsAutoMode` sentence — "Absent in claude's reply (Haiku's entry omits it) decodes to false, which is the correct reading." This is the house phrasing site 1 sits next to. Its `supportsEffort … once the empty encoding below is decided` clause is **out of scope** (§ Open questions). |
-| `internal/streamsup/parser.go` | `modelOptionLine` | Where each collapse actually happens. For the bool: `encoding/json`'s absent/null no-op — no daemon code implements it. For the list: absent and null land as nil for free, and `[]` is normalised separately. |
-| `internal/streamsup/parser.go` | `emitModelList` | The `boundEach` closure's zero-length arm — the one place the `[]` → `nil` normalisation is performed, and the only normalisation anything below the decode does. Site 3's new reason names this. |
-| `internal/e2e/internal/fakeclaude/main.go` | `initializeModels` | **Site 3** — the doc comment. The `var` block beneath it (sonnet's eight keys, haiku's four) **must not change**. |
-| `internal/e2e/internal/fakeclaude/initialize_control_test.go` | `TestRunStreamJSON_InitializeControlAnswer`, subtest `"covers both the present and the absent arm"` | **Site 4** — the `t.Error` message in the `minimal == 0` branch. Also read the `hasLevels`/`hasAuto` reads above it: presence and value are read *separately*, and that is the input-shape fact the new message restates. |
-| `docs/knowledge/features/fakeclaude-binary.md` | § the model-list / `initializeModels` section | **READ ONLY, do not edit.** It carries the same stale claim ("leaving the daemon-internal reading … for #1690", "a fake that emitted `[]`/`false` … would settle #1690's question"). The documentation phase repairs it; it is not a deliverable here. |
-| `CODING-STYLE.md` | § "Comments — Citing Other Code" | The rule `make check` enforces via `cmd/cite-guard`: name the symbol, never `file.go:NNN`, no range exemption, no bare `:NNN`. |
-
 ## Context
 
 Four shipped comments hand the absent-vs-empty (and absent-vs-false) reading of claude's model capability keys to **#1690, which is CLOSED as NOT_PLANNED**. #1690 was split; the slices that inherited the question have decided it and shipped:

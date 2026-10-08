@@ -16,50 +16,6 @@ source files and reuses the `#854`/`#997` harness already in the package. All
 verb-drive and drain machinery already exists; the only genuinely new code is a
 ~15-line on-disk registry reader for the "entry gone after delete" assertion.
 
-## Files to read first
-
-- `internal/e2e/realclaude/interactive_per_conversation_liveness_test.go` —
-  **the primary model.** Reuse `startPerConversationHarness` (returns
-  `*perConvHarness{phone, initSend, initRecv, home, workdir}`),
-  `createConversationViaPhone(t, phone, initSend, initRecv, reqID, cwd *string) string`,
-  `sealEnvelope(t, phone, cs, env)`, and
-  `drainForReply(t, phone, cs, wantType, reqID, timeout) protocol.Envelope`.
-  Also note `perTurnReplyBudget = 120*time.Second` and the nonce pattern.
-- `internal/e2e/realclaude/interactive_bootstrap_liveness_test.go:160-239` —
-  `sealSendMessage(t, phone, cs, id, convID, msgID, text)` and
-  `drainForAssistantReply(t, phone, cs, convID, turn, timeout)` (the liveness
-  drain — returns on the first non-empty `assistant_delta` for `convID`); plus
-  `mustJSON`. These are the exact helpers AC #3 wants mirrored.
-- `internal/e2e/relay_v2_rename_test.go:104-153` — the `rename_conversation`
-  request shape (`protocol.RenameConversationPayload{ConversationID, Name}`) and
-  the `conversation_updated` reply projection to assert
-  (`ConversationUpdatedPayload.Name`).
-- `internal/e2e/relay_v2_archive_test.go:116-207` — the archive/unarchive
-  toggle: both verbs use `protocol.ArchiveConversationPayload{ConversationID}`;
-  reply is `conversation_updated` with `IsArchived` true then false. The
-  on-disk-`is_archived` decode note (omitempty on disk) is background only —
-  this test asserts `IsArchived` from the **reply**, not disk.
-- `internal/e2e/relay_v2_delete_test.go:107-172` — `delete_conversation`
-  request (`protocol.DeleteConversationPayload{ConversationID}`), the
-  `conversation_deleted` reply (`ConversationDeletedPayload{ID}` — id only), and
-  the on-disk registry read-back shape for the "row gone" assertion.
-- `internal/protocol/conversations_write.go` — the payload structs
-  (`CreateConversationPayload`, `RenameConversationPayload`,
-  `ArchiveConversationPayload`, `DeleteConversationPayload`,
-  `ConversationCreatedPayload`, `ConversationUpdatedPayload`,
-  `ConversationDeletedPayload`).
-- `internal/protocol/codes.go:22,54-91` — `TypeCreateConversation`,
-  `TypeRenameConversation`, `TypeArchiveConversation`,
-  `TypeUnarchiveConversation`, `TypeDeleteConversation`,
-  `TypeConversationCreated`, `TypeConversationUpdated`,
-  `TypeConversationDeleted`.
-- `internal/relay/handlers/{create,archive,delete}_conversation.go` — confirm
-  (already confirmed for this spec) each verb is a **pure registry op with eager
-  `Save` before the reply**: `create` mints+binds+persists a live session and
-  replies `conversation_created`; `archive`/`delete` mutate only the registry
-  row by exact-id match with **no live-session guard**, so archiving/deleting a
-  conversation whose claude session is alive is safe.
-
 ## Context
 
 The `e2e_realclaude` tier has exactly one interactive-daemon liveness test today

@@ -7,23 +7,6 @@
 
 ---
 
-## Files to read first
-
-Read these before writing anything. Each addition mirrors an existing precedent in this exact package — copy the precedent, don't invent.
-
-- `internal/protocol/codes.go:127-141` — **`TypeResync` const block.** The precedent for this ticket's constant: its own `const ( … )` block, a rationale comment, and the "MUST NOT be added to v1TypeSet" paragraph. Mirror its shape for `TypeSessionTransition`.
-- `internal/protocol/messaging.go:26-34` — **`BackfillSincePayload`.** Carries *both* fields this payload needs: `time.Time` (`since_ts`, RFC3339Nano) and `*string` **without** `omitempty` (`conversation_id`, renders literal `null`). Copy the json-tag discipline verbatim — this is the model for `OccurredAt` and `WorkspaceCwd`.
-- `internal/protocol/interactive.go:1-25` — header comment + `TurnStatePayload`. The "plain string, not a named enum" precedent for `Reason` (same as `MessagePayload.Role`, `TurnEndPayload.StopReason`), and the no-omitempty doc style.
-- `internal/protocol/compat_test.go:39-53, 97-152` — the three test edit sites: `TestIsV1Compatible` rejection cases (39-53), the `v2OnlyTypes` map (97-108), and `TestTypeConstants_V1V2Partition`'s `all` slice + union-count check (110-152).
-- `internal/protocol/messaging_test.go:82-118` — **`TestBackfillSincePayload_RoundTrip`.** The exact template for the new test: byte-equal envelope round-trip, `.Equal` for the `time.Time` field, `*string` nil assertion, and the regression-guard comment explaining why byte-equality catches an accidental `omitempty`.
-- `internal/protocol/interactive_test.go:9-28` — `roundTripEnvelope(t, env, payload, raw)` helper. Same package, reusable for the new test's round-trip assertion.
-- `internal/protocol/testdata/backfill_since.json` — fixture shape showing `"conversation_id":null` and an RFC3339 `since_ts`. Author the two new fixtures in **struct-field order** (see § Testing — `canonical()` compacts but does not sort keys).
-- `internal/protocol/envelope.go:111-130` — `v1TypeSet`. **Do NOT add the new constant here.** The partition test enforces its absence; this is the one file you must not touch.
-- `docs/protocol-mobile.md:402-435` — § Application message types table; add the row after the `resync` row (433).
-- `docs/protocol-mobile.md:484-567` — § Interactive events intro + `#### resync` (557-565). Mirror the field-table + invariant prose; place the new `#### session_transition` subsection here.
-
----
-
 ## Context
 
 The v2 wire carries message content but has **no session-lifecycle representation**. `MessagePayload` is `{conversation_id, message_id, role, text}` — no `session_id`, no timestamp, no transition reason. The v2 interactive event family (`turn_state` / `assistant_delta` / `tool_use` / `tool_result` / `turn_end` / `stall` / `resync`) has no session-transition type.

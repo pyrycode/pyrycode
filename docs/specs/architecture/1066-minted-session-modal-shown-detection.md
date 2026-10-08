@@ -3,23 +3,6 @@
 **Ticket:** [#1066](https://github.com/pyrycode/pyrycode/issues/1066) · **Size:** S · **Labels:** `bug`, `security-sensitive`
 **Split lineage:** #1050 → #1063 → { #1065 (scoping, LANDED), **#1066 (this — detection/emission)** }
 
-## Files to read first
-
-Turn-1 data load. Read these before touching anything — the pipeline is already built; this ticket adds a minted-session regression path + a fix (if an in-repo defect exists).
-
-- `cmd/pyry/interactive_modal_stream_v2.go` (whole file, 167 lines) — `runModalStream` (the modal drain), `startInteractiveModalStreamV2` (the single startup wiring), `boundScreenText` (the #1065 single-cursor-read that pairs `conversation_id` + screen). **This is the follow-active modal path; the fix, if any, lives here or in what it resolves.**
-- `cmd/pyry/interactive_turn_stream_v2.go:436-510` — `resolveTarget`, the follow-active `TargetResolver` **shared** by the turn stream and the modal stream. The three branches (`convID==""` bootstrap / bound-to-bootstrap / bound-to-minted). The minted branch (line 499-508) is what a minted conversation resolves through.
-- `cmd/pyry/interactive_modal_v2.go:84-144` — `interactiveModalEmitterV2.Handle` / `handleModalShown`. The scoped emission: `reg.Record(req, class, convID)` (line 109) stamps `conversation_id`. **Do not add a second emission route — see § Security.**
-- `internal/modalbridge/modal.go:145-165` — `Registry.Record(req, wireClass, convID)`; confirms `ConversationID = convID` is stamped atomically under the same lock that mints `modal_id` (#1065).
-- `internal/turnbridge/producer.go:31-63,191-264` — `SessionHost` (the `Session()` + `WaitForPTY` seam), `Target`, `NewTargetSubscriber`. Shows how a (re)subscription captures the resolved host's live `*tuidriver.Session` and subscribes to its `Events()`. **The turn stream and modal stream use this identically.**
-- `internal/sessions/pool.go:405-437` (bootstrap supervisor build) vs `internal/sessions/pool.go:1241+` `buildSession` (minted). The **only** argv/config deltas between bootstrap and minted: `--session-id` source, `WorkDir`, and `ResolveTranscript`. Both get the same `--settings` MCP file (line 412 / buildSession), same `Bridge`, same hosting.
-- `internal/e2e/per_conversation_eviction_test.go:332+` — `createConversationViaPhone`: the hermetic "mint a per-conversation session over the wire" helper AC3 reuses.
-- `internal/e2e/relay_v2_modal_answer_test.go:46-130` (`modalHarness` / `bringUpModalHarness`) — the #791 hermetic modal harness. Note: it raises the modal on the **bootstrap** session (`convID==""`, no bound conversation seeded). AC3 must raise it on a **minted** session instead.
-- `internal/e2e/internal/fakeclaude/main.go:68-134` — the `PYRY_FAKE_CLAUDE_MODAL_TRIGGER` fixture: a file whose appearance makes fakeclaude paint a permission-modal screen once, driving tui-driver's `Unknown→Permission` class transition.
-- `internal/e2e/realclaude/interactive_modal_resolution_test.go` (whole file) — #1030's real-claude modal gate on the **bootstrap** session: `spawnPermissionDaemon` (the no-`--dangerously-skip-permissions` variant), `raiseRealPermissionModal`, `drainForControlEvent`. AC4 combines this with the per-conversation harness.
-- `internal/e2e/realclaude/interactive_per_conversation_liveness_test.go` — #997's real-claude per-conversation harness (`startPerConversationHarness`). AC4 = this harness + `spawnPermissionDaemon` + `raiseRealPermissionModal`.
-- Memory/doc: `docs/knowledge/codebase/1030.md` § Reliability determination — the tui-driver v1.10.0 / claude 2.1.199 version-lock status (relevant to whether AC4 can run green).
-
 ## Context
 
 A per-conversation interactive session (created over the wire → the daemon mints a dedicated claude session via `Pool.GetOrCreate`) started **without** `--dangerously-skip-permissions` blocks on claude's PTY permission prompt when a turn hits a gated tool. The daemon never fans `modal_shown`, so the remote sees no dialog and no reply; the turn wedges in the client's 120 s window.

@@ -9,45 +9,6 @@ the queued-message backlog and delivers #829's `queue_state` half. The shape is 
 mirror; the one genuinely new piece is a pure-read enumeration seam on `msgqueue.Queue` (its `convs`
 map is private).
 
-## Files to read first
-
-- `internal/relay/v2session.go:2195-2242` — `reconcileModals`: **the exact helper to mirror.** Guard
-  (`!s.interactive || seam == nil`) → snapshot-once → per-payload `json.Marshal` + `m.Push(ctx,
-  s.connID, env)` loop with content-free logging on both error branches. `reconcileQueues` is this
-  with `protocol.TypeQueueState` / `QueueStatePayload` substituted.
-- `internal/relay/v2session.go:738-756` — `V2SessionConfig.OutstandingModals`: the optional
-  closure-returning-`protocol`-payload seam. `OutstandingQueues` is its sibling (same nil-default
-  semantics, same "define the dependency where it is consumed" rationale — relay imports `protocol`,
-  not `msgqueue`).
-- `internal/relay/v2session.go:1408-1434` — `handleNoiseInit` success tail: `s.interactive` and
-  `s.state = V2StateOpen` set (1407-1408), `m.queues[s.connID]` created (1413-1415), then
-  `m.reconcileModals(ctx, s)` (1434). **The `reconcileQueues` call goes immediately after line 1434**,
-  before the `#647` replay block.
-- `internal/msgqueue/queue.go:243-256` — `Snapshot(convID)`: the single-conversation read to mirror —
-  fresh `make([]QueuedMessage, len)` value-copy under `q.mu`, includes the in-flight head. `SnapshotAll`
-  is this over every non-empty conversation.
-- `internal/msgqueue/queue.go:132-156` — `convQueue` / `Queue` internals: `convs map[string]*convQueue`
-  guarded by `q.mu`; the drain and `Enqueue`/`Remove` all mutate `c.items` under `q.mu`.
-- `internal/msgqueue/queue.go:407-426` — `advanceLocked` / `shrinkLocked`: a fully-drained conversation
-  keeps its `convQueue` entry in `convs` but with `items == nil`. **This is why `SnapshotAll` must skip
-  `len(c.items) == 0`** — that filter is AC3's deterministic enforcement point.
-- `cmd/pyry/queue_state_v2.go:166-185` — `toQueueStatePayload(convID, items)`: the **existing producer
-  mapping to reuse** (`QueuedMessage{ID,Text,TS}` → `QueuedItem{QueuedMsgID,Text,TS}`, FIFO order,
-  `Queued` initialised non-nil). The `outstandingQueues` adapter composes `SnapshotAll` with this.
-- `cmd/pyry/queue_state_v2.go:22-46` — `queueStateEmitterV2` doc + the `SECURITY:` block: queued `text`
-  is opaque, phone-originated transit, **never logged**. The reconcile inherits this discipline verbatim.
-- `cmd/pyry/relay.go:445, 505, 526` — the `NewV2SessionManager(relay.V2SessionConfig{…})` literal;
-  `OutstandingModals: modalReg.Snapshot` (the sibling wiring line the new field sits beside); and
-  `QueueRemover: queue` — **proof `queue` (`*msgqueue.Queue`) is already in scope at this literal**, so
-  no `startRelay`/`startRelayV2` signature change is needed.
-- `internal/protocol/messaging.go:185-204` — `QueuedItem` / `QueueStatePayload`: the reused wire
-  vocabulary (**no new payload type**). `internal/protocol/codes.go:310` — `TypeQueueState =
-  "queue_state"`.
-- `internal/relay/v2session_modalreconcile_test.go` (whole file) — **the test harness to clone.**
-  `startManager` + `V2SessionConfig{…}`, `openModalConn`, `waitForEnvelopes`, `noiseMsgsForConn`,
-  `decryptAppFrame`, `v2Recorder`. `reconciledModals` (`:39-57`) is the decrypt-and-key-by-id helper to
-  mirror as `reconciledQueues` (key by `conversation_id`).
-
 ## Context
 
 `queue_state` is pushed only on change (#722): the `queueStateEmitterV2` fans a snapshot to every open

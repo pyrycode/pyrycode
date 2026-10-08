@@ -4,23 +4,6 @@
 
 **Ticket:** https://github.com/pyrycode/pyrycode/issues/539
 
-## Files to read first
-
-- `internal/agentrun/selfcheck/selfcheck.go:1-30` — current package doc comment; the AC expands this to document the full deny-default contract (argv `--permission-mode dontAsk` from #538, settings `defaultMode: "dontAsk"`, `permissions.allow`) and to cite both Claude CLI docs pages.
-- `internal/agentrun/selfcheck/selfcheck.go:65-87` — `canonicalPrompt`, `canonicalAllow`, `ErrBashInvoked`. The single-source-of-truth introduction lands here.
-- `internal/agentrun/selfcheck/selfcheck.go:115-281` — `Result`, `SelfCheckDenyDefault`, the wrap-error site at line 269 that formats `ErrBashInvoked` with the literal `"Bash"`.
-- `internal/agentrun/selfcheck/selfcheck.go:283-312` — `bashInvokedInRaw` detector and its docstring; the rename + parameterisation lands here.
-- `internal/agentrun/selfcheck/selfcheck_test.go:19-31` — `passLine` / `bashLine` fixtures; `bashLine` flips to `writeLine` with a `Write` tool_use shape (file_path + content input).
-- `internal/agentrun/selfcheck/selfcheck_test.go:139-169, 358-413` — `TestSelfCheck_BashInvoked` and `TestBashInvokedInRaw`; renamed and the table cases updated for `Write`.
-- `cmd/pyry/agent_run_selfcheck.go:32-78` — `runAgentRunSelfCheck` switch arm referencing `selfcheck.ErrBashInvoked`; the PASS line at :60 mentions "Bash refused" and the INCONCLUSIVE message at :70 mentions "Bash invocation"; both update.
-- `cmd/pyry/agent_run_selfcheck.go:80-108` — `writeSelfCheckFailMessage` — the operator-facing FAIL banner with the literal prompt string and `name "Bash"` evidence label; rewritten for `Write`.
-- `cmd/pyry/agent_run_selfcheck_test.go:14-96` — `selfCheckBashLine` fixture and `TestRunAgentRunSelfCheck_FAIL`'s `required` substring list (currently asserts `"name":"Bash"` and the historical references); fixture flips; substring list adds the new tool name and adds `#538`/`#539` to the reference chain so the banner's provenance test pins post-#539.
-- `docs/specs/architecture/538-permission-mode-dontask-argv.md` — the production-impact sibling that landed `--permission-mode dontAsk`; this ticket completes the empirical credibility pair. The shared no-touch list (streamrunner path; `realclaude/permission_protocol_spike_test.go` knob) applies here too.
-- Claude CLI permission docs (referenced from the ticket and required by the AC):
-  - https://code.claude.com/docs/en/cli-reference — `--permission-mode` precedence (argv overrides settings `defaultMode`).
-  - https://code.claude.com/docs/en/permission-modes — `dontAsk` semantics, including the **read-only-Bash carveout** that motivates this ticket.
-- `internal/e2e/realclaude/allowed_tools_enforcement_test.go:60-95, 184-200` — **out of scope.** The `bashInvokedInRaw` helper there is an intentional Bash-specific gate test (separate from this ticket's deny-default-boundary test); the docstring already calls itself a "policy mirror" not a name mirror. Leave the realclaude helper, its name, and its `name "Bash"` fatal alone.
-
 ## Context
 
 Per the ticket: the existing exhibit (`"Use Bash to echo hello. Be brief."`) sits on the wrong side of a permanent claude carveout. From [code.claude.com/docs/en/permission-modes](https://code.claude.com/docs/en/permission-modes): *"`--permission-mode dontAsk` … auto-denies all tool calls except those matching allow rules **and read-only Bash commands**."* `echo hello` is read-only Bash. Even with the deny-default boundary fully in force, claude is permitted to attempt it. The selfcheck's PASS/FAIL signal therefore does not track the boundary 1:1 — a future claude release that re-scopes "read-only Bash" would shift the test result without the boundary actually changing.

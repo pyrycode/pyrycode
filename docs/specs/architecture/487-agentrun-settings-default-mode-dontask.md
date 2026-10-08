@@ -4,19 +4,6 @@
 
 **Security-sensitive:** yes (label on ticket). Inline review at end of this spec; verdict: PASS.
 
-## Files to read first
-
-- `internal/agentrun/settings/settings.go:1-86` — the entire file. The literal flip lives at line 72; the doc-comment lies at lines 5, 23, 40 must move in lockstep.
-- `internal/agentrun/settings/settings_test.go:67-141` — golden-bytes tests at lines 80, 100 and the round-trip `DefaultMode` check at lines 138-139. These are the byte assertions to update.
-- `cmd/pyry/agent_run.go:218-235` — short-circuit comment at line 227 names the literal `"deny"`.
-- `cmd/pyry/agent_run_selfcheck.go:80-108` — `writeSelfCheckFailMessage` emits the literal `permissions.defaultMode: "deny"` to operator stdout at line 92; the helper's doc-comment (lines 80-86) is pinned by `TestRunAgentRunSelfCheck_FAIL`.
-- `cmd/pyry/agent_run_selfcheck_test.go:55-96` — the FAIL-message regression test; line 83 pins the exact substring `permissions.defaultMode: "deny"` that the operator-output line emits.
-- `internal/agentrun/selfcheck/selfcheck.go:1-94` — package comment line 4 and the `canonicalPrompt` rationale at lines 65-69 reference the literal `"deny"`. Doc-only — no behaviour here changes; `canonicalAllow` and `ErrBashInvoked` stay byte-identical.
-- `internal/e2e/realclaude/allowed_tools_enforcement_test.go` — the structural template for the new regression test. Reuse `WithWorktree*`, `RunPyryAgentRun`, `ReadJSONL`, and the `bashInvokedInRaw`/`structuredDenialHit` pattern of "decode line-by-line, skip parse errors silently". Do NOT mirror that test's gate-held detector — the new test asserts on the **first `user` JSONL entry**, not on `assistant` entries.
-- `internal/e2e/realclaude/fixtures.go:1-78` — `WithWorktree` (re-pins HOME), `WithWorktreeAuthenticated` (re-pins HOME, requires `ANTHROPIC_API_KEY`, skips otherwise), `ReadJSONL`, `RunPyryAgentRun`, `RunOpts`. Use as-is — do not extend the fixture surface in this ticket (the wider Max-auth-vs-API-key fixture cleanup is OOS per ticket body).
-- `internal/e2e/realclaude/smoke_test.go:1-25` — `TestClaudeBinaryAvailable` is the suite-wide PATH gate; the new test inherits its protection (build-tag `e2e_realclaude` is the same).
-- Issue #487 body, "Reproduction" section — the manual reproduction script + the verbatim `/doctor` template substring (`"Help me fix the issues reported by /doctor below."`) that the new test asserts is NOT present.
-
 ## Context
 
 `internal/agentrun/settings/settings.go:72` hardcodes `DefaultMode: "deny"` in the per-spawn permissions JSON. Claude 2.1.145 (the production binary as of 2026-05-20) rejects `"deny"` at startup with:

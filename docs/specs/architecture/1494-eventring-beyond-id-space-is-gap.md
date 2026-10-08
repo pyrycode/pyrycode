@@ -8,28 +8,6 @@ total across `After` / `NewestID` / `replayMissed`.
 
 ---
 
-## Files to read first
-
-Read by symbol, not by line. Every name below resolves with `codegraph_search` / `codegraph_node`.
-
-| File | Symbol / section | What to extract |
-|---|---|---|
-| `internal/eventring/ring.go` | `Ring.After` | The three-outcome contract and its doc comment — this is the whole production change. |
-| `internal/eventring/ring.go` | `Ring.NewestID` | Its doc comment claims to be the clamp source that stops an out-of-range id muting the live stream. That claim narrows here (see § AC #4). |
-| `internal/eventring/ring.go` | `Ring.Append`, `convRing.evictOldest` | Why `c != nil ⇒ len(c.events) ≥ 1` — load-bearing for the reachability argument in § AC #4. |
-| `internal/relay/v2session_replay.go` | `V2SessionManager.replayMissed` | The sole production consumer of `After`. Its doc comment and its clamp comment both assert the old classification. |
-| `internal/relay/v2session_replay.go` | `V2SessionManager.emitResync` | What the gap branch emits: one `TypeResync` envelope, inline `{conversation_id}`, no `EventID`. |
-| `internal/relay/v2session_handshake.go` | `handleNoiseInit` (the `helloPayload.LastEventID != nil` tail) | Where `replayMissed` is called from, and why "before any live frame" is structural rather than timing-dependent. Its comment already says "(or emit a resync marker)" — **no change needed here**. |
-| `internal/eventring/ring_test.go` | `TestAfter_CaughtUp`, `TestAfter_GapWhenOldestFellOff`, `appendControl` | The row that must move; the gap-test shape to mirror; the fixture helper. |
-| `internal/relay/v2session_replay_test.go` | `reconnectScenario`, `reconnectOpenLive`, `appendRingEvents`, `waitForEnvelopes` | The `wantEnvs` / `wantHandshake` counts every retarget below turns on. |
-| `internal/relay/v2session_replay_test.go` | `TestV2Session_Reconnect_CaughtUp_NoReplay`, `TestV2Session_Reconnect_Gap_EmitsResync`, `TestV2Session_Reconnect_OutOfRangeLastEventID_LiveStreamDelivered`, `TestV2Session_Reconnect_ClearRotation_LiveStreamDelivered` | The four tests that change. `..._Gap_EmitsResync` is the template for the new test and does **not** itself change. |
-| `internal/relay/v2session.go` | `V2Session.replayThrough`, `V2SessionManager.forwardEnvelope` | The guard that turns a watermark into a silent mute — the mechanism the whole ticket is about. |
-| `docs/protocol-mobile.md` | § "Reconnect replay & resync (consumer, #647)" | The four-bullet branch table; the Caught-up bullet is stale. |
-| `docs/knowledge/features/eventring-package.md` | § "`After` — the three-way replay contract"; the `NewestID` paragraph above it | The condition table and the clamp-purpose sentence. |
-| `docs/knowledge/features/v2-session-manager.md` | § Reconnect replay (the `replayMissed` branch list, the `replayThrough` bullet, the intro paragraph's #663 clause, the test-inventory paragraph) | Four separate stale claims — see § Documentation for the full site table. |
-
----
-
 ## Context
 
 `Ring.After` classifies `afterID >= latestID` as caught-up. That lumps two different inputs

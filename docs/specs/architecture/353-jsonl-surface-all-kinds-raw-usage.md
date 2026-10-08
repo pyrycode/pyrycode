@@ -14,17 +14,6 @@ A future stream-json emitter needs (a) every line type, byte-equivalent to what 
 
 Existing `EndOfTurn` semantics for assistant entries are preserved verbatim. The only behavioural change for current callers is that the `Reader` (and therefore the `tail.Watcher`) now also yields Events for non-assistant lines — the in-tree consumer (`tail.Watcher`) forwards those verbatim, so the change is a no-op for end-of-turn detection.
 
-## Files to read first
-
-- `internal/agentrun/jsonl/reader.go:39-59` — current `Event` shape and its semantic contract.
-- `internal/agentrun/jsonl/reader.go:101-118` — `rawLine` (type-only) and `rawAssistantMessage` JSON shapes.
-- `internal/agentrun/jsonl/reader.go:132-183` — the `Next` loop, including the `raw.Type != "assistant" { continue }` line that this ticket removes.
-- `internal/agentrun/jsonl/reader.go:194-198` — `AssistantCount()` contract (stays assistant-only).
-- `internal/agentrun/jsonl/reader_test.go:144-171` — `TestReader_NonAssistantLinesSkipped`; repurpose to assert non-assistant lines now flow through with the expected `Kind` and `Raw`.
-- `internal/agentrun/jsonl/tail/watcher.go:238-258` — `drain` loop; the only in-tree consumer of `Reader.Next()`. No functional change needed (it already forwards every Event to `OnEvent`).
-- `internal/agentrun/jsonl/tail/watcher_test.go:230-250` — `TestWatcher_LateCreate` writes a `user` line between two `assistant` lines and asserts `len(events) == 2`; after the change this becomes 3.
-- `docs/lessons.md` § JSONL parsing — confirms the deterministic end-of-turn rule and "MUST NOT log file contents" invariant.
-
 ## Design
 
 ### New exported type — `UsageBlock`

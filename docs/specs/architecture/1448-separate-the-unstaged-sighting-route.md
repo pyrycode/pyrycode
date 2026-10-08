@@ -6,32 +6,6 @@
 
 ---
 
-## Files to read first
-
-Every line number below was re-resolved against `45806e6` on 2026-08-10. Read these before writing anything; the design is a five-line change surrounded by an enumeration cascade, and the cascade is where the turns go.
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/trail_run_outcome_test.go:745-878` | The step-1 gate switch. `trailGateAbsentOwesNone` is `:765-855` — the arm this ticket splits. Read all three of its exits (`:778-790` established, `:791-821` #1447's, `:822-855` the fall-through). |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:704-726` | The **no-C10 note**. Its closing sentence — "`trailRunAbsentOwesNoneReadings()` leaves both zero and is the row that proves it" — goes false under this ticket and must be corrected in place. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:436-467` | `trailRunOutcome`'s fields and its Detail content rule. `Route`'s doc `:441-454` carries the delegation this ticket must discharge. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:185-249` | `trailOutcomeVoidPathOwesNoReason` (`:185-213`) and `trailOutcomeVoidPinnedPidDidNotEstablish` (`:214-249`) — the two docs the new value must argue itself apart from, and the house idiom for a "deliberately NOT" block. |
-| `internal/e2e/realclaude/trail_sighting_liveness_test.go:353-404` | `trailEstablishSighting`. The ordering guard is `:360-367`; note that it fires **regardless of the verdict**. |
-| `internal/e2e/realclaude/trail_sighting_liveness_test.go:178-204` | The five reason constants. `trailSightingReasonPidReadFailed` (`:189-199`) **explicitly names the zero `""` of an unfilled `pinStateOutcome`**; `trailSightingReasonOrderingUncertified` (`:200-203`) names only #1439's three `trailOrderVoid*` values. That asymmetry is the whole design (§ Design, step 1). |
-| `internal/e2e/realclaude/trail_sighting_liveness_test.go:432-458` | `trailSightingReasons()` / `trailIsSightingReason` — the membership predicate the new field's values are checked against. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:1005-1054` | `trailRunAbsentOwesNoneReadings()` (the unstaged pair — **this fixture changes meaning**) and `trailRunSightingEstablishedReadings()`. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:1431-1514` | `TestTrailClassifyRun`. The `wantRoute` map is `:1441-1445`; its doc `:1434-1440` contains a sentence that goes false. The truncation-marker check is `:1468-1471`, the coverage loop `:1509-1513`. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:1716-1788` and `:1936-1947` | **Two drivers the ticket body does not name that go RED.** Both call `trailRunAbsentOwesNoneReadings()` and assert `trailOutcomeVoidPathOwesNoReason`. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:1950-2119` | `TestTrailRunOutcomeCarriesNoCapturedBytes` — the three existing blocks and the `sweep` helper the two new blocks reuse verbatim. |
-| `internal/e2e/realclaude/trail_run_instant_clause_test.go:36-139` | `trailRunCertifiesNothingArms()` and its conditional check. The new arm joins the list. |
-| `internal/e2e/realclaude/trail_run_instant_clause_test.go:174-211` | `TestTrailRunBareAlivenessAtTrailerIsBudgetFiredOnly` — **a source-file sweep over `trail_run_outcome_test.go` that reddens if any new prose uses the phrase `aliveness-at-trailer` unqualified.** Read before writing the new value's doc. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:1219-1349` | The union map (the new value joins at `:1258`-ish) and the zero-record walk `:1325-1370`. |
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:860-872` | `len(distinct) != 22` — **executable**, goes red. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:123`, `:945-950` | `reachMaxCommandBytes = 512` and the fact that `reachCapCommand` truncates **silently**, appending the marker only past the cap. |
-| `docs/specs/architecture/1447-measured-non-establishment-gets-its-own-run-value.md` | The immediately preceding ticket on this same arm. Its registration manifest and cite-sweep recipe transfer wholesale. |
-
----
-
 ## Context
 
 The `trailGateAbsentOwesNone` arm of `trailClassifyRun` consults #1440's sighting route and, on `trailSightingVoid`, answers `run-void-path-owes-no-reason`. Three materially different runs reach that one published answer:

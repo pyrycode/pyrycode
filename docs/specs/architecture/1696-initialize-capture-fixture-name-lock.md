@@ -3,33 +3,6 @@
 Test-only. Two files, both `*_test.go`, both in `internal/e2e/realclaude`. No production
 code in this slice.
 
-## Files to read first
-
-Everything below is in `internal/e2e/realclaude` unless stated otherwise. Resolve each
-symbol with `codegraph_node` / `codegraph_search` and read the enclosing declaration —
-no line numbers, they rot within a ticket's lifetime and `make cite-guard` rejects them
-in comments.
-
-| Where | Symbol | What to extract |
-| --- | --- | --- |
-| `inband_bypass_revoke_names_test.go` | `poolRevokeFixtureName` | **The model for this whole ticket.** #1661 did this job for #1643's family. Read its doc comment for the "literal prefix no input can reach" argument you are restating for one input instead of two. |
-| `inband_bypass_revoke_names_test.go` | `poolRevokeNamePattern` | The row type you reuse verbatim — `glob` / `underTestdata` / `controls` / `hazard`. Do **not** declare a parallel type. |
-| `inband_bypass_revoke_names_test.go` | `anchorFixtureName` | The single anchoring decision in the package. Both your negatives and your controls call it. |
-| `inband_bypass_revoke_names_test.go` | `TestPoolRevokeFixtureName_AvoidsCommittedFamiliesAndStaysContained` | The three-subtest shape you mirror. Note how its redundant `setModeFixtureName` equality loop carries an explicit "cannot be the sole red, kept for the failure message" comment — you need the same treatment for the `.`/`..` half of AC 3. |
-| `inband_bypass_revoke_names_test.go` | the file header (top-of-file comment block) | The prose idiom for these lock files: what is fenced off, why one-directional absence proves nothing, the exact `go test` invocation. Yours restates it for one input dimension. |
-| `permission_protocol_spike_test.go` | `versionSlug`, `versionSlugSubst` | Lowercase → `[^a-z0-9._-]+` → `_`, then a 32-**byte** cap. Confirm for yourself that `.` and `-` survive it, so `..` slugs to `..`. |
-| `permission_protocol_regression_test.go` | `fixtureGlob`, `TestRealClaude_PermissionProtocol_RegressionFixtures` | The glob's value **and** the fact that its owning test evaluates it via `filepath.Glob` against package-relative paths — that is why it anchors under `testdata/`. |
-| `dropped_line_capture_test.go` | `dropcapFixtureGlob` (in the `dropcapTicket` const block) | Same: `testdata/`-prefixed. Also read the block's header note on why every file-local identifier takes a file-local prefix. |
-| `inband_bypass_revoke_names_test.go` | `setModeFamilyGlob` | Already package-level, base-names-only, **no** `testdata/` prefix. Do not redeclare it. |
-| `set_permission_mode_probe_test.go` | `setModeFixtureName`, `setModeFixturePath`, `writeSetModeFixture` | Only so you recognise them as things this file must not reach. You do not call any of them. |
-| `offline_exec_ban_test.go` | `finOfflineExecBans`, `TestFinOfflineFilesReachNoExecHelper` | The map you add one entry to, and the AST check that enforces it. Read `inband_bypass_revoke_names_test.go`'s and `inband_bypass_revoke_fixture_test.go`'s entries — yours is the first plus `writeFixture`. |
-| `permission_protocol_spike_test.go` | `writeFixture`, `packageDir` | The third `packageDir` wrapper. Verified today: `setModeFixturePath`, `writeSetModeFixture`, `writeFixture` is the complete wrapper set. |
-| `docs/knowledge/features/permission-protocol-spike.md` | § fixture naming | Background on why this package commits version-stamped fixtures at all. Read-only; the documentation phase owns it. |
-
-`CODING-STYLE.md` § "Comments — Citing Other Code" is binding on every comment you write
-in this ticket. Name symbols. `make cite-guard` is diff-scoped and has no depth exemption
-and no range exemption.
-
 ## Context
 
 The daemon wants to publish claude's model list to clients. Measured by hand on

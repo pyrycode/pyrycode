@@ -5,22 +5,6 @@ internet-exposed frame route; see § Security review).
 
 Split child A of #1190. Blocks #1193.
 
-## Files to read first
-
-- `internal/relay/v2session_modal.go:434-478` — `handleInterrupt`'s full doc comment + body. Extract: the *order is load-bearing* contract (capability gate first), and the two existing record shapes (`v2.interrupt.inert` at `:467-469` Debug, `v2.interrupt.keystroke_err` at `:473-476` Warn) that the new records must sort with. **Arm 1's emission point is `:463`.**
-- `cmd/pyry/main.go:1292-1322` — `activeInterrupter` (struct at `:1299`, `SendEsc` at `:1312`). Extract: the two-field bag-of-injected-seams shape, and the two inert returns at `:1314-1316` (**arm 2**) and `:1317-1320` (**arm 3**).
-- `cmd/pyry/main.go:1271-1290` — `resolveBoundRunner`. Extract: its `(sessions.Runner, bool)` return — no session id reaches the caller, which is *why* the records identify the conversation, not the session. **Do not touch the `conv.CurrentSessionID == ""` guard** (#678 isolation enforcement point).
-- `cmd/pyry/main.go:984-1012` — the production wiring. Extract: the one production `activeInterrupter{…}` literal at `:996`; `logger` is already in scope there (built at `:743`).
-- `cmd/pyry/main.go:735-746` — daemon log level construction. Extract: **default is `slog.LevelInfo`**, Debug only behind `-pyry-verbose` (`:688`). This is what forces the level decision in § Design D2.
-- `cmd/pyry/interrupt_routing_test.go:156-221` — `TestActiveInterrupter`, four literals at `:167,189,202,213`. Extract: the two inert subtests (`:187`, `:201`) are the arm-2 / arm-3 vehicles; `SendEsc` is called synchronously on the test goroutine (no polling helper needed).
-- `cmd/pyry/modal_resolve_v2_test.go:83-88` — `auditLogger()`. Extract: **JSON**-backed, Debug-level, returns a plain `*bytes.Buffer`. Note `auditRecords()` at `:92` filters on `msg == "audit: remote permission decision"` and is **not** reusable here.
-- `internal/relay/v2session_interrupt_test.go:37-90` — `TestV2Session_Interrupt_RoutesEscByCapability`. Extract: the `{interactive → 1 Esc, non-interactive → 0 Esc}` table, `Logger: silentLogger()` at `:70` (the line AC5 swaps), and the **barrier-conn** ordering argument in the doc comment at `:41-43` — that barrier is what makes a negative log assertion sound.
-- `internal/relay/v2session_test.go:1613-1655` — `syncLogBuffer`, `bufferLogger()`, `waitForLogContains`. Extract: **Text**-backed (assert `key=value`, not JSON), mutex-guarded because the manager emits on the Run goroutine.
-- `internal/relay/v2session.go:187-222` — `V2Session` fields. Extract: `connID` (`:188`), `device` (`:199`), and `peerStatic` (`:210-222`) with its explicit **`MUST NOT appear in any logged field`** SECURITY comment. This is AC3's teeth.
-- `cmd/pyry/interactive_turn_v2.go:255-261` — a sibling `cmd/pyry` record. Extract: the house field key is **`"conversation_id"`**, not `conv_id` (also `queue_state_v2.go:93,133,158`; `session_error_v2.go:106,153,175`).
-- `cmd/pyry/stream_turn_drain.go:46-60` — `newStreamTurnSink`. Extract: the package-`main` nil-logger normalization idiom (`if logger == nil { logger = slog.Default() }`), which § Design D1 follows.
-- `docs/knowledge/codebase/1121.md` — the route's origin: why `activeInterrupter` exists and why `SendEsc` keeps its name.
-
 ## Context
 
 On 2026-07-24 a live desktop run (`real-claude-interrupt`, pyrycode-desktop#483) showed

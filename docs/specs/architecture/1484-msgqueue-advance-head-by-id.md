@@ -5,25 +5,6 @@
 
 ---
 
-## Files to read first
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `internal/msgqueue/queue.go` | `advanceLocked` | The whole bug: `items = items[1:]` with no guard. This is the edit site. |
-| `internal/msgqueue/queue.go` | `Queue.drain` | The two advance call sites and the `dropped` local. Read the whole loop — the ordering of `ctx.Err()` → `err == nil` → `dropped` → `Pending` → retry/give-up is load-bearing and does **not** change. |
-| `internal/msgqueue/queue.go` | `Queue.giveUp` | Second advance site. Note the current order (Warn → lock → advance → `draining=false` → unlock → both seams); AC-3 forces that order to change. |
-| `internal/msgqueue/queue.go` | `Queue.commitGate` | **The predicate to mirror.** Its reject condition — conv missing, FIFO empty, or front id ≠ the attempted id — is exactly the "is this still my head" test the guard needs. The bug is that this predicate existed at one site and not at the other two. |
-| `internal/msgqueue/queue.go` | `Queue.Remove` | Why the head is droppable at all (`idx == 0 && c.committing` gate, #1085), and the `deliverCancel` plumbing. Read its doc comment — it carries the safety argument that this ticket rewrites. |
-| `internal/msgqueue/queue.go` | `convQueue.shrinkLocked` | Why `[A]` panics rather than silently misbehaving: it sets `items = nil` at empty, so a later `items[1:]` is out of range. |
-| `internal/msgqueue/queue_test.go` | `fakeDeliver`, `newFakeDeliver`, `recvWithin`, `waitSnapshotEmpty`, `equalStrings` | The harness every new test builds on. `setPermaFail` is the "claude wedged" toggle the give-up rows need. |
-| `internal/msgqueue/queue_test.go` | `TestQueue_RemoveHeadWaitingForIdle_Droppable` | The closest existing shape to the success-path rows: gate a delivery, `Remove` the head mid-flight, assert the outcome. |
-| `internal/msgqueue/queue_test.go` | `TestQueue_GivesUpAfterPersistentFailure` | The give-up harness: `GiveUpAfter: 20 * time.Millisecond`, `OnGiveUp` recorder channel, `setPermaFail`. |
-| `internal/msgqueue/queue_test.go` | `TestQueue_GiveUp_NoUntrustedContentLeak` | The `slog` + `bytes.Buffer` log capture AC-3's "no give-up warning names it" assertion reuses — **including its comment about why reading the buffer is race-clean.** |
-| `internal/msgqueue/giveup_exempt_test.go` | `exemptPending`, `scriptDeliver` | How `Config.Pending` is injected and driven. The give-up rows use `Pending` as the in-window seam. |
-| `docs/knowledge/features/msgqueue-package.md` | § *Introspection…* bullet **"`Remove(convID, id)` — the in-flight-head no-op is the load-bearing rule"**; § *Concurrency model* bullet **"TOCTOU on the FIFO head:"**; § *Bounded give-up…* bullet **"Give-up drops one head and exits the drain"** | The three stale regions AC-5 names. Read all three before editing any. |
-
----
-
 ## Context
 
 `advanceLocked` drops index 0 unconditionally. Both callers decided "the head is still mine" in an *earlier* `q.mu` hold and neither re-checks under the hold that actually splices. Since #1085 (`1192107`) narrowed `Remove`'s head gate from `draining` to `committing`, the head is deliberately droppable for the entire idle-gate wait — so the assumption `advanceLocked` was built on is gone, while `advanceLocked` is unchanged.

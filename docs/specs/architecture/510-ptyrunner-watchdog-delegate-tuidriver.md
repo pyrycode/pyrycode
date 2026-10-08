@@ -2,27 +2,6 @@
 
 Confirms PO's size: **S**. One production file shrinks from 89 LOC to ~20 LOC of thin glue; one test function deletion; `runner.go` is not touched (the glue keeps the existing function signature). Sibling of #509 (same delegation pattern, the JSONL side).
 
-## Files to read first
-
-- `internal/agentrun/ptyrunner/watchdog.go` (full file, 89 LOC) — the only production file in scope. Every symbol it defines is on the chopping block:
-  - 15 — `defaultWatchdogTick` constant. Goes away (upstream handles the zero-tick fallback via `WatchdogOpts.Tick <= 0 → DefaultWatchdogTick`).
-  - 17–27 — `spinnerSecondsRe` var + its "consumer-policy not driver-policy" rationale comment. Goes away; the rationale is now stale (the library owns the parse).
-  - 29–42 — `parseSpinnerSeconds`. Goes away.
-  - 44–88 — `runWatchdog`. Body is replaced by a one-line delegation to `tuidriver.RunWatchdog` plus the existing three side-effect lines on a non-nil return; the **function signature is kept exactly as today** so `runner.go:384` does not change.
-- `internal/agentrun/ptyrunner/runner.go:380-387` — the spawn site. Confirms the `wg.Add(1)` / `defer wg.Done()` / `defer wg.Wait()` / `defer cancel()` shape the ticket says to preserve. No edits required to this file; verify by inspection only.
-- `internal/agentrun/ptyrunner/runner.go:155-165` — `Config.WatchdogTick` and `Config.WatchdogTrackerOpts` doc comments. Stay accurate after the refactor (the zero-default behaviour is unchanged — just the fallback site moves into the library). No edits required.
-- `internal/agentrun/ptyrunner/runner_test.go:464-497` — `TestRun_WatchdogFires`. Stays green unchanged; verifies the end-to-end fire path (trailer `Subtype = "error_during_execution"`, `IsError = true`, wall-clock under 5 s). Read it to confirm the assertions still hold after the body swap.
-- `internal/agentrun/ptyrunner/runner_test.go:499-526` — `TestParseSpinnerSeconds` (the table test). Deleted as part of this ticket; equivalent coverage is upstream (see next bullet).
-- `github.com/pyrycode/tui-driver/pkg/tuidriver` package docs — confirm the four exported names this spec relies on:
-  - `func RunWatchdog(ctx context.Context, buf *Buffer, tr *Tracker, opts WatchdogOpts) error` — blocks the calling goroutine, returns `nil` on ctx cancellation, returns the `CheckWatchdog` error verbatim on wedge; applies its own `tick <= 0 → DefaultWatchdogTick` fallback; nil `buf` / `tr` panic on first dereference (matches current local behaviour).
-  - `type WatchdogOpts struct { Tick time.Duration }` — the only field.
-  - `func ParseSpinner(snap []byte) (verb string, totalSeconds int, ok bool)` — class-A only; strips ANSI internally; class-B/C/D return `ok=false`. Called by `RunWatchdog` internally on each tick; pyrycode never calls it directly.
-  - `const DefaultWatchdogTick = 1 * time.Second` — the fallback constant; matches the local `defaultWatchdogTick` value 1:1.
-- `github.com/pyrycode/tui-driver/pkg/tuidriver/state_test.go` (TestParseSpinnerClassAMatches at L150, TestParseSpinnerNonClassA at L198) — confirms the upstream test coverage that subsumes the deleted local `TestParseSpinnerSeconds` (class-A single/two-word verb, class-A minutes+seconds, class B ellipsis, class C parenthesised, no-glyph, glyph-only — same fixture set the local test exercises).
-- `github.com/pyrycode/tui-driver/pkg/tuidriver/watchdog_test.go` — confirms the upstream test coverage for the loop itself (`TestRunWatchdogContextCancellation`, `TestRunWatchdogPTYQuietWedge`, `TestRunWatchdogSpinnerFreezeWedge`, `TestRunWatchdogDefaultTickApplied`). The pyrycode side does **not** need to re-cover any of these; the `TestRun_WatchdogFires` integration test is the only watchdog test that remains on the pyrycode side, and it asserts the glue's side effects (`SetExitReason` + `cancel()`) — not the loop mechanics.
-
-Module version: `go.mod` already pins `github.com/pyrycode/tui-driver v0.0.0-20260523181457-c2dcd1e49992`, which is the version that shipped `RunWatchdog`/`ParseSpinner` (tui-driver #89). **No `go get` / `go mod tidy` step in this ticket.** Verify with `go doc github.com/pyrycode/tui-driver/pkg/tuidriver RunWatchdog`; if the output is empty, escalate — the version pin is wrong and this spec's premise no longer holds.
-
 ## Context
 
 `internal/agentrun/ptyrunner/watchdog.go` carries two responsibilities the tui-driver library now owns:

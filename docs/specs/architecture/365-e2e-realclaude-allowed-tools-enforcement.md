@@ -1,41 +1,5 @@
 # Spec: e2e/realclaude --allowed-tools enforcement regression guard (#365)
 
-## Files to read first
-
-- `internal/e2e/realclaude/fixtures.go` — `WithWorktree`, `ReadJSONL`,
-  `RunPyryAgentRun`, `RunOpts`, `RunResult`, `JSONLEntry` (alias to
-  `jsonl.Event`). The helper surface this test composes over. No
-  modifications.
-- `internal/e2e/realclaude/prompt_fidelity_test.go` — the closest sibling
-  test in the package. Mirror its build-tag header, its package layout, the
-  `WithWorktree → RunPyryAgentRun → ReadJSONL` four-phase shape, the
-  failure-message style (exit-code first, then session-id, then the JSONL
-  walk), and the `Model: "claude-haiku-4-5"` literal. The new test only
-  diverges in what it asserts about the events.
-- `internal/agentrun/selfcheck/selfcheck.go:273-302` — `bashInvokedInRaw`.
-  This is the **reference detector** the ticket calls out. The new test
-  must replicate it inline — same exact-case match on
-  `message.content[].type == "tool_use" && .name == "Bash"`, same
-  "decode-error → skip this line, don't fail" policy. Do not import
-  selfcheck from the e2e package (inverts the dep direction).
-- `internal/agentrun/selfcheck/selfcheck.go:207-232` — the loop that wraps
-  the detector. Two patterns to copy: (a) only inspect `ev.Kind ==
-  "assistant"` entries; (b) on decode error, do NOT log raw bytes (the
-  selfcheck comment at :217-219 explains why — same discipline applies
-  here, even though our test prompt is synthetic).
-- `cmd/pyry/agent_run.go:246-267` — the production argv that this test
-  guards. The comment block at :246-252 explains *why* the legacy
-  `--settings` / `--permission-mode` / `--session-id` flags are gone and
-  `--allowed-tools` is now the authoritative gate. This is the contract
-  the test pins.
-- `cmd/pyry/agent_run_test.go:484` — the unit-test argv ban-list. Read
-  this so a future maintainer who finds the new e2e test can see that the
-  unit side already pins the argv shape; the e2e side pins the runtime
-  behavior of that shape.
-- `internal/agentrun/jsonl/reader.go:41-83` — `Event` struct. The two
-  fields the assertion touches: `Kind` ("assistant" filter) and `Raw`
-  (the bytes the inline detector decodes).
-
 ## Context
 
 `pyry agent-run` (cmd/pyry/agent_run.go:255-267) currently constructs

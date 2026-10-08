@@ -7,21 +7,6 @@
 
 ---
 
-## Files to read first
-
-- `internal/acp/acp.go:221-244` — `dispatchRequest`. The **defer seam**: this is where a handler's return currently becomes a written response. The whole change lives here plus a new sibling file.
-- `internal/acp/acp.go:361-405` — `writeSuccess` / `writeError` / `writeErrorWithData` / `reply` / `writeMessage`. The **serialized write path** (`writeMu`). The deferred resolve MUST reuse `writeSuccess` / `writeErrorWithData`; do **not** add a second write path.
-- `internal/acp/acp.go:53-90` — `Handler` type + `Transport` struct. The contract to **preserve**: `Handler` stays `func(ctx, params) (any, error)`. Note `writeMu` / `pendingMu` are documented **leaf locks** (never held across a handler call or a read) — the responder guard must keep that discipline. Do **not** overload the outbound `pending` map (acp.go:86) for inbound holds.
-- `internal/acp/acp.go:171-219` — `handleLine`. Shows the request-vs-notification classifier (`dispatchRequest` reached only when `msg.Method != nil && msg.ID != nil`, so a deferred request always has a non-nil id) and the **scanner-buffer lifetime** note that drives the id-copy rule below.
-- `internal/acp/jsonrpc.go:8-39` — error codes + `Error` + `NewError`. `ReplyError` takes `*Error`.
-- `internal/acp/jsonrpc.go:41-97` — `rpcMessage` / `successResponse` / `errorResponse` / `rpcError`. Wire shapes and the id-echo contract (`idOrNull`).
-- `internal/acp/acp_test.go:17-56` — `run` / `runErr` single-shot harness + `echoParams`. Reused for the defer-suppression test (Serve runs to EOF; a deferred-but-unresolved request emits no frame).
-- `internal/acp/acp_test.go:412-523` — `syncBuffer`, `liveTransport`, `newLiveTransport`, `nextRequest`, `feedResp`, `goCall`. The **cross-goroutine harness** the resolve-later / read-loop-alive tests reuse (Serve on its own goroutine over `io.Pipe`s). `feedResp` writes a line onto the transport's reader — it works for inbound **request** lines too, not just responses. A small `nextResponse` helper (read one line off `reqR`, parse as a response frame) is the only harness addition needed.
-- `cmd/pyry/acp.go:106-110, 136-137, 177, 221` — the three **existing** sync handlers (`session/new`, `session/load`, `session/cancel`) registered on the transport. Proof that the `Handler` signature must stay unchanged: any signature change fans out to these three plus ~15 test handlers. This spec keeps them byte-identical.
-- `CODING-STYLE.md` §§ Concurrency, Testing — leaf-lock discipline, `atomic` for shared flags, table-driven, `t.Parallel()`, `go test -race`.
-
----
-
 ## Context
 
 **Epic #600 — `pyry acp` as a thin adapter over the shared remote-head core.** An ACP turn is one `session/prompt` request that streams notifications and then returns a `stopReason`. The adapter must hold the in-flight `session/prompt` call open for the whole turn and resolve it later — from the outbound event-stream goroutine, not the read loop.

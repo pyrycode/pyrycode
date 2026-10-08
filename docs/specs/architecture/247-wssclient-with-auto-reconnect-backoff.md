@@ -1,17 +1,5 @@
 # 247 — `net`: WSS client with auto-reconnect backoff
 
-## Files to read first
-
-- `docs/protocol-mobile.md:154-175` — § Heartbeat + § Reconnect. The wire-spec source of truth for the cadence this ticket implements: 30s idle ping, 30s pong timeout, 1s/2s/4s/8s/16s/30s backoff with ±20% jitter, reset to attempt 1 after ≥60s connected. Do not deviate from these constants — the relay (and the phone, separately) implements the symmetric side and the cadence is part of the protocol.
-- `docs/protocol-mobile.md:69-83` — § Binary → relay. The endpoint shape this client targets (`wss://<relay>/v1/server`) and the request headers convention (`X-Pyry-Server-Id`, `X-Pyry-Binary-Version`, `X-Pyry-Protocol-Versions`). This client does NOT construct headers — caller passes them via `Config.Headers`. Header semantics, including server-id-conflict close `4409`, are the future handshake layer's concern.
-- `docs/protocol-mobile.md:45-55` — § TLS. v1 uses standard TLS verification (no pinning). This client uses Go's default `crypto/tls.Config` with `MinVersion: tls.VersionTLS12` — no custom verifier, no skip-verify, no pinning.
-- `internal/supervisor/backoff.go` (all 46 lines) — the existing supervisor's `backoffTimer` pattern. Same shape: capped exponential growth + reset-on-long-uptime. New `transport.backoff` follows this idiom verbatim, swapping in the wire-spec constants and adding ±20% jitter.
-- `internal/supervisor/backoff_test.go` — table-driven test shape for the backoff sequence. The new `backoff_test.go` mirrors it.
-- `internal/protocol/envelope.go:1-95` — sibling package's doc-comment shape (package overview, "single source of truth is `docs/protocol-mobile.md`", typed sentinels, no I/O). The new `internal/transport` package follows the same documentation idiom — package doc explicitly names what it does NOT know about (protocol envelope, handshake, dispatch).
-- `internal/supervisor/supervisor.go` — Pyrycode's pattern for `Run(ctx) error` as the blocking lifecycle entry point. `Client.Connect(ctx) error` mirrors this shape.
-- `CODING-STYLE.md` — `gofmt` non-negotiable, stdlib-first, `log/slog`, table-driven tests, context for cancellation, errors-not-panics. This spec inherits all five.
-- `docs/lessons.md:290` — "The `g.Go(sess.Run)` schedule must run inside the same critical section as the registry insert." Same shape applies here: when `Connect`'s outer dial loop opens a fresh conn, the recv-pump and ping-loop goroutines must be installed before the conn is observable via `Send`/`Receive` — otherwise a concurrent caller can race between "live conn registered" and "pump goroutines started" and observe a frozen client.
-
 ## Context
 
 Phase 3 Track C transport mechanics. The binary's outbound network layer needs a long-lived WSS connection to the relay that reconnects automatically and detects dead connections quickly. This ticket lands the transport primitive; protocol semantics layer on top in a future ticket (handshake, server-id assignment, hello/hello_ack dispatch).

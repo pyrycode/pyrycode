@@ -8,50 +8,6 @@ conversation cursor `send_message` stamped, builds the same `message` applicatio
 envelope the v1 bridge (#311) builds, enumerates the currently-open v2 sessions
 (#588 `ActiveConnIDs`), and `Push`es (#571) the sealed envelope to each.
 
-## Files to read first
-
-- `cmd/pyry/assistant_turn.go` (whole file, ~205 LOC) — the **v1 emitter** this
-  slice parallels: `assistantTurnEmitter` (queue + drain + `broadcast`), the
-  `cursorReader` interface (**reused verbatim** by the v2 emitter — same package),
-  `assistantTurnQueueSize`, `Enqueue` copy-and-drop-on-full discipline, and the
-  per-branch log-field hygiene (PTY bytes never logged). The v2 emitter mirrors
-  its shape; the only divergence is the fan-out tail.
-- `cmd/pyry/relay.go:255-297` — `startRelayV2`: the function whose signature gains
-  `sup`/`bridge` and whose body gains the bridge wiring + cleanup. Note the existing
-  `mgr` handle (`*relay.V2SessionManager`) is the `v2Broadcaster`.
-- `cmd/pyry/relay.go:88-208` — `startRelay`: the **single call site** of
-  `startRelayV2` (line 141); it already holds `sup`/`bridge` (params line 96-97) and
-  forwards them. Lines 162-208 show the v1 leg's bridge wiring + `legCleanup`
-  ordering to mirror (observer cleared first; cleanup waits on the Run goroutine).
-- `cmd/pyry/main.go:489` — the `startRelay(...)` call passing
-  `bootstrap.Supervisor()` / `bootstrap.Bridge()`; and `main.go:514` `pool.Run(ctx)`
-  + `defer relayCleanup()` — proof the cleanup runs **after** ctx-cancel, so a
-  bridge cleanup that waits on the emitter's ctx-driven exit completes promptly.
-- `internal/relay/v2session.go:1357` — `Push(ctx, connID, env) error` contract
-  (seal-under-`s.send` + `noise_msg`; `ErrConnNotFound` for torn-down conn,
-  `ErrSessionNotOpen` for un-authenticated, `ctx.Err()` on cancel; best-effort,
-  never tears the session down).
-- `internal/relay/v2session.go:1444` — `ActiveConnIDs(ctx) []string` contract
-  (snapshot of `V2StateOpen` conn IDs; `nil` on ctx-cancel or Run-exited; unordered).
-- `internal/protocol/messaging.go:13-30` — `MessagePayload` fields; `codes.go:45`
-  `TypeMessage = "message"`. Envelope shape is identical to v1.
-- `internal/e2e/relay_v2_daemon_test.go` (whole file) — AC#4 target. Reuse
-  `driveHandshakeToOpenDaemon`, `waitBinaryHello`, the sealed-frame request/decrypt
-  pattern (lines 134-167). The new test combines this with the assistant-trigger
-  flow below.
-- `internal/e2e/relay_assistant_turn_test.go` (whole file) — the **v1 e2e**: the
-  `send_message`-stamps-cursor → write-trigger → loop-until-marker pattern the v2
-  e2e copies, plus the "tolerate prelude chunks" loop.
-- `internal/e2e/harness.go:318-360` — `StartRotationWithRelay`: forwards `extraEnv`
-  and takes the relay URL, so the v2 e2e reuses it with `/v2/server` +
-  `PYRY_MOBILE_V2=1` + `PYRY_FAKE_CLAUDE_ASSISTANT_TRIGGER=...`. **No harness change.**
-- `docs/knowledge/codebase/311.md` — v1 bridge design (gate-eligibility race,
-  defensive-log-fields-not-defensive-code, don't-close-the-channel rationale). The
-  v2 emitter inherits all three lessons.
-- `docs/knowledge/codebase/571.md` / `588.md` — `Push` / `ActiveConnIDs` surfaces;
-  both name #589 as their consumer and document the `V2StateOpen` security gate
-  (belt-and-suspenders: enumeration filter + `Push` gate, two deterministic checks).
-
 ## Context
 
 `startAssistantTurnBridge` (v1, #311) is wired into the v1 dispatcher leg only

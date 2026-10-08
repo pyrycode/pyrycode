@@ -10,52 +10,6 @@ table row, and the corrections AC 4 requires to the sentences those additions fa
 It is the smallest child of this family, and almost all of its written lines are the
 corrections rather than the check.
 
-## Files to read first
-
-This is the turn-1 data load; the design below assumes you have it.
-
-- `internal/e2e/realclaude/ask_user_question_shape_test.go` — **read the whole file
-  before the first edit.** It is the only file you change and every one of AC 4's six
-  correction sites is a doc comment in it. Specifically: the file header (its opening
-  paragraph, its `# The limit of this file` section, and its three-counts paragraph),
-  `askQuestionQuestion`, `askQuestionCheckNames`, `askQuestionShapeFindings`,
-  `askQuestionShapeRecord`, `requireAskQuestionShape`, and
-  `TestAskQuestionShape_ReportsEachMissedCheckAndSkipsAfterAnUndecodableInput` —
-  including the shared comment sitting on its first content row, which is correction
-  site 6.
-- `internal/e2e/realclaude/ask_user_question_record_test.go` → `askQuestionFixtureInput`
-  — the positive control's input. Confirm for yourself that it already carries
-  `"multiSelect":false`, because that is what satisfies AC 1's second half with **no new
-  row**. **Read its doc comment, not just the literal**: the two constraints it states
-  (keys unsorted at two levels; no `<`, `>` or `&`) are why you must not reorder or
-  "tidy" it, and the multi-select key sits third in that unsorted order. Also
-  `askQuestionFullRecord` and `askQuestionFixtureRecord` — the four-field record, which
-  gains no fifth field here.
-- `internal/e2e/realclaude/ask_user_question_writer_test.go` → `askQuestionPlantedInput`,
-  `askQuestionPlantedPath`, `askQuestionPlantedKeyPrefix` — read them so you recognise
-  them and leave them alone. `askQuestionPlantedInput` is the package's only other
-  one-option `AskUserQuestion` input and it *also* carries `"multiSelect":false`, which
-  makes it look even more like the right base for this slice's fixture than it did for
-  #1952's. It is not. See § Security review, [Tokens].
-- `internal/e2e/realclaude/offline_exec_ban_test.go` → `finOfflineExecBans`, the
-  `"ask_user_question_shape_test.go"` entry — read it to confirm you need **no** edit
-  here, and to read the one sentence in it that constrains this slice: "The only
-  in-package helper it calls is `askQuestionFullRecord`, which is pure literals." Your
-  new fixture keeps that true by being a flat literal.
-- `docs/knowledge/features/e2e-realclaude-ask-user-question-shape-test-go.md` — #1951's
-  and #1952's folded lessons. Three bind here: exact equality turns a per-check mutation
-  matrix into something a reviewer checks by inspection; a collided-constant mutant
-  reddens the vacuity control alone; and **batch-width independence is unpinned by
-  construction** — every row carries exactly one question, so nothing in the table would
-  catch a mutant that looped over `in.Questions`. That last one is named at #1950 by
-  name in that document. This slice does not close it and must not pretend to.
-- `docs/specs/architecture/1952-ask-user-question-shape-content-checks.md` → its
-  "The five negative fixtures" and "The mutation enumeration AC 4 asks you to grow"
-  sections — the shape your one new row and your one new enumeration bullet copy.
-- `CODING-STYLE.md` § "Comments — Citing Other Code" — every comment you add cites a
-  symbol, never a line. `make cite-guard` is diff-scoped and fails on any `//` citation
-  that resolves to a declaration, at any depth, ranges included.
-
 ## Context
 
 `askQuestionShapeFindings` reports eight names today and says nothing about the

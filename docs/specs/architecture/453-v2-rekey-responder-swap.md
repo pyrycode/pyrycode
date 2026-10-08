@@ -1,27 +1,5 @@
 # 453 — `internal/relay`: v2 re-key responder swap on open conn (`handleRekeyInit` + atomic CipherState swap + peer-static continuity check)
 
-## Files to read first
-
-Each entry says **what to extract**, so the developer's turn-1 data load is complete.
-
-- `internal/relay/v2session.go:317-499` — `handleNoiseInit`. Two changes: (1) the top-of-function `if s.state != V2StateAwaitingInit` gate becomes a `switch s.state` that routes `V2StateOpen` to the new `handleRekeyInit`; the existing `awaitingInit`-only body stays in place inside the `case V2StateAwaitingInit:` arm. The `handshakeComplete` and `default` arms keep the existing 4421 reject path verbatim (a `noise_init` arriving while we hold uncommitted CipherStates is the same state-machine violation it is today). (2) **Nothing else in `handleNoiseInit` moves.** The peer-static capture at line 364 (`s.peerStatic = s.resp.PeerStatic()`) already landed in #452 and is the source the re-key check reads from.
-- `internal/relay/v2session.go:67-99` — `V2Session` struct. `peerStatic []byte` already exists (added in #452); read its SECURITY doc-comment — the lifetime contract ("a successful re-key MUST NOT overwrite this value") is load-bearing for the new code.
-- `internal/relay/v2session.go:160-175` — package-level concurrency comment on `V2SessionManager` ("Run is the only goroutine the manager owns"). The atomic-swap invariant the new code relies on is *structural*, not lock-based — the spec amends this comment block to name `s.send` / `s.recv` ownership and the field-reassignment zeroisation choice.
-- `internal/relay/v2session.go:560-580` — `handleNoiseMsg`'s `V2StateOpen` branch. **No code change in this slice.** Re-read it because AC #4 (old-key frame after swap → 4421) is *verification only* — that branch is the inherited tampered-frame teardown the new test asserts against the post-swap state.
-- `internal/relay/v2session.go:730-751` — `closeWith`. Re-used unchanged on every re-key failure path. The session-removal half (`delete(m.sessions, s.connID)` on close) is what makes AC #4's "session absent" assertion hold without new cleanup code.
-- `internal/relay/v2session.go:716-728` — `marshalInnerFrameV2`. Re-used to wrap the new responder's outbound `noise_resp`; same shape as initial.
-- `internal/noise/noise.go:106-141` — `(*Responder).PeerStatic()`, `WriteResp`. Re-key constructs a fresh `Responder` per re-run (`NewResponder` + `ReadInit` + `WriteResp`) and consumes the same `(send, recv)` pair as initial; the symmetric-collapse at lines 136-140 is the load-bearing detail that makes the swap a one-liner.
-- `internal/relay/v2session_test.go:60-69, 217-256, 740-828` — test helpers: `silentLogger`, `genV2Keypair`, `startManager` / `waitForEnvelopes` / `wrapInnerFrame` / `decodeRespFrame` / `decodeNoiseMsg`, `openSession` struct, `driveToOpen`, `sealAppFrame`, `decryptAppFrame`. The three new tests reuse these verbatim — do not duplicate.
-- `internal/relay/v2session_test.go:409-464` — `TestV2Session_NoiseInitAfterOpen_4421`. **Delete this test.** It pins the behaviour this slice intentionally changes (second `noise_init` in `open` → 4421 close). Replacement coverage is the three new tests below.
-- `internal/relay/v2session_test.go:830-915` — `TestV2Session_OpenState_EncryptedRoundTrip` and its setup. The re-key happy-path test mirrors this shape (drive to open, do a round-trip, but with a re-key in between).
-- `docs/protocol-mobile.md` § Re-key (lines around 203-236) — re-key is a full IK re-run, phone-initiated; the re-key `noise_init`'s early-data is **empty**; atomic switchover; no `rekey_ack` envelope; old-key frames after switchover fail AEAD.
-- `docs/protocol-mobile.md` § Threat #3 (around lines 483-505) — "no impersonation succeeds" residual-risk claim. The peer-static continuity check this slice adds is the implementation of that claim on the re-key path.
-- `docs/knowledge/decisions/024-noise-ik-mobile-e2e.md` § Re-key policy — per-binary static key on the responder; cryptographic-not-policy mitigation for the relay-operator surface.
-- `docs/knowledge/codebase/446.md` — `closeWith` cleanup pattern reuse + the AEAD-failure teardown branch that AC #4 inherits verbatim. The "reuse `closeWith` rather than adding a parallel cleanup path" pattern applies here too.
-- `docs/knowledge/codebase/452.md` — predecessor slice (peer-static capture); the field this slice reads and the lifetime contract it must honour.
-- `docs/knowledge/codebase/454.md` — sibling slice (`rekey_request` control-envelope discriminator). Independent — neither calls the other. Re-key is the IK re-run; `rekey_request` is a nudge envelope.
-- `docs/specs/architecture/449-v2-rekey-responder.md` on `feature/449` (orphan branch, closed `NOT_PLANNED`) — the parent super-slice's spec. Contains the design notes for the responder swap *verbatim*; this slice ships exactly that design with the peer-static capture (#452) and `rekey_request` discriminator (#454) carved off. **Lift the design decisions verbatim; do not re-derive.** Same orphan-spec pattern as #452 / #454.
-
 ## Context
 
 `#452` (peer-static capture) and `#454` (`rekey_request` discriminator) both landed already. Looking at `internal/relay/v2session.go` today:

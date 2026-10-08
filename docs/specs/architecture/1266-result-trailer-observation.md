@@ -6,28 +6,6 @@
 
 ---
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/tool_loop_test.go:185-228` | `resultTrailer` — confirm with your own eyes it has **no** `result` member (Type, Subtype, StopReason, NumTurns, PermissionDenials, IsError, TerminalReason, Usage). That absence is the whole leak argument. Also `parseResultTrailer`'s body: the matching rule to copy verbatim, in the file you must **not** edit. |
-| `internal/agentrun/streamjson/emitter.go:454-469` | The pinned on-the-wire field order. `result` is **6th**, `terminal_reason` is **last**. This is why a cap applied to the line destroys the field the consumer branches on, and why the decode must run against the full line. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:718-757` | `probeSyncBuffer` (mutex-guarded, `Bytes()` returns a copy) and `probeWaitForSessionID` — the scan → check-deadline → sleep shape to mirror exactly. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:759-788` | `probeWaitForBashToolUse` — the precedent for "poll, then return the verbatim line bytes". |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:131` | `probePollInterval = 200 * time.Millisecond`. Reuse it; do not introduce a second tick constant. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:111-125` | `reachMaxCommandBytes = 512`, `reachTruncationMarker`, and the comment stating the threat model the cap serves. Read the reasoning, not just the numbers. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:945-950` | `reachCapCommand`'s body — byte-sliced, marker appended. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:132-140` | The "three-valued, never collapsed; the fourth value is not a collapse of the three" constant-block precedent. Your two constant blocks follow this shape. |
-| `internal/e2e/realclaude/teardown_liveness_test.go:1-61` | File-header discipline: build tag, the explicit "runs offline, no credentials, no `t.Skip`" claim, the `go test -run '^TestX'` recipe line. Yours needs the same, at a fraction of the length. |
-| `internal/e2e/realclaude/teardown_liveness_test.go:112-127` | `tdnReapOutcome` — the record-shape discipline: json tags on every field, a `Detail` that says which arm fired and why. |
-| `internal/e2e/realclaude/teardown_liveness_test.go:144-166` | `tdnClassifyReapLog`'s contract (pure over bytes, no `*testing.T`, never fails a test) and line 166 — the precedent for capping a captured line **as it enters** the record. |
-| `internal/e2e/realclaude/teardown_liveness_test.go:325-345` | Closed-value-space constant style: kebab-case strings, a positive allowlist, each constant carrying the argument for why it is not a collapse of its neighbour. |
-| `internal/e2e/realclaude/process_pin_liveness_test.go:225-232` | `pinStateColumns`' prohibition. Read it to confirm it is **not engaged here** — this ticket spawns no process and reads no process table. |
-
-Not code, but read before writing prose: `docs/specs/architecture/1251-teardown-liveness-probe.md` (record-shape discipline for this family).
-
----
-
 ## Context
 
 A downstream probe asks: *was a backgrounded command still running when pyry declared the turn finished?* The only available signal for "pyry declared the turn finished" is the `{"type":"result",...}` trailer on pyry's stdout, and the rig learns of it by polling on a 200 ms tick. The trailer was therefore written some time **before** the poll that first saw it.

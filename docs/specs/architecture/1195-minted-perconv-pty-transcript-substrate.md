@@ -9,38 +9,6 @@ plus the hermetic PTY e2e that they make possible. **No production (`cmd/`,
 
 ---
 
-## Files to read first
-
-Turn-1 data load. Read these before writing any code; every design decision below
-cites one of them.
-
-| Path | Extract |
-|---|---|
-| `internal/e2e/internal/fakeclaude/main.go:1-240` | The env-knob doc-comment block. **Every new knob gets an entry here in the same voice, ending with the "Default off — when unset, byte-identical to its prior behaviour" clause.** This is the AC4 contract in prose. |
-| `internal/e2e/internal/fakeclaude/main.go:256-277` | The `env*` const block — where the two new consts go. |
-| `internal/e2e/internal/fakeclaude/main.go:504-558` | `main()`'s PTY-mode preamble: `mustEnv(envSessionsDir)` / `mustEnv(envInitialUUID)` / `mustEnv(envTrigger)`, the knob reads, `startStdinReader`, then `f := openSession(dir, initU)` at `:558`. **`:558` is the single line whose `initU` argument the stem knob redirects.** |
-| `internal/e2e/internal/fakeclaude/main.go:572-678` | The poll loop and its one-shot gate style (`rotated` / `idled` / `modalShown` / …). `:673-675` is the existing `jsonlTrig` branch the per-child trigger branch mirrors. |
-| `internal/e2e/internal/fakeclaude/main.go:699-745` | `emitStructuredJSONLIfTriggered` + `claimTrigger`. **Reuse verbatim — the per-child knob passes a different `path`, nothing else.** Note the doc's "fixed `<path>.consuming` sidecar is sound because fakeclaude runs a single poll goroutine": that reasoning survives per-child paths because each child's path (and therefore sidecar) is distinct. |
-| `internal/e2e/internal/fakeclaude/main.go:995-1008` | `openSession(dir, uuid)` — `filepath.Join(dir, uuid+".jsonl")`. The join the stem guard protects. |
-| `internal/e2e/internal/fakeclaude/esc_detect_test.go` | The unit-test idiom for this package: `package main`, **no `//go:build e2e` tag**, table-driven over a pure helper. `argvSessionID`'s test goes here-style, in a new file. (`main_test.go` *is* tagged `e2e` — don't copy that one.) |
-| `internal/e2e/relay_v2_modal_perconv_test.go` (whole file, 243 lines) | **The template for the new e2e.** Mint-over-the-wire mechanics: `shortHome` → `pair` → `claudeSessionsDir(home)` + pre-create `<initialUUID>.jsonl` → `fakerelay.New` → `StartRotationWithRelay` → `driveHandshakeToOpenDaemonInteractive` → local `sealSend` / `nextEnv` closures → all-null `create_conversation` → drain to `conversation_created` → `send_message` to move the active cursor → drain. Copy this skeleton. |
-| `internal/e2e/harness.go:323-366` | `StartRotationWithRelay` — the four `PYRY_FAKE_CLAUDE_*` envs it always sets, and `extraEnv ...string` appended verbatim (where the two new knobs go). |
-| `internal/e2e/harness.go:479-490` | `seedBootstrapRegistry` — **writes `sessions.json` with `id: <initialUUID>, bootstrap: true`. This is why the bootstrap pool id EQUALS `PYRY_FAKE_CLAUDE_INITIAL_UUID` in every rotation-harness e2e.** Load-bearing for AC3/AC4 (see § Why the bootstrap child is unaffected). |
-| `internal/sessions/pool.go:1363-1406` | `buildSession`: `base := append(slices.Clone(tpl.ClaudeArgs), "--session-id", string(id))` at `:1379`, then `--settings`. **Exactly one `--session-id` in a minted child's argv, and no `ResolveSessionID` on the minted `supCfg`, so the supervisor appends nothing further.** Also: `workDir = tpl.WorkDir` when `spawnDir == ""` (`:1387-1390`). |
-| `internal/sessions/pool.go:433-473` | Bootstrap argv: `base` is `Bootstrap.ClaudeArgs + --settings <path>` — **no `--session-id`**; `ResolveSessionID` (`:466`) supplies it at spawn, and returns `resume=true` iff `StatByID(cfg.ClaudeSessionsDir, id)` succeeds. |
-| `internal/supervisor/supervisor.go:905-925` | `buildClaudeArgs` — appends `--resume <id>` when the transcript exists, else `--session-id <id>`, **always last, and the two are mutually exclusive**. This is why `argvSessionID` must accept both flags and take the last occurrence. |
-| `cmd/pyry/interactive_turn_stream_v2.go:389-394` | `perConversationSessionsDir` — returns `sharedDir` when `sessionWorkDir == bootstrapWorkDir`. With `sessionTpl = cfg.Bootstrap` (`internal/sessions/pool.go:592`) and `Bootstrap.WorkDir = trustedWorkdir` (`cmd/pyry/main.go:825`), a default-minted session's `convDir` **is** the shared dir. Only the stem diverges. |
-| `cmd/pyry/interactive_turn_stream_v2.go:427-470` | `resolveTarget` — the non-bootstrap branch calls `resolveBoundSessionJSONL(convDir, sessionID)` and **never falls back to bootstrap under a non-empty cursor**. AC5's subject; do not touch. |
-| `cmd/pyry/main.go:859-872` | `boundHost` — where `convDir` comes from. Read-only context for why the dirs already agree. |
-| `internal/turnbridge/mapper.go:21-31` | `EventKindJsonlEndOfTurn → turnevent.TurnEnd{Reason: end_turn}`. The only mapping that yields a `turn_end`, and it is transcript-derived — the structural reason this ticket exists. |
-| `internal/protocol/interactive.go:73-77` | `TurnEndPayload{ConversationID, TurnID, StopReason}` — the fields the e2e asserts. |
-| `internal/e2e/relay_two_phone_structured_test.go:255-310` | The **injection-line fixture shape** (`:263`, an `assistant` + `stop_reason:"end_turn"` + non-empty-text line) and the drop mechanics: plain `os.WriteFile` of the trigger, **re-dropped on a ticker**. |
-| `docs/knowledge/codebase/929.md` (whole file, 96 lines) | **Mandatory.** The subscription-offset race: the producer subscribes at EOF after a `subscribeRetryDelay` (500 ms) settle, so a single-shot append lands *below* the tailed range and is never seen. The established fix is the re-drop kicker. § Testing strategy below is built on this. |
-| `internal/sessions/pool.go:1329-1333`, `internal/sessions/rotation/watcher.go:140-190` | `RegisterAllocatedUUID` before `supervise`, and `handleCreate`'s `IsAllocated` skip (`:149`) plus the `ref.ID == stem` early return (`:161`). Why a **new** `<mintedID>.jsonl` appearing in the shared dir cannot be mistaken for a `/clear` rotation. |
-| `CODING-STYLE.md` | Table-driven tests, stdlib only, `gofmt`. |
-
----
-
 ## Context
 
 `turn_end` exists on exactly one code path: `tuidriver.EventKindJsonlEndOfTurn`

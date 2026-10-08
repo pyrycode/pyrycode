@@ -7,25 +7,6 @@
 
 ---
 
-## Files to read first
-
-- `cmd/pyry/acp.go:106-130` — `serveACPWithPool` register closure + pool teardown. The **one edit site**: construct the hold store here and add the `session/prompt` registration alongside the other four `t.Register(...)` calls. Extract the closure-wiring pattern.
-- `cmd/pyry/acp.go:162-210` — `decodeSessionID` (reuse verbatim — the empty/missing-id rejection that dodges the `Lookup("")` bootstrap trap) + `loadSessionHandler` (mirror its `errors.Is(err, sessions.ErrSessionNotFound)` → `CodeInvalidParams "unknown session"` mapping).
-- `cmd/pyry/acp.go:212-255` — `resolveCancelTarget` + `interrupter` + `cancelSessionHandler`. The **exact pattern this spec mirrors**: a consumer-defined 1-method interface, an injected `resolve` closure wired at the composition root, and the nil-interface trap (`pool.Lookup` error must return a true `nil` interface, not a typed nil pointer).
-- `internal/acp/responder.go:1-89` — the #765 deferral primitive: `ErrDeferred`, `ResponderFrom(ctx) *Responder`, `Responder.Reply(result)` / `Responder.ReplyError(*Error)` (both once-guarded via `done` CAS → `ErrAlreadyResolved`). This is the whole "hold the call open" mechanism.
-- `internal/acp/acp.go:221-262` — `dispatchRequest`. Shows how returning `ErrDeferred` suppresses the synchronous write, and that the `*Responder` is injected into the handler's `ctx` (so the handler is reached only for `method+id` requests — a `session/prompt` sent as a notification gets **no** responder).
-- `internal/acp/jsonrpc.go:11-40` — `Code*` constants + `NewError(code, message)` + `Error`. Codes used here: `CodeInvalidParams` (bad content / unknown session), `CodeInvalidRequest` (second concurrent prompt), `CodeInternalError` (delivery failure, generic message).
-- `internal/sessions/pool.go:731-745` — `Pool.Lookup(id) (*Session, error)`: a **non-empty** unknown id → `ErrSessionNotFound`; an **empty** id → the parked bootstrap (why `decodeSessionID` must reject empty *before* Lookup).
-- `internal/sessions/session.go:119-132` — `Session.WriteUserTurn(ctx, conversationID string, payload []byte) error` (delegates to `Supervisor.WriteUserTurn`). `*sessions.Session` is the production `promptDeliverer`.
-- `docs/knowledge/architecture/system-overview.md` § `Supervisor.WriteUserTurn` (#312/#594/#668) — the delivery contract: blocks for **WaitReady + commit-confirm (~10 s)**, returns non-nil on failure (`ErrNoLiveSession` / `ErrTurnNotCommitted` / wrapped deadline). Two facts drive this spec: (a) it **must not** run on the read loop; (b) with `ValidateConversation == nil` (the ACP pool) the `conversationID` arg is not load-bearing — pass the session id.
-- `cmd/pyry/acp_handshake.go:51-58` — `promptCapabilities` (image/audio/embeddedContext all `false`). The advertised text-only contract that justifies **rejecting** non-text content blocks.
-- `cmd/pyry/acp_turn_stream.go:36-52` — `acpTurnStream.onTurnEnd func(reason string)`. The T7 (#751) join seam: T7 will wire `onTurnEnd` for a session to `holds.end(sessionID, reason)`. This pins the store's `end(sessionID, reason string)` signature. **Not wired by this ticket** — the store's `end` is exercised only by tests here (the placeholder-end path).
-- `cmd/pyry/inbound_deliver_test.go:22-59` — `gatingWriter`, a fake `TurnWriter` that records delivered payloads and gates commit on a channel. Mirror it for the fake `promptDeliverer` (recorder + optional error injection).
-- `cmd/pyry/acp_test.go:277-400` — `serveACP(ctx, r, w, logger, register)` (the pool-free serve entry — the prompt tests reuse it with a **custom register**, no fake-claude pool needed) + `newFakeClaudePool` / `acpHarness.send/read/shutdown` (the pipe-driven live-transport harness pattern to extend).
-- `tui-driver@v1.3.0/pkg/tuidriver/deliver.go` (doc header, lines 68-80) — `DeliverPrompt` uses **bracketed paste** for multi-line/long prompts, so a `\n` in the payload does not submit prematurely. This is why joining text blocks with `\n` is safe and matches the mobile multi-line-message path.
-
----
-
 ## Context
 
 **Epic #600 — `pyry acp` as a thin adapter over the shared remote-head core.** `session/prompt` is the main call: the host sends a user turn, pyry drives claude, and the call returns a `stopReason` when the turn ends. An ACP turn is **one** `session/prompt` request that streams `session/update` notifications and then resolves. So the handler must do two things that a normal request handler cannot: deliver the prompt into the supervised interactive claude, **and hold its own JSON-RPC call open** for the duration of the turn.

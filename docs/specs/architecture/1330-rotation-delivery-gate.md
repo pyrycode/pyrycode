@@ -8,31 +8,6 @@ call-site cascade (every production change is additive except one statement insi
 
 ---
 
-## Files to read first
-
-Reading list, in order. Each entry says what to extract; do not read past it.
-
-| Path | What to extract |
-|---|---|
-| `internal/streamsup/runner.go:154-211` | The three-mutex split. `mu` guards `stdin` ONLY; `restartMu` guards `args`/`iterCancel`/`sessionID`/`rotatePending`; `stateMu` guards `state`. The new gate goes under `mu`, and § Concurrency explains why it cannot go under `restartMu`. |
-| `internal/streamsup/runner.go:257-285` | `Stdin()` and `WriteUserTurn`. `WriteUserTurn` is a one-line delegation `WriteTurn(ctx, r.Stdin(), payload)` — that line is the ONLY production statement this ticket rewrites. |
-| `internal/streamsup/runner.go:351-410` | `RestartFresh` + `nextSpawnID`. Note that `RestartFresh` returns after `cancel()`, and the child dies asynchronously on the Run goroutine — the reason "release the gate when `RestartFresh` returns" is NOT sufficient. |
-| `internal/streamsup/runner.go:588-628` | `spawnAndWait`'s `setStdin` (:588, immediately after `cmd.Start`) / `takeStdin` (:604) pair, and the two helpers at :613-628. `setStdin` is the gate's close point; `takeStdin` deliberately is not. |
-| `internal/streamsup/envelope.go:139-152` | `WriteTurn`'s nil-writer contract: a nil `w` yields `ErrNoLiveChild` and writes nothing, and the nil check PRECEDES the turncommit claim. This is why the gate can be expressed as "hand `WriteTurn` a nil writer" and reuse an already-reviewed refusal path verbatim. |
-| `cmd/pyry/main.go:1447-1477` | `startFreshRunner` — the dispatch this ticket edits, and its doc's load-bearing ordering claim (rotate-before-`RestartFresh` primes the watcher skip-set). That ordering is PRESERVED; the arm is inserted ahead of both. |
-| `cmd/pyry/main.go:1586-1653` | `newInboundDeliver` — resolve → `Activate` → `waitIdleForDelivery` → `openForDelivery` → `WriteUserTurn`. Read the PLACEMENT paragraph. **This function is not modified.** |
-| `cmd/pyry/streamsup_runner.go:14-54` | `streamRunner`, the `*streamsup.Runner` → `sessions.Runner` adapter, and the `Interrupt`/`RestartFresh` precedent for a concrete method reached by type assertion off the un-widened interface. The new forwarder is the third such method. |
-| `cmd/pyry/inbound_deliver_rotation_test.go:61-259` | The `fakeChild` / `rotatingWriter` / `rotatingSessionOwner` fixture. Reuse it. Read :84-106 especially — the "resolves its target child at WRITE time" decision, and the "no refuse-to-write branch" decision this ticket must revisit. |
-| `cmd/pyry/inbound_deliver_rotation_test.go:261-403` | `TestInboundDeliver_RotationReleasesHeldTurn_DeliversToFreshChild` — the 9-step shape the new test mirrors, and :281-293, the paragraph that names this ticket's window as deliberately undecided. |
-| `cmd/pyry/inbound_deliver_rotation_test.go:405-452` | `TestInboundDeliver_RotationWithoutHold_WritesIntoThePreRotationChild`, the fixture-reachability control. It must stay green; § Testing says why it does. |
-| `cmd/pyry/new_session_routing_test.go:12-46` | `restartFreshStub` / `startNewSessionStub` / `bothMethodsStub`. None of them will grow a `BeginRotation` method; § Design explains why the dispatch uses an OPTIONAL assertion so these stay green. |
-| `internal/streamsup/runner_test.go:649-740` | `TestRunner_RestartFresh_RotatesThenResumesNewID` — the `helperRunCfg` / `onSpawn` / `spawnArgsRecorder` / `runInBackground` harness the streamsup-level tests reuse. `onSpawn` fires after `setStdin`, which is the hook the new tests need. |
-| `internal/msgqueue/queue.go:120-160, :580-615` | `PendingFunc` and the two drain arms. `ErrNoLiveChild` matches no `Pending` classifier, so it takes the ERROR-RETURN arm: 1 Hz retry of the same head, give-up at 2 m. That is the retry ladder this fix relies on. |
-| `internal/e2e/relay_v2_stream_new_session_test.go:62-72, :402-546` | The sink-tag divergence, the deadline argument (do not touch it), and the AC-1 guard at :496-546. **This file is not modified by this ticket.** |
-| `docs/specs/architecture/1295-forced-rotation-delivery-ordering.md:518` | Open question 4, "the clear-before-`RestartFresh` window … not structurally excluded". This spec closes it. |
-
----
-
 ## Context
 
 `startFreshRunner` (`cmd/pyry/main.go:1462`) runs the rotation in two statements:

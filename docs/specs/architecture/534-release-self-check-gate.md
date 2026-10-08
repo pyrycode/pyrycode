@@ -3,15 +3,6 @@
 **Ticket:** #534
 **Size:** S (2 files modified, ~25 added lines of YAML, no Go code, no tests)
 
-## Files to read first
-
-- `.github/workflows/release.yml` — entire file (~37 lines). The only file with new jobs added. Internalize the existing single-job shape before editing.
-- `.github/workflows/self-check-daily.yml` — entire file (~70 lines). The only modification here is adding a third trigger to the `on:` block and updating the header comment. The two existing jobs (`self-check`, `notify-failure`) are NOT touched.
-- `docs/specs/architecture/533-self-check-discord-alert.md` — sibling spec. The `notify-failure` job's behaviour (job-level `if: failure()` + soft-fail on missing `DISCORD_WEBHOOK_URL`) travels into the release-tag invocation for free; that's intentional and worth understanding before designing the wiring.
-- `docs/knowledge/codebase/533.md` — implementation notes for the Discord-alert sibling. Pattern for `notify-failure` semantics is the same one that will fire on a release-time failure.
-
-No Go source is in scope.
-
 ## Context
 
 The `agent-run self-check (daily)` workflow is the deterministic safety net for the per-agent tool-allowlist contract (#375). Today it runs on cron only — no enforcement at release time. The `release.yml` workflow runs goreleaser on every `v*` tag push, independent of self-check state.

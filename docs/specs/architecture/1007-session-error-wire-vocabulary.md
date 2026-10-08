@@ -13,24 +13,6 @@ The existing v2 error primitives don't fit an unsolicited, conversation-scoped, 
 
 So this ticket introduces a **dedicated v2-only** session-error type, a **terminal** code distinct from transient `server.binary_busy`, and a conversation-scoped payload — the exact shape every other v2-only interactive event already follows (`TypeStall`, `TypeQueueState`, `TypeSessionTransition`), each excluded from `v1TypeSet` and carrying `conversation_id` as its routing key.
 
-## Files to read first
-
-- `internal/protocol/codes.go:32-34` — the "Session errors" group (`CodeSessionNotFound`); the new terminal code lands here.
-- `internal/protocol/codes.go:227-245` — the `TypeSessionTransition` single-const-block precedent (comment shape + "wire vocabulary only, producer is sibling #N"); the new type mirrors it exactly.
-- `internal/protocol/messaging.go:36-65` — `SessionTransitionPayload`: sibling conversation-scoped v2-only payload, doc-comment conventions, `conversation_id` routing-key wording.
-- `internal/protocol/messaging.go:197-205` — `QueueStatePayload`: the closest structural mirror (plain `ConversationID` string, no omitempty, resolved daemon-side).
-- `internal/protocol/compat_test.go:142-174` — `v2OnlyTypes` allowlist; add the new type here.
-- `internal/protocol/compat_test.go:183-240` — `TestTypeConstants_V1V2Partition`: the disjoint-partition check + its `all` drift-detector list (add the type to BOTH the map above and this `all` list; the union-count assertion at line 237 forces both).
-- `internal/protocol/compat_test.go:33-92` — `TestIsV1Compatible` `cases`: add a `session_error-rejected` case (mirror `session_transition-rejected`, line 59-61).
-- `internal/protocol/compat_test.go:242-281` — `TestErrorCode_Constants_MatchSpec`: add `CodeSessionBlocked` to BOTH the `cases` and `want` maps (the len-equality guard at line 273 forces both).
-- `internal/protocol/messaging_test.go:462-509` — `TestQueueStatePayload_RoundTrip`: the round-trip test template to copy.
-- `internal/protocol/interactive_test.go:9-28` — `roundTripEnvelope` helper (re-marshals the decoded payload; this is what pins struct→wire shape).
-- `internal/protocol/envelope_test.go:11-27` — `canonical` / `readFixture` helpers.
-- `internal/protocol/testdata/queue_state.json` — fixture format (single-line envelope-with-payload JSON) to mirror for `session_error.json`.
-- `docs/protocol-mobile.md` § Error codes / § Interactive events — add the spec-table row for `session_error` + `session.blocked` (documentation-owned evergreen doc; the developer appends the wire-vocab row here only, no other doc).
-
-**Do NOT touch `internal/protocol/envelope.go`.** The v1/v2 boundary is enforced by *omitting* the constant from `v1TypeSet` — exactly as the sibling v2 types do. Adding it there would fail the disjoint-partition test.
-
 ## Design
 
 Three declarations + one partition entry + one fixture + one round-trip test. Names are carried forward verbatim from the #1001 split.

@@ -4,16 +4,6 @@
 **Size:** XS
 **Slice of:** Phase 3 Track C (mobile push). Schema half of #250.
 
-## Files to read first
-
-- `internal/devices/device.go:24-29` — current `Device` struct shape; the two new fields land here, after `LastSeenAt`.
-- `internal/devices/registry.go:18-53` — `registryFile` envelope + `Load` semantics. Confirms that decoding via `encoding/json` already tolerates unknown / missing keys (no `DisallowUnknownFields`, no custom unmarshaler). The new fields will deserialise to `""` on pre-existing files without further changes.
-- `internal/devices/registry.go:63-107` — `Save`'s atomic write path. **Unchanged by this slice** — confirm by reading; do not edit.
-- `internal/devices/device_test.go` — pattern for table-driven tests in this package; the new round-trip tests live here (or in `registry_test.go` if a similar pattern already exists there; check first).
-- `internal/protocol/push.go:14-18` — wire-side `RegisterPushTokenPayload` for the exact `Platform` doc-string contract (`"fcm"` / `"apns"`). The new doc comment on `Device.Platform` must mirror this language so the on-disk and wire contracts stay verbatim-aligned.
-- `docs/protocol-mobile.md` § `register_push_token` (lines 480–498) — the protocol-level prose this slice ultimately serves. Read for context; no edits.
-- Ticket #282 body, "Acceptance Criteria" section — three round-trip assertions are spelled out there; mirror them as test cases.
-
 ## Context
 
 `internal/devices.Device` is the on-disk shape under `~/.pyry/<name>/devices.json`. Phase 3 needs the binary to persist per-device push-notification state so it can wake backgrounded phones via APNs/FCM (`docs/protocol-mobile.md` § Phone background behaviour). The wire-side carrier already exists at `internal/protocol.RegisterPushTokenPayload` (shipped via #275); this ticket is the on-disk counterpart.

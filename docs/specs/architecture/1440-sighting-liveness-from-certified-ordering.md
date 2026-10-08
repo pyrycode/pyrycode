@@ -2,37 +2,6 @@
 
 Ticket: https://github.com/pyrycode/pyrycode/issues/1440 · Split from #1436 · Sibling: #1439 (merged, PR #1441)
 
-## Files to read first
-
-Turn-1 data load. Every line number below was re-verified against `176ba0d` (the #1439 merge) at the time this spec was written.
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/trail_ordering_premises_test.go` (all 618 lines) | **The template for this whole ticket.** Read it end to end before writing a line. Its header/value-space/record/predicate/membership/fixtures/tests layout is the layout to reproduce. Note especially `:572-590` — it names #1440 as the ticket that ships the needle sweep it deliberately omits. |
-| `internal/e2e/realclaude/trail_ordering_premises_test.go:107-128` | The four `trailOrder*` values, and the doc pattern for arguing a prefix is load-bearing. |
-| `internal/e2e/realclaude/trail_ordering_premises_test.go:158-161` | `trailOrderResult{Value, Detail}` — one of this ticket's two input records. Two strings; no pointer. |
-| `internal/e2e/realclaude/trail_ordering_premises_test.go:242-284` | `trailCertifyOrdering` — guards-then-fall-through body shape, and the `decide` closure that wraps `trailDetail`. Reproduce both. |
-| `internal/e2e/realclaude/trail_ordering_premises_test.go:320-333` | `trailOrderPremises`, its `certify()` method, and `trailOrderCertifiedPremises()` — **AC3 drives off these three, not off a hand-built value.** |
-| `internal/e2e/realclaude/trail_ordering_premises_test.go:465-512` | `TestTrailOrderEachPremiseHasItsOwnVoid` — the exact premise-removal shape AC3 asks for, including the assert-the-base-certifies-first discipline. |
-| `internal/e2e/realclaude/trail_ordering_premises_test.go:529-570` | `TestTrailOrderValuesAgreeWithThePredicate` — the both-directions + count + spelled-rejected-list shape AC4 asks for. |
-| `internal/e2e/realclaude/process_pin_liveness_test.go:204-219` | The four `pinState*` verdicts, with the reason each exists. |
-| `internal/e2e/realclaude/process_pin_liveness_test.go:238-253` | `pinStateOutcome` — the other input record. **Seven fields; three are string-bearing (`Detail`, `StateColumn`, `ToolStderr`).** |
-| `internal/e2e/realclaude/process_pin_liveness_test.go:297-341` | `pinClassifyState`'s branch table. Branch 1 (`err != nil`, stderr non-empty) is the live capture route: `:341` assigns raw `ps` stderr to `ToolStderr`, and `:348-349` folds it into `Detail`. This is why AC5's plant is load-bearing. |
-| `internal/e2e/realclaude/process_pin_liveness_test.go:265-295` | `pinReadState` — the no-`*testing.T`, never-fails-a-test contract this predicate inherits. Also `:268-271`: the direct-lookup argument (no parentage) the ticket's Context leans on. |
-| `internal/e2e/realclaude/process_pin_liveness_test.go:1142` | `pinIsVerdict` — the shipped membership predicate over the four verdicts. **There is no `pinVerdicts()` list**; spell the four where you need them. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:114-118` | `trailOutcomeRunningAtTrailer = "run-running-at-trailer"` and its doc. **This is the collision this ticket's naming must defeat.** |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:159-163` | `trailOutcomeVoidLivenessInstrument = "run-void-liveness-instrument-failed"` — the second, subtler near-collision (see § Naming). |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:309-323` | `trailIsRunOutcome` — the membership-predicate shape AC4 names. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:1571-1627` | `TestTrailRunOutcomeCarriesNoCapturedBytes` — **the exact shape of AC5's sweep**, both halves. `:1586-1591` shows a `pinStateOutcome` planted with the needle in `Detail` + `ToolStderr`; `:1594-1599` is the premise-first discipline; `:1618-1626` is the forbidden-key half. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:1164-1298` | `TestTrailAdmissibilityConstantsAreClosed` — the union closure map. § Closure-map manifest below gives the six exact edit sites. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:340-360` | `trailAdmitResult` (Value+Detail) and `trailDetail(format, args...)`. `trailGateResult` is the Value+**Reason**+Detail precedent this ticket's record follows. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:123` | `reachMaxCommandBytes = 512` and `reachTruncationMarker` — the cap `trailDetail` inherits, and the marker the coverage test asserts absent. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:325` | `trailNeedle` — the shipped needle constant. Reuse; do not define a second. |
-| `internal/agentrun/streamrunner/runner.go:203-208` | The single reap call site inside `cmd.Cancel`, and the "It never fires on a clean exit" comment. This is *why* the ticket exists; quote it in the file header. |
-| `internal/agentrun/ptyrunner/runner.go:387-398` | The contrasting `defer`-based reap that fires on every teardown. |
-
-Do **not** read `finding_run_gather_test.go` for the input shape — `finSighting` (`:372-384`) is the wrong input and § Inputs says why.
-
 ## Context
 
 `trailClassifyRun` ranks an admissible reap-log attribution above every point-in-time reading (`trail_run_outcome_test.go:364-365`), and argues at the point of use (`:602-606`) that the readings "are expected to be late … so resting a verdict on them manufactures a systematic false negative". `:845-847` makes that executable.

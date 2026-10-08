@@ -1,20 +1,5 @@
 # #260 — e2e: `pyry update` happy-path against fake release server
 
-## Files to read first
-
-- `cmd/pyry/update.go:25-209` — `runUpdate`, `updateOptions`, `defaultProbeRestart`, `defaultRunRestart`, `doUpdate`. The `updateOptions` struct (lines 70–84) is the test seam; `doUpdate` (lines 111–209) is the function this test drives directly.
-- `cmd/pyry/update_test.go:23-85` — existing `buildTarGzForTest`, `fakeRelease`, `newFakeReleaseServer`. Reuse verbatim — same package, no build tag, automatically visible to the new tagged file.
-- `cmd/pyry/update_test.go:90-143` — `TestUpdate_Success`. Mirror the `updateOptions` wiring shape (fetcher BaseURL, releaseBaseURL, executablePath, replace, out, probeRestart, runRestart).
-- `internal/update/replace.go:9-64` — `AtomicReplace` semantics. Confirms inode change on success: `os.Rename(tmp, targetPath)` swaps in a fresh inode, so an inode comparison before/after is a reliable structural assertion.
-- `internal/update/restart.go:27-37` — `DetectRestartCommand`. Test must pass a `RestartProbe` whose discriminant flags produce a non-nil argv (`LaunchdPlistExists` on darwin, `SystemdUnitExists` on linux), otherwise the wiring silently skips `runRestart` and the test never exercises the restart seam.
-- `internal/e2e/harness.go:184-394` — `Start`/`StartIn`/`spawn`/`spawnWith` patterns: childEnv with HOME isolation and `PYRY_NAME` stripped, `-pyry-name=test` + `-pyry-claude=/bin/sleep` + `-pyry-idle-timeout=0` flag set, `99999`-second sleep argv (NOT `infinity` — see lessons.md "/bin/sleep infinity" — macOS BSD sleep rejects it), the wait-goroutine + doneCh pattern, the `waitForReady` socket-dial poll loop with 5-second deadline. Replicate inline (do not import — see § Why an inline spawn helper).
-- `internal/e2e/install_darwin_test.go:1-9` — build-tag header `//go:build darwin && e2e_install` and the run-with-tag invocation comment. Mirror the pattern for `e2e_update`.
-- `internal/e2e/restart_test.go:34-49,51-115` — `newRegistryHome` (sun_path-safe temp HOME via `os.MkdirTemp("", "pyry-rs-*")`, NOT `t.TempDir()` — the longer test name overflows macOS's 104-byte sun_path limit). The two-daemon restart pattern (`StartIn` → `Stop` → `StartIn`) is the structural analogue of what runRestart performs.
-- `docs/lessons.md` § "E2E against the operator's real systemd `--user` / launchd `gui/<uid>`" — explains why this test does NOT touch the operator's real launchd/systemd. Path the test takes instead: spawn pyry directly, restart by killing+respawning the same subprocess.
-- `docs/lessons.md` § "Reject hidden env vars added 'just for the test.'" — load-bearing for the seam choice. The drive-`doUpdate`-directly approach was chosen over a `PYRY_RELEASE_BASE_URL` env var precisely on this principle.
-- `docs/lessons.md` § "PTY Testing" — `cmd.Stdin = nil` makes Go's `os/exec` route stdin from `/dev/null` automatically (no explicit `os.Open(os.DevNull)` needed). This is what satisfies AC#2's "stdin closed" requirement structurally.
-- `docs/knowledge/features/pyry-update-command.md` — the command's existing surface. Don't duplicate facts the doc already records; this spec only adds the e2e gate.
-
 ## Context
 
 The update mechanism (#184/#186/#187/#189/#190) and post-install smoke check (#203) collectively wired fetch → verify → atomic-replace → restart → smoke. The v0.10.1 supervisor-startup-hang regression slipped past unit tests because the auto-restart added by #190 replaced the manual `launchctl kickstart` step that had given operators a natural moment to run a smoke check. There is no e2e test exercising the `pyry update` subcommand or its restart-into-new-binary path.

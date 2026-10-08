@@ -5,26 +5,6 @@
 **Labels:** `security-sensitive` (security review at the end of this spec)
 **Epic:** #597 Phase 3 (interactive modals, permissions, queued backlog)
 
-## Files to read first
-
-The developer's turn-1 data load. Read these before writing code.
-
-- `internal/protocol/codes.go:122-160` — the `TypeResync` / `TypeSessionTransition` single-const-block pattern and the **"MUST NOT be added to v1TypeSet"** doc convention. `TypeInterrupt` is a new block in this same style, adjacent to the modal cluster (`:162-193`).
-- `internal/protocol/compat_test.go:101-181` — the v1/v2 partition drift detector. Three edits land here: a `TypeInterrupt: true` entry in `v2OnlyTypes` (`:111`), a `TypeInterrupt` entry in `TestTypeConstants_V1V2Partition`'s `all` list (`:140-165`), and an `{"interrupt-rejected", TypeInterrupt, false, ErrUnknownType}` case in `TestIsV1Compatible` (`:27-67`). Do **not** touch `TestV1TypeSet_CoversAllExportedTypeConstants` (`:78-99`) — its `len(all), 16` count enumerates v1 types only; `interrupt` is v2-only.
-- `internal/protocol/envelope.go:111-135` — `v1TypeSet`. **Stays unchanged.** The drift detector forces the v2OnlyTypes edit; production `v1TypeSet` never gains `interrupt`.
-- `internal/turnevent/permission.go:40-66` — the `Inbound` sealed sum type, its unexported `isInbound()` marker, `PermissionResponse`, and the `var _ Inbound = …` compile-time assertion block. The comment at `:43-44` literally reserves "the deferred inbound-commands ticket adds Prompt / Cancel / DropQueued here." This ticket adds `Cancel`.
-- `internal/turnevent/permission_test.go:74-81` — `TestPermissionResponse_IsInbound`'s `var _ Inbound = …` compile-time-membership idiom; mirror it for `Cancel`.
-- `internal/relay/v2session.go:1294-1350` — `dispatchAppFrame`: the v2 control-envelope discriminator switch. The `interrupt` intercept case slots in beside `TypeModalCancel`.
-- `internal/relay/v2session.go:1520-1552` — `handleModalCancel`: the closest handler template (nil-seam guard, never-echo discipline, fire-and-forget, no reply). `handleInterrupt` mirrors its *shape* but is simpler (no payload decode, no broadcast) and adds the interactive gate.
-- `internal/relay/v2session.go:367-414` — `ScreenSnapshotter` / `ModalResolver`: the consumer-side-interface pattern (`internal/relay` declares the seam so it imports neither `internal/supervisor` nor tui-driver). `Interrupter` is a new sibling here.
-- `internal/relay/v2session.go:416-489` — `V2SessionConfig`: where the optional `Interrupter` field is added (mirror the `Snapshotter` / `ModalResolver` optional-seam doc style + nil-behaviour note).
-- `internal/relay/v2session.go:248-269` — `V2Session.interactive`: the negotiated capability flag the gate reads (set fail-closed in `handleNoiseInit`'s token-OK path, Run-goroutine-owned, no lock).
-- `internal/supervisor/modal.go:64` — `func (s *Supervisor) SendEsc() error`. The sealed keystroke surface (#726). `*supervisor.Supervisor` already satisfies `Interrupter` with **zero new supervisor code**.
-- `cmd/pyry/relay.go:305-334` — the production `V2SessionConfig{…}` literal. `sup` (`*supervisor.Supervisor`) is already in scope and already passed as `Snapshotter` and into `newModalResolverV2`; add one line: `Interrupter: sup`.
-- `internal/relay/v2session_modal_test.go:94-136` — the test idioms the new test reuses verbatim: `sealAppFrameConn(t, cs, connID, env)` (seal an app envelope into a routing frame) and `openModalConn(t, mgr, frames, rec, respPub, connID, caps)` (drive a handshake; pass `[]string{protocol.CapabilityInteractive}` for the interactive conn, `nil` for non-interactive — see `:266-268`).
-- `internal/relay/v2session_test.go:98` — `startManager(t, V2SessionConfig{…})` → `(mgr, stop)`. The new test builds its config with an `Interrupter: &fakeInterrupter{}`.
-- `docs/protocol-mobile.md:402-441` — the Application message types table (add the `interrupt` row) and `:618-687` the Modal/Queue sections (model an `### Interrupt (v2)` subsection on `#### dequeue_message` at `:680`, an ungated/payload-light inbound control).
-
 ## Context
 
 Phase 3 of epic #597 adds the **remote interrupt** control: the paired phone's equivalent of pressing **Esc** at the local terminal. A phone sends a bare `interrupt` frame; the daemon maps it to the internal neutral `Cancel` command and routes it to the supervised claude as a single Esc keystroke — claude's own interrupt.

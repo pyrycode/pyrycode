@@ -6,24 +6,6 @@
 
 ---
 
-## Files to read first
-
-| Path (line range) | What to extract |
-|---|---|
-| `internal/e2e/relay_v2_stream_send_test.go` (whole, 218 lines) | **The primary template.** `TestRelayV2_StreamSendMessageDrainsTurn` — pair → `seedBoundConversation` → `StartStreamInteractiveWithRelay` → `driveHandshakeToOpenDaemonInteractive` → send → ack → drain milestones. Copy this skeleton; extend from 1 send to 3 ordered sends + a hold trigger. |
-| `internal/e2e/relay_v2_queue_drain_test.go` (whole, 349 lines) | **The PTY sibling to model the flow on** (per ticket). Lift its structure: come-up-busy → accumulate → release trigger → drain-in-order, and its **vacuity-guard discipline** (positives gate before the ordering assertion; `t.Fatal` on the harness-produced-no-queue mode). Also the ASCII-marker header note (no secrets in markers). AC3 requires this file stays **untouched**. |
-| `internal/e2e/harness.go:388-435` | `StartStreamInteractiveWithRelay(t, home, initialUUID, relayURL, extraEnv ...string)` — writes the `interactive_runner:"stream-json"` config toggle + `PYRY_FAKE_CLAUDE_STREAM_JSON=1`, and forwards `extraEnv` to the spawned child. The hold-trigger env rides `extraEnv`; **no harness change needed.** |
-| `internal/e2e/internal/fakeclaude/main.go:460-471` | The stream-mode branch in `main()` — where the startup hold `if` goes, before `runStreamJSON`. `PYRY_FAKE_CLAUDE_*` envs propagate to the child (daemon inherits + passes them). |
-| `internal/e2e/internal/fakeclaude/main.go:540-560, 645` | The existing trigger-poll pattern (`os.Stat(trig)` + `time.Sleep(pollInterval)`). Mirror it for the hold wait. Confirm `pollInterval` const. |
-| `internal/e2e/internal/fakeclaude/main.go:1259-1303` | `writeStreamResponse` / `writeAssistantEcho` / `writeInterruptedResult` — the per-turn write helpers. The startup hold does **not** touch these (it holds before `runStreamJSON` runs at all). |
-| `internal/streamsup/envelope.go:126-172` | `WriteTurn` — writes the user envelope to the held-open stdin and **returns immediately**; no commit block, no idle wait. The load-bearing production fact below. |
-| `cmd/pyry/main.go:854-899` | msgqueue wiring: `send_message` enqueues, **one serial drain goroutine per conversation** delivers FIFO. All 3 test sends must target the **same** conversation for the serial drain to order them. |
-| `cmd/pyry/main.go:1413-1446` | `newInboundDeliver` — `WriteUserTurn` written with the raw ctx; the comment claims "return nil only on a confirmed commit," but on the stream path `WriteTurn` returns on write. This gap is why a msgqueue backlog can't form on the stream path (§ Open questions). |
-| `cmd/pyry/interactive_turn_v2.go:170-234` | Emitter state machine: `TextChunk` → `responding` + buffered delta; `TurnEnd` → `flushDelta` + `turn_end` + `idle` + `endTurn`. Each `(assistant, result)` pair ⟹ one clean `responding→delta→turn_end→idle` cycle; a fresh chunk after `idle` opens a **new** turn (`startTurnIfNeeded` mints a new turn id). This is why 3 ordered deltas ⟹ 3 ordered turn cycles. |
-| `cmd/pyry/stream_turn_drain_test.go:100, 183-220` | `assistantTextLine` / `resultLine` shapes + `TestStreamTurnDrainV2_FullSingleTurn`'s expected envelope order (`responding, assistant_delta, turn_end, idle`) for one turn. |
-
----
-
 ## Context
 
 `interactive_runner:"stream-json"` is now live end-to-end (#1081 toggle, #1098/#1109 drain, #1140 fake, #1141 first live send). This ticket adds the **queue-ordering** proof: multiple sends submitted while a turn is in flight drain to the client in submission order, under the toggle, against the fakeclaude stream-json harness. It is the stream analog of the PTY sibling `relay_v2_queue_drain_test.go`.

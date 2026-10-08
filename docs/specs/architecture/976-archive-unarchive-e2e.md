@@ -8,33 +8,6 @@ The handler `internal/relay/handlers/archive_conversation.go` already carries it
 reasoning (untrusted `conversation_id` used only as an exact-match registry key, static reject
 strings, no payload bytes on the wire). This ticket only *observes* that behaviour end-to-end.
 
-## Files to read first
-
-- `internal/e2e/relay_v2_rename_test.go` (whole file, ~309 lines) — **the template.** Copy its two-subtest
-  structure verbatim: pair → seed `conversations.json` → spawn v2 daemon → `driveHandshakeToOpenDaemon`
-  → seal request → decrypt reply → assert reply envelope → read registry back off disk. The
-  `conversation_updated` reply decode + `in_reply_to` correlation + `ConversationUpdatedPayload.IsArchived`
-  inspection at lines 123–154 is the exact reply shape this ticket toggles. The not-found subtest at
-  186–308 is the exact error-path shape (AC #3).
-- `internal/relay/handlers/archive_conversation.go` (whole file, ~135 lines) — the handler under test.
-  Confirms: `SetArchived(id, archived)` flips the flag, `Get` snapshots the post-flip record, `Save`
-  runs **before** `c.Reply` (so the disk write is complete by the time the reply lands — no polling),
-  a miss on `SetArchived` replies `conversation.not_found` and Saves nothing, and `last_used_at` is
-  never bumped (archive is a metadata edit, not a "use").
-- `cmd/pyry/relay.go:410-411` — the two registrations. `TypeArchiveConversation` → `archived=true`,
-  `TypeUnarchiveConversation` → `archived=false`, same factory. This test is a live guard on both lines:
-  delete either and the corresponding frame falls through to the no-handler `protocol.unsupported` arm
-  and the round-trip assertion fails.
-- `internal/protocol/conversations_write.go:80-131` — `ArchiveConversationPayload{ConversationID string}`
-  (id-only, serves both verbs) and `ConversationUpdatedPayload` (reply body; note `IsArchived bool`
-  is always serialized — no omitempty — on the wire).
-- `internal/protocol/codes.go:22,83,90` — `CodeConversationNotFound = "conversation.not_found"`,
-  `TypeArchiveConversation`, `TypeUnarchiveConversation`.
-- `internal/conversations/conversation.go:83` — on-disk `IsArchived bool json:"is_archived,omitempty"`.
-  **Read-back caveat:** unlike the wire payload, the on-disk key IS omitempty — after unarchive the key
-  is absent from `conversations.json`. Decode the read-back into a plain `bool` field; an absent key
-  yields `false`. Assert the value, never key presence.
-
 ## Context
 
 A 2026-07-15 full-repo review found eleven client-sendable v2 wire verbs whose only coverage is

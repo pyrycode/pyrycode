@@ -11,40 +11,6 @@ against a fake dialer.
 **Depends on:** #198 (the predicate `isTransientStartupError`, already merged
 into this branch).
 
-## Files to read first
-
-The developer's turn-1 data load. Each entry is paged in deliberately —
-don't grep for them.
-
-- `internal/control/client.go:248-285` — current `request()` and `dial()`.
-  `dial()` calls `net.Dialer.DialContext` once and wraps the error as
-  `fmt.Errorf("dial %s: %w", socketPath, err)`. **The error wrap shape is
-  load-bearing for AC #2** (failure preserves "the same error message users
-  get today, e.g. `dial unix .../pyry.sock: connect: no such file or
-  directory`"). Keep the `fmt.Errorf` exactly as it is.
-- `internal/control/dial.go` — current home of `isTransientStartupError`
-  (#198). Two-import file (`errors`, `syscall`). The retry helper lands
-  here; `dial()` moves here too so all dial-related helpers cohabit (the
-  #198 spec already announced this file as the home for #199's helpers).
-- `internal/control/dial_test.go` — current test layout for the predicate.
-  Mirror its conventions: stdlib `testing` only, table-driven, tight
-  failure messages.
-- `internal/control/attach_client.go:53` and
-  `internal/control/attach_stdio_client.go:34` — two additional callers
-  of `dial()`. Confirm they are unchanged: same package, same function
-  name, same signature. The PO ticket framed this as a "single-site wrap
-  of the dial primitive" — this is what makes that true.
-- `internal/control/client.go` — after relocating `dial`, the `net`
-  import drops from this file. Verify `goimports`/`gofmt` cleans it.
-- `docs/lessons.md` § "Aggregate sub-interfaces into a facade rather
-  than threading new constructor parameters" — relevant *only* as a
-  reminder that this ticket does NOT need to touch any of `NewServer`'s
-  call sites; the seam is purely inside the `control` package's dial
-  helpers. Skim once to confirm there's no facade work hiding in this
-  ticket.
-
-That's the read budget. The retry loop is twenty lines.
-
 ## Context
 
 After `launchctl kickstart -k` (manual) or `pyry update`'s self-restart

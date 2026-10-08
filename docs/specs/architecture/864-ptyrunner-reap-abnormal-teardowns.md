@@ -1,17 +1,5 @@
 # Spec #864 — ptyrunner: reap claude's descendant process groups on budget-hit and watchdog teardowns
 
-## Files to read first
-
-- `internal/agentrun/ptyrunner/reap.go` (whole file, ~125 LoC) — `reapDescendantGroups(rootPid, logger)` (the helper you wire, **unchanged**) and `descendantPGIDs`. Note the three load-bearing guards (`pgid<=1`, `pgid==Getpgrp()`, `pgid==rootPid`) and that the walk enumerates *descendants of `rootPid`* — a dead claude reparents its Bash group to init, so the walk only sees the orphan while claude is **still alive**. This is why ordering matters below.
-- `internal/agentrun/ptyrunner/runner.go:294-320` — `cmd` construction, the existing `cmd.Cancel` reap hook (operator-SIGTERM path), and `cmd.WaitDelay`. The reap-before-SIGTERM ordering here is the pattern the budget path must mirror.
-- `internal/agentrun/ptyrunner/runner.go:370-386` — `tuidriver.Spawn` success check and the `defer sess.Close()` registration. `cmd.Process` is non-nil only after this point; the new trailing reap defer registers immediately after this defer.
-- `internal/agentrun/ptyrunner/runner.go:440-502` — the defer-LIFO teardown chain (`runCtx`/`cancel`, emitter, counter, watchdog goroutine, `wg.Wait`). The budget `Terminate` hook is at ~476-493; `runWatchdog` is spawned at ~497-500. Read the LIFO doc comment at 467-470 — you will extend it to mention the reap.
-- `internal/agentrun/ptyrunner/watchdog.go` (whole file, 39 LoC) — `runWatchdog` cancels `runCtx` and does **not** signal claude; claude is reached only later via `sess.Close()`. This is why a trailing defer (not an in-`runWatchdog` reap) is the chokepoint for the watchdog path.
-- `internal/agentrun/budget/budget.go:106-166` — `Counter.OnEvent` calls `cfg.Terminate()` **synchronously** on the caller's goroutine (the Run event loop, `runner.go:554`). Confirms the in-hook reap runs on the Run goroutine, and claude is alive (just finished a turn) when `Terminate` fires.
-- `internal/agentrun/ptyrunner/runner_test.go:50-77` — `helperRunCfg` harness. `:569-598` — `TestRun_MaxTurnsExhaustion_NoBenignWarns` (mode `jsonl_exit143`, `MaxTurns:1`, the budget-hit harness to clone). `:600-633` — `TestRun_WatchdogFires` (mode `jsonl`, `WatchdogTick`, the watchdog harness to clone). `:22-38` — `loggerSyncWriter`, the mutex-guarded test-double pattern to mirror for the reap recorder.
-- `internal/agentrun/ptyrunner/reap_test.go:26-102` — `TestReapDescendantGroups` and its four subtests (`ReapsDescendantGroupSparesCaller`, `NoDescendantsIsNoOp`, `ExcludesRootOwnGroup`, `ReapsGrandchildGroupSparesRoot`). These already assert the three guards (AC-4). **They stay unchanged** — reap.go is unchanged — and continuing to pass *is* AC-4's evidence. Do not add new guard tests.
-- `docs/knowledge/codebase/565.md` § "Out of scope / known same-shape gaps" — this ticket is the documented promotion of the deferred budget/watchdog gap. Confirms the one-line reap drop-in and the "reap before self-signal" requirement.
-
 ## Context
 
 #565 made ptyrunner reap claude's detached Bash process groups but scoped the reap to the operator-cancel path only (`cmd.Cancel`), which fires *only* when the parent ctx passed to `CommandContext` is cancelled (operator SIGTERM/SIGINT). The two other teardown paths that kill claude mid-work never cancel the parent ctx, so their reap never runs and the Bash group they leave behind reparents to init unbounded:

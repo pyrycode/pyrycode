@@ -1,26 +1,5 @@
 # #359 — Remove stale "scaffold only — no spawn yet" disclaimer from `pyry agent-run --help`
 
-## Files to read first
-
-- `cmd/pyry/agent_run.go:78-82` — the `fs.Usage` callback containing the stale
-  one-liner. This is the only production-code line that changes.
-- `cmd/pyry/agent_run.go:179-188` — the `runAgentRun` doc comment. AC #2 names
-  this as the canonical prose source for the new help text; adapt (don't
-  copy verbatim — it's slightly too long for `--help`).
-- `cmd/pyry/agent_run.go:234-266` — `buildClaudeArgs` and its preceding doc
-  comment. Ground truth for what the help line is summarising: `--max-turns`,
-  `--dangerously-skip-permissions`, `--allowed-tools`, `--input-format
-  stream-json`, `--output-format stream-json --verbose`. Use this to check
-  that the help prose stays accurate, but do NOT enumerate flags in the
-  help text (the AC says "describes behaviour, not flags").
-- `cmd/pyry/agent_run_test.go` — sibling table tests for `parseAgentRunArgs`.
-  The new unit test goes here; follow the file's existing testing idioms
-  (stdlib `testing`, table-driven where relevant, no testify).
-
-No QMD / lessons / decisions lookup needed — the issue body cites the
-authoritative file:line ranges and the change is scoped to one string
-literal plus one test.
-
 ## Context
 
 `pyry agent-run --help` currently prints:

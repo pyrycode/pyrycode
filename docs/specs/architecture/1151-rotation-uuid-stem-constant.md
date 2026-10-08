@@ -2,15 +2,6 @@
 
 **Size:** XS · **Security-sensitive:** no (local-fs CREATE watcher; no untrusted/network input crosses this seam — unlike relay siblings #1149/#1150) · **Split from:** #973
 
-## Files to read first
-
-- `internal/sessions/rotation/watcher.go:10-19` — the `regexp` import and the local `uuidStemPattern` var + its two-line comment; both are deleted by this ticket.
-- `internal/sessions/rotation/watcher.go:144-152` — `handleCreate`: strips the `.jsonl` suffix (line 146, via `strings.HasSuffix`) then matches the bare `stem` (line 150). Line 150 is the one call site to change; line 146 is why `strings` stays.
-- `internal/transcript/transcript.go:48-50` — `func ValidStem(stem string) bool`; wraps the identical `uuidStemPattern.MatchString(stem)`, so the swap is behaviour-preserving by construction.
-- `internal/transcript/transcript.go:1-25` — package doc; confirms the leaf is stdlib-only and names `internal/sessions/rotation` as an intended consumer → the new `rotation → transcript` edge introduces no cycle.
-- `internal/sessions/rotation/watcher_test.go:200-224` — `TestWatcher_SkipsMalformedUUID` (writes `not-a-uuid.jsonl`, asserts `OnRotate` is *not* called): the invariant test for the matcher branch. Must stay green.
-- `internal/sessions/rotation/watcher_test.go:171-198` — `TestWatcher_SkipsNonJSONL`: pins the `.jsonl`-suffix branch that keeps the `strings` import. Must stay green.
-
 ## Context
 
 The canonical UUID-stem regexp `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` was triplicated across three production files. `internal/transcript` (#1148, merged) now owns it as `transcript.ValidStem`. The delivery-confirm (Family A, #1149) and outbound-stream (Family B, #1150) families have migrated and merged. This ticket migrates the **third and last** copy — `internal/sessions/rotation/watcher.go:19` (`uuidStemPattern`) — so the constant has a single source of truth. Pure mechanical swap, no behaviour change.

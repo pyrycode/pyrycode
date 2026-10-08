@@ -6,23 +6,6 @@
 go test -tags e2e_realclaude -run '^TestTrail' ./internal/e2e/realclaude/
 ```
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/result_trailer_observation_test.go:1-49` | File header + build tag + import block. **The two edits this ticket makes to this file land here and at :98 / :176.** |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:94-121` | `trailScanResult` — the four fields, and the `Line`-is-capped / `Trailer`-is-the-full-decode doc that the new field's doc must sit beside and extend. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:164-208` | `trailScan` — the match return at :176-188 is the **only** invocation site for the new reader. `scanner.Bytes()` is whole there; `Line` at :182 is not. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:276-317` | `trailFixtureTrailer`, `trailNeedle`, `trailPaddedTrailer(pad)` — the fixtures AC1/AC4 drive, and the plant-past-the-cap rule AC3's own fixture must honour (:297-300). |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:477-525` | **The trap.** `TestTrailScan`'s padded sub-test marshals the *whole* `trailScanResult` and sweeps it for `trailNeedle`. Correct here, and **fatal if copied for AC3** — see § AC3. |
-| `internal/e2e/realclaude/tool_loop_test.go:185-210` | `resultTrailer`'s eight fields + `resultTrailerUsage`. AC5a pins exactly this set. Note `PermissionDenials *[]json.RawMessage` at :199. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:123-124, :945-950` | `reachMaxCommandBytes = 512`, `reachTruncationMarker` (29 bytes, contains no `"`), and `reachCapCommand`. |
-| `internal/e2e/realclaude/finding_run_record_test.go:720-752` | `finRecordInputReaches` — the shipped reflect walk AC5b reuses verbatim. Follows struct fields, slice/array elems, pointers, map keys **and** values. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:1916-1932` | `TestFinSightingReachesNoScanType` — the **exact shape** AC5b copies (carrier type, forbidden-type slice, one walk per type). |
-| `internal/e2e/realclaude/finding_run_gather_test.go:1936-1941` | `finGatherForbiddenKeys` — the six substrings the new JSON key must dodge, because #1358 carries this name onto `finSighting`, which *is* swept. |
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:907-930` | The `map[string]json.RawMessage` key-scan idiom, **and** its own note (:913-917) that the scan is top-level only. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:608-610` | The package's fixture rule: fixtures are **functions, never package-level vars** — `go test -race` runs these tests in parallel over a shared backing array. |
-
 ## Context
 
 `trailScanResult.Trailer` is a decode into `resultTrailer` — eight fixed fields, deliberately **no `result` member**, which is what makes the 512-byte cap safe to apply to `Line` alone. That property is preserved here, not relaxed.

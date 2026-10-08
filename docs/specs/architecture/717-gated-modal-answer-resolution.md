@@ -10,22 +10,6 @@
 > This ticket fills the answer arm of #727's `ModalResolver`: it replaces the deferred-no-op
 > `ResolveAnswer` body and extends one interface. **Nothing else.**
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `cmd/pyry/modal_resolve_v2.go:11-103` | **The only production file you edit.** `modalKeystroker` interface (line 16 — extend with `Answer`/`AcceptTrust`); `modalResolverV2` struct + `newModalResolverV2`; `ResolveCancel:54-91` — **mirror its shape exactly** (consume → best-effort keystroke → audit → return dismissal); `ResolveAnswer:98-103` — **replace this body**. |
-| `cmd/pyry/modal_resolve_v2_test.go` | The test harness you extend: `fakeKeystroker:24-32` (extend to record `Answer`/`AcceptTrust`), `recordPermissionModal:36-47`, `auditLogger`/`auditRecords:51-74`, `testDevice:76-79`, and `TestModalResolverV2_Answer_NoOp:235-263` (**replace** — answer is no longer a no-op). The cancel tests are the template for every assertion you write. |
-| `internal/modalbridge/modal.go:75-186` | `Outstanding{Class, Options, DefaultOptionID}`; `Lookup` (read, no consume) and `Resolve` (one-shot consume = the idempotency gate); the option-id consts `optProceed`/`optExit:42-44` and class consts `classPermission`/`classTrust:33-36`. |
-| `internal/devices/auth.go:48-91` | `MayAnswerRemotePermission()` (nil-safe, fail-closed eligibility gate); `RemotePermissionOutcome` + `OutcomeAllow`/`OutcomeDeny:69-75`; `AuthorizeRemotePermission(d, outcome):89-91` (the grant decision — `MayAnswer && outcome==Allow`). |
-| `internal/audit/audit.go:27-81` | `Entry`; `OutcomeAllowed`/`OutcomeDenied`/`OutcomeDeniedUnauthorized:43-49`; `SourceRemote:57-61`; `Log` (emits a fixed non-secret attribute set — never a token/body). |
-| `internal/supervisor/modal.go:52-66` | `AcceptTrust()` / `Answer(choice)` / `SendEsc()` — the verbs the keystroker routes to; each returns wrapped `ErrNoLiveSession` and **writes nothing** when no child is live. |
-| `internal/protocol/messaging.go:88-162` | `ModalOption{ID,Label}`; `ModalAnswerPayload{ModalID,OptionID,AnswerToken}`; **`ModalDismissedPayload.Outcome` doc (line 153): "the selected `ModalOption.ID` when answered"** — the wire Outcome is the *option_id*, not "allowed". |
-| `internal/relay/v2session.go:366-393` | `ModalDismissal{Outcome,Source}` (line 370: "#717 uses the answered option_id") + the `ModalResolver` interface contract your `ResolveAnswer` fulfils. |
-| `internal/relay/v2session.go:1495-1518` | `handleModalAnswer` — already broadcasts `modal_dismissed` **iff** `ResolveAnswer` returns `ok=true`. **No manager change is needed**; you change only the resolver impl. |
-| `internal/turnevent/taxonomy.go:50-53` | `PermissionOptionKind` consts — these strings (`allow_once`/`allow_always`/`reject_once`/`reject_always`) are exactly the permission `option_id`s on the wire. |
-| `docs/knowledge/codebase/727.md` § "Out of scope (siblings)" (lines 124-130) | The hand-off note: replace `ResolveAnswer` body, extend `modalKeystroker` with `Answer`/`AcceptTrust`, the relay manager needs no change, `Lookup`/`Resolve` are the registry seams. |
-
 ## Context
 
 A phone surfaces a permission/trust modal (`modal_shown`, #716) and the human taps an option. The phone

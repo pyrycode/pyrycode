@@ -6,33 +6,6 @@
 
 ---
 
-## Files to read first
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `cmd/pyry/main.go` | `sessionRouter.resolve` | The single production edit point. Note the load-bearing ordering: the empty-`CurrentSessionID` guard fires **before** any `Lookup`, because `Lookup("")` returns the bootstrap. |
-| `cmd/pyry/main.go` | `boundSession` | The writer `resolve` returns. It is returned **unchanged** on the revive branch — there is exactly one write surface after this ticket. |
-| `cmd/pyry/main.go` | `resolveSpawnDir` | Reused verbatim for AC #4. Already does expandTilde → `confineWorkdirToHomeCreating` → `trustMark`, and already wraps `handlers.ErrSpawnDirRejected` on escape. Do not reimplement any of it. |
-| `cmd/pyry/main.go` | `resolveDefaultCwd` | Why a *default* conversation's recorded `Cwd` converges on the pool's `tpl.WorkDir` — see § "The default-`Cwd` convergence". |
-| `cmd/pyry/main.go` | `sessionMinter.Create` | The mint-time precedent this revive mirrors: `resolveSpawnDir` then a pool call, with the cmd layer as sole validator. |
-| `internal/sessions/get_or_create.go` | `GetOrCreateIn` | The sequence to factor: validate id → `buildSession` → lock → take-path → register → `saveLocked` (rollback on error) → prime skip-set → grab `runGroup` (rollback + `ErrPoolNotRunning` if nil) → `g.Go` → unlock → `Activate`. Only the trailing `Activate` is excluded from the new primitive. |
-| `internal/sessions/pool.go` | `buildSession` | The in-memory shape a revived entry gets: `lcState: stateEvicted`, open `activeCh`, closed `evictedCh` — byte-identical to an idle-evicted session. Also where `spawnDir` becomes `RunnerConfig.WorkDir`. |
-| `internal/sessions/pool.go` | `saveLocked` | Serialises exactly `p.sessions`. This is why AC #2 is satisfied by the *registration*, not by a separate write. |
-| `internal/sessions/pool.go` | `Lookup` | The `ErrSessionNotFound` the revive branch intercepts. |
-| `internal/sessions/pool.go` | `Ready` | Exported readiness signal — the `cmd/pyry` test fixture needs it (the in-package `runPoolInBackground` polls `pool.mu` directly and is not reachable from `cmd/pyry`). |
-| `internal/sessions/registry.go` | `pickBootstrap` | The sole reader of `reg.Sessions`. Confirms non-bootstrap entries are parsed then discarded. **Unchanged by this ticket** — do not touch. |
-| `internal/sessions/id.go` | `ValidID` | Canonical UUIDv4 shape. A non-canonical `CurrentSessionID` is rejected here, which changes an existing test's expectation (see § Testing). |
-| `internal/conversations/conversation.go` | `Conversation` | The `Cwd` and `CurrentSessionID` fields. Read `Cwd`'s doc: it is deliberately decoupled from a running session's captured spawn `WorkDir`, and "the new folder takes effect on the conversation's next fresh session spawn". |
-| `internal/relay/handlers/send_message.go` | `SendMessage` | The `Route`-error → wire-code mapping. **Unchanged**: any non-`ErrConversationNotFound` error is a retryable `server.binary_offline`. |
-| `cmd/pyry/session_router_test.go` | `TestSessionRouter_Route`, `newRouterTestPool`, `stubRunner` | The fixture to extend. Its `conv-dangling` subtest asserts `ErrSessionNotFound` flows through — that assertion changes. |
-| `cmd/pyry/conversation_spawndir_test.go` | `installRecordingTrustMark` | The `trustMark` seam override, plus the constraint that tests using it call `t.Setenv("HOME", …)` and therefore **cannot be `t.Parallel()`**. |
-| `internal/sessions/pool_create_test.go` | `helperPoolCreate`, `runPoolInBackground` | The running-pool fixture the `Revive` unit tests need. |
-| `internal/sessions/pool_spawndir_test.go` | `TestPool_GetOrCreateIn_SpawnsInGivenDir` | The pattern for asserting `spawnDir` reached `RunnerConfig.WorkDir`. Mirror it. |
-| `internal/sessions/pool_test.go` | `TestPool_BootstrapEvictedOnDisk_StartsClaudeOnWarmStart` | The #202 pin. AC #5 is satisfied by this staying green **unmodified**. |
-| `docs/knowledge/features/conversation-session-binding.md` | § "Edge cases & limitations" → "Restart scope" | The deferral this ticket pays. Also § "The `SessionRouter` seam" for the `resolve`/`Route` split contract. |
-
----
-
 ## Context
 
 `Pool.New` materialises exactly one `*Session` from `sessions.json`: the bootstrap. Every other persisted entry is parsed by `loadRegistry`, ignored by `pickBootstrap`, and then erased by the first `saveLocked`. A conversation's `CurrentSessionID` round-trips correctly through the conversations registry, so after a restart a *healthy* binding points at a session the pool does not have. `sessionRouter.resolve` gets `ErrSessionNotFound` from `Lookup` and the `send_message` handler rejects with a retryable `server.binary_offline` — before any enqueue, so the message is never even queued. The thread is permanently dead.

@@ -5,24 +5,6 @@
 
 ---
 
-## Files to read first
-
-Read these before writing anything. This list is the turn-1 data load; the design below assumes you have it.
-
-- `internal/e2e/realclaude/dropped_line_capture_test.go` → `dropcapRedactor`, `dropcapRule`, `add`, `redact` — the mechanism reused **unchanged**. Extract two properties from `add`: the empty-value guard (`strings.ReplaceAll(s, "", x)` inserts `x` between every character), and that it dedups by *value* keeping the **first** rule that claimed it. Both are load-bearing below.
-- same file → `dropcapPathSpellings`, `dropcapSlug`, `dropcapSlugSeparators` — the spelling enumeration (path, its `filepath.EvalSymlinks` form, the project-slug encoding of each) and the `/`, `_`, `.` → `-` map. Extract: a path with no resolved form contributes **two** spellings, not four.
-- same file → `newDropcapRedactor` — the constructor this ticket must **not** reuse. Extract the two things that make it unusable here: it reads `realHome` and `os.TempDir()` on its own, and it formats a `nonce int64` with `strconv.FormatInt`, which never returns `""` so the empty-value guard cannot reach it.
-- same file → the class constants `dropcapClassWorkdir`, `dropcapClassTempHome`, `dropcapClassOperatorHome`, `dropcapClassTempDir` — the four names reused verbatim. Note `dropcapClassNonce`, `dropcapClassSessionID` and `dropcapClassFIFOPath` exist and are **not** reused.
-- same file → `substitutions` — inherited unchanged; not this slice's subject (see § Non-goals).
-- `internal/e2e/realclaude/fixtures.go` → `realHome` — the package var the new construction must never reach, and one of the two names the ban entry adds.
-- `internal/e2e/realclaude/offline_exec_ban_test.go` → `finOfflineExecBans` and `TestFinOfflineFilesReachNoExecHelper` — the map to append to and the AST check it drives. Extract: the check parses **one file's tree** and matches identifiers, so it is per-file syntax and not call-graph; and it produces a subtest only for files that have an entry, so a missing entry is silent.
-- same file → the `initialize_control_record_test.go` and `initialize_control_writer_test.go` entries — this family's standing set, and the prose shape and length an entry is expected to carry.
-- `internal/e2e/realclaude/initialize_control_names_test.go` → the file header — the family's header shape and the `initControl…` identifier-prefix convention this file follows.
-- `internal/e2e/realclaude/permission_protocol_spike_test.go` → `captureClaudeVersion` — one of the banned names; confirms it resolves to a real declaration (AC5).
-- `docs/knowledge/features/e2e-realclaude.md` § the `finding_staging_fill_test.go` (#1304) entry and the `finding_run_gather_test.go` (#1284) entry — the two recorded lessons this design inherits: *redaction and scanning are deliberately different fabric*, and *a redaction test can be vacuous in ways that pass*. Read them before deciding how much each row proves.
-
----
-
 ## Context
 
 This family's committed artifact, `internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json`, carries operator paths right now — re-measured at `df126f8`: `argv[0]` under the operator's home, and the `system`/`init` line's `cwd` and `memory_paths.auto` under `/private/var/folders/…` and `/var/folders/…`. Three of the five fixed classes this package's own deny-scan arms, in a file that got a clean bill from two independent human reads.

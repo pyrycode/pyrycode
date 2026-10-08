@@ -6,27 +6,6 @@
 
 ---
 
-## Files to read first
-
-Read these before writing anything. Every entry names the symbol to read, not a
-line, so the reference stays true as the files move underneath it.
-
-| Path | Symbol | What to extract |
-|---|---|---|
-| `internal/e2e/realclaude/initialize_control_names_test.go` | `initControlFixtureName`, `TestInitControlFixtureName_AvoidsCommittedFamiliesAndStaysContained` | **The whole shape of this ticket.** The one-input namer, its doc comment's CONTRACT / LEXICAL-guarantee / TOTALITY paragraphs, and the three subtests. Its arm half — `initControlArmFixtureName`, `initControlArm`, `initControlArms`, `TestInitControlArmFixtureName_AvoidsCommittedNamesStaysDistinctAndContained` — does **not** apply here and must not be copied. |
-| `internal/e2e/realclaude/inband_bypass_revoke_names_test.go` | `poolRevokeNamePattern`, `anchorFixtureName`, `setModeFamilyGlob` | The row type and the single anchoring helper, both reused verbatim across the family boundary. Read `anchorFixtureName`'s doc comment for why `underTestdata` is the field that decides whether a row asserts anything at all. |
-| `internal/e2e/realclaude/permission_protocol_spike_test.go` | `versionSlug`, `versionSlugSubst`, `captureClaudeVersion`, `writeFixture` | `versionSlug` is the slug helper to reuse — pure, banned nowhere. `captureClaudeVersion` and `writeFixture` are on this file's ban list; read them to see what is being kept out. |
-| `internal/e2e/realclaude/ask_user_question_record_test.go` | `askQuestionFixtureRecord`, `askQuestionFullRecord` | The family's naming vocabulary (`askQuestion*`) and the two version fields the writer will eventually mint a name from. **Read `docs/knowledge/features/e2e-realclaude-ask-user-question-record-test-go.md` rather than this file's own comments before reusing its mutant table** — a false "the mutant compiles" claim shipped in the file's doc comment. |
-| `internal/e2e/realclaude/offline_exec_ban_test.go` | `finOfflineExecBans`, `TestFinOfflineFilesReachNoExecHelper` | The map is keyed by **filename**; a new offline file with no entry gets no subtest and no enforcement. `"ask_user_question_record_test.go"` sits at the head of the map — that is the entry to copy, and the new one goes beside it. The check parses without `parser.ParseComments`, so it cannot answer itself out of a comment. |
-| `internal/e2e/realclaude/permission_protocol_regression_test.go` | `fixtureGlob`, `TestRealClaude_PermissionProtocol_RegressionFixtures` | `"testdata/permission_protocol_v*_*.json"` and the sweep that reads the trailing token as an expected init permission mode. |
-| `internal/e2e/realclaude/dropped_line_capture_test.go` | `dropcapFixtureGlob` | `"testdata/dropped_lines_v*.json"`. |
-| `internal/e2e/realclaude/initialize_control_compare_test.go` | `initControlArmFixtureGlob` | `"testdata/initialize_control_v*_*.json"` — **the fourth family, and the one #1696's table does not carry.** #1764 added it and it is `filepath.Glob`-swept by that file's cross-arm comparison, which expects exactly three arms that agree. It is foreign to *this* family, so it is a required row here. |
-| `docs/knowledge/features/e2e-realclaude-ask-user-question-record-test-go.md` | § *Lessons that outlive this ticket* | The overlay lesson (below), the comment-density floor, and the corrected mutant claim. |
-| `docs/knowledge/features/e2e-realclaude-initialize-control-names-test-go.md` | whole file | #1696's own retro on the file being copied. |
-| `CODING-STYLE.md` | § *Comments — Citing Other Code* | `make cite-guard` is diff-scoped and has no depth or range exemption. Cite symbols. |
-
----
-
 ## Context
 
 The `AskUserQuestion` capture is being built offline before a live run spends

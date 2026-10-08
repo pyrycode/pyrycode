@@ -4,17 +4,6 @@
 
 This is the **wire-vocabulary half only**: add the field to the SSOT struct, the SSOT doc, and the testdata fixtures + round-trip test. No producer wiring, no routing. The producer keeps emitting the zero value (`conversation_id: ""`) until #741 binds it; that is harmless because the mobile consumer (`pyrycode-mobile#336`) is parked.
 
-## Files to read first
-
-- `internal/protocol/messaging.go:36-58` — `SessionTransitionPayload` definition + its doc comment; the sibling `*string`-no-`omitempty` pattern lives just above (`BackfillSincePayload:30-34`). **Extract:** the exact tag/comment idiom; note `WorkspaceCwd` is `*string` (literal-null semantics) but `ConversationID` is plain `string` (no null semantics) — do **not** copy the `*string` shape.
-- `internal/protocol/messaging.go:5-24, :184-198` — the four sibling interactive payloads that lead with `ConversationID string` + `json:"conversation_id"`, no `omitempty` (`SendMessagePayload`, `MessagePayload`, `QueueStatePayload`, `DequeueMessagePayload`). **Extract:** the field is always the **first** field and the routing key — mirror that placement.
-- `internal/protocol/envelope_test.go:11-27` — `canonical` is **`json.Compact` only** (it does *not* sort keys) and `readFixture`. **Extract (critical):** the round-trip byte-equal check is **sensitive to JSON key order**. Struct field order, fixture-payload key order, and doc-table row order must all line up, or `TestSessionTransitionPayload_RoundTrip` fails. See § Gotcha.
-- `internal/protocol/messaging_test.go:120-204` — `TestSessionTransitionPayload_RoundTrip`, table-driven over the two fixtures, per-field assertions + a byte-equal regression guard. **Extract:** add a `wantConvID` column and one assertion in the existing style; the byte-equal check needs no new logic, only correct fixtures.
-- `internal/protocol/testdata/session_transition.json` and `session_transition_workspace.json` — single-line envelope fixtures. **Extract:** the exact `payload` key order to edit.
-- `docs/protocol-mobile.md:554-568` — §`session_transition` field table + invariant prose; `:540` (`turn_end` table) shows a sibling that leads its table with a `conversation_id` row; `:434` is the one-line events-index row (no field detail). **Extract:** where to insert the new table row, and confirm `:434` needs no change.
-- `cmd/pyry/session_transition_v2.go:163-184` — `toWirePayload` (the producer, #657). **Read-only context, do not edit:** it uses **keyed** composite literals, so adding a field compiles untouched and emits `conversation_id: ""`. This is the proof that #740 has zero producer fan-out.
-- `internal/protocol/compat_test.go` — **do not edit.** It reads no fixtures; it only asserts `TypeSessionTransition`'s v1-incompatibility and v2 type-set membership, which a payload-field addition does not affect (per the ticket).
-
 ## Context
 
 `SessionTransitionPayload` is the only interactive v2 event with no `conversation_id`. Every other interactive payload carries it as a plain `string` routing key and routes by it; `session_transition` does not, leaving `pyrycode-mobile#336` with no key to fold the session-boundary marker into the correct thread. This ticket gives the payload the same routing-key shape as its siblings. The producer-side binding (populating the field from a real conversation↔session binding) is the sibling ticket #741, which is `addBlockedBy` this one.

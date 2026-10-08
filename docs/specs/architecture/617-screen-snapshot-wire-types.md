@@ -19,43 +19,6 @@ consumer. (Same reasoning #607 used versus #608.)
 
 ---
 
-## Files to read first
-
-Read these before writing anything; this is the turn-1 data load.
-
-- `internal/protocol/interactive.go` (whole, 78 lines) — **the per-type struct-file template.** Copy
-  its shape exactly: file-level doc comment stating "wire vocabulary only," per-struct doc comment
-  pointing at the `docs/protocol-mobile.md §`, **no `omitempty` on any field**, pure data (no methods).
-- `internal/protocol/interactive_test.go:9-53` — the `roundTripEnvelope(t, env, payload, raw)` helper
-  and `TestTurnStatePayload_RoundTrip`. **REUSE `roundTripEnvelope` — it is in this package already;
-  do NOT redefine it** (redefinition is a compile error). Mirror the per-type test body.
-- `internal/protocol/envelope_test.go:11-27` — `canonical(t, b)` and `readFixture(t, name)` helpers
-  (same package, reuse directly). `:43-49` — the **`env.TS.Equal(wantTS)`** comparison pattern; the
-  `ts` field on `screen_snapshot` follows it verbatim.
-- `internal/protocol/codes.go:64-105` — the two existing v2-only `Type*` const blocks (control block
-  `TypeRekeyRequest`; interactive block `TypeTurnState…`). The new block mirrors these, including the
-  block-level comment stating the constants MUST NOT be added to `v1TypeSet`.
-- `internal/protocol/envelope.go:80-125` — `IsV1Compatible` + `v1TypeSet`. **The load-bearing
-  absence: the two new constants MUST NOT be added to `v1TypeSet`.** `IsV1Compatible` returns
-  `ErrUnknownType` for any type not in that set — which is exactly what AC #2 requires for both.
-- `internal/protocol/compat_test.go:27-46` (the `IsV1Compatible` rejection-case table), `:80-97`
-  (the test-local `v2OnlyTypes` map), `:99-137` (`TestTypeConstants_V1V2Partition`). These are the
-  three edit sites for the partition. **Do NOT touch `TestV1TypeSet_CoversAllExportedTypeConstants`
-  (`:57-78`) or its hardcoded `16`** — the new types are not v1 types, so that count is unchanged.
-- `internal/protocol/testdata/turn_state.json` — fixture format: a single-line JSON envelope
-  `{"id","type","ts","payload":{…}}`. Both new fixtures follow this exactly.
-- `docs/protocol-mobile.md:396-423` — Application message types table (add two rows).
-  `:464-512` — Interactive events section (style template for the new "Screen snapshot" section).
-  `:219-236` — `rekey_request` shape (style template for documenting an inbound control type).
-- `docs/PROJECT-MEMORY.md` § Project-level conventions — the **`time.Time` round-trip discipline**
-  (monotonic reading strips on marshal; compare with `time.Time.Equal`, never `==`/`reflect.DeepEqual`).
-- `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md` § Safe degradation and
-  § Wire-protocol extension — the source pinning both shapes and the no-raw-bytes invariant on
-  `screen_snapshot.text` (parser-independent floor; survives any parser break; backs the stall
-  fallback).
-
----
-
 ## Context
 
 ADR 025 § Safe degradation makes an always-available, parser-independent **screen snapshot** the floor

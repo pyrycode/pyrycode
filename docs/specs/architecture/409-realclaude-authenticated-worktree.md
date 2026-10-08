@@ -3,16 +3,6 @@
 Ticket: [#409](https://github.com/pyrycode/pyrycode/issues/409)
 Size: XS (one new helper ~15 LoC + one test ~40 LoC, additive only)
 
-## Files to read first
-
-- `internal/e2e/realclaude/fixtures.go:29-37` — `WithWorktree(t)`. The new helper is a thin wrapper around this; mirror the `t.Helper()` call, doc-comment density, and return shape.
-- `internal/e2e/realclaude/fixtures.go:87-142` — `RunPyryAgentRun`. Note line 123: `cmd.Env = append(os.Environ(), opts.ExtraEnv...)`. The subprocess already inherits the full outer env including any `ANTHROPIC_API_KEY`; no change to `RunPyryAgentRun` is required for the new helper to work. The new helper's only job vs. plain `WithWorktree` is to **gate the test on the presence of an outer-env credential** and pin the value into the test process so the inheritance is deterministic.
-- `internal/e2e/realclaude/fixtures_test.go:22-55` — `TestWithWorktree_ReturnsExistingHomeIsolatedDir`. Patterns: build-tag header, `realclaude` package (not `_test`), `os.Stat` + `os.UserHomeDir` shape, nested-subtest HOME-restore check. The new test sits in the same file and reuses these idioms.
-- `internal/e2e/realclaude/per_agent_test.go:83-133` — `runRoleSmokeTest`. The canonical real-claude assertion shape: `ExitCode == 0` → `SessionID != ""` → `parseResultTrailer` → walk JSONL for the last `assistant`-kinded event with `EndOfTurn && TextChars > 0`. Reuse the same five-step shape and the file-local `truncate` helper.
-- `internal/e2e/realclaude/per_agent_test.go:104-114` and `internal/e2e/realclaude/tool_loop_test.go:190-203` — `parseResultTrailer` + `resultTrailer.PermissionDenials` shape. Used in the assertion phase to keep diagnostic output consistent with siblings.
-- GitHub issue body, §"Evidence (#383 trace)" — the synthetic `"model":"<synthetic>"` + `"error":"authentication_failed"` envelope the test pins against. The test asserts those substrings are NOT present in `result.Stdout` as a belt-and-suspenders check beyond the structural assertions.
-- `agents/architect/security-review.md` — the security-review pass appended at the end of this spec follows that template. Ticket is labelled `security-sensitive`; the appended section is the required output.
-
 ## Context
 
 `WithWorktree(t)` pins `$HOME` to a per-test temp directory so the in-test process and any spawned subprocess resolve `os.UserHomeDir()` identically. That isolation is load-bearing for the existing tests (`ReadJSONL` depends on it; the JSONL session files claude writes must end up under the pinned `HOME`). **But the pinned `$HOME` also hides any credential material claude would normally find under the real `~/.claude/`.** On platforms / shells where claude's auth lives in a file under `~/.claude/` (Linux; macOS sessions that can't reach the user Keychain), the subprocess returns a synthetic `"Not logged in"` assistant message with `"error":"authentication_failed"` and exits 1 — before any model/tool/permission code path runs.

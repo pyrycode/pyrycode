@@ -6,22 +6,6 @@
 
 ---
 
-## Files to read first
-
-- `cmd/pyry/interactive_modal_v2.go:30-137` — `interactiveModalEmitterV2`, the outbound surfacer. **The whole change lives here.** Extract its body into a `handleModalShown`; add a `handleModalHidden`; the `ActiveConns → Interactive → nextID → Push` fan-out loop (lines 113-136) is the shape the local dismissal reuses (factor it into a private helper). Note the struct doc comment's single-goroutine invariant (lines 21-24) — the two new tracking fields must be added to it.
-- `internal/modalbridge/modal.go:74-186` — `Outstanding` (75-82), `Registry` + its leaf mutex (84-93), and the one-shot `Resolve` (178-186) **which is the first-answer-wins arbiter** (first caller deletes + gets `ok`; second gets `!ok`). Also `Lookup` (168-173) and `Record` (145-164, the nonce mint site). Read but **do not modify** — the registry contract is complete.
-- `internal/relay/v2session.go:376-413` — `ModalDismissal` struct (379) + `ModalResolver` interface (391): the remote arm's source/outcome vocabulary.
-- `internal/relay/v2session.go:1601-1656` — `broadcastModalDismissed`: the **relay sibling broadcast site**. The local dismissal must produce a byte-identical `ModalDismissedPayload` envelope shape (`{ModalID, Outcome, Source}`, `Type: TypeModalDismissed`). Read for shape-parity; **do not** call it from the emitter (it iterates `m.sessions` on the Run goroutine and must not be reached from the producer goroutine).
-- `cmd/pyry/modal_resolve_v2.go:56-150` — `ResolveCancel` / `ResolveTimeout`: the **precedent pattern** this ticket mirrors on the local side — `Resolve` (consume) → best-effort actuation → `audit.Log` → return a `{Outcome, Source}` dismissal, with **one vocabulary feeding both the wire dismissal and the audit entry**. The no-device-timeout audit shape (empty `DeviceHash`/`DeviceLabel`) is exactly what the local path uses.
-- `internal/audit/audit.go:36-81` — `Outcome` consts (43-49, **add `OutcomeDismissedLocal` here**), `Source` consts (57-61, **`SourceLocal` already exists, reserved for #706** at line 60), `Entry` (27-34), `Log` (69-81).
-- `internal/protocol/messaging.go:149-162` — `ModalDismissedPayload`: the wire struct; its doc already names the closed `source` set `{remote, local, timeout}` and the producer-defined-sentinel `outcome`.
-- tui-driver `pkg/tuidriver/events.go:36-44, 101-128, 263-287` — `EventKindPtyModalHidden` semantics: **`Modal` carries the just-hidden class**; on a class→class change the merge loop emits **`Hidden(old)` immediately before `Shown(new)`**; only one modal is active at a time (the transition only fires on `cur.modal != prev.modal`). `Event.Modal` is a `tuidriver.ModalClass`.
-- `cmd/pyry/interactive_modal_v2_test.go` (whole, 205 lines) + `cmd/pyry/interactive_turn_v2_test.go:28-63` — `fakeInteractiveBcast` (records every `Push` into `pushes`; **`ActiveConns` reuses the last snapshot when calls exceed the scripted list**, so one snapshot serves a Shown-then-Hidden sequence), `fakeArmer`, `newModalEmitterTestDeps`, `pushesFor`, `recordedPush`. Reuse all of these.
-- `internal/protocol/testdata/modal_dismissed.json` — golden dismissal envelope; the test decodes a pushed envelope as `protocol.ModalDismissedPayload` and asserts `{outcome: "dismissed_local", source: "local"}`.
-- `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md:134-140` — Security model §4: *"If the local `pyry attach` terminal answers a modal, the binary emits `modal_dismissed{local}`; the phone's pending answer becomes stale and is rejected."* This ticket implements §4.
-
----
-
 ## Context
 
 A surfaced permission/trust modal can be resolved by **two heads**: the local `pyry attach` TTY (operator types `1`/Esc directly into claude) or a paired phone (`modal_answer`/`modal_cancel`). Three failure modes must be closed:

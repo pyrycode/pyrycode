@@ -2,13 +2,6 @@
 
 Pure predicate `ShouldArchive(c, now)` over the `Conversation` type. No I/O, no clock injection, no goroutines. Underpins the Phase 3 sweep ticket (#220) by isolating the archival rule from the timer/loop that will call it.
 
-## Files to read first
-
-- `internal/conversations/conversation.go:29-72` — `Conversation` struct, specifically the `IsPromoted` and `LastUsedAt` field semantics. The predicate reads these two fields only.
-- `internal/conversations/conversation_test.go` — table-driven test idiom in this package (stdlib `testing`, struct-of-cases pattern, `time.Date(...)` for deterministic timestamps without monotonic component). Mirror the style.
-- `CODING-STYLE.md` — gofmt, doc comment style, table-driven tests.
-- `docs/specs/architecture/216-conversation-type.md` — context for why `IsPromoted` is the auto-archive exemption bit and why `LastUsedAt` is "always present" (no zero-value handling needed at this layer).
-
 ## Context
 
 Phase 3 auto-archive policy: unpromoted conversations idle for ≥30 days are archived; promoted channels are exempt. Splitting the policy into a pure predicate (this ticket) and a sweep loop (#220) lets us unit-test the rule with plain `time.Time` literals — no fake clock, no test goroutines, no scheduler — and keeps the sweep code thin enough to test by exercising only its I/O contract.
@@ -101,6 +94,3 @@ Skip a "promoted with recent activity" row — it tests the same `IsPromoted` sh
 
 Construct the `Conversation` literal inline per row (not a shared fixture) — only `IsPromoted` and `LastUsedAt` matter; the other fields can stay at zero values without affecting the predicate. This keeps each row readable on its own.
 
-## Open questions
-
-None.

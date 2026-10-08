@@ -27,54 +27,6 @@ ticket demands — what to do with the payload's required `Cwd`, which `Registry
 does not consume — is resolved in § The Cwd decision below, and drives the
 `security-sensitive` verdict.
 
-## Files to read first
-
-The developer's turn-1 data load. Read these before writing anything.
-
-- `cmd/pyry/relay.go:404-499` — the `V2SessionConfig.Handlers` map literal. **The one
-  production edit lands here**: a `protocol.TypePromoteConversation:` entry alongside the
-  neighbouring conversation-write verbs (`TypeRenameConversation` line 407 is the closest
-  shape twin). Note each entry's constructor-argument pattern.
-- `internal/relay/handlers/rename_conversation.go` (whole file, ~130 lines) — **the
-  primary clone target.** Same reply type (`conversation_updated`), same
-  `reg`/`registryPath`/`logger` constructor shape, same empty-name guard, same "log the id
-  not the user-content name" discipline. The promote handler is this file with
-  `Registry.Promote` substituted for the inline `Update` closure and one extra read-back.
-- `internal/relay/handlers/change_workspace.go` (whole file) — the `security-sensitive`
-  sibling. **Read it for what promote must NOT do**: change_workspace consumes an untrusted
-  `Cwd` and must confine it; promote deliberately does not (§ The Cwd decision). Its
-  malformed-branch logging discipline (conn_id only, `change_workspace.go:121`) is the one
-  promote adopts over rename's (rename logs the decode err).
-- `internal/conversations/registry.go:296-346` — `Registry.Promote(id, name) error`
-  contract and its four error sentinels (`ErrPromotionNameEmpty`,
-  `ErrConversationNotFound`, `ErrConversationAlreadyPromoted`, `ErrPromotionNameInUse`).
-  **Every one must be mapped** (§ Error handling). Note: Promote locks internally and
-  returns only `error` — it does NOT return the updated record.
-- `internal/conversations/registry.go:142` — `Registry.Get(id) (Conversation, bool)`. The
-  read-back the handler uses to build the reply after a successful Promote (Promote does
-  not return the row). Returns the `Conversation` **by value** (race-safe snapshot).
-- `internal/protocol/conversations_write.go:35-44` — `PromoteConversationPayload`
-  (`conversation_id`, `name`, `cwd`, all value strings, all spec-required). **Do not modify
-  this struct** — the `Cwd` field stays on the wire (client symmetry); the daemon simply
-  does not consume it.
-- `internal/protocol/conversations_write.go:112-131` — `ConversationUpdatedPayload`, the
-  reused reply (same one rename/archive/change_workspace return).
-- `internal/protocol/codes.go` — `CodeConversationNotFound`,
-  `CodeConversationAlreadyPromoted`, `CodeProtocolMalformed` (the three wire codes this
-  handler emits); `TypePromoteConversation` / `TypeConversationUpdated`.
-- `internal/relay/handlers/register_push_token.go:128` — `replyError(ctx, c, env, code,
-  message, retryable)` helper (shared across handlers; the reject-branch primitive).
-- `internal/e2e/relay_v2_daemon_test.go` (whole file) — **the e2e clone target.**
-  `testV2DaemonListConversationsRoundTrip` (line 89) is the exact scaffold: pair a device,
-  seed `conversations.json`, `StartInWithEnv(... "PYRY_MOBILE_V2=1")`, drive the Noise
-  handshake via `driveHandshakeToOpenDaemon`, seal a request with `initSend.Encrypt`, read
-  the reply with `readInnerFrame` + `initRecv.Decrypt`. `decryptInnerEnvelope` (line 378)
-  and the foreign-id `conversation.not_found` assertion in
-  `testV2DaemonRequestSnapshotRoundTrip` (line 292) are the error-branch pattern.
-- `docs/specs/architecture/823-change-workspace-wire-verb.md` § Security review — the
-  format and depth the appended review section mirrors (promote's is simpler: no
-  file-operation surface).
-
 ## The Cwd decision (the architect's mandated call)
 
 `PromoteConversationPayload` carries a **required `Cwd`** that `Registry.Promote(id, name)`

@@ -2,24 +2,6 @@
 
 Split from #313 (parent salvaged; reusable Files-to-read-first and wire-surface notes are at `docs/specs/architecture/313-send-message-handler.md` on `feature/313`). Scope here is **strictly inbound**: phone → `send_message` → supervisor write → synchronous `ack` (or refusal). Assistant-turn delivery is #311.
 
-## Files to read first
-
-- `internal/relay/handlers/register_push_token.go` (full file) — sibling handler this spec mirrors for file layout, factory shape, `replyAck`/`replyError` helper idiom, and logging posture. **Do NOT mirror its wider branch set** — `send_message` has fewer branches because the validation surface is upstream.
-- `internal/relay/handlers/register_push_token_test.go:30-106` — `testLogger`, `newTestConn`, `makeRequest`, `assertEnvelopeShape` helpers. Copy the pattern (don't try to share — each handler test file keeps its own copies, see #319 spec). Use `protocol.TypeSendMessage` and `protocol.SendMessagePayload` shapes instead of register_push_token's.
-- `internal/dispatch/dispatch.go:82-149` — `Conn.Auth()`, `Conn.NextID()`, `Conn.Reply(ctx, req, respType, payload)`. `Reply` (lines 141–149) is load-bearing: it stamps `id`, `in_reply_to`, `ts` so the handler never touches them. Mirror the existing handler's use of `Reply` for the wire envelope.
-- `internal/dispatch/dispatch.go:95-110` — `NewTestConn(id, outbound, auth)` constructor (added in #319). Exact seam the unit tests use to drive a real `*Conn` without a full dispatcher.
-- `internal/supervisor/supervisor.go:140-174` — `Supervisor.WriteUserTurn(id, payload) error`. Contract: when `ValidateConversation` is wired (pool's bootstrap path does this), unknown ids return `conversations.ErrConversationNotFound` verbatim; PTY write failures wrap with prefix `"supervisor: write user turn:"`.
-- `internal/sessions/pool.go:350-362` — confirms the bootstrap session's `ValidateConversation` closure returns `conversations.ErrConversationNotFound` for unknown ids. This is the upstream guarantee the handler's sentinel mapping relies on.
-- `internal/sessions/session.go:100-115` — existing one-line delegation pattern (`Session.State()` → `s.sup.State()`). The new `Session.WriteUserTurn` sits in the same delegation cluster.
-- `internal/conversations/registry.go:25` — `ErrConversationNotFound` sentinel.
-- `internal/protocol/codes.go:22` — `CodeConversationNotFound = "conversation.not_found"`. **Note the singular wire string**; the AC text reads `conversations.not_found` (plural) — see Open Questions §1. Use the existing constant.
-- `internal/protocol/codes.go:44-46` — `TypeSendMessage`, `TypeAck`, `TypeError`.
-- `internal/protocol/messaging.go:7-11` — `SendMessagePayload{ConversationID, MessageID, Text}`.
-- `internal/protocol/handshake.go:39-48` — `AckPayload`, `ErrorPayload` shapes.
-- `cmd/pyry/relay.go:86-93,128-134` — `startRelay` signature + the `dispatch.New` block where `d.Register(...)` calls live. New register call lands immediately after the existing `register_push_token` line. The function also takes a new parameter — see Design § Wiring.
-- `cmd/pyry/main.go:447-481` — current ordering: `startRelay` is called BEFORE `sessions.New`. Reorder so the pool is built first; pass `pool.Default()` into `startRelay`. None of `sessions.New`'s inputs depend on the relay.
-- `docs/PROJECT-MEMORY.md` § "Project-level conventions" — refusal-to-wire-code mapping is the **consumer's** job (this handler is the consumer). The handler depends on `internal/conversations` only for the sentinel; the wire code lives in `internal/protocol`.
-
 ## Context
 
 The dispatcher (#307) routes per-conn frames through `dispatch.Handler` callbacks. `Supervisor.WriteUserTurn` (#312) accepts `(conversation_id, payload []byte)` and returns `conversations.ErrConversationNotFound` for unknown ids via the configured validator. The bootstrap session's supervisor wires that validator (pool.go:355). The sibling `register_push_token` handler (#319) established the factory + closure shape used here.

@@ -6,30 +6,6 @@ Line numbers as of `9b7a51d`; **locate by symbol name, not by line.**
 
 ---
 
-## Files to read first
-
-Turn-1 data load. Read these before writing anything.
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:203-234` | `finTrailerBuild` — the signature you change, the `Bounded` derivation you must NOT touch (`:209-215`), the guard you rewrite (`:218`), the two Detail shapes. |
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:82-155` | `finTrailerRecord`. The ten flat scalars, `:86-94`'s two claims (AC5 items 1–2), and `:112-124`'s `StopReason` caveat — **the reason the new trap-free claim must not over-claim.** |
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:159-202` | The builder's doc block. `:168-171` (AC5 item 3) and `:192-202` (AC5 item 4). `:173-190` (outcome consumed, never decided) is unchanged by the new input — leave it. |
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:238-252` | `finTrailerSeenScan` / `AbsentScan` / `AbortedScan`. The new helper goes immediately after these, same tier. |
-| `internal/e2e/realclaude/finding_trailer_evidence_test.go:263-311` | The bound table and the **`synthetic` field idiom** (`:270-272`, used at `:305-309`) the new test's false arm must be named in. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:346-356` | `finSighting` — the eight fields, the json tags, the `CarriesTrailer` pair. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:442-453` | **The fill the new helper must be a copy of.** State operand first, four scalars only behind the pair. `:438-441` is #1309's declined-constructor reason; `:443-447` is the agreement obligation that lands on the helper. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:1595-1680` | `TestFinGatherSightingScalarsComeFromTheFullLineDecode` — where the retiring `:430-470` row's claim already lives, one tier down. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:1696-1722` | `TestFinSightingReachesNoScanType` — the **checked** proof that `finSighting` reaches no scan type. Every "trap-free by construction" sentence you write cites this, not a comment. |
-| `internal/e2e/realclaude/finding_run_record_test.go:464-479` | Two of the nine call sites. |
-| `internal/e2e/realclaude/finding_artifact_write_test.go:165-192` | `finWriteTrailerPad = 0` and `finWritePlantedTrailerScan` — the in-cap plant. Do **not** repad. |
-| `internal/e2e/realclaude/finding_artifact_write_test.go:263-287` | The ninth call site, inside `finWriteInputs`. |
-| `internal/e2e/realclaude/finding_artifact_write_test.go:899-940` | `TestFinWriteArtifactPublishesNoVerbatimModelOutput` — **the surviving true-arm pin.** Read it before deciding what the new test owes. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:52-90` | The three scan states and the three lateness discriminators, by name. |
-| `CODING-STYLE.md` | Table-driven tests, stdlib only, error-message register. |
-
----
-
 ## Context
 
 `finTrailerBuild` projects a run's outcome plus its trailer evidence onto the published `finTrailerRecord`. It takes a `trailObservation` today, which embeds `trailScanResult` — so `.Line` (verbatim model output, OPERATOR-REVIEW-BEFORE-PASTE, ~415 of its retained 512 bytes being the assistant's last message) and the `*resultTrailer` are both in the builder's reach. That is why `finGatherReadings` will not hand its observation back, and why the live composition currently has no way to build a record from the sighting it classified against.

@@ -51,10 +51,6 @@ Unchanged shapes: nil device → `denied_unauthorized` audit, modal/batch left o
 - `question_resolve_v2_test.go`: `GateDeniesBeforeConsume` keeps only the nil row; new table over `questionArms`: a bit-off device answers/refuses → true, batch consumed, one `allowed`/`denied` record. The three-record audit test's unauthorized case uses a nil device (identity expectation empty for that record).
 - Mint and MCP refusal tests, including `internal/e2e/relay_v2_mcp_actuation_test.go`, run unedited.
 
-## Open questions
-
-None.
-
 ## Documentation handoff (pending — documentation stage)
 
 - `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md` § "Security model — remote permission granting (default-safe)": dated amendment (2026-09-24, #2605): any authenticated device may answer permission/trust/destructive modals and question batches; the per-device bit gates only minting pairings and MCP actuation; a stolen unprivileged pairing can approve a tool call, accepted because view-only clients are not wanted. Alternative "C. Auto-grant on timeout (or no per-device gate)" gains a pointer to the amendment.

@@ -2,28 +2,6 @@
 
 **Size:** S (confirmed, not overridden). One production file, one new test file, no signature change, no consumer call sites.
 
-## Files to read first
-
-Symbols, not line numbers — resolve each with `codegraph_search` / `codegraph_node`.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `cmd/pyry/interactive_turn_v2.go` | `flushDelta` | The whole contract you are changing: no-op-on-empty, one `emitMapped`, one `seq++`, reset, `flushTimer.Stop()`. Every line of its doc comment is load-bearing and needs updating. |
-| `cmd/pyry/interactive_turn_v2.go` | `coalesceWindow` | Where the new constant goes, and the file's comment register for a tunable. |
-| `cmd/pyry/interactive_turn_v2.go` | `emitMapped`, `emit` | `emitMapped` reads `e.seq` off the struct (so `seq++` must land *between* chunk emits, not before or after the loop); `emit` mints one ring `eventID` and one per-conn `env.ID` per call. Both stay unchanged. |
-| `internal/relay/v2bundlestream.go` | `bundleChunkBytes`, `bundleEnvelopes` | **The pattern this ticket mirrors.** The cap-constant comment style (observed expansion, arithmetic, "if the test fails, LOWER this — never raise it") and the ceil-division chunk loop. |
-| `internal/relay/v2bundlestream_test.go` | `TestStreamBundle_EveryFrameWithinCap` | The "different fabric" per-frame cap test this ticket's cap test mirrors. |
-| `internal/protocol/interactive_test.go` | `maxV2AppEnvelope`, `TestBackgroundTaskPayloads_FitV2EnvelopeCap` | The test-local `65519` constant convention (do **not** export one) and the `<`-fill rationale — including the two secondary facts worth restating: a NUL fill measures identically, and a 4-byte emoji fill measures like `a` because Go emits multi-byte runes raw. Copy the reasoning; write your own code. |
-| `internal/protocol/envelope.go` | `Envelope` | The fields that ride *outside* the payload — `id`, `type`, `ts`, `payload`, `event_id`. This struct's marshalled form is exactly what the cap measures. |
-| `internal/protocol/interactive.go` | `AssistantDeltaPayload` | The four payload fields and their JSON names; no `omitempty` anywhere, so all four always cost bytes. |
-| `internal/turnbridge/outbound.go` | `MapEvent` | Confirms `TextChunk.Text` crosses to `AssistantDeltaPayload.Text` verbatim with no cap. **Do not add one here** — see § What not to touch. |
-| `internal/relay/v2session.go` | `forwardEnvelope`, `marshalInnerFrameV2` | Read to confirm the cap surface is the marshalled `protocol.Envelope` (`envJSON`), before `Encrypt` adds the 16-byte tag. **Do not modify** — explicitly out of scope. |
-| `cmd/pyry/interactive_turn_v2_test.go` | `fakeInteractiveBcast`, `assistantDeltas`, `pushTypes`, `stubCursor`, `discardLogger`, `testConvID` | The harness the new tests reuse (same package, no new doubles needed). `fakeInteractiveBcast.pushes` records the exact `protocol.Envelope` that `forwardEnvelope` would marshal — that is the AC #1 measurement point. |
-| `cmd/pyry/interactive_turn_v2_test.go` | `TestInteractiveTurnEmitterV2_OneSeqPerCoalescedDelta`, `TestInteractiveTurnEmitterV2_NoAppOutputLogLeak` | Two of the tests that must stay green **unmodified** — see § Stays green. |
-| `internal/eventring/ring.go` | `MaxEventsPerConversation` | 1024 per conversation; chunking now consumes N slots where it consumed 1. Read for the note in § Interactions. |
-| `internal/relay/v2session_modal.go` | `queuedEnv` | The `droppable = env.Type == protocol.TypeAssistantDelta` policy (#610). Read for the note in § Interactions. |
-| `docs/protocol-mobile.md` | § "Application-envelope size cap" and § `assistant_delta` | The 65519 derivation, and the field table that **already** permits N deltas per turn — which is why this ticket changes no wire contract. |
-
 ## Context
 
 `docs/protocol-mobile.md` § Application-envelope size cap caps the decrypted v2 application envelope at 65519 bytes (Noise's 65535-byte transport message minus the 16-byte AEAD tag). Nothing on the outbound assistant-text path enforces it: `flushDelta` emits the whole `deltaBuf` as one `assistant_delta`, `MapEvent` passes `Text` verbatim, and `forwardEnvelope` marshals-and-seals with no size check. `flynn/noise`'s `CipherState.Encrypt` checks only `invalid` and `MaxNonce`, so there is no accidental backstop either.

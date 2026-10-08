@@ -1,26 +1,5 @@
 # #301 — Wire `relay.Connect` into the pyry daemon startup
 
-## Files to read first
-
-- `cmd/pyry/main.go:387-499` — `runSupervisor` startup path; this is where the relay goroutine attaches.
-- `cmd/pyry/main.go:78-109` — `resolveSocketPath` / `resolveRegistryPath` family; `resolveServerIDPath` follows the same shape.
-- `cmd/pyry/pair.go:38-104` — `resolveServerIDPath`, `resolveConfigPath`, `resolveRelay` precedence helper to mirror.
-- `cmd/pyry/pair.go:166` — `identity.LoadOrCreate(resolveServerIDPath(...))` — the load path to reuse.
-- `internal/relay/connection.go:96-139` — `Connect`, `Config`; the wss-only check at line 113-116 is what the test seam relaxes.
-- `internal/relay/connection.go:163-179` — `Wait` / `Close` lifecycle; the goroutine drives off these.
-- `internal/relay/connection.go:183-212` — `run` loop: shows transport reconnect happens internally, terminal classification surfaces via `Wait`.
-- `internal/relay/connection.go:295-302` — `classifyTransportErr`; `ErrServerIDConflict` is the only fatal classification today.
-- `internal/relay/connection_test.go:250-273` — `connectWithClient` test seam; the new `AllowInsecureScheme` field replaces it for production-shaped Connect calls.
-- `internal/config/config.go` — the on-disk schema; `RelayURL` field + `DefaultConfig()` precedence base.
-- `internal/identity/server_id.go`, `store.go` — `LoadOrCreate` returns canonical UUIDv4 `ServerID`; never overwrites on existing-file path.
-- `internal/transport/wssclient.go:181-220` — `Connect` reconnect-on-non-fatal-close behaviour confirms architect's "no goroutine-side reconnect logic" decision.
-- `internal/e2e/internal/fakerelay/fakerelay.go:37-229` — current fakerelay; § "Deviations from the production wire spec" calls out HTTP 409 vs WS 4409.
-- `internal/e2e/internal/fakerelay/fakerelay.go:151-229` — `handleBinary`; the conflict path becomes mode-switchable, hello dispatch is appended.
-- `internal/e2e/internal/fakerelay/fakerelay.go:332-373` — `binaryRecvPump` / `binarySendPump`; the new hello detection slots in alongside the existing routing-envelope path.
-- `internal/e2e/harness.go:200-220, 318-394` — `StartIn` + `spawnWith`/`spawnOpts` for the e2e test (`extraEnv` + `extraFlags` patterns).
-- `cmd/pyry/main.go:444-475` — `signal.NotifyContext` `cancel` is the single shutdown lever; the relay goroutine reuses it.
-- `docs/protocol-mobile.md` § Error codes line 552 — `4409` is the server-id-already-claimed close code.
-
 ## Context
 
 `internal/relay.Connect` ships as a pure library; nothing in `cmd/pyry` or `internal/supervisor` imports it, so the daemon never opens a relay connection. The `RelayURL` field in `config.Config` is consumed only by `cmd/pyry/pair.go` to mint the QR payload.

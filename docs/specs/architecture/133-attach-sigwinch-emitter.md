@@ -1,18 +1,5 @@
 # #133 — `pyry attach` forwards SIGWINCH to daemon
 
-## Files to read first
-
-- `internal/control/attach_client.go` (whole file, ~140 lines) — the function being extended. The SIGWINCH watcher hooks in between the handshake ack (line 65) and `copyWithEscape` (line 83). The Phase-0 caveat at lines 25-27 is rewritten by AC#4.
-- `internal/control/client.go:68-92` — `SendResize` signature and the "don't retry on transient failure; the next SIGWINCH re-emits" contract that this ticket consumes verbatim.
-- `internal/control/protocol.go:32-79` — `VerbResize`, `ResizePayload`. Confirms the wire shape; nothing in this package changes here. The "deferred to #133" parenthetical at line 62 is informational only — it's already accurate.
-- `internal/supervisor/winsize.go` (whole file, 58 lines) — the existing daemon-side SIGWINCH pattern in this codebase. The new client-side watcher mirrors its structure: `signal.Notify` + buffered chan(1) + `done`-driven goroutine + `signal.Stop` + close on teardown. Two deltas vs that file: (a) the client-side watcher does **not** prime once at startup (the handshake `AttachPayload` already covers initial sizing — AC#2), and (b) teardown is **synchronous** (stop blocks until the goroutine exits), which is the load-bearing part of AC#3 in this ticket.
-- `internal/supervisor/winsize.go:40-57` — `resizeOnce`. Pin the `term.IsTerminal` guard idiom and the rationale for not wrapping `os.Stdin.Fd()` in a fresh `*os.File` (lessons.md / PROJECT-MEMORY 2026-05-02 — finalizer-induced fd reuse races). The new client helper reuses `os.Stdin` directly for the same reason.
-- `internal/control/resize_test.go:207-288` — `TestSendResize_RoundTrip` and `TestSendResize_ServerError`. The pattern for the new SIGWINCH→resize unit test: hand-rolled `net.Listen`, server-goroutine that decodes the request, asserts on the decoded payload, encodes a `Response{OK: true}`. The new test reuses this shape; only the trigger differs (a real `syscall.Kill(os.Getpid(), syscall.SIGWINCH)` instead of a direct `SendResize` call).
-- `internal/control/attach_test.go:746-864` — `TestAttach_ClientSendsSessionID` and `TestAttach_EmptySessionIDOmittedOnWire`. Same hand-rolled-listener pattern; confirms the wire-shape test idiom established for `Attach`.
-- `cmd/pyry/main.go:445-474` — `runAttach`. No changes here; `socketPath` and `sessionID` are already in scope for `Attach` and flow through unchanged.
-- `docs/specs/architecture/137-resize-wire-message.md` (whole spec) — what this ticket consumes upstream. The "Data flow" section ends with "Client (e.g. pyry attach SIGWINCH handler — landed by #133)" — that handler is what this ticket lands.
-- `docs/specs/architecture/136-bridge-resize-seam.md` (Concurrency model section, ~30 lines) — confirms the server-side concurrency contract the SIGWINCH burst will exercise. Nothing changes here; it's load-bearing context for "is it OK if the user drags the window corner and we emit ten resizes in a row?" → yes, `Bridge.ptyMu` serialises and last-write-wins is the only meaningful semantic.
-
 ## Context
 
 `Bridge.Resize` (#136) and the `VerbResize` wire+server-applier (#137) shipped together: the daemon already accepts a resize message on a fresh control connection, swaps cols/rows, clamps to `uint16`, and applies via the seam. The remaining gap is the **trigger** on the client side. `pyry attach` (`internal/control/attach_client.go`) installs no SIGWINCH handler today, so the supervised `claude` only ever sees the handshake's initial geometry; if the user resizes their terminal mid-session, the child renders against stale dimensions until they detach and reattach.

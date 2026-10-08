@@ -17,19 +17,6 @@ The phone-dependent migrations (`per_conversation_eviction`, `respawn_after_evic
 
 This is a mechanical sweep: **1 production-source file touched** (`harness.go`, the relocation target); everything else is `_test.go` deletes/edits. Net LOC is deletion-dominant (~400 lines removed, ~60 relocated).
 
-## Files to read first
-
-- `internal/e2e/relay_test.go` — the relocation SOURCE for `shortHome` / `readPersistedServerID` / `relayTestLogger` / `recvEnvelope` (lines 20–80), plus the two route-swap tests `TestRelay_4409` (82–115) and `TestRelay_1011` (117–163). This file is **reduced, not deleted**.
-- `internal/e2e/relay_auth_test.go` — `TestRelay_AuthReject_4401` (delete) + `mustJSON` (108–115, relocate). After both, the file is empty → **delete it**.
-- `internal/e2e/relay_v2_daemon_test.go:34–38, 312–381` — `TestRelayV2_Daemon` dispatch + the `testV2DaemonDisabledDoesNotEngageV2` sub-test to reduce (AC5). Note lines 316–318 host the `TestRelay_AuthReject_4401` cross-ref comment that retires with it. Reuse `readInnerFrame` / `sendNoiseInit` / `buildHelloEarly` / `driveHandshakeToOpenDaemon` (40–74) already in this file — **no new handshake authoring**.
-- `internal/e2e/relay_base_url_test.go` (whole, 37 lines) — AC4 candidate for drop.
-- `internal/relay/connection.go:146–165` — `resolveDialURL`: production appends **`/v1/server`** for a bare base URL (`:162`), untouched by this ticket. This is why AC4 resolves to *drop*, not *re-target to `/v2/server`* (see Design AC4).
-- `internal/relay/connection_test.go:580–629` — `TestResolveDialURL` already asserts server-path append/passthrough, incl. explicit-v2 passthrough (`:597`). This is the existing coverage that lets AC4 drop the e2e test.
-- `internal/e2e/internal/fakerelay/fakerelay.go:130–136` — `/v2/server` shares `handleBinary` with `/v1/server`; `RejectNextBinaryWith4409` (508), `WaitBinary` (527), `ForceCloseBinary` (557) key on `serverID`, not path → the 4409/1011 route-swap is transport-agnostic. **Preserved plumbing — do not touch.**
-- `internal/e2e/harness.go:1` (build tag `//go:build e2e || e2e_install`) and `:307–321` (`StartRotationWithRelay`, whose `/v1/server` example comment is an AC6 carve-out). This is the relocation TARGET.
-- `CODING-STYLE.md` — table-driven, stdlib `testing` only, `log/slog`; the relocated helpers already conform, keep them verbatim.
-- Memory context (not in codegraph): the build-tag gotcha — `internal/e2e` **never compiles under pure `-tags e2e_install`** on main (`harness.go` references `safeBuffer`, an `e2e`-only symbol). The real compile checks are `-tags e2e` **and** `-tags "e2e e2e_install"`. Never verify with bare `-tags e2e_install`.
-
 ## Design
 
 Package-internal, test-only. No new types, no interfaces, no concurrency, no production change. Five work items, one per acceptance criterion group.

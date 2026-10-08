@@ -2,17 +2,6 @@
 
 **Ticket:** #974 (split from #960) · **Size:** S · **Security-sensitive:** no (test-only; observable-behaviour assertions, no new attack surface)
 
-## Files to read first
-
-- `internal/e2e/relay_v2_promote_test.go` (whole file, ~168 lines) — **the template.** Copy its pair → seed → spawn-daemon → Noise_IK handshake → seal-request → decrypt-reply → read-registry-back structure verbatim; swap the verb, payload, and assertions. Both this spec's subtests are this file with `promote` → `rename`.
-- `internal/e2e/relay_v2_daemon_test.go:245-308` — the `roundTrip(reqID, convID)` closure (`seal → sendNoiseMsg → decryptInnerEnvelope(readInnerFrame(...))`, single frame) and the **error-reply decode** (`errReply.Type == TypeError`, `InReplyTo` correlation, `ErrorPayload.Code == CodeConversationNotFound`). The not-found subtest's assertions are lifted directly from lines 292-308.
-- `internal/relay/handlers/rename_conversation.go` (whole file, 129 lines) — the handler under test. Confirms: sets `cv.Name = &title`; **preserves** `IsPromoted`, `IsArchived`, `Cwd`, `LastUsedAt` (rename does not bump last-used); on a registry miss replies `CodeConversationNotFound` **before** any `Save`, so the file is untouched on the error path; empty/blank title → `CodeProtocolMalformed` (out of scope for this ticket's ACs).
-- `internal/protocol/conversations_write.go:46-57` — `RenameConversationPayload{ConversationID, Name}` (two fields, **no `Cwd`** — unlike promote). Lines 112-131 — `ConversationUpdatedPayload{ID, IsPromoted, IsArchived, Name *string, Cwd, LastUsedAt time.Time}`, the reused reply body.
-- `internal/protocol/handshake.go:81-86` — `ErrorPayload{Code, Message, Retryable, RetryAfterS}`.
-- `internal/protocol/codes.go:22,43,56,62` — `CodeConversationNotFound = "conversation.not_found"`, `TypeError`, `TypeConversationUpdated`, `TypeRenameConversation`.
-- `internal/conversations/*.go` — the on-disk `Conversation` struct: confirm the JSON tags (`id`, `name` as `*string`, `cwd`, `is_promoted`, `is_archived`, `last_used_at`) before hand-authoring the seed JSON. The promote test's local `onDisk` decode struct (its lines 141-148) is the read-back template.
-- `docs/PROJECT-MEMORY.md` § "time.Time round-trip discipline" — compare any `time.Time` that crossed the wire with `.Equal`, never `==` / `reflect.DeepEqual`.
-
 ## Context
 
 A 2026-07-15 full-repo review found eleven client-sendable v2 wire verbs whose only coverage is package-level unit tests — the exact `promote_conversation` gap shape that let #949 ship a handler nothing exercised end-to-end. `rename_conversation` is one of four conversation-lifecycle verbs in that gap. This ticket proves its happy path and its not-found path **at the daemon boundary**: over the encrypted Noise v2 channel against a real spawned daemon, asserting decrypted wire frames and on-disk `conversations.json` state — never fake internals. Siblings (also split from #960) cover `delete_conversation` and the `archive`/`unarchive` round-trip; #963 is the realclaude capstone blocked by all of them.

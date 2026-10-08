@@ -5,33 +5,6 @@
 
 ---
 
-## Files to read first
-
-Read these before writing anything. Every entry is a symbol, resolvable with
-`codegraph_search` / `codegraph_node`; there are deliberately no line numbers.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/e2e/realclaude/initialize_control_record_test.go` | `initControlFixtureRecord` | The struct and its doc comment. Two things: the field count spelled as a word, and the standing instruction that a string-bearing field added here must be visited by `redactInitControlRecord` — AC5 edits both. |
-| " | `initControlFullRecord` | The fixture literal and its six numbered literal-choice notes. You add a value; none of the six constrain it, and the record must stay path-free. |
-| " | `initControlFixtureFields` | The hand-written listing. One row added, in declaration order. **Do not regenerate by reflection** — its doc explains why at length. |
-| " | `initControlTrailerFields` | The precedent for a nested-type listing, and the reason this slice must *not* add one for `dropcapSubstitution` (see § Design, "What this slice deliberately does not add"). |
-| " | `TestInitControlFullRecord_PinsEveryFieldAndTheSluggableVersionToken` | The three record properties AC3 requires to stay green unmodified. Read `fixtureFieldNonZero`'s use in the non-zero subtest and the `reflect.TypeOf` grouping in the distinctness subtest. |
-| `internal/e2e/realclaude/initialize_control_probe_test.go` | `runInitControlChild` | The fill site. The record literal, then the pass, then the write. The census is already computed here and thrown away. Read the comment block above the pass call — it is the one piece of prose this slice falsifies. |
-| `internal/e2e/realclaude/initialize_control_redaction_test.go` | `redactInitControlRecord` | The return contract (`[]dropcapSubstitution`) and its "# It REPORTS the census, it does not STORE it" section, which names #1731 as the slice that lands this. |
-| " | `newInitControlRedactor` | Four path parameters, no ambient reads. The new test constructs one exactly as the byte-identity row does. |
-| " | `TestInitControlRedactRecord_LeavesAPathFreeRecordByteIdentical` | AC4. Read it closely: it is the sole red for a census stored inside the pass, and it must stay green with no edit. Its four `initControl*Value` constants are what the new test reuses. |
-| `internal/e2e/realclaude/initialize_control_writer_test.go` | `writeInitControlFixture` | `out := *rec` — a shallow copy that preserves nil-ness. That is the property AC2's new row rides on. |
-| " | `compactInitControlRawRows` | Selection is by Go TYPE (`json.RawMessage`, `[]json.RawMessage`). Confirm for yourself that a `[]dropcapSubstitution` row is invisible to it, which is what keeps the touched-name set at exactly three. |
-| " | `TestInitControlFixture_RoundTripsAnUnansweredWaitBesideCapturedBytes` | The placement precedent the new row copies verbatim: a row lands in this file rather than the record's *because it writes and reads back*, and this is the file whose `finOfflineExecBans` entry permits `os.WriteFile` and `os.ReadFile`. |
-| `internal/e2e/realclaude/dropped_line_capture_test.go` | `dropcapSubstitution` | The row type: `Class`/`Replacement`/`Count`, tags `class`/`replacement`/`count`. |
-| " | `dropcapRedactor.substitutions` | Returns a **non-nil empty** slice when nothing fired, sorted by class. That non-nil-ness is the entire mechanism AC2 protects. |
-| " | `dropcapRecord` / `dropcapWriteRecord` | The sibling's `Redaction []dropcapSubstitution` field — copy its **spelling**, not its **placement**. `dropcapWriteRecord` assigns inside the writer; that is the counter-example. |
-| `internal/e2e/realclaude/offline_exec_ban_test.go` | `finOfflineExecBans` | The per-file entries. Confirm the writer file's entry permits the os read/write group and that nothing this slice adds is on it. **No edit to this file.** |
-| `CODING-STYLE.md` § "Comments — Citing Other Code" | — | Symbol names, never line numbers. `make cite-guard` is diff-scoped and has no depth or range exemption. |
-
----
-
 ## Context
 
 `redactInitControlRecord` rewrites the operator home, the run's temp home, the

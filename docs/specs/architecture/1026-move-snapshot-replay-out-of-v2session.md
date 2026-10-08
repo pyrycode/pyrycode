@@ -4,18 +4,6 @@
 **Slice:** 6th `#964` carve-out, after #1021 (handshake), #1022 (rekey), #1023 (modal+queue), #1024 (settings), #1025 (debugbundle).
 **Branch:** from `main`. No blockers — `feature/449` overlap on `v2session.go` is a stale CLOSED-orphan (closed 2026-05-17, no open PR, main 1166 commits ahead, its re-key work already on main via #1022); not a live merge target.
 
-## Files to read first
-
-- `internal/relay/v2session.go:1121-1409` — **Block A to move.** The `msgSnapshot*` const pair (1121-1127), `handleRequestSnapshot` (1129-1237), `snapshotReplyError` (1239-1271), `SetReplaySource` (1273-1294), `replayMissed` (1296-1370), `emitResync` (1372-1409). Six contiguous declarations. Extract what imports they reference.
-- `internal/relay/v2session.go:1695-1770` — **Block B to move.** `drainReplayOnce` (doc at 1695, func 1713-1770). Separated from Block A by seven functions that STAY (`sealError`, `marshalInnerFrameV2`, `closeWith`, `send`, `Push`, `transportDown`, `drainOnce`).
-- `internal/relay/v2session.go:113-122` — `snapshotReq` type + its doc. **This STAYS** (see CRUX below). Read the doc: "enqueued by ActiveConns and dequeued by Run" — it is the ActiveConns-enumeration request, not the screen-snapshot path.
-- `internal/relay/v2session.go:1-20` — current import block (15 imports). Read to confirm none becomes unused after the move (they don't — see § Imports).
-- `internal/relay/v2session.go:278,754` — `replayQueue []eventring.Event` and `replayRing *eventring.Ring` struct fields. These keep `eventring` live in `v2session.go` after the move (the reason no import is forced out).
-- `internal/relay/v2session_debugbundle.go:1-19` — **template for the new file**: package clause, grouped imports, file-level doc comment describing what was carved out + the #964 slice lineage. Mirror this exactly.
-- `internal/relay/v2session_rekey.go:1-16` — second example of the same header pattern (`bytes` import present there because rekey uses it; your import set differs — let the compiler drive it).
-- `internal/relay/v2session_replay_test.go` — **already exists**, tests `replayMissed`/`emitResync`/`drainReplayOnce` by package-internal name. Do NOT touch it; it keeps compiling because the moved decls stay in `package relay`.
-- `cmd/pyry/interactive_turn_stream_v2.go:109` — `mgr.SetReplaySource(...)` call site. Do NOT touch. It resolves per-type (`*V2SessionManager`), not per-file; the move leaves it valid.
-
 ## Context
 
 `internal/relay/v2session.go` is 1925 lines (was 3744 when flagged as the largest readability liability in the 2026-07-15 review). This is the 6th and final-planned carve-out slice of #964. It lifts two reconnect-recovery concerns out of the core file into a named sibling within `package relay`:

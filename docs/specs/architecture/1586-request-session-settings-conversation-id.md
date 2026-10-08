@@ -2,25 +2,6 @@
 
 **Size:** S (confirmed; PO sized S). 3 production source files, 1 new exported type, 1 new gate branch, ~320 lines of total written work.
 
-## Files to read first
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/relay/v2session_settings.go` | `handleRequestSessionSettings` | The handler being changed. Its numbered doc comment IS the contract — steps 2 and 3 both become wrong and must be rewritten, not appended to. |
-| `internal/relay/v2session_replay.go` | `handleRequestSnapshot` | The decode + `KnownConversation` pattern to mirror: tolerated `_ = json.Unmarshal`, error never echoed. Note the one place we deliberately differ (below). |
-| `internal/relay/v2session_seams.go` | `V2SessionConfig` fields `KnownConversation`, `BootstrapSessionID` | The seam contract. `BootstrapSessionID`'s doc says the three run-config seams move together — that paragraph stays true and must not be edited here. |
-| `internal/protocol/snapshot.go` | `RequestSnapshotPayload` | The exact shape to mirror, including the file-level "no field carries omitempty" rationale. |
-| `internal/protocol/settings.go` | `SessionSettingsPayload` | The reply shape (unchanged). Its "Scope:" paragraph needs one sentence about the new request field. |
-| `internal/protocol/codes.go` | `TypeRequestSessionSettings` | Its trailing comment says "bare frame" — now wrong. |
-| `internal/relay/v2session_settings_read_test.go` | `readSeams`, `allReadSeams`, `readManagerFor` | The fixture harness. `readSeams` **already** has `knownConv` and `readManagerFor` already wires it — no harness plumbing needed. |
-| `internal/relay/v2session_settings_read_test.go` | `TestV2Session_RequestSessionSettings_IgnoresAnyPayload` | Assertion stays; its doc comment's stated reason no longer holds (AC #5). |
-| `internal/protocol/snapshot_test.go` | `TestRequestSnapshotPayload_RoundTrip` | The round-trip test to mirror for the new payload. |
-| `internal/e2e/relay_v2_stream_run_config_test.go` | `TestRelayV2_StreamRequestSessionSettings` | Comment-only edit. Assertions must not move. |
-| `cmd/pyry/relay.go` | the `KnownConversation` closure in `startRelayV2` | Read-only. Confirms production already wires the seam — no new plumbing. |
-| `cmd/pyry/relay_guard_test.go` | `interceptedTypes` map entry `"TypeRequestSessionSettings"` | Read-only. Classifies by Type, not payload — unaffected, do not edit. |
-| `docs/protocol-mobile.md` | § Session settings → `request_session_settings`, `session_settings` | The two subsections to rewrite. |
-| `CODING-STYLE.md` | § Comments — Citing Other Code | `make cite-guard` runs inside `make check`. Cite symbols, never `file.go:NNN`. |
-
 ## Context
 
 `request_session_settings` is the read verb that tells a client which session to address a `set_session_settings` to. It is a bare frame: it carries no field, so a client cannot say which conversation it is asking about. The sibling read verb in the same package, `handleRequestSnapshot`, already carries a `conversation_id` and validates it through the `KnownConversation` seam before doing any work — and that seam is a field on the same `V2SessionConfig`, already wired in production by `startRelayV2`. So the field and its validation cost no new plumbing.

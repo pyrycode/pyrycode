@@ -23,33 +23,6 @@ anyway. No `blockedBy` needed — do not re-flag it.)
 
 ---
 
-## Files to read first
-
-Read in this order. Everything below was verified against this branch's tip (`f7d7562`) on
-2026-08-20. The "what to extract" column is the reason to open it, not a summary you can
-substitute for it.
-
-| Path | Symbol / section | What to extract |
-| --- | --- | --- |
-| `CLAUDE.md` | § *Architecture* fenced block; § *Testing* → "Conventions" bullet list | The three edit sites for ACs 1–3. The block is a fixed-width two-column table — preserve the padding to column 31. |
-| `CODING-STYLE.md` | § *Package Layout*, one-package-per-concern bullet | The single edit site for AC 4. Read § *Naming* directly below it too — it also says `supervisor`, and it is deliberately **out of scope** (see § "What not to touch"). |
-| `internal/control/server.go` | `Server.handle` | **The authoritative verb list for AC 2.** Read the `switch req.Verb` arms, not the ticket's prose. Find it by symbol; the ticket's `:552-586` range has already shifted. |
-| `internal/control/server.go` | `handleLogs`, `handleStop`, `handleSessionsNew`, `handleSessionsRm`, `handleSessionsRename`, `handleSessionsList`, `handleSessionsHasID`, `handleRekey`, `handleApprove` | Nine handlers plus the inline `VerbStatus` arm = ten. The handler set and the switch-arm set agree exactly; that agreement is the cross-check for AC 2. |
-| `internal/control/protocol.go` | `VerbStatus`, `VerbLogs`, `VerbStop`, `VerbSessionsNew`, `VerbSessionsRm`, `VerbSessionsRename`, `VerbSessionsList`, `VerbSessionsHasID`, `VerbRekey`, `VerbMCPApprove` | The ten wire strings. Copy the row's verb tokens from these constant values, not from the ticket body. |
-| `docs/knowledge/features/jsonl-reconciliation.md` | Title line + the bold lead paragraph | **The banner precedent AC 5 mandates.** Copy the *shape* — title suffix + bold lead saying what was deleted and where the behaviour lives now. Do **not** copy its `[#839](../codebase/839.md)` link form; see § "The banner's link target". |
-| `docs/knowledge/features/ptyrunner-package.md` | Title line; § *Out of scope*; § *Related* | The four inversion sites and the banner insertion point. Locate them with the sweep in § "Verification strategy", not by the ticket's line numbers. |
-| `docs/knowledge/features/pyry-agent-run-command.md` | § opening / the `#1348` single-path statement | The doc that already records the post-#1348 reality correctly. This is the banner's "where the behaviour lives now" link target. |
-| `cmd/pyry/agent_run.go` | `runAgentRunStreamRunner` and the comment block naming `PYRY_USE_STREAMJSON` | Proof the variable is deliberately unread. Its own comment says so. Needed to write the AC-5 correction accurately. |
-| `docs/specs/architecture/1560-system-overview-restart-backoff-selfheal.md` | whole file | The house pattern for this ticket family (#1553/#1555/#1558/#1559/#1560, all merged 2026-08-20). Same shape: verified-facts table, symbol cites, scoped sweep with controls in the PR body. |
-
-**Cite by symbol name or section heading, never by line number.** `make cite-guard` fails a
-`//`-comment citation that resolves into a declaration, and this ticket demonstrates the rot
-first-hand: the body's `internal/control/protocol.go:35`, `server.go:506/:524/:581` and
-`client.go:80` cites all point at symbols that **no longer exist**, and its `go.mod:7` is
-actually line 17. Markdown prose is not gated by `cite-guard`, but the same rot applies.
-
----
-
 ## Context
 
 `CLAUDE.md` and `CODING-STYLE.md` are the first two files a headless agent loads, and

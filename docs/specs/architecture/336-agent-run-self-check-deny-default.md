@@ -1,20 +1,5 @@
 # 336 — `pyry agent-run --self-check`: boot-time verification of `permissions.defaultMode:"deny"` enforcement
 
-## Files to read first
-
-- `cmd/pyry/agent_run.go:198-287` — `runAgentRun` body. The `--self-check` short-circuit lands at the very top of this function (before `parseAgentRunArgs`) so the self-check verb doesn't have to satisfy the production verb's eight required flags.
-- `cmd/pyry/agent_run.go:334-360` — `buildClaudeArgs`. The self-check uses the identical argv shape (`--settings <path> --permission-mode default --model <m> --session-id <sid> --append-system-prompt-file <path>`) so the boundary it verifies is the same one production uses.
-- `internal/agentrun/settings.go:46-82` — `WriteSettings(workdir, allowed)`. Production self-check uses this verbatim; the AC's "mis-formatted settings" test bypasses it by hand-writing the bogus shape into `<workdir>/.pyry-agent-run-settings.json` before calling `SelfCheckDenyDefault`.
-- `internal/agentrun/trust.go:59-157` — `MarkWorkdirTrusted`. The self-check pre-accepts the throwaway workdir's trust dialog the same way the production verb does — otherwise claude blocks on the TUI menu and the PTY drive races.
-- `internal/agentrun/drive.go:57-107` — `Drive(ctx, DriveConfig)`. Reused verbatim. The self-check pipes the canned `"Use Bash to echo hello. Be brief."` prompt through `DriveConfig.PromptBytes`.
-- `internal/agentrun/jsonl/tail/watcher.go:33-130` — `Config` + `New`. The self-check is a second consumer of this watcher. `OnEvent` becomes the Bash-detector; `OnEndOfTurn` signals the PASS path. Both invoked from the `Run` goroutine — same single-threaded contract production already relies on.
-- `internal/agentrun/jsonl/reader.go:44-83` — `Event` shape. `Event.Raw` is the verbatim line bytes; the Bash detector re-parses `Raw` to walk content blocks (`tool_use` is a content-block type *inside* an assistant message, not a top-level `Event.Kind`).
-- `docs/specs/architecture/339-agent-run-settings-file.md` — the upstream contract the self-check verifies. Pinned for the spec's threat model.
-- `docs/specs/architecture/349-agentrun-jsonl-tail-watcher.md` — the watcher's behavioral contract (existing-file vs. late-create paths; integration test pattern).
-- Parent **#329's "Unknown 1 fallback: VERIFIED" comment** — the empirical reference behavior: prompt `"Use Bash to echo hello. Be brief."`, settings `{"permissions":{"allow":["Read"],"defaultMode":"deny"}}`, observed result: claude picked Read instead of Bash; no tool_use with `name == "Bash"`. This is the contract the daily CI run protects.
-- `cmd/pyry/agent_run_test.go:18-131` — `TestAgentRunFakeClaude` + `configureFakeClaude`. The `TestHelperProcess`-style fake-claude harness. The self-check tests reuse this pattern: a fake-claude variant that emits a Bash `tool_use` line (FAIL fixture) and a variant that emits a Read tool_use + end_turn (PASS fixture).
-- `.github/workflows/ci.yml` — the existing workflow; the new daily self-check workflow is a sibling file at the same level, not an edit to this one.
-
 ## Context
 
 #339 shipped the per-spawn settings file with `{"permissions": {"allow": [...], "defaultMode": "deny"}}`. That file IS the per-agent security boundary in interactive claude — verified empirically in the Phase A spike (#329), but load-bearing on a single string Anthropic can rename without notice. If `defaultMode` becomes `default_mode`, or `"deny"` is renamed to `"reject"`, or the field is removed entirely, the whitelist silently goes back to additive ("auto-approve these without prompting; everything else still runs"). The dispatcher's per-agent boundaries (developer = Write+Edit+Bash; code-review = Read+Grep only) all silently dissolve. No test fails. No log fires. A code-review agent could `rm -rf` or `git push --force`.

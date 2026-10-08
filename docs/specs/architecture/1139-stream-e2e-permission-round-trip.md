@@ -26,24 +26,6 @@ Consequence: fakeclaude cannot originate an approval "the way real claude does" 
 
 ---
 
-## Files to read first
-
-- `internal/e2e/relay_v2_stream_send_test.go` (all, 218 lines) — the template. The setup (pair → `seedBoundConversation` → `StartStreamInteractiveWithRelay` → `waitBinaryHello` → `fakephone.Dial` → `driveHandshakeToOpenDaemonInteractive` → `send_message` → ack → drain), the id-alignment invariant, and the two-milestone drain loop are all reused verbatim. **Copy this file's shape.**
-- `internal/e2e/relay_v2_modal_answer_test.go:60-330` — the PTY sibling. Lift `awaitModalShown` (drain until `modal_shown`, assert `ModalID != ""`), the 4-option assertion, the `modal_answer` send (`protocol.TypeModalAnswer` + `ModalAnswerPayload{ModalID, OptionID, AnswerToken}`), the `modal_dismissed` await, and **the `pair … --allow-remote-permissions` requirement** (line 74-77: without the flag `ResolveAnswer` denies at the device gate).
-- `internal/e2e/relay_v2_modal_cancel_test.go` (all, 158 lines) — the deny/no-answer sibling shape (ESC deny keystroke, late-answer no-op). Model the timeout case's tolerance here.
-- `internal/e2e/relay_v2_stream_interrupt_test.go` — the rider-style precedent: how a fake behavior is scoped **inside the spec via a rider env** (`PYRY_FAKE_CLAUDE_STREAM_INTERRUPT`) rather than as a standalone harness capability. The approve rider mirrors this exactly.
-- `internal/e2e/harness.go:368-442` — `StartStreamInteractiveWithRelay`. Reuse **as-is**; it appends `extraEnv ...string` to the daemon env, which the child inherits via `os.Environ()`. The three rider envs below ride in through `extraEnv`. Do **not** modify this helper.
-- `internal/e2e/harness.go:698-711` (`childEnv`) — confirms the child inherits the daemon's env; a rider env set on the daemon reaches fakeclaude.
-- `internal/e2e/internal/fakeclaude/main.go:1212-1316` — `runStreamJSON` / `userTurnText` / `writeStreamResponse` / `writeAssistantEcho` / `writeJSONLine`. The approve loop reuses `userTurnText` + `writeJSONLine`; **do not touch `runStreamJSON`'s signature** (siblings depend on it staying byte-identical). Also read `main.go:440-479` (the `main()` call-site branch where the stream mode + riders are selected) and the rider-env const block at `main.go:253-268`.
-- `cmd/pyry/modal_resolve_v2.go:266-368` (`ResolveAnswer`) and `:526-635` (`Surface` / `ResolveStream` / `retire`) — the production under test. Note `ResolveAnswer`'s gate order (Lookup → device gate → classify → consume → `ResolveStream`) and that `retire` broadcasts `modal_dismissed{denied_timeout, timeout}` on the no-answer path.
-- `internal/control/server.go:878-978` (`handleApprove` / `watchApproveConn`) — the daemon blocks on `permbridge.Pending.Await`, guaranteed to return within the approval timeout; the timer path denies with `reasonTimeout`.
-- `internal/permbridge/permbridge.go:112-176` — `Register` arms `time.AfterFunc(timeout, deny)`; `resolve` is the one-shot. This is the fail-closed timer the timeout case proves.
-- `internal/control/client.go:299-310` — `Approve(ctx, socketPath, ApprovePayload) (*ApproveResult, error)`, the client fakeclaude calls.
-- `cmd/pyry/main.go:1020-1029` and `:1402-1411` — `SetApprovalRegistry(approvals, mcpApprovalTimeout)` and `const mcpApprovalTimeout = 2 * time.Minute`. This is where the env seam lands.
-- `cmd/pyry/mcp_approve.go:205-295` (`toolsCall` / `deny` / `denyResult`) — the fail-closed reference fakeclaude mirrors on a `control.Approve` error (error → deny, never allow, never hang).
-
----
-
 ## Design
 
 Three moving parts. Two are new (the fakeclaude approve rider; the daemon-timeout env seam), one is pure test wiring (the spec).

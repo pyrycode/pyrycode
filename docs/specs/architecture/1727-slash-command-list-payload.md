@@ -6,22 +6,6 @@ already shipped. No producer, no emit, no handler, no relay wiring, no committed
 no `docs/protocol-mobile.md` (that is #1718's), no `docs/knowledge/**` (the documentation
 phase owns those).
 
-## Files to read first
-
-| Read | Symbol | What to extract |
-|---|---|---|
-| `internal/protocol/interactive.go` | `ModelListPayload` + its `MarshalJSON` | The payload doc form and the nil-list normalisation rationale, which transfers whole. This is the shape to mirror. |
-| `internal/protocol/interactive.go` | `ModelOption` + its `MarshalJSON` | The entry doc form, the COLLAPSE rationale for a normalised list, the `TruncatedFields` carve-out, and the SECURITY paragraph this spec strengthens. |
-| `internal/protocol/interactive.go` | `BackgroundTaskRosterPayload` + its `MarshalJSON` | The original "an empty list is a positive statement" reason both marshallers above cite by name. Read it so the citation is not repeated blind. |
-| `internal/protocol/interactive_test.go` | `TestModelListPayload_NilModelsNormalises` | The exact pin shape: nil precondition, value/pointer subtests, post-marshal receiver-not-mutated assertion. |
-| `internal/protocol/interactive_test.go` | `TestModelOption_NilSliceEncodings` | The three-way asymmetry pin: shared `assertEncodings` helper, value/pointer subtests, the nested-in-payload subtest and its backing-array assertion. |
-| `internal/protocol/interactive_test.go` | `TestModelListType_IsNotClaudesVocabulary` | Its **closing payload-bytes block** is the half AC 4 adapts — and its literal check list contains `description`, which this shape adopts. Read it for the shape, not for the list. |
-| `internal/protocol/interactive_test.go` | `TestSlashCommandListType_IsNotClaudesVocabulary` | The test this ticket **extends**. Its closing paragraph says there is no payload-bytes half "until #1727" — that paragraph becomes false and must be replaced. |
-| `internal/protocol/codes.go` | `TypeSlashCommandList` | The doc block already carries the direction, the four-claude-words containment lattice, the guard classification and the why-no-request-verb reasoning. Do **not** restate any of it in `interactive.go`. |
-| `internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json` | `control_responses[0].response.response.commands` | The 51-entry capture every measured figure in this spec is derived from. The `stdout_events` copy of the same array is byte-identical. |
-| `docs/knowledge/features/protocol-package.md` | § "Model-list payload (#1704 shape…)" | **Two recorded defects not to repeat** — `ModelOption.TruncatedFields` enumerates 2 of 3 credited text fields, and `ModelListPayload`'s `DroppedModels` doc contradicts the shipped `docs/protocol-mobile.md`. Both are avoidable here at zero cost. |
-| `docs/protocol-mobile.md` | § `model_list`, the `dropped_models` paragraph | The **honest** phrasing of an uncounted drop field. Mirror this wording in the Go doc from the start, not the Go doc's. |
-
 ## Context
 
 The desktop's Actions menu offers reset, compact and knowledge capture as slash commands in

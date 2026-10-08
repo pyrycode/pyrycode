@@ -1,17 +1,5 @@
 # 421 — e2e/realclaude: long-running session JSONL append integrity
 
-## Files to read first
-
-- `internal/e2e/realclaude/fixtures.go:32-78` — `WithWorktree`, `WithWorktreeAuthenticated`, `ReadJSONL`. The new test uses `WithWorktreeAuthenticated` (real-API call). `ReadJSONL` parses through `jsonl.NewReader` which has a 16 MiB cap, NOT the 64 KiB default — long lines do not break the read path.
-- `internal/e2e/realclaude/fixtures.go:107-188` — `RunOpts`, `RunResult`, `RunPyryAgentRun`. The new test composes `RunOpts` directly, same way `budget_test.go` does.
-- `internal/e2e/realclaude/budget_test.go:114-189` — the closest analogue: a multi-turn Bash-driven test (`TestRealClaude_MaxTurnsHonored`) with a "use the Bash tool five times in sequence, do NOT combine, do NOT chain" prompt. Reuse the steering wording and prompt shape; bump from 5 ops to 10+ and remove the `error_max_turns`-specific assertions.
-- `internal/e2e/realclaude/tool_loop_test.go:189-223` — `resultTrailer` struct + `parseResultTrailer`. The new test parses the trailer to assert `num_turns >= 10`.
-- `internal/e2e/realclaude/fixtures_test.go:60-102` — `TestWithWorktreeAuthenticated_RealAssistant` shows the EndOfTurn+TextChars idiom on the last assistant event; the new test mirrors and extends it (count ≥10 + last-event check).
-- `internal/e2e/realclaude/prompt_fidelity_test.go:75-89` — `jsonlPathFor` helper for failure diagnostics.
-- `internal/e2e/realclaude/per_agent_test.go:135-144` — `truncate(b []byte) string` helper used for stderr diagnostics, capped at 1 KiB.
-- `internal/agentrun/jsonl/reader.go:40-83` — `Event` struct contract. The fields the test asserts on: `Kind`, `EndOfTurn`, `TextChars`.
-- `internal/agentrun/jsonl/reader.go:27-30` — confirms `ReadJSONL`'s underlying buffer is 16 MiB; long-line tolerance on the read side is structural, not a test concern.
-
 ## Context
 
 Existing realclaude tests cap at `MaxTurns ∈ {1,2,3,4}`. The ≥10-turn append path through claude's session JSONL is unexercised end-to-end. The classes of regression that would slip through today's suite:

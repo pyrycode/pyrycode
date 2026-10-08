@@ -43,34 +43,6 @@ in-flight `feature/*` branch can touch its files. #607/#608 have no branches yet
 
 ---
 
-## Files to read first
-
-This is a greenfield package, so the reading list is **conventions to mirror**
-and the **source-of-truth taxonomy** (the design doc lives in the vault, *not*
-the worktree — its authoritative shapes are inlined in § Design below, so you do
-not need vault access):
-
-- `internal/protocol/codes.go:1-62` — grouped string-constant taxonomy with
-  doc-commented category blocks (`Code*`, `Type*`). **Mirror this exact shape**
-  for the three enum const blocks (naming `ToolKind<Value>`, grouped, commented).
-- `internal/protocol/compat_test.go:50-71` (`TestV1TypeSet_CoversAllExportedTypeConstants`)
-  and `:121-158` (`TestErrorCode_Constants_MatchSpec`) — the **drift-detector /
-  exactness** test pattern (hardcoded expected set + `len(...) == N` count guard +
-  membership loop). This is the template for the AC#2 "exactly the ACP taxonomy"
-  test.
-- `internal/sessions/id.go:43-69` (`ValidID`) — a `bool` validity predicate at a
-  type boundary. Mirror for each enum's `Valid()` method (AC#4).
-- `CODING-STYLE.md` §Naming (acronyms: `ID` all-caps), §Testing (table-driven,
-  same-package white-box tests, `t.Parallel()`), §Interface Design (small,
-  consumer-defined — note the sealed-marker exception justified in § Design).
-- `docs/knowledge/architecture/system-overview.md:88` — the `go list -deps`
-  import-direction invariant; background for the AC#5 boundary test.
-- `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md`
-  §"The event model" + §"Wire-protocol extension" — how these neutral events
-  feed the wire later (context only; do not implement any wire mapping here).
-
----
-
 ## Context
 
 ADR 025 commits the daemon to drive an interactive claude session through

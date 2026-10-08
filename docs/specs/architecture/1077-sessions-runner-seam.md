@@ -5,40 +5,6 @@
 runner and its authz ride downstream in T4/T7). No `security-sensitive` label → no
 security-review pass.
 
-## Files to read first
-
-- `internal/sessions/session.go:124-244` — the `Session` struct (`sup` field at `:133`), the five
-  delegating methods (`State` `:223`, `WriteUserTurn` `:230`, `WaitForPTY` inside `Activate` `:344`,
-  `Run`'s `s.sup.Run` at `:501`), and the **`Supervisor()` accessor at `:234-238`** (the one whose
-  return type this spec deliberately keeps concrete).
-- `internal/sessions/pool.go:53-137` — the `Config` struct (where `RunnerFactory` is added).
-- `internal/sessions/pool.go:175-200` — the `Pool` struct (where the normalized `newRunner` field lands;
-  mirror the `log` / `convReg` field style).
-- `internal/sessions/pool.go:460-510` — **bootstrap construction site** (`supervisor.New` at `:480`),
-  including the `bootstrapSup` local at `:462` (re-typed to `Runner`) and the `pidFn` closure that
-  reads `bootstrapSup.State().ChildPID` at `:466-470`.
-- `internal/sessions/pool.go:518` — the `&Pool{...}` literal in `Pool.New` (persist `newRunner` here).
-- `internal/sessions/pool.go:1241-1292` — `buildSession` (Create path); **second construction site**
-  (`supervisor.New` at `:1289`). Called by `CreateIn` (`:1181`) and `Pool.GetOrCreate`
-  (`internal/sessions/get_or_create.go`).
-- `internal/sessions/pool.go:685-694` — `UpdateSettings` reads `sup := sess.sup` then calls
-  `sup.Restart(newArgs)` — confirms `Restart` is dispatched through the field, so it belongs on `Runner`.
-- `internal/turnbridge/producer.go:31-36` — `SessionHost` interface (`Session()` + `WaitForPTY()`).
-  Read to confirm it is **not** widened by this ticket (it keeps consuming the concrete supervisor via
-  the concrete accessor).
-- `cmd/pyry/acp.go:257-273` — `resolveCancelTarget` returns `*supervisor.Supervisor`; **stays concrete**.
-  Read to confirm the accessor's concrete return keeps this and its caller (`:144-151`) compiling untouched.
-- `cmd/pyry/relay.go:146-185` + `:419-602` — `relayWiring.sup *supervisor.Supervisor` and its downstream
-  fan-out (`newModalResolverV2`, `startInteractiveTurnStreamV2`, `startInteractiveModalStreamV2`,
-  `Snapshotter`/`Interrupter`/`SessionStarter`, and `e.sup.CurrentConversation()` at
-  `interactive_turn_v2.go:141`). Read **only to confirm none of it is touched** — the concrete-accessor
-  decision is what keeps this subtree out of scope.
-- `internal/sessions/session_test.go:360-375` — existing test calls `sess.sup.WaitForPTY(...)`; the field
-  re-type must keep it compiling (`WaitForPTY` is on `Runner`).
-- `CODING-STYLE.md` § Interface Design — "accept interfaces, return structs; small interfaces; define at
-  the consumer." The `Runner` seam is consumer-defined in `internal/sessions` and satisfied structurally
-  by `*supervisor.Supervisor` with zero supervisor edits.
-
 ## Context
 
 `internal/sessions` is welded to the concrete supervisor: `Session.sup` is a

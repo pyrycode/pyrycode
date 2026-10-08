@@ -5,47 +5,6 @@ member to `internal/control` and a consumer-side `Sessioner` interface that
 `*sessions.Pool` will satisfy structurally. No `cmd/pyry` work — the `pyry
 sessions new` CLI router is a separate ticket.
 
-## Files to read first
-
-- `internal/control/protocol.go` (whole file, 116 lines) — Verb constants,
-  Request/Response shape, AttachPayload/ResizePayload `omitempty` precedent.
-  The new `VerbSessionsNew` constant and payload types slot into the same
-  pattern (`sessionID,omitempty`, etc.).
-- `internal/control/server.go:33-122` — existing `Session` /
-  `SessionResolver` interface declarations and `NewServer` shape. The new
-  `Sessioner` interface lives next to them; the new constructor parameter
-  mirrors the optional `logs LogProvider` / `shutdown func()` plumbing.
-- `internal/control/server.go:273-316` — the `handle` switch where
-  `case VerbSessionsNew:` slots in alongside `VerbStatus` / `VerbStop` /
-  `VerbAttach` / `VerbResize`.
-- `internal/control/server.go:320-342` — `handleLogs` / `handleStop` are
-  the single-purpose handler shapes the new `handleSessionsNew` mirrors
-  (encode-error-or-OK, no streaming machinery).
-- `internal/control/client.go` (whole file, 131 lines) — `Status` / `Logs` /
-  `Stop` / `SendResize` are the model for the new `SessionsNew` client. All
-  reuse `request()` (one-shot dial → encode → decode → close).
-- `internal/control/server_test.go:20-99` — `fakeSession` /
-  `fakeResolver` test doubles; the new `fakeSessioner` follows the same
-  shape (mu-guarded recorded calls, configurable error).
-- `internal/control/attach_resolve_test.go:26-37` —
-  `TestAttach_WireBackCompat_EmptySessionID` is the byte-equality
-  assertion pattern the new `omitempty` round-trip test reuses.
-- `internal/sessions/pool.go:803-882` — `Pool.Create(ctx, label) (SessionID,
-  error)` — the signature the `Sessioner` interface mirrors verbatim. Also
-  confirms the empty-label semantics (`label == ""` → no-label session;
-  Pool does not reject it).
-- `internal/sessions/id.go:12-30` — `SessionID` is `type SessionID string`;
-  `NewID()` returns `SessionID(fmt.Sprintf("%08x-%04x-...", ...))`. The wire
-  carries a plain `string` (not `SessionID`) so external clients do not
-  need to import the `sessions` package.
-- `docs/knowledge/features/control-plane.md:23-59` — the resolver-seam
-  section the new "Sessions: creation seam" subsection extends.
-- `docs/lessons.md` § "Interface adapters for covariant returns" (lines
-  22-24) — explains why most Pool methods need an adapter at the call
-  site. `Pool.Create` returns `SessionID` (a primitive `string` newtype),
-  not an interface — so it satisfies `Sessioner.Create` directly with no
-  adapter, unlike `Pool.Lookup`.
-
 ## Context
 
 The control plane currently exposes `status`, `stop`, `logs`, `attach`,

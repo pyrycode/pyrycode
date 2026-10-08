@@ -4,25 +4,6 @@
 
 **Labels:** `enhancement`, `size:xs`, `security-sensitive`, `needs-real-claude`.
 
-## Files to read first
-
-Symbol-anchored. Resolve each name with `codegraph_search` / `codegraph_node`; do not go looking for line numbers.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `cmd/pyry/main.go` | `mcpApprovalTimeout` | The literal to change **and** the stale doc block to rewrite — it is the whole production edit |
-| `cmd/pyry/main.go` | `envApprovalTimeout`, `approvalTimeout` | The override contract that stays byte-identical: `os.Getenv` → `time.ParseDuration` → fall back to the constant. Read it to confirm nothing here moves |
-| `cmd/pyry/main.go` | `streamTurnHoldTimeout` | The 15-minute delivery hold the new value must stay clear of. **Read-only — do not edit** |
-| `cmd/pyry/mcp_approve.go` | `mcpApproveClientMargin`, `newMCPApproveServer` | The derivation `approvalTimeout() + mcpApproveClientMargin`. Both docs state the *relationship*, never a number — confirm that, then leave this file untouched |
-| `cmd/pyry/mcp_approve_test.go` | `TestMCPApproveServer_ClientDeadline` | The only thing in the tree that goes **red**: two `want` literals, one row that goes vacuous, and a doc naming `2m30s` twice |
-| `cmd/pyry/approval_timeout_test.go` | `TestApprovalTimeout` | Header prose names "the 2-minute `mcpApprovalTimeout`" while the table asserts symbolically — green while reading false |
-| `internal/relay/v2session_modal.go` | `reconcileModals` | The doc sentence "the prompt silently rides the daemon's 2-minute deny-on-timeout unseen" — this is the fourth Go site |
-| `internal/relay/v2session_modal.go` | `modalDenyTimeout` | A **different** constant that is also two minutes. Read it once so you can tell the two apart, then leave it exactly as it is |
-| `internal/e2e/relay_v2_stream_modal_test.go` | the harness env line that appends `"PYRY_APPROVAL_TIMEOUT="+tc.approvalTimeout` | Confirms the fake tier always sets the window explicitly, so it is default-independent |
-| `internal/e2e/realclaude/interactive_stream_permission_deny_test.go` | the `dis.Source != "remote"` guards (both the first-modal check and the retry-loop check) | Why a longer default makes this test *stricter*, not looser |
-| `docs/guide.md` | § Environment knobs | The user-facing half: table `Default` cell, the reasoning paragraph, the example, and the ceiling paragraph's issue link |
-| `docs/knowledge/features/control-plane-approve-mcp-approve-verb-forward-to-permbridge.md` | § on `mcpApprovalTimeout` | The package overview for this window. **Read-only** — it also carries a "Known gap" about the client margin that #1507 already closed; both are the documentation phase's to fix, not yours |
-
 ## Context
 
 `mcpApprovalTimeout` is the fail-closed window `cmd/pyry` hands `permbridge.Register` for every approval. When it elapses with no decision, `permbridge`'s own `time.AfterFunc` resolves the entry to a deny and deletes it. It is two minutes, chosen when nothing in production could reach it.

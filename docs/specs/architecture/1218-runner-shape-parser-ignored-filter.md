@@ -2,24 +2,6 @@
 
 Ticket: [#1218](https://github.com/pyrycode/pyrycode/issues/1218) · size `s` · one file, **no production code**
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:56-108` | `additiveDriftAllowlist` type + the two one-sided tables. The per-entry trailing-comment-with-citation convention the new table must follow. |
-| `…:160-197` | `shapeFilterTypes` (the union) and its only caller `extractShapes`. **The single edit point for the filter.** |
-| `…:258-337` | `additiveDriftViolations` — confirm it reads only `expectedStreamRunnerOnly.Events` / `expectedPtyRunnerOnly.Events`. AC2 is "keep it that way". |
-| `…:532-578` | `compareShapes` — the four guards AC3 falsifies (`:543`, `:546`, `:549`, `:552`) and the three that survive untouched (last-is-result ×2, last-subtype-agreement). |
-| `…:588-642` | `checkInit` — read-only. Proves AC4 needs no edit: it walks **raw bytes**, never shapes. |
-| `…:704-808` | `TestAdditiveDriftAssertion_SelfCheck` — the `intersectionBaseline` fixture and the `inject` helper the new sub-tests reuse; the assert-shape (`len(vs)`, `strings.Contains` on identifier + table name) to copy. |
-| `internal/streamsup/parser.go:38-73` | `ignoredLineTypes` and the 2026-07-27 measurement comment. **The set being mirrored** — `{system, rate_limit_event}`. |
-| `internal/streamsup/parser.go:203-241` | `consumeLine` — the ignored arm returns before emitting. This is what the parity test exercises. |
-| `internal/streamsup/parser.go:105-124` | `NewParser(sink func(turnevent.Event), logger *slog.Logger) *Parser` + `Write` — line-buffered, so fixture lines need a trailing `\n`. `logger` nil is fine (Debug only). |
-| `internal/agentrun/ptyrunner/runner_test.go:148-168` | `lines[0]` of ptyrunner's raw stdout is asserted `(system,init)`. Evidence for § "The positional claim is not lost". |
-| `cmd/pyry/agent_run_test.go:660-694` | `system/init` asserted to precede every `assistant`. Same evidence, verb level. |
-| `internal/e2e/realclaude/fixtures.go:373-390` | `parseInitSessionID` scans for the **first matching** init line — position-independent. No consumer indexes init. |
-| `internal/e2e/realclaude/interactive_stream_liveness_test.go:229-258` | The existing pre-ship alarm for `ignoredLineTypes` going *too narrow*. Explains why the new parity test only needs to guard the *too wide* direction. |
-
 ## Context
 
 `TestPtyRunnerVsStreamRunner_StructuralEquivalence` compares the two runners' stdout as `(type, subtype)` sequences. It is RED because the streamrunner side carries ~10 `system/thinking_tokens` lines per turn and the ptyrunner side carries none. Everything else matches: same init, same two assistant messages, same `result/success`.

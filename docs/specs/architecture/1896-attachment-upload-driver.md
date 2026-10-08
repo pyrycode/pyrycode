@@ -1,40 +1,5 @@
 # #1896 — Drive one decoded attachment chunk from admission to stored bytes
 
-## Files to read first
-
-- `internal/attachments/registry.go` → `Registry.Admit`, `Registry.Lookup`,
-  `Registry.Deliver`, `Registry.ReleaseConn`, `ErrUnknownUpload` — the four
-  primitives this slice sequences, and the one sentinel the sequence must not
-  be able to raise. `Lookup`'s doc names this dispatch site as its reason to
-  exist: a pure, non-stamping, non-reaping read.
-- `internal/attachments/storage.go` → `EnsureDir`, `Store`, `ErrInvalidID`,
-  `ErrNotContained`, `ErrWriteFailed` — the completion half, its typed
-  `conversations.ConversationID` parameter, and the LOGGING OBLIGATION clause
-  `Store`'s doc places on its consumer.
-- `internal/attachments/accumulator.go` → `ErrIncomplete` — the one non-latching,
-  non-discarding sentinel, and the whole reason this seam answers three ways.
-- `internal/protocol/attachments.go` → `AttachmentChunkPayload` (the SECURITY
-  block's four never-logged strings; the absent `conversation_id` and why),
-  `AttachmentStoredPayload` (#1895 — what the success answer may and may not
-  name; it rules out the stored path by name).
-- `cmd/pyry/relay.go` → `boundSessionIDForActive` — the nearest precedent for
-  reading the daemon's conversation cursor, and for refusing the empty and
-  unknown cases explicitly instead of falling through to a bootstrap default.
-- `internal/relay/v2session_seams.go` → `QueueRemover`, `SettingsUpdate` — the
-  shape #1897's seam interface will take, and the reason this slice's exported
-  surface stays primitives plus `protocol.AttachmentChunkPayload`.
-- `docs/knowledge/features/attachments-package-in-flight-upload-registry.md` —
-  the sequencing constraint (call `Deliver` with the same chunk just passed to
-  `Admit`, never `Admit`'s returned accumulator), and the recorded gap that a
-  structural never-log claim is unpinned until a test puts the banned string
-  back.
-- `docs/knowledge/features/attachments-package-sentinels-and-discard-semantics.md`
-  — which sentinels latch, which discard, and that mapping to wire codes is not
-  this package's.
-- `docs/protocol-mobile.md` § Attachments — chunks may arrive in **any order**
-  (the rule a reader would wrongly copy from `debug_bundle_chunk`'s strict
-  `seq`), and the two receiver bounds that stay unpublished.
-
 ## Context
 
 `internal/attachments` ships every primitive of the upload leg and has no

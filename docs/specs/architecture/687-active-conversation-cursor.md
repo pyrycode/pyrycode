@@ -2,19 +2,6 @@
 
 **Size:** XS (PO sized S; architect downgrades — the verified `cursorReader` injection seam means the live read site does not change, and the concurrency reconcile is a ~12-LOC guarded holder + one `-race` probe).
 
-## Files to read first
-
-- `cmd/pyry/interactive_turn_v2.go:104-137` — emitter constructor `newInteractiveTurnEmitterV2(sup cursorReader, …)` and the cursor read `convID := e.sup.CurrentConversation()` at `:131`; the empty-cursor drop at `:132-137`. **This read site does not change** — it reads through the `cursorReader` interface, so re-keying is an injection swap at the constructor call.
-- `cmd/pyry/interactive_turn_stream_v2.go:45-66` — `startInteractiveTurnStreamV2`: the emitter is built at `:52` (`newInteractiveTurnEmitterV2(sup, mgr, logger)`) and the #647 replay source is set at `:60` (`mgr.SetReplaySource(emitter.ring, sup.CurrentConversation)`). **Both readers** re-key here. `sup *supervisor.Supervisor` stays a param — `NewSessionSubscriber(sup, …)` at `:66` still needs it.
-- `cmd/pyry/assistant_turn.go:20-26` — the `cursorReader` interface (`interface { CurrentConversation() string }`). The new holder satisfies this verbatim.
-- `cmd/pyry/main.go:647-705` — `errNoBoundSession`, `sessionRouter` struct (`:662`), `Route` (`:671`), `boundSession`. `Route`'s success path (after `pool.Lookup` succeeds, before `return boundSession{…}`) is where the signal is stamped. `Route` has a **value receiver** behind the `handlers.SessionRouter` interface — the holder field must be a **pointer** so the copy writes the one holder the emitter reads.
-- `cmd/pyry/main.go:580-586` — `runSupervisor`'s `startRelay(…, sessionRouter{pool: pool, convReg: convReg}, …)` call: the single production construction site. Construct the holder here and pass it both into the `sessionRouter` literal and (separately) down the wiring chain.
-- `cmd/pyry/relay.go:88-102` (`startRelay` signature), `:145` (`startRelayV2` call), `:272-287` (`startRelayV2` signature), `:348` (`startInteractiveTurnStreamV2` call) — the three signatures that gain a `*activeConversation` param, each with exactly one caller.
-- `internal/relay/v2session.go:1436` — `SetReplaySource(ring *eventring.Ring, currentConv func() string)`; second arg is `func() string`, so a method value `activeConv.CurrentConversation` drops in where `sup.CurrentConversation` is today. **No `internal/relay` change.**
-- `cmd/pyry/assistant_turn_test.go:22-32` — `stubCursor` (`atomic.Value`-backed `CurrentConversation()` + `set(id)`). The production holder mirrors this exactly; it is also the precedent for the holder's shape.
-- `cmd/pyry/session_router_test.go:35-100` — `TestSessionRouter_Route`. The literal at `:46` gains the holder field; the success subtest at `:48-63` gains a "Route stamped the holder" assertion; the reject subtests assert the holder stays empty.
-- `docs/knowledge/codebase/678.md` — the documented outbound asymmetry this ticket closes ("inbound now routes per-conversation; outbound still taps the bootstrap PTY").
-
 ## Context
 
 Since #678, an inbound `send_message` is routed to the conversation's own bound claude session via `sessionRouter.Route` (`cmd/pyry/main.go:671`), which writes the turn through `boundSession.WriteUserTurn` → that session's *own* supervisor. The **outbound** structured turn stream, however, still reads its conversation cursor from the **bootstrap** supervisor: the emitter does `convID := e.sup.CurrentConversation()` (`interactive_turn_v2.go:131`) and **drops every event on an empty cursor** (`:132-137`). Routed turns now commit on bound-session supervisors and never touch the bootstrap supervisor's cursor, so the bootstrap cursor stays empty and the structured reply stream goes silent after the first per-conversation route.

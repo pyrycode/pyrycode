@@ -5,31 +5,6 @@
 
 ---
 
-## Files to read first
-
-Read these before writing anything. The whole design lives in two files; the third is the consumer whose ordering the ticket forbids you to touch.
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/finding_run_gather_test.go:174-279` | `finGatherReadings`' doc comment and body. The two lines at `:275-276` are what this ticket deletes; the caller-obligations bullet at `:207-215` is the prose that dies with them. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:93-98` | File-header § *"The two staged values that are still staged, and who owns them"* — the second prose site AC1 kills. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:68-91` | File-header § *"The certified terminal reason crosses into the readings VERBATIM, by design"*. **`ClaudeState` joins this list.** Read it before touching `TestFinGatherReturnsNoCapturedBytes`. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:283-347` | `finGatherCase` + `finGatherCases()`. The three rows and the one-varied-dimension doctrine. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:378-396, 402-515, 524-612, 643-707` | The four call sites of the gather, and `finGatherAssertContract`'s per-row checks (`:502-506` reads `readings.PyryExited`). |
-| `internal/e2e/realclaude/finding_stage_held_group_test.go:395-440` | `finStageRun` — the fifth call site, and the doc sentence at `:406-408` AC1 names explicitly. |
-| `internal/e2e/realclaude/finding_stage_held_group_test.go:15-26` | Stage-file header; `:26` points at the gather doc's `:202-206`, a reference that moves when you edit that doc. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:173-219` | `trailRunReadings`. `PyryExited`'s zero-polarity argument (`:204-207`) is the one you copy into the new inputs type; `ClaudeState`'s doc (`:215-218`) is the shipped meaning of `""`. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:306-343, 434-449, 523-542` | The decision order, contract check C7 (both arms), Step 2 and Step 3. This is the ordering you must not change. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:693-702, 817-832` | The shipped ordering rows. `proofPyryLive` (proof + `PyryExited: false`) wants `trailOutcomeRunningAtTrailer`. This row is why AC2's pair may not be built on the proof arm. |
-| `internal/e2e/realclaude/finding_run_record_test.go:201-242` | `finRecordInputs` — the family's named-fields precedent and its *stated reason*, which you will restate differently here (see § Design). |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:242-274` | `trailWaitForTrailer` reads `stdout.Bytes()` and never writes. Load-bearing for AC2's pair — see § AC2. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:722-742` | `probeSyncBuffer`. `Bytes()` returns a copy; the type only ever appends. |
-| `internal/e2e/realclaude/process_pin_liveness_test.go:275`, `:1142` | `pinReadState`'s four documented verdicts and `pinIsVerdict`. The closed set the claude parameter's admissible producer draws from. |
-
-**Out of scope, do not touch:** `internal/e2e/realclaude/trail_run_rig_test.go:38-47, 191-192`. It stages the same two values on a different rig under its own stated reason. The ticket says so; so does this spec.
-
----
-
 ## Context
 
 `finGatherReadings` assembles a complete `trailRunReadings` from what a live probe holds. Four of its six fields come from parameters and shipped producers. Two do not — it ends by staging them:

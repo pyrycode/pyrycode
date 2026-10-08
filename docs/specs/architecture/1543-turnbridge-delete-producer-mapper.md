@@ -2,22 +2,6 @@
 
 Ships as `size:s`. No split — see § Size check.
 
-## Files to read first
-
-| Path | Symbol | What to extract |
-|---|---|---|
-| `internal/turnbridge/outbound.go` | the file-header comment block above the `import` group (the *"outbound.go is the mirror of mapper.go"* paragraph) | The block you replace. Note it sits **below** `package turnbridge`, so it is *not* a doc comment today. |
-| `internal/turnbridge/outbound.go` | `MapEvent` | **Read to confirm you leave it alone.** Its arms carry eight `producer` / four `streamsup` attributions to the live path. Not one byte changes. |
-| `internal/turnbridge/outbound.go` | `inputSummary` | Doc comment ends *"(mirrors rawInput's posture in mapper.go)"* — the parenthetical you delete. |
-| `internal/turnbridge/outbound.go` | `resultSummary` | Doc comment opens *"The current inbound producer (mapper.go)…"* — the attribution you re-ground. |
-| `internal/turnbridge/producer.go` | the `// Package turnbridge …` doc comment above `package turnbridge` | The doc that dies with the file. Read it to see what the new one must **stop** saying. |
-| `internal/streamsup/parser.go` | `toolResultContent` | The live inbound producer of `ToolContent`. Confirms it emits `TextContent` or `nil` only — the claim `resultSummary` re-grounds onto. |
-| `internal/streamsup/parser.go` | `rawInput` | Read to see why `inputSummary`'s cross-reference is **dropped**, not re-grounded — this one has no failure branch to mirror. |
-| `internal/turnbridge/mapper.go` | `rawInput` | The posture `inputSummary` used to mirror (empty→nil, marshal error→nil). Contrast with the streamsup twin above. |
-| `cmd/pyry/interactive_turn_v2.go` | `interactiveTurnEmitterV2.emitMapped`, `interactiveTurnEmitterV2.emit` | The sole consumer. `emit` is what wraps a payload into an Envelope — the live replacement for the header's dead `cmd/pyry/assistant_turn_v2.go` reference (§ Correction 3). |
-| `CODING-STYLE.md` | § "Comments — Citing Other Code" | You are writing new comment lines. Name symbols; never write a `:NNN`. `cite-guard` is in `make check`. |
-| `docs/knowledge/features/turnbridge-package.md` | § "Files", § "The mapper (`mapEvent`)", § "The follow-active subscriber" | **Read-only context.** Documents the producer at length. Bringing it to the surviving shape is the *documentation phase's* job, not yours — see § Out of scope. |
-
 ## Context
 
 #1348 deleted both terminal-driving claude paths. `internal/turnbridge` was left holding a live half (`outbound.go` — the `turnevent.Event` → v2 wire-payload adapter, consumed by `cmd/pyry`) and a dead half (`producer.go` + `mapper.go` — the tui-driver drain/re-subscribe lifecycle and its `tuidriver.Event` → `turnevent.Event` mapper).

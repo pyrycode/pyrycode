@@ -6,26 +6,6 @@
 
 ---
 
-## Files to read first
-
-| Path / range | What to extract |
-|---|---|
-| `internal/turnevent/event.go:1-18` | Package doc. The "out of scope" line (`internal-only events (BusyState, Stall, …) … get a home in a later ticket`) is the line to amend — remove `Stall`, keep `BusyState`. |
-| `internal/turnevent/event.go:22-27` | `Event interface{ isTurnEvent() }` + the variant enumeration in its doc comment (add `Stall`, annotated internal-only). |
-| `internal/turnevent/event.go:78-92` | The exact pattern to mirror: value-receiver `isTurnEvent()` block + the `var ( _ Event = …{} )` assertion block. |
-| `internal/turnevent/event_test.go:46-81` | `eventKind` type-switch (has a `default`, so adding a variant is non-breaking) + `TestEvent_StreamTypeSwitch`. Optional: add a `Stall` case so the switch stays exhaustive-by-intent. |
-| `internal/protocol/interactive.go:1-25` | File header — the **no-`omitempty`** invariant — and `TurnStatePayload` (lines 22-25), the exact peer to mirror (`conversation_id` only, plus one field; `StallPayload` drops the second field). |
-| `internal/protocol/codes.go:87-105` | The v2 interactive partition const block. Add `TypeStall = "stall"`; bump the trailing comment "these **five** live in the latter" → "**six**". |
-| `internal/protocol/interactive_test.go:9-53` | `roundTripEnvelope` helper + `TestTurnStatePayload_RoundTrip` — the template for `TestStallPayload_RoundTrip`. Reuses `readFixture` / `canonical` (already defined in the package's test files). |
-| `internal/protocol/compat_test.go:27-58` | `TestIsV1Compatible` rejection cases (add a `stall-rejected` case). |
-| `internal/protocol/compat_test.go:93-143` | `v2OnlyTypes` map (add `TypeStall: true`) and `TestTypeConstants_V1V2Partition`'s `all` list (add `TypeStall` to the v2-interactive group). The union-count assertion `len(v1TypeSet)+len(v2OnlyTypes) == len(all)` balances automatically once both grow by one. |
-| `internal/protocol/testdata/turn_state.json` | The fixture shape to mirror — a single-line envelope `{"id":…,"type":…,"ts":…,"payload":{…}}`. |
-| `docs/protocol-mobile.md:419-425` | Message-types table, interactive rows — add a `stall` row. |
-| `docs/protocol-mobile.md:466-514` | "Interactive events (v2, capability-gated)" section — bump intro "These **five** envelope types" → "**six**", add a `#### stall` subsection. |
-| `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md` | ADR-025 rationale: internal model is ~90% ACP-shaped; an internal-only event (a stall) is *dropped* by the future ACP adapter and *sent* by the mobile adapter. Background only — no code change here. |
-
----
-
 ## Context
 
 `tui-driver` raises a one-shot `stall_detected` signal (`EventKindStallDetected`, no payload, no clearing edge — shipped in tui-driver v1.3.0), and the mobile UI already knows how to surface a stall (#373). The signal has nowhere to live in Pyrycode's daemon: the neutral internal turn-event model (#606) explicitly deferred the `Stall` variant, and the v2 mobile wire (#607) added only the five ACP-shaped turn events.

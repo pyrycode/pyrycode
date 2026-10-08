@@ -3,27 +3,6 @@
 Adds the two integrity comparisons to `internal/attachments`. One production
 file, two new sentinels, no new type, no wire codes, no disk.
 
-## Files to read first
-
-Read in this order. Everything is symbol-named; resolve names with
-`codegraph_search` / `codegraph_node` rather than by line.
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `internal/attachments/accumulator.go` | `Assemble` | The one place both checks land. Note the order of its existing guards and that it is **non-consuming** — it may be called repeatedly and must keep working. |
-| `internal/attachments/accumulator.go` | `reject` | The latch-and-release primitive you reuse. It sets `rejected`, nils `chunks`, returns the error, so a caller reads as `return nil, a.reject(...)`. |
-| `internal/attachments/accumulator.go` | `Accumulator` | The `size` and `sha256` fields, latched by `NewAccumulator` and until now unread. Their doc comments say in as many words that this slice is what reads them — update both. |
-| `internal/attachments/accumulator.go` | `Add` | Its doc paragraph on why `Size`/`SHA256` are *not* checked per chunk. Still true, but the reason changes: the comparison uses the **latched** declaration, so a later chunk restating either differently changes nothing. Reword, don't delete. |
-| `internal/attachments/accumulator_test.go` | `newTestAccumulator`, `testFixture`, `testParts`, `testTotal` | The fixture you extend. The uneven 10+10+4 tail is load-bearing — keep it. |
-| `internal/attachments/accumulator_test.go` | `TestAccumulator_FramingFaults_RejectAndDiscard` | The table shape to mirror: one fault per row, and a shared body that asserts the sentinel, then the discard, then the post-refusal `Assemble`. The integrity table is the same shape. |
-| `internal/attachments/accumulator_test.go` | `TestAccumulator_ZeroByteAttachment`, `TestAccumulator_DuplicateZeroByteChunk`, `TestAccumulator_Incomplete_IsResumable` | The three fixtures that declare `""` for the digest today. Two of them assert a successful `Assemble` and go red the moment the comparison exists. |
-| `internal/protocol/attachments.go` | `AttachmentChunkPayload` | The `SHA256` and `Size` field contracts, the `SECURITY` block, and the **INTEGRITY, NOT AUTHENTICITY** paragraph that states the exact-equality rule and resolves its apparent contradiction. |
-| `internal/protocol/codes.go` | `CodeAttachmentIntegrityFailed` | The wire code both new sentinels answer — **at #1744's dispatch site, not here.** Do not import this constant into `internal/attachments`. |
-| `internal/protocol/attachments_test.go` | `attachmentSHA256HexLen` | Its doc comment offers a hex validator as a fifth exported constant and addresses it to "#1741", a ticket that has since closed into this family. One comment edit (below). |
-| `internal/update/checksum.go` | `VerifySHA256` | **The nearest precedent, and the wrong one to copy.** See § Design. Read it so you recognise it, not so you reuse it. |
-| `docs/knowledge/features/attachments-package.md` | § "A mutation-testing lesson worth carrying into #1770", § "Three shipped properties with no test pin" | The sole-redness trap this spec's testing strategy is written against, and the three unpinned #1769 properties two of which ride these criteria for free. |
-| `docs/protocol-mobile.md` | § Attachments → "Reassembly & integrity (the receiver's rules)" | The published contract. Not re-decided here. |
-
 ## Context
 
 `internal/attachments` (#1769, merged in #1771) accumulates one upload's chunks

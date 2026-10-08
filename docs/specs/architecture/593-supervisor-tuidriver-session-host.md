@@ -2,29 +2,6 @@
 
 Phase 5 / Phase 1 task **T2** of [ADR 025](../../knowledge/decisions/025-mobile-remote-head-interactive-session.md). Migrate `internal/supervisor` from a raw `pty.Start` + `io.Copy` host loop to hosting claude through a tui-driver `Session`. **Behaviour-preserving** hosting swap: the conversation cursor, restart survival, live terminal resize, and every raw-byte consumer must keep working unchanged. Reliable turn delivery (#594), attach rewire + two-heads (#595), and structured streaming (#596) build on the supervisor-owned `Session` this ticket introduces — but none of that is pulled forward here.
 
-## Files to read first
-
-Code (use codegraph for symbols; the module-cache paths are read via `Read`):
-
-- `internal/supervisor/supervisor.go:106-243` — `Supervisor` struct + the cursor/readiness machinery you re-key: `convMu`/`currentConvID`, `ptmxMu`/`ptmx *os.File`/`ptmxReadyCh`, `WriteUserTurn`, `setPTY`, `WaitForPTY`, `CurrentConversation`. The `ptmx *os.File` field and its helpers become a `*tuidriver.Session`.
-- `internal/supervisor/supervisor.go:354-481` — `runOnce`, the host loop. Two branches (bridge mode at 371-414, foreground at 416-480). This is the bulk of the rewrite.
-- `internal/supervisor/bridge.go:49-71` + `261-290` — `Bridge`'s `ptyMu`/`ptmx *os.File`, `SetPTY`, `Resize`. The `*os.File` resize coupling is replaced by a `resizer` delegate. **`Bridge.Write` / `SetOutputObserver` / `Attach` (153-259) are NOT touched** — they stay the raw-byte fan-out hub; only their byte feed changes.
-- `internal/supervisor/winsize.go` (whole, 57 lines) — `watchWindowSize` + `resizeOnce`. Change the resize target from `pty.Setsize(ptmx,…)` to `sess.Resize(…)`; keep reading the *operator's own* terminal size via `pty.GetsizeFull(os.Stdin)`.
-- `internal/agentrun/ptyrunner/runner.go:288-294` + `364-380` — the in-repo precedent for `Spawn` + `defer sess.Close()` + cmd construction. **Note the deliberate divergence below:** this ticket does NOT call `EnsureClaudeEnv` (ptyrunner does).
-- tui-driver module cache (`go list -m -f '{{.Dir}}' github.com/pyrycode/tui-driver` → append `/pkg/tuidriver/…`):
-  - `session.go:49-235` — `SpawnOpts.MirrorOutput`, `Spawn`, the reader goroutine (drop-newest mirror, sole sender/closer of `mirrorOut`), `Session` fields. **The PTY `*os.File` is private — there is no accessor.** This is *why* `Bridge.SetPTY(*os.File)` cannot survive.
-  - `session.go:382-450` — `MirrorOutput() <-chan []byte` (buffer 256, closed by the reader on exit/Close), `Wait()` (blocks until exited **and** reader drained), `Close()` (SIGTERM→grace→SIGKILL, close PTY, join reader; idempotent).
-  - `keys.go:77-94` — `AttachInput([]byte) error`, the production raw-input seam `WriteUserTurn` now writes through (replaces `ptmx.Write`).
-  - `pty.go:120-155` — `StartPTY` (40×120 default size) and `Session.Resize(rows, cols uint16) error` (the resize delegate; callable the instant `Spawn` returns).
-- `internal/supervisor/supervisor_test.go:142-254` — `TestHelperProcess` + `helperConfig`. The fake-child harness your new/updated tests reuse; `stdin_to_file` mode (179-198) is how the WriteUserTurn happy path verifies bytes reach claude's stdin.
-- `internal/supervisor/supervisor_test.go:455-735` — the `WriteUserTurn_*` and `WaitForPTY_*` sets. The `WaitForPTY_*` tests call `sup.setPTY(f)` with `/dev/null`; these become `setSession(...)` call-site swaps.
-- `internal/supervisor/bridge_test.go:240-302` — `TestBridge_Resize*`. Currently open a real `pty.Open` and assert `pty.Getsize`; they move to a `fakeResizer` double.
-- `internal/sessions/session.go:109-226` — `WriteUserTurn` / `Resize` / `Activate` (→ `WaitForPTY`) delegations. **Confirm these keep compiling unchanged** — they are the proof that the public method signatures must not move.
-- `docs/lessons.md` § *"`SetPTY(nil)` must run BEFORE `EndIteration`"* — the EBADF ordering rule. Preserved here as **`SetResizer(nil)` before `sess.Close()`** (see Concurrency).
-- [ADR 007](../../knowledge/decisions/007-bridge-iteration-boundaries.md) (iteration boundaries) + [ADR 008](../../knowledge/decisions/008-bridge-resize-seam.md) (why `Resize` lives on `*Bridge`). The resize seam stays on `*Bridge`; only its target type changes.
-
-Do **not** touch: `internal/supervisor/spawn.go` + `spawn_test.go`. `SpawnPTY`/`SpawnConfig` is a standalone helper with **zero production callers** (test-only, verified via codegraph + grep) — it is not part of the host loop, so AC #1 does not reach it. Leaving it untouched keeps the diff to the host loop.
-
 ## Context
 
 Today the supervisor hosts claude with `pty.Start(cmd)` + two `io.Copy` pumps + a raw `WriteUserTurn` that calls `ptmx.Write`. The PTY master `*os.File` is held in three places: the supervisor (`ptmx`, for `WriteUserTurn`), the `Bridge` (`ptmx`, for `Resize`), and `winsize.go` (for SIGWINCH `Setsize`).

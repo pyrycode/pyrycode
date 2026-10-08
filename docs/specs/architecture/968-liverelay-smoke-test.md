@@ -76,45 +76,6 @@ Three facts, each verified, make the fakerelay body port cleanly:
    it drives the real relay's `/v1/client` route unchanged. Reused by import (see
    § Package structure).
 
-## Files to read first
-
-- `internal/e2e/relay_v2_daemon_test.go:86-186` — `testV2DaemonListConversationsRoundTrip`.
-  **The primary template.** Port this body 1:1, swapping the relay (§ Design).
-  Note its `fr.WaitBinary(serverID)` call — the real relay has no such hook;
-  replace per § Phone-connect readiness.
-- `internal/e2e/realclaude/interactive_bootstrap_liveness_test.go:247-475` —
-  the **transcription source** for the standalone helpers: `driveHandshakeInteractive`
-  (Noise IK to open state), `sendNoiseInit`/`sendNoiseMsg`/`readInnerFrame`,
-  `spawnBootstrapDaemon`/`waitForReady`/`stop`, `shortSocketPath`, `runPyry`,
-  `decodePairPayload`. These are already a standalone transcription of the
-  `internal/e2e` harness under a sibling build tag — copy-adapt them, dropping
-  the real-claude/auth bits and swapping fakerelay → the spawned relay's base URL.
-- `internal/e2e/internal/fakephone/fakephone.go` — the phone client. **Import
-  and use directly** (`Dial`, `SendBytes`, `ReceiveBytes`, `Close`); it dials
-  `/v1/client`. Importable from `internal/e2e/liverelay` under Go's `internal/`
-  rule (both rooted at `internal/e2e/`).
-- `internal/relay/connection.go:147-165` — `resolveDialURL`: proof that a
-  path-less base URL gets `/v1/server` appended. Drives the "pass a bare base
-  URL" decision.
-- `internal/e2e/harness.go:462-485` — `sleepClaudeScript` + `writeSleepClaude`:
-  the supervised-child stand-in to pass via `-pyry-claude` (a bare `/bin/sleep`
-  crash-loops because the daemon appends `--session-id`). Transcribe (~12 lines).
-- `internal/e2e/harness.go:853-878` — `shortHome`, `readPersistedServerID`,
-  `relayTestLogger`: small unexported helpers to transcribe (~30 lines total).
-- `internal/e2e/realclaude/fixtures.go` — the `ensurePyryBuilt` pattern (build
-  `pyry` once via `go build`, honor `PYRY_E2E_BIN`, `sync.Once`). Mirror it, and
-  mirror it again for the relay binary (§ Relay binary resolution).
-- `../pyrycode-relay/cmd/pyrycode-relay/main.go:49-101,216-281` — relay flags and
-  mux: `--insecure-listen`, `--metrics-listen` (empty disables), `/healthz`,
-  `/v1/server`, `/v1/client`. Confirms no env/creds needed to start insecure.
-- `../pyrycode-relay/Makefile:10-12` + `README.md` § Build/Run — `go build -o
-  bin/pyrycode-relay ./cmd/pyrycode-relay`; `--insecure-listen :8080`
-  behind-proxy mode.
-- `docs/knowledge/features/e2e-realclaude.md` § Build tag, § CI cadence — the
-  opt-in-tag + wired-into-preship-not-check precedent this ticket mirrors
-  (including the **skip-loud-on-missing-prerequisite** posture).
-- `docs/release-tooling.md` — the doc to extend (AC #2).
-
 ## Package structure & build tag
 
 New package, one file:

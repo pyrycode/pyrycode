@@ -2,31 +2,6 @@
 
 **Ticket:** [#1491](https://github.com/pyrycode/pyrycode/issues/1491) · **Size:** S · `bug`, `security-sensitive`
 
-## Files to read first
-
-Symbols, not line numbers — resolve each with `codegraph_search` / `codegraph_node`, then Read.
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `internal/relay/v2session_debugbundle.go` | `handleDebugBundleRequest` | The function being restructured. Note the branch order: nil-seam → gate → assemble → stream → log. |
-| `internal/relay/v2session_debugbundle.go` | `bundleInFlight` | The queue-derived half of the gate. Its doc comment states the TOCTOU argument that must survive this change **unchanged**. |
-| `internal/relay/v2session_debugbundle.go` | `debugBundleReplyError`, `msgDebugBundleUnavailable` | The deterministic reply. It stays on `Run` and stays byte-identical — do not add a second reply path. |
-| `internal/relay/v2session.go` | `V2SessionManager.Run` | The select loop you add one arm to. Copy the arm shape from the `m.modalTimeout` / `m.pushOverflow` arms. |
-| `internal/relay/v2session.go` | `appFrameWorker`, `routeAppFrame`, `forwardToRun`, `forwardAppReply`, `appReplyMsg` | **The precedent (#965).** Work moves off `Run`; the seal comes back. Mirror this posture, not a new one. |
-| `internal/relay/v2session.go` | `handleWake`, `wakeSignal` | The pattern for carrying a `*V2Session` across a goroutine boundary and dereferencing it **only** on `Run`, behind a `V2StateOpen` check. `handleBundleReady` is this shape. |
-| `internal/relay/v2session.go` | `handleModalTimeout`, `handlePushOverflow` | Naming + arm shape for a `Run` handler fed by an off-`Run` producer. |
-| `internal/relay/v2session.go` | `closeWith` | Sets `V2StateClosed`, closes `s.done`, deletes from `m.sessions` **and** `m.queues`. This is why a per-session marker cannot leak. |
-| `internal/relay/v2session.go` | `V2Session.done`, `V2Session.appFrames` | The precedent for a session field an off-`Run` goroutine may read (created on `Run`, closed once, never reassigned). |
-| `internal/relay/v2session.go` | `wakeBufferSize` | The buffer size every off-`Run`→`Run` signal channel in this package uses. |
-| `internal/relay/v2bundlestream.go` | `StreamBundle`, `bundleEnvelopes` | Enqueue-only, returns on enqueue not delivery. Unchanged by this ticket, and stays on `Run`. |
-| `internal/relay/v2session_seams.go` | `V2SessionConfig.DebugBundler` | Seam signature `func() ([]byte, error)` — **no `ctx`**. Drives the § Open questions residual. |
-| `internal/relay/v2session_modal.go` | `pushQueue.enqueue` | The two soft-overflow comments that credit the queue-derived gate. Their claim must stay true. |
-| `internal/relay/v2session_debugbundle_test.go` | `bundleGatedManagerFor`, `requestBundle`, `assertBusyReject`, `waitQueueLen`, `waitCallCount`, `fakeBundler` | Every fixture the new tests need already exists. Do not build a new harness. |
-| `internal/relay/v2session_debugbundle_test.go` | `TestV2Session_DebugBundle_ErrorReplies` | **The one existing test this change breaks.** Its barrier assumes a synchronous reply — see § Testing strategy. |
-| `internal/relay/v2session_appframe_test.go` | `TestV2Session_SlowHandler_DoesNotStallOtherConn`, `TestV2Session_SlowHandler_ModalTimeoutStillFires`, `blockingHandler` | **The template for AC #1's test.** Copy the structure; swap the blocked handler for a blocked `DebugBundler`. |
-| `internal/relay/v2session_test.go` | `queueLen`, `assertQueueDrains`, `waitForLogContains` | Shared polls the new tests reuse. |
-| `docs/knowledge/features/v2-session-manager.md` | § "Inbound debug-bundle request (#813)" and the #965 paragraph asserting control arms stay on `Run` because they are "fast" | The doc claims this ticket falsifies — for the documentation phase, not the developer. |
-
 ## Context
 
 `handleDebugBundleRequest` calls the `DebugBundler` seam inline on `V2SessionManager.Run`. In production that seam is a closure over `debugbundle.Assemble`, which reads the newest `.cast` in full and gzips the archive in memory. For that whole duration `Run` sits inside one select arm and services nothing else: another conn's application frame, the `m.drainCh` push drain, `m.wake` rekey/idle timers, `m.modalTimeout`.

@@ -1,16 +1,5 @@
 # 237 — `conv`: in-memory auto-archive sweep primitive
 
-## Files to read first
-
-- `internal/conversations/registry.go:118-189` — existing `Create`/`Get`/`List`/`Update` methods. `Delete` mirrors their shape: mutex-guarded, no I/O, no validation, returns a single bool.
-- `internal/conversations/registry.go:142-167` — `List` doc comment + body. Pins the "returns a copy" contract that the snapshot-safety test relies on.
-- `internal/conversations/registry.go:34-37` — `Registry` struct (sole fields: `mu sync.Mutex`, `conversations []Conversation`). The slice is the only state to mutate.
-- `internal/conversations/archive.go` — `ShouldArchive(c, now) bool` and the `archiveIdleThreshold` constant. `Sweep` is the predicate's only consumer in this ticket.
-- `internal/conversations/archive_test.go` — table-driven shape and the `time.Date(...)` literal style for deterministic clocks. `TestSweep` reuses the same idiom.
-- `internal/conversations/registry_test.go:136-194` — `TestRegistry_Get` table shape. `TestRegistry_Delete` mirrors it (hit / miss / delete-then-get).
-- `internal/conversations/registry_test.go:393-413` — the existing "returned-slice-is-copy" subtest. Snapshot-safety for `Delete` extends the same invariant: a snapshot taken before `Delete` is unaffected by it.
-- `internal/conversations/conversation.go` — `Conversation` field set (especially `ID`, `IsPromoted`, `LastUsedAt`) used by test fixtures.
-
 ## Context
 
 Phase 3 of auto-archive. The predicate `ShouldArchive(c, now)` landed in #219; the daemon-side ticker + load/save wiring is a sibling ticket downstream. This ticket adds the two pure pieces that bridge them:

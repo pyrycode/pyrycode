@@ -1,20 +1,5 @@
 # Spec — `create_conversation` handler on the v2 phone-protocol dispatch (#666)
 
-## Files to read first
-
-- `internal/relay/handlers/list_conversations.go:14-59` — the closest analog: the minimal consumer-declared interface (`ConversationLister`), the read-then-`c.Reply(...)` shape, and the `protocol.Type*` reply discipline. The new handler mirrors this structure exactly.
-- `internal/relay/handlers/send_message.go:31-83` — the malformed-payload reject pattern: a *static* user-facing message (never echo decoded bytes), `replyError(ctx, c, env, protocol.CodeProtocolMalformed, msg, false)`, and the `logger.Warn("…malformed payload", "event", …, "conn_id", …)` field convention. Reuse verbatim.
-- `internal/relay/handlers/register_push_token.go:106-124` — `replyAck` / `replyError` helpers (package-private, already available to the new file). The new handler uses `replyError`; success goes through `c.Reply` directly (it returns a typed payload, not an ack).
-- `internal/protocol/conversations_write.go:5-33` — `CreateConversationPayload` (request: all three fields `*`-nullable → server fills defaults) and `ConversationCreatedPayload` (reply: `ID`, `IsPromoted`, `Cwd`, `Name *string`, `LastUsedAt`). Field semantics + nullability rationale.
-- `internal/protocol/testdata/create_conversation.json` + `conversation_created.json` — the exact wire shapes. Note the request fixture is `{"is_promoted":false,"name":null,"cwd":null}` (the common "scratch discussion" path) and the reply carries `in_reply_to`. The handler must produce a reply byte-compatible with `conversation_created.json`'s field set.
-- `internal/conversations/registry.go:118-137` — `Registry.Create(Conversation)` (caller owns id/uniqueness; in-memory append) and `Registry.Get(id)` (the validity check `send_message` already performs via the pool's `ValidateConversation`). `Registry.Save(path)` at `:72-116` — atomic temp+rename, snapshot-under-lock, mode `0600`/`0700`.
-- `internal/conversations/id.go:10-19` — `conversations.NewID()` (UUIDv4 via `crypto/rand`; errors only on rng failure).
-- `internal/conversations/sweep_loop.go:14-63` — the *only* current persistence writer: `RunSweepLoop` Saves **lazily** (only on a non-zero archive tick). This is why a created row is otherwise non-durable until the next archive — the basis for this spec's eager-Save decision.
-- `cmd/pyry/relay.go:154-163` (v1 `d.Register(...)` block) and `:296-300` (v2 `Handlers:` map) — the two registration sites. Both already register `ListConversations` / `RegisterPushToken` / `SendMessage`; this ticket adds one line to each.
-- `cmd/pyry/relay.go:88-100` (`startRelay` signature) + `:269-282` (`startRelayV2` signature) + `cmd/pyry/main.go:489` (the single `startRelay` call site) — where the new `defaultCwd` argument threads through.
-- `cmd/pyry/main.go:402` (`pyry-workdir` flag, default `""`) + `:118-130` (`resolveClaudeSessionsDir`, the `filepath.Abs(workdir)` + getwd-fallback idiom to mirror) — source for the default cwd.
-- `internal/relay/handlers/send_message_test.go:64-86` (`newSendMsgConn` → `dispatch.NewTestConn`) and `register_push_token_test.go:39-58` (`newTestConn`) — the **light** handler-test idiom: build a `*dispatch.Conn` directly via `dispatch.NewTestConn(connID, out, dev)`, invoke the handler closure, read the outbound envelope off the channel. Prefer this over `list_conversations_test.go`'s full-dispatcher loop.
-
 ## Context
 
 The mobile rung-3 interactive-stream e2e (pyrycode-mobile#421) was driven live on 2026-06-18 and fails at discussion creation: tapping "New discussion" sends a `create_conversation` frame over the Noise v2 channel, but `cmd/pyry/relay.go` registers only `list_conversations` / `register_push_token` / `send_message` on both dispatch paths. With no handler, `dispatch.Route` returns `protocol.unsupported` ("no handler registered"); the mobile `createDiscussion` awaits `conversation_created`, receives the error, throws, and the app never navigates into the thread.

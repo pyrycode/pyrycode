@@ -5,24 +5,6 @@
 
 ---
 
-## Files to read first
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `internal/protocol/attachments.go` | `MaxAttachmentChunkBytes` | The bound (45000) and its `THE CROSS-CHECK` paragraph — **doc site A**. Note the units: raw, pre-base64 bytes, which is the same unit `Size` counts, so the division is raw-over-raw. |
-| `internal/protocol/attachments.go` | `AttachmentChunkPayload` | The `NEVER ALLOCATE FROM A CLAIM` block — **doc site B** — and the field contracts for `TotalChunks` (`int`) and `Size` (`int64`). The type asymmetry drives the comparison rule in § Design. |
-| `internal/attachments/accumulator.go` | package doc, `Accumulator`, `NewAccumulator`, `Add`, `Assemble` | The six `#1767` mentions to re-point (**doc sites C, D, E** plus two more), and the house doc-comment voice the new file matches. |
-| `internal/attachments/accumulator.go` | `Add`, `reject` | The sentinel-wrapping idiom the new refusals copy: `fmt.Errorf("attachments: … %d …: %w", …, ErrX)`, numbers only, never a client-supplied string. |
-| `internal/attachments/filename.go` | `SanitizeFilename` | The nearest structural sibling — one exported symbol in its own file, doc block stating the postcondition **and** the non-goals. `admission.go` mirrors this shape. |
-| `internal/attachments/accumulator_test.go` | `TestAccumulator_FramingFaults_RejectAndDiscard` | The table-driven refusal-test idiom (`errors.Is`, `t.Parallel()`) the new table copies. |
-| `internal/attachments/accumulator_test.go` | `TestAccumulator_ZeroDeclaredCount_IsIncomplete`, `testFixture` | The test AC 5 requires to survive **unchanged**; `testFixture`'s comment block carries the seventh `#1767` mention. |
-| `internal/attachments/filename_test.go` | `TestSanitizeFilename` | The table shape for a pure function with no accumulator state — the closer model for this ticket's test than the accumulator tables. |
-| `docs/protocol-mobile.md` | § Attachments, **Chunking (the sender's obligation)** | The published `total_chunks = max(1, ceil(size / 45000))` form this slice adopts verbatim. **No edit** — it already says everything this slice enforces. |
-| `docs/knowledge/features/attachments-package.md` | § "Mutation-testing lessons", § "Blocked family" | The two overlay traps the § Testing measurement must avoid (a mutant that breaks the build scores as *green*), and the description of #1767's four bounds, of which this slice ships exactly one. |
-| `CODING-STYLE.md` | § "Comments — Citing Other Code" | Every comment this ticket writes names a symbol. `make cite-guard` is diff-scoped and fails on any line citation the branch adds. |
-
----
-
 ## Context
 
 On the inbound leg every field of `attachment_chunk` is an unverified claim. `AttachmentChunkPayload`'s `NEVER ALLOCATE FROM A CLAIM` block names the cheapest attack the frame offers: a claimed `TotalChunks` of 2^31-1 drives a multi-gigabyte allocation from one ~60 KB frame. The defence is free from the **first** chunk, before a byte is accumulated — `total_chunks` and `size` cross-check each other through the published per-chunk bound.

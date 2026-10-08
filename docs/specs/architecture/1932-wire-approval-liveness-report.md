@@ -10,28 +10,6 @@ new exported types, one consumer call site.
 
 ---
 
-## Files to read first
-
-| Path | Symbol | What to extract |
-|---|---|---|
-| `internal/permbridge/permbridge.go` | `expire`, `SetAnswerable`, `AnswerableFunc` | The seam's contract: called with **no registry lock held**, from the `time.AfterFunc` goroutine, **must not panic**, read as a level and re-asked every window. `expire` re-arms *the same* window on a positive reading. |
-| `cmd/pyry/relay.go` | `startRelayV2` | The `w.approvals != nil` branch — the one wiring site. Note its inner `w.busy != nil` guard: `bridge.toolCallInFlight` and `w.approvalParked.set(...)` live there; this ticket's assignment does **not**. |
-| `cmd/pyry/modal_resolve_v2.go` | `ApprovalAnswerable` | The report itself. Its doc states the two load-bearing halves, the parked-first ordering, and **"NEVER CALL THIS FROM THE RELAY `Run` GOROUTINE"**. Read all of it before wiring. |
-| `cmd/pyry/modal_resolve_v2.go` | `retire`, `broadcast` | `retire` writes the `audit.Log` record (`outcome=denied_timeout`, `source=timeout`, `modal_id=…`) that the reworked e2e gates on, and broadcasts `modal_dismissed` only to conns live at that moment. |
-| `internal/control/server.go` | `handleApprove`, `watchApproveConn`, `SetApprovalRegistry` | The five doc claims that go false (§ Doc-claim rewrites). Also: `handleApprove` logs `control: approval resolved` with `tool_use_id` + `behavior` — content-free, keep it that way. |
-| `internal/e2e/relay_v2_stream_modal_test.go` | `TestRelayV2_StreamModalPermissionRoundTrip` | The case table, the `nextEnv` single-reader discipline, and the drain loop's needle / forbidden-needle assertions. |
-| `internal/e2e/handshake_interactive_helpers_test.go` | `buildHelloEarlyInteractive`, `driveHandshakeToOpenDaemonInteractive` | The handshake helpers. **Nine specs call the drive helper — add a sibling, do not widen its signature.** |
-| `internal/e2e/relay_v2_rekey_test.go` | `waitForLog` | The existing `*safeBuffer` log-polling helper, same package. `h.Stderr` is a `*safeBuffer`. |
-| `internal/relay/v2session_replay.go` | `replayMissed` | Replay runs only when the hello carried `last_event_id`, and only for `cursor()`'s conversation. |
-| `internal/eventring/ring.go` | `After` | `After(conv, 0)` on a non-evicted ring returns the **whole** retained tail with `gap == false`. This is why the reconnecting phone needs no event-id bookkeeping. |
-| `cmd/pyry/interactive_turn_v2.go` | `emit` | `ring.Append` happens **before** the `ActiveConns` fan-out, so events are retained even when no phone is connected — the property the reconnect-replay witness rests on. |
-| `internal/relay/v2session.go` | `dispatchFrame`'s `default:` arm, `idleTimeout` | An unknown inner-frame type on an open session ⇒ `closeWith(StatusProtocolMismatch)`, deleting the session on the Run goroutine. `idleTimeout` is 15 minutes and has no env seam. Both matter — see § The disconnect problem. |
-| `internal/e2e/internal/fakeclaude/main.go` | `approveDialTimeout`, `dialApproval` | The 30 s margin comment to update, and the three needle constants. |
-| `docs/protocol-mobile.md` § "Error codes", close-code row **4408** | — | *"The relay↔binary leg is a single multiplexed WebSocket with **no per-connection disconnect frame**, so a phone that drops or backgrounds is only detectable by inbound-frame silence."* This sentence is the reason the obvious e2e design does not work. |
-| `docs/knowledge/features/permbridge-package.md` § "Conditional bound", § "Trust boundary" | — | The injected report's honesty is a documented trust input; a report that always answers `true` removes the fail-closed bound. |
-
----
-
 ## Context
 
 `internal/permbridge`'s registry parks every approval under a fail-closed

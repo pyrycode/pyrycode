@@ -3,23 +3,6 @@
 **Ticket:** [#1795](https://github.com/pyrycode/pyrycode/issues/1795) · `size:s` · `security-sensitive`
 **Package:** `internal/attachments` · **Production files touched:** 1 (`registry.go`)
 
-## Files to read first
-
-| Read | Symbols | What to extract |
-|---|---|---|
-| `internal/attachments/registry.go` | whole file (184 lines) | Every production change lands here. Read it end to end — the doc comments *are* most of the work, and AC 3 sweeps four of them. |
-| `internal/attachments/registry_test.go` | `TestRegistry_AdmitUnderAHeldPair_KeepsTheIncumbent` | The shape AC 2's new test copies (admit → feed 2 chunks → repeat → feed the rest → assemble), and the doc AC 3 narrows. |
-| ″ | `TestRegistry_AdmitRefusedDeclaration_StoresNothing` | The two declarations AC 2 reuses verbatim, and the doc whose sole-redness rationale is stated backwards. |
-| ″ | `TestRegistry_ConcurrentSamePairInsert_TellsExactlyOneItIsFresh` | The `got.got != got.own` pointer-identity assertions that rule out passing `insert` declaration scalars. Stays green, unmodified. |
-| ″ | `TestRegistry_AdmitAfterARefusal_AdmitsTheSamePair` | Refuses then admits on the *same* registry — the landed deterministic control for a missed unlock on a refusal path (§ Concurrency model). |
-| `internal/attachments/admission.go` | `CheckDeclaration`, `CheckDeclaredSize` | Signatures, and from their docs that both are pure and stateless — no lock, no registry read. That is what lets them run inside the critical section. |
-| `internal/attachments/accumulator.go` | `NewAccumulator` | That it cannot fail, and that its chunk map is created **without** a capacity hint. That hint-free map is what makes construction-under-lock bounded work (§ Security review, finding 6). |
-| `internal/sessions/pool.go` | `saveLocked` | House phrasing for a caller-holds-the-lock precondition: "Caller MUST hold p.mu". |
-| ″ | `Pool.capMu` | The precedent `Registry`'s type doc cites. Its doc names the sequence it serialises so a later caller re-uses it rather than wrapping it — the sentence this slice must keep citing correctly. |
-| `docs/knowledge/features/attachments-package.md` | § "In-flight upload registry (#1787, #1788)" | The "one `sync.Mutex`, taken once per operation and held for the whole body — never once to read, again to write" rule this slice extends to `Admit`. |
-| ″ | § "Mutation-testing lessons" | The `go test -overlay` recipe, and the build-failure trap (a deleted check that orphans an import or a local reads as green). |
-| `CODING-STYLE.md` | § "Comments — Citing Other Code" | `make cite-guard` runs inside `make check` and fails on `foo.go:123` in a `//` comment, at any depth, ranges included. Every comment this slice writes cites by symbol. |
-
 ## Context
 
 `Registry` holds one `*Accumulator` per `uploadKey{connID, attachmentID}` behind one `sync.Mutex`. The decision that puts an entry there is split across two layers today: `Admit` runs `CheckDeclaration` and `CheckDeclaredSize` off-lock, constructs the `Accumulator`, and hands it to `insert`, which takes `mu` for the map lookup-and-store alone. `Admit` takes no lock of its own.

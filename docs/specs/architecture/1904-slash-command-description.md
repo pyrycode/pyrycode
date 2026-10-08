@@ -2,30 +2,6 @@
 
 **Size: s** (re-checked against this written spec in § Size re-check.) `security-sensitive` — § Security review below is part of the deliverable's evidence, not the developer's work.
 
-## Files to read first
-
-Read these before writing anything. Every entry names a symbol; resolve it with `codegraph_search` / `codegraph_node`, not with a line number.
-
-| File | Symbol | What to extract |
-| --- | --- | --- |
-| `internal/streamsup/parser.go` | `commandEntryLine` | The decode target this slice adds a second field to. Read the WHOLE doc — six of the ten corrections live in it. |
-| `internal/streamsup/parser.go` | `emitSlashCommandList` | The per-entry construction loop this rides. Note the `// No bound closure` comment (item 3) and the `argument_hint (#1833)` cite (AC 4's re-point). |
-| `internal/streamsup/parser.go` | `maxSlashCommandName` | The sibling cap. Its doc-shape is what the new constant's derivation mirrors; its THE PER-ENTRY TERM paragraph is item 4. |
-| `internal/streamsup/parser.go` | `maxTaskRosterDescription` | **The doc-shape precedent.** The multiplication argument and the ROLE argument the derivation has to weigh. |
-| `internal/streamsup/parser.go` | `maxModelListEntries` | Where the retired-8192 correction and the "re-derive your own fraction per shape" rule are stated. The ceiling argument is copied from here, not from the roster. |
-| `internal/streamsup/parser.go` | `truncateField` | The cut helper: `<=` boundary, empty-replacement mid-rune **deletion** (a cut value can land 1–3 bytes under the limit). |
-| `internal/streamsup/parser.go` | `emitModelList` | The `bound` closure inside its per-entry loop — the mechanism § Design adopts, including *why the closure is declared inside the loop*. |
-| `internal/streamsup/parser.go` | `logControlResponse` | Item 9's `commands` attribute paragraph. The record itself gains nothing. |
-| `internal/turnevent/event.go` | `SlashCommand` | Type doc (item 1) + `TruncatedFields` doc (item 2) + `Name`'s doc as the model for `Description`'s. |
-| `internal/turnevent/event.go` | `SlashCommandList` | Its SECURITY paragraph — the statement `Description`'s own doc must NOT restate, only inherit. |
-| `internal/protocol/interactive.go` | `SlashCommand` | Declaration order (`Name`, `ArgumentHint`, `Description`, `Aliases`, `TruncatedFields`) and the `description` JSON tag. Its SECURITY paragraph carries the newline measurement. |
-| `internal/streamsup/parser_test.go` | `commandEntryFixture` | **Do not widen it.** 26 calls across 21 lines. |
-| `internal/streamsup/parser_test.go` | `modelEntryWithFixture` | The sibling-helper pattern to copy, verbatim in shape and in the reason its doc states. |
-| `internal/streamsup/parser_test.go` | `TestParser_SlashCommandFieldsAreCapped` | The existing per-entry cap table. Liveness rows go here; read the row struct's `commandsOnly` / `entries` / `want` / `why` fields and the `slashCommandNameCapFixture` convention. |
-| `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseRejectBranches` | Where AC 5's non-string case goes — the `"an entry's name is a number"` row is the template. |
-| `cmd/pyry/interactive_turn_v2_test.go` | `emitterSlashCommandListSentinels`, `emitterSlashCommandListFixture` | Item 10: the enumeration, the fixture's two entries, and the sentinel-shape rule (`qq-…-alpha-sentinel` / `zz-…-beta-sentinel`). |
-| `docs/knowledge/features/` | the streamsup package overview | Read-only. The documentation phase owns it; do **not** write one. |
-
 ## Context
 
 The bounded slash-command list is built and emitting. `commandEntryLine` decodes one key (#1853), `turnevent.SlashCommandList` carries the daemon-internal shape (#1854), `emitSlashCommandList` constructs one `turnevent.SlashCommand` per entry with `Name` cut at `maxSlashCommandName` (#1877, moved to its own emitter in #1886), and a commands-only success rung emits it with no model list beside it (#1890 / #1891).

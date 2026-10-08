@@ -1,15 +1,5 @@
 # #288 — transport.serve close-frame race regression test
 
-## Files to read first
-
-- `internal/transport/wssclient.go:372-411` — the `serve` function and the close-status preference loop (lines 405-410). This is the contract being pinned. **Do NOT modify.**
-- `internal/transport/wssclient.go:174-248` — `Connect` loop; specifically the post-serve fatal-close check at lines 226-232. The test's outer assertion (Connect returns `ErrFatalClose`) flows through this branch.
-- `internal/transport/wssclient_test.go:605-661` — existing `closeCodeRelay` + `TestFatalCloseCodes_HaltsReconnect`. The new test reuses the relay shape and extends it; the new test sits adjacent to this one.
-- `internal/transport/wssclient_test.go:668-705` — `TestFatalCloseCodes_HaltsOnDialError` shows the `dialFn` injection pattern referenced by the ticket's Technical Notes.
-- `internal/transport/wssclient_test.go:30-64` — `testOpts` / `newClientForTest` — the test-config harness already supports `dialFn` substitution.
-- `internal/transport/wssclient_test.go:102-154` — `newTestRelay` / `relayCtrl` — pattern for an `httptest`-backed WS server with per-conn signalling (`connectedCh`); template for the new relay's structure.
-- *(reference, do NOT read in full)* `coder/websocket@v1.8.13` `read.go:226-255` (`prepareRead` / `done`) — documents the `ctx.Err()` override of `closeReceivedErr` that makes the race subtle. Cited here so the developer understands why "ensure both pushes land in `errCh` before `serve` cancels ctx" is the only way to preserve the `CloseError` in later `errs` slots.
-
 ## Context
 
 #248 fixed a close-frame race in `transport.serve`: when `recvPump` and `sendPump` (or `pingLoop`) both error from the same peer-close event, the original code returned the first error to arrive on `errCh`. If the first arrival was `sendPump`'s mid-Write failure (no recognizable WS close status), the `FatalCloseCodes` check downstream in `Connect` silently skipped — a 4409 server-id conflict from the relay would not halt reconnect, defeating the whole point of `Config.FatalCloseCodes`.

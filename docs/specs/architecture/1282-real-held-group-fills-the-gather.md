@@ -7,36 +7,6 @@
 
 ---
 
-## Files to read first
-
-Turn-1 data load. Each entry says what to extract; do not re-derive any of it.
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/finding_run_gather_test.go:230-279` | `finGatherReadings`' body — the four parameters, which fields it stages, and where `record.Selected` is copied into `Admit`. **Call it; do not rebuild it and do not change its signature.** |
-| `internal/e2e/realclaude/finding_run_gather_test.go:200-215` | The caller obligation this ticket discharges: `pinned` is `[]int`, and the caller holding `pinScan.Matches` converts at its own call site taking `.PGID` and nothing else. Also the conditional `PyryExited` note — see § *What stays staged*. |
-| `internal/e2e/realclaude/trail_run_rig_test.go:506-556` | **The staging to copy.** `exec.LookPath` in the parent, both operands as positional parameters, `exit 0` to defeat the exec optimisation, `cmd.Env = []string{}`, `SysProcAttr{Setpgid: true}`, and the `defer` (not `t.Cleanup`) that kills `-pgid`. |
-| `internal/e2e/realclaude/trail_run_rig_test.go:277-284` | The flip test's subject — the staging **not** to copy: no `SysProcAttr`, so the pinned group would be `syscall.Getpgrp()` and AC3's own-group arm would collapse into AC2's finding arm. |
-| `internal/e2e/realclaude/trail_run_rig_test.go:119` | `trailRigHeldPGID()` — `syscall.Getpgrp()`, the exact hardcoding AC3's second arm traps. |
-| `internal/e2e/realclaude/trail_run_rig_test.go:49-57` | The failure-message redaction rule this file's header restates, and the reason. |
-| `internal/e2e/realclaude/trail_run_rig_test.go:572-586` | The per-matched-pid liveness loop and `pinIsVerdict` call to mirror — see § *Liveness is live for the first time*. |
-| `internal/e2e/realclaude/process_pin_liveness_test.go:191-198` | `pinScanArgv(needles, exclude) (pinScan, error)` — zero `pinScan` on error. |
-| `internal/e2e/realclaude/process_pin_liveness_test.go:128-136` | `pinScan`: `Matches []reachProc`, `RowsScanned`, `MatchCount`. `Matches` is the value that must never leave the helper. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:161-168` | `reachProc` — `PID`, `PPID`, `PGID`, and `Command`, which is verbatim argv. `.PGID` is the join key; `.Command` never leaves the scan. |
-| `internal/e2e/realclaude/process_pin_liveness_test.go:206-232` | `pinStateColumns = "pid=,ppid=,stat="` and its never-add-`command` prohibition. This ticket adds no `ps` read of its own. |
-| `internal/e2e/realclaude/process_pin_liveness_test.go:1142` | `pinIsVerdict` — the membership predicate over the four per-pid states. Call it; do not re-switch. |
-| `internal/e2e/realclaude/finding_attribution_fanout_test.go:186-260` | `finAttributeFanOut` step 1 (dedupe + sort) and step 2 (`pgid <= 1` → unreportable). Step 1 is why two rows in one group reduce to one entry. |
-| `internal/e2e/realclaude/finding_attribution_fanout_test.go:88-125` | `finAttributeRecord` — `Conditions`, `Unreportable`, `Entries`, `Selected`. `len(Entries)` is the distinct-group count. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:533-537` | `trailReapLine(count int, pgids string) string` — the synthetic reap line in `reap.go:65`'s slog shape. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:440-478` | `trailAdmitAttribution`'s verdict switch: `tdnReapNoLine` → `trailAdmitVoidNoLine`, `tdnReapHeldPGIDAbsent` → `trailAdmitVoidGroupUnnamed`, `tdnReapHeldPGIDKilled` + `LineCount == 1` → `trailAdmitProof`. |
-| `internal/e2e/realclaude/teardown_liveness_test.go:144-158` | `tdnClassifyReapLog`'s `heldPGID <= 1` guard → `tdnReapInstrumentFailed`. Why `syscall.Getpgrp()` (always > 1) reaches the *absent* arm and not the instrument arm. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:505-598` | Classifier Steps 2–8 verbatim. **Step 2 (proof) outranks Step 6 (liveness instrument) and Step 7 (`MatchCount > 0`).** This ordering decides every arm below. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:663-700` | `holdProbeFIFO(t, path)` — mkfifo, holds the write end, returns the rendezvous channel, releases in a `t.Cleanup`. |
-| `internal/e2e/realclaude/fifo_reader_liveness_test.go:86,100,106,133` | `fifoLiveReaderPresent`, `fifoLiveReaderCommand` (`cat`), `fifoLiveRendezvousWait`, `fifoLiveRead(path)`. |
-| `internal/e2e/realclaude/result_trailer_observation_test.go:282` | `trailFixtureTrailer` — the ordinary trailer certifying `"completed"`. |
-
----
-
 ## Context
 
 `finGatherReadings` (#1281) takes pyry's reap-log stderr and the pinned process-group set as parameters and proves both the finding and a genuine negative come out of its composition. Every row that proves it is driven from a synthetic stdout, a synthetic stderr and **hand-passed pgid integers**.

@@ -2,13 +2,6 @@
 
 **Ticket:** pyrycode/pyrycode#1057 (split from #970) · **Size:** S · **Kind:** docs-only, no code changes · **Security-sensitive:** no
 
-## Files to read first
-
-- `internal/protocol/codes.go:40-143` — the v1 application `Type*` constants (`hello` … `register_push_token`). The per-constant doc comments for the ten new types (`:58-139`) state each type's Direction and reply-pairing **definitively**; they are the source of truth for the Direction and Notes columns (AC2). Transcribe from them — do not guess.
-- `docs/protocol-mobile.md:405-450` — the `## Application message types` table. Note the two row formats: **plain** rows for v1 application types (`create_conversation` … `error`, `:417-423`) and **bold `**\`type\`**` "New in v2." rows** for every type from `rekey_request` down (`:424-448`). The ten new rows use the **plain** format.
-- `internal/protocol/envelope.go:113-143` — `inboundAppTypeSet`, the closed enumeration of v1 inbound application types. All ten new types are members here, which is *why* they are plain rows, not bold v2 rows.
-- `internal/protocol/compat_test.go:143-242` — `v2OnlyTypes` allowlist + `TestTypeConstants_V1V2Partition`. This is the deterministic code-side guarantee that `inboundAppTypeSet ∪ v2OnlyTypes = {all Type* constants}`, and the ten new types are in the **former**. It does NOT check the doc table — the doc-vs-source completeness (AC3) is verified by the developer via the grep in § Testing strategy.
-
 ## Context
 
 The 2026-07-15 docs review found the `## Application message types` table in `docs/protocol-mobile.md` silently missing ten shipped message types. The authoritative vocabulary is the `protocol.Type*` constants in `internal/protocol/codes.go`; the table drifted below it. This backfills the ten rows so the table is a complete reference. The ten types already exist on the wire (constants + handlers shipped in prior tickets) — this is a documentation-completeness fix only.

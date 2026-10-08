@@ -1,12 +1,5 @@
 # Spec: e2e/realclaude nightly GitHub workflow (#362)
 
-## Files to read first
-
-- `.github/workflows/self-check-daily.yml` (entire file, 36 lines) — canonical template. Copy structure: leading comment block → `on:` (schedule + workflow_dispatch) → single job with `runs-on`, `timeout-minutes`, `actions/checkout@v6`, `actions/setup-go@v6` with `go-version: "1.26.x"`, npm install of `@anthropic-ai/claude-code`, then a final `run` step that exports `ANTHROPIC_API_KEY` from the secret. **Mirror the action versions and Go pin exactly** — the AC specifies parity, and divergence creates two CI footprints to keep in sync.
-- `Makefile` — confirm `e2e-realclaude` target exists and what it runs (`go test -tags e2e_realclaude ./internal/e2e/realclaude/...`). The workflow invokes the make target, not `go test` directly, so future test additions in `internal/e2e/realclaude/` are picked up without touching CI.
-- `internal/e2e/realclaude/` — current contents (smoke test scaffold from #361). Just confirm it exists; no code changes here.
-- `docs/knowledge/codebase/336.md` (if present) — the self-check-daily ticket's lessons. Skim for any monitoring-contract gotchas that should propagate.
-
 ## Context
 
 Real-claude e2e tests cost API credits and are intentionally tag-gated out of per-PR CI (#361). Without a scheduled run, an upstream `claude` binary regression would only surface at the next production dispatch. A nightly run provides 24h-bounded detection at low cost.

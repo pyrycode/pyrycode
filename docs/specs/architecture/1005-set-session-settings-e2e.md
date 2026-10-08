@@ -7,31 +7,6 @@ The production code (`handleSetSessionSettings` + the `settingsUpdaterAdapter` w
 
 ---
 
-## Files to read first
-
-Turn-1 data load. Read these before writing a line; do not re-discover them by grepping.
-
-**The contract under test (production, read-only):**
-- `internal/relay/v2session.go:2745-2830` — `handleSetSessionSettings`: the exact 5-step order the test asserts against — interactive gate → decode → `validModel`/`validEffort` (BEFORE persist) → nil-seam guard → `UpdateSettings` + reply `session_settings_updated`. Reply built at :2818; success log at :2827 logs **conn_id + session_id only, never model/effort/yolo**.
-- `internal/relay/v2session.go:2704-2712` — the three fixed reject constants. `msgSettingsMalformed = "malformed set_session_settings request"` is what AC-3 asserts. **It is package-private (`internal/relay`) — the e2e cannot import it; assert the literal string.**
-- `internal/relay/v2session.go:2887-2923` — `validModel` (a **shape** check: 1..64 bytes, first byte alphanumeric, charset `[A-Za-z0-9._-]`; `""` allowed) and `validEffort` (a **closed enum** `{"", low, medium, high, xhigh, max}`). **This drives the choice of non-vacuous invalid values (see § Design).**
-- `internal/relay/v2session.go:2847-2875` — `settingsReplyError`: emits `TypeError` with an `ErrorPayload{Code, Message, Retryable}` correlated by `InReplyTo`; the reject log records `code + conn_id` only, never the value.
-- `internal/protocol/settings.go` — `SetSessionSettingsPayload{SessionID string; Model,Effort *string; YOLO *bool}` (pointer = presence contract) and `SessionSettingsUpdatedPayload{SessionID string}` (reply echoes only the id).
-- `internal/protocol/handshake.go:81` — `ErrorPayload` shape (decode the reject reply into this).
-- `internal/protocol/codes.go` — `TypeError = "error"` (:44), `CodeProtocolMalformed = "protocol.malformed"` (:10), `TypeSetSessionSettings`/`TypeSessionSettingsUpdated` (:453-454).
-
-**The e2e harness to ride (do NOT extract new infra):**
-- `internal/e2e/relay_v2_promote_test.go` — **the reply-bearing template.** Copy its shape: `json.Marshal(Envelope{...})` → `initSend.Encrypt` → `sendNoiseMsg` → `decryptInnerEnvelope(t, readInnerFrame(t, phone, 3*time.Second), initRecv)` → assert `Type` + `InReplyTo == reqID` → decode payload → read the on-disk registry back with a **local anonymous decode struct** (lines 141-167 — mirror this exactly; do not touch shared types).
-- `internal/e2e/relay_v2_new_session_test.go:49-178` — **the interactive-verb template.** Reuse: `StartRotationWithRelay(... "PYRY_MOBILE_V2=1")` with a **never-created trigger path**, `driveHandshakeToOpenDaemonInteractive` (the interactive grant `handleSetSessionSettings` requires), `waitForBootstrapID(t, regPath, initialUUID, 5*time.Second)` as the precondition, and the `regPath := filepath.Join(home, ".pyry", "test", "sessions.json")` read pattern. **Do NOT copy its `PYRY_FAKE_CLAUDE_CLEAR_ROTATES` / stdin-log machinery — this ticket does not rotate.**
-- `internal/e2e/relay_two_phone_structured_test.go:501-543` — `driveHandshakeToOpenDaemonInteractive`: drives the Noise_IK handshake advertising the `interactive` capability and asserts the daemon granted it. Returns `(initSend, initRecv)` CipherStates.
-- `internal/e2e/harness.go:309-366` — `StartRotationWithRelay` signature/semantics (pre-seeds the bootstrap registry at `initialUUID`, sets `PYRY_ALLOW_INSECURE_RELAY`, spawns fakeclaude). `Harness.Stderr` is a `*safeBuffer` (:102) with `.String()` — **this is the daemon-log capture the AC-3 no-leak assertion scans.** `seedBootstrapRegistry` (:~380) seeds the bootstrap with **no settings** → the on-disk baseline is `model:"" effort:"" yolo:false`.
-- `internal/e2e/rotation_test.go:36,111,143,158` — `claudeSessionsDir`, `waitForBootstrapID`, `readBootstrap`, `readBootstrapIfPresent`. Reuse.
-- `internal/e2e/restart_test.go:17-29` — the shared local `registryEntry`/`registryFile` decode structs. **They lack `Model`/`Effort`/`YOLO` — do NOT extend them** (shared across tests; editing them is a file-overlap risk). Define a small **local** settings-aware decode struct in the new file instead (see § Design).
-- `internal/sessions/registry.go:23-38` — the authoritative on-disk JSON tags: `model,omitempty` / `effort,omitempty` / `yolo,omitempty`. Match these in the local decode struct.
-- `internal/sessions/pool_update_settings_restart_test.go` — the **unit-tier** persistence shape this e2e mirrors (`diskSettings`, `SessionSettings{Model,Effort,YOLO}`). Read for the shape only; it is same-package and its helpers are not reachable from `internal/e2e`.
-
----
-
 ## Context
 
 The `set_session_settings` v2 control verb lets a paired phone change a session's `model` / `effort` / `yolo`. It is **interactive-gated** and **request/reply** (unlike the fire-and-forget verbs). Its design is a validate-at-the-wire-boundary argv-injection defense: an untrusted `model`/`effort` is checked by `validModel`/`validEffort` **before** any persistence, so a value shaped like a claude flag (`--dangerously-skip-permissions`, `--foo`) can never reach the spawn argv. Invalid values, decode failures, and unknown ids each yield a deterministic `TypeError` whose message is a **fixed constant** — no payload byte or value ever reaches the wire or a log.

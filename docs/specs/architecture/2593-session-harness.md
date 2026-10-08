@@ -63,10 +63,6 @@ New `cmd/pyry/harness_runner_test.go`: `harnessRunnerFactory` delegates for `""`
 
 Existing suites run untouched (AC 4).
 
-## Open questions
-
-None.
-
 ## Documentation handoff
 
 None required by the ticket. Pending for the documentation stage: the sessions package overview may note the `harness` registry key and the selecting factory.

@@ -3,31 +3,6 @@
 **Size:** S (PO's `size:s` re-verified below). **Tier:** test-only — one test-tier binary
 (`fakeclaude`), one e2e spec, one new pure unit test. No production package is touched.
 
-## Files to read first
-
-Turn-1 reading list. Each entry says what to extract; read the range, not the whole file.
-
-| Path + range | What to extract |
-|---|---|
-| `internal/e2e/internal/fakeclaude/main.go:544-608` | `main()`'s stream branch. The tee at `:566-574` is the **single writer-side edit site**. The comment at `:557-565` carries the clause this ticket retires — "so the bootstrap child and the fresh post-rotation child both accumulate into one file". |
-| `internal/e2e/internal/fakeclaude/main.go:1132-1170` | `argvSessionID(args)` + its stem-guard rationale (`:1146-1158`). The new writer-side helper wraps it; the guard is why an argv value may be spliced into a filename at all. |
-| `internal/e2e/internal/fakeclaude/main.go:1-22` | Package header env table; the `PYRY_FAKE_CLAUDE_STDIN_LOG` entry at `:14-22` is the one whose stream-mode clause changes. |
-| `internal/e2e/internal/fakeclaude/main.go:229-263` | `PYRY_FAKE_CLAUDE_SESSION_ID_FROM_ARGV`'s doc. Two things: the "argv is the one per-child channel that already carries the id" argument this design reuses, **and** that this var is INERT on the stream path — do not set it (see Constraints). |
-| `internal/e2e/internal/fakeclaude/main.go:264-294` | `PYRY_FAKE_CLAUDE_JSONL_TRIGGER_DIR` (#1195). The **shipped precedent**: a shared path could not serve a multi-child tree, and "keying the path on the child's own stem makes ownership structural". This ticket is that same move applied to the stdin tee. |
-| `internal/e2e/internal/fakeclaude/argv_session_id_test.go` (whole file, 90 lines) | The untagged pure table-test idiom (`// Intentionally UNTAGGED … so the standard go test gate exercises the parser`) the new writer-side test copies, and the stem-guard rows it must **not** duplicate. |
-| `internal/e2e/relay_v2_stream_new_session_test.go:23-72` | File header: the milestone sketch (M4's line is `:47`) and the drain-divergence analysis (`:62-72`). Both say "the stdin log", singular. |
-| `internal/e2e/relay_v2_stream_new_session_test.go:109-129` | The tee's env wiring. `:117-120` states the shared-file contract being replaced; `:121` is the `stdinLog` variable that becomes a stem. |
-| `internal/e2e/relay_v2_stream_new_session_test.go:334-400` | M4's ack #2 wait, the ack-time byte-count probe (`:371-384`) and the daemon-log byte offset (`:386-400`). Extract the **same-instrument-at-both-ends** doctrine (`:376-379`) — it survives this change verbatim, re-pointed at a per-child file. |
-| `internal/e2e/relay_v2_stream_new_session_test.go:402-494` | M4's poll and its whole failure record. Two binding rules live here: nothing on the failure path may call a `t.Fatal*`-ing helper (`:446-448`), and a broken instrument must render as a sentinel, never as a measurement (`:449-460`, `:424-426`). |
-| `internal/e2e/relay_v2_stream_new_session_test.go:496-546` | The AC-1 instrument guard. `:507-511` explains why it only runs on a green M4 — the fact AC-4 turns on. `:538-544` is the message AC-4 amends. |
-| `internal/e2e/relay_v2_stream_new_session_test.go:548-564` | M5: the non-vacuity guard (which today matches turn #1 — the **outgoing** child's bytes) and the `/clear` check. |
-| `internal/e2e/relay_v2_stream_new_session_test.go:680-836` | `TestDaemonLogWindow`. The in-file table-test idiom the AC-3 fixture copies, including its "CONTRACT check, not a manufactured failing scenario" posture (`:680-688`, `:781-787`). **Untouched by this ticket** — `daemonLogWindow` and its test do not move. |
-| `internal/streamsup/runner.go:782-804` | `buildArgs`: every spawn ends in `--session-id <id>` (first run) or `--resume <id>` (respawn). This is why the argv discriminator is **total** on this path, and why a crash-respawn of the same session appends to the same per-child file. |
-| `internal/streamsup/runner.go:484-510` | `RestartFresh` re-arms first-run form, so the post-rotation spawn carries `--session-id <newID>` — the id M2 captures as `post.ID`. |
-| `internal/e2e/harness.go:368-467` | `StartStreamInteractiveWithRelay`: `extraEnv` flows verbatim into the daemon's process env, inherited identically by both children. **Not modified by this ticket.** |
-| `docs/knowledge/features/fakeclaude-binary.md:667-690` | § "Stream-path stdin tee" — the contract that goes stale. A **documentation-phase** follow-up, not a developer AC (see Out of scope). |
-| `docs/knowledge/codebase/1330.md` | The sibling's scope note: the ~21 s M4 stall is **#1298, still open**, and not this ticket's. Read before interpreting any red run. |
-
 ## Context
 
 M4 asserts "the fresh post-rotation child received the subsequent turn" by polling one

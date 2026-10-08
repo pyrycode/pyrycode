@@ -1,18 +1,5 @@
 # #508 — agentrun: delete `EncodeProjectDir`; remove redundant `EvalSymlinks` from the JSONL hot path
 
-## Files to read first
-
-- `internal/agentrun/workdir.go` (45 lines) — the two functions under refactor. `EncodeProjectDir` (chains `ResolveWorkdir` → `tuidriver.EncodeCwd`) is deleted; `ResolveWorkdir` is left untouched because `trust.go` is its remaining caller (out of scope per ticket AC2).
-- `internal/agentrun/workdir_test.go` (158 lines) — the `TestResolveWorkdir_*` tests stay verbatim; the `TestEncodeProjectDir_*` block (lines 69–157) is deleted. The behaviours those tests exercised are covered by `tuidriver`'s own `cwd_test.go` (canonicalisation rules, dash substitution, darwin realpath).
-- `internal/agentrun/jsonl/tail/watcher.go:108-119` — current pattern: call `agentrun.ResolveWorkdir(cfg.Workdir)`, pass `resolved` into `tuidriver.SessionJSONLPath`, then `MkdirAll`. The `ResolveWorkdir` step is redundant — `SessionJSONLPath` internally calls `EncodeCwd`, which already canonicalises (darwin: `F_GETPATH`; linux: `EvalSymlinks`). This spec drops the explicit `ResolveWorkdir` call.
-- `internal/agentrun/jsonl/tail/watcher_test.go:92-101` — `expectedEncodedDir` helper currently mirrors the production canonicalisation step via `agentrun.ResolveWorkdir` then `tuidriver.SessionJSONLPath`. Update to match the simplified production call (pass `workdir` straight through).
-- `internal/e2e/realclaude/fixtures.go:360-376` — `resolveAndOpenJSONL` calls `agentrun.EncodeProjectDir` then composes the path. The whole composition collapses to `tuidriver.SessionJSONLPath(home, workdir, sessionID)`.
-- `internal/e2e/realclaude/fixtures_test.go:295-300, 553-575` — two `agentrun.EncodeProjectDir(workdir)` sites used to compute the expected on-disk path. Both lift to `tuidriver.SessionJSONLPath`.
-- `internal/e2e/realclaude/prompt_fidelity_test.go:79-89` — `jsonlPathFor` diagnostic helper. Same lift.
-- `internal/agentrun/ptyrunner/runner_test.go:31-62` — `helperRunCfg` precomputes the encoded JSONL path the fake helper child writes into. Switch the encoder call to `tuidriver.EncodeCwd(workdir)` (returns plain `string`, drop the err check).
-- `vendor view: github.com/pyrycode/tui-driver@v0.0.0-20260523181457-c2dcd1e49992/pkg/tuidriver/cwd.go:20-35` — `EncodeCwd` contract: input canonicalised via `canonicalisePath`; on resolution failure, the input is encoded **as-passed** (no error path). This is the behaviour shift documented in § Error handling.
-- `internal/agentrun/trust/trust.go:50-54` — left untouched. Its `agentrun.ResolveWorkdir` call is the **sole remaining production caller** of `ResolveWorkdir` after this ticket. Out of scope per AC2 (different output shape required — fs path, not dashed name — plus security-boundary audit not in this ticket's budget). A follow-up issue tracks eventual removal.
-
 ## Context
 
 #501 made `agentrun.EncodeProjectDir` delegate to `tuidriver.EncodeCwd`, but the wrapper still chains through `agentrun.ResolveWorkdir` first. Since tui-driver #57 shipped `canonicalisePath` inside `EncodeCwd` (darwin: `F_GETPATH`; non-darwin: `EvalSymlinks`), the chain resolves symlinks twice on linux and does an extraneous `EvalSymlinks` before `F_GETPATH` on darwin. Error-path semantics also diverge: `ResolveWorkdir` errors on `fs.ErrNotExist`; `EncodeCwd` silently falls back to encoding the input as-passed.

@@ -35,33 +35,6 @@ prose is preserved verbatim in git at `93c6d83` if the original reasoning is nee
 
 ---
 
-## Files to read first
-
-Line numbers are against `feature/1219` at `6ca5b37`. Your own edits shift them —
-re-derive before citing them anywhere else.
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/sigterm_mid_tool_use_test.go:20-21` | The invariant-4 statement, **falsified**. "no matching tool_result was written" is the sentence AC5 makes you rewrite. |
-| `internal/e2e/realclaude/sigterm_mid_tool_use_test.go:23-41` | The fragility-history block. Defeats #1 and #2 are recorded; you append #3 (the 2026-07-28 discovery). Keep the existing two entries verbatim. |
-| `internal/e2e/realclaude/sigterm_mid_tool_use_test.go:72-79` | The "On defeat #3" paragraph. Renumbered and reordered by Part II § *Error handling*. |
-| `internal/e2e/realclaude/sigterm_mid_tool_use_test.go:99-108` | The branch-B paragraph, **superseded**. Branch A is now observed. Its `subtype != success` instruction names a field that does not exist on this surface — see the `tool_loop_test.go` row below. |
-| `internal/e2e/realclaude/sigterm_mid_tool_use_test.go:258-279` | The `waitForBashToolUseOnDisk` → `SIGTERM` seam. The pre-signal snapshot (Part II § *Second call site*) goes between these two, and nowhere else. |
-| `internal/e2e/realclaude/sigterm_mid_tool_use_test.go:342-397` | Invariants 4a and 4b. 4a is unchanged; 4b's inline scan is what the classifier replaces. |
-| `internal/e2e/realclaude/sigterm_mid_tool_use_test.go:400-477` | `holdFIFO` — **unchanged** (AC3). Its HAZARD comment is why the release stays in `t.Cleanup`; the classifier's correctness depends on that ordering holding. |
-| `internal/e2e/realclaude/sigterm_mid_tool_use_test.go:479-564` | `TestHoldFIFO_RendezvousAndRelease` — **unchanged**. It is AC4's oracle for "holdFIFO lifetime bug"; the new failure message points at it by name. |
-| `internal/e2e/realclaude/sigterm_mid_tool_use_test.go:766-784` | `findBashToolUse` returns `(id, index)`. The credential-free test calls it too, so the fixture exercises the same entry path as the live test. |
-| `internal/e2e/realclaude/tool_loop_test.go:160-183` | `contentBlock` + `parseContentBlocks`. `IsError bool` at `:167` is `omitempty`-tagged, so **absent and `false` are indistinguishable** after decode. There is no `Input` field and no `Subtype` field — `Subtype` lives on `resultTrailer` (`:194-203`), a different surface. Read, do not modify: it is shared across the package. |
-| `internal/e2e/realclaude/resilience_test.go:105-129` | `TestRealClaude_BashTool_NonZeroExit` asserts `is_error == true` on a Bash `tool_result` for a command that **ran to completion** and exited non-zero. This single fact decides the discriminator — see Part II § *Why not `is_error`*. |
-| `internal/e2e/realclaude/allowed_tools_enforcement_test.go:166-192` | `structuredDenialHit` reads a top-level `is_error` as a **permission-denial** signal. Third distinct meaning for the same flag in this one package. |
-| `internal/e2e/realclaude/fixtures.go:145-167` | `ReadJSONL` — the live parse path. Note `jsonl.NewReader(src io.Reader, jsonl.Config{})`: the zero-value `Config` is proven safe, and the source is any `io.Reader`, which is what lets the credential-free test parse a string. |
-| `internal/agentrun/jsonl/reader.go:45-83` | `Event`. `Raw` (`:71`) is the verbatim line bytes; `Kind` (`:77`) is **derived from the line's `type` field**, not caller-supplied. Feed the fixture envelopes through `NewReader` so `Kind` is derived — hand-setting it would let the fixture pass while the live path skips the line. |
-| `internal/e2e/realclaude/per_agent_test.go:138-144` | `truncate(b []byte) string`, 1 KiB cap. Reuse for the envelope dumps. |
-| `Makefile:55-57` | `make e2e-realclaude` = `go test -tags e2e_realclaude ./internal/e2e/realclaude/...`. The credential-free test runs under this tag with no auth. |
-| `docs/knowledge/codebase/422.md:10,16` | Records the old "tool_result-absent" invariant and the same wrong `subtype != success` flip instruction. **Not yours to edit** — see Part II § *Out of scope*. |
-
----
-
 # Part I — delivered (`6ca5b37`), do not regress
 
 ## Context

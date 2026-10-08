@@ -6,30 +6,6 @@
 
 ---
 
-## Files to read first
-
-Symbols, not line numbers — resolve each with `codegraph_search` / `codegraph_node`, then Read the block whole. `make cite-guard` bans `file.go:NNN` in `//` comments at any depth, with no range and no 20-line exemption, so nothing below gives you one to copy.
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `internal/streamsup/parser.go` | `maxSlashCommandDescription` | The doc SHAPE the new constant must copy: measurement → multiple → why it differs from its neighbours → ceiling fraction → one-constant-per-meaning. Also **three of the five stale figures** live in this doc. |
-| `internal/streamsup/parser.go` | `maxSlashCommandName` | Its *THE PER-ENTRY TERM* paragraph is the two-term sum this slice makes three-term. Its 10.7x-over-the-longest is the multiple whose **base** this slice must name. |
-| `internal/streamsup/parser.go` | `commandEntryLine` | The decode target gaining `ArgumentHint`. Seven separate claims inside its doc go stale — see § The correction manifest. Its sink-enumeration paragraphs are the model the hint's own security re-walk copies. |
-| `internal/streamsup/parser.go` | `emitSlashCommandList` | The `bound` closure and the construction loop. The **call sequence** is what orders `TruncatedFields`; the new call goes BETWEEN the two existing ones, not after them. |
-| `internal/streamsup/parser.go` | `logControlResponse` | Its `commands` paragraph draws an UNREACHABLE-by-omission vs UNWRITTEN distinction that this slice moves `argumentHint` across. A re-argument, not a sentence edit. |
-| `internal/streamsup/parser.go` | `truncateField` | The `<=` boundary and the empty-replacement scrub (a cut lands 1–3 bytes short when it lands mid-rune). The cut semantics the new cap inherits unchanged. |
-| `internal/turnevent/event.go` | `SlashCommand` | The type doc's fixed-declaration-order promise, and `TruncatedFields`' enumeration of what it may carry. `ArgumentHint` goes between `Name` and `Description`. |
-| `internal/turnevent/event.go` | `SlashCommandList` | Its SECURITY paragraph owns the never-sanitized statement for every string on the type — the new field doc points at it rather than restating it. |
-| `internal/protocol/interactive.go` | `SlashCommand` | The wire type, already declaring `ArgumentHint` with tag `argument_hint` and already enumerating it in `TruncatedFields`. **Read-only for this ticket** — no protocol change. |
-| `internal/streamsup/parser_test.go` | `commandEntryWithFixture`, `commandEntryFixture` | The fixture builders this slice REUSES. `commandEntryFixture` builds the `name` key only, which is why no existing row gains a hint by accident. |
-| `internal/streamsup/parser_test.go` | `TestParser_SlashCommandFieldsAreCapped` | The boundary matrix the liveness rows join. Read its rows' sole-redness `why` claims before adding beside them. |
-| `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseCountsTheCapturedCommands` | Its `slices.Contains(got.TruncatedFields, "name")` narrowing — #1904 had to make exactly that edit when the second field landed. Check whether a third field re-breaks it (it does not; see § Testing). |
-| `cmd/pyry/interactive_turn_v2_test.go` | `emitterSlashCommandListFixture`, `emitterSlashCommandListSentinels` | The log-leak negative. Its doc **already states** that each field-adding slice owes a sentinel and a line here. Note the empty-string trap in § Testing. |
-| `docs/knowledge/features/streamsup-package-the-commands-only-rung-s-emit-lands.md` | § `Description` joins the per-entry shape (#1904) | The predecessor's own lessons, including the one that says a ten-item correction list costs a paragraph each and names #1830 by number as the ticket that should cost it in. |
-| `docs/knowledge/features/streamsup-package-producing-turnevent-slashcommandlist.md` | whole | Three lessons this spec leans on: a category-phrased `//` claim is the one grep misses; a spec-inherited sink enumeration still needs checking against the call graph; a sole-redness claim is measurable, not descriptive. |
-
----
-
 ## Context
 
 `internal/streamsup`'s `control_response` arm decodes claude's `commands` array — the workspace's slash-command inventory — into a bounded daemon value. `commandEntryLine` declares two of the four keys claude publishes; `emitSlashCommandList` copies each into a `turnevent.SlashCommand` through a per-entry `bound` closure that cuts at a per-field byte cap and appends the cut field's daemon name to that entry's `TruncatedFields`.

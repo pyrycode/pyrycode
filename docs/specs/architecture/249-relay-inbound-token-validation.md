@@ -1,20 +1,5 @@
 # Spec: relay inbound token validation per WS connection (#249)
 
-## Files to read first
-
-- `internal/devices/auth.go:32-46` — `Registry.Validate(plain) (Device, bool)` contract: empty input short-circuits to (Device{}, false); on hit, LastSeenAt is bumped under the registry's mutex; never logs the plain or hash.
-- `internal/devices/registry.go:111-128` — `Add` / `Remove` semantics used by tests to construct paired / revoked fixtures.
-- `internal/devices/device.go:24-43` — `Device` struct (TokenHash, Name, PairedAt, LastSeenAt).
-- `internal/protocol/handshake.go:30-44` — `HelloAckPayload` (protocol_version, server_id, conn_id) and `ErrorPayload` (code, message, retryable, retry_after_s) wire shapes.
-- `internal/protocol/envelope.go:23-43` — `Envelope` (id, type, ts, payload, in_reply_to, payload_encrypted) and `RoutingEnvelope` (conn_id, frame) outer shapes.
-- `internal/protocol/codes.go:14-15, 38-41` — `CodeAuthInvalidToken`, `TypeHello`, `TypeHelloAck`, `TypeError` wire constants.
-- `internal/relay/connection.go:214-266` — existing binary↔relay `handshake`: shows the envelope-build → json.Marshal → routing wrap pattern this ticket mirrors for the binary→phone leg.
-- `internal/protocol/handshake_test.go:101-180` — fixture round-trip test pattern for `hello_ack` and `error` envelopes; the new tests reuse the marshalling style (no shared helpers required).
-- `docs/protocol-mobile.md` § Authentication (line 67–) and the inline summary at line 98 — first-frame validation contract: valid → `hello_ack`; invalid → `error` envelope code `auth.invalid_token` + relay closes phone WS with code `4401`.
-- `docs/protocol-mobile.md` § hello_ack (line 240–255) and § error (line 257–278) — exact wire shape, including `in_reply_to` echoing the hello envelope's id and the canonical error message string.
-- `docs/protocol-mobile.md` § Error codes (line 534–550) — the `auth.invalid_token` row, the line 535 `auth.token_revoked` "Same UX as invalid_token" equivalence, and the `4401` close-code row.
-- `docs/protocol-mobile.md` § Worked example (line 720–732) — frame addressing pattern showing the binary's outbound `hello_ack` uses `conn_id` = phone's id with `frame.id` = 1, `frame.in_reply_to` = the hello's id.
-
 ## Context
 
 Phase 3 Track C composes A5 (`devices.Registry.Validate`, shipped 2026-05-09 as #210) with the v1 handshake/control payload structs (`protocol.HelloAckPayload`, `protocol.ErrorPayload`, shipped as #271). The relay performs no token validation per spec § Authentication phone→relay→binary; the binary owns the entire trust check. The relay forwards every phone frame to the binary in a `RoutingEnvelope`; the binary validates on receipt of the phone's first frame for a given `conn_id`.

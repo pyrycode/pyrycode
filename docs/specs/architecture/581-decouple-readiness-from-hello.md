@@ -2,19 +2,6 @@
 
 **Ticket:** #581 (split from #569) · **Size:** S · **Type:** test-only mechanical refactor · **Security-sensitive:** no (no `security-sensitive` label; no production code, no wire change)
 
-## Files to read first
-
-The developer needs all nine e2e files plus the fakerelay accessor. Read these first; every edit point is one contiguous block inside one of them.
-
-- `internal/e2e/internal/fakerelay/fakerelay.go:602-642` — **the contract.** `LastBinaryHello(serverID) (Envelope, bool)` (hello-recording, stays) vs. `WaitBinary(ctx, serverID) bool`. Note: `WaitBinary` has **no internal deadline** — it blocks until the binary registers *or* `ctx` is done. The caller owns the timeout. `context.Background()` would block forever on a never-registering binary; you must pass a `context.WithTimeout`.
-- `internal/e2e/internal/fakerelay/fakerelay_test.go:478-532` — the canonical `WaitBinary` call idiom (`if !s.WaitBinary(ctx, …) { t.Fatal(…) }`) and the `TestWaitBinary` happy/timeout coverage. **Leave this file unchanged** (AC); it's your idiom reference and the helper's regression guard.
-- `internal/e2e/relay_test.go:60-92` — `TestRelay_Hello`. The `LastBinaryHello` read at **line 72 is EXCLUDED** (payload assertion: `role=server` / `server_id` — the *subject* of the test, a bool can't replace it). Leave it.
-- `internal/e2e/relay_test.go:132-159` — `TestRelay_1011`. The migrating site (lines 145-154). **`relay_test.go` does NOT import `context`** — this site needs the import added (see § Per-site notes).
-- `internal/e2e/relay_v2_daemon_test.go:75-87,127,222` — the `waitBinaryHello` helper (2 callers). Migrate the helper body once.
-- `internal/e2e/relay_v2_handshake_test.go:55-99` — `startV2Harness`. The readiness block (85-94) is inside the harness, so one edit covers every v2-handshake subtest.
-- `internal/e2e/respawn_after_eviction_test.go:95-137` — has **two** poll loops; only the `LastBinaryHello` readiness one migrates (see § Per-site notes).
-- `internal/e2e/register_push_token_test.go:48-61`, `relay_assistant_turn_test.go:75-86`, `relay_auth_test.go:36-47`, `relay_roundtrip_test.go:71-83`, `relay_send_message_test.go:73-84` — the five uniform inline sites.
-
 ## Context
 
 The e2e suite proves "the binary's outbound relay connection is up" by polling `fr.LastBinaryHello(serverID)` — a fakerelay map populated only when the binary *sends* a relay-leg `hello` envelope. That couples the suite's readiness gates to an application-level handshake. #582 will retire that handshake; if the suite still keys readiness off the hello, retiring it cascades `t.Fatal`s across nine files.

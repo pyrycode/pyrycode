@@ -2,21 +2,6 @@
 
 **Size:** XS · **Split from:** #1587 · **Labels:** `security-sensitive`
 
-## Files to read first
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `cmd/pyry/snapshot_usage.go` | `snapshotUsageFor` | The whole function. Its doc comment carries the #1214 / #989 history and must survive the edit intact — you are changing the signature, not the reasoning. |
-| `cmd/pyry/snapshot_usage_test.go` | `TestSnapshotUsageFor_ReadsTheBoundTranscript`, `TestSnapshotUsageFor_SiblingTranscriptIsNeverRead`, `TestSnapshotUsageFor_UnresolvableReportsFreshSession`, `TestSnapshotUsageFor_UnwiredReturnsNilSeam`, `writeUsageTranscript` | All four tests plus the fixture helper. Two move mechanically, one strengthens, one loses half its body to the new wiring test. |
-| `cmd/pyry/relay.go` | `startRelayV2` | The sole production call site: the `snapshotUsage := …` line and the `SnapshotUsage:` field it feeds. Read the surrounding comment block — it describes the nil-seam contract you are preserving. |
-| `cmd/pyry/relay.go` | `boundSessionIDForActive` | The in-file precedent for a named, unit-testable resolver extracted out of untestable wiring. Mirror its doc-comment density and fail-closed framing. |
-| `cmd/pyry/bound_session_active_test.go` | `TestBoundSessionIDForActive` | The test shape for that precedent — subtests named after the property, not the input. |
-| `internal/transcript/transcript.go` | `StatByID`, `ValidStem` | The validate-before-join contract. `ValidStem` is an anchored canonical-UUIDv4 regexp; this is why a caller-supplied id is safe. Do not add a second layer. |
-| `internal/contextwindow/usage.go` | `Read` | The two "nothing to report" inputs vs the error path. Note that on error it returns a **zero** `Usage` — including `WindowTokens: 0`. That fact is what makes AC #2's new row discriminating. |
-| `internal/relay/v2session_seams.go` | `V2SessionConfig.SnapshotUsage` | The documented `nil ⇒ handler reports zeros` contract. This spec preserves it exactly; the field's type does not change. |
-| `cmd/pyry/main.go` | the `relayWiring` literal in `runSupervisor` | `bootstrapIDFn: func() string { return string(pool.BootstrapID()) }` — the single producer, always non-nil. |
-| `internal/e2e/relay_v2_stream_run_config_test.go` | `TestRelayV2_StreamRequestSessionSettings` | Read only to confirm you have not modified it. It must stay green **unmodified**; see AC #4 below for why it is the no-regression half and not the discriminating half. |
-
 ## Context
 
 `snapshotUsageFor` builds the relay's `SnapshotUsage` seam — the reader behind `used_tokens` / `window_tokens` on both the `screen_snapshot` and the `session_settings` replies. It already resolves a transcript **by session id**; it merely *closes over* a bootstrap-id function, so the id is fixed when the reader is built and no caller can ask about a different session.

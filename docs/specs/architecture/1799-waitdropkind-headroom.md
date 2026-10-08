@@ -3,42 +3,6 @@
 **Size:** XS (confirmed; PO's estimate stands). One test file, ~16 written lines,
 zero production source files, zero call-site edits.
 
-## Files to read first
-
-Everything below is in package `main` under `cmd/pyry`. Resolve symbols with
-`codegraph_search` / `codegraph_node`; do not go hunting by line.
-
-- `cmd/pyry/stream_turn_drain_test.go` → `waitDropKind` — **the only symbol this
-  ticket changes.** Note its exact signature: `(t *testing.T, kinds <-chan string,
-  want string)`. AC4 requires that signature to survive untouched.
-- `cmd/pyry/stream_turn_drain_test.go` → `dropWatcher` (and its `Handle` method) —
-  the producer feeding the `kinds` channel. Extract one fact: the send is
-  **non-blocking with a `default:` arm**, so a full channel silently discards a
-  kind. That is why the new diagnostic must be worded as *kinds seen*, never *all
-  kinds* (see § Error handling).
-- `cmd/pyry/streamsup_runner_exit_test.go` → `waitRecord` — the in-package
-  precedent the AC names as the 5s floor. Read it for the `t.Helper()` +
-  `time.After` + `for { select { … } }` shape the changed helper must keep.
-  **Cite it by this symbol name only** — see § The cite-guard trap.
-- `cmd/pyry/streamsup_runner_exit_test.go` → `fakeExitingClaude`,
-  `TestStreamRunnerFactory_ChildExitClearsTurnBusy` — the observed-failure call
-  site. Extract two things: (a) the barrier sits behind a real spawned `/bin/sh`
-  child, which is why it is contention-sensitive at all; (b) the same test already
-  arms a **10-second** `context.WithTimeout` for its `WaitIdle` on the *same*
-  fixture — the in-package precedent this spec's chosen value leans on.
-- `cmd/pyry/main.go` → `inboundActivateTimeout` — the package's naming and
-  declaration idiom for a named duration constant (`const <thing>Timeout = N *
-  time.Second`, doc comment above). There is no time-valued package constant in
-  `cmd/pyry`'s test files yet; this ticket adds the first, and it should look like
-  the four in `main.go`.
-- `docs/knowledge/features/streamsup-package.md` § "Exit lane on the turn-busy
-  fan-in (#1209)" — why the barrier's *design* is already correct: the drop is
-  logged after `observe` on the same goroutine, so seeing it is a deterministic
-  happens-after signal. Read this so you do not redesign the barrier. Only the
-  give-up value is wrong.
-- `CODING-STYLE.md` § "Comments — Citing Other Code" — binding on the new doc
-  comment.
-
 ## Context
 
 `waitDropKind` arms a 2-second give-up deadline. Nine call sites across three test

@@ -12,18 +12,6 @@ The production resolver (`cmd/pyry/modal_resolve_v2.go:63` `ResolveCancel`) does
 
 This test confirms the wired path live over one spawned daemon + a fake claude that raises a permission modal; it does not re-prove correctness (the unit tier and #791/#793 own that) — it confirms the encrypted-v2 round trip.
 
-## Files to read first
-
-- `internal/e2e/relay_v2_modal_answer_test.go:46-215` — **the primary template.** `modalHarness` struct + `bringUpModalHarness` (daemon + gated interactive phone + `sealSend`/`nextEnv`/`stdinLog`/`modalTrig`) and `awaitModalShown`. **Reuse both verbatim** — do not mutate (frozen for #791) and do not duplicate.
-- `internal/e2e/relay_v2_modal_answer_test.go:224-348` — `TestRelayV2_RemotePermissionAnswered`: the exact assertion shape to mirror (await `modal_shown`, capture `modalID`, send a control frame via `h.sealSend`, drain to `modal_dismissed` under a long deadline, then a cheap short-deadline replay negative). The `modal_cancel` test is this minus the option-ID/keystroke-digit specifics.
-- `internal/e2e/relay_v2_modal_answer_test.go:442-454` — `assertNoAnswerDigit(t, log, when)`: reuse verbatim to prove cancel routed **no** answer digit (only the ESC).
-- `internal/e2e/relay_v2_interrupt_test.go:323-362` — the **bare-ESC stdin-log oracle**: `hasBareESC(b []byte) bool` (reuse verbatim) and its bounded-poll cross-process fsync-visibility loop (~2 s). This is AC-3's non-vacuity mechanism; mirror the poll, not the single-read.
-- `internal/e2e/relay_v2_two_head_modal_test.go:360-417` — the snapshot-then-byte-unchanged stdin-log pattern (`logAfterWin` → `bytes.Equal`) for the one-shot replay negative (AC-4 cheap substitute).
-- `internal/relay/v2session.go:2268-2300` — `handleModalCancel`: fire-and-broadcast, no reply; unknown/already-resolved id ⇒ no keystroke, no broadcast.
-- `cmd/pyry/modal_resolve_v2.go:56-100` — `ResolveCancel`: `Resolve` (one-shot gate) → `SendEsc` → audit → `{Outcome:"cancelled", Source:"remote"}`. Confirms the expected wire values and the replay/timeout one-shot semantics.
-- `internal/protocol/messaging.go:146-169` — `ModalCancelPayload{ModalID}` and `ModalDismissedPayload{ModalID, Outcome, Source}` wire shapes; `internal/protocol/codes.go:277-278` — `TypeModalCancel` / `TypeModalDismissed`.
-- `internal/audit/audit.go:44-61` — confirms `OutcomeCancelled == "cancelled"`, `SourceRemote == "remote"`.
-
 ## Design
 
 One new file, `internal/e2e/relay_v2_modal_cancel_test.go`, build tag `//go:build e2e`, package `e2e`. It contains **exactly one** test function and **no new helpers** — every helper it needs already exists in-package (same build tag): `bringUpModalHarness`, `awaitModalShown`, `hasBareESC`, `assertNoAnswerDigit`, `mustJSON`. Redefining any of them is a duplicate-symbol compile error; do not.

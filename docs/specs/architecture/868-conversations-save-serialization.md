@@ -2,18 +2,6 @@
 
 **Ticket:** [#868](https://github.com/pyrycode/pyrycode/issues/868) · **Size:** XS · **Security-sensitive:** no (label absent — write-serialization/lost-update fix; provenance of stored records is not the design surface)
 
-## Files to read first
-
-- `internal/conversations/registry.go:34-37` — `Registry` struct: `mu sync.Mutex` + `conversations []Conversation`. Add the new save mutex here.
-- `internal/conversations/registry.go:72-116` — `Save`: the exact snapshot→sort→temp-write→chmod→encode→fsync→close→rename sequence. This is the whole change surface. Note it takes `r.mu` **only** to copy the snapshot (73-76), then does all disk I/O unlocked — that unlocked disk I/O is the bug.
-- `internal/sessions/pool.go:1352-1396` — sibling `Pool.saveLocked`: the posture to mirror *in spirit* (serialize the whole save), but note the mechanism differs — sessions serializes under `Pool.mu` (the state lock itself), which blocks read/mutate during the write. We must NOT copy that; a separate save mutex is what preserves read/mutate concurrency (AC #2). Read the lock-order comment at 1356-1358.
-- `internal/conversations/registry_test.go:75-124` — `Save`/`Load` round-trip test: the harness idiom (`&Registry{}`, `r.Create(...)`, `t.TempDir()`, `Load` + `List` assertions). The new regression test reuses this shape.
-- `internal/conversations/registry_test.go:340-373` — byte-stable-ordering test: shows how to compare on-disk content and how `mk(order)` builds a registry from a fixed slice.
-- `internal/conversations/registry_test.go:375-414` — `SaveAtomicRenamePreservesOldFile`: the atomic-write invariants (0600, rename-as-commit, pre-existing target untouched on failure) that AC #3 says must still hold. Do not disturb this test.
-- `internal/conversations/conversation.go` — `Conversation` shape (`ID`, `LastUsedAt`, etc.) for building distinct records in the regression test.
-
-Call sites of `Save` (for context — none change, signature is untouched): `internal/conversations/sweep_loop.go:58` (auto-archive sweep), `internal/sessions/transition.go:81` (`/clear` rebind observer), and the v2 relay handlers `create_conversation.go:208` / `rename_conversation.go:110` / `archive_conversation.go:108` / `delete_conversation.go:86`. These are the three-plus production goroutines that call `Save` concurrently.
-
 ## Context
 
 `Registry.Save` holds `r.mu` only long enough to copy the in-memory snapshot (registry.go:73-76), then performs temp-write → fsync → **rename** with no lock held. Nothing serializes two overlapping `Save` calls, so their renames can land in an order **inverted** from their snapshot order: an older snapshot's rename lands last and clobbers a newer one on disk. The file self-heals on the next `Save`, but if the daemon restarts before that, the newer mutation is durably lost — a phone-created conversation vanishes, or a `/clear` rebind reverts so the conversation points at a retired session id.

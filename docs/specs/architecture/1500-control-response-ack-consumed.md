@@ -32,34 +32,6 @@ Which is precisely the structural fact `#1404` used to move `rate_limit_event` o
 
 ---
 
-## Files to read first
-
-Symbols, not line numbers — resolve each with `codegraph_search` / `codegraph_node`. Where an entry names a markdown section it is because the region genuinely is not a symbol.
-
-| Where | Symbol / section | What to extract |
-|---|---|---|
-| `internal/streamsup/parser.go` | `consumeLine` | The switch this ticket adds one arm to. Read the `rate_limit_event` arm's comment in full — it is the recorded reasoning this spec's shape decision follows. |
-| `internal/streamsup/parser.go` | `ignoredLineTypes` | The map, and the 2026-07-27 census that is its stated provenance. Note it says *top-level types only* and *measured, not guessed* — both bear on why `control_response` must not join it. |
-| `internal/streamsup/parser.go` | `streamLine` | Three fields. `Subtype` is **top-level**; a `control_response` leaves it empty. |
-| `internal/streamsup/parser.go` | `emitRateLimit`, `emitSystemSubtype` | The two silent-consumption idioms: a `Debug` record naming a reason, and the bool-returning "did I consume it?" dispatch. The new arm follows the first and deliberately not the second. |
-| `internal/streamsup/parser.go` | `emitUnrecognized` | The lane this ticket makes unreachable for one type. |
-| `internal/streamsup/parser_test.go` | `TestParser_IgnoredLineTypesIsTheMeasuredSet` | AC2's pin. Under the shape below it is **untouched and green** — verify that, do not edit it. |
-| `internal/streamsup/parser_test.go` | `TestParser_IgnoredLineTypesStaySilent` | The table shape to mirror for the new silence rows, and its `collectEvents`-style harness. |
-| `internal/e2e/internal/fakeclaude/main.go` | `runStreamJSON` | The rider dispatch. Read the `rateLimitStatus` rider's own comment on writing *before* the reply — AC3(a) asks for the same argument, and it is already written down here. |
-| `internal/e2e/internal/fakeclaude/main.go` | `interruptControlRequest`, `inControlRequest`, `writeInterruptedResult`, `writeJSONLine` | The interrupt rider's whole surface. `inControlRequest` does **not** decode `request_id` yet. |
-| `internal/e2e/internal/fakeclaude/main.go` | `writeRateLimitEvent` | The `#1411` writer this one mirrors — including its doc's discipline of naming the capture a fixture is transcribed from. |
-| `internal/e2e/internal/fakeclaude/stream_detect_test.go` | `parseEmitted`, `interruptControlRequestLine` | `parseEmitted` runs the fake's stdout through the **real** `streamsup.Parser`. This is load-bearing for § "The free discriminator" below. |
-| `internal/e2e/internal/fakeclaude/stream_detect_test.go` | `TestRunStreamJSON_InterruptMode_InterruptEndsTurnCancelled`, `TestRunStreamJSON_InterruptMode_InFlightThenInterrupt` | Both assert an **exact event count**. Both go red on the rider alone and green again on the parser arm, unmodified. |
-| `internal/e2e/internal/fakeclaude/stream_detect_test.go` | `TestRunStreamJSON_RateLimitRider` | The emitted-line assertion shape AC3(b) needs. |
-| `internal/e2e/relay_v2_stream_interrupt_test.go` | `TestRelayV2_StreamInterruptStopsRunningTurn`, and its `nextEnv` closure | AC3(a)'s host. `nextEnv` is per-test and serves all four drain loops. |
-| `internal/e2e/realclaude/interactive_stream_interrupt_test.go` | `drainForCancelledTurnEnd` | AC4's host. Its non-target arm is the bare `continue` that swallows the frame today. |
-| `internal/e2e/realclaude/interactive_stream_liveness_test.go` | `drainForCompletedTurn` | Its `TypeUnrecognizedMessage` arm is the alarm shape AC4 mirrors, and its `TypeRateLimited` arm is the model for naming a legitimate cause beside the bug reading. |
-| `docs/knowledge/features/set-permission-mode-inband-probe.md` | § "The `control_response` received, verbatim" | The capture. The authority for every byte of the fixture. |
-| `docs/knowledge/features/streamsup-package.md` | § "Two tiers, and the split is the whole design" | The `{"system": true}` claim AC5 checks. |
-| `cmd/pyry/stream_turn_busy.go` | `turnMarkFor` | Its comment carries a `system` alone claim (AC5), and it classifies `Unrecognized` as `turnMarkNone` — see § "What a green does not prove". |
-
----
-
 ## Context
 
 The daemon writes an interrupt `control_request` to its child's held-open stdin. claude acks ~40 ms later on **stdout** — the same stream the `Parser` consumes — and then ends the turn. The runner never reads the ack; that is documented and fine. But never-read is not never-parsed: the ack reaches `consumeLine`, matches no case, is not on `ignoredLineTypes`, and falls to `emitUnrecognized`, which `turnbridge` maps to an `unrecognized_message` frame on the phone.

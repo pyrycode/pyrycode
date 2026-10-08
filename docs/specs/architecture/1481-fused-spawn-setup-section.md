@@ -5,24 +5,6 @@
 (`docs/knowledge/features/streamsup-package.md`). No new exported types, no interface change,
 one production call site (`Run`).
 
-## Files to read first
-
-Symbols, not line numbers — resolve each with `codegraph_search` / `codegraph_node`.
-
-- `internal/streamsup/runner.go` → `Run` — the spawn-setup block at the top of the loop body. Extract: the exact statement order (`nextSpawnID` → `buildArgs(liveArgs(), …)` → `log.Info("spawning claude", …)` → `WithCancel` → `setIterCancel`) and the started-gated `firstRun` flip further down.
-- `internal/streamsup/runner.go` → `nextSpawnID`, `liveArgs`, `setIterCancel` — the three `restartMu` accessors the fix subsumes. Extract: each takes `restartMu` itself, so a fused section **cannot call any of them** (Go mutexes are not reentrant).
-- `internal/streamsup/runner.go` → `RestartFresh`, `Restart` — the two racers. Extract: both read `iterCancel` under `restartMu`, **release**, then call `cancel()` outside the lock. That release-before-cancel ordering is what keeps the fused section deadlock-free.
-- `internal/streamsup/runner.go` → `buildArgs` — pure; it `append`s `base` into a freshly-`make`d slice and never retains or mutates it. Extract: that is why the fused section can pass `r.args` directly and `liveArgs`'s `slices.Clone` disappears rather than moving.
-- `internal/streamsup/runner.go` → `spawnAndWait` — the `(started bool, waitErr error)` contract. Extract: `started == false` on any pre-launch failure, and the loop's `if started { firstRun = false }` gate that depends on it.
-- `internal/streamsup/runner.go` → `Runner` — the `restartMu` field-group doc comment plus the `args`, `sessionID` and `rotatePending` field comments. Extract: the charter sentence to widen, and the three comments that name `liveArgs`/`nextSpawnID` by hand.
-- `internal/streamsup/runner_test.go` → `spawnArgsRecorder` — an existing `slog.Handler` that captures the argv of every `"spawning claude"` record. Extract: it is the hook the regression test wraps; `Handle` runs **synchronously on the Run goroutine**.
-- `internal/streamsup/runner_test.go` → `TestRunner_RestartFresh_RotatesThenResumesNewID` — the closest existing analogue (once-guarded rotation + recorder + argv assertions). Extract: its shape, its `idFlagValue` / `idFlagCount` helpers, and `rotatedSessionID` / `testSessionID`.
-- `internal/streamsup/runner_test.go` → `TestRunner_RestartFresh_EmptyIDIsNoOp` — the **only** test-side caller of `nextSpawnID`. Extract: it must be retargeted when `nextSpawnID` is deleted.
-- `internal/streamsup/runner_test.go` → `helperRunCfg`, `runInBackground` — harness reused verbatim.
-- `internal/streamsup/helper_test.go` → `helperChild` — the fake-claude modes. Extract: `record_block` blocks until SIGTERM (a stable long-lived child); `crash` exits after 20 ms.
-- `internal/sessions/pool.go` → `UpdateSettings` — the sole production `Restart(args)` caller. Extract: confirms no signature change reaches it, so this ticket has no cross-package fan-out.
-- `docs/knowledge/features/streamsup-package.md` → § "Supervise loop (`Run`)", § "Fresh-restart under a new id (#1124)", § "Live-restart seam", and the `codebase/1124.md` line in the See-also list — the four sites naming the old shape.
-
 ## Context
 
 `Run`'s spawn setup currently reads the rotation state and publishes the iteration cancel in

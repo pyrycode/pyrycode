@@ -6,40 +6,6 @@ tool-permission enforcement block. The § Security review pass at the end of thi
 and was run. The change cannot alter behaviour, so that review is of the *replacement wording*, not
 of a design.
 
-## Files to read first
-
-- `cmd/pyry/agent_run.go` → `runAgentRunStreamRunner` — sites 1–3. Read the whole function including
-  its doc comment; the `#1387` paragraph above the `settingsWrite` call is the one that must survive.
-- `cmd/pyry/agent_run.go` → `buildStreamRunnerClaudeArgs` — sites 4–6. The doc comment is long; only
-  three paragraphs of it are in scope.
-- `cmd/pyry/agent_run.go` → `runAgentRun` — the body comment above the `runAgentRunStreamRunner` call
-  is **already correct** and is the tone to match: it states the single-path fact and says
-  `PYRY_USE_STREAMJSON` "is deliberately NOT read any more". Out of scope; do not edit it.
-- `cmd/pyry/agent_run.go` → `agentRunUsageDescription` — the shipped `--help` body. This is the
-  wording the comments must agree with ("There is no second runner…"). **Do not edit the literal**;
-  AC 5 pins it byte-identical.
-- `cmd/pyry/agent_run_test.go` → `TestAgentRunUsageDescription` — why that literal is pinned: it locks
-  the `--help` prose against stale-disclaimer regressions (#359). Editing the literal breaks it.
-- `cmd/pyry/agent_run_test.go` → `TestBuildStreamRunnerClaudeArgs_Shape` — the argv contract. A useful
-  symbol to point at from the rewritten `buildStreamRunnerClaudeArgs` doc, in place of the deleted
-  "the other path owns its own argv" sentence.
-- `internal/agentrun/settings/settings.go` → `WriteSettingsWithDeny` — read its doc comment and the
-  `Deny` field on `settingsFile`. This is the **source for site 3's replacement text**, verified at
-  architect time: the `--disallowed-tools` tokens become `permissions.deny`, an empty slice omits the
-  key entirely, and listing a tool there removes it from the model's tool surface rather than
-  producing a runtime denial (`#411`, origin `#398`). Do not restate this from memory — quote the
-  mechanism this doc comment already commits to.
-- `CODING-STYLE.md` § "Comments — Citing Other Code" — every comment line you touch enters
-  `make cite-guard`'s diff-scoped check. Cite by symbol; never write `agent_run.go:NNN`, a range, or
-  a bare `:NNN` into the replacement text. Issue references (`#1348`, `pyrycode#1387`) are fine.
-- `docs/specs/architecture/971-comment-hygiene-sweep.md` — the house pattern for a comment-only sweep.
-  Its § Item 2 makes the point that matters here: **a mechanism correction, not a token swap.**
-- `docs/knowledge/features/pyry-agent-run-command.md` — **read this as a warning, not as a source.**
-  It is itself pre-#1348 and still documents the two-path world in detail (a `PYRY_USE_STREAMJSON`
-  branch table, `runAgentRunPty`, `ptyrunner.Run`). If you consult it for "how does this work", it
-  will feed you exactly the falsehoods this ticket removes. It is documentation-phase-owned and out
-  of scope — see § Context.
-
 ## Context
 
 #1348 deleted the PTY `agent-run` entry point. Verified at this tree, not inherited from the ticket:

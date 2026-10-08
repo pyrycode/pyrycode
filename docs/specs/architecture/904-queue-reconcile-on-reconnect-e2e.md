@@ -6,17 +6,6 @@ Pure test code. **Zero production files.** One new file: `internal/e2e/relay_v2_
 
 ---
 
-## Files to read first
-
-- `internal/e2e/relay_v2_queue_drain_test.go` — **the primary pattern.** Copy its bootstrap verbatim (pair → `decodePairPayload` → `seedBoundConversation` → align sessions dir + pre-create `<initialUUID>.jsonl` → `fakerelay.New` → `StartRotationWithRelay` with `PYRY_FAKE_CLAUDE_IDLE_TRIGGER` → `readPersistedServerID` → `waitBinaryHello`). Its lines 177-238 show the enqueue-while-busy → drain `queue_state` until `len(qs.Queued)==N` loop and the exact `protocol.QueueStatePayload` field access (`.ConversationID`, `.Queued[i].Text`, `.Queued[i].QueuedMsgID`). Reuse its `sealSend` / `nextEnv` closure bodies.
-- `internal/e2e/relay_v2_modal_reconnect_test.go` (**on `origin/feature/903`, not yet merged — read for structural mirror only, do not import from it**) — the exact twin. Copy the shape of `reconnectModalHarness` → your `reconnectQueueHarness`, `phoneSession` + `openInteractivePhone` (verbatim — frozen, correct), and `assertModalShownFor` → your `assertQueueStateFor`. Note the deliberate-duplication house pattern: everything lives in the one test file, no shared-harness edit.
-- `internal/relay/v2session.go:2292` — `reconcileQueues`. The producer under test: fires on every `handleNoiseInit` success tail (fresh interactive Noise handshake), gated on `s.interactive && cfg.OutstandingQueues != nil`, unicasts one `queue_state` per non-empty conversation to `s.connID` only. `ID:1` non-load-bearing; `EventID` nil (not in the replay ring). This is what "reconnect" triggers.
-- `internal/e2e/relay_two_phone_structured_test.go:427-456` — `buildHelloEarlyInteractive` (advertises `CapabilityInteractive`, **no** replay cursor → no `#647`/`#777` replay path) and `driveHandshakeToOpenDaemonInteractive` (returns fresh send/recv `CipherState` per handshake — each reconnect gets a new Noise session). Reuse verbatim.
-- `docs/knowledge/codebase/878.md` — the producer's contract: `SnapshotAll` skips empty conversations (AC3), snapshot is idempotent full-state, the phone correlates on `conversation_id` + `queued_msg_id`. Confirms "current truth" and the match-and-replace-by-stable-id semantics AC2 asserts.
-- `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md` § "Backpressure / replay" — the contract this test protects.
-
----
-
 ## Context
 
 ADR 025 promises a reconnecting client's view is reconciled to current truth. #878 wired the queue half: on a fresh interactive Noise handshake the daemon re-sends a `queue_state` snapshot for every non-empty backlog. #878 has unit coverage (`internal/relay`, `internal/msgqueue`, `cmd/pyry`), but **no cross-layer proof** that a real fake client, disconnected then reconnected over the full daemon + Noise + relay stack, sees the backlog reconciled exactly once with no loss or duplication. Losing or duplicating a queued message on reconnect is a no-data-loss regression. This ticket is that proof for the queue path (the modal path is #903).

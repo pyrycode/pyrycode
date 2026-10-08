@@ -11,20 +11,6 @@ The permission modal is a **tui-driver PTY-state event** (`tuidriver.EventKindPt
 
 **Scope of this ticket = the adapter, unwired, unit-tested in isolation** — mirroring how `interactiveModalEmitterV2` (`cmd/pyry/interactive_modal_v2.go`) ships as a passive event-driven unit whose live wiring is a separate deferred ticket (#708). The live subscription that drives this adapter from `Session.Events()` in the `pyry acp` composition root belongs to T7 (#751) / the modal-event wiring follow-up (see § Deferred wiring). No existing file is modified; the adapter is two new files.
 
-## Files to read first
-
-- `cmd/pyry/modal_resolve_v2.go:23-27, 255-300` — `modalKeystroker` interface (reuse it) + `classifyAnswer` / `routeAnswerKeystroke` — the exact optionId→(verb, 1-based digit) mapping template. `*supervisor.Supervisor` satisfies `modalKeystroker`.
-- `internal/supervisor/modal.go:52-91` — the keystroke seam contract: `Answer(choice)` sends `choice+"\r"`, `SendEsc()` sends ESC; `ErrNoLiveSession` (wrapped) when no child, **nothing written** in that case; safe from any goroutine.
-- `internal/acp/acp.go:260-305` — `Transport.Call(ctx, method, params) (json.RawMessage, error)`: blocking outbound request; **MUST be issued off the Serve read loop** (its own doc: a Call on that goroutine deadlocks); ctx cancel reclaims the pending slot; a reply for a reclaimed/unknown id is dropped (transport-owned correlation).
-- `internal/modalbridge/modal.go:100-136` — `PermissionRequestForClass(class, screenText) (turnevent.PermissionRequest, wireClass string, ok bool)` — reuse for the option set: options carry the four `PermissionOptionKind`s in claude's display (allow-first) order.
-- `internal/turnevent/permission.go:12-38` — `PermissionRequest` / `PermissionOption{ID, Label, Kind}`; `internal/turnevent/taxonomy.go:45-54` — the four `PermissionOptionKind` string values (they **are** the ACP wire strings).
-- `cmd/pyry/acp_turn_stream.go` (whole file) — the sibling outbound adapter: consumer owns its own params-wrapper types locally (not in `acpbridge`); content-free logging discipline; `nil`-tolerant seam pattern.
-- `cmd/pyry/interactive_modal_v2.go:80-212` — the mobile modal surfacer: the Shown/Hidden `Handle` dispatch shape and the first-answer-wins one-shot via `Registry.Resolve`. This adapter is the ACP analogue but far thinner (blocking Call in place of broadcast+registry).
-- `internal/acp/notify.go` — `Transport.Notify` (sibling of `Call`) shows the marshal-first / write-under-`writeMu` pattern; **not used here** (we use `Call`), read only to confirm the transport seam idioms.
-- `cmd/pyry/acp.go:106-130` — the composition root where the deferred wiring will register/drive this adapter (context only; not edited by this ticket).
-- `docs/knowledge/decisions/027-acp-mapping.md:42-88` — the authoritative outbound row: `PermissionRequest → session/request_permission` (divergence 2); response is `outcome: "selected"` + `optionId` or `outcome: "cancelled"`; `ToolCallID` is empty from the modal-event path.
-- `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md:134-186` — the default-safe security model: unanswered/errored/cancelled ⇒ deny/ESC, never a silent grant; one-shot replay-safe.
-
 ## Design
 
 ### Placement

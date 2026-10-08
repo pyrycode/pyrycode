@@ -27,55 +27,6 @@ The relay/transport is content-blind and carries the frame unchanged — **no
 transport work**. The deliverable is a protocol type + payload struct + a daemon
 handler + its two dispatch registrations.
 
-## Files to read first
-
-- `internal/relay/handlers/create_conversation.go:115-232` — **the handler shape
-  to clone**: decode → validate → mutate registry via a minimal consumed
-  interface → eager `Save` → typed reply via `c.Reply`. Note lines 16-42 (the
-  static per-branch message constants — never echo attacker bytes) and 64-67 (the
-  `ConversationCreator` minimal-interface pattern). Your handler is *simpler* —
-  no session minting, no cwd, no `SessionCreator`.
-- `internal/relay/handlers/create_conversation_test.go:1-95` — **the test harness
-  to reuse**: `dispatch.NewTestConn`, the `recv()` helper, the temp-dir registry
-  (`conversations.Load` on a `t.TempDir()` path), and the envelope builder. Clone
-  these helpers with `rename`-prefixed names.
-- `internal/relay/handlers/register_push_token.go:120-138` — `replyError` and
-  `replyAck` are **package-level helpers** in `handlers`; reuse `replyError` for
-  the malformed / empty-title / not-found branches. Do not redefine them.
-- `internal/conversations/registry.go:169-189` — `Registry.Update` contract: `fn`
-  runs under `r.mu`; returns `false` (no `fn` call, no mutation) on miss; `fn`
-  MUST NOT call back into the registry (non-reentrant mutex) or retain the
-  `*Conversation` pointer past return.
-- `internal/conversations/registry.go:247-299` — `Registry.Promote` is the
-  **empty-name precedent**: `strings.TrimSpace(name) == ""` → refuse; on accept it
-  stores the **raw** (untrimmed) name. Mirror this in the handler (see Design).
-- `internal/protocol/conversations_write.go:35-58` — `PromoteConversationPayload`
-  (payload precedent) and `ConversationUpdatedPayload` (the reply struct to reuse
-  as-is; note `Name` is `*string`).
-- `internal/protocol/codes.go:39-65` — the closed `Type*` const block; the
-  "Conversations" cluster (50-56) is where `TypeRenameConversation` lands.
-  `CodeConversationNotFound` (22) and `CodeProtocolMalformed` (10) already exist.
-- `internal/protocol/envelope.go:116-135` — `v1TypeSet`, the closed enumeration of
-  dispatch.Route application types. `TypeRenameConversation` is added here (see
-  the v1/v2 classification decision in Design).
-- `internal/protocol/compat_test.go:8-222` — three constant enumerations
-  (`TestIsV1Compatible` L10-17, `TestV1TypeSet_CoversAllExportedTypeConstants`
-  L98-108, `TestTypeConstants_V1V2Partition` L172-206) plus the **hardcoded count
-  `16`** at L107-108 that becomes `17`. Adding the const forces all three edits or
-  the partition test fails.
-- `internal/protocol/conversations_write_test.go:91-136` — the round-trip test
-  precedent (`TestPromoteConversationPayload_RoundTrip`); add an equivalent
-  `TestRenameConversationPayload_RoundTrip`.
-- `cmd/pyry/relay.go:173-176` (v1 legacy `d.Register` block) and `:322-327` (v2
-  `Handlers` map passed to `NewV2SessionManager`) — **the two wiring sites**.
-  `TypeCreateConversation` appears in both; add `TypeRenameConversation` to both,
-  mirroring it exactly.
-- `internal/relay/v2session.go:1569-1613` — `dispatchAppFrame`: it intercepts only
-  v2 *control* types (the `switch`), then falls through to
-  `dispatch.Route(Handlers, plaintext)`. Confirms `rename_conversation` reaches
-  the handler purely via the `Handlers` map — nothing else in the v2 path needs
-  touching.
-
 ## Design
 
 ### Package structure

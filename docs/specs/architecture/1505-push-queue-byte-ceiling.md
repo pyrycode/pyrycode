@@ -5,27 +5,6 @@
 
 ---
 
-## Files to read first
-
-Read these before touching anything. Symbols, not line numbers — resolve each with
-`codegraph_node <symbol>` / `codegraph_search <symbol>`.
-
-| File | Symbols | What to extract |
-|---|---|---|
-| `internal/relay/v2session_modal.go` | `pushQueue`, `queuedEnv`, `pushQueue.enqueue`, `pushQueueCap` | The three append sites and the one evict site. This is where the byte counter is maintained and where the ceiling check goes. The `enqueue` doc comment's drop-policy list is the contract you extend. |
-| `internal/relay/v2session.go` | `V2SessionManager.Push`, `drainOnce`, `transportDown`, `closeWith`, `forwardEnvelope` | `Push`'s `pushMu` hold (where the latch is read), `drainOnce`'s pop (which becomes `popHead`), `closeWith`'s queue delete (what frees the bytes), and `transportDown`'s hold (why nothing drains). |
-| `internal/relay/v2session.go` | `V2SessionManager.Run`, `handleWake`, `armIdleTimer`, `idleTimeout`, `StatusIdleTimeout` | The Run select-arm shape you add one arm to; `handleWake`'s `wakeIdleTimeout` case is the teardown precedent (`closeWith(ctx, s, StatusIdleTimeout, nil)` — note the **nil frame**). |
-| `internal/relay/v2session.go` | `V2SessionManager` struct's `modalTimeout` field + its `make(chan string, wakeBufferSize)` in the constructor | The exact shape to mirror for the new off-Run→Run connID channel. Do not invent a new one. |
-| `internal/relay/v2bundlestream.go` | `bundleChunkBytes`, `bundleEnvelopes`, `StreamBundle` | The chunk arithmetic (48000 raw → ~64200 B envelope payload) that AC#5's two fixtures are sized from, and the fact that `StreamBundle` returns the *first* `Push` error. |
-| `internal/relay/v2session_debugbundle.go` | `bundleInFlight`, `handleDebugBundleRequest` | The #911 gate — read-only over `q.items`. Confirm you do not disturb it (it reads `items`, never `bytes`). |
-| `internal/relay/v2session_test.go` | `TestPushQueue_Enqueue_AllControlSoftOverflow`, `pqEnv`, `assertQueue` | **AC#4's regression pin.** `pqEnv` builds envelopes with a **zero-length `Payload`** and the test binds `enqueue`'s return with `dropped := q.enqueue(...)` — both facts constrain the design (see § Design). |
-| `internal/relay/v2session_test.go` | `gatedRecorder`, `newGatedRecorder`, `driveToOpen`, `queueLen`, `TestV2Session_Push_HoldGatedOnProbeNotSendError` | The #874 fixtures. The last one is the **independent probe/send wiring** (`Connected: probeUp.Load` + an `Outbound` that records unconditionally) that AC#2's test needs — plain `gatedRecorder` records *nothing* while down, so it cannot observe the close frame. |
-| `internal/relay/v2session_debugbundle_test.go` | `bundleGatedManagerFor`, `waitQueueLen`, `requestBundle`, `fakeBundler`, `decryptFrames` | AC#5's fixture is already built: `bundleGatedManagerFor` returns a decoupled `probeUp` + unconditionally-recording `rec`. |
-| `docs/protocol-mobile.md` | § Error codes (the close-code table + the per-code prose under it); § Application-envelope size cap | One new table row + one prose paragraph, in `4408`'s style. The 65519-byte cap is the number the ceiling is derived from. |
-| `docs/knowledge/decisions/025-*.md` | § Backpressure (and its 2026-07-10 amendment) | The never-drop-control rule the ceiling is an exception to, and why. |
-
----
-
 ## Context
 
 `pushQueue.enqueue`'s last branch — the "all-control saturated, incoming control" soft

@@ -1,17 +1,5 @@
 # Spec — `internal/dispatch` scaffold + daemon wiring (#307)
 
-## Files to read first
-
-- `internal/relay/connection.go:161-186` — `Frames() <-chan protocol.RoutingEnvelope` / `Wait` / `Close` contract. Frames channel closes when the relay lifecycle terminates (covers ctx cancel and transport-fatal paths). Frames are delivered in arrival order.
-- `internal/relay/connection.go:120-146` / `190-219` — how the relay's transport is constructed and how `client.Send` is reached today (handshake path); the new `Connection.Send` wraps the same `transport.Client`.
-- `internal/protocol/envelope.go` — `Envelope` (id/type/ts/payload/in_reply_to) and `RoutingEnvelope{ConnID, Frame}`; `Frame` is `json.RawMessage` so the relay never decodes payloads.
-- `internal/protocol/codes.go:9-31` — `CodeProtocolUnsupported = "protocol.unsupported"` and the rest of the `Code*` set the dispatcher maps `errors.Is` results to at the call site.
-- `internal/protocol/envelope.go:47-75` — `IsV1Compatible` + `ErrUnknownType` / `ErrUnsupported` sentinels (already maps `payload_encrypted` to `unsupported`; the dispatcher composes this).
-- `internal/transport/wssclient.go:262-300` — `Client.Send([]byte) error`; concurrency-safe, returns `ErrDisconnected` post-drop. The new `Connection.Send` is a JSON-marshal wrapper around it.
-- `cmd/pyry/relay.go:88-119` — current `for range conn.Frames()` discard goroutine, plus the `Wait`/shutdown classification. Dispatcher wiring replaces the discard with two goroutines (run dispatcher; forward dispatcher Outbound to the relay).
-- `docs/protocol-mobile.md:100-125` — Routing envelope semantics: `conn_id` is relay-assigned and opaque; the binary uses it verbatim to address replies; phones never see it.
-- `docs/PROJECT-MEMORY.md:20` — Refusal-to-wire-code mapping convention: primitives return Go sentinels; the dispatcher does the `errors.Is → CodeProtocol*` mapping at the call site.
-
 ## Context
 
 `internal/relay.Connection.Frames()` (#248) yields `protocol.RoutingEnvelope` values keyed by `conn_id` — one logical phone connection per id. Today, `cmd/pyry/relay.go` drains and discards. This ticket installs the dispatcher seam that downstream verb slices (#303 / #304 / #305) plug into, but registers no real handlers yet — every inbound frame falls through to `protocol.unsupported`. Auth gating and the 4401 close path land in #308.

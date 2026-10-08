@@ -3,21 +3,6 @@
 **Ticket:** [#1769](https://github.com/pyrycode/pyrycode/issues/1769) · `size:s` · `security-sensitive`
 **Split from:** #1766 (closed), which split from #1741 (closed). Sibling #1770 adds the two claim checks on top of what this ships.
 
-## Files to read first
-
-| Read | Symbol / section | What to extract |
-|---|---|---|
-| `internal/protocol/attachments.go` | `AttachmentChunkPayload` | The eight always-present fields, and the `SECURITY:` / `NEVER ALLOCATE FROM A CLAIM` doc block. This slice is the receiver half of that block's first half — it is the type this package consumes and never re-declares. |
-| `internal/protocol/attachments.go` | `MaxAttachmentChunkBytes` | Context only. This slice enforces **no** byte cap; the constant's two open consequences belong to #1767. Read it so you can see what you are *not* implementing. |
-| `internal/relay/v2bundlestream.go` | `ReassembleBundle` | The all-or-nothing posture to copy (never partial, never corrupted output), and the two things not to copy: its strict `Seq` succession rule, and its take-every-frame-at-once signature. |
-| `docs/protocol-mobile.md` | § Attachments → "Reassembly & integrity (the receiver's rules)" | The receiver's published rules: store at `index`, any arrival order, complete when every index in `[0, total_chunks)` arrived **exactly once**, three discard triggers. |
-| `docs/protocol-mobile.md` | § Attachments, the sender's chunking arithmetic `total_chunks = max(1, ceil(size / 45000))` | Why a zero-byte file is **one chunk carrying zero bytes** rather than zero chunks. This is what the last AC implements. |
-| `docs/knowledge/features/protocol-package.md` | § "v2 attachment-chunk vocabulary", the `Data` bullet and the `Index`/`TotalChunks` naming bullet | `Data` never aliases a reused read buffer, so no defensive copy; and why the fields are not named `Seq`/`Total`. |
-| `internal/conversations/registry.go` | the `Err*` `var` block | The sentinel house style this package copies: `errors.New("<pkg>: <lowercase message>")`, grouped in one `var` block with a doc comment each. |
-| `internal/eventring/ring.go` | package doc comment + `New` | The shape of a small in-memory, daemon-resident package. Note the package comment sits atop the primary file — there is no `doc.go` anywhere under `internal/`. |
-| `internal/relay/v2session.go` | `appFrameWorker` | Exactly one goroutine per session, strict FIFO, no two handlers for one conn concurrent. This is the whole reason the new type carries no mutex. |
-| `internal/protocol/codes.go` | `CodeAttachmentInvalidChunk` | Context only. All three framing sentinels map to this one wire code — **at #1744's dispatch site**, not here. This slice must not import or mention it in code. |
-
 ## Context
 
 The daemon has never held partial state across inbound messages. The one payload that splits across frames today runs the other way (daemon → client) and its receiver-side reference, `ReassembleBundle`, is pure, exported, and has no inbound production caller. The three-way "copy this, not that" is in the ticket body and is the design's spine:

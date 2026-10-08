@@ -2,39 +2,6 @@
 
 Test-only. No production file changes.
 
-## Files to read first
-
-- `internal/streamsup/capture_test.go` → `capturePath`, `capturedLines` — **the idiom to copy and the
-  two sentences that go stale.** The cross-package read (`os.ReadFile` on a
-  `../e2e/realclaude/testdata/…` path) is confirmed to resolve from this package today; reuse that.
-  Do **not** reuse `droppedLineCapture`, `capturedLine`, `capturedSystemLine(s)` — those decode the
-  line-record shape, whose `payload` is a JSON *string*. Read `capturedLines`' doc in full: the
-  provenance-at-the-reader argument is the discipline this ticket restates, and two of its claims
-  stop being true when this lands (see § Doc corrections).
-- `internal/e2e/realclaude/initialize_control_record_test.go` → `initControlFixtureRecord` — the
-  **authoritative** field set and JSON tags for this record. It sits behind `e2e_realclaude`, so it
-  cannot be imported. Read it to copy tags exactly; do **not** restate its twenty-nine fields (see
-  § The struct is deliberately narrow).
-- `internal/e2e/realclaude/initialize_control_compare_test.go` → `initControlDiscoverArms` — two
-  idioms this spec adopts: binding a file's NAME to its CONTENT by re-minting the name from the
-  record's own fields, and accumulating every problem into ONE `t.Fatalf` rather than failing at the
-  first.
-- `internal/e2e/realclaude/initialize_control_names_test.go` → `initControlFixtureName`,
-  `initControlArmFixtureName`, `initControlArms` — the two name shapes (`initialize_control_v<v>.json`
-  for the unarmed base, `initialize_control_v<v>_<arm>.json` for the arms) and the arm identifiers.
-- `internal/e2e/internal/fakeclaude/initialize_control_test.go` → `captureModelKeySets` — the
-  existing walk down `control_responses[…].response.response.models` from a package **outside** the
-  `e2e_realclaude` tag. Proof that the nesting and the cross-package read both work; note it walks
-  `map[string]any` and skips silently, which is right for its aggregate sweep and wrong here.
-- `internal/streamsup/envelope.go` → `marshalInitializeEnvelope`, `WriteInitialize` — the request
-  half of the exchange these captures record, written by this same package (#1689).
-- `docs/knowledge/features/streamsup-package.md` § "Initialize send primitive (#1689)" — states that
-  nothing in this package reads the ack yet. This ticket does not change that; it makes the ack's
-  committed bytes *readable*, and #1811 / #1812 / #1719 / #1809 are the decodes that ride it.
-- `docs/knowledge/features/e2e-realclaude.md` § `initialize_control_record_test.go` — why the base
-  capture "is simply missing the fields, not zero-valued in them". That is the reason this reader
-  depends on the common subset only.
-
 ## Context
 
 Four captures of claude 2.1.239's reply to the `initialize` control request are committed under

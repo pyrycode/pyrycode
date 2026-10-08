@@ -2,26 +2,6 @@
 
 Split from #1587. Blocked-by #1608 (landed, `bd64f5b`).
 
-## Files to read first
-
-Read these before writing anything. Each entry names the **symbol**, not a line — resolve with `codegraph_search` / `codegraph_node`.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/relay/v2session_seams.go` | `V2SessionConfig` — its `SnapshotSettings`, `SnapshotUsage`, `BootstrapSessionID` fields | The three seams the new one replaces; the doc-comment idiom every field follows (what it reports → the nil/optional contract → why the type is primitive → a security-posture paragraph). The paragraph inside `BootstrapSessionID`'s doc that records the all-three-move-together decision is the one this ticket amends. |
-| `cmd/pyry/main.go` | `resolveBoundSession` | The refusal to inherit **verbatim**: registry miss, then `CurrentSessionID == ""`. Its doc says why the second guard is load-bearing — `Pool.Lookup("")` returns the bootstrap. |
-| `cmd/pyry/main.go` | `snapshotSettings` (the closure built in `runSupervisor`) | The precedent for decoding `sessions.SessionSettings` into primitives at the composition root so the value crossing into `relay.go` carries no `internal/sessions` type. |
-| `internal/sessions/pool.go` | `SettingsFor` | The whole contract: `ErrSessionNotFound` for an unheld id; `""` deliberately **not** special-cased; one `RLock` acquisition; the read-modify-write warning; the "`DefaultSettings` must not be rewritten to call it" note. |
-| `internal/sessions/pool.go` | `DefaultSettings` | Contrast only — why the bootstrap read stays its own single-acquisition method. |
-| `cmd/pyry/snapshot_usage.go` | `snapshotUsageFor`, `bootstrapSnapshotUsage` | The by-id usage reader (`nil` iff no sessions dir) and the builder-time nil-guard pattern. §"Why the two nils differ" below diverges from `bootstrapSnapshotUsage` deliberately — read its doc so you can see the divergence is chosen, not copied wrong. |
-| `cmd/pyry/relay.go` | `relayWiring`, `startRelayV2`, `boundSessionIDForActive` | Where a wiring field is declared and threaded; where the `V2SessionConfig` literal is populated; the in-file precedent for a named, unit-testable resolver pulled out of otherwise-untestable wiring. |
-| `cmd/pyry/session_router_test.go` | `newRouterTestPool`, `stubRunner` | **Reuse.** A real `*sessions.Pool` that spawns nothing. Same package, so a new `_test.go` calls it directly. |
-| `cmd/pyry/bound_session_active_test.go` | `TestBoundSessionIDForActive` | The registry fixture idiom (`&conversations.Registry{}` + `Create`) and the fail-closed subtest naming this spec's table should mirror. |
-| `cmd/pyry/snapshot_usage_test.go` | `TestSnapshotUsageFor_SiblingTranscriptIsNeverRead` | The cross-session confidentiality assertion shape — one reader, asked for **both** ids, each returning its own figures. AC #3's matrix is the same shape one layer up. |
-| `internal/transcript/transcript.go` | `StatByID`, `ValidStem` | The UUID-shape validation that happens **before** any `filepath.Join`. This is the pre-existing floor; the ticket's security property is a second, upstream guarantee stacked on it. |
-| `docs/knowledge/codebase/1608.md` | — | The blocker's handoff, including the open question §"Why no authorisation layer" below answers. |
-| `CODING-STYLE.md` | § "Comments — Citing Other Code" | Cite symbols, never `:NNN`. `make cite-guard` runs inside `make check`. |
-
 ## Context
 
 `relay.V2SessionConfig` reports run configuration through three bootstrap-scoped seams — `SnapshotSettings`, `SnapshotUsage`, `BootstrapSessionID`. None takes a conversation. Their coupling is recorded, not accidental: they must describe the *same* session or a client reads one session's values and writes to another.

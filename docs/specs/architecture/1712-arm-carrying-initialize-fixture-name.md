@@ -3,48 +3,6 @@
 Test-only. One file modified: `internal/e2e/realclaude/initialize_control_names_test.go`. No
 production change, no new file, no new `finOfflineExecBans` entry.
 
-## Files to read first
-
-Symbols, not lines — resolve each with `codegraph_search` / `codegraph_node`.
-
-- `internal/e2e/realclaude/initialize_control_names_test.go` → the whole file. It is the edit
-  site. Read its header end to end, then `initControlFixtureName` and
-  `TestInitControlFixtureName_AvoidsCommittedFamiliesAndStaysContained`. Extract: the three
-  subtest shapes, the `patterns` literal, the `targetDir` comment, and the § "One input, not
-  two" paragraph this ticket has to correct.
-- `internal/e2e/realclaude/inband_bypass_revoke_names_test.go` → `poolRevokeFixtureName`,
-  `poolRevokeNamePattern`, `anchorFixtureName`, and the `hostileArms` literal inside
-  `TestPoolRevokeFixtureName_AvoidsCommittedFamiliesAndStaysContained`. Extract: the two-input
-  namer shape, the row type you must reuse, the single anchoring point you must reuse, and the
-  arm-column hostile shapes.
-- `internal/e2e/realclaude/permission_protocol_spike_test.go` → `versionSlug`. Extract: the
-  lowercase + `[^a-z0-9._-]+` → `_` fold + 32-character truncation. All three bear on
-  distinctness.
-- `internal/e2e/realclaude/set_permission_mode_probe_test.go` → `setModeFixtureName`,
-  `setModeArms`, and the trailing `seen` map inside
-  `TestRealClaude_SetPermissionMode_FixtureNamesAvoidRegressionGlobs`. Extract: the pairwise
-  collision check shape (the `seen` map), and the counter-example — `setModeFixtureName`
-  interpolates its arm RAW and is the wrong sibling to copy.
-- `internal/e2e/realclaude/inband_bypass_revoke_arms_test.go` → `poolRevokeArm`,
-  `poolRevokeArms`. Extract: the read-only-shared-table doc discipline the new arm declaration
-  copies.
-- `internal/e2e/realclaude/offline_exec_ban_test.go` → `finOfflineExecBans`, its
-  `initialize_control_names_test.go` entry, `TestFinOfflineFilesReachNoExecHelper`. Extract:
-  confirmation that the existing seventeen-name entry already covers everything this ticket
-  adds, so **no map edit is needed**. Read it; do not change it.
-- `internal/e2e/realclaude/permission_protocol_regression_test.go` → `fixtureGlob`.
-  `internal/e2e/realclaude/dropped_line_capture_test.go` → `dropcapFixtureGlob`.
-  `internal/e2e/realclaude/inband_bypass_revoke_names_test.go` → `setModeFamilyGlob`. Extract:
-  the exact pattern strings and which of them carries a `testdata/` prefix.
-- `internal/e2e/realclaude/initialize_control_writer_test.go` → `writeInitControlFixture`.
-  Extract: it mints through `initControlFixtureName` today and **stays that way in this
-  slice**; #1713 is what migrates it.
-- `internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json` — the committed capture
-  this lock protects. Its `claude_version` is `2.1.239`; that string must be a row in the token
-  table.
-- `docs/knowledge/features/e2e-realclaude.md` § the fixture-name-lock entries for #1661, #1696,
-  #1701, #1702 — the accumulated lessons for this exact family.
-
 ## Context
 
 `initControlFixtureName` takes one input. #1696 collapsed the arm dimension deliberately and

@@ -2,35 +2,6 @@
 
 Confirms PO's size: **S**. Two production files modified (`internal/agentrun/ptyrunner/runner.go`, `internal/agentrun/budget/budget.go`), two production files deleted (`internal/agentrun/jsonl/tail/watcher.go` and `_test.go`), two test files migrated (`internal/agentrun/budget/budget_test.go`, light tweak to `internal/agentrun/ptyrunner/runner_test.go`). Net ~140 LOC written; ~700 LOC deleted. Single consumer per migrated symbol; no callback abstraction is added.
 
-## Files to read first
-
-- `internal/agentrun/ptyrunner/runner.go` (475 LOC, full file).
-  - Imports (lines 39–57) — drop `internal/agentrun/jsonl/tail`. The `internal/agentrun/jsonl` import is also deleted (only `eventToEntry` referenced it).
-  - `Run` body, watcher-wiring block at lines 360–399 — the entire `tail.New(...)` / `OnEvent` / `OnEndOfTurn` / `watcher.Run` shape is replaced by an inline `tuidriver.SessionJSONLPath` + `WaitForSessionJSONL` + `TailJSONL` drain. See § Design.
-  - `eventToEntry` (lines 420–460) — **delete** in full. The adapter only existed because `streamjson.Emitter.Emit` consumed `jsonl.Event` before #511; now `Emit` consumes `tuidriver.JSONLEntry` natively and the channel already delivers that shape.
-  - Package doc (lines 1–37) — one-line update: drop `internal/agentrun/jsonl/tail` from the sibling-subpackages list. Re-state the dependency-direction grep so it still passes (the `grep | empty` invariant is unchanged).
-  - `Run`'s return-value contract doc (lines 181–216) — replace the "`ptyrunner: tail:`" wrap with the new wrap names (see § Error handling). The cleanup-LIFO comment stays valid but the `wg.Wait()` step now drains only the watchdog goroutine — note that in the doc.
-- `internal/agentrun/jsonl/tail/watcher.go` (241 LOC) and `watcher_test.go` (459 LOC) — **read once for behaviour-equivalence sanity**, then delete both files. Key behaviours to preserve in the inline rewrite: (a) wait for the JSONL file before opening (`tuidriver.WaitForSessionJSONL` handles this); (b) drain the file via the channel until end-of-turn fires or ctx cancels; (c) propagate ctx cancellation cleanly. The encoded-project-dir MkdirAll (`watcher.go:112`) is **NOT** carried forward — `tuidriver.WaitForSessionJSONL` polls via `os.Stat` and does not need the parent dir to pre-exist (a missing parent surfaces as `os.IsNotExist`, same as a missing file).
-- `internal/agentrun/budget/budget.go` (187 LOC, full file).
-  - `OnEvent` (lines 101–138) — signature changes from `jsonl.Event` to `tuidriver.JSONLEntry`; the `if ev.EndOfTurn { return }` branch at lines 109–114 is **deleted**. See § `budget.OnEvent` semantic change.
-  - `OnEndOfTurn` (lines 140–148) — body unchanged; doc-comment cross-reference to `tail.Config.OnEndOfTurn` rewrites to "the ptyrunner caller's `tuidriver.IsEndTurn`-gated invocation".
-  - Package doc (lines 1–11) and `Counter` struct doc (line 67) — drop references to `tail.Config` / `tail.Watcher.Run goroutine`. Replace with "the agent-run caller's goroutine that drains the `tuidriver.TailJSONL` channel".
-  - The `jsonl` import goes away; `tuidriver` (`github.com/pyrycode/tui-driver/pkg/tuidriver`) takes its place.
-- `internal/agentrun/budget/budget_test.go` (377 LOC, full file).
-  - `assistantEvent` helper (lines 56–58) — rewrite to `assistantEntry()` returning `tuidriver.JSONLEntry{Type: "assistant"}` (no `endOfTurn` parameter; see § `budget.OnEvent` semantic change for why).
-  - All ~14 `jsonl.Event{Kind: ...}` literals — migrate to `tuidriver.JSONLEntry{Type: ...}`. Inventory of construction sites at lines 105, 110–115, 132–143, 164, 212, 251–252, 272, 291–293, 312–313, 332, 352.
-  - `TestOnEvent_BudgetBoundaryEndOfTurnIsCompletion` (lines 279–301) — **delete**. The test's whole premise (the EOT branch in `OnEvent` skips the budget check at the boundary) no longer holds; see § `budget.OnEvent` semantic change.
-  - `TestOnEndOfTurn_ReasonCompletion` (lines 242–260) — simplify: the second event drops `(true)` since the EOT shape is no longer carried on the entry; the assertion that `Reason == ReasonCompletion` after `OnEndOfTurn` is unchanged.
-- `internal/agentrun/ptyrunner/runner_test.go` (544 LOC) — public-API tests against `Run(ctx, Config)`. Should be byte-equivalent except for one doc comment in `helper_test.go:47` (`tail.Watcher` → `tuidriver.TailJSONL` channel drain). No structural test changes; the existing fixtures (`happyPathBody`, `noEotBody`, `helperRunCfg`) drive the new inline drain through the same PTY + filesystem path.
-- `internal/agentrun/ptyrunner/helper_test.go` lines 44–47 and 120–129 — the helper's `MkdirAll` (line 130) **stays**: in test mode the helper writes the JSONL file, and it owns parent-dir creation. The doc comment at lines 124–129 referring to `tail.New`'s `fsnotify.Add` is rewritten to reference `tuidriver.WaitForSessionJSONL`'s stat-poll loop.
-- `internal/agentrun/streamjson/emitter.go` lines 161–210 — confirms `Emit(entry tuidriver.JSONLEntry) error` is already the live signature (shipped by #511). No changes here.
-- tuidriver module cache (`$GOMODCACHE/github.com/pyrycode/tui-driver@v0.0.0-20260523181457-c2dcd1e49992/pkg/tuidriver/jsonl.go`):
-  - `SessionJSONLPath(home, cwd, sessionID) string` (lines 35–37) — pure path composer; same encoded-cwd rule as the deleted watcher (`watcher.go:110`).
-  - `WaitForSessionJSONL(ctx, path) error` (lines 58–78) — initial `os.Stat`, then ticker at `DefaultPollInterval`. Returns nil on appearance, wrapped `context.Cause(ctx)` on cancel/deadline, wrapped stat-error otherwise. Cancellation-safe.
-  - `TailJSONL(ctx, path, startOffset) (<-chan JSONLEntry, error)` (lines 171–183) — synchronous open + seek failure surface; otherwise spawns the tail goroutine and returns the buffered channel. Channel closes when ctx cancels or an unrecoverable read error occurs. **Use `startOffset = 0`** — ptyrunner does not resume mid-file.
-  - `IsEndTurn(e JSONLEntry) bool` (lines 297–305) — the deterministic end-of-turn discriminator (assistant ∧ `Message.StopReason == "end_turn"` ∧ non-empty text content). Semantically equivalent to the deleted `jsonl.Event.EndOfTurn` field.
-- `docs/specs/architecture/511-streamjson-consumes-tuidriver-jsonl-entry.md` — sibling spec; confirms `streamjson.Emitter.Emit` already consumes `tuidriver.JSONLEntry` and that the adapter (`eventToEntry`) is **the** seam #512 deletes.
-
 ## Context
 
 This is the second of two slices that decouple the runtime agent-run hot path from the local `internal/agentrun/jsonl` package's `Reader` / `Event` shape. #511 migrated `streamjson.Emitter.Emit` from `jsonl.Event` → `tuidriver.JSONLEntry` and introduced `eventToEntry` as a throwaway adapter inside `ptyrunner.Run`. This ticket pivots the watcher itself to `tuidriver.TailJSONL`, which delivers `JSONLEntry` natively — so `eventToEntry` is deleted (no caller), `budget.Counter.OnEvent` is migrated to the new shape, and the bespoke `internal/agentrun/jsonl/tail/` watcher is removed (no caller).

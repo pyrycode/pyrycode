@@ -33,38 +33,6 @@ exists and is green against fakeclaude.
 
 ---
 
-## Files to read first
-
-Everything is in package `realclaude` under the `e2e_realclaude` build tag; all helpers
-below are reused **verbatim** (same package, same tag). The new file transcribes the
-#1153 body and adds one drain helper.
-
-- `internal/e2e/realclaude/interactive_stream_liveness_test.go` (whole file, ~255 lines)
-  — **the transcription base.** Copy its `TestInteractiveStreamLiveness` setup body
-  (lines 73–133: LookPath → auth → workdir → `writeStreamInteractiveConfig` → pair →
-  seed×2 → fakerelay → `spawnBootstrapDaemon` → serverID → `waitBinaryHello` → Dial →
-  `driveHandshakeInteractive`) almost line-for-line; replace the single `sealSendMessage`
-  + `drainForCompletedTurn` (lines 138–141) with the turn loop. Also read
-  `writeStreamInteractiveConfig` (155–165, the stream-json toggle) and
-  `drainForCompletedTurn` (181–254) — the new capturing drain is its superset.
-- `internal/e2e/realclaude/interactive_bootstrap_liveness_test.go` — home of every reused
-  helper. Exact signatures to satisfy:
-  - `sealSendMessage(t, phone, cs *noise.CipherState, id uint64, convID, msgID, text string)` (160) — **note `id` is `uint64`** (loop index needs `uint64(...)`).
-  - `spawnBootstrapDaemon(t, home, workdir, claudeBin, relayURL string) *bootstrapDaemon` (383) — ungated spawn (`--dangerously-skip-permissions`); reuse this, NOT `spawnPermissionDaemon` (no tool use → no modal).
-  - `seedBootstrapRegistry(t, home, bootstrapUUID)` (529), `seedBoundConversation(t, home, convID, boundSessionID, cwd)` (546), `driveHandshakeInteractive` (247), `runPyry` (481), `readPersistedServerID` (509), `decodePairPayload` (559), `waitBinaryHello` (575), `relayTestLogger` (584).
-- `internal/e2e/realclaude/interactive_per_conversation_liveness_test.go:85` — `const perTurnReplyBudget = 120 * time.Second`. Reuse per turn (this file already drives multiple sequential turns each with this budget — the established norm; `interactive_session_control_liveness_test.go` drives three).
-- `internal/streamsup/roundtrip_test.go:21` — `TestParser_MultiTurnRoundTripZeroBleed` — the unit-level proof of the same held-open-stdin, reuse-across-turns invariant this e2e proves against real claude. Read to confirm the mental model (capture stdin once, no per-turn respawn); do **not** couple to it.
-- `internal/protocol` — `AssistantDeltaPayload{ConversationID, Seq, Text}` and `TurnStatePayload{State, ConversationID}` are the two payloads the drain decodes (both already used in `drainForCompletedTurn`).
-
-**UUID collision map (must not redeclare a name or reuse an in-flight literal).** Existing
-package literals: `77777777`/`55555555` (#854), `99999999`/`66666666` (#1030),
-`88888888` (#1153 bootstrap, also #997), `77777777`/`55555555` (#1154),
-`aaaaaaaa`/`bbbbbbbb` (session-control), `11111111` (fixtures). In-flight on
-`feature/1172`: `runningTurnBootstrapUUID`=`33333333`, `runningTurnConvID`=`44444444`,
-plus a `drainForResponding` helper. This spec's fresh names/literals dodge all of them.
-
----
-
 ## Design
 
 ### New file

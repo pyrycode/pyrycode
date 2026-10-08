@@ -2,27 +2,6 @@
 
 Epic #600 — `pyry acp` as a thin adapter over the shared remote-head core. Builds directly on #761 (`session/new` + the embedded pool standup).
 
-## Files to read first
-
-Turn-1 data load. Read these before writing any code. Everything you touch lives in `cmd/pyry/acp.go`; the rest is contract you consume unchanged.
-
-- `cmd/pyry/acp.go` (whole, 207 lines) — the file you extend. Key seams:
-  - `serveACPWithPool:106-108` — the `register` closure. You add two `t.Register(...)` lines here alongside `session/new`. **No other structural change to this function.**
-  - `newSessionHandler:134-142` — the handler shape to mirror (`func(pool) acp.Handler`, returns a closure over `pool`).
-  - `newSessionResult:120-122` — the `{"sessionId": string}` result struct. **Reuse it for `session/load`'s success result** (zero new types).
-- `internal/acp/acp.go:53-59` — `Handler` contract: `func(ctx, params json.RawMessage) (result any, err error)`. A returned `*acp.Error` controls the wire code; any other error → `CodeInternalError` (detail logged, not leaked); `(nil, nil)` = "nothing".
-- `internal/acp/acp.go:246-258` — `dispatchNotification`. **Load-bearing for AC-4:** a notification (method, no `id`) routes to the same handler map but **never emits a response regardless of the handler's return** — the handler's error is only logged. This is why `session/cancel` needs no response plumbing: registering it is enough.
-- `internal/acp/acp.go:221-244` — `dispatchRequest`. What `session/load` (a request, has `id`) returns: `*acp.Error` → `writeErrorWithData` (typed code); plain error → `CodeInternalError`; success → `writeSuccess`.
-- `internal/acp/jsonrpc.go:12-18` — error codes. `CodeInvalidParams = -32602` is the code for a missing/malformed/unknown `sessionId`. `NewError(code, msg)` at :37 constructs the `*acp.Error`.
-- `internal/sessions/pool.go:713-729` — `Pool.Lookup(id)`. **Read the empty-id trap:** `Lookup("")` returns the **bootstrap** session (the parked evicted placeholder), *not* an error. A non-empty unknown id returns `ErrSessionNotFound`. The decode must reject empty `sessionId` before it reaches `Lookup`, or a host could resolve/activate the bootstrap.
-- `internal/sessions/pool.go:33` — `var ErrSessionNotFound`. The sentinel `Lookup` returns on an unknown non-empty id → map to `CodeInvalidParams` (AC-2).
-- `internal/sessions/pool.go:1216-1241` — `Pool.Activate(ctx, id)`. ACP leaves `ActiveCap == 0` (uncapped), so this delegates straight to `sess.Activate(ctx)` — **the capped-path `stateActive` early-return does not run**; idempotency comes from `Session.Activate` itself (next entry).
-- `internal/sessions/session.go:209-229` — `Session.Activate`. **The AC-3/divergence-6 linchpin:** when the session is already `stateActive`, it sends nothing on `activateCh`, the shared `activeCh` is already closed so the receive returns immediately, then `WaitForPTY` returns against the live PTY. **No second claude spawns.** Read this to confirm the idempotency claim first-hand.
-- `internal/sessions/session.go:118-122` — `Session.Supervisor() *supervisor.Supervisor`. Already exposed. The cancel seam resolves onto this; T9 (#753) delivers the abort keystroke against it.
-- `cmd/pyry/acp_test.go` (whole, 278 lines) — the test file you extend. `fakeClaudeScript:153-164` (argv-recording fake claude, one line per spawn) and `TestACP_SessionNew_SpawnsOneInteractiveClaude:171-278` (the full transport-driven harness: paired `io.Pipe`s, `serveACPWithPool`, request write, response read, argv-line count). **This is the divergence-6 harness to extend** — the argv-line-count assertion IS the "exactly one claude" proof.
-- `internal/sessions/id.go:18` (`type SessionID string`) and `:43` (`func ValidID(string) bool`) — id type + canonical-shape validator (optional; see Open Questions).
-- `CODING-STYLE.md` § Testing — table-driven, stdlib `testing` only.
-
 ## Context
 
 #761 delivered the first ACP method that does real work (`session/new`) and the composition root it needs: an embedded, trimmed `internal/sessions` pool (bootstrap evicted, service-mode bridge, no persistence/relay/control/queue). `session/new` mints a fresh id and spawns exactly one supervised interactive claude per call.

@@ -1,22 +1,5 @@
 # Spec — `internal/relay`: concurrency-safe v2 session push surface for unsolicited `noise_msg` (#571)
 
-## Files to read first
-
-- `internal/relay/v2session.go:98-105` — `manualRekeyReq` struct: the per-request reply-channel funnel shape the new `pushReq` mirrors byte-for-byte.
-- `internal/relay/v2session.go:300-340` — `V2SessionManager` struct + the single-owner-goroutine concurrency contract (`sessions` mutated only by `Run`, no mutex). The `wake` / `manualRekey` field doc-comments are the template for the new `push` field's comment.
-- `internal/relay/v2session.go:346-372` — `NewV2SessionManager`: where the `push` channel is allocated (`make(chan pushReq)`, unbuffered — same as `manualRekey`).
-- `internal/relay/v2session.go:383-401` — `Run`'s `select` loop: add one `case req := <-m.push` arm next to the existing `manualRekey` arm.
-- `internal/relay/v2session.go:1220-1288` — `Rekey` (public funnel method) + `handleManualRekey` (the on-dispatch-goroutine lookup + state-check handler). **`Push`/`handlePush` are the structural twins of these two functions** — same funnel-then-handle split, same `ErrConnNotFound` / `ErrSessionNotOpen` error contract.
-- `internal/relay/v2session.go:1044-1119` — `emitRekeyRequest`: the exact `json.Marshal(envelope)` → `s.send.Encrypt` → `marshalInnerFrameV2(TypeNoiseMsg, …)` → `m.send` sequence `handlePush` reuses (minus the rekey timer/awaiting bookkeeping).
-- `internal/relay/v2session.go:957-1001` — `dispatchAppFrame`: the in-flight reply path the push must interleave safely with. Confirms every `s.send.Encrypt` already runs on the `Run` goroutine.
-- `internal/relay/v2session.go:1153-1165` — `marshalInnerFrameV2`: the noise_msg wrapper to reuse verbatim (no new wire shape).
-- `internal/relay/v2session.go:62-76` — `ErrConnNotFound` (wraps `control.ErrConnNotFound`) + `ErrSessionNotOpen` sentinels, reused unchanged by `Push`.
-- `internal/relay/v2session_test.go:94-117` (`startManager`), `:39-64` (`v2Recorder`), `:157-172` (`waitForEnvelopes`), `:690-774` (`openSession`, `driveToOpen`, `sealAppFrame`, `decryptAppFrame`) — the white-box harness the concurrency tests build on. `driveToOpen` returns the phone-side `initRecv` CipherState used to decrypt pushed frames; `v2Recorder.snapshot()` captures outbound frames in send order.
-- `internal/relay/v2session_test.go:781-849` — `TestV2Session_OpenState_EncryptedRoundTrip`: the closest existing test shape — drives to open, registers a reply handler, sends a sealed request, decrypts the reply. The AC#1 concurrency test extends this pattern with a concurrent `Push`.
-- `cmd/pyry/assistant_turn.go:97-159` — v1 `assistantTurnEmitter.broadcast`: how the consumer (#572) builds a `message` envelope (`protocol.TypeMessage` + `protocol.MessagePayload`) and fans out. Confirms the input the v2 push surface must accept is a fully-formed `protocol.Envelope`.
-- `cmd/pyry/relay.go:255-297` — `startRelayV2`: where #572 will obtain the `*V2SessionManager` handle to call `Push`. No change in this ticket; read it to confirm the manager handle is reachable for the consumer.
-- `docs/protocol-mobile.md` § Wire shapes (`noise_msg`, InnerFrameV2) and § Re-key — wire source of truth; confirms no new inner-frame or envelope type is introduced.
-
 ## Context
 
 **What problem this solves.** On the v2 (Noise) mobile path the daemon's `V2SessionManager` can only reply to a phone synchronously — one reply per inbound frame, drained inside `dispatchAppFrame`. There is no way to send an *unsolicited* frame to an open session. The code calls this out directly at `v2session.go:208-210` ("a broadcast layer added in a later slice") and on `State()`.

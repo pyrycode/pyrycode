@@ -4,17 +4,6 @@
 **Size:** S — 2 production files modified (`acp.go`, `jsonrpc.go`), 0 new files, **0 new exported types** (one new exported *method* `Transport.Call`; reuses the existing `*Error`), 0 consumer call sites (unused until T7/T8). ~80 production LOC + ~200 test LOC. 5 reject/drop branches (under the 10-branch line).
 **Security-sensitive:** No (not labelled). This adds a transport mechanism — id correlation + a pending-call registry — that drives no claude, registers no real ACP method, and makes no trust/dispatch/gate decision. The outbound call is agent-initiated; the response comes from the same client the transport already serves.
 
-## Files to read first
-
-Read these before writing code. Each line says what to extract.
-
-- `internal/acp/acp.go:61-106` — `Transport` struct + `New`. **What to extract:** where to add the three new registry fields (`nextID`, `pendingMu`, `pending`) and the one-line `pending` map init in `New`. Note the existing `writeMu`/`enc` seam already lives here.
-- `internal/acp/acp.go:194-209` — `handleLine`'s classification switch, specifically the **response-frame case at :199-208** that today logs-and-drops. **What to extract:** the exact case you replace. `msg.ID != nil && (msg.Result != nil || msg.Error != nil)` is already the correct guard; swap the `Debug` drop for `t.routeResponse(&msg)`. The unknown-id path keeps log-and-drop, now *inside* `routeResponse`.
-- `internal/acp/acp.go:286-294` — `writeMessage` + the `writeMu` doc comment. **What to extract:** the write seam `Call` reuses verbatim. `writeMessage(v any) error` already serialises every write under `writeMu`; the outbound request goes through it with **no change to the write path**. Note the comment already names #757 as the sharer.
-- `internal/acp/jsonrpc.go:20-52` — `Error`, `rpcError`, `rpcMessage`. **What to extract:** (a) reuse `*Error` as the returned mapped error — do **not** add a new exported error type (Technical Notes); (b) reuse `rpcError{Code,Message,Data}` to decode an inbound error object; (c) add the new **unexported** outbound `request` wire type in this file next to the existing encode structs.
-- `internal/acp/acp_test.go:17-52` — the `run`/`runErr` harness + `echoParams`. **What to extract:** this harness is **single-shot and synchronous** (`strings.NewReader` fed whole, `Serve` runs to EOF, then output is parsed). It does **not** fit the outbound tests, which need `Serve` live in a goroutine while the test writes a response *after* observing the request. The Testing strategy below specifies the new live-Serve harness; reuse the diagnostics-sink pattern (`slog.NewTextHandler` over a `bytes.Buffer`) and the JSON-frame assertions.
-- `CODING-STYLE.md` §§ "Concurrency", "Testing" — mutex-for-shared-state, channel-for-signalling, `go test -race` is mandatory, table-driven stdlib-only tests, `t.Parallel()`.
-
 ## Context
 
 Epic #600 makes `pyry acp` speak the Agent Client Protocol. ACP is **bidirectional**: besides answering host requests (built by #755), the agent issues its *own* requests to the client — `session/request_permission` (T8's permission proxy) and the held `session/prompt` return path (T7). Both need an outbound-request primitive on the transport.

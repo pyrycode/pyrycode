@@ -1,22 +1,5 @@
 # Spec — cmd/pyry: `pyry pair preflight` empty-registry gate for v2 cutover (#436)
 
-## Files to read first
-
-The developer's turn-1 reading list. Lift these into context before writing any code.
-
-- `cmd/pyry/pair.go:106-129` — `runPair` dispatch. New `case "preflight":` arm goes alongside `list` / `revoke`. Also update `pairVerbList` (line 24) to `"list, revoke, preflight"`.
-- `cmd/pyry/pair.go:203-249` — `pairListArgs` / `parsePairListArgs` / `runPairList`. The preflight verb's parser is structurally identical (only `-pyry-name` accepted, no positionals); clone the shape with rename, do not extract a shared parser. The `devices.Load` + `registry.List()` read path used by `runPairList` is the same read path this ticket reuses verbatim (Technical Note in the issue body pins this).
-- `cmd/pyry/pair.go:319-348` — `runPairRevoke`. **Two patterns to mirror exactly:**
-  (a) `os.Exit(1)` direct call at line 341 for the not-found case — bypasses main's `pyry: ` prefix so the stderr line reads `pyry pair revoke: …` not `pyry: pair revoke: …`. The preflight verb uses the same trick for its exit-2 gate-fail message.
-  (b) `fmt.Errorf("pair revoke: %w", err)` for I/O errors at lines 337 and 344 — returns up to `main.run`, which prefixes with `pyry: ` and `os.Exit(1)`s. This is the corrupt-registry path (exit 1).
-- `cmd/pyry/pair_test.go:261-299` — `TestParsePairListArgs`. Clone-and-rename for the preflight parser. Same four cases (empty, instance, positional rejected, unknown flag rejected).
-- `cmd/pyry/pair_test.go:349-453` — `TestRunPairRevoke_RemovesEntry` and `TestRunPairRevoke_SaveFailure`. The harness pattern (`t.Setenv("HOME", …)`, `resolveDevicesPath(defaultName())`, write a registry via the public `devices` API, then call the run-function under test) is the template for the preflight-success-path and preflight-corrupt-registry tests.
-- `cmd/pyry/main.go:156-194` — `main` + `run`. Pins the contract: `run` returns nil for success, returns an error which `main` prints as `pyry: <err>` then `os.Exit(1)`. Confirms why direct `os.Exit(N)` calls in the runX functions are the right escape hatch for any non-1 exit code or any message that should not be prefixed by `pyry: `.
-- `internal/devices/registry.go:37-53` — `devices.Load` contract: missing file → empty `*Registry`, nil error (cold start). Zero-byte file → empty `*Registry`, nil error. Malformed JSON → wrapped error, nil `*Registry`. The preflight verb depends on this contract: missing/empty file → exit 0, malformed JSON → exit 1.
-- `internal/devices/registry.go:131-139` — `Registry.List()` returns a copied slice. `len(registry.List())` is the count we gate on.
-- `docs/protocol-mobile.md:561-565` — § *Pre-flight: `pyry pair list` empty check*. The paragraph the developer updates per AC #3: replace the bare prose "run `pyry pair list` and confirm it is empty" with the concrete verb invocation `pyry pair preflight` and document the exit-code contract (0 / 1 / 2) so release tooling can copy it verbatim.
-- `docs/protocol-mobile.md:9` — § *Version negotiation* opening paragraph. Already cross-references #436 and the *Pre-flight* anchor — leave intact, do not edit. (Pinned by issue body AC #3 parenthetical.)
-
 ## Context
 
 Mobile Protocol v2 (#430) ships as a hard cutover. v1 pair records lack `server_static_pubkey` (the field added in #432); a v2 binary cannot complete the Noise_IK handshake with a v1-paired phone — the connection closes with WS code `4426` (handshake failure) and the user has no recovery path other than `pyry pair revoke && pyry pair` per device.

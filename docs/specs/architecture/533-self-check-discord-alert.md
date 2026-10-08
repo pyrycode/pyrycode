@@ -3,14 +3,6 @@
 **Ticket:** #533
 **Size:** XS (1 file modified, ~30-50 added lines, no Go code, no tests)
 
-## Files to read first
-
-- `.github/workflows/self-check-daily.yml` — entire file (~40 lines). The only file you'll modify. Internalize the existing header comment block before touching it; you'll extend it, not replace it.
-- `.github/workflows/ci.yml` — skim for any pre-existing pattern for failure notifications. (Currently there is none — confirm and proceed.)
-- `.github/workflows/release.yml` — same skim, same purpose. Confirm no existing webhook-post pattern is established elsewhere in this repo that you should mimic.
-
-No Go source is in scope.
-
 ## Context
 
 The `agent-run self-check (daily)` workflow is the deterministic safety net for the per-agent tool-allowlist contract (#375). Between 2026-05-19 and 2026-05-24 it correctly went red while a regression (`selfcheck.go` not passing `AllowedTools` to `ptyrunner.Config`, fixed in #526) shipped to main. The signal worked; the alerting surface (red README badge + Actions tab entry) did not reach the operator. This ticket converts the passive badge into an active Discord push so a future regression of the same shape gets investigated within a day, not five.

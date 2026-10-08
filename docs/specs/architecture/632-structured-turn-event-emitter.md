@@ -3,22 +3,6 @@
 **Part of EPIC #596** (Phase 2 structured streaming). See [ADR 025](../../knowledge/decisions/025-mobile-remote-head-interactive-session.md) § Phase 2.
 **`security-sensitive`** — see § Security review at the end.
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `cmd/pyry/assistant_turn_v2.go` (full) | **The template.** #589's `broadcast`: fresh-snapshot-per-emit, `nextID++` per-conn envelope-ID policy, per-conn `Push` error → DEBUG + `continue`, `ctx.Err()` → return, the marshal-error branch that never echoes `err.Error()`, and the "PTY/app bytes NEVER logged" field discipline. The new emitter mirrors this fan-out tail. |
-| `internal/turnbridge/outbound.go:62-109` | `MapEvent(ev, tc) (typ, payload, ok)` and `BuildTurnState(convID, state) (typ, payload)` — the pure adapter the emitter consumes. `ThoughtChunk` → `ok==false` (drop, no thought text). `TurnContext{ConversationID, TurnID, Seq}`; `TurnState` + `StateThinking`/`StateResponding`/`StateIdle`. |
-| `internal/turnevent/event.go` | The sealed `Event` sum type the emitter type-switches over: `TextChunk`, `ThoughtChunk`, `ToolStart`, `ToolUpdate`, `TurnEnd`. Value receivers (`TextChunk{}` satisfies `Event`). |
-| `internal/relay/v2session.go:1623-1667` | `ActiveConn{ConnID, Interactive}` + `ActiveConns(ctx) []ActiveConn` — the capability-aware enumeration. `V2StateOpen` gate inside; `nil` on ctx-cancel; unordered set. |
-| `internal/relay/v2session.go:1560-1576` | `Push(ctx, connID, env) error` — the per-conn sealed delivery; its own `V2StateOpen` re-gate (`ErrSessionNotOpen`) is the safety net. |
-| `internal/turnbridge/producer.go:38-57, 98-118` | `Config.OnEvent func(turnevent.Event)` callback seam (wired by #633, not here) + the contract: **OnEvent runs on the producer's single Run goroutine**. This is what makes the emitter's state lock-free. |
-| `cmd/pyry/assistant_turn.go:20-26` | The reusable `cursorReader` interface (`CurrentConversation() string`). Same package `main` — reference directly, no edit. |
-| `internal/protocol/interactive.go` (full) | The five binary→phone payloads. **No `omitempty`** — `seq:0` / `is_error:false` always serialize. |
-| `docs/knowledge/codebase/589.md` | Envelope-ID policy (`nextID++` per conn), the two-deterministic-gates security pattern, the no-app-output-log contract — all inherited verbatim. |
-| `docs/knowledge/codebase/627.md` | "The consumer owns the decision to call `BuildTurnState`" — the lifecycle/state-machine ownership boundary this slice implements. |
-| ADR 025 § Phase 2 + § Backpressure | turn_state mapping; capability gating; backpressure/coalescing/droppable-delta are a **separate** Phase 2 child (deferred, see § Out of scope). |
-
 ## Context
 
 This is the **stateful structured emitter** at the heart of Phase 2. Its two upstream

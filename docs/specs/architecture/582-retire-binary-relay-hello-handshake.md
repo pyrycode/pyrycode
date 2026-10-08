@@ -4,21 +4,6 @@
 
 **One production source file modified:** `internal/relay/connection.go`. Everything else is test files (`connection_test.go`, `internal/e2e/relay_test.go`) and one doc (`docs/protocol-mobile.md`).
 
-## Files to read first
-
-- `internal/relay/connection.go:1-13` — package doc comment; describes the "one-shot hello/hello_ack handshake on every fresh conn" that this ticket retires (doc-comment AC).
-- `internal/relay/connection.go:39-43` — `handshakeTimeout` package var (delete; AC #1).
-- `internal/relay/connection.go:232-261` — `run()`; the `case <-c.client.Connected():` branch is the surgical call site (AC #1).
-- `internal/relay/connection.go:263-315` — `handshake()`; delete in full (AC #1). Note its `protocol.HelloServerPayload` construction (264-269) is the only thing the AC names for removal — the *type* stays (still defined in `internal/protocol/handshake.go`, still referenced by the v2 phone↔binary path; its removal is the separate follow-up cleanup, out of scope here).
-- `internal/relay/connection.go:163-183` — `Frames` / `Send` doc comments mentioning "a fresh hello/hello_ack handshake" (doc-comment AC). `CloseConn` (185-210) does **not** mention the handshake — verify, leave it.
-- `internal/relay/connection.go:344-351` — `classifyTransportErr`; the 4409→`ErrServerIDConflict` mapping. Read-only confirmation it's independent of the hello round-trip (AC #3) — do **not** touch it.
-- `internal/relay/connection_test.go:35-233` — `shortenHandshakeTimeout` helper + `testRelay` (behaviors enum, the hello-read + hello_ack-send block, `helloEnv`/`HelloEnv`). This is the bulk of the rework.
-- `internal/relay/connection_test.go:277-663` — the test cases: which to delete, which to repurpose, which to re-sync. See § Test rework.
-- `internal/e2e/relay_test.go:52-93` — `TestRelay_Hello`; delete this function + its doc comment only. `TestRelay_4409` (95-128) and `TestRelay_1011` (130-176) stay and share the file's helpers — leave them and the helpers intact.
-- `internal/e2e/internal/fakerelay/fakerelay.go:195-271` — `handleBinary`: registers `s.binaries[serverID]` on WS upgrade (line 266), header-based, **before any hello**. This is why `WaitBinary` keeps working after the binary stops sending a hello. Read-only — fakerelay is NOT modified here (its dead hello-receiving path is the named follow-up).
-- `docs/protocol-mobile.md:17-29` — the "v2 changes from v1" table; the **Endpoints** row (line 20) is the one to amend (AC #5).
-- `docs/protocol-mobile.md:312-326` — § Authentication / Binary → relay; already header-based + "no Noise on this leg". This is where the "established on WS upgrade, no relay-originated hello_ack, route names carry no protocol meaning" note lands.
-
 ## Context
 
 The v2 mobile wire is a hard cutover and the relay is **content-blind**: `pyrycode-relay` registers a binary's server-id from the `x-pyrycode-server` request header, claims the slot on WS upgrade, and signals a server-id clash with WS close 4409. It **never** sends a `hello_ack` — under v2 a `hello_ack` is AEAD-sealed application data the relay holds no key for, and registration is already header-based.

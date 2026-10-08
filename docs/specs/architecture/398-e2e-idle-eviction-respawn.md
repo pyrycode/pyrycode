@@ -8,20 +8,6 @@ The test drives the full pyry binary across one **eviction → inbound `send_mes
 
 Scope is one test file under `internal/e2e/`, no production change. The PO body floated a possible <30 LOC harness accessor — not needed. `pyry status` already surfaces `ChildPID` via `StatusPayload` (`internal/control/protocol.go:280`) and `cmd/pyry/main.go:574` prints it as `Child PID:     N`. Tests poll `h.Run(t, "status")` and parse that line.
 
-## Files to read first
-
-- `internal/e2e/idle_test.go:1-125` — sibling that already drives `-pyry-idle-timeout=1s` against `/bin/sleep`. Reuse `newRegistryHome`, `waitForBootstrapState`, `readRegistry`. Adopt the same 5s registry-poll deadline shape, but extend timeout knobs (eviction window is 2s here, respawn budget 15s).
-- `internal/e2e/relay_roundtrip_test.go:31-220` — canonical pattern for the full phone→relay→binary→fakeclaude wire: `RunBareIn(... "pair" ...)` + `decodePairPayload`, seed `conversations.json`, `fakerelay.New`, `StartRotationWithRelay`, wait for `fr.LastBinaryHello(serverID)`, `fakephone.Dial`, send hello / send_message, drain envelopes. Lift the same steps; this ticket only needs hello + send_message (no list_conversations, no assistant-turn echo, no register_push_token).
-- `internal/e2e/relay_send_message_test.go:32-166` — the minimal send_message→ack drive. Demonstrates conversations.json seeding (lines 50-56), `fakephone.Dial` ergonomics (lines 86-92), the ack-shape assertion (lines 135-148). This ticket's send_message slice is almost identical; the difference is the eviction interleave and the PID-changed assertion that follows the ack.
-- `internal/e2e/harness.go:266-359` — `StartRotation` and `StartRotationWithRelay` (the wire-enabled variant). `extraEnv` is variadic and last-wins for flags. Adopting `StartRotationWithRelay` gives the test both a real fakeclaude PID **and** a working relay path.
-- `internal/e2e/harness.go:563-601` — `Harness.Run`. `pyry status` exit-and-stdout shape; reuse the `Phase:         running` literal match.
-- `internal/sessions/session.go:341-369` — the idle-eviction emit. Locks in the exact slog fields (`event=session.idle_eviction`, `session_id`, `idle_timeout`, `bootstrap`). `s.id` is the supervisor name; with the harness's `-pyry-name=test` that yields `session_id=test`.
-- `internal/supervisor/supervisor.go:288-336` — `ChildPID` is set on spawn (line 304) and zeroed at backoff (line 325). The "Child PID:     N" status line disappears between eviction and respawn — both halves of the test rely on that.
-- `cmd/pyry/main.go:572-583` — exact `pyry status` print format. Anchor the parse on `Child PID:     ` (4 spaces of alignment) — `Phase:         running` already proven stable by `idle_test.go:90`.
-- `internal/control/protocol.go:274-286` — `StatusPayload` shape. Documents `child_pid,omitempty` (= 0 → omitted). Useful background; the e2e test parses CLI output, not the JSON.
-- `docs/knowledge/codebase/396.md` — fix shape; clarifies that Activate runs **before** WriteUserTurn and now waits for `WaitForPTY`, so by the time the ack envelope reaches the phone the PTY is bound and `ChildPID` is set. The respawn "within 15s" budget collapses to "by the time we receive the ack" in practice; test still asserts the 15s upper bound for documentation parity.
-- `docs/knowledge/decisions/023-activate-waits-pty-readiness.md` — strengthened Activate contract that this test pins end-to-end.
-
 ## Design
 
 ### File and build tag

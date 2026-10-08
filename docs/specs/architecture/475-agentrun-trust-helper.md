@@ -1,14 +1,5 @@
 # 475 — `internal/agentrun/trust/` helper (slimmed)
 
-## Files to read first
-
-- `internal/agentrun/workdir.go:21-31` — existing `agentrun.ResolveWorkdir(workdir string) (string, error)`. The trust subpackage MUST import and call this; do NOT re-implement `Abs` + `EvalSymlinks` inline. This is the single source of truth for "claude's realpath rule" in pyrycode and the AC's "Resolves `workdir` via `filepath.EvalSymlinks`" is satisfied by delegating here.
-- `internal/agentrun/workdir.go:1-7` — package doc-comment establishes the "MUST NOT log file contents" convention for the `agentrun` package family. The new `trust` subpackage doc-comment mirrors and tightens this for `~/.claude.json` contents.
-- `internal/devices/registry.go:55-107` — canonical pyrycode atomic-write recipe (`os.CreateTemp` in dir → `os.Chmod` → encode → `f.Sync()` → `f.Close()` → `os.Rename`). Mirror this shape line-for-line; per `docs/PROJECT-MEMORY.md` § "Atomic-write recipe for on-disk registries" the convention is duplication-not-extraction until a fifth registry forces it.
-- `docs/specs/architecture/341-agentrun-trust-helper.md` — the original (closed) spec being slimmed. § "ResolveWorkdir — body shape", § "Write step", § "File mode", § "Numeric precision (preservation)", § "Idempotency", § "Logging discipline", and the test list are all still in force; the slimming removes the lock + the `homeDir` parameter only (see "What changes vs #341" below). Do not re-derive the design that #341 already pinned — read #341 first, then read this delta.
-- `internal/sessions/rotation/watcher.go:108-115` — example of pyrycode's "EvalSymlinks before comparing against claude's path key" idiom in another consumer. Read for context only; the trust helper does not call this code path.
-- `docs/PROJECT-MEMORY.md` § "Atomic-write recipe for on-disk registries" — convention statement; spec just points at it.
-
 ## Context
 
 The 2026-05-19 pivot back to PTY drive (#329 tracking; ptyrunner in #471/#472; cutover in #470) re-introduces the workspace-trust modal problem: interactive `claude` shows a modal the first time a workdir is opened, and the dispatcher's automated flow has no human to dismiss it. Pre-writing `projects[<realpath(workdir)>].hasTrustDialogAccepted = true` in `~/.claude.json` side-steps the modal entirely.

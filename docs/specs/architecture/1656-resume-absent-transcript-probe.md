@@ -1,58 +1,5 @@
 # #1656 — evidence: measure how `--resume` answers an absent transcript
 
-## Files to read first
-
-Everything below except the last three entries is in **package `realclaude`, build tag
-`e2e_realclaude`** — directly callable, no import, no copy. That reuse is most of why this
-ticket is `s`.
-
-- `internal/e2e/realclaude/session_transcript_probe_test.go` → `startProbeChild`,
-  `probeChild.alive`, `probeChild.waitExit`, `probeChild.snapshotExit` — the child lifecycle
-  this file reuses wholesale. Note `snapshotExit` returns `(-1, "")` for a child that has not
-  exited; that is AC 3's "did not exit within N".
-- same file → `endTurnlessChild`, `terminationMode` (`terminationSIGTERM` /
-  `terminationSIGKILL` / `terminationDidNotExit`) — SIGTERM → grace → SIGKILL, never Fatals,
-  reports which signal actually ended the child. Despite the name it ends **any** probe child.
-- same file → `boundedBuffer`, `recordStream`, `redactCredentials` — bounded ingest capture and
-  the single redact-then-truncate egress. `recordStream` is the **only** permitted path from a
-  captured stream to a string this test emits.
-- same file → `statByID`, `statByIDPolled`, `probeReading` — the by-id instrument, through
-  `transcript.StatByID`. An absent file returns `(Result{}, err)` wrapping the raw `os.Stat`
-  error; that is the expected answer here, not a failure.
-- same file → `transcriptProbeArgs` — the first-spawn argv shape. **Do not edit it**; #1655's
-  test depends on it. Extract the shape it emits; this ticket writes a sibling.
-- same file → `TestRealClaude_TurnlessSessionIDTranscript` — its **arm A block** (start child,
-  write one turn, locate the directory, close stdin, wait, snapshot) is the ~58-line turnful
-  drive to transcribe. There is no control-turn helper to call.
-- same file → `classifyTurnlessTranscript` and `TestTurnlessTranscriptVerdict` — the
-  verdict-function-plus-offline-table shape this file mirrors, including the
-  `strings.HasPrefix(sentence, want+":")` assertion.
-- `internal/streamsup/runner.go` → `buildArgs` — production's argv. Confirms the only
-  difference between a first spawn and a respawn is the trailing pair. The `firstRun` latch
-  it reads is advanced in `Runner.Run`'s post-wait block, on `started`, which is the bug
-  #1630 fixes.
-- `internal/e2e/realclaude/interactive_stream_new_session_test.go` →
-  `streamNewSessionTranscriptDir` — polls `<home>/.claude/projects/*/` for `<id>.jsonl`,
-  returns that dir, `t.Fatalf`s with a full tree listing on timeout. **Do not edit it**;
-  `TestInteractiveStreamNewSessionRotatesAndSpawnsFresh` depends on it.
-- `internal/e2e/realclaude/set_permission_mode_probe_test.go` → `setModeTurnLine` — one
-  newline-terminated stream-json user-turn line in pyry's production envelope shape.
-- `internal/e2e/realclaude/permission_protocol_spike_test.go` → `captureClaudeVersion` —
-  `(raw, token)` for the record.
-- `internal/e2e/realclaude/fixtures.go` → `WithWorktreeAuthenticated` (and `WithWorktree`
-  beneath it) — per-test temp dir pinned as `$HOME` via `t.Setenv`, credential re-pin, clean
-  skip when neither credential variable is set. **Do not edit it.**
-- `internal/transcript/transcript.go` → `StatByID`, `Result.Found` — the primitive #1630's
-  respawn probe calls, so evidence and consumer read with one instrument.
-- `internal/agentrun` → `ResolveWorkdir` — canonicalises the child cwd the way `streamsup`
-  does before assigning `cmd.Dir`. Signature is `(string, error)`.
-- `internal/sessions/reconcile.go` → `DefaultClaudeSessionsDir` — the production reference.
-  **Read it to know what it is; do not use it to derive the directory here** (see § Design).
-- `docs/knowledge/features/session-transcript-and-resume-probe.md` — the record this
-  measurement extends. Its `#1655` sections' findings survive unchanged.
-- `docs/knowledge/decisions/032-bootstrap-resume-per-spawn-existence-probe.md` § Context —
-  the refusal fact that orders the arms, and the ~220 ms latency that calibrates the deadline.
-
 ## Context
 
 `internal/streamsup` picks a spawn's id flag from a one-way latch: `--session-id <id>` on the

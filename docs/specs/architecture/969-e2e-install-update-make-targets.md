@@ -5,28 +5,6 @@ section. **Zero production Go files** touched. Not `security-sensitive` (label a
 a target that merely *runs* an existing opt-in suite introduces no design surface —
 the suites already exist and are unchanged).
 
-## Files to read first
-
-- `Makefile:15-33` — the `check`/`preship` header block and the standing note
-  *"e2e_install and e2e_update stay separate opt-in tags … deliberately not part of
-  preship."* AC3 requires this comment be **preserved verbatim**.
-- `Makefile:55-65` — the `e2e-realclaude` and `e2e-liverelay` targets. **These are the
-  exact template.** Copy their shape: a comment block, `.PHONY: <name>`, then a
-  one-line `$(GO) test -tags <tag> <pkg>` recipe. Note the style is bare — **no**
-  `-race`, **no** `-count=1` (unlike the `e2e` target at :51-53). Match that.
-- `Makefile:67-73` — `preship: check e2e-realclaude e2e-liverelay`. The new targets are
-  **NOT** added here or to `check` (:40-41). Leaving them out is the whole point (AC3).
-- `internal/e2e/install_darwin_test.go:1` / `install_linux_test.go:1` — build tags
-  `darwin && e2e_install` and `linux && e2e_install`. The OS gate means only the host's
-  install test compiles under one `-tags e2e_install ./internal/e2e/...` run.
-- `cmd/pyry/update_e2e_test.go:1,16,59-70` — build tag `(darwin || linux) && e2e_update`,
-  `package main` (⇒ scope is `./cmd/pyry/...`, **not** `internal/e2e`), and the
-  `os.MkdirTemp` temp-HOME setup that proves the update suite is **hermetic** (in-process
-  fake release server, temp HOME destroyed on cleanup) — it does **not** touch the real
-  launchd/systemd domain.
-- `docs/release-tooling.md:85-125` — the `## Live-relay smoke test` section added by #968.
-  This is the model for the new section, and its natural neighbour: append after it.
-
 ## Context
 
 Two real, maintained e2e suites are reachable only by hand-typed build tags, so they

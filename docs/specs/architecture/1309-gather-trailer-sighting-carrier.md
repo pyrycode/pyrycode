@@ -2,28 +2,6 @@
 
 **Size:** S (see § Scope check) · **Label:** `security-sensitive` · **Everything offline.**
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/finding_run_gather_test.go:126-156` | The constants block. `finGatherTrailerWait` is AC1's upper bound. Its "NO ROW EVER WAITS IT OUT" claim is **not** falsified here — leave it alone (#1310 owns it). |
-| `…/finding_run_gather_test.go:253-358` | `finGatherReadings` — the doc block to re-state (`:263-271`) and the body to fill from (`:304-306`, where `obs` lives). |
-| `…/finding_run_gather_test.go:388-426` | `finGatherCases()`. The C4 row at `:413-423` is AC2's no-decoded-trailer arm; its comment states why it costs no wall clock. |
-| `…/finding_run_gather_test.go:930-1035` | `TestFinGatherReturnsNoCapturedBytes` — AC4's target. The `{what, value}` slice is at `:1010-1016`; the cap premise on the **scan result** is at `:993`. |
-| `…/finding_run_gather_test.go:1039-1101` | `finGatherForbiddenKeys` / `finGatherExemptKeys` / `finGatherForbiddenKeyPaths` — the walk AC4 reuses unchanged. |
-| `…/finding_run_gather_test.go:96-113` | The file header's **Fatalf content rule**. Its licence sentence covers "a whole readings or record" and does not yet cover a sighting — see § The header's licence. |
-| `…/result_trailer_observation_test.go:75-90` | The three bound-origin constants, incl. `trailBoundFromStart` "BOUNDS NOTHING". |
-| `…/result_trailer_observation_test.go:94-137` | `trailScanResult` (`.Line` = OPERATOR-REVIEW-BEFORE-PASTE, `.Trailer` = discriminated optional) and `trailObservation`. The three fields the carrier must **not** be able to reach. |
-| `…/result_trailer_observation_test.go:242-274` | `trailWaitForTrailer`. Note `Staleness` and `BoundFrom` are set at `:256-262` from the poll's own stamps — the gather takes no clock reading of its own. |
-| `…/finding_trailer_evidence_test.go:100-155` | `finTrailerRecord`'s field set, its json keys, the **no-`omitempty` decision**, and § "What the four trailer fields are worth" (`:112-124`) — `StopReason` is the one model-influenced field crossing uncapped. |
-| `…/finding_trailer_evidence_test.go:203-234` | `finTrailerBuild`. `:209-215` is `Bounded`'s single source (no `Bounded` on the carrier); `:218` is the `State && Trailer != nil` pair whose *outcome* the carrier records. |
-| `…/finding_trailer_evidence_test.go:623-662` | `TestFinTrailerRecordCarriesNoCapturedBytes` — the needle-inside-the-cap Fatalf and the per-row headroom check. Precedent only; this ticket adds no Detail, so no headroom obligation arises. |
-| `…/finding_run_record_test.go:724-756` | `finRecordInputReaches` — **the walker AC3 reuses.** Same package, same build tag. |
-| `…/finding_run_record_test.go:784-816` | `TestFinRecordEmbedsTrailerRecordWhole`'s structural subtest — the shape AC3's test copies, with one more forbidden type. |
-| `…/trail_run_outcome_test.go:200-219` | `trailRunReadings.BoundFrom` and the comment stating why `Staleness` is **deliberately absent** there. AC1's "no counterpart to agree with". |
-| `…/tool_loop_test.go:194-203` | `resultTrailer` — note `PermissionDenials *[]json.RawMessage` at `:199`, raw bytes no cap applies to. This is why the walk forbids the decoded type, not only the two scan types. |
-| `…/finding_stage_held_group_test.go:409-437` | The seventh call site (`:423`). One-token edit. |
-
 ## Scope check
 
 Measured at `fddf873`, before writing:

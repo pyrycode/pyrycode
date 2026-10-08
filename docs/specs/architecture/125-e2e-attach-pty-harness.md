@@ -5,24 +5,6 @@ status: spec
 size: S
 ---
 
-# Files to read first
-
-Read these before doing any exploration of your own — they are the load-bearing surfaces this spec composes.
-
-- `internal/e2e/harness.go` — full file (~460 lines). The existing daemon harness. The new PTY harness lives in the same package and reuses three private helpers (`ensurePyryBuilt`, `childEnv`, `killSpawned`) and the shared timing constants (`readyDeadline`, `readyPollGap`, `termGrace`, `killGrace`). The new harness does **not** modify this file; it adds a new file alongside it. Pay particular attention to:
-  - `harness.go:107-132` — `ensurePyryBuilt` (sync.Once-cached `go build` of pyry)
-  - `harness.go:226-269` — `spawn` shape (stdout/stderr buffers, doneCh wait goroutine, readiness poll)
-  - `harness.go:271-292` — `killSpawned` (SIGTERM → grace → SIGKILL teardown)
-  - `harness.go:294-307` — `childEnv` (HOME substitution, PYRY_NAME strip)
-- `internal/control/attach_client.go` — full file (~140 lines). The client side of attach. **Critical:** lines 68-74 — `Attach` calls `term.MakeRaw(os.Stdin.Fd())` if stdin is a TTY. When the harness hands `pyry attach` a PTY slave as stdin, the client puts the slave into raw mode (ECHO and ICANON off), which is what makes the round-trip deterministic.
-- `internal/supervisor/supervisor.go:226-268` — `runOnce` bridge-mode branch. Confirms two facts the test depends on: (a) `cmd.Env = append(os.Environ(), s.cfg.helperEnv...)` propagates the daemon's own env to the supervised child — so env vars set on the daemon's `cmd.Env` flow through to the helper claude; (b) bridge mode does **not** put the supervisor's PTY into raw mode — the kernel's line discipline still runs with default ECHO on, so the helper must disable ECHO itself or the test sees doubled bytes.
-- `internal/supervisor/supervisor_test.go:139-231` — the existing `TestHelperProcess` pattern. Shape reference: `if os.Getenv("GO_TEST_HELPER_PROCESS") != "1" { return }`, switch on `GO_TEST_HELPER_MODE`. The new `internal/e2e/attach_pty_test.go` defines its **own** `TestHelperProcess` (different package, different test binary), with a single mode `"echo"`. Don't try to share this across packages — `os.Args[0]` differs per test binary.
-- `cmd/pyry/main.go:278-285` — the foreground-vs-bridge detection. Pyry runs in bridge mode iff `term.IsTerminal(os.Stdin.Fd())` is false. `exec.Command` defaults stdin to `/dev/null` when not set, so a daemon spawned by the test always lands in bridge mode regardless of how `go test` is invoked. The new harness relies on this — it does not explicitly set `cmd.Stdin` on the daemon.
-- `cmd/pyry/main.go:440-474` — `runAttach`. Confirms: `pyry attach` reads `term.GetSize` from stdout fd for the initial cols/rows, then calls `control.Attach(ctx, socket, cols, rows, sessionID)`. With the slave PTY on stdout, `GetSize` succeeds and a sane geometry flows through the handshake.
-- `internal/supervisor/bridge.go:1-60` — confirms the bridge is bound to a single attacher; a second attach is rejected with `ErrBridgeBusy`. This is why the test attaches to a *single* session and does not run two attachers concurrently.
-- `docs/lessons.md` § "PTY Testing" — CI runners on Linux do have `creack/pty` working (cross-platform reads + writes against a `pty.Open` pair are fine; what they lack is a *controlling* terminal). The skip-on-no-pty fallback in AC#5 is for hosts where `pty.Open` itself fails, not for absence of `term.IsTerminal(os.Stdin)` on CI.
-- `docs/specs/architecture/122-fake-claude-test-binary.md` — the immediately-prior fake-binary spec. Pattern reference for an e2e-internal helper binary, but **the helper here is different**: ticket #122 uses a separate `package main` binary (rotation behaviour); this ticket uses the test binary itself via `TestHelperProcess` re-exec (echo behaviour). Both patterns appear in the AC; this one is simpler for echo because the work is `io.Copy` after `MakeRaw`.
-
 # Context
 
 `pyry attach` is the only interactive surface in the product, and the only one currently uncovered at the binary boundary. Unit tests cover the wire protocol (`internal/control/attach_*`) and the bridge pump (`internal/supervisor/bridge_test.go`); the existing e2e harness (`internal/e2e/harness.go`) drives non-interactive verbs against a daemon whose claude is `/bin/sleep 99999`. There is no test that proves a byte typed at a user's terminal travels: terminal → attach client → control socket → bridge → supervisor PTY → claude → and back.

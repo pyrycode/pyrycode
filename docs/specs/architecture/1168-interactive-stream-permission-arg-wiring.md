@@ -2,21 +2,6 @@
 
 **Size:** S (2 production files, ~40 production LOC, 0 new exported types). Security-sensitive.
 
-## Files to read first
-
-- `cmd/pyry/mcp_config.go:35-45` — `permissionArgs(yolo bool, mcpConfigPath string) []string`: the exact non-YOLO arg set to inject. Runner-agnostic by design (#1106); this ticket is its first interactive-path consumer.
-- `cmd/pyry/mcp_config.go:105-127` — `writeMCPApproveConfig(pyryBin, socketPath string) (string, error)`: writes the per-daemon `--mcp-config` tmp file (mode 0600), fail-closed on empty inputs. Caller owns removal.
-- `cmd/pyry/streamsup_runner.go:69-101` — `newStreamRunnerFactory` + its closure: the sole stream-path-specific construction site, where the injection lands. Note `mapStreamsupConfig` is deliberately **pure** (comment at :103-114); keep it that way — inject in the closure, not the mapper.
-- `cmd/pyry/streamsup_runner.go:115-160` — `mapStreamsupConfig` / `stripSessionIDFlags`: `Config.Args = stripSessionIDFlags(cfg.ClaudeArgs)`; the strip drops only `--session-id`/`--resume`, so `--dangerously-skip-permissions` survives it (the yolo signal is still visible on `scfg.Args`).
-- `cmd/pyry/main.go:667-677` — `selectInteractiveRunner`: gains one `mcpApprovePath string` param, threaded to `newStreamRunnerFactory`. Sole prod caller at `main.go:787`.
-- `cmd/pyry/main.go:681-812` — `runSupervisor`: `socketPath` resolved at :698, pool built at :791; this is where the config is written once and removed at shutdown.
-- `cmd/pyry/update.go:86-93` — `resolveExecutable() string`: existing self-path helper (`os.Executable()` with `os.Args[0]` fallback). Use it for `pyryBin`.
-- `internal/sessions/session.go:93-107` — `claudeSettingsArgs`: confirms **per-session YOLO also emits `--dangerously-skip-permissions`** (not just the operator's bootstrap pass-through). This is why the yolo probe reads the flag off the args, per-spawn.
-- `internal/streamsup/runner.go:593-601` — `buildArgs`: prepends the stream-format flags, appends `Config.Args` verbatim as `base`, then the id flag. Injected approval flags land inside `base` — a valid position (claude accepts flags order-independently).
-- `internal/e2e/realclaude/interactive_stream_modal_resolution_test.go` (whole file) — the #1154 gate this fix greens (AC #3). Uses `spawnPermissionDaemon` (no `--dangerously-skip-permissions` → non-yolo).
-- `internal/e2e/realclaude/interactive_stream_liveness_test.go:118` — #1153 uses `spawnBootstrapDaemon` (**YOLO**), so AC #4 is satisfied by the yolo pass-through: the factory injects nothing on a yolo spawn, leaving #1153's argv byte-identical.
-- `docs/knowledge/codebase/1106.md` — the upstream ticket. Its "Out of scope, deferred" list (line 37) names the exact four concerns this ticket closes: yolo source, socket value, config-file removal lifecycle, and the streamsup live-wiring.
-
 ## Context
 
 This is the final wire in the Streamrunner-Interactive permission bridge (#1079 → #1103 `permbridge` registry → #1104 `mcp.approve` control-socket verb → #1105 `pyry mcp-approve` stdio server → #1106 arg-injection primitives). #1106 wired the non-YOLO `--permission-prompt-tool`/`--mcp-config` flags onto the **`pyry agent-run`** stream spawn and explicitly deferred the interactive-daemon live-wiring downstream. That downstream wire was never laid.

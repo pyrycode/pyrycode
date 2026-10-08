@@ -8,18 +8,6 @@ This is the **3rd slice of #964**, continuing the `v2session.go` carve-out after
 
 ---
 
-## Files to read first
-
-- `internal/relay/v2session.go:52–228` — the header decls. Which are **moved** (`modalDenyTimeout` 52–60, `queuedEnv` 124–133, `pushQueue` 135–143, `enqueue` 145–197, `pushQueueCap` 218–228) versus the **staying interleaved neighbours** (`idleTimeout` 62–75, the `Err*` sentinels 77–101, `wakeKind`/`wakeSignal` 103–122, `snapshotReq` 199–208, `wakeBufferSize` 210–216, `handlerOutboundBuf` 230–236). **Extract:** every moved decl is a *standalone* declaration with its own keyword + doc comment — none shares a `const (…)`/`var (…)`/`type (…)` block with a staying neighbour, so each moves independently without splitting a block.
-- `internal/relay/v2session.go:459–512` — the `ModalDismissal` (461–467, **moves**) vs `ModalResolver` (469–499, **STAYS**) boundary, with `ErrSessionUnknown` (459) and `V2SessionConfig` (501+) staying. **Extract:** the cut is between line 467 and line 469; `ModalResolver`'s method signatures reference `ModalDismissal`, which resolves in-package after the move (do **not** move `ModalResolver`).
-- `internal/relay/v2session.go:1035–1061` — `ArmModalTimeout` (doc from ~1035, func 1052–1061), a standalone method sandwiched between `armIdleTimer` (1026, stays) and `handleFrame` (1063, stays). **Extract:** it moves alone; nothing around it moves.
-- `internal/relay/v2session.go:1550–2010` — `bundleInFlight` ends at 1564 (**stays**) → the **9-method contiguous block 1566–2000** (**moves**) → the settings `const` block at 2002 (**stays**). **Extract:** the whole block from `handleModalCancel`'s doc comment (1566) through `handleDequeueMessage`'s closing brace (2000) is one clean cut — nothing that stays is interleaved.
-- `internal/relay/v2session_handshake.go:330–345` — the in-package call sites `m.reconcileModals(ctx, s)` (333) and `m.reconcileQueues(ctx, s)` (343). **Extract:** these call moved methods but **must NOT be edited** — Go resolves same-package identifiers across files, so the reference binds to the new file automatically (this is why AC#3 holds).
-- `internal/relay/v2session_rekey.go` (whole file) — the **#1022 prior slice**; use it as the structural template for the new file: `package relay` header + a focused import block containing only what the moved code references.
-- `docs/specs/architecture/1022-relay-move-rekey-machinery.md` — the prior slice's spec; same pure-move pattern and conventions.
-
----
-
 ## Context
 
 `internal/relay/v2session.go` was 3744 lines when the 2026-07-15 full-repo review flagged it as the largest readability liability. #1021 (handshake) and #1022 (rekey) have since landed, bringing it to 2875 lines. This slice continues the carve-out by lifting two cohesive concerns that both **reconcile per-session state on reconnect** — the modal lifecycle and the queue reconcile/dequeue handlers (`reconcileModals` and `reconcileQueues` are adjacent in the file and share the reconnect trigger). No behaviour changes; the goal is purely that this reconnect/reconcile machinery reads in isolation and the core file shrinks.

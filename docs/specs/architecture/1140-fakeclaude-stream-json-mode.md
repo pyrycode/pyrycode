@@ -2,20 +2,6 @@
 
 **Size:** XS · **Security-sensitive:** no (test-only fake CLI, no production surface) · **Split from:** #1135
 
-## Files to read first
-
-- `internal/e2e/internal/fakeclaude/main.go:9-202` — the env-var mode preamble (package doc). The new mode gets a paragraph here in the same style. **Extract:** the exact doc-comment shape every mode follows ("optional; when set…", "Default off — when unset, fakeclaude is byte-identical…", "Mutually exclusive with…").
-- `internal/e2e/internal/fakeclaude/main.go:225-241` — the `env*` const block + `mustEnv`. **Extract:** where the new `envStreamJSON` const lands.
-- `internal/e2e/internal/fakeclaude/main.go:409-458` — the top of `main()`: the `mustEnv(envSessionsDir/…)` calls and the mode-gate wiring. **Extract:** the exact insertion point — the stream gate goes **above line 410** (`dir := mustEnv(envSessionsDir)`), so stream mode never touches the sessions-dir machinery (AC3).
-- `internal/streamsup/envelope.go:20-68` — `userTurn`/`userTurnMessage`/`userTurnContentText` + `marshalTurnEnvelope`. **Extract:** the exact stdin envelope shape fakeclaude reads (`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"…"}]}}`). These are **unexported** — mirror the shape with a local struct, do not import.
-- `internal/streamsup/parser.go:97-208` — `streamLine`/`streamMessage`/`streamBlock`, `consumeLine`, `emitAssistant`, `resultTurnEndReason`. **Extract:** the stdout line→event mapping the fake must satisfy: an `assistant` line with a `text` block → `TextChunk{MessageID, Text}`; a `result` line → `TurnEnd{Reason: resultTurnEndReason(subtype)}`, where `subtype:"success"` → `TurnEndReasonEndTurn`.
-- `cmd/pyry/stream_turn_drain_test.go:100-116` — `assistantTextLine`, `resultLine`, `feedLines`. **Extract:** the *exact* stdout line literals the daemon side already asserts against — the fake must emit byte-compatible shapes:
-  - assistant: `{"type":"assistant","message":{"id":<id>,"role":"assistant","content":[{"type":"text","text":<text>}]}}`
-  - result: `{"type":"result","subtype":"success","session_id":<id>}`
-- `internal/e2e/internal/fakeclaude/clear_detect_test.go` (whole file, ~48 lines) — the `*_detect_test.go` convention: `package main`, untagged (no `//go:build e2e`), `t.Parallel()`, table-driven. **Extract:** the test skeleton the new `stream_detect_test.go` follows.
-- `internal/turnevent/event.go:30-70` — `TextChunk`, `TurnEnd`, `TurnEndReason`. **Extract:** the exact event shapes the unit-test asserts against.
-- `docs/lessons.md:256` — "`Pool.Create` appends `--session-id`". **Extract:** confirmation that the fake must tolerate injected argv flags (it already does — see Design § argv).
-
 ## Context
 
 `internal/e2e/internal/fakeclaude` is the test-only stand-in for the real `claude` CLI. Today it models only claude's **PTY/TUI** surface — every mode (`PYRY_FAKE_CLAUDE_TUI` / `_MODAL_TRIGGER` / `_TRUST_TRIGGER` / `_IDLE_TRIGGER` / `_ESC_ENDS_TURN` / `_CLEAR_ROTATES` / rotation trigger) drives tui-driver's screen-reading detection or grows an on-disk `<uuid>.jsonl` transcript.

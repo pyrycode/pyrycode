@@ -1,55 +1,5 @@
 # Spec: Real-claude e2e — stream liveness under `interactive_runner: "stream-json"` (#1153)
 
-## Files to read first
-
-Read these before writing anything. The new file is a composition of two existing
-templates: the #854 real-claude daemon-relay body (structure, spawn, seeds, Noise
-wire) and the #1141 fake-side stream drain (the two-milestone assertion). Almost
-every helper is reused verbatim.
-
-- `internal/e2e/realclaude/interactive_bootstrap_liveness_test.go` (#854) — **THE
-  template; read the whole file.** The new test copies this body near-verbatim.
-  Reuse these package-private symbols UNCHANGED (same package, same build tag — no
-  new export, no edit to this file): `spawnBootstrapDaemon`, `bootstrapDaemon` +
-  `stop`/`waitForReady`, `driveHandshakeInteractive`, `buildHelloEarlyInteractive`,
-  `sealSendMessage`, `sendNoiseMsg`/`sendNoiseInit`/`readInnerFrame`, `mustJSON`,
-  `seedBootstrapRegistry`, `seedBoundConversation`, `readPersistedServerID`,
-  `waitBinaryHello`, `decodePairPayload`, `runPyry`, `shortSocketPath`,
-  `relayTestLogger`, `lockedBuffer`. Note line 122: `spawnBootstrapDaemon` spawns
-  `-- --model haiku --dangerously-skip-permissions` — reused as-is.
-- `internal/e2e/relay_v2_stream_send_test.go:149-217` (#1141, fake side) — the
-  **two-milestone drain** the new `drainForCompletedTurn` mirrors: M1 = first
-  non-empty `assistant_delta` for the conv, M2 = terminal `turn_state{idle}` for
-  the conv observed AFTER M1. Extract the loop shape (decrypt-in-order, skip
-  `turn_state{responding}` until `sawDelta`, milestone-specific timeout messages).
-  **Do NOT copy the `echoNeedle` content check (lines 194-197)** — real claude does
-  not echo the prompt; assert only non-empty text.
-- `internal/e2e/harness.go:388-406` (#1141 fake harness `StartStreamInteractiveWithRelay`)
-  — the exact config-toggle recipe to transcribe into `writeStreamInteractiveConfig`:
-  `os.MkdirAll(<home>/.pyry, 0o700)` then
-  `os.WriteFile(<home>/.pyry/config.json, []byte(`{"interactive_runner":"stream-json"}`), 0o600)`.
-  A raw JSON literal (no `internal/config` import) keeps the realclaude package
-  import-lean, mirroring `seedBootstrapRegistry`.
-- `cmd/pyry/main.go:667-676` — `selectInteractiveRunner`: confirms the accepted
-  toggle string is exactly `"stream-json"` (also `""`/`"pty"` = default PTY). This
-  is the production seam being proven end-to-end.
-- `cmd/pyry/pair.go:50-58` — `resolveConfigPath`: config is `<home>/.pyry/config.json`,
-  **per-user, NOT per-instance** (independent of `-pyry-name=test`). Confirms
-  `writeStreamInteractiveConfig` writes to the same path the daemon reads under the
-  isolated authenticated HOME.
-- `cmd/pyry/streamsup_runner.go:91-160` — `newStreamRunnerFactory` +
-  `mapStreamsupConfig` + `stripSessionIDFlags`: confirms the daemon's
-  `--model haiku --dangerously-skip-permissions` passthrough survives into
-  streamsup (only `--session-id`/`--resume` are stripped; streamsup re-injects the
-  stream-json I/O flags). No test code here — read to confirm the spawn is compatible.
-- `docs/knowledge/features/e2e-realclaude.md` — suite conventions the new file must
-  match: header `//go:build e2e_realclaude` (single tag), `WithWorktreeAuthenticated`
-  skip contract, `make e2e-realclaude`, **no CI workflow**, no `-race`, `t.Parallel()`
-  NOT called. §"What's there today" for the `WithWorktreeAuthenticated` fixture.
-- `internal/protocol/interactive.go:16-70` — `TurnStatePayload` (`.State`,
-  `.ConversationID`), `AssistantDeltaPayload` (`.ConversationID`, `.Text`, `.Seq`).
-  The envelope fields the drain decodes.
-
 ## Context
 
 Per the always-a-real-claude-gate policy (2026-07-08), every operator-facing

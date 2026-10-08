@@ -6,31 +6,6 @@
 
 ---
 
-## Files to read first
-
-Symbols, not line numbers — resolve each with `codegraph_search` / `codegraph_node`, then Read the declaration.
-
-| Where | Symbol | What to extract |
-|---|---|---|
-| `finding_run_gather_test.go` | `finGatherInputs` | The struct **and its whole doc block**. The doc block is AC 5's entire subject; the struct is where AC 1's field is appended. Note the per-field doc shape: producer rule, zero-polarity argument, travels-whole argument. |
-| `finding_run_gather_test.go` | `finGatherReadings` | The "caller's own three readings, carried WHOLE" block near the end — where AC 1's carriage line goes. Read the paragraph above it: it is why nothing is normalised, defaulted or re-decided at this tier. |
-| `finding_run_gather_test.go` | `TestFinGatherHalfStagedRouteMovesNoOutcome` | AC 3's subject. Its doc asks to be revisited here. Its body is also the **recipe** AC 2 must reuse — seed, needles, `RunnerPath`, and the `Fatalf` gate premise. |
-| `finding_run_gather_test.go` | `finGatherPinnedReadings` | The file's own idiom for pinned-read fixture shapes, and its doc's SHAPES-not-verdicts argument. AC 2 needs two verdicts this set does not carry. |
-| `finding_run_gather_test.go` | `finGatherSeed`, `finGatherNeedles`, `finGatherPinnedReadPID` | The three helpers AC 2's rows are built from. `finGatherNeedles` returns a `t.TempDir()` path nothing is staged at — that is what makes the argv leg deterministic. |
-| `trail_run_outcome_test.go` | `trailClassifyRun` | The `trailGateAbsentOwesNone` arm: the step-1 ordering guard, the established arm, the unestablished arm, the void fall-through. Also holds **two** AC 4 sweep sites — the no-C10 note and the "Testing both fields with `&&`" note. |
-| `trail_run_outcome_test.go` | `trailRunReadings` | The `Ordering` field's own doc — the contract AC 1's new field feeds. Note it already says the value is taken WHOLE. |
-| `trail_run_outcome_test.go` | `trailOutcomeVoidSightingRouteNotStaged` | Its const doc carries two AC 4 sweep claims that resolve **in opposite directions**. |
-| `trail_run_outcome_test.go` | `trailRunAbsentOwesNoneReadings`, `trailRunSightingEstablishedReadings` | Two AC 4 sweep sites, and the classifier-tier fixtures whose `trailCertifyOrdering(true, true, true)` call AC 2 mirrors at the gather tier. |
-| `trail_run_outcome_test.go` | `trailRunCases`, `TestTrailRunComposesUnderAnAbsentReasonOnAPathThatOwesNone` | Two more AC 4 sweep sites. |
-| `trail_run_outcome_test.go` | `TestTrailRunComposesUnderANamedReasonOnAPathThatOwesNone` | An AC 4 sweep **hit that is not an edit** — see § Sweep, group C. |
-| `trail_sighting_liveness_test.go` | `trailEstablishSighting` | The consumer. Its guard (`ordering.Value != trailOrderCertified`), its three verdict arms, and the "passed through WHOLE and never re-decided here" sentence AC 1 cites as the reason the field is not narrowed. |
-| `trail_sighting_liveness_test.go` | `trailSightingPin` | Read it to know **not** to use it — see § Design, "The pin fixture". |
-| `trail_ordering_premises_test.go` | `trailCertifyOrdering`, `trailOrderResult` | The producer and its output type. Its signature is three `bool`s — the whole basis of this ticket's captured-bytes posture. Its doc's "premises are supplied, not recovered" note is an AC 4 **verify-no-edit** site. |
-| `process_pin_liveness_test.go` | `pinClassifyState` | The arms that fill `pinStateExitedNotReaped` and `pinStateNoSuchProcess`. AC 2's two refutation rows must carry those arms' real shapes, not a verdict string with everything else zero. |
-| `CODING-STYLE.md` § "Comments — Citing Other Code" | — | Cite the symbol. `make cite-guard` is a build gate. |
-
----
-
 ## Context
 
 `trailClassifyRun`'s `trailGateAbsentOwesNone` arm consults the pinned-pid sighting route. Its step-1 guard is **single-sided**: it reads `readings.Ordering.Value` alone and, when unfilled, answers `trailOutcomeVoidSightingRouteNotStaged` before the route is consulted at all.

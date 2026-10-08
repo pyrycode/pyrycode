@@ -8,27 +8,6 @@
 
 ---
 
-## Files to read first
-
-Read these before writing anything. Every addition mirrors an existing precedent in this exact package — copy the precedent, don't invent. (Generated from `codegraph_context` + the reads done during this spec; off-topic hits pruned.)
-
-- `internal/protocol/codes.go:108-160` — **the `request_snapshot`/`screen_snapshot` block (108-125) and the `session_transition` block (143-160).** The snapshot block is the precedent for a **mixed inbound+outbound cluster in one `const` block with one rationale comment** — copy its shape for the four modal constants. The `session_transition` block shows the "wire vocabulary only — producer is sibling #N" closing line.
-- `internal/protocol/codes.go:64-85` — the `TypeRekeyRequest` block: the **inbound v2 control** rationale paragraph (intercepted at `dispatchAppFrame` before `dispatch.Route`). `modal_answer`/`modal_cancel` are inbound control; reuse this wording.
-- `internal/protocol/snapshot.go` (whole file, 51 lines) — **the closest structural template for the new structs.** A cohesive request/response cluster: header comment scoping the file to "wire vocabulary only", the inbound-control struct (`RequestSnapshotPayload`) with the "no `dispatch.Route` handler — the consumer intercepts it" note, and the outbound struct (`ScreenSnapshotPayload`). The modal structs land in `messaging.go` (per AC), but write their doc comments in this voice.
-- `internal/protocol/messaging.go:36-58` — `SessionTransitionPayload`: the most recent v2 payload added to **`messaging.go`** (the AC-pinned home), and the "plain string over a closed wire set, not a named enum" precedent for `class` / `source` / `outcome`.
-- `internal/protocol/interactive.go:1-14` — the "no field carries `omitempty`; every field always present so fixtures pin the full shape" rule. Modal payloads follow it (all strings + one slice, never `omitempty`).
-- `internal/protocol/compat_test.go:39-56, 100-158` — the three test edit sites: `TestIsV1Compatible` rejection cases (39-56), the `v2OnlyTypes` map (100-112), and `TestTypeConstants_V1V2Partition`'s `all` slice + union-count check (121-158). Four constants → +4 in each of the three.
-- `internal/protocol/interactive_test.go:9-28` — the `roundTripEnvelope(t, env, payload, raw)` helper. Reuse it; each modal round-trip test is then ~12 lines.
-- `internal/protocol/messaging_test.go:120-204` — `TestSessionTransitionPayload_RoundTrip`: the table + per-field asserts + byte-equal regression-guard pattern. Model the modal tests on it (but one func per type — the four shapes differ too much for one table).
-- `internal/protocol/envelope_test.go:11-30` — `canonical(t, b)` and `readFixture(t, name)`. **`canonical` compacts but does NOT sort keys** → author every fixture in struct-field order or the byte-equal check fails.
-- `internal/protocol/testdata/session_transition.json` — fixture shape reference (single-line, struct-field order).
-- `internal/protocol/envelope.go:111-135` — `v1TypeSet`. **Do NOT add any modal constant here.** The partition test enforces their absence; this is the one file you must not touch.
-- `internal/relay/v2session.go:1200-1320` — `dispatchAppFrame` + its type switch (cases at 1212 `TypeRekeyRequest`, 1215 `TypeRequestSnapshot`). **Read-only context:** this is where **#703** will add `case protocol.TypeModalAnswer` / `case protocol.TypeModalCancel`. Confirms the inbound-control interception seam your constants slot into. You do **not** edit this file.
-- `docs/protocol-mobile.md:402-435` — § Application message types table; add four rows after the `session_transition` row (434).
-- `docs/protocol-mobile.md:487-609` — § Interactive events + § Screen snapshot. The **Screen snapshot section (588-608) is the doc template**: a feature section with mixed-direction `####` subsections + field tables. Add a new `### Modal (v2)` section in this style (recommended placement: after § Screen snapshot, before § Backfill semantics).
-
----
-
 ## Context
 
 Epic #597 Phase 3 puts a **modal over the encrypted mobile wire**: when the supervised `claude` surfaces a modal (a permission prompt, a plan-approval, a tool-confirmation), the daemon describes it to the phone, the phone answers, and the daemon drives that answer back into `claude`. None of that vocabulary exists on the wire yet.

@@ -2,14 +2,6 @@
 
 Ticket: #371
 
-## Files to read first
-
-- `internal/e2e/internal/fakerelay/fakerelay.go:189-287` — `handleBinary`: the upgrade path. The race lives here: `websocket.Accept` (line 231) returns to the client after writing the 101 response, but registration `s.binaries[serverID] = bc` (line 260) happens in a later locked section. Extract: the exact ordering of Accept → mu.Lock → map insert.
-- `internal/e2e/internal/fakerelay/fakerelay.go:587-596` — `LastBinaryHello`: existing fixture probe accessor. The new helper should match its locking style (single `s.mu.Lock(); defer s.mu.Unlock()`).
-- `internal/e2e/internal/fakerelay/fakerelay.go:598-613` — `ForceCloseBinary`: the probe whose flake we are fixing. Do NOT modify its semantics; the `ghost` server-id branch must keep returning `false` immediately.
-- `internal/e2e/internal/fakerelay/fakerelay_test.go:475-497` — `TestForceCloseBinary`: the failing test. The new helper call slots between `dialBinary` (line 481) and `ForceCloseBinary` (line 487).
-- `internal/e2e/relay_test.go:145-158` — existing precedent: poll on `LastBinaryHello` to wait for binary readiness before calling `ForceCloseBinary`. The new `WaitBinary` helper is the same pattern, lifted to a reusable method so unit tests that haven't sent a hello can still synchronize.
-
 ## Context
 
 `TestForceCloseBinary` flakes under CI's `-race` runner. The race is in the test-fixture's API expectations, not in production code:

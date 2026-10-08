@@ -8,27 +8,6 @@
 
 ---
 
-## Files to read first
-
-- `internal/protocol/messaging.go:77-98` — `ModalShownPayload` struct + its doc comment. **Add the field here; the doc's "there is no conversation_id" clause (line ~85) becomes false and must be revised** (see § Design 5).
-- `internal/protocol/messaging.go:26-54,170-178,196-224` — `SessionTransitionPayload` / `QueueStatePayload` / `SessionErrorPayload`: the sibling payloads that already lead with `ConversationID string json:"conversation_id"` (no omitempty). **Copy that field placement and tag exactly.**
-- `internal/modalbridge/modal.go:75-82` — `Outstanding` struct. **Add `ConversationID string` here** so `Snapshot` can re-stamp it.
-- `internal/modalbridge/modal.go:138-164` — `Record`: the single mint+build+store site. **Add the `convID` param; stamp `p.ConversationID` and store it in `Outstanding` in one op** (atomic).
-- `internal/modalbridge/modal.go:188-214` — `Snapshot`: rebuilds a payload per `Outstanding`. **Add `ConversationID: o.ConversationID`.** This is what makes AC3 (reconcile replay) free.
-- `internal/modalbridge/modal.go:216-233` — `buildPayload`: builds the content-only payload. **Leave it unchanged** — `Record` stamps the routing keys (`ModalID`, now `ConversationID`), `buildPayload` owns content only. Do not thread `convID` here.
-- `cmd/pyry/interactive_modal_v2.go:80-139` — `Handle` + `handleModalShown`: the surfacer entry and the `Record` call site. **Add `convID` to both signatures; pass it to `Record`.** `handleModalHidden` does not use it.
-- `cmd/pyry/interactive_modal_stream_v2.go:76-112` — `boundScreenText`: already reads `active.CurrentConversation()` once to pick the screen host. **Change it to return `(convID, screen)` from that single read** — this is the single-read guarantee (§ Design 4).
-- `cmd/pyry/interactive_modal_stream_v2.go:130-157` — `runModalStream`: the sole caller of `emitter.Handle`. **Thread the `convID` from `boundScreenText` into `Handle`.**
-- `cmd/pyry/interactive_turn_v2.go:135-160` — the sibling turn emitter's `Handle`: reads the cursor once and uses that single value for both content attribution and the `turn_state` stamp. This spec applies the same single-read discipline to the modal path (screen host + stamp from one read).
-- `docs/specs/architecture/1062-fan-turn-state-per-conversation.md` — the direct mirror (turn_state scoping). Read § "Cross-conversation scoping (AC3 — assertion, not new design)" — the client-side-filter model this change extends.
-- `internal/relay/v2session_modal.go:290-362` — `reconcileModals`: marshals each `OutstandingModals()` payload **verbatim** into the replay envelope. **Read-only — it needs no change.** Because it replays the stored `Snapshot()` payload byte-for-byte, stamping `Snapshot` (above) scopes replay identically to initial delivery for free.
-- `internal/protocol/messaging_test.go:234-276` — `TestModalShownPayload_RoundTrip`. **Add a `payload.ConversationID` assertion** and update the golden.
-- `internal/protocol/envelope_test.go:11-18` — `canonical` uses `json.Compact` (whitespace strip, **not** key sort). **The golden fixture's key order must match struct declaration order** — put `"conversation_id"` first in `modal_shown.json` because the field is declared first.
-- `internal/relay/v2session_modalreconcile_test.go:16-95` — `sampleModalPayload` + `reconciledModals`: the AC3 reconcile harness. **Give `sampleModalPayload` a `conversation_id` and assert the reconciled payload carries it.**
-- `cmd/pyry/interactive_modal_v2_test.go` — the hermetic emitter test file. Home of the 15 `e.Handle` call sites (cascade) and where the new concurrent-conversation scoping test lands.
-
----
-
 ## Context
 
 Today the daemon broadcasts every outbound interactive event to **all** interactive conns; per-conversation scoping is **client-side**, keyed off a `conversation_id` stamp on the payload. `TurnStatePayload` and `QueueStatePayload` both carry `conversation_id`; **`ModalShownPayload` does not** — it carries only `ModalID`/`Class`/`Title`/`Prompt`/`Options`/`DefaultOptionID`. `ActiveConn` is `{ConnID, Interactive}` — there is no per-conn "viewing conversation" state, and `assistant_delta`/`turn_state` already broadcast every conversation's content to all interactive conns, relying on the client-side filter.

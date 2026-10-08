@@ -23,26 +23,6 @@ The ticket delegates to the architect: *confirm the current claude reliably rais
 
 Narrowing would not materially de-risk: the flake surface, if any, is the **shared trigger** (real claude raising + tui-driver classifying the modal), not either resolution verb. If preship shows trigger flake, the fix is trigger-robustness or deferral — not shipping one branch. Because the trigger is shared, the two branches cost only a second modal cycle to cover both, so both ship.
 
-## Files to read first
-
-- `internal/e2e/realclaude/interactive_bootstrap_liveness_test.go` — **the harness this file reuses wholesale (same package, same build tag).** Extract:
-  - `spawnBootstrapDaemon` (:383) + the hardcoded `--dangerously-skip-permissions` at **:398** — the spawn to mirror MINUS that one flag.
-  - `bootstrapDaemon` struct (:372) + `waitForReady` (:423) + `stop` (:445) + `shortSocketPath` (:467) + `ensurePyryBuilt` + `lockedBuffer` (:589) — reusable daemon plumbing; the new spawn helper reuses these unchanged.
-  - `driveHandshakeInteractive` (:247) — grants the `interactive` capability the modal broadcast rides.
-  - `sealSendMessage` (:160), `drainForAssistantReply` (:188) — the send + liveness-drain, including the **receive-nonce-in-lockstep discipline** (decrypt every `noise_msg` in arrival order).
-  - `seedBootstrapRegistry` (:528), `seedBoundConversation` (:545), `runPyry`/`decodePairPayload`/`readPersistedServerID`/`waitBinaryHello`/`relayTestLogger` — setup helpers.
-- `internal/e2e/realclaude/interactive_per_conversation_liveness_test.go` — `startPerConversationHarness` (:151, the closest harness shape); `sealEnvelope` (:262); `drainForReply` (:281, the `InReplyTo`-correlated drain — the broadcast drain this spec adds is a Type-only variant); `perTurnReplyBudget` (:85, 120s).
-- `internal/e2e/realclaude/interactive_conversation_lifecycle_test.go` — **the structural precedent for this test's shape:** ONE test function, ONE live session, sequential operations over one encrypted channel with the nonce in lockstep (:66-153). This spec mirrors that shape (answer-phase then cancel-phase on one daemon), not the N-subtest/N-daemon shape.
-- `internal/e2e/relay_v2_modal_answer_test.go` — the FAKE answer capstone. `bringUpModalHarness` (:67) **pairs WITH `--allow-remote-permissions`** (:76) — the answer gate; `awaitModalShown` (:189) — the `modal_shown{permission}` drain + vacuous-pass guard to mirror; the answer flow (:224-290). **Mirror the liveness shape, NOT the keystroke-fidelity checks** (`stdin.log` "2\r" oracle at :298-309) — that's fake-tier-only; real claude has no stdin log.
-- `internal/e2e/relay_v2_modal_cancel_test.go` — the FAKE cancel capstone. `modal_cancel{modal_id}` is **fire-and-broadcast: no reply is correlated to the cancel** (:25, :57-98); the observable is the `modal_dismissed{cancelled,remote}` broadcast. Mirror the assertion order (raise → assert permission class → cancel → assert dismissal), skip the `stdin.log` ESC oracle.
-- `internal/protocol/messaging.go:104-169` — `ModalShownPayload` (Class/ModalID/Options/DefaultOptionID), `ModalAnswerPayload` (**AnswerToken is a client-minted idempotency key, NOT authorization** — an arbitrary constant is fine), `ModalCancelPayload` (ModalID only), `ModalDismissedPayload` (Outcome + Source `{remote,local,timeout}`).
-- `internal/protocol/codes.go:275-278` — `TypeModalShown`/`TypeModalAnswer`/`TypeModalCancel`/`TypeModalDismissed`.
-- `internal/turnevent/taxonomy.go:50-51` — `PermissionOptionKindAllowOnce` / `PermissionOptionKindAllowAlways` (the answer's `OptionID`; either allow option makes claude proceed).
-- `cmd/pyry/main.go:678-695` — `runSupervisor` confines + **trust-marks `-pyry-workdir`** and spawns claude in the trusted realpath. This is WHY dropping `--dangerously-skip-permissions` yields **only** the per-tool permission modal (no startup trust modal).
-- `docs/knowledge/features/modalbridge-package.md` § "Live daemon wiring (#798)" — the daemon path (already in production) that detects a permission modal and broadcasts `modal_shown`; confirms **no production change** is needed.
-- `docs/knowledge/features/permission-protocol-spike.md` — **read for the CAVEAT only.** #383's null finding ("no permission event on stdout") is the `agent-run` **stream-json** path — a *different surface* from this ticket's interactive-PTY TUI-grid modal. Do not conclude from #383 that real permission prompts don't surface here; they surface via tui-driver grid detection, not stdout events.
-- *(reference, outside repo)* `tui-driver@v1.10.0/pkg/tuidriver/permission.go`, `cmd/spike-multi-turn/README.md`, `cmd/spike-permission/main.go` — evidence that default-mode Bash raises a `ModalClassPermission` modal against claude 2.1.199. Skim only if the trigger's reliability is in doubt.
-
 ## Design
 
 One new file: **`internal/e2e/realclaude/interactive_modal_resolution_test.go`** (`//go:build e2e_realclaude`, `package realclaude`). No production files. No edits to the three shipped liveness gates.

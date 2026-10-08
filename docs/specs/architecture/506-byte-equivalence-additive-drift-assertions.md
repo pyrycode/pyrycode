@@ -22,49 +22,6 @@ streamrunner-only event types and (b) the existing `envelopeShape`
 doc-comment's enumeration of streamrunner-only result-trailer fields, with
 two corrections noted under "Initial allowlist contents" below.
 
-## Files to read first
-
-- `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:84-119` —
-  `envelopeShape` doc-comment + `extractShapes`. The new helpers live next to
-  these; the doc-comment's 8-field enumeration is the source for the
-  result-trailer field allowlist.
-- `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:288-339` —
-  `compareShapes`. The new assertion is called alongside this, after the
-  `reflect.DeepEqual` check at line 328, from
-  `TestPtyRunnerVsStreamRunner_StructuralEquivalence`.
-- `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:416-447` —
-  `byteEquivResultTrailer` + `decodeResultTrailer`. The new field-set helper
-  reuses the "find the result line" loop shape but unmarshals to
-  `map[string]json.RawMessage` instead of the two-field struct.
-- `internal/agentrun/streamjson/emitter.go:297-333` — `initLine` + `trailer`
-  + `trailerUsage` structs. The trailer's top-level fields are: `type`,
-  `subtype`, `is_error`, `duration_ms`, `num_turns`, `result`, `stop_reason`,
-  `session_id`, `total_cost_usd`, `usage`, `terminal_reason`. ptyrunner's
-  intersection-side surface — use to verify which AC-cited "8 fields" are
-  truly streamrunner-only at the top level versus actually emitted by
-  ptyrunner.
-- `internal/agentrun/jsonl/reader.go:160-169` — the jsonl `knownKinds`
-  whitelist. ptyrunner re-emits `ev.Raw` verbatim regardless of `Kind`, so
-  every line in claude's JSONL flows through to stdout; the event-type set
-  on the wire is whatever claude wrote into the JSONL file for the run.
-- `internal/agentrun/streamjson/emitter.go:171-202` — `Emit` verbatim
-  re-emission contract. Confirms ptyrunner does not filter by event type;
-  the event-type set is producer-determined.
-- GitHub issue [#503](https://github.com/pyrycode/pyrycode/issues/503) — the
-  byte-equivalence audit. The "Event types emitted" table and "Result envelope
-  field divergence" section are the citation source for each allowlist
-  entry. The audit report itself (path TBD when #503 closes) will be the
-  durable reference; until then, link to the issue body.
-- `docs/specs/architecture/482-ptyrunner-byte-equivalence-smoke.md:1-100` —
-  the parent test's design rationale, including the "shape comparison asks the
-  right question — *does the dispatcher see the same signal?*" framing. The
-  new assertions extend this framing from "shape-equality" to "no-additive-
-  drift on either side."
-- `docs/knowledge/codebase/498.md` — #498's wiring of the leading `system/init`
-  envelope. Explains why both runners now emit `(system, init)` as the first
-  line; relevant because the event-type intersection's `system` membership is
-  load-bearing for the AC's intersection-plus-allowlist semantics.
-
 ## Context
 
 The existing `TestPtyRunnerVsStreamRunner_StructuralEquivalence`

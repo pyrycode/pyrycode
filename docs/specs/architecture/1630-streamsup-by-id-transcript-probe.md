@@ -1,27 +1,5 @@
 # #1630 — streamsup decides a spawn's id flag from a by-id transcript probe, inert until a sessions dir is supplied
 
-## Files to read first
-
-Code:
-
-- `internal/streamsup/runner.go` → `buildArgs` — the current signature and the `firstRun` truth table you are keeping the *shape* of.
-- `internal/streamsup/runner.go` → `beginSpawn` — the one production call site of `buildArgs`, and the `restartMu` section this ticket restructures. Read its whole doc comment: it states the #1481 single-acquisition charter you must not break.
-- `internal/streamsup/runner.go` → `setArgsLocked` — two facts this design leans on: (a) it clones on the way **in**, so the backing array of `r.args` is never mutated after publication; (b) its last paragraph states the in-repo invariant *"restartMu is a leaf: nothing under it may take another lock or do synchronous I/O"* — that sentence is why the probe goes outside the section.
-- `internal/streamsup/runner.go` → `Run` — the `firstRun` latch, the `forceFirst` re-arm, and the `if started { firstRun = false }` gate. All three stay **byte-identical**; this ticket adds no edit here.
-- `internal/streamsup/runner.go` → `RestartFresh` — how `sessionID` + `rotatePending` are published; AC 4's fixture drives this.
-- `internal/streamsup/runner.go` → `Config` — where the new field goes and the doc-comment register the neighbouring fields are written in.
-- `internal/transcript/transcript.go` → `StatByID`, `ValidStem`, `Result.Found` — the probe primitive. Note `StatByID` validates the stem *before* any `filepath.Join`, and that a hit is exactly `err == nil` (see § Error handling).
-- `internal/sessions/pool.go` → `Config.ClaudeSessionsDir` — the field whose name, semantics and doc-comment wording the new `streamsup.Config` field mirrors.
-- `cmd/pyry/streamsup_runner.go` → `mapStreamsupConfig`, and `internal/sessions/runnerstate.go` → `RunnerConfig` — read together they are the *structural* proof of inertness: the mapper can only set what `RunnerConfig` carries, and `RunnerConfig` has no sessions-directory field. Do not add one (that is #1631).
-- `internal/streamsup/runner_test.go` → `helperRunCfg`, `testSessionID`, `rotatedSessionID`, `spawnArgsRecorder`, `idFlagValue`, `idFlagCount` — the fixtures and argv-observing helpers every new test reuses. Both id constants are canonical lowercase-hex UUID stems, so both work as `StatByID` fixture stems unchanged.
-- `internal/streamsup/runner_test.go` → `TestRunner_RestartFresh_RotatesThenResumesNewID` — the direct template for AC 4's test.
-
-Docs:
-
-- `docs/knowledge/features/session-transcript-and-resume-probe.md` § "Both `<C>` readings" — the **NO STUB** measurement. It is the fact that makes a by-id probe *converge* rather than latch, and the reason no anti-latch bookkeeping is needed.
-- `docs/knowledge/decisions/032-bootstrap-resume-per-spawn-existence-probe.md` § Decision + § "Per-spawn over a one-shot decision" — the rule being carried into this package, and why a construction-time answer is insufficient.
-- `docs/knowledge/features/streamsup-package.md` § "`buildArgs` — the id-flag inversion…" and § "`firstRun` gate" — the current documented behaviour. **Read-only**: keeping it accurate is the documentation phase's job, not a deliverable here.
-
 ## Context
 
 `buildArgs` picks one spawn's id flag from a `firstRun` bool that the `Run` loop flips as soon as `cmd.Start` succeeded. "claude launched" and "a transcript exists on disk" are different facts, and #1655/#1656 measured the gap end to end against claude 2.1.220: a child that launches and runs no turn writes no `<id>.jsonl`, and `--resume` against an absent `<id>.jsonl` exits 1. Because the latch only moves true→false, that session's every respawn re-emits `--resume <id>` on a widening backoff — a crash-loop with no exit. The same probe also removes ADR 032's second defect in this package: on a daemon restart the transcript survives, so the *first* spawn emits `--session-id` against a live transcript and claude refuses it (~220 ms wasted crash).

@@ -1,19 +1,5 @@
 # #1890 — Give the commands-only success its own reason keyword
 
-## Files to read first
-
-Everything in this ticket lives in one package. Read these symbols, in this order.
-
-- `internal/streamsup/parser.go` → the `const` block headed by `controlResponseMsg` — the closed reason set (`controlResponseNAK` / `Ack` / `Undecodable` / `ModelList`), each keyword's trailing comment, and the block doc that calls the set closed. This is where the one new constant lands.
-- `internal/streamsup/parser.go` → `emitModelList` — the whole function AND its doc. The doc's `FOUR RUNGS` enumeration is the thing this ticket re-authors; the function body's `commands := len(...)` statement, its count-placement comment, and rung 3's `len(entries) == 0` block are the only executable lines that move.
-- `internal/streamsup/parser.go` → `logControlResponse` — the doc's `commands` paragraph (the sentence that hands this decision over) and its swap-hazard paragraph. The function body does not change; the attribute set stays six.
-- `internal/streamsup/parser.go` → `emitSlashCommandList` — read the doc only, for the cite it makes into `emitModelList`'s enumeration by ORDINAL. See § The renumbering constraint; this is the one item not in the ticket's list.
-- `internal/streamsup/parser_test.go` → `TestParser_InitializeControlResponseAckReportsTheCommandCount` — the table whose `wantAttrs` hardcodes `"reason": "ack"` for both rows. This is where the new keyword's proof lives and where the relocated row lands.
-- `internal/streamsup/parser_test.go` → `TestParser_InitializeControlResponseRejectBranches` — the `wantCommands` struct field, its doc comment, and the `an entry's name is null, beside a well-formed sibling` row. Note the table asserts `len(events) != 0` ONCE for the whole table, not per row.
-- `internal/streamsup/parser_test.go` → `TestParser_ModelListIsLoggedContentFree` — the `wantReasons` slice; the ninth element is the commands-only line.
-- `internal/streamsup/parser_test.go` → `TestParser_ControlResponseAckIsConsumedSilently`, `TestParser_SlashCommandListIsSuppressed`, `TestParser_SlashCommandFieldsAreCapped` — read the DOC of each. None of their `wantAttrs` move; each carries a `//` claim that does.
-- `docs/knowledge/features/streamsup-package.md` § "Declaring `commands` alongside `models` (#1853)" — the gate-placement testing lesson (*a placement claim needs a fixture where the two placements disagree*). It is the reason the `THE SUBTYPE HALF: a NAK carrying a well-formed commands array` row must survive this change untouched.
-
 ## Context
 
 `emitModelList` classifies one top-level `control_response` onto four rungs. Rung 3's `ack` currently answers two different payloads: a success carrying neither array, and a success carrying a non-empty `commands` and no `models`. The `commands` count is what separates them on the record today; the keyword is not.

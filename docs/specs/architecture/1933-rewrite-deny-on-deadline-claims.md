@@ -2,20 +2,6 @@
 
 **Size:** XS · **Not security-sensitive** (comment-only; the behaviour described was reviewed on #1931 and #1932).
 
-## Files to read first
-
-Read these before editing. Every entry is symbol-anchored — resolve with `codegraph_search` / `codegraph_node`, not line numbers.
-
-| Path | Symbol | What to extract |
-|---|---|---|
-| `cmd/pyry/main.go` | `mcpApprovalTimeout`, `envApprovalTimeout`, `approvalTimeout` | The three docs being rewritten. Note which paragraphs of `mcpApprovalTimeout` stay (see § Design). |
-| `internal/relay/v2session_modal.go` | `reconcileModals` | The fourth doc being rewritten. Read its whole doc block — only the first paragraph changes. |
-| `internal/permbridge/permbridge.go` | `Register`, `expire`, `SetAnswerable` | **The authoritative mechanism.** `Register`'s doc already states "timeout is a re-check interval rather than a hard deadline whenever an `AnswerableFunc` is installed"; `expire` is the ask-then-re-arm loop. Copy this vocabulary — do not invent a second phrasing for the same behaviour. |
-| `cmd/pyry/modal_resolve_v2.go` | `streamApprovalBridge.ApprovalAnswerable` | What the report actually reads: the approval is answerable iff (a) the bridge still holds a modal correlation for it AND (b) `ActiveConns` has at least one **interactive** conn. Note that (b) is *any* interactive conn — **not** "a conn that has seen this modal". That asymmetry is the whole point of AC3. |
-| `cmd/pyry/relay.go` | `startRelayV2` — the `w.approvals.SetAnswerable(bridge.ApprovalAnswerable)` block | Already current (#1932 wrote it). It is the wording model for the rewrite: "asks this on every expiry and re-arms the SAME window while somebody can still answer … denies within one window of the last answerer going away." Do **not** edit this file. |
-| `internal/e2e/relay_v2_stream_modal_test.go` | `TestRelayV2_StreamModalPermissionRoundTrip` — its file-head doc and the `cases` table | The source for AC2. Read the `approvalTimeout` / `answerDelay` / `loseAnswerer` field comments and the `extended` + `timeout` rows. The head doc's "THE WINDOW IS A RE-CHECK INTERVAL, NOT A DEADLINE (#1932)" paragraph states exactly what the suite pins today. |
-| `docs/knowledge/features/permbridge-package.md` | § "Conditional bound: `expire` and `AnswerableFunc`" and § the production-bound note | Background. Contains one nuance the rewrite must not contradict: since #1932 the *production* bound is `idleTimeout + window`, because a vanished phone stays in the daemon's active set until `internal/relay`'s 15-minute idle sweep. **Read-only — the documentation phase owns this file.** |
-
 ## Context
 
 The approval window stopped being an unconditional bound. #1931 taught `internal/permbridge`'s `Registry` to route its timer through `expire`, which consults an injected `AnswerableFunc` and re-arms the *same* window while the answer is yes; #1932 wired `streamApprovalBridge.ApprovalAnswerable` in as that report, so it is live in production rather than shipped-dormant. Both slices rewrote the claims in the files they touched.

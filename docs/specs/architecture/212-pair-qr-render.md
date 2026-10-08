@@ -16,44 +16,6 @@ package; this ticket consumes both `Payload` and `Encode`). Already on
 main as of 2026-05-09 (commit `bc87a7c`). Imports stdlib +
 `github.com/mdp/qrterminal/v3` only.
 
-## Files to read first
-
-The developer's turn-1 data load. Each entry is paged in deliberately —
-don't grep for them.
-
-- `internal/pair/payload.go` (whole file, 113 lines) — the package this
-  spec extends. Read for: package doc-comment style, the `Payload`
-  struct shape, the `Encode(p Payload) string` signature this spec
-  consumes, and the **token-secrecy contract** documented on the
-  package doc and on `Payload.Token`. Render's output contains the
-  plaintext token; the secrecy contract from #211 propagates here.
-- `internal/pair/payload_test.go` (whole file, ~120 lines) — table-
-  driven test patterns to mirror (`t.Parallel()`, sub-tests via
-  `t.Run(tt.name, …)`, the `testServerID`/`testRelay`/`testToken`
-  constants you can reuse for `render_test.go`).
-- `docs/protocol-mobile.md:560-610` — security model items
-  `#1 Prompt injection` and `#4 Token leak via phone`. Two specific
-  rules bind this ticket: "Paste-fallback is one-time-only" (line 608)
-  and "Per-device tokens can leak via … QR screenshots auto-uploaded
-  to cloud backup" (line 603). Render is the one-time display surface.
-- `docs/protocol-mobile.md:705-714` — appendix "first pairing"
-  example. The CLI lines visible there (`==> Server-id: …`,
-  `==> Scan QR or paste this:`, …) are illustrative of the eventual
-  `pyry pair` command — NOT this ticket's contract. This ticket owns
-  only the QR + payload-string + one-line instruction. Surrounding
-  framing (server-id summary, relay summary, banner) is the future
-  CLI ticket's concern; do NOT add them here.
-- `CODING-STYLE.md` § "Error Handling" (`fmt.Errorf("X: %w", err)`,
-  sentinel-via-`errors.Is`), § "Testing" (table-driven, stdlib
-  `testing` only, `t.Parallel()`, no testify), § "Stdlib over
-  dependencies" (justification for the new dep is in this spec).
-- The ticket body itself (#212) — six AC bullets. Five map directly to
-  test cases / behavior in this slice; the sixth (manual QR scan) is
-  PR-description prose, not code.
-
-That's the read budget. The whole package addition is ~50 production
-lines.
-
 ## Context
 
 Phase 3 needs `pyry pair` to print a QR symbol AND a paste-fallback

@@ -3,23 +3,6 @@
 Test-only. No production file changes. Two test files touched, both under
 `internal/e2e/realclaude/`, both behind the `e2e_realclaude` build tag.
 
-## Files to read first
-
-- `internal/e2e/realclaude/initialize_control_redaction_test.go` → `newInitControlRedactor` — the construction this slice applies: four path parameters, no ambient read, one trailing-slash trim inside it, longest-value-first sort. **Do not re-trim at the call site.**
-- Same file → `initControlDivergentDir` — returns `(handed, resolved)` for a real directory whose `filepath.EvalSymlinks` form differs on every platform. AC2's workdir value comes from here and nowhere else.
-- Same file → `initControlTempDirValue`, `initControlTempHomeValue`, `initControlWorkdirValue`, `initControlOperatorHomeValue` — the four nested synthetic constants. AC2 and AC4 reuse three of them; the workdir slot is the divergent pair instead.
-- Same file → its header, § "The mechanism is reused whole" and § "Offline, and further: no I/O in either direction" — this is the file the pass joins, and its offline contract binds everything you add to it.
-- `internal/e2e/realclaude/dropped_line_capture_test.go` → `dropcapRedactor`, `redact`, `str`, `strs`, `substitutions`, `dropcapSubstitution`, `dropcapSlug`, `dropcapPathSpellings`, `add` — the mechanism. Extract: `redact` counts **per rule, per call, accumulated on the redactor**, so the census sums across every field the pass visits; `redact` returns its input slice untouched when no rule matched, which is what makes AC3's byte-identity clause satisfiable at all.
-- `internal/e2e/realclaude/initialize_control_record_test.go` → `initControlFixtureRecord` — the four string-bearing Go shapes and which field carries which. Extract the exact field/tag list; the pass visits by field, not by reflection.
-- Same file → `initControlFullRecord`, and literal-choice **2** in its doc comment — AC4's subject, and the reason it must NOT acquire `<`, `>`, `&` or insignificant whitespace.
-- Same file → `initControlFixtureFields` and the `reflect.TypeOf(initControlFixtureRecord{}).NumField()` assertion inside `TestInitControlFullRecord_PinsEveryFieldAndTheSluggableVersionToken` — this is what a record field added in this slice would collide with. AC5 forbids the field; this is what enforces it.
-- `internal/e2e/realclaude/initialize_control_probe_test.go` → `runInitControlChild` — the fill site. Extract three positions: the `record := &initControlFixtureRecord{…}` literal, the `writeInitControlFixture` call, and the `t.Logf` loop over `responses` that follows the write.
-- Same file → `TestRealClaude_InitializeControl_Capture` — the ONE call site, and the place that already holds `home` (the pinned `$HOME`) and `workdir`.
-- `internal/e2e/realclaude/initialize_control_writer_test.go` → `writeInitControlFixture` — read the `out := *rec` / cap-only-`StderrCapture` contract to confirm this slice leaves the writer alone; and `compactInitControlRawRows`, whose doc records that this record carries three raw-JSON-bearing fields of **two different Go types** and that a normaliser covering one is "red on arrival".
-- `internal/e2e/realclaude/offline_exec_ban_test.go` → `finOfflineExecBans` (the `initialize_control_redaction_test.go` entry) and `TestFinOfflineFilesReachNoExecHelper` — that entry bans `realHome` and `os.TempDir` in the file the pass joins, and permits `t.TempDir`. A new file would need its own entry to be checked at all.
-- `internal/e2e/realclaude/fixtures.go` → `realHome` — `os.Getenv("HOME")` captured at package load, empty when HOME was unset. `add`'s empty-value guard already drops such a rule, so the live call site needs no guard of its own.
-- `docs/knowledge/features/e2e-realclaude.md`, the `initialize_control_redaction_test.go` (#1732) entry — the two review lessons. The load-bearing one here: **assemble an expectation from the row's own inputs; never read it back off the subject.**
-
 ## Context
 
 The committed artifact `internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json`

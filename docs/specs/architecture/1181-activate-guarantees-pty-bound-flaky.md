@@ -2,17 +2,6 @@
 
 **Ticket:** [#1181](https://github.com/pyrycode/pyrycode/issues/1181) · **Size:** S (in practice XS — one test file, ~20 lines, zero production) · **Security-sensitive:** no
 
-## Files to read first
-
-- `internal/sessions/session_test.go:333-374` — `TestSession_Activate_GuaranteesPTYBound`, the flaky test being rewritten. Extract: the current fixture arms `helperPoolIdle(t, 80*time.Millisecond)`, waits for `stateEvicted` (relying on idle eviction), Activates, then re-checks with `WaitForPTY(10ms)`.
-- `internal/sessions/session_persist_test.go:101-142` — `TestSession_ActivateBlocksUntilPersisted`, the **proven deterministic idiom to mirror**: `helperPoolIdle(t, 0)` → `pollUntil(stateActive)` → `sess.Evict(ctx)` → assert `stateEvicted` → `sess.Activate(ctx)`. Copy this shape.
-- `internal/sessions/session.go:345-365` — `Activate`. Extract: its final statement is `return s.sup.WaitForPTY(ctx)`, so `Activate` returning nil already means the PTY was bound *at the instant it returned*. The contract is not in doubt.
-- `internal/sessions/session.go:377-394` — `Evict`. Extract: force-evict via the buffered `evictCh`; **independent of the idle timer** — works with `idleTimeout==0`.
-- `internal/sessions/session.go:516-580` — `runActive`. Extract: the idle `timer` is armed at the *start* of `runActive` (before the PTY binds) and re-armed on every Activate; the `case <-s.evictCh` arm returns `ReasonEviction` regardless of `idleTimeout`; a zero `idleTimeout` sets `timerCh = nil` (never selects).
-- `internal/supervisor/supervisor.go:617-657` — `setSession` + `WaitForPTY`. Extract: `setSession(non-nil)` closes `sessReadyCh`; `setSession(nil)` **freshens** it (allocates a new unclosed channel). `WaitForPTY` reads the current `sessReadyCh` under `sessMu` and waits on it. This freshen-on-clear is the mechanism the flake exploits.
-- `internal/sessions/session_test.go:116-165` — `helperPoolIdle` (accepts `idle=0`, documented "eviction disabled") + `pollUntil`. The fixture the rewrite reuses unchanged.
-- `internal/supervisor/supervisor_test.go:1097` — `TestSupervisor_WaitForPTY_FreshensAfterClear`. Extract: canonical proof that a session clear replaces `sessReadyCh` with an unclosed channel — i.e. `deadline exceeded` on a fresh channel is exactly what a post-Activate eviction produces.
-
 ## Context
 
 `TestSession_Activate_GuaranteesPTYBound` fails intermittently under full-suite `make check` with `-race` (once in 20+ runs; never isolated or package-scoped). Signature: `WaitForPTY immediately after Activate = context deadline exceeded, want nil`. Surfaced while QA-gating PR #1180 but **confirmed pre-existing and unrelated** — that PR adds only an `e2e_realclaude`-gated test file plus a spec doc, nothing in `internal/sessions`.

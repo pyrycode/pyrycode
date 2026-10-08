@@ -5,17 +5,6 @@ status: spec
 size: S
 ---
 
-# Files to read first
-
-Read these before doing any exploration of your own — they are the load-bearing surfaces this spec composes.
-
-- `internal/sessions/id.go` — full file (~30 lines). The hand-rolled UUIDv4 generator the binary's `uuidV4()` mirrors. Same crypto/rand + version/variant byte fixup, just inlined into `package main` to avoid pulling in `internal/sessions` from a test-only binary.
-- `internal/sessions/rotation/watcher.go:17-19` — the `uuidStemPattern` regex (`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`). The binary's freshly-generated stem must satisfy this so a downstream consumer (the next ticket) gets a CREATE event the watcher actually accepts. The initial UUID handed in via env must satisfy the same regex.
-- `internal/e2e/harness.go:107-132` — `ensurePyryBuilt`. Pattern reference: `sync.Once`-cached `go build` into a tmp dir. The next-ticket harness consumer will mirror this for the fake claude binary; this ticket's test does the simpler one-shot `go build` (no caching needed — single test, single process).
-- `internal/e2e/harness.go:271-292` — `killSpawned`. Pattern reference for the test's SIGTERM-then-grace-then-SIGKILL teardown of the binary it spawns.
-- `docs/lessons.md` § "Claude session storage on disk" — the on-disk shape the binary mimics. The binary itself does not encode a path; the harness (next ticket) hands it the encoded directory via env. This lesson is here so the developer understands *why* the env contract is "give me a directory that already exists" rather than "give me HOME and I'll encode."
-- `docs/specs/architecture/55-clear-rotation-watcher-e2e.md` (commit 840bad0) — the parent spec that combined this binary with its harness consumer. The binary sketch around the "NEW `internal/e2e/internal/fakeclaude/main.go`" heading is useful reference; the harness/test plumbing on the rest of that page is **out of scope here** (sibling slice).
-
 # Context
 
 The e2e harness today hardcodes the supervised child to `/bin/sleep 99999` (`internal/e2e/harness.go:243-252`). That child opens no JSONLs, so it cannot exercise `internal/sessions/rotation`'s production behaviour: matching `<uuid>.jsonl` CREATE events to a tracked PID via `/proc/<pid>/fd` (Linux) or `lsof` (macOS), and calling `Pool.RotateID` when claude has clearly pivoted to a fresh UUID.

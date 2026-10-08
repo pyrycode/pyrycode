@@ -1,19 +1,5 @@
 # Spec — supervisor user-turn write surface + `conversation_id` cursor (#312)
 
-## Files to read first
-
-- `internal/supervisor/supervisor.go:54-105` — `Config` + `Supervisor` struct definitions; this slice adds one `Config` field, two `Supervisor` fields, and two exported methods.
-- `internal/supervisor/supervisor.go:226-287` — `runOnce` service-mode path (`pty.Start` → `Bridge.SetPTY(ptmx)` → child wait → teardown). New `setPTY` calls bracket the same lifetime as the existing `Bridge.SetPTY` calls.
-- `internal/supervisor/supervisor.go:288-349` — `runOnce` foreground-mode path. Same `setPTY`/`clearPTY` bracketing applies (the supervisor tracks ptmx in both modes; only the bridge case mirrors today's pattern).
-- `internal/supervisor/bridge.go:242-271` — existing `SetPTY` / `Resize` pair on `Bridge`. The supervisor's new private `setPTY` mirrors this design (mutex-guarded fd registration); the new public `WriteUserTurn` writes directly to that fd, not through the bridge.
-- `internal/conversations/registry.go:22-29` — `ErrConversationNotFound` sentinel and the sibling errors. The supervisor never imports this package; the sentinel travels through the validator closure verbatim.
-- `internal/conversations/registry.go:128-137` — `(*Registry).Get(id) (Conversation, bool)`. The Pool-side validator wraps this: `if _, ok := r.Get(id); !ok { return conversations.ErrConversationNotFound }`.
-- `internal/sessions/pool.go:344-358` — bootstrap supervisor `Config` construction in `New`. One new field assignment (`ValidateConversation`) plumbs the validator.
-- `internal/sessions/pool.go:923-945` — `buildSession` (non-bootstrap supervisor construction). Same one-line addition.
-- `internal/sessions/session.go:62-98` — `Session` struct (owns `*supervisor.Supervisor`). No edits required by this slice; downstream consumers (#310 handler, #311 bridge) will add accessor methods if they need to reach the new supervisor surface through `*Session`.
-- `internal/supervisor/supervisor_test.go:1-90` — `helperConfig` pattern; tests for this slice extend the same fixture.
-- `docs/PROJECT-MEMORY.md:20-24` — refusal-to-wire-code mapping convention. The supervisor returns `ErrConversationNotFound` verbatim; the relay handler in the sibling slice does the `errors.Is → CodeConversationNotFound` mapping.
-
 ## Context
 
 `internal/supervisor.Supervisor` owns one claude child plus its PTY master. Today the PTY master fd lives entirely inside `runOnce` (and, in service mode, gets handed to the `Bridge` for the iteration's duration). Nothing outside the supervisor can drive an inbound write tagged with a `conversation_id`, and there is no readable cursor for "which conversation is currently active."

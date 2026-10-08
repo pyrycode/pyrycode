@@ -13,46 +13,6 @@ the end of this spec; verdict **PASS**.
 
 ---
 
-## Files to read first
-
-- `internal/supervisor/supervisor.go:199-255` — `WriteUserTurn` + `deliverViaSession` + the
-  `deliverFn` seam. **This is the file you rewrite.** Extract: the capture-then-unlock pattern,
-  the current `deliverViaSession` body (becomes the nil-resolver fallback), the
-  `ErrTurnNotCommitted` sentinel (reused, do not add a new one), and the long doc-comment at
-  `:223-239` that explains *why* `JSONLPath` was left empty — you are superseding that comment.
-- `internal/supervisor/supervisor.go:66-117` — `Config` struct. Add the new optional
-  `ResolveTranscript` field here, modelled on `ValidateConversation` (`:106-112`): optional,
-  nil-safe, doc'd as the production-vs-test seam.
-- `internal/supervisor/supervisor.go:364-392` — `New`; note `deliverFn` is set here. No change,
-  but the new resolver is read from `s.cfg`, not a separate set-once field.
-- `internal/sessions/reconcile.go:57-86` — `mostRecentJSONL(dir) (SessionID, error)`. **Reuse
-  this**; the new `newTranscriptResolver` wraps it + `os.Stat` for size. Note `jsonlExt`
-  (same package) and the empty-dir contract (`"" , nil`, not an error).
-- `internal/sessions/pool.go:351-369` — bootstrap `supCfg` construction (the `ValidateConversation`
-  closure precedent). Wire `supCfg.ResolveTranscript` here, gated on `cfg.ClaudeSessionsDir != ""`.
-  `cfg.ClaudeSessionsDir` is in scope (also stored as `p.claudeSessionsDir`, `:160`).
-- `internal/sessions/pool.go:946-964` — `buildSession` (the per-`--session-id` path). **Do NOT
-  wire the resolver here** — out of scope (see § Out of scope); leave nil.
-- `cmd/pyry/interactive_turn_stream_v2.go:98-155` — `resolveLatestSessionJSONL(dir)`. **Reference
-  only, do not call.** It is the sibling resolver the turn-bridge already uses (newest `*.jsonl`
-  + size, same stem regex, same mtime+lexical tiebreak). Your `newTranscriptResolver` resolves the
-  *same file by construction* (same dir, same algorithm) — that coherence is the point; it is why
-  the turn-bridge can stream the very turn this path confirmed.
-- `internal/relay/handlers/send_message.go:113-148` — the error switch. **No change needed**:
-  `ErrTurnNotCommitted` already falls into `default` → `CodeServerBinaryOffline` retryable
-  (`:148`). Read it to confirm the loud-failure → retryable-wire-reply mapping is already wired.
-- `$(go list -m -f '{{.Dir}}' github.com/pyrycode/tui-driver)/pkg/tuidriver/deliver.go:94-171` —
-  `DeliverPrompt` + the `deliverPrompt` loop. Extract the **exact false-ack mechanism**
-  (`:155-163`: no commit signal + no `[Pasted text]` chip ⇒ `Committed=true`, "committed-but-slow")
-  and that `JSONLPath` commit detection is `os.Stat` *appearance* (`:188-191`), not growth.
-- `.../pkg/tuidriver/ready.go:42-54` — `WaitReady`/`Readiness`. Unchanged; we keep #594's
-  "ignore the Readiness policy fields" stance.
-- `docs/knowledge/codebase/594.md` — the direct predecessor. This spec is the JSONL-net upgrade
-  #594 explicitly deferred (it "gates on `Committed` with no downstream net"; ptyrunner treats
-  `Committed` as advisory *with* a JSONL/watchdog net — this path now gets that net).
-
----
-
 ## Context
 
 **The user-visible failure.** A mobile user creates a discussion, types a one-line message; the

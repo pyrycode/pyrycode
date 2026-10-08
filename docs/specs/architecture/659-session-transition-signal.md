@@ -14,18 +14,6 @@ The v2 wire has a `session_transition` event (#656, merged: `protocol.SessionTra
 
 This slice adds an **injectable, in-process transition observer** to the pool so #657 can map it to the wire event. It does **not** build the wire event or fan it out.
 
-## Files to read first
-
-- `internal/sessions/session.go:270-373` — `Run` loop + `runActive`. **The eviction surfacing site.** `runActive` returns `error`; this slice changes it to `(TransitionReason, error)`. Note the **four** return paths: `<-ctx.Done()` (returns `ctx.Err()`, no signal), `<-runErr` (spontaneous exit, `nil`, **no signal** — wire has no "crashed" reason), `<-timerCh` w/ `attached==0` (idle → eviction signal), `<-s.evictCh` (cap → eviction signal).
-- `internal/sessions/session.go:387-438` — `transitionTo`. **Do not modify.** Fire the observer *after* it returns — the post-persist, waiters-woken, no-`lcMu`-held point. Its 3-phase choreography (flip+alloc under `lcMu` → release → persist → re-acquire → close wake chan) is load-bearing (#155/#169).
-- `internal/sessions/pool.go:778-831` — `Pool.Run`; the `OnRotate` closure at `:810` is the clear surfacing site. Route it through a new `p.onRotate` so the fire logic is testable without the watcher.
-- `internal/sessions/pool.go:152-215` — `Pool` struct + the "read-only after New, no lock needed" field convention (`convReg`, `activeCap`, `sessionTpl`). The observer field follows this pattern.
-- `internal/sessions/pool.go:427-464` — `RotateID` contract (returns `ErrSessionNotFound`/save error; releases `Pool.mu` before returning).
-- `cmd/pyry/main.go:460-493` — pool built at `:460` via `sessions.New`; `startRelay` (the consumer's home) runs at `:489`, **after** New. This construction order is why the observer is a **post-construction setter**, not a `Config` field (the emitter doesn't exist at New time).
-- `internal/protocol/messaging.go:52-58` — `SessionTransitionPayload` (`previous_session_id`, `new_session_id`, `reason`, `occurred_at`, `workspace_cwd`). The mapping target for #657 — **not imported here**.
-- `docs/lessons.md:79-82` ("Lock order with callback into the host") and `:102-107` ("In-memory state flips before persist completes") — why the observer fires off-lock and post-persist.
-- `internal/sessions/pool_cap_test.go` (`helperPoolCap`, `addCapTestSession`) and `internal/sessions/session_test.go` — reuse for the eviction tests (Bridge-mode supervisors, `/bin/sleep` fake claude, "settle into stateActive before racing" discipline).
-
 ## Design
 
 ### New types (`internal/sessions/transition.go`)

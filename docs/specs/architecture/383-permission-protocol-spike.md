@@ -1,16 +1,5 @@
 # Spec: e2e/realclaude permission-prompt-tool stdio spike (#383)
 
-## Files to read first
-
-- `internal/e2e/realclaude/fixtures.go` — patterns for `WithWorktree(t)` ($HOME pinning), `ensurePyryBuilt` (NOT used here — we exec `claude` directly), and the build-tag convention `//go:build e2e_realclaude`.
-- `internal/e2e/realclaude/allowed_tools_enforcement_test.go` — reference for the allow-list contract being probed; the spike sits adjacent and runs in the same package.
-- `internal/e2e/realclaude/smoke_test.go:12-24` — `claude --version` invocation pattern with `exec.CommandContext`. The spike reuses this shape to capture the version string for the fixture filename.
-- `internal/e2e/realclaude/per_agent_test.go:104-114` and `internal/e2e/realclaude/tool_loop_test.go:190-203` — `parseResultTrailer` shape and `resultTrailer.PermissionDenials`. Useful as a fallback signal: even if no inline permission event reaches stdout, denials may surface in the final `type:"result"` envelope.
-- `cmd/pyry/agent_run.go:254-266` — `buildClaudeArgs`. Shows the canonical pyry argv (notably `--dangerously-skip-permissions` and `--input-format stream-json`/`--output-format stream-json`/`--verbose`). The spike intentionally diverges: it must NOT pass `--dangerously-skip-permissions` (that flag is what suppresses permission gates), and it adds `--permission-prompt-tool stdio` plus `--permission-mode <mode>`.
-- `cmd/pyry/agent_run_test.go:402-...` — `TestBuildClaudeArgs_Shape`. Confirms the canonical flag set so the spike's divergent flag set can be reasoned about against a known baseline.
-- `internal/agentrun/jsonl/` (via `jsonl.NewReader`) — only relevant if we later choose to parse the captured stream; the spike captures raw bytes and does not parse them in-test.
-- `docs/PROJECT-MEMORY.md` — confirms `docs/knowledge/INDEX.md` is documentation-phase-only. The spec below routes the INDEX update there rather than to the developer.
-
 ## Context
 
 `claude --permission-prompt-tool stdio` is undocumented in `--help` but is the mechanism VS Code's Claude Code extension uses to surface permission prompts to its UI. The pyrycode-mobile design depends on relaying these prompts phone ↔ pyry ↔ claude. Before that design starts, we need a captured trace of the actual event/response shapes — not guesses.

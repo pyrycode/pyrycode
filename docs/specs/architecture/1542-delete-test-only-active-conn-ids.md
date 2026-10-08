@@ -5,29 +5,6 @@
 
 ---
 
-## Files to read first
-
-| Read | Symbol | What to extract |
-|---|---|---|
-| `internal/relay/v2session.go` | `ActiveConnIDs` | the deletion target: decl + doc comment. Note the nil-guard's stated reason. |
-| `internal/relay/v2session.go` | `ActiveConns` | the survivor. Two `select`s: the **enqueue** one (`m.snapshot <- req`) and the **reply** one. AC4 mutates the enqueue arm only. |
-| `internal/relay/v2session.go` | `handleActiveConns` | the `s.state == V2StateOpen` security gate, and the `make([]ActiveConn, 0, len(m.sessions))` that makes an empty snapshot **non-nil**. This is why the deleted nil-guard is redundant. |
-| `internal/relay/v2session.go` | `snapshotReq` | doc comment names `ActiveConnIDs` — needs a clause dropped. |
-| `internal/relay/v2session.go` | `V2SessionManager` | the `snapshot` field's doc comment names `ActiveConnIDs` — needs a parenthetical dropped. |
-| `internal/relay/v2session.go` | `ActiveConn` | the struct the retargeted assertions read `ConnID` off. |
-| `internal/relay/v2session_test.go` | `TestV2Session_ActiveConnIDs_OpenOnly`, `..._TornDownSessionAbsent`, `..._ConcurrentWithDispatch_RaceClean`, `..._EmptyManager`, `..._CtxCancelled_ReturnsNil` | the five tests to rename + retarget. Read each doc comment — the rationale is what must survive, not the call. |
-| `internal/relay/v2session_test.go` | `TestV2Session_ActiveConns_MixedInteractive` | the flag assertion that stays **byte-identical**; the projection assertion below it that goes. |
-| `internal/relay/v2session_test.go` | `TestV2Session_IdleChurn_ReturnsToBaseline` | two call sites to rewrite onto `ActiveConns`. |
-| `internal/relay/v2session_test.go` | `TestV2Session_Push_ByteCeilingTearsDownSession` | **the fourth out-of-section site, new since the ticket was written.** One `for _, id := range` loop. |
-| `internal/relay/v2session_test.go` | `buildMessageEnvelope` | doc comment promises a `#572` bridge that will never land. |
-| `internal/relay/v2session_test.go` | `TestV2Session_CapabilitySpoof_TokenFail_NeverEnumerated` | the token-fail security proof. Already asserts through `ActiveConns` — **do not touch it**; read it to confirm this ticket cannot weaken it. |
-| `cmd/pyry/interactive_turn_v2.go` | `interactiveBroadcaster` | doc comment names both `ActiveConnIDs` and the `v2Broadcaster` type #699 deleted. |
-| `docs/knowledge/features/v2-session-manager.md` | § "Concurrency-safe open-session enumeration (#588)" | the funnel's design rationale — the `V2StateOpen` gate, single-writer, returns-no-error. Read for context; **do not edit** (see § Handoff). |
-
-**Line numbers in the ticket body are stale.** It was written against `2e33ffe`; every site it cites has since moved by roughly two hundred lines. Resolve every site by symbol name with `codegraph_search` / `git grep -F`, never by the ticket's line numbers.
-
----
-
 ## Context
 
 `(*V2SessionManager).ActiveConnIDs` is a thin `[]string` projection over `ActiveConns` that drops the interactive flag. Its doc comment says it is reachable only from `internal/relay` tests until #572 delivers a production wire-up.

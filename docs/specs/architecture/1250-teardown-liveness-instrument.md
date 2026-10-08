@@ -5,40 +5,6 @@ One new file, `internal/e2e/realclaude/teardown_liveness_test.go`, under the exi
 classifier, a real-bytes proof of the per-pid liveness read's fail-safe premise, and the
 record its live consumer (#1251) will write.
 
-## Files to read first
-
-- `internal/agentrun/reap.go:35-67` — `ReapDescendantGroups`. The `Info` at `:65` is the
-  only line this ticket classifies; the `len(reaped) > 0` guard at `:64` is what makes
-  silence ambiguous; `:56-62` skips `ESRCH` **before** the append, so a group that exited
-  in the teardown window is not in `pgids`.
-- `internal/e2e/realclaude/process_pin_liveness_test.go:199-448` — `pinStateColumns`,
-  `pinStateArgs`, `pinStateOutcome`, `pinReadState`'s `pid <= 0` guard at `:276`,
-  `pinClassifyState`'s ten-branch contract at `:297-331`, `pinStateRow`'s
-  exactly-three-fields rule at `:404-426`, `pinIsZombie` at `:436`. AC2 **calls** these; it
-  edits none of them.
-- `internal/e2e/realclaude/process_pin_liveness_test.go:712-983` — `TestPinClassifyState`'s
-  13 hand-built rows (what is already proven, so AC2 does not re-prove it) and
-  `TestPinStateColumns_ReadsNoEnvironment` (`:950`), the redaction tripwire AC3 must not
-  duplicate.
-- `internal/e2e/realclaude/process_pin_liveness_test.go:1082-1126` — `pinExit1` /
-  `pinSignaled`. These are the hand-built errors AC2 exists to complement; read them to see
-  exactly what is *not* proven by them.
-- `internal/e2e/realclaude/background_reach_probe_test.go:162-168, 199-260` — `reachProc`
-  and `reachRecord` (field-comment density, `note`, the `Ticket` provenance field). The
-  record in AC3 mirrors this shape.
-- `internal/e2e/realclaude/background_reach_probe_test.go:820-855` — `writeReachArtifacts`:
-  `MarshalIndent`, `0o600`, `t.Errorf` (never `Fatal`) on a failed write. AC3's writer
-  follows this and diverges in exactly one way (§ 3.2).
-- `internal/e2e/realclaude/background_reach_probe_test.go:857-882` — `reachScanArgv` and
-  redaction rule 1 at `:866-872`; `reachCapCommand` at `:945`.
-- `internal/e2e/realclaude/fifo_reader_liveness_test.go:78-93, 111-212` — the
-  three-valued verdict block and `fifoLiveOutcome`. This is the closest existing model for
-  a pure classifier with an `instrument-failed` arm, and AC3 composes the type verbatim.
-- `cmd/pyry/agent_run.go:299-330` and `internal/agentrun/ptyrunner/runner.go:289-292` —
-  **read these two together.** `runAgentRunPty` passes no `Logger`, so `ptyrunner` falls
-  back to `slog.Default()`. This decides AC1's fixture set (§ 1.1) and is not what the
-  ticket body's cited `cmd/pyry/main.go:743-744` renders.
-
 ## Context
 
 `agentrun.ReapDescendantGroups` SIGKILLs the detached Bash process groups claude leaves

@@ -24,46 +24,6 @@ state reconnects via a cheap current-state snapshot — *match-and-replace by st
 applied idempotently on every connect, replaying no past control events*. These are
 complements, not alternatives; the #647 machinery stays exactly as-is.
 
-## Files to read first
-
-- `docs/protocol-mobile.md:850-852` — `## Backfill semantics` (the stub: "Unchanged from v1.
-  All backfill frames ride inside `noise_msg`."). **Primary edit site** — expand into the
-  two-mode reconnect rule (AC1–AC4). The existing v1-backfill line is preserved as the
-  bulk-transcript sub-part.
-- `docs/protocol-mobile.md:580-603` — `#### Reconnect replay & resync (consumer, #647)`. The
-  bulk-transcript event-ring path. **Read to cross-link, do NOT modify** — the new contract
-  is its control-state complement (Technical Notes).
-- `docs/protocol-mobile.md:630-675` — `### Modal (v2)` intro + `modal_shown`/`modal_dismissed`
-  tables + the **Security & validation contract** note (L675). The nonce + `answer_token` +
-  first-answer-wins semantics AC3 references already live here — add a *pointer*, don't
-  restate them. Edit site for AC1 (Modal points to the rule).
-- `docs/protocol-mobile.md:677-692` — `### Queue (v2)` intro + `queue_state` table +
-  **Emission (#722)** note. **L692 is now stale**: "a phone that reconnects after missing a
-  `queue_state` sees the current backlog only on the next change" contradicts #878's
-  connect-time reconcile. Edit site for AC1 (Queue consistent with the rule).
-- `docs/protocol-mobile.md:401-403` — `### Reconnect` (backoff/jitter timing, under Connection
-  lifecycle). Add a one-line cross-reference to `## Reconnect / Backfill semantics`; do not
-  move the application-layer contract into this timing subsection.
-- `docs/protocol-mobile.md:405-451` — Application message types table; `modal_shown` (L438) /
-  `queue_state` (L442) already say "not part of the reconnect-replay ring." Read for
-  vocabulary consistency; no edit required beyond the sections above.
-- `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md:130` —
-  `**Backpressure / replay.**` paragraph. **Edit site for AC5.** Contains the exact wording
-  to supersede for control events: "the binary replays from a bounded per-conversation event
-  ring." Read L134-145 (Security model 1–4) — the nonce/deny-on-timeout/first-answer-wins
-  invariants AC3 codifies are already stated there; the note references, does not restate.
-- `docs/knowledge/decisions/025-mobile-remote-head-interactive-session.md:484-486` (in
-  protocol-mobile.md) — the `> **Superseded as a requirement — 2026-06-22 (ADR 025
-  amendment).**` blockquote is the **house style** for a dated superseding note. Mirror it.
-- `docs/knowledge/codebase/877.md`, `docs/knowledge/codebase/878.md` — the two mechanisms
-  being documented. Read for the precise contract (unicast, same `modal_id`, `queue_state`
-  snapshot-shaped so re-send is idempotent, `EventID` nil ⇒ never in the ring). Cite the
-  tickets; do not restate the implementation.
-- `docs/knowledge/features/v2-session-manager.md` — anchors
-  `#connect-time-modal-reconcile-877--outstandingmodals-seam--reconcilemodals` and
-  `#connect-time-queue-reconcile-878--outstandingqueues-seam--reconcilequeues` for optional
-  deeper cross-links from the protocol doc.
-
 ## Design — what to write, where
 
 Four edit sites. One canonical statement (Backfill semantics), two consistency pointers

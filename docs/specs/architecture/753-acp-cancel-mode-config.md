@@ -4,23 +4,6 @@ Epic [#600](https://github.com/pyrycode/pyrycode/issues/600) — `pyry acp` as a
 
 **Not security-sensitive** (no `security-sensitive` label; this is inbound control over local stdio to a co-located, user-launched host — no auth/crypto/network/remote-frame surface). No security-review pass.
 
-## Files to read first
-
-- `cmd/pyry/acp.go:197-229` — `resolveCancelTarget` (the #762 seam, returns `*supervisor.Supervisor`) + `cancelSessionHandler` (the resolve-then-`(nil,nil)` stub this ticket fills). **This is the primary edit site for cancel.**
-- `cmd/pyry/acp.go:106-119` — the `register` closure inside `serveACPWithPool` where handlers are bound; `logger` is in scope here. Add `session/set_mode` / `session/set_config_option` registration and the cancel resolver closure here.
-- `cmd/pyry/acp.go:121-145` — `newSessionResult` type + `newSessionHandler`; `loadSessionHandler:178-195` also returns `newSessionResult`. Both construction sites gain the `modes` field.
-- `cmd/pyry/acp.go:147-169` — `decodeSessionID`: the empty-`sessionId` rejection pattern to mirror for `set_mode` param decoding; note *why* empty is load-bearing (`Pool.Lookup("")` → bootstrap).
-- `cmd/pyry/acp_handshake.go` (whole file, ~110 lines) — `initializeResult` / `agentCapabilities` / `registerHandshake`; the stateless-handler idiom (`initializeHandler`, `authenticateHandler`) the two new mode/config handlers mirror, and the empty-struct-result pattern (`authenticateResult{}` → `{}`).
-- `internal/relay/v2session.go:376-388` + `1725-1741` — the established `Interrupter interface{ SendEsc() error }` consumer-declared seam and `handleInterrupt`'s **best-effort** `SendEsc` treatment (nil-guard + tolerate error). This ticket mirrors that pattern for ACP cancel.
-- `internal/sessions/session.go:118-122` — `Session.Supervisor()` returns `s.sup` (never nil, even when evicted — `PhaseStopped`); `SendEsc` on an evicted/mid-teardown session self-reports `ErrNoLiveSession`, which we swallow.
-- `internal/supervisor/modal.go:64` + system-overview "safe-answer seam (#726)" — `SendEsc()` is a single non-blocking keystroke actuator; no `context`, best-effort, `ErrNoLiveSession` when no child is live.
-- `internal/acp/acp.go:221-258` — `dispatchRequest` (writes exactly one response; `*acp.Error` → error frame with its code; plain `error` → `CodeInternalError`, detail logged not leaked) vs `dispatchNotification` (never writes a response; logs a returned error once as `"acp: notification handler error"`). Determines how `set_mode`/`set_config_option` (requests) and `cancel` (notification) behave.
-- `internal/acp/jsonrpc.go:9-40` — `acp.Error`, `acp.NewError(code, msg)`, `CodeInvalidParams`; `acp.Handler = func(ctx, json.RawMessage) (any, error)`.
-- `cmd/pyry/acp_test.go:288-447` — `newFakeClaudePool`, `newACPHarness`/`send`/`read`/`shutdown`, `acpReply` (`Result *newSessionResult` — adding `Modes` decodes automatically), `sessionIDParams`, `unknownSessionID`. Test scaffolding to reuse.
-- `cmd/pyry/acp_test.go:492-546` + `646-690` — `TestResolveCancelTarget` (pointer-equality routing proof — **keep, it is half of AC-1**) and `TestACP_SessionCancel_NotificationEmitsNoResponse` (no-response + one-log-on-unknown-id — **stays green unchanged**, see Testing).
-- `internal/relay/v2session_interrupt_test.go:24` / `cmd/pyry/modal_resolve_v2_test.go:32` — existing `fakeInterrupter` / `fakeKeystroker` doubles to copy for the cancel actuation test.
-- `docs/knowledge/decisions/027-acp-mapping.md` — ADR 027; **Open Item #1 is resolved by this spec's architect run** (already edited on this branch). The mode/config decision + rationale live there and in this spec (AC-4).
-
 ## Context
 
 `session/cancel` is an ACP **notification** (no response) that aborts the running turn. The interrupt lever already exists — `supervisor.Supervisor.SendEsc()` ("cancel an in-flight turn", #726) — and #762 already resolves the target session's supervisor via `resolveCancelTarget`. This ticket drops the interrupt onto that seam.

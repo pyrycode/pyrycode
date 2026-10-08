@@ -1,21 +1,5 @@
 # #1781 — Resolve and create a conversation's attachment directory, refusing an escaping one
 
-## Files to read first
-
-| Read | Symbol | What to extract |
-|---|---|---|
-| `cmd/pyry/main.go` | `confineWorkdirToHomeCreating` | **The whole doc comment, twice.** It records the ordering this design copies: `os.Lstat` ancestor probing so a symlink counts as existing and is *resolved* rather than stepped over; the containment check **before** anything is created; `MkdirAll` only after it passes; a re-`EvalSymlinks` + second check afterwards that also yields the path to return. |
-| `cmd/pyry/main.go` | `withinDir` | Read it to understand what this design deliberately does **not** use. Its `filepath.Rel` boundary test answers "is it under the root", which is too weak for AC 4 — see § Design, "Why equality and not `withinDir`". |
-| `internal/conversations/id.go` | `ValidID` | The canonical shape both ids must satisfy. Note the alphabet: lowercase hex and dashes only. That is load-bearing beyond traversal (§ Security review, File operations). |
-| `internal/attachments/filename.go` | `SanitizeFilename` | The sibling path-component primitive in this package (#1772). Its shape, doc density and comment register are the template for `storage.go`. |
-| `internal/attachments/filename_test.go` | `assertComponent` | The table + shared-`t.Helper()`-assertion idiom this package tests in. |
-| `internal/attachments/accumulator.go` | the package doc comment at the top of the file, and the sentinel `var` block containing `ErrIndexOutOfRange` | House style for sentinel doc comments (what refuses, what the caller does about it, who maps it to the wire). The package comment also contains the one sentence this ticket must amend — § Design, "The package comment stops being true". |
-| `internal/attachments/admission.go` | `ErrInvalidDeclaration`, `ErrUploadTooLarge` | The precedent for *why two sentinels rather than one*: they differ because the client's repair differs. Mirror that reasoning style for this slice's pair. |
-| `internal/protocol/attachments.go` | `MaxAttachmentIDBytes`, and the SECURITY block in `AttachmentChunkPayload`'s doc comment | The 64-byte ceiling that is explicitly *not* a defence, and the sentence assigning the canonical-shape check to whoever turns the id into a path component. That sentence is this ticket. |
-| `internal/conversations/registry.go` | `Registry.Save` | The `os.MkdirAll(dir, 0o700)` precedent for directories under the instance directory. `internal/devices/registry.go`'s `Registry.Save` is the identical second instance. |
-| `docs/knowledge/features/attachments-package.md` | § "Sentinels and discard semantics" | The seven-sentinel table this slice extends to nine, and the standing rule that wire mapping is #1744's, not this package's. |
-| `docs/knowledge/features/attachments-package.md` | § "Mutation-testing lessons" | **Read before writing the tests.** Sole-redness in this package is *measured* with `go test -overlay`, never argued from a table. The first bullet — a predicted red set that measured larger than predicted — is the trap this spec's § Testing strategy is written to avoid repeating. |
-
 ## Context
 
 An attachment upload arrives as chunks, is reassembled in memory by this package, and then has to land somewhere on the host. This slice decides *where*, creates that directory, and hands its resolved path back. Writing bytes into it is #1782's; dispatching to it and mapping refusals to wire codes is #1744's.

@@ -6,15 +6,6 @@ Phase 3 Track C — push-registration slice of the v1 payload catalog. The frami
 
 The shape is fixed verbatim by `docs/protocol-mobile.md` § Message types → `register_push_token`. The example payload in the spec is this ticket's golden-file fixture, end of story. Pure DTO: no I/O, no methods, no constructors.
 
-## Files to read first
-
-- `docs/protocol-mobile.md:480-499` — `register_push_token` subsection. The example envelope (`id 8`, `type "register_push_token"`, fields `platform` / `token` / `device_name`) IS the golden fixture, copied verbatim into testdata. Read this first; everything else is plumbing.
-- `internal/protocol/envelope.go:1-30` — package doc + `Envelope` struct. New file lives in the same package and mirrors this file's tone (struct-only, no methods, doc comment that points at the spec).
-- `internal/protocol/codes.go:60-62` — `TypeRegisterPushToken = "register_push_token"` already declared. Use this constant in the test (`env.Type == TypeRegisterPushToken`), do **not** hardcode the string.
-- `internal/protocol/envelope_test.go:11-27` — `canonical(t, b)` and `readFixture(t, name)` helpers. New test file in the same package reuses these directly; do not redefine.
-- `internal/protocol/envelope_test.go:29-67` — `TestEnvelope_RoundTrip_Full`. Mirror this exact shape for the new test (unmarshal full envelope → check fields → re-marshal → `bytes.Equal` of the compacted forms).
-- `internal/protocol/testdata/envelope_full.json` — formatting reference for the new fixture (single line, compact, no trailing newline behaviour preserved as-is by `os.ReadFile`).
-
 ## Design
 
 ### Production code

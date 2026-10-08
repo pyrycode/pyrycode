@@ -10,25 +10,6 @@ Desktop (pyrycode-desktop#156) and a forthcoming mobile client need one shared d
 
 This ticket is the **daemon-side handler**. It intercepts `set_session_settings` in the v2 manager before `dispatch.Route`, gates on the negotiated `interactive` capability, validates the untrusted model/effort at the wire boundary, persists via the injected settings seam, and replies with a deterministic success or failure. The relay forwards v2 frames opaquely, so this is entirely daemon-side. The change takes effect on the session's **next spawn** (via #833's `claudeSettingsArgs`); making a *running* session pick it up immediately is the sibling live-restart ticket #842 — out of scope here.
 
-## Files to read first
-
-- `internal/relay/v2session.go:1511-1548` — `dispatchAppFrame` control switch. Add the new `case protocol.TypeSetSessionSettings` here, before `dispatch.Route`, mirroring the other interception cases.
-- `internal/relay/v2session.go:1648-1747` — `handleRequestSnapshot` + `snapshotReplyError`: the **reply-owing** handler precedent (validate → `forwardEnvelope` success/error, all on the Run goroutine). This is the closest shape to copy. Note the `msgSnapshot*` static-constant discipline.
-- `internal/relay/v2session.go:1779-1851` — `handleDebugBundleRequest` + `debugBundleReplyError`: the nil-seam → deterministic-"unavailable"-reply pattern, and the "never echo the assembly error text" discipline.
-- `internal/relay/v2session.go:2019-2143` — `handleInterrupt` / `handleNewSession` / `handleDequeueMessage`: the `if !s.interactive { return }` capability gate (the authz boundary) and the tolerant-decode / never-echo posture. Note these are fire-and-forget (no reply); this verb differs — it always replies on the interactive path.
-- `internal/relay/v2session.go:433-509` — the consumer-side seam interfaces (`Interrupter`, `SessionStarter`, `QueueRemover`, `ModalResolver`). Add `SettingsUpdater` + `SettingsUpdate` + `ErrSessionUnknown` beside them, same doc-comment idiom (relay imports neither `internal/sessions` nor `cmd/pyry`).
-- `internal/relay/v2session.go:522-628` — `V2SessionConfig`. Add the optional `SettingsUpdater` field with the nil-behaviour doc, mirroring `QueueRemover` / `DebugBundler`.
-- `internal/relay/v2session.go:2786-2821` — `forwardEnvelope`: the single seal-and-forward path both the success and error replies use (`V2StateOpen`-gated; the Run goroutine).
-- `internal/protocol/settings.go` — `SetSessionSettingsPayload` (decode target) and `SessionSettingsUpdatedPayload` (success reply body). The pointer-presence contract lives in this file's doc comment; do not re-derive it.
-- `internal/protocol/codes.go:7-34` — the error-code constants. Reuse `CodeSessionNotFound`, `CodeProtocolMalformed`, `CodeServerBinaryOffline`; **do not add a new code** (wire vocab is #844's closed domain).
-- `internal/sessions/pool.go:571-612` — `Pool.UpdateSettings`: merges present fields, one atomic `saveLocked`, rolls back in-memory on save failure, returns `ErrSessionNotFound` for an unknown id. This is what the cmd/pyry adapter wraps.
-- `internal/sessions/session.go:75-109` — `SettingsUpdate` (the seam's presence contract to mirror) and `claudeSettingsArgs` (**the argv surface the model/effort validator defends** — `--model <value>` / `--effort <value>` as separate argv tokens).
-- `cmd/pyry/relay.go:91-110, 277-365` — `startRelay` / `startRelayV2` signatures + the `V2SessionConfig{…}` construction. Thread the new seam param through both and wire it into the config.
-- `cmd/pyry/main.go:738-757, 853` — `pool` construction and the single `startRelay(...)` call site. `pool` is already in scope (passed as `transitionObserverSink`); construct the settings adapter here (like `sessionMinter{pool}` on the same line).
-- `cmd/pyry/main.go:898-1009` — `poolResolver` / `sessionMinter` / `sessionRouter`: the co-located `*sessions.Pool` → consumer-interface adapter idiom. Add `settingsUpdaterAdapter` here.
-- Tests to mirror: `internal/relay/v2session_dequeue_test.go` (interactive-gated inbound verb; capability negative path) and `internal/relay/v2session_debugbundle_test.go` (reply decryption). Harness: `driveToOpenCaps` (open a conn with a chosen capability set), `sealAppFrame` (seal an inbound control frame), `v2Recorder` + `openSession` (decrypt outbound replies) — all in `internal/relay/v2session_test.go:718-855`.
-- `docs/protocol-mobile.md:802-845` — the `set_session_settings` / `session_settings_updated` wire contract (presence semantics, `session_id` addressing key, `in_reply_to` correlation, example frames). Line 859 pins `session.not_found` as *"Returned by the handler (#845)."*
-
 ## Design
 
 ### 1. Interception point (`internal/relay/v2session.go`)

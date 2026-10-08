@@ -5,15 +5,6 @@ size: XS
 
 # 221 — watcher: resolve symlinks on macOS for fsnotify path compare
 
-## Files to read first
-
-- `internal/sessions/rotation/watcher.go:78-115` — `New`: where `resolvedDir` is captured (one side of the comparison is already canonicalised).
-- `internal/sessions/rotation/watcher.go:142-188` — `handleCreate`: the per-event match; the only line changing is the comparison gate at line 179.
-- `internal/sessions/rotation/watcher_test.go:1-95` — test scaffolding (`fakeProbe`, `rotateRecord`, `startWatcher`, `newUUID`/`oldUUID`).
-- `internal/sessions/rotation/watcher_test.go:347-392` — `TestWatcher_DetectsRotationThroughSymlink`: exact mirror image of the new "watched dir is symlinked → probe canonical" case; the new test inverts the symlink direction.
-- `internal/sessions/rotation/watcher_test.go:259-289` — `TestWatcher_ProbePathMismatch`: shape to follow for the "non-resolvable / mismatch" negative test.
-- `internal/sessions/rotation/probe.go:18-30` — `Probe` interface (so the fix doesn't accidentally re-shape it).
-
 ## Context
 
 The rotation watcher uses fsnotify CREATE + a per-PID `lsof`-style probe to detect `/clear`-style UUID rotations. The match gate at `internal/sessions/rotation/watcher.go:179` compares the probe-returned path against `expected = filepath.Join(w.resolvedDir, base)`.

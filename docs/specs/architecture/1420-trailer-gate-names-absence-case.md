@@ -8,25 +8,6 @@ on 2026-08-09 via `go test -overlay` with no worktree writes.
 
 ---
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/trailer_admissibility_test.go:370-412` | The `reason == ""` block. `:389-401` is the absence arm you split three ways; `:402-411` is the present-and-empty arm you must not touch. `:384-388` is a claim inside this block that this ticket falsifies. |
-| `internal/e2e/realclaude/trailer_terminal_reason_test.go:215-272` | `trailReasonAgainstPath` — signature, the `present` computation at `:216`, the three absence answers, and the fall-through shape at `:265-271` you will mirror. |
-| `internal/e2e/realclaude/trailer_terminal_reason_test.go:201-214` | The structural no-echo guarantee that makes embedding its Detail safe. Cite this, do not re-argue it. |
-| `internal/e2e/realclaude/trailer_terminal_reason_test.go:80-126` | The six `trailReason*` constants. The three you switch on, and the exact strings the new test asserts. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:959-1028` | `TestTrailGate`'s "out-of-contract details name their own sub-case" subtest. `:991` and `:1004` are re-pointed; `:979`, `:983`, `:998`, `:1009`, `:1014` must keep passing unweakened. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:1031-1166` | `trailGateRunnerReadings()` and `TestTrailGateIgnoresTheRunnerPath` — the five readings, clause A, the four-field pin, clause B, and the two comparisons AC2 re-scopes. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:676-796` | `trailGateAbsentReasonScan()`, `trailGateEmptyReasonScan()`, `trailRunnerUnread()`, and `trailGateCases()`' nine rows incl. row nine at `:781-794`. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:1448-1514` | The key-name sweep. Its `marker` at `:1466` pins the literal phrase your rewritten prose must retain. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:123-124, :945-950` | `reachMaxCommandBytes = 512`, `reachTruncationMarker` (29 B), and `reachCapCommand`'s truncate-and-mark behaviour — the basis of the headroom assertion. |
-| `internal/e2e/realclaude/trail_run_outcome_test.go:366-390` | `trailClassifyRun`'s C1 and C2. Read once to confirm they key on `Value` and the certify-iff-reason invariant only, then leave them alone. |
-| `internal/e2e/realclaude/trail_ptyrunner_composition_test.go:28-34` | The **tenth** doc site, outside AC3's file scope, whose claim this ticket falsifies. See § Scope note. |
-| `internal/e2e/realclaude/finding_run_gather_test.go:546-551`, `trail_run_rig_test.go:157-161` | The two gather supply comments. Attribution-only edits. |
-
----
-
 ## Context
 
 `trailGate`'s absence arm (`:389-401`) collapses three situations under one Detail: the field absent

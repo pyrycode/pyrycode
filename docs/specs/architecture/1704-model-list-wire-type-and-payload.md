@@ -3,24 +3,6 @@
 **Size:** s (verified against the six boundaries — see § Sizing)
 **Scope:** vocabulary only. No producer, no emit, no handler, no relay wiring, no fixtures, no `docs/protocol-mobile.md`.
 
-## Files to read first
-
-Read these before writing anything. Every entry names the symbol to read and what to take from it.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/protocol/codes.go` | the `TypeModelAnnounced` const block | The doc-block form to copy: grouping rationale, the "NAME is the daemon's, not claude's" paragraph, and the `MUST NOT be added to inboundAppTypeSet` paragraph. This block is the template for the new one. |
-| `internal/protocol/interactive.go` | `ModelAnnouncedPayload` | The SECURITY paragraph (claude-authored text is a REPORT, never a control input; caps are the producer's), and the delegate-vs-restate convention. |
-| `internal/protocol/interactive.go` | `BackgroundTaskRosterPayload` and its `MarshalJSON` | The whole precedent: per-field paragraphs in the type doc, why `[]` beats `null`, why `truncated_fields` is deliberately *not* normalised, why a value receiver, and the `type alias` recursion guard. Read the doc comment in full — it argues both sides. |
-| `internal/protocol/interactive.go` | `BackgroundTask` | The entry-type shape: a row type with its own `TruncatedFields` and its own SECURITY paragraph. |
-| `internal/protocol/interactive_test.go` | `TestBackgroundTaskRosterPayload_NilTasksNormalises` | The exact shape both nil-path tests take, including the value/pointer subtests and the receiver-not-mutated check. |
-| `internal/protocol/interactive_test.go` | `TestModelAnnouncedType_IsNotClaudesSubtype` | The naming-pin shape: negative `strings.Contains` checks, the positive exact-equality pin, and the payload-bytes regression pin over claude's excluded keys. Its doc comment documents the same contains-trap this ticket has. |
-| `internal/protocol/compat_test.go` | `TestIsKnownAppType`, `v2OnlyTypes`, `TestTypeConstants_V1V2Partition` | The three lists that take the new constant, and their comment style. |
-| `internal/protocol/compat_test.go` | `TestInboundAppTypeSet_CoversAllExportedTypeConstants` | Read it to confirm you must **not** touch it: its `all` literal enumerates 23 v1 types and it asserts both `len(all) == 23` and `len(inboundAppTypeSet) == len(all)`. Adding the new constant here turns it red. |
-| `cmd/pyry/relay_guard_test.go` | `excludedTypes`, `TestEveryInboundV2TypeHasHandler` | Where the `"push"` entry goes, and Assertion #3 (totality) — the reason an unclassified constant is red on its own. |
-| `internal/relay/v2session_settings.go` | `validModel`, `validEffort` | The inbound rules AC 2 makes you document. Read `validModel`'s doc comment for the argv-injection rationale you must **not** weaken. |
-| `docs/knowledge/features/protocol-package.md` | § "Background-task event payloads (#1393…)" | The lessons from the nearest structural analogue, including the recorded SHOULD FIX: the roster row's `SECURITY:` comment *claims* to repeat a warning it does not actually restate. Do not repeat that. |
-
 ## Context
 
 The daemon can already ask claude for its model list — a `control_request` with subtype `initialize` on the child's held-open stdin returns a `models` array. Nothing in the tree gives that list a wire shape, so [pyrycode-desktop#561](https://github.com/pyrycode/pyrycode-desktop/issues/561) has been blocked since 2026-08-19: it needs the identifiers for its model menu and the per-model effort levels for its effort segments, because the effort control currently offers combinations that cannot work. [pyrycode-desktop#682](https://github.com/pyrycode/pyrycode-desktop/issues/682) is the same defect for permission modes and needs `supportsAutoMode`.

@@ -12,55 +12,6 @@ drives an allow/deny on a permission gate — see `## Security review` at the en
 
 ---
 
-## Files to read first
-
-The developer's turn-1 data load. Read these before writing any code.
-
-- `internal/permbridge/permbridge.go:121-176` — `Register` / `Lookup` / `Resolve`
-  contract + the fail-closed one-shot (`resolve`). `Lookup(id)→Request` (read),
-  `Resolve(id, Verdict)→bool` (one-shot consume). `Allow(req.Input)` echoes the
-  parked input **byte-verbatim** (`json.RawMessage`). The registry-owned timer
-  already denies on timeout — this ticket does **not** touch permbridge.
-- `internal/modalbridge/modal.go:116-196` — `PermissionRequestForClass`,
-  `Record(req, wireClass, convID)→(payload, err)` (mints `modal_id`, stamps the
-  Outstanding), `Lookup`, `Resolve` (one-shot consume), `Snapshot`. The bridge
-  reuses `PermissionRequestForClass(tuidriver.ModalClassPermission, prompt)` to
-  build the exact 4-option / reject-once-default permission payload — this is how
-  AC-1 byte-compatibility is guaranteed **by construction**.
-- `cmd/pyry/modal_resolve_v2.go:200-291` — `ResolveAnswer`: the security-critical
-  gated answer arm (Lookup → **gate** → classify → consume → actuate → audit).
-  The stream arm slots in at the actuate step. `:311-338` `classifyAnswer`
-  (optionID → outcome), `:270-291` the `AuthorizeRemotePermission` decision.
-- `internal/control/server.go:865-908` — `handleApprove`: parks in permbridge,
-  starts `watchApproveConn` (disconnect/shutdown deny), blocks on
-  `pending.Await()`. The surfacer seam hooks in right after `Register`; the
-  `defer retire()` backstop hangs off the post-`Await` return. `:333-338`
-  `SetApprovalRegistry` — the setter shape to mirror for `SetApprovalSurfacer`.
-  `:921-937` `watchApproveConn` (the two-cancellation-source watcher, unchanged).
-- `cmd/pyry/interactive_modal_v2.go:98-144` — `handleModalShown` (Record → arm →
-  broadcast) and `:227-251` `broadcastInteractive` (the ActiveConns/Push fan-out
-  the bridge mirrors, with a mutex-guarded counter of its own). **Do not** call
-  `ArmModalTimeout` for the stream modal (see § Concurrency: single timeout
-  authority).
-- `internal/relay/v2session_modal.go:194-231` — `handleModalAnswer` (calls
-  `ResolveAnswer`, broadcasts on `ok=true`) and `broadcastModalDismissed`
-  (`:251-`). The manager already broadcasts the answer-path dismissal from
-  `ResolveAnswer`'s return — no manager change.
-- `cmd/pyry/main.go:914-970` — composition: `approvals := permbridge.New()`
-  (:921), `startRelay(relayWiring{…})` (:923), `ctrl := control.NewServer` +
-  `SetApprovalRegistry` (:966-970). The 3 wiring edits land here.
-- `cmd/pyry/relay.go:260-304` (`startRelay`) and `:414-442` (`startRelayV2` where
-  `modalReg`, `modalResolver`, and `mgr` are constructed) — the bridge is
-  constructed here and its `Surface` returned outward.
-- `internal/devices/auth.go:60,89` — `MayAnswerRemotePermission()` (the gate) and
-  `AuthorizeRemotePermission(d, outcome)→bool` (the fail-closed allow decision).
-- Test doubles to reuse: `cmd/pyry/interactive_turn_v2_test.go:71`
-  (`fakeInteractiveBcast`), `cmd/pyry/modal_resolve_v2_test.go:25`
-  (`fakeKeystroker`), `internal/control/approve_test.go:1-40`
-  (`startServerWithApprovalRegistry` — its doc already anticipates #1080).
-
----
-
 ## Context
 
 Non-YOLO stream-json claude is spawned with `--permission-prompt-tool`; on a

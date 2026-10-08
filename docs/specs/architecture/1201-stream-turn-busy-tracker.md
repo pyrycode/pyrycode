@@ -9,30 +9,6 @@ no v2 frame changes, no delivery behaviour changes.
 
 ---
 
-## Files to read first
-
-Turn-1 data load. Read these before writing any code; every design decision below
-cites one of them.
-
-| Path | Extract |
-|---|---|
-| `cmd/pyry/stream_turn_drain.go` (whole file, 143 lines) | **The file you are modifying.** `streamTurnEnvelope{sessionID, ev}` (`:23-26`) is the only point in the pipeline holding a producing identity. `startStreamTurnDrainV2`'s three-case select (`:122-140`) — the `sink.ch` arm at `:126-136` is where `observe` goes, above the `activeSession()` gate at `:127`. Also the SECURITY note style at `:74-79` / `:129-133` (content-free discriminants only) and the "channel is NEVER closed" shutdown reasoning at `:37-40`. |
-| `cmd/pyry/stream_turn_drain_test.go` (whole file, 426 lines) | The 7 call sites that take the new parameter (`:196, :236, :264, :309, :349, :375, :409`) and **every helper the new drain-tier tests reuse**: `stubActiveSession` (`:32`), `chanBcast`/`newChanBcast` (`:48-58`), `dropWatcher` + `waitDropKind` (`:71-96`, `:153-166`), `feedLines` (`:112-117`), `collectEnvs` (`:121`), `assertNoPush` (`:168`), `testConvIDB` (`:27`), the line fixtures (`:100-108`). Do not write new doubles — these cover the whole drain tier. |
-| `cmd/pyry/relay.go:702-726` | The stream-mode branch. `:719` builds the emitter, `:725` builds the `activeSession` closure, `:726` starts the drain — the tracker is constructed between `:719` and `:726`, local to this branch. |
-| `cmd/pyry/relay.go:755-756` | **Copy this closure verbatim**: `func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }` — already in scope here, already the session→conversation resolver, and it keeps `internal/conversations` out of the tracker's file. |
-| `cmd/pyry/relay.go:799-826` | `conversationForSession` — the `sid == ""` guard (`:817-819`, rationale `:807-809`), the `CurrentSessionID` **or** `SessionHistory` match (`:821`, why a just-rotated session still resolves), and the `List()` race-safety note (`:813-815`). Read-only: the tracker adds a reader, not a policy. |
-| `cmd/pyry/relay.go:412-437` | `boundSessionIDForActive` + its #678 `CurrentSessionID == ""` rationale. Read-only context for **why the tracker does not use it**: it answers "which session is the *active* conversation on", the wrong direction for a per-conversation tracker. Byte-identical, untouched. |
-| `internal/eventring/ring.go:1-95` | **The primitive to mirror.** Package-doc voice for a self-synchronised per-conversation store, `mu sync.Mutex` + `map[string]…` (`:63-67`), "All methods are safe for concurrent use" (`:62`), and `New`'s panic-on-misconfig (`:78-85`) — the precedent for the constructor's nil-resolver panic. |
-| `internal/turnevent/event.go:23-125` | The sealed 8-variant set and the "no variant carries conversation identity" contract (`:75-76`). The type switch in `observe` enumerates these. |
-| `internal/streamsup/parser.go:137-226` | The **only** producer into the sink: `TurnEnd` (`:157`), `TextChunk` (`:193`), `ThoughtChunk` (`:195`), `ToolStart` (`:197`), `ToolUpdate` (`:220`), and the `default:` tolerate-and-drop arm (`:158-163`) whose growth path — `rate_limit_event` → a future `ApiRetry` — is the whitelist's actual evidence. `resultTurnEndReason` (`:173`) shows both stop reasons traverse one arm. |
-| `cmd/pyry/interactive_turn_v2.go:399-422` | `eventKind` — the content-free discriminant for the tracker's one log field. **Reuse it; do not write a second one** (this is why the tracker lives in `cmd/pyry`, not a new `internal/` package). |
-| `cmd/pyry/interactive_turn_v2.go:76-112`, `:140-160` | Why the signal cannot be a tap on the emitter: unguarded single-goroutine lifecycle fields (`:81-86`), scalar `currentState` (`:86`), cursor-resolved `turnConvID` (`:141`, `:84`), and the #1062 follow-active flush (`:149-160`) that **must not** be ported. Read once, then design away from it. |
-| `cmd/pyry/streamsup_runner.go:105` | `streamsup.NewParser(sink.sinkFor(cfg.SessionID), …)` — the sink's sole producer, and why the variant set is closed to five today. |
-| `cmd/pyry/relay.go:395-410` | `screenSnapshotterOrNil`'s #1101 comment — the existence-oracle posture `Busy`'s signature enforces. |
-| `CODING-STYLE.md` § Concurrency, § Testing | "Channels for coordination, mutexes for state"; table-driven, stdlib-only, `t.Parallel()`, `-race`. |
-
----
-
 ## Context
 
 On `interactive_runner: stream-json` the daemon computes turn transitions but keeps

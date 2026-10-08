@@ -10,28 +10,6 @@ Two files, both tests, zero production files:
 
 ---
 
-## Files to read first
-
-Symbols, not line numbers — resolve each with `codegraph_search` / `codegraph_node`.
-
-| File | Symbols | What to extract |
-|---|---|---|
-| `internal/e2e/realclaude/inband_bypass_revoke_names_test.go` | `poolRevokeFixtureName` | The namer this writer mints through. Its doc comment states the contract the writer leans on: the result is always a **single clean path component**, for any pair of inputs. Read the whole header — it is the shape this file's header should mirror in tone and length. |
-| `internal/e2e/realclaude/inband_bypass_revoke_arms_test.go` | `poolRevokeArm`, `poolRevokeArms` | The arm table and its field names (`launchYOLO`, `takesSettingsUpdate`) — the record's field names must match so the two files read as one family. The table is **READ-ONLY**: do not append to it, do not use its rows as this file's fixture arm. |
-| `internal/e2e/realclaude/set_permission_mode_probe_test.go` | `setModeFixtureRecord` | The security doc comment the new type inherits verbatim in substance: no `env` field, and the free-text capture is capped. |
-| ″ | `writeSetModeFixture`, `setModeFixturePath` | The temp-file-and-rename discipline to keep, and the hardcoded `packageDir(t)/testdata` to **not** repeat. Do not edit either. |
-| ″ | `probeOutcome` | The nested behavioural-read type field 15 carries. Plain tagged struct, no custom marshaller — confirmed: the package declares no `MarshalJSON`/`UnmarshalJSON` anywhere. |
-| `internal/e2e/realclaude/permission_protocol_spike_test.go` | `stderrFixtureCap`, `truncateString` | The 8 KiB cap constant and the byte-slicing helper to reuse. Do not declare a second cap. |
-| ″ | `versionSlug` | What `poolRevokeFixtureName` applies to **both** of its arguments. Lowercase, `[^a-z0-9._-]+` → `_`, 32-char cap; idempotent on already-slugged input. |
-| ″ | `packageDir`, `writeFixture` | `packageDir` is what this file must never reach. `writeFixture` is the second instance of the same anti-pattern. |
-| `internal/e2e/realclaude/offline_exec_ban_test.go` | `finOfflineExecBans`, `TestFinOfflineFilesReachNoExecHelper` | The map to append to, and the AST check that reads it. Note it parses **without** `parser.ParseComments`, and that a dotted entry matches a selector while a bare entry matches an identifier. |
-| ″ | the `inband_bypass_revoke_names_test.go` entry | The trio to copy (`packageDir`, `setModeFixturePath`, `writeSetModeFixture`) and the five `os.*`/`filepath.Glob` bans **not** to copy. |
-| `internal/e2e/realclaude/fixtures.go` | `WithWorktreeAuthenticated` | Calls `t.Skipf` *inside* the test body — the reason the ban entry exists rather than a header paragraph. |
-| `internal/sessions/pool.go` | `deliverSettingsInBand` | Field 16's source is the `p.log.Info("sessions: in-band settings command not delivered", …)` call inside it. Nothing is returned and no struct escapes — the field is a capture of emitted log records, not a decoded type. |
-| `docs/knowledge/features/set-permission-mode-inband-probe.md` | — | #1595's live wire-format result: the committed fixture family this new family must stay clear of. |
-
----
-
 ## Context
 
 #1595 proved live that a `set_permission_mode` control request carrying `mode: "default"` drops a running child's bypass posture. #1604 built the composed path (`Pool.UpdateSettings` → `inBandDeliverable` → `deliverSettingsInBand` → `Runner.RevokeBypass`) and #1622 proved that path emits the revocation onto a live child without respawning it. None of them claims behavioural **effect** — an echoed `init.permissionMode` is claude's report of its own posture, not proof it is enforced.

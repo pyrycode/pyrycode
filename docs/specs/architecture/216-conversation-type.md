@@ -2,13 +2,6 @@
 
 Foundation ticket for the Phase 3 `conv:` series. Defines the on-disk shape for conversations as a pure Go type with `encoding/json` tags. No persistence, no consumers, no I/O.
 
-## Files to read first
-
-- `internal/sessions/registry.go:14-29` — `registryFile` / `registryEntry` shape: tag style (snake_case), `omitempty` placement, field-ordering convention. The new `Conversation` struct mirrors this style.
-- `internal/sessions/id.go:1-32` — `SessionID` typedef pattern (`type SessionID string`) and its package-level doc comment treatment. The conversation `ID` field follows the same pattern as a `ConversationID` typedef.
-- `internal/sessions/id.go:43-69` — `ValidID` shape, for context only. **Do not** port a `ValidConversationID` here — that belongs in #217 if/when it's needed; this ticket is type-only.
-- `CODING-STYLE.md` — gofmt, doc comment style, table-driven test conventions.
-
 ## Context
 
 Phase 3 introduces `Conversation` as a richer entity than `Session`: a conversation owns a current claude session plus a history of prior sessions, and carries a promotion bit (discussion vs. channel) along with display metadata. This ticket lands the type alone — registry CRUD (#217), promotion API (#218), and auto-archive (#219, #220) build on it.

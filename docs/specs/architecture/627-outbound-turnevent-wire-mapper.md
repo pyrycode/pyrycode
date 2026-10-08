@@ -4,21 +4,6 @@
 **Size:** S (1 new production file, 2 exported types, 0 consumer call sites, 5 ACs, no state machine).
 **Not security-sensitive** (confirmed against the label, not the lineage): a pure value-to-value adapter — no untrusted input, no capability decision, no dispatch. The trust boundary lives in #616's capability-gated fan-out, already merged.
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/turnbridge/mapper.go` (whole, ~182 LOC) | The **symmetric inbound mapper**. Mirror its file shape exactly: one cohesive file, a pure type-switch returning `(value, ok)`, small pure helpers below it, no logger, no I/O. `outbound.go` is its mirror image (model → wire instead of wire → model). |
-| `internal/protocol/interactive.go:16-77` | The five payload structs + their json tags + the **"no omitempty / boundary values explicit"** contract. These are the exact targets you build. |
-| `internal/protocol/codes.go:100-104` | `TypeTurnState`, `TypeAssistantDelta`, `TypeToolUse`, `TypeToolResult`, `TypeTurnEnd` — the discriminant strings `MapEvent`/`BuildTurnState` return. |
-| `internal/turnevent/event.go:22-92` | The sealed `Event` sum type + the five event structs and their fields: `TextChunk.Text`, `ToolStart.{ToolCallID,Title,RawInput}`, `ToolUpdate.{ToolCallID,Status,Content}`, `TurnEnd.Reason`, `ThoughtChunk.Text`. |
-| `internal/turnevent/taxonomy.go:24-43` | `ToolStatus` (→ `is_error`) and `TurnEndReason` (string-backed → `stop_reason` via `string(e.Reason)`). |
-| `internal/turnevent/content.go` (whole, 35 LOC) | The sealed `ToolContent` sum type — `TextContent` / `DiffContent` / `TerminalContent`, and `nil` = "no content change". `resultSummary` type-switches over exactly these. |
-| `cmd/pyry/assistant_turn_v2.go:120-161` | The **consumer seam** this adapter feeds: how a payload becomes an `Envelope` (`nextID++` mint, `time.Now().UTC()`, `json.Marshal(payload)`, `Push`). Read it to confirm what the adapter must **NOT** do (no ID, no TS, no seal). |
-| `docs/protocol-mobile.md:466-514` | Authoritative field tables for the five interactive events; `input_summary`/`result_summary` are a "human-readable **précis** (not the raw input/output)"; the `stop_reason` taxonomy. |
-| ADR 025 (`docs/knowledge/decisions/025-…md`) §"The event model" + §"Wire-protocol extension" (lines 91-118, 145-152) | The **ThoughtChunk treatment** rationale: thinking is screen-sourced/brittle and surfaces as a `turn_state` transition; #607 defines no thought-text envelope so the thought text is **not forwarded**. |
-| `docs/knowledge/codebase/{606,607,615}.md` | Sibling context: the neutral model (606), the wire types (607), the symmetric inbound producer (615) whose patterns this slice mirrors. |
-
 ## Context
 
 #615 shipped the **inbound** half of the Phase 2 bridge (`internal/turnbridge`): it drains the live claude session's `Events()` stream and maps each tui-driver event into the neutral internal `turnevent.Event` model (#606). #607 defined the five v2 interactive wire payloads (`internal/protocol/interactive.go`). #616 (merged) wired the capability-gated fan-out but, per `[[po-capability-gated-consumer-hidden-surfaces]]`, deferred the actual event→envelope **mapping** to this slice.

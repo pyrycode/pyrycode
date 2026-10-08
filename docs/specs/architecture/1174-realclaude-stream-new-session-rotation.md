@@ -11,22 +11,6 @@ This test differs from #1031 in exactly one axis: the **stream-json interactive 
 
 ---
 
-## Files to read first
-
-Turn-1 reading list — read these before writing a line. Most of this test is *composition of existing helpers*; the reading is about which helper to reuse, not new machinery.
-
-- `internal/e2e/realclaude/interactive_session_control_liveness_test.go` (#1031) — **the closest sibling; read in full.** It already implements: the daemon spine (pair → seed → spawn → handshake), the `new_session` re-send actuation loop (lines 188–221), the on-disk rotation reader, and the settle-after-rotation discipline. **Reuse — do NOT redeclare** (same package): `bootstrapRow`, `readBootstrapRowIfPresent`, `readBootstrapRow`, `waitBootstrapID`, `waitBootstrapIDSettled`, `uuidStemPattern`, `ptr`, and the rotation budgets `newSessionResend`/`rotateBudget`/`idSettleQuiesce`/`idSettleTimeout`.
-- `internal/e2e/realclaude/interactive_stream_liveness_test.go` (#1153) — the stream-toggle setup. **Reuse:** `writeStreamInteractiveConfig` (flips `interactive_runner:"stream-json"` before spawn) and `drainForCompletedTurn` (turn-1 drain: non-empty `assistant_delta` M1 → terminal `turn_state{idle}` M2, no content assertion).
-- `internal/e2e/relay_v2_stream_new_session_test.go` (#1137) — the fakeclaude sibling; read the header (lines 22–71) for the **drain-gate divergence** (§ Design → "The load-bearing tension"). Its M1–M5 are the milestone template; M4/M5's stdin-log observable is what this real-claude test *replaces* with an on-disk transcript.
-- `internal/e2e/realclaude/interactive_bootstrap_liveness_test.go` (#854) — defines `spawnBootstrapDaemon`, `seedBootstrapRegistry`, `seedBoundConversation`, `sealSendMessage`, `driveHandshakeInteractive`, `readPersistedServerID`, `waitBinaryHello`, `runPyry`, `decodePairPayload`, `mustJSON`, `relayTestLogger`. All reused verbatim.
-- `internal/e2e/realclaude/interactive_per_conversation_liveness_test.go:262-330` — `sealEnvelope` (seal+send an arbitrary envelope) and `drainForReply(t, phone, cs, wantType, reqID, timeout)` (drain to a typed reply correlated on `InReplyTo`). Used for the `new_session` frame and the turn-2 ack.
-- `internal/e2e/realclaude/interactive_modal_resolution_test.go:345-388` — `drainForControlEvent(t, phone, cs, wantType, timeout)` (drain to the first envelope of `wantType`; Fatals on a `TypeError`). Used for the `session_transition` (M3). Note: matches on **type only** — the caller asserts the payload fields.
-- `internal/streamsup/runner.go:283-365` + `internal/streamsup/runner_test.go:662` (`TestRunner_RestartFresh_RotatesThenResumesNewID`) — **the contract that makes the on-disk observable meaningful.** `RestartFresh(newID)` re-arms first-run form so the next spawn uses `--session-id <newID>` (a **fresh transcript**), *not* `--resume`. This is what mints a brand-new `<newID>.jsonl`; a `--resume` would reuse the old file. Read to understand *why* a fresh `<newID>.jsonl` on disk proves "fresh spawn, not resume".
-- `internal/sessions/reconcile.go:13-62` — `encodeWorkdir` + `DefaultClaudeSessionsDir`. Read the #989 comment: claude encodes its **resolved** cwd, and `ResolveWorkdir` (`internal/agentrun/workdir.go:33`) additionally applies `canonicalCase`, so recomputing the encoded folder name in the test is fragile. This spec **locates the transcript dir empirically** instead (§ Design → AC3 observable).
-- `internal/protocol/messaging.go:47` (`SessionTransitionPayload`) + `internal/protocol/codes.go` (`TypeNewSession`, `TypeSessionTransition`, `TypeAck`, `TypeSendMessage`) — wire types.
-
----
-
 ## Context
 
 Stream `new_session` rotation is proven today only against fakeclaude (#1137). That test proves routing + on-disk rotation, but the *real spawn* — a genuinely fresh live `claude` child under a new session id, not a `--resume` of turn one's session — is unproven, and a scripted fake cannot regress it (the recurring fake-green/real-red class, e.g. #949). Per the 2026-07-08 always-a-real-claude-gate policy, every operator-facing happy-path flow needs a real-claude e2e that actually runs in the pre-ship gate.

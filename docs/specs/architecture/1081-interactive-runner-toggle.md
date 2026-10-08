@@ -8,29 +8,6 @@ This is the single "turn on stream-json interactive mode" wiring step. Every sea
 
 ---
 
-## Files to read first
-
-Generated from the code surface; each line names what to extract.
-
-- `internal/config/config.go:12-53` — `Config` struct + `Load`. Copy the **`DebugCapture` precedent** exactly: additive `json` field, **no** `DefaultConfig` entry (absent → zero value → PTY). `Load` stays parse-only — do NOT add enum validation here.
-- `cmd/pyry/streamsup_runner.go:69-101` — `newStreamRunnerFactory(sink *streamTurnSink) sessions.RunnerFactory`. **Already built. Do not re-implement.** Its doc-comment names #1081 as the assigner. Construct one sink, call this, inject the result.
-- `cmd/pyry/stream_turn_drain.go` (whole file) — `streamTurnSink`, `newStreamTurnSink(buf, logger)`, `sinkFor(sessionID)`, and `startStreamTurnDrainV2(ctx, sink, emitter, activeSession, logger) (cleanup func())`. **Already built; zero production callers today.** Note its doc explicitly scopes "production selection (`sessions.Config.RunnerFactory` wiring) and composing `activeSession`/`SetReplaySource` at the relay leg" to this ticket.
-- `cmd/pyry/main.go:741-770` — `config.Load` → `sessions.New(sessions.Config{...})`. The composition root. The selector runs between these; `RunnerFactory` is threaded into the `sessions.Config` literal.
-- `cmd/pyry/main.go:750-752` — the `DebugCapture` gate: the exact "resolve X only when the flag is on, else leave the byte-identical default" shape the selector mirrors.
-- `cmd/pyry/main.go:923-965` — the `relayWiring{...}` literal `startRelay` is called with. One new field (`streamSink`) is set here.
-- `cmd/pyry/relay.go:196-244` — `relayWiring` struct fields (`sup`, `bridge`, `claudeSessionsDir`, `active`, `convReg`, `boundHost`, `approvals`). The new `streamSink` field is declared here.
-- `cmd/pyry/relay.go:477-499` — `snapshotUsage` build. **Landmine #1**: its `pidFn` reads `w.sup.State().ChildPID` — nil-deref on the typed-nil stream-mode `w.sup`. Gate it off in stream mode.
-- `cmd/pyry/relay.go:656-673` — the shared PTY interactive-streams gate (`startInteractiveTurnStreamV2` + `startInteractiveModalStreamV2`). **Landmines #2/#3**: both take `w.sup` and a `pidFn` reading `w.sup.State()`. This is the block a stream-mode branch replaces.
-- `cmd/pyry/relay.go:709-727` — the returned `cleanup` closure; the stream drain's cleanup joins here.
-- `cmd/pyry/interactive_turn_stream_v2.go:96-114` — the **canonical emitter + replay wiring** the stream branch mirrors: `newInteractiveTurnEmitterV2(active, mgr, logger)` then `mgr.SetReplaySource(emitter.ring, active.CurrentConversation)`. Same emitter type `startStreamTurnDrainV2` already consumes.
-- `cmd/pyry/interactive_turn_v2.go:117` — `newInteractiveTurnEmitterV2(sup cursorReader, bcast interactiveBroadcaster, logger)` signature. `*activeConversation` satisfies `cursorReader`; `*relay.V2SessionManager` satisfies `interactiveBroadcaster`.
-- `cmd/pyry/main.go:1218-1285` — `resolveBoundRunner` / `resolveBoundSession`: the merged follow-active resolvers (`convID → CurrentSessionID → Pool.Lookup`). The stream `activeSession` closure mirrors the **`conv.CurrentSessionID` guard** these enforce.
-- `internal/sessions/session.go:245-258` — `Supervisor()` returns typed-nil `*supervisor.Supervisor` for a stream runner; `Runner()` is total. **This is why `w.sup` is nil-deref-unsafe in stream mode.**
-- `internal/sessions/transition.go:113-142` + `internal/sessions/pool.go:627-641` (`rekeyLocked`) — `RotateForNewSession` rebinds `conv.CurrentSessionID` to a fresh id on a stream `new_session`. **Read for § Open Questions (the frozen-tag gap).**
-- `internal/sessions/pool.go:139-147` + `:355-362` — `Config.RunnerFactory` seam (nil ⇒ `supervisor.New`, the rollback guarantee) + `newRunner` normalization.
-
----
-
 ## Context
 
 The daemon has a merged stream-json interactive runner (`internal/streamsup`) selectable behind `sessions.Config.RunnerFactory` (nil ⇒ today's PTY `supervisor.New`, byte-identical — the rollback guarantee). Three merged seams sit unwired:

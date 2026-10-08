@@ -14,58 +14,6 @@ for `Registry`, `Registry.mu`, `Registry.devices`. Both files this ticket
 touches (`auth.go` is new; same-package access to `mu` and `devices` is
 implicit) live in `internal/devices`.
 
-## Files to read first
-
-The developer's turn-1 data load. Each entry is paged in deliberately —
-don't grep for them.
-
-- `internal/devices/device.go` (whole file, 50 lines) — the package
-  SECURITY doc comment and the `HashToken` / `VerifyToken` primitives
-  this predicate composes. The new file lives in the same package; the
-  package doc comment is already written and does not need updating.
-  - `HashToken` (line 36) — deterministic SHA-256 hex; the predicate
-    calls it on the wire-presented plain after the empty-string early-out.
-  - `VerifyToken` (line 46) — **not used by this predicate.** The chain
-    "hash plain once → byte-exact lookup against the registry" is
-    deliberately simpler than "iterate every device and run constant-time
-    compare per entry"; see `Open questions` § "Why not iterate
-    VerifyToken over all devices?" for the full chain.
-- `internal/devices/registry.go` (whole file, 154 lines) — the existing
-  `Registry` shape, the `mu sync.Mutex` + `devices []Device` fields,
-  and the existing read-only `FindByTokenHash` (lines 145-154). Mirror
-  the locking shape: `r.mu.Lock(); defer r.mu.Unlock()`, linear scan,
-  byte-exact `==` on `TokenHash`. `Validate` adds one mutation
-  (`r.devices[i].LastSeenAt = now`) inside the same critical section,
-  not a separate one — see `Concurrency` below.
-- `internal/devices/registry_test.go` lines 159-216
-  (`TestRegistry_FindByTokenHash`) — table-driven hit/miss layout to
-  mirror for the predicate's hit/miss/empty cases.
-- `internal/devices/registry_test.go` lines 333-354
-  (`TestRegistry_ConcurrentReadWrite`) — the race-detector probe shape
-  to mirror for the concurrent-validation test. Uses `sync.WaitGroup`,
-  no fixed sleep, asserts post-condition only.
-- `docs/specs/architecture/209-pair-devices-registry-crud.md` lines
-  225-264 — the established `Registry` concurrency contract: single
-  mutex, every method takes it on entry. Validate inherits this
-  contract; no new lock, no lock ordering to document.
-- `docs/specs/architecture/208-pair-device-entry-and-token-hashing.md`
-  § "Security review" — the SECURITY contract this ticket inherits
-  (constant-time at plain↔hash; byte-exact at hash↔hash; no plain in
-  logs/errors; no token wrapping in error context). Re-reference,
-  don't relitigate.
-- `docs/lessons.md` § "JSON roundtrip strips monotonic-clock state from
-  `time.Time`" (lines 209-...) — `LastSeenAt` is `time.Time`. The
-  in-memory mutation under test is wall-clock only (no JSON roundtrip
-  in the test path), so `time.Time.Equal` vs `==` doesn't bite this
-  ticket — but if the test ever Saves and Loads to verify persistence,
-  switch to `Equal`. (The spec keeps persistence out of scope per AC.)
-- `CODING-STYLE.md` § "Concurrency" (lines 53-59) — `sync.Mutex` for
-  shared state, `go test -race` always. § "Testing" (lines 61-66) —
-  table-driven, `t.Parallel()`, stdlib only.
-- The ticket body itself (#210) — six AC bullets. The predicate must
-  not call `Save`; the empty plain must not perform a registry
-  lookup; no log/error/panic message contains plain, hash, or name.
-
 ## Context
 
 #208 delivered the hashing primitives. #209 delivered the `Registry`

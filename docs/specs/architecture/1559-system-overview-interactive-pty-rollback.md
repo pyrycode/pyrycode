@@ -11,59 +11,6 @@ the ticket, and § "The AC-5 sweep" below hands it over pre-built.
 
 ---
 
-## Files to read first
-
-The deliverable is one markdown file. Everything else here is read to *verify* a
-claim before writing it, or to avoid a trap.
-
-- `docs/knowledge/architecture/system-overview.md` § **Data Flow** → **Interactive
-  Session** (the fenced diagram through the agent-pipeline paragraph) and the
-  `pyrycode/tui-driver` + `creack/pty` rows of § **Dependencies** — **the only
-  regions you may edit.** § Restart Cycle, § Fast-crash self-heal and § Key Types
-  belong to #1560 / #1561 and still describe the deleted `internal/supervisor`;
-  leaving them alone is correct, not an oversight.
-- `cmd/pyry/main.go` → `selectInteractiveRunner` — the source of truth for AC-2.
-  Its `switch` gives you the accepted set verbatim and its doc comment gives you
-  why the empty default moved. Read the sibling `selectsStreamRunner` too: it
-  records that since #1348 *every valid value including the empty one* selects the
-  stream runner.
-- `cmd/pyry/agent_run.go` → `runAgentRunStreamRunner` and the comment block at its
-  call site inside `runAgentRun` — the source of truth for AC-3. It carries the
-  "deliberately NOT read any more, and setting it is harmless" decision and the
-  "all five dispatcher forks carry it in their .env" claim you must **attribute**
-  rather than assert. Also read this file's `agentRunLongHelp`-adjacent doc string
-  ("There is no second runner…"), which is the house phrasing for the same fact.
-- `internal/e2e/realclaude/background_reach_probe_test.go` → `reachRunnerPathFromEnv`
-  and the `PYRY_USE_STREAMJSON` skip gate inside
-  `TestRealClaude_BackgroundReachability` — the two live `os.Getenv` read sites
-  that make "the variable is read nowhere" false. Behind the `e2e_realclaude`
-  build tag, so `make check` never compiles it; that does not make the reads
-  hypothetical.
-- `internal/streamsup/runner.go` → `buildArgs`, `Runner.Run`, `Runner.Stdin` — the
-  shape of the path that replaces the PTY diagram: `--input-format stream-json
-  --output-format stream-json --verbose`, plus `--session-id` on create or
-  `--resume` on reattach, with the child's stdin pipe held open across turns.
-- `cmd/pyry/streamsup_runner.go` → `newStreamRunnerFactory`, and
-  `cmd/pyry/stream_turn_drain.go` → `newStreamTurnSink` — the consumer end of the
-  interactive data path (`streamsup.NewParser` → turn events → the single relay-leg
-  drain). Needed to make the replacement diagram's right-hand side true.
-- `README.md`, the "There is one way to drive claude" paragraph — the model for
-  tone and compactness the ticket points at. **Read it for tone, not for text:
-  it contains the one sentence AC-3 forbids.** See § "Trap 3" below.
-- `docs/knowledge/features/streamsup-package.md` — the package overview for the
-  path that replaces the PTY one. Useful for what `streamsup` does and does not do
-  (notably: no transcript tailing). Its own opening line still calls `streamsup`
-  the "sibling of `internal/supervisor`" — that doc is out of scope and owned by
-  the documentation phase; do not fix it here, and do not quote it.
-- `docs/specs/architecture/1558-system-overview-tree-nonexistent-paths.md` — the
-  merged sibling that fixed this same file's module tree. Its § Context carries the
-  ownership note reproduced below; its edit-by-edit shape is the model for this one.
-- `docs/specs/architecture/1553-creack-pty-indirect.md` — the merged ticket that
-  **already fixed the `creack/pty` row**. Read before touching that row. See
-  § "Premise drift" below.
-
----
-
 ## Context
 
 Repo `CLAUDE.md` names `system-overview.md` the architecture authority and tells

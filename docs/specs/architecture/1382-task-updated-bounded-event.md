@@ -6,34 +6,6 @@ Sibling of #1380 (`task_started`, merged) and #1381 (`background_tasks_changed`,
 
 ---
 
-## Files to read first
-
-Read these before writing anything. This list is the turn-1 data load; everything the design references is here with a line range and what to take from it.
-
-| Path | What to extract |
-|---|---|
-| `internal/streamsup/parser.go:21-66` | The three existing cap constants (`maxUnrecognizedRaw`, `maxTaskFieldID`, `maxTaskDescription`) and — more important — the **comment style** for a cap: observed size, multiple, envelope arithmetic against 65519, escaping note. `maxTaskPatch`'s comment must match this shape. |
-| `internal/streamsup/parser.go:243-269` | `streamLine` (the segmentation struct — do **not** widen it) and `systemTaskStartedLine` (the per-subtype decode target this ticket's mirrors). Note the doc's "field set is exactly what the capture shows and nothing invented" and the named drops. |
-| `internal/streamsup/parser.go:340-364` | `consumeLine`'s `default:` arm — where the `sl.Type == "system"` guard and the `emitSystemSubtype` call already live. **No edit here.** |
-| `internal/streamsup/parser.go:367-389` | `emitSystemSubtype` — the one enumeration site. This ticket adds exactly one `case`. Read its doc: it explains why unknown subtypes fall through to silence. |
-| `internal/streamsup/parser.go:391-448` | `emitBackgroundTaskStarted` — the function to mirror. Take: the top-level-`line` decode argument, the undecodable path's content-free Debug + `return true`, the `bound` closure, the sequential-statement ordering rationale. |
-| `internal/streamsup/parser.go:450-467` | `truncateField` — reused as-is. Note the `<=` boundary and the **empty** replacement in `strings.ToValidUTF8` (a mid-rune cut *deletes* the partial rune, so a cut value can land 1–3 bytes under the cap). Its doc's "the scrub is a no-op on the untruncated path" claim needs a correction — see § Truncation semantics. |
-| `internal/turnevent/event.go:74-125` | `BackgroundTaskStarted` — the doc structure to mirror (name rationale, the deliberate-drops list, the bounded-at-construction paragraph) and `TruncatedFields`' contract. |
-| `internal/turnevent/event.go:172-206` | `Unrecognized`'s doc and struct. The load-bearing sentence is at `:191-193` — *"Raw is a plain string, not `json.RawMessage`, because the producer truncates it at construction: a truncated blob is no longer valid JSON, so typing it as raw JSON would be a lie."* This is the precedent that settles `Patch`'s type. |
-| `internal/turnevent/event.go:23-30, 216-236` | The `Event` interface doc (lists the variants — needs the new name) and the two marker blocks (`isTurnEvent()` + `_ Event = …`). |
-| `internal/streamsup/capture_test.go` (whole file, 80 lines) | `capturedSystemLine(t, subtype)` — **reuse, do not write a second reader.** Its doc already names #1382 as an intended caller. |
-| `internal/streamsup/parser_test.go:498-541` | `TestParser_IgnoredLineTypesStaySilent` — the silence table. Line 532's `task_updated` row is deleted here and the comment at 529-531 rewritten. See § Comment obligations. |
-| `internal/streamsup/parser_test.go:543-587` | `taskStartedCapCheat` (literal cap fixtures — follow the rule), `taskStartedLineFixture`, `taskStartedEvent`. The new fixtures mirror these. `taskFieldIDCapFixture` (256) is reused, not redeclared. |
-| `internal/streamsup/parser_test.go:589-672` | `TestParser_TaskStartedMapsFromCapture` — the derive-don't-pin rule and, critically, the **reflection drop sweep with the `swept` guard** at 649-671. This ticket inherits that mechanism. |
-| `internal/streamsup/parser_test.go:674-828` | `TestParser_TaskStartedFieldCaps` — the cap table's row shape, the declaration-order row, the exactly-at-cap row, the mid-rune subtest. |
-| `internal/streamsup/parser_test.go:830-~920` | `TestParser_TaskStartedDropIsLoggedContentFree` — the `logRecorder` sweep over every log record, driven on both the success and the decode-failure path. Mirror it. |
-| `internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json` | The capture. The one `task_updated` record is at `dropped_lines[15]`. Do not read it by hand-copying the payload into a fixture — go through `capturedSystemLine`. |
-| `docs/knowledge/codebase/1380.md` | The predecessor's decisions, especially the two deliberate key drops and why the drop proof is a reflection sweep. |
-
-*Codegraph note:* `codegraph_context` returned only `Parser` and `emitSystemSubtype` for this task — the #1380 symbols (`emitBackgroundTaskStarted`, `systemTaskStartedLine`, `truncateField`) merged hours ago and are not yet in the index. The table above was completed by reading. Do not conclude from a thin codegraph result that those symbols are absent.
-
----
-
 ## Context
 
 `internal/streamsup`'s parser drops every `system` line through `ignoredLineTypes`. #1380 changed that for one subtype: it added a subtype match *inside* the drop branch, mapped `system/task_started` to `turnevent.BackgroundTaskStarted`, and bounded every claude-derived string at construction. Two mechanisms landed with it — subtype dispatch, and a construction-time cap — and both siblings ride them.

@@ -11,52 +11,6 @@ additive seams that compose with #1087's existing `Runner.Stdin()` and `Config.S
 no `<uuid>.jsonl` to watch, so there is structurally no bind race (the #528/#996/#989 family the
 stream-json path exists to kill). AC4 is a property of *what this slice does not do*.
 
-## Files to read first
-
-- `internal/streamsup/runner.go:169-182` — **`Stdin() io.Writer` seam.** Returns the held-open
-  stdin write end, or untyped-nil when no child is live. This slice's `WriteTurn` writes here; the
-  untyped-nil return is what lets `WriteTurn`'s `w == nil` check work without a typed-nil gotcha.
-- `internal/streamsup/runner.go:86-90` — **`Config.Stdout io.Writer` seam.** The child-stdout sink
-  #1087 left for "the turnevent parser to plug into." This slice's `Parser` is that `io.Writer`; the
-  caller sets `Config.Stdout = parser`.
-- `internal/agentrun/streamrunner/runner.go:92-109,254-272` — `userTurn`/`userTurnMessage`/
-  `userTurnContentText` envelope types + `marshalEnvelope`. **Mirror this shape verbatim** for the
-  send half. The one divergence is already handled upstream: streamrunner closes stdin after the
-  write; here we never close (the `io.Writer` return type structurally forbids it).
-- `internal/agentrun/streamrunner/watchdog.go:65-144` — `streamParser.Write`/`feed`: the
-  byte-buffer + `bytes.IndexByte('\n')` line-splitter + `maxBuf` partial-line cap. **Mirror the
-  buffering/splitting/cap mechanics.** Divergences: (a) no passthrough `dst` — streamsup's parser is
-  the *terminal* stdout consumer, not a tee; (b) no watchdog `awaiting`/`sawResult` state — that
-  belongs to #1089; (c) no mutex needed (see Concurrency).
-- `internal/turnbridge/mapper.go:20-188` — **the content-extraction logic to mirror**: assistant
-  `text`→TextChunk, `thinking`→ThoughtChunk, `tool_use`→ToolStart, `tool_result`→ToolUpdate,
-  end-of-turn→TurnEnd; plus `toolKind`/`toolStatus`/`toolResultContent`/`toolResultText`/`rawInput`.
-  Divergences below (§ Receive half): source is our own decoded JSON (not `tuidriver.JSONLEntry`, so
-  no `ParseToolUse`/`ParseToolResult` re-parse), and one assistant message may carry multiple content
-  blocks. Duplication is deliberate and ticket-sanctioned ("mirror `turnbridge/mapper.go`") —
-  `mapper.go`'s helpers are unexported and keyed on tui-driver types, so they cannot be imported, and
-  importing tui-driver into `streamsup` would recouple the clean stream-json package to the PTY
-  substrate. Do not refactor a shared package.
-- `internal/turnevent/event.go:23-103` — the sealed `Event` sum type + the five variants the parser
-  emits (`TextChunk`, `ThoughtChunk`, `ToolStart`, `ToolUpdate`, `TurnEnd`). `Stall` is not emitted
-  here (it's a screen signal, #1089-adjacent).
-- `internal/turnevent/taxonomy.go:9-43` — `ToolKind`/`ToolStatus`/`TurnEndReason` enums the mapping
-  targets.
-- `internal/turnevent/content.go` — `ToolContent`/`TextContent` for `ToolUpdate.Content`.
-- `internal/streamsup/helper_test.go:22-79` — the `TestMain` env-dispatch fake-child harness (#1087,
-  keyed by `GO_STREAMSUP_HELPER_MODE`). Add a `stream_json` mode here (§ Testing). This is the
-  harness shape to grow — **not** streamrunner's `-test.run …--` trick (breaks on the runner's
-  fixed leading flags; see codebase/1087.md § "TestMain-dispatch fake-child harness").
-- `docs/specs/architecture/1087-streamsup-child-lifecycle.md` § "Open questions" — the two seams this
-  slice consumes and the explicit "if #1088 prefers streamsup to own the parser wiring… that is a
-  #1088 decision" hand-off. This spec decides: the **caller** supplies the parser as `Config.Stdout`;
-  `runner.go` stays untouched.
-- QMD `second-brain` → `Streamrunner Interactive - Spike Findings` (T1, #1075) § 1 — the live-verified
-  parser taxonomy: **per-turn `system` init** (not session-open), **session id constant across
-  turns**, **turn ends on `result`**, tolerate `system/thinking_tokens`, `system/status`,
-  `rate_limit_event`. § 2 — interrupt yields `result` subtype `error_during_execution` (T4/#1089
-  concern, reason-refinement deferred here).
-
 ## Context
 
 #1087 stood up the lifecycle skeleton: a long-lived headless claude spawned with

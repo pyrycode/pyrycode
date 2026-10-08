@@ -1,14 +1,5 @@
 # Spec: Fixture-walk regression test for permission-protocol-spike null findings (#418)
 
-## Files to read first
-
-- `internal/e2e/realclaude/permission_protocol_spike_test.go` — the spike that produced the fixtures. Build tag, package, fixture-record shape, fixture filename pattern.
-- `internal/e2e/realclaude/testdata/permission_protocol_v2.1.143_default.json:1-377` — one full fixture so the parse shape is concrete (top-level keys; `stdout_events[0]` = `system/init` with `tools`, `permissionMode`; trailing `stdout_events[N-1]` = `result/success` with `permission_denials`).
-- `internal/e2e/realclaude/fixtures_test.go:1-100` — package conventions: build tag header, table-driven test layout, `t.Fatalf` patterns, no testify.
-- `internal/e2e/realclaude/allowed_tools_enforcement_test.go:75-94` — pattern for parsing only the JSON keys we need into a narrow struct (mirrors `selfcheck` style). The regression test uses the same minimal-struct technique.
-- `docs/knowledge/features/permission-protocol-spike.md:55-75` — the four null findings being pinned. Findings 1-3 map 1:1 to AC#2-#4-#5; finding 4 is the "init.tools is the full registry" observation that AC#3 leans on (Bash present).
-- `Makefile` § `e2e-realclaude` — confirms the build-tag gate is what excludes the new test from `make check`.
-
 ## Context
 
 #383 captured six per-mode fixtures at `claude v2.1.143` to document that `--permission-prompt-tool stdio` does not emit any permission-gate event and `--allowed-tools` is not enforced under that argv. The spike test PASSES on rerun regardless of whether the protocol still behaves that way — it pins the on-disk artefact, not its shape. If a future `claude` release starts emitting permission events on stdio, the spike-runner regenerates fixtures per the manual matrix-sweep discipline, the file contents change, no test fails, and the mobile-relay design implication (documented in `features/permission-protocol-spike.md`) silently flips.

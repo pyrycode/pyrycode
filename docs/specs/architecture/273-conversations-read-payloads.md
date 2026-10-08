@@ -6,15 +6,6 @@ Phase 3 Track C — the conversations-read slice of the v1 payload catalog. The 
 
 Shapes are fixed verbatim by `docs/protocol-mobile.md` § `list_conversations` and § `conversations`. The example payloads in those subsections are this ticket's golden fixtures, end of story. Pure DTOs: no I/O, no methods, no constructors.
 
-## Files to read first
-
-- `docs/protocol-mobile.md:331-369` — `list_conversations` (empty payload) and `conversations` (array of summaries with `name: null` on one row and a string on another) subsections. Both example envelopes are copied verbatim into testdata. Read first; everything else is plumbing.
-- `internal/protocol/envelope.go:11-30` — package doc + `Envelope` struct. The new file lives in the same package and mirrors this file's tone (struct-only, no methods, doc comments that point at the spec).
-- `internal/protocol/codes.go:48-50` — `TypeListConversations` and `TypeConversations` constants already declared. Use these in the tests (`env.Type == TypeListConversations` / `TypeConversations`), do **not** hardcode the strings.
-- `internal/protocol/push.go:1-19` — closest sibling DTO (just merged via #275). Same package; same shape constraints (struct + json tags only). Mirror its doc-comment style: lead with what the frame is, cite the spec section, note any non-obvious wire-type choice.
-- `internal/protocol/push_test.go:9-41` — golden round-trip test mirror. The new test file in the same package reuses `canonical` and `readFixture` (defined in `envelope_test.go:11-27`) without imports.
-- `internal/protocol/testdata/register_push_token.json` and `testdata/envelope_full.json` — formatting reference: single line, compact, no extraneous whitespace; `os.ReadFile` preserves the trailing newline byte if present, which `json.Compact` strips, so byte-equality is on the *compacted* form (already handled by the `canonical` helper).
-
 ## Design
 
 ### Production code

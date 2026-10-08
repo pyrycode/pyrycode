@@ -1,21 +1,5 @@
 # Spec — Cancel a removed session's lifecycle goroutine on `Pool.Remove` (#775)
 
-## Files to read first
-
-- `internal/sessions/pool.go:613-643` — `Pool.Remove`: the stale lifecycle-after-Remove comment (`613-617`) and the delete→save→dispose→Evict body. **This is where the close-on-remove signal is fired, and the comment to rewrite.**
-- `internal/sessions/session.go:269-324` — `Session.Run`: the active↔evicted loop. The `stateEvicted` branch gains the removal check.
-- `internal/sessions/session.go:412-422` — `runEvicted`: the park on `{ctx, activateCh}`. Gains the `removedCh` select case.
-- `internal/sessions/session.go:333-410` — `runActive`: read to confirm it is **left unchanged** (why: `Evict` already drives active→evicted deterministically; see Concurrency model).
-- `internal/sessions/session.go:64-97` — `Session` struct: where the new `removedCh` field lands, next to `activateCh`/`evictCh`. Note the lcMu-guarded swap-channels vs. the new write-once channel distinction.
-- `internal/sessions/session.go:230-257` — `Session.Evict`: the primitive `Remove` already calls; confirms evictedCh close is the unblock signal that must not be short-circuited.
-- `internal/sessions/pool.go:423-436` — bootstrap `Session` literal (construction site #1): add `removedCh` init.
-- `internal/sessions/pool.go:1056-1072` — `buildSession` `Session` literal (construction site #2): add `removedCh` init.
-- `internal/sessions/pool.go:887-906` — `supervise` + `g.Go(sess.Run(gctx))`: confirms every `Run` executes under the pool's **shared** errgroup ctx (`gctx`). The removed `Run` MUST return `nil`, never `ctx.Err()`.
-- `internal/sessions/session.go:281-295` — the non-fatal-persist warning block: the canonical statement of "returning an error here tears down every session + the relay leg." The removal path must respect the same rule.
-- `internal/sessions/pool_remove_test.go:1-75` + `internal/sessions/pool_create_test.go:54-81` — `runPoolInBackground` helper and existing Remove-test scaffolding to reuse.
-- `internal/sessions/session_test.go:149` — `pollUntil(t, timeout, fn)` helper (already in the test package) for the poll-until-settle in the leak test.
-- `internal/relay/v2session_test.go:2091-2137` — reference goroutine-leak test shape (`before := runtime.NumGoroutine()` … `runtime.GC()` … `after`); and `internal/e2e/internal/fakerelay/fakerelay_test.go:334-379` — baseline + poll-until-`≤baseline+jitter` shape.
-
 ## Context
 
 `Pool.Remove` deletes the session's map entry, persists, and calls `sess.Evict(ctx)` to terminate the child. But the session's lifecycle goroutine — the body of `Session.Run` — then loops into `runEvicted` and parks on `activateCh` / `ctx.Done()`. The session is no longer reachable via `Pool.sessions`, so nothing can ever signal `activateCh`, and `ctx` here is the pool's **shared** errgroup context (`gctx`), which cancels only at full pool shutdown. The goroutine and everything it captures (`*Session`, `*supervisor.Supervisor`, `*supervisor.Bridge`, logger) therefore leak for the daemon's lifetime — one orphan per create+remove cycle.

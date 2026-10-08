@@ -3,25 +3,6 @@
 **Size:** s (re-counted against this spec in § Size re-check — test-only, one file, no production change)
 **Blocker:** #1748, merged at `7f5bef9`; this slice is the per-class sweep its header defers to.
 
-## Files to read first
-
-Read these before writing anything. Every fact this spec asserts was re-measured against them at `2c9dddc`.
-
-- `internal/e2e/realclaude/initialize_control_writer_test.go` → `TestInitControlFixture_ScanRefusesAPlantedCredential` — **the exemplar.** Its doc comment states the resolution this ticket inherits (marshal the record, call `scan` directly, assert on `hits`), its two vacuity controls, and the "ONE planted class here, deliberately" hand-off to this ticket. Copy its shape, not its scope.
-- `internal/e2e/realclaude/initialize_control_writer_test.go` → `initControlPlantedPath` — the existing `/Users/…` plant. **This ticket reuses it verbatim as the `users-path-prefix` row's value**; do not mint a second one.
-- `internal/e2e/realclaude/initialize_control_writer_test.go` → `scanInitControlFixture` — the writer step whose refusal this table stands in for. Read its doc comment for the two rules that bind every line added to this file: never print a needle value, and **never format a `dropcapScanner`**.
-- `internal/e2e/realclaude/dropped_line_capture_test.go` → `newDropcapScanner` — the constructor this table's builder mirrors **minus its ambient reads**. It is the definition of "the classes the scanner arms", and it is banned by name in the file this table lands in.
-- `internal/e2e/realclaude/dropped_line_capture_test.go` → `dropcapFixedNeedles` — the five fixed classes and their literals, appended wholesale by the builder.
-- `internal/e2e/realclaude/dropped_line_capture_test.go` → `addDynamic`, `addDynamicPath`, `dropcapPathSpellings` — how a dynamic class is armed, and how one path becomes several needles (spelling + slug + long segments).
-- `internal/e2e/realclaude/dropped_line_capture_test.go` → `scan`, `applied`, `dropcapMinNeedle` — the two return values this table asserts over, and the 16-byte minimum that decides whether a row is real or vacuous.
-- `internal/e2e/realclaude/dropped_line_capture_test.go` → `dropcapContains` — the membership helper AC 1 asserts with.
-- `internal/e2e/realclaude/dropped_line_capture_test.go` → `TestDropcapRedactionAndDenyScan`, subtest *"the deny-scan sees a slug-mangled path a slash-bearing needle cannot"* — the live precedent for arming a path class on a bare `dropcapScanner{}` from a synthetic value. Two lines, and it is the whole builder pattern.
-- `internal/e2e/realclaude/initialize_control_record_test.go` → `initControlFullRecord` — the base record every row plants into. Note it is **path-free**, which is what makes the clean-record control reachable rather than red on arrival.
-- `internal/e2e/realclaude/initialize_control_redaction_test.go` → `initControlTempHomeValue`, `initControlOperatorHomeValue`, `initControlWorkdirValue`, `initControlTempDirValue` — the family's existing synthetic path constants and their byte lengths. Three of the four are usable as-is; `initControlTempDirValue` is 14 bytes and must not be used as a needle.
-- `internal/e2e/realclaude/initialize_control_probe_test.go` → `TestInitControlScanApplied_RecordsAnArmedNothingClassForAnAbsentPath` — the nearest prior art for asserting over `applied()`, including the present-but-false vs absent-entirely split into two messages. AC 2 follows it.
-- `internal/e2e/realclaude/offline_exec_ban_test.go` → `finOfflineExecBans`, entry `"initialize_control_writer_test.go"` — the shipped enforcement this table's file placement rests on. Read the comment block above it; #1748 added `newDropcapScanner` and `realHome` there for exactly this reason.
-- `docs/knowledge/features/` — nothing in this area is a deliverable here. The documentation phase owns those files.
-
 ## Context
 
 #1748 put a deny-scan on the `initialize` capture's write path: `scanInitControlFixture` marshals the record, scans the bytes, and refuses the write when any armed class hits. It shipped with **one** planted row behind it — a `/Users/…` path in `stderr_capture` — and its own header says so out loud, naming this ticket as the sweep.

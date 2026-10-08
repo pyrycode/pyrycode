@@ -6,23 +6,6 @@
 
 ---
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/background_trigger_probe_test.go:663-715` | `holdProbeFIFO` — full body. It **creates** the FIFO (`syscall.Mkfifo(path, 0o600)`), holds the write end in a goroutine, and returns a rendezvous channel closed the instant a reader opens. Release is its own registered `t.Cleanup`; the write end never leaves the helper. Note the cleanup's `default:` arm (no reader ever arrived) — it opens the read end non-blockingly to unpark the goroutine. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:1113-1173` | `TestProbeFIFOHold_HoldsReaderUntilCleanupRelease` — the offline shape to mirror for AC4: reader-exit assertion registered **before** `holdProbeFIFO` so `t.Cleanup`'s LIFO puts it after the release; real `cat`; rendezvous wait; still-blocked assertion. Also read its doc comment — it names why a kill-the-reader safety net after `holdProbeFIFO` would make the check vacuous. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:104-148` | The three const blocks. Per-file distinct consts is the package convention (`probeFIFOName`, `probeHeldCommandName`, `probeFIFOReleaseDeadline`, `probeEnableEnv`). Your file gets its own, none reused except `probeFIFOReleaseDeadline` is **not** yours to reuse — declare your own deadline const. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:266-290` | The `probeFiredBackground` / `probeDidNotFire` / `probeCommandNeverRan` const block and `probeProc` — the package's outcome idiom: bare untyped `string` consts in kebab-case, plus a struct with JSON tags for evidence. Match it. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:1-60` | The file-header comment convention for this package: mechanism diagram, what is being probed, what is not load-bearing. Your file needs one in the same register. |
-| `internal/e2e/realclaude/fixtures.go:96-130` | `WithWorktreeAuthenticated` — `t.Skipf`s without `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`. **Do not call it.** Read it only to confirm it is the skip source AC5 forbids. |
-| `internal/e2e/realclaude/fixtures_test.go:348-355` | `TestMain` — branches only on `GO_TEST_HELPER_PROCESS`, then `m.Run()`. It does **not** gate credentials, which is what makes AC5's zero-SKIP run achievable. |
-| `CODING-STYLE.md` § Error Handling, § Testing | `errors.Is` / `errors.As` for matching (never string compare); table-driven tests; `t.Helper()` on shared assertions; stdlib `testing` only. |
-
-Everything else in the package is out of scope for this ticket.
-
----
-
 ## Context
 
 Several probes in `internal/e2e/realclaude` stage a live claude turn around a command the test holds open through a FIFO. Holding the write end proves the command could not have **finished**; it does not prove the command is **alive**. A killed command leaves the same held write end and records identically.

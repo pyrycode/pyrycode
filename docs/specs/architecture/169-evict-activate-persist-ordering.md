@@ -4,20 +4,6 @@
 **Size:** S
 **Files:** `internal/sessions/session.go` (production), one new test file in `internal/sessions/` (regression).
 
-## Files to read first
-
-- `internal/sessions/session.go:65-98` — `Session` struct fields, in particular `lcMu`, `lcState`, `activeCh`, `evictedCh`, `activateCh`, `evictCh`. The fix only manipulates these.
-- `internal/sessions/session.go:175-228` — current `Activate` / `Evict` bodies. These get rewritten.
-- `internal/sessions/session.go:346-374` — current `transitionTo` body, including the lock-order comment. This gets rewritten.
-- `internal/sessions/session.go:281-344` — `runActive` / `runEvicted`. Read for context: the lifecycle goroutine signals are unaffected, but the design relies on the loop being the *sole* caller of `transitionTo`.
-- `internal/sessions/pool.go:316-325` — bootstrap channel initialisation in `New` (`activeCh`/`evictedCh` start as `closedChan()` for the matching state). The fix preserves this exactly.
-- `internal/sessions/pool.go:849-854` — same channel initialisation in `Create` (sessions are created in `stateEvicted` with `evictedCh = closedChan()`, `activeCh = make`).
-- `internal/sessions/pool.go:963-1002` — `saveLocked` and `persist`. `saveLocked` reads each session's `lcState` / `lastActiveAt` under that session's `lcMu`. The lock-order edge `Pool.mu (held by caller) → Session.lcMu` lives here.
-- `internal/sessions/session_test.go:155-310` — existing lifecycle tests (`TestSession_IdleEvictionFires`, `TestSession_ActivateRespawns`, `TestSession_ActivateNoOpWhenActive`, `TestSession_ActivateCtxCancellation`). The regression test follows their shape (uses `helperPoolPersistent` + `runPoolInBackground` from `pool_create_test.go:59-83`, asserts via `loadRegistry`).
-- `internal/sessions/pool_create_test.go:59-83` — `runPoolInBackground` helper used by the regression test.
-- `internal/sessions/session_test.go:143` — `pollUntil` helper.
-- `docs/lessons.md` — scan for entries on lifecycle / lcMu / persist; the current code's lock-order rule is documented at `session.go:347-349` and must continue to hold.
-
 ## Context
 
 `internal/sessions/session.go:transitionTo` flips `lcState` and closes the per-direction "transition complete" channel (`evictedCh` on evict, `activeCh` on activate) under `lcMu`, then **releases `lcMu` and calls `s.pool.persist()` after the close**:

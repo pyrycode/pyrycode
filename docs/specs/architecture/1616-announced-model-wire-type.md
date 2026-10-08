@@ -3,27 +3,6 @@
 **Size:** S (confirmed against PO's `size:s`; see § Size check).
 **Shape:** wire vocabulary only. Nothing emits the frame — that is #1617.
 
-## Files to read first
-
-Read these before writing anything. Every entry names a symbol; resolve it with
-`codegraph_search` / `codegraph_node` rather than opening at a line.
-
-| File | Symbol | What to extract |
-|---|---|---|
-| `internal/turnevent/event.go` | `ModelAnnounced` | The semantics this payload mirrors. Its field comments are the **single source of truth** — the payload points at them, it does not restate them. |
-| `internal/protocol/interactive.go` | `RateLimitedPayload` | The nearest analogue's doc-comment shape: what it states, what it delegates, where its SECURITY paragraph draws the line. |
-| `internal/protocol/interactive.go` | `UnrecognizedMessagePayload` | The `truncated bool` precedent — why a single bounded string gets a bool, not `truncated_fields`. |
-| `internal/protocol/interactive.go` | `ThinkingProgressPayload` | The "points at `turnevent`'s field comments rather than restating them" manner the Technical Notes ask for. |
-| `internal/protocol/codes.go` | `TypeRateLimited` | The const-block form: one grouped block, a rationale comment above it, the `MUST NOT be added to inboundAppTypeSet` paragraph. |
-| `internal/protocol/compat_test.go` | `TestIsKnownAppType`, `v2OnlyTypes`, `TestTypeConstants_V1V2Partition` | Three of the four registration sites. Each takes one entry. |
-| `cmd/pyry/relay_guard_test.go` | `excludedTypes`, `TestEveryInboundV2TypeHasHandler` | The fourth site. Assertion #3 enumerates every `Type*` constant in `codes.go`, so the entry is mandatory the moment the constant exists. |
-| `internal/protocol/interactive_test.go` | `TestRateLimitedPayload_RoundTrip`, `TestRateLimitedPayload_ZeroValue_RoundTrip`, `TestRateLimitedType_IsNotClaudesVocabulary` | The three-test template this ticket copies, including why the zero-value fixture exists for the encoding rather than for a scenario. |
-| `internal/protocol/interactive_test.go` | `roundTripEnvelope` | Reuse; do not write a new round-trip helper. |
-| `internal/protocol/envelope_test.go` | `readFixture`, `canonical` | Reuse for fixture loading and for the `null` / explicit-zero byte assertions. |
-| `internal/streamsup/parser.go` | `maxModelField` | The producer's 256-byte cap **and its already-written justification + envelope arithmetic**. Reuse the reasoning by reference; do not re-derive it. |
-| `internal/turnbridge/outbound.go` | `MapEvent` | Read the `default` arm only, to confirm it stays untouched. This ticket adds no case here. |
-| `docs/protocol-mobile.md` | § `rate_limited` | The section template: field table, "Like every frame in this section…", the declared-vs-emitted paragraph, the SECURITY paragraph. |
-
 ## Context
 
 Since #1600 the daemon parses claude's `system` / `init` line into

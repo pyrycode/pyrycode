@@ -2,20 +2,6 @@
 
 **Ticket:** [#958](https://github.com/pyrycode/pyrycode/issues/958) · **Size:** XS (architect override S→XS — the diagnosed fix is a single consumer-side gate) · **Security-sensitive:** No (label absent; harness-timing fix, no new trust surface — see § Security posture)
 
-## Files to read first
-
-Turn-1 reading list. Read these before touching anything.
-
-- `internal/e2e/internal/fakeclaude/main.go:423-448` — `emitStructuredJSONLIfTriggered`, **the consumer to fix**. Note the fatal sequence: `os.ReadFile` → `f.Write(data)` → `f.Sync()` → **`os.Remove(path)`**. A zero-byte read still reaches the `os.Remove`, destroying the fixture.
-- `internal/e2e/internal/fakeclaude/main.go:394-400` — the single poll-loop call site (~50 ms `pollInterval`). Context only; unchanged.
-- `internal/e2e/relay_two_phone_structured_test.go:279-310` — the producer side: a 250 ms **kicker** goroutine and a once-only **`dropFull`**, both `os.WriteFile(jsonlTrigger, …)`. `dropFull` is the load-bearing write whose loss is the observed flake.
-- `internal/e2e/relay_two_phone_structured_test.go:319-371` — `failVacuous` (the **exact observed error**), the `required`/`structuredTypes` sets, and the "A observed before B's negative" ordering. **All must stay byte-identical** (AC: security oracle preserved).
-- `internal/e2e/relay_v2_interrupt_test.go:205-219` — the interrupt test's kicker: **same** `os.WriteFile` producer, **same** consumer. Confirms one consumer gate fixes both tests.
-- `internal/e2e/internal/fakeclaude/esc_detect_test.go` — the **untagged** unit-test idiom (`package main`, no `//go:build`), runs in the default `go test ./...` gate. The new gate test mirrors this.
-- `internal/e2e/internal/fakeclaude/main_test.go:1` — note it is `//go:build e2e`-tagged (it builds+runs the binary). The new test is **not** in this file; it calls the function in-process, so it stays untagged.
-- `docs/knowledge/codebase/642.md` § "Code-review NITs" (lines ~219-227) — the deferred NIT that predicted this exact flake ("`os.Rename`-from-temp … if CI ever shows it"). CI has now shown it.
-- `docs/knowledge/codebase/956.md` — the direct precedent in the same race family: the `waitForRotatedJSONL` consumer non-empty (`Size()>0`) poll gate over a write-then-rename producer. Mirror its shape.
-
 ## Context
 
 `TestTwoPhoneStructured_InteractiveReceivesStream` and `TestRelayV2_InterruptStopsRunningTurn` intermittently fail under the full-suite `-tags e2e -race` leg of `make check` (observed on QA of PR #957, 2026-07-15). Both drive `fakeclaude` through the **same** JSONL-trigger consumer, so they are two witnesses of one root cause. Isolated re-runs pass; only full-suite `-race` contention surfaces it. It rots undetected between full-suite runs because neither CI's untagged gates nor QA's default gates run `-tags e2e`.

@@ -6,33 +6,6 @@
 
 ---
 
-## Files to read first
-
-Turn-1 reading list. Each entry says what to extract; read the range, not the file.
-
-| Path | What to extract |
-|---|---|
-| `internal/streamsup/parser.go:38-83` | `ignoredLineTypes` + its 2026-07-27 measurement comment. This is **correction site 1** and the canonical note. Read the whole comment — the send-vs-draw argument replaces one paragraph of it, not the block. |
-| `internal/streamsup/parser.go:245-283` | `consumeLine`. The `default:` arm's `ignoredLineTypes` branch (`:269-278`) is the **only** edit site in the dispatch. `:281`'s `emitUnrecognized` is the top-level alarm AC5 protects. **Correction site 2** is the inline comment at `:270-275`. |
-| `internal/streamsup/parser.go:285-316` | `emitUnrecognized` + `truncateRaw`. The exact precedent this ticket follows: cap **at construction**, content-free Debug log, `strings.ToValidUTF8` after a byte-slice cut. Mirror both. |
-| `internal/streamsup/parser.go:21-36` | `maxUnrecognizedRaw`'s doc comment. The house style for justifying a cap **number** (envelope arithmetic + "more than a human reads"). The two new caps are documented the same way. |
-| `internal/streamsup/parser.go:188-197` | `streamLine`. Declares `Type`, `Subtype`, `Message` only. Do **not** widen it — it is the line-level segmentation struct. The payload gets its own shape. |
-| `internal/turnevent/event.go:99-143` | `UnrecognizedSite` + `Unrecognized`. The variant + doc-comment style to match. `Unrecognized`'s doc at `:124-127` is **correction site 4**. |
-| `internal/turnevent/event.go:24-30, 152-174` | `Event` interface doc + the `isTurnEvent()` / `_ Event =` blocks. A new variant adds one line to each of the three lists. |
-| `internal/streamsup/parser_test.go:36-45` | `collectEvents` — the one-line-in, events-out helper every new test row uses. |
-| `internal/streamsup/parser_test.go:498-520` | `TestParser_IgnoredLineTypesStaySilent` — the table AC3/AC4 **extend** rather than rebuild. Its in-body comment at `:509-511` is **correction site 3**. |
-| `internal/streamsup/parser_test.go:415-496` | `TestParser_UnrecognizedTruncation` — the shape of a cap test in this package, including the mid-rune / valid-UTF-8 assertion. AC2's table mirrors it. |
-| `internal/streamsup/parser_test.go:522-576` | `logRecorder` + `withMessage` — reuse verbatim for the content-free-logging test. Already in the package; write no new recorder. |
-| `internal/streamsup/parser_test.go:621-632` | `TestParser_IgnoredLineTypesIsTheMeasuredSet` — the `reflect.DeepEqual` pin on `{system, rate_limit_event}`. It must stay **green and unedited**; that is the check that proves the design kept `system` on the list. |
-| `internal/streamsup/parser_test.go:22-34` | `harnessNudgeFixture`'s doc — the "a fixture built from the constant it validates asserts nothing" rule. Applies to the new cap tests: build over-cap fixtures from literals/arithmetic, never from the production constants. |
-| `internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json` | The capture. `dropped_lines` is an array of records; `payload` is a **JSON string holding the whole line**, `payload_encoding: "json-string"`. Top-level `is_capture`, `census`, `expected_absent` are what the reader asserts against. |
-| `docs/protocol-mobile.md:304` | The 65519-byte v2 application-envelope cap — the arithmetic the new cap numbers are justified against. (Verified 2026-08-07, not inherited.) |
-| `internal/turnbridge/outbound.go:129`, `internal/acpbridge/outbound.go:175`, `cmd/pyry/stream_turn_busy.go:160`, `cmd/pyry/interactive_turn_v2.go:240,435` | The five downstream type-switches. **Read only to confirm each has a `default:` arm — change none of them.** See § Downstream. |
-
-**Do not open** `internal/e2e/realclaude/*.go`. They carry `//go:build e2e_realclaude` (verified on all three files named in the ticket), so they do not compile under `make check` and nothing there goes red. Their staleness is #1379.
-
----
-
 ## Context
 
 `internal/streamsup/parser.go` drops every `system` line through `ignoredLineTypes`. That discards claude's background-task lifecycle, which is why #1240's symptom exists: `turn_end`/`end_turn` and state `idle` while a command claude started is provably alive, with nothing reaching a client that separates it from a genuine finish.

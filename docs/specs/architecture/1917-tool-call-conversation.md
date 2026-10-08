@@ -2,56 +2,6 @@
 
 **Size:** S · **One production file:** `cmd/pyry/stream_turn_busy.go`
 
-## Files to read first
-
-Read these before writing anything. The whole slice lives inside one type, and that
-type's doc comment carries invariants the design must not retire.
-
-- `cmd/pyry/stream_turn_busy.go` → the `turnBusyTracker` type comment — the
-  **THREE FEEDS** paragraph (what closes a turn) and the **SECURITY** paragraph
-  ("the key is never taken from the wire") are the two claims every change here
-  has to keep true.
-- `cmd/pyry/stream_turn_busy.go` → `observe` — where capture hooks in, and the
-  already-resolved `convID` it holds by the time it applies the mark.
-- `cmd/pyry/stream_turn_busy.go` → `setBusy` — the single mutation point this
-  slice widens. Its doc states why every feed funnels through one lock
-  acquisition; that argument is the load-bearing one below.
-- `cmd/pyry/stream_turn_busy.go` → `turnMarkFor` — the purity discipline the new
-  classifier copies: switch on the Go variant type, never on a field value.
-- `cmd/pyry/stream_turn_busy.go` → `Busy` — the signature-is-the-enforcement
-  posture the report mirrors, and the reason neither read carries a nil guard.
-- `cmd/pyry/stream_turn_busy.go` → `clearForSession`, `openForDelivery` — the two
-  non-tool feeds whose call sites gain a zero delta.
-- `cmd/pyry/stream_turn_busy_test.go` → `stubBusyResolve`, `requireWaitIdle`,
-  `testConvID` / `testConvIDB` usage in
-  `TestTurnBusyTracker_PerConversationIndependence` — the two-conversation
-  fixture shape to copy, cursor-free by design.
-- `cmd/pyry/stream_turn_busy_test.go` → `TestTurnBusyTracker_ImportsStayMinimal`
-  — **pins the production file's import set exactly.** This design adds no
-  import; if you find yourself needing one, the design has drifted.
-- `cmd/pyry/stream_turn_busy_test.go` → `exitLaneDrain` — the ready-made drain
-  fixture (cursor and gate on B, events for A) for the child-death criterion.
-- `cmd/pyry/stream_turn_drain_test.go` → `toolUseLine`, `toolRsltLine`,
-  `feedLines`, `waitDropKind`, `dropWatcher` — the stream-line fixtures already
-  carrying tool-call id `tu-1`, and the handler whose `recs` field forwards whole
-  records (what the no-logging criterion asserts against).
-- `cmd/pyry/interactive_turn_v2_test.go` → `discardLogger` — where that helper
-  actually lives.
-- `internal/turnevent/event.go` → `ToolStart`, `ToolUpdate` — the only two
-  variants carrying `ToolCallID`.
-- `internal/turnevent/taxonomy.go` → `ToolStatus` — the field the classifier
-  deliberately does **not** read.
-- `internal/streamsup/parser.go` → `emitUser`, `toolStatus` — the sole production
-  `ToolUpdate` emission site and the comment recording why it is always terminal.
-- `docs/knowledge/features/streamsup-package-per-conversation-turn-busy-track-session-teardown-clear.md`
-  — why `setBusy` became the shared mutator (#1202) and why the clear stays
-  session-keyed. Same reasoning drives the sweep's placement here.
-- `docs/knowledge/features/streamsup-package-per-conversation-turn-busy-track-exit-lane-on-the-turn-busy-fan.md`
-  — the child-death lane the third criterion rides.
-- `CODING-STYLE.md` § "Comments — Citing Other Code" — cite by symbol, never a
-  line, no range exemption. `make cite-guard` is diff-scoped and will fail the
-  branch otherwise.
-
 ## Context
 
 The delivery hold that #1911 needs must separate *waiting on a person* from

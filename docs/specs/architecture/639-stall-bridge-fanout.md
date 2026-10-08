@@ -8,25 +8,6 @@
 
 ---
 
-## Files to read first
-
-The developer's turn-1 data load. Every entry is on the existing turn-event path; the stall is an additive `case` at three already-built switch sites plus the two tests that currently assert the drop.
-
-- `internal/turnevent/event.go:72-78` — `turnevent.Stall struct{}` (child A). The internal variant you map *to*. Onset-only, no fields, no conversation identity.
-- `internal/protocol/interactive.go:79-89` — `protocol.StallPayload{ConversationID string}` + (`codes.go:105`) `TypeStall = "stall"` (child A). The wire form you map *to*. Carries `conversation_id` only — no `turn_id` (not turn-scoped), no clearing field (onset-only).
-- `internal/turnbridge/mapper.go:11-32` — `mapEvent`'s switch. `EventKindStallDetected` currently falls through `default: return nil, false` (the drop). **Add the case here.** The doc comment at lines 16-18 names "the stall marker" among the dropped kinds — **update it.**
-- `internal/turnbridge/outbound.go:49-97` — `MapEvent`'s type-switch. `turnevent.Stall` currently hits `default: return "", nil, false`. **Add the case here** returning `TypeStall` + `StallPayload`. Mirror the `TurnEnd` arm's shape (lines 87-92).
-- `cmd/pyry/interactive_turn_v2.go:80-129` — `Handle`'s type-switch (the consumer). `turnevent.Stall` currently hits `default` → debug-drop. **Add the case** — emit via `emitMapped`/`emit` with **no lifecycle mutation**. Also extend `eventKind` (lines 239-254) with a `stall` arm, and the `emitMapped` reachability comment (lines 173-176).
-- `cmd/pyry/interactive_turn_v2.go:196-235` — `emit()`: the single capability-gated fan-out point (`c.Interactive` gate + per-conn `Push`). The stall rides this unchanged. **Read it to see why no new dispatch logic is needed.**
-- `cmd/pyry/interactive_turn_stream_v2.go:45-81` — `startInteractiveTurnStreamV2`: producer→emitter wiring (already built). Confirms `OnEvent → emitter.Handle`. The comment at line 54 ("drives only the dropped stall arm, which the mapper discards anyway") becomes stale — **update it** (the stall is no longer discarded).
-- `internal/turnbridge/producer.go:95-115` — `drain`: `te, ok := mapEvent(ev)`; on `ok` invokes `OnEvent(te)`. Confirms a now-mapped stall reaches `Handle`. No change here.
-- `internal/turnbridge/mapper_test.go:143-167` — the drop-table. Line 154 `{name: "drop stall detected", …}` asserts `wantOK == false`. **Flip it** to `want: turnevent.Stall{}, wantOK: true` and rename; update the table's lead comment (lines 143-144) which lists "stall" among drops.
-- `internal/turnbridge/outbound_test.go:14-…` — `TestMapEventOutbound` table (`in / wantTyp / wantOK`). **Add a row** `turnevent.Stall{}` → `wantTyp: protocol.TypeStall, wantOK: true`. The `ThoughtChunk dropped` row (line 145) is the shape model for a payload-bearing assertion.
-- `internal/turnbridge/producer_test.go:92-102` — `TestDrain_NilOnEventIsNoop` sends a stall with `onEvent: nil`. **No change** — nil OnEvent drops regardless of mapping; verify it stays green.
-- `cmd/pyry/interactive_turn_v2_test.go:18-112` — emitter test harness: `fakeInteractiveBcast` (scripted `ActiveConns` + recorded `Push`), `recordedPush`, `pushTypes`, `pushesFor`, `turnStateValues`. **Reuse these** for the new stall tests; no new doubles needed.
-
----
-
 ## Context
 
 A stalled turn — claude gone quiet mid-turn, or the screen-parser degrading — is detected by tui-driver (`EventKindStallDetected`, shipped v1.3.0) and drained off `Session.Events()`, but **dropped at the daemon**: `mapEvent` maps only the robust JSONL-sourced kinds and explicitly discards the stall marker ("the internal model has no type for them"). The mobile UI already knows how to surface a stall (#373, which this ticket unblocks) and the data vocabulary landed in child A (#638). This slice is the **bridge wiring**: it un-drops the marker and threads it through all three bridge stages to the capability-gated push surface so the phone sees the stall instead of a silently-hanging session.

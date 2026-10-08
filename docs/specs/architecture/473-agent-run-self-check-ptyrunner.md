@@ -9,62 +9,6 @@ settings file with `allow=["Read"]` — against the ptyrunner spawn shape
 default`) instead of the streamrunner shape (claude `-p` with
 `--allowed-tools Read --dangerously-skip-permissions`).
 
-## Files to read first
-
-- `internal/agentrun/selfcheck/selfcheck.go:1-273` — the package being
-  rewritten. Preserves `Config` / `Result` / `ErrBashInvoked` /
-  `ErrTimeout` shapes verbatim; swaps the spawn body and the assembled
-  argv. The `bashInvokedInRaw` helper is unchanged.
-- `internal/agentrun/selfcheck/selfcheck_test.go:1-289` — the test
-  fixtures and `TestSelfCheckHelperProcess` re-exec pattern. Reuses
-  `passLine` / `bashLine` JSONL fixtures; replaces the
-  `selfCheckHelperWrapper` shell script with in-process mocking of the
-  four wired collaborators (`trustMark`, `settingsWrite`, `newSessionID`,
-  `ptyRun`).
-- `internal/agentrun/ptyrunner/runner.go:78-419` — the spawn surface the
-  rewrite delegates to. Required-field validation list (lines 209-247)
-  drives selfcheck's wiring: `SessionID`, `SettingsPath`, `SystemPrompt`,
-  `Model`, `Effort`, `MaxTurns`, `PromptBytes`, `Stdout`, `Stderr` are
-  all required.
-- `internal/agentrun/ptyrunner/runner.go:60-75` — the three structured
-  sentinels (`ErrTrustModalDetected`, `ErrMcpFailureBanner`,
-  `ErrNetworkFailure`) the rewrite propagates verbatim; the CLI maps
-  them as infrastructure errors.
-- `cmd/pyry/agent_run.go:288-322` — the production
-  `runAgentRunPty` composition (trust + settings + sessionID + ptyrunner)
-  the rewrite mirrors at smaller scale (no operator-supplied flags).
-- `cmd/pyry/agent_run_selfcheck.go:1-105` — the CLI wrapper. Update
-  `writeSelfCheckFailMessage` so the "What was tested" / "What to check"
-  prose matches the ptyrunner path (per-spawn deny-default settings JSON
-  + interactive PTY) instead of streamrunner (`-p` + `--allowed-tools`).
-  The PASS / INCONCLUSIVE branches keep the same shape.
-- `cmd/pyry/agent_run_selfcheck_test.go:107-138` — the `TestRun­
-  AgentRunSelfCheck_FAIL` forbidden-substring list. The
-  `permissions.defaultMode` / `.pyry-agent-run-settings.json` /
-  `per-spawn settings file` / `PTY` substrings are now ACCURATE
-  descriptors of what selfcheck exercises; the forbidden-list pin must
-  be inverted (turned into a required-substring pin) or removed.
-- `internal/agentrun/settings/settings.go:32-86` — `WriteSettings` signature
-  and tempfile cleanup contract; selfcheck calls with `allow=["Read"]`.
-- `internal/agentrun/trust/trust.go:28-46` — `MarkWorkdirTrusted` signature
-  and the realpath-return contract; selfcheck passes the result as
-  ptyrunner's `WorkDir`.
-- `internal/agentrun/streamjson/emitter.go:115-156` — `Emit` writes each
-  assistant event's raw JSONL verbatim followed by `\n` to the supplied
-  writer, then a `type:"result"` trailer on `Close`. The selfcheck's
-  `jsonl.Reader` consumer naturally filters the trailer via `ev.Kind !=
-  "assistant"`. No new parser needed.
-- `docs/specs/architecture/336-agent-run-self-check-deny-default.md` —
-  the original streamrunner-based design this rewrite supersedes.
-  Re-read for the empirical-contract framing (#329 spike); the rewrite
-  preserves the contract, swaps the verification path.
-- `docs/lessons.md` § "Test helpers across packages" — `/bin/sleep` or a
-  shell wrapper as a "fake claude" alternative when the test binary's
-  flag parser would reject ptyrunner's argv. Selfcheck tests do not need
-  this — the `ptyRun` seam mocks the entire spawn in-process — but the
-  pattern is referenced by the ptyrunner package's own tests if you need
-  to add a real-claude integration smoke later.
-
 ## Context
 
 The original selfcheck (#336, shipped early-May) was a security

@@ -3,20 +3,6 @@
 **Size:** XS (test-only, one file, no production change, no new exported symbol, no edit fan-out).
 **Security-sensitive:** No (test-harness synchronization; no product code, no trust or input surface).
 
-## Files to read first
-
-- `internal/streamsup/interface_test.go` → `TestRunner_LiveRestart` — the test being fixed. The entire change lives in this file. Extract the current control flow: `spawns` channel fed by `cfg.onSpawn`, two `select` waits on it, `r.Restart`, `cancel()`/`join()`, then a single `os.ReadFile(argvFile)` at the bottom feeding four argv assertions.
-- `internal/streamsup/interface_test.go` → `findEchoedLine` — the precedent for a single-caller test helper colocated in this file next to the test that uses it. The new wait helper follows the same placement and `t.Helper()` + `t.Fatalf` shape.
-- `internal/streamsup/helper_test.go` → `helperChild`, its `case "record_block"` arm — the child-side write order: argv append + `Sync` + `Close` **first**, `signal.Notify` **second**. This ordering is the mechanism, and it is what the discriminator overlay injects a delay ahead of. **Do not modify this file** (except transiently, via `-overlay`, for the discriminator runs).
-- `internal/streamsup/runner_test.go` → `waitForContains` — the package's existing bounded-poll idiom (deadline computed once, 10 ms tick, `t.Fatalf` naming the observable it never saw). The new helper mirrors this shape.
-- `internal/streamsup/runner_test.go` → `launchRecorder.waitLaunch` — the "*the timeout is a FAILURE BOUND, not a calibration*" doc-comment idiom. The new helper's deadline comment says the same thing, for the same reason.
-- `internal/streamsup/runner_test.go` → `TestRunner_ResumeIDStableAcrossRestart` — the **other** `GO_STREAMSUP_HELPER_ARGV_FILE` consumer. Extract why it is *not* exposed to this bug: it uses `crash` mode, whose children self-exit, so each argv write happens-before the child exit that triggers the next spawn. Its own inline comment states the ordering argument. No change there.
-- `internal/streamsup/runner_test.go` → `TestRunner_OnChildExit_FiresOnDeliberateRestart` — the test with the *identical* unsynchronized `onSpawn → Restart → onSpawn → cancel` shape. It asserts only exit counts, which stay caller-caused whether or not the child records argv. Confirm, then leave alone.
-- `internal/streamsup/runner.go` → `spawnAndWait` — read-only. Extract two facts: `r.cfg.onSpawn` fires immediately after `cmd.Start` returns (the child may not have executed a single line of Go yet), and `cmd.Cancel` is the SIGTERM sender wired to the iteration ctx. **This file must not change** (AC5).
-- `internal/streamsup/runner.go` → `Restart` — that it cancels the live iteration ctx, which is what fires `cmd.Cancel` and SIGTERMs the child.
-- `docs/lessons.md` § "Control socket dialability lags supervisor `Phase: running` — poll, don't single-shot, on post-restart status" — the house rule this fix instantiates: when a readiness signal is set by code that runs *before* the observable, poll the observable under a bounded deadline; do not lean on the readiness signal as a memory barrier.
-- `docs/specs/architecture/1118-acp-argv-poll-flake.md` — prior art, same class. Read for the shape *difference*: #1118 had a poll that was merely too tight and needed widening; here there is no poll at all, and the test does not merely fail to observe the write — it kills the child before the write can happen.
-
 ## Context
 
 `TestRunner_LiveRestart` fails ~10% of the time under full-suite `go test -race ./...`, on `main` and independent of PR #1588. It passes 20/20 in isolation. The ticket establishes the mechanism, and it is confirmed by reading `spawnAndWait`:

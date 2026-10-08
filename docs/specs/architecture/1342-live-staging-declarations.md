@@ -7,34 +7,6 @@
 
 ---
 
-## Files to read first
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/finding_staging_gate_test.go:299-309` | The identity arm: `IssuedCommand != StagedCommand \|\| StagedCommand == ""` → `stage-command-not-staged`. This is the byte equality every declaration here exists to satisfy. |
-| `internal/e2e/realclaude/finding_staging_gate_test.go:368-375` | `finOutcomeHoldCommand` — the `sh -c … ; exit 0` **stand-in**, and the recorded reason a fixture must not carry an operator filesystem path. Contrast target; never reuse as the staged literal. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:160-172` | `probeSystemPrompt` (reuse verbatim) and `probePrompt` — the backticked delimiter form this ticket follows. Note the sentence period falls **outside** the backticks. |
-| `internal/e2e/realclaude/background_trigger_probe_test.go:142-148` | `probeFIFOName = "probe-hold"`, `probeHeldCommandName = "cat"`. The second is spliced into this rig's command literal. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:1089-1113` | `reachRunnerPathFromEnv` — reads the ambient `os.Getenv("PYRY_USE_STREAMJSON")` **first** (`:1103`), delta overrides after. Returns the **full** reading `"ptyrunner (interactive TUI, the agent-run default)"`. |
-| `internal/e2e/realclaude/background_reach_probe_test.go:108-131` | `reachFIFOName` + the recorded both-directions collision reason (`:112-114`); `reachEnvDelta` (`:130`), the settled #1223 trigger. |
-| `internal/e2e/realclaude/finding_run_record_test.go:256-272` | `finRecordRunnerLabel` — truncates the reading at `" ("`. Compare through this, never the raw return against `"ptyrunner"`. |
-| `internal/e2e/realclaude/finding_run_record_test.go:432-439` | `finRecordEnvDelta()` — `PYRY_USE_STREAMJSON=0`, the func form, and the "operator's shell" reason for naming it explicitly. |
-| `internal/e2e/realclaude/finding_run_record_test.go:818-827` | The nearest precedent for the runner assertion. It argues ambient-independence in its failure message and **never sets the ambient**. Do not copy as-is — AC3 requires the hostile ambient. |
-| `internal/e2e/realclaude/finding_staging_fill_test.go:556-562` | The lengths-only failure-message form for captured-class strings. Copy this shape. |
-| `internal/e2e/realclaude/finding_staging_fill_test.go:80-100` | The no-JSON-tags rule at `finTranscriptBashCall` / `finTranscriptReading`, and its reason. |
-| `internal/e2e/realclaude/finding_staging_fill_test.go:252-264` | `finTranscriptFill` — the **second** byte-equality (`call.Command == staged`) that silently zeroes `TriggerFired` on a mismatched literal. |
-| `internal/e2e/realclaude/finding_live_pin_test.go:1-40` | The pure-file header idiom: what the file does, what it execs (nothing), the `go test -run` line, and the symbol-list discipline in place of an `exec.` grep. |
-| `internal/e2e/realclaude/finding_live_pin_test.go:216-234` | `finLivePinFIFOPath` — the synthetic-const fixture form and the splice-the-constant idiom (`finLivePinClaudeCommand` splices `tdnClaudeNeedle`). |
-| `internal/e2e/realclaude/interactive_background_idle_probe_test.go:445-459` | `bgIdlePrompt` — the abutting-period form **not** to follow, and its `run=%d` cache-buster (also not adopted). `bgIdleFIFOName` is at `:153`. |
-| `internal/e2e/realclaude/teardown_liveness_probe_test.go:146-166` | `tdnFIFOName` (`:150`), `tdnEnvDelta` (`:166`). |
-| `internal/e2e/realclaude/trail_run_rig_test.go:103` | `trailRigFIFOName = "trail-rig-subject"`. |
-| `internal/e2e/realclaude/finding_stage_held_group_test.go:148` | `finStageFIFOName = "fin-stage-held-subject"`. |
-| `internal/e2e/realclaude/fifo_reader_liveness_test.go:99` | `fifoLiveFIFOName = "liveness-hold"`. |
-| `internal/e2e/realclaude/fixtures_test.go:348-354` | `TestMain` branches only on `GO_TEST_HELPER_PROCESS`. Nothing gates this package — a regression here is red on a credential-free machine. |
-| `internal/e2e/realclaude/trailer_admissibility_test.go:206` | `trailDetail` and its `reachMaxCommandBytes` cap. Cited only to say this file formats **no** `Detail`. |
-
----
-
 ## Size check
 
 **Verdict: S, no split.** Additive single new test file; **zero** existing symbols change, so the edit fan-out is zero — the eight FIFO constants and the four shipped helpers are *read* by the new test, never modified.

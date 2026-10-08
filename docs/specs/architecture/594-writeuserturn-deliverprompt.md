@@ -4,24 +4,6 @@
 **Size:** S (3 production files, 5 trivial ctx-threading sites, no edit fan-out, no branch overlap).
 **Label:** `security-sensitive` — security-review pass appended at the end.
 
-## Files to read first
-
-Read these before touching code; they are the turn-1 data load.
-
-- `internal/supervisor/supervisor.go:147-181` — current `WriteUserTurn` (the method to rewrite): validate → stamp cursor → `sess == nil → return nil` (the silent drop to kill) → `AttachInput`.
-- `internal/supervisor/supervisor.go:193-243` — `setSession` / `WaitForPTY` / `sessReadyCh` choreography and the `sessMu`/`convMu` leaf-lock discipline. The cursor-stamp-before-write ordering and the lock-leaf rules are invariants you must preserve.
-- `internal/supervisor/supervisor.go:356-509` — `runOnce`: how `setSession(sess)` / `setSession(nil)` bracket each iteration and why `setSession(nil)` runs **before** `sess.Close()`. Establishes the teardown ordering the new locking relies on.
-- `internal/sessions/session.go:109-113` — `Session.WriteUserTurn` delegation (ctx-threading site #1).
-- `internal/relay/handlers/send_message.go:38-118` — `TurnWriter` interface (ctx-threading site #2), the `Activate → WriteUserTurn` sequence, the error switch, and the **existing `server.binary_offline` retryable precedent** (the model for the new loud-failure reply).
-- `internal/relay/handlers/send_message_test.go:27-53` — `stubTurnWriter` (ctx-threading site #3) and the handler tests to update.
-- `internal/agentrun/ptyrunner/runner.go:382-432` — **reference implementation** of `WaitReady → DeliverPrompt`. Note: ptyrunner treats `DeliverResult.Committed` as *advisory* (ignores it, has a downstream JSONL/watchdog net). Our path is *stricter* — it has no downstream net, so it gates the return value on `Committed`.
-- `internal/sessions/pool.go:125-137` — `SessionConfig` comment: the bootstrap session runs `--continue`, and `--session-id` is "deliberately NOT introduced" until Phase 1.1+. This is *why* `JSONLPath` is left empty (see Design § JSONLPath).
-- `internal/dispatch/dispatch.go:543-586` — `Route`: a handler that returns a non-nil error is **logged at WARN, no reply synthesised, conn NOT torn down**. This is why "report failure to the phone" requires the handler to emit a wire reply, not just `return err`.
-- tui-driver `pkg/tuidriver/deliver.go:29-110` — `DeliverOpts` / `DeliverResult` / `DeliverPrompt` contract. Key: `JSONLPath` is optional ("pass `""` to rely on the spinner signal alone"); `Committed == false` is the "may still be wedged" signal.
-- tui-driver `pkg/tuidriver/ready.go` — `WaitReady(ctx) (Readiness, error)`: the ready-gate. Blocks until claude's TUI reaches idle; error is the ctx cause on cancel.
-- tui-driver `pkg/tuidriver/keys.go:77-94` — `AttachInput` contract: "Returns the first non-nil PTY write error (e.g. the closed-file error after Close). **No panic.**" Confirms Session methods are teardown-safe (error, never crash) — the basis for the capture-then-unlock locking.
-- `internal/supervisor/supervisor_test.go:551-701` — the existing `WriteUserTurn` tests (`HappyPath`, `CursorReadBack`, `UnknownIDDoesNotMutateCursor`, `NilValidatorSkips`, `NoPTYDrops`) that this change updates.
-
 ## Context
 
 `Supervisor.WriteUserTurn` is the delivery path for untrusted, phone-originated turn payloads: relay `send_message` handler → `sessions.Session.WriteUserTurn` → `supervisor.WriteUserTurn` → live claude. Today it is fire-and-forget: it validates, stamps the cursor, then either **drops the turn silently** (`s.sess == nil → return nil`) or does a raw `Session.AttachInput(payload)` with no ready-gate and no commit-confirm. Both outcomes are reported back to the phone as a successful ack. A short, human-timed message typed while claude is busy or mid-restart can vanish into a false success.

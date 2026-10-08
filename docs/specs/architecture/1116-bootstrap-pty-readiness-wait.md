@@ -2,18 +2,6 @@
 
 **Size:** S (test-only; zero production change). **Security-sensitive:** no.
 
-## Files to read first
-
-- `internal/sessions/pool_test.go:601-612` — RotateID test's poll loop (site 1). 2s wall-clock deadline over `pool.Default().State().ChildPID > 0`; this is the flake shape.
-- `internal/sessions/pool_test.go:928-939` — `TestPool_Supervise_AfterRunReturns_ReturnsErrPoolNotRunning` poll loop (site 2).
-- `internal/sessions/pool_test.go:957-975` — `TestPool_Supervise_ConcurrentCalls_RaceClean` poll loop (site 3).
-- `internal/sessions/pool_test.go:57-79` — `helperPoolWithSleepArgs`: bootstrap = `/bin/sleep 3600`, Bridge set. Used by sites 2 & 3. Note the RotateID test (site 1) builds its own `New(Config{...})` inline (line 574) with `/bin/sh -c "exec sleep 3600"` — the helper must work for both `pool` values.
-- `internal/sessions/session.go:335-355` — `Session.Activate` already funnels through `s.sup.WaitForPTY(ctx)` at line 354. This is the exact accessor pattern to mirror; `sup` is the unexported `Runner` field.
-- `internal/supervisor/supervisor.go:611-631` — `WaitForPTY`: blocks on `sessReadyCh` until `setSession(non-nil)` closes it, or ctx cancels. Returns `nil` on readiness, `ctx.Err()` on cancel. Channel is allocated in `supervisor.New` (line 657), so it is non-nil before `Run` — a pre-`Run` wait blocks (does not nil-hang) until the child spawns.
-- `internal/supervisor/supervisor.go:940-1000` — `runOnce` ordering: `tuidriver.Spawn` → `onSpawn(pid)` sets `ChildPID` (line 946) → `setSession(sess)` fires readiness (line 964 bridge mode / line 1000 foreground mode). Readiness is a **strictly-later** event than `ChildPID > 0`, and fires for **any** spawned child including `/bin/sleep`.
-- `internal/sessions/pool.go:1088-1106` — `Pool.Run` ordering: `runGroup`/`runCtx` wired (1091) → `supervise(bootstrap)` schedules `sess.Run` (1099) → `close(readyCh)` (1106). Establishes that when readiness fires (child spawned inside that scheduled goroutine), `runGroup` was already non-nil.
-- `docs/lessons.md:94` — `pty.Start` is not interruptible; under `-race` + contention it "stretches into hundreds-of-ms-to-seconds per cycle." This is the documented root cause the 2s deadline collides with.
-
 ## Context
 
 `TestPool_Supervise_AfterRunReturns_ReturnsErrPoolNotRunning`, `TestPool_Supervise_ConcurrentCalls_RaceClean`, and the `RotateID` bootstrap wait all detect "bootstrap child started" by **polling `pool.Default().State().ChildPID > 0` against a fixed 2s deadline**. Under `-race`'s scheduling slowdown, `tuidriver.Spawn`/`pty.Start` can exceed 2s; the poll expires before the child spawns and the test fails on `pool_test.go:938: bootstrap child never started` — a timing artefact, not a defect. Recurring family; unmasked most recently by PR #1115 (which touches zero `internal/sessions/` files).

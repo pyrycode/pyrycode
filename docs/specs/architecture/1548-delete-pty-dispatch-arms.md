@@ -3,22 +3,6 @@
 **Size:** S (PO's estimate, re-verified — see § Size check).
 **Packages touched:** `cmd/pyry` only.
 
-## Files to read first
-
-| Path | Symbol | What to extract |
-|---|---|---|
-| `cmd/pyry/main.go` | `interruptArm`, `armInterrupt`, `armSendEsc`, `armNone` | The const block and its doc. Note the doc's operator-facing claim (#1193) and the **trailing comment on each constant** — those are three separate identifier-class sites in one block. |
-| `cmd/pyry/main.go` | `interruptRunner` | The type switch and its doc. Four load-bearing claims to preserve; three false-by-arithmetic claims to rewrite (§ Comment sweep S2). |
-| `cmd/pyry/main.go` | `activeInterrupter.SendEsc` | The **live** consumer: `arm, err := interruptRunner(r)` then the `arm == armNone` branch. Confirms the return contract this ticket must not change. This method survives untouched (AC2). |
-| `cmd/pyry/main.go` | `startFreshRunner` | The type switch, the rotate-error `abort()` path, and the #1330 ordering paragraph. |
-| `cmd/pyry/main.go` | `beginRotationOrNoop` | The optional-assertion shape this spec adopts for both dispatchers, and the stale justification naming two deleted stubs. |
-| `cmd/pyry/streamsup_runner.go` | `streamRunner.Interrupt`, `streamRunner.RestartFresh`, `streamRunner.BeginRotation` | The three concrete methods reached by assertion. `BeginRotation`'s doc already states the gate-less-runner contract that re-grounds `beginRotationOrNoop`. |
-| `cmd/pyry/streamsup_runner.go` | `var _ sessions.Runner = streamRunner{}` | Its doc comment. **Read it before trusting the ticket's description of it** — see § Stale premise. |
-| `cmd/pyry/relay.go` | `startRelayV2` → the `V2SessionConfig` literal's `Interrupter:` and `SessionStarter:` fields | The two wiring comments. Both sit in one literal; the `ModalResolver:` comment three fields above belongs to **#1546** — do not touch it. |
-| `cmd/pyry/inbound_deliver_rotation_test.go` | `baseRunner` | The stub the new test embeds. Seven trivial `sessions.Runner` methods, value receivers. |
-| `cmd/pyry/inbound_deliver_rotation_test.go` | `rotatingRunner`, `TestInboundDeliver_RotationInProductionOrder_DeliversToFreshChild` | The existing coverage of `startFreshRunner`'s surviving `RestartFresh` arm — **do not duplicate it**. `rotatingRunner`'s own doc is the source for `beginRotationOrNoop`'s re-grounded justification. |
-| `docs/knowledge/features/streamsup-package.md` | § dispatch case (search `new_session_routing_test.go`) | Documentation-phase-owned; read-only context on why the assertion is optional. |
-
 ## Context
 
 `#1348` deleted `internal/supervisor` outright. Two type-switch arms in `cmd/pyry`'s

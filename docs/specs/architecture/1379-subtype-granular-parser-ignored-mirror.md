@@ -6,29 +6,6 @@
 
 ---
 
-## Files to read first
-
-Ordered by when the developer needs them. Everything is in one package plus one parser file.
-
-| Path | What to extract |
-|---|---|
-| `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:125-146` | The mirror: doc comment (125-142), `var parserIgnoredTypes` (143), the `system` entry comment (144) and the `rate_limit_event` entry (145). **All four criteria land here or downstream of here.** |
-| `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:177-244` | `envelopeShape` (194) already declares `Subtype`; `shapeFilterTypes` (199-222) builds the union of three tables; `extractShapes` (224-244) already decodes `subtype` at 233 and then throws it away at the filter lookup (238). **The change is the filter's key, not a new decode.** |
-| `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:918-972` | `TestExtractShapes_FiltersParserIgnoredTypes` — the stream fixture (922-928), `want` (934-937), the comment AC5 inverts (941-942), the survivor assertion (943-948), the `unknown_type_survives` negative arm (950-971). |
-| `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:974-1046` | `parserIgnoredTypeFixtures` (978-987), the pin test (1003-1033) with its member-has-fixture check (1005), orphan check (1019-1023), control arm (1028-1032), and `parseOne` (1038-1046). |
-| `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:319-380` | `additiveDriftViolations` — read it once to confirm it never touches `parserIgnoredTypes`. That is AC3's whole content. |
-| `internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go:870-911` | The two `system_one_sided_*` arms — AC3's existing evidence. **Do not modify.** |
-| `internal/streamsup/parser.go:500-536` | `consumeLine`'s drop branch. `ignoredLineTypes[sl.Type]` gates, then `sl.Type == "system" && p.emitSystemSubtype(...)` at 518 carves the mapped subtypes out from **inside** the branch. This is the shape the mirror must reproduce. |
-| `internal/streamsup/parser.go:538-564` | `emitSystemSubtype` — the case arms (555-560) are the ONE enumeration of the mapped set. Its doc states the pointer-not-a-list doctrine AC5 applies. |
-| `internal/streamsup/parser.go:247-250` | `ignoredLineTypes` itself — still `{"system": true, "rate_limit_event": true}`, deliberately top-level-only (rationale at 222-246). This ticket does **not** touch it. Also the correct cite replacing `parser.go:80-83`. |
-| `internal/streamsup/parser.go:587-595` | `emitBackgroundTaskStarted`'s undecodable arm: `return true` with **zero events**. This is the vacuity trap's mechanism. (`emitBackgroundTaskRoster:716-726` is identical in shape.) |
-| `internal/streamsup/parser.go:70-91` | Proof the old cite is stale: `parser.go:80-83` now sits inside `maxTaskPatch`'s doc comment, mid-sentence about envelope arithmetic. |
-| `internal/e2e/realclaude/interactive_stream_unrecognized_test.go:5-18` | The `system/*` claim at 8-9 and the measurement paragraph at 14-18 it sits above. |
-| `internal/e2e/realclaude/dropped_line_capture_test.go:1053-1074` | `dropcapClassify` — **read this before touching anything in that file.** It runs every line through the real parser (`parseOne`, 1063) and returns `dropped == false` on a non-zero emission. The classifier is already subtype-correct by construction; only the prose is stale. |
-| `internal/e2e/realclaude/dropped_line_capture_test.go:1508-1512` | The `system/init` row whose `why` is false on both halves. |
-
----
-
 ## Context
 
 `parserIgnoredTypes` (`ptyrunner_byte_equivalence_test.go:143`) is keyed by top-level stream-json type. `shapeFilterTypes()` unions it with the two one-sided allowlists, and `extractShapes` drops every line whose **top-level type** is in that union. `system` is a member, so every `system` line is dropped from the runner-equivalence **sequence** comparison.

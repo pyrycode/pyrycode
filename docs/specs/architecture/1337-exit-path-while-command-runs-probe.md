@@ -6,49 +6,6 @@
 
 ---
 
-## Files to read first
-
-Read these before writing anything. Every one of them is consumed by this rig; none is re-derived.
-
-**The driver you call, and the one file you edit**
-
-- `internal/e2e/realclaude/finding_live_run_test.go:119-173` — `finLiveRunHandle` as it stands before your edit, and at `:101-118` the five deliberate omissions (your edit adds a field that is not one of them; do not restate a field count anywhere, since yours changes it). Extract: what crosses whole (`Pin`, `Staging`), what is receive-only (`PyryExited`), and the invitation this ticket accepts — *"If #1337 needs one of these, that is #1337's argument to make."*
-- `internal/e2e/realclaude/finding_live_run_test.go:247-446` — `finLiveRunStage`'s body. Extract: the cleanup registration order (`:267-300`), the `cmd.Wait` goroutine you edit (`:326-329`), the two `t.Fatalf` abort paths you inherit (`:331-341`), and the during-turn pin (`:388-423`).
-- `internal/e2e/realclaude/finding_live_run_test.go:5-70` — the file header. Extract: the `ps -E`/`-Eww` prohibition and the sentence at `:63-64` counting *"the two `t.Fatalf` messages"* and *"the one `t.Logf`"* — your edit must not falsify it.
-
-**The composition, in call order**
-
-- `internal/e2e/realclaude/finding_run_gather_test.go:239-270` — `finGatherInputs`' six fields. Extract: `Pinned` is `[]int`; `ClaudeState`'s only admissible producer is `pinReadState(...).Verdict`; `Stderr` is `[]byte`.
-- `internal/e2e/realclaude/finding_run_gather_test.go:348-358` — `finSighting`'s eight fields. Extract: it carries neither `.Line` nor the `*resultTrailer`, which is why it is safe to forward.
-- `internal/e2e/realclaude/finding_run_gather_test.go:424-507` — `finGatherReadings`' three returns and its `pinScanArgv(in.Needles, nil)` call at `:478`. Extract: the scan is internal, only counts and per-pid liveness come back, and `Needles` is used with **no** exclusions.
-- `internal/e2e/realclaude/trail_run_outcome_test.go:306-321` — the classifier's ordered decision list. Extract: Step 2 (attribution) outranks Steps 3-8, so a post-trailer match count of 0 costs nothing.
-- `internal/e2e/realclaude/finding_trailer_evidence_test.go:197-214, :241-272` — `finTrailerBuild`. Extract: the first parameter is a bare `string` from **either** closed set (the classifier's eleven or the staging tier's seven), carried as returned.
-- `internal/e2e/realclaude/finding_run_record_test.go:222-242` — `finRecordInputs`' eight fields. Extract: `Rows` is `[]reachProc`, `ClaudeCommand` crosses whole and is reduced internally, and there is no runner-agreement input.
-- `internal/e2e/realclaude/finding_run_record_test.go:123-135` — `finRecordRun.ExitCode`'s doc. Extract: **0 is a real successful exit**, and a caller with no observed exit hands `pinExitStatusUnknown` — *"a documented caller obligation, not a validated one."* This is the second criterion's whole argument.
-- `internal/e2e/realclaude/finding_artifact_write_test.go:131-163` — `finWriteArtifacts`. Extract: the two files it writes, and the note's content rule at `:141-150` (never a `%v` verb on a struct or a slice).
-
-**The staging tier and the values you branch on**
-
-- `internal/e2e/realclaude/finding_staging_gate_test.go:113-134` — the seven staging outcomes. Extract: `finOutcomeReadyToClassify` is the pass-through and is deliberately **not** the zero value.
-- `internal/e2e/realclaude/finding_staging_gate_test.go:198-201` — `finOutcomeResult`'s two fields, both publishable.
-
-**Precedents you copy the shape of**
-
-- `internal/e2e/realclaude/background_reach_probe_test.go:266-316` — the probe entry point: `reachEnableEnv` skip, `os.MkdirTemp` (deliberately not `t.TempDir()`), `t.Logf` of the dir, delegate to a body function. Copy this shape; **do not** copy the `PYRY_USE_STREAMJSON` gate at `:296-306` (withdrawn — see § Design).
-- `internal/e2e/realclaude/background_reach_probe_test.go:1091-1113` — `reachRunnerPathFromEnv`. Extract: it reads ambient `os.Getenv` first and only then lets the delta override, which is why the delta must be passed.
-- `internal/e2e/attach_stdio.go:231-237` — the repo's own `ProcessState.ExitCode()` read with a `-1` fallback. This is the shipped shape for the handle's new field; `auto_attach.go:357-363` is the identical sibling.
-- `internal/e2e/realclaude/process_pin_liveness_test.go:234-236` — `pinExitStatusUnknown = -1`, and `:275-295` for `pinReadState`.
-- `internal/e2e/realclaude/trail_run_outcome_test.go:611-631` — `trailRunWellFormed` / `trailRunProofReadings`, the fixtures the one offline test drives.
-
-**Production code the evidence is about (read, do not touch)**
-
-- `internal/agentrun/ptyrunner/runner.go:479-485` — the teardown-order comment pinning `emitter.Close() → cancel() → [reap] → sess.Close()`, with the reap defer at `:398`. This is the ordering the whole proof rests on.
-- `internal/agentrun/ptyrunner/runner.go:492-503` and `:596-606` — the budget `Terminate` hook (reaps *inside* the hook, pre-trailer) and `Run`'s `return nil` on a cancelled run context.
-- `cmd/pyry/agent_run.go:266-278` — the exit mapping. Extract: only a non-nil, non-`context.Canceled` error becomes a non-zero exit, so completion and budget-termination share an exit code.
-- `internal/agentrun/reap.go:56-57, :65, :76` — the skip-if-already-exited and the log line naming the groups actually killed. This log is the primary evidence.
-
----
-
 ## Context
 
 `pyry agent-run`'s ptyrunner path writes its result trailer at `emitter.Close()`, which the runner's own defer chain pins **before** `sess.Close()`'s SIGTERM and before the descendant reap. So at trailer time claude is alive, unsignalled, and any command claude auto-backgrounded is still a descendant of pyry. Nobody has measured whether pyry therefore declares a turn finished while the work that turn described is still in flight.

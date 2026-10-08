@@ -6,29 +6,6 @@
 
 ---
 
-## Files to read first
-
-Read these before touching code. Line ranges are current as of this spec; the symbols are the anchors if they drift.
-
-- `internal/relay/v2session.go:3225-3227` — **`transportDown()`**, the gate to reuse verbatim: `m.cfg.Connected != nil && !m.cfg.Connected()`. Nil `Connected` ⇒ never down ⇒ byte-identical to today (the foreground/unwired/existing-test case).
-- `internal/relay/v2session.go:3229-3249` — **`drainOnce`'s #874 hold precedent.** The design you are mirroring: probe off-lock on the Run goroutine, BEFORE the seal, "pop nothing, seal nothing, re-signal nothing." Read the comment block at 3236-3246 — it is the reasoning template for this ticket.
-- `internal/relay/v2session.go:2916-2972` — **`emitRekeyRequest`.** The nonce-burning seal is `s.send.Encrypt(envJSON)` at line 2951; `awaitingRekeyReply = true` + `armRekeyReplyTimer` at 2966-2967. This function stays **unchanged** except a precondition doc line (see § Design). Note the existing `awaitingRekeyReply` defensive skip at 2922 — the shape a precondition-guard comment follows.
-- `internal/relay/v2session.go:964-1010` — **`handleWake`.** The `wakeRekeyEmit` arm is at 976-977; the top-of-function `state != V2StateOpen` guard at 972 means the scheduled site already knows the session is open. This is scheduled-path edit site #1.
-- `internal/relay/v2session.go:3107-3157` — **`Rekey` + `handleManualRekey`.** The manual gate goes at the top of `handleManualRekey`, **before** the scheduled-timer `Stop()` at 3151 (critical ordering — see § Design). `Rekey`'s doc-comment return-set at 3094-3100 gains `ErrTransportDown`.
-- `internal/relay/v2session.go:1012-1036` — **`armRekeyTimer` / `armRekeyReplyTimer`.** The `time.AfterFunc` + `select { case m.wake <- …: case <-ctx.Done(): }` callback shape the new `armRekeyRetryTimer` copies. `armRekeyTimer` has only 2 callers (425, 1433) — do not change its signature.
-- `internal/relay/v2session.go:395-426` — **`rekeyComplete`.** Timer re-arm choreography (Stop-then-arm on `s.rekeyTimer`); the retry re-arm follows the same field-ownership discipline.
-- `internal/relay/v2session.go:59-71` — **`rekeyInterval` / `rekeyReplyTimeout` package-var pattern** (lowercase, test-overridable via save/restore `t.Cleanup`). The new `rekeyRetryInterval` follows this exactly.
-- `internal/relay/v2session.go:106-112` — **`ErrSessionNotOpen` sentinel pattern** — the new `ErrTransportDown` mirrors it (package-level `errors.New`, surfaced verbatim by the control dispatcher, no wire code).
-- `internal/control/server.go:782-803` — **`handleRekey`.** Confirms a new manual error needs **zero control-package changes**: any non-nil `Rekey` error surfaces verbatim in `Response.Error`; only `ErrConnNotFound` gets an `ErrorCode`. `ErrTransportDown` flows through like `ErrSessionNotOpen`.
-- `internal/relay/v2session_test.go:4604-4680` — **the togglable-`Connected` test harness** (`gatedRecorder` at ~4610, `.connected()` at 4633, `assertHeldQueued`/`assertQueueDrains` at 4647-4680) plus `errTransportDown`. Reuse `gatedRecorder` to drive `transportDown` in the new tests.
-- `internal/relay/v2session_test.go:4682-4740` — `TestV2Session_Push_HeldWhileTransportDown_ReflushContiguous` — the #874 hold test; structural template for the scheduled deferred-then-recovers test.
-- `internal/relay/v2session_test.go:1882-1999` — `TestV2Session_RekeyInitiator_Emit_ReArmViaResponder` — scheduled-emit + re-arm harness (`waitForEnvelopes`, `decryptAppFrame`, `sess.initRecv` **nonce oracle**, `rekeyInterval`/`rekeyReplyTimeout` sub-second override).
-- `internal/relay/v2session_test.go:2185-2360` — the manual-rekey tests: `…_HappyPath_EmitsManualReason` (2185) and `…_AlreadyAwaitingReply_ReturnsErrSessionNotOpen` (2299) — the `sess.mgr.Rekey(ctx, …)` call + error-return + no-side-effect assertion patterns.
-- `internal/relay/v2session_test.go:700-756` — `openSession` struct + `driveToOpen`: `sess.initRecv` decrypts binary→phone frames **in capture order**, so a burned nonce MAC-fails — the AC1 nonce oracle.
-- `docs/knowledge/codebase/874.md` — the push-drain hold precedent this ticket extends to the rekey emit.
-
----
-
 ## Context
 
 `#874` taught the push drain (`drainOnce`) to hold unsealed envelopes while the relay transport is down: the `transportDown()` probe runs off-lock on the single-owner Run goroutine, **before** the `s.send.Encrypt` seal, so no Noise send-nonce is burned for a frame that cannot reach the phone. The timer-driven and operator-driven rekey emit (`emitRekeyRequest`) never got the same treatment.

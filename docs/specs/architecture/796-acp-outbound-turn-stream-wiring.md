@@ -7,27 +7,6 @@
 
 ---
 
-## Files to read first
-
-Turn-1 reading list — read these before writing anything.
-
-- `cmd/pyry/acp.go:74-145` — `serveACPWithPool` composition root. Where the stream manager is constructed, `attach`ed inside `register`, and joined on return. This file gains a param + ~6 wiring lines.
-- `cmd/pyry/acp.go:28-72` — `runACP`. `trustedWorkdir` is computed here (`confineWorkdirToHome("")` → `trustMark`). Compute `claudeSessionsDir` next to it and pass it into `serveACPWithPool`.
-- `cmd/pyry/acp.go:167-225` — `newSessionHandler` / `loadSessionHandler`. The two `streams.start(id)` call sites; note where each obtains the session id (new mints it via `pool.Create`; load decodes it from params).
-- `cmd/pyry/acp_turn_stream.go` (whole, 118 lines) — the sink (#750). `newACPTurnStream(transport, sessionID, onTurnEnd, logger)` signature; `Handle`; the `onTurnEnd` **nil seam** #751 will flip; the content-free logging posture the wiring must not break.
-- `cmd/pyry/interactive_turn_stream_v2.go:59-117` — `startInteractiveTurnStreamV2`, the mobile analogue to mirror. Your version is far thinner: no emitter, no replay ring, no flush/coalesce, no follow-active.
-- `cmd/pyry/interactive_turn_stream_v2.go:283-361` — `resolveTarget` + `resolveBoundSessionJSONL`. Reuse `resolveBoundSessionJSONL(dir, sessionID)` verbatim; your `TargetResolver` is the degenerate fixed-target case of `resolveTarget` (one host, nil `Switch`).
-- `internal/turnbridge/producer.go:29-63` — `Subscriber` / `SessionHost` / `Target` / `TargetResolver` contracts. `*supervisor.Supervisor` satisfies `SessionHost` structurally.
-- `internal/turnbridge/producer.go:97-132, 167-318` — `New` / `Run` (re-subscribe loop) + `NewTargetSubscriber` (per-subscription ctx, session-end re-subscribe, retry backoff). This is what gives you "runs for the session's lifecycle, re-subscribes per turn, no leaked goroutine."
-- `internal/acpbridge/outbound.go:110-182` — `MapUpdate`: the four emit-able variants and the two `ok==false` events (TurnEnd/Stall). You don't call this directly — the sink does — but it defines what frames a scripted turn produces.
-- `cmd/pyry/interactive_turn_stream_v2_test.go:28-54, 550-586, 591-639, 699-729` — **reusable** package-`main` test fixtures: `streamEntry` / `jsonlStreamEvent` / `endOfTurnEvent`, `scriptedSubscriber`, `waitClosed`, and the `EventsReachHandle` / `TeardownUnblocks` patterns. Your AC1/AC4 test is the ACP twin of `TestInteractiveTurnStream_EventsReachHandle`.
-- `cmd/pyry/acp_turn_stream_test.go` (whole) — `streamHarness`, `frames`, `assertNotification`, `discriminant`. Reuse `assertNotification` shape to assert `session/update` frames addressed to the session id.
-- `cmd/pyry/acp_test.go:284-360` — `newFakeClaudePool` / `newACPHarness`. Backing for the manager-lifecycle test. Also the two `serveACPWithPool(ctx, pool, …)` call sites (`:205`, `:350`) you must update with the new param.
-- `internal/sessions/reconcile.go:37-40` — `DefaultClaudeSessionsDir(workdir string) string` (returns `""` when `$HOME` unresolvable).
-- `internal/sessions/pool.go:728-744` — `Pool.Lookup(id) (*Session, error)`. `Session.Supervisor()` returns the `*supervisor.Supervisor` that is your `SessionHost`.
-
----
-
 ## Context
 
 The neutral, daemon-owned turn-event model (`internal/turnevent`) is already mapped OUT to ACP `session/update` payloads by two merged pieces: `acpbridge.MapUpdate` (#769, the pure value-to-value mapper) and `acpTurnStream` (#750, the stateless OnEvent sink that writes `session/update` notifications on the ACP transport). **`acpTurnStream` currently has zero non-test callers.** Nothing in the `pyry acp` composition root constructs a `turnbridge.Producer` to drive it, so no turn events ever reach the host.

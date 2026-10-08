@@ -22,44 +22,6 @@ with static user-facing error strings. It is a v1 `dispatch.Route` request/reply
 verb — a `v1TypeSet` member, **not** a v2-only control frame. ("v2 wire message"
 in the title refers to the encrypted v2 transport, not the v1/v2 type partition.)
 
-## Files to read first
-
-- `internal/relay/handlers/rename_conversation.go` (all, 129 lines) — **THE
-  template.** Clone its structure verbatim: decode → mutate → eager `Save` →
-  typed reply; the `msg*` static-string constants; the `SECURITY:` doc comment
-  discipline. Note the two deliberate divergences called out under **Error
-  handling** below (malformed-branch logging).
-- `internal/relay/handlers/register_push_token.go:120-138` — `replyError(ctx, c,
-  env, code, message, retryable)` and `replyAck`: the shared package helpers the
-  reject branches call. `replyError` marshals a static `protocol.ErrorPayload`.
-- `internal/dispatch/dispatch.go:149-163` — `Conn.Reply(ctx, req, respType,
-  payload)` sets `InReplyTo = req.ID` and `TS`. This is what satisfies AC #2's
-  `in_reply_to` correlation — the handler does not build the envelope itself.
-- `internal/conversations/registry.go:240-251` — `Delete(id ConversationID)
-  bool`: exact byte-match removal under the registry lock; returns hit/miss. The
-  terminal primitive AC #1 reuses. **A miss (`false`) becomes
-  `conversation.not_found`.**
-- `internal/conversations/registry.go:72-115` — `Save(path string) error`:
-  atomic temp-file→fsync→rename. The eager best-effort persist for AC #1's
-  restart-survival. Failure is logged, not fatal (mirrors rename/create).
-- `internal/protocol/conversations_write.go:46-71` — `RenameConversationPayload`
-  (request; `conversation_id` json tag) and `ConversationUpdatedPayload` (reply;
-  `id` json tag). Mirror these for the two new payload structs.
-- `internal/protocol/codes.go:50-62` — the conversations `Type*` const block and
-  the `TypeRenameConversation` doc-comment shape to copy. `CodeConversationNotFound`
-  (line 22) and `CodeProtocolMalformed` (line 10) are the two wire codes reused.
-- `internal/protocol/envelope.go:118-136` — `v1TypeSet` map. Add two entries.
-- `internal/protocol/compat_test.go` — three type lists (lines 9, 99, 174) and
-  the hardcoded `want := 17` count (line 109). Add both new types to all three
-  lists; bump `17 → 19`. The partition union check (line 222) stays balanced
-  because both types go into `v1TypeSet` **and** the `all` list.
-- `internal/relay/handlers/rename_conversation_test.go:1-70` — the handler test
-  harness to clone: `dispatch.NewTestConn`, `conversations.Load` + `reg.Create`
-  seeding on a `t.TempDir()` path, the `recv` helper reading one outbound frame.
-- `cmd/pyry/relay.go:175-176` and `362-363` — the two register sites: the v1
-  `d.Register(...)` block **and** the v2 `Handlers` map. Wire the handler in
-  both, mirroring create/rename.
-
 ## Design
 
 ### New protocol vocabulary (`internal/protocol`)

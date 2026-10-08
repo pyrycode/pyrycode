@@ -5,21 +5,6 @@ status: spec
 size: S
 ---
 
-# Files to read first
-
-Read these before doing any exploration of your own. They're the load-bearing surfaces this spec composes; reading them up front is cheaper than rediscovering them via grep.
-
-- `internal/e2e/harness.go` — full file; `spawn`, `StartIn`, constants (`readyDeadline`, `readyPollGap`), package doc. The variadic-flags extension lives here.
-- `internal/e2e/restart_test.go:13-49,117-148` — `registryFile`/`registryEntry` mirror types, `newRegistryHome` / `writeRegistry` / `readRegistry` / `mustReadFile` helpers. Reuse verbatim — do not duplicate, do not promote to harness.go.
-- `internal/sessions/pool.go:264-352` — `New`'s warm-vs-cold init. Notice that with no pre-populated registry the bootstrap starts in `stateActive` (default), so `runActive`'s idle timer arms shortly after pyry boots.
-- `internal/sessions/pool.go:980-1000` — `saveLocked`'s `LifecycleState` write rule. `if state == stateEvicted` writes `"evicted"`; active is omitted (`omitempty`). Tests assert on the **string `"evicted"`**, not on the field's presence in the active case.
-- `internal/sessions/session.go:155-213` — `Activate` / `Evict` semantics. Activate returns when `activeCh` is closed by `transitionTo`, which fires **before** `pool.persist()`. Test polls for the persist completing, not for Activate returning.
-- `internal/control/protocol.go` — `Request`, `Response`, `Verb`, `AttachPayload`. Test 2 imports these directly to issue a raw `VerbAttach`.
-- `internal/control/server.go:347-410` — `handleAttach`. The Activate-before-Attach call site this test exercises end-to-end.
-- `cmd/pyry/main.go:255-295` — flag parsing; `-pyry-idle-timeout` flag exists already (default `15m`), so no CLI surface change is needed — only the harness extra-args hook.
-- `cmd/pyry/main.go:81-89` — `resolveRegistryPath` (`~/.pyry/<name>/sessions.json`). The harness uses `-pyry-name=test` so the registry is at `<HomeDir>/.pyry/test/sessions.json`.
-- `docs/specs/architecture/40-idle-eviction-lazy-respawn.md` — full spec. The state machine, idle-timer rearm-while-attached behaviour, and the `omitempty` rule on `lifecycle_state` are all defined there.
-
 # Context
 
 Idle eviction and lazy respawn shipped in #40, exercised today only by package-level integration tests in `internal/sessions/`. Those tests build `Pool` in-process with stub bridges; they do not run the assembled `pyry` binary, do not exercise the control plane's `handleAttach` Activate-before-Attach call, and do not observe the on-disk registry under daemon ownership.

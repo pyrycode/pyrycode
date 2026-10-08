@@ -3,21 +3,6 @@
 **Size:** S · **Security-sensitive:** no (mechanism only; the routing sibling #1125 carries the `security-sensitive` label)
 **Package touched:** `internal/streamsup` only. No interface change, no cross-package edit, no new file.
 
-## Files to read first
-
-- `internal/streamsup/runner.go:339-416` — `Run`: the spawn loop. Line 359, `buildArgs(r.liveArgs(), firstRun, r.cfg.SessionID)`, is the **exact seam** to change. The `firstRun` local (declared 341, flipped 388-390 only `if started`) is the "current id not yet on disk" state the fresh path must re-arm, not bypass.
-- `internal/streamsup/runner.go:266-326` — `Restart` / `liveArgs` / `setIterCancel` / `drainRestart`: the `restartMu` + `restartCh` publish/consume/coalesce discipline `RestartFresh` mirrors exactly. Read `Restart`'s doc comment (266-281) — the "hint first, then cancel" ordering and the coalescing rationale carry over verbatim.
-- `internal/streamsup/runner.go:507-529` — `buildArgs`: the pure id-flag builder. It stays **byte-identical**; only the *source* of its `sessionID` argument changes. Its three existing tests (`TestBuildArgs*`) are unaffected.
-- `internal/streamsup/runner.go:119-160` — `Runner` struct, esp. the `restartMu`-guarded field group (145-154). The two new fields land here.
-- `internal/streamsup/runner.go:165-203` — `New`: seed the new mutable id field from `cfg.SessionID` in the returned struct literal (195-202).
-- `internal/streamsup/runner.go:418-488` — `spawnAndWait`: read the `started` contract (comment 418-426). A setup failure returns `started == false`, and the fresh path must honor the same "retry with `--session-id`, never `--resume` against an id `--session-id` never created" invariant.
-- `internal/streamsup/runner_test.go:398-444` — `spawnArgsRecorder`: a `slog.Handler` that captures the argv of every `"spawning claude"` log record, in order. This is the primary observation seam for the new tests — it sees argv per spawn including spawns that never launch a child.
-- `internal/streamsup/runner_test.go:336-394` — `TestRunner_ResumeIDStableAcrossRestart`: the ordered-argv assertion pattern (`--session-id <id>` on spawn 1, `--resume <id>` on spawn 2). The new AC5 test mirrors this shape with a rotation injected in between.
-- `internal/streamsup/runner_test.go:41-92` — `helperRunCfg` / `runInBackground` / `waitForContains` + `onSpawn` usage. `onSpawn` fires **on the Run goroutine, after `cmd.Start`, every spawn** — the injection point for a deterministic rotation.
-- `internal/streamsup/runner_test.go:454-490` — `TestRunner_SpawnSetupFailureRetainsSessionID`: the `started == false` retry invariant the fresh path must not break.
-- `cmd/pyry/streamsup_runner.go:107-152` — `mapStreamsupConfig` + `stripSessionIDFlags`: confirms *why* a plain `Restart(--session-id newID)` cannot work — the id flag is stripped out of `Config.Args` and re-injected by `buildArgs` from `Config.SessionID`. This is the Context section's core constraint; no change here.
-- `docs/knowledge/features/streamsup-package.md` — evergreen package doc (context, not code).
-
 ## Context
 
 On the stream-json path a session runs inside a persistent `*streamsup.Runner`. Its restart ladder builds argv as `buildArgs(liveArgs, firstRun, cfg.SessionID)`: the **first** spawn passes `--session-id <id>` (establishes a new on-disk transcript under a known id); **every** respawn passes `--resume <id>` (reattach, append, no fork).

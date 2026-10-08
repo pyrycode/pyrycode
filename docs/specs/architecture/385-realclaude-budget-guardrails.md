@@ -25,48 +25,6 @@ Composition is the established `WithWorktreeAuthenticated` → `RunPyryAgentRun`
 → `parseResultTrailer` shape (sibling tests #381 / #382 / #384). Zero edits to
 `fixtures.go`; zero production-source changes.
 
-## Files to read first
-
-- `internal/e2e/realclaude/fixtures.go:32-225` — `WithWorktree`,
-  `WithWorktreeAuthenticated`, `RunOpts`, `RunResult`, `RunPyryAgentRun`. The
-  argv contract you compose against; in particular the `--max-turns`
-  lowering at line 163 and the `--allowed-tools` join at 162.
-- `internal/e2e/realclaude/tool_loop_test.go:185-209` — `resultTrailer`
-  struct and `parseResultTrailer(stdout)`. Reuse both as-is; this is the
-  **fifth** consumer of `parseResultTrailer` (after #376, #381, #382, #384).
-- `internal/e2e/realclaude/prompt_fidelity_test.go:79-89` — `jsonlPathFor`
-  helper for resolving the JSONL path in failure messages. **Eighth**
-  consumer if you cite it (still file-private; YAGNI bar for promoting to
-  fixture export not yet met).
-- `internal/agentrun/streamjson/emitter.go:251-273` — the exact wire shape
-  of the `type:"result"` trailer (`trailer` + `trailerUsage`). The field
-  names + JSON tags your assertions bind to. Note **`terminal_reason`**
-  (not `termination_reason`) and **`subtype`** values
-  `"success"` / `"error_max_turns"` / `"error_during_execution"`.
-- `internal/agentrun/streamjson/emitter.go:238-249` — `wireFields(r)`
-  mapping table. The exact `(subtype, terminal_reason, is_error)` triple
-  the max-turns path emits: `("error_max_turns", "max_turns", true)`.
-- `internal/agentrun/budget/budget.go:101-138` — `Counter.OnEvent`. Confirms
-  the budget is enforced **on assistant-entry count**, not raw turn count,
-  and fires `SetExitReason(ExitReasonMaxTurns)` via the `Terminate` hook
-  when `count >= MaxTurns` AND the current event is **not** `end_turn`. The
-  `num_turns == 2` assertion below derives from this — the emitter's
-  `numTurns` is incremented per assistant entry and the trailer reports the
-  count at termination.
-- `internal/agentrun/streamjson/emitter_test.go:225-240` — `TestTrailer_MaxTurns`.
-  Reference for the exact field-level assertion shape this spec mirrors at
-  the real-`claude` boundary.
-- `internal/agentrun/jsonl/reader.go:85-92` — `UsageBlock` field names.
-  Confirms `CacheReadInputTokens` / `CacheCreationInputTokens` snake-case
-  JSON keys at the on-disk surface (the trailer aggregates them at
-  `emitter.go:269-272`).
-- `docs/knowledge/codebase/372.md` + `docs/knowledge/codebase/373.md` —
-  helper authoring rationale; `WithWorktreeAuthenticated` from #409.
-- `docs/knowledge/features/e2e-realclaude.md` § sibling-test prose (lines
-  containing `#381`, `#382`, `#384`) — established patterns for shared
-  helper reuse, prompt-as-enforcement-fixture discipline, and `t.Parallel()`
-  convention (never call it in this suite).
-
 ## Context
 
 This is the seventh consumer of the `WithWorktree(Authenticated)` →
